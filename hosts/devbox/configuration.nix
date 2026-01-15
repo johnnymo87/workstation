@@ -54,16 +54,30 @@
 
   networking.firewall.enable = true;
 
-  # Persistent volume for Claude state
+  # Persistent volume for state that survives rebuilds
   fileSystems."/persist" = {
     device = "/dev/disk/by-id/scsi-0HC_Volume_104378953";
     fsType = "ext4";
     options = [ "nofail" ];
   };
 
+  # Bind mount projects from persistent volume
+  fileSystems."/home/dev/projects" = {
+    device = "/persist/projects";
+    fsType = "none";
+    options = [ "bind" ];
+    depends = [ "/persist" ];
+  };
+
   systemd.tmpfiles.rules = [
+    # Claude state
     "d /persist/claude 0700 dev dev -"
     "L+ /home/dev/.claude - - - - /persist/claude"
+    # Projects directory on persistent volume
+    "d /persist/projects 0755 dev dev -"
+    # SSH directory on persistent volume (for devbox key)
+    "d /persist/ssh 0700 dev dev -"
+    "L+ /home/dev/.ssh - - - - /persist/ssh"
   ];
 
   # User account with stable UID/GID for persistent volume ownership

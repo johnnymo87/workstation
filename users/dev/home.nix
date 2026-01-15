@@ -103,9 +103,6 @@
     "$HOME/.npm-global/bin"
   ];
 
-  # Projects directory
-  home.file."projects/.keep".text = "";
-
   # Claude skills from assets
   home.file.".claude/skills" = {
     source = "${assetsPath}/claude/skills";
