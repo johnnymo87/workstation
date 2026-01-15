@@ -1,0 +1,12 @@
+# Nix
+result
+result-*
+.direnv/
+
+# Secrets (encrypted files are OK, but not decrypted)
+secrets/*.dec.*
+
+# Editor
+*.swp
+*~
+.nvim.lua
