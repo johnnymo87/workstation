@@ -12,6 +12,21 @@ sudo nixos-rebuild switch --flake .#devbox
 home-manager switch --flake .#dev
 ```
 
+## Managing Projects
+
+Projects are declared in `projects.nix` and auto-cloned on login.
+
+**Add a project:**
+1. Edit `projects.nix`:
+   ```nix
+   my-new-project = { url = "git@github.com:org/repo.git"; };
+   ```
+2. Push to GitHub
+3. On devbox: `home-manager switch --flake .#dev`
+4. Run: `~/.local/bin/ensure-projects` (or re-login)
+
+**Projects survive rebuilds** - stored on `/persist/projects`, bind-mounted to `~/projects`.
+
 ## Commands
 
 | Command | Description |
@@ -30,10 +45,21 @@ home-manager switch --flake .#dev
 
 ```
 workstation/
+├── flake.nix         # Flake with NixOS + home-manager
+├── projects.nix      # Declarative project list
 ├── hosts/devbox/     # NixOS system config
 ├── users/dev/        # Home-manager user config
 ├── assets/           # Content deployed to user (claude/, nvim/)
-├── secrets/          # sops-nix encrypted secrets (skeleton)
+├── secrets/          # sops-nix encrypted secrets
 ├── scripts/          # Helper scripts
 └── .claude/          # Documentation for THIS repo
 ```
+
+## Fresh Devbox Setup
+
+After `nixos-anywhere`:
+1. Copy age key: `scp /path/to/key devbox:/persist/sops-age-key.txt`
+2. Clone workstation: `git clone ... ~/projects/workstation`
+3. Apply system: `sudo nixos-rebuild switch --flake .#devbox`
+4. Apply home: `home-manager switch --flake .#dev`
+5. Projects auto-clone on next login (or run `~/.local/bin/ensure-projects`)
