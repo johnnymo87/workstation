@@ -2,6 +2,24 @@
 { config, pkgs, lib, ... }:
 
 {
+  # sops-nix configuration
+  sops = {
+    defaultSopsFile = ../../secrets/devbox.yaml;
+    age = {
+      # Key will be at this path on the devbox
+      keyFile = "/persist/sops-age-key.txt";
+      generateKey = false;
+    };
+    secrets = {
+      github_ssh_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0600";
+        path = "/home/dev/.ssh/id_ed25519_github";
+      };
+    };
+  };
+
   # System identity
   networking.hostName = "devbox";
   time.timeZone = "America/New_York";
