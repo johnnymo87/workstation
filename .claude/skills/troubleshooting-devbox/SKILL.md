@@ -1,0 +1,136 @@
+---
+name: troubleshooting-devbox
+description: Use when SSH connection fails, host key mismatch, NixOS issues, or verifying devbox is properly configured
+---
+
+# Troubleshooting Devbox
+
+## Overview
+
+Common issues and fixes for the Hetzner NixOS remote development environment.
+
+## Can't SSH After Recreate
+
+Host key changed because server was recreated with new IP or reinstalled.
+
+```bash
+# Remove old host key
+ssh-keygen -R devbox
+ssh-keygen -R $(hcloud server ip devbox)
+
+# Reconnect with new key acceptance
+ssh -o StrictHostKeyChecking=accept-new devbox
+```
+
+## Verify NixOS Installation
+
+Check NixOS version:
+
+```bash
+ssh devbox 'nixos-version'
+# Expected: 24.11... (Vicuna)
+```
+
+Check tools are installed:
+
+```bash
+ssh devbox 'tmux -V && nvim --version | head -1 && mise --version'
+```
+
+## NixOS Configuration Issues
+
+View current system generation:
+
+```bash
+ssh devbox 'sudo nix-env --list-generations --profile /nix/var/nix/profiles/system'
+```
+
+Rollback to previous generation:
+
+```bash
+ssh devbox 'sudo nixos-rebuild switch --rollback'
+```
+
+Check system journal for errors:
+
+```bash
+ssh devbox 'journalctl -b --priority=err'
+```
+
+## nixos-anywhere Deployment Failed
+
+If deployment fails mid-way, the server may be in an inconsistent state.
+
+Check if server is accessible:
+
+```bash
+# Try root (during nixos-anywhere)
+ssh root@$(hcloud server ip devbox) 'uname -a'
+
+# Try dev (after completion)
+ssh dev@$(hcloud server ip devbox) 'uname -a'
+```
+
+If stuck, use Hetzner rescue mode:
+
+```bash
+hcloud server enable-rescue devbox --type linux64
+hcloud server reboot devbox
+# Then SSH as root with rescue password from console
+```
+
+Or just destroy and recreate:
+
+```bash
+/rebuild
+```
+
+## Verify SSH Hardening
+
+```bash
+# Should fail (root login disabled):
+ssh root@$(hcloud server ip devbox) 'echo test'
+
+# Should work:
+ssh dev@$(hcloud server ip devbox) 'echo test'
+```
+
+## Connection Timeout / Slow
+
+Check latency:
+
+```bash
+ping -c 5 $(hcloud server ip devbox)
+```
+
+Helsinki datacenter latency from US East: ~100-150ms (acceptable for terminal work).
+
+## Server Not Responding
+
+Check Hetzner console:
+
+```bash
+hcloud server list
+hcloud server describe devbox
+```
+
+Power cycle if needed:
+
+```bash
+hcloud server reboot devbox
+```
+
+## Disk Space Issues
+
+NixOS can accumulate old generations. Clean up:
+
+```bash
+ssh devbox 'sudo nix-collect-garbage --delete-older-than 7d'
+ssh devbox 'sudo nix-store --optimise'
+```
+
+Check disk usage:
+
+```bash
+ssh devbox 'df -h /'
+```
