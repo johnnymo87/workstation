@@ -1,8 +1,8 @@
 # Declarative list of projects to maintain on devbox
 # Each entry will be cloned to ~/projects/<name> if not present
 {
-  eternal-machinery-2 = {
-    url = "git@github.com:johnnymo87/eternal-machinery-2.git";
+  eternal-machinery = {
+    url = "git@github.com:johnnymo87/eternal-machinery.git";
   };
   workstation = {
     url = "git@github.com:johnnymo87/workstation.git";
