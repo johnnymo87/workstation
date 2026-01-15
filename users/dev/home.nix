@@ -14,10 +14,10 @@
   # Git
   programs.git = {
     enable = true;
-    userName = "Jonathan Mohrbacher";
-    userEmail = "jonathan.mohrbacher@gmail.com";
     signing.key = "0C0EF2DF7ADD5DD9";
-    extraConfig = {
+    settings = {
+      user.name = "Jonathan Mohrbacher";
+      user.email = "jonathan.mohrbacher@gmail.com";
       init.defaultBranch = "main";
       push.autoSetupRemote = true;
       pull.rebase = true;
