@@ -7,7 +7,6 @@
 
   # User packages
   home.packages = with pkgs; [
-    mise
     claude-code
     devenv
   ];
@@ -78,7 +77,6 @@
       "..." = "cd ../..";
     };
     initExtra = ''
-      eval "$(mise activate bash)"
       export GPG_TTY=$(tty)
       export HISTSIZE=10000
       export HISTFILESIZE=20000
