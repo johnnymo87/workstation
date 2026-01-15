@@ -133,7 +133,7 @@
       '';
       lines = lib.concatStringsSep "\n" (lib.mapAttrsToList mkLine projects);
     in ''
-      #!/usr/bin/env bash
+      #!${pkgs.bash}/bin/bash
       set -euo pipefail
 
       # Refuse to run if /persist isn't mounted
