@@ -18,9 +18,14 @@
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, home-manager, disko, claude-code, ... }:
+  outputs = { self, nixpkgs, home-manager, disko, claude-code, sops-nix, ... }:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -37,6 +42,7 @@
       system = devboxSystem;
       modules = [
         disko.nixosModules.disko
+        sops-nix.nixosModules.sops
         { nixpkgs.overlays = [ claude-code.overlays.default ]; }
         ./hosts/devbox/configuration.nix
         ./hosts/devbox/hardware.nix
