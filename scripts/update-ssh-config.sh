@@ -22,16 +22,16 @@ Host devbox
     User dev
     ForwardAgent yes
     # GPG agent forwarding
-    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/\${USER}/.gnupg/S.gpg-agent.extra
+    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
 $MARKER_END
 EOF
 
 # Update SSH config
 if grep -q "$MARKER_START" "$SSH_CONFIG" 2>/dev/null; then
     # Replace existing block (macOS sed)
-    sed -i '' "/$MARKER_START/,/$MARKER_END/c\\
-$CONFIG_BLOCK
-" "$SSH_CONFIG"
+    sed -i '' "/$MARKER_START/,/$MARKER_END/d" "$SSH_CONFIG"
+    echo "" >> "$SSH_CONFIG"
+    echo "$CONFIG_BLOCK" >> "$SSH_CONFIG"
     echo "Updated devbox entry in $SSH_CONFIG"
 else
     # Append new block
