@@ -66,12 +66,17 @@
     "L+ /home/dev/.claude - - - - /persist/claude"
   ];
 
-  # User account
+  # User account with stable UID/GID for persistent volume ownership
+  users.groups.dev = { gid = 1000; };
+
   users.users.dev = {
     isNormalUser = true;
+    uid = 1000;
+    group = "dev";
     description = "Development user";
     extraGroups = [ "wheel" ];
     shell = pkgs.bashInteractive;
+    linger = true;  # Allow user services to run without active login
     openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIjoX7P9gYCGqSbqoIvy/seqAbtzbLAdhaGCYRRVbDR2 johnnymo87@gmail.com"
     ];
