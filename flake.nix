@@ -59,6 +59,7 @@
       extraSpecialArgs = {
         inherit self;
         assetsPath = ./assets;
+        projects = import ./projects.nix;
       };
     };
   };
