@@ -7,43 +7,86 @@ description: Use when copy/paste doesn't work over SSH, or clipboard not syncing
 
 ## Overview
 
-OSC 52 is an escape sequence that allows remote terminals to write to the local system clipboard over SSH.
+OSC 52 is an escape sequence that allows remote terminals to write to the local system clipboard over SSH. This enables yanking in Neovim on the devbox and pasting locally on macOS.
 
-## Requirements
+## How It's Configured in This Repo
 
-1. **Local terminal** must support OSC 52
-2. **tmux** must be configured to pass through
-3. **neovim** must use OSC 52 provider
-
-## Local Terminal Support
-
-| Terminal | Support |
-|----------|---------|
-| WezTerm | Works out of the box |
-| kitty | Works (may need `clipboard_control` config) |
-| GNOME Terminal / VTE | Does NOT support OSC 52 |
-| iTerm2 | Works with "Allow clipboard access" enabled |
-
-## tmux Configuration
-
-Enable clipboard pass-through:
+### tmux (`assets/tmux/extra.conf`)
 
 ```tmux
-set -s set-clipboard on
+set -s set-clipboard on              # Accept OSC 52 from apps
+set -gq allow-passthrough on         # tmux 3.3+ passthrough support
+set -as terminal-features ',xterm-256color:clipboard'  # Ms capability
 ```
 
-## Neovim Configuration
-
-In `init.lua` on the remote:
+### Neovim (`assets/nvim/lua/user/settings.lua`)
 
 ```lua
 vim.g.clipboard = "osc52"
 ```
 
+### Local Terminal (iTerm2)
+
+Preferences → General → Selection → Enable "Applications in terminal may access clipboard"
+
 ## Testing
 
-1. SSH into remote
-2. Run: `printf '\033]52;c;%s\a' "$(echo -n 'test' | base64)"`
-3. Paste locally - should see "test"
+### Test 1: Raw SSH (no tmux)
 
-If it doesn't work, check your local terminal settings.
+```bash
+ssh devbox
+printf '\033]52;c;%s\007' "$(printf 'test-raw' | base64 | tr -d '\n')"
+# Cmd+V locally should paste "test-raw"
+```
+
+### Test 2: Inside tmux
+
+```bash
+ssh devbox
+tmux new
+printf '\033]52;c;%s\007' "$(printf 'test-tmux' | base64 | tr -d '\n')"
+# Cmd+V locally should paste "test-tmux"
+```
+
+### Test 3: Inside Neovim
+
+```bash
+nvim somefile
+# Yank a line with `yy`
+# Cmd+V locally should paste the line
+```
+
+### Test 4: Verify nvim provider
+
+```vim
+:lua print(vim.g.clipboard)
+" Should print: osc52
+```
+
+## Troubleshooting
+
+If Test 2 fails (tmux), check:
+
+```bash
+tmux show -s set-clipboard    # Should be: on
+tmux info | grep 'Ms:'        # Should NOT say [missing]
+```
+
+**After changing tmux config:** Must restart tmux server, not just detach/attach:
+
+```bash
+tmux kill-server
+```
+
+## Local Terminal Support
+
+| Terminal | Support |
+|----------|---------|
+| iTerm2 | Works with "Allow clipboard access" enabled |
+| WezTerm | Works out of the box |
+| kitty | Works (may need `clipboard_control` config) |
+| GNOME Terminal / VTE | Does NOT support OSC 52 |
+
+## Note on Paste
+
+OSC 52 is primarily for **copy** (yank → local clipboard). Pasting from local clipboard into remote nvim typically uses your terminal's paste function (Cmd+V in insert mode, or terminal's paste bracketing).

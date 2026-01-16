@@ -51,8 +51,12 @@
       setw -g pane-base-index 1
       set -g renumber-windows on
       set -ag terminal-overrides ",xterm-256color:RGB"
+      source-file ~/.config/tmux/extra.conf
     '';
   };
+
+  # Tmux extra config (OSC 52 clipboard, etc.)
+  xdg.configFile."tmux/extra.conf".source = "${assetsPath}/tmux/extra.conf";
 
   # Neovim
   programs.neovim = {
@@ -61,6 +65,7 @@
     viAlias = true;
     vimAlias = true;
     extraLuaConfig = ''
+      require("user.settings")
       require("user.mappings")
     '';
   };
