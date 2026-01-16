@@ -22,8 +22,14 @@ set -as terminal-features ',xterm-256color:clipboard'  # Ms capability
 ### Neovim (`assets/nvim/lua/user/settings.lua`)
 
 ```lua
+-- HOW to talk to clipboard (use OSC 52 escape sequences)
 vim.g.clipboard = "osc52"
+
+-- WHEN to use clipboard (sync unnamed register with +)
+vim.opt.clipboard = "unnamedplus"
 ```
+
+**Both are required:** `vim.g.clipboard` sets the provider, `vim.opt.clipboard` makes yanks use it by default.
 
 ### Local Terminal (iTerm2)
 
@@ -56,16 +62,28 @@ nvim somefile
 # Cmd+V locally should paste the line
 ```
 
-### Test 4: Verify nvim provider
+### Test 4: Verify nvim settings
 
 ```vim
 :lua print(vim.g.clipboard)
 " Should print: osc52
+
+:lua print(vim.o.clipboard)
+" Should print: unnamedplus
 ```
 
 ## Troubleshooting
 
-If Test 2 fails (tmux), check:
+**If Tests 1 & 2 pass but Test 3 fails (nvim yanks don't reach clipboard):**
+
+Check that `vim.opt.clipboard = "unnamedplus"` is set. Without this, yanks go to the unnamed register, not the `+` register that OSC 52 uses.
+
+```vim
+:lua print(vim.o.clipboard)
+" Should print: unnamedplus
+```
+
+**If Test 2 fails (tmux)**, check:
 
 ```bash
 tmux show -s set-clipboard    # Should be: on
