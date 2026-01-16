@@ -30,12 +30,12 @@
     experimental-features = [ "nix-command" "flakes" ];
     trusted-users = [ "root" "@wheel" ];
     auto-optimise-store = true;
-    substituters = [
-      "https://claude-code.cachix.org"
+    extra-substituters = [
+      "https://cache.numtide.com"
       "https://devenv.cachix.org"
     ];
-    trusted-public-keys = [
-      "claude-code.cachix.org-1:YeXf2aNu7UTX8Vwrze0za1WEDS+4DuI2kVeWEE4fsRk="
+    extra-trusted-public-keys = [
+      "niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g="
       "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw="
     ];
   };
