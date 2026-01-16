@@ -27,6 +27,7 @@ programs.neovim = {
   viAlias = true;
   vimAlias = true;
   extraLuaConfig = ''
+    require("user.settings")
     require("user.mappings")
   '';
 };
@@ -35,6 +36,12 @@ xdg.configFile."nvim/lua/user" = {
   source = "${assetsPath}/nvim/lua/user";
   recursive = true;
 };
+```
+
+**assets/nvim/lua/user/settings.lua:**
+```lua
+vim.g.clipboard = "osc52"           -- OSC 52 clipboard provider
+vim.opt.clipboard = "unnamedplus"   -- Sync unnamed register with +
 ```
 
 **assets/nvim/lua/user/mappings.lua:**
@@ -46,7 +53,7 @@ vim.keymap.set("t", "<C-w>a", [[<C-\><C-n>]], { noremap = true, silent = true })
 
 1. **Create a Lua file** in `assets/nvim/lua/user/`:
    ```lua
-   -- assets/nvim/lua/user/settings.lua
+   -- assets/nvim/lua/user/options.lua
    vim.opt.number = true
    vim.opt.relativenumber = true
    ```
@@ -54,8 +61,9 @@ vim.keymap.set("t", "<C-w>a", [[<C-\><C-n>]], { noremap = true, silent = true })
 2. **Add the require** in `home.nix`:
    ```nix
    extraLuaConfig = ''
-     require("user.mappings")
      require("user.settings")
+     require("user.options")
+     require("user.mappings")
    '';
    ```
 
