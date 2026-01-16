@@ -14,9 +14,9 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    claude-code = {
-      url = "github:sadjow/claude-code-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
+    llm-agents = {
+      url = "github:numtide/llm-agents.nix";
+      # Don't use inputs.nixpkgs.follows - we want their pinned nixpkgs for cache hits
     };
 
     sops-nix = {
@@ -25,13 +25,12 @@
     };
   };
 
-  outputs = { self, nixpkgs, home-manager, disko, claude-code, sops-nix, ... }:
+  outputs = { self, nixpkgs, home-manager, disko, llm-agents, sops-nix, ... }:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
       inherit system;
       config.allowUnfree = true;
-      overlays = [ claude-code.overlays.default ];
     };
 
     devboxSystem = "aarch64-linux";
@@ -43,7 +42,6 @@
       modules = [
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
-        { nixpkgs.overlays = [ claude-code.overlays.default ]; }
         ./hosts/devbox/configuration.nix
         ./hosts/devbox/hardware.nix
         ./hosts/devbox/disko.nix
@@ -57,7 +55,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self;
+        inherit self llm-agents;
         assetsPath = ./assets;
         projects = import ./projects.nix;
       };
