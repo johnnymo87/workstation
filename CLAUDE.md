@@ -40,6 +40,7 @@ Projects are declared in `projects.nix` and auto-cloned on login.
 |-------|-------------|
 | [Understanding Workstation](.claude/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
 | [Rebuilding Devbox](.claude/skills/rebuilding-devbox/SKILL.md) | How to apply changes, full rebuilds |
+| [Growing Neovim Config](.claude/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
 
 ## Structure
 
