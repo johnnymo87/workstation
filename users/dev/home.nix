@@ -1,14 +1,45 @@
 # Home-manager configuration for dev user
-{ config, pkgs, lib, self, assetsPath, projects, ... }:
+{ config, pkgs, lib, self, llm-agents, assetsPath, projects, ... }:
 
+let
+  # Packages from llm-agents.nix flake (use hostPlatform.system for idiomaticity)
+  llmPkgs = llm-agents.packages.${pkgs.stdenv.hostPlatform.system};
+
+  # Wrapper script for ccusage statusline with absolute path
+  # This ensures the command works regardless of Claude's PATH
+  claudeStatusline = pkgs.writeShellApplication {
+    name = "claude-statusline";
+    runtimeInputs = [ llmPkgs.ccusage ];
+    text = ''
+      exec ccusage statusline --offline
+    '';
+  };
+
+  # Managed settings fragment - only keys we want to control
+  # Claude Code's runtime state (feedbackSurveyState, enabledPlugins, etc.) is preserved
+  managedSettings = {
+    statusLine = {
+      type = "command";
+      command = lib.getExe claudeStatusline;
+    };
+  };
+
+  managedSettingsJson = pkgs.writeText "claude-settings.managed.json"
+    (builtins.toJSON managedSettings);
+in
 {
   home.username = "dev";
   home.homeDirectory = "/home/dev";
 
   # User packages
-  home.packages = with pkgs; [
-    claude-code
-    devenv
+  home.packages = [
+    # LLM tools from numtide/llm-agents.nix
+    llmPkgs.claude-code
+    llmPkgs.ccusage
+    llmPkgs.beads
+
+    # Other tools
+    pkgs.devenv
   ];
 
   # Git
@@ -128,6 +159,38 @@
     source = "${assetsPath}/claude/skills";
     recursive = true;
   };
+
+  # Managed settings fragment (read-only, Nix store symlink)
+  home.file.".claude/settings.managed.json".source = managedSettingsJson;
+
+  # Merge managed settings into the real settings.json on each switch
+  # This preserves Claude Code's runtime state while enforcing our config
+  home.activation.mergeClaudeSettings = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+    set -euo pipefail
+
+    runtime="$HOME/.claude/settings.json"
+    managed="$HOME/.claude/settings.managed.json"
+
+    # Ensure directory exists (handles fresh install)
+    mkdir -p "$(dirname "$runtime")"
+
+    # Treat missing/empty runtime file as {}
+    if [[ -s "$runtime" ]]; then
+      base="$runtime"
+    else
+      base="$(mktemp)"
+      echo '{}' > "$base"
+    fi
+
+    tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+    # Merge strategy: runtime first, then managed => managed wins on conflicts,
+    # but unmentioned runtime keys (feedbackSurveyState, etc.) are preserved
+    ${pkgs.jq}/bin/jq -S -s '.[0] * .[1]' "$base" "$managed" > "$tmp"
+
+    mv "$tmp" "$runtime"
+    [[ "$base" == "$runtime" ]] || rm -f "$base"
+  '';
 
   # Mask GPG agent sockets for forwarding
   home.activation.maskGpgAgentSockets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
