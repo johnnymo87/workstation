@@ -26,7 +26,7 @@ workstation/
 │
 ├── assets/                   # Content deployed by home-manager
 │   ├── claude/               # Claude skills and commands
-│   └── nvim/                 # Neovim config (future)
+│   └── nvim/                 # Neovim Lua config (lua/user/)
 │
 ├── secrets/                  # sops-nix encrypted secrets (skeleton)
 │
@@ -84,5 +84,6 @@ Both NixOS and home-manager use this, ensuring consistent packages.
 | Bash aliases | `users/dev/home.nix` (programs.bash) |
 | Git config | `users/dev/home.nix` (programs.git) |
 | Claude skills (deployed) | `assets/claude/skills/` |
+| Neovim config | `assets/nvim/lua/user/` |
 | SSH server settings | `hosts/devbox/configuration.nix` |
 | Flake inputs | `flake.nix` |

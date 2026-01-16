@@ -60,6 +60,15 @@
     defaultEditor = true;
     viAlias = true;
     vimAlias = true;
+    extraLuaConfig = ''
+      require("user.mappings")
+    '';
+  };
+
+  # Neovim Lua config files (kept separate from HM-managed init.vim)
+  xdg.configFile."nvim/lua/user" = {
+    source = "${assetsPath}/nvim/lua/user";
+    recursive = true;
   };
 
   # Direnv
