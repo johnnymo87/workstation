@@ -183,6 +183,10 @@
       ExecStart = "%h/.local/bin/ensure-projects";
       StandardOutput = "journal";
       StandardError = "journal";
+      Environment = [
+        "GIT_SSH_COMMAND=${pkgs.openssh}/bin/ssh"
+        "HOME=%h"
+      ];
     };
     Install = {
       WantedBy = [ "default.target" ];
