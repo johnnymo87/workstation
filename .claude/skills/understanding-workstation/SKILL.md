@@ -60,11 +60,33 @@ The flake defines `pkgsFor` once to prevent drift:
 pkgsFor = system: import nixpkgs {
   inherit system;
   config.allowUnfree = true;
-  overlays = [ claude-code.overlays.default ];
 };
 ```
 
 Both NixOS and home-manager use this, ensuring consistent packages.
+
+### External Flake Inputs
+
+LLM tools come from `numtide/llm-agents.nix`, passed to home-manager via `extraSpecialArgs`:
+
+| Package | Source | Notes |
+|---------|--------|-------|
+| claude-code | llm-agents.nix | Daily updates, binary cache at cache.numtide.com |
+| ccusage | llm-agents.nix | Usage analytics, statusline for Claude Code |
+| beads | llm-agents.nix | Distributed issue tracker for AI workflows |
+| devenv | nixpkgs | Development environments |
+
+**Important:** We do NOT use `inputs.nixpkgs.follows` for llm-agents. This preserves binary cache hits from Numtide's cache.
+
+### Claude Code Settings
+
+The `~/.claude/settings.json` uses a "managed fragment + merge" pattern because Claude Code writes runtime state to this file:
+
+- `~/.claude/settings.managed.json` — Nix-managed config (read-only symlink)
+- `~/.claude/settings.json` — Mutable file Claude Code can write to
+- On `home-manager switch`, managed keys are merged into settings.json
+- Claude Code's runtime state (`feedbackSurveyState`, `enabledPlugins`, etc.) is preserved
+- Our managed keys (like `statusLine`) win on conflict
 
 ## Common Tasks
 
@@ -87,3 +109,4 @@ Both NixOS and home-manager use this, ensuring consistent packages.
 | Neovim config | `assets/nvim/lua/user/` |
 | SSH server settings | `hosts/devbox/configuration.nix` |
 | Flake inputs | `flake.nix` |
+| Claude Code statusline | `users/dev/home.nix` (managedSettings) |
