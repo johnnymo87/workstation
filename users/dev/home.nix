@@ -1,10 +1,11 @@
 # Home-manager entry point
-# Auto-imports platform-specific modules based on current system
+# Imports all modules - platform-specific ones use mkIf internally
 { pkgs, lib, ... }:
 
 {
-  imports =
-    [ ./home.base.nix ]
-    ++ lib.optionals pkgs.stdenv.isLinux  [ ./home.linux.nix ]
-    ++ lib.optionals pkgs.stdenv.isDarwin [ ./home.darwin.nix ];
+  imports = [
+    ./home.base.nix
+    ./home.linux.nix
+    ./home.darwin.nix
+  ];
 }
