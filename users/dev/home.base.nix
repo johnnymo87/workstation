@@ -18,7 +18,8 @@ let
 
   # Managed settings fragment - only keys we want to control
   # Claude Code's runtime state (feedbackSurveyState, enabledPlugins, etc.) is preserved
-  managedSettings = {
+  # On Darwin, we skip statusLine to preserve the custom dotfiles statusline.sh
+  managedSettings = lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
     statusLine = {
       type = "command";
       command = lib.getExe claudeStatusline;
@@ -155,11 +156,10 @@ in
     "$HOME/.npm-global/bin"
   ];
 
-  # Claude skills from assets
-  home.file.".claude/skills" = {
-    source = "${assetsPath}/claude/skills";
-    recursive = true;
-  };
+  # Claude skills and commands - managed individually for gradual migration
+  # As we migrate each skill/command from dotfiles to HM, add it here.
+  # On Darwin, remove the corresponding dotfiles symlink after adding here.
+  home.file.".claude/commands/ask-question.md".source = "${assetsPath}/claude/commands/ask-question.md";
 
   # Managed settings fragment (read-only, Nix store symlink)
   home.file.".claude/settings.managed.json".source = managedSettingsJson;
