@@ -1,8 +1,8 @@
 # Linux-specific home-manager configuration
 # Contains systemd services and other Linux-only features
-{ config, pkgs, lib, projects, ... }:
+{ config, pkgs, lib, projects, isLinux, ... }:
 
-{
+lib.mkIf isLinux {
   # Linux devbox identity
   home.username = "dev";
   home.homeDirectory = "/home/dev";

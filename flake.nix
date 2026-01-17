@@ -10,7 +10,7 @@
     };
 
     nix-darwin = {
-      url = "github:nix-darwin/nix-darwin";
+      url = "github:nix-darwin/nix-darwin/nix-darwin-25.11";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -66,6 +66,8 @@
         inherit self llm-agents;
         assetsPath = ./assets;
         projects = import ./projects.nix;
+        isLinux = true;
+        isDarwin = false;
       };
     };
 
@@ -82,11 +84,13 @@
             inherit llm-agents;
             assetsPath = ./assets;
             projects = import ./projects.nix;
+            isLinux = false;
+            isDarwin = true;
           };
-          home-manager.users.${mac.username} = { ... }: {
-            home.username = mac.username;
-            home.homeDirectory = mac.homeDir;
-            home.stateVersion = "25.11";
+          home-manager.users.${mac.username} = { lib, ... }: {
+            home.username = lib.mkForce mac.username;
+            home.homeDirectory = lib.mkForce mac.homeDir;
+            home.stateVersion = lib.mkForce "25.11";
             imports = [ ./users/dev/home.nix ];
           };
         }

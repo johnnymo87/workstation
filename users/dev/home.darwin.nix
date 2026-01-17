@@ -1,8 +1,8 @@
 # macOS-specific home-manager configuration
 # Contains Darwin-only scripts, aliases, and settings
-{ config, pkgs, lib, assetsPath, ... }:
+{ config, pkgs, lib, assetsPath, isDarwin, ... }:
 
-{
+lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
   home.packages = [
     (pkgs.writeShellApplication {
