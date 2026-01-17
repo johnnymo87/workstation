@@ -135,6 +135,7 @@ in
   # SSH
   programs.ssh = {
     enable = true;
+    enableDefaultConfig = false;  # Silence deprecation warning; defaults mirror SSH's own
     extraConfig = ''
       Host github.com
         HostName github.com
