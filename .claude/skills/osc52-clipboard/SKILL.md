@@ -108,3 +108,16 @@ tmux kill-server
 ## Note on Paste
 
 OSC 52 is primarily for **copy** (yank → local clipboard). Pasting from local clipboard into remote nvim typically uses your terminal's paste function (Cmd+V in insert mode, or terminal's paste bracketing).
+
+## Images
+
+OSC 52 only handles **text**. For sharing images with Claude Code over SSH, use the [screenshot-to-devbox](../screenshot-to-devbox/SKILL.md) helper script, which:
+
+1. Takes a screenshot on macOS
+2. Uploads it to the devbox via scp
+3. Copies the remote path to clipboard
+
+Then paste the path into Claude Code:
+```
+Analyze this image: /home/dev/.cache/claude-images/screenshot-20240115-143022-12345.png
+```

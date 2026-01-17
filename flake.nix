@@ -9,6 +9,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    nix-darwin = {
+      url = "github:nix-darwin/nix-darwin";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     disko = {
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -25,7 +30,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, home-manager, disko, llm-agents, sops-nix, ... }:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, sops-nix, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -35,6 +40,9 @@
 
     devboxSystem = "aarch64-linux";
     devboxPkgs = pkgsFor devboxSystem;
+
+    # macOS host facts
+    mac = import ./hosts/Y0FMQX93RR-2/vars.nix;
   in {
     # NixOS system configuration
     nixosConfigurations.devbox = nixpkgs.lib.nixosSystem {
@@ -48,7 +56,7 @@
       ];
     };
 
-    # Home-manager configuration (standalone for fast iteration)
+    # Home-manager configuration (standalone for fast iteration on devbox)
     homeConfigurations.dev = home-manager.lib.homeManagerConfiguration {
       pkgs = devboxPkgs;
       modules = [
@@ -59,6 +67,30 @@
         assetsPath = ./assets;
         projects = import ./projects.nix;
       };
+    };
+
+    # Darwin (macOS) system configuration
+    darwinConfigurations.${mac.hostname} = nix-darwin.lib.darwinSystem {
+      specialArgs = { inherit inputs mac; };
+      modules = [
+        ./hosts/Y0FMQX93RR-2/configuration.nix
+        home-manager.darwinModules.home-manager
+        {
+          home-manager.useGlobalPkgs = true;
+          home-manager.useUserPackages = true;
+          home-manager.extraSpecialArgs = {
+            inherit llm-agents;
+            assetsPath = ./assets;
+            projects = import ./projects.nix;
+          };
+          home-manager.users.${mac.username} = { ... }: {
+            home.username = mac.username;
+            home.homeDirectory = mac.homeDir;
+            home.stateVersion = "25.11";
+            imports = [ ./users/dev/home.nix ];
+          };
+        }
+      ];
     };
   };
 }
