@@ -136,13 +136,12 @@ in
   programs.ssh = {
     enable = true;
     enableDefaultConfig = false;  # Silence deprecation warning; defaults mirror SSH's own
-    extraConfig = ''
-      Host github.com
-        HostName github.com
-        User git
-        IdentityFile ~/.ssh/id_ed25519_github
-        IdentitiesOnly yes
-    '';
+    matchBlocks."github.com" = {
+      hostname = "github.com";
+      user = "git";
+      identityFile = "~/.ssh/id_ed25519_github";
+      identitiesOnly = true;
+    };
   };
 
   # FZF
