@@ -162,6 +162,8 @@ in
   # On Darwin, remove the corresponding dotfiles symlink after adding here.
   home.file.".claude/commands/ask-question.md".source = "${assetsPath}/claude/commands/ask-question.md";
   home.file.".claude/commands/beads.md".source = "${assetsPath}/claude/commands/beads.md";
+  home.file.".claude/commands/notify-telegram.md".source = "${assetsPath}/claude/commands/notify-telegram.md";
+  home.file.".claude/skills/using-telegram-notifications/SKILL.md".source = "${assetsPath}/claude/skills/using-telegram-notifications/SKILL.md";
 
   # Managed settings fragment (read-only, Nix store symlink)
   home.file.".claude/settings.managed.json".source = managedSettingsJson;
