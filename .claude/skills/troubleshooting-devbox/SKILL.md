@@ -9,6 +9,22 @@ description: Use when SSH connection fails, host key mismatch, NixOS issues, or 
 
 Common issues and fixes for the Hetzner NixOS remote development environment.
 
+## Port Forwarding
+
+The devbox connection uses several port forwards for development tools:
+
+| Port | Direction | Purpose |
+|------|-----------|---------|
+| 4000 | Local (-L) | eternal-machinery dev server |
+| 4003 | Local (-L) | eternal-machinery (secondary) |
+| 9222 | Remote (-R) | Chrome DevTools Protocol - control macOS browser from devbox |
+| 3033 | Remote (-R) | chatgpt-relay - `/ask-question` CLI talks to macOS daemon |
+
+**Local forwards (-L):** devbox service → accessible on macOS localhost
+**Remote forwards (-R):** macOS service → accessible on devbox localhost
+
+These should be configured in `~/.ssh/config` (see below) so every `ssh devbox` includes them automatically.
+
 ## Can't SSH After Recreate
 
 Host key changed because server was recreated with new IP or reinstalled.

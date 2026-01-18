@@ -7,6 +7,9 @@
   workstation = {
     url = "git@github.com:johnnymo87/workstation.git";
   };
+  chatgpt-relay = {
+    url = "git@github.com:johnnymo87/chatgpt-relay.git";
+  };
   # Add more projects as needed:
   # my-project = { url = "git@github.com:org/repo.git"; };
 }
