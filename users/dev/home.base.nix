@@ -164,6 +164,11 @@ in
   home.file.".claude/commands/notify-telegram.md".source = "${assetsPath}/claude/commands/notify-telegram.md";
   home.file.".claude/skills/using-telegram-notifications/SKILL.md".source = "${assetsPath}/claude/skills/using-telegram-notifications/SKILL.md";
   home.file.".claude/skills/using-chatgpt-relay-from-devbox/SKILL.md".source = "${assetsPath}/claude/skills/using-chatgpt-relay-from-devbox/SKILL.md";
+  home.file.".claude/skills/using-beads-for-issue-tracking/SKILL.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/SKILL.md";
+  home.file.".claude/skills/using-beads-for-issue-tracking/references/BOUNDARIES.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/BOUNDARIES.md";
+  home.file.".claude/skills/using-beads-for-issue-tracking/references/CLI_REFERENCE.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/CLI_REFERENCE.md";
+  home.file.".claude/skills/using-beads-for-issue-tracking/references/DEPENDENCIES.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/DEPENDENCIES.md";
+  home.file.".claude/skills/using-beads-for-issue-tracking/references/WORKFLOWS.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/WORKFLOWS.md";
 
   # Managed settings fragment (read-only, Nix store symlink)
   home.file.".claude/settings.managed.json".source = managedSettingsJson;
