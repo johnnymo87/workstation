@@ -161,6 +161,7 @@ in
   # As we migrate each skill/command from dotfiles to HM, add it here.
   # On Darwin, remove the corresponding dotfiles symlink after adding here.
   home.file.".claude/commands/ask-question.md".source = "${assetsPath}/claude/commands/ask-question.md";
+  home.file.".claude/commands/beads.md".source = "${assetsPath}/claude/commands/beads.md";
 
   # Managed settings fragment (read-only, Nix store symlink)
   home.file.".claude/settings.managed.json".source = managedSettingsJson;
