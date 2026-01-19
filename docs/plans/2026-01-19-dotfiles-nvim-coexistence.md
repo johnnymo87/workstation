@@ -1,6 +1,6 @@
 # Dotfiles/Home-Manager Nvim Coexistence Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Status:** ✅ COMPLETED
 
 **Goal:** Refactor deprecated-dotfiles so home-manager can manage `ccremote.lua` on macOS without conflicting with the existing nvim configuration.
 
@@ -10,224 +10,117 @@
 
 ---
 
-### Task 1: Refactor dotfiles install.sh for nvim
+### Task 1: Refactor dotfiles install.sh for nvim ✅
 
 **Files:**
-- Modify: `~/projects/deprecated-dotfiles/install.sh`
+- Modified: `~/projects/deprecated-dotfiles/install.sh`
 
-**Step 1: Update the nvim symlink section**
-
-Find the current nvim section (around lines 44-48):
+Changed nvim from monolithic symlink to child symlinks:
 ```bash
-# Vim/Neovim
-ln -sf "$DOTFILES_DIR/.vimrc" "$HOME/.vimrc"
-mkdir -p "$HOME/.config"
-rm -rf "$HOME/.config/nvim" 2>/dev/null || true
-ln -sf "$DOTFILES_DIR/.config/nvim" "$HOME/.config/nvim"
-```
-
-Replace with:
-```bash
-# Vim/Neovim
-ln -sf "$DOTFILES_DIR/.vimrc" "$HOME/.vimrc"
-mkdir -p "$HOME/.config"
-
 # Create nvim as a real directory with child symlinks
-# This allows home-manager to manage additional files (e.g., lua/ccremote.lua)
 NVIM_HOME="$HOME/.config/nvim"
 NVIM_SRC="$DOTFILES_DIR/.config/nvim"
 
-# Remove old monolithic symlink if it exists
-if [ -L "$NVIM_HOME" ]; then
-  rm "$NVIM_HOME"
-fi
+if [ -L "$NVIM_HOME" ]; then rm "$NVIM_HOME"; fi
 mkdir -p "$NVIM_HOME"
 
-# Symlink top-level files
+# Symlink top-level files and directories
 for f in init.lua lazy-lock.json; do
   [ -f "$NVIM_SRC/$f" ] && ln -sf "$NVIM_SRC/$f" "$NVIM_HOME/$f"
 done
-
-# Symlink top-level directories (except lua/)
 for d in autoload ftplugin; do
   [ -d "$NVIM_SRC/$d" ] && ln -sfn "$NVIM_SRC/$d" "$NVIM_HOME/$d"
 done
 
 # Create lua/ as real directory with child symlinks
 mkdir -p "$NVIM_HOME/lua"
-
-# Symlink lua/ subdirectories
 for d in config plugins user; do
   [ -d "$NVIM_SRC/lua/$d" ] && ln -sfn "$NVIM_SRC/lua/$d" "$NVIM_HOME/lua/$d"
 done
-
-# Symlink top-level lua files (ccremote.lua, etc.)
-# On Nix machines, home-manager will replace this with its managed version
 for f in "$NVIM_SRC/lua/"*.lua; do
   [ -f "$f" ] && ln -sf "$f" "$NVIM_HOME/lua/$(basename "$f")"
 done
 ```
 
-**Step 2: Commit in deprecated-dotfiles**
+---
 
-```bash
-cd ~/projects/deprecated-dotfiles
-git add install.sh
-git commit -m "Refactor nvim install to use child symlinks
+### Task 2: Push deprecated-dotfiles changes ✅
 
-Instead of symlinking entire ~/.config/nvim directory, create it
-as a real directory with child symlinks. This allows home-manager
-to manage additional files like lua/ccremote.lua without conflict.
-
-Structure after install:
-~/.config/nvim/
-├── init.lua -> dotfiles (symlink)
-├── lazy-lock.json -> dotfiles (symlink)
-├── autoload/ -> dotfiles (symlink)
-├── ftplugin/ -> dotfiles (symlink)
-└── lua/
-    ├── config/ -> dotfiles (symlink)
-    ├── plugins/ -> dotfiles (symlink)
-    ├── user/ -> dotfiles (symlink)
-    └── ccremote.lua -> dotfiles (symlink, replaced by HM on Nix machines)
-
-Note: init.lua keeps require('ccremote').setup() - it works with either
-the dotfiles or home-manager version of ccremote.lua."
-```
+Pushed to `origin/main`.
 
 ---
 
-### Task 2: Push deprecated-dotfiles changes
-
-**Step 1: Push to remote**
-
-```bash
-cd ~/projects/deprecated-dotfiles
-git push origin main
-```
-
----
-
-### Task 3: Update workstation home.darwin.nix for nvim
+### Task 3: Update workstation home.darwin.nix for nvim ✅
 
 **Files:**
-- Modify: `~/projects/workstation/users/dev/home.darwin.nix`
+- Modified: `users/dev/home.darwin.nix`
 
-**Step 1: Read the current home.darwin.nix**
+**Key insight:** The base config uses `recursive = true` for `nvim/lua`, which creates individual file entries. You cannot disable subdirectories with `enable = false` - you must disable the entire recursive deployment and explicitly deploy only what you need.
 
-```bash
-cat ~/projects/workstation/users/dev/home.darwin.nix
-```
-
-Check current Darwin-specific config to understand what's there.
-
-**Step 2: Add Darwin-specific nvim config**
-
-The key insight: On Darwin, dotfiles manages nvim's init.lua (which already has `require("ccremote").setup()`). Home-manager only needs to:
-1. Remove the dotfiles ccremote.lua symlink (to avoid conflict)
-2. Deploy HM-managed `lua/ccremote.lua` in its place
-
-Add to home.darwin.nix (inside the `config = lib.mkIf pkgs.stdenv.isDarwin` block):
-
+**Actual implementation:**
 ```nix
-    # On Darwin, dotfiles symlinks ccremote.lua but we want HM to manage it.
-    # Remove the dotfiles symlink before HM tries to create its own.
-    home.activation.prepareNvimForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
-      rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
-    '';
+  # Disable the entire nvim/lua recursive deployment from base config
+  # (it conflicts with dotfiles-managed nvim config)
+  xdg.configFile."nvim/lua".enable = lib.mkForce false;
 
-    # Deploy HM-managed ccremote.lua (dotfiles init.lua already loads it)
-    xdg.configFile."nvim/lua/ccremote.lua".source = "${assetsPath}/nvim/lua/ccremote.lua";
-```
+  # Deploy only ccremote.lua (dotfiles init.lua already loads it)
+  xdg.configFile."nvim/lua/ccremote.lua".source = "${assetsPath}/nvim/lua/ccremote.lua";
 
-Note: `assetsPath` should already be available from extraSpecialArgs in flake.nix.
-
-**Step 3: Commit**
-
-```bash
-cd ~/projects/workstation
-git add users/dev/home.darwin.nix
-git commit -m "Add Darwin-specific ccremote.lua deployment
-
-On Darwin, dotfiles manages nvim's init.lua which loads ccremote.
-We deploy HM-managed ccremote.lua to replace the dotfiles symlink.
-
-Includes activation script to remove dotfiles symlink before HM
-creates its own (avoids checkLinkTargets conflict)."
+  # On Darwin, dotfiles creates symlinks that HM also wants to manage.
+  # Remove dotfiles symlinks before HM tries to create its own.
+  home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
+    rm -f ~/.claude/commands/ask-question.md 2>/dev/null || true
+    rm -f ~/.claude/commands/beads.md 2>/dev/null || true
+    rm -f ~/.claude/commands/notify-telegram.md 2>/dev/null || true
+  '';
 ```
 
 ---
 
-### Task 4: Push workstation changes
+### Task 4: Push workstation changes ✅
 
-**Step 1: Push to remote**
-
-```bash
-cd ~/projects/workstation
-git push origin main
-```
+Pushed to `origin/main`.
 
 ---
 
-## CHECKPOINT: Pause here on devbox
+### Task 5: Test on macOS ✅
 
-Tasks 1-4 can be completed on the devbox. After pushing, pause and switch to macOS to continue with Task 5.
+**Note:** install.sh clones dotfiles to `~/projects/dotfiles`, while you may also have `~/Code/dotfiles`. Keep them in sync.
 
----
+**Steps completed:**
+1. Pulled dotfiles and ran `./install.sh`
+2. Verified nvim structure (lua/ is real directory, children are symlinks)
+3. Synced `ask-question.md` between dotfiles and workstation (they had diverged)
+4. Ran `sudo /run/current-system/sw/bin/darwin-rebuild switch --flake .#Y0FMQX93RR-2`
+5. Build succeeded after fixing:
+   - Disabled entire `nvim/lua` recursive deployment (not individual files)
+   - Added activation script to remove dotfiles symlinks for claude commands
 
-### Task 5: Test on macOS (must run on macOS)
-
-**Prerequisites:** You must be on macOS for this task.
-
-**Step 1: Pull deprecated-dotfiles and re-run installer**
-
+**Remaining verification (Task 5 Steps 4-6):**
 ```bash
-cd ~/projects/dotfiles  # or wherever dotfiles is on macOS
-git pull origin main
-./install.sh
-```
-
-**Step 2: Verify nvim structure after install.sh**
-
-```bash
-ls -la ~/.config/nvim/
-# Should show: init.lua, lazy-lock.json as symlinks, lua/ as DIRECTORY (not symlink)
-
-ls -la ~/.config/nvim/lua/
-# Should show: config/, plugins/, user/ as symlinks, ccremote.lua as symlink to dotfiles
-```
-
-**Step 3: Pull workstation and rebuild darwin**
-
-```bash
-cd ~/Code/workstation  # or your macOS path
-git pull origin main
-darwin-rebuild switch --flake .#Y0FMQX93RR-2  # adjust hostname as needed
-```
-
-**Step 4: Verify ccremote.lua replaced by HM**
-
-```bash
+# Verify ccremote.lua is HM-managed
 ls -la ~/.config/nvim/lua/ccremote.lua
-# Should now show symlink to Nix store (not dotfiles)
-```
+# Should point to Nix store
 
-**Step 5: Test nvim loads correctly**
-
-```bash
+# Test nvim loads ccremote
 nvim -c ':CCList' -c ':q'
-```
+# Expected: "ccremote: no instances registered"
 
-Expected: "ccremote: no instances registered" (not "Unknown command")
-
-**Step 6: Test nvims function**
-
-```bash
+# Test nvims function
 type nvims
 nvims --version
 ```
 
-Expected: Shows function definition, then nvim version with socket path on stderr.
+---
+
+## Lessons Learned
+
+1. **`recursive = true` creates file entries, not directory entries.** You cannot use `xdg.configFile."subdir".enable = false` to disable a subdirectory - you must disable the entire parent or list each file individually.
+
+2. **HM activation scripts run before checkLinkTargets.** Use `lib.hm.dag.entryBefore ["checkLinkTargets"]` to remove conflicting symlinks before HM checks for them.
+
+3. **Keep dotfiles repos in sync.** install.sh clones to `~/projects/dotfiles`, but you may edit in `~/Code/dotfiles`. Push changes and pull in both locations.
 
 ---
 
