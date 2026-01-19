@@ -35,8 +35,14 @@ lib.mkIf isDarwin {
   # Neovim: generates init.lua
   programs.neovim.enable = lib.mkForce false;
 
-  # Disable nvim lua files from assets (conflicts with existing nvim config)
+  # Disable nvim lua user/ files from assets (conflicts with existing dotfiles nvim config)
   xdg.configFile."nvim/lua/user".enable = lib.mkForce false;
+
+  # On Darwin, dotfiles symlinks ccremote.lua but we want HM to manage it.
+  # Remove the dotfiles symlink before HM tries to create its own.
+  home.activation.prepareNvimForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
+  '';
 
   # Tmux extra config (disable if you have existing tmux config)
   # Uncomment if tmux conflicts:
