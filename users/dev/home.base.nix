@@ -129,6 +129,9 @@ in
       export HISTFILESIZE=20000
       export HISTCONTROL=ignoredups:erasedups
       shopt -s histappend
+
+      # Claude Code Remote helpers
+      ${builtins.readFile "${assetsPath}/bash/claude.bash"}
     '';
   };
 
