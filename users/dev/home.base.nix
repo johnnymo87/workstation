@@ -100,12 +100,14 @@ in
     extraLuaConfig = ''
       require("user.settings")
       require("user.mappings")
+      require("ccremote").setup()
     '';
   };
 
   # Neovim Lua config files (kept separate from HM-managed init.vim)
-  xdg.configFile."nvim/lua/user" = {
-    source = "${assetsPath}/nvim/lua/user";
+  # Deploys entire lua/ directory to support both user/ configs and top-level modules like ccremote
+  xdg.configFile."nvim/lua" = {
+    source = "${assetsPath}/nvim/lua";
     recursive = true;
   };
 
