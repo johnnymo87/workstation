@@ -51,6 +51,35 @@
     ];
   };
 
+  # CCR webhook server (depends on ngrok)
+  systemd.services.ccr-webhooks = {
+    description = "Claude Code Remote webhook server";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" "ngrok.service" ];
+    requires = [ "ngrok.service" ];
+
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/Claude-Code-Remote";
+      Environment = [
+        "HOME=/home/dev"
+        "NODE_ENV=production"
+      ];
+      ExecStart = "${pkgs.nodejs}/bin/npm run webhooks";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+  };
+
+  # Optional: Stack target to start/stop both together
+  systemd.targets.ccr = {
+    description = "CCR stack (ngrok + webhooks)";
+    wants = [ "ngrok.service" "ccr-webhooks.service" ];
+  };
+
   # Allow unfree packages (ngrok)
   nixpkgs.config.allowUnfree = true;
 
