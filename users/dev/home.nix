@@ -7,5 +7,6 @@
     ./home.base.nix
     ./home.linux.nix
     ./home.darwin.nix
+    ./claude-skills.nix
   ];
 }
