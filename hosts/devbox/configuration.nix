@@ -59,6 +59,8 @@
     after = [ "network-online.target" "ngrok.service" ];
     requires = [ "ngrok.service" ];
 
+    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils ];
+
     serviceConfig = {
       Type = "simple";
       User = "dev";
