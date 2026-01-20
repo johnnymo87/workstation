@@ -10,7 +10,7 @@ Get notified on your phone when Claude Code completes tasks or needs input.
 
 ## What This Skill Does
 
-- Starts the local webhook server (Claude-Code-Remote daemon)
+- Starts the local webhook server (claude-code-remote daemon)
 - Establishes ngrok tunnel for Telegram webhooks
 - Enables per-session notification opt-in
 - Sends task completion notifications to Telegram
@@ -73,11 +73,11 @@ Multiple Claude Code sessions run in neovim terminal buffers within tmux:
 
 ## Prerequisites
 
-1. **Claude-Code-Remote repository** cloned locally
-   - Location: `~/Code/Claude-Code-Remote` (or your preferred location)
+1. **claude-code-remote repository** cloned locally
+   - Location: `~/Code/claude-code-remote` (or your preferred location)
    - Branch: `develop`
 
-2. **Telegram bot** configured in Claude-Code-Remote
+2. **Telegram bot** configured in claude-code-remote
    - `.env` file with `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 
 3. **ngrok** installed with a reserved domain
@@ -92,7 +92,7 @@ Multiple Claude Code sessions run in neovim terminal buffers within tmux:
 ### Step 1: Start the Webhook Server
 
 ```bash
-cd ~/Code/Claude-Code-Remote
+cd ~/Code/claude-code-remote
 lsof -ti :4731 | xargs kill -9 2>/dev/null; sleep 2 && node start-telegram-webhook.js
 ```
 
@@ -120,7 +120,7 @@ pkill -f ngrok; sleep 2 && ngrok http 4731 --url=rehabilitative-joanie-undefeate
 
 The `pkill` prefix kills any existing ngrok process before starting.
 
-**Note:** Replace the URL with your own ngrok domain. If you don't have a reserved domain, ngrok will provide a random URL and you'll need to update the webhook configuration in Claude-Code-Remote.
+**Note:** Replace the URL with your own ngrok domain. If you don't have a reserved domain, ngrok will provide a random URL and you'll need to update the webhook configuration in claude-code-remote.
 
 **Expected output:**
 ```
@@ -270,7 +270,7 @@ lsof -i :4731
 
 **Check .env configuration:**
 ```bash
-cd ~/Code/Claude-Code-Remote
+cd ~/Code/claude-code-remote
 cat .env | grep TELEGRAM
 ```
 
@@ -303,7 +303,7 @@ cat /tmp/claude/tasks/<daemon-task>.output | tail -50
 
 **Check SQLite mapping:**
 ```bash
-# In Claude-Code-Remote directory
+# In claude-code-remote directory
 sqlite3 src/data/message-tokens.db "SELECT * FROM message_tokens ORDER BY created_at DESC LIMIT 5;"
 ```
 

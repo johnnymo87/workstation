@@ -65,7 +65,7 @@
       Type = "simple";
       User = "dev";
       Group = "dev";
-      WorkingDirectory = "/home/dev/projects/Claude-Code-Remote";
+      WorkingDirectory = "/home/dev/projects/claude-code-remote";
       Environment = [
         "HOME=/home/dev"
         "NODE_ENV=production"
