@@ -1,0 +1,47 @@
+# Claude Code skills deployment
+# Centralizes all skill file deployments with platform-conditional logic
+{ lib, pkgs, assetsPath, ... }:
+
+let
+  isDarwin = pkgs.stdenv.isDarwin;
+
+  # Helper to create home.file entry for a skill
+  mkSkill = name: {
+    ".claude/skills/${name}/SKILL.md".source =
+      "${assetsPath}/claude/skills/${name}/SKILL.md";
+  };
+
+  # Helper to create entries for multiple skills
+  mkSkills = names:
+    lib.foldl' (acc: name: acc // (mkSkill name)) {} names;
+
+  # Skills deployed to all platforms
+  crossPlatformSkills = [
+    "using-telegram-notifications"
+    "using-chatgpt-relay-from-devbox"
+    "using-beads-for-issue-tracking"
+  ];
+
+  # Skills deployed only on Darwin (work machine)
+  darwinOnlySkills = [
+    "using-gcloud-bq-cli"
+  ];
+
+  # Skills with additional reference files need explicit entries
+  beadsReferences = {
+    ".claude/skills/using-beads-for-issue-tracking/references/BOUNDARIES.md".source =
+      "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/BOUNDARIES.md";
+    ".claude/skills/using-beads-for-issue-tracking/references/CLI_REFERENCE.md".source =
+      "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/CLI_REFERENCE.md";
+    ".claude/skills/using-beads-for-issue-tracking/references/DEPENDENCIES.md".source =
+      "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/DEPENDENCIES.md";
+    ".claude/skills/using-beads-for-issue-tracking/references/WORKFLOWS.md".source =
+      "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/WORKFLOWS.md";
+  };
+in
+{
+  home.file =
+    mkSkills crossPlatformSkills
+    // lib.optionalAttrs isDarwin (mkSkills darwinOnlySkills)
+    // beadsReferences;
+}
