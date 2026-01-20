@@ -5,7 +5,7 @@
 # On Darwin, we disable programs that conflict with existing dotfiles.
 # As we migrate each program to HM, remove the corresponding mkForce false.
 # See: /tmp/research-nix-darwin-dotfiles-conflict-answer.md
-{ config, pkgs, lib, assetsPath, isDarwin, ... }:
+{ config, pkgs, lib, assetsPath, isDarwin, ccrNgrok, ... }:
 
 lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
@@ -15,7 +15,37 @@ lib.mkIf isDarwin {
       name = "screenshot-to-devbox";
       text = builtins.readFile "${assetsPath}/scripts/screenshot-to-devbox.sh";
     })
+    pkgs.ngrok
   ];
+
+  # ngrok launchd agent with Keychain-sourced authtoken
+  launchd.agents.ngrok-ccr = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "/bin/sh" "-c"
+        ''
+          export NGROK_AUTHTOKEN="$(/usr/bin/security find-generic-password -s ngrok-authtoken -w)"
+          exec ${pkgs.ngrok}/bin/ngrok start --all --config ${
+            (pkgs.formats.yaml {}).generate "ngrok-ccr.yml" {
+              version = 3;
+              endpoints = [
+                {
+                  name = ccrNgrok.name;
+                  url = "https://${ccrNgrok.domain}";
+                  upstream.url = toString ccrNgrok.port;
+                }
+              ];
+            }
+          }
+        ''
+      ];
+      RunAtLoad = false;  # Start manually, not at login
+      KeepAlive = false;  # Don't auto-restart
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/ngrok-ccr.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/ngrok-ccr.err.log";
+    };
+  };
 
   # ============================================================
   # DISABLED PROGRAMS (using existing dotfiles instead)
