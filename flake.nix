@@ -48,13 +48,22 @@
 
     # macOS host facts
     mac = import ./hosts/Y0FMQX93RR-2/vars.nix;
+
+    # Shared ngrok tunnel configuration for CCR
+    ccrNgrok = {
+      name = "ccr-webhooks";
+      domain = "rehabilitative-joanie-undefeatedly.ngrok-free.dev";
+      port = 4731;
+    };
   in {
     # NixOS system configuration
     nixosConfigurations.devbox = nixpkgs.lib.nixosSystem {
       system = devboxSystem;
+      specialArgs = { inherit ngrok ccrNgrok; };
       modules = [
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
+        ngrok.nixosModules.ngrok
         ./hosts/devbox/configuration.nix
         ./hosts/devbox/hardware.nix
         ./hosts/devbox/disko.nix
@@ -68,7 +77,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self llm-agents;
+        inherit self llm-agents ccrNgrok;
         assetsPath = ./assets;
         projects = import ./projects.nix;
         isLinux = true;
@@ -78,7 +87,7 @@
 
     # Darwin (macOS) system configuration
     darwinConfigurations.${mac.hostname} = nix-darwin.lib.darwinSystem {
-      specialArgs = { inherit inputs mac; };
+      specialArgs = { inherit inputs mac ccrNgrok; };
       modules = [
         ./hosts/Y0FMQX93RR-2/configuration.nix
         home-manager.darwinModules.home-manager
@@ -86,7 +95,7 @@
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = {
-            inherit llm-agents;
+            inherit llm-agents ccrNgrok;
             assetsPath = ./assets;
             projects = import ./projects.nix;
             isLinux = false;
