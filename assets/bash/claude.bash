@@ -1,7 +1,7 @@
 # Claude Code Remote: Start neovim with RPC socket for remote control
 # Usage: nvims [files...]
 #
-# The socket allows external tools (Claude-Code-Remote) to send commands
+# The socket allows external tools (claude-code-remote) to send commands
 # to Claude instances running in neovim terminal buffers.
 #
 # Security: Uses XDG_RUNTIME_DIR (mode 0700) when available, falls back to /tmp.
