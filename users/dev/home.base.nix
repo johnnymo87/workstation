@@ -161,19 +161,11 @@ in
     "$HOME/.npm-global/bin"
   ];
 
-  # Claude skills and commands - managed individually for gradual migration
-  # As we migrate each skill/command from dotfiles to HM, add it here.
-  # On Darwin, remove the corresponding dotfiles symlink after adding here.
+  # Claude commands - managed individually for gradual migration
+  # Skills are managed by claude-skills.nix module
   home.file.".claude/commands/ask-question.md".source = "${assetsPath}/claude/commands/ask-question.md";
   home.file.".claude/commands/beads.md".source = "${assetsPath}/claude/commands/beads.md";
   home.file.".claude/commands/notify-telegram.md".source = "${assetsPath}/claude/commands/notify-telegram.md";
-  home.file.".claude/skills/using-telegram-notifications/SKILL.md".source = "${assetsPath}/claude/skills/using-telegram-notifications/SKILL.md";
-  home.file.".claude/skills/using-chatgpt-relay-from-devbox/SKILL.md".source = "${assetsPath}/claude/skills/using-chatgpt-relay-from-devbox/SKILL.md";
-  home.file.".claude/skills/using-beads-for-issue-tracking/SKILL.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/SKILL.md";
-  home.file.".claude/skills/using-beads-for-issue-tracking/references/BOUNDARIES.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/BOUNDARIES.md";
-  home.file.".claude/skills/using-beads-for-issue-tracking/references/CLI_REFERENCE.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/CLI_REFERENCE.md";
-  home.file.".claude/skills/using-beads-for-issue-tracking/references/DEPENDENCIES.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/DEPENDENCIES.md";
-  home.file.".claude/skills/using-beads-for-issue-tracking/references/WORKFLOWS.md".source = "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/WORKFLOWS.md";
 
   # Managed settings fragment (read-only, Nix store symlink)
   home.file.".claude/settings.managed.json".source = managedSettingsJson;
