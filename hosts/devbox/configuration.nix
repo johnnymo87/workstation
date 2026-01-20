@@ -1,5 +1,5 @@
 # NixOS system configuration for devbox
-{ config, pkgs, lib, ... }:
+{ config, pkgs, lib, ngrok, ccrNgrok, ... }:
 
 {
   # sops-nix configuration
@@ -17,6 +17,39 @@
         mode = "0600";
         path = "/home/dev/.ssh/id_ed25519_github";
       };
+      ngrok_authtoken = {
+        owner = "ngrok";
+        group = "ngrok";
+        mode = "0400";
+      };
+    };
+
+    # Render ngrok config with authtoken
+    templates."ngrok-secrets.yml" = {
+      owner = "ngrok";
+      group = "ngrok";
+      mode = "0400";
+      content = ''
+        version: 3
+        agent:
+          authtoken: ${config.sops.placeholder.ngrok_authtoken}
+      '';
+    };
+  };
+
+  # ngrok tunnel for CCR webhooks
+  services.ngrok = {
+    enable = true;
+    extraConfigFiles = [ config.sops.templates."ngrok-secrets.yml".path ];
+    extraConfig = {
+      version = 3;
+      endpoints = [
+        {
+          name = ccrNgrok.name;
+          url = "https://${ccrNgrok.domain}";
+          upstream.url = toString ccrNgrok.port;
+        }
+      ];
     };
   };
 
