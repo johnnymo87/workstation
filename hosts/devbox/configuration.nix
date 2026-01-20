@@ -41,17 +41,18 @@
   services.ngrok = {
     enable = true;
     extraConfigFiles = [ config.sops.templates."ngrok-secrets.yml".path ];
-    extraConfig = {
-      version = 3;
-      endpoints = [
-        {
-          name = ccrNgrok.name;
-          url = "https://${ccrNgrok.domain}";
-          upstream.url = toString ccrNgrok.port;
-        }
-      ];
-    };
+    # Use top-level endpoints option (not extraConfig) so module starts with --all
+    endpoints = [
+      {
+        name = ccrNgrok.name;
+        url = "https://${ccrNgrok.domain}";
+        upstream.url = toString ccrNgrok.port;
+      }
+    ];
   };
+
+  # Allow unfree packages (ngrok)
+  nixpkgs.config.allowUnfree = true;
 
   # System identity
   networking.hostName = "devbox";
