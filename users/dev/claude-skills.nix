@@ -17,10 +17,18 @@ let
 
   # Skills deployed to all platforms
   crossPlatformSkills = [
-    "using-telegram-notifications"
+    "notify-telegram"
     "using-chatgpt-relay-from-devbox"
     "using-beads-for-issue-tracking"
   ];
+
+  # notify-telegram has a script that needs to be executable
+  notifyTelegramScript = {
+    ".claude/skills/notify-telegram/register.sh" = {
+      source = "${assetsPath}/claude/skills/notify-telegram/register.sh";
+      executable = true;
+    };
+  };
 
   # Skills deployed only on Darwin (work machine)
   darwinOnlySkills = [
@@ -43,5 +51,6 @@ in
   home.file =
     mkSkills crossPlatformSkills
     // lib.optionalAttrs isDarwin (mkSkills darwinOnlySkills)
-    // beadsReferences;
+    // beadsReferences
+    // notifyTelegramScript;
 }
