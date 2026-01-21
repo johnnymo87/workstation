@@ -40,6 +40,9 @@ in
     llmPkgs.ccusage
     llmPkgs.beads
 
+    # Cloudflare Workers CLI
+    pkgs.wrangler
+
     # Other tools
     pkgs.devenv
   ];
