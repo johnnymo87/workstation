@@ -28,14 +28,9 @@
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
-    ngrok = {
-      url = "github:ngrok/ngrok-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, sops-nix, ngrok, ... }@inputs:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, sops-nix, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -49,21 +44,19 @@
     # macOS host facts
     mac = import ./hosts/Y0FMQX93RR-2/vars.nix;
 
-    # Shared ngrok tunnel configuration for CCR
-    ccrNgrok = {
-      name = "ccr-webhooks";
-      domain = "rehabilitative-joanie-undefeatedly.ngrok-free.dev";
+    # Shared Cloudflare Tunnel configuration for CCR webhooks
+    ccrTunnel = {
+      hostname = "ccr.mohrbacher.dev";
       port = 4731;
     };
   in {
     # NixOS system configuration
     nixosConfigurations.devbox = nixpkgs.lib.nixosSystem {
       system = devboxSystem;
-      specialArgs = { inherit ngrok ccrNgrok; };
+      specialArgs = { inherit ccrTunnel; };
       modules = [
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
-        ngrok.nixosModules.ngrok
         ./hosts/devbox/configuration.nix
         ./hosts/devbox/hardware.nix
         ./hosts/devbox/disko.nix
@@ -77,7 +70,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self llm-agents ccrNgrok;
+        inherit self llm-agents ccrTunnel;
         assetsPath = ./assets;
         projects = import ./projects.nix;
         isLinux = true;
@@ -87,7 +80,7 @@
 
     # Darwin (macOS) system configuration
     darwinConfigurations.${mac.hostname} = nix-darwin.lib.darwinSystem {
-      specialArgs = { inherit inputs mac ccrNgrok; };
+      specialArgs = { inherit inputs mac ccrTunnel; };
       modules = [
         ./hosts/Y0FMQX93RR-2/configuration.nix
         home-manager.darwinModules.home-manager
@@ -95,7 +88,7 @@
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = {
-            inherit llm-agents ccrNgrok;
+            inherit llm-agents ccrTunnel;
             assetsPath = ./assets;
             projects = import ./projects.nix;
             isLinux = false;
