@@ -1,5 +1,5 @@
 # NixOS system configuration for devbox
-{ config, pkgs, lib, ngrok, ccrNgrok, ... }:
+{ config, pkgs, lib, ccrTunnel, ... }:
 
 {
   # sops-nix configuration
@@ -17,47 +17,50 @@
         mode = "0600";
         path = "/home/dev/.ssh/id_ed25519_github";
       };
-      ngrok_authtoken = {
-        owner = "ngrok";
-        group = "ngrok";
+      cloudflared_tunnel_token = {
+        owner = "cloudflared";
+        group = "cloudflared";
         mode = "0400";
       };
     };
 
-    # Render ngrok config with authtoken
-    templates."ngrok-secrets.yml" = {
-      owner = "ngrok";
-      group = "ngrok";
-      mode = "0400";
-      content = ''
-        version: 3
-        agent:
-          authtoken: ${config.sops.placeholder.ngrok_authtoken}
-      '';
+  };
+
+  # cloudflared service user
+  users.groups.cloudflared = {};
+  users.users.cloudflared = {
+    isSystemUser = true;
+    group = "cloudflared";
+    description = "Cloudflare Tunnel daemon user";
+  };
+
+  # Cloudflare Tunnel for CCR webhooks (dashboard-managed with token)
+  systemd.services.cloudflared-tunnel = {
+    description = "Cloudflare Tunnel for CCR webhooks";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+
+    serviceConfig = {
+      Type = "simple";
+      User = "cloudflared";
+      Group = "cloudflared";
+      ExecStart = "${pkgs.writeShellScript "cloudflared-run" ''
+        exec ${pkgs.cloudflared}/bin/cloudflared tunnel --no-autoupdate run \
+          --token "$(cat ${config.sops.secrets.cloudflared_tunnel_token.path})"
+      ''}";
+      Restart = "on-failure";
+      RestartSec = 5;
     };
   };
 
-  # ngrok tunnel for CCR webhooks
-  services.ngrok = {
-    enable = true;
-    extraConfigFiles = [ config.sops.templates."ngrok-secrets.yml".path ];
-    # Use top-level endpoints option (not extraConfig) so module starts with --all
-    endpoints = [
-      {
-        name = ccrNgrok.name;
-        url = "https://${ccrNgrok.domain}";
-        upstream.url = toString ccrNgrok.port;
-      }
-    ];
-  };
-
-  # CCR webhook server (depends on ngrok)
+  # CCR webhook server (depends on cloudflared)
   systemd.services.ccr-webhooks = {
     description = "Claude Code Remote webhook server";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" "ngrok.service" ];
-    requires = [ "ngrok.service" ];
+    after = [ "network-online.target" "cloudflared-tunnel.service" ];
+    requires = [ "cloudflared-tunnel.service" ];
 
     path = [ pkgs.nodejs pkgs.bash pkgs.coreutils ];
 
@@ -78,12 +81,9 @@
 
   # Optional: Stack target to start/stop both together
   systemd.targets.ccr = {
-    description = "CCR stack (ngrok + webhooks)";
-    wants = [ "ngrok.service" "ccr-webhooks.service" ];
+    description = "CCR stack (cloudflared + webhooks)";
+    wants = [ "cloudflared-tunnel.service" "ccr-webhooks.service" ];
   };
-
-  # Allow unfree packages (ngrok)
-  nixpkgs.config.allowUnfree = true;
 
   # System identity
   networking.hostName = "devbox";
