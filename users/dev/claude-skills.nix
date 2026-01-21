@@ -17,9 +17,9 @@ let
 
   # Skills deployed to all platforms
   crossPlatformSkills = [
+    "beads"
     "notify-telegram"
     "using-chatgpt-relay-from-devbox"
-    "using-beads-for-issue-tracking"
   ];
 
   # notify-telegram has a script that needs to be executable
@@ -37,14 +37,14 @@ let
 
   # Skills with additional reference files need explicit entries
   beadsReferences = {
-    ".claude/skills/using-beads-for-issue-tracking/references/BOUNDARIES.md".source =
-      "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/BOUNDARIES.md";
-    ".claude/skills/using-beads-for-issue-tracking/references/CLI_REFERENCE.md".source =
-      "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/CLI_REFERENCE.md";
-    ".claude/skills/using-beads-for-issue-tracking/references/DEPENDENCIES.md".source =
-      "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/DEPENDENCIES.md";
-    ".claude/skills/using-beads-for-issue-tracking/references/WORKFLOWS.md".source =
-      "${assetsPath}/claude/skills/using-beads-for-issue-tracking/references/WORKFLOWS.md";
+    ".claude/skills/beads/references/BOUNDARIES.md".source =
+      "${assetsPath}/claude/skills/beads/references/BOUNDARIES.md";
+    ".claude/skills/beads/references/CLI_REFERENCE.md".source =
+      "${assetsPath}/claude/skills/beads/references/CLI_REFERENCE.md";
+    ".claude/skills/beads/references/DEPENDENCIES.md".source =
+      "${assetsPath}/claude/skills/beads/references/DEPENDENCIES.md";
+    ".claude/skills/beads/references/WORKFLOWS.md".source =
+      "${assetsPath}/claude/skills/beads/references/WORKFLOWS.md";
   };
 in
 {
