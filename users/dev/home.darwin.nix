@@ -63,11 +63,13 @@ lib.mkIf isDarwin {
 
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.
   # Remove dotfiles symlinks before HM tries to create its own.
+  # Also clean up renamed/removed skills.
   home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
     rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
     rm -f ~/.claude/commands/ask-question.md 2>/dev/null || true
     rm -f ~/.claude/commands/beads.md 2>/dev/null || true
     rm -f ~/.claude/commands/notify-telegram.md 2>/dev/null || true
+    rm -rf ~/.claude/skills/using-telegram-notifications 2>/dev/null || true
   '';
 
   # Tmux extra config (disable if you have existing tmux config)

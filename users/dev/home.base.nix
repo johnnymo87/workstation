@@ -165,7 +165,6 @@ in
   # Skills are managed by claude-skills.nix module
   home.file.".claude/commands/ask-question.md".source = "${assetsPath}/claude/commands/ask-question.md";
   home.file.".claude/commands/beads.md".source = "${assetsPath}/claude/commands/beads.md";
-  home.file.".claude/commands/notify-telegram.md".source = "${assetsPath}/claude/commands/notify-telegram.md";
 
   # Managed settings fragment (read-only, Nix store symlink)
   home.file.".claude/settings.managed.json".source = managedSettingsJson;
