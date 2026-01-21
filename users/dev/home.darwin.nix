@@ -5,7 +5,7 @@
 # On Darwin, we disable programs that conflict with existing dotfiles.
 # As we migrate each program to HM, remove the corresponding mkForce false.
 # See: /tmp/research-nix-darwin-dotfiles-conflict-answer.md
-{ config, pkgs, lib, assetsPath, isDarwin, ccrNgrok, ... }:
+{ config, pkgs, lib, assetsPath, isDarwin, ccrTunnel, ... }:
 
 lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
@@ -15,35 +15,24 @@ lib.mkIf isDarwin {
       name = "screenshot-to-devbox";
       text = builtins.readFile "${assetsPath}/scripts/screenshot-to-devbox.sh";
     })
-    pkgs.ngrok
+    pkgs.cloudflared
   ];
 
-  # ngrok launchd agent with Keychain-sourced authtoken
-  launchd.agents.ngrok-ccr = {
+  # Cloudflare Tunnel launchd agent with Keychain-sourced token
+  launchd.agents.cloudflared-ccr = {
     enable = true;
     config = {
       ProgramArguments = [
         "/bin/sh" "-c"
         ''
-          export NGROK_AUTHTOKEN="$(/usr/bin/security find-generic-password -s ngrok-authtoken -w)"
-          exec ${pkgs.ngrok}/bin/ngrok start --all --config ${
-            (pkgs.formats.yaml {}).generate "ngrok-ccr.yml" {
-              version = 3;
-              endpoints = [
-                {
-                  name = ccrNgrok.name;
-                  url = "https://${ccrNgrok.domain}";
-                  upstream.url = toString ccrNgrok.port;
-                }
-              ];
-            }
-          }
+          TUNNEL_TOKEN="$(/usr/bin/security find-generic-password -s cloudflared-tunnel-token -w)"
+          exec ${pkgs.cloudflared}/bin/cloudflared tunnel --no-autoupdate run --token "$TUNNEL_TOKEN"
         ''
       ];
       RunAtLoad = false;  # Start manually, not at login
       KeepAlive = false;  # Don't auto-restart
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/ngrok-ccr.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/ngrok-ccr.err.log";
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudflared-ccr.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudflared-ccr.err.log";
     };
   };
 
