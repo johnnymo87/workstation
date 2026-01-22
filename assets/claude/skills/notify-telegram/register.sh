@@ -6,8 +6,8 @@ LABEL="${1:-$(basename "$PWD")}"
 DAEMON_URL="http://localhost:4731"
 
 # Find session ID from most recent transcript in this project
-# Claude Code uses path with slashes replaced by dashes, prefixed with dash
-PROJECT_KEY="$(pwd | sed 's|/|-|g')"
+# Claude Code replaces slashes and periods with dashes, prefixed with dash
+PROJECT_KEY="$(pwd | sed 's|[/.]|-|g')"
 TRANSCRIPT_DIR="$HOME/.claude/projects/$PROJECT_KEY"
 
 if [[ ! -d "$TRANSCRIPT_DIR" ]]; then
