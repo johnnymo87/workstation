@@ -22,6 +22,11 @@
         group = "cloudflared";
         mode = "0400";
       };
+      cloudflare_api_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };

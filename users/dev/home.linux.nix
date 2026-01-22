@@ -10,6 +10,13 @@ lib.mkIf isLinux {
   # home.stateVersion for this platform
   home.stateVersion = "25.11";
 
+  # Cloudflare API token for wrangler (from sops-nix secret)
+  programs.bash.initExtra = lib.mkAfter ''
+    if [ -r /run/secrets/cloudflare_api_token ]; then
+      export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+    fi
+  '';
+
   # Mask GPG agent sockets for forwarding (systemd-specific)
   home.activation.maskGpgAgentSockets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     mkdir -p "$HOME/.config/systemd/user"

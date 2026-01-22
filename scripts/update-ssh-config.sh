@@ -23,8 +23,6 @@ Host devbox
     ForwardAgent yes
     # GPG agent forwarding
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
-    # Wrangler OAuth callback (for 'wrangler login' on devbox)
-    LocalForward 8976 localhost:8976
 $MARKER_END
 EOF
 
