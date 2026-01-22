@@ -27,6 +27,7 @@ Host devbox
     LocalForward 4000 localhost:4000
     LocalForward 4003 localhost:4003
     RemoteForward 9222 localhost:9222
+    # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 $MARKER_END
 EOF
