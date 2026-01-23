@@ -23,6 +23,11 @@ Host devbox
     ForwardAgent yes
     # GPG agent forwarding
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
+    # Development tunnels (see troubleshooting-devbox skill for details)
+    LocalForward 4000 localhost:4000
+    LocalForward 4003 localhost:4003
+    RemoteForward 9222 localhost:9222
+    RemoteForward 3033 localhost:3033
 $MARKER_END
 EOF
 
