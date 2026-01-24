@@ -16,6 +16,19 @@ let
     '';
   };
 
+  # Clipboard commands via tmux (work over SSH, inside tmux sessions)
+  tcopy = pkgs.writeShellApplication {
+    name = "tcopy";
+    runtimeInputs = [ pkgs.tmux ];
+    text = builtins.readFile "${assetsPath}/scripts/tcopy.bash";
+  };
+
+  tpaste = pkgs.writeShellApplication {
+    name = "tpaste";
+    runtimeInputs = [ pkgs.tmux ];
+    text = builtins.readFile "${assetsPath}/scripts/tpaste.bash";
+  };
+
   # Managed settings fragment - only keys we want to control
   # Claude Code's runtime state (feedbackSurveyState, enabledPlugins, etc.) is preserved
   # On Darwin, we skip statusLine to preserve the custom dotfiles statusline.sh
@@ -58,6 +71,10 @@ in
 
     # Cloudflare Workers CLI
     pkgs.wrangler
+
+    # Clipboard via tmux
+    tcopy
+    tpaste
 
     # Other tools
     pkgs.devenv
