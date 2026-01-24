@@ -8,5 +8,6 @@
     ./home.linux.nix
     ./home.darwin.nix
     ./claude-skills.nix
+    ./claude-hooks.nix
   ];
 }

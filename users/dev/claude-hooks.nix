@@ -27,19 +27,7 @@ let
   hooksDir = "${config.home.homeDirectory}/.claude/hooks";
 in
 {
-  # Deploy wrapper scripts to ~/.claude/hooks/
-  home.file.".claude/hooks/on-session-start.sh" = {
-    source = "${hookStart}/bin/claude-hook-session-start";
-    executable = true;
-  };
-
-  home.file.".claude/hooks/on-stop.sh" = {
-    source = "${hookStop}/bin/claude-hook-stop";
-    executable = true;
-  };
-
   # Export hook paths for use in managedSettings (home.base.nix)
-  # This is a custom option that home.base.nix will read
   options.claude.hooks = {
     sessionStartPath = lib.mkOption {
       type = lib.types.str;
@@ -51,5 +39,16 @@ in
       default = "${hooksDir}/on-stop.sh";
       description = "Path to stop hook";
     };
+  };
+
+  # Deploy wrapper scripts to ~/.claude/hooks/
+  config.home.file.".claude/hooks/on-session-start.sh" = {
+    source = "${hookStart}/bin/claude-hook-session-start";
+    executable = true;
+  };
+
+  config.home.file.".claude/hooks/on-stop.sh" = {
+    source = "${hookStop}/bin/claude-hook-stop";
+    executable = true;
   };
 }

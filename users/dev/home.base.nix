@@ -19,7 +19,23 @@ let
   # Managed settings fragment - only keys we want to control
   # Claude Code's runtime state (feedbackSurveyState, enabledPlugins, etc.) is preserved
   # On Darwin, we skip statusLine to preserve the custom dotfiles statusline.sh
-  managedSettings = lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
+  managedSettings = {
+    hooks = {
+      SessionStart = [{
+        matcher = "compact|startup|resume";
+        hooks = [{
+          type = "command";
+          command = config.claude.hooks.sessionStartPath;
+        }];
+      }];
+      Stop = [{
+        hooks = [{
+          type = "command";
+          command = config.claude.hooks.stopPath;
+        }];
+      }];
+    };
+  } // lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
     statusLine = {
       type = "command";
       command = lib.getExe claudeStatusline;
