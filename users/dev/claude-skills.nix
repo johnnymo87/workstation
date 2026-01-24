@@ -17,6 +17,7 @@ let
 
   # Skills deployed to all platforms
   crossPlatformSkills = [
+    "ask-question"
     "beads"
     "notify-telegram"
     "using-chatgpt-relay-from-devbox"

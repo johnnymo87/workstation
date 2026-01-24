@@ -69,6 +69,7 @@ lib.mkIf isDarwin {
     rm -f ~/.claude/commands/ask-question.md 2>/dev/null || true
     rm -f ~/.claude/commands/beads.md 2>/dev/null || true
     rm -f ~/.claude/commands/notify-telegram.md 2>/dev/null || true
+    rm -rf ~/.claude/skills/ask-question 2>/dev/null || true
     rm -rf ~/.claude/skills/using-telegram-notifications 2>/dev/null || true
     rm -rf ~/.claude/skills/using-beads-for-issue-tracking 2>/dev/null || true
     rm -f ~/.claude/hooks/on-session-start.sh 2>/dev/null || true

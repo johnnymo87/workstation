@@ -1,4 +1,5 @@
 ---
+name: ask-question
 description: Draft a technical research question and send to ChatGPT for investigation
 argument-hint: [draft]
 allowed-tools: [Read, Glob, Grep, Bash]
