@@ -180,10 +180,6 @@ in
     "$HOME/.npm-global/bin"
   ];
 
-  # Claude commands - managed individually for gradual migration
-  # Skills are managed by claude-skills.nix module
-  home.file.".claude/commands/ask-question.md".source = "${assetsPath}/claude/commands/ask-question.md";
-
   # Managed settings fragment (read-only, Nix store symlink)
   home.file.".claude/settings.managed.json".source = managedSettingsJson;
 
