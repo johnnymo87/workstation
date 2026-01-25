@@ -54,21 +54,16 @@ lib.mkIf isDarwin {
   # Neovim: generates init.lua
   programs.neovim.enable = lib.mkForce false;
 
-  # Deploy workstation's nvim/lua as overlay on dotfiles
-  # Includes: ccremote.lua, user/settings.lua, user/mappings.lua
-  # force = true ensures workstation files win over any dotfiles copies
-  xdg.configFile."nvim/lua" = {
-    source = "${assetsPath}/nvim/lua";
-    recursive = true;
-    force = true;
-  };
+  # Deploy only ccremote.lua - user/ directory is managed entirely by dotfiles
+  # on Darwin. Home-manager can't overlay files into a symlinked directory,
+  # and creating the directory breaks the dotfiles symlink to user/*.lua modules.
+  xdg.configFile."nvim/lua/ccremote.lua".source = "${assetsPath}/nvim/lua/ccremote.lua";
 
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.
   # Remove dotfiles symlinks before HM tries to create its own.
   # Also clean up renamed/removed skills and commands.
   home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
     rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
-    rm -rf ~/.config/nvim/lua/user 2>/dev/null || true
     rm -f ~/.claude/commands/ask-question.md 2>/dev/null || true
     rm -f ~/.claude/commands/beads.md 2>/dev/null || true
     rm -f ~/.claude/commands/notify-telegram.md 2>/dev/null || true
