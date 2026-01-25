@@ -1,11 +1,13 @@
 ---
-name: Growing Neovim Config
+name: growing-nvim-config
 description: How to incrementally add Neovim configuration in this NixOS/home-manager setup. Use this when adding keybindings, settings, or plugins to nvim.
 ---
 
 # Growing Neovim Config
 
 This repo uses a "migrate only when needed" approach to Neovim configuration. Config lives in real `.lua` files, deployed by home-manager.
+
+**Platform note:** This skill describes the devbox setup where home-manager fully owns nvim. On Darwin, dotfiles still manages nvim and we only overlay `ccremote.lua`. See [gradual-dotfiles-migration](../gradual-dotfiles-migration/SKILL.md) for Darwin migration patterns.
 
 ## Architecture
 
