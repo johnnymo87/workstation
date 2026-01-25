@@ -65,3 +65,11 @@ After `nixos-anywhere`:
 3. Apply system: `sudo nixos-rebuild switch --flake .#devbox`
 4. Apply home: `home-manager switch --flake .#dev`
 5. Projects auto-clone on next login (or run `~/.local/bin/ensure-projects`)
+
+## Secrets on Devbox
+
+Secrets are managed by sops-nix and auto-decrypted at boot:
+- Available at `/run/secrets/<secret_name>`
+- `CLOUDFLARE_API_TOKEN` is exported in bash automatically
+
+Don't decrypt sops files manually - just use the environment variables or `/run/secrets/`.
