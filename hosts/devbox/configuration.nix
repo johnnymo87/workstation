@@ -27,6 +27,27 @@
         group = "dev";
         mode = "0400";
       };
+      # CCR secrets (Claude Code Remote)
+      ccr_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_bot_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_webhook_secret = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_webhook_path_secret = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
