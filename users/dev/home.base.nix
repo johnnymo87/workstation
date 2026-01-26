@@ -118,10 +118,12 @@ in
       no-emit-version = true;
       # NOTE: no-autostart is NOT here - it's Linux-only (see home.linux.nix)
     };
-    dirmngrSettings = {
-      keyserver = "hkps://keys.openpgp.org";
-    };
   };
+
+  # Dirmngr config (keyserver) - manual file since dirmngrSettings not in our HM version
+  home.file.".gnupg/dirmngr.conf".text = ''
+    keyserver hkps://keys.openpgp.org
+  '';
 
   # common.conf is platform-specific - see home.linux.nix and home.darwin.nix
 
