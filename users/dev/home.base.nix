@@ -109,19 +109,21 @@ in
     };
   };
 
-  # GPG
+  # GPG - shared settings (both platforms)
   programs.gpg = {
     enable = true;
-    settings.no-autostart = true;
+    package = pkgs.gnupg;  # Use nixpkgs GPG for consistency
+    settings = {
+      auto-key-retrieve = true;
+      no-emit-version = true;
+      # NOTE: no-autostart is NOT here - it's Linux-only (see home.linux.nix)
+    };
+    dirmngrSettings = {
+      keyserver = "hkps://keys.openpgp.org";
+    };
   };
 
-  # GPG common.conf: no-autostart applies to ALL GnuPG components (gpg, gpgsm, etc.)
-  # This is critical for forwarding setups - ensures nothing spawns a local agent
-  # use-keyboxd enables the modern keybox daemon (default in GnuPG 2.4+)
-  home.file.".gnupg/common.conf".text = ''
-    no-autostart
-    use-keyboxd
-  '';
+  # common.conf is platform-specific - see home.linux.nix and home.darwin.nix
 
   # Tmux
   programs.tmux = {
