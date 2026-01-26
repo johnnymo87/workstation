@@ -48,9 +48,22 @@ lib.mkIf isDarwin {
   # SSH: manages .ssh/config
   programs.ssh.enable = lib.mkForce false;
 
-  # GPG: manages .gnupg/gpg.conf and common.conf
-  programs.gpg.enable = lib.mkForce false;
-  home.file.".gnupg/common.conf".enable = lib.mkForce false;
+  # GPG: fully managed by home-manager on Darwin
+  # Agent runs locally, keys live here, forwarded to devbox via SSH
+  services.gpg-agent = {
+    enable = true;
+    defaultCacheTtl = 600;      # 10 minutes
+    maxCacheTtl = 7200;         # 2 hours
+    enableExtraSocket = true;   # For SSH forwarding to devbox
+    pinentryPackage = pkgs.pinentry_mac;
+    extraConfig = ''
+      # Pin extra-socket path for stable SSH RemoteForward config
+      extra-socket ${config.home.homeDirectory}/.gnupg/S.gpg-agent.extra
+    '';
+  };
+
+  # Darwin common.conf - empty (no special options needed locally)
+  home.file.".gnupg/common.conf".text = "";
 
   # Neovim: generates init.lua
   programs.neovim.enable = lib.mkForce false;
@@ -68,6 +81,10 @@ lib.mkIf isDarwin {
   # Remove dotfiles symlinks before HM tries to create its own.
   # Also clean up renamed/removed skills and commands.
   home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    rm -f ~/.gnupg/gpg.conf 2>/dev/null || true
+    rm -f ~/.gnupg/gpg-agent.conf 2>/dev/null || true
+    rm -f ~/.gnupg/dirmngr.conf 2>/dev/null || true
+    rm -f ~/.gnupg/common.conf 2>/dev/null || true
     rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
     rm -f ~/.claude/commands/ask-question.md 2>/dev/null || true
     rm -f ~/.claude/commands/beads.md 2>/dev/null || true
