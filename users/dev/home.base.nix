@@ -179,7 +179,12 @@ in
       "..." = "cd ../..";
     };
     initExtra = ''
-      export GPG_TTY=$(tty)
+      # GPG TTY - tmux-aware (from deprecated-dotfiles)
+      if [ -n "$TMUX" ]; then
+          export GPG_TTY=$(tmux display-message -p '#{pane_tty}')
+      else
+          export GPG_TTY=$(tty)
+      fi
       export HISTSIZE=10000
       export HISTFILESIZE=20000
       export HISTCONTROL=ignoredups:erasedups
