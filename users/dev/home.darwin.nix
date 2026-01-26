@@ -48,8 +48,9 @@ lib.mkIf isDarwin {
   # SSH: manages .ssh/config
   programs.ssh.enable = lib.mkForce false;
 
-  # GPG: manages .gnupg/gpg.conf
+  # GPG: manages .gnupg/gpg.conf and common.conf
   programs.gpg.enable = lib.mkForce false;
+  home.file.".gnupg/common.conf".enable = lib.mkForce false;
 
   # Neovim: generates init.lua
   programs.neovim.enable = lib.mkForce false;
