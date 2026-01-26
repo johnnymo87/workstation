@@ -117,7 +117,7 @@ if command -v npx >/dev/null 2>&1; then
     if [ ${#cost_parts[@]} -gt 0 ]; then
         cost_info=" | "
         for i in "${!cost_parts[@]}"; do
-            if [ $i -gt 0 ]; then
+            if [ "$i" -gt 0 ]; then
                 cost_info="${cost_info} | "
             fi
             cost_info="${cost_info}${cost_parts[$i]}"
