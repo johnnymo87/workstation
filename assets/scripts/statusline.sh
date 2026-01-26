@@ -4,8 +4,10 @@
 input=$(cat)
 
 # Extract basic information
-model=$(echo "$input" | jq -r '.model.display_name')
-current_dir=$(echo "$input" | jq -r '.workspace.current_dir')
+# Handle model as either object with display_name or plain string
+model=$(echo "$input" | jq -r 'if .model | type == "object" then .model.display_name else .model end // ""')
+# Handle current_dir from workspace object or cwd field
+current_dir=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // ""')
 
 # WORKAROUND: After /compact, Claude Code may pass stale transcript_path
 # Use PPID-based mailbox from SessionStart hook as authoritative source
