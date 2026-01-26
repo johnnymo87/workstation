@@ -32,6 +32,12 @@ lib.mkIf isLinux {
     "d %t/gnupg 0700 - - -"
   ];
 
+  # GPG common.conf for devbox: no-autostart prevents local agent from clobbering
+  # the forwarded socket. Do NOT use use-keyboxd here (causes issues with no-autostart).
+  home.file.".gnupg/common.conf".text = ''
+    no-autostart
+  '';
+
   # Generate ensure-projects script from declarative manifest
   home.file.".local/bin/ensure-projects" = {
     executable = true;
