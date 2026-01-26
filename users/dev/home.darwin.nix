@@ -54,6 +54,10 @@ lib.mkIf isDarwin {
   # Neovim: generates init.lua
   programs.neovim.enable = lib.mkForce false;
 
+  # Disable recursive nvim/lua deployment from home.base.nix
+  # On Darwin, dotfiles owns the user/ directory
+  xdg.configFile."nvim/lua".enable = lib.mkForce false;
+
   # Deploy only ccremote.lua - user/ directory is managed entirely by dotfiles
   # on Darwin. Home-manager can't overlay files into a symlinked directory,
   # and creating the directory breaks the dotfiles symlink to user/*.lua modules.
@@ -72,6 +76,7 @@ lib.mkIf isDarwin {
     rm -rf ~/.claude/skills/using-beads-for-issue-tracking 2>/dev/null || true
     rm -f ~/.claude/hooks/on-session-start.sh 2>/dev/null || true
     rm -f ~/.claude/hooks/on-stop.sh 2>/dev/null || true
+    rm -f ~/.claude/statusline.sh 2>/dev/null || true
   '';
 
   # Tmux extra config (disable if you have existing tmux config)

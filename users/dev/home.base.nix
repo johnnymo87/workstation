@@ -6,15 +6,24 @@ let
   # Packages from llm-agents.nix flake (use hostPlatform.system for idiomaticity)
   llmPkgs = llm-agents.packages.${pkgs.stdenv.hostPlatform.system};
 
-  # Wrapper script for ccusage statusline with absolute path
-  # This ensures the command works regardless of Claude's PATH
-  claudeStatusline = pkgs.writeShellApplication {
+  # Linux: simple ccusage statusline
+  linuxStatusline = pkgs.writeShellApplication {
     name = "claude-statusline";
     runtimeInputs = [ llmPkgs.ccusage ];
     text = ''
       exec ccusage statusline --offline
     '';
   };
+
+  # Darwin: custom statusline with context tracking, git branch, and cost info
+  darwinStatusline = pkgs.writeShellApplication {
+    name = "claude-statusline";
+    runtimeInputs = [ pkgs.jq pkgs.git pkgs.bc pkgs.coreutils ];
+    text = builtins.readFile "${assetsPath}/scripts/statusline.sh";
+  };
+
+  # Pick the right statusline for the platform
+  claudeStatusline = if pkgs.stdenv.isDarwin then darwinStatusline else linuxStatusline;
 
   # Clipboard commands via tmux (work over SSH, inside tmux sessions)
   tcopy = pkgs.writeShellApplication {
@@ -31,7 +40,6 @@ let
 
   # Managed settings fragment - only keys we want to control
   # Claude Code's runtime state (feedbackSurveyState, enabledPlugins, etc.) is preserved
-  # On Darwin, we skip statusLine to preserve the custom dotfiles statusline.sh
   managedSettings = {
     hooks = {
       SessionStart = [{
@@ -48,7 +56,6 @@ let
         }];
       }];
     };
-  } // lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
     statusLine = {
       type = "command";
       command = lib.getExe claudeStatusline;
