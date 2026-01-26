@@ -108,6 +108,14 @@ in
     settings.no-autostart = true;
   };
 
+  # GPG common.conf: no-autostart applies to ALL GnuPG components (gpg, gpgsm, etc.)
+  # This is critical for forwarding setups - ensures nothing spawns a local agent
+  # use-keyboxd enables the modern keybox daemon (default in GnuPG 2.4+)
+  home.file.".gnupg/common.conf".text = ''
+    no-autostart
+    use-keyboxd
+  '';
+
   # Tmux
   programs.tmux = {
     enable = true;
