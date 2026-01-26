@@ -48,6 +48,12 @@
         group = "dev";
         mode = "0400";
       };
+      # 1Password service account token (bootstrap for all other secrets)
+      op_service_account_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
