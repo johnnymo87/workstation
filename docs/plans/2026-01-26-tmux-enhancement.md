@@ -350,3 +350,11 @@ git push
 **Part 1 (Tasks 1-4):** ✅ Complete
 **Part 1.5 (Fixes):** In progress
 **Part 2 (Tasks 5-6):** Execute later after Part 1.5 is verified working.
+
+---
+
+## Follow-up: Neovim Session Integration
+
+To make `@resurrect-strategy-nvim 'session'` work properly, neovim session management was implemented separately. See [2026-01-27-nvim-session-management.md](2026-01-27-nvim-session-management.md) for the implementation plan.
+
+This adds vim-obsession to auto-save `Session.vim` files in project directories, which tmux-resurrect uses to restore nvim state.
