@@ -134,6 +134,11 @@ in
     terminal = "tmux-256color";
     historyLimit = 50000;  # Generous scrollback for long build logs
     extraConfig = ''
+      # Prefix key: Ctrl-a (easier to reach than Ctrl-b)
+      unbind C-b
+      set -g prefix C-a
+      bind C-a send-prefix    # Press C-a twice to send C-a to nested tmux/app
+
       # Usability
       set -g mouse on
       set -g renumber-windows on
