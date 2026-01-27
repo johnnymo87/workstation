@@ -20,7 +20,7 @@ On Darwin, `home.darwin.nix` disables several home-manager programs to avoid con
 programs.bash.enable = lib.mkForce false;    # dotfiles owns .bashrc
 programs.neovim.enable = lib.mkForce false;  # dotfiles owns nvim
 programs.ssh.enable = lib.mkForce false;     # dotfiles owns .ssh/config
-programs.gpg.enable = lib.mkForce false;     # dotfiles owns gpg.conf
+# GPG is now fully migrated to home-manager (services.gpg-agent)
 ```
 
 ## The Key Limitation
@@ -145,7 +145,7 @@ lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
 | Neovim | Workstation | Dotfiles + ccremote overlay | user/ stays in dotfiles |
 | Bash | Workstation | Dotfiles | Need full migration |
 | SSH | Workstation | Dotfiles | Need full migration |
-| GPG | Workstation | Dotfiles | Need full migration |
+| GPG | Workstation | Workstation | Fully migrated |
 | Tmux | Workstation | Workstation | Fully migrated |
 | Claude | Workstation | Workstation | Fully migrated |
 
