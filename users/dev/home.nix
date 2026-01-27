@@ -9,5 +9,6 @@
     ./home.darwin.nix
     ./claude-skills.nix
     ./claude-hooks.nix
+    ./tmux.linux.nix
   ];
 }
