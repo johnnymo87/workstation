@@ -179,6 +179,7 @@ in
     extraLuaConfig = ''
       require("user.settings")
       require("user.mappings")
+      require("user.sessions")  -- Session management for tmux-resurrect
       require("ccremote").setup()
     '';
   };
