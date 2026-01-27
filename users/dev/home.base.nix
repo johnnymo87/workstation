@@ -149,8 +149,8 @@ in
       # Truecolor support
       set -ag terminal-overrides ",xterm-256color:RGB"
 
-      # Load extra config (OSC 52 clipboard, etc.)
-      source-file ~/.config/tmux/extra.conf
+      # Load extra config if it exists (safe during partial migration)
+      if-shell -b '[ -f ~/.config/tmux/extra.conf ]' 'source-file ~/.config/tmux/extra.conf'
     '';
   };
 
