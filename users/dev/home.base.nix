@@ -142,6 +142,8 @@ in
       # Usability
       set -g mouse on
       set -g renumber-windows on
+      set -g allow-rename off     # Don't let programs rename windows via escape sequences
+      set -g automatic-rename off # Don't auto-rename based on running command; manual names stick
 
       # Vi keybindings
       set -g status-keys vi      # Vi keys in command prompt (prefix + :)
