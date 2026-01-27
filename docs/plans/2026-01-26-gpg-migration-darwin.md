@@ -4,14 +4,16 @@
 
 **Goal:** Migrate GPG configuration from manual files to home-manager, with platform-specific handling for macOS (local agent) and Linux devbox (forwarded agent).
 
-**Architecture:** macOS runs the gpg-agent locally (keys live here), Linux devbox receives the agent socket via SSH forwarding (no local keys). We use `services.gpg-agent` on Darwin (launchd) and mask all gpg units on Linux (systemd). The `no-autostart` option is Linux-only to prevent the forwarded socket from being clobbered.
+**Architecture:** macOS runs the gpg-agent locally (keys live here), Linux devbox receives the agent socket via SSH forwarding (no local keys). On Darwin, we configure `services.gpg-agent` but **disable the launchd service** because gpg-agent's `--supervised` mode expects systemd-style socket activation (LISTEN_FDS), not launchd's `launch_activate_socket()` API. Instead, we let GnuPG auto-start the agent on demand (upstream recommended approach). The `no-autostart` option is Linux-only to prevent the forwarded socket from being clobbered.
 
 **Tech Stack:** home-manager, NixOS, nix-darwin, GnuPG 2.4.x, pinentry-mac
 
 **References:**
 - ChatGPT research: `/tmp/research-gpg-migration-darwin-answer.md`
 - GPG forwarding research: `/tmp/research-gpg-agent-forwarding-answer-1.md`
+- Launchd socket activation research: `/tmp/research-gpg-agent-launchd-supervised-answer.md`
 - GnuPG Agent Forwarding: https://wiki.gnupg.org/AgentForwarding
+- home-manager gpg-agent launchd PR: https://github.com/nix-community/home-manager/pull/2964
 
 ---
 
@@ -110,22 +112,34 @@ Replace:
 With:
 ```nix
   # GPG: fully managed by home-manager on Darwin
-  # Agent runs locally, keys live here, forwarded to devbox via SSH
+  # Agent runs locally (auto-starts on demand), keys live here, forwarded to devbox via SSH
   services.gpg-agent = {
     enable = true;
     defaultCacheTtl = 600;      # 10 minutes
     maxCacheTtl = 7200;         # 2 hours
-    enableExtraSocket = true;   # For SSH forwarding to devbox
-    pinentryPackage = pkgs.pinentry_mac;
+    enableExtraSocket = false;  # We set path manually in extraConfig
+    grabKeyboardAndMouse = false;  # Not needed for pinentry-mac (X11-only feature)
+    pinentry.package = pkgs.pinentry_mac;
     extraConfig = ''
       # Pin extra-socket path for stable SSH RemoteForward config
       extra-socket ${config.home.homeDirectory}/.gnupg/S.gpg-agent.extra
     '';
   };
 
+  # Disable home-manager's launchd socket-activated service (doesn't work with gpg-agent)
+  # gpg-agent --supervised expects systemd-style LISTEN_FDS, not launchd's launch_activate_socket()
+  # Instead, let GnuPG auto-start the agent on demand (upstream recommended approach)
+  launchd.agents.gpg-agent.enable = lib.mkForce false;
+
   # Darwin common.conf - empty (no special options needed locally)
   home.file.".gnupg/common.conf".text = "";
 ```
+
+**Why these specific options:**
+- `pinentry.package` (not `pinentryPackage`): The old option was deprecated in home-manager PR #6900
+- `grabKeyboardAndMouse = false`: Prevents adding "grab" to gpg-agent.conf (X11-only, not needed for pinentry-mac)
+- `enableExtraSocket = false`: We set the path explicitly in `extraConfig` for stable SSH RemoteForward
+- `launchd.agents.gpg-agent.enable = false`: The launchd socket-activated service doesn't work because gpg-agent's `--supervised` mode expects systemd-style `LISTEN_FDS` environment variables, not launchd's `launch_activate_socket()` API
 
 **Step 3: Add prepareForHM cleanup for GPG files**
 
@@ -286,11 +300,11 @@ Run: `home-manager switch --flake .#$(whoami)`
 
 Expected: Successful activation (may need to handle file conflicts)
 
-**Step 3: Verify gpg-agent is running via launchd**
+**Step 3: Verify launchd gpg-agent service is DISABLED**
 
 Run: `launchctl list | grep gpg`
 
-Expected: Shows `org.nix-community.home.gpg-agent` or similar
+Expected: `org.nix-community.home.gpg-agent` should NOT appear (we disabled it because socket activation doesn't work). You may see GPGTools entries like `org.gpgtools.*` which are unrelated.
 
 **Step 4: Verify socket paths**
 
@@ -308,7 +322,7 @@ Expected:
 
 Run: `echo "test" | gpg --clearsign`
 
-Expected: Signed output with pinentry-mac prompt
+Expected: Signed output with pinentry-mac prompt. This command will auto-start the gpg-agent if not already running (which is the intended behavior since we disabled the launchd service).
 
 **Step 6: Test SSH forwarding to devbox**
 
@@ -387,8 +401,9 @@ If something breaks:
 
 ## Success Criteria
 
-- [ ] GPG signing works on macOS (local agent)
-- [ ] GPG signing works on devbox (forwarded agent)
+- [x] GPG signing works on macOS (local agent, auto-started on demand)
+- [x] GPG signing works on devbox (forwarded agent)
 - [ ] No manual GPG config files needed (all managed by home-manager)
-- [ ] pinentry-mac prompts work correctly on macOS
-- [ ] SSH forwarding works for git commit signing on devbox
+- [x] pinentry-mac prompts work correctly on macOS
+- [x] SSH forwarding works for git commit signing on devbox
+- [x] No broken launchd service (disabled because socket activation incompatible with gpg-agent)

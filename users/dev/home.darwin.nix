@@ -49,18 +49,24 @@ lib.mkIf isDarwin {
   programs.ssh.enable = lib.mkForce false;
 
   # GPG: fully managed by home-manager on Darwin
-  # Agent runs locally, keys live here, forwarded to devbox via SSH
+  # Agent runs locally (auto-starts on demand), keys live here, forwarded to devbox via SSH
   services.gpg-agent = {
     enable = true;
     defaultCacheTtl = 600;      # 10 minutes
     maxCacheTtl = 7200;         # 2 hours
-    enableExtraSocket = true;   # For SSH forwarding to devbox
-    pinentryPackage = pkgs.pinentry_mac;
+    enableExtraSocket = false;  # We set path manually in extraConfig
+    grabKeyboardAndMouse = false;  # Not needed for pinentry-mac (X11-only feature)
+    pinentry.package = pkgs.pinentry_mac;
     extraConfig = ''
       # Pin extra-socket path for stable SSH RemoteForward config
       extra-socket ${config.home.homeDirectory}/.gnupg/S.gpg-agent.extra
     '';
   };
+
+  # Disable home-manager's launchd socket-activated service (doesn't work with gpg-agent)
+  # gpg-agent --supervised expects systemd-style LISTEN_FDS, not launchd's launch_activate_socket()
+  # Instead, let GnuPG auto-start the agent on demand (upstream recommended approach)
+  launchd.agents.gpg-agent.enable = lib.mkForce false;
 
   # Darwin common.conf - empty (no special options needed locally)
   home.file.".gnupg/common.conf".text = "";
