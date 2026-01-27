@@ -170,6 +170,12 @@ in
     defaultEditor = true;
     viAlias = true;
     vimAlias = true;
+
+    # Session management for tmux-resurrect integration
+    plugins = with pkgs.vimPlugins; [
+      vim-obsession
+    ];
+
     extraLuaConfig = ''
       require("user.settings")
       require("user.mappings")
