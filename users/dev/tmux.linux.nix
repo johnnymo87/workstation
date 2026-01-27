@@ -53,5 +53,6 @@ lib.mkIf isLinux {
   home.activation.ensureTmuxResurrectDir =
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       mkdir -p '${resurrectDir}'
+      chmod 700 '${resurrectDir}'
     '';
 }
