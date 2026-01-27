@@ -132,13 +132,24 @@ in
     enable = true;
     clock24 = true;
     terminal = "tmux-256color";
-    historyLimit = 10000;
+    historyLimit = 50000;  # Generous scrollback for long build logs
     extraConfig = ''
+      # Usability
       set -g mouse on
-      set -g base-index 1
-      setw -g pane-base-index 1
       set -g renumber-windows on
+
+      # Vi keybindings
+      set -g status-keys vi      # Vi keys in command prompt (prefix + :)
+      set -g mode-keys vi        # Vi keys in copy mode
+
+      # Modern terminal integration
+      set -g focus-events on     # Pass focus events to apps (neovim FocusGained/Lost)
+      set -s escape-time 10      # Responsive Esc (tmux 3.5+ default is 10ms)
+
+      # Truecolor support
       set -ag terminal-overrides ",xterm-256color:RGB"
+
+      # Load extra config (OSC 52 clipboard, etc.)
       source-file ~/.config/tmux/extra.conf
     '';
   };
