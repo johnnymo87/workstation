@@ -91,6 +91,9 @@ in
   programs.git = {
     enable = true;
     signing.key = "0C0EF2DF7ADD5DD9";
+    ignores = [
+      "Session.vim"  # vim-obsession session files (for tmux-resurrect)
+    ];
     settings = {
       user.name = "Jonathan Mohrbacher";
       user.email = "jonathan.mohrbacher@gmail.com";
