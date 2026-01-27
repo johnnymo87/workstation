@@ -172,6 +172,9 @@
     # SSH directory on persistent volume (for devbox key)
     "d /persist/ssh 0700 dev dev -"
     "L+ /home/dev/.ssh - - - - /persist/ssh"
+    # Tmux resurrect data on persistent volume
+    "d /persist/tmux 0755 dev dev -"
+    "d /persist/tmux/dev 0700 dev dev -"
   ];
 
   # User account with stable UID/GID for persistent volume ownership
