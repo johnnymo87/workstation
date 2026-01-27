@@ -146,7 +146,7 @@ lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
 | Bash | Workstation | Dotfiles | Need full migration |
 | SSH | Workstation | Dotfiles | Need full migration |
 | GPG | Workstation | Workstation | Fully migrated |
-| Tmux | Workstation | Workstation | Fully migrated |
+| Tmux | Workstation (enhanced) | Dotfiles (TPM) | Part 1 complete; Part 2 pending |
 | Claude | Workstation | Workstation | Fully migrated |
 
 ## Lessons Learned
