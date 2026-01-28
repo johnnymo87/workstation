@@ -24,8 +24,10 @@ lib.mkIf isLinux {
           set -g @resurrect-dir '${resurrectDir}'
           # Restore neovim sessions (requires Session.vim in nvim)
           set -g @resurrect-strategy-nvim 'session'
-          # Match nvim anywhere in command (tilde prefix) since Nix paths start with /nix/store/
-          set -g @resurrect-processes '~nvim'
+          # Match nvim anywhere in command (tilde), restore as plain nvim (arrow)
+          # Nix wraps nvim with complex --cmd flags that break session restore
+          # NOTE: Escape the > to prevent shell redirect during resurrect's eval
+          set -g @resurrect-processes '"~nvim->nvim"'
         '';
       }
 
