@@ -74,7 +74,7 @@ base_status="🤖 $model | 📁 $display_dir | 🌿 $branch${context_info}"
 
 # Try to get ccusage information
 cost_info=""
-if command -v npx >/dev/null 2>&1; then
+if command -v ccusage >/dev/null 2>&1; then
     # Get costs from JSON API - per directory and per day
     today=$(date +%Y%m%d)
 
@@ -82,7 +82,7 @@ if command -v npx >/dev/null 2>&1; then
     ccusage_session_id=$(echo "$current_dir" | sed 's/^\//-/' | tr '/.' '--')
 
     # Fetch daily costs with instance breakdown
-    daily_json=$(npx -y ccusage daily --instances --since "$today" --json 2>/dev/null)
+    daily_json=$(ccusage daily --instances --since "$today" --json 2>/dev/null)
 
     dir_cost=""
     daily_cost=""
