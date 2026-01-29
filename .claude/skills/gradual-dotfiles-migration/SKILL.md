@@ -145,9 +145,27 @@ lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
 | Neovim | Workstation | Dotfiles + ccremote overlay | user/ stays in dotfiles |
 | Bash | Workstation | Dotfiles | Need full migration |
 | SSH | Workstation | Dotfiles | Need full migration |
-| GPG | Workstation | Workstation | Fully migrated |
+| GPG | Workstation | Workstation (pinentry-op) | 1Password Touch ID integration |
 | Tmux | Workstation (enhanced) | Dotfiles (TPM) | Part 1 complete; Part 2 pending |
 | Claude | Workstation | Workstation | Fully migrated |
+
+## Detecting Drift
+
+Dotfiles includes a verification script to detect missing or broken symlinks:
+
+```bash
+cd ~/Code/dotfiles  # or wherever your dotfiles clone is
+./verify.sh         # Check all expected symlinks
+./install.sh        # Fix any issues
+```
+
+The script:
+- Checks core symlinks (shell, git, vim, nvim, tmux)
+- Allows files to be managed by home-manager (won't flag nix store symlinks)
+- Reports INFO for regular files that might be home-manager managed
+- Returns exit code 1 if any errors found
+
+Run `verify.sh` after migrations or if things break unexpectedly.
 
 ## Lessons Learned
 
@@ -155,3 +173,4 @@ lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
 2. **Test on Darwin before pushing** - devbox success doesn't guarantee Darwin works
 3. **Single file deployments are safest** during gradual migration
 4. **Full migration is cleaner** when you're ready to move a whole program
+5. **Run verify.sh after migrations** - catches missing symlinks early
