@@ -45,8 +45,8 @@
     darwinSystem = "aarch64-darwin";
     darwinPkgs = pkgsFor darwinSystem;
 
-    # Build pinentry-mac-keychain locally (upstream flake uses deprecated vendorSha256)
-    pinentry-mac-keychain = darwinPkgs.callPackage ./pkgs/pinentry-mac-keychain { };
+    # Custom pinentry that fetches GPG passphrase from 1Password
+    pinentry-op = darwinPkgs.callPackage ./pkgs/pinentry-op { };
 
     # macOS host facts
     mac = import ./hosts/Y0FMQX93RR-2/vars.nix;
@@ -95,7 +95,7 @@
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = {
-            inherit llm-agents ccrTunnel pinentry-mac-keychain;
+            inherit llm-agents ccrTunnel pinentry-op;
             assetsPath = ./assets;
             projects = import ./projects.nix;
             isLinux = false;
