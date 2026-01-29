@@ -42,6 +42,21 @@
         "type": "github"
       }
     },
+    "flake-utils": {
+      "locked": {
+        "lastModified": 1667395993,
+        "narHash": "sha256-nuEHfE/LcWyuSWnS8t12N1wc105Qtau+/OdUAjtQ0rA=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "5aed5285a952e0b949eb3ba02c12fa4fcfef535f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
     "home-manager": {
       "inputs": {
         "nixpkgs": [
@@ -136,6 +151,27 @@
         "type": "github"
       }
     },
+    "pinentry-mac-keychain": {
+      "inputs": {
+        "flake-utils": "flake-utils",
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1676021581,
+        "narHash": "sha256-ErcLx0eokJ/JOE2xIDPTmg0s7kMP+1oNJ4yyYnkW7sI=",
+        "owner": "olebedev",
+        "repo": "pinentry-mac-keychain",
+        "rev": "082f5bfb0aadab9e1a823461a9e7e7be6b0b49b2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "olebedev",
+        "repo": "pinentry-mac-keychain",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "disko": "disko",
@@ -143,6 +179,7 @@
         "llm-agents": "llm-agents",
         "nix-darwin": "nix-darwin",
         "nixpkgs": "nixpkgs_2",
+        "pinentry-mac-keychain": "pinentry-mac-keychain",
         "sops-nix": "sops-nix"
       }
     },

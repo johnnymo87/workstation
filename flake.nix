@@ -24,6 +24,11 @@
       # Don't use inputs.nixpkgs.follows - we want their pinned nixpkgs for cache hits
     };
 
+    pinentry-mac-keychain = {
+      url = "github:olebedev/pinentry-mac-keychain";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
