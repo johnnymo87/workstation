@@ -35,7 +35,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, sops-nix, ... }@inputs:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, sops-nix, pinentry-mac-keychain, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -93,7 +93,7 @@
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = {
-            inherit llm-agents ccrTunnel;
+            inherit llm-agents ccrTunnel pinentry-mac-keychain;
             assetsPath = ./assets;
             projects = import ./projects.nix;
             isLinux = false;
