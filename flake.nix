@@ -26,7 +26,7 @@
 
     pinentry-mac-keychain = {
       url = "github:olebedev/pinentry-mac-keychain";
-      inputs.nixpkgs.follows = "nixpkgs";
+      # Don't follow nixpkgs - upstream uses vendorSha256 which our nixpkgs deprecated
     };
 
     sops-nix = {

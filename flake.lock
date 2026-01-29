@@ -151,12 +151,26 @@
         "type": "github"
       }
     },
+    "nixpkgs_3": {
+      "locked": {
+        "lastModified": 1669147342,
+        "narHash": "sha256-q13Yxj/qVRuK6bXLjdgHkrbiX8xhcnsEP4X2Ai/gtKw=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "2cb8f1a0ac4d706bcb56489ec53629f55867bfdc",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "2cb8f1a0ac4d706bcb56489ec53629f55867bfdc",
+        "type": "github"
+      }
+    },
     "pinentry-mac-keychain": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": [
-          "nixpkgs"
-        ]
+        "nixpkgs": "nixpkgs_3"
       },
       "locked": {
         "lastModified": 1676021581,
