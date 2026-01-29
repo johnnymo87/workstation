@@ -5,7 +5,7 @@
 # On Darwin, we disable programs that conflict with existing dotfiles.
 # As we migrate each program to HM, remove the corresponding mkForce false.
 # See: /tmp/research-nix-darwin-dotfiles-conflict-answer.md
-{ config, pkgs, lib, assetsPath, isDarwin, ccrTunnel, ... }:
+{ config, pkgs, lib, assetsPath, isDarwin, ccrTunnel, pinentry-mac-keychain, ... }:
 
 lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
@@ -16,6 +16,7 @@ lib.mkIf isDarwin {
       text = builtins.readFile "${assetsPath}/scripts/screenshot-to-devbox.sh";
     })
     pkgs.cloudflared
+    pinentry-mac-keychain.packages.aarch64-darwin.default
   ];
 
   # Cloudflare Tunnel launchd agent with Keychain-sourced token
@@ -50,14 +51,18 @@ lib.mkIf isDarwin {
 
   # GPG: fully managed by home-manager on Darwin
   # Agent runs locally (auto-starts on demand), keys live here, forwarded to devbox via SSH
+  #
+  # Uses pinentry-mac-keychain for silent passphrase retrieval from macOS Keychain.
+  # First use: pinentry-mac prompts and saves to Keychain.
+  # Subsequent uses: passphrase retrieved silently from Keychain (no prompt).
   services.gpg-agent = {
     enable = true;
-    defaultCacheTtl = 600;      # 10 minutes
-    maxCacheTtl = 7200;         # 2 hours
+    defaultCacheTtl = 86400;    # 24 hours (fallback if keychain fails)
+    maxCacheTtl = 86400;        # 24 hours
     enableExtraSocket = false;  # We set path manually in extraConfig
-    grabKeyboardAndMouse = false;  # Not needed for pinentry-mac (X11-only feature)
-    pinentry.package = pkgs.pinentry_mac;
+    grabKeyboardAndMouse = false;
     extraConfig = ''
+      pinentry-program ${pinentry-mac-keychain.packages.aarch64-darwin.default}/bin/pinentry-mac-keychain
       # Pin extra-socket path for stable SSH RemoteForward config
       extra-socket ${config.home.homeDirectory}/.gnupg/S.gpg-agent.extra
     '';
