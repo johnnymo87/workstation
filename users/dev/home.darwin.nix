@@ -49,6 +49,12 @@ lib.mkIf isDarwin {
   # SSH: manages .ssh/config
   programs.ssh.enable = lib.mkForce false;
 
+  # 1Password secret reference for GPG passphrase
+  # pinentry-op fetches from this 1Password item using Touch ID
+  home.sessionVariables = {
+    OP_GPG_SECRET_REF = "op://Automation/gpg-passphrase/password";
+  };
+
   # GPG: fully managed by home-manager on Darwin
   # Agent runs locally (auto-starts on demand), keys live here, forwarded to devbox via SSH
   #
