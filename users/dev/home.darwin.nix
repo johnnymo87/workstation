@@ -16,7 +16,7 @@ lib.mkIf isDarwin {
       text = builtins.readFile "${assetsPath}/scripts/screenshot-to-devbox.sh";
     })
     pkgs.cloudflared
-    pinentry-mac-keychain.packages.aarch64-darwin.default
+    pinentry-mac-keychain
   ];
 
   # Cloudflare Tunnel launchd agent with Keychain-sourced token
@@ -62,7 +62,7 @@ lib.mkIf isDarwin {
     enableExtraSocket = false;  # We set path manually in extraConfig
     grabKeyboardAndMouse = false;
     extraConfig = ''
-      pinentry-program ${pinentry-mac-keychain.packages.aarch64-darwin.default}/bin/pinentry-mac-keychain
+      pinentry-program ${pinentry-mac-keychain}/bin/pinentry-mac-keychain
       # Pin extra-socket path for stable SSH RemoteForward config
       extra-socket ${config.home.homeDirectory}/.gnupg/S.gpg-agent.extra
     '';

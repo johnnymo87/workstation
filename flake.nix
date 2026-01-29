@@ -24,18 +24,13 @@
       # Don't use inputs.nixpkgs.follows - we want their pinned nixpkgs for cache hits
     };
 
-    pinentry-mac-keychain = {
-      url = "github:olebedev/pinentry-mac-keychain";
-      # Don't follow nixpkgs - upstream uses vendorSha256 which our nixpkgs deprecated
-    };
-
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, sops-nix, pinentry-mac-keychain, ... }@inputs:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, sops-nix, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -45,6 +40,13 @@
 
     devboxSystem = "aarch64-linux";
     devboxPkgs = pkgsFor devboxSystem;
+
+    # Darwin (macOS) pkgs
+    darwinSystem = "aarch64-darwin";
+    darwinPkgs = pkgsFor darwinSystem;
+
+    # Build pinentry-mac-keychain locally (upstream flake uses deprecated vendorSha256)
+    pinentry-mac-keychain = darwinPkgs.callPackage ./pkgs/pinentry-mac-keychain { };
 
     # macOS host facts
     mac = import ./hosts/Y0FMQX93RR-2/vars.nix;
