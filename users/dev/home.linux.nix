@@ -166,4 +166,36 @@ lib.mkIf isLinux {
       echo "Update complete"
     '';
   };
+
+  # Systemd service to pull and apply workstation updates
+  systemd.user.services.pull-workstation = {
+    Unit = {
+      Description = "Pull workstation updates and apply home-manager";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "%h/.local/bin/pull-workstation";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      Environment = [
+        "HOME=%h"
+        "GIT_SSH_COMMAND=${pkgs.openssh}/bin/ssh -i %h/.ssh/id_ed25519_github -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes"
+      ];
+    };
+  };
+
+  # Timer: run at startup + every 4 hours
+  systemd.user.timers.pull-workstation = {
+    Unit = {
+      Description = "Pull workstation updates periodically";
+    };
+    Timer = {
+      OnStartupSec = "10min";        # Run 10min after boot/login
+      OnUnitInactiveSec = "4h";       # Then every 4h after last run
+      RandomizedDelaySec = "15min";   # Jitter to avoid thundering herd
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
 }
