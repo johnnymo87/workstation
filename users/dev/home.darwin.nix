@@ -117,4 +117,12 @@ lib.mkIf isDarwin {
   # Tmux extra config (disable if you have existing tmux config)
   # Uncomment if tmux conflicts:
   # xdg.configFile."tmux/extra.conf".enable = lib.mkForce false;
+
+  # Auto-expire old home-manager generations (same as Linux)
+  services.home-manager.autoExpire = {
+    enable = true;
+    frequency = "daily";
+    timestamp = "-7 days";
+    store.cleanup = true;
+  };
 }
