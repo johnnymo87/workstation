@@ -75,7 +75,39 @@ xdg.configFile."nvim/lua/ccremote.lua".source = "${assetsPath}/nvim/lua/ccremote
 
 Requires: The target path must not be inside a symlinked directory.
 
-### Pattern 2: Parallel Directory
+**When deploying Lua modules that Lazy needs to load**, update the Lazy plugin spec to require it:
+
+```lua
+-- In deprecated-dotfiles lua/plugins/vim-obsession.lua
+{
+  "tpope/vim-obsession",
+  config = function()
+    require("user.sessions")  -- Loads HM-deployed module
+  end,
+}
+```
+
+### Pattern 2: Nix Plugin Without Init.lua Takeover
+
+Best for: Installing a Nix-managed plugin on Darwin while dotfiles still owns init.lua.
+
+Neovim auto-loads plugins from `~/.local/share/nvim/site/pack/*/start/`. Use `xdg.dataFile` to install there:
+
+```nix
+# Install vim-obsession via Nix, but let dotfiles keep init.lua
+xdg.dataFile."nvim/site/pack/nix/start/vim-obsession" = {
+  source = pkgs.vimPlugins.vim-obsession;
+  recursive = true;
+};
+```
+
+Then either:
+- Remove/disable the Lazy spec for that plugin, OR
+- Keep Lazy spec but mark it disabled when Nix version exists
+
+This lets you migrate plugins one-by-one from Lazy to Nix without big-bang neovim migration.
+
+### Pattern 3: Parallel Directory
 
 Best for: New functionality that dotfiles doesn't have.
 
@@ -87,7 +119,7 @@ xdg.configFile."myapp/config" = {
 };
 ```
 
-### Pattern 3: Full Program Migration
+### Pattern 5: Full Program Migration
 
 Best for: When you're ready to move everything at once.
 
@@ -109,7 +141,7 @@ Best for: When you're ready to move everything at once.
    darwin-rebuild switch --flake .#hostname
    ```
 
-### Pattern 4: prepareForHM Cleanup
+### Pattern 6: prepareForHM Cleanup
 
 For files that might exist from dotfiles, add cleanup:
 
@@ -118,6 +150,45 @@ home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
   rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
 '';
 ```
+
+### Pattern 7: NVIM_APPNAME for Parallel Testing
+
+Best for: Testing a new neovim config without breaking the existing one.
+
+Neovim supports `NVIM_APPNAME` to select a separate config/data/state namespace:
+
+```bash
+# Run with workstation-managed config
+NVIM_APPNAME=nvim-workstation nvim
+
+# Config lives in ~/.config/nvim-workstation/
+# Data lives in ~/.local/share/nvim-workstation/
+```
+
+This lets you:
+- Keep dotfiles config untouched as `nvim`
+- Build new HM-managed config as `nvim-workstation`
+- Flip between them with a shell alias
+- Merge when ready
+
+### Pattern 8: Resilient Lua Modules
+
+Best for: Shared modules that might load before their dependencies.
+
+When deploying Lua modules that depend on plugins (which may load in different order on Nix vs Lazy), make them resilient:
+
+```lua
+-- Check if Obsession command exists before using it
+vim.api.nvim_create_autocmd("VimEnter", {
+  callback = function()
+    if vim.fn.exists(":Obsession") == 2 then
+      vim.cmd("silent! Obsess")
+    end
+  end,
+})
+```
+
+This removes ordering sensitivity between Nix packpath autoload vs Lazy event loading.
 
 ## Platform-Specific Config
 
@@ -142,11 +213,11 @@ lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
 
 | Program | Devbox | Darwin | Notes |
 |---------|--------|--------|-------|
-| Neovim | Workstation | Dotfiles + ccremote overlay | user/ stays in dotfiles |
+| Neovim | Workstation | Dotfiles + overlays | ccremote.lua, sessions.lua via Pattern 1 |
 | Bash | Workstation | Dotfiles | Need full migration |
 | SSH | Workstation | Dotfiles | Need full migration |
 | GPG | Workstation | Workstation (pinentry-op) | 1Password Touch ID integration |
-| Tmux | Workstation (enhanced) | Dotfiles (TPM) | Part 1 complete; Part 2 pending |
+| Tmux | Workstation (enhanced) | Dotfiles (TPM) | Part 2 pending (see tmux enhancement plan) |
 | Claude | Workstation | Workstation | Fully migrated |
 
 ## Detecting Drift
@@ -174,3 +245,6 @@ Run `verify.sh` after migrations or if things break unexpectedly.
 3. **Single file deployments are safest** during gradual migration
 4. **Full migration is cleaner** when you're ready to move a whole program
 5. **Run verify.sh after migrations** - catches missing symlinks early
+6. **Nix plugins can coexist with Lazy** - use `xdg.dataFile` to install to pack path
+7. **Update Lazy specs to load HM-deployed modules** - use `config = function() require(...) end`
+8. **Make shared modules resilient** - check if dependencies exist before using them
