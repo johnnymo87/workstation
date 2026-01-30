@@ -10,3 +10,4 @@ secrets/*.dec.*
 *.swp
 *~
 .nvim.lua
+docs/plans/
