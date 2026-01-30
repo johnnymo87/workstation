@@ -71,5 +71,6 @@ After `nixos-anywhere`:
 Secrets are managed by sops-nix and auto-decrypted at boot:
 - Available at `/run/secrets/<secret_name>`
 - `CLOUDFLARE_API_TOKEN` is exported in bash automatically
+- `CLAUDE_CODE_OAUTH_TOKEN` is exported for headless Claude Code (personal subscription, not work)
 
 Don't decrypt sops files manually - just use the environment variables or `/run/secrets/`.
