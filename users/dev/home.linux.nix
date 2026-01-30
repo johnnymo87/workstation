@@ -121,4 +121,49 @@ lib.mkIf isLinux {
     timestamp = "-7 days";
     store.cleanup = true;  # Also run nix-collect-garbage for user store
   };
+
+  # Script to pull workstation updates and apply home-manager
+  home.file.".local/bin/pull-workstation" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      set -euo pipefail
+
+      repo="$HOME/projects/workstation"
+      lock_dir="''${XDG_RUNTIME_DIR:-/tmp}"
+      lock="$lock_dir/pull-workstation.lock"
+
+      # Prevent concurrent runs
+      exec 9>"$lock"
+      ${pkgs.util-linux}/bin/flock -n 9 || { echo "Already running"; exit 0; }
+
+      cd "$repo"
+
+      # Fail if working tree is dirty
+      if [[ -n "$(${pkgs.git}/bin/git status --porcelain)" ]]; then
+        echo "Working tree not clean; skipping auto-pull"
+        exit 0
+      fi
+
+      # Fetch and pull if there are updates
+      ${pkgs.git}/bin/git fetch origin
+
+      local_rev=$(${pkgs.git}/bin/git rev-parse HEAD)
+      remote_rev=$(${pkgs.git}/bin/git rev-parse origin/main)
+
+      if [[ "$local_rev" != "$remote_rev" ]]; then
+        echo "Pulling updates..."
+        # Fast-forward only (fail if diverged)
+        ${pkgs.git}/bin/git pull --ff-only origin main
+      else
+        echo "Git already up to date"
+      fi
+
+      # Always attempt switch (handles retry after failed switch)
+      echo "Applying home-manager..."
+      ${pkgs.nix}/bin/nix run github:nix-community/home-manager/release-25.11 -- switch --flake "$repo#dev"
+
+      echo "Update complete"
+    '';
+  };
 }
