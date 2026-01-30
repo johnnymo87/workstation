@@ -11,3 +11,4 @@ secrets/*.dec.*
 *~
 .nvim.lua
 docs/plans/
+.beads/
