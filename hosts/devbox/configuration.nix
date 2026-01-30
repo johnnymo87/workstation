@@ -33,6 +33,13 @@
         group = "dev";
         mode = "0400";
       };
+      # Personal Claude subscription token (not work account)
+      # For headless/cron Claude Code usage on devbox
+      claude_personal_oauth_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
