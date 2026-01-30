@@ -112,4 +112,13 @@ lib.mkIf isLinux {
       WantedBy = [ "default.target" ];
     };
   };
+
+  # Auto-expire old home-manager generations
+  # System nix.gc runs weekly; this cleans up HM generations daily
+  services.home-manager.autoExpire = {
+    enable = true;
+    frequency = "daily";
+    timestamp = "-7 days";
+    store.cleanup = true;  # Also run nix-collect-garbage for user store
+  };
 }
