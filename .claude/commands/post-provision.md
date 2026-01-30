@@ -11,13 +11,15 @@ Complete the devbox setup after first SSH.
 
 ## Steps
 
-1. **Authenticate with GitHub**
+1. **Authenticate with GitHub CLI**
    ```bash
    gh auth login
    ```
    - Select GitHub.com
-   - Select HTTPS
+   - Select SSH (matches our git config)
    - Authenticate via browser (device flow)
+
+   Note: This is for the `gh` CLI (PRs, issues, API). Git operations use the SSH key at `~/.ssh/id_ed25519_github`.
 
 2. **Configure git credential helper**
    ```bash

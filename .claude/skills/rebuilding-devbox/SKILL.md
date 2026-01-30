@@ -20,7 +20,7 @@ description: This skill covers how to apply configuration changes to the devbox,
 After editing files in `hosts/devbox/`:
 
 ```bash
-cd ~/Code/workstation
+cd ~/projects/workstation
 sudo nixos-rebuild switch --flake .#devbox
 ```
 
@@ -31,7 +31,7 @@ This rebuilds the NixOS system. May require reboot if kernel changed.
 After editing files in `users/dev/` or `assets/`:
 
 ```bash
-cd ~/Code/workstation
+cd ~/projects/workstation
 home-manager switch --flake .#dev
 ```
 

@@ -150,3 +150,42 @@ Check disk usage:
 ```bash
 ssh devbox 'df -h /'
 ```
+
+## Systemd User Timers
+
+The devbox runs several user-level timers for automation.
+
+### Check Timer Status
+
+```bash
+# List all user timers
+systemctl --user list-timers
+
+# Specific timers
+systemctl --user status pull-workstation.timer
+systemctl --user status home-manager-auto-expire.timer
+```
+
+### View Timer Logs
+
+```bash
+# Auto-update pull logs
+journalctl --user -u pull-workstation -n 50
+
+# Generation cleanup logs
+journalctl --user -u home-manager-auto-expire -n 50
+```
+
+### Timer Not Running
+
+If a timer isn't active after `home-manager switch`:
+
+```bash
+# Reload systemd
+systemctl --user daemon-reload
+
+# Enable and start timer
+systemctl --user enable --now pull-workstation.timer
+```
+
+See [Automated Updates](.claude/skills/automated-updates/SKILL.md) for full details on the update pipeline.

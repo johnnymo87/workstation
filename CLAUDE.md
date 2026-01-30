@@ -42,6 +42,7 @@ Projects are declared in `projects.nix` and auto-cloned on login.
 | [Setting Up Hetzner](.claude/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
 | [Rebuilding Devbox](.claude/skills/rebuilding-devbox/SKILL.md) | How to apply changes, full rebuilds |
 | [Troubleshooting Devbox](.claude/skills/troubleshooting-devbox/SKILL.md) | SSH issues, host keys, NixOS problems |
+| [Automated Updates](.claude/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
 | [Managing Secrets](.claude/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
 | [Growing Neovim Config](.claude/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
 | [Migrating Claude Assets](.claude/skills/migrating-claude-assets/SKILL.md) | Moving skills/commands to home-manager |
