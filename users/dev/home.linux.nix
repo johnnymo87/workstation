@@ -15,6 +15,12 @@ lib.mkIf isLinux {
     if [ -r /run/secrets/cloudflare_api_token ]; then
       export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
     fi
+
+    # Personal Claude subscription token (not work account)
+    # Enables headless/cron Claude Code without interactive OAuth
+    if [ -r /run/secrets/claude_personal_oauth_token ]; then
+      export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
+    fi
   '';
 
   # Mask GPG agent units for forwarding (systemd-specific)
