@@ -190,33 +190,47 @@ Create `users/dev/tmux.darwin.nix`:
 # Darwin-specific tmux configuration
 # Uses XDG state directory for resurrect (no /persist volume on macOS)
 #
-# NOTE: Resurrect data is "state" not "data", so we use xdg.stateHome
-# (~/.local/state/tmux/resurrect) rather than xdg.dataHome
+# Plugin ordering is CRITICAL:
+# 1. resurrect - must load before continuum
+# 2. catppuccin - theme must load before continuum to avoid status-right conflicts
+# 3. continuum - MUST BE LAST (uses status-right hook for autosave)
 { config, pkgs, lib, isDarwin, ... }:
 
 let
-  # Use stateHome for session state (not dataHome which is for persistent data)
   resurrectDir = "${config.xdg.stateHome}/tmux/resurrect";
 in
 lib.mkIf isDarwin {
   programs.tmux = {
-    # Plugin ordering is CRITICAL - see tmux.linux.nix for explanation
     plugins = with pkgs.tmuxPlugins; [
+      # 1. Resurrect: save/restore sessions
       {
         plugin = resurrect;
         extraConfig = ''
           set -g @resurrect-dir '${resurrectDir}'
           set -g @resurrect-strategy-nvim 'session'
+          # Match nvim anywhere in command (tilde), restore as plain nvim (arrow)
+          # Nix wraps nvim with complex --cmd flags that break session restore
+          # NOTE: Quotes protect > from shell redirect during resurrect's eval
+          set -g @resurrect-processes '"~nvim->nvim"'
         '';
       }
 
+      # 2. Theme: Catppuccin (before continuum to avoid status-right conflicts)
       {
         plugin = catppuccin;
         extraConfig = ''
           set -g @catppuccin_flavor "mocha"
+
+          # Window tabs: show window name (#W) so manual renames work
+          set -g @catppuccin_window_text " #W"
+          set -g @catppuccin_window_current_text " #W"
+
+          # Right status: two pills with different colors (date darker, time lighter)
+          set -g status-right "#[fg=#cdd6f4,bg=#313244] %d/%m #[fg=#cdd6f4,bg=#45475a] %H:%M:%S "
         '';
       }
 
+      # 3. Continuum: auto-save/restore (MUST BE LAST)
       {
         plugin = continuum;
         extraConfig = ''
@@ -271,11 +285,97 @@ git commit -m "feat(tmux): add Darwin-specific module (not yet active)"
 
 ---
 
-### Task 6: Remove tmux from deprecated-dotfiles (on Darwin machine)
+### Task 6: Deploy sessions.lua for Darwin nvim
+
+**Context:** On Darwin, neovim is managed by dotfiles + Lazy, not home-manager. We need to:
+1. Deploy `sessions.lua` via home-manager (Pattern 1 from gradual-dotfiles-migration)
+2. Update Lazy spec to load it
+3. Remove old vim-obsession user config from dotfiles
+
+**Step 1: Add sessions.lua deployment to home.darwin.nix**
+
+```nix
+# In users/dev/home.darwin.nix, add alongside ccremote.lua deployment:
+xdg.configFile."nvim/lua/user/sessions.lua".source = "${assetsPath}/nvim/lua/user/sessions.lua";
+```
+
+**Step 2: Commit on devbox**
+
+```bash
+git add users/dev/home.darwin.nix
+git commit -m "feat(nvim): deploy sessions.lua on Darwin for tmux-resurrect"
+git push
+```
+
+---
+
+### Task 7: Update dotfiles on Darwin machine
 
 **Prerequisites:** This task must be run on the Darwin machine, not devbox.
 
-**Pre-flight check:** Ensure iTerm2 has "Applications in terminal may access clipboard" enabled in Preferences for OSC 52 to work.
+**Pre-flight check:** Ensure iTerm2 has "Applications in terminal may access clipboard" enabled.
+
+**Step 1: Pull workstation changes**
+
+```bash
+cd ~/Code/workstation
+git pull
+```
+
+**Step 2: Update Lazy spec in dotfiles**
+
+Edit `~/Code/deprecated-dotfiles/.config/nvim/lua/plugins/vim-obsession.lua`:
+
+```lua
+-- vim-obsession for session management (tmux-resurrect integration)
+return {
+  "tpope/vim-obsession",
+  lazy = false,
+  config = function()
+    -- Load sessions.lua (deployed by home-manager from workstation)
+    require("user.sessions")
+  end,
+}
+```
+
+**Step 3: Remove old vim-obsession user config**
+
+```bash
+cd ~/Code/deprecated-dotfiles
+rm .config/nvim/lua/user/vim-obsession.lua
+git add -A
+git commit -m "refactor(nvim): use workstation sessions.lua for vim-obsession"
+git push
+```
+
+**Step 4: Apply darwin-rebuild**
+
+```bash
+cd ~/Code/workstation
+darwin-rebuild switch --flake .#<hostname>
+```
+
+**Step 5: Verify sessions.lua is deployed**
+
+```bash
+ls -la ~/.config/nvim/lua/user/sessions.lua
+# Should be a symlink to nix store
+```
+
+**Step 6: Test in nvim**
+
+```bash
+cd ~/Code/workstation  # or any project directory
+nvim
+# Should auto-start Obsession (check with :Obsess - shows "Obsessing")
+:q
+ls Session.vim  # Should exist
+rm Session.vim  # Clean up
+```
+
+---
+
+### Task 8: Remove tmux from deprecated-dotfiles
 
 **Step 1: Remove tmux config from dotfiles**
 
@@ -295,23 +395,20 @@ rm -f ~/.tmux.conf
 rm -rf ~/.tmux/
 ```
 
-**Step 3: Apply darwin-rebuild**
+**Step 3: Apply darwin-rebuild** (if not already done)
 
 ```bash
-cd ~/Code/workstation
-git pull
-darwin-rebuild switch --flake .#Y0FMQX93RR-2
+darwin-rebuild switch --flake .#<hostname>
 ```
 
-Expected: tmux now fully managed by home-manager with Catppuccin theme
+**Step 4: Verify tmux on Darwin**
 
-**Step 4: Verify on Darwin**
-
-Same verification steps as Task 3:
-- Theme visible
-- Session persistence works
+- Theme visible (Catppuccin mocha)
+- Window names show correctly (#W not hostname)
+- Session persistence works (C-a C-s to save, kill tmux, restart, C-a C-r to restore)
 - Vi copy mode works
-- OSC 52 clipboard works (requires iTerm2 preference)
+- OSC 52 clipboard works
+- nvim restores with Session.vim
 
 **Step 5: Update migration status**
 
@@ -319,6 +416,7 @@ Update `.claude/skills/gradual-dotfiles-migration/SKILL.md`:
 
 ```markdown
 | Tmux | Workstation | Workstation | Fully migrated |
+| Neovim | Workstation | Dotfiles + overlays | ccremote.lua, sessions.lua via Pattern 1 |
 ```
 
 **Step 6: Commit and push**
@@ -339,17 +437,16 @@ git push
 | 2 | Update base tmux config | Both | ✅ |
 | 3 | Apply and test | Devbox | ✅ |
 | 4 | Document migration status | Devbox | ✅ |
-| 1.5a | Fix clipboard security in extra.conf | Both | Pending |
-| 1.5b | Guard source-file | Both | Pending |
-| 1.5c | Add /persist/tmux to tmpfiles | Devbox | Pending |
-| 1.5d | Add chmod to activation | Devbox | Pending |
-| 1.5e | Apply and verify fixes | Devbox | Pending |
+| 1.5a-e | Post-implementation fixes | Devbox | ✅ (most done, 1.5a reverted for SSH) |
 | 5 | Create Darwin tmux module | Devbox (code) | Future |
-| 6 | Remove from dotfiles, apply | Darwin | Future |
+| 6 | Deploy sessions.lua for Darwin nvim | Devbox (code) | Future |
+| 7 | Update dotfiles on Darwin | Darwin | Future |
+| 8 | Remove tmux from dotfiles | Darwin | Future |
 
 **Part 1 (Tasks 1-4):** ✅ Complete
-**Part 1.5 (Fixes):** In progress
-**Part 2 (Tasks 5-6):** Execute later after Part 1.5 is verified working.
+**Part 1.5 (Fixes):** ✅ Complete (clipboard stayed `on` for SSH passthrough)
+**Nvim Session Integration:** ✅ Complete (see follow-up section)
+**Part 2 (Tasks 5-8):** Execute on Darwin machine when ready.
 
 ---
 
