@@ -39,10 +39,15 @@ Projects are declared in `projects.nix` and auto-cloned on login.
 | Skill | Description |
 |-------|-------------|
 | [Understanding Workstation](.claude/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
+| [Setting Up Hetzner](.claude/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
 | [Rebuilding Devbox](.claude/skills/rebuilding-devbox/SKILL.md) | How to apply changes, full rebuilds |
+| [Troubleshooting Devbox](.claude/skills/troubleshooting-devbox/SKILL.md) | SSH issues, host keys, NixOS problems |
 | [Managing Secrets](.claude/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
 | [Growing Neovim Config](.claude/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
+| [Migrating Claude Assets](.claude/skills/migrating-claude-assets/SKILL.md) | Moving skills/commands to home-manager |
 | [Gradual Dotfiles Migration](.claude/skills/gradual-dotfiles-migration/SKILL.md) | Migrating from dotfiles to home-manager on Darwin |
+| [OSC52 Clipboard](.claude/skills/osc52-clipboard/SKILL.md) | Copy/paste over SSH, clipboard sync |
+| [Screenshot to Devbox](.claude/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote Claude Code |
 
 ## Structure
 
@@ -69,9 +74,6 @@ After `nixos-anywhere`:
 
 ## Secrets on Devbox
 
-Secrets are managed by sops-nix and auto-decrypted at boot:
-- Available at `/run/secrets/<secret_name>`
-- `CLOUDFLARE_API_TOKEN` is exported in bash automatically
-- `CLAUDE_CODE_OAUTH_TOKEN` is exported for headless Claude Code (personal subscription, not work)
+See [Managing Secrets](.claude/skills/managing-secrets/SKILL.md) for full details.
 
-Don't decrypt sops files manually - just use the environment variables or `/run/secrets/`.
+Quick reference: secrets are at `/run/secrets/<name>`, env vars (`CLOUDFLARE_API_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) are auto-exported in bash.
