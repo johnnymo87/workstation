@@ -75,6 +75,8 @@ in
     llmPkgs.claude-code
     llmPkgs.ccusage
     llmPkgs.beads
+    llmPkgs.opencode
+    llmPkgs.ccusage-opencode
 
     # Cloudflare Workers CLI
     pkgs.wrangler
