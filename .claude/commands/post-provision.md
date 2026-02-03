@@ -1,13 +1,13 @@
 ---
 name: post-provision
-description: Complete devbox setup after first SSH (authentication, git signing, agent forwarding)
+description: Complete devbox setup after first SSH (authentication, GPG signing, agent forwarding)
 ---
 
 # Post-Provision Setup
 
 Complete the devbox setup after first SSH.
 
-> **Note:** Git commit signing uses SSH agent forwarding from your Mac. Connect with `ssh -A devbox`.
+> **Note:** Git commit signing uses GPG agent forwarding from your Mac. Your SSH config should include `RemoteForward` for the GPG socket.
 
 ## Steps
 
@@ -26,11 +26,13 @@ Complete the devbox setup after first SSH.
    gh auth setup-git
    ```
 
-3. **Verify agent forwarding works**
+3. **Verify GPG agent forwarding works**
    ```bash
-   ssh-add -l
+   gpg --card-status
    ```
-   Should show your Mac's SSH key.
+   Should show your GPG card/key info from your Mac's agent.
+
+   If it fails, check your SSH config has the GPG socket RemoteForward configured.
 
 4. **Verify git signing works**
    ```bash
@@ -38,7 +40,7 @@ Complete the devbox setup after first SSH.
    git init && echo test > file && git add file
    git commit -m "test signing"
    ```
-   Should succeed with SSH signature.
+   Should succeed with GPG signature.
 
 5. **Clean up test**
    ```bash
@@ -47,4 +49,4 @@ Complete the devbox setup after first SSH.
 
 ## Done
 
-After these steps, commits will be signed (when connected with agent forwarding) and pushed via gh credentials.
+After these steps, commits will be GPG-signed (when connected with agent forwarding) and pushed via gh credentials.
