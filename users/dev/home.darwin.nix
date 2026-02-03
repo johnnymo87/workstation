@@ -89,10 +89,11 @@ lib.mkIf isDarwin {
   # On Darwin, dotfiles owns the user/ directory
   xdg.configFile."nvim/lua".enable = lib.mkForce false;
 
-  # Deploy only ccremote.lua - user/ directory is managed entirely by dotfiles
+  # Deploy only specific lua files - user/ directory is managed entirely by dotfiles
   # on Darwin. Home-manager can't overlay files into a symlinked directory,
   # and creating the directory breaks the dotfiles symlink to user/*.lua modules.
   xdg.configFile."nvim/lua/ccremote.lua".source = "${assetsPath}/nvim/lua/ccremote.lua";
+  xdg.configFile."nvim/lua/user/sessions.lua".source = "${assetsPath}/nvim/lua/user/sessions.lua";
 
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.
   # Remove dotfiles symlinks before HM tries to create its own.
@@ -103,6 +104,7 @@ lib.mkIf isDarwin {
     rm -f ~/.gnupg/dirmngr.conf 2>/dev/null || true
     rm -f ~/.gnupg/common.conf 2>/dev/null || true
     rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
+    rm -f ~/.config/nvim/lua/user/sessions.lua 2>/dev/null || true
     rm -f ~/.claude/commands/ask-question.md 2>/dev/null || true
     rm -f ~/.claude/commands/beads.md 2>/dev/null || true
     rm -f ~/.claude/commands/notify-telegram.md 2>/dev/null || true
