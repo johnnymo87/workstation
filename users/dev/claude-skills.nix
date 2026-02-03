@@ -21,7 +21,6 @@ let
     "beads"
     "consult-chatgpt"
     "notify-telegram"
-    "setting-up-oh-my-opencode"
     "using-chatgpt-relay-from-devbox"
   ];
 
