@@ -72,59 +72,12 @@ context_info=" | [${color}${bar}${reset}] ${color}${context_pct}%${reset} ($(pri
 # Base status line
 base_status="🤖 $model | 📁 $display_dir | 🌿 $branch${context_info}"
 
-# Try to get ccusage information
+# Extract session cost from Claude Code stdin (instant, no external calls)
+session_cost=$(echo "$input" | jq -r '.cost.total_cost_usd // empty')
 cost_info=""
-if command -v ccusage >/dev/null 2>&1; then
-    # Get costs from JSON API - per directory and per day
-    today=$(date +%Y%m%d)
-
-    # ccusage uses path-based session IDs: convert /Users/foo.bar/baz -> -Users-foo-bar-baz
-    ccusage_session_id=$(echo "$current_dir" | sed 's/^\//-/' | tr '/.' '--')
-
-    # Fetch daily costs with instance breakdown
-    daily_json=$(ccusage daily --instances --since "$today" --json 2>/dev/null)
-
-    dir_cost=""
-    daily_cost=""
-    if [ -n "$daily_json" ]; then
-        # Get cost for this specific directory/instance from .projects[sessionId]
-        if [ -n "$ccusage_session_id" ]; then
-            dir_cost=$(echo "$daily_json" | jq -r --arg sid "$ccusage_session_id" '(.projects[$sid] // [])[0].totalCost // empty' 2>/dev/null)
-            if [ -n "$dir_cost" ] && [ "$dir_cost" != "null" ]; then
-                dir_cost="\$$(printf "%.2f" "$dir_cost")"
-            else
-                dir_cost=""
-            fi
-        fi
-
-        # Get total cost for today (all directories) from .totals
-        daily_cost=$(echo "$daily_json" | jq -r '.totals.totalCost // empty' 2>/dev/null)
-        if [ -n "$daily_cost" ] && [ "$daily_cost" != "null" ]; then
-            daily_cost="\$$(printf "%.2f" "$daily_cost")"
-        else
-            daily_cost=""
-        fi
-    fi
-
-    # Build cost information string
-    cost_parts=()
-    if [ -n "$dir_cost" ]; then
-        cost_parts+=("📁 $dir_cost")
-    fi
-    if [ -n "$daily_cost" ]; then
-        cost_parts+=("📅 $daily_cost")
-    fi
-
-    # Join cost parts with " | "
-    if [ ${#cost_parts[@]} -gt 0 ]; then
-        cost_info=" | "
-        for i in "${!cost_parts[@]}"; do
-            if [ "$i" -gt 0 ]; then
-                cost_info="${cost_info} | "
-            fi
-            cost_info="${cost_info}${cost_parts[$i]}"
-        done
-    fi
+if [ -n "$session_cost" ] && [ "$session_cost" != "null" ]; then
+    formatted_cost=$(printf "%.2f" "$session_cost")
+    cost_info=" | 💰 \$${formatted_cost}"
 fi
 
 # Output the complete status line
