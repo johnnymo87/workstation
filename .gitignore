@@ -10,7 +10,6 @@ secrets/*.dec.*
 *.swp
 *~
 .nvim.lua
-docs/plans/
 .beads/
 
 # OpenCode user configuration (managed per-machine)
