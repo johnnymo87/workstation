@@ -18,7 +18,7 @@ let
   # Darwin: custom statusline with context tracking, git branch, and cost info
   darwinStatusline = pkgs.writeShellApplication {
     name = "claude-statusline";
-    runtimeInputs = [ pkgs.jq pkgs.git pkgs.bc pkgs.coreutils llmPkgs.ccusage ];
+    runtimeInputs = [ pkgs.jq pkgs.git pkgs.bc pkgs.coreutils ];
     text = builtins.readFile "${assetsPath}/scripts/statusline.sh";
   };
 
