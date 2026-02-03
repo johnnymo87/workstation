@@ -10,5 +10,6 @@
     ./claude-skills.nix
     ./claude-hooks.nix
     ./tmux.linux.nix
+    ./tmux.darwin.nix
   ];
 }
