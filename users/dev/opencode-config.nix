@@ -66,6 +66,18 @@ let
       atlas = {
         model = "anthropic/claude-sonnet-4-5";
       };
+      slack = {
+        model = "anthropic/claude-haiku-4-5";
+        prompt_append = builtins.readFile "${assetsPath}/opencode/prompts/slack-agent.md";
+        description = "Slack research agent for searching and analyzing Slack conversations";
+        tools = {
+          slack_channels_list = true;
+          slack_conversations_add_message = true;
+          slack_conversations_history = true;
+          slack_conversations_replies = true;
+          slack_conversations_search_messages = true;
+        };
+      };
     };
 
     categories = {
@@ -100,7 +112,7 @@ let
       };
     };
 
-    disabled_mcps = [ "websearch" "context7" "grep_app" ];
+    disabled_mcps = [ "websearch" "context7" "grep_app" "slack" ];
   };
 
   ohMyManagedFile = pkgs.writeText "oh-my-opencode.managed.json"
@@ -210,14 +222,15 @@ in
       if [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
         
-        # Escape tokens for jq and inject into mcp.slack (disabled by default)
+        # Escape tokens for jq and inject into mcp.slack
+        # MCP is enabled but globally disabled via disabled_mcps; slack agent has explicit tool access
         ${pkgs.jq}/bin/jq \
           --arg xoxc "''${xoxc_token}" \
           --arg xoxd "''${xoxd_token}" \
           '.mcp.slack = {
             "type": "local",
             "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
-            "enabled": false,
+            "enabled": true,
             "environment": {
               "SLACK_MCP_XOXC_TOKEN": $xoxc,
               "SLACK_MCP_XOXD_TOKEN": $xoxd,

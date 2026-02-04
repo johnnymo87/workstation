@@ -7,6 +7,14 @@ description: Set up Slack MCP server with macOS Keychain token storage. Use for 
 
 This workstation uses macOS Keychain to store Slack MCP tokens securely. Tokens are fetched at `darwin-rebuild switch` time and injected into OpenCode config.
 
+## Architecture
+
+- **Slack MCP is globally disabled** for all agents via `disabled_mcps`
+- **Dedicated `slack` agent** has explicit access to Slack tools
+- To use Slack: delegate tasks to the `slack` agent (e.g., `delegate_task(subagent_type="slack", ...)`)
+
+This prevents accidental Slack access from other agents while providing a focused, lightweight agent for Slack research.
+
 ## Initial Setup
 
 ### 1. Get Tokens from Slack
@@ -117,8 +125,30 @@ Slack MCP creates cache files in working directory:
 
 **Gitignore recommendation**: Add `.*.json` to `.gitignore` in repos where you use Slack MCP to avoid committing cache files.
 
+## Using the Slack Agent
+
+Delegate Slack research to the dedicated agent:
+
+```typescript
+delegate_task(
+  subagent_type="slack",
+  load_skills=[],
+  run_in_background=true,
+  description="Search Slack for X",
+  prompt="Find messages about [topic] in [channel/timeframe]. Return key findings with quotes and attribution."
+)
+```
+
+**Available tools for slack agent:**
+- `slack_channels_list` - List channels
+- `slack_conversations_history` - Get channel messages
+- `slack_conversations_replies` - Get thread replies
+- `slack_conversations_search_messages` - Search messages with filters
+- `slack_conversations_add_message` - Post messages (use carefully)
+
 ## References
 
 - Repo: https://github.com/korotovsky/slack-mcp-server
 - Auth docs: https://github.com/korotovsky/slack-mcp-server/blob/master/docs/01-authentication-setup.md
 - Activation script: `users/dev/opencode-config.nix` (home.activation.injectSlackMcpSecrets)
+- Slack agent config: `users/dev/opencode-config.nix` (ohMyManaged.agents.slack)
