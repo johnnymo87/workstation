@@ -34,6 +34,7 @@ let
 
   # Skills deployed only on Darwin (work machine)
   darwinOnlySkills = [
+    "slack-mcp-setup"
     "using-gcloud-bq-cli"
   ];
 
