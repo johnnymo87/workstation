@@ -179,4 +179,52 @@ in
     mv "$tmp" "$runtime"
     [[ "$base" == "$runtime" ]] || rm -f "$base"
   '';
+
+  # Inject Slack MCP secrets from macOS Keychain into opencode.json
+  # Runs after mergeOpencode to ensure runtime file exists
+  # If tokens missing/empty, explicitly deletes mcpServers.slack to prevent stale config
+  home.activation.injectSlackMcpSecrets = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      # Fetch tokens from Keychain
+      xoxc_token="$(/usr/bin/security find-generic-password -s slack-mcp-xoxc-token -w 2>/dev/null || true)"
+      xoxd_token="$(/usr/bin/security find-generic-password -s slack-mcp-xoxd-token -w 2>/dev/null || true)"
+
+      # If either token is missing or empty, delete mcpServers.slack and exit cleanly
+      if [[ -z "''${xoxc_token}" ]] || [[ -z "''${xoxd_token}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcpServers.slack)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "Slack MCP tokens not found in Keychain; removed mcpServers.slack from config" >&2
+        exit 0
+      fi
+
+      # Both tokens present: inject full Slack MCP config
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        
+        # Escape tokens for jq and inject into mcpServers.slack
+        ${pkgs.jq}/bin/jq \
+          --arg xoxc "''${xoxc_token}" \
+          --arg xoxd "''${xoxd_token}" \
+          '.mcpServers.slack = {
+            "command": "npx",
+            "args": ["-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "env": {
+              "SLACK_MCP_XOXC_TOKEN": $xoxc,
+              "SLACK_MCP_XOXD_TOKEN": $xoxd,
+              "SLACK_MCP_CUSTOM_TLS": "1",
+              "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+            },
+            "type": "stdio"
+          }' "$runtime" > "$tmp"
+        
+        mv "$tmp" "$runtime"
+      fi
+    '');
 }
