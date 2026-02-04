@@ -66,18 +66,8 @@ let
       atlas = {
         model = "anthropic/claude-sonnet-4-5";
       };
-      slack = {
-        model = "anthropic/claude-haiku-4-5";
-        prompt_append = builtins.readFile "${assetsPath}/opencode/prompts/slack-agent.md";
-        description = "Slack research agent for searching and analyzing Slack conversations";
-        tools = {
-          slack_channels_list = true;
-          slack_conversations_add_message = true;
-          slack_conversations_history = true;
-          slack_conversations_replies = true;
-          slack_conversations_search_messages = true;
-        };
-      };
+      # Note: Custom "slack" agent is defined via markdown file in assets/opencode/agents/
+      # oh-my-opencode.json agent overrides only work for built-in agents
     };
 
     categories = {
@@ -112,7 +102,9 @@ let
       };
     };
 
-    disabled_mcps = [ "websearch" "context7" "grep_app" "slack" ];
+    # Note: disabled_mcps only works for built-in MCPs (websearch, context7, grep_app)
+    # Custom MCPs like "slack" cannot be disabled via this mechanism
+    disabled_mcps = [ "websearch" "context7" "grep_app" ];
   };
 
   ohMyManagedFile = pkgs.writeText "oh-my-opencode.managed.json"
@@ -123,6 +115,10 @@ in
   # Symlink managed files to XDG config directory
   xdg.configFile."opencode/opencode.managed.json".source = opencodeManagedFile;
   xdg.configFile."opencode/oh-my-opencode.managed.json".source = ohMyManagedFile;
+
+  # Custom agents via markdown files (oh-my-opencode loads from ~/.config/opencode/agents/)
+  # This is the proper way to define custom agents - JSON config only supports overriding built-in agents
+  xdg.configFile."opencode/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
 
   # Merge managed config into runtime opencode.json on each switch
   # Preserves runtime keys; managed keys win on conflict.

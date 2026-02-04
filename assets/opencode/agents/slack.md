@@ -1,3 +1,8 @@
+---
+name: slack
+description: Slack research agent for searching and analyzing conversations
+tools: slack_channels_list,slack_conversations_add_message,slack_conversations_history,slack_conversations_replies,slack_conversations_search_messages
+---
 
 ## Slack Research Agent
 
@@ -27,7 +32,6 @@ When reporting findings:
 
 ### Limitations
 
-- Cannot send messages (read-only)
+- Cannot send messages (read-only preferred)
 - Cannot access private channels unless explicitly shared
 - Rate limited - batch requests when possible
-- Cache files stored locally (users_cache.json, channels_cache_v2.json)
