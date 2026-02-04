@@ -210,13 +210,14 @@ in
       if [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
         
-        # Escape tokens for jq and inject into mcp.slack
+        # Escape tokens for jq and inject into mcp.slack (disabled by default)
         ${pkgs.jq}/bin/jq \
           --arg xoxc "''${xoxc_token}" \
           --arg xoxd "''${xoxd_token}" \
           '.mcp.slack = {
             "type": "local",
             "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "enabled": false,
             "environment": {
               "SLACK_MCP_XOXC_TOKEN": $xoxc,
               "SLACK_MCP_XOXD_TOKEN": $xoxd,
