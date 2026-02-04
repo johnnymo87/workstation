@@ -9,6 +9,7 @@
     ./home.darwin.nix
     ./claude-skills.nix
     ./claude-hooks.nix
+    ./opencode-config.nix
     ./tmux.linux.nix
     ./tmux.darwin.nix
   ];
