@@ -62,20 +62,22 @@ The activation script will:
 
 ```bash
 # Check config was created
-jq '.mcpServers.slack' ~/.config/opencode/opencode.json
+jq '.mcp.slack' ~/.config/opencode/opencode.json
 
 # Should show:
 # {
-#   "command": "npx",
-#   "args": ["-y", "slack-mcp-server@latest", "--transport", "stdio"],
-#   "env": {
+#   "type": "local",
+#   "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+#   "environment": {
 #     "SLACK_MCP_XOXC_TOKEN": "xoxc-...",
 #     "SLACK_MCP_XOXD_TOKEN": "xoxd-...",
 #     "SLACK_MCP_CUSTOM_TLS": "1",
 #     "SLACK_MCP_USER_AGENT": "Mozilla/5.0..."
-#   },
-#   "type": "stdio"
+#   }
 # }
+
+# Verify opencode boots without errors
+opencode --version
 ```
 
 ### 5. Restart OpenCode
