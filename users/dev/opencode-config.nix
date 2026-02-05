@@ -30,9 +30,6 @@ let
         model = "anthropic/claude-opus-4-5";
         variant = "max";
         prompt_append = builtins.readFile "${assetsPath}/opencode/prompts/sisyphus.md";
-        # Disable slack tools - use dedicated slack agent via delegate_task
-        # Must use permission format (not tools) since oh-my-opencode merges permissions at runtime
-        permission = { "slack_*" = "deny"; };
       };
       hephaestus = {
         model = "openai/gpt-5.2-codex";
@@ -51,7 +48,7 @@ let
         model = "anthropic/claude-haiku-4-5";
       };
       "multimodal-looker" = {
-        model = "google/gemini-3-flash";
+        model = "google/gemini-3-flash-preview";
       };
       prometheus = {
         model = "anthropic/claude-opus-4-5";
@@ -75,7 +72,7 @@ let
 
     categories = {
       "visual-engineering" = {
-        model = "google/gemini-3-pro";
+        model = "google/gemini-3-pro-preview";
       };
       ultrabrain = {
         model = "openai/gpt-5.2-codex";
@@ -97,10 +94,10 @@ let
         variant = "max";
       };
       writing = {
-        model = "google/gemini-3-flash";
+        model = "google/gemini-3-flash-preview";
       };
       artistry = {
-        model = "google/gemini-3-pro";
+        model = "google/gemini-3-pro-preview";
         variant = "max";
       };
     };
@@ -223,14 +220,14 @@ in
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
         
         # Escape tokens for jq and inject into mcp.slack
-        # MCP is enabled but globally disabled via disabled_mcps; slack agent has explicit tool access
+        # MCP is disabled by default; enable manually or use dedicated slack agent when needed
         ${pkgs.jq}/bin/jq \
           --arg xoxc "''${xoxc_token}" \
           --arg xoxd "''${xoxd_token}" \
           '.mcp.slack = {
             "type": "local",
             "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
-            "enabled": true,
+            "enabled": false,
             "environment": {
               "SLACK_MCP_XOXC_TOKEN": $xoxc,
               "SLACK_MCP_XOXD_TOKEN": $xoxd,

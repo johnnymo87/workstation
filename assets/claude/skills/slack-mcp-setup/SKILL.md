@@ -10,25 +10,13 @@ This workstation uses macOS Keychain to store Slack MCP tokens securely. Tokens 
 ## Architecture
 
 - **Slack MCP** is injected into opencode.json with tokens from Keychain
-- **Slack tools globally disabled** via `"tools": { "slack_*": false }` in opencode.json
-- **Dedicated `slack` agent** with per-agent override `"tools": { "slack_*": true }`
-- To use Slack: delegate tasks to the `slack` agent (e.g., `delegate_task(subagent_type="slack", ...)`)
+- **MCP is disabled by default** (`"enabled": false`) to keep slack tools out of normal sessions
+- To use Slack: manually enable the MCP, or delegate to the `slack` agent
 
-**How tool access control works:**
-
-```json
-// opencode.json
-{
-  "tools": { "slack_*": false },        // Global disable
-  "agent": {
-    "slack": {
-      "tools": { "slack_*": true }      // Per-agent enable
-    }
-  }
-}
-```
-
-**Agent definition** uses OpenCode-native markdown format (`~/.config/opencode/agents/slack.md`) with `tools:` as YAML map for additional restrictions (disable write, edit, bash, etc.)
+**Why disabled by default?**
+- Prevents accidental Slack API calls from main agents
+- Reduces MCP server startup overhead when not needed
+- Slack tools only available when explicitly enabled
 
 ## Initial Setup
 
@@ -91,11 +79,11 @@ jq '.mcp.slack' ~/.config/opencode/opencode.json
 # {
 #   "type": "local",
 #   "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+#   "enabled": false,
 #   "environment": {
 #     "SLACK_MCP_XOXC_TOKEN": "xoxc-...",
 #     "SLACK_MCP_XOXD_TOKEN": "xoxd-...",
-#     "SLACK_MCP_CUSTOM_TLS": "1",
-#     "SLACK_MCP_USER_AGENT": "Mozilla/5.0..."
+#     ...
 #   }
 # }
 
@@ -140,9 +128,21 @@ Slack MCP creates cache files in working directory:
 
 **Gitignore recommendation**: Add `.*.json` to `.gitignore` in repos where you use Slack MCP to avoid committing cache files.
 
-## Using the Slack Agent
+## Using Slack
 
-Delegate Slack research to the dedicated agent:
+### Option 1: Enable MCP temporarily
+
+```bash
+# Enable the MCP
+jq '.mcp.slack.enabled = true' ~/.config/opencode/opencode.json > /tmp/oc.json && mv /tmp/oc.json ~/.config/opencode/opencode.json
+
+# Restart OpenCode, use slack tools directly
+
+# Disable when done
+jq '.mcp.slack.enabled = false' ~/.config/opencode/opencode.json > /tmp/oc.json && mv /tmp/oc.json ~/.config/opencode/opencode.json
+```
+
+### Option 2: Delegate to slack agent
 
 ```typescript
 delegate_task(
@@ -153,6 +153,8 @@ delegate_task(
   prompt="Find messages about [topic] in [channel/timeframe]. Return key findings with quotes and attribution."
 )
 ```
+
+Note: The slack agent still requires the MCP to be enabled.
 
 **Available tools for slack agent:**
 - `slack_channels_list` - List channels
