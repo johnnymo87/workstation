@@ -116,9 +116,10 @@ in
   xdg.configFile."opencode/opencode.managed.json".source = opencodeManagedFile;
   xdg.configFile."opencode/oh-my-opencode.managed.json".source = ohMyManagedFile;
 
-  # Custom agents via markdown files (oh-my-opencode loads from ~/.config/opencode/agents/)
-  # This is the proper way to define custom agents - JSON config only supports overriding built-in agents
-  xdg.configFile."opencode/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
+  # Custom agents via markdown files
+  # oh-my-opencode loads from ~/.claude/agents/ (NOT ~/.config/opencode/agents/)
+  # JSON config only supports overriding built-in agents, not creating new ones
+  home.file.".claude/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
 
   # Merge managed config into runtime opencode.json on each switch
   # Preserves runtime keys; managed keys win on conflict.

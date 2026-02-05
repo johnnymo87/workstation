@@ -14,7 +14,7 @@ This workstation uses macOS Keychain to store Slack MCP tokens securely. Tokens 
 - To use Slack: delegate tasks to the `slack` agent (e.g., `delegate_task(subagent_type="slack", ...)`)
 
 **How custom agents work in oh-my-opencode:**
-- Custom agents are defined as markdown files in `~/.config/opencode/agents/`
+- Custom agents are defined as markdown files in `~/.claude/agents/` (user) or `.claude/agents/` (project)
 - The `tools:` frontmatter field creates an allowlist of permitted tools
 - JSON config (`oh-my-opencode.json`) only supports overriding built-in agents, not creating new ones
 - `disabled_mcps` only works for built-in MCPs (websearch, context7, grep_app), not custom MCPs
@@ -155,5 +155,5 @@ delegate_task(
 - Repo: https://github.com/korotovsky/slack-mcp-server
 - Auth docs: https://github.com/korotovsky/slack-mcp-server/blob/master/docs/01-authentication-setup.md
 - Activation script: `users/dev/opencode-config.nix` (home.activation.injectSlackMcpSecrets)
-- Slack agent definition: `assets/opencode/agents/slack.md` (deployed to ~/.config/opencode/agents/)
+- Slack agent definition: `assets/opencode/agents/slack.md` (deployed to ~/.claude/agents/)
 - oh-my-opencode agent loader: `src/features/claude-code-agent-loader/loader.ts`
