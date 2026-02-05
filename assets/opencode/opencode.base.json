@@ -1,5 +1,15 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "tools": {
+    "slack_*": false
+  },
+  "agent": {
+    "slack": {
+      "tools": {
+        "slack_*": true
+      }
+    }
+  },
   "plugin": [
     "oh-my-opencode@latest",
     "opencode-openai-codex-auth",

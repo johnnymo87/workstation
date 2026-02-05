@@ -10,20 +10,25 @@ This workstation uses macOS Keychain to store Slack MCP tokens securely. Tokens 
 ## Architecture
 
 - **Slack MCP** is injected into opencode.json with tokens from Keychain
-- **Dedicated `slack` agent** defined via OpenCode-native markdown with tool allowlist
+- **Slack tools globally disabled** via `"tools": { "slack_*": false }` in opencode.json
+- **Dedicated `slack` agent** with per-agent override `"tools": { "slack_*": true }`
 - To use Slack: delegate tasks to the `slack` agent (e.g., `delegate_task(subagent_type="slack", ...)`)
 
-**Two agent systems exist (don't confuse them!):**
+**How tool access control works:**
 
-| System | Path | `tools:` format |
-|--------|------|-----------------|
-| **OpenCode-native** (we use this) | `~/.config/opencode/agents/` | YAML map: `tools:\n  bash: false` |
-| **Claude Code-style** | `~/.claude/agents/` | Comma string: `tools: foo,bar` |
+```json
+// opencode.json
+{
+  "tools": { "slack_*": false },        // Global disable
+  "agent": {
+    "slack": {
+      "tools": { "slack_*": true }      // Per-agent enable
+    }
+  }
+}
+```
 
-We use **OpenCode-native** format because:
-- First-class validation (errors aren't silently swallowed)
-- Tool allowlist/denylist is natural YAML map format
-- No dependency on oh-my-opencode's Claude-compat layer
+**Agent definition** uses OpenCode-native markdown format (`~/.config/opencode/agents/slack.md`) with `tools:` as YAML map for additional restrictions (disable write, edit, bash, etc.)
 
 ## Initial Setup
 
