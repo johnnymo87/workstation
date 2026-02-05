@@ -31,7 +31,8 @@ let
         variant = "max";
         prompt_append = builtins.readFile "${assetsPath}/opencode/prompts/sisyphus.md";
         # Disable slack tools - use dedicated slack agent via delegate_task
-        tools = { "slack_*" = false; };
+        # Must use permission format (not tools) since oh-my-opencode merges permissions at runtime
+        permission = { "slack_*" = "deny"; };
       };
       hephaestus = {
         model = "openai/gpt-5.2-codex";
