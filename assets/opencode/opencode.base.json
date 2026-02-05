@@ -4,6 +4,16 @@
     "slack_*": false
   },
   "agent": {
+    "sisyphus": {
+      "tools": {
+        "slack_*": false
+      }
+    },
+    "hephaestus": {
+      "tools": {
+        "slack_*": false
+      }
+    },
     "slack": {
       "tools": {
         "slack_*": true
