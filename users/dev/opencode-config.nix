@@ -30,6 +30,8 @@ let
         model = "anthropic/claude-opus-4-5";
         variant = "max";
         prompt_append = builtins.readFile "${assetsPath}/opencode/prompts/sisyphus.md";
+        # Disable slack tools - use dedicated slack agent via delegate_task
+        tools = { "slack_*" = false; };
       };
       hephaestus = {
         model = "openai/gpt-5.2-codex";
