@@ -102,13 +102,6 @@ let
       };
     };
 
-    # Enable Claude Code compatibility features (loads from ~/.claude/)
-    claude_code = {
-      agents = true;  # Load custom agents from ~/.claude/agents/
-      skills = true;  # Load custom skills from ~/.claude/skills/
-      commands = true;  # Load custom commands from ~/.claude/commands/
-    };
-
     # Note: disabled_mcps only works for built-in MCPs (websearch, context7, grep_app)
     # Custom MCPs like "slack" cannot be disabled via this mechanism
     disabled_mcps = [ "websearch" "context7" "grep_app" ];
@@ -123,10 +116,10 @@ in
   xdg.configFile."opencode/opencode.managed.json".source = opencodeManagedFile;
   xdg.configFile."opencode/oh-my-opencode.managed.json".source = ohMyManagedFile;
 
-  # Custom agents via markdown files
-  # oh-my-opencode loads from ~/.claude/agents/ (NOT ~/.config/opencode/agents/)
-  # JSON config only supports overriding built-in agents, not creating new ones
-  home.file.".claude/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
+  # Custom agents via OpenCode-native markdown format
+  # OpenCode loads agents from ~/.config/opencode/agents/ with tools as YAML map
+  # (NOT Claude Code-style ~/.claude/agents/ with comma-separated tools string)
+  xdg.configFile."opencode/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
 
   # Merge managed config into runtime opencode.json on each switch
   # Preserves runtime keys; managed keys win on conflict.

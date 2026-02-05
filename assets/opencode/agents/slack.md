@@ -1,7 +1,18 @@
 ---
-name: slack
 description: Slack research agent for searching and analyzing conversations
-tools: slack_channels_list,slack_conversations_add_message,slack_conversations_history,slack_conversations_replies,slack_conversations_search_messages
+mode: subagent
+tools:
+  slack_channels_list: true
+  slack_conversations_add_message: true
+  slack_conversations_history: true
+  slack_conversations_replies: true
+  slack_conversations_search_messages: true
+  write: false
+  edit: false
+  bash: false
+  glob: false
+  grep: false
+  read: false
 ---
 
 ## Slack Research Agent
@@ -32,6 +43,6 @@ When reporting findings:
 
 ### Limitations
 
-- Cannot send messages (read-only preferred)
+- Cannot send messages without explicit permission
 - Cannot access private channels unless explicitly shared
 - Rate limited - batch requests when possible

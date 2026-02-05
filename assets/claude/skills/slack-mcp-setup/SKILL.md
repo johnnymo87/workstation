@@ -10,14 +10,20 @@ This workstation uses macOS Keychain to store Slack MCP tokens securely. Tokens 
 ## Architecture
 
 - **Slack MCP** is injected into opencode.json with tokens from Keychain
-- **Dedicated `slack` agent** defined via markdown file with tool allowlist
+- **Dedicated `slack` agent** defined via OpenCode-native markdown with tool allowlist
 - To use Slack: delegate tasks to the `slack` agent (e.g., `delegate_task(subagent_type="slack", ...)`)
 
-**How custom agents work in oh-my-opencode:**
-- Custom agents are defined as markdown files in `~/.claude/agents/` (user) or `.claude/agents/` (project)
-- The `tools:` frontmatter field creates an allowlist of permitted tools
-- JSON config (`oh-my-opencode.json`) only supports overriding built-in agents, not creating new ones
-- `disabled_mcps` only works for built-in MCPs (websearch, context7, grep_app), not custom MCPs
+**Two agent systems exist (don't confuse them!):**
+
+| System | Path | `tools:` format |
+|--------|------|-----------------|
+| **OpenCode-native** (we use this) | `~/.config/opencode/agents/` | YAML map: `tools:\n  bash: false` |
+| **Claude Code-style** | `~/.claude/agents/` | Comma string: `tools: foo,bar` |
+
+We use **OpenCode-native** format because:
+- First-class validation (errors aren't silently swallowed)
+- Tool allowlist/denylist is natural YAML map format
+- No dependency on oh-my-opencode's Claude-compat layer
 
 ## Initial Setup
 
@@ -155,5 +161,5 @@ delegate_task(
 - Repo: https://github.com/korotovsky/slack-mcp-server
 - Auth docs: https://github.com/korotovsky/slack-mcp-server/blob/master/docs/01-authentication-setup.md
 - Activation script: `users/dev/opencode-config.nix` (home.activation.injectSlackMcpSecrets)
-- Slack agent definition: `assets/opencode/agents/slack.md` (deployed to ~/.claude/agents/)
-- oh-my-opencode agent loader: `src/features/claude-code-agent-loader/loader.ts`
+- Slack agent definition: `assets/opencode/agents/slack.md` (deployed to ~/.config/opencode/agents/)
+- OpenCode agent docs: https://opencode.ai/docs (native markdown agent format)
