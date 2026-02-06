@@ -27,7 +27,7 @@ let
 
     agents = {
       sisyphus = {
-        model = "anthropic/claude-opus-4-5";
+        model = "anthropic/claude-opus-4-6";
         variant = "max";
         prompt_append = builtins.readFile "${assetsPath}/opencode/prompts/sisyphus.md";
       };
@@ -51,12 +51,12 @@ let
         model = "google/gemini-3-flash-preview";
       };
       prometheus = {
-        model = "anthropic/claude-opus-4-5";
+        model = "anthropic/claude-opus-4-6";
         variant = "max";
         prompt_append = builtins.readFile "${assetsPath}/opencode/prompts/prometheus.md";
       };
       metis = {
-        model = "anthropic/claude-opus-4-5";
+        model = "anthropic/claude-opus-4-6";
         variant = "max";
       };
       momus = {
@@ -90,7 +90,7 @@ let
         variant = "medium";
       };
       "unspecified-high" = {
-        model = "anthropic/claude-opus-4-5";
+        model = "anthropic/claude-opus-4-6";
         variant = "max";
       };
       writing = {
