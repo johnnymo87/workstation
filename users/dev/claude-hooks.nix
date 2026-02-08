@@ -22,6 +22,7 @@ let
 
   hookStart = mkHook "session-start" "on-session-start.sh";
   hookStop = mkHook "stop" "on-stop.sh";
+  hookNotification = mkHook "notification" "on-notification.sh";
 
   # Absolute paths for settings.json (no tilde expansion needed)
   hooksDir = "${config.home.homeDirectory}/.claude/hooks";
@@ -39,6 +40,11 @@ in
       default = "${hooksDir}/on-stop.sh";
       description = "Path to stop hook";
     };
+    notificationPath = lib.mkOption {
+      type = lib.types.str;
+      default = "${hooksDir}/on-notification.sh";
+      description = "Path to notification hook";
+    };
   };
 
   # Deploy wrapper scripts to ~/.claude/hooks/
@@ -49,6 +55,11 @@ in
 
   config.home.file.".claude/hooks/on-stop.sh" = {
     source = "${hookStop}/bin/claude-hook-stop";
+    executable = true;
+  };
+
+  config.home.file.".claude/hooks/on-notification.sh" = {
+    source = "${hookNotification}/bin/claude-hook-notification";
     executable = true;
   };
 }
