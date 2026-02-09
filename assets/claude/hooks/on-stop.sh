@@ -59,6 +59,11 @@ transcript_path=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/de
 echo "checkpoint=transcript path=$transcript_path exists=$(test -f "$transcript_path" 2>/dev/null && echo y || echo n)" >>"$_dbg"
 
 # Extract Claude's last assistant message with text content from transcript JSONL
+# Brief delay to let CC flush the assistant message to disk before we read.
+# CC fires the Stop hook ~40ms after writing the assistant entry, but the write
+# may still be in Node.js/OS buffers. Without this, we read the N-1 message.
+sleep 0.2
+
 last_message=""
 if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
     # Limit scan to last 3000 lines, reverse, then find first assistant message
