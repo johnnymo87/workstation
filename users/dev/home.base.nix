@@ -55,12 +55,6 @@ let
           command = config.claude.hooks.stopPath;
         }];
       }];
-      Notification = [{
-        hooks = [{
-          type = "command";
-          command = config.claude.hooks.notificationPath;
-        }];
-      }];
     };
     statusLine = {
       type = "command";
