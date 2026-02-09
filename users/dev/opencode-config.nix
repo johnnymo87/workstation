@@ -116,10 +116,17 @@ in
   xdg.configFile."opencode/opencode.managed.json".source = opencodeManagedFile;
   xdg.configFile."opencode/oh-my-opencode.managed.json".source = ohMyManagedFile;
 
-  # Custom agents via OpenCode-native markdown format
-  # OpenCode loads agents from ~/.config/opencode/agents/ with tools as YAML map
-  # (NOT Claude Code-style ~/.claude/agents/ with comma-separated tools string)
-  xdg.configFile."opencode/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
+   # Custom agents via OpenCode-native markdown format
+   # OpenCode loads agents from ~/.config/opencode/agents/ with tools as YAML map
+   # (NOT Claude Code-style ~/.claude/agents/ with comma-separated tools string)
+   xdg.configFile."opencode/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
+
+   # OpenCode plugins deployed via symlink
+   # opencode-pigeon: TypeScript plugin for pigeon-specific functionality
+   xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
+     if isDarwin
+     then /Users/dev/Code/opencode-pigeon/src/index.ts
+     else /home/dev/projects/opencode-pigeon/src/index.ts;
 
   # Merge managed config into runtime opencode.json on each switch
   # Preserves runtime keys; managed keys win on conflict.
