@@ -69,12 +69,15 @@ if [[ -n "$session_id" ]]; then
         fi
     fi
 
-    # Check if notify_label exists from previous opt-in
-    notify_label=""
-    notify_flag="false"
+    # Auto-enable notifications with project dir as label
+    notify_flag="true"
     if [[ -n "${session_dir:-}" && -f "${session_dir}/notify_label" ]]; then
         notify_label=$(cat "${session_dir}/notify_label")
-        notify_flag="true"
+    else
+        notify_label="${PWD##*/}"
+        if [[ -n "${session_dir:-}" ]]; then
+            printf '%s\n' "$notify_label" > "${session_dir}/notify_label"
+        fi
     fi
 
     json_payload=$(jq -n \
