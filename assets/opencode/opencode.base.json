@@ -21,7 +21,7 @@
     }
   },
   "plugin": [
-    "file:///Users/jonathan.mohrbacher/Code/oh-my-opencode/dist/index.js",
+    "oh-my-opencode",
     "opencode-openai-codex-auth",
     "opencode-antigravity-auth@1.4.3"
   ],
