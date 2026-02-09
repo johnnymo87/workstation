@@ -94,10 +94,20 @@ if [[ -n "$session_id" ]]; then
         --arg label "$notify_label" \
         '{session_id: $session_id, ppid: $ppid, pid: $pid, start_time: $start_time, cwd: $cwd, nvim_socket: $nvim_socket, tmux_session: $tmux_session, tmux_pane: $tmux_pane, tmux_pane_id: $tmux_pane_id, notify: $notify, label: $label}')
 
-    curl -sS --connect-timeout 1 --max-time 2 \
+    _dbg_dir="${HOME}/.claude/runtime/hook-debug"
+    mkdir -p "$_dbg_dir"
+    _dbg="${_dbg_dir}/session-start.$(date +%s%N).log"
+    {
+      echo "ts=$(date -Is) pid=$$ ppid=$PPID session=$session_id"
+      echo "notify=$notify_flag label=$notify_label"
+      echo "payload=$json_payload"
+    } >"$_dbg"
+
+    curl_output=$(curl -sS --connect-timeout 1 --max-time 2 \
         -X POST "http://127.0.0.1:4731/session-start" \
         -H "Content-Type: application/json" \
-        -d "$json_payload" >/dev/null 2>&1 || true
+        -d "$json_payload" 2>&1) || true
+    echo "curl_done output=$curl_output" >>"$_dbg"
 fi
 
 exit 0
