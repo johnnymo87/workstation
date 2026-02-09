@@ -99,25 +99,13 @@ local function handle_send(name, command)
     return { ok = false, error = "buffer_invalid" }
   end
 
-  -- Send command to the terminal job
-  -- Hybrid approach: nvim focuses the correct buffer, tmux sends text+Enter
-  -- nvim can target specific terminal buffers within a pane, tmux handles input
+  -- Send command to the terminal job via chansend (targets PTY directly, no focus needed)
   local job_id = instance.job_id
-  local bufnr = instance.bufnr
 
   -- Send command to terminal, with delay before Enter to avoid Ink paste detection
   -- Ink treats multi-char input arriving at once as "paste" and Enter becomes newline.
   -- A synchronous sleep ensures Enter arrives in a separate read chunk.
   local success, err = pcall(function()
-    -- Focus the terminal and enter insert mode
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
-      if vim.api.nvim_win_get_buf(win) == bufnr then
-        vim.api.nvim_set_current_win(win)
-        vim.cmd("startinsert")
-        break
-      end
-    end
-
     -- Send the text
     vim.fn.chansend(job_id, command)
 
@@ -287,6 +275,49 @@ function M.setup()
         return vim.tbl_keys(instances)
       end
       return {}
+    end,
+  })
+
+  -- Auto-register terminal buffers by PTY device path
+  -- PTY is inherited through subshells/wrappers, so it's stable for matching
+  -- The daemon's session-start hook sends `tty` which matches this PTY path
+  vim.api.nvim_create_autocmd("TermOpen", {
+    callback = function(ev)
+      local bufnr = ev.buf
+      if vim.bo[bufnr].buftype ~= "terminal" then return end
+
+      local chan = vim.bo[bufnr].channel
+      if not chan or chan == 0 then
+        -- Defensive fallback: retry next tick with stable bufnr
+        vim.schedule(function()
+          if not vim.api.nvim_buf_is_valid(bufnr) then return end
+          local ch = vim.bo[bufnr].channel
+          if ch and ch ~= 0 then
+            local info = vim.api.nvim_get_chan_info(ch)
+            if info and info.pty and info.pty ~= "" then
+              instances[info.pty] = { bufnr = bufnr, job_id = ch, registered_at = os.time() }
+            end
+          end
+        end)
+        return
+      end
+
+      local info = vim.api.nvim_get_chan_info(chan)
+      if info and info.pty and info.pty ~= "" then
+        instances[info.pty] = { bufnr = bufnr, job_id = chan, registered_at = os.time() }
+      end
+    end,
+  })
+
+  -- Clean up instances when terminal closes or buffer is wiped
+  vim.api.nvim_create_autocmd({ "TermClose", "BufWipeout" }, {
+    callback = function(ev)
+      local bufnr = ev.buf
+      for name, data in pairs(instances) do
+        if data.bufnr == bufnr then
+          instances[name] = nil
+        end
+      end
     end,
   })
 end

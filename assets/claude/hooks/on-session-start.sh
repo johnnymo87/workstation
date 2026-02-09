@@ -48,6 +48,28 @@ if [[ -n "${TMUX:-}" ]]; then
     tmux_pane_id="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
 fi
 
+# Detect controlling TTY for nvim RPC instance matching
+# Hook stdin is piped (CC sends JSON), so `tty` won't work. Instead, read the PTY
+# device from CC's own stdin fd, which is the terminal PTY inherited from nvim.
+# This PTY path matches nvim_get_chan_info(chan).pty on the nvim side.
+session_tty=""
+if [[ -n "${NVIM:-}" && "$ppid" =~ ^[0-9]+$ ]]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS: no /proc, use ps to get controlling terminal
+        tty_name="$(ps -o tty= -p "$ppid" 2>/dev/null | sed 's/^[[:space:]]*//')"
+        if [[ -n "$tty_name" && "$tty_name" != "??" ]]; then
+            session_tty="/dev/$tty_name"
+        fi
+    else
+        # Linux: read PTY device from CC's stdin fd
+        session_tty="$(readlink "/proc/$ppid/fd/0" 2>/dev/null || true)"
+        # Only accept PTY device paths
+        if [[ "$session_tty" != /dev/pts/* && "$session_tty" != /dev/tty* ]]; then
+            session_tty=""
+        fi
+    fi
+fi
+
 # Notify daemon of session start (fire-and-forget)
 if [[ -n "$session_id" ]]; then
     ppid_num=0
@@ -90,9 +112,10 @@ if [[ -n "$session_id" ]]; then
         --arg tmux_session "$tmux_session" \
         --arg tmux_pane "$tmux_pane" \
         --arg tmux_pane_id "$tmux_pane_id" \
+        --arg tty "$session_tty" \
         --argjson notify "$notify_flag" \
         --arg label "$notify_label" \
-        '{session_id: $session_id, ppid: $ppid, pid: $pid, start_time: $start_time, cwd: $cwd, nvim_socket: $nvim_socket, tmux_session: $tmux_session, tmux_pane: $tmux_pane, tmux_pane_id: $tmux_pane_id, notify: $notify, label: $label}')
+        '{session_id: $session_id, ppid: $ppid, pid: $pid, start_time: $start_time, cwd: $cwd, nvim_socket: $nvim_socket, tmux_session: $tmux_session, tmux_pane: $tmux_pane, tmux_pane_id: $tmux_pane_id, tty: $tty, notify: $notify, label: $label}')
 
     _dbg_dir="${HOME}/.claude/runtime/hook-debug"
     mkdir -p "$_dbg_dir"
