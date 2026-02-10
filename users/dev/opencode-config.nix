@@ -1,7 +1,7 @@
 # OpenCode configuration management
 # Manages opencode.json and oh-my-opencode.json via home-manager
 # with merge-on-activate pattern (runtime keys preserved, managed keys enforced)
-{ lib, pkgs, assetsPath, ... }:
+{ config, lib, pkgs, assetsPath, ... }:
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
@@ -123,10 +123,10 @@ in
 
    # OpenCode plugins deployed via symlink
    # opencode-pigeon: TypeScript plugin for pigeon-specific functionality
-   xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
-     if isDarwin
-     then /Users/dev/Code/opencode-pigeon/src/index.ts
-     else /home/dev/projects/opencode-pigeon/src/index.ts;
+    xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
+      if isDarwin
+      then "${config.home.homeDirectory}/Code/opencode-pigeon/src/index.ts"
+      else "${config.home.homeDirectory}/projects/opencode-pigeon/src/index.ts";
 
   # Merge managed config into runtime opencode.json on each switch
   # Preserves runtime keys; managed keys win on conflict.

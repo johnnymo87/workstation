@@ -5,7 +5,7 @@
 # On Darwin, we disable programs that conflict with existing dotfiles.
 # As we migrate each program to HM, remove the corresponding mkForce false.
 # See: /tmp/research-nix-darwin-dotfiles-conflict-answer.md
-{ config, pkgs, lib, assetsPath, isDarwin, ccrTunnel, pinentry-op, ... }:
+{ config, pkgs, lib, assetsPath, isDarwin, ccrTunnel, pinentry-op, projects, ... }:
 
 lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
@@ -98,6 +98,29 @@ lib.mkIf isDarwin {
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.
   # Remove dotfiles symlinks before HM tries to create its own.
   # Also clean up renamed/removed skills and commands.
+  home.activation.ensureProjects = let
+    mkLine = name: p: ''
+      ensure_repo ${lib.escapeShellArg name} ${lib.escapeShellArg p.url}
+    '';
+    lines = lib.concatStringsSep "\n" (lib.mapAttrsToList mkLine projects);
+  in lib.hm.dag.entryAfter ["writeBoundary"] ''
+    ensure_repo() {
+      local name="$1"
+      local url="$2"
+      local dir="${config.home.homeDirectory}/Code/$name"
+
+      if [ -d "$dir/.git" ]; then
+        return 0
+      fi
+
+      echo "Cloning $name to ~/Code ..."
+      ${pkgs.git}/bin/git clone --recursive "$url" "$dir"
+    }
+
+    mkdir -p "${config.home.homeDirectory}/Code"
+    ${lines}
+  '';
+
   home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
     rm -f ~/.gnupg/gpg.conf 2>/dev/null || true
     rm -f ~/.gnupg/gpg-agent.conf 2>/dev/null || true
