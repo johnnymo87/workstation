@@ -1,19 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-opus-4-6",
   "tools": {
     "slack_*": false
   },
   "agent": {
-    "sisyphus": {
-      "tools": {
-        "slack_*": false
-      }
-    },
-    "hephaestus": {
-      "tools": {
-        "slack_*": false
-      }
-    },
     "slack": {
       "tools": {
         "slack_*": true
@@ -21,7 +12,8 @@
     }
   },
   "plugin": [
-    "oh-my-opencode",
+    "opencode-beads",
+    "@tarquinen/opencode-dcp",
     "opencode-openai-codex-auth",
     "opencode-antigravity-auth@1.4.3"
   ],
