@@ -1,18 +1,15 @@
 ---
-name: librarian
 description: Documentation and OSS research specialist — finds official docs, examples, and best practices
 mode: subagent
-model:
-  modelID: claude-sonnet-4-5
-  providerID: anthropic
+model: anthropic/claude-sonnet-4-5
 permission:
-  read: true
-  glob: true
-  grep: true
-  bash: true
-  webfetch: true
-  websearch: true
-  codesearch: true
+  read: allow
+  glob: allow
+  grep: allow
+  bash: allow
+  webfetch: allow
+  websearch: allow
+  codesearch: allow
 ---
 
 # The Librarian

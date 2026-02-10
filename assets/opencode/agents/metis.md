@@ -1,15 +1,12 @@
 ---
-name: metis
 description: Pre-planning gap analysis reviewer — identifies missed questions, ambiguities, and scope creep risks
 mode: subagent
-model:
-  modelID: claude-opus-4-6
-  providerID: anthropic
+model: anthropic/claude-opus-4-6
 variant: max
 permission:
-  read: true
-  glob: true
-  grep: true
+  read: allow
+  glob: allow
+  grep: allow
 ---
 
 # Metis - Pre-Planning Consultant

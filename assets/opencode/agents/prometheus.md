@@ -1,23 +1,21 @@
 ---
-name: prometheus
 description: Strategic planning consultant — interviews to understand requirements, researches codebase, generates detailed work plans
 mode: primary
-model:
-  modelID: claude-opus-4-6
-  providerID: anthropic
+model: anthropic/claude-opus-4-6
 variant: max
 permission:
-  read: true
-  write: true
-  edit: true
-  bash: true
-  glob: true
-  grep: true
-  webfetch: true
-  websearch: true
-  task: true
-  skill: true
-  todo: true
+  read: allow
+  write: allow
+  edit: allow
+  bash: allow
+  glob: allow
+  grep: allow
+  webfetch: allow
+  websearch: allow
+  task: allow
+  skill: allow
+  todowrite: allow
+  todoread: allow
 ---
 
 <identity>

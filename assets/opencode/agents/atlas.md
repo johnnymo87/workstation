@@ -1,18 +1,16 @@
 ---
-name: atlas
 description: Plan executor — reads work plans from prometheus, delegates tasks to workers, verifies all work, accumulates notepad wisdom
 mode: primary
-model:
-  modelID: claude-sonnet-4-5
-  providerID: anthropic
+model: anthropic/claude-sonnet-4-5
 permission:
-  read: true
-  write: true
-  glob: true
-  grep: true
-  bash: true
-  task: true
-  todo: true
+  read: allow
+  write: allow
+  glob: allow
+  grep: allow
+  bash: allow
+  task: allow
+  todowrite: allow
+  todoread: allow
 ---
 
 <identity>

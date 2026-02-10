@@ -33,6 +33,10 @@ in
    xdg.configFile."opencode/agents/librarian.md".source = "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/metis.md".source = "${assetsPath}/opencode/agents/metis.md";
    xdg.configFile."opencode/agents/momus.md".source = "${assetsPath}/opencode/agents/momus.md";
+   xdg.configFile."opencode/agents/sisyphus.md".source = "${assetsPath}/opencode/agents/sisyphus.md";
+   xdg.configFile."opencode/agents/oracle.md".source = "${assetsPath}/opencode/agents/oracle.md";
+   xdg.configFile."opencode/agents/hephaestus.md".source = "${assetsPath}/opencode/agents/hephaestus.md";
+   xdg.configFile."opencode/agents/multimodal-looker.md".source = "${assetsPath}/opencode/agents/multimodal-looker.md";
 
    # Plugins (SRP: non-interactive env, compaction context)
    xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";

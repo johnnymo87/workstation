@@ -1,15 +1,12 @@
 ---
-name: momus
 description: Plan quality reviewer — validates completeness, reference accuracy, and acceptance criteria
 mode: subagent
-model:
-  modelID: gpt-5.2
-  providerID: openai
+model: openai/gpt-5.2
 variant: medium
 permission:
-  read: true
-  glob: true
-  grep: true
+  read: allow
+  glob: allow
+  grep: allow
 ---
 
 # Momus - Plan Reviewer
