@@ -1,20 +1,28 @@
 # Workstation
 
-NixOS devbox configuration with standalone home-manager.
+NixOS devbox + nix-darwin macOS configuration with standalone home-manager.
 
 ## Quick Start
 
+**Devbox (NixOS):**
 ```bash
-# Apply system changes (requires sudo)
-sudo nixos-rebuild switch --flake .#devbox
+sudo nixos-rebuild switch --flake .#devbox   # System changes
+home-manager switch --flake .#dev            # User changes (fast, no sudo)
+```
 
-# Apply user changes (fast, no sudo)
-home-manager switch --flake .#dev
+**macOS (nix-darwin):**
+```bash
+sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2   # System + user changes
 ```
 
 ## Managing Projects
 
-Projects are declared in `projects.nix` and auto-cloned on login.
+Projects are declared in `projects.nix` and auto-cloned per platform.
+
+| Platform | Clone target | Trigger |
+|----------|-------------|---------|
+| Devbox | `~/projects/` | Login (systemd service) or `~/.local/bin/ensure-projects` |
+| macOS | `~/Code/` | `darwin-rebuild switch` (activation script) |
 
 **Add a project:**
 1. Edit `projects.nix`:
@@ -22,10 +30,9 @@ Projects are declared in `projects.nix` and auto-cloned on login.
    my-new-project = { url = "git@github.com:org/repo.git"; };
    ```
 2. Push to GitHub
-3. On devbox: `home-manager switch --flake .#dev`
-4. Run: `~/.local/bin/ensure-projects` (or re-login)
+3. Apply: `home-manager switch --flake .#dev` (devbox) or `darwin-rebuild switch` (macOS)
 
-**Projects survive rebuilds** - stored on `/persist/projects`, bind-mounted to `~/projects`.
+**Devbox projects survive rebuilds** — stored on `/persist/projects`, bind-mounted to `~/projects`.
 
 ## Commands
 
@@ -49,19 +56,28 @@ Projects are declared in `projects.nix` and auto-cloned on login.
 | [Gradual Dotfiles Migration](.claude/skills/gradual-dotfiles-migration/SKILL.md) | Migrating from dotfiles to home-manager on Darwin |
 | [OSC52 Clipboard](.claude/skills/osc52-clipboard/SKILL.md) | Copy/paste over SSH, clipboard sync |
 | [Screenshot to Devbox](.claude/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote Claude Code |
+| [Setting Up oh-my-opencode](.claude/skills/setting-up-oh-my-opencode/SKILL.md) | OpenCode plugin install, Vertex AI routing |
 
 ## Structure
 
 ```
 workstation/
-├── flake.nix         # Flake with NixOS + home-manager
-├── projects.nix      # Declarative project list
-├── hosts/devbox/     # NixOS system config
-├── users/dev/        # Home-manager user config
-├── assets/           # Content deployed to user (claude/, nvim/)
-├── secrets/          # sops-nix encrypted secrets
-├── scripts/          # Helper scripts
-└── .claude/          # Documentation for THIS repo
+├── flake.nix              # Flake: NixOS + nix-darwin + home-manager
+├── projects.nix           # Declarative project list (both platforms)
+├── hosts/
+│   ├── devbox/            # NixOS system config
+│   └── Y0FMQX93RR-2/     # macOS (nix-darwin) system config
+├── users/dev/
+│   ├── home.nix           # Entry point (imports all modules)
+│   ├── home.base.nix      # Shared config (git, bash, packages)
+│   ├── home.linux.nix     # Linux-only (systemd services, ensure-projects)
+│   ├── home.darwin.nix    # macOS-only (launchd, ensure-projects, dotfiles migration)
+│   ├── opencode-config.nix # OpenCode + oh-my-opencode managed config
+│   ├── claude-skills.nix  # Claude Code skills deployed to ~/.claude/
+│   └── claude-hooks.nix   # Claude Code hooks (session start/stop)
+├── assets/                # Content deployed to user (claude/, nvim/)
+├── secrets/               # sops-nix encrypted secrets
+└── .claude/               # Documentation for THIS repo
 ```
 
 ## Fresh Devbox Setup
@@ -73,8 +89,16 @@ After `nixos-anywhere`:
 4. Apply home: `home-manager switch --flake .#dev`
 5. Projects auto-clone on next login (or run `~/.local/bin/ensure-projects`)
 
-## Secrets on Devbox
+## Fresh macOS Setup
 
-See [Managing Secrets](.claude/skills/managing-secrets/SKILL.md) for full details.
+1. Install Nix: `curl -L https://nixos.org/nix/install | sh`
+2. Clone workstation: `git clone ... ~/Code/workstation`
+3. Apply: `sudo darwin-rebuild switch --flake ~/Code/workstation#Y0FMQX93RR-2`
+4. Projects auto-clone during activation (to `~/Code/`)
+5. For devenv projects: `cd ~/Code/<project> && direnv allow`
 
-Quick reference: secrets are at `/run/secrets/<name>`, env vars (`CLOUDFLARE_API_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) are auto-exported in bash.
+## Secrets
+
+**Devbox:** Secrets at `/run/secrets/<name>` via sops-nix. Env vars (`CLOUDFLARE_API_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) auto-exported in bash. See [Managing Secrets](.claude/skills/managing-secrets/SKILL.md).
+
+**macOS:** 1Password via desktop app or service account token in Keychain. See [configuring-notifications](https://github.com/johnnymo87/claude-code-remote/.claude/skills/configuring-notifications/SKILL.md) for CCR secrets.
