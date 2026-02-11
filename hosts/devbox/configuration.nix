@@ -72,9 +72,9 @@
     };
   };
 
-  # CCR webhook server (depends on cloudflared)
+  # Pigeon daemon service (depends on cloudflared)
   systemd.services.ccr-webhooks = {
-    description = "Claude Code Remote webhook server";
+    description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
     after = [ "network-online.target" "cloudflared-tunnel.service" ];
@@ -86,12 +86,19 @@
       Type = "simple";
       User = "dev";
       Group = "dev";
-      WorkingDirectory = "/home/dev/projects/claude-code-remote";
+      WorkingDirectory = "/home/dev/projects/pigeon/packages/daemon";
       Environment = [
         "HOME=/home/dev"
         "NODE_ENV=production"
+        "CCR_WORKER_URL=https://ccr-router.jonathan-mohrbacher.workers.dev"
+        "CCR_MACHINE_ID=devbox"
       ];
-      ExecStart = "${pkgs.nodejs}/bin/npm run webhooks";
+      ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
+        set -euo pipefail
+        export OP_SERVICE_ACCOUNT_TOKEN="$(cat /run/secrets/op_service_account_token)"
+        exec /nix/store/2cxyi2vivwqkw6fc46ssfmz1ch4z041s-1password-cli-2.32.0/bin/op run --env-file=/home/dev/projects/claude-code-remote/.env.1password -- \
+          ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/packages/daemon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
+      ''}";
       Restart = "on-failure";
       RestartSec = 5;
     };
