@@ -14,3 +14,4 @@ secrets/*.dec.*
 
 # OpenCode user configuration (managed per-machine)
 .opencode/
+session-ses_*.md
