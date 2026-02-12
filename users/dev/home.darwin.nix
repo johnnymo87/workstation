@@ -37,6 +37,41 @@ lib.mkIf isDarwin {
     };
   };
 
+  # Pigeon daemon launchd agent with 1Password secret injection
+  launchd.agents.pigeon-daemon = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "/bin/sh" "-c"
+        ''
+          export OP_SERVICE_ACCOUNT_TOKEN="$(/usr/bin/security find-generic-password -s op-service-account-token -w)"
+          cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
+          exec ${pkgs._1password-cli}/bin/op run \
+            --env-file=${config.home.homeDirectory}/Code/pigeon/.env.1password -- \
+            ${pkgs.nodejs}/bin/node \
+              node_modules/tsx/dist/cli.mjs \
+              src/index.ts
+        ''
+      ];
+      EnvironmentVariables = {
+        HOME = config.home.homeDirectory;
+        NODE_ENV = "production";
+        CCR_WORKER_URL = "https://ccr-router.jonathan-mohrbacher.workers.dev";
+        CCR_MACHINE_ID = "macbook";
+        PATH = lib.concatStringsSep ":" [
+          "${pkgs.nodejs}/bin"
+          "${pkgs._1password-cli}/bin"
+          "/usr/bin"
+          "/bin"
+        ];
+      };
+      RunAtLoad = false;
+      KeepAlive = false;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.err.log";
+    };
+  };
+
   # ============================================================
   # DISABLED PROGRAMS (using existing dotfiles instead)
   # Remove these overrides one-by-one as you migrate to HM

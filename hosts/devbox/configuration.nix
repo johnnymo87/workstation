@@ -80,7 +80,7 @@
     after = [ "network-online.target" "cloudflared-tunnel.service" ];
     requires = [ "cloudflared-tunnel.service" ];
 
-    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils ];
+    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.tmux ];
 
     serviceConfig = {
       Type = "simple";
@@ -96,7 +96,7 @@
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
         export OP_SERVICE_ACCOUNT_TOKEN="$(cat /run/secrets/op_service_account_token)"
-        exec /nix/store/2cxyi2vivwqkw6fc46ssfmz1ch4z041s-1password-cli-2.32.0/bin/op run --env-file=/home/dev/projects/claude-code-remote/.env.1password -- \
+        exec /nix/store/2cxyi2vivwqkw6fc46ssfmz1ch4z041s-1password-cli-2.32.0/bin/op run --env-file=/home/dev/projects/pigeon/.env.1password -- \
           ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/packages/daemon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";
       Restart = "on-failure";

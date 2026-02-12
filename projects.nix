@@ -13,8 +13,8 @@
   claude-code-remote = {
     url = "git@github.com:johnnymo87/claude-code-remote.git";
   };
-  opencode-pigeon = {
-    url = "git@github.com:johnnymo87/opencode-pigeon.git";
+  pigeon = {
+    url = "git@github.com:johnnymo87/pigeon.git";
   };
   # Add more projects as needed:
   # my-project = { url = "git@github.com:org/repo.git"; };

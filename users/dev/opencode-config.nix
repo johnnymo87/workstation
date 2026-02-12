@@ -46,8 +46,8 @@ in
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
       config.lib.file.mkOutOfStoreSymlink (
         if isDarwin
-        then "${config.home.homeDirectory}/Code/opencode-pigeon/src/index.ts"
-        else "${config.home.homeDirectory}/projects/opencode-pigeon/src/index.ts"
+        then "${config.home.homeDirectory}/Code/pigeon/packages/opencode-plugin/src/index.ts"
+        else "${config.home.homeDirectory}/projects/pigeon/packages/opencode-plugin/src/index.ts"
       );
 
   # Merge managed config into runtime opencode.json on each switch
