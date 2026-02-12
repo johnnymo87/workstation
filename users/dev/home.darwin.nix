@@ -189,6 +189,19 @@ lib.mkIf isDarwin {
 
     mkdir -p "${config.home.homeDirectory}/Code"
     ${lines}
+
+    # Post-clone: install pigeon dependencies
+    if [ -d "${config.home.homeDirectory}/Code/pigeon" ] && [ ! -d "${config.home.homeDirectory}/Code/pigeon/node_modules" ]; then
+      echo "Installing pigeon dependencies ..."
+      (cd "${config.home.homeDirectory}/Code/pigeon" && ${pkgs.bun}/bin/bun install)
+    fi
+
+    # Check if pigeon Keychain secrets are populated
+    if ! /usr/bin/security find-generic-password -s pigeon-ccr-api-key -w >/dev/null 2>&1; then
+      echo ""
+      echo "⚠ Pigeon Keychain secrets not found. Run: pigeon-setup-secrets"
+      echo ""
+    fi
   '';
 
   home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
