@@ -45,12 +45,16 @@ lib.mkIf isDarwin {
         "/bin/sh" "-c"
         ''
           export OP_SERVICE_ACCOUNT_TOKEN="$(/usr/bin/security find-generic-password -s op-service-account-token -w)"
+          OP="${pkgs._1password-cli}/bin/op"
+          export CCR_API_KEY="$($OP read "op://Automation/ccr-secrets/CCR_API_KEY")"
+          export TELEGRAM_BOT_TOKEN="$($OP read "op://Automation/ccr-secrets/TELEGRAM_BOT_TOKEN")"
+          export TELEGRAM_CHAT_ID="$($OP read "op://Automation/ccr-secrets/TELEGRAM_CHAT_ID")"
+          export TELEGRAM_WEBHOOK_SECRET="$($OP read "op://Automation/ccr-secrets/TELEGRAM_WEBHOOK_SECRET")"
+          export TELEGRAM_WEBHOOK_PATH_SECRET="$($OP read "op://Automation/ccr-secrets/TELEGRAM_WEBHOOK_PATH_SECRET")"
           cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
-          exec ${pkgs._1password-cli}/bin/op run \
-            --env-file=${config.home.homeDirectory}/Code/pigeon/.env.1password -- \
-            ${pkgs.nodejs}/bin/node \
-              node_modules/tsx/dist/cli.mjs \
-              src/index.ts
+          exec ${pkgs.nodejs}/bin/node \
+            node_modules/tsx/dist/cli.mjs \
+            src/index.ts
         ''
       ];
       EnvironmentVariables = {
