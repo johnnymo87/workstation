@@ -65,8 +65,8 @@ lib.mkIf isDarwin {
           "/bin"
         ];
       };
-      RunAtLoad = false;
-      KeepAlive = false;
+      RunAtLoad = true;
+      KeepAlive = true;
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.out.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.err.log";
     };
