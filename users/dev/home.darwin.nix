@@ -149,7 +149,7 @@ lib.mkIf isDarwin {
       fi
 
       echo "Cloning $name to ~/Code ..."
-      GIT_SSH_COMMAND="${pkgs.openssh}/bin/ssh" ${pkgs.git}/bin/git clone --recursive "$url" "$dir"
+      GIT_SSH_COMMAND="/usr/bin/ssh" ${pkgs.git}/bin/git clone --recursive "$url" "$dir"
     }
 
     mkdir -p "${config.home.homeDirectory}/Code"
