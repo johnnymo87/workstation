@@ -11,8 +11,45 @@ let
   # ---------------------------------------------------------------------------
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
-  # Platform-specific overlay (placeholder for future macOS MCP servers)
-  opencodeOverlay = lib.optionalAttrs isDarwin { };
+  # Platform-specific overlay (macOS only: Gemini Code Assist via wonder-sandbox)
+  opencodeOverlay = lib.optionalAttrs isDarwin {
+    plugin = opencodeBase.plugin ++ [
+      "opencode-gemini-auth@1.3.10"
+    ];
+    provider = (opencodeBase.provider or {}) // {
+      google = {
+        options = {
+          projectId = "wonder-sandbox";
+        };
+        models = {
+          "gemini-3-pro-preview" = {
+            name = "Gemini 3 Pro (Code Assist)";
+            limit = { context = 1048576; output = 65536; };
+            modalities = { input = ["text" "image"]; output = ["text"]; };
+            options.thinkingConfig = { thinkingLevel = "high"; includeThoughts = true; };
+          };
+          "gemini-3-flash-preview" = {
+            name = "Gemini 3 Flash (Code Assist)";
+            limit = { context = 1048576; output = 65536; };
+            modalities = { input = ["text" "image"]; output = ["text"]; };
+            options.thinkingConfig = { thinkingLevel = "low"; includeThoughts = true; };
+          };
+          "gemini-2.5-pro" = {
+            name = "Gemini 2.5 Pro (Code Assist)";
+            limit = { context = 1048576; output = 65536; };
+            modalities = { input = ["text" "image"]; output = ["text"]; };
+            options.thinkingConfig = { thinkingBudget = 8192; includeThoughts = true; };
+          };
+          "gemini-2.5-flash" = {
+            name = "Gemini 2.5 Flash (Code Assist)";
+            limit = { context = 1048576; output = 65536; };
+            modalities = { input = ["text" "image"]; output = ["text"]; };
+            options.thinkingConfig = { thinkingBudget = 4096; includeThoughts = true; };
+          };
+        };
+      };
+    };
+  };
 
   opencodeManaged = lib.recursiveUpdate opencodeBase opencodeOverlay;
 
