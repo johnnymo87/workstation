@@ -56,7 +56,6 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Gradual Dotfiles Migration](.claude/skills/gradual-dotfiles-migration/SKILL.md) | Migrating from dotfiles to home-manager on Darwin |
 | [OSC52 Clipboard](.claude/skills/osc52-clipboard/SKILL.md) | Copy/paste over SSH, clipboard sync |
 | [Screenshot to Devbox](.claude/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote Claude Code |
-| [Setting Up oh-my-opencode](.claude/skills/setting-up-oh-my-opencode/SKILL.md) | OpenCode plugin install, Vertex AI routing |
 
 ## Structure
 
@@ -72,7 +71,7 @@ workstation/
 │   ├── home.base.nix      # Shared config (git, bash, packages)
 │   ├── home.linux.nix     # Linux-only (systemd services, ensure-projects)
 │   ├── home.darwin.nix    # macOS-only (launchd, ensure-projects, dotfiles migration)
-│   ├── opencode-config.nix # OpenCode + oh-my-opencode managed config
+│   ├── opencode-config.nix # OpenCode managed config
 │   ├── claude-skills.nix  # Claude Code skills deployed to ~/.claude/
 │   └── claude-hooks.nix   # Claude Code hooks (session start/stop)
 ├── assets/                # Content deployed to user (claude/, nvim/)

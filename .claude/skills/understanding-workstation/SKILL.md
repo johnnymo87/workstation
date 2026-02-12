@@ -32,7 +32,7 @@ workstation/
 │       ├── home.base.nix      # Shared: git, bash, tmux, neovim, packages
 │       ├── home.linux.nix     # Linux-only: systemd services, ensure-projects script
 │       ├── home.darwin.nix    # macOS-only: launchd, ensure-projects activation, dotfiles migration
-│       ├── opencode-config.nix # OpenCode + oh-my-opencode managed config
+│       ├── opencode-config.nix # OpenCode managed config
 │       ├── claude-skills.nix  # Claude Code skills deployed to ~/.claude/
 │       ├── claude-hooks.nix   # Claude Code hooks (session start/stop)
 │       ├── tmux.linux.nix     # Linux tmux extras
@@ -156,7 +156,6 @@ Both Claude Code and OpenCode settings use the same merge strategy:
 Files using this pattern:
 - `~/.claude/settings.managed.json` → `~/.claude/settings.json`
 - `~/.config/opencode/opencode.managed.json` → `~/.config/opencode/opencode.json`
-- `~/.config/opencode/oh-my-opencode.managed.json` → `~/.config/opencode/oh-my-opencode.json`
 
 ### mkOutOfStoreSymlink — Out-of-Flake Paths
 

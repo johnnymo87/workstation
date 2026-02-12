@@ -19,8 +19,6 @@ The pipeline updates the `llm-agents` input in `flake.lock`, which provides:
 
 All packages use Numtide's binary cache for fast updates.
 
-**Note**: The oh-my-opencode *plugin* is NOT managed by this pipeline. It's an npm package installed per-machine via `npx oh-my-opencode install`. See the `setting-up-oh-my-opencode` skill for configuration details.
-
 ## How It Works
 
 ```

@@ -115,7 +115,7 @@
   time.timeZone = "America/New_York";
   i18n.defaultLocale = "en_US.UTF-8";
 
-  # Enable running dynamically linked binaries (needed for npm packages like oh-my-opencode)
+  # Enable running dynamically linked binaries (needed for npm packages)
   programs.nix-ld.enable = true;
   programs.nix-ld.libraries = with pkgs; [
     # Common libraries for npm native binaries
