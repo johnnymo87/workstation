@@ -17,6 +17,38 @@ lib.mkIf isDarwin {
     })
     pkgs.cloudflared
     pinentry-op
+    (pkgs.writeShellApplication {
+      name = "pigeon-setup-secrets";
+      runtimeInputs = [ pkgs._1password-cli ];
+      text = ''
+        echo "Populating macOS Keychain with pigeon secrets from 1Password..."
+        echo "You may be prompted by 1Password for authentication."
+        echo ""
+
+        secrets=(
+          "pigeon-ccr-api-key:op://Automation/ccr-secrets/CCR_API_KEY"
+          "pigeon-telegram-bot-token:op://Automation/ccr-secrets/TELEGRAM_BOT_TOKEN"
+          "pigeon-telegram-chat-id:op://Automation/ccr-secrets/TELEGRAM_CHAT_ID"
+          "pigeon-telegram-webhook-secret:op://Automation/ccr-secrets/TELEGRAM_WEBHOOK_SECRET"
+          "pigeon-telegram-webhook-path-secret:op://Automation/ccr-secrets/TELEGRAM_WEBHOOK_PATH_SECRET"
+        )
+
+        for entry in "''${secrets[@]}"; do
+          name="''${entry%%:*}"
+          ref="''${entry#*:}"
+          echo "  Reading $name ..."
+          value=$(op read "$ref")
+          # Delete existing entry if present (ignore errors)
+          security delete-generic-password -s "$name" 2>/dev/null || true
+          security add-generic-password -a "$USER" -s "$name" -w "$value"
+          echo "  Stored $name in Keychain"
+        done
+
+        echo ""
+        echo "Done. You can now start the pigeon daemon:"
+        echo "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/org.nix-community.home.pigeon-daemon.plist"
+      '';
+    })
   ];
 
   # Cloudflare Tunnel launchd agent with Keychain-sourced token
@@ -37,20 +69,20 @@ lib.mkIf isDarwin {
     };
   };
 
-  # Pigeon daemon launchd agent with 1Password secret injection
+  # Pigeon daemon launchd agent — all secrets from macOS Keychain
+  # Run `pigeon-setup-secrets` once in a terminal to populate Keychain from 1Password
   launchd.agents.pigeon-daemon = {
     enable = true;
     config = {
       ProgramArguments = [
         "/bin/sh" "-c"
         ''
-          export OP_SERVICE_ACCOUNT_TOKEN="$(/usr/bin/security find-generic-password -s op-service-account-token -w)"
-          OP="${pkgs._1password-cli}/bin/op"
-          export CCR_API_KEY="$($OP read "op://Automation/ccr-secrets/CCR_API_KEY")"
-          export TELEGRAM_BOT_TOKEN="$($OP read "op://Automation/ccr-secrets/TELEGRAM_BOT_TOKEN")"
-          export TELEGRAM_CHAT_ID="$($OP read "op://Automation/ccr-secrets/TELEGRAM_CHAT_ID")"
-          export TELEGRAM_WEBHOOK_SECRET="$($OP read "op://Automation/ccr-secrets/TELEGRAM_WEBHOOK_SECRET")"
-          export TELEGRAM_WEBHOOK_PATH_SECRET="$($OP read "op://Automation/ccr-secrets/TELEGRAM_WEBHOOK_PATH_SECRET")"
+          SEC="/usr/bin/security"
+          export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
+          export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
+          export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
+          export TELEGRAM_WEBHOOK_SECRET="$($SEC find-generic-password -s pigeon-telegram-webhook-secret -w)"
+          export TELEGRAM_WEBHOOK_PATH_SECRET="$($SEC find-generic-password -s pigeon-telegram-webhook-path-secret -w)"
           cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
           exec ${pkgs.nodejs}/bin/node \
             node_modules/tsx/dist/cli.mjs \
@@ -64,7 +96,6 @@ lib.mkIf isDarwin {
         CCR_MACHINE_ID = "macbook";
         PATH = lib.concatStringsSep ":" [
           "${pkgs.nodejs}/bin"
-          "${pkgs._1password-cli}/bin"
           "/usr/bin"
           "/bin"
         ];
