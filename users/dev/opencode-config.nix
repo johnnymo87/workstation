@@ -14,9 +14,24 @@ let
   # Platform-specific overlay (macOS only: Gemini Code Assist via wonder-sandbox)
   opencodeOverlay = lib.optionalAttrs isDarwin {
     model = "google/gemini-3-pro-preview";
+
     plugin = opencodeBase.plugin ++ [
       "opencode-gemini-auth@1.3.10"
     ];
+
+    mcp = (opencodeBase.mcp or {}) // {
+      atlassian = {
+        type = "local";
+        command = [
+          "${pkgs.nodejs}/bin/npx"
+          "-y"
+          "mcp-remote"
+          "https://mcp.atlassian.com/v1/sse"
+        ];
+        enabled = false;
+      };
+    };
+
     provider = (opencodeBase.provider or {}) // {
       google = {
         options = {
