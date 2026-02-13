@@ -121,6 +121,58 @@ in
     [[ "$base" == "$runtime" ]] || rm -f "$base"
   '';
 
+  # Inject Basecamp MCP secrets from macOS Keychain into opencode.json
+  # Runs after mergeOpencode to ensure runtime file exists
+  # Uses basic auth (username/password) instead of OAuth for simpler setup
+  home.activation.injectBasecampMcpSecrets = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      # Fetch credentials from Keychain
+      bc_username="$(/usr/bin/security find-generic-password -a basecamp-mcp -s basecamp-mcp-username -w 2>/dev/null || true)"
+      bc_password="$(/usr/bin/security find-generic-password -a basecamp-mcp -s basecamp-mcp-password -w 2>/dev/null || true)"
+
+      # If either credential is missing, delete mcp.basecamp and exit cleanly
+      if [[ -z "''${bc_username}" ]] || [[ -z "''${bc_password}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.basecamp)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "Basecamp MCP credentials not found in Keychain; removed mcp.basecamp from config" >&2
+        exit 0
+      fi
+
+      # Both credentials present: inject full Basecamp MCP config
+      # Disabled by default; enable manually when needed
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --arg user "''${bc_username}" \
+          --arg pass "''${bc_password}" \
+          --arg home "$HOME" \
+          '.mcp.basecamp = {
+            "type": "local",
+            "command": [
+              ($home + "/Code/Basecamp-MCP-Server/.venv/bin/python"),
+              ($home + "/Code/Basecamp-MCP-Server/basecamp_fastmcp.py")
+            ],
+            "enabled": false,
+            "environment": {
+              "BASECAMP_USERNAME": $user,
+              "BASECAMP_PASSWORD": $pass,
+              "BASECAMP_ACCOUNT_ID": "3671212",
+              "USER_AGENT": "Basecamp MCP Server (espresso@wonder.com)"
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
   # Inject Slack MCP secrets from macOS Keychain into opencode.json
   # Runs after mergeOpencode to ensure runtime file exists
   # If tokens missing/empty, explicitly deletes mcp.slack to prevent stale config
