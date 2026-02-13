@@ -13,5 +13,6 @@ secrets/*.dec.*
 .beads/
 
 # OpenCode user configuration (managed per-machine)
-.opencode/
+.opencode/*
+!.opencode/skills/
 session-ses_*.md
