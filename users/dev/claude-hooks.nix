@@ -1,6 +1,7 @@
 # Claude Code hooks deployment
 # Wraps hook scripts with dependencies for cross-platform compatibility
-{ config, lib, pkgs, assetsPath, ... }:
+# Hook scripts live in the pigeon repo; wrappers add PATH and exec them
+{ config, lib, pkgs, ... }:
 
 let
   # Dependencies for hook scripts
@@ -11,12 +12,18 @@ let
     pkgs.coreutils
   ];
 
+  # Runtime path to pigeon hooks (resolved at exec time, not Nix build time)
+  pigeonHooksDir =
+    if pkgs.stdenv.isDarwin
+    then "${config.home.homeDirectory}/Code/pigeon/packages/hooks"
+    else "${config.home.homeDirectory}/projects/pigeon/packages/hooks";
+
   # Create a wrapper that sets PATH and execs the real script
   mkHook = name: scriptName: pkgs.writeShellApplication {
     name = "claude-hook-${name}";
     runtimeInputs = hookInputs;
     text = ''
-      exec ${assetsPath}/claude/hooks/${scriptName} "$@"
+      exec ${pigeonHooksDir}/${scriptName} "$@"
     '';
   };
 

@@ -185,16 +185,24 @@ in
       require("user.settings")
       require("user.mappings")
       require("user.sessions")  -- Session management for tmux-resurrect
-      require("ccremote").setup()
+      require("pigeon").setup()
     '';
   };
 
   # Neovim Lua config files (kept separate from HM-managed init.vim)
-  # Deploys entire lua/ directory to support both user/ configs and top-level modules like ccremote
-  xdg.configFile."nvim/lua" = {
-    source = "${assetsPath}/nvim/lua";
+  # User config modules from workstation assets
+  xdg.configFile."nvim/lua/user" = {
+    source = "${assetsPath}/nvim/lua/user";
     recursive = true;
   };
+
+  # Pigeon nvim plugin — runtime symlink to pigeon repo (not in Nix store)
+  xdg.configFile."nvim/lua/pigeon.lua".source =
+    config.lib.file.mkOutOfStoreSymlink (
+      if pkgs.stdenv.isDarwin
+      then "${config.home.homeDirectory}/Code/pigeon/packages/nvim-plugin/lua/pigeon.lua"
+      else "${config.home.homeDirectory}/projects/pigeon/packages/nvim-plugin/lua/pigeon.lua"
+    );
 
   # Direnv
   programs.direnv = {
