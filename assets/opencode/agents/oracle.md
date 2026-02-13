@@ -1,7 +1,7 @@
 ---
 description: Read-only strategic technical advisor — architecture, debugging, high-stakes decisions
 mode: subagent
-model: openai/gpt-5.2
+model: openai/gpt-5.3-codex
 variant: medium
 permission:
   read: allow
