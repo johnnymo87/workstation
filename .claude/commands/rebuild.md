@@ -49,5 +49,5 @@ Note: The full path `/run/current-system/sw/bin/darwin-rebuild` is required beca
 1. Check for errors in output
 2. On NixOS: If kernel changed, reboot may be needed
 3. Verify services are running:
-   - NixOS: `systemctl status sshd cloudflared-tunnel ccr-webhooks`
+   - NixOS: `systemctl status sshd cloudflared-tunnel pigeon-daemon`
    - macOS: `launchctl list | grep cloudflared`

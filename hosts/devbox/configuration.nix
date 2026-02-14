@@ -73,7 +73,7 @@
   };
 
   # Pigeon daemon service (depends on cloudflared)
-  systemd.services.ccr-webhooks = {
+  systemd.services.pigeon-daemon = {
     description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
@@ -105,9 +105,9 @@
   };
 
   # Optional: Stack target to start/stop both together
-  systemd.targets.ccr = {
-    description = "CCR stack (cloudflared + webhooks)";
-    wants = [ "cloudflared-tunnel.service" "ccr-webhooks.service" ];
+  systemd.targets.pigeon = {
+    description = "Pigeon stack (cloudflared + daemon)";
+    wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
   };
 
   # System identity
