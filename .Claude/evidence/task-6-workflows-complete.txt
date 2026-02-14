@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Build and Release Patched OpenCode",
+    "state": "active"
+  },
+  {
+    "name": "Check Upstream Caching Status",
+    "state": "active"
+  },
+  {
+    "name": "Sync Upstream Releases",
+    "state": "active"
+  }
+]

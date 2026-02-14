@@ -1,0 +1,3 @@
+checksums.sha256 (186 bytes)
+opencode-darwin-arm64.zip (35218487 bytes)
+opencode-linux-arm64.tar.gz (52124854 bytes)

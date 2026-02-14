@@ -1,0 +1,9 @@
+ccusage
+ccusage-opencode
+opencode
+
+USAGE:
+  @ccusage/opencode [daily] <OPTIONS>
+  @ccusage/opencode <COMMANDS>
+
+COMMANDS:
