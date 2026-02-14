@@ -13,8 +13,7 @@
     }
   },
   "plugin": [
-    "opencode-beads",
-    "@tarquinen/opencode-dcp"
+    "opencode-beads"
   ],
   "provider": {
     "openai": {
