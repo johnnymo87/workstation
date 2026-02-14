@@ -96,6 +96,7 @@ lib.mkIf isDarwin {
         CCR_MACHINE_ID = "macbook";
         PATH = lib.concatStringsSep ":" [
           "${pkgs.nodejs}/bin"
+          "${pkgs.neovim}/bin"
           "/usr/bin"
           "/bin"
         ];
