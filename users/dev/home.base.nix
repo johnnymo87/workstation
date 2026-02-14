@@ -6,6 +6,58 @@ let
   # Packages from llm-agents.nix flake (use hostPlatform.system for idiomaticity)
   llmPkgs = llm-agents.packages.${pkgs.stdenv.hostPlatform.system};
 
+  # Custom opencode with PR #5422 caching improvements
+  # See: https://github.com/johnnymo87/opencode-cached
+  # Patch provides 44% cache write reduction (saves ~$400/month)
+  opencode-cached = pkgs.stdenv.mkDerivation rec {
+    pname = "opencode-cached";
+    version = "1.1.65";
+
+    src = pkgs.fetchurl {
+      url = "https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached/opencode-${
+        if pkgs.stdenv.isLinux then "linux" else "darwin"
+      }-arm64.${if pkgs.stdenv.isLinux then "tar.gz" else "zip"}";
+      sha256 = if pkgs.stdenv.isLinux 
+        then "sha256-mXOj3sTGsqzJfngK5mpCciXM8FLvYK7417zbkfRdafQ=" # Linux arm64 v1.1.65-cached
+        else "sha256-oi+Qb32xmboQlIcY00c/D9loDmCKPo/e1FqaSujbqGs="; # Darwin arm64 v1.1.65-cached
+    };
+
+    nativeBuildInputs = [ pkgs.makeWrapper ]
+      ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.unzip ]
+      ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
+
+    buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
+      pkgs.stdenv.cc.cc.lib
+    ];
+
+    dontConfigure = true;
+    dontBuild = true;
+    dontStrip = true; # CRITICAL: preserves embedded TypeScript
+
+    unpackPhase = ''
+      runHook preUnpack
+      ${if pkgs.stdenv.isDarwin then "unzip $src" else "tar -xzf $src"}
+      runHook postUnpack
+    '';
+
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out/bin
+      install -m755 bin/opencode $out/bin/opencode
+      wrapProgram $out/bin/opencode \
+        --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fzf pkgs.ripgrep ]}
+      runHook postInstall
+    '';
+
+    meta = with pkgs.lib; {
+      description = "OpenCode with PR #5422 prompt caching improvements";
+      homepage = "https://github.com/johnnymo87/opencode-cached";
+      license = licenses.mit;
+      platforms = [ "aarch64-linux" "aarch64-darwin" ];
+      mainProgram = "opencode";
+    };
+  };
+
   # Linux: simple ccusage statusline
   linuxStatusline = pkgs.writeShellApplication {
     name = "claude-statusline";
@@ -75,7 +127,7 @@ in
     llmPkgs.claude-code
     llmPkgs.ccusage
     llmPkgs.beads
-    llmPkgs.opencode
+    opencode-cached # Custom build with PR #5422 caching (replaces llmPkgs.opencode)
     llmPkgs.ccusage-opencode
 
     # Cloudflare Workers CLI
