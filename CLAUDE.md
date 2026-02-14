@@ -6,8 +6,8 @@ NixOS devbox + nix-darwin macOS configuration with standalone home-manager.
 
 **Devbox (NixOS):**
 ```bash
-sudo nixos-rebuild switch --flake .#devbox   # System changes
-home-manager switch --flake .#dev            # User changes (fast, no sudo)
+sudo nixos-rebuild switch --flake .#devbox            # System changes
+nix run home-manager -- switch --flake .#dev           # User changes (fast, no sudo)
 ```
 
 **macOS (nix-darwin):**
@@ -30,7 +30,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
    my-new-project = { url = "git@github.com:org/repo.git"; };
    ```
 2. Push to GitHub
-3. Apply: `home-manager switch --flake .#dev` (devbox) or `darwin-rebuild switch` (macOS)
+3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox) or `darwin-rebuild switch` (macOS)
 
 **Devbox projects survive rebuilds** — stored on `/persist/projects`, bind-mounted to `~/projects`.
 
@@ -85,7 +85,7 @@ After `nixos-anywhere`:
 1. Copy age key: `scp /path/to/key devbox:/persist/sops-age-key.txt`
 2. Clone workstation: `git clone ... ~/projects/workstation`
 3. Apply system: `sudo nixos-rebuild switch --flake .#devbox`
-4. Apply home: `home-manager switch --flake .#dev`
+4. Apply home: `nix run home-manager -- switch --flake .#dev`
 5. Projects auto-clone on next login (or run `~/.local/bin/ensure-projects`)
 
 ## Fresh macOS Setup
