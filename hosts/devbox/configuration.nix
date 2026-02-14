@@ -80,7 +80,7 @@
     after = [ "network-online.target" "cloudflared-tunnel.service" ];
     requires = [ "cloudflared-tunnel.service" ];
 
-    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils ];
+    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ];
 
     serviceConfig = {
       Type = "simple";
