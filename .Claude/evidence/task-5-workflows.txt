@@ -1,2 +1,0 @@
-Build and Release Patched OpenCode: active
-Sync Upstream Releases: active
