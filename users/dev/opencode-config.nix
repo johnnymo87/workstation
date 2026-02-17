@@ -91,9 +91,10 @@ in
    xdg.configFile."opencode/agents/hephaestus.md".source = "${assetsPath}/opencode/agents/hephaestus.md";
    xdg.configFile."opencode/agents/multimodal-looker.md".source = "${assetsPath}/opencode/agents/multimodal-looker.md";
 
-   # Plugins (SRP: non-interactive env, compaction context)
+   # Plugins (SRP: non-interactive env, compaction context, context cache)
    xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
    xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+   xdg.configFile."opencode/plugins/opencode-context-cache.mjs".source = "${assetsPath}/opencode/plugins/opencode-context-cache.mjs";
 
    # OpenCode plugins deployed via out-of-store symlink (path resolved at activation, not eval)
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
@@ -130,8 +131,12 @@ in
     tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
     # Merge strategy: runtime first, then managed => managed wins on conflicts,
-    # but unmentioned runtime keys are preserved
-    ${pkgs.jq}/bin/jq -S -s '.[0] * .[1]' "$base" "$managed" > "$tmp"
+    # but unmentioned runtime keys are preserved.
+    # Use reduce over managed keys so arrays fully replace (not merge by index).
+    ${pkgs.jq}/bin/jq -S -s '
+      .[1] as $managed |
+      .[0] | reduce ($managed | keys[]) as $k (.; .[$k] = $managed[$k])
+    ' "$base" "$managed" > "$tmp"
 
     mv "$tmp" "$runtime"
     [[ "$base" == "$runtime" ]] || rm -f "$base"
