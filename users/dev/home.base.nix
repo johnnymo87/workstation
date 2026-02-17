@@ -78,7 +78,7 @@ let
       aarch64-darwin = {
         asset = "opencode-darwin-arm64.zip";
         hash = "sha256:00q6qdgd4dxpmpd7d5dm8rki5kjiqq7pg91iqy6a9qpr8bwq1jjj";
-        isZip = false;
+        isZip = true;
       };
     }.${pkgs.stdenv.hostPlatform.system} or (throw "Unsupported system");
   in pkgs.stdenv.mkDerivation {
