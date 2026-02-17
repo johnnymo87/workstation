@@ -6,58 +6,6 @@ let
   # Packages from llm-agents.nix flake (use hostPlatform.system for idiomaticity)
   llmPkgs = llm-agents.packages.${pkgs.stdenv.hostPlatform.system};
 
-  # Custom opencode with PR #5422 caching improvements
-  # See: https://github.com/johnnymo87/opencode-cached
-  # Patch provides 44% cache write reduction (saves ~$400/month)
-  opencode-cached = pkgs.stdenv.mkDerivation rec {
-    pname = "opencode-cached";
-    version = "1.1.65";
-
-    src = pkgs.fetchurl {
-      url = "https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached/opencode-${
-        if pkgs.stdenv.isLinux then "linux" else "darwin"
-      }-arm64.${if pkgs.stdenv.isLinux then "tar.gz" else "zip"}";
-      sha256 = if pkgs.stdenv.isLinux 
-        then "sha256-mXOj3sTGsqzJfngK5mpCciXM8FLvYK7417zbkfRdafQ=" # Linux arm64 v1.1.65-cached
-        else "sha256-oi+Qb32xmboQlIcY00c/D9loDmCKPo/e1FqaSujbqGs="; # Darwin arm64 v1.1.65-cached
-    };
-
-    nativeBuildInputs = [ pkgs.makeWrapper ]
-      ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.unzip ]
-      ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
-
-    buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
-      pkgs.stdenv.cc.cc.lib
-    ];
-
-    dontConfigure = true;
-    dontBuild = true;
-    dontStrip = true; # CRITICAL: preserves embedded TypeScript
-
-    unpackPhase = ''
-      runHook preUnpack
-      ${if pkgs.stdenv.isDarwin then "unzip $src" else "tar -xzf $src"}
-      runHook postUnpack
-    '';
-
-    installPhase = ''
-      runHook preInstall
-      mkdir -p $out/bin
-      install -m755 bin/opencode $out/bin/opencode
-      wrapProgram $out/bin/opencode \
-        --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fzf pkgs.ripgrep ]}
-      runHook postInstall
-    '';
-
-    meta = with pkgs.lib; {
-      description = "OpenCode with PR #5422 prompt caching improvements";
-      homepage = "https://github.com/johnnymo87/opencode-cached";
-      license = licenses.mit;
-      platforms = [ "aarch64-linux" "aarch64-darwin" ];
-      mainProgram = "opencode";
-    };
-  };
-
   # Linux: simple ccusage statusline
   linuxStatusline = pkgs.writeShellApplication {
     name = "claude-statusline";
@@ -116,6 +64,64 @@ let
 
   managedSettingsJson = pkgs.writeText "claude-settings.managed.json"
     (builtins.toJSON managedSettings);
+
+  # Patched opencode with improved Anthropic prompt caching (PR #5422)
+  # https://github.com/johnnymo87/opencode-cached
+  opencode-cached = let
+    version = "1.2.6";
+    platformInfo = {
+      aarch64-linux = {
+        asset = "opencode-linux-arm64.tar.gz";
+        hash = "sha256:082nzpbhyaqxc3iizj5f2rl6h0glnl8ljv0xbvn7l1g748a81xiv";
+        isZip = false;
+      };
+      aarch64-darwin = {
+        asset = "opencode-darwin-arm64.zip";
+        hash = "sha256:00q6qdgd4dxpmpd7d5dm8rki5kjiqq7pg91iqy6a9qpr8bwq1jjj";
+        isZip = false;
+      };
+    }.${pkgs.stdenv.hostPlatform.system} or (throw "Unsupported system");
+  in pkgs.stdenv.mkDerivation {
+    pname = "opencode-cached";
+    inherit version;
+    src = pkgs.fetchurl {
+      url = "https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached/${platformInfo.asset}";
+      hash = platformInfo.hash;
+    };
+    nativeBuildInputs = [ pkgs.makeWrapper ]
+      ++ lib.optionals platformInfo.isZip [ pkgs.unzip ]
+      ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+        pkgs.autoPatchelfHook
+      ];
+    buildInputs = lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+      pkgs.stdenv.cc.cc.lib
+    ];
+    dontConfigure = true;
+    dontBuild = true;
+    dontStrip = true;
+    unpackPhase = ''
+      runHook preUnpack
+    '' + lib.optionalString platformInfo.isZip ''
+      unzip $src
+    '' + lib.optionalString (!platformInfo.isZip) ''
+      tar -xzf $src
+    '' + ''
+      runHook postUnpack
+    '';
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out/bin
+      install -m755 bin/opencode $out/bin/opencode
+      wrapProgram $out/bin/opencode \
+        --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.ripgrep ]}
+      runHook postInstall
+    '';
+    meta = {
+      description = "OpenCode with improved Anthropic prompt caching";
+      homepage = "https://github.com/johnnymo87/opencode-cached";
+      mainProgram = "opencode";
+    };
+  };
 in
 {
   # NOTE: home.username and home.homeDirectory are set per-host
@@ -127,7 +133,7 @@ in
     llmPkgs.claude-code
     llmPkgs.ccusage
     llmPkgs.beads
-    opencode-cached # Custom build with PR #5422 caching (replaces llmPkgs.opencode)
+    opencode-cached
     llmPkgs.ccusage-opencode
 
     # Cloudflare Workers CLI
