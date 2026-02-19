@@ -190,3 +190,26 @@ systemctl --user enable --now pull-workstation.timer
 ```
 
 See [Automated Updates](.claude/skills/automated-updates/SKILL.md) for full details on the update pipeline.
+
+## GPG Agent Forwarding
+
+The devbox is configured to forward your local GPG agent so you can sign commits on the remote machine using your local keys (and Touch ID via 1Password).
+
+### Symptoms
+- `gpg --card-status` on devbox hangs or says "No such device"
+- Commits fail with "error: gpg failed to sign the data"
+- You see `gpg: problem with fast path key listing: Forbidden - ignored`
+
+### Fix: Stale Local Socket
+If the local agent socket (`~/.gnupg/S.gpg-agent.extra`) gets into a bad state (e.g. after sleep/wake), the connection breaks.
+
+Run this **locally on macOS** to reload the agent:
+```bash
+gpg-connect-agent reloadagent /bye
+```
+
+### Note: Fast Path Warning
+You may see this warning when running GPG commands on devbox:
+`gpg: problem with fast path key listing: Forbidden - ignored`
+
+**This is normal and harmless.** It happens because we forward the restricted `extra` socket, which blocks certain administrative commands (like listing secret keys in fast mode). GnuPG automatically falls back to the standard mode, and signing works fine.
