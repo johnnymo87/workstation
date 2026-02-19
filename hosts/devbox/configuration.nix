@@ -40,6 +40,11 @@
         group = "dev";
         mode = "0400";
       };
+      openai_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
@@ -151,6 +156,7 @@
     gnumake gcc
     tmux direnv neovim
     gh gnupg pinentry-curses
+    python314 ffmpeg uv
   ];
 
   # SSH server
@@ -196,6 +202,8 @@
     # Tmux resurrect data on persistent volume
     "d /persist/tmux 0755 dev dev -"
     "d /persist/tmux/dev 0700 dev dev -"
+    # My Podcasts persistent state
+    "d /persist/my-podcasts 0755 dev dev -"
   ];
 
   # User account with stable UID/GID for persistent volume ownership

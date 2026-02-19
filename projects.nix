@@ -16,6 +16,9 @@
   pigeon = {
     url = "git@github.com:johnnymo87/pigeon.git";
   };
+  my-podcasts = {
+    url = "git@github.com:johnnymo87/my-podcasts.git";
+  };
   # Add more projects as needed:
   # my-project = { url = "git@github.com:org/repo.git"; };
 }

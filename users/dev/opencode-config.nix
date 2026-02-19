@@ -91,10 +91,9 @@ in
    xdg.configFile."opencode/agents/hephaestus.md".source = "${assetsPath}/opencode/agents/hephaestus.md";
    xdg.configFile."opencode/agents/multimodal-looker.md".source = "${assetsPath}/opencode/agents/multimodal-looker.md";
 
-   # Plugins (SRP: non-interactive env, compaction context, context cache)
+   # Plugins (SRP: non-interactive env, compaction context)
    xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
    xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
-   xdg.configFile."opencode/plugins/opencode-context-cache.mjs".source = "${assetsPath}/opencode/plugins/opencode-context-cache.mjs";
 
    # OpenCode plugins deployed via out-of-store symlink (path resolved at activation, not eval)
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
