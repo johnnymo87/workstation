@@ -45,6 +45,21 @@
         group = "dev";
         mode = "0400";
       };
+      r2_account_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      r2_access_key_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      r2_secret_access_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
@@ -113,6 +128,46 @@
   systemd.targets.pigeon = {
     description = "Pigeon stack (cloudflared + daemon)";
     wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
+  };
+
+  systemd.services.my-podcasts-consumer = {
+    description = "My Podcasts queue consumer";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+
+    path = [ pkgs.python314 pkgs.ffmpeg pkgs.uv pkgs.bash pkgs.coreutils ];
+
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/my-podcasts";
+      Environment = [
+        "HOME=/home/dev"
+        "CLOUDFLARE_QUEUE_ID=fb2d616c57034fed8e6505a4ccd315b9"
+        "NLTK_DATA=/persist/my-podcasts/nltk_data"
+        "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      ];
+      ExecStartPre = "${pkgs.writeShellScript "my-podcasts-consumer-setup" ''
+        set -euo pipefail
+        cd /home/dev/projects/my-podcasts
+        ${pkgs.uv}/bin/uv sync --frozen
+        ${pkgs.uv}/bin/uv run python -c "import pathlib, ssl, certifi, nltk; pathlib.Path('/persist/my-podcasts/nltk_data').mkdir(parents=True, exist_ok=True); ssl._create_default_https_context=lambda: ssl.create_default_context(cafile=certifi.where()); nltk.download('punkt_tab', download_dir='/persist/my-podcasts/nltk_data', quiet=True)"
+      ''}";
+      ExecStart = "${pkgs.writeShellScript "my-podcasts-consumer-start" ''
+        set -euo pipefail
+        export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
+        export R2_ACCOUNT_ID="$(cat /run/secrets/r2_account_id)"
+        export R2_ACCESS_KEY_ID="$(cat /run/secrets/r2_access_key_id)"
+        export R2_SECRET_ACCESS_KEY="$(cat /run/secrets/r2_secret_access_key)"
+        export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+        cd /home/dev/projects/my-podcasts
+        exec ${pkgs.uv}/bin/uv run python -m pipeline consume
+      ''}";
+      Restart = "on-failure";
+      RestartSec = 30;
+    };
   };
 
   # System identity
