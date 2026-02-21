@@ -13,7 +13,7 @@ let
 
   # Platform-specific overlay (macOS only: Gemini Code Assist via wonder-sandbox)
   opencodeOverlay = lib.optionalAttrs isDarwin {
-    model = "google/gemini-3-pro-preview";
+    model = "google/gemini-3.1-pro";
 
     plugin = opencodeBase.plugin ++ [
       "opencode-gemini-auth@1.3.10"
@@ -38,6 +38,12 @@ let
           projectId = "wonder-sandbox";
         };
         models = {
+          "gemini-3.1-pro" = {
+            name = "Gemini 3.1 Pro (Code Assist)";
+            limit = { context = 1048576; output = 65536; };
+            modalities = { input = ["text" "image"]; output = ["text"]; };
+            options.thinkingConfig = { thinkingLevel = "high"; includeThoughts = true; };
+          };
           "gemini-3-pro-preview" = {
             name = "Gemini 3 Pro (Code Assist)";
             limit = { context = 1048576; output = 65536; };
