@@ -68,6 +68,18 @@ let
             modalities = { input = ["text" "image"]; output = ["text"]; };
             options.thinkingConfig = { thinkingBudget = 4096; includeThoughts = true; };
           };
+          "gemini-2.0-pro" = {
+            name = "Gemini 2.0 Pro (Code Assist)";
+            limit = { context = 1048576; output = 65536; };
+            modalities = { input = ["text" "image"]; output = ["text"]; };
+            options.thinkingConfig = { thinkingBudget = 8192; includeThoughts = true; };
+          };
+          "gemini-2.0-flash" = {
+            name = "Gemini 2.0 Flash (Code Assist)";
+            limit = { context = 1048576; output = 65536; };
+            modalities = { input = ["text" "image"]; output = ["text"]; };
+            options.thinkingConfig = { thinkingBudget = 4096; includeThoughts = true; };
+          };
         };
       };
     };
