@@ -201,6 +201,7 @@ lib.mkIf isLinux {
       StandardError = "journal";
       Environment = [
         "HOME=%h"
+        "PATH=${pkgs.nix}/bin:${pkgs.git}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
       ];
     };
   };
