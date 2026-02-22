@@ -12,8 +12,10 @@ let
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # Platform-specific overlay (macOS only: Gemini Code Assist via wonder-sandbox)
+  # Model definitions live in opencode.base.json (shared); this overlay adds
+  # the auth plugin and projectId that are only needed on macOS.
   opencodeOverlay = lib.optionalAttrs isDarwin {
-    model = "google/gemini-3.1-pro";
+    model = "google/gemini-3.1-pro-preview";
 
     plugin = opencodeBase.plugin ++ [
       "opencode-gemini-auth@1.3.10"
@@ -33,53 +35,9 @@ let
     };
 
     provider = (opencodeBase.provider or {}) // {
-      google = {
-        options = {
+      google = (opencodeBase.provider.google or {}) // {
+        options = (opencodeBase.provider.google.options or {}) // {
           projectId = "wonder-sandbox";
-        };
-        models = {
-          "gemini-3.1-pro" = {
-            name = "Gemini 3.1 Pro (Code Assist)";
-            limit = { context = 1048576; output = 65536; };
-            modalities = { input = ["text" "image"]; output = ["text"]; };
-            options.thinkingConfig = { thinkingLevel = "high"; includeThoughts = true; };
-          };
-          "gemini-3-pro-preview" = {
-            name = "Gemini 3 Pro (Code Assist)";
-            limit = { context = 1048576; output = 65536; };
-            modalities = { input = ["text" "image"]; output = ["text"]; };
-            options.thinkingConfig = { thinkingLevel = "high"; includeThoughts = true; };
-          };
-          "gemini-3-flash-preview" = {
-            name = "Gemini 3 Flash (Code Assist)";
-            limit = { context = 1048576; output = 65536; };
-            modalities = { input = ["text" "image"]; output = ["text"]; };
-            options.thinkingConfig = { thinkingLevel = "low"; includeThoughts = true; };
-          };
-          "gemini-2.5-pro" = {
-            name = "Gemini 2.5 Pro (Code Assist)";
-            limit = { context = 1048576; output = 65536; };
-            modalities = { input = ["text" "image"]; output = ["text"]; };
-            options.thinkingConfig = { thinkingBudget = 8192; includeThoughts = true; };
-          };
-          "gemini-2.5-flash" = {
-            name = "Gemini 2.5 Flash (Code Assist)";
-            limit = { context = 1048576; output = 65536; };
-            modalities = { input = ["text" "image"]; output = ["text"]; };
-            options.thinkingConfig = { thinkingBudget = 4096; includeThoughts = true; };
-          };
-          "gemini-2.0-pro" = {
-            name = "Gemini 2.0 Pro (Code Assist)";
-            limit = { context = 1048576; output = 65536; };
-            modalities = { input = ["text" "image"]; output = ["text"]; };
-            options.thinkingConfig = { thinkingBudget = 8192; includeThoughts = true; };
-          };
-          "gemini-2.0-flash" = {
-            name = "Gemini 2.0 Flash (Code Assist)";
-            limit = { context = 1048576; output = 65536; };
-            modalities = { input = ["text" "image"]; output = ["text"]; };
-            options.thinkingConfig = { thinkingBudget = 4096; includeThoughts = true; };
-          };
         };
       };
     };
@@ -108,6 +66,7 @@ in
    xdg.configFile."opencode/agents/oracle.md".source = "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/hephaestus.md".source = "${assetsPath}/opencode/agents/hephaestus.md";
    xdg.configFile."opencode/agents/multimodal-looker.md".source = "${assetsPath}/opencode/agents/multimodal-looker.md";
+   xdg.configFile."opencode/agents/vision-qa.md".source = "${assetsPath}/opencode/agents/vision-qa.md";
 
    # Plugins (SRP: non-interactive env, compaction context)
    xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";

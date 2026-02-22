@@ -28,6 +28,28 @@
     }
   },
   "provider": {
+    "google": {
+      "models": {
+        "gemini-3.1-pro-preview": {
+          "name": "Gemini 3.1 Pro",
+          "limit": { "context": 1048576, "output": 65536 },
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "options": { "thinkingConfig": { "thinkingLevel": "medium", "includeThoughts": false } }
+        },
+        "gemini-3-pro-preview": {
+          "name": "Gemini 3 Pro",
+          "limit": { "context": 1048576, "output": 65536 },
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "options": { "thinkingConfig": { "thinkingLevel": "high", "includeThoughts": false } }
+        },
+        "gemini-3-flash-preview": {
+          "name": "Gemini 3 Flash",
+          "limit": { "context": 1048576, "output": 65536 },
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "options": { "thinkingConfig": { "thinkingLevel": "low", "includeThoughts": false } }
+        }
+      }
+    },
     "openai": {
       "options": {
         "reasoningEffort": "medium",

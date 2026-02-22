@@ -68,16 +68,16 @@ let
   # Patched opencode with improved Anthropic prompt caching (PR #5422)
   # https://github.com/johnnymo87/opencode-cached
   opencode-cached = let
-    version = "1.2.6";
+    version = "1.2.10";
     platformInfo = {
       aarch64-linux = {
         asset = "opencode-linux-arm64.tar.gz";
-        hash = "sha256:082nzpbhyaqxc3iizj5f2rl6h0glnl8ljv0xbvn7l1g748a81xiv";
+        hash = "sha256-VsApVybxdCAMg6vvUymOp7u//+aLdObXxgiYOAh2e8c=";
         isZip = false;
       };
       aarch64-darwin = {
         asset = "opencode-darwin-arm64.zip";
-        hash = "sha256:00q6qdgd4dxpmpd7d5dm8rki5kjiqq7pg91iqy6a9qpr8bwq1jjj";
+        hash = "sha256-n7YgEFHjLhCtzniZNtT5Phf/DIl3cWOuNSRSqUKWeEg=";
         isZip = true;
       };
     }.${pkgs.stdenv.hostPlatform.system} or (throw "Unsupported system");

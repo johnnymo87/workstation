@@ -45,6 +45,12 @@
         group = "dev";
         mode = "0400";
       };
+      # Google Gemini API key for OpenCode (direct API, not enterprise/Code Assist)
+      gemini_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       r2_account_id = {
         owner = "dev";
         group = "dev";
