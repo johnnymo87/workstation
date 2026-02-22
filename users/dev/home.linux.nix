@@ -128,12 +128,28 @@ lib.mkIf isLinux {
     store.cleanup = true;  # Also run nix-collect-garbage for user store
   };
 
+  # Git SSH wrapper for systemd services (avoids Environment= quoting issues)
+  home.file.".local/bin/git-ssh-github" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      exec ${pkgs.openssh}/bin/ssh \
+        -i "$HOME/.ssh/id_ed25519_github" \
+        -o IdentitiesOnly=yes \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=yes \
+        "$@"
+    '';
+  };
+
   # Script to pull workstation updates and apply home-manager
   home.file.".local/bin/pull-workstation" = {
     executable = true;
     text = ''
       #!${pkgs.bash}/bin/bash
       set -euo pipefail
+
+      export GIT_SSH_COMMAND="$HOME/.local/bin/git-ssh-github"
 
       repo="$HOME/projects/workstation"
       lock_dir="''${XDG_RUNTIME_DIR:-/tmp}"
@@ -185,7 +201,6 @@ lib.mkIf isLinux {
       StandardError = "journal";
       Environment = [
         "HOME=%h"
-        "GIT_SSH_COMMAND=${pkgs.openssh}/bin/ssh -i %h/.ssh/id_ed25519_github -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes"
       ];
     };
   };
