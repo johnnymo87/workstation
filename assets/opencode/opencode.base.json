@@ -15,6 +15,18 @@
   "plugin": [
     "opencode-beads"
   ],
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": [
+        "playwright-mcp",
+        "--headless",
+        "--caps",
+        "vision,devtools"
+      ],
+      "enabled": false
+    }
+  },
   "provider": {
     "openai": {
       "options": {

@@ -317,6 +317,24 @@ in
     "$HOME/.npm-global/bin"
   ];
 
+  # npm-global packages that can't be managed by Nix
+  # (e.g. nixpkgs version is too old, or package not in nixpkgs)
+  # Installed to ~/.npm-global which is already on sessionPath
+  home.activation.installNpmGlobalPackages = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    set -euo pipefail
+    export PATH="${pkgs.nodejs}/bin:$PATH"
+    export npm_config_prefix="$HOME/.npm-global"
+
+    # playwright-mcp: nixpkgs has 0.0.56, we need 0.0.68+ for devtools cap
+    wanted="0.0.68"
+    current="$(npm ls -g --prefix "$HOME/.npm-global" @playwright/mcp --json 2>/dev/null \
+      | ${pkgs.jq}/bin/jq -r '.dependencies["@playwright/mcp"].version // empty' 2>/dev/null || true)"
+    if [[ "$current" != "$wanted" ]]; then
+      echo "Installing @playwright/mcp@$wanted (have: ''${current:-none})"
+      npm install -g "@playwright/mcp@$wanted" --prefix "$HOME/.npm-global" --no-fund --no-audit 2>&1 || true
+    fi
+  '';
+
   # Managed settings fragment (read-only, Nix store symlink)
   home.file.".claude/settings.managed.json".source = managedSettingsJson;
 
