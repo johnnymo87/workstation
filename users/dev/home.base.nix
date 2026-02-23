@@ -151,6 +151,9 @@ in
     tcopy
     tpaste
 
+    # GitHub CLI
+    pkgs.gh
+
     # Other tools
     pkgs.devenv
   ];
