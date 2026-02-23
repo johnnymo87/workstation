@@ -1,6 +1,6 @@
 # Crostini (ChromeOS Linux) home-manager configuration
 # Chromebook-specific settings: identity, sops secrets via HM module, Gemini API key
-{ config, pkgs, lib, isCrostini, ... }:
+{ config, pkgs, lib, isCrostini, projects, ... }:
 
 lib.mkIf isCrostini {
   # Chromebook identity
@@ -36,6 +36,30 @@ lib.mkIf isCrostini {
       commit.gpgsign = lib.mkForce false;
     };
   };
+
+  # Ensure declared projects are cloned (runs during home-manager switch)
+  home.activation.ensureProjects = let
+    mkLine = name: p: ''
+      ensure_repo ${lib.escapeShellArg name} ${lib.escapeShellArg p.url}
+    '';
+    lines = lib.concatStringsSep "\n" (lib.mapAttrsToList mkLine projects);
+  in lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    ensure_repo() {
+      local name="$1"
+      local url="$2"
+      local dir="${config.home.homeDirectory}/projects/$name"
+
+      if [ -d "$dir/.git" ]; then
+        return 0
+      fi
+
+      echo "Cloning $name ..."
+      ${pkgs.git}/bin/git clone --recursive "$url" "$dir" || echo "WARNING: Failed to clone $name (check SSH access)"
+    }
+
+    mkdir -p "${config.home.homeDirectory}/projects"
+    ${lines}
+  '';
 
   # Auto-expire old home-manager generations
   services.home-manager.autoExpire = {
