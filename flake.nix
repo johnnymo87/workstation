@@ -41,6 +41,10 @@
     devboxSystem = "aarch64-linux";
     devboxPkgs = pkgsFor devboxSystem;
 
+    # Chromebook (Crostini) pkgs
+    chromebookSystem = "x86_64-linux";
+    chromebookPkgs = pkgsFor chromebookSystem;
+
     # Darwin (macOS) pkgs
     darwinSystem = "aarch64-darwin";
     darwinPkgs = pkgsFor darwinSystem;
@@ -74,6 +78,7 @@
     homeConfigurations.dev = home-manager.lib.homeManagerConfiguration {
       pkgs = devboxPkgs;
       modules = [
+        sops-nix.homeManagerModules.sops
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
@@ -82,6 +87,26 @@
         projects = import ./projects.nix;
         isLinux = true;
         isDarwin = false;
+        isDevbox = true;
+        isCrostini = false;
+      };
+    };
+
+    # Home-manager configuration for Chromebook (Crostini)
+    homeConfigurations.livia = home-manager.lib.homeManagerConfiguration {
+      pkgs = chromebookPkgs;
+      modules = [
+        sops-nix.homeManagerModules.sops
+        ./users/dev/home.nix
+      ];
+      extraSpecialArgs = {
+        inherit self llm-agents ccrTunnel;
+        assetsPath = ./assets;
+        projects = import ./projects.nix;
+        isLinux = true;
+        isDarwin = false;
+        isDevbox = false;
+        isCrostini = true;
       };
     };
 
@@ -100,12 +125,17 @@
             projects = import ./projects.nix;
             isLinux = false;
             isDarwin = true;
+            isDevbox = false;
+            isCrostini = false;
           };
           home-manager.users.${mac.username} = { lib, ... }: {
             home.username = lib.mkForce mac.username;
             home.homeDirectory = lib.mkForce mac.homeDir;
             home.stateVersion = lib.mkForce "25.11";
-            imports = [ ./users/dev/home.nix ];
+            imports = [
+              sops-nix.homeManagerModules.sops
+              ./users/dev/home.nix
+            ];
           };
         }
       ];

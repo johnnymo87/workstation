@@ -67,20 +67,23 @@ let
 
   # Patched opencode with improved Anthropic prompt caching (PR #5422)
   # https://github.com/johnnymo87/opencode-cached
+  # Only available for aarch64-{linux,darwin}; falls back to upstream on x86_64
+  opencode-cached-platforms = {
+    aarch64-linux = {
+      asset = "opencode-linux-arm64.tar.gz";
+      hash = "sha256-VsApVybxdCAMg6vvUymOp7u//+aLdObXxgiYOAh2e8c=";
+      isZip = false;
+    };
+    aarch64-darwin = {
+      asset = "opencode-darwin-arm64.zip";
+      hash = "sha256-n7YgEFHjLhCtzniZNtT5Phf/DIl3cWOuNSRSqUKWeEg=";
+      isZip = true;
+    };
+  };
+
   opencode-cached = let
     version = "1.2.10";
-    platformInfo = {
-      aarch64-linux = {
-        asset = "opencode-linux-arm64.tar.gz";
-        hash = "sha256-VsApVybxdCAMg6vvUymOp7u//+aLdObXxgiYOAh2e8c=";
-        isZip = false;
-      };
-      aarch64-darwin = {
-        asset = "opencode-darwin-arm64.zip";
-        hash = "sha256-n7YgEFHjLhCtzniZNtT5Phf/DIl3cWOuNSRSqUKWeEg=";
-        isZip = true;
-      };
-    }.${pkgs.stdenv.hostPlatform.system} or (throw "Unsupported system");
+    platformInfo = opencode-cached-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-cached";
     inherit version;
@@ -122,6 +125,11 @@ let
       mainProgram = "opencode";
     };
   };
+
+  # Use cached fork where available, upstream otherwise (e.g. x86_64-linux)
+  opencode = if builtins.hasAttr pkgs.stdenv.hostPlatform.system opencode-cached-platforms
+    then opencode-cached
+    else llmPkgs.opencode;
 in
 {
   # NOTE: home.username and home.homeDirectory are set per-host
@@ -133,7 +141,7 @@ in
     llmPkgs.claude-code
     llmPkgs.ccusage
     llmPkgs.beads
-    opencode-cached
+    opencode
     llmPkgs.ccusage-opencode
 
     # Cloudflare Workers CLI
@@ -243,7 +251,9 @@ in
       require("user.settings")
       require("user.mappings")
       require("user.sessions")  -- Session management for tmux-resurrect
-      require("pigeon").setup()
+      -- Pigeon: soft-load (symlink may not exist on all hosts)
+      local ok, pigeon = pcall(require, "pigeon")
+      if ok then pigeon.setup() end
     '';
   };
 

@@ -1,5 +1,6 @@
-# Linux-specific tmux configuration with plugins
+# Devbox-specific tmux configuration with plugins
 # Includes session persistence (resurrect/continuum) and Catppuccin theme
+# Uses /persist volume for resurrect data (survives NixOS rebuilds)
 #
 # Plugin ordering is CRITICAL:
 # 1. resurrect - must load before continuum
@@ -7,12 +8,12 @@
 # 3. continuum - MUST BE LAST (uses status-right hook for autosave)
 #
 # WARNING: Do NOT set status-right in extraConfig - it will clobber continuum's autosave hook
-{ config, pkgs, lib, isLinux, ... }:
+{ config, pkgs, lib, isDevbox, ... }:
 
 let
   resurrectDir = "/persist/tmux/${config.home.username}/resurrect";
 in
-lib.mkIf isLinux {
+lib.mkIf isDevbox {
   programs.tmux = {
     # Plugin ordering is CRITICAL - see module header comment
     plugins = with pkgs.tmuxPlugins; [
