@@ -18,7 +18,7 @@ let
     model = "google/gemini-3.1-pro-preview";
 
     plugin = opencodeBase.plugin ++ [
-      "opencode-gemini-auth@1.3.10"
+      "opencode-gemini-auth@1.4.2"
     ];
 
     mcp = (opencodeBase.mcp or {}) // {
