@@ -101,11 +101,9 @@ in
 
     # Merge strategy: runtime first, then managed => managed wins on conflicts,
     # but unmentioned runtime keys are preserved.
-    # Use reduce over managed keys so arrays fully replace (not merge by index).
-    ${pkgs.jq}/bin/jq -S -s '
-      .[1] as $managed |
-      .[0] | reduce ($managed | keys[]) as $k (.; .[$k] = $managed[$k])
-    ' "$base" "$managed" > "$tmp"
+    # Recursive merge: runtime first, managed second => managed wins on conflicts,
+    # runtime-only nested keys are preserved (fixes shallow-merge bug).
+    ${pkgs.jq}/bin/jq -S -s '.[0] * .[1]' "$base" "$managed" > "$tmp"
 
     mv "$tmp" "$runtime"
     [[ "$base" == "$runtime" ]] || rm -f "$base"

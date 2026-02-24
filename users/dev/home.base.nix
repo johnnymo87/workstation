@@ -43,33 +43,6 @@ let
     text = builtins.readFile "${assetsPath}/scripts/tpaste.bash";
   };
 
-  # Managed settings fragment - only keys we want to control
-  # Claude Code's runtime state (feedbackSurveyState, enabledPlugins, etc.) is preserved
-  managedSettings = {
-    hooks = {
-      SessionStart = [{
-        matcher = "compact|startup|resume";
-        hooks = [{
-          type = "command";
-          command = config.claude.hooks.sessionStartPath;
-        }];
-      }];
-      Stop = [{
-        hooks = [{
-          type = "command";
-          command = config.claude.hooks.stopPath;
-        }];
-      }];
-    };
-    statusLine = {
-      type = "command";
-      command = lib.getExe claudeStatusline;
-    };
-  };
-
-  managedSettingsJson = pkgs.writeText "claude-settings.managed.json"
-    (builtins.toJSON managedSettings);
-
   # Patched opencode with improved Anthropic prompt caching (PR #5422)
   # https://github.com/johnnymo87/opencode-cached
   # Only available for aarch64-{linux,darwin}; falls back to upstream on x86_64
@@ -143,7 +116,6 @@ in
   # User packages
   home.packages = [
     # LLM tools from numtide/llm-agents.nix
-    llmPkgs.claude-code
     llmPkgs.ccusage
     llmPkgs.beads
     opencode
@@ -306,9 +278,7 @@ in
       export HISTCONTROL=ignoredups:erasedups
       shopt -s histappend
 
-      # Claude Code Remote helpers
-      ${builtins.readFile "${assetsPath}/bash/claude.bash"}
-    '';
+      '';
   };
 
   # SSH
@@ -353,35 +323,4 @@ in
     fi
   '';
 
-  # Managed settings fragment (read-only, Nix store symlink)
-  home.file.".claude/settings.managed.json".source = managedSettingsJson;
-
-  # Merge managed settings into the real settings.json on each switch
-  # This preserves Claude Code's runtime state while enforcing our config
-  home.activation.mergeClaudeSettings = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
-    set -euo pipefail
-
-    runtime="$HOME/.claude/settings.json"
-    managed="$HOME/.claude/settings.managed.json"
-
-    # Ensure directory exists (handles fresh install)
-    mkdir -p "$(dirname "$runtime")"
-
-    # Treat missing/empty runtime file as {}
-    if [[ -s "$runtime" ]]; then
-      base="$runtime"
-    else
-      base="$(mktemp)"
-      echo '{}' > "$base"
-    fi
-
-    tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
-
-    # Merge strategy: runtime first, then managed => managed wins on conflicts,
-    # but unmentioned runtime keys (feedbackSurveyState, etc.) are preserved
-    ${pkgs.jq}/bin/jq -S -s '.[0] * .[1]' "$base" "$managed" > "$tmp"
-
-    mv "$tmp" "$runtime"
-    [[ "$base" == "$runtime" ]] || rm -f "$base"
-  '';
 }

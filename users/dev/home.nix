@@ -8,9 +8,8 @@
     ./home.devbox.nix
     ./home.crostini.nix
     ./home.darwin.nix
-    ./claude-skills.nix
-    ./claude-hooks.nix
     ./opencode-config.nix
+    ./opencode-skills.nix
     ./tmux.devbox.nix
     ./tmux.crostini.nix
     ./tmux.darwin.nix

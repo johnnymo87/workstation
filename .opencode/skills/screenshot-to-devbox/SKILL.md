@@ -1,6 +1,6 @@
 ---
 name: screenshot-to-devbox
-description: Use when you need to share a screenshot with Claude Code running on the devbox over SSH, since Ctrl+V image paste doesn't work remotely
+description: Use when you need to share a screenshot with OpenCode running on the devbox over SSH, since Ctrl+V image paste doesn't work remotely
 ---
 
 # Screenshot to Devbox

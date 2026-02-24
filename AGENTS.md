@@ -38,8 +38,9 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 
 | Command | Description |
 |---------|-------------|
-| [/rebuild](.claude/commands/rebuild.md) | Apply system and/or home changes |
-| [/apply-home](.claude/commands/apply-home.md) | Quick home-manager apply |
+| [/rebuild](.opencode/commands/rebuild.md) | Apply system and/or home changes |
+| [/apply-home](.opencode/commands/apply-home.md) | Quick home-manager apply |
+| [/post-provision](.opencode/commands/post-provision.md) | Complete devbox setup after first SSH |
 
 ## Automated Dependency Updates
 
@@ -51,17 +52,18 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 
 | Skill | Description |
 |-------|-------------|
-| [Understanding Workstation](.claude/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
-| [Setting Up Hetzner](.claude/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
-| [Rebuilding Devbox](.claude/skills/rebuilding-devbox/SKILL.md) | How to apply changes, full rebuilds |
-| [Troubleshooting Devbox](.claude/skills/troubleshooting-devbox/SKILL.md) | SSH issues, host keys, NixOS problems |
-| [Automated Updates](.claude/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
-| [Managing Secrets](.claude/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
-| [Growing Neovim Config](.claude/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
-| [Migrating Claude Assets](.claude/skills/migrating-claude-assets/SKILL.md) | Moving skills/commands to home-manager |
-| [Gradual Dotfiles Migration](.claude/skills/gradual-dotfiles-migration/SKILL.md) | Migrating from dotfiles to home-manager on Darwin |
-| [OSC52 Clipboard](.claude/skills/osc52-clipboard/SKILL.md) | Copy/paste over SSH, clipboard sync |
-| [Screenshot to Devbox](.claude/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote Claude Code |
+| [Understanding Workstation](.opencode/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
+| [Setting Up Hetzner](.opencode/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
+| [Rebuilding Devbox](.opencode/skills/rebuilding-devbox/SKILL.md) | How to apply changes, full rebuilds |
+| [Troubleshooting Devbox](.opencode/skills/troubleshooting-devbox/SKILL.md) | SSH issues, host keys, NixOS problems |
+| [Automated Updates](.opencode/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
+| [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
+| [Growing Neovim Config](.opencode/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
+| [Gradual Dotfiles Migration](.opencode/skills/gradual-dotfiles-migration/SKILL.md) | Migrating from dotfiles to home-manager on Darwin |
+| [OSC52 Clipboard](.opencode/skills/osc52-clipboard/SKILL.md) | Copy/paste over SSH, clipboard sync |
+| [Screenshot to Devbox](.opencode/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote OpenCode |
+| [OpenCode Agents](.opencode/skills/opencode-agents/SKILL.md) | Agent set rationale, what was kept/removed and why |
+| [Tracking Cache Costs](.opencode/skills/tracking-cache-costs/SKILL.md) | Measuring OpenCode prompt caching efficiency |
 
 ## Structure
 
@@ -77,12 +79,15 @@ workstation/
 │   ├── home.base.nix      # Shared config (git, bash, packages)
 │   ├── home.linux.nix     # Linux-only (systemd services, ensure-projects)
 │   ├── home.darwin.nix    # macOS-only (launchd, ensure-projects, dotfiles migration)
-│   ├── opencode-config.nix # OpenCode managed config
-│   ├── claude-skills.nix  # Claude Code skills deployed to ~/.claude/
-│   └── claude-hooks.nix   # Claude Code hooks (session start/stop)
-├── assets/                # Content deployed to user (claude/, nvim/)
+│   ├── opencode-config.nix  # OpenCode managed config + agents
+│   └── opencode-skills.nix  # System-wide OpenCode skills deployed to ~/.config/opencode/skills/
+├── assets/                # Content deployed to user
+│   ├── opencode/          # OpenCode agents, skills, plugins, base config
+│   └── nvim/              # Neovim Lua config
 ├── secrets/               # sops-nix encrypted secrets
-└── .claude/               # Documentation for THIS repo
+└── .opencode/             # Documentation and config for THIS repo
+    ├── skills/            # Repo-specific skills (auto-discovered by OpenCode)
+    └── commands/          # Repo-specific slash commands
 ```
 
 ## Fresh Devbox Setup
@@ -104,6 +109,6 @@ After `nixos-anywhere`:
 
 ## Secrets
 
-**Devbox:** Secrets at `/run/secrets/<name>` via sops-nix. Env vars (`CLOUDFLARE_API_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) auto-exported in bash. See [Managing Secrets](.claude/skills/managing-secrets/SKILL.md).
+**Devbox:** Secrets at `/run/secrets/<name>` via sops-nix. Env vars auto-exported in bash. See [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md).
 
-**macOS:** 1Password via desktop app or service account token in Keychain. See [configuring-notifications](https://github.com/johnnymo87/claude-code-remote/.claude/skills/configuring-notifications/SKILL.md) for CCR secrets.
+**macOS:** 1Password via desktop app or service account token in Keychain.
