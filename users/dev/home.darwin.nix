@@ -51,6 +51,9 @@ lib.mkIf isDarwin {
         # Keep a stable alias while bash migration is in progress.
         alias ssdb='screenshot-to-devbox'
       '';
+
+      # Darwin common.conf - empty (no special options needed locally)
+      ".gnupg/common.conf".text = "";
     };
 
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
@@ -202,9 +205,6 @@ lib.mkIf isDarwin {
   # gpg-agent --supervised expects systemd-style LISTEN_FDS, not launchd's launch_activate_socket()
   # Instead, let GnuPG auto-start the agent on demand (upstream recommended approach)
   launchd.agents.gpg-agent.enable = lib.mkForce false;
-
-  # Darwin common.conf - empty (no special options needed locally)
-  home.file.".gnupg/common.conf".text = "";
 
   # Neovim: generates init.lua
   programs.neovim.enable = lib.mkForce false;
