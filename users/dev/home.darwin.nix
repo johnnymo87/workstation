@@ -180,6 +180,10 @@ lib.mkIf isDarwin {
   # pinentry-op fetches from this 1Password item using Touch ID
   home.sessionVariables = {
     OP_GPG_SECRET_REF = "op://Automation/gpg-passphrase/password";
+    # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
+    # These call mcp.exa.ai with no API key (free tier). If rate-limited (429),
+    # obtain a free key at exa.ai and set OPENCODE_ENABLE_EXA=https://mcp.exa.ai/mcp?exaApiKey=<key>
+    OPENCODE_ENABLE_EXA = "1";
   };
 
   # GPG: fully managed by home-manager on Darwin

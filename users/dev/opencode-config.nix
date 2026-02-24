@@ -57,14 +57,8 @@ in
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as YAML map
    # (NOT Claude Code-style ~/.claude/agents/ with comma-separated tools string)
    xdg.configFile."opencode/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
-   xdg.configFile."opencode/agents/prometheus.md".source = "${assetsPath}/opencode/agents/prometheus.md";
-   xdg.configFile."opencode/agents/atlas.md".source = "${assetsPath}/opencode/agents/atlas.md";
    xdg.configFile."opencode/agents/librarian.md".source = "${assetsPath}/opencode/agents/librarian.md";
-   xdg.configFile."opencode/agents/metis.md".source = "${assetsPath}/opencode/agents/metis.md";
-   xdg.configFile."opencode/agents/momus.md".source = "${assetsPath}/opencode/agents/momus.md";
-   xdg.configFile."opencode/agents/sisyphus.md".source = "${assetsPath}/opencode/agents/sisyphus.md";
    xdg.configFile."opencode/agents/oracle.md".source = "${assetsPath}/opencode/agents/oracle.md";
-   xdg.configFile."opencode/agents/hephaestus.md".source = "${assetsPath}/opencode/agents/hephaestus.md";
    xdg.configFile."opencode/agents/multimodal-looker.md".source = "${assetsPath}/opencode/agents/multimodal-looker.md";
    xdg.configFile."opencode/agents/vision-qa.md".source = "${assetsPath}/opencode/agents/vision-qa.md";
 
