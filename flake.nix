@@ -24,13 +24,17 @@
       # Don't use inputs.nixpkgs.follows - we want their pinned nixpkgs for cache hits
     };
 
+    devenv = {
+      url = "github:cachix/devenv";
+    };
+
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, sops-nix, ... }@inputs:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, devenv, sops-nix, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -82,7 +86,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self llm-agents ccrTunnel;
+        inherit self llm-agents devenv ccrTunnel;
         assetsPath = ./assets;
         projects = import ./projects.nix;
         isLinux = true;
@@ -100,7 +104,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self llm-agents ccrTunnel;
+        inherit self llm-agents devenv ccrTunnel;
         assetsPath = ./assets;
         projects = import ./projects.nix;
         isLinux = true;
@@ -120,7 +124,7 @@
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = {
-            inherit llm-agents ccrTunnel pinentry-op;
+            inherit llm-agents devenv ccrTunnel pinentry-op;
             assetsPath = ./assets;
             projects = import ./projects.nix;
             isLinux = false;

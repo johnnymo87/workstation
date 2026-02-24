@@ -1,10 +1,15 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, llm-agents, assetsPath, ... }:
+{ config, pkgs, lib, llm-agents, devenv, assetsPath, ... }:
 
 let
   # Packages from llm-agents.nix flake (use hostPlatform.system for idiomaticity)
   llmPkgs = llm-agents.packages.${pkgs.stdenv.hostPlatform.system};
+  # Use the latest devenv tool directly from cachix, but override to skip tests
+  # since they try to modify /nix/var/nix/profiles and fail in the sandbox
+  devenvPkg = devenv.packages.${pkgs.stdenv.hostPlatform.system}.default.overrideAttrs (old: {
+    doCheck = false;
+  });
 
   # Linux: simple ccusage statusline
   linuxStatusline = pkgs.writeShellApplication {
@@ -155,7 +160,7 @@ in
     pkgs.gh
 
     # Other tools
-    pkgs.devenv
+    devenvPkg
   ];
 
   # Git

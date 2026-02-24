@@ -41,6 +41,12 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [/rebuild](.claude/commands/rebuild.md) | Apply system and/or home changes |
 | [/apply-home](.claude/commands/apply-home.md) | Quick home-manager apply |
 
+## Automated Dependency Updates
+
+- `llm-agents` input is auto-updated by `.github/workflows/update-llm-agents.yml` (every 4 hours).
+- `devenv` input is auto-updated by `.github/workflows/update-devenv.yml` (every 4 hours).
+- Both workflows use `DeterminateSystems/update-flake-lock` to update a single input, open a PR, and enable auto-merge.
+
 ## Skills
 
 | Skill | Description |
