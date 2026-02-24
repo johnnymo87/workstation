@@ -213,6 +213,23 @@ Run this **locally on macOS** to reload the agent:
 gpg-connect-agent reloadagent /bye
 ```
 
+### Fix: Stale Remote Forwarded Socket
+If reconnecting still leaves GPG broken on devbox, the remote socket path can be stale.
+
+Run this on **devbox**:
+```bash
+rm -f /run/user/1000/gnupg/S.gpg-agent
+```
+
+Then reconnect from macOS and test on devbox:
+```bash
+echo test | gpg --clearsign >/dev/null && echo ok
+```
+
+### Hardening Note
+`scripts/update-ssh-config.sh` configures `StreamLocalBindUnlink yes` on `devbox` and `devbox-tunnel`.
+This lets SSH automatically unlink stale remote unix sockets before binding forwarded sockets.
+
 ### Note: Fast Path Warning
 You may see this warning when running GPG commands on devbox:
 `gpg: problem with fast path key listing: Forbidden - ignored`

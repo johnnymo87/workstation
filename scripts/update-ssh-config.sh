@@ -21,6 +21,8 @@ Host devbox
     HostName $IP
     User dev
     ForwardAgent yes
+    # Rebind stale remote unix sockets (e.g. forwarded GPG agent socket)
+    StreamLocalBindUnlink yes
     # GPG agent forwarding
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
     # Remote forwards used by devbox tooling
@@ -32,6 +34,8 @@ Host devbox-tunnel
     HostName $IP
     User dev
     ForwardAgent yes
+    # Rebind stale remote unix sockets (e.g. forwarded GPG agent socket)
+    StreamLocalBindUnlink yes
     # GPG agent forwarding
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
     # Development tunnels (see troubleshooting-devbox skill for details)
