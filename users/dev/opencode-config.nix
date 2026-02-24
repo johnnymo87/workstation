@@ -12,8 +12,8 @@ let
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # Platform-specific overlay (macOS only: Gemini Code Assist via wonder-sandbox)
-  # Model definitions live in opencode.base.json (shared); this overlay adds
-  # the auth plugin and projectId that are only needed on macOS.
+  # Model metadata comes from models.dev (auto-fetched by OpenCode); this overlay
+  # adds the auth plugin and projectId that are only needed on macOS.
   opencodeOverlay = lib.optionalAttrs isDarwin {
     model = "google/gemini-3.1-pro-preview";
 
