@@ -220,7 +220,6 @@ lib.mkIf isDarwin {
   # Deploy only specific lua files - user/ directory is managed entirely by dotfiles
   # on Darwin. Home-manager can't overlay files into a symlinked directory,
   # and creating the directory breaks the dotfiles symlink to user/*.lua modules.
-  # pigeon.lua is deployed by home.base.nix via mkOutOfStoreSymlink (platform-aware)
   xdg.configFile."nvim/lua/user/sessions.lua".source = "${assetsPath}/nvim/lua/user/sessions.lua";
 
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.

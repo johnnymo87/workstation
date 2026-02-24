@@ -231,9 +231,6 @@ in
       require("user.settings")
       require("user.mappings")
       require("user.sessions")  -- Session management for tmux-resurrect
-      -- Pigeon: soft-load (symlink may not exist on all hosts)
-      local ok, pigeon = pcall(require, "pigeon")
-      if ok then pigeon.setup() end
     '';
   };
 
@@ -243,14 +240,6 @@ in
     source = "${assetsPath}/nvim/lua/user";
     recursive = true;
   };
-
-  # Pigeon nvim plugin — runtime symlink to pigeon repo (not in Nix store)
-  xdg.configFile."nvim/lua/pigeon.lua".source =
-    config.lib.file.mkOutOfStoreSymlink (
-      if pkgs.stdenv.isDarwin
-      then "${config.home.homeDirectory}/Code/pigeon/packages/nvim-plugin/lua/pigeon.lua"
-      else "${config.home.homeDirectory}/projects/pigeon/packages/nvim-plugin/lua/pigeon.lua"
-    );
 
   # Direnv
   programs.direnv = {
