@@ -24,7 +24,12 @@ The devbox connection uses several port forwards for development tools:
 **Local forwards (-L):** devbox service → accessible on macOS localhost
 **Remote forwards (-R):** macOS service → accessible on devbox localhost
 
-These should be configured in `~/.ssh/config` (see below) so every `ssh devbox` includes them automatically.
+Use two SSH hosts:
+
+- `ssh devbox` for normal interactive sessions (no local forwards, cleaner logs)
+- `ssh devbox-tunnel` when you need local forwards (`4000`, `4003`, `1455`)
+
+Both hosts keep remote forwards (`9222`, `3033`) and GPG agent forwarding.
 
 ## Can't SSH After Recreate
 
