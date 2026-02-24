@@ -8,6 +8,51 @@
 { config, pkgs, lib, assetsPath, isDarwin, ccrTunnel, pinentry-op, projects, ... }:
 
 lib.mkIf isDarwin {
+  # Dotfiles repository still hosts many legacy bash snippets on macOS.
+  # We let HM own ~/.bashrc.d and bridge individual files via out-of-store symlinks
+  # so snippets can migrate to workstation one-by-one.
+  home.file = let
+    dotfilesDir = "${config.home.homeDirectory}/Code/dotfiles";
+    legacyBashrcFiles = [
+      "asdf.bashrc"
+      "base.bashrc"
+      "chrome-debug.bashrc"
+      "claude.bashrc"
+      "copy-paste.bashrc"
+      "cpp.bashrc"
+      "direnv.bashrc"
+      "docker.bashrc"
+      "git.bashrc"
+      "go.bashrc"
+      "gpg.bashrc"
+      "kubectl.bashrc"
+      "mac.bashrc"
+      "mcp.bashrc"
+      "minecraft.bashrc"
+      "mise.bashrc"
+      "nix.bashrc"
+      "nodenv.bashrc"
+      "prompt.bashrc"
+      "py.bashrc"
+      "rb.bashrc"
+      "rust.bashrc"
+      "unknown-origin.bashrc"
+    ];
+  in
+    lib.listToAttrs (map
+      (name: {
+        name = ".bashrc.d/${name}";
+        value.source = config.lib.file.mkOutOfStoreSymlink "${dotfilesDir}/.bashrc.d/${name}";
+      })
+      legacyBashrcFiles)
+    // {
+      ".bashrc.d/home-manager.bashrc".text = ''
+        # Home-manager bridge (Darwin)
+        # Keep a stable alias while bash migration is in progress.
+        alias ssdb='screenshot-to-devbox'
+      '';
+    };
+
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
   # Note: No runtimeInputs for openssh - we want the system SSH which supports UseKeychain
   home.packages = [
@@ -113,9 +158,17 @@ lib.mkIf isDarwin {
   # Remove these overrides one-by-one as you migrate to HM
   # ============================================================
 
-  # Bash: manages .bashrc, .bash_profile, .profile
-  # Note: ssdb alias won't work until bash is migrated - use full command instead
-  programs.bash.enable = lib.mkForce false;
+  # Bash is now managed by home-manager. Legacy snippets are sourced from ~/.bashrc.d.
+  programs.bash = {
+    initExtra = lib.mkAfter ''
+      for file in ~/.bashrc.d/*.bashrc; do
+        [ -r "$file" ] && source "$file"
+      done
+    '';
+    shellAliases = {
+      ssdb = "screenshot-to-devbox";
+    };
+  };
 
   # SSH: manages .ssh/config
   programs.ssh.enable = lib.mkForce false;
@@ -206,6 +259,10 @@ lib.mkIf isDarwin {
   '';
 
   home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    if [ -L ~/.bashrc ]; then rm -f ~/.bashrc; fi
+    if [ -L ~/.bash_profile ]; then rm -f ~/.bash_profile; fi
+    if [ -L ~/.profile ]; then rm -f ~/.profile; fi
+    if [ -L ~/.bashrc.d ]; then rm -f ~/.bashrc.d; fi
     rm -f ~/.gnupg/gpg.conf 2>/dev/null || true
     rm -f ~/.gnupg/gpg-agent.conf 2>/dev/null || true
     rm -f ~/.gnupg/dirmngr.conf 2>/dev/null || true

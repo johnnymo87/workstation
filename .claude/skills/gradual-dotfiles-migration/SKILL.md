@@ -214,7 +214,7 @@ lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
 | Program | Devbox | Darwin | Notes |
 |---------|--------|--------|-------|
 | Neovim | Workstation | Dotfiles + overlays | ccremote.lua, sessions.lua via Pattern 1 |
-| Bash | Workstation | Dotfiles | Need full migration |
+| Bash | Workstation | Workstation + dotfiles bridges | HM owns shell files; legacy `~/.bashrc.d/*.bashrc` can migrate one-by-one |
 | SSH | Workstation | Dotfiles | Need full migration |
 | GPG | Workstation | Workstation (pinentry-op) | 1Password Touch ID integration |
 | Tmux | Workstation | Workstation | Fully migrated |
