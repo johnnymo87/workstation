@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [beads]
+        package: [beads, ccusage, ccusage-opencode]
     steps:
       - name: Check filter
         if: inputs.package && inputs.package != matrix.package

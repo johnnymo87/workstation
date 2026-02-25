@@ -1,10 +1,8 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, llm-agents, localPkgs, devenv, assetsPath, ... }:
+{ config, pkgs, lib, localPkgs, devenv, assetsPath, ... }:
 
 let
-  # Packages from llm-agents.nix flake (use hostPlatform.system for idiomaticity)
-  llmPkgs = llm-agents.packages.${pkgs.stdenv.hostPlatform.system};
   # Use the latest devenv tool directly from cachix, but override to skip tests
   # since they try to modify /nix/var/nix/profiles and fail in the sandbox
   devenvPkg = devenv.packages.${pkgs.stdenv.hostPlatform.system}.default.overrideAttrs (old: {
@@ -14,7 +12,7 @@ let
   # Linux: simple ccusage statusline
   linuxStatusline = pkgs.writeShellApplication {
     name = "claude-statusline";
-    runtimeInputs = [ llmPkgs.ccusage ];
+    runtimeInputs = [ localPkgs.ccusage ];
     text = ''
       exec ccusage statusline --offline
     '';
@@ -45,28 +43,45 @@ let
 
   # Patched opencode with improved Anthropic prompt caching (PR #5422)
   # https://github.com/johnnymo87/opencode-cached
-  # Only available for aarch64-{linux,darwin}; falls back to upstream on x86_64
-  opencode-cached-platforms = {
+  # aarch64: cached fork with caching improvements; x86_64: upstream (no fork builds)
+  opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
       hash = "sha256-VsApVybxdCAMg6vvUymOp7u//+aLdObXxgiYOAh2e8c=";
       isZip = false;
+      isCached = true;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
       hash = "sha256-n7YgEFHjLhCtzniZNtT5Phf/DIl3cWOuNSRSqUKWeEg=";
       isZip = true;
+      isCached = true;
+    };
+    x86_64-linux = {
+      asset = "opencode-linux-x64.tar.gz";
+      hash = "sha256-68wkAS6PBnsQ10FkMMiOnEKRFez7zPjanrWds7Ypo1g=";
+      isZip = false;
+      isCached = false;
+    };
+    x86_64-darwin = {
+      asset = "opencode-darwin-x64.zip";
+      hash = "sha256-HZQZbvEZ6WXVcZLc4hJJCoGaSNY8+JyQxoFZ15Ct4Gc=";
+      isZip = true;
+      isCached = false;
     };
   };
 
-  opencode-cached = let
+  opencode = let
     version = "1.2.10";
-    platformInfo = opencode-cached-platforms.${pkgs.stdenv.hostPlatform.system};
+    platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
+    baseUrl = if platformInfo.isCached
+      then "https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached"
+      else "https://github.com/anomalyco/opencode/releases/download/v${version}";
   in pkgs.stdenv.mkDerivation {
-    pname = "opencode-cached";
+    pname = if platformInfo.isCached then "opencode-cached" else "opencode";
     inherit version;
     src = pkgs.fetchurl {
-      url = "https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached/${platformInfo.asset}";
+      url = "${baseUrl}/${platformInfo.asset}";
       hash = platformInfo.hash;
     };
     nativeBuildInputs = [ pkgs.makeWrapper ]
@@ -92,22 +107,17 @@ let
     installPhase = ''
       runHook preInstall
       mkdir -p $out/bin
-      install -m755 bin/opencode $out/bin/opencode
+      install -m755 ${if platformInfo.isCached then "bin/opencode" else "opencode"} $out/bin/opencode
       wrapProgram $out/bin/opencode \
         --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.ripgrep ]}
       runHook postInstall
     '';
     meta = {
-      description = "OpenCode with improved Anthropic prompt caching";
-      homepage = "https://github.com/johnnymo87/opencode-cached";
+      description = "OpenCode AI coding agent";
+      homepage = "https://github.com/anomalyco/opencode";
       mainProgram = "opencode";
     };
   };
-
-  # Use cached fork where available, upstream otherwise (e.g. x86_64-linux)
-  opencode = if builtins.hasAttr pkgs.stdenv.hostPlatform.system opencode-cached-platforms
-    then opencode-cached
-    else llmPkgs.opencode;
 in
 {
   # NOTE: home.username and home.homeDirectory are set per-host
@@ -115,11 +125,11 @@ in
 
   # User packages
   home.packages = [
-    # LLM tools
+    # LLM tools (self-packaged in pkgs/, auto-updated by CI)
     localPkgs.beads
-    llmPkgs.ccusage
+    localPkgs.ccusage
+    localPkgs.ccusage-opencode
     opencode
-    llmPkgs.ccusage-opencode
 
     # Cloudflare Workers CLI
     pkgs.wrangler

@@ -19,11 +19,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    llm-agents = {
-      url = "github:numtide/llm-agents.nix";
-      # Don't use inputs.nixpkgs.follows - we want their pinned nixpkgs for cache hits
-    };
-
     devenv = {
       url = "github:cachix/devenv";
     };
@@ -34,7 +29,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, llm-agents, devenv, sops-nix, ... }@inputs:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, devenv, sops-nix, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -56,6 +51,8 @@
     # Self-packaged tools (updated via nix-update in CI)
     localPkgsFor = system: let p = pkgsFor system; in {
       beads = p.callPackage ./pkgs/beads { };
+      ccusage = p.callPackage ./pkgs/ccusage { };
+      ccusage-opencode = p.callPackage ./pkgs/ccusage-opencode { };
     };
 
     # Custom pinentry that fetches GPG passphrase from 1Password
@@ -99,7 +96,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self llm-agents devenv ccrTunnel;
+        inherit self devenv ccrTunnel;
         localPkgs = localPkgsFor devboxSystem;
         assetsPath = ./assets;
         projects = import ./projects.nix;
@@ -118,7 +115,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self llm-agents devenv ccrTunnel;
+        inherit self devenv ccrTunnel;
         localPkgs = localPkgsFor chromebookSystem;
         assetsPath = ./assets;
         projects = import ./projects.nix;
@@ -139,7 +136,7 @@
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = {
-            inherit llm-agents devenv ccrTunnel pinentry-op;
+            inherit devenv ccrTunnel pinentry-op;
             localPkgs = localPkgsFor darwinSystem;
             assetsPath = ./assets;
             projects = import ./projects.nix;
