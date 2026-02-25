@@ -22,8 +22,7 @@ lib.mkIf isDevbox {
       export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
     fi
 
-    # Gemini API key for OpenCode's @ai-sdk/google provider
-    # On macOS, auth is handled by opencode-gemini-auth plugin (enterprise/Code Assist)
+    # Gemini API key for OpenCode's @ai-sdk/google provider (direct API)
     if [ -r /run/secrets/gemini_api_key ]; then
       export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
     fi
