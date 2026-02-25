@@ -11,15 +11,11 @@ let
   # ---------------------------------------------------------------------------
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
-  # Platform-specific overlay (macOS only: Gemini Code Assist via wonder-sandbox)
+  # Platform-specific overlay (macOS only: Claude via GitHub Copilot)
   # Model metadata comes from models.dev (auto-fetched by OpenCode); this overlay
-  # adds the auth plugin and projectId that are only needed on macOS.
+  # sets the default model to route through GitHub Copilot on macOS.
   opencodeOverlay = lib.optionalAttrs isDarwin {
-    model = "google/gemini-3.1-pro-preview";
-
-    plugin = opencodeBase.plugin ++ [
-      "opencode-gemini-auth@1.4.2"
-    ];
+    model = "github-copilot/claude-opus-4.5";
 
     mcp = (opencodeBase.mcp or {}) // {
       atlassian = {
@@ -31,14 +27,6 @@ let
           "https://mcp.atlassian.com/v1/sse"
         ];
         enabled = false;
-      };
-    };
-
-    provider = (opencodeBase.provider or {}) // {
-      google = (opencodeBase.provider.google or {}) // {
-        options = (opencodeBase.provider.google.options or {}) // {
-          projectId = "wonder-sandbox";
-        };
       };
     };
   };
