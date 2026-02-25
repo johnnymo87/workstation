@@ -24,45 +24,38 @@ let
 
   # Patched opencode with improved Anthropic prompt caching (PR #5422)
   # https://github.com/johnnymo87/opencode-cached
-  # aarch64: cached fork with caching improvements; x86_64: upstream (no fork builds)
+  # All 4 platforms built by the cached fork's CI
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-VsApVybxdCAMg6vvUymOp7u//+aLdObXxgiYOAh2e8c=";
+      hash = "sha256-bip7Rl1az9nbzD3GtY862ysH0AiRfsITiF2onsLzLgc=";
       isZip = false;
-      isCached = true;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-n7YgEFHjLhCtzniZNtT5Phf/DIl3cWOuNSRSqUKWeEg=";
+      hash = "sha256-M0YiTRJuEiICzaPTGVlQCEyllOOeUFIez7yW4EnTINU=";
       isZip = true;
-      isCached = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-68wkAS6PBnsQ10FkMMiOnEKRFez7zPjanrWds7Ypo1g=";
+      hash = "sha256-ZIuNV3qu3vJV5sPWei/rVeLfy48F6khLDnS21ep8IfU=";
       isZip = false;
-      isCached = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-HZQZbvEZ6WXVcZLc4hJJCoGaSNY8+JyQxoFZ15Ct4Gc=";
+      hash = "sha256-1/Mln9eq8CUCKqSQvc1KjH5w6X1lomMthTT8bWCwPNk=";
       isZip = true;
-      isCached = false;
     };
   };
 
   opencode = let
-    version = "1.2.10";
+    version = "1.2.14";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
-    baseUrl = if platformInfo.isCached
-      then "https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached"
-      else "https://github.com/anomalyco/opencode/releases/download/v${version}";
   in pkgs.stdenv.mkDerivation {
-    pname = if platformInfo.isCached then "opencode-cached" else "opencode";
+    pname = "opencode-cached";
     inherit version;
     src = pkgs.fetchurl {
-      url = "${baseUrl}/${platformInfo.asset}";
+      url = "https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached/${platformInfo.asset}";
       hash = platformInfo.hash;
     };
     nativeBuildInputs = [ pkgs.makeWrapper ]
@@ -88,14 +81,14 @@ let
     installPhase = ''
       runHook preInstall
       mkdir -p $out/bin
-      install -m755 ${if platformInfo.isCached then "bin/opencode" else "opencode"} $out/bin/opencode
+      install -m755 bin/opencode $out/bin/opencode
       wrapProgram $out/bin/opencode \
         --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.ripgrep ]}
       runHook postInstall
     '';
     meta = {
-      description = "OpenCode AI coding agent";
-      homepage = "https://github.com/anomalyco/opencode";
+      description = "OpenCode with improved Anthropic prompt caching";
+      homepage = "https://github.com/johnnymo87/opencode-cached";
       mainProgram = "opencode";
     };
   };
