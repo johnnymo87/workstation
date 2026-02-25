@@ -51,7 +51,6 @@
     # Self-packaged tools (updated via nix-update in CI)
     localPkgsFor = system: let p = pkgsFor system; in {
       beads = p.callPackage ./pkgs/beads { };
-      ccusage = p.callPackage ./pkgs/ccusage { };
       ccusage-opencode = p.callPackage ./pkgs/ccusage-opencode { };
     };
 

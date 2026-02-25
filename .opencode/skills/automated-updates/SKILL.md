@@ -18,7 +18,6 @@ Updated by `.github/workflows/update-devenv.yml` using `DeterminateSystems/updat
 ### Local packages (daily)
 
 - **beads**: Distributed issue tracker for AI workflows
-- **ccusage**: Usage analytics for Claude Code
 - **ccusage-opencode**: Usage analytics for OpenCode
 
 Updated by `.github/workflows/update-packages.yml` using `nix-update`. Package definitions live in `pkgs/<name>/default.nix`.

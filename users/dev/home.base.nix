@@ -9,25 +9,6 @@ let
     doCheck = false;
   });
 
-  # Linux: simple ccusage statusline
-  linuxStatusline = pkgs.writeShellApplication {
-    name = "claude-statusline";
-    runtimeInputs = [ localPkgs.ccusage ];
-    text = ''
-      exec ccusage statusline --offline
-    '';
-  };
-
-  # Darwin: custom statusline with context tracking, git branch, and cost info
-  darwinStatusline = pkgs.writeShellApplication {
-    name = "claude-statusline";
-    runtimeInputs = [ pkgs.jq pkgs.git pkgs.bc pkgs.coreutils ];
-    text = builtins.readFile "${assetsPath}/scripts/statusline.sh";
-  };
-
-  # Pick the right statusline for the platform
-  claudeStatusline = if pkgs.stdenv.isDarwin then darwinStatusline else linuxStatusline;
-
   # Clipboard commands via tmux (work over SSH, inside tmux sessions)
   tcopy = pkgs.writeShellApplication {
     name = "tcopy";
@@ -127,7 +108,6 @@ in
   home.packages = [
     # LLM tools (self-packaged in pkgs/, auto-updated by CI)
     localPkgs.beads
-    localPkgs.ccusage
     localPkgs.ccusage-opencode
     opencode
 
