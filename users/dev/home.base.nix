@@ -3,11 +3,8 @@
 { config, pkgs, lib, localPkgs, devenv, assetsPath, ... }:
 
 let
-  # Use the latest devenv tool directly from cachix, but override to skip tests
-  # since they try to modify /nix/var/nix/profiles and fail in the sandbox
-  devenvPkg = devenv.packages.${pkgs.stdenv.hostPlatform.system}.default.overrideAttrs (old: {
-    doCheck = false;
-  });
+  # Use devenv directly from cachix (no override, so cachix cache hits work)
+  devenvPkg = devenv.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
   # Clipboard commands via tmux (work over SSH, inside tmux sessions)
   tcopy = pkgs.writeShellApplication {
