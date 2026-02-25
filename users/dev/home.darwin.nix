@@ -273,6 +273,7 @@ lib.mkIf isDarwin {
     rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
     rm -f ~/.config/nvim/lua/pigeon.lua 2>/dev/null || true
     rm -f ~/.config/nvim/lua/user/sessions.lua 2>/dev/null || true
+    rm -f ~/.claude/hooks 2>/dev/null || true
   '';
 
   # Tmux extra config (disable if you have existing tmux config)

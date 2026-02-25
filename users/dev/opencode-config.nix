@@ -15,7 +15,7 @@ let
   # Model metadata comes from models.dev (auto-fetched by OpenCode); this overlay
   # sets the default model to route through GitHub Copilot on macOS.
   opencodeOverlay = lib.optionalAttrs isDarwin {
-    model = "github-copilot/claude-opus-4.5";
+    model = "github-copilot/claude-opus-4.6";
 
     mcp = (opencodeBase.mcp or {}) // {
       atlassian = {
