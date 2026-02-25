@@ -53,6 +53,11 @@
     darwinSystem = "aarch64-darwin";
     darwinPkgs = pkgsFor darwinSystem;
 
+    # Self-packaged tools (updated via nix-update in CI)
+    localPkgsFor = system: let p = pkgsFor system; in {
+      beads = p.callPackage ./pkgs/beads { };
+    };
+
     # Custom pinentry that fetches GPG passphrase from 1Password
     pinentry-op = darwinPkgs.callPackage ./pkgs/pinentry-op { };
 
@@ -64,7 +69,15 @@
       hostname = "ccr.mohrbacher.dev";
       port = 4731;
     };
+    # All systems we target
+    systems = [ devboxSystem chromebookSystem darwinSystem ];
   in {
+    # Expose local packages for nix-update and nix build
+    packages = builtins.listToAttrs (map (system: {
+      name = system;
+      value = localPkgsFor system;
+    }) systems);
+
     # NixOS system configuration
     nixosConfigurations.devbox = nixpkgs.lib.nixosSystem {
       system = devboxSystem;
@@ -87,6 +100,7 @@
       ];
       extraSpecialArgs = {
         inherit self llm-agents devenv ccrTunnel;
+        localPkgs = localPkgsFor devboxSystem;
         assetsPath = ./assets;
         projects = import ./projects.nix;
         isLinux = true;
@@ -105,6 +119,7 @@
       ];
       extraSpecialArgs = {
         inherit self llm-agents devenv ccrTunnel;
+        localPkgs = localPkgsFor chromebookSystem;
         assetsPath = ./assets;
         projects = import ./projects.nix;
         isLinux = true;
@@ -125,6 +140,7 @@
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = {
             inherit llm-agents devenv ccrTunnel pinentry-op;
+            localPkgs = localPkgsFor darwinSystem;
             assetsPath = ./assets;
             projects = import ./projects.nix;
             isLinux = false;

@@ -1,6 +1,6 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, llm-agents, devenv, assetsPath, ... }:
+{ config, pkgs, lib, llm-agents, localPkgs, devenv, assetsPath, ... }:
 
 let
   # Packages from llm-agents.nix flake (use hostPlatform.system for idiomaticity)
@@ -115,9 +115,9 @@ in
 
   # User packages
   home.packages = [
-    # LLM tools from numtide/llm-agents.nix
+    # LLM tools
+    localPkgs.beads
     llmPkgs.ccusage
-    llmPkgs.beads
     opencode
     llmPkgs.ccusage-opencode
 

@@ -130,28 +130,28 @@ pkgsFor = system: import nixpkgs {
 
 Both NixOS and home-manager use this, ensuring consistent packages.
 
-### External Flake Inputs
+### Local Packages and External Inputs
 
-LLM tools come from `numtide/llm-agents.nix`, passed to home-manager via `extraSpecialArgs`:
+LLM tools are either self-packaged in `pkgs/` or come from flake inputs:
 
 | Package | Source | Notes |
 |---------|--------|-------|
-| claude-code | llm-agents.nix | Daily updates, binary cache at cache.numtide.com |
-| ccusage | llm-agents.nix | Usage analytics, statusline for Claude Code |
-| beads | llm-agents.nix | Distributed issue tracker for AI workflows |
-| opencode | llm-agents.nix | OpenCode editor |
-| devenv | nixpkgs | Development environments |
+| beads | `pkgs/beads/` | Distributed issue tracker, auto-updated daily via nix-update |
+| ccusage | llm-agents.nix | Usage analytics, statusline |
+| ccusage-opencode | llm-agents.nix | Usage tracking for OpenCode |
+| opencode | `opencode-cached` (inline) | Patched fork with caching improvements |
+| devenv | devenv flake input | Development environments |
 
-**Important:** We do NOT use `inputs.nixpkgs.follows` for llm-agents. This preserves binary cache hits from Numtide's cache.
+Local packages are exposed as `packages.<system>.<name>` in `flake.nix` and passed to home-manager via `localPkgs`.
 
 ### Merge-on-Activate Pattern
 
-Both Claude Code and OpenCode settings use the same merge strategy:
+OpenCode settings use a merge-on-activate strategy:
 
 1. Nix generates a `*.managed.json` (read-only, in Nix store)
 2. On `home-manager switch`, an activation script merges managed → runtime
 3. Managed keys win on conflict; runtime-only keys are preserved
-4. This lets Claude Code / OpenCode write their own runtime state without clobbering
+4. This lets OpenCode write its own runtime state without clobbering
 
 Files using this pattern:
 - `~/.claude/settings.managed.json` → `~/.claude/settings.json`

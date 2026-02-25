@@ -44,9 +44,9 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 
 ## Automated Dependency Updates
 
-- `llm-agents` input is auto-updated by `.github/workflows/update-llm-agents.yml` (every 4 hours).
-- `devenv` input is auto-updated by `.github/workflows/update-devenv.yml` (every 4 hours).
-- Both workflows use `DeterminateSystems/update-flake-lock` to update a single input, open a PR, and enable auto-merge.
+- **Flake inputs** (`devenv`): auto-updated by `.github/workflows/update-devenv.yml` (every 4 hours) using `DeterminateSystems/update-flake-lock`.
+- **Local packages** (`beads`): auto-updated by `.github/workflows/update-packages.yml` (daily) using `nix-update`.
+- Both workflows open a PR with auto-merge enabled.
 
 ## Skills
 
@@ -81,6 +81,9 @@ workstation/
 │   ├── home.darwin.nix    # macOS-only (launchd, ensure-projects, dotfiles migration)
 │   ├── opencode-config.nix  # OpenCode managed config + agents
 │   └── opencode-skills.nix  # System-wide OpenCode skills deployed to ~/.config/opencode/skills/
+├── pkgs/                  # Self-packaged tools (auto-updated by nix-update)
+│   ├── beads/             # Distributed issue tracker
+│   └── pinentry-op/       # macOS GPG pinentry via 1Password
 ├── assets/                # Content deployed to user
 │   ├── opencode/          # OpenCode agents, skills, plugins, base config
 │   └── nvim/              # Neovim Lua config

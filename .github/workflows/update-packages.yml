@@ -1,0 +1,85 @@
+name: Update packages
+
+on:
+  schedule:
+    # Daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to update (blank = all)'
+        required: false
+        type: string
+
+concurrency:
+  group: update-packages
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [beads]
+    steps:
+      - name: Check filter
+        if: inputs.package && inputs.package != matrix.package
+        run: echo "SKIP=true" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        if: env.SKIP != 'true'
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        if: env.SKIP != 'true'
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Run nix-update
+        if: env.SKIP != 'true'
+        run: |
+          nix-shell -p nix-update --run "nix-update --flake ${{ matrix.package }}"
+
+      - name: Check for changes
+        if: env.SKIP != 'true'
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            version=$(nix eval --raw ".#packages.x86_64-linux.${{ matrix.package }}.version" 2>/dev/null || echo "unknown")
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create PR
+        if: env.SKIP != 'true' && steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: |
+          pkg="${{ matrix.package }}"
+          version="${{ steps.diff.outputs.version }}"
+          branch="auto/update-${pkg}"
+
+          git checkout -B "$branch"
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore(deps): update ${pkg} to ${version}"
+          git push -u origin "$branch" --force
+
+          # Create or update PR
+          if gh pr view "$branch" --json number >/dev/null 2>&1; then
+            echo "PR already exists for $branch, force-pushed update"
+          else
+            pr_url=$(gh pr create \
+              --title "chore(deps): update ${pkg} to ${version}" \
+              --body "Automated update of \`${pkg}\` to \`${version}\` via \`nix-update\`." \
+              --label "dependencies,automated" \
+              --head "$branch")
+            pr_number=$(gh pr view "$branch" --json number -q '.number')
+            gh pr merge "$pr_number" --auto --squash
+          fi

@@ -1,36 +1,39 @@
 ---
 name: Automated Updates
-description: How the devbox automatically updates llm-agents and devenv via GitHub Actions and systemd timers. Use when debugging update failures or understanding the update flow.
+description: How the devbox automatically updates llm-agents (claude-code) via GitHub Actions and systemd timers. Use when debugging update failures or understanding the update flow.
 ---
 
 # Automated Updates
 
-The devbox automatically keeps `llm-agents` packages up to date via a GitHub Actions + systemd timer pipeline.
+The devbox keeps dependencies up to date via two GitHub Actions workflows and a systemd timer.
 
 ## What Gets Updated
 
-The pipeline updates the `llm-agents` input in `flake.lock`, which provides:
+### Flake inputs (every 4 hours)
 
-- **claude-code**: Official Claude Code CLI
-- **ccusage**: Usage analytics and statusline
-- **beads**: Distributed issue tracker
-- **opencode**: OpenCode CLI (alternative AI coding tool)
-- **ccusage-opencode**: Usage tracking for OpenCode
+- **devenv**: Development environment tool from Cachix
 
-All packages use Numtide's binary cache for fast updates.
+Updated by `.github/workflows/update-devenv.yml` using `DeterminateSystems/update-flake-lock`.
+
+### Local packages (daily)
+
+- **beads**: Distributed issue tracker for AI workflows
+
+Updated by `.github/workflows/update-packages.yml` using `nix-update`. Package definitions live in `pkgs/<name>/default.nix`.
 
 ## How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ GitHub Actions (every 4 hours)                              │
+│ GitHub Actions                                              │
 │                                                             │
-│  1. update-llm-agents.yml runs                              │
-│  2. Updates flake.lock (llm-agents input only)              │
-│  3. Opens/updates PR on auto/update-llm-agents branch       │
-│  4. Enables auto-merge (squash)                             │
+│  Flake inputs (every 4h):                                   │
+│    update-devenv.yml → updates flake.lock → PR → auto-merge │
 │                                                             │
-│  CI (ci.yml) runs nix flake check on PR                     │
+│  Local packages (daily):                                    │
+│    update-packages.yml → nix-update → PR → auto-merge       │
+│                                                             │
+│  CI (ci.yml) runs nix flake check on each PR                │
 │  ↓                                                          │
 │  Checks pass → PR auto-merges to main                       │
 └─────────────────────────────────────────────────────────────┘
@@ -50,11 +53,19 @@ All packages use Numtide's binary cache for fast updates.
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | `ci.yml` | `.github/workflows/` | Runs `nix flake check` on PRs |
-| `update-llm-agents.yml` | `.github/workflows/` | Updates llm-agents, opens PR with auto-merge |
+| `update-devenv.yml` | `.github/workflows/` | Updates devenv flake input, opens PR |
+| `update-packages.yml` | `.github/workflows/` | Updates local packages via nix-update |
 | `UPDATE_TOKEN` | GitHub Secrets | PAT for PR creation + CI triggers |
 | `pull-workstation` | `~/.local/bin/` | Script to pull + apply home-manager |
 | `pull-workstation.timer` | systemd user | Triggers every 4h + 10min after boot |
 | `home-manager-auto-expire.timer` | systemd user | Cleans old generations daily |
+
+## Adding a New Package
+
+1. Create `pkgs/<name>/default.nix` with the derivation
+2. Add to `localPkgsFor` in `flake.nix`
+3. Reference as `localPkgs.<name>` in `home.base.nix`
+4. Add `<name>` to the matrix in `.github/workflows/update-packages.yml`
 
 ## Checking Status
 
@@ -62,10 +73,11 @@ All packages use Numtide's binary cache for fast updates.
 
 ```bash
 # Recent workflow runs
-gh run list --workflow=update-llm-agents.yml --limit=5
+gh run list --workflow=update-devenv.yml --limit=5
+gh run list --workflow=update-packages.yml --limit=5
 
 # Open update PRs
-gh pr list --head auto/update-llm-agents
+gh pr list --label automated
 
 # CI status on a PR
 gh pr checks <pr-number>
@@ -93,7 +105,10 @@ journalctl --user -u home-manager-auto-expire -n 50
 ### Trigger GitHub Update
 
 ```bash
-gh workflow run update-llm-agents.yml
+gh workflow run update-devenv.yml
+gh workflow run update-packages.yml
+# Or update a single package:
+gh workflow run update-packages.yml -f package=beads
 ```
 
 ### Trigger Devbox Pull
@@ -112,7 +127,7 @@ systemctl --user start pull-workstation
 
 ### PR not being created
 
-1. Check workflow ran: `gh run list --workflow=update-llm-agents.yml --limit=1`
+1. Check workflow ran: `gh run list --workflow=update-packages.yml --limit=1`
 2. Check for errors: `gh run view <run-id> --log`
 3. Verify `UPDATE_TOKEN` secret exists: `gh secret list`
 
@@ -165,15 +180,19 @@ nix-collect-garbage
 
 ### Update Frequency
 
-Both GitHub Action and devbox timer run every 4 hours. To change:
-
-**GitHub Action:** Edit `.github/workflows/update-llm-agents.yml`:
+**Flake inputs (devenv):** Edit `.github/workflows/update-devenv.yml`:
 ```yaml
 schedule:
   - cron: '0 */4 * * *'  # Change */4 to desired interval
 ```
 
-**Devbox timer:** Edit `users/dev/home.linux.nix`:
+**Local packages:** Edit `.github/workflows/update-packages.yml`:
+```yaml
+schedule:
+  - cron: '0 6 * * *'  # Daily at 06:00 UTC
+```
+
+**Devbox timer:** Edit `users/dev/home.devbox.nix`:
 ```nix
 Timer = {
   OnStartupSec = "10min";
@@ -183,7 +202,7 @@ Timer = {
 
 ### Generation Retention
 
-Edit `users/dev/home.linux.nix`:
+Edit `users/dev/home.devbox.nix`:
 ```nix
 services.home-manager.autoExpire = {
   frequency = "daily";
