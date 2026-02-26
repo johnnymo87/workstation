@@ -53,8 +53,12 @@
           msal134Path = "${msal134}/${prev.python3.sitePackages}";
         in {
           azure-cli = prev.azure-cli.overrideAttrs (old: {
+            # The inner az wrapper does `export PYTHONPATH=...` (hard set),
+            # so --prefix on the outer wrapper gets wiped. Use --run to
+            # inject msal 1.34.0 AFTER the inner wrapper sets PYTHONPATH.
             postFixup = (old.postFixup or "") + ''
-              wrapProgram $out/bin/az --prefix PYTHONPATH : "${msal134Path}"
+              wrapProgram $out/bin/az \
+                --run 'PYTHONPATH="${msal134Path}:$PYTHONPATH"'
             '';
             nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ prev.makeWrapper ];
           });
