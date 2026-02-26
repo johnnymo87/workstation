@@ -35,37 +35,7 @@
     pkgsFor = system: import nixpkgs {
       inherit system;
       config.allowUnfree = true;
-      overlays = [
-        # TODO: remove when nixpkgs bumps azure-cli to >= 2.83.0
-        # azure-cli 2.79.0 ships msal 1.33.0 which crashes on
-        # `az login --use-device-code` (claims_challenge bug).
-        # python3.override packageOverrides don't compose, so we
-        # wrap the az binary to prepend msal 1.34.0 to PYTHONPATH.
-        (final: prev: let
-          msal134 = prev.python3Packages.msal.overridePythonAttrs (old: rec {
-            version = "1.34.0";
-            src = prev.python3Packages.fetchPypi {
-              inherit (old) pname;
-              inherit version;
-              hash = "sha256-drqDtxbqWm11sCecCsNToOBbggyh9mgsDrf0UZDEPC8=";
-            };
-          });
-          msal134Path = "${msal134}/${prev.python3.sitePackages}";
-        in {
-          azure-cli = prev.azure-cli.overrideAttrs (old: {
-            # The inner az wrapper does `export PYTHONPATH=...` (hard set),
-            # so any outer wrapper env gets wiped. Patch the inner wrapper
-            # to prepend msal 1.34.0 to its hardcoded PYTHONPATH.
-            postFixup = (old.postFixup or "") + ''
-              inner="$out/bin/.az-wrapped_"
-              if [ -f "$inner" ]; then
-                substituteInPlace "$inner" \
-                  --replace-quiet "export PYTHONPATH='" "export PYTHONPATH='${msal134Path}:"
-              fi
-            '';
-          });
-        })
-      ];
+      overlays = [];
     };
 
     devboxSystem = "aarch64-linux";
