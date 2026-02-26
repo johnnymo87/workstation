@@ -54,6 +54,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 |-------|-------------|
 | [Understanding Workstation](.opencode/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
 | [Setting Up Hetzner](.opencode/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
+| [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) | GCP ARM VM provisioning with nixos-anywhere |
 | [Rebuilding Devbox](.opencode/skills/rebuilding-devbox/SKILL.md) | How to apply changes, full rebuilds |
 | [Troubleshooting Devbox](.opencode/skills/troubleshooting-devbox/SKILL.md) | SSH issues, host keys, NixOS problems |
 | [Automated Updates](.opencode/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
@@ -72,7 +73,8 @@ workstation/
 ├── flake.nix              # Flake: NixOS + nix-darwin + home-manager
 ├── projects.nix           # Declarative project list (both platforms)
 ├── hosts/
-│   ├── devbox/            # NixOS system config
+│   ├── devbox/            # NixOS system config (Hetzner)
+│   ├── cloudbox/          # NixOS system config (GCP ARM)
 │   └── Y0FMQX93RR-2/     # macOS (nix-darwin) system config
 ├── users/dev/
 │   ├── home.nix           # Entry point (imports all modules)
