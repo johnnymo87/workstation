@@ -61,6 +61,13 @@ in
         else "${config.home.homeDirectory}/projects/pigeon/packages/opencode-plugin/src/index.ts"
       );
 
+    xdg.configFile."opencode/plugins/superpowers.js".source =
+      config.lib.file.mkOutOfStoreSymlink (
+        if isDarwin
+        then "${config.home.homeDirectory}/Code/superpowers/.opencode/plugins/superpowers.js"
+        else "${config.home.homeDirectory}/projects/superpowers/.opencode/plugins/superpowers.js"
+      );
+
   # Merge managed config into runtime opencode.json on each switch
   # Preserves runtime keys; managed keys win on conflict.
   home.activation.mergeOpencode = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''

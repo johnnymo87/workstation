@@ -19,6 +19,9 @@
   my-podcasts = {
     url = "git@github.com:johnnymo87/my-podcasts.git";
   };
+  superpowers = {
+    url = "git@github.com:obra/superpowers.git";
+  };
   # Add more projects as needed:
   # my-project = { url = "git@github.com:org/repo.git"; };
 }

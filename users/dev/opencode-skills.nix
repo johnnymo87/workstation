@@ -1,7 +1,7 @@
 # OpenCode system-wide skills deployment
 # Deploys skills to ~/.config/opencode/skills/ where OpenCode auto-discovers them
 # Skills are tool-agnostic workflows usable from any project
-{ lib, pkgs, assetsPath, ... }:
+{ config, lib, pkgs, assetsPath, ... }:
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
@@ -48,11 +48,23 @@ let
     ".config/opencode/skills/beads/references/WORKFLOWS.md".source =
       "${assetsPath}/opencode/skills/beads/references/WORKFLOWS.md";
   };
+
+  # Superpowers skills: symlink the entire upstream skills directory
+  # Uses out-of-store symlink since the repo is cloned via projects.nix, not in the Nix store
+  superpowersSkills = {
+    ".config/opencode/skills/superpowers".source =
+      config.lib.file.mkOutOfStoreSymlink (
+        if isDarwin
+        then "${config.home.homeDirectory}/Code/superpowers/skills"
+        else "${config.home.homeDirectory}/projects/superpowers/skills"
+      );
+  };
 in
 {
   home.file =
     mkSkills crossPlatformSkills
     // lib.optionalAttrs isDarwin (mkSkills darwinOnlySkills)
     // beadsReferences
-    // notifyTelegramScript;
+    // notifyTelegramScript
+    // superpowersSkills;
 }
