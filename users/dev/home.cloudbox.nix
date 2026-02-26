@@ -19,6 +19,14 @@ lib.mkIf isCloudbox {
     bazelisk    # Bazel version manager (respects .bazelversion)
     buf         # Protobuf linting, breaking change detection, codegen
     protobuf    # protoc compiler
+
+    # Cloud / Kubernetes
+    (azure-cli.withExtensions (with azure-cli.extensions; [
+      azure-devops
+    ]))
+    kubelogin        # Azure AD credential plugin for kubectl
+    kubectl          # Kubernetes CLI (for AKS clusters)
+    google-cloud-sdk # GCP VM management (gcloud, gsutil, bq)
   ];
 
   # Export secrets from sops-nix (system-level decryption to /run/secrets/)
