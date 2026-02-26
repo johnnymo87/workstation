@@ -263,6 +263,7 @@ in
   };
 
   # Nix binary caches (devenv uses its own nixpkgs, so cache avoids building from source)
+  nix.package = pkgs.nix;
   nix.settings = {
     extra-substituters = [
       "https://devenv.cachix.org"
