@@ -79,6 +79,11 @@ lib.mkIf isCloudbox {
       export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
     fi
 
+    # Atlassian API token for acli / nvim Atlassian commands
+    if [ -r /run/secrets/atlassian_api_token ]; then
+      export ATLASSIAN_API_TOKEN="$(cat /run/secrets/atlassian_api_token)"
+    fi
+
     # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
     export OPENCODE_ENABLE_EXA=1
   '';

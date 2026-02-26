@@ -20,6 +20,7 @@ let
     "beads"
     "consult-chatgpt"
     "notify-telegram"
+    "using-atlassian-cli"
     "using-chatgpt-relay-from-devbox"
   ];
 
@@ -49,6 +50,12 @@ let
       "${assetsPath}/opencode/skills/beads/references/WORKFLOWS.md";
   };
 
+  # using-atlassian-cli has a reference file
+  atlassianReferences = {
+    ".config/opencode/skills/using-atlassian-cli/REFERENCE.md".source =
+      "${assetsPath}/opencode/skills/using-atlassian-cli/REFERENCE.md";
+  };
+
   # Superpowers skills: symlink the entire upstream skills directory
   # Uses out-of-store symlink since the repo is cloned via projects.nix, not in the Nix store
   superpowersSkills = {
@@ -65,6 +72,7 @@ in
     mkSkills crossPlatformSkills
     // lib.optionalAttrs isDarwin (mkSkills darwinOnlySkills)
     // beadsReferences
+    // atlassianReferences
     // notifyTelegramScript
     // superpowersSkills;
 }

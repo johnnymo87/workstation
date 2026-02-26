@@ -99,6 +99,7 @@ in
     # LLM tools (self-packaged in pkgs/, auto-updated by CI)
     localPkgs.beads
     localPkgs.ccusage-opencode
+    localPkgs.html2markdown
     opencode
 
     # Cloudflare Workers CLI
@@ -114,6 +115,12 @@ in
     # Other tools
     devenvPkg
   ];
+
+  # Atlassian (non-secret; API token set per-platform via Keychain/sops)
+  home.sessionVariables = {
+    ATLASSIAN_EMAIL = "jmohrbacher@wonder.com";
+    ATLASSIAN_CLOUD_ID = "70497edc-9c59-45b2-8e47-e46913d4c6cf";
+  };
 
   # Git
   programs.git = {
@@ -216,7 +223,8 @@ in
     extraLuaConfig = ''
       require("user.settings")
       require("user.mappings")
-      require("user.sessions")  -- Session management for tmux-resurrect
+      require("user.sessions")    -- Session management for tmux-resurrect
+      require("user.atlassian")   -- :FetchJiraTicket, :FetchConfluencePage
     '';
   };
 

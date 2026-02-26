@@ -168,6 +168,10 @@ lib.mkIf isDarwin {
       GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" && export GH_TOKEN="$GH_TOKEN_VAL"
       unset GH_TOKEN_VAL
 
+      # Atlassian API token for acli / nvim Atlassian commands (from macOS Keychain)
+      ATLASSIAN_VAL="$(/usr/bin/security find-generic-password -s atlassian-api-token -w 2>/dev/null)" && export ATLASSIAN_API_TOKEN="$ATLASSIAN_VAL"
+      unset ATLASSIAN_VAL
+
       for file in ~/.bashrc.d/*.bashrc; do
         [ -r "$file" ] && source "$file"
       done
@@ -225,6 +229,7 @@ lib.mkIf isDarwin {
   # on Darwin. Home-manager can't overlay files into a symlinked directory,
   # and creating the directory breaks the dotfiles symlink to user/*.lua modules.
   xdg.configFile."nvim/lua/user/sessions.lua".source = "${assetsPath}/nvim/lua/user/sessions.lua";
+  xdg.configFile."nvim/lua/user/atlassian.lua".source = "${assetsPath}/nvim/lua/user/atlassian.lua";
 
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.
   # Remove dotfiles symlinks before HM tries to create its own.
@@ -277,6 +282,7 @@ lib.mkIf isDarwin {
     rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
     rm -f ~/.config/nvim/lua/pigeon.lua 2>/dev/null || true
     rm -f ~/.config/nvim/lua/user/sessions.lua 2>/dev/null || true
+    rm -f ~/.config/nvim/lua/user/atlassian.lua 2>/dev/null || true
     rm -f ~/.claude/hooks 2>/dev/null || true
   '';
 

@@ -53,6 +53,7 @@
     localPkgsFor = system: let p = pkgsFor system; in {
       beads = p.callPackage ./pkgs/beads { };
       ccusage-opencode = p.callPackage ./pkgs/ccusage-opencode { };
+      html2markdown = p.callPackage ./pkgs/html2markdown { };
     };
 
     # Custom pinentry that fetches GPG passphrase from 1Password
