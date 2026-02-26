@@ -1,6 +1,6 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, localPkgs, devenv, assetsPath, ... }:
+{ config, pkgs, lib, localPkgs, devenv, assetsPath, isCrostini, ... }:
 
 let
   # Use devenv directly from cachix (no override, so cachix cache hits work)
@@ -144,7 +144,7 @@ in
   programs.gpg = {
     enable = true;
     package = pkgs.gnupg;  # Use nixpkgs GPG for consistency
-    publicKeys = [
+    publicKeys = lib.mkIf (!isCrostini) [
       {
         source = "${assetsPath}/gpg-signing-key.asc";
         trust = 5;  # ultimate (our own key)
