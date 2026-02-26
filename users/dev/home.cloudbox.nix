@@ -85,7 +85,7 @@ lib.mkIf isCloudbox {
         ${pkgs.git}/bin/git clone --recursive "$url" "$dir"
       }
 
-      mkdir -p "$base"
+      ${pkgs.coreutils}/bin/mkdir -p "$base"
       ${lines}
 
       echo "All projects ready."
