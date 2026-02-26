@@ -57,6 +57,9 @@ lib.mkIf isCloudbox {
     google-cloud-sdk # GCP VM management (gcloud, gsutil, bq)
   ];
 
+  # GCP project for Vertex AI (OpenCode auto-discovers this for google-vertex providers)
+  home.sessionVariables.GOOGLE_CLOUD_PROJECT = "wonder-sandbox";
+
   # Export secrets from sops-nix (system-level decryption to /run/secrets/)
   programs.bash.initExtra = lib.mkAfter ''
     # Alias bazelisk as bazel (projects expect `bazel` on PATH)

@@ -1,7 +1,7 @@
 # OpenCode configuration management
 # Manages opencode.json via home-manager
 # with merge-on-activate pattern (runtime keys preserved, managed keys enforced)
-{ config, lib, pkgs, assetsPath, ... }:
+{ config, lib, pkgs, assetsPath, isCloudbox, ... }:
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
@@ -11,10 +11,10 @@ let
   # ---------------------------------------------------------------------------
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
-  # Platform-specific overlay (macOS only: Claude via GitHub Copilot)
+  # Platform overlay: Claude via GitHub Copilot (macOS + cloudbox)
   # Model metadata comes from models.dev (auto-fetched by OpenCode); this overlay
-  # sets the default model to route through GitHub Copilot on macOS.
-  opencodeOverlay = lib.optionalAttrs isDarwin {
+  # sets the default model to route through GitHub Copilot.
+  opencodeOverlay = lib.optionalAttrs (isDarwin || isCloudbox) {
     model = "github-copilot/claude-opus-4.6";
 
     mcp = (opencodeBase.mcp or {}) // {
