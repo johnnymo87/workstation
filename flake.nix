@@ -35,6 +35,26 @@
     pkgsFor = system: import nixpkgs {
       inherit system;
       config.allowUnfree = true;
+      overlays = [
+        # TODO: remove when nixpkgs bumps azure-cli to >= 2.83.0
+        # azure-cli 2.79.0 ships msal 1.33.0 which crashes on
+        # `az login --use-device-code` (claims_challenge bug).
+        (final: prev: {
+          python3 = prev.python3.override {
+            packageOverrides = _: pyPrev: {
+              msal = pyPrev.msal.overridePythonAttrs (old: rec {
+                version = "1.34.0";
+                src = pyPrev.fetchPypi {
+                  inherit (old) pname;
+                  inherit version;
+                  hash = "sha256-drqDtxbqWm11sCecCsNToOBbggyh9mgsDrf0UZDEPC8=";
+                };
+              });
+            };
+          };
+          python3Packages = final.python3.pkgs;
+        })
+      ];
     };
 
     devboxSystem = "aarch64-linux";
