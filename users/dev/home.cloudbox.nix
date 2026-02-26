@@ -21,7 +21,24 @@ lib.mkIf isCloudbox {
     protobuf    # protoc compiler
 
     # Cloud / Kubernetes
-    (azure-cli.withExtensions (with azure-cli.extensions; [
+    # NOTE: azure-cli 2.79.0 ships msal 1.33.0 which has a bug where
+    # `az login --use-device-code` crashes with "Session.request() got
+    # an unexpected keyword argument 'claims_challenge'". Fixed in msal 1.34.0.
+    # Remove this override when nixpkgs bumps azure-cli to >= 2.83.0.
+    ((azure-cli.override {
+      python3 = python3.override {
+        packageOverrides = _: super: {
+          msal = super.msal.overridePythonAttrs (old: rec {
+            version = "1.34.0";
+            src = super.fetchPypi {
+              inherit (old) pname;
+              inherit version;
+              hash = "sha256-drqDtxbqWm11sCecCsNToOBbggyh9mgsDrf0UZDEPC8=";
+            };
+          });
+        };
+      };
+    }).withExtensions (with azure-cli.extensions; [
       azure-devops
     ]))
     kubelogin        # Azure AD credential plugin for kubectl
