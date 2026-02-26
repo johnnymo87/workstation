@@ -66,6 +66,12 @@
         group = "dev";
         mode = "0400";
       };
+      # GitHub API token (for gh CLI, GH_TOKEN)
+      github_api_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };

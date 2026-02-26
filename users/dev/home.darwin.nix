@@ -164,6 +164,10 @@ lib.mkIf isDarwin {
   # Bash is now managed by home-manager. Legacy snippets are sourced from ~/.bashrc.d.
   programs.bash = {
     initExtra = lib.mkAfter ''
+      # GitHub API token for gh CLI (from macOS Keychain)
+      GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" && export GH_TOKEN="$GH_TOKEN_VAL"
+      unset GH_TOKEN_VAL
+
       for file in ~/.bashrc.d/*.bashrc; do
         [ -r "$file" ] && source "$file"
       done

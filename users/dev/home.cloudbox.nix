@@ -34,6 +34,11 @@ lib.mkIf isCloudbox {
     # Alias bazelisk as bazel (projects expect `bazel` on PATH)
     alias bazel=bazelisk
 
+    # GitHub API token for gh CLI
+    if [ -r /run/secrets/github_api_token ]; then
+      export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+    fi
+
     if [ -r /run/secrets/cloudflare_api_token ]; then
       export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
     fi
