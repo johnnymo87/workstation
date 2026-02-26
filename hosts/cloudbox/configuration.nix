@@ -161,6 +161,9 @@
     nodejs  # For pigeon
   ];
 
+  # Docker (for testcontainers)
+  virtualisation.docker.enable = true;
+
   # Disable Google OS Login (we manage users/keys declaratively via NixOS)
   security.googleOsLogin.enable = lib.mkForce false;
   users.mutableUsers = false;
@@ -193,7 +196,7 @@
     uid = 1000;
     group = "dev";
     description = "Development user";
-    extraGroups = [ "wheel" ];
+    extraGroups = [ "wheel" "docker" ];
     shell = pkgs.bashInteractive;
     linger = true;  # Allow user services to run without active login
     openssh.authorizedKeys.keys = [

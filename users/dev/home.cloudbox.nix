@@ -14,8 +14,18 @@ lib.mkIf isCloudbox {
 
   home.stateVersion = "25.11";
 
+  # Developer tooling (project-specific)
+  home.packages = with pkgs; [
+    bazelisk    # Bazel version manager (respects .bazelversion)
+    buf         # Protobuf linting, breaking change detection, codegen
+    protobuf    # protoc compiler
+  ];
+
   # Export secrets from sops-nix (system-level decryption to /run/secrets/)
   programs.bash.initExtra = lib.mkAfter ''
+    # Alias bazelisk as bazel (projects expect `bazel` on PATH)
+    alias bazel=bazelisk
+
     if [ -r /run/secrets/cloudflare_api_token ]; then
       export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
     fi
