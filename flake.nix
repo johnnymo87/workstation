@@ -65,6 +65,13 @@
       hostname = "ccr.mohrbacher.dev";
       port = 4731;
     };
+
+    # Filter projects by platform tag.
+    # Projects without a `platforms` attr are included everywhere.
+    allProjects = import ./projects.nix;
+    projectsFor = platform: nixpkgs.lib.filterAttrs
+      (_: p: !(p ? platforms) || builtins.elem platform p.platforms)
+      allProjects;
     # All systems we target
     systems = [ devboxSystem chromebookSystem darwinSystem ];
   in {
@@ -111,7 +118,7 @@
         inherit self devenv ccrTunnel;
         localPkgs = localPkgsFor devboxSystem;
         assetsPath = ./assets;
-        projects = import ./projects.nix;
+        projects = projectsFor "devbox";
         isLinux = true;
         isDarwin = false;
         isDevbox = true;
@@ -131,7 +138,7 @@
         inherit self devenv ccrTunnel;
         localPkgs = localPkgsFor devboxSystem;
         assetsPath = ./assets;
-        projects = import ./projects.nix;
+        projects = projectsFor "cloudbox";
         isLinux = true;
         isDarwin = false;
         isDevbox = false;
@@ -151,7 +158,7 @@
         inherit self devenv ccrTunnel;
         localPkgs = localPkgsFor chromebookSystem;
         assetsPath = ./assets;
-        projects = import ./projects.nix;
+        projects = projectsFor "crostini";
         isLinux = true;
         isDarwin = false;
         isDevbox = false;
@@ -174,9 +181,9 @@
             inherit devenv ccrTunnel pinentry-op;
             localPkgs = localPkgsFor darwinSystem;
             assetsPath = ./assets;
-            projects = import ./projects.nix;
-            isLinux = false;
-            isDarwin = true;
+        projects = projectsFor "darwin";
+        isLinux = false;
+        isDarwin = true;
             isDevbox = false;
             isCloudbox = false;
             isCrostini = false;
