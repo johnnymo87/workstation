@@ -87,6 +87,19 @@
       ];
     };
 
+    # NixOS system configuration for GCP ARM devbox
+    nixosConfigurations.cloudbox = nixpkgs.lib.nixosSystem {
+      system = devboxSystem;  # aarch64-linux (same as devbox)
+      specialArgs = { inherit ccrTunnel; };
+      modules = [
+        disko.nixosModules.disko
+        sops-nix.nixosModules.sops
+        ./hosts/cloudbox/configuration.nix
+        ./hosts/cloudbox/hardware.nix
+        ./hosts/cloudbox/disko.nix
+      ];
+    };
+
     # Home-manager configuration (standalone for fast iteration on devbox)
     homeConfigurations.dev = home-manager.lib.homeManagerConfiguration {
       pkgs = devboxPkgs;
@@ -102,6 +115,27 @@
         isLinux = true;
         isDarwin = false;
         isDevbox = true;
+        isCloudbox = false;
+        isCrostini = false;
+      };
+    };
+
+    # Home-manager configuration for GCP ARM devbox (standalone)
+    homeConfigurations.cloudbox = home-manager.lib.homeManagerConfiguration {
+      pkgs = devboxPkgs;  # aarch64-linux (same as devbox)
+      modules = [
+        sops-nix.homeManagerModules.sops
+        ./users/dev/home.nix
+      ];
+      extraSpecialArgs = {
+        inherit self devenv ccrTunnel;
+        localPkgs = localPkgsFor devboxSystem;
+        assetsPath = ./assets;
+        projects = import ./projects.nix;
+        isLinux = true;
+        isDarwin = false;
+        isDevbox = false;
+        isCloudbox = true;
         isCrostini = false;
       };
     };
@@ -121,6 +155,7 @@
         isLinux = true;
         isDarwin = false;
         isDevbox = false;
+        isCloudbox = false;
         isCrostini = true;
       };
     };
@@ -143,6 +178,7 @@
             isLinux = false;
             isDarwin = true;
             isDevbox = false;
+            isCloudbox = false;
             isCrostini = false;
           };
           home-manager.users.${mac.username} = { lib, ... }: {
