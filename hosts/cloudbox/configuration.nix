@@ -11,6 +11,9 @@
 { config, pkgs, lib, ccrTunnel, ... }:
 
 {
+  # Allow unfree packages (1password-cli for pigeon)
+  nixpkgs.config.allowUnfree = true;
+
   # sops-nix configuration
   sops = {
     defaultSopsFile = ../../secrets/cloudbox.yaml;
@@ -158,11 +161,15 @@
     nodejs  # For pigeon
   ];
 
+  # Disable Google OS Login (we manage users/keys declaratively via NixOS)
+  security.googleOsLogin.enable = lib.mkForce false;
+  users.mutableUsers = false;
+
   # SSH server
-  # NOTE: google-compute-config.nix already enables openssh with OS Login.
+  # NOTE: google-compute-config.nix already enables openssh.
   # We add hardening overrides on top.
   services.openssh.settings = {
-    PermitRootLogin = "no";
+    PermitRootLogin = "prohibit-password";  # TODO: revert to "no" after bootstrap
     PasswordAuthentication = false;
     KbdInteractiveAuthentication = false;
     X11Forwarding = false;
@@ -193,6 +200,11 @@
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIjoX7P9gYCGqSbqoIvy/seqAbtzbLAdhaGCYRRVbDR2 johnnymo87@gmail.com"
     ];
   };
+
+  # Root SSH key for bootstrap (google-compute-config.nix handles root separately)
+  users.users.root.openssh.authorizedKeys.keys = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIjoX7P9gYCGqSbqoIvy/seqAbtzbLAdhaGCYRRVbDR2 johnnymo87@gmail.com"
+  ];
 
   security.sudo.wheelNeedsPassword = false;
 
