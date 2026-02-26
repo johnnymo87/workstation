@@ -140,7 +140,19 @@ ssh cloudbox 'cd ~/projects/workstation && nix run home-manager -- switch --flak
 
 This installs all user packages (tmux, neovim, opencode, beads, etc.), deploys dotfiles, and starts the `ensure-projects` service which clones all declared projects.
 
-## Step 8: Install pigeon dependencies
+## Step 8: Authenticate gcloud ADC for Vertex AI
+
+The VM's GCE service account only has default scopes (storage, logging, monitoring) — not `cloud-platform`. OpenCode's Vertex providers need user ADC credentials with full scopes:
+
+```bash
+ssh cloudbox 'gcloud auth application-default login --no-launch-browser'
+```
+
+Open the URL in your browser, complete the OAuth flow, and paste the code back. This creates `~/.config/gcloud/application_default_credentials.json` which the `google-auth-library` ADC chain prefers over the GCE metadata service account.
+
+Without this step, Vertex AI calls fail with `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
+
+## Step 9: Install pigeon dependencies
 
 Pigeon is a Node.js project that needs `npm install`. The systemd service expects `node_modules/` to exist:
 
@@ -154,7 +166,7 @@ Then restart pigeon:
 ssh cloudbox 'sudo systemctl restart pigeon-daemon.service'
 ```
 
-## Step 9: Set up macOS SSH config
+## Step 10: Set up macOS SSH config
 
 Add entries to `~/.ssh/config` on your Mac:
 
@@ -180,7 +192,7 @@ Host cloudbox-tunnel
 - `ssh cloudbox` for normal use
 - `ssh cloudbox-tunnel` when running `opencode auth login` (needs port 1455 forwarded)
 
-## Step 10: Verify everything works
+## Step 11: Verify everything works
 
 ```bash
 ssh cloudbox
@@ -220,6 +232,8 @@ After bootstrap is confirmed working, ensure `PermitRootLogin` is set to `"no"` 
 7. **`nix.package = pkgs.nix`** must be set in home-manager base config when `nix.settings` is configured, or home-manager fails with a missing `nix.package` error.
 
 8. **sops age key at `/var/lib/sops-age-key.txt`** is owned by root — user-level sops commands need `sudo cat` to a temp file or a user-readable copy.
+
+9. **GCE default scopes lack `cloud-platform`** — the VM's service account credentials (from metadata server) don't include Vertex AI access. Must run `gcloud auth application-default login` to create user ADC credentials that override the metadata chain. Without this, Vertex calls fail with `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
 
 ## Removing the temporary external IP
 
