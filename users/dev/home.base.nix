@@ -144,6 +144,12 @@ in
   programs.gpg = {
     enable = true;
     package = pkgs.gnupg;  # Use nixpkgs GPG for consistency
+    publicKeys = [
+      {
+        source = "${assetsPath}/gpg-signing-key.asc";
+        trust = 5;  # ultimate (our own key)
+      }
+    ];
     settings = {
       auto-key-retrieve = true;
       no-emit-version = true;
