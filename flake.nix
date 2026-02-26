@@ -39,23 +39,25 @@
         # TODO: remove when nixpkgs bumps azure-cli to >= 2.83.0
         # azure-cli 2.79.0 ships msal 1.33.0 which crashes on
         # `az login --use-device-code` (claims_challenge bug).
-        # Override azure-cli to use a python3 with msal 1.34.0.
-        (_: prev: {
-          azure-cli = prev.azure-cli.override {
-            python3 = prev.python3.override {
-              self = prev.python3;
-              packageOverrides = _: pyPrev: {
-                msal = pyPrev.msal.overridePythonAttrs (old: rec {
-                  version = "1.34.0";
-                  src = pyPrev.fetchPypi {
-                    inherit (old) pname;
-                    inherit version;
-                    hash = "sha256-drqDtxbqWm11sCecCsNToOBbggyh9mgsDrf0UZDEPC8=";
-                  };
-                });
-              };
+        # python3.override packageOverrides don't compose, so we
+        # wrap the az binary to prepend msal 1.34.0 to PYTHONPATH.
+        (final: prev: let
+          msal134 = prev.python3Packages.msal.overridePythonAttrs (old: rec {
+            version = "1.34.0";
+            src = prev.python3Packages.fetchPypi {
+              inherit (old) pname;
+              inherit version;
+              hash = "sha256-drqDtxbqWm11sCecCsNToOBbggyh9mgsDrf0UZDEPC8=";
             };
-          };
+          });
+          msal134Path = "${msal134}/${prev.python3.sitePackages}";
+        in {
+          azure-cli = prev.azure-cli.overrideAttrs (old: {
+            postFixup = (old.postFixup or "") + ''
+              wrapProgram $out/bin/az --prefix PYTHONPATH : "${msal134Path}"
+            '';
+            nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ prev.makeWrapper ];
+          });
         })
       ];
     };
