@@ -206,4 +206,56 @@ in
         mv "$tmp" "$runtime"
       fi
     '');
+
+  # Inject Slack MCP secrets from sops on cloudbox into opencode.json
+  # Same pattern as Darwin, but reads from /run/secrets/ instead of Keychain
+  home.activation.injectSlackMcpSecretsSops = lib.mkIf isCloudbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      # Read tokens from sops-decrypted secrets
+      xoxc_token=""
+      xoxd_token=""
+      if [ -r /run/secrets/slack_mcp_xoxc_token ]; then
+        xoxc_token="$(cat /run/secrets/slack_mcp_xoxc_token)"
+      fi
+      if [ -r /run/secrets/slack_mcp_xoxd_token ]; then
+        xoxd_token="$(cat /run/secrets/slack_mcp_xoxd_token)"
+      fi
+
+      # If either token is missing or empty, delete mcp.slack and exit cleanly
+      if [[ -z "''${xoxc_token}" ]] || [[ -z "''${xoxd_token}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.slack)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "Slack MCP tokens not found in sops; removed mcp.slack from config" >&2
+        exit 0
+      fi
+
+      # Both tokens present: inject full Slack MCP config
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --arg xoxc "''${xoxc_token}" \
+          --arg xoxd "''${xoxd_token}" \
+          '.mcp.slack = {
+            "type": "local",
+            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "enabled": false,
+            "environment": {
+              "SLACK_MCP_XOXC_TOKEN": $xoxc,
+              "SLACK_MCP_XOXD_TOKEN": $xoxd,
+              "SLACK_MCP_CUSTOM_TLS": "1",
+              "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
 }

@@ -63,6 +63,17 @@
         group = "dev";
         mode = "0400";
       };
+      # Slack MCP tokens (for OpenCode slack-mcp-server)
+      slack_mcp_xoxc_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      slack_mcp_xoxd_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
   };
 
