@@ -69,6 +69,17 @@
         group = "dev";
         mode = "0400";
       };
+      # Datadog API keys (for Datadog MCP proxy)
+      dd_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      dd_app_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Slack MCP tokens (for OpenCode slack-mcp-server)
       slack_mcp_xoxc_token = {
         owner = "dev";

@@ -1,7 +1,7 @@
 # OpenCode configuration management
 # Manages opencode.json via home-manager
 # with merge-on-activate pattern (runtime keys preserved, managed keys enforced)
-{ config, lib, pkgs, assetsPath, isCloudbox, ... }:
+{ config, lib, pkgs, localPkgs, assetsPath, isCloudbox, ... }:
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
@@ -252,6 +252,95 @@ in
               "SLACK_MCP_XOXD_TOKEN": $xoxd,
               "SLACK_MCP_CUSTOM_TLS": "1",
               "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject Datadog MCP config with API key auth into opencode.json
+  # Uses datadog_mcp_cli proxy binary with --site us3 and DD_API_KEY/DD_APP_KEY
+  # Disabled by default — enable manually or via dedicated agent when needed
+  home.activation.injectDatadogMcpSecrets = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      dd_api_key="$(/usr/bin/security find-generic-password -s dd-api-key -w 2>/dev/null || true)"
+      dd_app_key="$(/usr/bin/security find-generic-password -s dd-app-key -w 2>/dev/null || true)"
+
+      if [[ -z "''${dd_api_key}" ]] || [[ -z "''${dd_app_key}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.datadog)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "Datadog API keys not found in Keychain; removed mcp.datadog from config" >&2
+        exit 0
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --arg cmd "${localPkgs.datadog-mcp-cli}/bin/datadog_mcp_cli" \
+          --arg api_key "''${dd_api_key}" \
+          --arg app_key "''${dd_app_key}" \
+          '.mcp.datadog = {
+            "type": "local",
+            "command": [$cmd, "--site", "us3"],
+            "enabled": false,
+            "environment": {
+              "DD_API_KEY": $api_key,
+              "DD_APP_KEY": $app_key
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  home.activation.injectDatadogMcpSecretsSops = lib.mkIf isCloudbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      dd_api_key=""
+      dd_app_key=""
+      if [ -r /run/secrets/dd_api_key ]; then
+        dd_api_key="$(cat /run/secrets/dd_api_key)"
+      fi
+      if [ -r /run/secrets/dd_app_key ]; then
+        dd_app_key="$(cat /run/secrets/dd_app_key)"
+      fi
+
+      if [[ -z "''${dd_api_key}" ]] || [[ -z "''${dd_app_key}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.datadog)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "Datadog API keys not found in sops; removed mcp.datadog from config" >&2
+        exit 0
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --arg cmd "${localPkgs.datadog-mcp-cli}/bin/datadog_mcp_cli" \
+          --arg api_key "''${dd_api_key}" \
+          --arg app_key "''${dd_app_key}" \
+          '.mcp.datadog = {
+            "type": "local",
+            "command": [$cmd, "--site", "us3"],
+            "enabled": false,
+            "environment": {
+              "DD_API_KEY": $api_key,
+              "DD_APP_KEY": $app_key
             }
           }' "$runtime" > "$tmp"
 

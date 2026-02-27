@@ -100,6 +100,7 @@ in
     localPkgs.acli
     localPkgs.beads
     localPkgs.ccusage-opencode
+    localPkgs.datadog-mcp-cli
     localPkgs.html2markdown
     opencode
 
