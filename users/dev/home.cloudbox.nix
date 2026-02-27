@@ -19,6 +19,7 @@ lib.mkIf isCloudbox {
     bazelisk    # Bazel version manager (respects .bazelversion)
     buf         # Protobuf linting, breaking change detection, codegen
     protobuf    # protoc compiler
+    python3     # Required by Docker image build steps
 
     # Cloud / Kubernetes
     # NOTE: azure-cli 2.79.0 ships msal 1.33.0 which has a bug where
