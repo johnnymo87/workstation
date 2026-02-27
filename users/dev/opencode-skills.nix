@@ -20,8 +20,10 @@ let
     "beads"
     "consult-chatgpt"
     "notify-telegram"
+    "slack-mcp-setup"
     "using-atlassian-cli"
     "using-chatgpt-relay-from-devbox"
+    "using-gcloud-bq-cli"
   ];
 
   # notify-telegram has a script that needs to be executable
@@ -31,12 +33,6 @@ let
       executable = true;
     };
   };
-
-  # Skills deployed only on Darwin (work machine)
-  darwinOnlySkills = [
-    "slack-mcp-setup"
-    "using-gcloud-bq-cli"
-  ];
 
   # beads has additional reference files
   beadsReferences = {
@@ -70,7 +66,6 @@ in
 {
   home.file =
     mkSkills crossPlatformSkills
-    // lib.optionalAttrs isDarwin (mkSkills darwinOnlySkills)
     // beadsReferences
     // atlassianReferences
     // notifyTelegramScript
