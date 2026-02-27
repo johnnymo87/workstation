@@ -116,6 +116,22 @@ in
     devenvPkg
   ];
 
+  # Bazel user config (~/.bazelrc)
+  home.file.".bazelrc".text = lib.concatStringsSep "\n" ([
+    "# Managed by home-manager — edits will be overwritten"
+    ""
+    "# Show test errors inline"
+    "test --test_output errors"
+    ""
+    "# Local disk and repository caches"
+    "common --disk_cache ~/bazel-diskcache --repository_cache ~/bazel-cache/repository"
+  ] ++ lib.optionals pkgs.stdenv.isLinux [
+    ""
+    "# NixOS: forward shell PATH into sandbox so coreutils are discoverable"
+    "build --action_env=PATH"
+    "build --host_action_env=PATH"
+  ]);
+
   # Atlassian (non-secret; API token set per-platform via Keychain/sops)
   home.sessionVariables = {
     ATLASSIAN_EMAIL = "jmohrbacher@wonder.com";
