@@ -84,6 +84,11 @@ lib.mkIf isCloudbox {
       export ATLASSIAN_API_TOKEN="$(cat /run/secrets/atlassian_api_token)"
     fi
 
+    # Azure DevOps PAT for private artifact registry
+    if [ -r /run/secrets/azure_devops_pat ]; then
+      export SYSTEM_ACCESSTOKEN="$(cat /run/secrets/azure_devops_pat)"
+    fi
+
     # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
     export OPENCODE_ENABLE_EXA=1
   '';

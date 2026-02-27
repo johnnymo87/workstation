@@ -63,6 +63,12 @@
         group = "dev";
         mode = "0400";
       };
+      # Azure DevOps PAT (for private Maven/artifact registry)
+      azure_devops_pat = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Slack MCP tokens (for OpenCode slack-mcp-server)
       slack_mcp_xoxc_token = {
         owner = "dev";
