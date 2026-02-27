@@ -96,7 +96,8 @@ in
 
   # User packages
   home.packages = [
-    # LLM tools (self-packaged in pkgs/, auto-updated by CI)
+    # Self-packaged tools (in pkgs/, some auto-updated by CI)
+    localPkgs.acli
     localPkgs.beads
     localPkgs.ccusage-opencode
     localPkgs.html2markdown
