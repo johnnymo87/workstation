@@ -127,9 +127,9 @@ in
     "common --disk_cache ~/bazel-diskcache --repository_cache ~/bazel-cache/repository"
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     ""
-    "# NixOS: forward shell PATH into sandbox so coreutils are discoverable"
-    "build --action_env=PATH"
-    "build --host_action_env=PATH"
+    "# NixOS: explicit PATH for sandbox — forwarding alone doesn't cover all action types"
+    "build --action_env=PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin"
+    "build --host_action_env=PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin"
   ]);
 
   # Atlassian (non-secret; API token set per-platform via Keychain/sops)
