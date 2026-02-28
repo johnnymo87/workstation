@@ -12,6 +12,7 @@ lib.mkIf isCrostini {
   # Packages
   home.packages = [
     pkgs.cloudflared
+    pkgs._1password-cli
   ];
 
   # sops-nix home-manager secrets (decrypted during activation)
@@ -22,11 +23,7 @@ lib.mkIf isCrostini {
     secrets = {
       gemini_api_key = {};
       cloudflared_tunnel_token = {};
-      pigeon_ccr_api_key = {};
-      pigeon_telegram_bot_token = {};
-      pigeon_telegram_chat_id = {};
-      pigeon_telegram_webhook_secret = {};
-      pigeon_telegram_webhook_path_secret = {};
+      op_service_account_token = {};
     };
   };
 
@@ -85,12 +82,10 @@ lib.mkIf isCrostini {
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
-        export CCR_API_KEY="$(cat ${config.sops.secrets.pigeon_ccr_api_key.path})"
-        export TELEGRAM_BOT_TOKEN="$(cat ${config.sops.secrets.pigeon_telegram_bot_token.path})"
-        export TELEGRAM_CHAT_ID="$(cat ${config.sops.secrets.pigeon_telegram_chat_id.path})"
-        export TELEGRAM_WEBHOOK_SECRET="$(cat ${config.sops.secrets.pigeon_telegram_webhook_secret.path})"
-        export TELEGRAM_WEBHOOK_PATH_SECRET="$(cat ${config.sops.secrets.pigeon_telegram_webhook_path_secret.path})"
-        exec ${pkgs.nodejs}/bin/node \
+        export OP_SERVICE_ACCOUNT_TOKEN="$(cat ${config.sops.secrets.op_service_account_token.path})"
+        exec ${pkgs._1password-cli}/bin/op run \
+          --env-file=${config.home.homeDirectory}/projects/pigeon/.env.1password -- \
+          ${pkgs.nodejs}/bin/node \
           node_modules/tsx/dist/cli.mjs \
           src/index.ts
       ''}";
