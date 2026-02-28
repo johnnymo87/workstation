@@ -1,6 +1,6 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, localPkgs, devenv, assetsPath, isCrostini, ... }:
+{ config, pkgs, lib, localPkgs, devenv, assetsPath, isDarwin, isCloudbox, isCrostini, ... }:
 
 let
   # Use devenv directly from cachix (no override, so cachix cache hits work)
@@ -97,10 +97,8 @@ in
   # User packages
   home.packages = [
     # Self-packaged tools (in pkgs/, some auto-updated by CI)
-    localPkgs.acli
     localPkgs.beads
     localPkgs.ccusage-opencode
-    localPkgs.datadog-mcp-cli
     localPkgs.html2markdown
     opencode
 
@@ -116,6 +114,11 @@ in
 
     # Other tools
     devenvPkg
+  ]
+  # Work tools (macOS + cloudbox only)
+  ++ lib.optionals (isDarwin || isCloudbox) [
+    localPkgs.acli
+    localPkgs.datadog-mcp-cli
   ];
 
   # Bazel user config (~/.bazelrc)

@@ -48,10 +48,14 @@ in
    xdg.configFile."opencode/agents/librarian.md".source = "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/oracle.md".source = "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/vision-qa.md".source = "${assetsPath}/opencode/agents/vision-qa.md";
+   xdg.configFile."opencode/agents/implementer.md".source = "${assetsPath}/opencode/agents/implementer.md";
+   xdg.configFile."opencode/agents/spec-reviewer.md".source = "${assetsPath}/opencode/agents/spec-reviewer.md";
+   xdg.configFile."opencode/agents/code-reviewer.md".source = "${assetsPath}/opencode/agents/code-reviewer.md";
 
-   # Plugins (SRP: non-interactive env, compaction context)
+   # Plugins (SRP: non-interactive env, compaction context, subagent routing)
    xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
    xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+   xdg.configFile."opencode/plugins/subagent-routing.ts".source = "${assetsPath}/opencode/plugins/subagent-routing.ts";
 
    # OpenCode plugins deployed via out-of-store symlink (path resolved at activation, not eval)
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
