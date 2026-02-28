@@ -302,7 +302,11 @@ in
   };
 
   # Nix binary caches (devenv uses its own nixpkgs, so cache avoids building from source)
-  nix.package = pkgs.nix;
+  # mkDefault: in module mode (nix-darwin/NixOS), home-manager's nixos/common.nix
+  # forwards the system nix.package into each user, causing a duplicate definition
+  # error. mkDefault lets the system's value win. In standalone mode (devbox),
+  # this provides the required package for nix.settings below. (HM #5870)
+  nix.package = lib.mkDefault pkgs.nix;
   nix.settings = {
     extra-substituters = [
       "https://devenv.cachix.org"
