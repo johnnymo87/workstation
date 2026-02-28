@@ -1,11 +1,9 @@
 # OpenCode system-wide skills deployment
 # Deploys skills to ~/.config/opencode/skills/ where OpenCode auto-discovers them
 # Skills are tool-agnostic workflows usable from any project
-{ config, lib, pkgs, assetsPath, ... }:
+{ config, lib, pkgs, assetsPath, isDarwin, isCloudbox, ... }:
 
 let
-  isDarwin = pkgs.stdenv.isDarwin;
-
   mkSkill = name: {
     ".config/opencode/skills/${name}/SKILL.md".source =
       "${assetsPath}/opencode/skills/${name}/SKILL.md";
@@ -20,9 +18,13 @@ let
     "beads"
     "consult-chatgpt"
     "notify-telegram"
+    "using-chatgpt-relay-from-devbox"
+  ];
+
+  # Work-only skills (macOS + cloudbox)
+  workOnlySkills = [
     "slack-mcp-setup"
     "using-atlassian-cli"
-    "using-chatgpt-relay-from-devbox"
     "using-gcloud-bq-cli"
   ];
 
@@ -67,7 +69,10 @@ in
   home.file =
     mkSkills crossPlatformSkills
     // beadsReferences
-    // atlassianReferences
     // notifyTelegramScript
-    // superpowersSkills;
+    // superpowersSkills
+    // lib.optionalAttrs (isDarwin || isCloudbox) (
+      mkSkills workOnlySkills
+      // atlassianReferences
+    );
 }

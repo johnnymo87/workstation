@@ -121,24 +121,27 @@ in
     localPkgs.datadog-mcp-cli
   ];
 
-  # Bazel user config (~/.bazelrc)
-  home.file.".bazelrc".text = lib.concatStringsSep "\n" ([
-    "# Managed by home-manager — edits will be overwritten"
-    ""
-    "# Show test errors inline"
-    "test --test_output errors"
-    ""
-    "# Local disk and repository caches"
-    "common --disk_cache ~/bazel-diskcache --repository_cache ~/bazel-cache/repository"
-  ] ++ lib.optionals pkgs.stdenv.isLinux [
-    ""
-    "# NixOS: explicit PATH for sandbox — forwarding alone doesn't cover all action types"
-    "build --action_env=PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin"
-    "build --host_action_env=PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin"
-  ]);
+  # Bazel user config (~/.bazelrc) — work machines only
+  home.file.".bazelrc" = lib.mkIf (isDarwin || isCloudbox) {
+    text = lib.concatStringsSep "\n" ([
+      "# Managed by home-manager — edits will be overwritten"
+      ""
+      "# Show test errors inline"
+      "test --test_output errors"
+      ""
+      "# Local disk and repository caches"
+      "common --disk_cache ~/bazel-diskcache --repository_cache ~/bazel-cache/repository"
+    ] ++ lib.optionals pkgs.stdenv.isLinux [
+      ""
+      "# NixOS: explicit PATH for sandbox — forwarding alone doesn't cover all action types"
+      "build --action_env=PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin"
+      "build --host_action_env=PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin"
+    ]);
+  };
 
-  # Atlassian (non-secret; API token set per-platform via Keychain/sops)
-  home.sessionVariables = {
+  # Atlassian (non-secret config; API token set per-platform via Keychain/sops)
+  # Only on work machines (macOS + cloudbox)
+  home.sessionVariables = lib.mkIf (isDarwin || isCloudbox) {
     ATLASSIAN_EMAIL = "jmohrbacher@wonder.com";
     ATLASSIAN_CLOUD_ID = "70497edc-9c59-45b2-8e47-e46913d4c6cf";
   };
@@ -245,6 +248,7 @@ in
       require("user.settings")
       require("user.mappings")
       require("user.sessions")    -- Session management for tmux-resurrect
+    '' + lib.optionalString (isDarwin || isCloudbox) ''
       require("user.atlassian")   -- :FetchJiraTicket, :FetchConfluencePage
     '';
   };
