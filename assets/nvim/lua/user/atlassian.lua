@@ -1,12 +1,15 @@
 local M = {}
 
--- Helper function to convert HTML to Markdown
+-- Helper function to convert HTML to Markdown using pandoc
 local function html_to_markdown(html_content)
   if not html_content or html_content == "" then
     return ""
   end
 
-  local markdown_content = vim.fn.system({"html2markdown"}, html_content)
+  local markdown_content = vim.fn.system(
+    {"pandoc", "-f", "html", "-t", "gfm", "--wrap=none"},
+    html_content
+  )
   if vim.v.shell_error ~= 0 then
     vim.notify(
       "Error converting HTML to Markdown. Shell error: " .. vim.v.shell_error ..
@@ -227,8 +230,8 @@ function M.fetch_jira_ticket(ticket_key)
     vim.notify("Error: 'jq' command not found in PATH.", vim.log.levels.ERROR)
     return
   end
-  if vim.fn.executable("html2markdown") == 0 then
-    vim.notify("Error: 'html2markdown' command not found in PATH.", vim.log.levels.ERROR)
+  if vim.fn.executable("pandoc") == 0 then
+    vim.notify("Error: 'pandoc' command not found in PATH.", vim.log.levels.ERROR)
     return
   end
 
@@ -454,8 +457,8 @@ function M.fetch_page_content(page_id)
     vim.notify("Error: 'jq' command not found in PATH.", vim.log.levels.ERROR)
     return
   end
-  if vim.fn.executable("html2markdown") == 0 then
-    vim.notify("Error: 'html2markdown' command not found in PATH.", vim.log.levels.ERROR)
+  if vim.fn.executable("pandoc") == 0 then
+    vim.notify("Error: 'pandoc' command not found in PATH.", vim.log.levels.ERROR)
     return
   end
 

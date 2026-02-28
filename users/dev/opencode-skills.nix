@@ -54,6 +54,14 @@ let
       "${assetsPath}/opencode/skills/using-atlassian-cli/REFERENCE.md";
   };
 
+  # fetching-atlassian-content lives in claude assets (shared with claude-skills.nix)
+  fetchingAtlassianSkill = {
+    ".config/opencode/skills/fetching-atlassian-content/SKILL.md".source =
+      "${assetsPath}/claude/skills/fetching-atlassian-content/SKILL.md";
+    ".config/opencode/skills/fetching-atlassian-content/REFERENCE.md".source =
+      "${assetsPath}/claude/skills/fetching-atlassian-content/REFERENCE.md";
+  };
+
   # Superpowers skills: symlink the entire upstream skills directory
   # Uses out-of-store symlink since the repo is cloned via projects.nix, not in the Nix store
   superpowersSkills = {
@@ -74,5 +82,6 @@ in
     // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills
       // atlassianReferences
+      // fetchingAtlassianSkill
     );
 }

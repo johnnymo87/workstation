@@ -99,7 +99,7 @@ in
     # Self-packaged tools (in pkgs/, some auto-updated by CI)
     localPkgs.beads
     localPkgs.ccusage-opencode
-    localPkgs.html2markdown
+    pkgs.pandoc
     opencode
 
     # Cloudflare Workers CLI
