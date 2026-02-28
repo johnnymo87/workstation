@@ -235,6 +235,8 @@ After bootstrap is confirmed working, ensure `PermitRootLogin` is set to `"no"` 
 
 9. **GCE default scopes lack `cloud-platform`** — the VM's service account credentials (from metadata server) don't include Vertex AI access. Must run `gcloud auth application-default login` to create user ADC credentials that override the metadata chain. Without this, Vertex calls fail with `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
 
+10. **`nixos-rebuild switch` can leave SSH unreachable** — if the activation fails mid-way or a race condition prevents sops from reading `/var/lib/sops-age-key.txt`, SSH host keys won't be decrypted and sshd will accept TCP connections but hang during banner exchange. Symptoms: `Connection timed out during banner exchange`. Serial console will show `Cannot read ssh key` and `cannot read keyfile '/var/lib/sops-age-key.txt'`. Fix: hard reset via `gcloud compute instances reset cloudbox --zone=us-east1-b --project=wonder-sandbox`. The VM will reboot cleanly and sops will succeed on the next boot.
+
 ## Removing the temporary external IP
 
 If you switch to IAP tunneling and no longer need the public IP:
