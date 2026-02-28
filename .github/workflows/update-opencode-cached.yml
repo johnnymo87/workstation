@@ -1,0 +1,106 @@
+name: Update opencode-cached
+
+on:
+  schedule:
+    # Every 8 hours (matches opencode-cached's sync-upstream schedule)
+    - cron: '0 2,10,18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: update-opencode-cached
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Check for new release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Current version from nix file
+          current=$(grep 'version = ' users/dev/home.base.nix | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+          # Latest release from opencode-cached
+          latest=$(gh api repos/johnnymo87/opencode-cached/releases/latest --jq '.tag_name' | sed 's/^v//;s/-cached$//')
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+          if [ "$current" = "$latest" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "Already on $current"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+            echo "Update available: $current -> $latest"
+          fi
+
+      - name: Compute hashes
+        if: steps.check.outputs.up_to_date == 'false'
+        id: hashes
+        run: |
+          version="${{ steps.check.outputs.latest }}"
+          base="https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached"
+
+          for asset in opencode-linux-arm64.tar.gz opencode-darwin-arm64.zip opencode-linux-x64.tar.gz opencode-darwin-x64.zip; do
+            hash=$(nix-prefetch-url "${base}/${asset}" 2>/dev/null)
+            sri=$(nix hash convert --hash-algo sha256 --to sri "$hash")
+            # Convert asset name to output key: opencode-linux-arm64.tar.gz -> linux_arm64
+            key=$(echo "$asset" | sed 's/opencode-//;s/\.tar\.gz//;s/\.zip//;s/-/_/')
+            echo "${key}=${sri}" >> "$GITHUB_OUTPUT"
+            echo "$asset -> $sri"
+          done
+
+      - name: Update home.base.nix
+        if: steps.check.outputs.up_to_date == 'false'
+        run: |
+          file="users/dev/home.base.nix"
+          version="${{ steps.check.outputs.latest }}"
+
+          # Update version
+          sed -i "s/version = \"${{ steps.check.outputs.current }}\"/version = \"${version}\"/" "$file"
+
+          # Update hashes - match the line containing each asset name and replace the hash on that line
+          sed -i '/opencode-linux-arm64\.tar\.gz/,/hash =/{s|hash = "sha256-[^"]*"|hash = "${{ steps.hashes.outputs.linux_arm64 }}"|;}' "$file"
+          sed -i '/opencode-darwin-arm64\.zip/,/hash =/{s|hash = "sha256-[^"]*"|hash = "${{ steps.hashes.outputs.darwin_arm64 }}"|;}' "$file"
+          sed -i '/opencode-linux-x64\.tar\.gz/,/hash =/{s|hash = "sha256-[^"]*"|hash = "${{ steps.hashes.outputs.linux_x64 }}"|;}' "$file"
+          sed -i '/opencode-darwin-x64\.zip/,/hash =/{s|hash = "sha256-[^"]*"|hash = "${{ steps.hashes.outputs.darwin_x64 }}"|;}' "$file"
+
+          echo "Updated $file to v${version}"
+          git diff "$file"
+
+      - name: Create PR
+        if: steps.check.outputs.up_to_date == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: |
+          version="${{ steps.check.outputs.latest }}"
+          branch="auto/update-opencode-cached"
+
+          git checkout -B "$branch"
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore(deps): update opencode-cached to ${version}"
+          git push -u origin "$branch" --force
+
+          if gh pr view "$branch" --json number >/dev/null 2>&1; then
+            echo "PR already exists for $branch, force-pushed update"
+          else
+            pr_url=$(gh pr create \
+              --title "chore(deps): update opencode-cached to ${version}" \
+              --body "Automated update of \`opencode-cached\` to \`v${version}-cached\`." \
+              --label "dependencies,automated" \
+              --head "$branch")
+            pr_number=$(gh pr view "$branch" --json number -q '.number')
+            gh pr merge "$pr_number" --auto --squash
+          fi
