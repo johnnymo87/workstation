@@ -308,6 +308,7 @@ in
   # this provides the required package for nix.settings below. (HM #5870)
   nix.package = lib.mkDefault pkgs.nix;
   nix.settings = {
+    experimental-features = [ "nix-command" "flakes" ];
     extra-substituters = [
       "https://devenv.cachix.org"
     ];
