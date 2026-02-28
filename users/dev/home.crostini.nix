@@ -27,11 +27,25 @@ lib.mkIf isCrostini {
     };
   };
 
-  # Crostini (Debian) tmux fix: source hm-session-vars.sh from .bashrc
-  # On NixOS this happens automatically, but on Debian the Nix profile PATH
-  # set in .profile gets clobbered when tmux starts a new login shell.
-  # Sourcing it here ensures ~/.nix-profile/bin is on PATH inside tmux panes.
+  # Crostini (Debian) tmux fix: re-source Nix profile from .bashrc
+  #
+  # Problem: tmux starts a login shell which re-runs /etc/profile (resetting
+  # PATH to just system dirs). Normally /etc/profile.d/nix.sh restores Nix
+  # paths, but nix-daemon.sh has a once-per-shell guard (__ETC_PROFILE_NIX_SOURCED)
+  # that's inherited from the parent shell, so the script exits immediately
+  # without re-adding Nix to PATH.
+  #
+  # Fix: unset the guard and re-source nix-daemon.sh from .bashrc, which runs
+  # after /etc/profile has clobbered PATH.
   programs.bash.initExtra = lib.mkAfter ''
+    # Re-source Nix and HM profiles (tmux login shell fix — see comment above)
+    # Both scripts have once-per-shell guards inherited from the parent env.
+    unset __ETC_PROFILE_NIX_SOURCED
+    if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then
+      . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
+    fi
+
+    unset __HM_SESS_VARS_SOURCED
     if [ -e "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh" ]; then
       . "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh"
     fi
