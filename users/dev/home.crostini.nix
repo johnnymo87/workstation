@@ -19,8 +19,15 @@ lib.mkIf isCrostini {
     };
   };
 
-  # Export Gemini API key for OpenCode's @ai-sdk/google provider
+  # Crostini (Debian) tmux fix: source hm-session-vars.sh from .bashrc
+  # On NixOS this happens automatically, but on Debian the Nix profile PATH
+  # set in .profile gets clobbered when tmux starts a new login shell.
+  # Sourcing it here ensures ~/.nix-profile/bin is on PATH inside tmux panes.
   programs.bash.initExtra = lib.mkAfter ''
+    if [ -e "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh" ]; then
+      . "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh"
+    fi
+
     if [ -r "${config.sops.secrets.gemini_api_key.path}" ]; then
       export GOOGLE_GENERATIVE_AI_API_KEY="$(cat "${config.sops.secrets.gemini_api_key.path}")"
     fi
