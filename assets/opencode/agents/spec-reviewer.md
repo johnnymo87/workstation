@@ -7,8 +7,8 @@ permission:
   glob: allow
   grep: allow
   bash: allow
-  write: false
-  edit: false
+  write: deny
+  edit: deny
 ---
 
 # Spec Compliance Reviewer
