@@ -56,6 +56,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Understanding Workstation](.opencode/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
 | [Setting Up Hetzner](.opencode/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
 | [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) | GCP ARM VM provisioning with nixos-anywhere |
+| [Setting Up Crostini](.opencode/skills/setting-up-crostini/SKILL.md) | Chromebook Crostini setup with Nix + home-manager |
 | [Rebuilding Devbox](.opencode/skills/rebuilding-devbox/SKILL.md) | How to apply changes, full rebuilds |
 | [Troubleshooting Devbox](.opencode/skills/troubleshooting-devbox/SKILL.md) | SSH issues, host keys, NixOS problems |
 | [Automated Updates](.opencode/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |

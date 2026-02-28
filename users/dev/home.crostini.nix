@@ -61,7 +61,7 @@ lib.mkIf isCrostini {
       fi
 
       echo "Cloning $name ..."
-      ${pkgs.git}/bin/git clone --recursive "$url" "$dir" || echo "WARNING: Failed to clone $name (check SSH access)"
+      GIT_SSH_COMMAND="${pkgs.openssh}/bin/ssh" ${pkgs.git}/bin/git clone --recursive "$url" "$dir" || echo "WARNING: Failed to clone $name (check SSH access)"
     }
 
     mkdir -p "${config.home.homeDirectory}/projects"
