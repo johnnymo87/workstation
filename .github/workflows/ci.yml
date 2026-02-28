@@ -7,7 +7,12 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+          - runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,4 +21,4 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v14
 
       - name: Run nix flake check
-        run: nix flake check --no-build
+        run: nix flake check
