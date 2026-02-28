@@ -79,10 +79,17 @@
     # All systems we target
     systems = [ devboxSystem chromebookSystem darwinSystem ];
   in {
-    # Expose local packages for nix-update and nix build
+    # Expose local packages for nix-update and nix build.
+    # Filter out packages whose meta.platforms excludes the target system
+    # (e.g. acli is aarch64-only, so it's not in packages.x86_64-linux).
     packages = builtins.listToAttrs (map (system: {
       name = system;
-      value = localPkgsFor system;
+      value = let
+        all = localPkgsFor system;
+        platform = (pkgsFor system).stdenv.hostPlatform;
+      in nixpkgs.lib.filterAttrs
+        (_: pkg: nixpkgs.lib.meta.availableOn platform pkg)
+        all;
     }) systems);
 
     # NixOS system configuration
