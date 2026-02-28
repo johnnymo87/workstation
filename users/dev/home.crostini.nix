@@ -100,8 +100,8 @@ lib.mkIf isCrostini {
         exec ${pkgs._1password-cli}/bin/op run \
           --env-file=${config.home.homeDirectory}/projects/pigeon/.env.1password -- \
           ${pkgs.nodejs}/bin/node \
-          node_modules/tsx/dist/cli.mjs \
-          src/index.ts
+          ${config.home.homeDirectory}/projects/pigeon/node_modules/tsx/dist/cli.mjs \
+          ${config.home.homeDirectory}/projects/pigeon/packages/daemon/src/index.ts
       ''}";
       Restart = "on-failure";
       RestartSec = 5;
@@ -148,7 +148,7 @@ lib.mkIf isCrostini {
     # Post-clone: install pigeon dependencies
     if [ -d "${config.home.homeDirectory}/projects/pigeon" ] && [ ! -d "${config.home.homeDirectory}/projects/pigeon/node_modules" ]; then
       echo "Installing pigeon dependencies ..."
-      (cd "${config.home.homeDirectory}/projects/pigeon" && ${pkgs.nodejs}/bin/npm install)
+      (cd "${config.home.homeDirectory}/projects/pigeon" && PATH="${pkgs.nodejs}/bin:$PATH" ${pkgs.nodejs}/bin/npm install)
     fi
   '';
 
