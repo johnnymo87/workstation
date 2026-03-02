@@ -260,17 +260,16 @@ in
   # Bash
   programs.bash = {
     enable = true;
-    sessionVariables = {
-      # Vertex AI: Gemini 3.x models require the "global" endpoint.
-      # Without this, OpenCode defaults to "us-east5" which 404s on newer models.
-      GOOGLE_CLOUD_LOCATION = "global";
-    };
     shellAliases = {
       ll = "ls -la";
       ".." = "cd ..";
       "..." = "cd ../..";
     };
     initExtra = ''
+      # Vertex AI: Gemini 3.x models require the "global" endpoint.
+      # Without this, OpenCode defaults to "us-east5" which 404s on newer models.
+      export GOOGLE_CLOUD_LOCATION="global"
+
       # GPG TTY - tmux-aware (from deprecated-dotfiles)
       if [ -n "$TMUX" ]; then
           export GPG_TTY=$(tmux display-message -p '#{pane_tty}')
