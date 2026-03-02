@@ -60,8 +60,7 @@ lib.mkIf isCloudbox {
     google-cloud-sdk # GCP VM management (gcloud, gsutil, bq)
   ];
 
-  # GCP project for Vertex AI (OpenCode auto-discovers this for google-vertex providers)
-  home.sessionVariables.GOOGLE_CLOUD_PROJECT = "wonder-sandbox";
+  # GCP project: read from sops in initExtra below (org-identifying, not in public source)
 
   # Export secrets from sops-nix (system-level decryption to /run/secrets/)
   programs.bash.initExtra = lib.mkAfter ''
@@ -85,6 +84,24 @@ lib.mkIf isCloudbox {
     # Atlassian API token for acli / nvim Atlassian commands
     if [ -r /run/secrets/atlassian_api_token ]; then
       export ATLASSIAN_API_TOKEN="$(cat /run/secrets/atlassian_api_token)"
+    fi
+
+    # Atlassian org config (non-secret but org-identifying)
+    if [ -r /run/secrets/atlassian_site ]; then
+      export ATLASSIAN_SITE="$(cat /run/secrets/atlassian_site)"
+    fi
+
+    if [ -r /run/secrets/atlassian_email ]; then
+      export ATLASSIAN_EMAIL="$(cat /run/secrets/atlassian_email)"
+    fi
+
+    if [ -r /run/secrets/atlassian_cloud_id ]; then
+      export ATLASSIAN_CLOUD_ID="$(cat /run/secrets/atlassian_cloud_id)"
+    fi
+
+    # GCP project for Vertex AI
+    if [ -r /run/secrets/google_cloud_project ]; then
+      export GOOGLE_CLOUD_PROJECT="$(cat /run/secrets/google_cloud_project)"
     fi
 
     # Azure DevOps PAT for private artifact registry

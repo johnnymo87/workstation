@@ -63,6 +63,22 @@
         group = "dev";
         mode = "0400";
       };
+      # Atlassian org config (non-secret but org-identifying)
+      atlassian_site = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      atlassian_email = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      atlassian_cloud_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Azure DevOps PAT (for private Maven/artifact registry)
       azure_devops_pat = {
         owner = "dev";
@@ -87,6 +103,12 @@
         mode = "0400";
       };
       slack_mcp_xoxd_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      # GCP project name (org-identifying)
+      google_cloud_project = {
         owner = "dev";
         group = "dev";
         mode = "0400";
