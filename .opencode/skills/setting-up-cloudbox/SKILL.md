@@ -9,7 +9,7 @@ Cloudbox is a GCP C4a Axion (aarch64-linux) VM running NixOS, provisioned via ni
 
 ## Prerequisites
 
-- `gcloud` CLI authenticated as a user with `roles/owner` on the `wonder-sandbox` project
+- `gcloud` CLI authenticated as a user with `roles/owner` on your GCP project
 - SSH key registered with GCP (or use `gcloud compute ssh` which handles this)
 - The workstation repo checked out locally
 
@@ -17,7 +17,7 @@ Cloudbox is a GCP C4a Axion (aarch64-linux) VM running NixOS, provisioned via ni
 
 ```bash
 gcloud compute instances create cloudbox \
-  --project=wonder-sandbox \
+  --project=my-gcp-project \
   --zone=us-east1-b \
   --machine-type=c4a-standard-4 \
   --image-family=ubuntu-2404-lts-arm64 \
@@ -46,7 +46,7 @@ nixos-anywhere needs outbound internet to download the kexec tarball. Add a temp
 gcloud compute instances add-access-config cloudbox \
   --zone=us-east1-b \
   --access-config-name="bootstrap-nat" \
-  --project=wonder-sandbox
+  --project=my-gcp-project
 ```
 
 Get the assigned IP:
@@ -54,7 +54,7 @@ Get the assigned IP:
 ```bash
 gcloud compute instances describe cloudbox \
   --zone=us-east1-b \
-  --project=wonder-sandbox \
+  --project=my-gcp-project \
   --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
 ```
 
@@ -235,7 +235,7 @@ After bootstrap is confirmed working, ensure `PermitRootLogin` is set to `"no"` 
 
 9. **GCE default scopes lack `cloud-platform`** — the VM's service account credentials (from metadata server) don't include Vertex AI access. Must run `gcloud auth application-default login` to create user ADC credentials that override the metadata chain. Without this, Vertex calls fail with `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
 
-10. **`nixos-rebuild switch` can leave SSH unreachable** — if the activation fails mid-way or a race condition prevents sops from reading `/var/lib/sops-age-key.txt`, SSH host keys won't be decrypted and sshd will accept TCP connections but hang during banner exchange. Symptoms: `Connection timed out during banner exchange`. Serial console will show `Cannot read ssh key` and `cannot read keyfile '/var/lib/sops-age-key.txt'`. Fix: hard reset via `gcloud compute instances reset cloudbox --zone=us-east1-b --project=wonder-sandbox`. The VM will reboot cleanly and sops will succeed on the next boot.
+10. **`nixos-rebuild switch` can leave SSH unreachable** — if the activation fails mid-way or a race condition prevents sops from reading `/var/lib/sops-age-key.txt`, SSH host keys won't be decrypted and sshd will accept TCP connections but hang during banner exchange. Symptoms: `Connection timed out during banner exchange`. Serial console will show `Cannot read ssh key` and `cannot read keyfile '/var/lib/sops-age-key.txt'`. Fix: hard reset via `gcloud compute instances reset cloudbox --zone=us-east1-b --project=my-gcp-project`. The VM will reboot cleanly and sops will succeed on the next boot.
 
 ## Removing the temporary external IP
 
@@ -245,7 +245,7 @@ If you switch to IAP tunneling and no longer need the public IP:
 gcloud compute instances delete-access-config cloudbox \
   --zone=us-east1-b \
   --access-config-name="bootstrap-nat" \
-  --project=wonder-sandbox
+  --project=my-gcp-project
 ```
 
 Then update SSH config to use a `ProxyCommand` with `gcloud compute ssh --tunnel-through-iap`.
