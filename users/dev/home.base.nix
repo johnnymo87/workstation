@@ -260,6 +260,11 @@ in
   # Bash
   programs.bash = {
     enable = true;
+    sessionVariables = {
+      # Vertex AI: Gemini 3.x models require the "global" endpoint.
+      # Without this, OpenCode defaults to "us-east5" which 404s on newer models.
+      GOOGLE_CLOUD_LOCATION = "global";
+    };
     shellAliases = {
       ll = "ls -la";
       ".." = "cd ..";
@@ -312,13 +317,6 @@ in
   programs.fzf = {
     enable = true;
     enableBashIntegration = true;
-  };
-
-  # Session variables (cross-platform, non-secret)
-  home.sessionVariables = {
-    # Vertex AI: Gemini 3.x models require the "global" endpoint.
-    # Without this, OpenCode defaults to "us-east5" which 404s on newer models.
-    GOOGLE_CLOUD_LOCATION = "global";
   };
 
   # Session path
