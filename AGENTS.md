@@ -44,7 +44,6 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 
 ## Automated Dependency Updates
 
-- **Flake inputs** (`devenv`): auto-updated by `.github/workflows/update-devenv.yml` (every 4 hours) using `DeterminateSystems/update-flake-lock`.
 - **Local packages** (`beads`, `ccusage-opencode`): auto-updated by `.github/workflows/update-packages.yml` (daily) using `nix-update`.
 - **opencode-cached**: auto-updated by `.github/workflows/update-opencode-cached.yml` (every 8 hours) -- checks `johnnymo87/opencode-cached` releases, computes platform hashes, updates `home.base.nix`.
 - All workflows open a PR with auto-merge enabled.

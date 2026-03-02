@@ -139,7 +139,7 @@ LLM tools are either self-packaged in `pkgs/` or come from flake inputs:
 | beads | `pkgs/beads/` | Distributed issue tracker, auto-updated daily via nix-update |
 | ccusage-opencode | `pkgs/ccusage-opencode/` | Usage tracking for OpenCode, auto-updated daily |
 | opencode | inline in `home.base.nix` | Cached fork for aarch64, upstream for x86_64 |
-| devenv | devenv flake input | Development environments |
+| devenv | nixpkgs | Development environments (stable channel) |
 
 Local packages are exposed as `packages.<system>.<name>` in `flake.nix` and passed to home-manager via `localPkgs`.
 

@@ -19,17 +19,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    devenv = {
-      url = "github:cachix/devenv";
-    };
-
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, devenv, sops-nix, ... }@inputs:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, sops-nix, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -125,7 +121,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self devenv ccrTunnel;
+        inherit self ccrTunnel;
         localPkgs = localPkgsFor devboxSystem;
         assetsPath = ./assets;
         projects = projectsFor "devbox";
@@ -145,7 +141,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self devenv ccrTunnel;
+        inherit self ccrTunnel;
         localPkgs = localPkgsFor devboxSystem;
         assetsPath = ./assets;
         projects = projectsFor "cloudbox";
@@ -165,7 +161,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self devenv ccrTunnel;
+        inherit self ccrTunnel;
         localPkgs = localPkgsFor chromebookSystem;
         assetsPath = ./assets;
         projects = projectsFor "crostini";
@@ -188,7 +184,7 @@
           home-manager.useUserPackages = true;
           home-manager.backupFileExtension = "hm-backup";
           home-manager.extraSpecialArgs = {
-            inherit devenv ccrTunnel pinentry-op;
+            inherit ccrTunnel pinentry-op;
             localPkgs = localPkgsFor darwinSystem;
             assetsPath = ./assets;
         projects = projectsFor "darwin";

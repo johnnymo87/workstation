@@ -1,10 +1,8 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, localPkgs, devenv, assetsPath, isDarwin, isCloudbox, isCrostini, ... }:
+{ config, pkgs, lib, localPkgs, assetsPath, isDarwin, isCloudbox, isCrostini, ... }:
 
 let
-  # Use devenv directly from cachix (no override, so cachix cache hits work)
-  devenvPkg = devenv.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
   # Clipboard commands via tmux (work over SSH, inside tmux sessions)
   tcopy = pkgs.writeShellApplication {
@@ -113,7 +111,7 @@ in
     pkgs.gh
 
     # Other tools
-    devenvPkg
+    pkgs.devenv
   ]
   # Work tools (macOS + cloudbox only)
   ++ lib.optionals (isDarwin || isCloudbox) [
@@ -294,7 +292,7 @@ in
     };
   };
 
-  # Nix binary caches (devenv uses its own nixpkgs, so cache avoids building from source)
+  # Nix binary caches (devenv projects use their own flake inputs, cachix avoids rebuilds)
   # mkDefault: in module mode (nix-darwin/NixOS), home-manager's nixos/common.nix
   # forwards the system nix.package into each user, causing a duplicate definition
   # error. mkDefault lets the system's value win. In standalone mode (devbox),

@@ -5,15 +5,9 @@ description: How the devbox automatically updates llm-agents (claude-code) via G
 
 # Automated Updates
 
-The devbox keeps dependencies up to date via two GitHub Actions workflows and a systemd timer.
+The devbox keeps dependencies up to date via GitHub Actions workflows and a systemd timer.
 
 ## What Gets Updated
-
-### Flake inputs (every 4 hours)
-
-- **devenv**: Development environment tool from Cachix
-
-Updated by `.github/workflows/update-devenv.yml` using `DeterminateSystems/update-flake-lock`.
 
 ### Local packages (daily)
 
@@ -27,9 +21,6 @@ Updated by `.github/workflows/update-packages.yml` using `nix-update`. Package d
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ GitHub Actions                                              │
-│                                                             │
-│  Flake inputs (every 4h):                                   │
-│    update-devenv.yml → updates flake.lock → PR → auto-merge │
 │                                                             │
 │  Local packages (daily):                                    │
 │    update-packages.yml → nix-update → PR → auto-merge       │
@@ -54,7 +45,6 @@ Updated by `.github/workflows/update-packages.yml` using `nix-update`. Package d
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | `ci.yml` | `.github/workflows/` | Runs `nix flake check` on PRs |
-| `update-devenv.yml` | `.github/workflows/` | Updates devenv flake input, opens PR |
 | `update-packages.yml` | `.github/workflows/` | Updates local packages via nix-update |
 | `UPDATE_TOKEN` | GitHub Secrets | PAT for PR creation + CI triggers |
 | `pull-workstation` | `~/.local/bin/` | Script to pull + apply home-manager |
@@ -74,7 +64,6 @@ Updated by `.github/workflows/update-packages.yml` using `nix-update`. Package d
 
 ```bash
 # Recent workflow runs
-gh run list --workflow=update-devenv.yml --limit=5
 gh run list --workflow=update-packages.yml --limit=5
 
 # Open update PRs
@@ -106,7 +95,6 @@ journalctl --user -u home-manager-auto-expire -n 50
 ### Trigger GitHub Update
 
 ```bash
-gh workflow run update-devenv.yml
 gh workflow run update-packages.yml
 # Or update a single package:
 gh workflow run update-packages.yml -f package=beads
@@ -180,12 +168,6 @@ nix-collect-garbage
 ## Configuration
 
 ### Update Frequency
-
-**Flake inputs (devenv):** Edit `.github/workflows/update-devenv.yml`:
-```yaml
-schedule:
-  - cron: '0 */4 * * *'  # Change */4 to desired interval
-```
 
 **Local packages:** Edit `.github/workflows/update-packages.yml`:
 ```yaml
