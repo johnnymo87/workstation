@@ -12,32 +12,32 @@ Jira CRUD operations from the terminal using `acli`.
 ```bash
 # Auth (one-time)
 echo "$ATLASSIAN_API_TOKEN" > /tmp/token.txt && \
-  acli jira auth login --site wonder.atlassian.net --email "$ATLASSIAN_EMAIL" --token < /tmp/token.txt && \
+  acli jira auth login --site "$ATLASSIAN_SITE" --email "$ATLASSIAN_EMAIL" --token < /tmp/token.txt && \
   rm /tmp/token.txt
 
 # Create ticket
-acli jira workitem create --project COPS --type Task \
+acli jira workitem create --project PROJ --type Task \
   --summary "Add integration tests" --description-file desc.md \
-  --assignee "712020:06f441a1-e941-43ab-884f-4cb37b207f95"
+  --assignee "$ATLASSIAN_ASSIGNEE_ID"
 
 # View ticket
-acli jira workitem view --key COPS-1234 --json | jq .
+acli jira workitem view --key PROJ-1234 --json | jq .
 
 # Edit ticket
-acli jira workitem edit --key COPS-1234 --summary "Updated summary"
+acli jira workitem edit --key PROJ-1234 --summary "Updated summary"
 
 # Add comment
-acli jira workitem comment create --key COPS-1234 --body "Comment text"
+acli jira workitem comment create --key PROJ-1234 --body "Comment text"
 ```
 
-## Wonder Config
+## Org Config
 
 | Setting | Value |
 |---------|-------|
-| Subdomain | `wonder.atlassian.net` |
-| Project | `COPS` |
-| Default Assignee | `712020:06f441a1-e941-43ab-884f-4cb37b207f95` |
-| BA 2.0 Epic | `COPS-4865` |
+| Subdomain | `$ATLASSIAN_SITE` |
+| Project | `PROJ` |
+| Default Assignee | `$ATLASSIAN_ASSIGNEE_ID` |
+| Active Epic | `PROJ-5678` |
 
 ## Environment Variables
 
