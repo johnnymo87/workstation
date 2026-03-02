@@ -25,7 +25,8 @@
       "type": "local",
       "command": [
         "playwright-mcp",
-        "--headless",
+        "--cdp-endpoint",
+        "http://localhost:9222",
         "--caps",
         "vision,devtools"
       ],
