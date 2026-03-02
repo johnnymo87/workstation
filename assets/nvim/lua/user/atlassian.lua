@@ -1,5 +1,14 @@
 local M = {}
 
+-- Get Atlassian site from environment (e.g., "company.atlassian.net")
+local function get_atlassian_site()
+  local site = os.getenv("ATLASSIAN_SITE")
+  if not site or site == "" then
+    error("ATLASSIAN_SITE environment variable is not set. Set it in macOS Keychain (atlassian-site) or sops (cloudbox).")
+  end
+  return site
+end
+
 -- Helper function to convert HTML to Markdown using pandoc
 local function html_to_markdown(html_content)
   if not html_content or html_content == "" then
@@ -69,7 +78,7 @@ local function get_comment_parent(comment_id, comment_type, email, api_token)
   local endpoint = comment_type == "ConfluenceInlineComment" and "inline-comments" or "footer-comments"
   local command = string.format(
     "curl --fail --silent --show-error --request GET " ..
-    "--url 'https://wonder.atlassian.net/wiki/api/v2/%s/%s' " ..
+    "--url 'https://" .. get_atlassian_site() .. "/wiki/api/v2/%s/%s' " ..
     "--user '%s:%s' " ..
     "--header 'Accept: application/json' " ..
     "| jq -r '.parentCommentId // \"null\"'",
@@ -184,7 +193,7 @@ local function download_jira_attachments(ticket_key, attachments, email, api_tok
 
       local download_cmd = string.format(
         "curl -sS -L --fail " ..
-        "--url 'https://wonder.atlassian.net/rest/api/3/attachment/content/%s' " ..
+        "--url 'https://" .. get_atlassian_site() .. "/rest/api/3/attachment/content/%s' " ..
         "--user '%s:%s' " ..
         "--output %s",
         attachment_id,
@@ -244,7 +253,7 @@ function M.fetch_jira_ticket(ticket_key)
   -- Fetch ticket data
   local fetch_ticket_command = string.format(
     "curl --fail --silent --show-error --request GET " ..
-    "--url 'https://wonder.atlassian.net/rest/api/3/issue/%s?fields=key,summary,description,attachment&expand=renderedFields' " ..
+    "--url 'https://" .. get_atlassian_site() .. "/rest/api/3/issue/%s?fields=key,summary,description,attachment&expand=renderedFields' " ..
     "--user '%s:%s' " ..
     "--header 'Accept: application/json' " ..
     "| jq '{ \"key\": .key, \"summary\": .fields.summary, \"description\": .renderedFields.description, \"attachments\": .fields.attachment }'",
@@ -275,7 +284,7 @@ function M.fetch_jira_ticket(ticket_key)
   -- Fetch comments
   local fetch_comments_command = string.format(
     "curl --fail --silent --show-error --request GET " ..
-    "--url 'https://wonder.atlassian.net/rest/api/3/issue/%s/comment?expand=renderedBody' " ..
+    "--url 'https://" .. get_atlassian_site() .. "/rest/api/3/issue/%s/comment?expand=renderedBody' " ..
     "--user '%s:%s' " ..
     "--header 'Accept: application/json' " ..
     "| jq '.comments'",
@@ -378,7 +387,7 @@ local function download_attachments(page_id, email, api_token)
   -- List attachments
   local list_cmd = string.format(
     "curl --silent --show-error " ..
-    "--url 'https://wonder.atlassian.net/wiki/rest/api/content/%s/child/attachment' " ..
+    "--url 'https://" .. get_atlassian_site() .. "/wiki/rest/api/content/%s/child/attachment' " ..
     "--user '%s:%s' " ..
     "--header 'Accept: application/json'",
     page_id,
@@ -410,7 +419,7 @@ local function download_attachments(page_id, email, api_token)
 
       local download_cmd = string.format(
         "curl -sS -L --fail " ..
-        "--url 'https://wonder.atlassian.net/wiki/rest/api/content/%s/child/attachment/%s/download' " ..
+        "--url 'https://" .. get_atlassian_site() .. "/wiki/rest/api/content/%s/child/attachment/%s/download' " ..
         "--user '%s:%s' " ..
         "--output %s",
         page_id,
@@ -524,7 +533,7 @@ query getPageWithComments($id: ID!) {
   -- Execute GraphQL query
   local graphql_command = string.format(
     "curl --fail --silent --show-error --request POST " ..
-    "--url 'https://wonder.atlassian.net/gateway/api/graphql' " ..
+    "--url 'https://" .. get_atlassian_site() .. "/gateway/api/graphql' " ..
     "--user '%s:%s' " ..
     "--header 'Accept: application/json' " ..
     "--header 'Content-Type: application/json' " ..
