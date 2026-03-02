@@ -120,9 +120,10 @@ in
       # Fetch credentials from Keychain
       bc_username="$(/usr/bin/security find-generic-password -a basecamp-mcp -s basecamp-mcp-username -w 2>/dev/null || true)"
       bc_password="$(/usr/bin/security find-generic-password -a basecamp-mcp -s basecamp-mcp-password -w 2>/dev/null || true)"
+      bc_account_id="$(/usr/bin/security find-generic-password -s basecamp-account-id -w 2>/dev/null || true)"
 
-      # If either credential is missing, delete mcp.basecamp and exit cleanly
-      if [[ -z "''${bc_username}" ]] || [[ -z "''${bc_password}" ]]; then
+      # If any credential is missing, delete mcp.basecamp and exit cleanly
+      if [[ -z "''${bc_username}" ]] || [[ -z "''${bc_password}" ]] || [[ -z "''${bc_account_id}" ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.basecamp)' "$runtime" > "$tmp"
@@ -141,6 +142,7 @@ in
           --arg user "''${bc_username}" \
           --arg pass "''${bc_password}" \
           --arg home "$HOME" \
+          --arg account_id "''${bc_account_id}" \
           '.mcp.basecamp = {
             "type": "local",
             "command": [
@@ -151,8 +153,8 @@ in
             "environment": {
               "BASECAMP_USERNAME": $user,
               "BASECAMP_PASSWORD": $pass,
-              "BASECAMP_ACCOUNT_ID": "3671212",
-              "USER_AGENT": "Basecamp MCP Server (espresso@wonder.com)"
+              "BASECAMP_ACCOUNT_ID": $account_id,
+              "USER_AGENT": ("Basecamp MCP Server (" + $user + ")")
             }
           }' "$runtime" > "$tmp"
 
