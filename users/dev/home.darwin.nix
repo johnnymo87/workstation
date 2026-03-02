@@ -168,6 +168,16 @@ lib.mkIf isDarwin {
       GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" && export GH_TOKEN="$GH_TOKEN_VAL"
       unset GH_TOKEN_VAL
 
+      # Atlassian config (from macOS Keychain)
+      ATLASSIAN_SITE_VAL="$(/usr/bin/security find-generic-password -s atlassian-site -w 2>/dev/null)" && export ATLASSIAN_SITE="$ATLASSIAN_SITE_VAL"
+      unset ATLASSIAN_SITE_VAL
+
+      ATLASSIAN_EMAIL_VAL="$(/usr/bin/security find-generic-password -s atlassian-email -w 2>/dev/null)" && export ATLASSIAN_EMAIL="$ATLASSIAN_EMAIL_VAL"
+      unset ATLASSIAN_EMAIL_VAL
+
+      ATLASSIAN_CLOUD_ID_VAL="$(/usr/bin/security find-generic-password -s atlassian-cloud-id -w 2>/dev/null)" && export ATLASSIAN_CLOUD_ID="$ATLASSIAN_CLOUD_ID_VAL"
+      unset ATLASSIAN_CLOUD_ID_VAL
+
       # Atlassian API token for acli / nvim Atlassian commands (from macOS Keychain)
       ATLASSIAN_VAL="$(/usr/bin/security find-generic-password -s atlassian-api-token -w 2>/dev/null)" && export ATLASSIAN_API_TOKEN="$ATLASSIAN_VAL"
       unset ATLASSIAN_VAL
