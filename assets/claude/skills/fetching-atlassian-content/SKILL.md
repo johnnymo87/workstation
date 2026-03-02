@@ -6,13 +6,13 @@ Export Confluence pages and Jira tickets to local Markdown files with image atta
 
 ```bash
 # Fetch Confluence page
-nvim --headless output.md -c "FetchConfluencePage 3963715585" -c "write" -c "quit"
+nvim --headless output.md -c "FetchConfluencePage 1234567890" -c "write" -c "quit"
 
 # Fetch Jira ticket
-nvim --headless ticket.md -c "FetchJiraTicket COPS-1234" -c "write" -c "quit"
+nvim --headless ticket.md -c "FetchJiraTicket PROJ-1234" -c "write" -c "quit"
 
 # Extract page ID from URL
-echo "https://wonder.atlassian.net/wiki/spaces/CT/pages/3963715585/Title" | grep -oE '[0-9]{10}'
+echo "https://company.atlassian.net/wiki/spaces/ENG/pages/1234567890/Title" | grep -oE '[0-9]{10}'
 ```
 
 ## Output Locations

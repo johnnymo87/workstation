@@ -20,7 +20,7 @@ Configured via home-manager (macOS Keychain / sops-nix secrets):
 
 ```bash
 nvim --headless output.md \
-  -c "FetchConfluencePage 3963715585" \
+  -c "FetchConfluencePage 1234567890" \
   -c "write" \
   -c "quit"
 ```
@@ -28,7 +28,7 @@ nvim --headless output.md \
 ### Batch Fetch
 
 ```bash
-for page_id in 3963715585 3963191313; do
+for page_id in 1234567890 0987654321; do
   nvim --headless "page-${page_id}.md" \
     -c "FetchConfluencePage ${page_id}" \
     -c "write" \
@@ -39,13 +39,13 @@ done
 ### Extract Page ID from URL
 
 ```
-https://wonder.atlassian.net/wiki/spaces/CT/pages/3963715585/Page+Title
-                                                ^^^^^^^^^^
-                                                 page ID
+https://company.atlassian.net/wiki/spaces/ENG/pages/1234567890/Page+Title
+                                                 ^^^^^^^^^^
+                                                  page ID
 ```
 
 ```bash
-url="https://wonder.atlassian.net/wiki/spaces/CT/pages/3963715585/Page+Title"
+url="https://company.atlassian.net/wiki/spaces/ENG/pages/1234567890/Page+Title"
 page_id=$(echo "$url" | grep -oE '[0-9]{10}')
 ```
 
@@ -53,7 +53,7 @@ page_id=$(echo "$url" | grep -oE '[0-9]{10}')
 
 ```bash
 nvim --headless ticket.md \
-  -c "FetchJiraTicket COPS-1234" \
+  -c "FetchJiraTicket PROJ-1234" \
   -c "write" \
   -c "quit"
 ```
@@ -67,11 +67,11 @@ nvim --headless ticket.md \
 
 ~/.cache/atlassian-attachments/
 ├── confluence/
-│   └── 3963715585/                        # Page ID
+│   └── 1234567890/                        # Page ID
 │       ├── diagram1.png
 │       └── diagram2.png
 └── jira/
-    └── COPS-1234/                         # Ticket key
+    └── PROJ-1234/                         # Ticket key
         ├── screenshot1.png
         └── diagram.jpg
 ```
@@ -83,7 +83,7 @@ nvim --headless ticket.md \
 ```markdown
 Page Title
 
-> **Attachments downloaded to**: `~/.cache/atlassian-attachments/confluence/3963715585/`
+> **Attachments downloaded to**: `~/.cache/atlassian-attachments/confluence/1234567890/`
 
 [page content in markdown...]
 
@@ -107,9 +107,9 @@ Page Title
 ### Jira Ticket
 
 ```markdown
-COPS-1234 Ticket summary here
+PROJ-1234 Ticket summary here
 
-> **Attachments downloaded to**: `~/.cache/atlassian-attachments/jira/COPS-1234/`
+> **Attachments downloaded to**: `~/.cache/atlassian-attachments/jira/PROJ-1234/`
 
 [description in markdown...]
 
@@ -126,17 +126,17 @@ COPS-1234 Ticket summary here
 
 ```bash
 # User provides Confluence URL
-URL="https://wonder.atlassian.net/wiki/spaces/CT/pages/3963715585/Product+Catalog+Service"
+URL="https://company.atlassian.net/wiki/spaces/ENG/pages/1234567890/Example+Page+Title"
 PAGE_ID=$(echo "$URL" | grep -oE '[0-9]{10}')
 
 # Fetch with descriptive filename
-nvim --headless product-catalog-service.md \
+nvim --headless example-page.md \
   -c "FetchConfluencePage ${PAGE_ID}" \
   -c "write" \
   -c "quit"
 
 # Verify
-ls -lh product-catalog-service.md
+ls -lh example-page.md
 ls -lh ~/.cache/atlassian-attachments/confluence/${PAGE_ID}/
 ```
 
@@ -150,7 +150,7 @@ which curl jq pandoc nvim
 
 # Test API access
 curl -s -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN" \
-  "https://api.atlassian.com/ex/confluence/$ATLASSIAN_CLOUD_ID/wiki/api/v2/pages/3963715585" | jq .
+  "https://api.atlassian.com/ex/confluence/$ATLASSIAN_CLOUD_ID/wiki/api/v2/pages/1234567890" | jq .
 
 # Check Neovim plugin exists
 ls -l ~/.config/nvim/lua/user/atlassian.lua
