@@ -139,13 +139,6 @@ in
     ]);
   };
 
-  # Atlassian (non-secret config; API token set per-platform via Keychain/sops)
-  # Only on work machines (macOS + cloudbox)
-  home.sessionVariables = lib.mkIf (isDarwin || isCloudbox) {
-    ATLASSIAN_EMAIL = "jmohrbacher@wonder.com";
-    ATLASSIAN_CLOUD_ID = "70497edc-9c59-45b2-8e47-e46913d4c6cf";
-  };
-
   # Git
   programs.git = {
     enable = true;
