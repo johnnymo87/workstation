@@ -44,7 +44,7 @@ Current env vars managed this way:
 | `ATLASSIAN_CLOUD_ID` | `atlassian-cloud-id` | `atlassian_cloud_id` |
 | `ATLASSIAN_API_TOKEN` | `atlassian-api-token` | `atlassian_api_token` |
 | `BASECAMP_ACCOUNT_ID` | `basecamp-account-id` | N/A |
-| `GOOGLE_CLOUD_PROJECT` | N/A | `google_cloud_project` |
+| `GOOGLE_CLOUD_PROJECT` | `google-cloud-project` | `google_cloud_project` |
 
 **To add a new env var:**
 1. macOS: Add Keychain read in `users/dev/home.darwin.nix` initExtra

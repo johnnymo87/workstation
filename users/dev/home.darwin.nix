@@ -186,6 +186,10 @@ lib.mkIf isDarwin {
       AZDO_VAL="$(/usr/bin/security find-generic-password -s azure-devops-pat -w 2>/dev/null)" && export SYSTEM_ACCESSTOKEN="$AZDO_VAL"
       unset AZDO_VAL
 
+      # GCP project for Vertex AI (from macOS Keychain)
+      GCP_VAL="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null)" && export GOOGLE_CLOUD_PROJECT="$GCP_VAL"
+      unset GCP_VAL
+
       for file in ~/.bashrc.d/*.bashrc; do
         [ -r "$file" ] && source "$file"
       done

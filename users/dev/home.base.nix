@@ -316,6 +316,13 @@ in
     enableBashIntegration = true;
   };
 
+  # Session variables (cross-platform, non-secret)
+  home.sessionVariables = {
+    # Vertex AI: Gemini 3.x models require the "global" endpoint.
+    # Without this, OpenCode defaults to "us-east5" which 404s on newer models.
+    GOOGLE_CLOUD_LOCATION = "global";
+  };
+
   # Session path
   home.sessionPath = [
     "$HOME/.local/bin"
