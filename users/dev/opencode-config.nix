@@ -1,10 +1,22 @@
 # OpenCode configuration management
 # Manages opencode.json via home-manager
 # with merge-on-activate pattern (runtime keys preserved, managed keys enforced)
-{ config, lib, pkgs, localPkgs, assetsPath, isCloudbox, ... }:
+{ config, lib, pkgs, localPkgs, assetsPath, isCloudbox ? false, isCrostini ? false, ... }:
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
+  isDevbox = pkgs.stdenv.isLinux && !isCloudbox && !isCrostini;
+  useGeminiForAgents = isDarwin || isDevbox;
+  geminiModel = "google-vertex/gemini-3.1-pro-preview";
+
+  # Patch agent files if needed to override the sonnet hardcoded model
+  patchAgent = name: src:
+    if useGeminiForAgents then
+      pkgs.runCommand "''${name}-gemini.md" {} ''
+        sed 's|model: anthropic/claude-sonnet-4-6|model: ${geminiModel}|' ${src} > $out
+      ''
+    else
+      src;
 
   # ---------------------------------------------------------------------------
   # opencode.json managed config
@@ -44,13 +56,13 @@ in
    # Custom agents via OpenCode-native markdown format
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as YAML map
    # (NOT Claude Code-style ~/.claude/agents/ with comma-separated tools string)
-   xdg.configFile."opencode/agents/slack.md".source = "${assetsPath}/opencode/agents/slack.md";
-   xdg.configFile."opencode/agents/librarian.md".source = "${assetsPath}/opencode/agents/librarian.md";
-   xdg.configFile."opencode/agents/oracle.md".source = "${assetsPath}/opencode/agents/oracle.md";
-   xdg.configFile."opencode/agents/vision-qa.md".source = "${assetsPath}/opencode/agents/vision-qa.md";
-   xdg.configFile."opencode/agents/implementer.md".source = "${assetsPath}/opencode/agents/implementer.md";
-   xdg.configFile."opencode/agents/spec-reviewer.md".source = "${assetsPath}/opencode/agents/spec-reviewer.md";
-   xdg.configFile."opencode/agents/code-reviewer.md".source = "${assetsPath}/opencode/agents/code-reviewer.md";
+   xdg.configFile."opencode/agents/slack.md".source = patchAgent "slack" "${assetsPath}/opencode/agents/slack.md";
+   xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
+   xdg.configFile."opencode/agents/oracle.md".source = patchAgent "oracle" "${assetsPath}/opencode/agents/oracle.md";
+   xdg.configFile."opencode/agents/vision-qa.md".source = patchAgent "vision-qa" "${assetsPath}/opencode/agents/vision-qa.md";
+   xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
+   xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
+   xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
 
    # Plugins (SRP: non-interactive env, compaction context, subagent routing)
    xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
