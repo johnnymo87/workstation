@@ -107,6 +107,23 @@ let
 
       mkdir -p "$skill_dir"
 
+      # Load Atlassian env vars (activation scripts don't have .bashrc sourced)
+      if [ -z "''${ATLASSIAN_API_TOKEN:-}" ]; then
+        ${if isDarwin then ''
+          export ATLASSIAN_SITE=$(/usr/bin/security find-generic-password -s atlassian-site -w 2>/dev/null || echo "")
+          export ATLASSIAN_EMAIL=$(/usr/bin/security find-generic-password -s atlassian-email -w 2>/dev/null || echo "")
+          export ATLASSIAN_API_TOKEN=$(/usr/bin/security find-generic-password -s atlassian-api-token -w 2>/dev/null || echo "")
+          export ATLASSIAN_CLOUD_ID=$(/usr/bin/security find-generic-password -s atlassian-cloud-id -w 2>/dev/null || echo "")
+        '' else ''
+          if [ -r /run/secrets/atlassian_api_token ]; then
+            export ATLASSIAN_SITE="$(cat /run/secrets/atlassian_site 2>/dev/null || echo "")"
+            export ATLASSIAN_EMAIL="$(cat /run/secrets/atlassian_email 2>/dev/null || echo "")"
+            export ATLASSIAN_API_TOKEN="$(cat /run/secrets/atlassian_api_token 2>/dev/null || echo "")"
+            export ATLASSIAN_CLOUD_ID="$(cat /run/secrets/atlassian_cloud_id 2>/dev/null || echo "")"
+          fi
+        ''}
+      fi
+
       # Skip if all required env vars aren't set
       if [ -z "''${ATLASSIAN_SITE:-}" ] || [ -z "''${ATLASSIAN_EMAIL:-}" ] || \
          [ -z "''${ATLASSIAN_API_TOKEN:-}" ] || [ -z "''${ATLASSIAN_CLOUD_ID:-}" ]; then
@@ -115,8 +132,15 @@ let
       fi
 
       echo "fetchConfluenceSkills: fetching $skill_name/$file_name (page $page_id)..."
-      if ${pkgs.neovim}/bin/nvim --headless "$skill_file" \
-           -c "FetchConfluencePage $page_id" -c "write" -c "quit" 2>/dev/null; then
+      # Use configured nvim from profile so plugins (atlassian.lua) are loaded
+      local nvim_bin="${config.home.homeDirectory}/.nix-profile/bin/nvim"
+      if [ ! -x "$nvim_bin" ]; then
+        # Fallback for macOS if not in nix profile
+        nvim_bin="nvim"
+      fi
+
+      if PATH="${config.home.homeDirectory}/.nix-profile/bin:${pkgs.curl}/bin:$PATH" $nvim_bin --headless "$skill_file" \
+           -c "FetchConfluencePage $page_id" -c "write" -c "quit" >/dev/null 2>&1; then
         echo "fetchConfluenceSkills: $skill_name/$file_name updated"
       else
         echo "fetchConfluenceSkills: WARNING: failed to fetch $skill_name/$file_name"
