@@ -115,11 +115,57 @@ echo $GOOGLE_GENERATIVE_AI_API_KEY | head -c 10
 |------|---------|
 | `flake.nix` | `homeConfigurations.livia` (x86_64-linux, `isCrostini = true`) |
 | `scripts/setup-crostini.sh` | One-time system config (nix.conf, flakes) |
+| `scripts/update-ssh-config-crostini.sh` | SSH config for devbox connection (port forwards) |
 | `users/dev/home.crostini.nix` | Crostini-specific HM: identity, sops, git, projects |
 | `users/dev/tmux.crostini.nix` | Tmux plugins (resurrect, catppuccin, continuum) |
 | `users/dev/home.base.nix` | Shared config (cross-platform) |
 | `secrets/chromebook.yaml` | Encrypted secrets (age key on Chromebook) |
 | `secrets/.sops.yaml` | Age public key for chromebook |
+
+## Connecting to the Devbox
+
+Livia's SSH key is authorized on the devbox `dev` user. To connect, configure the SSH hosts with the devbox IP:
+
+```bash
+cd ~/projects/workstation
+bash scripts/update-ssh-config-crostini.sh <devbox-ip>
+```
+
+This generates two SSH hosts in `~/.ssh/config`:
+
+| Host | Purpose |
+|------|---------|
+| `devbox` | Interactive sessions + Chrome CDP reverse tunnel (9222) |
+| `devbox-tunnel` | Same as above + local forward for citadels UI (4173) |
+
+### Port forwarding
+
+| Port | Direction | Purpose |
+|------|-----------|---------|
+| 4173 | Local (-L) | Citadels UI from devbox accessible at `localhost:4173` in Chromebook browser |
+| 9222 | Remote (-R) | Chrome DevTools Protocol -- devbox AI controls Chromebook Chrome |
+
+### Usage
+
+```bash
+# Normal interactive session (just CDP tunnel)
+ssh devbox
+
+# Development session with citadels UI forwarded
+ssh devbox-tunnel
+# Then open http://localhost:4173 in Chromebook browser
+```
+
+### Remote browser control
+
+To let AI on the devbox control a Chrome browser on the Chromebook:
+
+1. Connect with `ssh devbox` or `ssh devbox-tunnel` (both forward port 9222)
+2. Launch Chrome with CDP on the Chromebook:
+   ```bash
+   google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-dev-session
+   ```
+3. AI on devbox can connect via `chromium.connectOverCDP('http://localhost:9222')`
 
 ## Gotchas
 

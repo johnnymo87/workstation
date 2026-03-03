@@ -29,6 +29,10 @@
     url = "git@github.com:johnnymo87/my-podcasts.git";
     platforms = [ "devbox" ];
   };
+  citadels = {
+    url = "https://github.com/livia0804/citadels.git";
+    platforms = [ "devbox" ];
+  };
 
   # Add more projects as needed:
   # my-project = { url = "git@github.com:org/repo.git"; };
