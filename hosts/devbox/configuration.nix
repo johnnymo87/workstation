@@ -299,6 +299,7 @@
     linger = true;  # Allow user services to run without active login
     openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIjoX7P9gYCGqSbqoIvy/seqAbtzbLAdhaGCYRRVbDR2 johnnymo87@gmail.com"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFZW/G8i9mAYOB7ls4p16j5HiaGe+XXHmsOW73eDsmf1 delacroix.livialou@gmail.com"
     ];
   };
 
