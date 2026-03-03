@@ -89,7 +89,7 @@ let
   #   4. The public SKILL.md can reference the companion file
   confluenceSkills = [
     # Add entries as pages are created:
-    # { pageId = "1234567890"; skillName = "working-with-kubernetes"; fileName = "INTERNAL.md"; }
+    { pageId = "4909269028"; skillName = "working-with-kubernetes"; fileName = "INTERNAL.md"; }
   ];
 
   # Activation script: fetch Confluence pages into skill directories
