@@ -113,6 +113,23 @@
         group = "dev";
         mode = "0400";
       };
+      # ba CLI GitHub repo path (org/repo, org-identifying)
+      ba_cli_repo = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      # Jenkins credentials (for ba login)
+      jenkins_api_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      jenkins_user = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
   };
 

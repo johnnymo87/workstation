@@ -55,6 +55,7 @@ lib.mkIf isCloudbox {
         done
       '';
     }))
+    awscli2          # AWS CLI (EKS kubeconfig credential plugin)
     kubelogin        # Azure AD credential plugin for kubectl
     kubectl          # Kubernetes CLI (for AKS clusters)
     google-cloud-sdk # GCP VM management (gcloud, gsutil, bq)
@@ -109,8 +110,81 @@ lib.mkIf isCloudbox {
       export SYSTEM_ACCESSTOKEN="$(cat /run/secrets/azure_devops_pat)"
     fi
 
+    # ba CLI config (org-identifying, used by install-ba activation script and ba login)
+    if [ -r /run/secrets/ba_cli_repo ]; then
+      export BA_CLI_REPO="$(cat /run/secrets/ba_cli_repo)"
+    fi
+
+    # ba uses GITHUB_API_TOKEN (same token as GH_TOKEN, different var name)
+    if [ -r /run/secrets/github_api_token ]; then
+      export GITHUB_API_TOKEN="$(cat /run/secrets/github_api_token)"
+    fi
+
+    # Jenkins credentials (for ba login)
+    if [ -r /run/secrets/jenkins_api_token ]; then
+      export JENKINS_API_TOKEN="$(cat /run/secrets/jenkins_api_token)"
+    fi
+    if [ -r /run/secrets/jenkins_user ]; then
+      export JENKINS_USER="$(cat /run/secrets/jenkins_user)"
+    fi
+
     # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
     export OPENCODE_ENABLE_EXA=1
+  '';
+
+  # Install/update ba CLI from private GitHub release
+  # Downloads linux-arm64 binary via gh CLI, caches by version in ~/.local/bin
+  home.activation.installBaCli = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    ba_repo=""
+    if [ -r /run/secrets/ba_cli_repo ]; then
+      ba_repo="$(cat /run/secrets/ba_cli_repo)"
+    fi
+
+    if [ -z "$ba_repo" ]; then
+      echo "installBaCli: skipping (ba_cli_repo secret not available)"
+    else
+      gh_token=""
+      if [ -r /run/secrets/github_api_token ]; then
+        gh_token="$(cat /run/secrets/github_api_token)"
+      fi
+
+      if [ -z "$gh_token" ]; then
+        echo "installBaCli: skipping (github_api_token not available)"
+      else
+        latest=$(GH_TOKEN="$gh_token" ${pkgs.gh}/bin/gh api \
+          "repos/$ba_repo/releases/latest" --jq .tag_name 2>/dev/null || true)
+
+        if [ -z "$latest" ]; then
+          echo "installBaCli: WARNING: could not fetch latest release"
+        else
+          current=""
+          if [ -x "$HOME/.local/bin/ba" ]; then
+            current=$("$HOME/.local/bin/ba" --version 2>/dev/null \
+              | ${pkgs.gnugrep}/bin/grep -oP 'v?\K[0-9]+\.[0-9]+\.[0-9]+' \
+              | head -1 || true)
+          fi
+
+          if [ "$current" = "$latest" ]; then
+            echo "installBaCli: ba $latest already installed"
+          else
+            echo "installBaCli: installing ba $latest (was: ''${current:-not installed})..."
+            ${pkgs.coreutils}/bin/mkdir -p "$HOME/.local/bin"
+            tmpdir=$(${pkgs.coreutils}/bin/mktemp -d)
+            if GH_TOKEN="$gh_token" ${pkgs.gh}/bin/gh release download "$latest" \
+                 --repo "$ba_repo" \
+                 -p 'ba-linux-arm64.tar.gz' \
+                 -D "$tmpdir" 2>/dev/null; then
+              ${pkgs.gnutar}/bin/tar --use-compress-program=${pkgs.gzip}/bin/gzip -xf "$tmpdir/ba-linux-arm64.tar.gz" -C "$tmpdir"
+              ${pkgs.coreutils}/bin/install -m 755 "$tmpdir/ba" "$HOME/.local/bin/ba"
+              echo "installBaCli: ba $latest installed"
+            else
+              echo "installBaCli: WARNING: download failed"
+            fi
+            ${pkgs.coreutils}/bin/rm -rf "$tmpdir"
+          fi
+        fi
+      fi
+    fi
   '';
 
   # Mask GPG agent units for forwarding (systemd-specific)

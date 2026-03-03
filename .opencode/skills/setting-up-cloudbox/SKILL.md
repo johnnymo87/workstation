@@ -22,7 +22,7 @@ gcloud compute instances create cloudbox \
   --machine-type=c4a-standard-4 \
   --image-family=ubuntu-2404-lts-arm64 \
   --image-project=ubuntu-os-cloud \
-  --boot-disk-size=100GB \
+  --boot-disk-size=200GB \
   --boot-disk-type=hyperdisk-balanced \
   --no-address \
   --metadata=enable-oslogin=FALSE
@@ -236,6 +236,12 @@ After bootstrap is confirmed working, ensure `PermitRootLogin` is set to `"no"` 
 9. **GCE default scopes lack `cloud-platform`** — the VM's service account credentials (from metadata server) don't include Vertex AI access. Must run `gcloud auth application-default login` to create user ADC credentials that override the metadata chain. Without this, Vertex calls fail with `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
 
 10. **`nixos-rebuild switch` can leave SSH unreachable** — if the activation fails mid-way or a race condition prevents sops from reading `/var/lib/sops-age-key.txt`, SSH host keys won't be decrypted and sshd will accept TCP connections but hang during banner exchange. Symptoms: `Connection timed out during banner exchange`. Serial console will show `Cannot read ssh key` and `cannot read keyfile '/var/lib/sops-age-key.txt'`. Fix: hard reset via `gcloud compute instances reset cloudbox --zone=us-east1-b --project=my-gcp-project`. The VM will reboot cleanly and sops will succeed on the next boot.
+
+11. **Nix GC on a nearly-full disk can block SSH** — the weekly `nix-gc.timer` has `Persistent=true`, so if the VM reboots after the timer was due, GC runs immediately at boot. On a disk near capacity, the GC causes heavy I/O that prevents socket-activated sshd from spawning. Symptoms: same `Connection timed out during banner exchange` as gotcha #10, but serial console shows sops succeeded and `Starting Nix Garbage Collector...` with no completion. Fix: hard reset (same as #10). Prevention: keep disk usage below 80% — use 200GB+ boot disk and clean generations regularly.
+
+12. **Disk can fill rapidly from auto-updates** — the `pull-workstation` timer runs every 4 hours and applies `home-manager switch`, creating a new generation each time. Combined with system rebuilds, this can produce 30+ generations in a week. The `home-manager-auto-expire` timer (daily) and `nix-gc` timer (weekly) help, but may not keep pace. Manual cleanup: `nix-env --delete-generations +3 --profile /home/dev/.local/state/nix/profiles/home-manager && sudo nix-env --delete-generations +3 --profile /nix/var/nix/profiles/system && sudo nix-collect-garbage`.
+
+13. **Resizing the boot disk is online and safe** — use `gcloud compute disks resize cloudbox --size=NEWGB --zone=us-east1-b --project=my-gcp-project`, then on the VM: find `growpart` in the nix store (`ls /nix/store/*/bin/growpart`) and run `sudo /nix/store/.../growpart /dev/nvme0n1 2 && sudo resize2fs /dev/nvme0n1p2`. No reboot required.
 
 ## Removing the temporary external IP
 

@@ -23,9 +23,11 @@ let
 
   # Work-only skills (macOS + cloudbox)
   workOnlySkills = [
+    "cleaning-bazel-monorepo-disk"
     "slack-mcp-setup"
     "using-atlassian-cli"
     "using-gcloud-bq-cli"
+    "working-with-kubernetes"
   ];
 
   # notify-telegram has a script that needs to be executable
@@ -72,6 +74,57 @@ let
         else "${config.home.homeDirectory}/projects/superpowers/skills"
       );
   };
+
+  # Confluence-fetched skill files: content too sensitive for source control.
+  # Pages are maintained in Confluence and fetched during home-manager activation
+  # via nvim --headless + FetchConfluencePage.
+  #
+  # Each entry fetches a Confluence page into an existing skill directory.
+  # This lets sensitive companion files live alongside generic public skills.
+  #
+  # To add a new Confluence-fetched file:
+  #   1. Create the Confluence page with the content in markdown
+  #   2. Add an entry: { pageId = "1234567890"; skillName = "my-skill"; fileName = "INTERNAL.md"; }
+  #   3. The activation script writes to ~/.config/opencode/skills/<skillName>/<fileName>
+  #   4. The public SKILL.md can reference the companion file
+  confluenceSkills = [
+    # Add entries as pages are created:
+    # { pageId = "1234567890"; skillName = "working-with-kubernetes"; fileName = "INTERNAL.md"; }
+  ];
+
+  # Activation script: fetch Confluence pages into skill directories
+  fetchConfluenceSkillsScript = let
+    fetchCommands = lib.concatMapStringsSep "\n" (s: ''
+      fetch_skill "${s.pageId}" "${s.skillName}" "${s.fileName}"
+    '') confluenceSkills;
+  in lib.optionalString (confluenceSkills != []) ''
+    fetch_skill() {
+      local page_id="$1"
+      local skill_name="$2"
+      local file_name="$3"
+      local skill_dir="${config.home.homeDirectory}/.config/opencode/skills/$skill_name"
+      local skill_file="$skill_dir/$file_name"
+
+      mkdir -p "$skill_dir"
+
+      # Skip if all required env vars aren't set
+      if [ -z "''${ATLASSIAN_SITE:-}" ] || [ -z "''${ATLASSIAN_EMAIL:-}" ] || \
+         [ -z "''${ATLASSIAN_API_TOKEN:-}" ] || [ -z "''${ATLASSIAN_CLOUD_ID:-}" ]; then
+        echo "fetchConfluenceSkills: skipping $skill_name/$file_name (Atlassian env vars not set)"
+        return 0
+      fi
+
+      echo "fetchConfluenceSkills: fetching $skill_name/$file_name (page $page_id)..."
+      if ${pkgs.neovim}/bin/nvim --headless "$skill_file" \
+           -c "FetchConfluencePage $page_id" -c "write" -c "quit" 2>/dev/null; then
+        echo "fetchConfluenceSkills: $skill_name/$file_name updated"
+      else
+        echo "fetchConfluenceSkills: WARNING: failed to fetch $skill_name/$file_name"
+      fi
+    }
+
+    ${fetchCommands}
+  '';
 in
 {
   home.file =
@@ -84,4 +137,9 @@ in
       // atlassianReferences
       // fetchingAtlassianSkill
     );
+
+  # Fetch Confluence-based skills during activation (macOS + cloudbox only)
+  home.activation.fetchConfluenceSkills = lib.mkIf
+    ((isDarwin || isCloudbox) && confluenceSkills != [])
+    (lib.hm.dag.entryAfter ["writeBoundary"] fetchConfluenceSkillsScript);
 }

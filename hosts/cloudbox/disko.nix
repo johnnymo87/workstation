@@ -1,7 +1,7 @@
 # Disk partitioning for GCP Compute Engine (C4a ARM)
 #
 # C4a uses NVMe storage controller, so the boot disk is /dev/nvme0n1.
-# Single pd-balanced 50GB disk — no separate persistent volume.
+# Single hyperdisk-balanced 200GB disk — no separate persistent volume.
 # All state lives on the root partition.
 { lib, ... }:
 
