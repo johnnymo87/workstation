@@ -5,8 +5,7 @@
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
-  isDevbox = pkgs.stdenv.isLinux && !isCloudbox && !isCrostini;
-  useGeminiForAgents = isDarwin || isDevbox;
+  useGeminiForAgents = isDarwin || isCloudbox;
   geminiModel = "google-vertex/gemini-3.1-pro-preview";
 
   # Patch agent files if needed to override the sonnet hardcoded model
