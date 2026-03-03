@@ -36,6 +36,7 @@ let
           "-y"
           "mcp-remote"
           "https://mcp.atlassian.com/v1/sse"
+          "3334"
         ];
         enabled = false;
       };

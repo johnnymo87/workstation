@@ -16,7 +16,7 @@ local function html_to_markdown(html_content)
   end
 
   local markdown_content = vim.fn.system(
-    {"pandoc", "-f", "html", "-t", "gfm", "--wrap=none"},
+    {"pandoc", "-f", "html", "-t", "markdown-simple_tables-multiline_tables-smart", "--wrap=none"},
     html_content
   )
   if vim.v.shell_error ~= 0 then
@@ -28,7 +28,27 @@ local function html_to_markdown(html_content)
     return "Error converting content to Markdown."
   end
 
-  return markdown_content
+  -- Strip pandoc extended-markdown artifacts that Confluence HTML produces:
+  --   ::: {.class ...}  fenced divs (code panels, content wrappers)
+  --   {#id ...}         header attributes (auto-generated anchor IDs)
+  --   {.class ...}      link/code fence attributes
+  local cleaned = {}
+  for line in markdown_content:gmatch("([^\n]*)\n?") do
+    -- Remove fenced div lines (:::+ with optional attributes)
+    if not line:match("^%s*:::+%s*{") and not line:match("^%s*:::+%s*$") then
+      -- Strip header attributes: ## Title {#id .class ...}
+      line = line:gsub("^(%s*#+%s+.+)%s+{[^}]*}$", "%1")
+      -- Strip code fence attributes: ``` {.syntax ...}
+      line = line:gsub("^(%s*)```%s+{[^}]*}$", "%1```")
+      -- Strip link attributes: [text](url){.class ...}
+      line = line:gsub("(%]%([^)]+%)){[^}]*}", "%1")
+      -- Fix autolink-wrapped URLs in code spans: `<url`\> → `url`
+      line = line:gsub("`<(https?://[^`]*)`\\>", "`%1`")
+      table.insert(cleaned, line)
+    end
+  end
+
+  return table.concat(cleaned, "\n")
 end
 
 -- Helper function to format comments with XML-style nesting
