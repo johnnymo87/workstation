@@ -185,12 +185,13 @@ Host cloudbox-tunnel
     ForwardAgent yes
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/<you>/.gnupg/S.gpg-agent.extra
     LocalForward 1455 localhost:1455
+    LocalForward 3334 localhost:3334
     RemoteForward 9222 localhost:9222
     RemoteForward 3033 localhost:3033
 ```
 
 - `ssh cloudbox` for normal use
-- `ssh cloudbox-tunnel` when running `opencode auth login` (needs port 1455 forwarded)
+- `ssh cloudbox-tunnel` when running `opencode auth login` (port 1455) or MCP remote OAuth (port 3334)
 
 ## Step 11: Verify everything works
 

@@ -1,24 +1,39 @@
 #!/usr/bin/env bash
-# Update local SSH config with devbox IP from Hetzner Cloud
+# Update local SSH config with devbox and cloudbox IPs
 set -euo pipefail
 
-SERVER_NAME="devbox"
 SSH_CONFIG="$HOME/.ssh/config"
-MARKER_START="# BEGIN devbox managed block"
-MARKER_END="# END devbox managed block"
 
-# Get IP from hcloud
-IP=$(hcloud server ip "$SERVER_NAME" 2>/dev/null) || {
-    echo "Error: Could not get IP for server '$SERVER_NAME'"
-    echo "Make sure hcloud is configured and the server exists"
-    exit 1
+# --- Helper ---
+
+upsert_block() {
+    local marker_start="$1"
+    local marker_end="$2"
+    local block="$3"
+
+    if grep -q "$marker_start" "$SSH_CONFIG" 2>/dev/null; then
+        sed -i '' "/$marker_start/,/$marker_end/d" "$SSH_CONFIG"
+    fi
+    echo "" >> "$SSH_CONFIG"
+    echo "$block" >> "$SSH_CONFIG"
 }
 
-# Generate SSH config block
-read -r -d '' CONFIG_BLOCK << EOF || true
-$MARKER_START
+# --- Devbox (Hetzner) ---
+
+DEVBOX_MARKER_START="# BEGIN devbox managed block"
+DEVBOX_MARKER_END="# END devbox managed block"
+
+DEVBOX_IP=$(hcloud server ip devbox 2>/dev/null) || {
+    echo "Warning: Could not get IP for devbox (hcloud not configured?)"
+    echo "Skipping devbox block"
+    DEVBOX_IP=""
+}
+
+if [ -n "$DEVBOX_IP" ]; then
+    read -r -d '' DEVBOX_BLOCK << EOF || true
+$DEVBOX_MARKER_START
 Host devbox
-    HostName $IP
+    HostName $DEVBOX_IP
     User dev
     ForwardAgent yes
     # Rebind stale remote unix sockets (e.g. forwarded GPG agent socket)
@@ -31,7 +46,7 @@ Host devbox
     RemoteForward 3033 localhost:3033
 
 Host devbox-tunnel
-    HostName $IP
+    HostName $DEVBOX_IP
     User dev
     ForwardAgent yes
     # Rebind stale remote unix sockets (e.g. forwarded GPG agent socket)
@@ -45,21 +60,56 @@ Host devbox-tunnel
     RemoteForward 9222 localhost:9222
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
-$MARKER_END
+$DEVBOX_MARKER_END
 EOF
 
-# Update SSH config
-if grep -q "$MARKER_START" "$SSH_CONFIG" 2>/dev/null; then
-    # Replace existing block (macOS sed)
-    sed -i '' "/$MARKER_START/,/$MARKER_END/d" "$SSH_CONFIG"
-    echo "" >> "$SSH_CONFIG"
-    echo "$CONFIG_BLOCK" >> "$SSH_CONFIG"
-    echo "Updated devbox entry in $SSH_CONFIG"
-else
-    # Append new block
-    echo "" >> "$SSH_CONFIG"
-    echo "$CONFIG_BLOCK" >> "$SSH_CONFIG"
-    echo "Added devbox entry to $SSH_CONFIG"
+    upsert_block "$DEVBOX_MARKER_START" "$DEVBOX_MARKER_END" "$DEVBOX_BLOCK"
+    echo "Devbox IP: $DEVBOX_IP"
 fi
 
-echo "Devbox IP: $IP"
+# --- Cloudbox (GCP) ---
+
+CLOUDBOX_MARKER_START="# BEGIN cloudbox managed block"
+CLOUDBOX_MARKER_END="# END cloudbox managed block"
+
+CLOUDBOX_IP=$(gcloud compute instances describe cloudbox \
+    --zone=us-east1-b \
+    --format='get(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null) || {
+    echo "Warning: Could not get IP for cloudbox (gcloud not configured?)"
+    echo "Skipping cloudbox block"
+    CLOUDBOX_IP=""
+}
+
+if [ -n "$CLOUDBOX_IP" ]; then
+    read -r -d '' CLOUDBOX_BLOCK << EOF || true
+$CLOUDBOX_MARKER_START
+Host cloudbox
+    HostName $CLOUDBOX_IP
+    User dev
+    ForwardAgent yes
+    # GPG agent forwarding
+    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
+    # Remote forwards used by cloudbox tooling
+    RemoteForward 9222 localhost:9222
+    # chatgpt-relay tunnel (ask-question CLI)
+    RemoteForward 3033 localhost:3033
+
+Host cloudbox-tunnel
+    HostName $CLOUDBOX_IP
+    User dev
+    ForwardAgent yes
+    # GPG agent forwarding
+    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
+    # OpenCode OAuth callback
+    LocalForward 1455 localhost:1455
+    # mcp-remote OAuth callback
+    LocalForward 3334 localhost:3334
+    RemoteForward 9222 localhost:9222
+    # chatgpt-relay tunnel (ask-question CLI)
+    RemoteForward 3033 localhost:3033
+$CLOUDBOX_MARKER_END
+EOF
+
+    upsert_block "$CLOUDBOX_MARKER_START" "$CLOUDBOX_MARKER_END" "$CLOUDBOX_BLOCK"
+    echo "Cloudbox IP: $CLOUDBOX_IP"
+fi
