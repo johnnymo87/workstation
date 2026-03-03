@@ -72,6 +72,12 @@
         group = "dev";
         mode = "0400";
       };
+      # xAI API key (for Grok x_search in Things Happen digest)
+      xai_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
@@ -174,6 +180,7 @@
         export R2_ACCESS_KEY_ID="$(cat /run/secrets/r2_access_key_id)"
         export R2_SECRET_ACCESS_KEY="$(cat /run/secrets/r2_secret_access_key)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+        export XAI_API_KEY="$(cat /run/secrets/xai_api_key)"
         cd /home/dev/projects/my-podcasts
         exec ${pkgs.uv}/bin/uv run python -m pipeline consume
       ''}";
