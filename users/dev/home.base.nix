@@ -189,6 +189,7 @@ in
   # Tmux
   programs.tmux = {
     enable = true;
+    shell = "${pkgs.bash}/bin/bash";  # Explicit: macOS defaults to zsh, but our config is all bash
     clock24 = true;
     terminal = "tmux-256color";
     historyLimit = 50000;  # Generous scrollback for long build logs
