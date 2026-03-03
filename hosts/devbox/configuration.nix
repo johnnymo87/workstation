@@ -181,6 +181,7 @@
       ''}";
       ExecStart = "${pkgs.writeShellScript "my-podcasts-consumer-start" ''
         set -euo pipefail
+        export PYTHONUNBUFFERED=1
         export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
         export R2_ACCOUNT_ID="$(cat /run/secrets/r2_account_id)"
         export R2_ACCESS_KEY_ID="$(cat /run/secrets/r2_access_key_id)"
