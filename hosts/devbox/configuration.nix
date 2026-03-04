@@ -190,7 +190,6 @@
         export XAI_API_KEY="$(cat /run/secrets/xai_api_key)"
         export EXA_API_KEY="$(cat /run/secrets/exa_api_key)"
         export GEMINI_API_KEY="$(cat /run/secrets/gemini_api_key)"
-        export THINGS_HAPPEN_DRY_RUN=1
         cd /home/dev/projects/my-podcasts
         exec ${pkgs.uv}/bin/uv run python -m pipeline consume
       ''}";
