@@ -257,6 +257,9 @@ in
     recursive = true;
   };
 
+  # Home Manager (standalone command on PATH for all platforms)
+  programs.home-manager.enable = true;
+
   # Direnv
   programs.direnv = {
     enable = true;
