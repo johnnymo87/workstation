@@ -22,11 +22,11 @@ let
   # ---------------------------------------------------------------------------
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
-  # Platform overlay: Claude via GitHub Copilot (macOS + cloudbox)
+  # Platform overlay: Claude via Vertex AI (macOS + cloudbox)
   # Model metadata comes from models.dev (auto-fetched by OpenCode); this overlay
-  # sets the default model to route through GitHub Copilot.
+  # sets the default model to route through Google Vertex AI.
   opencodeOverlay = lib.optionalAttrs (isDarwin || isCloudbox) {
-    model = "github-copilot/claude-opus-4.6";
+    model = "google-vertex-anthropic/claude-opus-4-6@default";
 
     mcp = (opencodeBase.mcp or {}) // {
       atlassian = {
