@@ -1,5 +1,5 @@
 ---
-name: Understanding Workstation Config
+name: understanding-workstation
 description: This skill explains the workstation monorepo structure, how NixOS (devbox) and nix-darwin (macOS) are organized with standalone home-manager, and how to navigate the configuration. Use this when onboarding or trying to understand how either platform is configured.
 ---
 

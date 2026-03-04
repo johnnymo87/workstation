@@ -1,3 +1,8 @@
+---
+name: fetching-atlassian-content
+description: Export Confluence pages and Jira tickets to local Markdown files with image attachments via Neovim. Use when fetching content from Atlassian for local use.
+---
+
 # Fetching Atlassian Content
 
 Export Confluence pages and Jira tickets to local Markdown files with image attachments via Neovim.

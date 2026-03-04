@@ -1,5 +1,5 @@
 ---
-name: Rebuilding the Devbox
+name: rebuilding-devbox
 description: This skill covers how to apply configuration changes to the devbox, including full rebuilds with nixos-anywhere. Use this when you need to update the system or recover from issues.
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: Managing Secrets
+name: managing-secrets
 description: How secrets are stored, decrypted, and used on the devbox. Use when adding, removing, or debugging secrets.
 ---
 

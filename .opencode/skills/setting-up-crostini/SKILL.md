@@ -1,5 +1,5 @@
 ---
-name: Setting Up Crostini (ChromeOS Linux)
+name: setting-up-crostini
 description: Guide for setting up a Chromebook Crostini container with Nix and home-manager. Use when provisioning a new Chromebook or recovering from a container reset.
 ---
 

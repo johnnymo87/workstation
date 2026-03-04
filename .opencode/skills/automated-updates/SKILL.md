@@ -1,5 +1,5 @@
 ---
-name: Automated Updates
+name: automated-updates
 description: How the devbox automatically updates llm-agents (claude-code) via GitHub Actions and systemd timers. Use when debugging update failures or understanding the update flow.
 ---
 

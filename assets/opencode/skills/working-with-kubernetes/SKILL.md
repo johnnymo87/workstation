@@ -1,5 +1,5 @@
 ---
-name: Working with Kubernetes (Generic Patterns)
+name: working-with-kubernetes
 description: Generic kubectl patterns for pod interaction, file transfer, debugging distroless containers, and kubeconfig management. Works with any Kubernetes cluster. For environment-specific configurations, see the companion skill fetched from Confluence.
 ---
 

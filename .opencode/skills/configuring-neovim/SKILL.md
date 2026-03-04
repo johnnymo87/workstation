@@ -1,3 +1,8 @@
+---
+name: configuring-neovim
+description: Patterns for safely testing nvim configuration changes in this NixOS/home-manager setup. Use when modifying or debugging Neovim config.
+---
+
 # Testing and Debugging Neovim Config
 
 Patterns for safely testing nvim configuration changes in this repo. For adding new config files, see [growing-nvim-config](../growing-nvim-config/SKILL.md).

@@ -1,5 +1,5 @@
 ---
-name: Setting Up Cloudbox (GCP ARM)
+name: setting-up-cloudbox
 description: Guide for provisioning the cloudbox GCP VM from scratch with nixos-anywhere. Use when rebuilding the cloudbox or setting up a new GCP ARM instance.
 ---
 

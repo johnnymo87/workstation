@@ -1,5 +1,5 @@
 ---
-name: Scrubbing Company References
+name: scrubbing-company-references
 description: Policy for keeping org-identifying metadata out of public source. Use when adding new config, writing skill docs, or reviewing for company references before committing.
 ---
 

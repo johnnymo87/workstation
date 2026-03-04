@@ -1,5 +1,5 @@
 ---
-name: Cleaning Bazel Monorepo Disk
+name: cleaning-bazel-monorepo-disk
 description: Reclaim disk space in Bazel monorepo development environments. Covers Bazel caches, Docker, Nix store/generations, and package manager caches. Use when disk space is low or for regular maintenance. Works on both macOS and cloudbox (NixOS).
 ---
 
