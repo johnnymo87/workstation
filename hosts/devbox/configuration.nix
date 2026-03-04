@@ -84,6 +84,12 @@
         group = "dev";
         mode = "0400";
       };
+      # OpenCode server password (shared between opencode-serve and pigeon-daemon)
+      opencode_server_password = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
@@ -140,6 +146,8 @@
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
         export OP_SERVICE_ACCOUNT_TOKEN="$(cat /run/secrets/op_service_account_token)"
+        export OPENCODE_URL="http://127.0.0.1:4096"
+        export OPENCODE_PASSWORD="$(cat /run/secrets/opencode_server_password)"
         exec /nix/store/2cxyi2vivwqkw6fc46ssfmz1ch4z041s-1password-cli-2.32.0/bin/op run --env-file=/home/dev/projects/pigeon/.env.1password -- \
           ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/packages/daemon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";
@@ -152,6 +160,26 @@
   systemd.targets.pigeon = {
     description = "Pigeon stack (cloudflared + daemon)";
     wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
+  };
+
+  systemd.services.opencode-serve = {
+    description = "OpenCode headless serve";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" ];
+    path = [ pkgs.git pkgs.fzf pkgs.ripgrep ];
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev";
+      ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
+        set -euo pipefail
+        export OPENCODE_SERVER_PASSWORD="$(cat /run/secrets/opencode_server_password)"
+        exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
+      ''}";
+      Restart = "always";
+      RestartSec = 10;
+    };
   };
 
   systemd.services.my-podcasts-consumer = {
