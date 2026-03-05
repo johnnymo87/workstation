@@ -20,13 +20,6 @@
   "plugin": [
     "opencode-beads"
   ],
-  "lsp": {
-    "kotlin-ls": {
-      "env": {
-        "IJ_JAVA_OPTIONS": "-Xms128m -Xmx1024m -XX:MaxMetaspaceSize=256m -XX:+UseSerialGC"
-      }
-    }
-  },
   "mcp": {
     "playwright": {
       "type": "local",

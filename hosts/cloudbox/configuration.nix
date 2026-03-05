@@ -243,6 +243,14 @@
   # Docker (for testcontainers)
   virtualisation.docker.enable = true;
 
+  # Pin GCP metadata server route to eth0 so Docker bridge networks
+  # can't steal the 169.254.0.0/16 link-local route and break DNS.
+  # Without this, testcontainers' bridge network creates a veth that
+  # captures traffic to 169.254.169.254 (GCP's DNS/metadata endpoint).
+  networking.interfaces.eth0.ipv4.routes = [
+    { address = "169.254.169.254"; prefixLength = 32; }
+  ];
+
   # Disable Google OS Login (we manage users/keys declaratively via NixOS)
   security.googleOsLogin.enable = lib.mkForce false;
   users.mutableUsers = false;
