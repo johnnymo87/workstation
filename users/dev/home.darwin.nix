@@ -63,6 +63,7 @@ lib.mkIf isDarwin {
       name = "screenshot-to-devbox";
       text = builtins.readFile "${assetsPath}/scripts/screenshot-to-devbox.sh";
     })
+    pkgs.google-cloud-sdk
     pkgs.cloudflared
     pinentry-op
     (pkgs.writeShellApplication {
