@@ -218,7 +218,7 @@ in
               "SLACK_MCP_XOXD_TOKEN": $xoxd,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
               "SLACK_MCP_CUSTOM_TLS": "1",
-              "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+              "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0"
             }
           }' "$runtime" > "$tmp"
         
@@ -271,7 +271,7 @@ in
               "SLACK_MCP_XOXD_TOKEN": $xoxd,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
               "SLACK_MCP_CUSTOM_TLS": "1",
-              "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+              "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0"
             }
           }' "$runtime" > "$tmp"
 
