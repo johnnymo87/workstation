@@ -51,6 +51,7 @@
       beads = p.callPackage ./pkgs/beads { };
       ccusage-opencode = p.callPackage ./pkgs/ccusage-opencode { };
       datadog-mcp-cli = p.callPackage ./pkgs/datadog-mcp-cli { };
+      gws = p.callPackage ./pkgs/gws { };
     };
 
     # Custom pinentry that fetches GPG passphrase from 1Password

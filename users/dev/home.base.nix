@@ -110,6 +110,9 @@ in
     # GitHub CLI
     pkgs.gh
 
+    # Google Workspace CLI
+    localPkgs.gws
+
     # Other tools
     pkgs.devenv
   ]
