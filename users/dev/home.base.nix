@@ -134,11 +134,27 @@ in
       ""
       "# Local disk and repository caches"
       "common --disk_cache ~/bazel-diskcache --repository_cache ~/bazel-cache/repository"
+      ""
+      "# Reap idle Bazel servers after 15 min (default 3h) to free RAM across worktrees"
+      "startup --max_idle_secs=900"
+      ""
+      "# Cap Kotlin persistent workers to 1 per worktree (default can spawn 2-3)"
+      "build --worker_max_instances=KotlinCompile=1"
+      "test  --worker_max_instances=KotlinCompile=1"
+      ""
+      "# Evict idle workers if they collectively exceed 2.5 GB"
+      "build --experimental_total_worker_memory_limit_mb=2500"
+      "build --experimental_shrink_worker_pool"
+      "test  --experimental_total_worker_memory_limit_mb=2500"
+      "test  --experimental_shrink_worker_pool"
     ] ++ lib.optionals pkgs.stdenv.isLinux [
       ""
       "# NixOS: explicit PATH for sandbox — forwarding alone doesn't cover all action types"
       "build --action_env=PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin"
       "build --host_action_env=PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin"
+      ""
+      "# Auto-shutdown server when system is low on memory"
+      "startup --shutdown_on_low_sys_mem"
     ]);
   };
 
