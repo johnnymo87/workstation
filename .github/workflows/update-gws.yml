@@ -95,8 +95,10 @@ jobs:
               commit -m "chore(deps): update gws to ${version}"
           git push -u origin "$branch" --force
 
-          if gh pr view "$branch" --json number >/dev/null 2>&1; then
-            echo "PR already exists for $branch, force-pushed update"
+          # gh pr view matches merged/closed PRs too — only skip if truly open
+          pr_state=$(gh pr view "$branch" --json state -q '.state' 2>/dev/null || echo "NONE")
+          if [ "$pr_state" = "OPEN" ]; then
+            echo "PR already open for $branch, force-pushed update"
           else
             pr_url=$(gh pr create \
               --title "chore(deps): update gws to ${version}" \
