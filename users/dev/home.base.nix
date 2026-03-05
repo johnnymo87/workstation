@@ -161,6 +161,13 @@ in
     ]);
   };
 
+  # Cap JetBrains kotlin-lsp JVM heap — each OpenCode session spawns its
+  # own instance; without a cap they grow to ~1.5 GB each.
+  # IJ_JAVA_OPTIONS is read by JetBrains tools only (not generic JVMs).
+  home.sessionVariables = lib.mkIf (isDarwin || isCloudbox) {
+    IJ_JAVA_OPTIONS = "-Xms128m -Xmx1024m -XX:MaxMetaspaceSize=256m -XX:+UseSerialGC";
+  };
+
   # Git
   programs.git = {
     enable = true;
