@@ -216,6 +216,7 @@ in
             "environment": {
               "SLACK_MCP_XOXC_TOKEN": $xoxc,
               "SLACK_MCP_XOXD_TOKEN": $xoxd,
+              "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
               "SLACK_MCP_CUSTOM_TLS": "1",
               "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
             }
@@ -268,6 +269,7 @@ in
             "environment": {
               "SLACK_MCP_XOXC_TOKEN": $xoxc,
               "SLACK_MCP_XOXD_TOKEN": $xoxd,
+              "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
               "SLACK_MCP_CUSTOM_TLS": "1",
               "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
             }
