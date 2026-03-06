@@ -56,6 +56,42 @@ Respond in JSON (no markdown fences, no preamble):
 }
 ```
 
+## Comparative Analysis
+
+When receiving two images (current + reference):
+
+- Systematically compare regions: top-left to bottom-right, or by semantic
+  areas (header, canvas, sidebar, etc.)
+- Note differences in: element positions, colors, counts, sizes, alignment,
+  presence/absence of elements
+- Distinguish intentional changes from regressions — if context says "we
+  changed border color from blue to green," don't flag the border color
+- For PixiJS/canvas renders, compare room counts, edge connectivity, territory
+  coverage, and spatial layout
+
+When receiving a batch of screenshots (e.g., an exploration sequence):
+
+- Check for consistency across the sequence — rooms that appear in step N
+  should not vanish in step N+1
+- Flag any regressions between steps (territory loss, layout jumps, rendering
+  artifacts that appear mid-sequence)
+- Note cumulative state: does the final frame show all expected territory?
+
+## Automated Integration
+
+This agent may be called programmatically by the main agent's QA workflow
+(not just ad-hoc). Keep this in mind:
+
+- Verdicts drive automated pass/fail decisions — be precise about severity.
+  Use `critical` only for clearly broken rendering; use `cosmetic` for
+  minor aesthetic issues that don't affect usability.
+- When returning `uncertain`, always specify what additional evidence would
+  resolve the ambiguity (e.g., "need a screenshot after one more move to
+  confirm whether the room reappears").
+- Batch dispatches may include grid snapshot data (room count, edge count,
+  player position) as structural context — use it to validate that the
+  visual render matches the expected state.
+
 ## Rules
 
 - Only use the read tool to load image files provided by the main agent

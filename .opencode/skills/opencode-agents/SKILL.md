@@ -32,8 +32,12 @@ Uses OpenAI auth configured via sops-nix (`openai_api_key` secret on devbox).
 **Purpose:** Visual QA analyst — analyzes screenshots and UI renders.
 **Model:** claude-opus-4-6
 **Tools:** read only
-**When to use:** Comparing screenshots, identifying visual regressions, analyzing canvas/WebGL output, triaging UI bugs.
-**Output:** Structured JSON with verdict (pass/fail/uncertain), confidence score, issues with severity and suggested next checks.
+**When to use:** Comparing screenshots, identifying visual regressions, analyzing canvas/WebGL output, triaging UI bugs. Also used for:
+- **Comparative analysis** — current vs reference image, systematically comparing regions and element positions
+- **Batch analysis** — screenshot sequences (e.g., exploration steps), checking consistency and flagging regressions between steps
+- **Automated dispatch** — called programmatically by the main agent's QA workflow (e.g., the `e2e-manual-qa` skill's vision-qa integration protocol)
+
+**Output:** Structured JSON with verdict (pass/fail/uncertain), confidence score, issues with severity and suggested next checks. Verdicts drive automated pass/fail decisions, so severity must be precise.
 
 ### slack (subagent)
 **Purpose:** Slack research — searching and analyzing conversations.
