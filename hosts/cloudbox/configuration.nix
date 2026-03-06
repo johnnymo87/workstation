@@ -130,6 +130,22 @@
         group = "dev";
         mode = "0400";
       };
+      # Google Workspace CLI (gws) OAuth credentials
+      gws_client_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      gws_client_secret = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      gws_refresh_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
   };
 

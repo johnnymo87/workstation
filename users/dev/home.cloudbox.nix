@@ -188,6 +188,74 @@ lib.mkIf isCloudbox {
     fi
   '';
 
+  # Assemble gws config files from sops secrets at activation time
+  # Both client_secret.json (OAuth client config, needed for re-auth)
+  # and credentials.json (authorized_user tokens) are assembled from
+  # the same sops secrets to avoid committing secrets to git.
+  home.activation.assembleGwsCredentials = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+    set -euo pipefail
+
+    gws_dir="$HOME/.config/gws"
+
+    # Read secrets from sops-decrypted files
+    client_id=""
+    client_secret=""
+    refresh_token=""
+    if [ -r /run/secrets/gws_client_id ]; then
+      client_id="$(cat /run/secrets/gws_client_id)"
+    fi
+    if [ -r /run/secrets/gws_client_secret ]; then
+      client_secret="$(cat /run/secrets/gws_client_secret)"
+    fi
+    if [ -r /run/secrets/gws_refresh_token ]; then
+      refresh_token="$(cat /run/secrets/gws_refresh_token)"
+    fi
+
+    # Skip if any secret is missing
+    if [ -z "$client_id" ] || [ -z "$client_secret" ] || [ -z "$refresh_token" ]; then
+      echo "assembleGwsCredentials: skipping (gws secrets not available)"
+      exit 0
+    fi
+
+    mkdir -p "$gws_dir"
+
+    # Assemble client_secret.json (OAuth client config for re-auth / token refresh)
+    tmp="$(mktemp "''${gws_dir}/client_secret.json.tmp.XXXXXX")"
+    ${pkgs.jq}/bin/jq -n \
+      --arg cid "$client_id" \
+      --arg cs "$client_secret" \
+      '{
+        installed: {
+          client_id: $cid,
+          project_id: "wonder-sandbox",
+          auth_uri: "https://accounts.google.com/o/oauth2/auth",
+          token_uri: "https://oauth2.googleapis.com/token",
+          auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
+          client_secret: $cs,
+          redirect_uris: ["http://localhost"]
+        }
+      }' > "$tmp"
+    mv "$tmp" "$gws_dir/client_secret.json"
+    chmod 600 "$gws_dir/client_secret.json"
+
+    # Assemble credentials.json (authorized_user tokens for API access)
+    tmp="$(mktemp "''${gws_dir}/credentials.json.tmp.XXXXXX")"
+    ${pkgs.jq}/bin/jq -n \
+      --arg cid "$client_id" \
+      --arg cs "$client_secret" \
+      --arg rt "$refresh_token" \
+      '{
+        type: "authorized_user",
+        client_id: $cid,
+        client_secret: $cs,
+        refresh_token: $rt
+      }' > "$tmp"
+    mv "$tmp" "$gws_dir/credentials.json"
+    chmod 600 "$gws_dir/credentials.json"
+
+    echo "assembleGwsCredentials: client_secret.json and credentials.json assembled"
+  '';
+
   # Mask GPG agent units for forwarding (systemd-specific)
   # Masks both sockets AND service to prevent any local agent from starting
   home.activation.maskGpgAgentUnits = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
