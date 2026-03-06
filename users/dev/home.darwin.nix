@@ -127,7 +127,7 @@ lib.mkIf isDarwin {
         "/bin/sh" "-c"
         ''
           SEC="/usr/bin/security"
-          # TODO: Move CCR_WORKER_URL to macOS Keychain
+          export CCR_WORKER_URL="$($SEC find-generic-password -s ccr-worker-url -w)"
           export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
           export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
           export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
