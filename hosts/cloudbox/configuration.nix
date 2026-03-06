@@ -8,7 +8,7 @@
 #   - No R2/OpenAI secrets (not needed here)
 #   - Pigeon uses CCR_MACHINE_ID=cloudbox
 #   - Firewall disabled (google-compute-config defers to GCP firewall)
-{ config, pkgs, lib, ccrTunnel, ... }:
+{ config, pkgs, lib, ... }:
 
 {
   # Allow unfree packages (1password-cli for pigeon)
@@ -146,6 +146,18 @@
         group = "dev";
         mode = "0400";
       };
+      # CCR Worker URL for Pigeon daemon
+      ccr_worker_url = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      # Azure DevOps npm registry URL (org-identifying)
+      ado_npm_registry_url = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
   };
 
@@ -195,11 +207,11 @@
       Environment = [
         "HOME=/home/dev"
         "NODE_ENV=production"
-        "CCR_WORKER_URL=https://ccr-router.jonathan-mohrbacher.workers.dev"
         "CCR_MACHINE_ID=cloudbox"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
+        export CCR_WORKER_URL="$(cat /run/secrets/ccr_worker_url)"
         export OP_SERVICE_ACCOUNT_TOKEN="$(cat /run/secrets/op_service_account_token)"
         export OPENCODE_URL="http://127.0.0.1:4096"
         exec ${pkgs._1password-cli}/bin/op run --env-file=/home/dev/projects/pigeon/.env.1password -- \

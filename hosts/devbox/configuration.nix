@@ -1,5 +1,5 @@
 # NixOS system configuration for devbox
-{ config, pkgs, lib, ccrTunnel, ... }:
+{ config, pkgs, lib, ... }:
 
 {
   # sops-nix configuration
@@ -134,14 +134,14 @@
       Environment = [
         "HOME=/home/dev"
         "NODE_ENV=production"
-        "CCR_WORKER_URL=https://ccr-router.jonathan-mohrbacher.workers.dev"
         "CCR_MACHINE_ID=devbox"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
+        export CCR_WORKER_URL="$(cat /run/secrets/ccr_worker_url)"
         export OP_SERVICE_ACCOUNT_TOKEN="$(cat /run/secrets/op_service_account_token)"
         export OPENCODE_URL="http://127.0.0.1:4096"
-        exec /nix/store/2cxyi2vivwqkw6fc46ssfmz1ch4z041s-1password-cli-2.32.0/bin/op run --env-file=/home/dev/projects/pigeon/.env.1password -- \
+        exec ${pkgs._1password-cli}/bin/op run --env-file=/home/dev/projects/pigeon/.env.1password -- \
           ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/packages/daemon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";
       Restart = "on-failure";
@@ -189,7 +189,6 @@
       WorkingDirectory = "/home/dev/projects/my-podcasts";
       Environment = [
         "HOME=/home/dev"
-        "CLOUDFLARE_QUEUE_ID=fb2d616c57034fed8e6505a4ccd315b9"
         "NLTK_DATA=/persist/my-podcasts/nltk_data"
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       ];
@@ -202,6 +201,7 @@
       ExecStart = "${pkgs.writeShellScript "my-podcasts-consumer-start" ''
         set -euo pipefail
         export PYTHONUNBUFFERED=1
+        export CLOUDFLARE_QUEUE_ID="$(cat /run/secrets/cloudflare_queue_id)"
         export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
         export R2_ACCOUNT_ID="$(cat /run/secrets/r2_account_id)"
         export R2_ACCESS_KEY_ID="$(cat /run/secrets/r2_access_key_id)"

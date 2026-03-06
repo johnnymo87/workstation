@@ -201,6 +201,7 @@ lib.mkIf isCloudbox {
     client_id=""
     client_secret=""
     refresh_token=""
+    project_id=""
     if [ -r /run/secrets/gws_client_id ]; then
       client_id="$(cat /run/secrets/gws_client_id)"
     fi
@@ -210,9 +211,12 @@ lib.mkIf isCloudbox {
     if [ -r /run/secrets/gws_refresh_token ]; then
       refresh_token="$(cat /run/secrets/gws_refresh_token)"
     fi
+    if [ -r /run/secrets/google_cloud_project ]; then
+      project_id="$(cat /run/secrets/google_cloud_project)"
+    fi
 
     # Skip if any secret is missing
-    if [ -z "$client_id" ] || [ -z "$client_secret" ] || [ -z "$refresh_token" ]; then
+    if [ -z "$client_id" ] || [ -z "$client_secret" ] || [ -z "$refresh_token" ] || [ -z "$project_id" ]; then
       echo "assembleGwsCredentials: skipping (gws secrets not available)"
       exit 0
     fi
@@ -224,10 +228,11 @@ lib.mkIf isCloudbox {
     ${pkgs.jq}/bin/jq -n \
       --arg cid "$client_id" \
       --arg cs "$client_secret" \
+      --arg pid "$project_id" \
       '{
         installed: {
           client_id: $cid,
-          project_id: "wonder-sandbox",
+          project_id: $pid,
           auth_uri: "https://accounts.google.com/o/oauth2/auth",
           token_uri: "https://oauth2.googleapis.com/token",
           auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",

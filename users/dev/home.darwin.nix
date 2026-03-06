@@ -5,7 +5,7 @@
 # On Darwin, we disable programs that conflict with existing dotfiles.
 # As we migrate each program to HM, remove the corresponding mkForce false.
 # See: /tmp/research-nix-darwin-dotfiles-conflict-answer.md
-{ config, pkgs, lib, assetsPath, isDarwin, ccrTunnel, pinentry-op, projects, ... }:
+{ config, pkgs, lib, assetsPath, isDarwin, pinentry-op, projects, ... }:
 
 lib.mkIf isDarwin {
   # Dotfiles repository still hosts many legacy bash snippets on macOS.
@@ -127,6 +127,7 @@ lib.mkIf isDarwin {
         "/bin/sh" "-c"
         ''
           SEC="/usr/bin/security"
+          # TODO: Move CCR_WORKER_URL to macOS Keychain
           export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
           export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
           export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
@@ -141,7 +142,6 @@ lib.mkIf isDarwin {
       EnvironmentVariables = {
         HOME = config.home.homeDirectory;
         NODE_ENV = "production";
-        CCR_WORKER_URL = "https://ccr-router.jonathan-mohrbacher.workers.dev";
         CCR_MACHINE_ID = "macbook";
         OPENCODE_URL = "http://127.0.0.1:4096";
         PATH = lib.concatStringsSep ":" [

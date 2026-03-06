@@ -60,12 +60,6 @@
     # macOS host facts
     mac = import ./hosts/Y0FMQX93RR-2/vars.nix;
 
-    # Shared Cloudflare Tunnel configuration for CCR webhooks
-    ccrTunnel = {
-      hostname = "ccr.mohrbacher.dev";
-      port = 4731;
-    };
-
     # Filter projects by platform tag.
     # Projects without a `platforms` attr are included everywhere.
     allProjects = import ./projects.nix;
@@ -91,7 +85,6 @@
     # NixOS system configuration
     nixosConfigurations.devbox = nixpkgs.lib.nixosSystem {
       system = devboxSystem;
-      specialArgs = { inherit ccrTunnel; };
       modules = [
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
@@ -104,7 +97,6 @@
     # NixOS system configuration for GCP ARM devbox
     nixosConfigurations.cloudbox = nixpkgs.lib.nixosSystem {
       system = devboxSystem;  # aarch64-linux (same as devbox)
-      specialArgs = { inherit ccrTunnel; };
       modules = [
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
@@ -122,7 +114,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self ccrTunnel;
+        inherit self;
         localPkgs = localPkgsFor devboxSystem;
         assetsPath = ./assets;
         projects = projectsFor "devbox";
@@ -142,7 +134,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self ccrTunnel;
+        inherit self;
         localPkgs = localPkgsFor devboxSystem;
         assetsPath = ./assets;
         projects = projectsFor "cloudbox";
@@ -162,7 +154,7 @@
         ./users/dev/home.nix
       ];
       extraSpecialArgs = {
-        inherit self ccrTunnel;
+        inherit self;
         localPkgs = localPkgsFor chromebookSystem;
         assetsPath = ./assets;
         projects = projectsFor "crostini";
@@ -176,7 +168,7 @@
 
     # Darwin (macOS) system configuration
     darwinConfigurations.${mac.hostname} = nix-darwin.lib.darwinSystem {
-      specialArgs = { inherit inputs mac ccrTunnel; };
+      specialArgs = { inherit inputs mac; };
       modules = [
         ./hosts/Y0FMQX93RR-2/configuration.nix
         home-manager.darwinModules.home-manager
@@ -185,7 +177,7 @@
           home-manager.useUserPackages = true;
           home-manager.backupFileExtension = "hm-backup";
           home-manager.extraSpecialArgs = {
-            inherit ccrTunnel pinentry-op;
+            inherit pinentry-op;
             localPkgs = localPkgsFor darwinSystem;
             assetsPath = ./assets;
         projects = projectsFor "darwin";

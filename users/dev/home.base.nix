@@ -234,18 +234,47 @@ in
   # Azure DevOps npm registry auth (~/.npmrc) — work machines only
   # Uses npm's native ${ENV_VAR} interpolation; ADO_NPM_PAT_B64 is exported
   # in platform-specific bash init (home.cloudbox.nix / home.darwin.nix).
-  home.file.".npmrc" = lib.mkIf (isDarwin || isCloudbox) {
-    text = ''
-      ; begin auth token
-      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/registry/:username=foodtruckinc
-      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/registry/:_password=''${ADO_NPM_PAT_B64}
-      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/registry/:email=npm requires email to be set but doesn't use the value
-      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/:username=foodtruckinc
-      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/:_password=''${ADO_NPM_PAT_B64}
-      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/:email=npm requires email to be set but doesn't use the value
-      ; end auth token
-    '';
-  };
+  # We generate the file at activation time to avoid hardcoding the ADO registry URL
+  # (which contains the employer org/project name) in the Nix config.
+  home.activation.generateNpmrc = lib.mkIf (isDarwin || isCloudbox) (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    NPMRC_PATH="$HOME/.npmrc"
+    rm -f "$NPMRC_PATH"
+    REGISTRY_URL=""
+
+    ${if isCloudbox then ''
+      SECRET_PATH="/run/secrets/ado_npm_registry_url"
+      if [ -f "$SECRET_PATH" ]; then
+        REGISTRY_URL=$(cat "$SECRET_PATH")
+      else
+        echo "Warning: ADO npm registry secret not found at $SECRET_PATH"
+      fi
+    '' else ''
+      if /usr/bin/security find-generic-password -s ado-npm-registry-url -w >/dev/null 2>&1; then
+        REGISTRY_URL=$(/usr/bin/security find-generic-password -s ado-npm-registry-url -w)
+      else
+        echo "Warning: ADO npm registry URL not found in macOS Keychain (ado-npm-registry-url)"
+      fi
+    ''}
+
+    if [ -n "$REGISTRY_URL" ]; then
+      ORG_NAME=$(echo "$REGISTRY_URL" | cut -d/ -f4)
+      cat > "$NPMRC_PATH" <<EOF
+; begin auth token
+$REGISTRY_URL/registry/:username=$ORG_NAME
+$REGISTRY_URL/registry/:_password=\''${ADO_NPM_PAT_B64}
+$REGISTRY_URL/registry/:email=npm requires email to be set but doesn't use the value
+$REGISTRY_URL/:username=$ORG_NAME
+$REGISTRY_URL/:_password=\''${ADO_NPM_PAT_B64}
+$REGISTRY_URL/:email=npm requires email to be set but doesn't use the value
+; end auth token
+EOF
+    else
+      cat > "$NPMRC_PATH" <<EOF
+; ADO npm registry URL secret not found during activation
+; Add it to sops (Cloudbox) or Keychain (Darwin) and run rebuild
+EOF
+    fi
+  '');
 
   # Cap JetBrains kotlin-lsp JVM heap — each OpenCode session spawns its
   # own instance; without a cap they grow to ~1.5 GB each.

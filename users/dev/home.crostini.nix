@@ -1,6 +1,6 @@
 # Crostini (ChromeOS Linux) home-manager configuration
 # Chromebook-specific settings: identity, sops secrets via HM module, pigeon daemon
-{ config, pkgs, lib, isCrostini, ccrTunnel, projects, ... }:
+{ config, pkgs, lib, isCrostini, projects, ... }:
 
 lib.mkIf isCrostini {
   # Chromebook identity
@@ -90,12 +90,12 @@ lib.mkIf isCrostini {
       Environment = [
         "HOME=${config.home.homeDirectory}"
         "NODE_ENV=production"
-        "CCR_WORKER_URL=https://ccr-router.jonathan-mohrbacher.workers.dev"
         "CCR_MACHINE_ID=chromebook"
         "PATH=${lib.makeBinPath [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ]}"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
+        export CCR_WORKER_URL="$(cat ${config.sops.secrets.ccr_worker_url.path})"
         export OP_SERVICE_ACCOUNT_TOKEN="$(cat ${config.sops.secrets.op_service_account_token.path})"
         export OPENCODE_URL="http://127.0.0.1:4096"
         exec ${pkgs._1password-cli}/bin/op run \
