@@ -87,6 +87,18 @@
         group = "dev";
         mode = "0400";
       };
+      # CCR worker URL (used by pigeon-daemon)
+      ccr_worker_url = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      # Cloudflare Queue ID (used by my-podcasts-consumer)
+      cloudflare_queue_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
