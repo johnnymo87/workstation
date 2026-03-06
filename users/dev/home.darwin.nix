@@ -186,6 +186,9 @@ lib.mkIf isDarwin {
       # Azure DevOps PAT for private artifact registry (from macOS Keychain)
       AZDO_VAL="$(/usr/bin/security find-generic-password -s azure-devops-pat -w 2>/dev/null)" && export SYSTEM_ACCESSTOKEN="$AZDO_VAL"
       unset AZDO_VAL
+      if [ -n "$SYSTEM_ACCESSTOKEN" ]; then
+        export ADO_NPM_PAT_B64="$(printf '%s' "$SYSTEM_ACCESSTOKEN" | base64)"
+      fi
 
       # GCP project for Vertex AI (from macOS Keychain)
       GCP_VAL="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null)" && export GOOGLE_CLOUD_PROJECT="$GCP_VAL"

@@ -108,6 +108,7 @@ lib.mkIf isCloudbox {
     # Azure DevOps PAT for private artifact registry
     if [ -r /run/secrets/azure_devops_pat ]; then
       export SYSTEM_ACCESSTOKEN="$(cat /run/secrets/azure_devops_pat)"
+      export ADO_NPM_PAT_B64="$(printf '%s' "$SYSTEM_ACCESSTOKEN" | base64 -w0)"
     fi
 
     # ba CLI config (org-identifying, used by install-ba activation script and ba login)

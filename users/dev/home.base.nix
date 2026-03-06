@@ -161,6 +161,22 @@ in
     ]);
   };
 
+  # Azure DevOps npm registry auth (~/.npmrc) — work machines only
+  # Uses npm's native ${ENV_VAR} interpolation; ADO_NPM_PAT_B64 is exported
+  # in platform-specific bash init (home.cloudbox.nix / home.darwin.nix).
+  home.file.".npmrc" = lib.mkIf (isDarwin || isCloudbox) {
+    text = ''
+      ; begin auth token
+      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/registry/:username=foodtruckinc
+      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/registry/:_password=''${ADO_NPM_PAT_B64}
+      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/registry/:email=npm requires email to be set but doesn't use the value
+      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/:username=foodtruckinc
+      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/:_password=''${ADO_NPM_PAT_B64}
+      //pkgs.dev.azure.com/foodtruckinc/Wonder/_packaging/npm-local/npm/:email=npm requires email to be set but doesn't use the value
+      ; end auth token
+    '';
+  };
+
   # Cap JetBrains kotlin-lsp JVM heap — each OpenCode session spawns its
   # own instance; without a cap they grow to ~1.5 GB each.
   # IJ_JAVA_OPTIONS is read by JetBrains tools only (not generic JVMs).
