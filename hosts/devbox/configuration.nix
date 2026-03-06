@@ -2,6 +2,9 @@
 { config, pkgs, lib, ... }:
 
 {
+  # Allow unfree packages (1password-cli for pigeon)
+  nixpkgs.config.allowUnfree = true;
+
   # sops-nix configuration
   sops = {
     defaultSopsFile = ../../secrets/devbox.yaml;
