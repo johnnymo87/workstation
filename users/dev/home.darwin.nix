@@ -143,6 +143,7 @@ lib.mkIf isDarwin {
         NODE_ENV = "production";
         CCR_WORKER_URL = "https://ccr-router.jonathan-mohrbacher.workers.dev";
         CCR_MACHINE_ID = "macbook";
+        OPENCODE_URL = "http://127.0.0.1:4096";
         PATH = lib.concatStringsSep ":" [
           "${pkgs.nodejs}/bin"
           "${pkgs.neovim}/bin"
@@ -154,6 +155,31 @@ lib.mkIf isDarwin {
       KeepAlive = true;
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.out.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.err.log";
+    };
+  };
+
+  # OpenCode headless serve (for launching sessions from CLI or Telegram)
+  launchd.agents.opencode-serve = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "${config.home.homeDirectory}/.nix-profile/bin/opencode"
+        "serve" "--port" "4096" "--hostname" "127.0.0.1"
+      ];
+      EnvironmentVariables = {
+        HOME = config.home.homeDirectory;
+        PATH = lib.concatStringsSep ":" [
+          "${pkgs.git}/bin"
+          "${pkgs.fzf}/bin"
+          "${pkgs.ripgrep}/bin"
+          "/usr/bin"
+          "/bin"
+        ];
+      };
+      RunAtLoad = true;
+      KeepAlive = true;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/opencode-serve.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/opencode-serve.err.log";
     };
   };
 

@@ -97,6 +97,7 @@ lib.mkIf isCrostini {
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
         export OP_SERVICE_ACCOUNT_TOKEN="$(cat ${config.sops.secrets.op_service_account_token.path})"
+        export OPENCODE_URL="http://127.0.0.1:4096"
         exec ${pkgs._1password-cli}/bin/op run \
           --env-file=${config.home.homeDirectory}/projects/pigeon/.env.1password -- \
           ${pkgs.nodejs}/bin/node \
@@ -105,6 +106,32 @@ lib.mkIf isCrostini {
       ''}";
       Restart = "on-failure";
       RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # OpenCode headless serve (for launching sessions from CLI or Telegram)
+  systemd.user.services.opencode-serve = {
+    Unit = {
+      Description = "OpenCode headless serve";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "simple";
+      WorkingDirectory = config.home.homeDirectory;
+      Environment = [
+        "HOME=${config.home.homeDirectory}"
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.fzf pkgs.ripgrep ]}"
+      ];
+      ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
+        set -euo pipefail
+        exec ${config.home.homeDirectory}/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
+      ''}";
+      Restart = "always";
+      RestartSec = 10;
     };
     Install = {
       WantedBy = [ "default.target" ];

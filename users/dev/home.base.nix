@@ -17,6 +17,73 @@ let
     text = builtins.readFile "${assetsPath}/scripts/tpaste.bash";
   };
 
+  opencode-launch = pkgs.writeShellApplication {
+    name = "opencode-launch";
+    runtimeInputs = [ pkgs.curl pkgs.jq ];
+    text = ''
+      OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+
+      usage() {
+        echo "Usage: opencode-launch [directory] <prompt>"
+        echo ""
+        echo "Launch a headless opencode session."
+        echo ""
+        echo "  opencode-launch ~/projects/pigeon \"fix the test\""
+        echo "  opencode-launch \"fix the test\"  # uses current directory"
+        exit 1
+      }
+
+      if [ $# -eq 0 ]; then
+        usage
+      elif [ $# -eq 1 ]; then
+        directory="$PWD"
+        prompt="$1"
+      else
+        directory="$1"
+        shift
+        prompt="$*"
+      fi
+
+      # Resolve ~ to $HOME
+      directory="''${directory/#\~/$HOME}"
+
+      # Health check
+      if ! curl -sf "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+        echo "Error: opencode serve is not reachable at $OPENCODE_URL" >&2
+        echo "Check: systemctl status opencode-serve (Linux) or launchctl list | grep opencode (macOS)" >&2
+        exit 1
+      fi
+
+      # Create session
+      session_response=$(curl -sf -X POST "$OPENCODE_URL/session" \
+        -H "x-opencode-directory: $directory") || {
+        echo "Error: failed to create session" >&2
+        exit 1
+      }
+
+      session_id=$(echo "$session_response" | jq -r '.id')
+      if [ -z "$session_id" ] || [ "$session_id" = "null" ]; then
+        echo "Error: no session ID in response: $session_response" >&2
+        exit 1
+      fi
+
+      # Send prompt
+      curl -sf -X POST "$OPENCODE_URL/session/$session_id/prompt_async" \
+        -H "x-opencode-directory: $directory" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg p "$prompt" '{parts: [{type: "text", text: $p}]}')" >/dev/null || {
+        echo "Error: failed to send prompt to session $session_id" >&2
+        exit 1
+      }
+
+      echo "Session launched: $session_id"
+      echo "Directory: $directory"
+      echo ""
+      echo "Attach:  opencode attach $OPENCODE_URL --session $session_id"
+      echo "Kill:    curl -sf -X DELETE $OPENCODE_URL/session/$session_id"
+    '';
+  };
+
   # Patched opencode with improved Anthropic prompt caching (PR #5422)
   # https://github.com/johnnymo87/opencode-cached
   # All 4 platforms built by the cached fork's CI
@@ -106,6 +173,9 @@ in
     # Clipboard via tmux
     tcopy
     tpaste
+
+    # Headless opencode session launcher
+    opencode-launch
 
     # GitHub CLI
     pkgs.gh

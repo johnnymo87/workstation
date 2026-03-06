@@ -16,6 +16,7 @@ let
   crossPlatformSkills = [
     "ask-question"
     "beads"
+    "launching-headless-sessions"
     "notify-telegram"
     "using-chatgpt-relay-from-devbox"
   ];
