@@ -218,6 +218,49 @@
     };
   };
 
+  systemd.services.fp-digest = {
+    description = "Foreign Policy Digest daily podcast generation";
+    wants = [ "network-online.target" "opencode-serve.service" ];
+    after = [ "network-online.target" "opencode-serve.service" ];
+
+    path = [ pkgs.python314 pkgs.ffmpeg pkgs.uv pkgs.bash pkgs.coreutils ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/my-podcasts";
+      Environment = [
+        "HOME=/home/dev"
+        "NLTK_DATA=/persist/my-podcasts/nltk_data"
+        "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      ];
+      ExecStart = "${pkgs.writeShellScript "fp-digest-start" ''
+        set -euo pipefail
+        export PYTHONUNBUFFERED=1
+        export GEMINI_API_KEY="$(cat /run/secrets/gemini_api_key)"
+        export EXA_API_KEY="$(cat /run/secrets/exa_api_key)"
+        export R2_ACCOUNT_ID="$(cat /run/secrets/r2_account_id)"
+        export R2_ACCESS_KEY_ID="$(cat /run/secrets/r2_access_key_id)"
+        export R2_SECRET_ACCESS_KEY="$(cat /run/secrets/r2_secret_access_key)"
+        export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+        cd /home/dev/projects/my-podcasts
+        exec ${pkgs.uv}/bin/uv run python -m pipeline fp-digest
+      ''}";
+      TimeoutStartSec = 600;
+    };
+  };
+
+  systemd.timers.fp-digest = {
+    description = "Run FP Digest daily at 6 PM";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 18:00:00";
+      Persistent = true;
+      RandomizedDelaySec = "5min";
+    };
+  };
+
   # System identity
   networking.hostName = "devbox";
   time.timeZone = "America/New_York";
