@@ -271,7 +271,7 @@
     description = "Run FP Digest daily at 6 PM";
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "*-*-* 18:00:00";
+      OnCalendar = "Mon..Fri *-*-* 18:00:00";
       Persistent = true;
       RandomizedDelaySec = "5min";
     };
