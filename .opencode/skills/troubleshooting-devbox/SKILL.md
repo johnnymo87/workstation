@@ -19,8 +19,8 @@ The devbox connection uses several port forwards for development tools:
 | 4003 | Local (-L) | eternal-machinery (secondary) |
 | 4173 | Local (-L) | citadels Vite dev server |
 | 1455 | Local (-L) | OpenCode OAuth callback for ChatGPT Plus authentication |
-| 9222 | Remote (-R) | Chrome DevTools Protocol - project A (e.g. Citadels) |
-| 9223 | Remote (-R) | Chrome DevTools Protocol - project B (e.g. Eternal Machinery) |
+| 9222 | Remote (-R) | Chrome DevTools Protocol - project A (e.g. Eternal Machinery) |
+| 9223 | Remote (-R) | Chrome DevTools Protocol - project B (e.g. Citadels) |
 | 3033 | Remote (-R) | chatgpt-relay - `/ask-question` CLI talks to macOS daemon |
 
 **Local forwards (-L):** devbox service → accessible on macOS localhost
