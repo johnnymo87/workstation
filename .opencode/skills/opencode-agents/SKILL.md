@@ -21,7 +21,7 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### oracle (subagent)
 **Purpose:** Read-only strategic technical advisor — architecture, debugging, high-stakes decisions.
-**Model:** openai/gpt-5.3-codex (deliberately different from primary model for perspective diversity)
+**Model:** openai/chatgpt-5.4 (deliberately different from primary model for perspective diversity)
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
 **When to use:** Stuck after 2+ attempts, architectural decision, need a second opinion from a different model.
 **Key trait:** Cannot modify files. Gives a recommendation with effort estimate (Quick/Short/Medium/Large) and action plan. Pragmatic minimalism — biases toward simplest solution.
