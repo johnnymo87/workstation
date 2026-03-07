@@ -100,6 +100,58 @@ lib.mkIf isCloudbox {
       export ATLASSIAN_CLOUD_ID="$(cat /run/secrets/atlassian_cloud_id)"
     fi
 
+    # Save default Atlassian credentials for round-tripping
+    export ATLASSIAN_DEFAULT_SITE="''${ATLASSIAN_SITE:-}"
+    export ATLASSIAN_DEFAULT_EMAIL="''${ATLASSIAN_EMAIL:-}"
+    export ATLASSIAN_DEFAULT_CLOUD_ID="''${ATLASSIAN_CLOUD_ID:-}"
+    export ATLASSIAN_DEFAULT_API_TOKEN="''${ATLASSIAN_API_TOKEN:-}"
+
+    # Load alt Atlassian credentials (from sops)
+    if [ -r /run/secrets/atlassian_alt_site ]; then
+      export ATLASSIAN_ALT_SITE="$(cat /run/secrets/atlassian_alt_site)"
+    fi
+
+    if [ -r /run/secrets/atlassian_alt_email ]; then
+      export ATLASSIAN_ALT_EMAIL="$(cat /run/secrets/atlassian_alt_email)"
+    fi
+
+    if [ -r /run/secrets/atlassian_alt_cloud_id ]; then
+      export ATLASSIAN_ALT_CLOUD_ID="$(cat /run/secrets/atlassian_alt_cloud_id)"
+    fi
+
+    if [ -r /run/secrets/atlassian_alt_api_token ]; then
+      export ATLASSIAN_ALT_API_TOKEN="$(cat /run/secrets/atlassian_alt_api_token)"
+    fi
+
+    # Switch Atlassian profile function
+    switch-atlassian() {
+      case "''${1:-}" in
+        default)
+          export ATLASSIAN_SITE="''${ATLASSIAN_DEFAULT_SITE:-}"
+          export ATLASSIAN_EMAIL="''${ATLASSIAN_DEFAULT_EMAIL:-}"
+          export ATLASSIAN_CLOUD_ID="''${ATLASSIAN_DEFAULT_CLOUD_ID:-}"
+          export ATLASSIAN_API_TOKEN="''${ATLASSIAN_DEFAULT_API_TOKEN:-}"
+          echo "Switched to default Atlassian instance (''${ATLASSIAN_SITE})"
+          ;;
+        alt)
+          if [ -z "''${ATLASSIAN_ALT_SITE:-}" ]; then
+            echo "Error: alt Atlassian credentials not found in secrets"
+            return 1
+          fi
+          export ATLASSIAN_SITE="''${ATLASSIAN_ALT_SITE:-}"
+          export ATLASSIAN_EMAIL="''${ATLASSIAN_ALT_EMAIL:-}"
+          export ATLASSIAN_CLOUD_ID="''${ATLASSIAN_ALT_CLOUD_ID:-}"
+          export ATLASSIAN_API_TOKEN="''${ATLASSIAN_ALT_API_TOKEN:-}"
+          echo "Switched to alt Atlassian instance (''${ATLASSIAN_SITE})"
+          ;;
+        *)
+          echo "Usage: switch-atlassian default|alt"
+          echo "Current: ''${ATLASSIAN_SITE:-not set}"
+          return 1
+          ;;
+      esac
+    }
+
     # GCP project for Vertex AI
     if [ -r /run/secrets/google_cloud_project ]; then
       export GOOGLE_CLOUD_PROJECT="$(cat /run/secrets/google_cloud_project)"
