@@ -217,6 +217,54 @@ lib.mkIf isDarwin {
       ATLASSIAN_VAL="$(/usr/bin/security find-generic-password -s atlassian-api-token -w 2>/dev/null)" && export ATLASSIAN_API_TOKEN="$ATLASSIAN_VAL"
       unset ATLASSIAN_VAL
 
+      # Save default Atlassian credentials for round-tripping
+      export ATLASSIAN_DEFAULT_SITE="''${ATLASSIAN_SITE:-}"
+      export ATLASSIAN_DEFAULT_EMAIL="''${ATLASSIAN_EMAIL:-}"
+      export ATLASSIAN_DEFAULT_CLOUD_ID="''${ATLASSIAN_CLOUD_ID:-}"
+      export ATLASSIAN_DEFAULT_API_TOKEN="''${ATLASSIAN_API_TOKEN:-}"
+
+      # Load alt Atlassian credentials (from macOS Keychain)
+      ATLASSIAN_ALT_SITE_VAL="$(/usr/bin/security find-generic-password -s atlassian-alt-site -w 2>/dev/null)" && export ATLASSIAN_ALT_SITE="$ATLASSIAN_ALT_SITE_VAL"
+      unset ATLASSIAN_ALT_SITE_VAL
+
+      ATLASSIAN_ALT_EMAIL_VAL="$(/usr/bin/security find-generic-password -s atlassian-alt-email -w 2>/dev/null)" && export ATLASSIAN_ALT_EMAIL="$ATLASSIAN_ALT_EMAIL_VAL"
+      unset ATLASSIAN_ALT_EMAIL_VAL
+
+      ATLASSIAN_ALT_CLOUD_ID_VAL="$(/usr/bin/security find-generic-password -s atlassian-alt-cloud-id -w 2>/dev/null)" && export ATLASSIAN_ALT_CLOUD_ID="$ATLASSIAN_ALT_CLOUD_ID_VAL"
+      unset ATLASSIAN_ALT_CLOUD_ID_VAL
+
+      ATLASSIAN_ALT_VAL="$(/usr/bin/security find-generic-password -s atlassian-alt-api-token -w 2>/dev/null)" && export ATLASSIAN_ALT_API_TOKEN="$ATLASSIAN_ALT_VAL"
+      unset ATLASSIAN_ALT_VAL
+
+      # Switch Atlassian profile function
+      switch-atlassian() {
+        case "''${1:-}" in
+          default)
+            export ATLASSIAN_SITE="''${ATLASSIAN_DEFAULT_SITE:-}"
+            export ATLASSIAN_EMAIL="''${ATLASSIAN_DEFAULT_EMAIL:-}"
+            export ATLASSIAN_CLOUD_ID="''${ATLASSIAN_DEFAULT_CLOUD_ID:-}"
+            export ATLASSIAN_API_TOKEN="''${ATLASSIAN_DEFAULT_API_TOKEN:-}"
+            echo "Switched to default Atlassian instance (''${ATLASSIAN_SITE})"
+            ;;
+          alt)
+            if [ -z "''${ATLASSIAN_ALT_SITE:-}" ]; then
+              echo "Error: alt Atlassian credentials not found in Keychain"
+              return 1
+            fi
+            export ATLASSIAN_SITE="''${ATLASSIAN_ALT_SITE:-}"
+            export ATLASSIAN_EMAIL="''${ATLASSIAN_ALT_EMAIL:-}"
+            export ATLASSIAN_CLOUD_ID="''${ATLASSIAN_ALT_CLOUD_ID:-}"
+            export ATLASSIAN_API_TOKEN="''${ATLASSIAN_ALT_API_TOKEN:-}"
+            echo "Switched to alt Atlassian instance (''${ATLASSIAN_SITE})"
+            ;;
+          *)
+            echo "Usage: switch-atlassian default|alt"
+            echo "Current: ''${ATLASSIAN_SITE:-not set}"
+            return 1
+            ;;
+        esac
+      }
+
       # Azure DevOps PAT for private artifact registry (from macOS Keychain)
       AZDO_VAL="$(/usr/bin/security find-generic-password -s azure-devops-pat -w 2>/dev/null)" && export SYSTEM_ACCESSTOKEN="$AZDO_VAL"
       unset AZDO_VAL
