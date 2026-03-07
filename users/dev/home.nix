@@ -9,7 +9,6 @@
     ./home.cloudbox.nix
     ./home.crostini.nix
     ./home.darwin.nix
-    ./claude-skills.nix
     ./opencode-config.nix
     ./opencode-skills.nix
     ./tmux.devbox.nix

@@ -19,6 +19,7 @@ let
     "launching-headless-sessions"
     "notify-telegram"
     "using-chatgpt-relay-from-devbox"
+    "using-gws"
   ];
 
   # Work-only skills (macOS + cloudbox)
@@ -56,12 +57,12 @@ let
       "${assetsPath}/opencode/skills/using-atlassian-cli/REFERENCE.md";
   };
 
-  # fetching-atlassian-content lives in claude assets (shared with claude-skills.nix)
+  # fetching-atlassian-content skill + reference
   fetchingAtlassianSkill = {
     ".config/opencode/skills/fetching-atlassian-content/SKILL.md".source =
-      "${assetsPath}/claude/skills/fetching-atlassian-content/SKILL.md";
+      "${assetsPath}/opencode/skills/fetching-atlassian-content/SKILL.md";
     ".config/opencode/skills/fetching-atlassian-content/REFERENCE.md".source =
-      "${assetsPath}/claude/skills/fetching-atlassian-content/REFERENCE.md";
+      "${assetsPath}/opencode/skills/fetching-atlassian-content/REFERENCE.md";
   };
 
   # Superpowers skills: symlink the entire upstream skills directory
