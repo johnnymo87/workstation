@@ -1,7 +1,7 @@
 # Claude Code skills deployment
 # Deploys skills to ~/.claude/skills/ where Claude Code auto-discovers them
 # Skills are tool-agnostic workflows usable from any project
-{ config, lib, pkgs, assetsPath, isDarwin, isCloudbox, ... }:
+{ config, lib, pkgs, assetsPath, isDarwin, isDevbox, isCloudbox, ... }:
 
 let
   claudeAssetsPath = "${assetsPath}/claude";
@@ -24,10 +24,16 @@ let
     ".claude/skills/fetching-atlassian-content/REFERENCE.md".source =
       "${claudeAssetsPath}/skills/fetching-atlassian-content/REFERENCE.md";
   };
+
+  # All-platform skills (gws is installed everywhere)
+  commonSkills = [
+    "using-gws"
+  ];
 in
 {
   home.file =
-    lib.optionalAttrs (isDarwin || isCloudbox) (
+    mkSkills commonSkills
+    // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills
       // fetchingAtlassianReferences
     );

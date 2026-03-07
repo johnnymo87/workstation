@@ -36,6 +36,27 @@ lib.mkIf isDevbox {
     # These call mcp.exa.ai with no API key (free tier). If rate-limited (429),
     # obtain a free key at exa.ai and set OPENCODE_ENABLE_EXA=https://mcp.exa.ai/mcp?exaApiKey=<key>
     export OPENCODE_ENABLE_EXA=1
+
+    # Google Workspace CLI: default to jonathan.mohrbacher@gmail.com
+    export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws-default"
+
+    switch-gws() {
+      case "''${1:-}" in
+        default)
+          export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws-default"
+          echo "Switched to default gws account (jonathan.mohrbacher@gmail.com)"
+          ;;
+        alt)
+          export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws-alt"
+          echo "Switched to alt gws account (johnnymo87@gmail.com)"
+          ;;
+        *)
+          echo "Usage: switch-gws default|alt"
+          echo "Current: $GOOGLE_WORKSPACE_CLI_CONFIG_DIR"
+          return 1
+          ;;
+      esac
+    }
   '';
 
   # Mask GPG agent units for forwarding (systemd-specific)
@@ -46,6 +67,105 @@ lib.mkIf isDevbox {
       ln -sf /dev/null "$HOME/.config/systemd/user/$unit"
     done
     ${pkgs.systemd}/bin/systemctl --user daemon-reload 2>/dev/null || true
+  '';
+
+  # Assemble gws config files from sops secrets at activation time.
+  # Creates two config directories for multi-account support:
+  #   ~/.config/gws-default/ (jonathan.mohrbacher@gmail.com)
+  #   ~/.config/gws-alt/     (johnnymo87@gmail.com)
+  # Use switch-gws default|alt to swap between accounts.
+  home.activation.assembleGwsCredentials = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+    set -euo pipefail
+
+    assemble_gws_account() {
+      local dir="$1"
+      local client_id="$2"
+      local client_secret="$3"
+      local refresh_token="$4"
+      local project_id="''${5:-}"
+
+      mkdir -p "$dir"
+
+      # Assemble client_secret.json (OAuth client config for re-auth / token refresh)
+      local tmp
+      tmp="$(mktemp "''${dir}/client_secret.json.tmp.XXXXXX")"
+      if [ -n "$project_id" ]; then
+        ${pkgs.jq}/bin/jq -n \
+          --arg cid "$client_id" \
+          --arg cs "$client_secret" \
+          --arg pid "$project_id" \
+          '{
+            installed: {
+              client_id: $cid,
+              project_id: $pid,
+              auth_uri: "https://accounts.google.com/o/oauth2/auth",
+              token_uri: "https://oauth2.googleapis.com/token",
+              auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
+              client_secret: $cs,
+              redirect_uris: ["http://localhost"]
+            }
+          }' > "$tmp"
+      else
+        ${pkgs.jq}/bin/jq -n \
+          --arg cid "$client_id" \
+          --arg cs "$client_secret" \
+          '{
+            installed: {
+              client_id: $cid,
+              auth_uri: "https://accounts.google.com/o/oauth2/auth",
+              token_uri: "https://oauth2.googleapis.com/token",
+              auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
+              client_secret: $cs,
+              redirect_uris: ["http://localhost"]
+            }
+          }' > "$tmp"
+      fi
+      mv "$tmp" "$dir/client_secret.json"
+      chmod 600 "$dir/client_secret.json"
+
+      # Assemble credentials.json (authorized_user tokens for API access)
+      tmp="$(mktemp "''${dir}/credentials.json.tmp.XXXXXX")"
+      ${pkgs.jq}/bin/jq -n \
+        --arg cid "$client_id" \
+        --arg cs "$client_secret" \
+        --arg rt "$refresh_token" \
+        '{
+          type: "authorized_user",
+          client_id: $cid,
+          client_secret: $cs,
+          refresh_token: $rt
+        }' > "$tmp"
+      mv "$tmp" "$dir/credentials.json"
+      chmod 600 "$dir/credentials.json"
+    }
+
+    # Read default account secrets
+    def_cid="" def_cs="" def_rt="" def_pid=""
+    [ -r /run/secrets/gws_default_client_id ] && def_cid="$(cat /run/secrets/gws_default_client_id)"
+    [ -r /run/secrets/gws_default_client_secret ] && def_cs="$(cat /run/secrets/gws_default_client_secret)"
+    [ -r /run/secrets/gws_default_refresh_token ] && def_rt="$(cat /run/secrets/gws_default_refresh_token)"
+    [ -r /run/secrets/gws_default_project_id ] && def_pid="$(cat /run/secrets/gws_default_project_id)"
+
+    if [ -n "$def_cid" ] && [ -n "$def_cs" ] && [ -n "$def_rt" ]; then
+      assemble_gws_account "$HOME/.config/gws-default" "$def_cid" "$def_cs" "$def_rt" "$def_pid"
+      echo "assembleGwsCredentials: gws-default assembled"
+    else
+      echo "assembleGwsCredentials: skipping gws-default (secrets not available)"
+    fi
+
+    # Read alt account secrets
+    alt_cid="" alt_cs="" alt_rt="" alt_pid=""
+    [ -r /run/secrets/gws_alt_client_id ] && alt_cid="$(cat /run/secrets/gws_alt_client_id)"
+    [ -r /run/secrets/gws_alt_client_secret ] && alt_cs="$(cat /run/secrets/gws_alt_client_secret)"
+    [ -r /run/secrets/gws_alt_refresh_token ] && alt_rt="$(cat /run/secrets/gws_alt_refresh_token)"
+    [ -r /run/secrets/gws_alt_project_id ] && alt_pid="$(cat /run/secrets/gws_alt_project_id)"
+
+    if [ -n "$alt_cid" ] && [ -n "$alt_cs" ] && [ -n "$alt_rt" ]; then
+      assemble_gws_account "$HOME/.config/gws-alt" "$alt_cid" "$alt_cs" "$alt_rt" "$alt_pid"
+      echo "assembleGwsCredentials: gws-alt assembled"
+    else
+      echo "assembleGwsCredentials: skipping gws-alt (secrets not available)"
+    fi
   '';
 
   # Ensure GPG socket directory exists before SSH tries to bind RemoteForward

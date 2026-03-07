@@ -67,6 +67,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Screenshot to Devbox](.opencode/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote OpenCode |
 | [OpenCode Agents](.opencode/skills/opencode-agents/SKILL.md) | Agent set rationale, what was kept/removed and why |
 | [Tracking Cache Costs](.opencode/skills/tracking-cache-costs/SKILL.md) | Measuring OpenCode prompt caching efficiency |
+| [Configuring GWS](.opencode/skills/configuring-gws/SKILL.md) | Adding, debugging gws accounts and OAuth credentials |
 | [Scrubbing Company References](.opencode/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
 
 ## Structure

@@ -99,6 +99,48 @@
         group = "dev";
         mode = "0400";
       };
+      # Google Workspace CLI - default account (jonathan.mohrbacher@gmail.com)
+      gws_default_client_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      gws_default_client_secret = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      gws_default_refresh_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      gws_default_project_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      # Google Workspace CLI - alt account (johnnymo87@gmail.com)
+      gws_alt_client_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      gws_alt_client_secret = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      gws_alt_refresh_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      gws_alt_project_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
