@@ -79,6 +79,27 @@
         group = "dev";
         mode = "0400";
       };
+      # Alt Atlassian instance (for switch-atlassian alt)
+      atlassian_alt_api_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      atlassian_alt_site = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      atlassian_alt_email = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      atlassian_alt_cloud_id = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Azure DevOps PAT (for private Maven/artifact registry)
       azure_devops_pat = {
         owner = "dev";
