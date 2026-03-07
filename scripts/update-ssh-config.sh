@@ -56,6 +56,7 @@ Host devbox-tunnel
     # Development tunnels (see troubleshooting-devbox skill for details)
     LocalForward 4000 localhost:4000
     LocalForward 4003 localhost:4003
+    LocalForward 4173 localhost:4173
     LocalForward 1455 localhost:1455
     RemoteForward 9222 localhost:9222
     # chatgpt-relay tunnel (ask-question CLI)
