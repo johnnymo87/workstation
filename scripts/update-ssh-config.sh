@@ -107,8 +107,9 @@ Host cloudbox-tunnel
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
     # OpenCode OAuth callback
     LocalForward 1455 localhost:1455
-    # mcp-remote OAuth callback
+    # mcp-remote OAuth callbacks (default + alt Atlassian instances)
     LocalForward 3334 localhost:3334
+    LocalForward 3335 localhost:3335
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
     RemoteForward 9223 localhost:9223
