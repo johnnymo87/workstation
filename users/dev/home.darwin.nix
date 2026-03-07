@@ -159,23 +159,31 @@ lib.mkIf isDarwin {
   };
 
   # OpenCode headless serve (for launching sessions from CLI or Telegram)
+  # Uses a wrapper script so we can read GOOGLE_CLOUD_PROJECT from Keychain
+  # at launch time -- headless sessions need this to find the
+  # google-vertex-anthropic provider.
   launchd.agents.opencode-serve = {
     enable = true;
     config = {
       ProgramArguments = [
-        "${config.home.homeDirectory}/.nix-profile/bin/opencode"
-        "serve" "--port" "4096" "--hostname" "127.0.0.1"
+        "${pkgs.writeShellScript "opencode-serve-start" ''
+          export HOME="${config.home.homeDirectory}"
+          export PATH="${lib.concatStringsSep ":" [
+            "${pkgs.git}/bin"
+            "${pkgs.fzf}/bin"
+            "${pkgs.ripgrep}/bin"
+            "/usr/bin"
+            "/bin"
+          ]}"
+
+          # Google Vertex AI: project from Keychain, ADC from gcloud config
+          GCP_VAL="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null)" \
+            && export GOOGLE_CLOUD_PROJECT="$GCP_VAL"
+          export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
+
+          exec "$HOME/.nix-profile/bin/opencode" serve --port 4096 --hostname 127.0.0.1
+        ''}"
       ];
-      EnvironmentVariables = {
-        HOME = config.home.homeDirectory;
-        PATH = lib.concatStringsSep ":" [
-          "${pkgs.git}/bin"
-          "${pkgs.fzf}/bin"
-          "${pkgs.ripgrep}/bin"
-          "/usr/bin"
-          "/bin"
-        ];
-      };
       RunAtLoad = true;
       KeepAlive = true;
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/opencode-serve.out.log";

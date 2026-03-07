@@ -231,7 +231,7 @@
   systemd.services.opencode-serve = {
     description = "OpenCode headless serve";
     wantedBy = [ "multi-user.target" ];
-    after = [ "network.target" ];
+    after = [ "network.target" "sops-nix.service" ];
     path = [ pkgs.git pkgs.fzf pkgs.ripgrep ];
     serviceConfig = {
       Type = "simple";
@@ -240,6 +240,15 @@
       WorkingDirectory = "/home/dev";
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
+
+        # Google Vertex AI providers need project + ADC credentials.
+        # Interactive shells get these from .bashrc; the systemd service
+        # needs them injected explicitly.
+        if [ -r /run/secrets/google_cloud_project ]; then
+          export GOOGLE_CLOUD_PROJECT="$(cat /run/secrets/google_cloud_project)"
+        fi
+        export GOOGLE_APPLICATION_CREDENTIALS="/home/dev/.config/gcloud/application_default_credentials.json"
+
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
       Restart = "always";
