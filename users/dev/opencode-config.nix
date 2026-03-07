@@ -18,8 +18,41 @@ let
       src;
 
   # ---------------------------------------------------------------------------
-  # opencode.json managed config
+  # Atlassian MCP wrapper: reads site URL from credentials at runtime
+  # so org-identifying URLs stay out of version control.
   # ---------------------------------------------------------------------------
+  mkAtlassianMcp = { name, port, keychainService, sopsSecret }: pkgs.writeShellApplication {
+    inherit name;
+    runtimeInputs = [ pkgs.nodejs ];
+    text =
+      let
+        siteRead = if isDarwin
+          then ''SITE="$(/usr/bin/security find-generic-password -s ${keychainService} -w 2>/dev/null || true)"''
+          else ''SITE="$(cat /run/secrets/${sopsSecret} 2>/dev/null || true)"'';
+      in ''
+        ${siteRead}
+        if [ -z "''${SITE:-}" ]; then
+          echo "${name}: could not read atlassian site" >&2
+          exit 1
+        fi
+        exec npx -y mcp-remote https://mcp.atlassian.com/v1/mcp --resource "https://''${SITE}/" ${toString port}
+      '';
+  };
+
+  atlassian-mcp = mkAtlassianMcp {
+    name = "atlassian-mcp";
+    port = 3334;
+    keychainService = "atlassian-site";
+    sopsSecret = "atlassian_site";
+  };
+
+  atlassian-alt-mcp = mkAtlassianMcp {
+    name = "atlassian-alt-mcp";
+    port = 3335;
+    keychainService = "atlassian-alt-site";
+    sopsSecret = "atlassian_alt_site";
+  };
+
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # Platform overlay: Claude via Vertex AI (macOS + cloudbox)
@@ -31,13 +64,12 @@ let
     mcp = (opencodeBase.mcp or {}) // {
       atlassian = {
         type = "local";
-        command = [
-          "${pkgs.nodejs}/bin/npx"
-          "-y"
-          "mcp-remote"
-          "https://mcp.atlassian.com/v1/sse"
-          "3334"
-        ];
+        command = [ "${atlassian-mcp}/bin/atlassian-mcp" ];
+        enabled = false;
+      };
+      atlassian-alt = {
+        type = "local";
+        command = [ "${atlassian-alt-mcp}/bin/atlassian-alt-mcp" ];
         enabled = false;
       };
     };
