@@ -38,6 +38,16 @@ echo "https://company.atlassian.net/wiki/spaces/ENG/pages/1234567890/Title" | gr
 - Summary, description, and comments as Markdown
 - All image attachments (PNG, JPG, etc.)
 
+## Multiple Instances
+
+Commands use whichever Atlassian instance is active in the current shell. To target the alt instance:
+
+```bash
+switch-atlassian alt    # swap ATLASSIAN_* env vars
+# ... fetch pages/tickets ...
+switch-atlassian default  # restore
+```
+
 ## When to Use
 
 - Archiving content for offline reference

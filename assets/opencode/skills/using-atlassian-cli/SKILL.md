@@ -39,14 +39,27 @@ acli jira workitem comment create --key PROJ-1234 --body "Comment text"
 | Default Assignee | `$ATLASSIAN_ASSIGNEE_ID` |
 | Active Epic | `PROJ-5678` |
 
+## Multiple Instances
+
+Two Atlassian instances are configured: `default` and `alt`. Shell startup loads the default instance. To target the alt instance:
+
+```bash
+switch-atlassian alt    # swap ATLASSIAN_* env vars to alt instance
+# ... run acli commands ...
+switch-atlassian default  # restore
+```
+
+Re-authenticate after switching (`acli jira auth login` uses the active env vars).
+
 ## Environment Variables
 
 Set automatically by home-manager:
 
 | Variable | Source (macOS) | Source (cloudbox) |
 |----------|---------------|-------------------|
-| `ATLASSIAN_EMAIL` | `home.sessionVariables` | `home.sessionVariables` |
-| `ATLASSIAN_CLOUD_ID` | `home.sessionVariables` | `home.sessionVariables` |
+| `ATLASSIAN_SITE` | macOS Keychain (`atlassian-site`) | sops (`/run/secrets/atlassian_site`) |
+| `ATLASSIAN_EMAIL` | macOS Keychain (`atlassian-email`) | sops (`/run/secrets/atlassian_email`) |
+| `ATLASSIAN_CLOUD_ID` | macOS Keychain (`atlassian-cloud-id`) | sops (`/run/secrets/atlassian_cloud_id`) |
 | `ATLASSIAN_API_TOKEN` | macOS Keychain (`atlassian-api-token`) | sops (`/run/secrets/atlassian_api_token`) |
 
 ## Ticket Writing Philosophy

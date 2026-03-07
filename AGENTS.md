@@ -69,6 +69,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Tracking Cache Costs](.opencode/skills/tracking-cache-costs/SKILL.md) | Measuring OpenCode prompt caching efficiency |
 | [Configuring GWS](.opencode/skills/configuring-gws/SKILL.md) | Adding, debugging gws accounts and OAuth credentials |
 | [Scrubbing Company References](.opencode/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
+| [Atlassian Multi-Instance](.opencode/skills/atlassian-multi-instance/SKILL.md) | Adding, removing, debugging Atlassian instance profiles |
 
 ## Structure
 
