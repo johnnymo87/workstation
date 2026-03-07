@@ -253,6 +253,7 @@
       ExecStart = "${pkgs.writeShellScript "fp-digest-start" ''
         set -euo pipefail
         export PYTHONUNBUFFERED=1
+        export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
         export GEMINI_API_KEY="$(cat /run/secrets/gemini_api_key)"
         export EXA_API_KEY="$(cat /run/secrets/exa_api_key)"
         export R2_ACCOUNT_ID="$(cat /run/secrets/r2_account_id)"
