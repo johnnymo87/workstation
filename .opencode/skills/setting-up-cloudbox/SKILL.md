@@ -176,7 +176,9 @@ Host cloudbox
     User dev
     ForwardAgent yes
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/<you>/.gnupg/S.gpg-agent.extra
+    # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
+    RemoteForward 9223 localhost:9223
     RemoteForward 3033 localhost:3033
 
 Host cloudbox-tunnel
@@ -186,7 +188,9 @@ Host cloudbox-tunnel
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/<you>/.gnupg/S.gpg-agent.extra
     LocalForward 1455 localhost:1455
     LocalForward 3334 localhost:3334
+    # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
+    RemoteForward 9223 localhost:9223
     RemoteForward 3033 localhost:3033
 ```
 

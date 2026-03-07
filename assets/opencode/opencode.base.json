@@ -21,12 +21,23 @@
     "opencode-beads"
   ],
   "mcp": {
-    "playwright": {
+    "playwright-9222": {
       "type": "local",
       "command": [
         "playwright-mcp",
         "--cdp-endpoint",
         "http://localhost:9222",
+        "--caps",
+        "vision,devtools"
+      ],
+      "enabled": false
+    },
+    "playwright-9223": {
+      "type": "local",
+      "command": [
+        "playwright-mcp",
+        "--cdp-endpoint",
+        "http://localhost:9223",
         "--caps",
         "vision,devtools"
       ],

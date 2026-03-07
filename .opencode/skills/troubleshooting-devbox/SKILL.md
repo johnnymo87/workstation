@@ -17,8 +17,10 @@ The devbox connection uses several port forwards for development tools:
 |------|-----------|---------|
 | 4000 | Local (-L) | eternal-machinery dev server |
 | 4003 | Local (-L) | eternal-machinery (secondary) |
+| 4173 | Local (-L) | citadels Vite dev server |
 | 1455 | Local (-L) | OpenCode OAuth callback for ChatGPT Plus authentication |
-| 9222 | Remote (-R) | Chrome DevTools Protocol - control macOS browser from devbox |
+| 9222 | Remote (-R) | Chrome DevTools Protocol - project A (e.g. Citadels) |
+| 9223 | Remote (-R) | Chrome DevTools Protocol - project B (e.g. Eternal Machinery) |
 | 3033 | Remote (-R) | chatgpt-relay - `/ask-question` CLI talks to macOS daemon |
 
 **Local forwards (-L):** devbox service → accessible on macOS localhost
@@ -27,9 +29,13 @@ The devbox connection uses several port forwards for development tools:
 Use two SSH hosts:
 
 - `ssh devbox` for normal interactive sessions (no local forwards, cleaner logs)
-- `ssh devbox-tunnel` when you need local forwards (`4000`, `4003`, `1455`)
+- `ssh devbox-tunnel` when you need local forwards (`4000`, `4003`, `4173`, `1455`)
 
-Both hosts keep remote forwards (`9222`, `3033`) and GPG agent forwarding.
+Both hosts keep remote forwards (`9222`, `9223`, `3033`) and GPG agent forwarding.
+
+### Multi-project CDP
+
+Each project that uses human-in-the-loop visual QA needs its own Chrome instance on macOS with a unique `--remote-debugging-port` and `--user-data-dir`. Both CDP ports are reverse-forwarded over the same SSH session. See each project's VQA skill for the specific Chrome launch command and MCP server name (`playwright-9222` or `playwright-9223`).
 
 ## Can't SSH After Recreate
 

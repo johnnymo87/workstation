@@ -40,8 +40,9 @@ Host devbox
     StreamLocalBindUnlink yes
     # GPG agent forwarding
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
-    # Remote forwards used by devbox tooling
+    # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
+    RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 
@@ -58,7 +59,9 @@ Host devbox-tunnel
     LocalForward 4003 localhost:4003
     LocalForward 4173 localhost:4173
     LocalForward 1455 localhost:1455
+    # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
+    RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 $DEVBOX_MARKER_END
@@ -90,8 +93,9 @@ Host cloudbox
     ForwardAgent yes
     # GPG agent forwarding
     RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
-    # Remote forwards used by cloudbox tooling
+    # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
+    RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 
@@ -105,7 +109,9 @@ Host cloudbox-tunnel
     LocalForward 1455 localhost:1455
     # mcp-remote OAuth callback
     LocalForward 3334 localhost:3334
+    # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
+    RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 $CLOUDBOX_MARKER_END
