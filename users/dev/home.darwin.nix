@@ -175,7 +175,7 @@ lib.mkIf isDarwin {
             "${pkgs.ripgrep}/bin"
             "${pkgs.gh}/bin"
             "${pkgs.bun}/bin"
-            "$HOME/.nix-profile/bin"
+            "/etc/profiles/per-user/${config.home.username}/bin"
             "/usr/bin"
             "/bin"
           ]}"
@@ -189,7 +189,7 @@ lib.mkIf isDarwin {
             && export GOOGLE_CLOUD_PROJECT="$GCP_VAL"
           export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
 
-          exec "$HOME/.nix-profile/bin/opencode" serve --port 4096 --hostname 127.0.0.1
+          exec opencode serve --port 4096 --hostname 127.0.0.1
         ''}"
       ];
       RunAtLoad = true;
