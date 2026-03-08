@@ -24,6 +24,7 @@ lib.mkIf isCrostini {
       gemini_api_key = {};
       cloudflared_tunnel_token = {};
       op_service_account_token = {};
+      ccr_worker_url = {};
     };
   };
 
