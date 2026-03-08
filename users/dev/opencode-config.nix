@@ -99,7 +99,12 @@ in
    # Plugins (SRP: non-interactive env, compaction context, subagent routing)
    xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
    xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
-   xdg.configFile."opencode/plugins/subagent-routing.ts".source = "${assetsPath}/opencode/plugins/subagent-routing.ts";
+   # Subagent routing overrides model selection for plan execution subagents
+   # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
+   # subagents inherit the primary model, giving flexibility to choose at runtime.
+   xdg.configFile."opencode/plugins/subagent-routing.ts" = lib.mkIf (isDarwin || isCloudbox) {
+     source = "${assetsPath}/opencode/plugins/subagent-routing.ts";
+   };
 
    # OpenCode plugins deployed via out-of-store symlink (path resolved at activation, not eval)
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
