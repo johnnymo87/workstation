@@ -170,11 +170,19 @@ lib.mkIf isDarwin {
           export HOME="${config.home.homeDirectory}"
           export PATH="${lib.concatStringsSep ":" [
             "${pkgs.git}/bin"
+            "${pkgs.openssh}/bin"
             "${pkgs.fzf}/bin"
             "${pkgs.ripgrep}/bin"
+            "${pkgs.gh}/bin"
+            "${pkgs.bun}/bin"
+            "$HOME/.nix-profile/bin"
             "/usr/bin"
             "/bin"
           ]}"
+
+          # GitHub API token from macOS Keychain
+          GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" \
+            && export GH_TOKEN="$GH_TOKEN_VAL"
 
           # Google Vertex AI: project from Keychain, ADC from gcloud config
           GCP_VAL="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null)" \
