@@ -215,15 +215,23 @@
   systemd.services.opencode-serve = {
     description = "OpenCode headless serve";
     wantedBy = [ "multi-user.target" ];
-    after = [ "network.target" ];
-    path = [ pkgs.git pkgs.fzf pkgs.ripgrep ];
+    after = [ "network.target" "sops-nix.service" ];
+    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" ];
     serviceConfig = {
       Type = "simple";
       User = "dev";
       Group = "dev";
       WorkingDirectory = "/home/dev";
+      Environment = [
+        "HOME=/home/dev"
+        "OPENCODE_ENABLE_EXA=1"
+      ];
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
+        export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+        export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
+        export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
       Restart = "always";
