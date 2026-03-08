@@ -327,6 +327,43 @@
     };
   };
 
+  systemd.services.sync-sources = {
+    description = "Sync podcast source caches (Zvi, Semafor, Antiwar)";
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+
+    path = [ pkgs.python314 pkgs.uv pkgs.bash pkgs.coreutils ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/my-podcasts";
+      Environment = [
+        "HOME=/home/dev"
+        "NLTK_DATA=/persist/my-podcasts/nltk_data"
+        "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      ];
+      ExecStart = "${pkgs.writeShellScript "sync-sources-start" ''
+        set -euo pipefail
+        export PYTHONUNBUFFERED=1
+        cd /home/dev/projects/my-podcasts
+        exec ${pkgs.uv}/bin/uv run python -m pipeline sync-sources
+      ''}";
+      TimeoutStartSec = 300;
+    };
+  };
+
+  systemd.timers.sync-sources = {
+    description = "Sync source caches daily at noon";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 12:00:00";
+      Persistent = true;
+      RandomizedDelaySec = "5min";
+    };
+  };
+
   # System identity
   networking.hostName = "devbox";
   time.timeZone = "America/New_York";
