@@ -125,10 +125,16 @@ lib.mkIf isCrostini {
       WorkingDirectory = config.home.homeDirectory;
       Environment = [
         "HOME=${config.home.homeDirectory}"
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.fzf pkgs.ripgrep ]}"
+        "PATH=${lib.makeBinPath [
+          pkgs.git pkgs.openssh pkgs.fzf pkgs.ripgrep pkgs.gh pkgs.bun
+          pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused
+        ]}:${config.home.homeDirectory}/.nix-profile/bin"
       ];
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
+        if [ -r "${config.sops.secrets.gemini_api_key.path}" ]; then
+          export GOOGLE_GENERATIVE_AI_API_KEY="$(cat "${config.sops.secrets.gemini_api_key.path}")"
+        fi
         exec ${config.home.homeDirectory}/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
       Restart = "always";

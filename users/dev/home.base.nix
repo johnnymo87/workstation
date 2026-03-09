@@ -185,6 +185,9 @@ in
 
     # Other tools
     pkgs.devenv
+
+    # JavaScript runtime (used by pigeon and other projects)
+    pkgs.bun
   ]
   # Work tools (macOS + cloudbox only)
   ++ lib.optionals (isDarwin || isCloudbox) [

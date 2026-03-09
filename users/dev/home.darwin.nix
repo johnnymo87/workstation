@@ -170,18 +170,26 @@ lib.mkIf isDarwin {
           export HOME="${config.home.homeDirectory}"
           export PATH="${lib.concatStringsSep ":" [
             "${pkgs.git}/bin"
+            "${pkgs.openssh}/bin"
             "${pkgs.fzf}/bin"
             "${pkgs.ripgrep}/bin"
+            "${pkgs.gh}/bin"
+            "${pkgs.bun}/bin"
+            "/etc/profiles/per-user/${config.home.username}/bin"
             "/usr/bin"
             "/bin"
           ]}"
+
+          # GitHub API token from macOS Keychain
+          GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" \
+            && export GH_TOKEN="$GH_TOKEN_VAL"
 
           # Google Vertex AI: project from Keychain, ADC from gcloud config
           GCP_VAL="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null)" \
             && export GOOGLE_CLOUD_PROJECT="$GCP_VAL"
           export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
 
-          exec "$HOME/.nix-profile/bin/opencode" serve --port 4096 --hostname 127.0.0.1
+          exec opencode serve --port 4096 --hostname 127.0.0.1
         ''}"
       ];
       RunAtLoad = true;
