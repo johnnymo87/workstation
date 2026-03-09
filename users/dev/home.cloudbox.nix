@@ -23,7 +23,8 @@ lib.mkIf isCloudbox {
     coreutils   # dirname, mkdir, cat, etc. (explicit for restricted PATH contexts)
     gnused      # sed (explicit for restricted PATH contexts)
 
-    # Cloud / Kubernetes
+    # Cloud / Kubernetes / Tunnels
+    cloudflared   # Cloudflare Tunnel client (Access-protected API calls)
     # NOTE: azure-cli 2.79.0 ships msal 1.33.0 which has a bug where
     # `az login --use-device-code` crashes with "Session.request() got
     # an unexpected keyword argument 'claims_challenge'". Fixed in msal 1.34.0.
