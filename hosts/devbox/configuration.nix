@@ -320,6 +320,50 @@
     };
   };
 
+  systemd.services.the-rundown = {
+    description = "The Rundown daily podcast generation";
+    wants = [ "network-online.target" "opencode-serve.service" ];
+    after = [ "network-online.target" "opencode-serve.service" ];
+
+    path = [ pkgs.python314 pkgs.ffmpeg pkgs.uv pkgs.bash pkgs.coreutils ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/my-podcasts";
+      Environment = [
+        "HOME=/home/dev"
+        "NLTK_DATA=/persist/my-podcasts/nltk_data"
+        "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      ];
+      ExecStart = "${pkgs.writeShellScript "the-rundown-start" ''
+        set -euo pipefail
+        export PYTHONUNBUFFERED=1
+        export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
+        export GEMINI_API_KEY="$(cat /run/secrets/gemini_api_key)"
+        export EXA_API_KEY="$(cat /run/secrets/exa_api_key)"
+        export R2_ACCOUNT_ID="$(cat /run/secrets/r2_account_id)"
+        export R2_ACCESS_KEY_ID="$(cat /run/secrets/r2_access_key_id)"
+        export R2_SECRET_ACCESS_KEY="$(cat /run/secrets/r2_secret_access_key)"
+        export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+        cd /home/dev/projects/my-podcasts
+        exec ${pkgs.uv}/bin/uv run python -m pipeline the-rundown
+      ''}";
+      TimeoutStartSec = 600;
+    };
+  };
+
+  systemd.timers.the-rundown = {
+    description = "Run The Rundown daily at 5 PM ET Mon-Fri";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "Mon..Fri *-*-* 17:00:00";
+      Persistent = true;
+      RandomizedDelaySec = "5min";
+    };
+  };
+
   systemd.services.sync-sources = {
     description = "Sync podcast source caches (Zvi, Semafor, Antiwar)";
     wants = [ "network-online.target" ];
