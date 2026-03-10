@@ -75,12 +75,6 @@
         group = "dev";
         mode = "0400";
       };
-      # xAI API key (for Grok x_search in Things Happen digest)
-      xai_api_key = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
       # Exa API key (for web search in Things Happen digest)
       exa_api_key = {
         owner = "dev";
@@ -272,7 +266,6 @@
         export R2_ACCESS_KEY_ID="$(cat /run/secrets/r2_access_key_id)"
         export R2_SECRET_ACCESS_KEY="$(cat /run/secrets/r2_secret_access_key)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
-        export XAI_API_KEY="$(cat /run/secrets/xai_api_key)"
         export EXA_API_KEY="$(cat /run/secrets/exa_api_key)"
         export GEMINI_API_KEY="$(cat /run/secrets/gemini_api_key)"
         cd /home/dev/projects/my-podcasts
