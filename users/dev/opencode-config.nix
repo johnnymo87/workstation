@@ -92,6 +92,10 @@ in
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/oracle.md".source = patchAgent "oracle" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/vision-qa.md".source = patchAgent "vision-qa" "${assetsPath}/opencode/agents/vision-qa.md";
+   xdg.configFile."opencode/agents/svg-planner.md".source = patchAgent "svg-planner" "${assetsPath}/opencode/agents/svg-planner.md";
+   xdg.configFile."opencode/agents/svg-renderer.md".source = patchAgent "svg-renderer" "${assetsPath}/opencode/agents/svg-renderer.md";
+   xdg.configFile."opencode/agents/svg-vision-reviewer.md".source = patchAgent "svg-vision-reviewer" "${assetsPath}/opencode/agents/svg-vision-reviewer.md";
+   xdg.configFile."opencode/agents/svg-repairer.md".source = patchAgent "svg-repairer" "${assetsPath}/opencode/agents/svg-repairer.md";
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";

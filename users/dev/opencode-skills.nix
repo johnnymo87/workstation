@@ -18,6 +18,7 @@ let
     "beads"
     "launching-headless-sessions"
     "notify-telegram"
+    "svg-glyph-workflow"
     "using-chatgpt-relay-from-devbox"
     "using-gws"
   ];
