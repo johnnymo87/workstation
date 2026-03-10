@@ -318,10 +318,10 @@
   };
 
   systemd.timers.fp-digest = {
-    description = "Run FP Digest daily at 6 PM";
+    description = "Run FP Digest daily at 5 PM";
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "Mon..Fri *-*-* 18:00:00";
+      OnCalendar = "Mon..Fri *-*-* 17:00:00";
       Persistent = true;
       RandomizedDelaySec = "5min";
     };
