@@ -371,7 +371,7 @@ lib.mkIf isDarwin {
     # Post-clone: install pigeon dependencies
     if [ -d "${config.home.homeDirectory}/Code/pigeon" ] && [ ! -d "${config.home.homeDirectory}/Code/pigeon/node_modules" ]; then
       echo "Installing pigeon dependencies ..."
-      (cd "${config.home.homeDirectory}/Code/pigeon" && ${pkgs.bun}/bin/bun install)
+      (cd "${config.home.homeDirectory}/Code/pigeon" && PATH="${pkgs.nodejs}/bin:$PATH" ${pkgs.nodejs}/bin/npm install)
     fi
 
     # Check if pigeon Keychain secrets are populated
