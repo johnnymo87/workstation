@@ -322,8 +322,8 @@
 
   systemd.services.the-rundown = {
     description = "The Rundown daily podcast generation";
-    wants = [ "network-online.target" "opencode-serve.service" ];
-    after = [ "network-online.target" "opencode-serve.service" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
 
     path = [ pkgs.python314 pkgs.ffmpeg pkgs.uv pkgs.bash pkgs.coreutils ];
 
