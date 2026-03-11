@@ -193,7 +193,7 @@
         export OP_SERVICE_ACCOUNT_TOKEN="$(cat /run/secrets/op_service_account_token)"
         export OPENCODE_URL="http://127.0.0.1:4096"
         exec ${pkgs._1password-cli}/bin/op run --env-file=/home/dev/projects/pigeon/.env.1password -- \
-          ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/packages/daemon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
+          ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";
       Restart = "on-failure";
       RestartSec = 5;

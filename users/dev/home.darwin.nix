@@ -135,7 +135,7 @@ lib.mkIf isDarwin {
           export TELEGRAM_WEBHOOK_PATH_SECRET="$($SEC find-generic-password -s pigeon-telegram-webhook-path-secret -w)"
           cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
           exec ${pkgs.nodejs}/bin/node \
-            node_modules/tsx/dist/cli.mjs \
+            "${config.home.homeDirectory}/Code/pigeon/node_modules/tsx/dist/cli.mjs" \
             src/index.ts
         ''
       ];
