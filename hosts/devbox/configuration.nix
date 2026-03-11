@@ -392,10 +392,10 @@
   };
 
   systemd.timers.sync-sources = {
-    description = "Sync source caches daily at noon";
+    description = "Sync source caches daily at 4:30 PM ET (before podcasts)";
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "*-*-* 12:00:00";
+      OnCalendar = "*-*-* 16:30:00";
       Persistent = true;
       RandomizedDelaySec = "5min";
     };
