@@ -27,31 +27,61 @@ local function find_opencode_title(tabid)
   return nil
 end
 
+-- Build the curl command for the Gemini API.
+-- Returns url, auth_args or nil if no credentials available.
+-- Devbox/Crostini: direct Gemini API with API key
+-- macOS/Cloudbox: Vertex AI with gcloud bearer token
+local function gemini_curl_args(model)
+  -- Option 1: Direct Gemini API via API key (devbox, crostini)
+  local api_key = vim.env.GOOGLE_GENERATIVE_AI_API_KEY
+  if api_key and api_key ~= "" and not api_key:match("^PLACEHOLDER") then
+    local url = string.format(
+      "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent",
+      model
+    )
+    return url, { "-H", "x-goog-api-key: " .. api_key }
+  end
+
+  -- Option 2: Vertex AI via gcloud (macOS, cloudbox)
+  local project = vim.env.GOOGLE_CLOUD_PROJECT
+  local location = vim.env.GOOGLE_CLOUD_LOCATION or "global"
+  if project and project ~= "" and vim.fn.executable("gcloud") == 1 then
+    local url = string.format(
+      "https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent",
+      project, location, model
+    )
+    local token_result = vim.system({ "gcloud", "auth", "print-access-token" }, { text = true }):wait()
+    if token_result.code == 0 and token_result.stdout then
+      local token = vim.trim(token_result.stdout)
+      return url, { "-H", "Authorization: Bearer " .. token }
+    end
+  end
+
+  return nil, nil
+end
+
 -- Async Gemini call to shorten a title to ~24 characters.
 -- Calls callback(shortened_title) on completion or fallback.
 local function shorten_title_async(raw_title, callback)
+  local truncated = vim.fn.strcharpart(raw_title, 0, 24)
+
   -- Skip Gemini for already-short titles
   if vim.fn.strchars(raw_title) <= 24 then
     callback(raw_title)
     return
   end
 
-  local api_key = vim.env.GOOGLE_GENERATIVE_AI_API_KEY
-  if not api_key or api_key == "" or api_key:match("^PLACEHOLDER") then
-    callback(vim.fn.strcharpart(raw_title, 0, 24))
-    return
-  end
-
   if vim.fn.executable("curl") == 0 then
-    callback(vim.fn.strcharpart(raw_title, 0, 24))
+    callback(truncated)
     return
   end
 
   local model = "gemini-2.5-flash-lite"
-  local url = string.format(
-    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent",
-    model
-  )
+  local url, auth_args = gemini_curl_args(model)
+  if not url then
+    callback(truncated)
+    return
+  end
 
   local prompt = string.format(
     "Shorten this title to at most 24 characters. Keep it meaningful. Return ONLY the shortened title, nothing else.\n\nTitle: %s",
@@ -62,12 +92,16 @@ local function shorten_title_async(raw_title, callback)
     contents = { { parts = { { text = prompt } } } },
   })
 
-  vim.system(
-    { "curl", "-s", "--max-time", "5", "-X", "POST",
-      "-H", "Content-Type: application/json",
-      "-H", "x-goog-api-key: " .. api_key,
-      "-d", body, url },
-    { text = true },
+  local cmd = { "curl", "-s", "--max-time", "5", "-X", "POST",
+    "-H", "Content-Type: application/json" }
+  for _, arg in ipairs(auth_args) do
+    cmd[#cmd + 1] = arg
+  end
+  cmd[#cmd + 1] = "-d"
+  cmd[#cmd + 1] = body
+  cmd[#cmd + 1] = url
+
+  vim.system(cmd, { text = true },
     function(result)
       vim.schedule(function()
         if result.code == 0 and result.stdout then
@@ -88,7 +122,7 @@ local function shorten_title_async(raw_title, callback)
           end
         end
         -- Fallback: truncate
-        callback(vim.fn.strcharpart(raw_title, 0, 24))
+        callback(truncated)
       end)
     end
   )
