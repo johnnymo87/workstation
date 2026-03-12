@@ -342,6 +342,14 @@ lib.mkIf isDarwin {
   # and creating the directory breaks the dotfiles symlink to user/*.lua modules.
   xdg.configFile."nvim/lua/user/sessions.lua".source = "${assetsPath}/nvim/lua/user/sessions.lua";
   xdg.configFile."nvim/lua/user/atlassian.lua".source = "${assetsPath}/nvim/lua/user/atlassian.lua";
+  xdg.configFile."nvim/lua/user/tabby.lua".source = "${assetsPath}/nvim/lua/user/tabby.lua";
+
+  # tabby.nvim: install plugin to packpath (Pattern 2 from gradual-migration)
+  # Auto-loads from site/pack without touching dotfiles plugin manager
+  xdg.dataFile."nvim/site/pack/nix/start/tabby-nvim" = {
+    source = pkgs.vimPlugins.tabby-nvim;
+    recursive = true;
+  };
 
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.
   # Remove dotfiles symlinks before HM tries to create its own.
