@@ -383,12 +383,14 @@ EOF
     # Session management for tmux-resurrect integration
     plugins = with pkgs.vimPlugins; [
       vim-obsession
+      tabby-nvim
     ];
 
     extraLuaConfig = ''
       require("user.settings")
       require("user.mappings")
       require("user.sessions")    -- Session management for tmux-resurrect
+      require("user.tabby")       -- OpenCode session titles in tab labels
     '' + lib.optionalString (isDarwin || isCloudbox) ''
       require("user.atlassian")   -- :FetchJiraTicket, :FetchConfluencePage
     '';
