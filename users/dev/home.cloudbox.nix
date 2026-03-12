@@ -182,6 +182,20 @@ lib.mkIf isCloudbox {
       export JENKINS_USER="$(cat /run/secrets/jenkins_user)"
     fi
 
+    # Bundler private gem source credentials
+    if [ -r /run/secrets/bundle_gem_fury_io ]; then
+      export BUNDLE_GEM__FURY__IO="$(cat /run/secrets/bundle_gem_fury_io)"
+    fi
+    if [ -r /run/secrets/bundle_enterprise_contribsys_com ]; then
+      export BUNDLE_ENTERPRISE__CONTRIBSYS__COM="$(cat /run/secrets/bundle_enterprise_contribsys_com)"
+    fi
+    if [ -r /run/secrets/bundle_gems_graphql_pro ]; then
+      export BUNDLE_GEMS__GRAPHQL__PRO="$(cat /run/secrets/bundle_gems_graphql_pro)"
+    fi
+    if [ -r /run/secrets/bundle_fury_freshrealm_com ]; then
+      export BUNDLE_FURY__FRESHREALM__COM="$(cat /run/secrets/bundle_fury_freshrealm_com)"
+    fi
+
     # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
     export OPENCODE_ENABLE_EXA=1
   '';

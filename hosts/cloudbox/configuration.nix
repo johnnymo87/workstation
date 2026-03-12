@@ -179,6 +179,27 @@
         group = "dev";
         mode = "0400";
       };
+      # Bundler private gem source credentials
+      bundle_gem_fury_io = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      bundle_enterprise_contribsys_com = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      bundle_gems_graphql_pro = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      bundle_fury_freshrealm_com = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
   };
 
