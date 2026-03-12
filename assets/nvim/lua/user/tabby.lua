@@ -31,14 +31,19 @@ end
 -- Calls callback(shortened_title) on completion or fallback.
 local function shorten_title_async(raw_title, callback)
   -- Skip Gemini for already-short titles
-  if #raw_title <= 24 then
+  if vim.fn.strchars(raw_title) <= 24 then
     callback(raw_title)
     return
   end
 
   local api_key = vim.env.GOOGLE_GENERATIVE_AI_API_KEY
   if not api_key or api_key == "" or api_key:match("^PLACEHOLDER") then
-    callback(raw_title:sub(1, 24))
+    callback(vim.fn.strcharpart(raw_title, 0, 24))
+    return
+  end
+
+  if vim.fn.executable("curl") == 0 then
+    callback(vim.fn.strcharpart(raw_title, 0, 24))
     return
   end
 
@@ -74,14 +79,14 @@ local function shorten_title_async(raw_title, callback)
           then
             local text = response.candidates[1].content.parts[1].text
             text = vim.trim(text):gsub("\n.*", "")
-            if #text > 0 and #text <= 30 then
+            if vim.fn.strchars(text) > 0 and vim.fn.strchars(text) <= 30 then
               callback(text)
               return
             end
           end
         end
         -- Fallback: truncate
-        callback(raw_title:sub(1, 24))
+        callback(vim.fn.strcharpart(raw_title, 0, 24))
       end)
     end
   )
@@ -101,7 +106,7 @@ local function opencode_tab_override(tabid)
   end
 
   -- Title changed (or first seen) -- update cache and fire async shortening
-  local interim = raw_title:sub(1, 24)
+  local interim = vim.fn.strcharpart(raw_title, 0, 24)
   cache[key] = { oc_title = raw_title, short_title = interim }
 
   shorten_title_async(raw_title, function(shortened)
@@ -162,19 +167,27 @@ function M.setup()
     },
   })
 
+  -- Clean up previous timer if setup() is called again (e.g., config reload)
+  if M._timer then
+    M._timer:stop()
+    M._timer:close()
+  end
+
   -- Periodic redraw to pick up async b:term_title changes
-  local timer = vim.uv.new_timer()
-  timer:start(3000, 3000, vim.schedule_wrap(function()
+  M._timer = vim.uv.new_timer()
+  M._timer:start(3000, 3000, vim.schedule_wrap(function()
     cleanup_cache()
     vim.cmd("redrawtabline")
   end))
 
   -- Clean up timer on exit
   vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = vim.api.nvim_create_augroup("TabbyOpenCodeCleanup", { clear = true }),
     callback = function()
-      if timer then
-        timer:stop()
-        timer:close()
+      if M._timer then
+        M._timer:stop()
+        M._timer:close()
+        M._timer = nil
       end
     end,
   })
