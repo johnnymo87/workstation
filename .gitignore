@@ -16,3 +16,6 @@ secrets/*.dec.*
 .opencode/*
 !.opencode/skills/
 session-ses_*.md
+
+# Worktrees
+.worktrees/
