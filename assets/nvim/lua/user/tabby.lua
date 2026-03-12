@@ -49,8 +49,8 @@ local function shorten_title_async(raw_title, callback)
 
   local model = "gemini-2.5-flash-lite"
   local url = string.format(
-    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-    model, api_key
+    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent",
+    model
   )
 
   local prompt = string.format(
@@ -64,7 +64,9 @@ local function shorten_title_async(raw_title, callback)
 
   vim.system(
     { "curl", "-s", "--max-time", "5", "-X", "POST",
-      "-H", "Content-Type: application/json", "-d", body, url },
+      "-H", "Content-Type: application/json",
+      "-H", "x-goog-api-key: " .. api_key,
+      "-d", body, url },
     { text = true },
     function(result)
       vim.schedule(function()
@@ -135,7 +137,10 @@ local function cleanup_cache()
 end
 
 function M.setup()
-  require("tabby").setup({
+  local ok, tabby = pcall(require, "tabby")
+  if not ok then return end
+
+  tabby.setup({
     line = function(line)
       return {
         line.tabs().foreach(function(tab)
@@ -168,7 +173,7 @@ function M.setup()
   })
 
   -- Clean up previous timer if setup() is called again (e.g., config reload)
-  if M._timer then
+  if M._timer and not M._timer:is_closing() then
     M._timer:stop()
     M._timer:close()
   end
@@ -184,7 +189,7 @@ function M.setup()
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = vim.api.nvim_create_augroup("TabbyOpenCodeCleanup", { clear = true }),
     callback = function()
-      if M._timer then
+      if M._timer and not M._timer:is_closing() then
         M._timer:stop()
         M._timer:close()
         M._timer = nil
