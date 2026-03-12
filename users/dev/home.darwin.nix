@@ -284,6 +284,16 @@ lib.mkIf isDarwin {
       GCP_VAL="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null)" && export GOOGLE_CLOUD_PROJECT="$GCP_VAL"
       unset GCP_VAL
 
+      # Bundler private gem source credentials (from macOS Keychain)
+      BUNDLE_VAL="$(/usr/bin/security find-generic-password -s bundle-gem-fury-io -w 2>/dev/null)" && export BUNDLE_GEM__FURY__IO="$BUNDLE_VAL"
+      unset BUNDLE_VAL
+      BUNDLE_VAL="$(/usr/bin/security find-generic-password -s bundle-enterprise-contribsys-com -w 2>/dev/null)" && export BUNDLE_ENTERPRISE__CONTRIBSYS__COM="$BUNDLE_VAL"
+      unset BUNDLE_VAL
+      BUNDLE_VAL="$(/usr/bin/security find-generic-password -s bundle-gems-graphql-pro -w 2>/dev/null)" && export BUNDLE_GEMS__GRAPHQL__PRO="$BUNDLE_VAL"
+      unset BUNDLE_VAL
+      BUNDLE_VAL="$(/usr/bin/security find-generic-password -s bundle-fury-freshrealm-com -w 2>/dev/null)" && export BUNDLE_FURY__FRESHREALM__COM="$BUNDLE_VAL"
+      unset BUNDLE_VAL
+
       for file in ~/.bashrc.d/*.bashrc; do
         [ -r "$file" ] && source "$file"
       done
