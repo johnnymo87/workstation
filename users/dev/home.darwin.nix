@@ -340,27 +340,6 @@ lib.mkIf isDarwin {
   # Instead, let GnuPG auto-start the agent on demand (upstream recommended approach)
   launchd.agents.gpg-agent.enable = lib.mkForce false;
 
-  # Neovim: generates init.lua
-  programs.neovim.enable = lib.mkForce false;
-
-  # Disable recursive nvim/lua/user deployment from home.base.nix
-  # On Darwin, dotfiles owns the user/ directory
-  xdg.configFile."nvim/lua/user".enable = lib.mkForce false;
-
-  # Deploy only specific lua files - user/ directory is managed entirely by dotfiles
-  # on Darwin. Home-manager can't overlay files into a symlinked directory,
-  # and creating the directory breaks the dotfiles symlink to user/*.lua modules.
-  xdg.configFile."nvim/lua/user/sessions.lua".source = "${assetsPath}/nvim/lua/user/sessions.lua";
-  xdg.configFile."nvim/lua/user/atlassian.lua".source = "${assetsPath}/nvim/lua/user/atlassian.lua";
-  xdg.configFile."nvim/lua/user/tabby.lua".source = "${assetsPath}/nvim/lua/user/tabby.lua";
-
-  # tabby.nvim: install plugin to packpath (Pattern 2 from gradual-migration)
-  # Auto-loads from site/pack without touching dotfiles plugin manager
-  xdg.dataFile."nvim/site/pack/nix/start/tabby-nvim" = {
-    source = pkgs.vimPlugins.tabby-nvim;
-    recursive = true;
-  };
-
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.
   # Remove dotfiles symlinks before HM tries to create its own.
   # Also clean up renamed/removed skills and commands.
@@ -409,11 +388,13 @@ lib.mkIf isDarwin {
     rm -f ~/.gnupg/gpg-agent.conf 2>/dev/null || true
     rm -f ~/.gnupg/dirmngr.conf 2>/dev/null || true
     rm -f ~/.gnupg/common.conf 2>/dev/null || true
+    # Neovim: remove dotfiles-managed files before HM takes over
+    rm -f ~/.config/nvim/init.lua 2>/dev/null || true
+    rm -rf ~/.config/nvim/lua/user 2>/dev/null || true
+    rm -rf ~/.config/nvim/lua/config 2>/dev/null || true
+    rm -rf ~/.config/nvim/lua/plugins 2>/dev/null || true
     rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
     rm -f ~/.config/nvim/lua/pigeon.lua 2>/dev/null || true
-    rm -f ~/.config/nvim/lua/user/sessions.lua 2>/dev/null || true
-    rm -f ~/.config/nvim/lua/user/atlassian.lua 2>/dev/null || true
-    rm -f ~/.config/nvim/lua/user/tabby.lua 2>/dev/null || true
     rm -f ~/.claude/hooks 2>/dev/null || true
     rm -f ~/.bazelrc 2>/dev/null || true
   '';
