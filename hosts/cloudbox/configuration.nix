@@ -355,6 +355,49 @@
   security.googleOsLogin.enable = lib.mkForce false;
   users.mutableUsers = false;
 
+  # ---------------------------------------------------------------------------
+  # Memory protection — prevent OOM lockups that require hard reset
+  # ---------------------------------------------------------------------------
+
+  # Kernel reserves: keep memory available for SSH/kernel even under pressure
+  boot.kernel.sysctl = {
+    "vm.min_free_kbytes" = 262144;        # 256 MiB — kernel allocation reserve
+    "vm.admin_reserve_kbytes" = 262144;   # 256 MiB — root/admin recovery reserve
+    "vm.user_reserve_kbytes" = 131072;    # 128 MiB — user recovery reserve
+  };
+
+  # Soft memory limit on user slice: throttle (not kill) when dev workload
+  # exceeds 24 GB. Leaves ~8 GB for system/kernel/buffers. Also cap user
+  # swap usage so system services always have swap headroom.
+  systemd.slices."user-1000" = {
+    description = "User slice for UID 1000 (dev)";
+    sliceConfig = {
+      MemoryHigh = "24G";
+      MemorySwapMax = "12G";
+    };
+  };
+
+  # Protect sshd from OOM killer — always the last thing to die
+  systemd.services.sshd.serviceConfig = {
+    OOMScoreAdjust = "-1000";
+  };
+
+  # earlyoom: last-resort killer when RAM+swap are nearly exhausted.
+  # Sends SIGTERM at 5%/5%, SIGKILL at 2%/2%. Targets heavy user
+  # processes first, never touches sshd/systemd.
+  services.earlyoom = {
+    enable = true;
+    freeMemThreshold = 5;
+    freeSwapThreshold = 5;
+    freeMemKillThreshold = 2;
+    freeSwapKillThreshold = 2;
+    reportInterval = 15;
+    extraArgs = [
+      "--prefer" "(^|/)(opencode|node|bun|bazel|java|kotlin-language-server|docker)$"
+      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon)$"
+    ];
+  };
+
   # SSH server
   # NOTE: google-compute-config.nix already enables openssh.
   # We add hardening overrides on top.
