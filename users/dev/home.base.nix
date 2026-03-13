@@ -485,19 +485,46 @@ EOF
     viAlias = true;
     vimAlias = true;
 
-    # Session management for tmux-resurrect integration
     plugins = with pkgs.vimPlugins; [
       vim-obsession
       tabby-nvim
+      goyo-vim
+      mini-align
+      plenary-nvim
+      telescope-fzy-native-nvim
+      telescope-nvim
+      (nvim-treesitter.withPlugins (p: with p; [
+        bash c comment css csv diff dockerfile
+        editorconfig git_config gitcommit gitignore go
+        html http javascript json json5 lua luadoc
+        make markdown markdown_inline nix python
+        regex ruby sql ssh_config tmux toml
+        typescript vimdoc xml yaml
+      ]))
+      (pkgs.vimUtils.buildVimPlugin {
+        pname = "vim-ripgrep";
+        version = "unstable-2026-01-13";
+        src = pkgs.fetchFromGitHub {
+          owner = "jremmen";
+          repo = "vim-ripgrep";
+          rev = "2bb2425387b449a0cd65a54ceb85e123d7a320b8";
+          hash = "sha256-OvQPTEiXOHI0uz0+6AVTxyJ/TUMg6kd3BYTAbnCI7W8=";
+        };
+      })
     ];
+
+    extraPackages = [ pkgs.ripgrep ];
 
     extraLuaConfig = ''
       require("user.settings")
       require("user.mappings")
-      require("user.sessions")    -- Session management for tmux-resurrect
-      require("user.tabby")       -- OpenCode session titles in tab labels
+      require("user.sessions")          -- tmux-resurrect session management
+      require("user.tabby")             -- OpenCode session tab labels
+      require("user.cursor_highlight")  -- Ctrl+K cursor crosshair toggle
+      require("user.telescope")         -- treesitter + telescope + keymaps
+      require("mini.align").setup()     -- text alignment (ga/gA)
     '' + lib.optionalString (isDarwin || isCloudbox) ''
-      require("user.atlassian")   -- :FetchJiraTicket, :FetchConfluencePage
+      require("user.atlassian")         -- :FetchJiraTicket, :FetchConfluencePage
     '';
   };
 
