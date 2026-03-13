@@ -18,4 +18,3 @@ end, { noremap = true, desc = "Copy file path to clipboard" })
 
 -- Plugin-dependent mappings (only bind if plugin is loaded)
 map_if_cmd("Rg", "n", "<leader>rr", ":Rg ''<left>", { noremap = true, desc = "Ripgrep search" })
-map_if_cmd("Git", "n", "<leader>gg", ":Git ", { noremap = true, desc = "Git (Fugitive)" })
