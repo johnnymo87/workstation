@@ -20,6 +20,20 @@
   # Allow unfree
   nixpkgs.config.allowUnfree = true;
 
+  # setproctitle fork tests segfault on Darwin (exit code -11),
+  # blocking azure-cli build. Disable tests for this package.
+  nixpkgs.overlays = [
+    (final: prev: {
+      pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+        (pfinal: pprev: {
+          setproctitle = pprev.setproctitle.overridePythonAttrs {
+            doCheck = false;
+          };
+        })
+      ];
+    })
+  ];
+
   # Primary user (single-user laptop ergonomics)
   system.primaryUser = mac.username;
 
