@@ -367,12 +367,12 @@
   };
 
   # Soft memory limit on user slice: throttle (not kill) when dev workload
-  # exceeds 24 GB. Leaves ~8 GB for system/kernel/buffers. Also cap user
+  # exceeds 30 GB. Leaves ~2 GB for system/kernel/buffers. Also cap user
   # swap usage so system services always have swap headroom.
   systemd.slices."user-1000" = {
     description = "User slice for UID 1000 (dev)";
     sliceConfig = {
-      MemoryHigh = "24G";
+      MemoryHigh = "30G";
       MemorySwapMax = "12G";
     };
   };
@@ -383,8 +383,10 @@
   };
 
   # earlyoom: last-resort killer when RAM+swap are nearly exhausted.
-  # Sends SIGTERM at 5%/5%, SIGKILL at 2%/2%. Targets heavy user
-  # processes first, never touches sshd/systemd.
+  # Sends SIGTERM at 5%/5%, SIGKILL at 2%/2%.
+  # Kill order: bazel/java/node first (--prefer), then other processes,
+  # then opencode last (--avoid). sshd is also --avoid but has
+  # OOMScoreAdjust=-1000 so it's effectively unkillable.
   services.earlyoom = {
     enable = true;
     freeMemThreshold = 5;
@@ -393,8 +395,8 @@
     freeSwapKillThreshold = 2;
     reportInterval = 15;
     extraArgs = [
-      "--prefer" "(^|/)(opencode|node|bun|bazel|java|kotlin-language-server|docker)$"
-      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon)$"
+      "--prefer" "(^|/)(node|bun|bazel|java|kotlin-language-server|docker)$"
+      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|opencode)$"
     ];
   };
 
