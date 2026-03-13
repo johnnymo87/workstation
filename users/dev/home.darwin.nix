@@ -294,6 +294,15 @@ lib.mkIf isDarwin {
       BUNDLE_VAL="$(/usr/bin/security find-generic-password -s bundle-fury-freshrealm-com -w 2>/dev/null)" && export BUNDLE_FURY__FRESHREALM__COM="$BUNDLE_VAL"
       unset BUNDLE_VAL
 
+      # ba CLI credentials (from macOS Keychain)
+      # GITHUB_API_TOKEN is the GoBA token ba uses for self-updates (same token as GH_TOKEN)
+      GITHUB_API_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" && export GITHUB_API_TOKEN="$GITHUB_API_TOKEN_VAL"
+      unset GITHUB_API_TOKEN_VAL
+      JENKINS_API_TOKEN_VAL="$(/usr/bin/security find-generic-password -s jenkins-api-token -w 2>/dev/null)" && export JENKINS_API_TOKEN="$JENKINS_API_TOKEN_VAL"
+      unset JENKINS_API_TOKEN_VAL
+      JENKINS_USER_VAL="$(/usr/bin/security find-generic-password -s jenkins-user -w 2>/dev/null)" && export JENKINS_USER="$JENKINS_USER_VAL"
+      unset JENKINS_USER_VAL
+
       for file in ~/.bashrc.d/*.bashrc; do
         [ -r "$file" ] && source "$file"
       done
