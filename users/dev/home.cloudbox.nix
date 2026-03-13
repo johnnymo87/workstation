@@ -23,42 +23,8 @@ lib.mkIf isCloudbox {
     coreutils   # dirname, mkdir, cat, etc. (explicit for restricted PATH contexts)
     gnused      # sed (explicit for restricted PATH contexts)
 
-    # Cloud / Kubernetes / Tunnels
-    cloudflared   # Cloudflare Tunnel client (Access-protected API calls)
-    # NOTE: azure-cli 2.79.0 ships msal 1.33.0 which has a bug where
-    # `az login --use-device-code` crashes with "Session.request() got
-    # an unexpected keyword argument 'claims_challenge'". Fixed in msal 1.34.0.
-    # Remove this block when nixpkgs bumps azure-cli to >= 2.83.0.
-    (let
-      msal134 = pkgs.python3Packages.msal.overridePythonAttrs (old: rec {
-        version = "1.34.0";
-        src = pkgs.python3Packages.fetchPypi {
-          inherit (old) pname;
-          inherit version;
-          hash = "sha256-drqDtxbqWm11sCecCsNToOBbggyh9mgsDrf0UZDEPC8=";
-        };
-      });
-      msal134Path = "${msal134}/${pkgs.python3.sitePackages}";
-      msal133 = pkgs.python3Packages.msal;
-      msal133Path = "${msal133}/${pkgs.python3.sitePackages}";
-      azWithExts = azure-cli.withExtensions (with azure-cli.extensions; [
-        azure-devops
-      ]);
-    in azWithExts.overrideAttrs (old: {
-      # withExtensions creates wrapper scripts with hardcoded msal 1.33.0
-      # store paths. Patch them to use msal 1.34.0 instead.
-      postFixup = (old.postFixup or "") + ''
-        for f in $out/bin/az $out/bin/.az-wrapped $out/bin/.az-wrapped_; do
-          if [ -f "$f" ]; then
-            substituteInPlace "$f" \
-              --replace-quiet "${msal133Path}" "${msal134Path}"
-          fi
-        done
-      '';
-    }))
-    awscli2          # AWS CLI (EKS kubeconfig credential plugin)
-    kubelogin        # Azure AD credential plugin for kubectl
-    kubectl          # Kubernetes CLI (for AKS clusters)
+    # Cloud / Tunnels (kubectl, kubelogin, awscli2, azure-cli are in home.base.nix)
+    cloudflared      # Cloudflare Tunnel client (Access-protected API calls)
     google-cloud-sdk # GCP VM management (gcloud, gsutil, bq)
   ];
 
@@ -200,60 +166,7 @@ lib.mkIf isCloudbox {
     export OPENCODE_ENABLE_EXA=1
   '';
 
-  # Install/update ba CLI from private GitHub release
-  # Downloads linux-arm64 binary via gh CLI, caches by version in ~/.local/bin
-  home.activation.installBaCli = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    ba_repo=""
-    if [ -r /run/secrets/ba_cli_repo ]; then
-      ba_repo="$(cat /run/secrets/ba_cli_repo)"
-    fi
-
-    if [ -z "$ba_repo" ]; then
-      echo "installBaCli: skipping (ba_cli_repo secret not available)"
-    else
-      gh_token=""
-      if [ -r /run/secrets/github_api_token ]; then
-        gh_token="$(cat /run/secrets/github_api_token)"
-      fi
-
-      if [ -z "$gh_token" ]; then
-        echo "installBaCli: skipping (github_api_token not available)"
-      else
-        latest=$(GH_TOKEN="$gh_token" ${pkgs.gh}/bin/gh api \
-          "repos/$ba_repo/releases/latest" --jq .tag_name 2>/dev/null || true)
-
-        if [ -z "$latest" ]; then
-          echo "installBaCli: WARNING: could not fetch latest release"
-        else
-          current=""
-          if [ -x "$HOME/.local/bin/ba" ]; then
-            current=$("$HOME/.local/bin/ba" --version 2>/dev/null \
-              | ${pkgs.gnugrep}/bin/grep -oP 'v?\K[0-9]+\.[0-9]+\.[0-9]+' \
-              | head -1 || true)
-          fi
-
-          if [ "$current" = "$latest" ]; then
-            echo "installBaCli: ba $latest already installed"
-          else
-            echo "installBaCli: installing ba $latest (was: ''${current:-not installed})..."
-            ${pkgs.coreutils}/bin/mkdir -p "$HOME/.local/bin"
-            tmpdir=$(${pkgs.coreutils}/bin/mktemp -d)
-            if GH_TOKEN="$gh_token" ${pkgs.gh}/bin/gh release download "$latest" \
-                 --repo "$ba_repo" \
-                 -p 'ba-linux-arm64.tar.gz' \
-                 -D "$tmpdir" 2>/dev/null; then
-              ${pkgs.gnutar}/bin/tar --use-compress-program=${pkgs.gzip}/bin/gzip -xf "$tmpdir/ba-linux-arm64.tar.gz" -C "$tmpdir"
-              ${pkgs.coreutils}/bin/install -m 755 "$tmpdir/ba" "$HOME/.local/bin/ba"
-              echo "installBaCli: ba $latest installed"
-            else
-              echo "installBaCli: WARNING: download failed"
-            fi
-            ${pkgs.coreutils}/bin/rm -rf "$tmpdir"
-          fi
-        fi
-      fi
-    fi
-  '';
+  # installBaCli is in home.base.nix (shared between cloudbox and macOS)
 
   # Assemble gws config files from sops secrets at activation time
   # Both client_secret.json (OAuth client config, needed for re-auth)

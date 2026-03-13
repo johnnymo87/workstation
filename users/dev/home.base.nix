@@ -154,6 +154,37 @@ let
       mainProgram = "opencode";
     };
   };
+
+  # Azure CLI with msal 1.34.0 patch and azure-devops extension (work machines)
+  # NOTE: azure-cli 2.79.0 ships msal 1.33.0 which has a bug where
+  # `az login --use-device-code` crashes with "Session.request() got
+  # an unexpected keyword argument 'claims_challenge'". Fixed in msal 1.34.0.
+  # Remove this block when nixpkgs bumps azure-cli to >= 2.83.0.
+  azureCliPatched = let
+    msal134 = pkgs.python3Packages.msal.overridePythonAttrs (old: rec {
+      version = "1.34.0";
+      src = pkgs.python3Packages.fetchPypi {
+        inherit (old) pname;
+        inherit version;
+        hash = "sha256-drqDtxbqWm11sCecCsNToOBbggyh9mgsDrf0UZDEPC8=";
+      };
+    });
+    msal134Path = "${msal134}/${pkgs.python3.sitePackages}";
+    msal133 = pkgs.python3Packages.msal;
+    msal133Path = "${msal133}/${pkgs.python3.sitePackages}";
+    azWithExts = pkgs.azure-cli.withExtensions (with pkgs.azure-cli.extensions; [
+      azure-devops
+    ]);
+  in azWithExts.overrideAttrs (old: {
+    postFixup = (old.postFixup or "") + ''
+      for f in $out/bin/az $out/bin/.az-wrapped $out/bin/.az-wrapped_; do
+        if [ -f "$f" ]; then
+          substituteInPlace "$f" \
+            --replace-quiet "${msal133Path}" "${msal134Path}"
+        fi
+      done
+    '';
+  });
 in
 {
   # NOTE: home.username and home.homeDirectory are set per-host
@@ -198,6 +229,11 @@ in
     # https://github.com/bazelbuild/rules_kotlin/pull/1452
     pkgs.zip
     pkgs.jdk21
+    # Cloud / Kubernetes
+    azureCliPatched
+    pkgs.awscli2       # AWS CLI (EKS kubeconfig credential plugin, ba exec SSO)
+    pkgs.kubelogin     # Azure AD credential plugin for kubectl
+    pkgs.kubectl       # Kubernetes CLI (for AKS clusters)
   ];
 
   # Bazel user config (~/.bazelrc) — work machines only
@@ -278,6 +314,75 @@ EOF
 EOF
     fi
   '');
+
+  # Install/update ba CLI from private GitHub release (work machines)
+  # Downloads platform-appropriate binary, caches by version in ~/.local/bin
+  # macOS: reads ba_cli_repo from Keychain, GH token from gh CLI auth
+  # Cloudbox: reads both from sops-nix secrets at /run/secrets/
+  home.activation.installBaCli = lib.mkIf (isDarwin || isCloudbox) (
+    lib.hm.dag.entryAfter [ "writeBoundary" ] (let
+      platform = if isDarwin then "darwin" else "linux";
+      asset = "ba-${platform}-arm64.tar.gz";
+    in ''
+      ba_repo=""
+      ${if isCloudbox then ''
+        if [ -r /run/secrets/ba_cli_repo ]; then
+          ba_repo="$(cat /run/secrets/ba_cli_repo)"
+        fi
+      '' else ''
+        ba_repo="$(/usr/bin/security find-generic-password -s ba-cli-repo -w 2>/dev/null || true)"
+      ''}
+
+      if [ -z "$ba_repo" ]; then
+        echo "installBaCli: skipping (ba_cli_repo not available)"
+      else
+        gh_token=""
+        ${if isCloudbox then ''
+          if [ -r /run/secrets/github_api_token ]; then
+            gh_token="$(cat /run/secrets/github_api_token)"
+          fi
+        '' else ''
+          gh_token="$(${pkgs.gh}/bin/gh auth token 2>/dev/null || true)"
+        ''}
+
+        if [ -z "$gh_token" ]; then
+          echo "installBaCli: skipping (GitHub token not available)"
+        else
+          latest=$(GH_TOKEN="$gh_token" ${pkgs.gh}/bin/gh api \
+            "repos/$ba_repo/releases/latest" --jq .tag_name 2>/dev/null || true)
+
+          if [ -z "$latest" ]; then
+            echo "installBaCli: WARNING: could not fetch latest release"
+          else
+            current=""
+            if [ -x "$HOME/.local/bin/ba" ]; then
+              current=$("$HOME/.local/bin/ba" --version 2>/dev/null \
+                | ${pkgs.gnugrep}/bin/grep -oP 'v?\K[0-9]+\.[0-9]+\.[0-9]+' \
+                | head -1 || true)
+            fi
+
+            if [ "$current" = "$latest" ]; then
+              echo "installBaCli: ba $latest already installed"
+            else
+              echo "installBaCli: installing ba $latest (was: ''${current:-not installed})..."
+              ${pkgs.coreutils}/bin/mkdir -p "$HOME/.local/bin"
+              tmpdir=$(${pkgs.coreutils}/bin/mktemp -d)
+              if GH_TOKEN="$gh_token" ${pkgs.gh}/bin/gh release download "$latest" \
+                   --repo "$ba_repo" \
+                   -p '${asset}' \
+                   -D "$tmpdir" 2>/dev/null; then
+                ${pkgs.gnutar}/bin/tar --use-compress-program=${pkgs.gzip}/bin/gzip -xf "$tmpdir/${asset}" -C "$tmpdir"
+                ${pkgs.coreutils}/bin/install -m 755 "$tmpdir/ba" "$HOME/.local/bin/ba"
+                echo "installBaCli: ba $latest installed"
+              else
+                echo "installBaCli: WARNING: download failed"
+              fi
+              ${pkgs.coreutils}/bin/rm -rf "$tmpdir"
+            fi
+          fi
+        fi
+      fi
+    ''));
 
   # Cap JetBrains kotlin-lsp JVM heap — each OpenCode session spawns its
   # own instance; without a cap they grow to ~1.5 GB each.
