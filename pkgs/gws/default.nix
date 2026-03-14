@@ -6,20 +6,20 @@
 }:
 
 let
-  version = "0.13.2";
+  version = "0.16.0";
 
   sources = {
     "aarch64-linux" = fetchurl {
       url = "https://github.com/googleworkspace/cli/releases/download/v${version}/gws-aarch64-unknown-linux-musl.tar.gz";
-      hash = "sha256-Y80MEhsJnysixpzLxXqlothQdB/nrFt54DlkhfvW5PY=";
+      hash = "sha256-v1mDoMNXhgjj1YgAzMYKixp9eoPH2f+d2+ub8lG7BCQ=";
     };
     "x86_64-linux" = fetchurl {
       url = "https://github.com/googleworkspace/cli/releases/download/v${version}/gws-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-tcjiiUF1eRki4WhH/SkNR88VBqUp/GqKjHfdg4ONhYo=";
+      hash = "sha256-rEtpZ/EErDITEVwwUr7qKps1B6EPjruss7cX8YPNA/Y=";
     };
     "aarch64-darwin" = fetchurl {
       url = "https://github.com/googleworkspace/cli/releases/download/v${version}/gws-aarch64-apple-darwin.tar.gz";
-      hash = "sha256-oYsClpg3baQVlS+y1N/rimcQ42BOhi2c3n6sLJY7jEQ=";
+      hash = "sha256-YCvdlNIPBv+33EuNlq/WIMlzsHhbYFIgc4VbcrdcbXw=";
     };
   };
 
