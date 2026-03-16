@@ -21,6 +21,11 @@ lib.mkIf isDevbox {
       export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
     fi
 
+    # Discord token (for DiscordChatExporter in tec-codex)
+    if [ -r /run/secrets/discord_token ]; then
+      export DISCORD_TOKEN="$(cat /run/secrets/discord_token)"
+    fi
+
     # Personal Claude subscription token (not work account)
     # Enables headless/cron Claude Code without interactive OAuth
     if [ -r /run/secrets/claude_personal_oauth_token ]; then
