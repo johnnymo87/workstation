@@ -55,22 +55,6 @@
         group = "dev";
         mode = "0400";
       };
-      # Pigeon daemon secrets (replaces 1Password op run)
-      ccr_api_key = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      telegram_bot_token = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      telegram_chat_id = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
       # Google Gemini API key for OpenCode (direct API)
       gemini_api_key = {
         owner = "dev";
@@ -262,8 +246,8 @@
     description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" "sops-nix.service" "cloudflared-tunnel.service" ];
-    requires = [ "sops-nix.service" "cloudflared-tunnel.service" ];
+    after = [ "network-online.target" "cloudflared-tunnel.service" ];
+    requires = [ "cloudflared-tunnel.service" ];
 
     path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ];
 
