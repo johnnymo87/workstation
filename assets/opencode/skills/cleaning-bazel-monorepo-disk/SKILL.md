@@ -78,23 +78,73 @@ sudo nix-env --delete-generations +3 \
 sudo nix-collect-garbage
 ```
 
-### 4. Old Bazel workspaces (~5-7 GB each)
+### 4. Bazel worktree output bases (often 50-70 GB!)
+
+Each git worktree gets its own Bazel output base (2-8 GB each). With many
+worktrees, this is typically the single largest disk consumer.
+
+**Map output bases to worktrees** using Bazel's MD5 hash of the workspace path:
+
+```python
+# Run on cloudbox or macOS -- maps every output base to its worktree
+python3 -c "
+import hashlib, os, subprocess
+
+def bazel_hash(path):
+    return hashlib.md5(path.encode()).hexdigest()
+
+# Adjust paths for your platform
+mono = os.path.expanduser('~/projects/mono')       # cloudbox
+# mono = os.path.expanduser('~/Code/mono')          # macOS
+base = os.path.expanduser('~/.cache/bazel/_bazel_' + os.environ['USER'])
+
+candidates = [mono]
+wt_dir = os.path.join(mono, '.worktrees')
+if os.path.isdir(wt_dir):
+    candidates += [os.path.join(wt_dir, w) for w in os.listdir(wt_dir)]
+
+hash_to_ws = {bazel_hash(c): c for c in candidates}
+
+for entry in sorted(os.listdir(base)):
+    path = os.path.join(base, entry)
+    if not os.path.isdir(path) or entry in ('install', 'cache'):
+        continue
+    ws = hash_to_ws.get(entry, 'ORPHAN')
+    size = subprocess.run(['du', '-sh', path], capture_output=True, text=True).stdout.split()[0]
+    short = ws.replace(os.path.expanduser('~/projects/mono'), 'mono')
+    print(f'{size}\t{entry[:12]}\t{short}')
+"
+```
+
+**Clean all output bases except the main checkout:**
 
 ```bash
-# Identify your current workspace (don't delete this one!)
-cd ~/Code/<repo>  # or ~/projects/<repo> on cloudbox
-bazel info output_base
+# Identify the mono main output base hash (KEEP this one)
+python3 -c "import hashlib; print(hashlib.md5(b'$HOME/projects/mono').hexdigest())"
 
-# Shutdown bazel before deleting
-bazel shutdown
+# Delete everything else -- sudo needed because Bazel sandbox sets
+# read-only permissions on extracted runtimes (e.g., rules_python)
+sudo rm -rf ~/.cache/bazel/_bazel_${USER}/<hash1>
+sudo rm -rf ~/.cache/bazel/_bazel_${USER}/<hash2>
+# ... or delete all except the keep hash
+```
 
+**Important:** Cleaning an output base does NOT delete the worktree or its
+code. It only removes build artifacts. The next `bazel build` will rebuild
+from scratch (using the disk cache to speed things up).
+
+### 5. Old Bazel workspaces by age
+
+If you don't use worktrees, you can clean by age instead:
+
+```bash
 # macOS: delete workspaces older than 30 days
 find /private/var/tmp/_bazel_${USER}/ -maxdepth 1 -type d -mtime +30 \
   -exec du -sh {} \;
 # Then rm -rf the ones you don't need
 
 # Linux: same but different path
-find /tmp/_bazel_${USER}/ -maxdepth 1 -type d -mtime +30 \
+find ~/.cache/bazel/_bazel_${USER}/ -maxdepth 1 -type d -mtime +30 \
   -exec du -sh {} \; 2>/dev/null
 ```
 
