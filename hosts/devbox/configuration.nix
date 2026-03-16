@@ -2,7 +2,7 @@
 { config, pkgs, lib, ... }:
 
 {
-  # Allow unfree packages (1password-cli for pigeon)
+  # Allow unfree packages
   nixpkgs.config.allowUnfree = true;
 
   # sops-nix configuration
@@ -30,8 +30,18 @@
         group = "dev";
         mode = "0400";
       };
-      # 1Password service account token (bootstrap for CCR and other app secrets)
-      op_service_account_token = {
+      # Pigeon daemon secrets
+      ccr_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_bot_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_chat_id = {
         owner = "dev";
         group = "dev";
         mode = "0400";
@@ -188,8 +198,8 @@
     description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" "cloudflared-tunnel.service" ];
-    requires = [ "cloudflared-tunnel.service" ];
+    after = [ "network-online.target" "sops-nix.service" "cloudflared-tunnel.service" ];
+    requires = [ "sops-nix.service" "cloudflared-tunnel.service" ];
 
     path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ];
 

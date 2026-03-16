@@ -22,6 +22,8 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | Platform | Clone target | Trigger |
 |----------|-------------|---------|
 | Devbox | `~/projects/` | Login (systemd service) or `~/.local/bin/ensure-projects` |
+| Cloudbox | `~/projects/` | Login (systemd service) or `~/.local/bin/ensure-projects` |
+| Crostini | `~/projects/` | `home-manager switch` (activation script) |
 | macOS | `~/Code/` | `darwin-rebuild switch` (activation script) |
 
 **Add a project:**
@@ -84,7 +86,9 @@ workstation/
 ├── users/dev/
 │   ├── home.nix           # Entry point (imports all modules)
 │   ├── home.base.nix      # Shared config (git, bash, packages)
-│   ├── home.linux.nix     # Linux-only (systemd services, ensure-projects)
+│   ├── home.devbox.nix    # Devbox-only (identity, sops secrets)
+│   ├── home.cloudbox.nix  # Cloudbox-only (identity, sops secrets, work tools)
+│   ├── home.crostini.nix  # Crostini-only (identity, sops secrets, pigeon, opencode-serve)
 │   ├── home.darwin.nix    # macOS-only (launchd, ensure-projects, dotfiles migration)
 │   ├── opencode-config.nix  # OpenCode managed config + agents
 │   └── opencode-skills.nix  # System-wide OpenCode skills deployed to ~/.config/opencode/skills/
@@ -119,9 +123,11 @@ After `nixos-anywhere`:
 
 ## Secrets
 
-**Devbox:** Secrets at `/run/secrets/<name>` via sops-nix. Env vars auto-exported in bash. See [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md).
+**Devbox/Cloudbox:** Secrets at `/run/secrets/<name>` via sops-nix (NixOS module). Env vars auto-exported in bash. See [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md).
 
-**macOS:** 1Password via desktop app or service account token in Keychain.
+**Crostini:** Secrets at `~/.config/sops-nix/secrets/<name>` via sops-nix (home-manager module). Env vars exported in `.bashrc`.
+
+**macOS:** macOS Keychain. Secrets populated via helper scripts (e.g. `pigeon-setup-secrets`).
 
 ## Landing the Plane (Session Completion)
 

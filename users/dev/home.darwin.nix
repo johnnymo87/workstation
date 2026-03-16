@@ -113,8 +113,8 @@ lib.mkIf isDarwin {
     };
   };
 
-  # Pigeon daemon launchd agent — all secrets from macOS Keychain
-  # Run `pigeon-setup-secrets` once in a terminal to populate Keychain from 1Password
+  # Pigeon daemon launchd agent — secrets from macOS Keychain
+  # Run `pigeon-setup-secrets` once in a terminal to populate Keychain
   launchd.agents.pigeon-daemon = {
     enable = true;
     config = {

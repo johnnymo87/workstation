@@ -5,11 +5,13 @@ description: This skill explains the workstation monorepo structure, how NixOS (
 
 # Understanding Workstation Config
 
-This repo manages two platforms with standalone home-manager:
+This repo manages four platforms with standalone home-manager:
 - **NixOS devbox** — Hetzner ARM server (system: `aarch64-linux`)
+- **NixOS cloudbox** — GCP ARM VM (system: `aarch64-linux`)
+- **Crostini chromebook** — ChromeOS Linux container (system: `x86_64-linux`)
 - **nix-darwin macOS** — MacBook Pro (system: `aarch64-darwin`)
 
-Both share the same home-manager base config. Platform differences are isolated in dedicated modules.
+All share the same home-manager base config. Platform differences are isolated in dedicated modules.
 
 ## Repository Structure
 
@@ -30,26 +32,28 @@ workstation/
 │   └── dev/
 │       ├── home.nix           # Entry point (imports all modules below)
 │       ├── home.base.nix      # Shared: git, bash, tmux, neovim, packages
-│       ├── home.linux.nix     # Linux-only: systemd services, ensure-projects script
+│       ├── home.devbox.nix    # Devbox-only: identity, sops secrets
+│       ├── home.cloudbox.nix  # Cloudbox-only: identity, sops secrets, work tools
+│       ├── home.crostini.nix  # Crostini-only: identity, sops secrets, pigeon, opencode-serve
 │       ├── home.darwin.nix    # macOS-only: launchd, ensure-projects activation, dotfiles migration
 │       ├── opencode-config.nix # OpenCode managed config
-│       ├── claude-skills.nix  # Claude Code skills deployed to ~/.claude/
-│       ├── claude-hooks.nix   # Claude Code hooks (session start/stop)
-│       ├── tmux.linux.nix     # Linux tmux extras
+│       ├── opencode-skills.nix # OpenCode skills deployed to ~/.config/opencode/skills/
+│       ├── tmux.devbox.nix    # Devbox tmux extras
+│       ├── tmux.cloudbox.nix  # Cloudbox tmux extras
+│       ├── tmux.crostini.nix  # Crostini tmux extras
 │       └── tmux.darwin.nix    # macOS tmux extras
 │
 ├── assets/                   # Content deployed by home-manager
-│   ├── claude/               # Claude skills and commands
-│   ├── opencode/             # OpenCode config templates, prompts, agents
+│   ├── opencode/             # OpenCode agents, skills, plugins, base config
 │   └── nvim/                 # Neovim Lua config (lua/user/)
 │
-├── secrets/                  # sops-nix encrypted secrets (devbox only)
+├── secrets/                  # sops-nix encrypted secrets
 │
 ├── scripts/                  # Helper scripts
 │
-└── .claude/                  # THIS REPO's Claude documentation
+└── .opencode/                # THIS REPO's OpenCode documentation
     ├── skills/               # How to understand/modify this config
-    └── commands/             # Quick actions for this repo
+    └── commands/             # Repo-specific slash commands
 ```
 
 ## Key Concepts
@@ -71,27 +75,30 @@ On macOS, `darwin-rebuild` handles both system and home-manager in one command.
 `home.nix` is just an import list:
 ```nix
 imports = [
-  ./home.base.nix      # Cross-platform (always applied)
-  ./home.linux.nix     # Guarded with lib.mkIf isLinux
-  ./home.darwin.nix    # Guarded with lib.mkIf isDarwin
-  ./claude-skills.nix
-  ./claude-hooks.nix
+  ./home.base.nix        # Cross-platform (always applied)
+  ./home.devbox.nix      # Guarded with lib.mkIf isDevbox
+  ./home.cloudbox.nix    # Guarded with lib.mkIf isCloudbox
+  ./home.crostini.nix    # Guarded with lib.mkIf isCrostini
+  ./home.darwin.nix      # Guarded with lib.mkIf isDarwin
   ./opencode-config.nix
-  ./tmux.linux.nix
+  ./opencode-skills.nix
+  ./tmux.devbox.nix
+  ./tmux.cloudbox.nix
+  ./tmux.crostini.nix
   ./tmux.darwin.nix
 ];
 ```
 
-All modules are imported on both platforms. Platform-specific modules use `lib.mkIf isLinux` or `lib.mkIf isDarwin` at the top level, so they evaluate to `{}` on the wrong platform.
+All modules are imported on all platforms. Platform-specific modules use guards like `lib.mkIf isDevbox` or `lib.mkIf isDarwin` at the top level, so they evaluate to `{}` on non-matching platforms.
 
 ### Platform Identity
 
-| Property | Devbox | macOS |
-|----------|--------|-------|
-| Username | `dev` | `jonathan.mohrbacher` |
-| Home dir | `/home/dev` | `/Users/jonathan.mohrbacher` |
-| Projects dir | `~/projects/` | `~/Code/` |
-| System type | `aarch64-linux` | `aarch64-darwin` |
+| Property | Devbox | Cloudbox | Crostini | macOS |
+|----------|--------|----------|----------|-------|
+| Username | `dev` | `dev` | `livia` | `jonathan.mohrbacher` |
+| Home dir | `/home/dev` | `/home/dev` | `/home/livia` | `/Users/jonathan.mohrbacher` |
+| Projects dir | `~/projects/` | `~/projects/` | `~/projects/` | `~/Code/` |
+| System type | `aarch64-linux` | `aarch64-linux` | `x86_64-linux` | `aarch64-darwin` |
 
 **CRITICAL**: Never hardcode paths like `/home/dev` or `/Users/jonathan.mohrbacher`. Always use `config.home.homeDirectory`.
 
@@ -109,13 +116,14 @@ How each platform uses it:
 | Platform | Mechanism | Clone target | Trigger |
 |----------|-----------|-------------|---------|
 | Devbox | `~/.local/bin/ensure-projects` script + systemd service | `~/projects/` | Login (systemd) or manual script |
+| Cloudbox | `~/.local/bin/ensure-projects` script + systemd service | `~/projects/` | Login (systemd) or manual script |
+| Crostini | `home.activation.ensureProjects` in `home.crostini.nix` | `~/projects/` | `home-manager switch` |
 | macOS | `home.activation.ensureProjects` in `home.darwin.nix` | `~/Code/` | `darwin-rebuild switch` |
 
-### assets/ vs .claude/
+### assets/ vs .opencode/
 
-- `assets/claude/` — Skills/commands deployed TO the user's `~/.claude/`
-- `assets/opencode/` — OpenCode config templates, prompts, custom agents
-- `.claude/` — Skills for working WITH this repo (not deployed anywhere)
+- `assets/opencode/` — Skills, agents, plugins, base config deployed TO the user's `~/.config/opencode/`
+- `.opencode/` — Skills/commands for working WITH this repo (auto-discovered by OpenCode)
 
 ### pkgsFor Pattern
 
@@ -188,7 +196,9 @@ Currently disabled on Darwin: `bash`, `ssh`, `neovim` (using existing dotfiles i
 
 | Platform | Mechanism | Storage |
 |----------|-----------|---------|
-| Devbox | sops-nix | `/run/secrets/<name>`, env vars in `.bashrc` |
+| Devbox | sops-nix (NixOS module) | `/run/secrets/<name>`, env vars in `.bashrc` |
+| Cloudbox | sops-nix (NixOS module) | `/run/secrets/<name>`, env vars in `.bashrc` |
+| Crostini | sops-nix (home-manager module) | `~/.config/sops-nix/secrets/<name>` |
 | macOS | macOS Keychain | `security find-generic-password -s <service> -w` |
 
 ## Common Tasks
@@ -210,19 +220,22 @@ Currently disabled on Darwin: `bash`, `ssh`, `neovim` (using existing dotfiles i
 | User packages (both) | `users/dev/home.base.nix` |
 | Bash aliases (both) | `users/dev/home.base.nix` (programs.bash) |
 | Git config (both) | `users/dev/home.base.nix` (programs.git) |
-| Linux systemd services | `users/dev/home.linux.nix` |
+| Devbox systemd services | `users/dev/home.devbox.nix` |
+| Cloudbox systemd services | `users/dev/home.cloudbox.nix` |
+| Crostini systemd user services | `users/dev/home.crostini.nix` |
 | macOS launchd agents | `users/dev/home.darwin.nix` |
 | macOS dotfiles migration | `users/dev/home.darwin.nix` (disabled programs) |
 | Declared projects | `projects.nix` |
 | OpenCode agent models | `users/dev/opencode-config.nix` (ohMyManaged) |
 | OpenCode MCP servers | `users/dev/opencode-config.nix` (opencodeBase) |
 | OpenCode plugins | `users/dev/opencode-config.nix` (xdg.configFile plugins) |
-| Claude skills (deployed) | `assets/claude/skills/` |
-| Claude hooks | `users/dev/claude-hooks.nix` |
+| OpenCode skills (deployed) | `assets/opencode/skills/` |
+| OpenCode skills config | `users/dev/opencode-skills.nix` |
 | Neovim config | `assets/nvim/lua/user/` |
 | SSH settings | `users/dev/home.base.nix` (programs.ssh) |
 | Flake inputs | `flake.nix` |
-| Claude Code statusline | `users/dev/home.base.nix` (managedSettings) |
 | Tmux config (shared) | `users/dev/home.base.nix` (programs.tmux) |
-| Tmux config (Linux) | `users/dev/tmux.linux.nix` |
+| Tmux config (devbox) | `users/dev/tmux.devbox.nix` |
+| Tmux config (cloudbox) | `users/dev/tmux.cloudbox.nix` |
+| Tmux config (crostini) | `users/dev/tmux.crostini.nix` |
 | Tmux config (macOS) | `users/dev/tmux.darwin.nix` |

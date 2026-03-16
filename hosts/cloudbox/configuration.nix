@@ -11,7 +11,7 @@
 { config, pkgs, lib, ... }:
 
 {
-  # Allow unfree packages (1password-cli for pigeon)
+  # Allow unfree packages
   nixpkgs.config.allowUnfree = true;
 
   # sops-nix configuration
@@ -39,8 +39,18 @@
         group = "dev";
         mode = "0400";
       };
-      # 1Password service account token (for pigeon secrets)
-      op_service_account_token = {
+      # Pigeon daemon secrets
+      ccr_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_bot_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_chat_id = {
         owner = "dev";
         group = "dev";
         mode = "0400";

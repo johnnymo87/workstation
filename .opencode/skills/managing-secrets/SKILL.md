@@ -14,11 +14,10 @@ Secrets are managed with sops-nix using age encryption. They're encrypted in the
 | `github_ssh_key` | Git operations | Deployed to `~/.ssh/id_ed25519_github` |
 | `cloudflared_tunnel_token` | Cloudflare tunnel | Systemd service reads from `/run/secrets/` |
 | `cloudflare_api_token` | Wrangler CLI | Exported as `CLOUDFLARE_API_TOKEN` in bash |
-| `op_service_account_token` | 1Password bootstrap | Available at `/run/secrets/` for scripts (kept for now; no longer needed by pigeon daemon — will be removed in a follow-up) |
 | `claude_personal_oauth_token` | Headless Claude Code | Exported as `CLAUDE_CODE_OAUTH_TOKEN` in bash |
-| `ccr_api_key` | Pigeon daemon auth to worker | Systemd service reads from `/run/secrets/ccr_api_key` |
-| `telegram_bot_token` | Pigeon daemon Telegram API | Systemd service reads from `/run/secrets/telegram_bot_token` |
-| `telegram_chat_id` | Pigeon daemon Telegram chat target | Systemd service reads from `/run/secrets/telegram_chat_id` |
+| `ccr_api_key` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
+| `telegram_bot_token` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
+| `telegram_chat_id` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
 
 ## How Secrets Flow
 
