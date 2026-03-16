@@ -103,12 +103,6 @@
         group = "dev";
         mode = "0400";
       };
-      # Discord token (for DiscordChatExporter in tec-codex)
-      discord_token = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
       # Google Workspace CLI - default account (jonathan.mohrbacher@gmail.com)
       gws_default_client_id = {
         owner = "dev";
