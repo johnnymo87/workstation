@@ -182,8 +182,8 @@
     description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" "sops-nix.service" "cloudflared-tunnel.service" ];
-    requires = [ "sops-nix.service" "cloudflared-tunnel.service" ];
+    after = [ "network-online.target" "cloudflared-tunnel.service" ];
+    requires = [ "cloudflared-tunnel.service" ];
 
     path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ];
 
