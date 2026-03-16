@@ -32,6 +32,11 @@ lib.mkIf isDevbox {
       export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
     fi
 
+    # OpenAI API key (for tec-codex embeddings via text-embedding-3-small)
+    if [ -r /run/secrets/openai_api_key ]; then
+      export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
+    fi
+
     # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
     # These call mcp.exa.ai with no API key (free tier). If rate-limited (429),
     # obtain a free key at exa.ai and set OPENCODE_ENABLE_EXA=https://mcp.exa.ai/mcp?exaApiKey=<key>
