@@ -183,22 +183,6 @@
         group = "dev";
         mode = "0400";
       };
-      # Pigeon daemon secrets (replaces op run)
-      ccr_api_key = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      telegram_bot_token = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      telegram_chat_id = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
       # Azure DevOps npm registry URL (org-identifying)
       ado_npm_registry_url = {
         owner = "dev";
