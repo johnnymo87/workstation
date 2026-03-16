@@ -23,6 +23,7 @@ lib.mkIf isCrostini {
       gemini_api_key = {};
       cloudflared_tunnel_token = {};
       ccr_worker_url = {};
+      # Pigeon daemon secrets
       ccr_api_key = {};
       telegram_bot_token = {};
       telegram_chat_id = {};
@@ -107,7 +108,7 @@ lib.mkIf isCrostini {
           ${config.home.homeDirectory}/projects/pigeon/packages/daemon/src/index.ts
       ''}";
       Restart = "on-failure";
-      RestartSec = 5;
+      RestartSec = 30;
     };
     Install = {
       WantedBy = [ "default.target" ];
@@ -128,6 +129,8 @@ lib.mkIf isCrostini {
         "HOME=${config.home.homeDirectory}"
         "PATH=${lib.makeBinPath [
           pkgs.git pkgs.openssh pkgs.fzf pkgs.ripgrep pkgs.gh pkgs.bun
+          pkgs.nodejs pkgs.curl pkgs.wget pkgs.jq pkgs.fd pkgs.unzip
+          pkgs.gnumake pkgs.gcc
           pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused
         ]}:${config.home.homeDirectory}/.nix-profile/bin"
       ];
