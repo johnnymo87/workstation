@@ -2,7 +2,7 @@
 { config, pkgs, lib, ... }:
 
 {
-  # Allow unfree packages (1password-cli for pigeon)
+  # Allow unfree packages
   nixpkgs.config.allowUnfree = true;
 
   # sops-nix configuration
@@ -30,8 +30,18 @@
         group = "dev";
         mode = "0400";
       };
-      # 1Password service account token (bootstrap for CCR and other app secrets)
-      op_service_account_token = {
+      # Pigeon daemon secrets
+      ccr_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_bot_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      telegram_chat_id = {
         owner = "dev";
         group = "dev";
         mode = "0400";
@@ -172,8 +182,8 @@
     description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" "cloudflared-tunnel.service" ];
-    requires = [ "cloudflared-tunnel.service" ];
+    after = [ "network-online.target" "sops-nix.service" "cloudflared-tunnel.service" ];
+    requires = [ "sops-nix.service" "cloudflared-tunnel.service" ];
 
     path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ];
 
@@ -190,10 +200,11 @@
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
         export CCR_WORKER_URL="$(cat /run/secrets/ccr_worker_url)"
-        export OP_SERVICE_ACCOUNT_TOKEN="$(cat /run/secrets/op_service_account_token)"
+        export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
+        export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
+        export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
         export OPENCODE_URL="http://127.0.0.1:4096"
-        exec ${pkgs._1password-cli}/bin/op run --env-file=/home/dev/projects/pigeon/.env.1password -- \
-          ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
+        exec ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";
       Restart = "on-failure";
       RestartSec = 5;

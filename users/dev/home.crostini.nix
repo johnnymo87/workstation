@@ -12,7 +12,6 @@ lib.mkIf isCrostini {
   # Packages
   home.packages = [
     pkgs.cloudflared
-    pkgs._1password-cli
   ];
 
   # sops-nix home-manager secrets (decrypted during activation)
@@ -23,8 +22,10 @@ lib.mkIf isCrostini {
     secrets = {
       gemini_api_key = {};
       cloudflared_tunnel_token = {};
-      op_service_account_token = {};
       ccr_worker_url = {};
+      ccr_api_key = {};
+      telegram_bot_token = {};
+      telegram_chat_id = {};
     };
   };
 
@@ -97,11 +98,11 @@ lib.mkIf isCrostini {
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
         export CCR_WORKER_URL="$(cat ${config.sops.secrets.ccr_worker_url.path})"
-        export OP_SERVICE_ACCOUNT_TOKEN="$(cat ${config.sops.secrets.op_service_account_token.path})"
+        export CCR_API_KEY="$(cat ${config.sops.secrets.ccr_api_key.path})"
+        export TELEGRAM_BOT_TOKEN="$(cat ${config.sops.secrets.telegram_bot_token.path})"
+        export TELEGRAM_CHAT_ID="$(cat ${config.sops.secrets.telegram_chat_id.path})"
         export OPENCODE_URL="http://127.0.0.1:4096"
-        exec ${pkgs._1password-cli}/bin/op run \
-          --env-file=${config.home.homeDirectory}/projects/pigeon/.env.1password -- \
-          ${pkgs.nodejs}/bin/node \
+        exec ${pkgs.nodejs}/bin/node \
           ${config.home.homeDirectory}/projects/pigeon/node_modules/tsx/dist/cli.mjs \
           ${config.home.homeDirectory}/projects/pigeon/packages/daemon/src/index.ts
       ''}";

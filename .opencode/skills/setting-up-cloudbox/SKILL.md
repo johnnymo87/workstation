@@ -104,9 +104,11 @@ SOPS_AGE_KEY="<devbox-age-private-key>" sops -d secrets/devbox.yaml
 
 Then create `secrets/cloudbox.yaml` with the same values for:
 - `github_ssh_key` — same key across machines
-- `op_service_account_token` — same 1Password SA token
 - `cloudflared_tunnel_token` — same tunnel (pigeon uses it)
 - `cloudflare_api_token` — same API token
+- `ccr_api_key` — pigeon daemon secret
+- `telegram_bot_token` — pigeon daemon secret
+- `telegram_chat_id` — pigeon daemon secret
 
 To set values in the encrypted file from the cloudbox (where the age key lives):
 
@@ -226,7 +228,7 @@ After bootstrap is confirmed working, ensure `PermitRootLogin` is set to `"no"` 
 
 2. **google-compute-config.nix sets legacy GRUB boot** which doesn't work on C4a UEFI. Must override with `boot.loader.grub.enable = lib.mkForce false` and `boot.loader.systemd-boot.enable = true`.
 
-3. **`nixpkgs.config.allowUnfree = true`** is required for `pkgs._1password-cli` (used by pigeon).
+3. **`nixpkgs.config.allowUnfree = true`** may be required for certain unfree packages.
 
 4. **`users.mutableUsers = false`** is needed for declarative user management (also prevents google-guest-agent from creating accounts).
 
