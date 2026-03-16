@@ -30,22 +30,6 @@
         group = "dev";
         mode = "0400";
       };
-      # Pigeon daemon secrets
-      ccr_api_key = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      telegram_bot_token = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      telegram_chat_id = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
       # Personal Claude subscription token (not work account)
       # For headless/cron Claude Code usage on devbox
       claude_personal_oauth_token = {
