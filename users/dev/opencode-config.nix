@@ -212,103 +212,89 @@ in
     '');
 
   # Inject Slack MCP secrets from macOS Keychain into opencode.json
-  # Runs after mergeOpencode to ensure runtime file exists
-  # If tokens missing/empty, explicitly deletes mcp.slack to prevent stale config
-  # Uses OpenCode's mcp config format: type=local, command=array, environment=object
+  # Uses xoxp User OAuth token (registered Slack app) instead of browser session tokens.
+  # Runs after mergeOpencode to ensure runtime file exists.
+  # If token missing/empty, explicitly deletes mcp.slack to prevent stale config.
   home.activation.injectSlackMcpSecrets = lib.mkIf isDarwin
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      # Fetch tokens from Keychain
-      xoxc_token="$(/usr/bin/security find-generic-password -s slack-mcp-xoxc-token -w 2>/dev/null || true)"
-      xoxd_token="$(/usr/bin/security find-generic-password -s slack-mcp-xoxd-token -w 2>/dev/null || true)"
+      # Fetch xoxp token from Keychain
+      xoxp_token="$(/usr/bin/security find-generic-password -s slack-mcp-xoxp-token -w 2>/dev/null || true)"
 
-      # If either token is missing or empty, delete mcp.slack and exit cleanly
-      if [[ -z "''${xoxc_token}" ]] || [[ -z "''${xoxd_token}" ]]; then
+      # If token is missing or empty, delete mcp.slack and exit cleanly
+      if [[ -z "''${xoxp_token}" ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.slack)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Slack MCP tokens not found in Keychain; removed mcp.slack from config" >&2
+        echo "Slack MCP xoxp token not found in Keychain; removed mcp.slack from config" >&2
         exit 0
       fi
 
-      # Both tokens present: inject full Slack MCP config
-      # OpenCode format: type=local, command=array, environment=object
+      # Token present: inject Slack MCP config with xoxp auth
+      # MCP is disabled by default; enable manually or use dedicated slack agent when needed
       if [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
-        
-        # Escape tokens for jq and inject into mcp.slack
-        # MCP is disabled by default; enable manually or use dedicated slack agent when needed
+
         ${pkgs.jq}/bin/jq \
-          --arg xoxc "''${xoxc_token}" \
-          --arg xoxd "''${xoxd_token}" \
+          --arg xoxp "''${xoxp_token}" \
           '.mcp.slack = {
             "type": "local",
             "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
             "enabled": false,
             "environment": {
-              "SLACK_MCP_XOXC_TOKEN": $xoxc,
-              "SLACK_MCP_XOXD_TOKEN": $xoxd,
-              "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
-              "SLACK_MCP_CUSTOM_TLS": "1",
-              "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0"
+              "SLACK_MCP_XOXP_TOKEN": $xoxp,
+              "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
             }
           }' "$runtime" > "$tmp"
-        
+
         mv "$tmp" "$runtime"
       fi
     '');
 
   # Inject Slack MCP secrets from sops on cloudbox into opencode.json
-  # Same pattern as Darwin, but reads from /run/secrets/ instead of Keychain
+  # Uses xoxp User OAuth token (registered Slack app) instead of browser session tokens.
+  # Same pattern as Darwin, but reads from /run/secrets/ instead of Keychain.
   home.activation.injectSlackMcpSecretsSops = lib.mkIf isCloudbox
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      # Read tokens from sops-decrypted secrets
-      xoxc_token=""
-      xoxd_token=""
-      if [ -r /run/secrets/slack_mcp_xoxc_token ]; then
-        xoxc_token="$(cat /run/secrets/slack_mcp_xoxc_token)"
-      fi
-      if [ -r /run/secrets/slack_mcp_xoxd_token ]; then
-        xoxd_token="$(cat /run/secrets/slack_mcp_xoxd_token)"
+      # Read xoxp token from sops-decrypted secret
+      xoxp_token=""
+      if [ -r /run/secrets/slack_mcp_xoxp_token ]; then
+        xoxp_token="$(cat /run/secrets/slack_mcp_xoxp_token)"
       fi
 
-      # If either token is missing or empty, delete mcp.slack and exit cleanly
-      if [[ -z "''${xoxc_token}" ]] || [[ -z "''${xoxd_token}" ]]; then
+      # If token is missing or empty, delete mcp.slack and exit cleanly
+      if [[ -z "''${xoxp_token}" ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.slack)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Slack MCP tokens not found in sops; removed mcp.slack from config" >&2
+        echo "Slack MCP xoxp token not found in sops; removed mcp.slack from config" >&2
         exit 0
       fi
 
-      # Both tokens present: inject full Slack MCP config
+      # Token present: inject Slack MCP config with xoxp auth
       if [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
-          --arg xoxc "''${xoxc_token}" \
-          --arg xoxd "''${xoxd_token}" \
+          --arg xoxp "''${xoxp_token}" \
           '.mcp.slack = {
             "type": "local",
             "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
             "enabled": false,
             "environment": {
-              "SLACK_MCP_XOXC_TOKEN": $xoxc,
-              "SLACK_MCP_XOXD_TOKEN": $xoxd,
-              "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
-              "SLACK_MCP_CUSTOM_TLS": "1",
-              "SLACK_MCP_USER_AGENT": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0"
+              "SLACK_MCP_XOXP_TOKEN": $xoxp,
+              "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
             }
           }' "$runtime" > "$tmp"
 
