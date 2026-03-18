@@ -389,13 +389,15 @@
   };
 
   # earlyoom: last-resort killer when memory is critically low.
-  # IMPORTANT: earlyoom uses AND logic (both RAM AND swap must be below
-  # threshold). Our failure mode exhausts RAM while swap has headroom,
-  # so we set swap threshold to 100% (always true) to make earlyoom
-  # trigger on RAM alone.
-  # Kill order: bazel/java/node first (--prefer), then other processes,
-  # then opencode last (--avoid). sshd is also --avoid but has
-  # OOMScoreAdjust=-1000 so it's effectively unkillable.
+  # Swap threshold set to 100% (always true) so earlyoom triggers on
+  # RAM alone — our failure mode exhausts RAM while swap has headroom.
+  # Kill order: bazel/java/node first (--prefer, +100 oom_score),
+  # then everything else by RSS (including opencode), then sshd/systemd
+  # last (--avoid, -100 oom_score, plus OOMScoreAdjust=-1000).
+  # NOTE: opencode is intentionally NOT in --avoid. Previous config had
+  # it there, but earlyoom then killed agetty/dhcpcd (tiny, useless)
+  # instead of the actual memory hogs. Also added agetty/dhcpcd to
+  # --avoid to prevent earlyoom wasting kills on system services.
   services.earlyoom = {
     enable = true;
     freeMemThreshold = 10;       # SIGTERM when <10% RAM free (~3.2 GB)
@@ -405,7 +407,7 @@
     reportInterval = 15;
     extraArgs = [
       "--prefer" "(^|/)(node|bun|bazel|java|kotlin-language-server|docker)$"
-      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|opencode)$"
+      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|agetty|dhcpcd)$"
     ];
   };
 
