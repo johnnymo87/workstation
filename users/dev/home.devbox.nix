@@ -354,39 +354,4 @@ lib.mkIf isDevbox {
       WantedBy = [ "timers.target" ];
     };
   };
-
-  home.file.".local/bin/anthropic-oauth-proxy" = {
-    executable = true;
-    text = ''
-      #!${pkgs.bash}/bin/bash
-      set -euo pipefail
-
-      export ANTHROPIC_PROXY_OVERRIDE_UA="''${ANTHROPIC_PROXY_OVERRIDE_UA:-true}"
-      export ANTHROPIC_PROXY_INJECT_BILLING="''${ANTHROPIC_PROXY_INJECT_BILLING:-true}"
-      export ANTHROPIC_PROXY_STRIP_CACHE_MARKERS="''${ANTHROPIC_PROXY_STRIP_CACHE_MARKERS:-false}"
-
-      exec ${pkgs.bun}/bin/bun "$HOME/projects/workstation/assets/opencode/plugins/anthropic-oauth-proxy/main.ts"
-    '';
-  };
-
-  systemd.user.services.anthropic-oauth-proxy = {
-    Unit = {
-      Description = "Anthropic OAuth proxy for OpenCode";
-      After = [ "network-online.target" ];
-      Wants = [ "network-online.target" ];
-    };
-    Service = {
-      ExecStart = "%h/.local/bin/anthropic-oauth-proxy";
-      Restart = "always";
-      RestartSec = 2;
-      StandardOutput = "journal";
-      StandardError = "journal";
-      Environment = [
-        "HOME=%h"
-      ];
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
 }

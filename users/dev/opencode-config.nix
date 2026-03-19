@@ -1,7 +1,7 @@
 # OpenCode configuration management
 # Manages opencode.json via home-manager
 # with merge-on-activate pattern (runtime keys preserved, managed keys enforced)
-{ config, lib, pkgs, localPkgs, assetsPath, isDevbox ? false, isCloudbox ? false, isCrostini ? false, ... }:
+{ config, lib, pkgs, localPkgs, assetsPath, isDevbox, isCloudbox, isCrostini, ... }:
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
