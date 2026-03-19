@@ -77,7 +77,7 @@ let
 
   anthropicProxyPlugin = "file://${config.home.homeDirectory}/.config/opencode/plugins/anthropic-oauth-proxy/plugin.ts";
 
-  opencodeOverlayWithAnthropicProxy = lib.optionalAttrs isDevbox {
+  opencodeOverlayWithAnthropicProxy = lib.optionalAttrs (isDevbox || isCrostini) {
     plugin = (opencodeBase.plugin or []) ++ [ anthropicProxyPlugin ];
   };
 
