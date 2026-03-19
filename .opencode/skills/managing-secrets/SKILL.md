@@ -18,6 +18,8 @@ Secrets are managed with sops-nix using age encryption. They're encrypted in the
 | `ccr_api_key` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
 | `telegram_bot_token` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
 | `telegram_chat_id` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
+| `dd_api_key` | Datadog CLI (dd-cli) | Exported as `DD_API_KEY` in bash |
+| `dd_app_key` | Datadog CLI (dd-cli) | Exported as `DD_APP_KEY` in bash |
 
 ## How Secrets Flow
 

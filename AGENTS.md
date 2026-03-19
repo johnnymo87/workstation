@@ -93,6 +93,7 @@ workstation/
 │   ├── opencode-config.nix  # OpenCode managed config + agents
 │   └── opencode-skills.nix  # System-wide OpenCode skills deployed to ~/.config/opencode/skills/
 ├── pkgs/                  # Self-packaged tools (auto-updated by nix-update)
+│   ├── dd-cli/            # Datadog CLI (installed as editable Python tool via home.activation.installDdCli in home.base.nix)
 │   ├── beads/             # Distributed issue tracker
 │   └── pinentry-op/       # macOS GPG pinentry via 1Password
 ├── assets/                # Content deployed to user
