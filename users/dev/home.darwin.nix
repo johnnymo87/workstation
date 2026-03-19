@@ -287,6 +287,13 @@ lib.mkIf isDarwin {
       BUNDLE_VAL="$(/usr/bin/security find-generic-password -s bundle-fury-freshrealm-com -w 2>/dev/null)" && export BUNDLE_FURY__FRESHREALM__COM="$BUNDLE_VAL"
       unset BUNDLE_VAL
 
+      # Datadog CLI credentials (from macOS Keychain)
+      export DD_SITE="us3.datadoghq.com"
+      DD_API_KEY_VAL="$(/usr/bin/security find-generic-password -s dd-api-key -w 2>/dev/null)" && export DD_API_KEY="$DD_API_KEY_VAL"
+      unset DD_API_KEY_VAL
+      DD_APP_KEY_VAL="$(/usr/bin/security find-generic-password -s dd-app-key -w 2>/dev/null)" && export DD_APP_KEY="$DD_APP_KEY_VAL"
+      unset DD_APP_KEY_VAL
+
       # ba CLI credentials (from macOS Keychain)
       # GITHUB_API_TOKEN is the GoBA token ba uses for self-updates (same token as GH_TOKEN)
       GITHUB_API_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" && export GITHUB_API_TOKEN="$GITHUB_API_TOKEN_VAL"

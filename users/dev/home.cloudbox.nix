@@ -162,6 +162,15 @@ lib.mkIf isCloudbox {
       export BUNDLE_FURY__FRESHREALM__COM="$(cat /run/secrets/bundle_fury_freshrealm_com)"
     fi
 
+    # Datadog CLI credentials (dd-cli)
+    export DD_SITE="us3.datadoghq.com"
+    if [ -r /run/secrets/dd_api_key ]; then
+      export DD_API_KEY="$(cat /run/secrets/dd_api_key)"
+    fi
+    if [ -r /run/secrets/dd_app_key ]; then
+      export DD_APP_KEY="$(cat /run/secrets/dd_app_key)"
+    fi
+
     # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
     export OPENCODE_ENABLE_EXA=1
   '';

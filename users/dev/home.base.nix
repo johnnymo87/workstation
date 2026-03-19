@@ -611,6 +611,27 @@ EOF
     "$HOME/.npm-global/bin"
   ];
 
+  # Install dd-cli (Datadog CLI) in editable mode from local checkout (work machines)
+  # Editable install means source changes are reflected immediately without reinstalling.
+  # Only re-run `home-manager switch` if dependencies in pyproject.toml change.
+  home.activation.installDdCli = lib.mkIf (isDarwin || isCloudbox) (
+    lib.hm.dag.entryAfter [ "writeBoundary" ] (let
+      ddCliDir = if isCloudbox
+        then "$HOME/projects/dd-cli"
+        else "$HOME/Code/dd-cli";
+    in ''
+      set -euo pipefail
+      dd_cli_dir="${ddCliDir}"
+      if [ -d "$dd_cli_dir" ]; then
+        ${pkgs.uv}/bin/uv tool install --editable "$dd_cli_dir" --force --quiet 2>&1 || {
+          echo "installDdCli: WARNING: uv tool install failed"
+        }
+        echo "installDdCli: dd-cli installed (editable) from $dd_cli_dir"
+      else
+        echo "installDdCli: skipping ($dd_cli_dir not found)"
+      fi
+    ''));
+
   # npm-global packages that can't be managed by Nix
   # (e.g. nixpkgs version is too old, or package not in nixpkgs)
   # Installed to ~/.npm-global which is already on sessionPath
