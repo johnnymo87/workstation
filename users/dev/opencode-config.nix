@@ -1,7 +1,7 @@
 # OpenCode configuration management
 # Manages opencode.json via home-manager
 # with merge-on-activate pattern (runtime keys preserved, managed keys enforced)
-{ config, lib, pkgs, localPkgs, assetsPath, isCloudbox ? false, isCrostini ? false, ... }:
+{ config, lib, pkgs, localPkgs, assetsPath, isDevbox ? false, isCloudbox ? false, isCrostini ? false, ... }:
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
@@ -75,7 +75,13 @@ let
     };
   };
 
-  opencodeManaged = lib.recursiveUpdate opencodeBase opencodeOverlay;
+  anthropicProxyPlugin = "file://${config.home.homeDirectory}/.config/opencode/plugins/anthropic-oauth-proxy/plugin.ts";
+
+  opencodeOverlayWithAnthropicProxy = lib.optionalAttrs isDevbox {
+    plugin = (opencodeBase.plugin or []) ++ [ anthropicProxyPlugin ];
+  };
+
+  opencodeManaged = lib.recursiveUpdate (lib.recursiveUpdate opencodeBase opencodeOverlay) opencodeOverlayWithAnthropicProxy;
 
   opencodeManagedFile = pkgs.writeText "opencode.managed.json"
     (builtins.toJSON opencodeManaged);
@@ -97,8 +103,15 @@ in
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
 
    # Plugins (SRP: non-interactive env, compaction context, subagent routing)
-   xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
-   xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+    xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
+    xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/billing.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/billing.ts";
+    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/request-shape.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/request-shape.ts";
+    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/index.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/index.ts";
+    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/config.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/config.ts";
+    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/log.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/log.ts";
+    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/main.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/main.ts";
+    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/plugin.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/plugin.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
