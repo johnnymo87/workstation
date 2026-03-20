@@ -35,7 +35,7 @@ Both hosts keep remote forwards (`9222`, `9223`, `3033`) and GPG agent forwardin
 
 ### Multi-project CDP
 
-Each project that uses human-in-the-loop visual QA needs its own Chrome instance on macOS with a unique `--remote-debugging-port` and `--user-data-dir`. Both CDP ports are reverse-forwarded over the same SSH session. See each project's VQA skill for the specific Chrome launch command and MCP server name (`playwright-9222` or `playwright-9223`).
+Each project that uses human-in-the-loop visual QA needs its own Chrome instance on macOS with a unique `--remote-debugging-port` and `--user-data-dir`. Both CDP ports are reverse-forwarded over the same SSH session. See each project's VQA skill for the specific Chrome launch command and MCP server name (`chrome-devtools-9222` or `chrome-devtools-9223`).
 
 ## Can't SSH After Recreate
 

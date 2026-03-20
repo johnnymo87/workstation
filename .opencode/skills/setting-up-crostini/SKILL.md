@@ -165,7 +165,7 @@ To let AI on the devbox control a Chrome browser on the Chromebook:
    ```bash
    google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-dev-session
    ```
-3. AI on devbox can connect via `chromium.connectOverCDP('http://localhost:9222')`
+3. AI on devbox connects via the `chrome-devtools-9222` MCP server (`--browserUrl=http://localhost:9222`)
 
 ## Gotchas
 

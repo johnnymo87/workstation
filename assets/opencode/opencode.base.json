@@ -21,25 +21,23 @@
     "opencode-beads"
   ],
   "mcp": {
-    "playwright-9222": {
+    "chrome-devtools-9222": {
       "type": "local",
       "command": [
-        "playwright-mcp",
-        "--cdp-endpoint",
-        "http://localhost:9222",
-        "--caps",
-        "vision,devtools"
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--browserUrl=http://localhost:9222"
       ],
       "enabled": false
     },
-    "playwright-9223": {
+    "chrome-devtools-9223": {
       "type": "local",
       "command": [
-        "playwright-mcp",
-        "--cdp-endpoint",
-        "http://localhost:9223",
-        "--caps",
-        "vision,devtools"
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--browserUrl=http://localhost:9223"
       ],
       "enabled": false
     }

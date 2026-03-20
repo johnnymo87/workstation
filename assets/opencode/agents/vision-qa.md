@@ -18,7 +18,7 @@ visual artifacts that the main agent provides to you.
 - Identifying visual regressions (layout shifts, missing elements, rendering
   artifacts, color changes)
 - Analyzing PixiJS canvas renders, WebGL output, or other non-DOM visuals
-- Interpreting browser screenshots from Playwright MCP
+- Interpreting browser screenshots from Chrome DevTools MCP
 - Triaging whether a visual change is intentional or a bug
 
 ## When NOT to Use You

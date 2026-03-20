@@ -84,28 +84,28 @@ let
     '';
   };
 
-  # Patched opencode with improved Anthropic prompt caching (PR #5422)
-  # https://github.com/johnnymo87/opencode-cached
-  # All 4 platforms built by the cached fork's CI
+  # Patched opencode with prompt caching (PR #5422) + vim keybindings (PR #12679)
+  # https://github.com/johnnymo87/opencode-patched
+  # All 4 platforms built by the patched fork's CI
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-V24l2ejjP5F0ITeBL6pJ3NbZJveGtLgZHoHSXcsm9B0=";
+      hash = "sha256-wrOkZXHWa0f+/KksTOA8D1ldm8GnY58YMw0awqxRhVY=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-9idPbmN+cw3YdsupCsH5FOitrz8ErQkpBAg+K9KVoOI=";
+      hash = "sha256-cVJ8bxEU8bfNWN3x4gYUw5Fy5sN+AOZhzlHoagNB4OM=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-4CHTjEHkK6Rrp6ER7/DUUHWGelnIkwr5QVKSAWiH33o=";
+      hash = "sha256-nlkrEgXnCnP5nbGwQEUY6inaRSz5UyiNnGRCvQ7K6u4=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-YXG3hLvKz/hGerWe3wP8M3+neU3d9xQbaq5QsJtoYaI=";
+      hash = "sha256-HEo7EeGhi9TVIIeirKITZOHeXjrMwGFWoovqGwNs/0E=";
       isZip = true;
     };
   };
@@ -114,10 +114,10 @@ let
     version = "1.2.27";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
-    pname = "opencode-cached";
+    pname = "opencode-patched";
     inherit version;
     src = pkgs.fetchurl {
-      url = "https://github.com/johnnymo87/opencode-cached/releases/download/v${version}-cached/${platformInfo.asset}";
+      url = "https://github.com/johnnymo87/opencode-patched/releases/download/v${version}-patched/${platformInfo.asset}";
       hash = platformInfo.hash;
     };
     nativeBuildInputs = [ pkgs.makeWrapper ]
@@ -149,8 +149,8 @@ let
       runHook postInstall
     '';
     meta = {
-      description = "OpenCode with improved Anthropic prompt caching";
-      homepage = "https://github.com/johnnymo87/opencode-cached";
+      description = "OpenCode with prompt caching + vim keybindings";
+      homepage = "https://github.com/johnnymo87/opencode-patched";
       mainProgram = "opencode";
     };
   };
@@ -640,13 +640,15 @@ EOF
     export PATH="${pkgs.nodejs}/bin:$PATH"
     export npm_config_prefix="$HOME/.npm-global"
 
-    # playwright-mcp: nixpkgs has 0.0.56, we need 0.0.68+ for devtools cap
-    wanted="0.0.68"
-    current="$(npm ls -g --prefix "$HOME/.npm-global" @playwright/mcp --json 2>/dev/null \
-      | ${pkgs.jq}/bin/jq -r '.dependencies["@playwright/mcp"].version // empty' 2>/dev/null || true)"
-    if [[ "$current" != "$wanted" ]]; then
-      echo "Installing @playwright/mcp@$wanted (have: ''${current:-none})"
-      npm install -g "@playwright/mcp@$wanted" --prefix "$HOME/.npm-global" --no-fund --no-audit 2>&1 || true
+    # chrome-devtools-mcp: primary browser MCP server for AI agent visual QA
+    # (replaces @playwright/mcp — better token efficiency, DevTools-native
+    # capabilities like Lighthouse audits, perf traces, memory snapshots)
+    wanted_cdmcp="0.20.3"
+    current_cdmcp="$(npm ls -g --prefix "$HOME/.npm-global" chrome-devtools-mcp --json 2>/dev/null \
+      | ${pkgs.jq}/bin/jq -r '.dependencies["chrome-devtools-mcp"].version // empty' 2>/dev/null || true)"
+    if [[ "$current_cdmcp" != "$wanted_cdmcp" ]]; then
+      echo "Installing chrome-devtools-mcp@$wanted_cdmcp (have: ''${current_cdmcp:-none})"
+      npm install -g "chrome-devtools-mcp@$wanted_cdmcp" --prefix "$HOME/.npm-global" --no-fund --no-audit 2>&1 || true
     fi
   '';
 
