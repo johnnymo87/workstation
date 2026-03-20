@@ -12,6 +12,9 @@ type BillingOptions = {
   entrypoint: string
 }
 
+const BILLING_SAMPLE_INDICES = [4, 7, 20]
+const BILLING_CCH = "00000"
+
 function firstUserMessageText(messages: Message[]) {
   for (const message of messages) {
     if (message.role !== "user") continue
@@ -44,9 +47,9 @@ export function buildBillingHeader(input: {
   entrypoint: string
 }) {
   const text = firstUserMessageText(input.messages)
-  const sampled = [4, 7, 20].map((idx) => sampleJsCodeUnit(text, idx)).join("")
+  const sampled = BILLING_SAMPLE_INDICES.map((idx) => sampleJsCodeUnit(text, idx)).join("")
   const digest = createHash("sha256").update(`${input.salt}${sampled}${input.version}`).digest("hex")
-  return `x-anthropic-billing-header: cc_version=${input.version}.${digest.slice(0, 3)}; cc_entrypoint=${input.entrypoint}; cch=00000;`
+  return `x-anthropic-billing-header: cc_version=${input.version}.${digest.slice(0, 3)}; cc_entrypoint=${input.entrypoint}; cch=${BILLING_CCH};`
 }
 
 export function injectBillingHeader(body: Record<string, any>, options: BillingOptions) {

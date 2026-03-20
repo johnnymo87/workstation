@@ -1,5 +1,5 @@
 import { injectBillingHeader } from "./billing"
-import { stripAnthropicCacheMarkers } from "./request-shape"
+import { rewriteAnthropicSystemPrompt, stripAnthropicCacheMarkers } from "./request-shape"
 
 export type RequestType = "messages" | "refresh" | "exchange" | "usage" | "other"
 
@@ -35,7 +35,7 @@ export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   injectBillingHeader: true,
   stripCacheMarkers: false,
   billingSalt: "59cf53e54c78",
-  billingVersion: "2.1.76",
+  billingVersion: "2.1.80",
   billingEntrypoint: "cli",
 }
 
@@ -177,6 +177,7 @@ async function buildForwardRequest(request: Request, config: ProxyConfig) {
     if (headers.get("content-type")?.includes("application/json") && url.pathname == "/v1/messages") {
       try {
         let next = JSON.parse(body)
+        next = rewriteAnthropicSystemPrompt(next)
         if (config.stripCacheMarkers) next = stripAnthropicCacheMarkers(next)
         next = injectBillingHeader(next, {
           enabled: config.injectBillingHeader,

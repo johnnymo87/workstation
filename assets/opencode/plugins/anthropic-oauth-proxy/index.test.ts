@@ -63,5 +63,24 @@ describe("createProxyHandler", () => {
 
     expect(upstream.url).toBe("https://api.anthropic.com/v1/messages")
     expect(upstream.headers.get("user-agent")).toBe("claude-code/2.1.80")
+    const parsed = JSON.parse(await upstream.text())
+    expect(parsed.system[0].text).toStartWith("x-anthropic-billing-header: cc_version=2.1.80.")
+    expect(parsed.system[1].text).toBe("You are Claude Code.")
+  })
+
+  test("does not inject billing on non-message routes", async () => {
+    const upstream = await captureUpstream(
+      new Request("http://127.0.0.1:4318/api/oauth/usage", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          system: [{ type: "text", text: "You are OpenCode." }],
+          messages: [{ role: "user", content: "hello world" }],
+        }),
+      }),
+    )
+
+    const parsed = JSON.parse(await upstream.text())
+    expect(parsed.system[0].text).toBe("You are OpenCode.")
   })
 })
