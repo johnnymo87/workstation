@@ -28,9 +28,9 @@ export type ProxyConfig = {
 
 export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   anthropicApiBaseURL: "https://api.anthropic.com",
-  anthropicConsoleBaseURL: "https://console.anthropic.com",
+  anthropicConsoleBaseURL: "https://platform.claude.com",
   clientID: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  userAgent: "claude-code/2.1.76",
+  userAgent: "claude-code/2.1.80",
   overrideUserAgent: true,
   injectBillingHeader: true,
   stripCacheMarkers: false,
@@ -106,9 +106,11 @@ async function summarizeResponseBody(response: Response) {
   }
 }
 
-function applyUserAgent(headers: Headers, config: ProxyConfig) {
+const OAUTH_USER_AGENT = "axios/1.13.6"
+
+function applyUserAgent(headers: Headers, config: ProxyConfig, policy: "oauth" | "api") {
   if (!config.overrideUserAgent) return
-  headers.set("user-agent", config.userAgent)
+  headers.set("user-agent", policy == "oauth" ? OAUTH_USER_AGENT : config.userAgent)
 }
 
 function sanitizeOutboundHeaders(headers: Headers) {
@@ -130,7 +132,7 @@ function mergeAnthropicBetas(headers: Headers) {
 async function buildRefreshRequest(request: Request, config: ProxyConfig) {
   const payload = await request.json()
   const headers = new Headers({ "Content-Type": "application/json" })
-  applyUserAgent(headers, config)
+  applyUserAgent(headers, config, "oauth")
   return new Request(`${config.anthropicConsoleBaseURL}/v1/oauth/token`, {
     method: "POST",
     headers,
@@ -145,7 +147,7 @@ async function buildRefreshRequest(request: Request, config: ProxyConfig) {
 async function buildExchangeRequest(request: Request, config: ProxyConfig) {
   const payload = await request.json()
   const headers = new Headers({ "Content-Type": "application/json" })
-  applyUserAgent(headers, config)
+  applyUserAgent(headers, config, "oauth")
   return new Request(`${config.anthropicConsoleBaseURL}/v1/oauth/token`, {
     method: "POST",
     headers,
@@ -154,7 +156,7 @@ async function buildExchangeRequest(request: Request, config: ProxyConfig) {
       code: payload.code,
       state: payload.state,
       client_id: payload.client_id ?? config.clientID,
-      redirect_uri: payload.redirect_uri ?? "https://console.anthropic.com/oauth/code/callback",
+      redirect_uri: payload.redirect_uri ?? "https://platform.claude.com/oauth/code/callback",
       code_verifier: payload.code_verifier,
     }),
   })
@@ -166,7 +168,7 @@ async function buildForwardRequest(request: Request, config: ProxyConfig) {
   const upstream = new URL(`${config.anthropicApiBaseURL}${upstreamPath}${url.search}`)
   const headers = new Headers(request.headers)
   sanitizeOutboundHeaders(headers)
-  applyUserAgent(headers, config)
+  applyUserAgent(headers, config, "api")
   mergeAnthropicBetas(headers)
 
   let body: string | undefined
