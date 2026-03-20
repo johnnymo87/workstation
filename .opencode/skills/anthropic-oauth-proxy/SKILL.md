@@ -105,7 +105,7 @@ If it still fails, verify the source files exist under `assets/opencode/plugins/
 Use plain OpenCode login:
 
 ```bash
-opencode providers login
+opencode auth login
 ```
 
 Choose:

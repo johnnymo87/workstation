@@ -127,7 +127,7 @@ function resolveRequestInput(input: RequestInfo | URL, baseURL: string) {
 function routeViaProxy(input: RequestInfo | URL, baseURL: string) {
   const resolved = resolveRequestInput(input, baseURL)
   const url = typeof resolved === "string" ? new URL(resolved) : resolved instanceof URL ? resolved : new URL(resolved.url)
-  if (url.hostname === "api.anthropic.com" || url.hostname === "console.anthropic.com") {
+  if (url.hostname === "api.anthropic.com" || url.hostname === "platform.claude.com" || url.hostname === "console.anthropic.com") {
     return new URL(`${url.pathname}${url.search}`, baseURL).toString()
   }
   return resolved
