@@ -5,7 +5,7 @@ description: Use when OpenCode on devbox or Crostini needs Anthropic OAuth to wo
 
 # Anthropic OAuth Proxy
 
-This workaround keeps Anthropic OAuth support working on devbox and Crostini by routing Anthropic auth and message traffic through a local proxy and a managed OpenCode plugin.
+This workaround keeps Anthropic OAuth support working on devbox and Crostini by routing Anthropic auth and message traffic through a local proxy and a managed OpenCode plugin with route-specific Claude Code parity behavior.
 
 ## Quick Reference
 
@@ -14,7 +14,7 @@ This workaround keeps Anthropic OAuth support working on devbox and Crostini by 
 | Apply config changes | `home-manager switch --flake .#dev` | User-level only |
 | Check proxy service | `systemctl --user status anthropic-oauth-proxy.service` | Managed on devbox and Crostini |
 | Restart proxy service | `systemctl --user restart anthropic-oauth-proxy.service` | Picks up code/config changes |
-| Follow proxy logs | `journalctl --user -u anthropic-oauth-proxy.service -f` | Structured request logs |
+| Follow proxy logs | `journalctl --user -u anthropic-oauth-proxy.service -f` | Check `/oauth/exchange`, `/oauth/refresh`, and `/v1/messages` separately |
 | Check health | `python - <<'PY'` ... `http://127.0.0.1:4318/health` | Returns `{"ok":true}` |
 | Verify Anthropic works | `opencode run "say hello in five words" --model anthropic/claude-opus-4-6` | Plain `opencode` should work |
 
@@ -32,7 +32,9 @@ The plugin is added to `~/.config/opencode/opencode.managed.json` during Home Ma
 
 The currently verified configuration on devbox is:
 
-- Claude Code style `User-Agent`: on
+- OAuth exchange/refresh `User-Agent`: `axios/1.13.6`
+- message-path `User-Agent`: `claude-code/2.1.80`
+- OAuth endpoints: `platform.claude.com`
 - billing header injection: on
 - cache marker stripping: off
 
@@ -43,8 +45,9 @@ That is the default service configuration. Use cache stripping only as a trouble
 1. OpenCode loads the managed plugin from `~/.config/opencode/plugins/anthropic-oauth-proxy/plugin.ts`
 2. The plugin handles Anthropic OAuth login, exchange, refresh, and request rerouting
 3. The local proxy listens on `127.0.0.1:4318`
-4. The proxy adds the required request shape for Anthropic OAuth traffic
-5. The managed user service keeps the proxy running on devbox and Crostini
+4. The proxy sends `/oauth/exchange` and `/oauth/refresh` to `platform.claude.com` with `User-Agent: axios/1.13.6`
+5. The proxy sends Anthropic message traffic with `User-Agent: claude-code/2.1.80`, billing injection, and system prompt rewriting
+6. The managed user service keeps the proxy running on devbox and Crostini
 
 ## Verification Workflow
 
@@ -55,12 +58,15 @@ cd ~/projects/workstation
 home-manager switch --flake .#dev    # devbox (.#livia for Crostini)
 systemctl --user restart anthropic-oauth-proxy.service
 systemctl --user status anthropic-oauth-proxy.service --no-pager
+journalctl --user -u anthropic-oauth-proxy.service --no-pager -n 50
 opencode run "say hello in five words" --model anthropic/claude-opus-4-6
 ```
 
 Expected:
 
 - service is `active (running)`
+- logs show `axios/1.13.6` on `/oauth/exchange` and `/oauth/refresh`
+- logs show `claude-code/2.1.80` on `/v1/messages`
 - `opencode` succeeds without extra env vars
 
 ## Troubleshooting
@@ -78,6 +84,12 @@ Look for whether the failure is in:
 - OAuth exchange
 - token refresh
 - message request shape
+
+For current parity mode, verify that:
+
+- `/oauth/exchange` and `/oauth/refresh` are hitting `platform.claude.com`
+- those auth-path calls show `user-agent: axios/1.13.6`
+- `/v1/messages` shows `user-agent: claude-code/2.1.80`
 
 ### Service is not running
 

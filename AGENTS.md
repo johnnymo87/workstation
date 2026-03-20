@@ -72,7 +72,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Configuring GWS](.opencode/skills/configuring-gws/SKILL.md) | Adding, debugging gws accounts and OAuth credentials |
 | [Scrubbing Company References](.opencode/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
 | [Atlassian Multi-Instance](.opencode/skills/atlassian-multi-instance/SKILL.md) | Adding, removing, debugging Atlassian instance profiles |
-| [Anthropic OAuth Proxy](.opencode/skills/anthropic-oauth-proxy/SKILL.md) | Operating and troubleshooting the managed Anthropic OAuth workaround on devbox and Crostini |
+| [Anthropic OAuth Proxy](.opencode/skills/anthropic-oauth-proxy/SKILL.md) | Operating and troubleshooting the managed Anthropic OAuth parity workaround on devbox and Crostini |
 
 ## Structure
 
