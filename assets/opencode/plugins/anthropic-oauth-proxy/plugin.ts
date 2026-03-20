@@ -18,6 +18,10 @@ type PluginInput = {
 }
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+const PLATFORM_CALLBACK_URL = "https://platform.claude.com/oauth/code/callback"
+const OAUTH_SCOPE = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+
+let pendingExchange: { code: string; promise: Promise<{ type: "failed" } | { type: "success"; refresh: string; access: string; expires: number }> } | undefined
 
 function proxyBaseURL() {
   return process.env.ANTHROPIC_PROXY_BASE_URL || "http://127.0.0.1:4318"
@@ -37,12 +41,12 @@ async function generatePKCE() {
 
 async function authorize(mode: "max" | "console") {
   const pkce = await generatePKCE()
-  const url = new URL(`https://${mode == "console" ? "console.anthropic.com" : "claude.ai"}/oauth/authorize`)
+  const url = new URL(`https://${mode == "console" ? "platform.claude.com" : "claude.ai"}/oauth/authorize`)
   url.searchParams.set("code", "true")
   url.searchParams.set("client_id", CLIENT_ID)
   url.searchParams.set("response_type", "code")
-  url.searchParams.set("redirect_uri", "https://console.anthropic.com/oauth/code/callback")
-  url.searchParams.set("scope", "org:create_api_key user:profile user:inference")
+  url.searchParams.set("redirect_uri", PLATFORM_CALLBACK_URL)
+  url.searchParams.set("scope", OAUTH_SCOPE)
   url.searchParams.set("code_challenge", pkce.challenge)
   url.searchParams.set("code_challenge_method", "S256")
   url.searchParams.set("state", pkce.verifier)
@@ -51,6 +55,17 @@ async function authorize(mode: "max" | "console") {
 
 async function exchange(code: string, verifier: string) {
   const normalized = code.replace(/\s+/g, "")
+  if (pendingExchange && pendingExchange.code == normalized) return pendingExchange.promise
+  const promise = exchangeOnce(normalized, verifier)
+  pendingExchange = { code: normalized, promise }
+  try {
+    return await promise
+  } finally {
+    if (pendingExchange?.code == normalized) pendingExchange = undefined
+  }
+}
+
+async function exchangeOnce(normalized: string, verifier: string) {
   const splits = normalized.split("#")
   const result = await fetch(`${proxyBaseURL()}/oauth/exchange`, {
     method: "POST",
@@ -59,7 +74,7 @@ async function exchange(code: string, verifier: string) {
       code: splits[0],
       state: splits[1],
       client_id: CLIENT_ID,
-      redirect_uri: "https://console.anthropic.com/oauth/code/callback",
+      redirect_uri: PLATFORM_CALLBACK_URL,
       code_verifier: verifier,
     }),
   })
