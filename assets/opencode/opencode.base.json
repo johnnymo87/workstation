@@ -17,9 +17,6 @@
       }
     }
   },
-  "tui": {
-    "vim": true
-  },
   "plugin": [
     "opencode-beads"
   ],

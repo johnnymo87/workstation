@@ -91,6 +91,9 @@ in
   # Symlink managed files to XDG config directory
   xdg.configFile."opencode/opencode.managed.json".source = opencodeManagedFile;
 
+  # TUI config (separate from opencode.json -- opencode reads tui settings from tui.json)
+  xdg.configFile."opencode/tui.json".source = "${assetsPath}/opencode/tui.json";
+
    # Custom agents via OpenCode-native markdown format
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as YAML map
    # (NOT Claude Code-style ~/.claude/agents/ with comma-separated tools string)
