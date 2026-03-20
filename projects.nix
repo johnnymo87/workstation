@@ -34,6 +34,14 @@
     platforms = [ "devbox" ];
   };
 
+  # Patch-carrier repos (opencode forks)
+  opencode-cached = {
+    url = "git@github.com:johnnymo87/opencode-cached.git";
+  };
+  opencode-patched = {
+    url = "git@github.com:johnnymo87/opencode-patched.git";
+  };
+
   # Add more projects as needed:
   # my-project = { url = "git@github.com:org/repo.git"; };
 }

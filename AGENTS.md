@@ -47,7 +47,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 ## Automated Dependency Updates
 
 - **Local packages** (`beads`, `ccusage-opencode`): auto-updated by `.github/workflows/update-packages.yml` (daily) using `nix-update`.
-- **opencode-cached**: auto-updated by `.github/workflows/update-opencode-cached.yml` (every 8 hours) -- checks `johnnymo87/opencode-cached` releases, computes platform hashes, updates `home.base.nix`.
+- **opencode-patched**: auto-updated by `.github/workflows/update-opencode-patched.yml` (every 8 hours) -- checks `johnnymo87/opencode-patched` releases (caching + vim), computes platform hashes, updates `home.base.nix`.
 - **gws**: auto-updated by `.github/workflows/update-gws.yml` (daily) -- checks `googleworkspace/cli` releases, computes platform hashes, updates `pkgs/gws/default.nix`.
 - All workflows open a PR with auto-merge enabled.
 
