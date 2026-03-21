@@ -21,6 +21,35 @@ Default is `jonathan.mohrbacher@gmail.com` in new shells.
 
 **Cloudbox/macOS** have a single work account (no switching needed).
 
+## Auth on Devbox
+
+When `gws auth status` shows `token_valid: false`, you need to re-authenticate:
+
+```bash
+# 1. Start login in the background (it spawns a localhost callback server)
+nohup gws auth login > /tmp/gws-auth.log 2>&1 &
+sleep 2
+cat /tmp/gws-auth.log   # grab the URL
+
+# 2. Give the user the URL to open in their browser
+#    They select the correct Google account and authorize
+
+# 3. The browser redirects to http://localhost:<port>/?code=...
+#    but the browser can't reach devbox's localhost.
+#    The user pastes back the redirect URL they landed on.
+
+# 4. Relay the callback from inside the devbox using curl:
+curl -s "THE_FULL_REDIRECT_URL_FROM_THE_BROWSER"
+# Should return: <html>...<title>Success</title>...</html>
+
+# 5. Verify:
+gws auth status   # token_valid should now be true
+```
+
+This relay step is necessary because the OAuth callback targets `localhost`,
+which resolves to the devbox -- not the user's browser machine. The user's
+browser can't deliver the callback, so you replay it locally with `curl`.
+
 ## Quick Reference
 
 ```bash
@@ -37,6 +66,9 @@ gws gmail users messages send --params '{"userId": "me"}' --json '{
 
 # List Drive files
 gws drive files list --params '{"pageSize": 10}'
+
+# Download a file from Drive (use get with alt=media, NOT the download subcommand)
+gws drive files get --params '{"fileId": "FILE_ID", "alt": "media"}' -o /path/to/output
 
 # Read a Google Doc
 gws docs documents get --params '{"documentId": "DOC_ID"}'
