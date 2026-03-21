@@ -1,25 +1,17 @@
 import { describe, expect, test } from "bun:test"
 
-import { rewriteAnthropicSystemPrompt } from "./request-shape"
+import { stripAnthropicCacheMarkers } from "./request-shape"
 
-describe("rewriteAnthropicSystemPrompt", () => {
-  test("rewrites text system blocks", () => {
-    const body = rewriteAnthropicSystemPrompt({
-      system: [
-        { type: "text", text: "You are OpenCode. Use opencode tools." },
-      ],
+describe("stripAnthropicCacheMarkers", () => {
+  test("removes cache marker fields from nested message payloads", () => {
+    const body = stripAnthropicCacheMarkers({
+      system: [{ type: "text", text: "one", cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: [{ type: "text", text: "two", cacheControl: { type: "ephemeral" } }] }],
     })
 
-    expect(body.system[0].text).toBe("You are Claude Code. Use Claude tools.")
-  })
-
-  test("leaves non-text blocks unchanged", () => {
-    const body = rewriteAnthropicSystemPrompt({
-      system: [
-        { type: "image", data: "OpenCode" },
-      ],
+    expect(body).toEqual({
+      system: [{ type: "text", text: "one" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "two" }] }],
     })
-
-    expect(body.system[0]).toEqual({ type: "image", data: "OpenCode" })
   })
 })

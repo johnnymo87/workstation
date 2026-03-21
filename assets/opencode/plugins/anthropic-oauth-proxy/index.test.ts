@@ -49,7 +49,7 @@ describe("createProxyHandler", () => {
     expect(upstream.headers.get("user-agent")).toBe("axios/1.13.6")
   })
 
-  test("uses claude-code user-agent for messages", async () => {
+  test("uses claude-code user-agent for messages without billing or prompt rewrites", async () => {
     const upstream = await captureUpstream(
       new Request("http://127.0.0.1:4318/v1/messages", {
         method: "POST",
@@ -64,11 +64,10 @@ describe("createProxyHandler", () => {
     expect(upstream.url).toBe("https://api.anthropic.com/v1/messages")
     expect(upstream.headers.get("user-agent")).toBe("claude-code/2.1.80")
     const parsed = JSON.parse(await upstream.text())
-    expect(parsed.system[0].text).toStartWith("x-anthropic-billing-header: cc_version=2.1.80.")
-    expect(parsed.system[1].text).toBe("You are Claude Code.")
+    expect(parsed.system[0].text).toBe("You are OpenCode.")
   })
 
-  test("does not inject billing on non-message routes", async () => {
+  test("does not rewrite non-message routes", async () => {
     const upstream = await captureUpstream(
       new Request("http://127.0.0.1:4318/api/oauth/usage", {
         method: "POST",

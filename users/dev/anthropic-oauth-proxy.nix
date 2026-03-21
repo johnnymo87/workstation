@@ -11,8 +11,8 @@ lib.mkIf (isDevbox || isCrostini) {
       set -euo pipefail
 
       export ANTHROPIC_PROXY_OVERRIDE_UA="''${ANTHROPIC_PROXY_OVERRIDE_UA:-true}"
-      export ANTHROPIC_PROXY_INJECT_BILLING="''${ANTHROPIC_PROXY_INJECT_BILLING:-true}"
       export ANTHROPIC_PROXY_STRIP_CACHE_MARKERS="''${ANTHROPIC_PROXY_STRIP_CACHE_MARKERS:-false}"
+      export ANTHROPIC_PROXY_DEBUG="''${ANTHROPIC_PROXY_DEBUG:-false}"
 
       if [[ ! -f "$HOME/projects/workstation/assets/opencode/plugins/anthropic-oauth-proxy/main.ts" ]]; then
         echo "anthropic-oauth-proxy: source not found, exiting" >&2

@@ -1,5 +1,4 @@
-import { injectBillingHeader } from "./billing"
-import { rewriteAnthropicSystemPrompt, stripAnthropicCacheMarkers } from "./request-shape"
+import { stripAnthropicCacheMarkers } from "./request-shape"
 
 export type RequestType = "messages" | "refresh" | "exchange" | "usage" | "other"
 
@@ -19,11 +18,8 @@ export type ProxyConfig = {
   clientID: string
   userAgent: string
   overrideUserAgent: boolean
-  injectBillingHeader: boolean
   stripCacheMarkers: boolean
-  billingSalt: string
-  billingVersion: string
-  billingEntrypoint: string
+  debug: boolean
 }
 
 export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
@@ -32,11 +28,8 @@ export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   clientID: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
   userAgent: "claude-code/2.1.80",
   overrideUserAgent: true,
-  injectBillingHeader: true,
   stripCacheMarkers: false,
-  billingSalt: "59cf53e54c78",
-  billingVersion: "2.1.80",
-  billingEntrypoint: "cli",
+  debug: false,
 }
 
 function redactValue(key: string, value: unknown) {
@@ -173,21 +166,14 @@ async function buildForwardRequest(request: Request, config: ProxyConfig) {
 
   let body: string | undefined
   if (!(request.method == "GET" || request.method == "HEAD")) {
-    body = await request.text()
-    if (headers.get("content-type")?.includes("application/json") && url.pathname == "/v1/messages") {
-      try {
-        let next = JSON.parse(body)
-        next = rewriteAnthropicSystemPrompt(next)
-        if (config.stripCacheMarkers) next = stripAnthropicCacheMarkers(next)
-        next = injectBillingHeader(next, {
-          enabled: config.injectBillingHeader,
-          version: config.billingVersion,
-          salt: config.billingSalt,
-          entrypoint: config.billingEntrypoint,
-        })
-        body = JSON.stringify(next)
-      } catch {
-      }
+      body = await request.text()
+      if (headers.get("content-type")?.includes("application/json") && url.pathname == "/v1/messages") {
+        try {
+          let next = JSON.parse(body)
+          if (config.stripCacheMarkers) next = stripAnthropicCacheMarkers(next)
+          body = JSON.stringify(next)
+        } catch {
+        }
     }
   }
 
@@ -218,7 +204,7 @@ export function createProxyHandler(
     if (url.pathname == "/health") return Response.json({ ok: true })
 
     const type = classifyRequest(url.pathname)
-    const bodySummary = await summarizeRequestBody(request)
+    const bodySummary = config.debug ? await summarizeRequestBody(request) : undefined
     const upstreamRequest =
       url.pathname == "/oauth/refresh"
         ? await buildRefreshRequest(request, config)
@@ -227,7 +213,7 @@ export function createProxyHandler(
           : await buildForwardRequest(request, config)
 
     const response = await upstreamFetch(upstreamRequest)
-    const responseSummary = !response.ok ? await summarizeResponseBody(response) : undefined
+    const responseSummary = config.debug && !response.ok ? await summarizeResponseBody(response) : undefined
 
     logger({
       type,
@@ -235,8 +221,8 @@ export function createProxyHandler(
       status: response.status,
       flags: {
         overrideUserAgent: config.overrideUserAgent,
-        injectBillingHeader: config.injectBillingHeader,
         stripCacheMarkers: config.stripCacheMarkers,
+        debug: config.debug,
       },
       headers: Object.fromEntries(request.headers.entries()),
       bodySummary,

@@ -7,10 +7,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ProxyConfig {
     clientID: env.ANTHROPIC_OAUTH_CLIENT_ID || DEFAULT_PROXY_CONFIG.clientID,
     userAgent: env.ANTHROPIC_PROXY_USER_AGENT || DEFAULT_PROXY_CONFIG.userAgent,
     overrideUserAgent: env.ANTHROPIC_PROXY_OVERRIDE_UA != "false",
-    injectBillingHeader: env.ANTHROPIC_PROXY_INJECT_BILLING != "false",
     stripCacheMarkers: env.ANTHROPIC_PROXY_STRIP_CACHE_MARKERS == "true",
-    billingSalt: env.ANTHROPIC_PROXY_BILLING_SALT || DEFAULT_PROXY_CONFIG.billingSalt,
-    billingVersion: env.ANTHROPIC_PROXY_BILLING_VERSION || DEFAULT_PROXY_CONFIG.billingVersion,
-    billingEntrypoint: env.ANTHROPIC_PROXY_BILLING_ENTRYPOINT || DEFAULT_PROXY_CONFIG.billingEntrypoint,
+    debug: env.ANTHROPIC_PROXY_DEBUG == "true",
   }
 }
