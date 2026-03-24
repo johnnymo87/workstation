@@ -257,7 +257,6 @@
     serviceConfig.Type = "oneshot";
     script = ''
       /run/current-system/sw/bin/systemctl restart opencode-serve.service
-      /run/current-system/sw/bin/systemctl --user -M dev@ restart anthropic-oauth-proxy.service || true
       /run/current-system/sw/bin/systemctl restart pigeon-daemon.service
     '';
   };

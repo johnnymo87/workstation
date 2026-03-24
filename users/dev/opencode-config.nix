@@ -75,13 +75,7 @@ let
     };
   };
 
-  anthropicProxyPlugin = "file://${config.home.homeDirectory}/.config/opencode/plugins/anthropic-oauth-proxy/plugin.ts";
-
-  opencodeOverlayWithAnthropicProxy = lib.optionalAttrs (isDevbox || isCrostini) {
-    plugin = (opencodeBase.plugin or []) ++ [ anthropicProxyPlugin ];
-  };
-
-  opencodeManaged = lib.recursiveUpdate (lib.recursiveUpdate opencodeBase opencodeOverlay) opencodeOverlayWithAnthropicProxy;
+  opencodeManaged = lib.recursiveUpdate opencodeBase opencodeOverlay;
 
   opencodeManagedFile = pkgs.writeText "opencode.managed.json"
     (builtins.toJSON opencodeManaged);
@@ -108,13 +102,6 @@ in
    # Plugins (SRP: non-interactive env, compaction context, subagent routing)
     xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
     xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
-    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/billing.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/billing.ts";
-    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/request-shape.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/request-shape.ts";
-    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/index.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/index.ts";
-    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/config.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/config.ts";
-    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/log.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/log.ts";
-    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/main.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/main.ts";
-    xdg.configFile."opencode/plugins/anthropic-oauth-proxy/plugin.ts".source = "${assetsPath}/opencode/plugins/anthropic-oauth-proxy/plugin.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
@@ -171,6 +158,20 @@ in
 
     mv "$tmp" "$runtime"
     [[ "$base" == "$runtime" ]] || rm -f "$base"
+  '';
+
+  home.activation.installOpencodePlugins = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    set -euo pipefail
+    export PATH="${pkgs.nodejs}/bin:$PATH"
+    mkdir -p "$HOME/.config/opencode"
+    cd "$HOME/.config/opencode"
+    
+    # Check if package.json exists, if not initialize it
+    if [ ! -f package.json ]; then
+      echo '{"name":"opencode-config","private":true}' > package.json
+    fi
+    
+    npm install @ex-machina/opencode-anthropic-auth@^0.2.0 --no-save >/dev/null 2>&1
   '';
 
   # Inject Basecamp MCP secrets from macOS Keychain into opencode.json

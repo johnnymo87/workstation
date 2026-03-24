@@ -18,7 +18,8 @@
     }
   },
   "plugin": [
-    "opencode-beads"
+    "opencode-beads",
+    "@ex-machina/opencode-anthropic-auth"
   ],
   "compaction": {
     "auto": false,

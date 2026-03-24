@@ -72,7 +72,6 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Configuring GWS](.opencode/skills/configuring-gws/SKILL.md) | Adding, debugging gws accounts and OAuth credentials |
 | [Scrubbing Company References](.opencode/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
 | [Atlassian Multi-Instance](.opencode/skills/atlassian-multi-instance/SKILL.md) | Adding, removing, debugging Atlassian instance profiles |
-| [Anthropic OAuth Proxy](.opencode/skills/anthropic-oauth-proxy/SKILL.md) | Operating and troubleshooting the managed Anthropic OAuth parity workaround on devbox and Crostini |
 
 ## Structure
 
@@ -91,7 +90,6 @@ workstation/
 │   ├── home.cloudbox.nix  # Cloudbox-only (identity, sops secrets, work tools)
 │   ├── home.crostini.nix  # Crostini-only (identity, sops secrets, pigeon, opencode-serve)
 │   ├── home.darwin.nix    # macOS-only (launchd, ensure-projects, dotfiles migration)
-│   ├── anthropic-oauth-proxy.nix  # Shared proxy module (devbox + Crostini)
 │   ├── opencode-config.nix  # OpenCode managed config + agents
 │   └── opencode-skills.nix  # System-wide OpenCode skills deployed to ~/.config/opencode/skills/
 ├── pkgs/                  # Self-packaged tools (auto-updated by nix-update)
