@@ -12,7 +12,7 @@ Multi-account gws setup using separate config directories per account, with cred
 ```
 sops secrets (per account)
     -> /run/secrets/gws_{default,alt}_*    (decrypted at boot)
-    -> ~/.config/gws-{default,alt}/        (assembled at home-manager switch)
+    -> ~/.config/gws{,-alt}/                (assembled at home-manager switch)
     -> GOOGLE_WORKSPACE_CLI_CONFIG_DIR     (set by switch-gws in bash)
 ```
 
@@ -22,7 +22,7 @@ Each account gets an isolated config directory containing `client_secret.json` (
 
 | Profile | Email | Config dir | GCP Project |
 |---------|-------|-----------|-------------|
-| default | jonathan.mohrbacher@gmail.com | `~/.config/gws-default/` | jonathan-mohrbacher |
+| default | jonathan.mohrbacher@gmail.com | `~/.config/gws/` | jonathan-mohrbacher |
 | alt | johnnymo87@gmail.com | `~/.config/gws-alt/` | valid-cell-358023 |
 
 ## Files

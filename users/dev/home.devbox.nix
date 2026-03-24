@@ -43,12 +43,12 @@ lib.mkIf isDevbox {
     export OPENCODE_ENABLE_EXA=1
 
     # Google Workspace CLI: default to jonathan.mohrbacher@gmail.com
-    export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws-default"
+    export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws"
 
     switch-gws() {
       case "''${1:-}" in
         default)
-          export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws-default"
+          export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws"
           echo "Switched to default gws account (jonathan.mohrbacher@gmail.com)"
           ;;
         alt)
@@ -76,7 +76,7 @@ lib.mkIf isDevbox {
 
   # Assemble gws config files from sops secrets at activation time.
   # Creates two config directories for multi-account support:
-  #   ~/.config/gws-default/ (jonathan.mohrbacher@gmail.com)
+  #   ~/.config/gws/         (jonathan.mohrbacher@gmail.com)
   #   ~/.config/gws-alt/     (johnnymo87@gmail.com)
   # Use switch-gws default|alt to swap between accounts.
   home.activation.assembleGwsCredentials = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
@@ -152,10 +152,10 @@ lib.mkIf isDevbox {
     [ -r /run/secrets/gws_default_project_id ] && def_pid="$(cat /run/secrets/gws_default_project_id)"
 
     if [ -n "$def_cid" ] && [ -n "$def_cs" ] && [ -n "$def_rt" ]; then
-      assemble_gws_account "$HOME/.config/gws-default" "$def_cid" "$def_cs" "$def_rt" "$def_pid"
-      echo "assembleGwsCredentials: gws-default assembled"
+      assemble_gws_account "$HOME/.config/gws" "$def_cid" "$def_cs" "$def_rt" "$def_pid"
+      echo "assembleGwsCredentials: gws assembled"
     else
-      echo "assembleGwsCredentials: skipping gws-default (secrets not available)"
+      echo "assembleGwsCredentials: skipping gws (secrets not available)"
     fi
 
     # Read alt account secrets

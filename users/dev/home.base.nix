@@ -90,7 +90,7 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-/Oa2HnHCeiSj4/Yh1lNM/aliyOqvCS1kQyoCe55StfQ=";
+      hash = "sha256-bVK70intd3r3dD+gY+pCX7CVpGkyEkQwNQHSmxXJD8Q=";
       isZip = false;
     };
     aarch64-darwin = {
