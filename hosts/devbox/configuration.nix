@@ -168,6 +168,7 @@
       Type = "simple";
       User = "cloudflared";
       Group = "cloudflared";
+      OOMScoreAdjust = "500";
       ExecStart = "${pkgs.writeShellScript "cloudflared-run" ''
         exec ${pkgs.cloudflared}/bin/cloudflared tunnel --no-autoupdate run \
           --token "$(cat ${config.sops.secrets.cloudflared_tunnel_token.path})"
@@ -191,6 +192,7 @@
       Type = "simple";
       User = "dev";
       Group = "dev";
+      OOMScoreAdjust = "500";
       WorkingDirectory = "/home/dev/projects/pigeon/packages/daemon";
       Environment = [
         "HOME=/home/dev"
@@ -239,8 +241,33 @@
         export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
+      # P3: Cap the always-on headless server so it can't monopolize RAM alone.
+      MemoryMax = "10G";
+      MemoryHigh = "8G";
+      OOMScoreAdjust = "500";
       Restart = "always";
       RestartSec = 10;
+    };
+  };
+
+  # Daily 3 AM restart of leaky long-running services.
+  # opencode-serve leaks from ~350 MB to 8-13 GB over days.
+  systemd.services.nightly-restart-background = {
+    description = "Restart long-running background services to reclaim leaked memory";
+    serviceConfig.Type = "oneshot";
+    script = ''
+      /run/current-system/sw/bin/systemctl restart opencode-serve.service
+      /run/current-system/sw/bin/systemctl --user -M dev@ restart anthropic-oauth-proxy.service || true
+      /run/current-system/sw/bin/systemctl restart pigeon-daemon.service
+    '';
+  };
+
+  systemd.timers.nightly-restart-background = {
+    description = "Nightly restart of background services at 3 AM ET";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 03:00:00";
+      Persistent = true;
     };
   };
 
@@ -256,6 +283,7 @@
       Type = "simple";
       User = "dev";
       Group = "dev";
+      OOMScoreAdjust = "500";
       WorkingDirectory = "/home/dev/projects/my-podcasts";
       Environment = [
         "HOME=/home/dev"
@@ -519,6 +547,48 @@
   };
 
   security.sudo.wheelNeedsPassword = false;
+
+  # --- OOM mitigation (P0-P4) ---
+  # Context: 16 GB RAM + 7.6 GB zram, opencode sessions leak to 8-13 GB,
+  # triggering global OOM kills that cascade into user@1000.service collapse.
+
+  # P0: earlyoom — kill the fattest process before the kernel OOM killer fires.
+  # Prevents the cascade that tears down the entire user session.
+  services.earlyoom = {
+    enable = true;
+    freeMemThreshold = 10;        # SIGTERM when <10% RAM free (~1.6 GB)
+    freeSwapThreshold = 100;      # Trigger on RAM alone (ignore swap)
+    freeMemKillThreshold = 5;     # SIGKILL when <5% RAM free (~800 MB)
+    freeSwapKillThreshold = 100;
+    reportInterval = 15;
+    extraArgs = [
+      "--prefer" "(^|/)(\\.opencode-wrapp|node|bun|headless_shell|nix-build)$"
+      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|agetty|dhcpcd|cloudflared)$"
+    ];
+  };
+
+  # P1: Protect sshd from OOM killer — always the last thing to die.
+  systemd.services.sshd.serviceConfig = {
+    OOMScoreAdjust = "-1000";
+  };
+
+  # P2: Kernel memory reserves — keep enough free for root recovery.
+  boot.kernel.sysctl = {
+    "vm.min_free_kbytes" = 131072;        # 128 MiB — kernel allocation reserve
+    "vm.admin_reserve_kbytes" = 131072;   # 128 MiB — root/admin recovery reserve
+    "vm.user_reserve_kbytes" = 65536;     # 64 MiB — user recovery reserve
+  };
+
+  # P4: Aggregate cap on user slice — throttle (not kill) when dev workload
+  # exceeds 12 GB.  Leaves ~4 GB for system/kernel/buffers.  Also cap user
+  # swap usage so the zram device doesn't saturate.
+  systemd.slices."user-1000" = {
+    description = "User slice for UID 1000 (dev)";
+    sliceConfig = {
+      MemoryHigh = "12G";
+      MemorySwapMax = "6G";
+    };
+  };
 
   # NOTE: Home-manager runs standalone, not as NixOS module
   # Run: home-manager switch --flake .#dev

@@ -31,6 +31,7 @@ lib.mkIf (isDevbox || isCrostini) {
     };
     Service = {
       ExecStart = "%h/.local/bin/anthropic-oauth-proxy";
+      OOMScoreAdjust = "500";
       Restart = "always";
       RestartSec = 2;
       StandardOutput = "journal";

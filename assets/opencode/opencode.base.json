@@ -20,6 +20,10 @@
   "plugin": [
     "opencode-beads"
   ],
+  "compaction": {
+    "auto": false,
+    "prune": false
+  },
   "mcp": {
     "chrome-devtools-9222": {
       "type": "local",
