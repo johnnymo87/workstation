@@ -192,6 +192,27 @@ lib.mkIf isDarwin {
     };
   };
 
+  # Persistent SSH tunnel to devbox for GPG agent forwarding.
+  # Keeps RemoteForward /run/user/1000/gnupg/S.gpg-agent alive so headless
+  # sessions on devbox can sign commits without an interactive SSH session.
+  launchd.agents.devbox-tunnel = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "/usr/bin/ssh"
+        "-N"              # No remote command
+        "-o" "ExitOnForwardFailure=yes"
+        "-o" "ServerAliveInterval=30"
+        "-o" "ServerAliveCountMax=3"
+        "devbox-tunnel"   # Uses ~/.ssh/config Host definition
+      ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-tunnel.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-tunnel.err.log";
+    };
+  };
+
   # ============================================================
   # DISABLED PROGRAMS (using existing dotfiles instead)
   # Remove these overrides one-by-one as you migrate to HM
