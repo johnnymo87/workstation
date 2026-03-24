@@ -6,6 +6,11 @@
 
 **Architecture:** A patch-combiner repo modeled on opencode-cached. CI fetches `caching.patch` from opencode-cached at build time (never duplicated), stores `vim.patch` locally (curated from PR #12679). Tails opencode-cached releases every 8h offset +1h. Workstation's existing update workflow is cloned to point at the new repo.
 
+**Signal model:** Three distinct signal classes exist in this pipeline:
+- **Drift** (`patch-drift` label in opencode-patched): the upstream PR diff has changed relative to the committed patch. This is a *producer review signal* — it prompts a human to inspect and regenerate the patch. It does NOT automatically block workstation.
+- **Build failure** (build-release failure issue in opencode-patched): patches failed to apply or the build broke. Until a new release is published, workstation cannot update. This IS a release-availability blocker.
+- **Release availability** (new `v{VERSION}-patched` tag published): the only signal workstation tracks. The `update-opencode-patched.yml` workflow polls for new published releases and opens a PR when one appears.
+
 **Tech Stack:** GitHub Actions, Bun (build), Nix (consumption in workstation), shell scripts
 
 ---
@@ -152,6 +157,8 @@ git commit -m "ci: add build-release workflow for combined patched binary"
 - If different: creates/updates a GitHub issue (label: `patch-drift`) alerting that the PR has changed
 - Include the PR URL and instructions to review and regenerate
 
+Note: a `patch-drift` issue is a *producer review signal* only. It means the upstream PR has diverged from the committed patch and a human should inspect it. Drift alone does not block workstation — workstation only depends on published releases. A drift alert becomes consumer-impacting only if/when it causes a subsequent build-release failure (no new release published).
+
 **Step 2:** Commit
 
 ```bash
@@ -231,7 +238,9 @@ gh repo view johnnymo87/opencode-patched
 **Step 1:** Clone `update-opencode-cached.yml` with these changes:
 - Name: "Update opencode-patched"
 - Cron stays `0 2,10,18 * * *` (already 1h after patched repo's schedule)
-- Check releases from `johnnymo87/opencode-patched` instead of `opencode-cached`
+- Check *published releases* from `johnnymo87/opencode-patched` instead of `opencode-cached`
+  - Workstation only tracks release availability, not drift or build signals in the producer repo
+  - A missing release (due to build failure) is the actual consumer-facing blocker; drift alone is not
 - Strip `-patched` suffix instead of `-cached`
 - Update `home.base.nix` the same way (version + 4 hashes)
 - Branch: `auto/update-opencode-patched`

@@ -32,7 +32,8 @@ jobs:
           current=$(grep 'version = ' users/dev/home.base.nix | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "current=$current" >> "$GITHUB_OUTPUT"
 
-          # Latest release from opencode-patched
+          # Latest published release from opencode-patched.
+          # Workstation tracks release availability only; a missing release (build failure) is the blocker.
           latest=$(gh api repos/johnnymo87/opencode-patched/releases/latest --jq '.tag_name' | sed 's/^v//;s/-patched$//')
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
