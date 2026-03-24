@@ -241,3 +241,20 @@ You may see this warning when running GPG commands on devbox:
 `gpg: problem with fast path key listing: Forbidden - ignored`
 
 **This is normal and harmless.** It happens because we forward the restricted `extra` socket, which blocks certain administrative commands (like listing secret keys in fast mode). GnuPG automatically falls back to the standard mode, and signing works fine.
+
+### Persistent Tunnel
+
+A `launchd` agent on macOS (`devbox-tunnel`) keeps the GPG forwarding alive in the background.
+This means headless OpenCode sessions on devbox can sign commits even without an interactive SSH shell.
+
+Check tunnel status on macOS:
+```bash
+launchctl list | grep devbox-tunnel
+```
+
+If the tunnel is down, restart it:
+```bash
+launchctl kickstart -k gui/$(id -u)/org.nix-community.home.devbox-tunnel
+```
+
+`opencode-launch` warns if the forwarded socket is missing on devbox before launching a session.
