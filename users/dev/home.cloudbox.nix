@@ -171,6 +171,9 @@ lib.mkIf isCloudbox {
       export DD_APP_KEY="$(cat /run/secrets/dd_app_key)"
     fi
 
+    # Google Workspace CLI: point to assembled credentials
+    export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws"
+
     # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
     export OPENCODE_ENABLE_EXA=1
   '';
