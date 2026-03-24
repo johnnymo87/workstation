@@ -7,24 +7,31 @@ local M = {}
 local cache = {}
 
 -- Scan a tab's windows for a terminal buffer with an OpenCode title.
--- Returns the raw session title (prefix stripped) or nil.
+-- Returns:
+--   oc_title: the raw session title (prefix stripped), or nil
+--   term_title: the raw b:term_title of the last terminal buffer found,
+--               or nil if no terminal buffer exists in the tab.
+-- This lets the caller distinguish "no terminal" from "terminal exists
+-- but title is empty/non-OpenCode" (e.g. OpenCode temporarily cleared it).
 local function find_opencode_title(tabid)
   local ok, wins = pcall(vim.api.nvim_tabpage_list_wins, tabid)
-  if not ok then return nil end
+  if not ok then return nil, nil end
+  local last_term_title = nil
   for _, win in ipairs(wins) do
     local buf = vim.api.nvim_win_get_buf(win)
     if vim.bo[buf].buftype == "terminal" then
       local title = vim.b[buf].term_title or ""
+      last_term_title = title
       local session_name = title:match("^OC | (.+)$")
       if session_name then
-        return session_name
+        return session_name, title
       end
       if title == "OpenCode" then
-        return "OpenCode"
+        return "OpenCode", title
       end
     end
   end
-  return nil
+  return nil, last_term_title
 end
 
 -- Build the curl command for the Gemini API.
@@ -131,30 +138,46 @@ end
 -- The override function called by tabby on every tabline render.
 -- Returns a tab label string, or nil to fall through to tabby defaults.
 local function opencode_tab_override(tabid)
-  local raw_title = find_opencode_title(tabid)
-  if not raw_title then return nil end
-
+  local raw_title, term_title = find_opencode_title(tabid)
   local key = tostring(tabid)
   local entry = cache[key]
 
-  if entry and entry.oc_title == raw_title then
-    return entry.short_title
+  if raw_title then
+    -- OpenCode title found; use cache or update it
+    if entry and entry.oc_title == raw_title then
+      return entry.short_title
+    end
+
+    -- Title changed (or first seen) -- update cache and fire async shortening
+    local interim = vim.fn.strcharpart(raw_title, 0, 24)
+    cache[key] = { oc_title = raw_title, short_title = interim }
+
+    shorten_title_async(raw_title, function(shortened)
+      -- Verify tab still exists and title hasn't changed again
+      local current = cache[key]
+      if current and current.oc_title == raw_title then
+        current.short_title = shortened
+        vim.cmd("redrawtabline")
+      end
+    end)
+
+    return interim
   end
 
-  -- Title changed (or first seen) -- update cache and fire async shortening
-  local interim = vim.fn.strcharpart(raw_title, 0, 24)
-  cache[key] = { oc_title = raw_title, short_title = interim }
-
-  shorten_title_async(raw_title, function(shortened)
-    -- Verify tab still exists and title hasn't changed again
-    local current = cache[key]
-    if current and current.oc_title == raw_title then
-      current.short_title = shortened
-      vim.cmd("redrawtabline")
+  -- No OpenCode title found. Decide whether to keep cached title.
+  if entry then
+    if term_title == "" then
+      -- Terminal still running but title is empty (OpenCode temporarily
+      -- cleared it, e.g. during compaction or state transition). Keep the
+      -- last known good title.
+      return entry.short_title
     end
-  end)
+    -- Either no terminal buffer (process exited) or terminal has a
+    -- non-OpenCode title (bash regained control). Clear stale cache.
+    cache[key] = nil
+  end
 
-  return interim
+  return nil
 end
 
 -- Clean up cache entries for closed tabs
