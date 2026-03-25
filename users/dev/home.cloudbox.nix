@@ -14,6 +14,20 @@ lib.mkIf isCloudbox {
 
   home.stateVersion = "25.11";
 
+  # Guard: abort activation if running on the wrong machine.
+  # Devbox and cloudbox share arch, user, and home dir -- applying the wrong
+  # flake target silently deploys incorrect config (wrong secrets, /persist
+  # assumptions, wrong pull-workstation target) and is hard to diagnose.
+  home.activation.assertPlatform =
+    lib.hm.dag.entryBefore [ "writeBoundary" ] ''
+      current="$(cat /etc/hostname 2>/dev/null || echo unknown)"
+      if [ "$current" != "cloudbox" ]; then
+        echo "FATAL: flake target #cloudbox is for cloudbox, but running on $current." >&2
+        echo "Use --flake .#$current (or the correct target) instead." >&2
+        exit 1
+      fi
+    '';
+
   # Developer tooling (project-specific)
   home.packages = with pkgs; [
     bazelisk    # Bazel version manager (respects .bazelversion)

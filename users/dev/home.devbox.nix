@@ -10,6 +10,20 @@ lib.mkIf isDevbox {
   # home.stateVersion for this platform
   home.stateVersion = "25.11";
 
+  # Guard: abort activation if running on the wrong machine.
+  # Devbox and cloudbox share arch, user, and home dir -- applying the wrong
+  # flake target silently deploys incorrect config (wrong secrets, /persist
+  # assumptions, wrong pull-workstation target) and is hard to diagnose.
+  home.activation.assertPlatform =
+    lib.hm.dag.entryBefore [ "writeBoundary" ] ''
+      current="$(cat /etc/hostname 2>/dev/null || echo unknown)"
+      if [ "$current" != "devbox" ]; then
+        echo "FATAL: flake target #dev is for devbox, but running on $current." >&2
+        echo "Use --flake .#$current (or the correct target) instead." >&2
+        exit 1
+      fi
+    '';
+
   # Cloudflare API token for wrangler (from sops-nix secret)
   programs.bash.initExtra = lib.mkAfter ''
     # GitHub API token for gh CLI
