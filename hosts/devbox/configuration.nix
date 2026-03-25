@@ -422,6 +422,7 @@
       ExecStart = "${pkgs.writeShellScript "sync-sources-start" ''
         set -euo pipefail
         export PYTHONUNBUFFERED=1
+        export GEMINI_API_KEY="$(cat /run/secrets/gemini_api_key)"
         cd /home/dev/projects/my-podcasts
         exec ${pkgs.uv}/bin/uv run python -m pipeline sync-sources
       ''}";
