@@ -30,6 +30,12 @@ jobs:
         if: inputs.package && inputs.package != matrix.package
         run: echo "SKIP=true" >> "$GITHUB_ENV"
 
+      - name: Skip unsupported beads auto-update
+        if: env.SKIP != 'true' && matrix.package == 'beads'
+        run: |
+          echo "Skipping beads auto-update: upstream now requires Go >= 1.25.8, but current CI builds with Go 1.25.5."
+          echo "SKIP=true" >> "$GITHUB_ENV"
+
       - name: Checkout repository
         if: env.SKIP != 'true'
         uses: actions/checkout@v4

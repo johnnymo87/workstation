@@ -6,20 +6,20 @@
 }:
 
 let
-  version = "0.19.0";
+  version = "0.22.1";
 
   sources = {
     "aarch64-linux" = fetchurl {
-      url = "https://github.com/googleworkspace/cli/releases/download/v${version}/gws-aarch64-unknown-linux-musl.tar.gz";
-      hash = "sha256-C0T+ysLTBe2jWLWTQ+S34rnbO6c1zQ5qT3OPHfs+/KI=";
+      url = "https://github.com/googleworkspace/cli/releases/download/v${version}/google-workspace-cli-aarch64-unknown-linux-musl.tar.gz";
+      hash = "sha256-KwFycZA6MMxcyjGXNBQUbFqh37NfzaVKLgka+8/botw=";
     };
     "x86_64-linux" = fetchurl {
-      url = "https://github.com/googleworkspace/cli/releases/download/v${version}/gws-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-STxIsqgJxNrMTTiNiN0D/MPknq5/LW3rvGcNAm3Vi88=";
+      url = "https://github.com/googleworkspace/cli/releases/download/v${version}/google-workspace-cli-x86_64-unknown-linux-gnu.tar.gz";
+      hash = "sha256-szIdHHoHVgez6ogz3veWyf/H+9rOtiq73xua0Uf8OaA=";
     };
     "aarch64-darwin" = fetchurl {
-      url = "https://github.com/googleworkspace/cli/releases/download/v${version}/gws-aarch64-apple-darwin.tar.gz";
-      hash = "sha256-cS+UDF5Qgsv33pjis5tE2WTOGdheCf0paZgBicaP7zc=";
+      url = "https://github.com/googleworkspace/cli/releases/download/v${version}/google-workspace-cli-aarch64-apple-darwin.tar.gz";
+      hash = "sha256-LJP8JzbT8Ho+Iq/NVXW0veELUpkoEW3o5hMkjY846/Y=";
     };
   };
 
@@ -43,7 +43,7 @@ stdenv.mkDerivation {
 
   installPhase = ''
     runHook preInstall
-    install -Dm755 gws-*/gws $out/bin/gws
+    install -Dm755 google-workspace-cli-*/gws $out/bin/gws
     runHook postInstall
   '';
 
