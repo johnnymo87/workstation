@@ -503,6 +503,7 @@
     device = "/dev/disk/by-id/scsi-0HC_Volume_104378953";
     fsType = "ext4";
     options = [ "nofail" ];
+    neededForBoot = true;  # Mount in initrd, before sops-nix decrypts secrets using /persist/sops-age-key.txt
   };
 
   # Bind mount projects from persistent volume
