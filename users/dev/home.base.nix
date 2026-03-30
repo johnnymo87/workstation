@@ -203,7 +203,6 @@ in
   home.packages = [
     # Self-packaged tools (in pkgs/, some auto-updated by CI)
     localPkgs.beads
-    localPkgs.ccusage-opencode
     pkgs.pandoc
     opencode
 

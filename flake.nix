@@ -49,7 +49,6 @@
     localPkgsFor = system: let p = pkgsFor system; in {
       acli = p.callPackage ./pkgs/acli { };
       beads = p.callPackage ./pkgs/beads { };
-      ccusage-opencode = p.callPackage ./pkgs/ccusage-opencode { };
       datadog-mcp-cli = p.callPackage ./pkgs/datadog-mcp-cli { };
       gws = p.callPackage ./pkgs/gws { };
     };

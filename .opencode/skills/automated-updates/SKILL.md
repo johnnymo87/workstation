@@ -12,7 +12,6 @@ The devbox keeps dependencies up to date via GitHub Actions workflows and a syst
 ### Local packages (daily)
 
 - **beads**: Distributed issue tracker for AI workflows
-- **ccusage-opencode**: Usage analytics for OpenCode
 
 Updated by `.github/workflows/update-packages.yml` using `nix-update`. Package definitions live in `pkgs/<name>/default.nix`.
 
