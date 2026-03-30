@@ -99,28 +99,28 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-9zHv0d9TItI3rWIo4ZGK76Bcg3VJQmIn7qEf7jadbFo=";
+      hash = "sha256-ENPpM2zPfK1vleP3I2qIX0VoBQWGTQVY9fhnYf1JeM0=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-OGMd/CfGSuHb2yAphjf6RkEKKcMDol7fybluSGyeFpg=";
+      hash = "sha256-QDrM4ad/w736HM0nU7MJx5P0UtzuIVTzhDl0dhzHG68=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-QDJO3lW1sptILlX8gR2VssW/xGCyy4O1R15XoVdyvUw=";
+      hash = "sha256-Oeid1LlV0NagxgNG71fu8L08AuGvSW8ubmp1yJKaY5Q=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-210Ms8xF0PE132CFmHFst+lKBTim+lnHK5fSiEkyo6I=";
+      hash = "sha256-vzHp8eGyL62sTEzdOJdsPGRkrbTI4VYytbcq76GvCHI=";
       isZip = true;
     };
   };
 
   opencode = let
-    version = "1.3.6";
+    version = "1.3.7";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
