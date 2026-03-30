@@ -18,6 +18,7 @@ let
     "beads"
     "launching-headless-sessions"
     "notify-telegram"
+    "preparing-for-compaction"
     "using-chatgpt-relay-from-devbox"
     "using-gws"
   ];
