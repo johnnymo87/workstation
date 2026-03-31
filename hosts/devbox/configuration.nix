@@ -223,7 +223,7 @@
     description = "OpenCode headless serve";
     wantedBy = [ "multi-user.target" ];
     after = [ "network.target" "sops-nix.service" ];
-    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" ];
+    path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" ];
     serviceConfig = {
       Type = "simple";
       User = "dev";
