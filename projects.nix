@@ -34,6 +34,11 @@
     platforms = [ "devbox" ];
   };
 
+  lgtm = {
+    url = "git@github.com:johnnymo87/lgtm.git";
+    platforms = [ "cloudbox" ];
+  };
+
   # Patch-carrier repos (opencode forks)
   opencode-cached = {
     url = "git@github.com:johnnymo87/opencode-cached.git";

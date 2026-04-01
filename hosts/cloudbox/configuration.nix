@@ -276,6 +276,45 @@
     wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
   };
 
+  # LGTM — AI-powered PR review via OpenCode
+  systemd.services.lgtm-run = {
+    description = "LGTM PR review cycle";
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" "opencode-serve.service" ];
+    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.coreutils pkgs.bash ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/lgtm";
+      Environment = [
+        "HOME=/home/dev"
+        "LGTM_ORG=food-truck"
+        "OPENCODE_URL=http://127.0.0.1:4096"
+        "LGTM_PROJECTS_DIR=/home/dev/projects"
+      ];
+      ExecStart = "${pkgs.writeShellScript "lgtm-run" ''
+        set -euo pipefail
+        export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        if [ ! -d /home/dev/projects/lgtm/node_modules ]; then
+          cd /home/dev/projects/lgtm
+          ${pkgs.nodejs}/bin/npm install
+        fi
+        exec ${pkgs.nodejs}/bin/node \
+          /home/dev/projects/lgtm/node_modules/tsx/dist/cli.mjs \
+          /home/dev/projects/lgtm/src/index.ts
+      ''}";
+    };
+  };
+
+  systemd.timers.lgtm-run = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*:0/10";
+      Persistent = true;
+    };
+  };
+
   systemd.services.opencode-serve = {
     description = "OpenCode headless serve";
     wantedBy = [ "multi-user.target" ];
