@@ -344,8 +344,31 @@ in
         export GOOGLE_APPLICATION_CREDENTIALS="/home/dev/.config/gcloud/application_default_credentials.json"
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
+      # Cap the always-on headless server so it can't monopolize RAM alone.
+      MemoryMax = "10G";
+      MemoryHigh = "8G";
+      OOMScoreAdjust = "500";
       Restart = "always";
       RestartSec = 10;
+    };
+  };
+
+  # Daily 3 AM restart of leaky long-running services.
+  # opencode-serve leaks from ~350 MB to 8-13 GB over days.
+  systemd.services.nightly-restart-background = {
+    description = "Restart long-running background services to reclaim leaked memory";
+    serviceConfig.Type = "oneshot";
+    script = ''
+      /run/current-system/sw/bin/systemctl restart opencode-serve.service
+    '';
+  };
+
+  systemd.timers.nightly-restart-background = {
+    description = "Nightly restart of background services at 3 AM ET";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 03:00:00";
+      Persistent = true;
     };
   };
 
@@ -435,13 +458,11 @@ in
   # earlyoom: last-resort killer when memory is critically low.
   # Swap threshold set to 100% (always true) so earlyoom triggers on
   # RAM alone — our failure mode exhausts RAM while swap has headroom.
-  # Kill order: bazel/java/node first (--prefer, +100 oom_score),
-  # then everything else by RSS (including opencode), then sshd/systemd
+  # Kill order: opencode/bazel/java/node first (--prefer, +100 oom_score),
+  # then everything else by RSS, then sshd/systemd
   # last (--avoid, -100 oom_score, plus OOMScoreAdjust=-1000).
-  # NOTE: opencode is intentionally NOT in --avoid. Previous config had
-  # it there, but earlyoom then killed agetty/dhcpcd (tiny, useless)
-  # instead of the actual memory hogs. Also added agetty/dhcpcd to
-  # --avoid to prevent earlyoom wasting kills on system services.
+  # opencode is in --prefer because it's the known memory leak leader
+  # and has OOMScoreAdjust=500 + cgroup caps as additional backstops.
   services.earlyoom = {
     enable = true;
     freeMemThreshold = 10;       # SIGTERM when <10% RAM free (~3.2 GB)
@@ -450,7 +471,7 @@ in
     freeSwapKillThreshold = 100; # Always true — trigger on RAM alone
     reportInterval = 15;
     extraArgs = [
-      "--prefer" "(^|/)(node|bun|bazel|java|kotlin-language-server|docker)$"
+      "--prefer" "(^|/)(\\.opencode-wrapp|node|bun|bazel|java|kotlin-language-server|docker)$"
       "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|agetty|dhcpcd)$"
     ];
   };
