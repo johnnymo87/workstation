@@ -10,6 +10,10 @@
 #   - Firewall disabled (google-compute-config defers to GCP firewall)
 { config, pkgs, lib, ... }:
 
+let
+  # Feature flags
+  enableLgtm = false;  # AI-powered PR review daemon (flip to true to activate)
+in
 {
   # Allow unfree packages
   nixpkgs.config.allowUnfree = true;
@@ -277,7 +281,8 @@
   };
 
   # LGTM — AI-powered PR review via OpenCode
-  systemd.services.lgtm-run = {
+  # Disabled by default. Set enableLgtm = true below to activate.
+  systemd.services.lgtm-run = lib.mkIf enableLgtm {
     description = "LGTM PR review cycle";
     wants = [ "network-online.target" ];
     after = [ "network-online.target" "opencode-serve.service" ];
@@ -307,7 +312,7 @@
     };
   };
 
-  systemd.timers.lgtm-run = {
+  systemd.timers.lgtm-run = lib.mkIf enableLgtm {
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnCalendar = "*:0/10";
