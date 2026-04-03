@@ -198,6 +198,25 @@ lib.mkIf isDevbox {
     no-autostart
   '';
 
+  # Backup /persist to a local tarball (cloud volume not included in Hetzner snapshots)
+  home.file.".local/bin/backup-persist" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      set -euo pipefail
+
+      timestamp=$(${pkgs.coreutils}/bin/date +%Y%m%d-%H%M%S)
+      dest="$HOME/persist-backup-$timestamp.tar.gz"
+
+      echo "Backing up /persist to $dest ..."
+      sudo ${pkgs.gnutar}/bin/tar czf "$dest" \
+        --exclude='persist/lost+found' \
+        -C / persist
+      sudo chown dev:dev "$dest"
+      echo "Backup complete: $dest ($(${pkgs.coreutils}/bin/du -h "$dest" | cut -f1))"
+    '';
+  };
+
   # Generate ensure-projects script from declarative manifest
   home.file.".local/bin/ensure-projects" = {
     executable = true;
