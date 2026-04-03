@@ -34,7 +34,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 2. Push to GitHub
 3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox) or `darwin-rebuild switch` (macOS)
 
-**Devbox projects survive rebuilds** — stored on `/persist/projects`, bind-mounted to `~/projects`.
+**Devbox projects live on the local SSD** (`~/projects` on root filesystem). They are reconstructable from git and do not survive full reprovisioning — `ensure-projects` reclones declared projects on login.
 
 ## Commands
 
