@@ -4,19 +4,6 @@
 
 let
 
-  # Clipboard commands via tmux (work over SSH, inside tmux sessions)
-  tcopy = pkgs.writeShellApplication {
-    name = "tcopy";
-    runtimeInputs = [ pkgs.tmux ];
-    text = builtins.readFile "${assetsPath}/scripts/tcopy.bash";
-  };
-
-  tpaste = pkgs.writeShellApplication {
-    name = "tpaste";
-    runtimeInputs = [ pkgs.tmux ];
-    text = builtins.readFile "${assetsPath}/scripts/tpaste.bash";
-  };
-
   opencode-launch = pkgs.writeShellApplication {
     name = "opencode-launch";
     runtimeInputs = [ pkgs.curl pkgs.jq ];
@@ -209,9 +196,8 @@ in
     # Cloudflare Workers CLI
     pkgs.wrangler
 
-    # Clipboard via tmux
-    tcopy
-    tpaste
+    # Remote clipboard (lemonade client talks to macOS server over SSH tunnel)
+    pkgs.lemonade
 
     # Headless opencode session launcher
     opencode-launch
