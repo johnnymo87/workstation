@@ -11,12 +11,12 @@ if vim.fn.executable("lemonade") == 1 and is_remote then
   vim.g.clipboard = {
     name = "lemonade",
     copy = {
-      ["+"] = { "lemonade", "copy" },
-      ["*"] = { "lemonade", "copy" },
+      ["+"] = { "lemonade", "copy", "--no-fallback-messages" },
+      ["*"] = { "lemonade", "copy", "--no-fallback-messages" },
     },
     paste = {
-      ["+"] = { "lemonade", "paste" },
-      ["*"] = { "lemonade", "paste" },
+      ["+"] = { "lemonade", "paste", "--no-fallback-messages" },
+      ["*"] = { "lemonade", "paste", "--no-fallback-messages" },
     },
   }
 elseif vim.env.SSH_TTY then

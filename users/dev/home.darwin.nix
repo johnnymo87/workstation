@@ -290,7 +290,7 @@ lib.mkIf isDarwin {
       ProgramArguments = [
         "${pkgs.lemonade}/bin/lemonade"
         "server"
-        "--allow" "127.0.0.1"
+        "--allow" "127.0.0.1,::1"
         "--port" "2489"
       ];
       RunAtLoad = true;
