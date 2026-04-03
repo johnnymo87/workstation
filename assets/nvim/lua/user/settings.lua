@@ -3,8 +3,23 @@ vim.g.mapleader = ","
 vim.g.maplocalleader = " "
 
 -- Clipboard: use system clipboard
--- On SSH sessions, force OSC 52 provider for clipboard over terminal
-if vim.env.SSH_TTY then
+-- On remote hosts, use lemonade (TCP-based, works through mosh).
+-- Falls back to OSC 52 if lemonade isn't available, then to default
+-- provider detection (pbcopy/pbpaste on macOS).
+local is_remote = vim.fn.has("mac") == 0 and vim.fn.has("macunix") == 0
+if vim.fn.executable("lemonade") == 1 and is_remote then
+  vim.g.clipboard = {
+    name = "lemonade",
+    copy = {
+      ["+"] = { "lemonade", "copy" },
+      ["*"] = { "lemonade", "copy" },
+    },
+    paste = {
+      ["+"] = { "lemonade", "paste" },
+      ["*"] = { "lemonade", "paste" },
+    },
+  }
+elseif vim.env.SSH_TTY then
   vim.g.clipboard = "osc52"
 end
 vim.opt.clipboard = "unnamedplus"
