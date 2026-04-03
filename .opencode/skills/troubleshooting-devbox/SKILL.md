@@ -9,29 +9,68 @@ description: Use when SSH connection fails, host key mismatch, NixOS issues, or 
 
 Common issues and fixes for the Hetzner NixOS remote development environment.
 
+## Connection Model
+
+Interactive sessions use **mosh** for persistence (survives sleep/wake, network changes):
+
+```bash
+mosh devbox -- tmux attach -t 1    # Persistent session via mosh + tmux
+mosh cloudbox -- tmux attach -t 1
+```
+
+Port forwarding runs via **persistent SSH tunnel launchd agents** on macOS (always-on, independent of interactive sessions):
+
+| Agent | SSH Host | Purpose |
+|-------|----------|---------|
+| `devbox-dev-tunnel` | `devbox-tunnel` | Dev ports + lemonade + CDP + chatgpt-relay |
+| `cloudbox-dev-tunnel` | `cloudbox-tunnel` | Dev ports + lemonade + CDP + chatgpt-relay |
+| `devbox-gpg-tunnel` | `devbox-gpg-tunnel` | GPG agent forwarding only |
+| `cloudbox-gpg-tunnel` | `cloudbox-gpg-tunnel` | GPG agent forwarding only |
+
+Check tunnel status:
+```bash
+launchctl list | grep -E '(dev|gpg)-tunnel'
+```
+
+Restart a tunnel:
+```bash
+launchctl kickstart -k gui/$(id -u)/org.nix-community.home.devbox-dev-tunnel
+```
+
 ## Port Forwarding
 
-The devbox connection uses several port forwards for development tools:
+Ports are configured in `scripts/update-ssh-config.sh` and carried by the persistent tunnel agents.
+
+### devbox-tunnel ports
 
 | Port | Direction | Purpose |
 |------|-----------|---------|
 | 4000 | Local (-L) | eternal-machinery dev server |
 | 4003 | Local (-L) | eternal-machinery (secondary) |
+| 4005 | Local (-L) | eternal-machinery (tertiary) |
 | 4173 | Local (-L) | citadels Vite dev server |
-| 1455 | Local (-L) | OpenCode OAuth callback for ChatGPT Plus authentication |
-| 9222 | Remote (-R) | Chrome DevTools Protocol - project A (e.g. Eternal Machinery) |
-| 9223 | Remote (-R) | Chrome DevTools Protocol - project B (e.g. Citadels) |
-| 3033 | Remote (-R) | chatgpt-relay - `/ask-question` CLI talks to macOS daemon |
+| 1455 | Local (-L) | OpenCode OAuth callback |
+| 9222 | Remote (-R) | Chrome DevTools Protocol - project A |
+| 9223 | Remote (-R) | Chrome DevTools Protocol - project B |
+| 3033 | Remote (-R) | chatgpt-relay (`/ask-question` CLI) |
+| 2489 | Remote (-R) | Lemonade clipboard (copy/paste to macOS) |
 
-**Local forwards (-L):** devbox service → accessible on macOS localhost
-**Remote forwards (-R):** macOS service → accessible on devbox localhost
+### cloudbox-tunnel ports
 
-Use two SSH hosts:
+| Port | Direction | Purpose |
+|------|-----------|---------|
+| 1455 | Local (-L) | OpenCode OAuth callback |
+| 3334 | Local (-L) | mcp-remote OAuth (default Atlassian) |
+| 3335 | Local (-L) | mcp-remote OAuth (alt Atlassian) |
+| 9222 | Remote (-R) | Chrome DevTools Protocol - project A |
+| 9223 | Remote (-R) | Chrome DevTools Protocol - project B |
+| 3033 | Remote (-R) | chatgpt-relay (`/ask-question` CLI) |
+| 2489 | Remote (-R) | Lemonade clipboard (copy/paste to macOS) |
 
-- `ssh devbox` for normal interactive sessions (no local forwards, cleaner logs)
-- `ssh devbox-tunnel` when you need local forwards (`4000`, `4003`, `4173`, `1455`)
+**Local forwards (-L):** devbox/cloudbox service → accessible on macOS localhost
+**Remote forwards (-R):** macOS service → accessible on remote localhost
 
-Both hosts keep remote forwards (`9222`, `9223`, `3033`) and GPG agent forwarding.
+**Note:** Both tunnels share `LocalForward 1455`. The agents use `ExitOnForwardFailure=no` so whichever starts first gets 1455; the other logs a warning but keeps all other forwards alive. OAuth is interactive and one-at-a-time, so this is fine.
 
 ### Multi-project CDP
 
@@ -200,7 +239,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now pull-workstation.timer
 ```
 
-See [Automated Updates](.claude/skills/automated-updates/SKILL.md) for full details on the update pipeline.
+See [Automated Updates](../automated-updates/SKILL.md) for full details on the update pipeline.
 
 ## GPG Agent Forwarding
 
@@ -233,7 +272,7 @@ echo test | gpg --clearsign >/dev/null && echo ok
 ```
 
 ### Hardening Note
-`scripts/update-ssh-config.sh` configures `StreamLocalBindUnlink yes` on `devbox` and `devbox-tunnel`.
+`scripts/update-ssh-config.sh` configures `StreamLocalBindUnlink yes` on `devbox-gpg-tunnel` and `cloudbox-gpg-tunnel`.
 This lets SSH automatically unlink stale remote unix sockets before binding forwarded sockets.
 
 ### Note: Fast Path Warning

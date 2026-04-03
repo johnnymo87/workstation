@@ -195,11 +195,14 @@ This removes ordering sensitivity between Nix packpath autoload vs Lazy event lo
 Use conditionals when behavior differs between platforms:
 
 ```lua
--- In Lua files
-if vim.env.SSH_TTY then
-  vim.g.clipboard = "osc52"  -- Remote: use OSC 52
+-- In Lua files: detect remote (non-macOS) and use lemonade clipboard bridge.
+-- Falls back to OSC 52 for plain SSH, native pbcopy/pbpaste on macOS.
+local is_remote = vim.fn.has("mac") == 0 and vim.fn.has("macunix") == 0
+if vim.fn.executable("lemonade") == 1 and is_remote then
+  vim.g.clipboard = { name = "lemonade", copy = { ... }, paste = { ... } }
+elseif vim.env.SSH_TTY then
+  vim.g.clipboard = "osc52"
 end
--- Local macOS uses native clipboard automatically
 ```
 
 ```nix

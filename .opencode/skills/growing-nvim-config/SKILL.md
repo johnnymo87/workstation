@@ -42,7 +42,13 @@ xdg.configFile."nvim/lua/user" = {
 
 **assets/nvim/lua/user/settings.lua:**
 ```lua
-vim.g.clipboard = "osc52"           -- OSC 52 clipboard provider
+-- Remote clipboard: lemonade (TCP, works through mosh) with OSC 52 fallback
+local is_remote = vim.fn.has("mac") == 0 and vim.fn.has("macunix") == 0
+if vim.fn.executable("lemonade") == 1 and is_remote then
+  vim.g.clipboard = { name = "lemonade", copy = { ... }, paste = { ... } }
+elseif vim.env.SSH_TTY then
+  vim.g.clipboard = "osc52"
+end
 vim.opt.clipboard = "unnamedplus"   -- Sync unnamed register with +
 ```
 

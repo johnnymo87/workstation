@@ -65,4 +65,4 @@ iTerm2's `it2ul` upload tool can be flaky inside tmux (proprietary escape sequen
 
 ## Related
 
-- [OSC 52 Clipboard](../osc52-clipboard/SKILL.md) - For text copy/paste over SSH
+- [Clipboard (Lemonade & OSC 52)](../osc52-clipboard/SKILL.md) - Text copy/paste over mosh/SSH
