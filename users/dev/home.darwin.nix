@@ -281,6 +281,26 @@ lib.mkIf isDarwin {
     };
   };
 
+  # Lemonade clipboard server.
+  # Exposes macOS pbcopy/pbpaste over TCP so remote sessions (via SSH
+  # RemoteForward) can copy/paste to the local clipboard through mosh.
+  launchd.agents.lemonade-server = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "${pkgs.lemonade}/bin/lemonade"
+        "server"
+        "--allow" "127.0.0.1"
+        "--port" "2489"
+      ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      ThrottleInterval = 30;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/lemonade-server.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/lemonade-server.err.log";
+    };
+  };
+
   # ============================================================
   # DISABLED PROGRAMS (using existing dotfiles instead)
   # Remove these overrides one-by-one as you migrate to HM
