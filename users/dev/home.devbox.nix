@@ -210,12 +210,6 @@ lib.mkIf isDevbox {
       #!${pkgs.bash}/bin/bash
       set -euo pipefail
 
-      # Refuse to run if /persist isn't mounted
-      if ! ${pkgs.util-linux}/bin/findmnt -rn /persist >/dev/null; then
-        echo "ERROR: /persist is not mounted; refusing to clone."
-        exit 1
-      fi
-
       # Verify SSH key exists
       if [ ! -f "$HOME/.ssh/id_ed25519_github" ]; then
         echo "ERROR: GitHub SSH key not found at ~/.ssh/id_ed25519_github"

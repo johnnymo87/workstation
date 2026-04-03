@@ -509,20 +509,12 @@
     neededForBoot = true;  # Mount in initrd, before sops-nix decrypts secrets using /persist/sops-age-key.txt
   };
 
-  # Bind mount projects from persistent volume
-  fileSystems."/home/dev/projects" = {
-    device = "/persist/projects";
-    fsType = "none";
-    options = [ "bind" ];
-    depends = [ "/persist" ];
-  };
-
   systemd.tmpfiles.rules = [
     # Claude state
     "d /persist/claude 0700 dev dev -"
     "L+ /home/dev/.claude - - - - /persist/claude"
-    # Projects directory on persistent volume
-    "d /persist/projects 0755 dev dev -"
+    # Projects directory on local SSD (not cloud volume)
+    "d /home/dev/projects 0755 dev dev -"
     # SSH directory on persistent volume (for devbox key)
     "d /persist/ssh 0700 dev dev -"
     "L+ /home/dev/.ssh - - - - /persist/ssh"
