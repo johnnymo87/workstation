@@ -43,7 +43,7 @@ stdenv.mkDerivation {
 
   installPhase = ''
     runHook preInstall
-    install -Dm755 google-workspace-cli-*/gws $out/bin/gws
+    install -Dm755 gws $out/bin/gws
     runHook postInstall
   '';
 
