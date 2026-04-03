@@ -247,7 +247,7 @@ lib.mkIf isDarwin {
       ProgramArguments = [
         "${pkgs.openssh}/bin/ssh"
         "-N"              # No remote command
-        "-o" "ExitOnForwardFailure=yes"
+        "-o" "ExitOnForwardFailure=no"
         "-o" "ServerAliveInterval=30"
         "-o" "ServerAliveCountMax=3"
         "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
@@ -267,7 +267,7 @@ lib.mkIf isDarwin {
       ProgramArguments = [
         "${pkgs.openssh}/bin/ssh"
         "-N"              # No remote command
-        "-o" "ExitOnForwardFailure=yes"
+        "-o" "ExitOnForwardFailure=no"
         "-o" "ServerAliveInterval=30"
         "-o" "ServerAliveCountMax=3"
         "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
