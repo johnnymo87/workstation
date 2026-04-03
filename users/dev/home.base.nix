@@ -454,6 +454,7 @@ EOF
   # Tmux
   programs.tmux = {
     enable = true;
+    secureSocket = false;  # Use /tmp for socket so mosh and non-login contexts find it
     shell = "${pkgs.bash}/bin/bash";  # Explicit: macOS defaults to zsh, but our config is all bash
     clock24 = true;
     terminal = "tmux-256color";

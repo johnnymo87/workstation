@@ -288,7 +288,19 @@ lib.mkIf isDarwin {
 
   # Bash is now managed by home-manager. Legacy snippets are sourced from ~/.bashrc.d.
   programs.bash = {
-    initExtra = lib.mkAfter ''
+    # Homebrew bash (used by iTerm2 Custom Command) doesn't have SYS_BASHRC
+    # compiled in, so it skips /etc/bashrc for non-login interactive shells.
+    # Source it explicitly to pick up nix-darwin's set-environment (PATH with
+    # /etc/profiles/per-user/$USER/bin, TERMINFO_DIRS, XDG_*, etc.).
+    # mkBefore so it runs before home.base.nix's initExtra (which sources
+    # ~/.bashrc.d scripts that depend on the nix-darwin PATH).
+    initExtra = lib.mkMerge [
+      (lib.mkBefore ''
+        if [ -z "$__ETC_BASHRC_SOURCED" ] && [ -r /etc/bashrc ]; then
+          source /etc/bashrc
+        fi
+      '')
+      (lib.mkAfter ''
       # GitHub API token for gh CLI (from macOS Keychain)
       GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" && export GH_TOKEN="$GH_TOKEN_VAL"
       unset GH_TOKEN_VAL
@@ -395,7 +407,8 @@ lib.mkIf isDarwin {
       for file in ~/.bashrc.d/*.bashrc; do
         [ -r "$file" ] && source "$file"
       done
-    '';
+    '')
+    ];
     shellAliases = {
       ssdb = "screenshot-to-devbox";
     };
