@@ -497,6 +497,9 @@
   };
 
   networking.firewall.enable = true;
+  # Mosh (mobile shell) uses UDP for its stateful transport.
+  # Range is generous; each session uses one port.
+  networking.firewall.allowedUDPPortRanges = [{ from = 60000; to = 61000; }];
 
   # Persistent volume for state that survives rebuilds
   fileSystems."/persist" = {

@@ -244,17 +244,22 @@ You may see this warning when running GPG commands on devbox:
 
 ### Persistent Tunnel
 
-A `launchd` agent on macOS (`devbox-tunnel`) keeps the GPG forwarding alive in the background.
-This means headless OpenCode sessions on devbox can sign commits even without an interactive SSH shell.
+Dedicated `launchd` agents on macOS keep the GPG forwarding alive in the background:
+- `devbox-gpg-tunnel` — forwards GPG agent socket to devbox
+- `cloudbox-gpg-tunnel` — forwards GPG agent socket to cloudbox
+
+These use isolated SSH hosts (`devbox-gpg-tunnel`, `cloudbox-gpg-tunnel`) that only
+forward the GPG socket, avoiding port contention with interactive `*-tunnel` sessions.
 
 Check tunnel status on macOS:
 ```bash
-launchctl list | grep devbox-tunnel
+launchctl list | grep gpg-tunnel
 ```
 
-If the tunnel is down, restart it:
+If a tunnel is down, restart it:
 ```bash
-launchctl kickstart -k gui/$(id -u)/org.nix-community.home.devbox-tunnel
+launchctl kickstart -k gui/$(id -u)/org.nix-community.home.devbox-gpg-tunnel
+launchctl kickstart -k gui/$(id -u)/org.nix-community.home.cloudbox-gpg-tunnel
 ```
 
-`opencode-launch` warns if the forwarded socket is missing on devbox before launching a session.
+`opencode-launch` warns if the forwarded socket is missing before launching a session.

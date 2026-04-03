@@ -192,24 +192,92 @@ lib.mkIf isDarwin {
     };
   };
 
-  # Persistent SSH tunnel to devbox for GPG agent forwarding.
+  # Persistent SSH tunnels for GPG agent forwarding.
   # Keeps RemoteForward /run/user/1000/gnupg/S.gpg-agent alive so headless
-  # sessions on devbox can sign commits without an interactive SSH session.
-  launchd.agents.devbox-tunnel = {
+  # sessions can sign commits without an interactive SSH session.
+  # Uses dedicated *-gpg-tunnel SSH hosts that ONLY forward the GPG socket,
+  # avoiding port contention with interactive *-tunnel sessions.
+  launchd.agents.devbox-gpg-tunnel = {
     enable = true;
     config = {
       ProgramArguments = [
-        "/usr/bin/ssh"
+        "${pkgs.openssh}/bin/ssh"
         "-N"              # No remote command
         "-o" "ExitOnForwardFailure=yes"
         "-o" "ServerAliveInterval=30"
         "-o" "ServerAliveCountMax=3"
-        "devbox-tunnel"   # Uses ~/.ssh/config Host definition
+        "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
+        "devbox-gpg-tunnel"
       ];
       RunAtLoad = true;
       KeepAlive = true;
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-tunnel.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-tunnel.err.log";
+      ThrottleInterval = 30;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-gpg-tunnel.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-gpg-tunnel.err.log";
+    };
+  };
+
+  launchd.agents.cloudbox-gpg-tunnel = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "${pkgs.openssh}/bin/ssh"
+        "-N"              # No remote command
+        "-o" "ExitOnForwardFailure=yes"
+        "-o" "ServerAliveInterval=30"
+        "-o" "ServerAliveCountMax=3"
+        "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
+        "cloudbox-gpg-tunnel"
+      ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      ThrottleInterval = 30;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-gpg-tunnel.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-gpg-tunnel.err.log";
+    };
+  };
+
+  # Persistent SSH tunnels for development port forwarding.
+  # Keeps LocalForward ports (dev servers, OAuth callbacks) and RemoteForward
+  # ports (CDP, chatgpt-relay) alive without a dedicated terminal tab.
+  # Uses the *-tunnel SSH hosts defined in update-ssh-config.sh.
+  launchd.agents.devbox-dev-tunnel = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "${pkgs.openssh}/bin/ssh"
+        "-N"              # No remote command
+        "-o" "ExitOnForwardFailure=yes"
+        "-o" "ServerAliveInterval=30"
+        "-o" "ServerAliveCountMax=3"
+        "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
+        "devbox-tunnel"
+      ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      ThrottleInterval = 30;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.err.log";
+    };
+  };
+
+  launchd.agents.cloudbox-dev-tunnel = {
+    enable = true;
+    config = {
+      ProgramArguments = [
+        "${pkgs.openssh}/bin/ssh"
+        "-N"              # No remote command
+        "-o" "ExitOnForwardFailure=yes"
+        "-o" "ServerAliveInterval=30"
+        "-o" "ServerAliveCountMax=3"
+        "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
+        "cloudbox-tunnel"
+      ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      ThrottleInterval = 30;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.err.log";
     };
   };
 

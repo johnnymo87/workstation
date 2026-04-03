@@ -36,10 +36,8 @@ Host devbox
     HostName $DEVBOX_IP
     User dev
     ForwardAgent yes
-    # Rebind stale remote unix sockets (e.g. forwarded GPG agent socket)
-    StreamLocalBindUnlink yes
-    # GPG agent forwarding
-    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
     RemoteForward 9223 localhost:9223
@@ -50,10 +48,8 @@ Host devbox-tunnel
     HostName $DEVBOX_IP
     User dev
     ForwardAgent yes
-    # Rebind stale remote unix sockets (e.g. forwarded GPG agent socket)
-    StreamLocalBindUnlink yes
-    # GPG agent forwarding
-    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
     # Development tunnels (see troubleshooting-devbox skill for details)
     LocalForward 4000 localhost:4000
     LocalForward 4003 localhost:4003
@@ -65,6 +61,19 @@ Host devbox-tunnel
     RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
+
+# Persistent GPG agent forwarding (kept alive by launchd on macOS).
+# GPG forwarding is isolated here so it doesn't contend with interactive
+# SSH sessions or claim LocalForward ports from devbox-tunnel.
+Host devbox-gpg-tunnel
+    HostName $DEVBOX_IP
+    User dev
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    # Rebind stale socket when tunnel reconnects
+    StreamLocalBindUnlink yes
+    # GPG agent forwarding
+    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
 $DEVBOX_MARKER_END
 EOF
 
@@ -92,8 +101,8 @@ Host cloudbox
     HostName $CLOUDBOX_IP
     User dev
     ForwardAgent yes
-    # GPG agent forwarding
-    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
     RemoteForward 9223 localhost:9223
@@ -104,8 +113,8 @@ Host cloudbox-tunnel
     HostName $CLOUDBOX_IP
     User dev
     ForwardAgent yes
-    # GPG agent forwarding
-    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
     # OpenCode OAuth callback
     LocalForward 1455 localhost:1455
     # mcp-remote OAuth callbacks (default + alt Atlassian instances)
@@ -116,6 +125,17 @@ Host cloudbox-tunnel
     RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
+
+# Persistent GPG agent forwarding (kept alive by launchd on macOS).
+Host cloudbox-gpg-tunnel
+    HostName $CLOUDBOX_IP
+    User dev
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    # Rebind stale socket when tunnel reconnects
+    StreamLocalBindUnlink yes
+    # GPG agent forwarding
+    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
 $CLOUDBOX_MARKER_END
 EOF
 

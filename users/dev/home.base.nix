@@ -54,12 +54,12 @@ let
         exit 1
       fi
 
-      # GPG agent forwarding check (devbox only)
+      # GPG agent forwarding check (Linux only)
       GPG_SOCKET="/run/user/1000/gnupg/S.gpg-agent"
       if [ -d "/run/user/1000" ] && [ ! -S "$GPG_SOCKET" ]; then
         echo "Warning: GPG agent socket not found at $GPG_SOCKET" >&2
         echo "Signed commits will fail in this session." >&2
-        echo "Ensure the devbox-tunnel SSH connection is active from macOS." >&2
+        echo "Ensure the persistent GPG tunnel is active from macOS." >&2
         echo "" >&2
       fi
 
@@ -221,6 +221,9 @@ in
 
     # Google Workspace CLI
     localPkgs.gws
+
+    # Mobile shell (survives sleep/wake, network changes)
+    pkgs.mosh
 
     # Other tools
     devenvPkg
