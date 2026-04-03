@@ -1,6 +1,6 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, localPkgs, assetsPath, isDarwin, isCloudbox, isCrostini, ... }:
+{ config, pkgs, lib, localPkgs, devenvPkg, assetsPath, isDarwin, isCloudbox, isCrostini, ... }:
 
 let
 
@@ -223,7 +223,7 @@ in
     localPkgs.gws
 
     # Other tools
-    pkgs.devenv
+    devenvPkg
 
     # JavaScript runtime (used by pigeon and other projects)
     pkgs.bun

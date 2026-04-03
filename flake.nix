@@ -23,9 +23,13 @@
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    devenv = {
+      url = "github:cachix/devenv";
+    };
   };
 
-  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, sops-nix, ... }@inputs:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, sops-nix, devenv, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -115,6 +119,7 @@
       extraSpecialArgs = {
         inherit self;
         localPkgs = localPkgsFor devboxSystem;
+        devenvPkg = devenv.packages.${devboxSystem}.devenv;
         assetsPath = ./assets;
         projects = projectsFor "devbox";
         isLinux = true;
@@ -135,6 +140,7 @@
       extraSpecialArgs = {
         inherit self;
         localPkgs = localPkgsFor devboxSystem;
+        devenvPkg = devenv.packages.${devboxSystem}.devenv;
         assetsPath = ./assets;
         projects = projectsFor "cloudbox";
         isLinux = true;
@@ -155,6 +161,7 @@
       extraSpecialArgs = {
         inherit self;
         localPkgs = localPkgsFor chromebookSystem;
+        devenvPkg = devenv.packages.${chromebookSystem}.devenv;
         assetsPath = ./assets;
         projects = projectsFor "crostini";
         isLinux = true;
@@ -178,6 +185,7 @@
           home-manager.extraSpecialArgs = {
             inherit pinentry-op;
             localPkgs = localPkgsFor darwinSystem;
+            devenvPkg = devenv.packages.${darwinSystem}.devenv;
             assetsPath = ./assets;
         projects = projectsFor "darwin";
         isLinux = false;
