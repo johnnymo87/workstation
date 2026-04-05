@@ -1,5 +1,5 @@
 ---
-name: osc52-clipboard
+name: clipboard
 description: Use when copy/paste doesn't work over mosh/SSH, or clipboard not syncing between local and remote, or setting up terminal remoting with gclpr or OSC 52
 ---
 
