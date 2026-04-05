@@ -196,8 +196,8 @@ in
     # Cloudflare Workers CLI
     pkgs.wrangler
 
-    # Remote clipboard (lemonade client talks to macOS server over SSH tunnel)
-    pkgs.lemonade
+    # Remote clipboard (gclpr client talks to macOS server over SSH tunnel)
+    localPkgs.gclpr
 
     # Headless opencode session launcher
     opencode-launch

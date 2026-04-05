@@ -5,7 +5,7 @@
 # On Darwin, we disable programs that conflict with existing dotfiles.
 # As we migrate each program to HM, remove the corresponding mkForce false.
 # See: /tmp/research-nix-darwin-dotfiles-conflict-answer.md
-{ config, pkgs, lib, assetsPath, isDarwin, pinentry-op, projects, ... }:
+{ config, pkgs, lib, localPkgs, assetsPath, isDarwin, pinentry-op, projects, ... }:
 
 lib.mkIf isDarwin {
   # Dotfiles repository still hosts many legacy bash snippets on macOS.
@@ -284,23 +284,26 @@ lib.mkIf isDarwin {
     };
   };
 
-  # Lemonade clipboard server.
-  # Exposes macOS pbcopy/pbpaste over TCP so remote sessions (via SSH
+  # gclpr clipboard server.
+  # Exposes macOS pbcopy/pbpaste over signed TCP so remote sessions (via SSH
   # RemoteForward) can copy/paste to the local clipboard through mosh.
-  launchd.agents.lemonade-server = {
+  launchd.agents.gclpr-server = {
     enable = true;
     config = {
       ProgramArguments = [
-        "${pkgs.lemonade}/bin/lemonade"
+        "${localPkgs.gclpr}/bin/gclpr"
         "server"
-        "--allow" "127.0.0.1,::1"
-        "--port" "2489"
       ];
+      EnvironmentVariables = {
+        HOME = config.home.homeDirectory;
+        LANG = "en_US.UTF-8";
+        LC_CTYPE = "en_US.UTF-8";
+      };
       RunAtLoad = true;
       KeepAlive = true;
       ThrottleInterval = 30;
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/lemonade-server.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/lemonade-server.err.log";
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gclpr-server.out.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gclpr-server.err.log";
     };
   };
 
