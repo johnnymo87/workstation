@@ -5,19 +5,19 @@ let
   platforms = {
     aarch64-linux = {
       asset = "gclpr_linux_arm64.zip";
-      hash = "sha256-C+4XWveoZhUp6H2AO+GTk5aNYxdSg8CG67lJp6zURWI=";
+      hash = "sha256-CPnKZF9DPSCxXECMXxIzHPBUnQYKiDTnh7+8XmkWS7Y=";
     };
     aarch64-darwin = {
       asset = "gclpr_darwin_arm64.zip";
-      hash = "sha256-fReLnTjvxMa/35eL/4Hv+eNE8IDvQgcg5GrzPG+hITg=";
+      hash = "sha256-4QjZfle+P/lsgw7L6gYbVJ2gYhJWSFNAMa+u+mpfnF8=";
     };
     x86_64-linux = {
       asset = "gclpr_linux_amd64.zip";
-      hash = "sha256-N7HeIzByA2/ZeOdBzZuBmN0yyxpr7cdKqdNryLkJnO4=";
+      hash = "sha256-cvkXKSt2Z7hOjPxhxuZyVLJR4uo+1R03QV6wD2DV//o=";
     };
     x86_64-darwin = {
       asset = "gclpr_darwin_amd64.zip";
-      hash = "sha256-ZO5gaN2LvjXh7LnpMUJOuse2jNy1GwIL5YTpy7qvPKs=";
+      hash = "sha256-9TR9Hh6f94mRF38Xl6Opb9zVJYpFbXzCrxYIEh9uMuc=";
     };
   };
   platformInfo = platforms.${stdenv.hostPlatform.system} or (throw "gclpr: unsupported system ${stdenv.hostPlatform.system}");
