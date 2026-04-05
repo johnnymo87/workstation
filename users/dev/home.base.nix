@@ -312,6 +312,23 @@ EOF
     fi
   '');
 
+home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
+    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      if [ -f /run/secrets/gclpr_private_key ]; then
+        mkdir -p "$HOME/.gclpr"
+        chmod 700 "$HOME/.gclpr"
+        (
+          umask 077
+          ${pkgs.coreutils}/bin/base64 -d /run/secrets/gclpr_private_key > "$HOME/.gclpr/key.tmp"
+        )
+        mv "$HOME/.gclpr/key.tmp" "$HOME/.gclpr/key"
+        chmod 400 "$HOME/.gclpr/key"
+      else
+        echo "deployGclprKey: skipping (secret not available)"
+      fi
+    ''
+  );
+
   # Install/update ba CLI from private GitHub release (work machines)
   # Downloads platform-appropriate binary, caches by version in ~/.local/bin
   # macOS: reads ba_cli_repo from Keychain, GH token from gh CLI auth
@@ -434,6 +451,11 @@ EOF
   home.file.".gnupg/dirmngr.conf".text = ''
     keyserver hkps://keys.openpgp.org
   '';
+
+  # gclpr clipboard bridge public key
+  home.file.".gclpr/key.pub" = lib.mkIf (!isDarwin && !isCrostini) {
+    source = "${assetsPath}/gclpr/key.pub";
+  };
 
   # common.conf is platform-specific - see home.linux.nix and home.darwin.nix
 

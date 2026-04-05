@@ -54,6 +54,9 @@ lib.mkIf isDarwin {
 
       # Darwin common.conf - empty (no special options needed locally)
       ".gnupg/common.conf".text = "";
+
+      # gclpr clipboard bridge trusted keys (macOS server)
+      ".gclpr/trusted".text = "122dcc14fa37068a2d604a736279c32f9aa1a38958a76f292f61812421544670\n";
     };
 
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)

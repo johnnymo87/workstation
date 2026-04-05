@@ -27,6 +27,12 @@ in
       generateKey = false;
     };
     secrets = {
+      # gclpr clipboard bridge private key (NaCl key for signed clipboard requests)
+      gclpr_private_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       github_ssh_key = {
         owner = "dev";
         group = "dev";
