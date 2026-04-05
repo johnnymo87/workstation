@@ -65,7 +65,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
 | [Growing Neovim Config](.opencode/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
 | [Gradual Dotfiles Migration](.opencode/skills/gradual-dotfiles-migration/SKILL.md) | Migrating from dotfiles to home-manager on Darwin |
-| [Clipboard (Lemonade & OSC 52)](.opencode/skills/osc52-clipboard/SKILL.md) | Copy/paste over mosh/SSH via lemonade TCP bridge |
+| [Clipboard (gclpr & OSC 52)](.opencode/skills/osc52-clipboard/SKILL.md) | Copy/paste over mosh/SSH via gclpr TCP bridge |
 | [Screenshot to Devbox](.opencode/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote OpenCode |
 | [OpenCode Agents](.opencode/skills/opencode-agents/SKILL.md) | Agent set rationale, what was kept/removed and why |
 | [Tracking Cache Costs](.opencode/skills/tracking-cache-costs/SKILL.md) | Measuring OpenCode prompt caching efficiency |

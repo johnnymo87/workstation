@@ -22,8 +22,8 @@ Port forwarding runs via **persistent SSH tunnel launchd agents** on macOS (alwa
 
 | Agent | SSH Host | Purpose |
 |-------|----------|---------|
-| `devbox-dev-tunnel` | `devbox-tunnel` | Dev ports + lemonade + CDP + chatgpt-relay |
-| `cloudbox-dev-tunnel` | `cloudbox-tunnel` | Dev ports + lemonade + CDP + chatgpt-relay |
+| `devbox-dev-tunnel` | `devbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay |
+| `cloudbox-dev-tunnel` | `cloudbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay |
 | `devbox-gpg-tunnel` | `devbox-gpg-tunnel` | GPG agent forwarding only |
 | `cloudbox-gpg-tunnel` | `cloudbox-gpg-tunnel` | GPG agent forwarding only |
 
@@ -53,7 +53,7 @@ Ports are configured in `scripts/update-ssh-config.sh` and carried by the persis
 | 9222 | Remote (-R) | Chrome DevTools Protocol - project A |
 | 9223 | Remote (-R) | Chrome DevTools Protocol - project B |
 | 3033 | Remote (-R) | chatgpt-relay (`/ask-question` CLI) |
-| 2489 | Remote (-R) | Lemonade clipboard (copy/paste to macOS) |
+| 2850 | Remote (-R) | gclpr clipboard (copy/paste to macOS) |
 
 ### cloudbox-tunnel ports
 
@@ -65,7 +65,7 @@ Ports are configured in `scripts/update-ssh-config.sh` and carried by the persis
 | 9222 | Remote (-R) | Chrome DevTools Protocol - project A |
 | 9223 | Remote (-R) | Chrome DevTools Protocol - project B |
 | 3033 | Remote (-R) | chatgpt-relay (`/ask-question` CLI) |
-| 2489 | Remote (-R) | Lemonade clipboard (copy/paste to macOS) |
+| 2850 | Remote (-R) | gclpr clipboard (copy/paste to macOS) |
 
 **Local forwards (-L):** devbox/cloudbox service → accessible on macOS localhost
 **Remote forwards (-R):** macOS service → accessible on remote localhost
