@@ -38,11 +38,13 @@ This forwards port 2850 on the remote host to port 2850 on the local macOS machi
 tmux is configured to pipe copy-mode selections to gclpr, and also accept OSC 52 from apps as a fallback:
 
 ```tmux
-set -s copy-command 'gclpr copy'    # Send copy-mode selections to gclpr
+if-shell 'test -f ~/.gclpr/key' 'set -s copy-command "gclpr copy"'  # Remote hosts only
 set -s set-clipboard on              # Accept OSC 52 from apps (fallback)
 set -gq allow-passthrough on         # tmux 3.3+ passthrough support
 set -as terminal-features ',xterm-256color:clipboard'  # Ms capability
 ```
+
+The `if-shell` guard ensures the copy-command is only set on remote hosts that have the gclpr client key. On macOS, tmux uses pbcopy natively.
 
 ### 4. Neovim (`assets/nvim/lua/user/settings.lua`)
 
