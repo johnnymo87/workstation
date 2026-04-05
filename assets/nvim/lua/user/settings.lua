@@ -3,20 +3,20 @@ vim.g.mapleader = ","
 vim.g.maplocalleader = " "
 
 -- Clipboard: use system clipboard
--- On remote hosts, use lemonade (TCP-based, works through mosh).
--- Falls back to OSC 52 if lemonade isn't available, then to default
+-- On remote hosts, use gclpr (TCP-based, works through mosh).
+-- Falls back to OSC 52 if gclpr isn't available, then to default
 -- provider detection (pbcopy/pbpaste on macOS).
 local is_remote = vim.fn.has("mac") == 0 and vim.fn.has("macunix") == 0
-if vim.fn.executable("lemonade") == 1 and is_remote then
+if vim.fn.executable("gclpr") == 1 and is_remote then
   vim.g.clipboard = {
-    name = "lemonade",
+    name = "gclpr",
     copy = {
-      ["+"] = { "lemonade", "copy", "--no-fallback-messages" },
-      ["*"] = { "lemonade", "copy", "--no-fallback-messages" },
+      ["+"] = { "gclpr", "copy" },
+      ["*"] = { "gclpr", "copy" },
     },
     paste = {
-      ["+"] = { "lemonade", "paste", "--no-fallback-messages" },
-      ["*"] = { "lemonade", "paste", "--no-fallback-messages" },
+      ["+"] = { "gclpr", "paste" },
+      ["*"] = { "gclpr", "paste" },
     },
   }
 elseif vim.env.SSH_TTY then

@@ -61,8 +61,8 @@ Host devbox-tunnel
     RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
-    # Lemonade clipboard (remote copy/paste to macOS)
-    RemoteForward 2489 127.0.0.1:2489
+    # gclpr clipboard (remote copy/paste to macOS)
+    RemoteForward 2850 127.0.0.1:2850
 
 # Persistent GPG agent forwarding (kept alive by launchd on macOS).
 # GPG forwarding is isolated here so it doesn't contend with interactive
@@ -127,8 +127,8 @@ Host cloudbox-tunnel
     RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
-    # Lemonade clipboard (remote copy/paste to macOS)
-    RemoteForward 2489 127.0.0.1:2489
+    # gclpr clipboard (remote copy/paste to macOS)
+    RemoteForward 2850 127.0.0.1:2850
 
 # Persistent GPG agent forwarding (kept alive by launchd on macOS).
 Host cloudbox-gpg-tunnel
