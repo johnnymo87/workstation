@@ -99,9 +99,10 @@ in
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
 
-   # Plugins (SRP: non-interactive env, compaction context, subagent routing)
+   # Plugins (SRP: non-interactive env, compaction context, subagent routing, mcp-reconnect)
     xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
     xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+    xdg.configFile."opencode/plugins/mcp-reconnect.ts".source = "${assetsPath}/opencode/plugins/mcp-reconnect.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
