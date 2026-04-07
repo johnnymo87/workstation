@@ -3,15 +3,13 @@ import type { Plugin } from "@opencode-ai/plugin"
 const MCP_NAME = "tec"
 const MCP_PROBE_URL = "http://localhost:4006/mcp"
 const TOOL_PREFIX = "mcp_tec_"
-const TTL_MS = 30_000
+const HEALTHY_TTL_MS = 30_000
 
 let lastHealthy = 0
+let reconnecting = false
 
-async function isReachable(): Promise<boolean> {
+async function isServerUp(): Promise<boolean> {
   try {
-    // GET /mcp returns 406 (Not Acceptable) when FastMCP is alive.
-    // Any HTTP response means the server is up. Only connection
-    // refused / timeout means it's down.
     await fetch(MCP_PROBE_URL, { signal: AbortSignal.timeout(2000) })
     return true
   } catch {
@@ -22,24 +20,32 @@ async function isReachable(): Promise<boolean> {
 const plugin: Plugin = async (ctx) => ({
   "tool.execute.before": async (input, output) => {
     if (!input.tool.startsWith(TOOL_PREFIX)) return
+    if (reconnecting) return
 
     const now = Date.now()
-    if (now - lastHealthy < TTL_MS) return
+    if (now - lastHealthy < HEALTHY_TTL_MS) return
 
-    if (await isReachable()) {
-      lastHealthy = now
+    // TTL expired — check if server is up, then force a fresh session.
+    // We can't tell from outside whether OpenCode's cached MCP session
+    // ID is still valid (server restart invalidates it), so we
+    // disconnect+reconnect to guarantee a fresh handshake.
+    if (!(await isServerUp())) {
+      // Server truly down — nothing to reconnect to. Let the tool
+      // call fail naturally with a clear error.
       return
     }
 
-    // MCP server unreachable — force reconnect
-    console.log(`[mcp-reconnect] ${MCP_NAME} unreachable, triggering reconnect...`)
+    reconnecting = true
     try {
+      console.log(`[mcp-reconnect] refreshing ${MCP_NAME} session...`)
+      await ctx.client.mcp.disconnect({ path: { name: MCP_NAME } })
       await ctx.client.mcp.connect({ path: { name: MCP_NAME } })
-      console.log(`[mcp-reconnect] ${MCP_NAME} reconnected`)
+      console.log(`[mcp-reconnect] ${MCP_NAME} session refreshed`)
       lastHealthy = Date.now()
     } catch (err) {
-      console.error(`[mcp-reconnect] reconnect failed:`, err)
-      // Let the tool call proceed — it will fail with a clear error
+      console.error(`[mcp-reconnect] refresh failed:`, err)
+    } finally {
+      reconnecting = false
     }
   },
 })
