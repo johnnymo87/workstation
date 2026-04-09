@@ -420,6 +420,8 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       pull.rebase = true;
       commit.gpgsign = true;
       gpg.format = "openpgp";
+      diff.algorithm = "patience";  # Better diffs for code with repeated patterns
+      rerere.enabled = true;        # Remember conflict resolutions for rebase
       alias = {
         st = "status";
         co = "checkout";
@@ -571,6 +573,12 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       ll = "ls -la";
       ".." = "cd ..";
       "..." = "cd ../..";
+      # Git shortcuts (from deprecated-dotfiles)
+      gs = "git status";
+      gco = "git checkout";
+      gd = "git diff";
+      gl = "git log";
+      gp = "git push";
     };
     initExtra = ''
       # Vertex AI: Gemini 3.x models require the "global" endpoint.
@@ -588,6 +596,10 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       export HISTCONTROL=ignoredups:erasedups
       shopt -s histappend
 
+      # Checkout default branch (from deprecated-dotfiles)
+      gcom() {
+        git fetch origin && git checkout "origin/$(git remote show origin | grep 'HEAD branch:' | awk '{ print $3 }')"
+      }
       '';
   };
 
