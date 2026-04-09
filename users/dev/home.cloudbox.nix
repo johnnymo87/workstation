@@ -430,6 +430,9 @@ lib.mkIf isCloudbox {
       ExecStart = "%h/.local/bin/pull-workstation";
       StandardOutput = "journal";
       StandardError = "journal";
+      Nice = 15;                          # Low scheduling priority
+      CPUQuota = "200%";                  # Hard cap at 2 cores (of 4)
+      IOSchedulingClass = "idle";         # Yield IO to interactive work
       Environment = [
         "HOME=%h"
         "PATH=${pkgs.nix}/bin:${pkgs.git}/bin:/run/current-system/sw/bin:/run/wrappers/bin"

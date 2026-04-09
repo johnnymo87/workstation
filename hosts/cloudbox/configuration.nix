@@ -394,6 +394,8 @@ in
     experimental-features = [ "nix-command" "flakes" ];
     trusted-users = [ "root" "@wheel" ];
     auto-optimise-store = true;
+    max-jobs = 2;   # Half of 4 cores — leave capacity for interactive work
+    cores = 2;      # Max 2 cores per individual build derivation
     extra-substituters = [
       "https://devenv.cachix.org"
     ];
@@ -401,6 +403,11 @@ in
       "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw="
     ];
   };
+
+  # Nix daemon scheduling — treat builds as batch work so interactive
+  # sessions (mosh, tmux, opencode) always get CPU/IO priority.
+  nix.daemonCPUSchedPolicy = "batch";
+  nix.daemonIOSchedClass = "idle";
 
   # Garbage collection
   nix.gc = {
@@ -453,12 +460,15 @@ in
     sliceConfig = {
       MemoryHigh = "30G";
       MemorySwapMax = "12G";
+      TasksMax = 512;       # Prevent runaway process fan-out from subagents
     };
   };
 
-  # Protect sshd from OOM killer — always the last thing to die
+  # Protect sshd from OOM killer — always the last thing to die.
+  # CPUWeight > default (100) ensures SSH remains responsive under load.
   systemd.services.sshd.serviceConfig = {
     OOMScoreAdjust = "-1000";
+    CPUWeight = 200;
   };
 
   # earlyoom: last-resort killer when memory is critically low.
