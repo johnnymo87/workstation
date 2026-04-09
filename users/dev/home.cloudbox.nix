@@ -14,6 +14,10 @@ lib.mkIf isCloudbox {
 
   home.stateVersion = "25.11";
 
+  # Constrain vitest worker count — default uses all cores, which starves
+  # opencode sessions and devenv services when tests run in watch mode.
+  home.sessionVariables.VITEST_MAX_WORKERS = "2";  # 4-core box, keep 50% free
+
   # Guard: abort activation if running on the wrong machine.
   # Devbox and cloudbox share arch, user, and home dir -- applying the wrong
   # flake target silently deploys incorrect config (wrong secrets, /persist
