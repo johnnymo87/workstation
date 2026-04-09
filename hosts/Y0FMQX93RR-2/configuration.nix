@@ -37,6 +37,16 @@
   # Primary user (single-user laptop ergonomics)
   system.primaryUser = mac.username;
 
+  # Login shell: set Nix bash as the user's login shell via dscl
+  # Requires knownUsers so nix-darwin's activation script runs chsh.
+  programs.bash.enable = true;
+  environment.shells = [ pkgs.bashInteractive ];
+  users.knownUsers = [ mac.username ];
+  users.users.${mac.username} = {
+    uid = 504;
+    shell = pkgs.bashInteractive;
+  };
+
   # State version (nix-darwin uses integers 1-6)
   system.stateVersion = 6;
 }

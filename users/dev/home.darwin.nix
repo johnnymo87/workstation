@@ -32,7 +32,6 @@ lib.mkIf isDarwin {
       "mise.bashrc"
       "nix.bashrc"
       "nodenv.bashrc"
-      "prompt.bashrc"
       "py.bashrc"
       "rb.bashrc"
       "rust.bashrc"

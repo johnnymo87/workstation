@@ -631,6 +631,12 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     ];
   };
 
+  # Starship prompt
+  programs.starship = {
+    enable = true;
+    enableBashIntegration = true;
+  };
+
   # FZF
   programs.fzf = {
     enable = true;
