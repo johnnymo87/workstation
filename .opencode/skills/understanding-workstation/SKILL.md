@@ -163,6 +163,8 @@ Files using this pattern:
 - `~/.claude/settings.managed.json` → `~/.claude/settings.json`
 - `~/.config/opencode/opencode.managed.json` → `~/.config/opencode/opencode.json`
 
+OpenCode also caches resolved plugin packages under `~/.cache/opencode`. If plugin behavior does not match the version installed in `~/.config/opencode/node_modules`, inspect and clear `~/.cache/opencode` too. Verifying only the config directory can miss a stale runtime plugin copy.
+
 ### mkOutOfStoreSymlink — Out-of-Flake Paths
 
 When `xdg.configFile.*.source` points to a path outside the flake (e.g., a cloned project), Nix pure evaluation fails:
