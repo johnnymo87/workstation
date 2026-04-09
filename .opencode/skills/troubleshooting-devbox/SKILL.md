@@ -1,6 +1,6 @@
 ---
 name: troubleshooting-devbox
-description: Use when SSH connection fails, host key mismatch, NixOS issues, or verifying devbox is properly configured
+description: Use when SSH connection fails, host key mismatch, NixOS issues, CPU/IO contention (high load), or verifying devbox is properly configured
 ---
 
 # Troubleshooting Devbox
@@ -185,6 +185,81 @@ Power cycle if needed:
 
 ```bash
 hcloud server reboot devbox
+```
+
+## CPU / IO Contention (High Load)
+
+### Symptoms
+- Mosh shows "last contact X ago" with blue status bar, but SSH still connects
+- Commands over SSH hang or time out (even `ps`, `top`)
+- Load average far exceeds core count (e.g. load 80 on 16 cores)
+
+### Quick Diagnosis
+
+```bash
+# Check load (reads /proc directly, works even under extreme load)
+ssh devbox 'cat /proc/loadavg'
+
+# Count runnable + blocked processes
+# Format: load1 load5 load15 running/total lastpid
+# "running" >> cores = oversubscribed
+
+# Check memory (if this times out, problem is CPU not memory)
+ssh devbox 'cat /proc/meminfo | head -5'
+
+# Process count by name (lighter than ps/top)
+ssh devbox 'for f in /proc/[0-9]*/comm; do cat "$f" 2>/dev/null; done | sort | uniq -c | sort -rn | head -20'
+```
+
+### Common Causes
+
+1. **Too many opencode subagents** — parallel subagent dispatch triggers concurrent nix evaluations via direnv, each consuming CPU and IO
+2. **pull-workstation rebuild** — home-manager switch compounding an already-loaded system
+3. **devenv services left running** — postgres, BEAM, etc. running 24/7 across multiple projects
+
+### Mitigations In Place
+
+Resource controls prevent this from becoming unrecoverable:
+
+| Layer | Setting | Devbox | Cloudbox |
+|-------|---------|--------|----------|
+| nix-daemon | `CPUSchedulingPolicy` | batch | batch |
+| nix-daemon | `IOSchedulingClass` | idle | idle |
+| nix-daemon | `max-jobs` | 8 (of 16) | 2 (of 4) |
+| nix-daemon | `cores` | 2 | 2 |
+| pull-workstation | `Nice` | 15 | 15 |
+| pull-workstation | `CPUQuota` | 200% | 200% |
+| pull-workstation | `IOSchedulingClass` | idle | idle |
+| user-1000 slice | `TasksMax` | 512 | 512 |
+| sshd | `CPUWeight` | 200 | 200 |
+
+These ensure nix builds and background updates yield to interactive sessions (mosh, tmux, opencode). SSH gets elevated CPU scheduling priority.
+
+### If Load Is Still Too High
+
+If the box is unresponsive despite mitigations:
+
+```bash
+# From macOS — reboot via cloud API (doesn't need SSH)
+hcloud server reboot devbox  # Hetzner devbox
+# For cloudbox: use GCP console or gcloud CLI
+```
+
+Tmux sessions are lost but the load clears. Mosh will reconnect automatically after reboot.
+
+### Post-Mortem Investigation
+
+After a reboot, check the previous boot's journal:
+
+```bash
+# Resource accounting per tmux session
+journalctl -b -1 --no-pager -u "user@1000.service" | grep "Consumed"
+
+# Check for OOM kills
+journalctl -b -1 -k | grep -i "oom\|killed"
+
+# nix-daemon IO during the incident
+journalctl -b -1 -u nix-daemon | tail -5
 ```
 
 ## Disk Space Issues
