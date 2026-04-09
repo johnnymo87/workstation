@@ -321,7 +321,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
           umask 077
           ${pkgs.coreutils}/bin/base64 -d /run/secrets/gclpr_private_key > "$HOME/.gclpr/key.tmp"
         )
-        mv "$HOME/.gclpr/key.tmp" "$HOME/.gclpr/key"
+        mv -f "$HOME/.gclpr/key.tmp" "$HOME/.gclpr/key"
         chmod 400 "$HOME/.gclpr/key"
       else
         echo "deployGclprKey: skipping (secret not available)"
