@@ -409,9 +409,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
   programs.git = {
     enable = true;
     signing.key = "0C0EF2DF7ADD5DD9";
-    ignores = [
-      "Session.vim"  # vim-obsession session files (for tmux-resurrect)
-    ];
+    ignores = [];
     settings = {
       user.name = "Jonathan Mohrbacher";
       user.email = "jonathan.mohrbacher@gmail.com";
@@ -508,7 +506,6 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     vimAlias = true;
 
     plugins = with pkgs.vimPlugins; [
-      vim-obsession
       tabby-nvim
       goyo-vim
       mini-align
@@ -540,7 +537,6 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     extraLuaConfig = ''
       require("user.settings")
       require("user.mappings")
-      require("user.sessions")          -- tmux-resurrect session management
       require("user.tabby")             -- OpenCode session tab labels
       require("user.cursor_highlight")  -- Ctrl+K cursor crosshair toggle
       require("user.telescope")         -- treesitter + telescope + keymaps
