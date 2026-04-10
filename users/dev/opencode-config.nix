@@ -35,7 +35,7 @@ let
           echo "${name}: could not read atlassian site" >&2
           exit 1
         fi
-        exec npx -y mcp-remote https://mcp.atlassian.com/v1/mcp --resource "https://''${SITE}/" ${toString port}
+        exec npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v1/mcp ${toString port} --resource "https://''${SITE}/"
       '';
   };
 
