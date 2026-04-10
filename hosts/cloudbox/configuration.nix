@@ -520,7 +520,7 @@
     sliceConfig = {
       MemoryHigh = "30G";
       MemorySwapMax = "12G";
-      TasksMax = 512;       # Prevent runaway process fan-out from subagents
+      TasksMax = 4096;      # Enough for Bazel's symlink-forest threads; still caps runaway fan-out
     };
   };
 
