@@ -276,6 +276,110 @@
     };
   };
 
+  # Reap stale opencode processes every 6 hours.
+  # Two classes of opencode processes accumulate and leak memory:
+  # 1. Headless sessions (opencode -s <id>): /launched from Telegram, often forgotten.
+  #    Killed when the session's time_updated in the DB is >24h ago.
+  # 2. Interactive sessions (bare opencode): started in tmux, left running.
+  #    Killed when the process is >24h old.
+  # opencode-serve is excluded (managed by nightly-restart-background).
+  # SIGKILL is used directly because opencode ignores SIGTERM.
+  systemd.services.reap-stale-opencode = {
+    description = "Kill stale opencode processes (>24h idle or old)";
+    path = [ pkgs.procps pkgs.gnugrep pkgs.coreutils pkgs.sqlite ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "root";
+    };
+    script = ''
+      THRESHOLD_SECONDS=86400  # 24 hours
+      NOW=$(date +%s)
+      NOW_MS=$((NOW * 1000))
+      CUTOFF_MS=$(( (NOW - THRESHOLD_SECONDS) * 1000 ))
+      DB="/home/dev/.local/share/opencode/opencode.db"
+      KILLED=0
+
+      HAS_DB=true
+      if [ ! -f "$DB" ]; then
+        echo "opencode DB not found at $DB, skipping DB-based detection"
+        HAS_DB=false
+      fi
+
+      # Helper: check if process is older than threshold
+      is_old_process() {
+        local pid=$1
+        local start_time
+        start_time=$(stat -c %Y /proc/$pid 2>/dev/null) || return 1
+        local age=$((NOW - start_time))
+        if [ "$age" -gt "$THRESHOLD_SECONDS" ]; then
+          echo $((age / 3600))
+          return 0
+        fi
+        return 1
+      }
+
+      # Find all opencode processes
+      for pid in $(pgrep -f 'opencode' -u dev || true); do
+        # Read cmdline
+        cmdline=$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null || continue)
+
+        # Skip opencode serve
+        if echo "$cmdline" | grep -qw 'serve'; then
+          continue
+        fi
+
+        # Skip non-opencode processes (e.g. grep itself, earlyoom)
+        if ! echo "$cmdline" | grep -q '/opencode'; then
+          continue
+        fi
+
+        # Check if this is a headless session (has -s <session_id>)
+        session_id=$(echo "$cmdline" | grep -oP '(?<=-s )\S+' || true)
+
+        if [ -n "$session_id" ] && [ "$HAS_DB" = true ]; then
+          # Headless session: check DB for session staleness
+          last_updated=$(sqlite3 "$DB" \
+            "SELECT time_updated FROM session WHERE id = '$session_id';" 2>/dev/null || echo "0")
+
+          if [ -z "$last_updated" ] || [ "$last_updated" = "0" ]; then
+            # Session not in DB — fall back to process age
+            age_hours=$(is_old_process "$pid") && {
+              echo "PID $pid: session $session_id not in DB, process ''${age_hours}h old, killing"
+              kill -9 "$pid" 2>/dev/null && KILLED=$((KILLED + 1))
+            } || echo "PID $pid: session $session_id not in DB but process is young, keeping"
+          elif [ "$last_updated" -lt "$CUTOFF_MS" ]; then
+            age_hours=$(( (NOW_MS - last_updated) / 1000 / 3600 ))
+            echo "PID $pid: session $session_id last updated ''${age_hours}h ago, killing"
+            kill -9 "$pid" 2>/dev/null && KILLED=$((KILLED + 1))
+          else
+            echo "PID $pid: session $session_id is recent, keeping"
+          fi
+        else
+          # Interactive session (or headless without DB): check process age
+          age_hours=$(is_old_process "$pid") && {
+            echo "PID $pid: opencode process ''${age_hours}h old, killing"
+            kill -9 "$pid" 2>/dev/null && KILLED=$((KILLED + 1))
+          } || {
+            start_time=$(stat -c %Y /proc/$pid 2>/dev/null || echo "$NOW")
+            age_hours=$(( (NOW - start_time) / 3600 ))
+            echo "PID $pid: opencode process ''${age_hours}h old, keeping"
+          }
+        fi
+      done
+
+      echo "Reaped $KILLED stale opencode processes"
+    '';
+  };
+
+  systemd.timers.reap-stale-opencode = {
+    description = "Reap stale opencode processes every 6 hours";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 00/6:30:00";  # Every 6h at :30 past (offset from nightly-restart at :00)
+      Persistent = true;
+    };
+  };
+
   systemd.services.my-podcasts-consumer = {
     description = "My Podcasts queue consumer";
     wantedBy = [ "multi-user.target" ];
