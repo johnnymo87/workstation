@@ -21,6 +21,11 @@
     "opencode-beads",
     "@ex-machina/opencode-anthropic-auth"
   ],
+  "lsp": {
+    "kotlin-ls": {
+      "disabled": true
+    }
+  },
   "compaction": {
     "auto": false,
     "prune": false
