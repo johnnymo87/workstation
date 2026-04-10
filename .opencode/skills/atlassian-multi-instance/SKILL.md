@@ -75,3 +75,44 @@ atlassian-alt-mcp = mkAtlassianMcp {
 ```
 
 This keeps org-identifying URLs out of the generated `opencode.managed.json`. The wrapper uses `--resource` to isolate OAuth sessions per instance, so both can run simultaneously.
+
+**Arg ordering matters:** `mcp-remote` parses positional args as `<url> [port] [flags...]`. The callback port MUST come before `--resource`:
+```bash
+# Correct: port as args[1]
+npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v1/mcp 3334 --resource "https://${SITE}/"
+
+# Wrong: --resource as args[1], port is never parsed
+npx -y mcp-remote https://mcp.atlassian.com/v1/mcp --resource "https://${SITE}/" 3334
+```
+
+## OAuth Token Cache
+
+`mcp-remote` stores OAuth tokens in `~/.mcp-auth/mcp-remote-${version}/`. Cache is keyed by a hash of the server URL + resource + headers.
+
+**Version-scoped invalidation:** When `mcp-remote` upgrades (e.g., 0.1.37 → 0.1.38), the cache directory name changes and all cached tokens are lost. Pin the version in the wrapper (`mcp-remote@0.1.38`) to prevent `npx -y` from auto-upgrading.
+
+## Troubleshooting MCP "Failed" Status
+
+If toggling an MCP on in OpenCode shows "Failed":
+
+1. **Check the wrapper runs:** Run the nix store path directly (find it in `~/.config/opencode/opencode.json` under `mcp.<name>.command`)
+2. **Check secrets exist:** `cat /run/secrets/atlassian_site` (Linux) or Keychain lookup (macOS)
+3. **Check OAuth tokens:** `ls ~/.mcp-auth/mcp-remote-*/` -- look for `*_tokens.json`
+4. **Re-auth if needed:** Run the wrapper manually, it prints an OAuth URL. Open in browser while SSH tunnel forwards the callback port (3334/3335). The callback URL `localhost:3334/oauth/callback?code=...` tunnels back to the server.
+
+## Re-authenticating OAuth (Headless Server)
+
+When tokens expire or cache is invalidated:
+
+```bash
+# 1. Ensure SSH tunnel is active (ports 3334/3335 forwarded)
+# 2. Clean stale cache
+rm -rf ~/.mcp-auth/mcp-remote-*
+
+# 3. Run wrapper manually (find path from opencode.json mcp.<name>.command)
+timeout 120 /nix/store/...-atlassian-mcp/bin/atlassian-mcp 2>&1
+
+# 4. Copy the authorization URL, open in local browser
+# 5. Complete consent -- callback goes through SSH tunnel
+# 6. Tokens are cached; toggle MCP on in OpenCode
+```
