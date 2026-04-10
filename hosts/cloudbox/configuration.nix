@@ -10,10 +10,6 @@
 #   - Firewall disabled (google-compute-config defers to GCP firewall)
 { config, pkgs, lib, ... }:
 
-let
-  # Feature flags
-  enableLgtm = false;  # AI-powered PR review daemon (flip to true to activate)
-in
 {
   # Allow unfree packages
   nixpkgs.config.allowUnfree = true;
@@ -284,46 +280,6 @@ in
   systemd.targets.pigeon = {
     description = "Pigeon stack (cloudflared + daemon)";
     wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
-  };
-
-  # LGTM — AI-powered PR review via OpenCode
-  # Disabled by default. Set enableLgtm = true below to activate.
-  systemd.services.lgtm-run = lib.mkIf enableLgtm {
-    description = "LGTM PR review cycle";
-    wants = [ "network-online.target" ];
-    after = [ "network-online.target" "opencode-serve.service" ];
-    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.coreutils pkgs.bash ];
-    serviceConfig = {
-      Type = "oneshot";
-      User = "dev";
-      Group = "dev";
-      WorkingDirectory = "/home/dev/projects/lgtm";
-      Environment = [
-        "HOME=/home/dev"
-        "LGTM_ORG=food-truck"
-        "OPENCODE_URL=http://127.0.0.1:4096"
-        "LGTM_PROJECTS_DIR=/home/dev/projects"
-      ];
-      ExecStart = "${pkgs.writeShellScript "lgtm-run" ''
-        set -euo pipefail
-        export GH_TOKEN="$(cat /run/secrets/github_api_token)"
-        if [ ! -d /home/dev/projects/lgtm/node_modules ]; then
-          cd /home/dev/projects/lgtm
-          ${pkgs.nodejs}/bin/npm install
-        fi
-        exec ${pkgs.nodejs}/bin/node \
-          /home/dev/projects/lgtm/node_modules/tsx/dist/cli.mjs \
-          /home/dev/projects/lgtm/src/index.ts
-      ''}";
-    };
-  };
-
-  systemd.timers.lgtm-run = lib.mkIf enableLgtm {
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnCalendar = "*:0/10";
-      Persistent = true;
-    };
   };
 
   systemd.services.opencode-serve = {
