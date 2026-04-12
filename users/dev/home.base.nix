@@ -80,34 +80,34 @@ let
     '';
   };
 
-  # Patched opencode with prompt caching (PR #5422) + vim keybindings (PR #12679)
+  # Patched opencode with prompt caching (PR #5422) + vim (PR #12679) + tool fix (PR #16751) + MCP reconnect (#15247)
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-pohuVliGm/h/9TuooW3bRkhpcat1pqbVE3zSSUpIDZU=";
+      hash = "sha256-o+NReVAKbkeZod7PLJONISLvdjWl/pNhJcp8Lyn5x1g=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-SvhaumgY6HyyCaodFpB9CiOb/tHV8OvqfycRfgKcgX4=";
+      hash = "sha256-ijFKxgRGgsn2os03qZ7YIDMeHgSgNuSnKhhZIR3BK5s=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-8OQ1hO9NgRqQlnJ3leFnKRGNt/YLaHHLA5z129FEp2k=";
+      hash = "sha256-Tdpn2zDjpl9Nuc43j7E9eoeEntcBSwqKY1dohnxOmh0=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-HK9wmuHtMWgjbdUqwv93eSGndprm6OGFvs3fEoSTzHw=";
+      hash = "sha256-tTTQhINCuKij6n92Btqrmj6ZvYCwp7nitVTTPdeRf60=";
       isZip = true;
     };
   };
 
   opencode = let
-    version = "1.4.0";
+    version = "1.4.3";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
@@ -145,7 +145,7 @@ let
       runHook postInstall
     '';
     meta = {
-      description = "OpenCode with prompt caching + vim keybindings";
+      description = "OpenCode with prompt caching + vim + tool fix + MCP reconnect";
       homepage = "https://github.com/johnnymo87/opencode-patched";
       mainProgram = "opencode";
     };
