@@ -569,13 +569,16 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
 
       query_escaped="''${query//\'/\'\'}"
 
-      # Execute SQLite query
-      ${pkgs.sqlite}/bin/sqlite3 -header -column "file:$DB_PATH?mode=ro" <<SQL_EOF
+      # Execute SQLite query (pragmas use .output /dev/null to suppress echo)
+      ${pkgs.sqlite}/bin/sqlite3 "file:$DB_PATH?mode=ro" <<SQL_EOF
+      .output /dev/null
       PRAGMA query_only=ON;
       PRAGMA busy_timeout=2000;
       PRAGMA temp_store=MEMORY;
       PRAGMA cache_size=-65536;
-
+      .output stdout
+      .headers on
+      .mode column
       WITH matched AS (
         SELECT
           p.session_id,
