@@ -11,6 +11,21 @@
 { config, pkgs, lib, ... }:
 
 {
+  # Guard: abort activation if applying the wrong host's config.
+  # Devbox and cloudbox share arch and user — applying the wrong flake target
+  # overwrites system identity, secrets paths, and service configs.
+  # Skipped when /etc/hostname doesn't exist yet (fresh nixos-anywhere install).
+  system.activationScripts.assertHostname = ''
+    expected="cloudbox"
+    current="$(cat /etc/hostname 2>/dev/null || echo "")"
+    if [ -n "$current" ] && [ "$current" != "$expected" ]; then
+      echo "FATAL: flake target #$expected is being applied on host '$current'." >&2
+      echo "This would overwrite $current's system config with $expected's." >&2
+      echo "Use: sudo nixos-rebuild switch --flake .#$current" >&2
+      exit 1
+    fi
+  '';
+
   # Allow unfree packages
   nixpkgs.config.allowUnfree = true;
 
