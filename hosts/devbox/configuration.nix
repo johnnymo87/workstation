@@ -459,10 +459,10 @@
   };
 
   systemd.timers.fp-digest = {
-    description = "Run FP Digest daily at 5 PM";
+    description = "Run FP Digest daily at 4:30 AM ET Mon-Fri";
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "Mon..Fri *-*-* 17:00:00";
+      OnCalendar = "Mon..Fri *-*-* 04:30:00";
       Persistent = true;
       RandomizedDelaySec = "5min";
     };
@@ -503,10 +503,10 @@
   };
 
   systemd.timers.the-rundown = {
-    description = "Run The Rundown daily at 5 PM ET Mon-Fri";
+    description = "Run The Rundown daily at 4:30 AM ET Mon-Fri";
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "Mon..Fri *-*-* 17:00:00";
+      OnCalendar = "Mon..Fri *-*-* 04:30:00";
       Persistent = true;
       RandomizedDelaySec = "5min";
     };
@@ -541,10 +541,10 @@
   };
 
   systemd.timers.sync-sources = {
-    description = "Sync source caches daily at 4:30 PM ET (before podcasts)";
+    description = "Sync source caches daily at 4:00 AM ET (before podcasts)";
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "*-*-* 16:30:00";
+      OnCalendar = "*-*-* 04:00:00";
       Persistent = true;
       RandomizedDelaySec = "5min";
     };
