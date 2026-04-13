@@ -462,6 +462,143 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     source = "${assetsPath}/gclpr/key.pub";
   };
 
+  # OpenCode session history search CLI
+  home.file.".local/bin/oc-search" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      set -euo pipefail
+
+      show_help() {
+        cat <<'HELP_EOF'
+      Usage: oc-search [OPTIONS] QUERY
+
+      Search OpenCode session history for QUERY.
+
+      Options:
+        --types TYPES    Comma-separated list of part types to search (default: tool)
+        --all            Search all part types (ignores --types)
+        -h, --help       Show this help message
+      HELP_EOF
+      }
+
+      types="tool"
+      search_all=false
+      query=""
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -h|--help)
+            show_help
+            exit 0
+            ;;
+          --types)
+            if [[ $# -gt 1 && ! "$2" == -* ]]; then
+              types="$2"
+              shift 2
+            else
+              echo "Error: --types requires an argument." >&2
+              show_help >&2
+              exit 1
+            fi
+            ;;
+          --types=*)
+            types="''${1#*=}"
+            shift
+            ;;
+          --all)
+            search_all=true
+            shift
+            ;;
+          --)
+            shift
+            for arg in "$@"; do
+              if [[ -n "$query" ]]; then
+                echo "Error: Multiple queries provided." >&2
+                show_help >&2
+                exit 1
+              fi
+              query="$arg"
+            done
+            break
+            ;;
+          -*)
+            echo "Unknown option: $1" >&2
+            show_help >&2
+            exit 1
+            ;;
+          *)
+            if [[ -n "$query" ]]; then
+              echo "Error: Multiple queries provided ('$query' and '$1')" >&2
+              show_help >&2
+              exit 1
+            fi
+            query="$1"
+            shift
+            ;;
+        esac
+      done
+
+      if [[ -z "$query" ]]; then
+        echo "Error: Search query is required." >&2
+        show_help >&2
+        exit 1
+      fi
+
+      DB_PATH="$HOME/.local/share/opencode/opencode.db"
+
+      if [[ ! -f "$DB_PATH" ]]; then
+        echo "Error: Database not found at $DB_PATH" >&2
+        exit 1
+      fi
+
+      type_filter=""
+      if [[ "$search_all" == false ]]; then
+        IFS=',' read -ra type_array <<< "$types"
+        in_list=""
+        for t in "''${type_array[@]}"; do
+          t_clean="''${t//\'/}"
+          if [[ -z "$in_list" ]]; then
+            in_list="'$t_clean'"
+          else
+            in_list="$in_list, '$t_clean'"
+          fi
+        done
+        type_filter="AND json_extract(p.data, '$.type') IN ($in_list)"
+      fi
+
+      query_escaped="''${query//\'/\'\'}"
+
+      # Execute SQLite query
+      ${pkgs.sqlite}/bin/sqlite3 -header -column "file:$DB_PATH?mode=ro" <<SQL_EOF
+      PRAGMA query_only=ON;
+      PRAGMA busy_timeout=2000;
+      PRAGMA temp_store=MEMORY;
+      PRAGMA cache_size=-65536;
+
+      WITH matched AS (
+        SELECT
+          p.session_id,
+          COUNT(*) AS match_count,
+          MAX(p.time_created) AS last_match_ms
+        FROM part p
+        WHERE instr(p.data, '$query_escaped') > 0
+          $type_filter
+        GROUP BY p.session_id
+      )
+      SELECT
+        s.slug,
+        substr(s.title, 1, 40) AS title,
+        substr(s.directory, 1, 45) AS directory,
+        datetime(m.last_match_ms / 1000, 'unixepoch', 'localtime') AS last_match,
+        m.match_count AS matches
+      FROM matched m
+      JOIN session s ON s.id = m.session_id
+      ORDER BY m.last_match_ms DESC;
+      SQL_EOF
+    '';
+  };
+
   # common.conf is platform-specific - see home.linux.nix and home.darwin.nix
 
   # Tmux
