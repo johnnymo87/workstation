@@ -576,6 +576,12 @@
     KbdInteractiveAuthentication = false;
     X11Forwarding = false;
     StreamLocalBindUnlink = "yes";  # GPG agent forwarding
+    # Detect dead clients so stale sessions don't hold remote-forwarded
+    # ports (gclpr 2850, CDP 9222/9223, etc.) after a VPN cycle or
+    # network drop.  Without this, orphaned sshd sessions linger
+    # indefinitely and block new tunnel connections from binding.
+    ClientAliveInterval = 30;
+    ClientAliveCountMax = 3;
   };
 
   # Firewall: disabled by google-compute-config.nix (defers to GCP firewall rules)

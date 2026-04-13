@@ -625,6 +625,12 @@
       AllowUsers = [ "dev" ];
       X11Forwarding = false;
       StreamLocalBindUnlink = "yes";
+      # Detect dead clients so stale sessions don't hold remote-forwarded
+      # ports (gclpr 2850, CDP 9222/9223, etc.) after a VPN cycle or
+      # network drop.  Without this, orphaned sshd sessions linger
+      # indefinitely and block new tunnel connections from binding.
+      ClientAliveInterval = 30;
+      ClientAliveCountMax = 3;
     };
   };
 
