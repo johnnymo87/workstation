@@ -19,6 +19,7 @@ let
     "launching-headless-sessions"
     "notify-telegram"
     "preparing-for-compaction"
+    "searching-sessions"
     "using-chatgpt-relay-from-devbox"
     "using-gws"
   ];
