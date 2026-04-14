@@ -26,7 +26,7 @@ let
 
   # Work-only skills (macOS + cloudbox)
   workOnlySkills = [
-    "cleaning-bazel-monorepo-disk"
+    "cleaning-disk"
     "creating-pull-requests"
     "slack-mcp-setup"
     "using-atlassian-cli"
