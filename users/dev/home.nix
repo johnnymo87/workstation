@@ -7,6 +7,7 @@
     ./home.base.nix
     ./home.devbox.nix
     ./home.cloudbox.nix
+    ./disk-cleanup.nix
     ./home.crostini.nix
     ./home.darwin.nix
     ./opencode-config.nix
