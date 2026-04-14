@@ -7,6 +7,22 @@ description: Reclaim disk space on devbox (NixOS) and macOS. Covers Nix store/ge
 
 Systematic disk cleanup for devbox (NixOS) and macOS workstations.
 
+## Automated Cleanup (cloudbox only)
+
+A nightly systemd timer (`disk-cleanup.timer`) runs at 3 AM on cloudbox and handles:
+- Nix garbage collection (system + HM generations, keep latest 3)
+- Merged/abandoned worktree removal (merged into main, or 28+ days old with no remote branch)
+- Orphan Bazel output base cleanup (output bases whose workspace no longer exists)
+- Safe cache removal (Cypress, coursier, pnpm, pip, Playwright, node-gyp, electron)
+- Stale /tmp cleanup (nix-shell, pip, pyright dirs)
+- OpenCode WAL checkpointing
+
+**Check timer status:** `systemctl --user list-timers | grep disk-cleanup`
+**View last run:** `journalctl --user -u disk-cleanup.service --since today`
+**Manual trigger:** `systemctl --user start disk-cleanup.service`
+
+The sections below cover what the timer does NOT handle, plus devbox/macOS manual cleanup.
+
 ## Quick Assessment
 
 ```bash
