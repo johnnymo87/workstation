@@ -20,12 +20,9 @@ digraph pr_lifecycle {
     "Fix (drop/squash/amend)" [shape=box];
     "Create PR" [shape=box];
     "Sleep 5 min" [shape=box];
-    "Check CI" [shape=box];
-    "CI green?" [shape=diamond];
-    "Investigate + fix + push" [shape=box];
-    "Fetch inline comments" [shape=box];
-    "Unresolved comments?" [shape=diamond];
-    "Address comments + push" [shape=box];
+    "Check CI + fetch comments" [shape=box];
+    "Issues found?" [shape=diamond];
+    "Fix + push" [shape=box];
     "Done" [shape=doublecircle];
 
     "Pre-PR checks" -> "Conflicts?";
@@ -39,15 +36,11 @@ digraph pr_lifecycle {
     "Looks right?" -> "Fix (drop/squash/amend)" [label="no"];
     "Fix (drop/squash/amend)" -> "Review commits/diff";
     "Create PR" -> "Sleep 5 min";
-    "Sleep 5 min" -> "Check CI";
-    "Check CI" -> "CI green?";
-    "CI green?" -> "Fetch inline comments" [label="yes"];
-    "CI green?" -> "Investigate + fix + push" [label="no/pending"];
-    "Investigate + fix + push" -> "Sleep 5 min";
-    "Fetch inline comments" -> "Unresolved comments?";
-    "Unresolved comments?" -> "Done" [label="no"];
-    "Unresolved comments?" -> "Address comments + push" [label="yes"];
-    "Address comments + push" -> "Sleep 5 min";
+    "Sleep 5 min" -> "Check CI + fetch comments";
+    "Check CI + fetch comments" -> "Issues found?";
+    "Issues found?" -> "Done" [label="CI green +\nno comments"];
+    "Issues found?" -> "Fix + push" [label="CI failed or\nunresolved comments"];
+    "Fix + push" -> "Sleep 5 min";
 }
 ```
 
@@ -119,22 +112,23 @@ After creating the PR, enter a monitoring loop. No maximum iterations -- loop un
 ### Loop body
 
 1. **Sleep 5 minutes** -- `sleep 300`
-2. **Check CI status**:
-   - GitHub Actions: `gh pr checks <number>`
-   - Azure DevOps: use `az pipelines` commands (discover the right invocation for the repo)
-   - If checks are still running, go back to sleep
-   - If checks failed, investigate the logs, fix the issue, push, go back to sleep
-3. **Fetch inline comments**:
-   ```bash
-   gh api repos/{owner}/{repo}/pulls/{number}/comments \
-     --jq '.[] | {id: .id, user: .user.login, body: .body[:120], path: .path, line: .line}'
-   ```
-   - Use best judgement: if a comment is actionable (from Gemini bot or a colleague), fix the code, push, and reply inline
-   - If a comment needs human decision, surface it to the user
-   - See the `reviewing-github-prs` skill for how to reply to comment threads
+2. **Check CI and comments** (both, every iteration):
+   - **CI status**:
+     - GitHub Actions: `gh pr checks <number>`
+     - Azure DevOps: use `az pipelines` commands (discover the right invocation for the repo)
+     - If failed, investigate logs and fix
+   - **Inline comments**:
+     ```bash
+     gh api repos/{owner}/{repo}/pulls/{number}/comments \
+       --jq '.[] | {id: .id, user: .user.login, body: .body[:120], path: .path, line: .line}'
+     ```
+     - If actionable (Gemini bot or colleague), fix the code and reply inline
+     - If it needs human decision, surface it to the user
+     - See the `reviewing-github-prs` skill for how to reply to comment threads
+3. **If anything was fixed**, push and go back to sleep. Otherwise:
 
 ### Exit condition
 
-Loop ends when **both** are true:
-- All CI checks pass
+Loop ends when **both** are true in the same iteration:
+- All CI checks pass (or are still pending -- sleep again if pending)
 - No unresolved inline comments remain
