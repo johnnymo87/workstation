@@ -614,6 +614,132 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     '';
   };
 
+  # lgtm-sessions: list active OpenCode sessions dispatched by lgtm.
+  # See lgtm-3j8 in ~/projects/lgtm beads tracker for design notes.
+  home.file.".local/bin/lgtm-sessions" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      set -euo pipefail
+
+      OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+      PROJECTS_DIR="''${LGTM_PROJECTS_DIR:-$HOME/projects}"
+
+      CURL="${pkgs.curl}/bin/curl"
+      JQ="${pkgs.jq}/bin/jq"
+      GIT="${pkgs.git}/bin/git"
+
+      # Health check
+      if ! "$CURL" -sf -m 5 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+        echo "OpenCode server not reachable at $OPENCODE_URL" >&2
+        exit 1
+      fi
+
+      # Find lgtm worktrees on disk: ~/projects/<repo>/.worktrees/pr-<N>
+      shopt -s nullglob
+      worktrees=( "$PROJECTS_DIR"/*/.worktrees/pr-[0-9]* )
+      shopt -u nullglob
+
+      if [ ''${#worktrees[@]} -eq 0 ]; then
+        echo "No active lgtm worktrees"
+        exit 0
+      fi
+
+      # Unique project roots (parent dir of .worktrees)
+      declare -A seen_root
+      project_roots=()
+      for wt in "''${worktrees[@]}"; do
+        root="''${wt%/.worktrees/*}"
+        if [ -z "''${seen_root[$root]:-}" ]; then
+          seen_root[$root]=1
+          project_roots+=( "$root" )
+        fi
+      done
+
+      # Resolve org/repo per project root via git remote (cached)
+      declare -A repo_id
+      for root in "''${project_roots[@]}"; do
+        url="$( "$GIT" -C "$root" remote get-url origin 2>/dev/null || true )"
+        # Parse https://github.com/<org>/<repo>(.git) or git@github.com:<org>/<repo>(.git)
+        case "$url" in
+          https://github.com/*)
+            id="''${url#https://github.com/}"
+            ;;
+          git@github.com:*)
+            id="''${url#git@github.com:}"
+            ;;
+          *)
+            id="$(basename "$root")"
+            ;;
+        esac
+        id="''${id%.git}"
+        repo_id[$root]="$id"
+      done
+
+      # Query API per project root and collect sessions whose directory is a
+      # pr-<N> worktree under that root. Build TSV: updated_ms\tcreated_ms\trepo_id\tpr_num\tsession_id
+      now_ms=$(( $(date +%s) * 1000 ))
+      tsv=""
+      for root in "''${project_roots[@]}"; do
+        body="$( "$CURL" -sf -m 10 -H "x-opencode-directory: $root" "$OPENCODE_URL/session" || echo "[]" )"
+        prefix="$root/.worktrees/pr-"
+        rows="$(
+          printf '%s' "$body" | "$JQ" -r --arg prefix "$prefix" --arg id "''${repo_id[$root]}" '
+            .[]
+            | select(.directory | startswith($prefix))
+            | (.directory | sub("^.*/pr-"; "")) as $tail
+            | select($tail | test("^[0-9]+$"))
+            | [ .time.updated, .time.created, $id, $tail, .id ]
+            | @tsv
+          '
+        )"
+        if [ -n "$rows" ]; then
+          tsv="$tsv$rows"$'\n'
+        fi
+      done
+
+      # Strip trailing blank line
+      tsv="''${tsv%$'\n'}"
+
+      if [ -z "$tsv" ]; then
+        echo "No active lgtm sessions"
+        exit 0
+      fi
+
+      # Format relative time from epoch ms
+      fmt_ago() {
+        local ms="$1"
+        local secs=$(( (now_ms - ms) / 1000 ))
+        if [ "$secs" -lt 0 ]; then secs=0; fi
+        if [ "$secs" -lt 60 ]; then
+          echo "''${secs}s ago"
+        elif [ "$secs" -lt 3600 ]; then
+          echo "$(( secs / 60 ))m ago"
+        elif [ "$secs" -lt 86400 ]; then
+          echo "$(( secs / 3600 ))h ago"
+        else
+          echo "$(( secs / 86400 ))d ago"
+        fi
+      }
+
+      # Sort by updated desc and render table
+      printf '%-50s  %-12s  %-12s  %s\n' "PR" "CREATED" "UPDATED" "SESSION"
+      count=0
+      while IFS=$'\t' read -r updated created repo_full pr_num sid; do
+        [ -z "$updated" ] && continue
+        printf '%-50s  %-12s  %-12s  %s\n' \
+          "''${repo_full}#''${pr_num}" \
+          "$(fmt_ago "$created")" \
+          "$(fmt_ago "$updated")" \
+          "$sid"
+        count=$(( count + 1 ))
+      done < <(printf '%s\n' "$tsv" | sort -t$'\t' -k1,1nr)
+
+      echo
+      echo "$count session(s). Attach: opencode attach $OPENCODE_URL --session <ID>"
+    '';
+  };
+
   # common.conf is platform-specific - see home.linux.nix and home.darwin.nix
 
   # Tmux
