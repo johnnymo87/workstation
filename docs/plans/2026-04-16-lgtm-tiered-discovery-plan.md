@@ -1,6 +1,22 @@
 # LGTM Tiered Discovery Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
+>
+> **POST-COMPACTION RESUMPTION CONTEXT:**
+> - Beads issue: `lgtm-89q` (P1)
+> - Design doc: `workstation/docs/plans/2026-04-16-lgtm-tiered-discovery-design.md`
+> - Previous superseded design: `workstation/docs/plans/2026-04-16-lgtm-scoped-discovery-design.md` (env-var based, already implemented and shipped)
+> - The codebase ALREADY has: `ScopeEntry` type, `LGTM_SCOPE` env parsing, `parseScope`/`filterByScope`/`deriveOrgs` functions, repo+path filtering. This plan REPLACES the config layer (env var -> YAML) and EXTENDS discovery (single-tier -> two-tier).
+> - User wants subagent-driven execution (in-session, fresh subagent per task, spec review after each)
+> - Branch: `v2` in lgtm repo (johnnymo87/lgtm), `main` in workstation
+> - LGTM is currently DISABLED in production (`enableLgtm = false` in cloudbox configuration.nix). Do NOT enable it as part of this work.
+> - Key user decisions from brainstorming:
+>   - Tier 1 = review-requested (always on, any author)
+>   - Tier 2 authors: alice, bob, charlie, dave, erin, frank, grace, dependabot[bot]
+>   - Tier 2 repos: see lgtm.yml in Task 1
+>   - YAML over env vars (env var soup was getting unreadable)
+>   - Skip drafts, skip self-authored, skip already-approved
+> - Verification: `npm test` should show all tests passing after each task. Currently 42 tests pass at HEAD (commit `6329024` on lgtm v2).
 
 **Goal:** Replace LGTM's env-var-based scope with a YAML config file and add tiered PR discovery (tier 1: review-requested, tier 2: author + repo/path allowlist with draft/self/approval filters).
 
