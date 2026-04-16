@@ -11,7 +11,7 @@
 { config, pkgs, lib, ... }:
 
 let
-  enableLgtm = false;  # AI-powered PR review daemon (flip to true to activate)
+  enableLgtm = true;  # AI-powered PR review daemon (flip to true to activate)
 in
 {
   # Guard: abort activation if applying the wrong host's config.
