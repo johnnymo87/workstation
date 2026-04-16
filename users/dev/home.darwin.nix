@@ -199,7 +199,7 @@ lib.mkIf isDarwin {
   # sessions can sign commits without an interactive SSH session.
   # Uses dedicated *-gpg-tunnel SSH hosts that ONLY forward the GPG socket,
   # avoiding port contention with interactive *-tunnel sessions.
-  launchd.agents.devbox-gpg-tunnel = {
+   launchd.agents.devbox-gpg-tunnel = {
     enable = true;
     config = {
       ProgramArguments = [
@@ -213,7 +213,7 @@ lib.mkIf isDarwin {
       ];
       RunAtLoad = true;
       KeepAlive = true;
-      ThrottleInterval = 30;
+      ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-gpg-tunnel.out.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-gpg-tunnel.err.log";
     };
@@ -233,7 +233,7 @@ lib.mkIf isDarwin {
       ];
       RunAtLoad = true;
       KeepAlive = true;
-      ThrottleInterval = 30;
+      ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-gpg-tunnel.out.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-gpg-tunnel.err.log";
     };
@@ -257,7 +257,7 @@ lib.mkIf isDarwin {
       ];
       RunAtLoad = true;
       KeepAlive = true;
-      ThrottleInterval = 30;
+      ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.out.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.err.log";
     };
@@ -277,7 +277,7 @@ lib.mkIf isDarwin {
       ];
       RunAtLoad = true;
       KeepAlive = true;
-      ThrottleInterval = 30;
+      ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.out.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.err.log";
     };
