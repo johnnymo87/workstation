@@ -432,6 +432,11 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       gpg.format = "openpgp";
       diff.algorithm = "patience";  # Better diffs for code with repeated patterns
       rerere.enabled = true;        # Remember conflict resolutions for rebase
+      # Use the gh CLI as the git credential helper for GitHub HTTPS remotes.
+      # Lets headless services (e.g. cloudbox lgtm-run) clone/fetch via HTTPS
+      # without SSH keys; interactive workflows over SSH (git@github.com:) are
+      # unaffected. Reads GH_TOKEN if set, falls back to gh's auth.json.
+      credential."https://github.com".helper = "!${pkgs.gh}/bin/gh auth git-credential";
       alias = {
         st = "status";
         co = "checkout";
