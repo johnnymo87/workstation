@@ -12,10 +12,11 @@
 > - LGTM is currently DISABLED in production (`enableLgtm = false` in cloudbox configuration.nix). Do NOT enable it as part of this work.
 > - Key user decisions from brainstorming:
 >   - Tier 1 = review-requested (always on, any author)
->   - Tier 2 authors: alice, bob, charlie, dave, erin, frank, grace, dependabot[bot]
->   - Tier 2 repos: see lgtm.yml in Task 1
+>   - Tier 2 authors: see `bd show lgtm-89q` notes for real values (this plan uses placeholders since workstation is public)
+>   - Tier 2 repos: see lgtm.yml in Task 1 (placeholder names; replace with real values from `bd show lgtm-89q` notes)
 >   - YAML over env vars (env var soup was getting unreadable)
 >   - Skip drafts, skip self-authored, skip already-approved
+> - **IMPORTANT (placeholder names):** This plan uses fake org/repo/author names (acme, globex, alice/bob/charlie, etc.) because the workstation repo is PUBLIC. The REAL values are in the `lgtm-89q` beads issue notes (lgtm repo is private). Before executing Task 1, run `bd show lgtm-89q` to get the real lgtm.yml content.
 > - Verification: `npm test` should show all tests passing after each task. Currently 42 tests pass at HEAD (commit `6329024` on lgtm v2).
 
 **Goal:** Replace LGTM's env-var-based scope with a YAML config file and add tiered PR discovery (tier 1: review-requested, tier 2: author + repo/path allowlist with draft/self/approval filters).
