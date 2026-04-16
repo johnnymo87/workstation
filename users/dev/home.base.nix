@@ -80,28 +80,28 @@ let
     '';
   };
 
-  # Patched opencode with prompt caching (PR #5422) + vim (PR #12679) + tool fix (PR #16751) + MCP reconnect (#15247)
+  # Patched opencode with prompt caching (PR #5422) + vim (PR #12679) + tool fix (PR #16751) + MCP reconnect (#15247) + Opus 4.7
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-o+NReVAKbkeZod7PLJONISLvdjWl/pNhJcp8Lyn5x1g=";
+      hash = "sha256-JZTTMy4IzC8pMuwxH+8nmpsi+YIzp+hRLWji2wgYjik=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-ijFKxgRGgsn2os03qZ7YIDMeHgSgNuSnKhhZIR3BK5s=";
+      hash = "sha256-4jDqOOvr2pXOqbOjDCCTBtiaikd0yHybvcD76v7zlh8=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-Tdpn2zDjpl9Nuc43j7E9eoeEntcBSwqKY1dohnxOmh0=";
+      hash = "sha256-cMf/gLTLZ3kDWlREY0cQo9z8FbQ6lfJfC0pRJnETEq0=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-tTTQhINCuKij6n92Btqrmj6ZvYCwp7nitVTTPdeRf60=";
+      hash = "sha256-gp0CgH9puex6qV2wfocAUSGGK0bkiK7LPXWLvBRDttk=";
       isZip = true;
     };
   };
