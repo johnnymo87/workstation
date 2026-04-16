@@ -59,7 +59,7 @@ let
   # Model metadata comes from models.dev (auto-fetched by OpenCode); this overlay
   # sets the default model to route through Google Vertex AI.
   opencodeOverlay = lib.optionalAttrs (isDarwin || isCloudbox) {
-    model = "google-vertex-anthropic/claude-opus-4-6@default";
+    model = "google-vertex-anthropic/claude-opus-4-7@default";
 
     mcp = (opencodeBase.mcp or {}) // {
       atlassian = {

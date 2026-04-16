@@ -1,7 +1,7 @@
 ---
 description: Visual QA analyst — analyzes screenshots and UI renders, returns structured verdicts. No tools, just interpretation.
 mode: subagent
-model: anthropic/claude-opus-4-6
+model: anthropic/claude-opus-4-7
 permission:
   "*": deny
   read: allow
