@@ -83,6 +83,13 @@ let
   # Patched opencode with prompt caching (PR #5422) + vim (PR #12679) + tool fix (PR #16751) + MCP reconnect (#15247) + Opus 4.7
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
+  #
+  # Darwin gotcha: the darwin-*.zip assets must be ad-hoc codesigned by the
+  # upstream CI or macOS kernels will SIGKILL the binary with "Killed: 9".
+  # See opencode-patched/.opencode/skills/darwin-signing.md for the full
+  # story (Bun 1.3.12 #29120 regression + the BUN_NO_CODESIGN_MACHO_BINARY
+  # workaround in build-release.yml). If a hash bump here lands a binary
+  # that dies on launch, the upstream workflow has regressed.
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
