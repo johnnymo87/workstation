@@ -316,7 +316,6 @@ in
       WorkingDirectory = "/home/dev/projects/lgtm";
       Environment = [
         "HOME=/home/dev"
-        "LGTM_SCOPE=acme/mono:apps/catalog,apps/storefront,apps/data/streaming,apps/data/legacy-streaming,apps/data/wiki;globex/ops-server"
         "OPENCODE_URL=http://127.0.0.1:4096"
         "LGTM_PROJECTS_DIR=/home/dev/projects"
       ];
