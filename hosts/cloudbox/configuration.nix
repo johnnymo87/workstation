@@ -10,6 +10,9 @@
 #   - Firewall disabled (google-compute-config defers to GCP firewall)
 { config, pkgs, lib, ... }:
 
+let
+  enableLgtm = false;  # AI-powered PR review daemon (flip to true to activate)
+in
 {
   # Guard: abort activation if applying the wrong host's config.
   # Devbox and cloudbox share arch and user — applying the wrong flake target
@@ -295,6 +298,49 @@
   systemd.targets.pigeon = {
     description = "Pigeon stack (cloudflared + daemon)";
     wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
+  };
+
+  # LGTM v2 — context-aware AI PR review via OpenCode
+  # Gated behind enableLgtm flag (default: false). Flip the let-binding
+  # at the top of this file to activate. The service exists in the config
+  # only when enabled, so flake evaluation is unaffected when disabled.
+  systemd.services.lgtm-run = lib.mkIf enableLgtm {
+    description = "LGTM PR review cycle";
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" "opencode-serve.service" ];
+    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.coreutils pkgs.bash ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/lgtm";
+      Environment = [
+        "HOME=/home/dev"
+        "LGTM_ORG=acme"
+        "OPENCODE_URL=http://127.0.0.1:4096"
+        "LGTM_PROJECTS_DIR=/home/dev/projects"
+      ];
+      ExecStart = "${pkgs.writeShellScript "lgtm-run" ''
+        set -euo pipefail
+        export PATH="/home/dev/.nix-profile/bin:/home/dev/.local/bin:$PATH"
+        export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        if [ ! -d /home/dev/projects/lgtm/node_modules ]; then
+          cd /home/dev/projects/lgtm
+          ${pkgs.nodejs}/bin/npm install
+        fi
+        exec ${pkgs.nodejs}/bin/node \
+          /home/dev/projects/lgtm/node_modules/tsx/dist/cli.mjs \
+          /home/dev/projects/lgtm/src/index.ts
+      ''}";
+    };
+  };
+
+  systemd.timers.lgtm-run = lib.mkIf enableLgtm {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*:0/10";
+      Persistent = true;
+    };
   };
 
   systemd.services.opencode-serve = {
