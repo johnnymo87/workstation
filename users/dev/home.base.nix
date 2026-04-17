@@ -924,6 +924,29 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
         cwd="$PWD"
       fi
 
+      # Pre-flight: verify the session exists.
+      #
+      # opencode serve's POST /session/<id>/prompt_async returns 204 No Content
+      # for ANY id, including nonexistent ones — there's no signal in the POST
+      # response that the target was real. So we GET /session/<id> first:
+      # 200 = exists, 404 = not found, anything else = treat as error.
+      check_status="$( "$CURL" -sS -o /dev/null -m 5 -w '%{http_code}' \
+        "$OPENCODE_URL/session/$session_id" )" || {
+        echo "Error: pre-flight GET to opencode serve failed" >&2
+        exit 1
+      }
+
+      if [[ "$check_status" == "404" ]]; then
+        echo "Error: session not found: $session_id" >&2
+        echo "Hint: run 'opencode-send --list' to see available sessions." >&2
+        exit 1
+      fi
+
+      if [[ "$check_status" -lt 200 || "$check_status" -ge 300 ]]; then
+        echo "Error: pre-flight GET returned HTTP $check_status for session $session_id" >&2
+        exit 1
+      fi
+
       # Build JSON body via jq to handle escaping safely
       body="$( "$JQ" -nc --arg text "$message" \
         '{parts: [{type: "text", text: $text}]}' )"

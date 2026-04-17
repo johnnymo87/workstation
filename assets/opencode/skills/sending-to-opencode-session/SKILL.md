@@ -65,11 +65,13 @@ POST http://127.0.0.1:4096/session/<id>/prompt_async
 
 The receiving session sees the message exactly as if a Telegram reply or pigeon-delivered command had arrived: it enters the agent's input stream and triggers a new turn.
 
+Before sending, `opencode-send` does a pre-flight `GET /session/<id>` to verify the target exists. A 404 fails the command with a clear error and a hint to run `--list` — so typos and stale IDs are caught up front.
+
 ## Gotchas
 
-- **Bad session IDs fail silently.** opencode serve returns `204 No Content` for any session ID — including ones that don't exist. `opencode-send` will report success. Always verify your target ID with `--list` first.
 - **You can interrupt a busy session.** If the target is mid-turn, your message lands on the queue and runs after the current turn completes (or alongside, depending on the agent). Avoid sending to an active session unless that's intentional.
 - **Cross-session messages are visible in the target's transcript** as a regular user message. They show up in `/sessions` and `oc-search` like any other prompt.
+- **POST `/session/<id>/prompt_async` returns 204 for any id** (real or fake). That's why the pre-flight GET is necessary — the POST response alone doesn't confirm delivery to a real session.
 
 ## Options
 
