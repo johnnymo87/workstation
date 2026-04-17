@@ -68,6 +68,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Clipboard (gclpr & OSC 52)](.opencode/skills/clipboard/SKILL.md) | Copy/paste over mosh/SSH via gclpr TCP bridge |
 | [Screenshot to Devbox](.opencode/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote OpenCode |
 | [OpenCode Agents](.opencode/skills/opencode-agents/SKILL.md) | Agent set rationale, what was kept/removed and why |
+| [Adding Workstation Skills](.opencode/skills/adding-workstation-skills/SKILL.md) | Where to put new OpenCode skills, how to register/deploy them, common footguns |
 | [Tracking Cache Costs](.opencode/skills/tracking-cache-costs/SKILL.md) | Measuring OpenCode prompt caching efficiency |
 | [Configuring GWS](.opencode/skills/configuring-gws/SKILL.md) | Adding, debugging gws accounts and OAuth credentials |
 | [Scrubbing Company References](.opencode/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
