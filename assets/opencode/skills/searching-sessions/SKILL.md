@@ -23,6 +23,17 @@ oc-search --types tool,text 'authentication'
 oc-search --all 'rules_oci'
 ```
 
+## Resuming a Found Session
+
+Output's first column is the session `id` (e.g. `ses_2645cd242ffewHTsOoDmVVWW9a`). Pass it to `opencode -s` from the session's directory:
+
+```bash
+cd <directory-from-output>
+opencode -s <id-from-output>
+```
+
+The full id is required — slugs are not unique and `opencode -s` won't accept them.
+
 ## How It Works
 
 Queries the global OpenCode SQLite DB at `~/.local/share/opencode/opencode.db`. Searches `part.data` JSON blobs using `instr()` substring matching.

@@ -602,7 +602,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
         GROUP BY p.session_id
       )
       SELECT
-        s.slug,
+        s.id,
         substr(s.title, 1, 40) AS title,
         substr(s.directory, 1, 45) AS directory,
         datetime(m.last_match_ms / 1000, 'unixepoch', 'localtime') AS last_match,
