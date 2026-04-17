@@ -21,49 +21,61 @@ ls "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR"   # must contain client_secret.json + cred
 
 ## Accounts
 
-**Devbox** has two personal accounts with `switch-gws` (a bash function from `home.devbox.nix`):
+The config dir `$GOOGLE_WORKSPACE_CLI_CONFIG_DIR` (or `~/.config/gws/` if unset)
+holds credentials for ONE account at a time. The OAuth client accepts both
+personal and work Google accounts -- whichever you sign in with during
+`gws auth login` becomes the active account.
 
-```bash
-switch-gws default   # jonathan.mohrbacher@gmail.com  -> ~/.config/gws/
-switch-gws alt       # johnnymo87@gmail.com           -> ~/.config/gws-alt/
-gws auth status      # check current account
-```
+**Devbox / Cloudbox / macOS:** single config dir, single active account.
+A `switch-gws` bash function (defined in `home.devbox.nix`) once supported a
+second `~/.config/gws-alt/` profile; verify it still exists before relying on
+it (`type switch-gws` and `ls ~/.config/gws-alt`).
 
-Default is `jonathan.mohrbacher@gmail.com` in new shells.
-
-**Cloudbox** has a single work account. `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` is set
-to `~/.config/gws/` in `home.cloudbox.nix`. No account switching needed.
-
-**macOS** has a single work account (no switching needed).
+**ALWAYS confirm with the user which Google account they want BEFORE running
+`gws auth login`.** The current config dir alone doesn't tell you the intended
+identity -- the previous token may have been minted for a different account
+than the user wants now. Ask explicitly.
 
 ## Re-authenticating (All Platforms)
 
-When `gws auth status` shows `token_valid: false`, re-authenticate:
+When `gws auth status` shows `token_valid: false`, re-authenticate.
+
+**Critical gotchas (learned the hard way):**
+- **Do NOT use `sleep`** -- it hangs in some environments. Check the listener
+  immediately after launch; if it's not up, the launch failed.
+- A bare `nohup ... &` can die when the shell is interrupted, taking the OAuth
+  listener with it. Use `setsid nohup ... < /dev/null > log 2>&1 & disown` to
+  fully detach.
+- Verifying the listener is **mandatory**, not optional. If it's dead, the URL
+  you give the user will 404 on callback and you'll waste their time.
 
 ```bash
-# 1. Start login in the background (spawns a localhost callback server)
-nohup gws auth login > /tmp/gws-auth.log 2>&1 &
+# 1. Confirm with the user: which Google account do they want to authenticate?
 
-# 2. Wait, then grab the URL AND verify the listener is alive
-sleep 2
-cat /tmp/gws-auth.log                   # grab the URL
-# Extract the port from the redirect_uri in the URL, then:
-ss -tlnp | grep <PORT>                  # MUST show a LISTEN line
-# If no listener, kill and retry step 1 -- the server died.
+# 2. Start login fully detached (survives Ctrl+C, no shell session ties)
+rm -f /tmp/gws-auth.log
+setsid nohup gws auth login < /dev/null > /tmp/gws-auth.log 2>&1 & disown
 
-# 3. Give the user the URL to open in their browser
-#    They select the correct Google account and authorize
+# 3. Grab the URL and verify the listener is alive (NO sleep -- check directly)
+cat /tmp/gws-auth.log                   # shows URL with redirect_uri=http://localhost:<PORT>
+ss -tlnp | grep <PORT>                  # MUST show a LISTEN line owned by gws
+# If no listener: server died. Kill stale gws processes and retry step 2.
 
-# 4. The browser redirects to http://localhost:<port>/?code=...
-#    but the browser can't reach the remote machine's localhost.
-#    The user pastes back the full redirect URL from their address bar.
+# 4. Give the user the URL. Confirm again which account they should select.
 
-# 5. Relay the callback locally using curl:
+# 5. Browser redirects to http://localhost:<port>/?code=... which won't load
+#    (localhost = remote machine, not user's laptop). User pastes the full
+#    redirect URL back to you.
+
+# 6. Relay the callback locally with curl:
 curl -s "THE_FULL_REDIRECT_URL_FROM_THE_BROWSER"
 # Should return: <html>...<title>Success</title>...</html>
 
-# 6. Verify:
-gws auth status   # token_valid should now be true
+# 7. Verify and confirm which account got authenticated:
+gws auth status 2>&1 | grep -E "token_valid|project_id|client_id"
+# token_valid: true. The redirect URL also contains hd=<domain> for work
+# accounts (no hd for personal) -- use that to confirm the user got the
+# account they intended.
 ```
 
 This relay step is necessary because the OAuth callback targets `localhost`,
