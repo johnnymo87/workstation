@@ -20,6 +20,7 @@ let
     "notify-telegram"
     "preparing-for-compaction"
     "searching-sessions"
+    "sending-to-opencode-session"
     "using-chatgpt-relay-from-devbox"
     "using-gws"
   ];

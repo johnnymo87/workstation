@@ -740,6 +740,218 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     '';
   };
 
+  # opencode-send: post a prompt into another local OpenCode session.
+  #
+  # Talks directly to opencode serve at http://127.0.0.1:4096 (POST
+  # /session/<id>/prompt_async). Bypasses the pigeon daemon entirely — this is
+  # purely local opencode-to-opencode messaging.
+  #
+  # See assets/opencode/skills/sending-to-opencode-session/SKILL.md for usage.
+  home.file.".local/bin/opencode-send" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      set -euo pipefail
+
+      OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+
+      CURL="${pkgs.curl}/bin/curl"
+      JQ="${pkgs.jq}/bin/jq"
+
+      show_help() {
+        cat <<'HELP_EOF'
+      Usage:
+        opencode-send [OPTIONS] <session-id> <message>
+        opencode-send [OPTIONS] <session-id> -        # read message from stdin
+        opencode-send --list [OPTIONS]                # list local sessions
+
+      Post a text prompt into another OpenCode session running on the local
+      machine. Talks directly to opencode serve via POST /session/<id>/prompt_async.
+
+      Options:
+        --list             List local sessions (id, updated, directory, title)
+        --cwd DIR          Set x-opencode-directory header (default: $PWD)
+        --url URL          opencode serve base URL
+                           (default: $OPENCODE_URL or http://127.0.0.1:4096)
+        -h, --help         Show this help
+
+      Environment:
+        OPENCODE_URL       Override the default opencode serve URL
+
+      Examples:
+        opencode-send --list
+        opencode-send ses_abc123 "please run the tests"
+        echo "long message body" | opencode-send ses_abc123 -
+        cat plan.md | opencode-send --cwd ~/projects/foo ses_abc123 -
+      HELP_EOF
+      }
+
+      mode="send"
+      cwd=""
+      session_id=""
+      message=""
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -h|--help)
+            show_help
+            exit 0
+            ;;
+          --list)
+            mode="list"
+            shift
+            ;;
+          --cwd)
+            if [[ $# -lt 2 ]]; then
+              echo "Error: --cwd requires an argument." >&2
+              exit 1
+            fi
+            cwd="$2"
+            shift 2
+            ;;
+          --cwd=*)
+            cwd="''${1#*=}"
+            shift
+            ;;
+          --url)
+            if [[ $# -lt 2 ]]; then
+              echo "Error: --url requires an argument." >&2
+              exit 1
+            fi
+            OPENCODE_URL="$2"
+            shift 2
+            ;;
+          --url=*)
+            OPENCODE_URL="''${1#*=}"
+            shift
+            ;;
+          --)
+            shift
+            break
+            ;;
+          -*)
+            # Allow bare "-" as the message arg (stdin sentinel)
+            if [[ "$1" == "-" ]]; then
+              break
+            fi
+            echo "Unknown option: $1" >&2
+            show_help >&2
+            exit 1
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+
+      # Health check (cheap and gives a clearer error than a failed POST)
+      if ! "$CURL" -sf -m 5 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+        echo "Error: opencode serve not reachable at $OPENCODE_URL" >&2
+        exit 1
+      fi
+
+      if [[ "$mode" == "list" ]]; then
+        if [[ $# -gt 0 ]]; then
+          echo "Error: --list takes no positional arguments." >&2
+          exit 1
+        fi
+
+        json="$( "$CURL" -sf -m 10 "$OPENCODE_URL/session" )" || {
+          echo "Error: GET $OPENCODE_URL/session failed" >&2
+          exit 1
+        }
+
+        # Render: id, updated (relative), directory, title
+        # Sort by time.updated descending.
+        now_ms="$(date +%s%3N)"
+        printf '%-32s  %-10s  %-40s  %s\n' "ID" "UPDATED" "DIRECTORY" "TITLE"
+        printf '%s' "$json" | "$JQ" -r --argjson now "$now_ms" '
+          sort_by(-.time.updated) | .[] |
+          [.id, (.time.updated // 0 | tostring), (.directory // ""), (.title // "")] |
+          @tsv
+        ' | while IFS=$'\t' read -r id updated dir title; do
+          [ -z "$id" ] && continue
+          secs=$(( (now_ms - updated) / 1000 ))
+          if [ "$secs" -lt 0 ]; then secs=0; fi
+          if   [ "$secs" -lt 60 ];    then ago="''${secs}s"
+          elif [ "$secs" -lt 3600 ];  then ago="$(( secs / 60 ))m"
+          elif [ "$secs" -lt 86400 ]; then ago="$(( secs / 3600 ))h"
+          else                              ago="$(( secs / 86400 ))d"
+          fi
+          # Truncate long fields for table neatness
+          dir_short="''${dir:0:40}"
+          title_short="''${title:0:60}"
+          printf '%-32s  %-10s  %-40s  %s\n' "$id" "$ago" "$dir_short" "$title_short"
+        done
+        exit 0
+      fi
+
+      # Send mode: need <session-id> <message>
+      if [[ $# -lt 1 ]]; then
+        echo "Error: session-id is required." >&2
+        show_help >&2
+        exit 1
+      fi
+      session_id="$1"
+      shift
+
+      if [[ $# -lt 1 ]]; then
+        echo "Error: message is required (or pass '-' to read from stdin)." >&2
+        show_help >&2
+        exit 1
+      fi
+
+      if [[ "$1" == "-" ]]; then
+        message="$(cat)"
+      else
+        message="$1"
+      fi
+      shift || true
+
+      if [[ $# -gt 0 ]]; then
+        echo "Error: unexpected extra arguments: $*" >&2
+        echo "Hint: quote multi-word messages." >&2
+        exit 1
+      fi
+
+      if [[ -z "$message" ]]; then
+        echo "Error: message is empty." >&2
+        exit 1
+      fi
+
+      # Default cwd to current directory if not specified
+      if [[ -z "$cwd" ]]; then
+        cwd="$PWD"
+      fi
+
+      # Build JSON body via jq to handle escaping safely
+      body="$( "$JQ" -nc --arg text "$message" \
+        '{parts: [{type: "text", text: $text}]}' )"
+
+      http_status="$( "$CURL" -sS -o /tmp/opencode-send-resp.$$ -w '%{http_code}' \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -H "x-opencode-directory: $cwd" \
+        --data "$body" \
+        "$OPENCODE_URL/session/$session_id/prompt_async" )" || {
+        echo "Error: POST to opencode serve failed" >&2
+        rm -f /tmp/opencode-send-resp.$$
+        exit 1
+      }
+
+      if [[ "$http_status" -lt 200 || "$http_status" -ge 300 ]]; then
+        echo "Error: opencode serve returned HTTP $http_status" >&2
+        cat /tmp/opencode-send-resp.$$ >&2 || true
+        echo >&2
+        rm -f /tmp/opencode-send-resp.$$
+        exit 1
+      fi
+
+      rm -f /tmp/opencode-send-resp.$$
+      echo "Sent to $session_id (cwd=$cwd, ''${#message} chars)"
+    '';
+  };
+
   # common.conf is platform-specific - see home.linux.nix and home.darwin.nix
 
   # Tmux
