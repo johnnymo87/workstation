@@ -14,6 +14,7 @@ let
 
   # Skills deployed to all platforms
   crossPlatformSkills = [
+    "adding-opencode-skills"
     "ask-question"
     "beads"
     "launching-headless-sessions"
