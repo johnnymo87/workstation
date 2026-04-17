@@ -105,6 +105,16 @@ git diff origin/main...HEAD --stat
 
 Sanity-check: are these the commits and files you expect? Use best judgement -- if something looks wrong (unrelated commits, unexpected files, merge commits from another branch), fix it (drop, squash, amend). If it looks clean, proceed.
 
+**Always compare against `origin/<trunk>`, never local `<trunk>`.** Local `main`/`master` can be ahead of origin (unpushed commits from prior sessions, especially in worktrees where the parent repo's local trunk drifts). `git log master..HEAD` will silently hide stowaway commits, and the rebase in step 1 won't strip them either -- `origin/<trunk>` is already an ancestor of your branch, so rebase is a no-op.
+
+If `git log origin/<trunk>..HEAD --oneline` shows more commits than you authored this session, you have stowaways. Fix:
+
+```bash
+git rebase --onto origin/<trunk> <local-trunk> <your-branch>
+```
+
+This replays only your branch-tip commits onto `origin/<trunk>`, dropping everything between `origin/<trunk>` and `<local-trunk>`.
+
 ## Post-PR Monitoring
 
 After creating the PR, enter a monitoring loop. No maximum iterations -- loop until CI is green and all comments are resolved.
