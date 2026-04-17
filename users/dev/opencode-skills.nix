@@ -30,7 +30,7 @@ let
     "cleaning-disk"
     "creating-pull-requests"
     "slack-mcp-setup"
-    "using-atlassian-cli"
+    "using-atlassian"
     "using-gcloud-bq-cli"
     "working-with-kubernetes"
   ];
@@ -55,18 +55,14 @@ let
       "${assetsPath}/opencode/skills/beads/references/WORKFLOWS.md";
   };
 
-  # using-atlassian-cli has a reference file
-  atlassianReferences = {
-    ".config/opencode/skills/using-atlassian-cli/REFERENCE.md".source =
-      "${assetsPath}/opencode/skills/using-atlassian-cli/REFERENCE.md";
-  };
-
-  # fetching-atlassian-content skill + reference
-  fetchingAtlassianSkill = {
-    ".config/opencode/skills/fetching-atlassian-content/SKILL.md".source =
-      "${assetsPath}/opencode/skills/fetching-atlassian-content/SKILL.md";
-    ".config/opencode/skills/fetching-atlassian-content/REFERENCE.md".source =
-      "${assetsPath}/opencode/skills/fetching-atlassian-content/REFERENCE.md";
+  # using-atlassian has a reference file and an executable helper script
+  atlassianExtras = {
+    ".config/opencode/skills/using-atlassian/REFERENCE.md".source =
+      "${assetsPath}/opencode/skills/using-atlassian/REFERENCE.md";
+    ".config/opencode/skills/using-atlassian/confluence-to-md.sh" = {
+      source = "${assetsPath}/opencode/skills/using-atlassian/confluence-to-md.sh";
+      executable = true;
+    };
   };
 
   # Superpowers skills: symlink the entire upstream skills directory
@@ -163,8 +159,7 @@ in
     // superpowersSkills
     // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills
-      // atlassianReferences
-      // fetchingAtlassianSkill
+      // atlassianExtras
     );
 
   # Fetch Confluence-based skills during activation (macOS + cloudbox only)
