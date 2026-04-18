@@ -230,7 +230,7 @@ Resource controls prevent this from becoming unrecoverable:
 | pull-workstation | `Nice` | 15 | 15 |
 | pull-workstation | `CPUQuota` | 200% | 200% |
 | pull-workstation | `IOSchedulingClass` | idle | idle |
-| user-1000 slice | `TasksMax` | 512 | 512 |
+| user-1000 slice | `TasksMax` | 2048 | 512 |
 | sshd | `CPUWeight` | 200 | 200 |
 
 These ensure nix builds and background updates yield to interactive sessions (mosh, tmux, opencode). SSH gets elevated CPU scheduling priority.

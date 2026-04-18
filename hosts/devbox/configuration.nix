@@ -720,7 +720,21 @@
     sliceConfig = {
       MemoryHigh = "12G";
       MemorySwapMax = "6G";
-      TasksMax = 512;       # Prevent runaway process fan-out from subagents
+      # TasksMax bumped from 512 -> 2048 after evidence (eternal-machinery
+      # bead hedl, 2026-04-18) that 512 was too low for the real dev
+      # workload: main BEAM (~48 threads) + Letta (~40) + tec-mcp (~20) +
+      # Codex (~15) + editor + elixir-ls (~20) + concurrent opencode agents
+      # routinely hit 475+/512, and starting a second BEAM (./bin/parlor)
+      # failed with EAGAIN mid-boot. Kernel cgroup pids.events at
+      # user-1000.slice showed 1422 historical fork denials on this cap.
+      # 2048 still provides the "prevent runaway subagent fan-out" safety
+      # property (it is ~18x smaller than systemd's own default per-unit
+      # cap of ~37458 on this box), but leaves real headroom for legitimate
+      # work. Follow-up: move agent processes into a sibling agents.slice
+      # with its own tighter cap so fan-out is fenced, not starving dev
+      # daemons. See docs/plans/research/2026-04-18-devbox-taskmax-devenv-vs-docker-answer.md
+      # in the eternal-machinery repo for full analysis.
+      TasksMax = 2048;
     };
   };
 
