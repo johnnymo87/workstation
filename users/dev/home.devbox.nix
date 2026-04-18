@@ -388,4 +388,32 @@ lib.mkIf isDevbox {
       WantedBy = [ "timers.target" ];
     };
   };
+
+  # Sibling slices under user@1000.service for explicit placement of
+  # agent workloads and devenv stacks. Processes do NOT land here
+  # automatically — they're reached via systemd-run --user --scope
+  # --slice=agents.slice ... (see bin/agent-run, bin/devenv-up in the
+  # eternal-machinery repo).
+  #
+  # PIDs-only for phase 1 per the design doc. No memory or CPU caps;
+  # the parent user-1000.slice already has MemoryHigh=12G and
+  # MemorySwapMax=6G, which is sufficient.
+  #
+  # See docs/plans/2026-04-18-agents-slice-hierarchy-design.md (Phase 0)
+  # in the eternal-machinery repo.
+  systemd.user.slices = {
+    agents = {
+      Unit.Description = "AI agent workloads (fan-out fence)";
+      Slice = {
+        TasksMax = 512;
+      };
+    };
+
+    dev-daemons = {
+      Unit.Description = "Interactive dev daemons (devenv stacks)";
+      Slice = {
+        TasksMax = 1536;
+      };
+    };
+  };
 }
