@@ -90,6 +90,33 @@ With the SSH reverse tunnel, the default works. If using a different setup:
 export ASK_QUESTION_SERVER_URL=http://localhost:3033
 ```
 
+## Research Caveats
+
+### DB-layer / schema claims: verify before coding
+
+ChatGPT-relay answers about database constraints, unique indexes, or
+model fields can be **stale or fabricated**, especially for fast-moving
+projects like Letta. A 2026-04-17 planning pass against Letta 0.16
+(eternal-machinery bead `zvul`) asked whether `server_name` uniqueness
+had been dropped; ChatGPT answered yes. First live run crashed on a
+still-enforced `uix_name_organization_mcp_server` UNIQUE constraint,
+costing a full session of rework.
+
+**Before relying on a schema claim, verify against one of:**
+
+1. The live API (e.g. deliberately POST a second instance, inspect the
+   error shape returned by the server).
+2. The upstream source tree (e.g. `letta/server/db/models.py` or
+   equivalent — a quick GitHub search of the upstream repo usually
+   settles it).
+3. A second ChatGPT pass that is required to cite a file path or
+   migration in the upstream repo, not just "I recall from the
+   changelog...".
+
+Non-schema behavioral claims (how a tool is called, what shape a JSON
+response has) can usually be trusted without extra verification because
+they're immediately falsifiable by writing the code.
+
 ## Troubleshooting
 
 ### "Server not running or not responding"
