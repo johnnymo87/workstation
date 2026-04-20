@@ -44,4 +44,38 @@ describe("findActiveModel", () => {
     })
     expect(result).toBeNull()
   })
+
+  it("returns null when the fetch itself throws (network error)", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("network down"))
+    const result = await findActiveModel({
+      fetch: mockFetch,
+      serverUrl: new URL("http://localhost:4096"),
+      sessionID: "s1",
+    })
+    expect(result).toBeNull()
+  })
+
+  it("returns null when the response body is not valid JSON", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response("not json at all", { status: 200 }),
+    )
+    const result = await findActiveModel({
+      fetch: mockFetch,
+      serverUrl: new URL("http://localhost:4096"),
+      sessionID: "s1",
+    })
+    expect(result).toBeNull()
+  })
+
+  it("returns null when the parsed JSON is not an array", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ unexpected: "shape" }), { status: 200 }),
+    )
+    const result = await findActiveModel({
+      fetch: mockFetch,
+      serverUrl: new URL("http://localhost:4096"),
+      sessionID: "s1",
+    })
+    expect(result).toBeNull()
+  })
 })
