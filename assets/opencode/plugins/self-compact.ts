@@ -73,3 +73,21 @@ export function createSelfCompactTool(deps: {
     },
   }
 }
+
+export function createOnCompacted(deps: {
+  pending: Map<string, PendingResume>
+  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
+}) {
+  return async (input: { event: { type: string; properties?: { sessionID?: string } } }) => {
+    if (input.event.type !== "session.compacted") return
+    const sessionID = input.event.properties?.sessionID
+    if (!sessionID) return
+    const entry = deps.pending.get(sessionID)
+    if (!entry) return
+    try {
+      await deps.callPromptAsync({ sessionID, text: entry.prompt })
+    } finally {
+      deps.pending.delete(sessionID)
+    }
+  }
+}
