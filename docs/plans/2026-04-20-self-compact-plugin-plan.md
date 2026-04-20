@@ -486,7 +486,7 @@ export function createSelfCompactTool(deps: {
 }
 ```
 
-> **Note:** Originally the parameter type was loose (`{ properties?: { sessionID?: string } }`) on the theory that this avoided coupling to the SDK. During Task 9 wiring it became apparent the loose type was incompatible with the SDK's `Event` discriminated union — variants like `EventServerInstanceDisposed` have unrelated `properties` shapes. Tightening to `{ event: Event }` fixes the assignment AND gives us proper narrowing inside the handler. The runtime `?.` chain stays as defense against future schema changes.
+> **Note (2nd revision):** After Task 9 wiring discovered the original loose shape was incompatible with the SDK's `Event` union, the parameter was first tightened to `{ event: Event }` (commit `29ce36e`) — but that turned out to treat a leaky abstraction as the source of truth (the SDK union is verifiably stale relative to the runtime; pigeon's plugin documents this; opencode's runtime invokes hooks with `input as any`). Final shape: a structural `PluginBusEvent = { type: string; properties?: unknown }` boundary type plus a named `isSessionCompacted` type predicate that imports only `EventSessionCompacted` (one variant, not the full union) from the SDK. Bonus: the tests' redundant `as any` casts on event payloads can come out. Research consult saved at `/tmp/research-opencode-plugin-event-type-answer.md`. Commit `3ec2823`.
 
 **Step 2: Run tests to verify they pass**
 
@@ -519,7 +519,7 @@ describe("createOnCompacted event handler", () => {
     pending.set("s1", { prompt: "x", createdAt: Date.now() })
     const callPromptAsync = vi.fn()
     const handler = createOnCompacted({ pending, callPromptAsync })
-    await handler({ event: { type: "session.idle", properties: { sessionID: "s1" } } } as any)
+    await handler({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
     expect(callPromptAsync).not.toHaveBeenCalled()
     expect(pending.has("s1")).toBe(true)
   })
@@ -528,7 +528,7 @@ describe("createOnCompacted event handler", () => {
     const pending = new Map<string, PendingResume>()
     const callPromptAsync = vi.fn()
     const handler = createOnCompacted({ pending, callPromptAsync })
-    await handler({ event: { type: "session.compacted", properties: { sessionID: "unknown" } } } as any)
+    await handler({ event: { type: "session.compacted", properties: { sessionID: "unknown" } } })
     expect(callPromptAsync).not.toHaveBeenCalled()
   })
 
@@ -539,7 +539,7 @@ describe("createOnCompacted event handler", () => {
     const handler = createOnCompacted({ pending, callPromptAsync })
     await handler({
       event: { type: "session.compacted", properties: { sessionID: "s1" } },
-    } as any)
+    })
     expect(callPromptAsync).toHaveBeenCalledWith({ sessionID: "s1", text: "resume now" })
     expect(pending.has("s1")).toBe(false)
   })
@@ -550,7 +550,7 @@ describe("createOnCompacted event handler", () => {
     const callPromptAsync = vi.fn().mockRejectedValue(new Error("boom"))
     const handler = createOnCompacted({ pending, callPromptAsync })
     await expect(
-      handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } } as any),
+      handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } }),
     ).rejects.toThrow("boom")
     expect(pending.has("s1")).toBe(false)
   })
@@ -580,14 +580,43 @@ git commit -m "test(self-compact): add failing tests for event handler"
 **Step 1: Add factory**
 
 ```ts
+/**
+ * Structural supertype matching any event the plugin bus may deliver. The
+ * runtime hands us arbitrary events (opencode's plugin host invokes hooks
+ * with `input as any`); the SDK's `Event` discriminated union is a
+ * convenience type that's known to lag behind the runtime (pigeon's plugin
+ * documents this). Typing the boundary wider than the SDK union avoids
+ * pretending the union is closed.
+ */
+type PluginBusEvent = {
+  type: string
+  properties?: unknown
+}
+
+/**
+ * Narrows a `PluginBusEvent` to `EventSessionCompacted` if the type
+ * discriminator and the `properties.sessionID` shape both match. Used at
+ * the top of `createOnCompacted`'s handler so all the code below can rely
+ * on `event.properties.sessionID: string` without further casting.
+ */
+function isSessionCompacted(event: PluginBusEvent): event is EventSessionCompacted {
+  if (event.type !== "session.compacted") return false
+  const props = event.properties
+  return (
+    !!props &&
+    typeof props === "object" &&
+    "sessionID" in props &&
+    typeof (props as Record<string, unknown>).sessionID === "string"
+  )
+}
+
 export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
   callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
 }) {
-  return async (input: { event: Event }) => {
-    if (input.event.type !== "session.compacted") return
-    const sessionID = input.event.properties?.sessionID
-    if (!sessionID) return
+  return async ({ event }: { event: PluginBusEvent }) => {
+    if (!isSessionCompacted(event)) return
+    const { sessionID } = event.properties
     const entry = deps.pending.get(sessionID)
     if (!entry) return
     // Remove the entry synchronously BEFORE the await so a re-entrant
@@ -628,7 +657,7 @@ This task glues the factories together into a real `Plugin`. Less test coverage 
 ```ts
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import type { Event } from "@opencode-ai/sdk"
+import type { EventSessionCompacted } from "@opencode-ai/sdk"
 
 // (existing exports above remain)
 
