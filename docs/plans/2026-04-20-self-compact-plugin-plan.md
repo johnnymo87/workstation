@@ -555,6 +555,8 @@ describe("createOnCompacted event handler", () => {
 })
 ```
 
+> **Note:** A fifth test ("removes the pending entry before awaiting callPromptAsync") added during code review to pin the no-double-delivery invariant. See `assets/opencode/plugins/test/self-compact.test.ts` for the canonical version.
+
 **Step 2: Run tests to verify they fail**
 
 Expected: FAIL — `createOnCompacted` undefined.
@@ -586,14 +588,18 @@ export function createOnCompacted(deps: {
     if (!sessionID) return
     const entry = deps.pending.get(sessionID)
     if (!entry) return
-    try {
-      await deps.callPromptAsync({ sessionID, text: entry.prompt })
-    } finally {
-      deps.pending.delete(sessionID)
-    }
+    // Remove the entry synchronously BEFORE the await so a re-entrant
+    // session.compacted event for the same session doesn't observe it
+    // and double-deliver. If callPromptAsync throws, the entry is still
+    // gone — matches MVP design (no automatic retry; user re-invokes the
+    // skill if the prompt fails to deliver).
+    deps.pending.delete(sessionID)
+    await deps.callPromptAsync({ sessionID, text: entry.prompt })
   }
 }
 ```
+
+> **Note:** Synchronous pop (rather than try/finally cleanup) added during code review of the original Task 8 implementation. The original plan version had a race window where two near-simultaneous `session.compacted` events for the same sessionID could both observe the pending entry. The post-review shape eliminates the race AND removes the need for `try/finally`.
 
 **Step 2: Run tests to verify they pass**
 
