@@ -1,3 +1,6 @@
+import type { Plugin } from "@opencode-ai/plugin"
+import { tool } from "@opencode-ai/plugin"
+
 export async function findActiveModel(input: {
   fetch: typeof fetch
   serverUrl: URL
@@ -78,7 +81,7 @@ export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
   callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
 }) {
-  return async (input: { event: { type: string; properties?: { sessionID?: string } } }) => {
+  return async (input: { event: { type: string; properties?: any } }) => {
     if (input.event.type !== "session.compacted") return
     const sessionID = input.event.properties?.sessionID
     if (!sessionID) return
@@ -94,3 +97,90 @@ export function createOnCompacted(deps: {
   }
 }
 
+
+export interface CallContext {
+  fetch: typeof fetch
+  serverUrl: URL
+}
+
+export async function callSummarizeHttp(
+  ctx: CallContext,
+  input: { sessionID: string; providerID: string; modelID: string },
+): Promise<void> {
+  const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/summarize`, ctx.serverUrl)
+  const res = await ctx.fetch(
+    new Request(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        providerID: input.providerID,
+        modelID: input.modelID,
+        auto: false,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    }),
+  )
+  if (!res.ok) throw new Error(`summarize failed: ${res.status} ${await res.text()}`)
+}
+
+export async function callPromptAsyncHttp(
+  ctx: CallContext,
+  input: { sessionID: string; text: string },
+): Promise<void> {
+  const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/prompt_async`, ctx.serverUrl)
+  const res = await ctx.fetch(
+    new Request(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        parts: [{ type: "text", text: input.text }],
+        noReply: false,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    }),
+  )
+  if (!res.ok) throw new Error(`prompt_async failed: ${res.status} ${await res.text()}`)
+}
+
+const plugin: Plugin = async (ctx) => {
+  // Verified path: pigeon's `_client.getConfig().fetch` — captures the in-process
+  // Hono transport in TUI mode while bypassing unreliable generated SDK wrappers.
+  const sdkClientConfig: any = (ctx.client as any)._client?.getConfig?.()
+  const internalFetch: typeof fetch = sdkClientConfig?.fetch ?? globalThis.fetch
+  const callCtx: CallContext = { fetch: internalFetch, serverUrl: ctx.serverUrl }
+  const pending = new Map<string, PendingResume>()
+
+  const toolImpl = createSelfCompactTool({
+    pending,
+    callSummarize: (input) => callSummarizeHttp(callCtx, input),
+    findActiveModel: ({ sessionID }) =>
+      findActiveModel({ fetch: internalFetch, serverUrl: ctx.serverUrl, sessionID }),
+  })
+
+  const onCompacted = createOnCompacted({
+    pending,
+    callPromptAsync: (input) => callPromptAsyncHttp(callCtx, input),
+  })
+
+  return {
+    tool: {
+      self_compact_and_resume: tool({
+        description:
+          "Compact the current session and queue a resumption prompt that will be processed " +
+          "as the first user message of the post-compaction turn. Use this as the final step " +
+          "of the preparing-for-compaction skill, after persisting durable context.",
+        args: {
+          prompt: tool.schema
+            .string()
+            .describe("The resumption prompt to send after compaction completes."),
+        },
+        async execute(args, toolCtx) {
+          return toolImpl.execute(args, { sessionID: toolCtx.sessionID })
+        },
+      }),
+    },
+    event: onCompacted,
+  }
+}
+
+export default plugin

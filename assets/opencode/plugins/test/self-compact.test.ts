@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest"
-import { findActiveModel, createSelfCompactTool, createOnCompacted } from "../self-compact"
+import {
+  findActiveModel,
+  createSelfCompactTool,
+  createOnCompacted,
+  callSummarizeHttp,
+  callPromptAsyncHttp,
+} from "../self-compact"
 import type { PendingResume } from "../self-compact"
 
 describe("findActiveModel", () => {
@@ -202,5 +208,48 @@ describe("createOnCompacted event handler", () => {
     expect(callPromptAsync).toHaveBeenCalledOnce()
     expect(observedDuringCall).toBe(false)
     expect(pending.has("s1")).toBe(false)
+  })
+})
+
+describe("callSummarizeHttp", () => {
+  it("POSTs to /session/:id/summarize with the right body", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    await callSummarizeHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", providerID: "p", modelID: "m" },
+    )
+    const req = fetchFn.mock.calls[0][0] as Request
+    expect(req.url).toBe("http://localhost:4096/session/s1/summarize")
+    expect(req.method).toBe("POST")
+    const body = await req.json()
+    expect(body).toEqual({ providerID: "p", modelID: "m", auto: false })
+  })
+
+  it("throws on non-2xx", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response("nope", { status: 500 }))
+    await expect(
+      callSummarizeHttp(
+        { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+        { sessionID: "s1", providerID: "p", modelID: "m" },
+      ),
+    ).rejects.toThrow(/500/)
+  })
+})
+
+describe("callPromptAsyncHttp", () => {
+  it("POSTs to /session/:id/prompt_async with the right body", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    await callPromptAsyncHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", text: "hello" },
+    )
+    const req = fetchFn.mock.calls[0][0] as Request
+    expect(req.url).toBe("http://localhost:4096/session/s1/prompt_async")
+    expect(req.method).toBe("POST")
+    const body = await req.json()
+    expect(body).toEqual({
+      parts: [{ type: "text", text: "hello" }],
+      noReply: false,
+    })
   })
 })
