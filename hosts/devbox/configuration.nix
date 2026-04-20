@@ -556,10 +556,16 @@
   };
 
   systemd.timers.sync-sources = {
-    description = "Sync source caches daily at 4:00 AM ET (before podcasts)";
+    description = "Sync source caches twice daily (4:00 AM and 8:00 PM ET)";
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "*-*-* 04:00:00";
+      # 04:00 ET: final catch-up just before the daily podcast jobs run.
+      # 20:00 ET: capture Semafor's daytime publishing so the next morning's
+      # lookback window has a full prior-day corpus to draw from.
+      OnCalendar = [
+        "*-*-* 04:00:00"
+        "*-*-* 20:00:00"
+      ];
       Persistent = true;
       RandomizedDelaySec = "5min";
     };
