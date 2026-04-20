@@ -96,7 +96,7 @@ describe("self_compact_and_resume tool", () => {
       modelID: "claude-3-5-sonnet",
     })
     const tool = createSelfCompactTool({ pending, callSummarize, findActiveModel })
-    const result = await tool.execute({ prompt: "resume here" }, { sessionID: "s1" } as any)
+    const result = await tool.execute({ prompt: "resume here" }, { sessionID: "s1" })
     expect(findActiveModel).toHaveBeenCalledWith({ sessionID: "s1" })
     expect(callSummarize).toHaveBeenCalledWith({
       sessionID: "s1",
@@ -113,7 +113,7 @@ describe("self_compact_and_resume tool", () => {
     const callSummarize = vi.fn()
     const findActiveModel = vi.fn().mockResolvedValue(null)
     const tool = createSelfCompactTool({ pending, callSummarize, findActiveModel })
-    const result = await tool.execute({ prompt: "resume" }, { sessionID: "s1" } as any)
+    const result = await tool.execute({ prompt: "resume" }, { sessionID: "s1" })
     expect(callSummarize).not.toHaveBeenCalled()
     expect(pending.size).toBe(0)
     expect(result).toMatch(/Cannot determine active model/i)
@@ -128,7 +128,7 @@ describe("self_compact_and_resume tool", () => {
     })
     const tool = createSelfCompactTool({ pending, callSummarize, findActiveModel })
     await expect(
-      tool.execute({ prompt: "resume" }, { sessionID: "s1" } as any),
+      tool.execute({ prompt: "resume" }, { sessionID: "s1" }),
     ).rejects.toThrow("boom")
     expect(pending.size).toBe(0)
   })
@@ -142,7 +142,7 @@ describe("self_compact_and_resume tool", () => {
       callSummarize: vi.fn().mockResolvedValue(undefined),
       findActiveModel: vi.fn().mockResolvedValue({ providerID: "p", modelID: "m" }),
     })
-    await tool.execute({ prompt: "new" }, { sessionID: "s1" } as any)
+    await tool.execute({ prompt: "new" }, { sessionID: "s1" })
     expect(pending.has("old-session")).toBe(false)
     expect(pending.has("recent-session")).toBe(true)
     expect(pending.has("s1")).toBe(true)
@@ -155,7 +155,7 @@ describe("createOnCompacted event handler", () => {
     pending.set("s1", { prompt: "x", createdAt: Date.now() })
     const callPromptAsync = vi.fn()
     const handler = createOnCompacted({ pending, callPromptAsync })
-    await handler({ event: { type: "session.idle", properties: { sessionID: "s1" } } } as any)
+    await handler({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
     expect(callPromptAsync).not.toHaveBeenCalled()
     expect(pending.has("s1")).toBe(true)
   })
@@ -164,7 +164,7 @@ describe("createOnCompacted event handler", () => {
     const pending = new Map<string, PendingResume>()
     const callPromptAsync = vi.fn()
     const handler = createOnCompacted({ pending, callPromptAsync })
-    await handler({ event: { type: "session.compacted", properties: { sessionID: "unknown" } } } as any)
+    await handler({ event: { type: "session.compacted", properties: { sessionID: "unknown" } } })
     expect(callPromptAsync).not.toHaveBeenCalled()
   })
 
@@ -175,7 +175,7 @@ describe("createOnCompacted event handler", () => {
     const handler = createOnCompacted({ pending, callPromptAsync })
     await handler({
       event: { type: "session.compacted", properties: { sessionID: "s1" } },
-    } as any)
+    })
     expect(callPromptAsync).toHaveBeenCalledWith({ sessionID: "s1", text: "resume now" })
     expect(pending.has("s1")).toBe(false)
   })
@@ -186,7 +186,7 @@ describe("createOnCompacted event handler", () => {
     const callPromptAsync = vi.fn().mockRejectedValue(new Error("boom"))
     const handler = createOnCompacted({ pending, callPromptAsync })
     await expect(
-      handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } } as any),
+      handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } }),
     ).rejects.toThrow("boom")
     expect(pending.has("s1")).toBe(false)
   })
@@ -204,7 +204,7 @@ describe("createOnCompacted event handler", () => {
     const handler = createOnCompacted({ pending, callPromptAsync })
     await handler({
       event: { type: "session.compacted", properties: { sessionID: "s1" } },
-    } as any)
+    })
     expect(callPromptAsync).toHaveBeenCalledOnce()
     expect(observedDuringCall).toBe(false)
     expect(pending.has("s1")).toBe(false)

@@ -1,6 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import type { Event } from "@opencode-ai/sdk"
+import type { EventSessionCompacted } from "@opencode-ai/sdk"
 
 export async function findActiveModel(input: {
   fetch: typeof fetch
@@ -78,17 +78,43 @@ export function createSelfCompactTool(deps: {
   }
 }
 
+/**
+ * Structural supertype matching any event the plugin bus may deliver. The
+ * runtime hands us arbitrary events (opencode's plugin host invokes hooks
+ * with `input as any`); the SDK's `Event` discriminated union is a
+ * convenience type that's known to lag behind the runtime (pigeon's plugin
+ * documents this). Typing the boundary wider than the SDK union avoids
+ * pretending the union is closed.
+ */
+type PluginBusEvent = {
+  type: string
+  properties?: unknown
+}
+
+/**
+ * Narrows a `PluginBusEvent` to `EventSessionCompacted` if the type
+ * discriminator and the `properties.sessionID` shape both match. Used at
+ * the top of `createOnCompacted`'s handler so all the code below can rely
+ * on `event.properties.sessionID: string` without further casting.
+ */
+function isSessionCompacted(event: PluginBusEvent): event is EventSessionCompacted {
+  if (event.type !== "session.compacted") return false
+  const props = event.properties
+  return (
+    !!props &&
+    typeof props === "object" &&
+    "sessionID" in props &&
+    typeof (props as Record<string, unknown>).sessionID === "string"
+  )
+}
+
 export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
   callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
 }) {
-  return async (input: { event: Event }) => {
-    if (input.event.type !== "session.compacted") return
-    // TS now narrows input.event to EventSessionCompacted, so properties.sessionID
-    // is typed as string (not optional). The runtime guard below is defensive
-    // against future SDK schema changes.
-    const sessionID = input.event.properties?.sessionID
-    if (!sessionID) return
+  return async ({ event }: { event: PluginBusEvent }) => {
+    if (!isSessionCompacted(event)) return
+    const { sessionID } = event.properties
     const entry = deps.pending.get(sessionID)
     if (!entry) return
     // Remove the entry synchronously BEFORE the await so a re-entrant
