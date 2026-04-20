@@ -42,9 +42,9 @@ These shaped the design. The full ChatGPT briefing is at `/tmp/research-opencode
 
 3. **The right pattern is split-phase via plugin event hook.** Tool stashes the prompt and triggers compaction. Event handler (subscribed to `session.compacted`) waits for idle, then enqueues. This guarantees the prompt arrives as a fresh user turn against the post-compact context. **Verified:** event is emitted by `Bus.publish(Event.Compacted, { sessionID })` in `packages/opencode/src/session/compaction.ts:292`. Plugin event hook signature is `event?: (input: { event: Event }) => Promise<void>` (`packages/plugin/src/index.ts:149`).
 
-4. **Use raw `fetch` against the in-process server, not the SDK wrappers.** There is an open opencode issue: "client.session.summarize hangs forever in Plugin". Pigeon documented that `ctx.client.session.promptAsync()` silently fails in serve mode. **Pattern (verified in pigeon):** capture `internalFetch = sdkClientConfig?.fetch ?? globalThis.fetch` from `ctx.client.config.fetch`, then call `internalFetch(new Request(\`${ctx.serverUrl}/session/${id}/summarize\`, { method, headers, body }))`. This uses the in-process Hono transport in TUI mode while bypassing the unreliable generated SDK wrappers.
+4. **Use raw `fetch` against the in-process server, not the SDK wrappers.** There is an open opencode issue: "client.session.summarize hangs forever in Plugin". Pigeon documented that `ctx.client.session.promptAsync()` silently fails in serve mode. **Pattern (verified in pigeon, Task 0 of plan confirmed exact path):** capture `internalFetch = (ctx.client as any)._client?.getConfig?.()?.fetch ?? globalThis.fetch`, then call `internalFetch(new Request(new URL(\`/session/${id}/summarize\`, ctx.serverUrl).toString(), { method, headers, body }))`. This uses the in-process Hono transport in TUI mode while bypassing the unreliable generated SDK wrappers. Source: `pigeon/packages/opencode-plugin/src/index.ts:21-22`.
 
-   ChatGPT proposed `ctx.client.post(...)`, but the SDK doesn't expose a public `.post` method on `OpencodeClient` — `_client` is `protected`. Pigeon's `internalFetch` workaround is the verified, in-production pattern.
+   ChatGPT proposed `ctx.client.post(...)`, but the SDK doesn't expose a public `.post` method on `OpencodeClient` — `_client` is `protected`. Earlier drafts of this design used `ctx.client.config.fetch` as the access path; that's also wrong (`config` is not a top-level property on the wrapper). Pigeon's `_client.getConfig().fetch` is the verified, in-production pattern.
 
 5. **Model discovery: walk messages backward.** Opencode core itself derives the active model by walking backward through messages and taking the newest user message with `info.model`. There's no cleaner session-level "current model" field. We mirror this — same approach pigeon uses in `compact-ingest.ts`.
 
@@ -86,7 +86,8 @@ const plugin: Plugin = async (ctx) => {
   // in-process Hono transport in TUI mode while bypassing the unreliable
   // generated SDK wrappers (client.session.summarize / promptAsync are
   // known to hang or silently fail in plugin context).
-  const sdkClientConfig: any = (ctx.client as any).config
+  // Verified path (Task 0 of plan): _client.getConfig().fetch.
+  const sdkClientConfig: any = (ctx.client as any)._client?.getConfig?.()
   const internalFetch: typeof fetch =
     sdkClientConfig?.fetch ?? globalThis.fetch
 

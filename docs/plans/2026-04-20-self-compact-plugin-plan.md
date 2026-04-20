@@ -45,8 +45,13 @@ Write a short comment block at the top of (a draft of) `assets/opencode/plugins/
 ```ts
 // Verified shapes (Task 0 of plan):
 // - Event union: { type: "session.compacted", properties: { sessionID: string } }
-// - internalFetch via: const fetch = (ctx.client as any).config?.fetch ?? globalThis.fetch
-// - ctx.serverUrl is a URL instance
+//   (sdk types.gen.ts:681-686; publisher compaction.ts:21-28,292)
+// - internalFetch via pigeon's pattern (NOT ctx.client.config.fetch — that path doesn't exist):
+//     const internalFetch =
+//       (ctx.client as any)._client?.getConfig?.()?.fetch ?? globalThis.fetch
+//   (pigeon/.../opencode-plugin/src/index.ts:21-22)
+// - ctx.serverUrl is a URL instance (plugin/src/index.ts:31);
+//   use directly: new URL(path, ctx.serverUrl)
 ```
 
 **Step 5: No commit yet** — these findings inform the next task's code.
@@ -623,7 +628,9 @@ export async function callPromptAsyncHttp(
 }
 
 const plugin: Plugin = async (ctx) => {
-  const sdkClientConfig: any = (ctx.client as any).config
+  // Verified path: pigeon's `_client.getConfig().fetch` — captures the in-process
+  // Hono transport in TUI mode while bypassing unreliable generated SDK wrappers.
+  const sdkClientConfig: any = (ctx.client as any)._client?.getConfig?.()
   const internalFetch: typeof fetch = sdkClientConfig?.fetch ?? globalThis.fetch
   const callCtx: CallContext = { fetch: internalFetch, serverUrl: ctx.serverUrl }
   const pending = new Map<string, PendingResume>()
