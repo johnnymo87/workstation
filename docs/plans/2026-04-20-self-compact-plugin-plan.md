@@ -486,6 +486,8 @@ export function createSelfCompactTool(deps: {
 }
 ```
 
+> **Note:** Originally the parameter type was loose (`{ properties?: { sessionID?: string } }`) on the theory that this avoided coupling to the SDK. During Task 9 wiring it became apparent the loose type was incompatible with the SDK's `Event` discriminated union — variants like `EventServerInstanceDisposed` have unrelated `properties` shapes. Tightening to `{ event: Event }` fixes the assignment AND gives us proper narrowing inside the handler. The runtime `?.` chain stays as defense against future schema changes.
+
 **Step 2: Run tests to verify they pass**
 
 ```bash
@@ -582,7 +584,7 @@ export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
   callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
 }) {
-  return async (input: { event: { type: string; properties?: { sessionID?: string } } }) => {
+  return async (input: { event: Event }) => {
     if (input.event.type !== "session.compacted") return
     const sessionID = input.event.properties?.sessionID
     if (!sessionID) return
@@ -626,6 +628,7 @@ This task glues the factories together into a real `Plugin`. Less test coverage 
 ```ts
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
+import type { Event } from "@opencode-ai/sdk"
 
 // (existing exports above remain)
 
