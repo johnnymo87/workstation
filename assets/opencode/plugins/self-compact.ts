@@ -84,10 +84,13 @@ export function createOnCompacted(deps: {
     if (!sessionID) return
     const entry = deps.pending.get(sessionID)
     if (!entry) return
-    try {
-      await deps.callPromptAsync({ sessionID, text: entry.prompt })
-    } finally {
-      deps.pending.delete(sessionID)
-    }
+    // Remove the entry synchronously BEFORE the await so a re-entrant
+    // session.compacted event for the same session doesn't observe it
+    // and double-deliver. If callPromptAsync throws, the entry is still
+    // gone — matches MVP design (no automatic retry; user re-invokes the
+    // skill if the prompt fails to deliver).
+    deps.pending.delete(sessionID)
+    await deps.callPromptAsync({ sessionID, text: entry.prompt })
   }
 }
+
