@@ -107,6 +107,7 @@ in
    # Plugins (SRP: non-interactive env, compaction context, subagent routing)
     xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
     xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+    xdg.configFile."opencode/plugins/self-compact.ts".source = "${assetsPath}/opencode/plugins/self-compact.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
