@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest"
-import { findActiveModel, createSelfCompactTool } from "../self-compact"
+import { findActiveModel, createSelfCompactTool, createOnCompacted } from "../self-compact"
+import type { PendingResume } from "../self-compact"
 
 describe("findActiveModel", () => {
   it("returns the model from the most recent user message that has model info", async () => {
@@ -139,5 +140,48 @@ describe("self_compact_and_resume tool", () => {
     expect(pending.has("old-session")).toBe(false)
     expect(pending.has("recent-session")).toBe(true)
     expect(pending.has("s1")).toBe(true)
+  })
+})
+
+describe("createOnCompacted event handler", () => {
+  it("ignores events that are not session.compacted", async () => {
+    const pending = new Map<string, PendingResume>()
+    pending.set("s1", { prompt: "x", createdAt: Date.now() })
+    const callPromptAsync = vi.fn()
+    const handler = createOnCompacted({ pending, callPromptAsync })
+    await handler({ event: { type: "session.idle", properties: { sessionID: "s1" } } } as any)
+    expect(callPromptAsync).not.toHaveBeenCalled()
+    expect(pending.has("s1")).toBe(true)
+  })
+
+  it("ignores session.compacted for sessions without a pending prompt", async () => {
+    const pending = new Map<string, PendingResume>()
+    const callPromptAsync = vi.fn()
+    const handler = createOnCompacted({ pending, callPromptAsync })
+    await handler({ event: { type: "session.compacted", properties: { sessionID: "unknown" } } } as any)
+    expect(callPromptAsync).not.toHaveBeenCalled()
+  })
+
+  it("calls callPromptAsync with the stashed prompt and clears state", async () => {
+    const pending = new Map<string, PendingResume>()
+    pending.set("s1", { prompt: "resume now", createdAt: Date.now() })
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    const handler = createOnCompacted({ pending, callPromptAsync })
+    await handler({
+      event: { type: "session.compacted", properties: { sessionID: "s1" } },
+    } as any)
+    expect(callPromptAsync).toHaveBeenCalledWith({ sessionID: "s1", text: "resume now" })
+    expect(pending.has("s1")).toBe(false)
+  })
+
+  it("clears state even if callPromptAsync throws", async () => {
+    const pending = new Map<string, PendingResume>()
+    pending.set("s1", { prompt: "resume", createdAt: Date.now() })
+    const callPromptAsync = vi.fn().mockRejectedValue(new Error("boom"))
+    const handler = createOnCompacted({ pending, callPromptAsync })
+    await expect(
+      handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } } as any),
+    ).rejects.toThrow("boom")
+    expect(pending.has("s1")).toBe(false)
   })
 })
