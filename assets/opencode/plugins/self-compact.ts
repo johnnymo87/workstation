@@ -4,16 +4,18 @@ export async function findActiveModel(input: {
   sessionID: string
 }): Promise<{ providerID: string; modelID: string } | null> {
   const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/message`, input.serverUrl)
-  let res: Response
+  let messages: Array<{
+    info: { role: string; model?: { providerID?: string; modelID?: string } }
+  }>
   try {
-    res = await input.fetch(new Request(url.toString(), { method: "GET" }))
+    const res = await input.fetch(new Request(url.toString(), { method: "GET" }))
+    if (!res.ok) return null
+    const parsed = await res.json()
+    if (!Array.isArray(parsed)) return null
+    messages = parsed
   } catch {
     return null
   }
-  if (!res.ok) return null
-  const messages = (await res.json()) as Array<{
-    info: { role: string; model?: { providerID?: string; modelID?: string } }
-  }>
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (
