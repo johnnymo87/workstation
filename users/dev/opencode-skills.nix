@@ -17,6 +17,7 @@ let
     "adding-opencode-skills"
     "ask-question"
     "beads"
+    "formatting-slack-messages"
     "launching-headless-sessions"
     "notify-telegram"
     "preparing-for-compaction"
