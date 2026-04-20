@@ -223,8 +223,44 @@ describe("findActiveModel", () => {
     })
     expect(result).toBeNull()
   })
+
+  it("returns null when the fetch itself throws (network error)", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("network down"))
+    const result = await findActiveModel({
+      fetch: mockFetch,
+      serverUrl: new URL("http://localhost:4096"),
+      sessionID: "s1",
+    })
+    expect(result).toBeNull()
+  })
+
+  it("returns null when the response body is not valid JSON", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response("not json at all", { status: 200 }),
+    )
+    const result = await findActiveModel({
+      fetch: mockFetch,
+      serverUrl: new URL("http://localhost:4096"),
+      sessionID: "s1",
+    })
+    expect(result).toBeNull()
+  })
+
+  it("returns null when the parsed JSON is not an array", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ unexpected: "shape" }), { status: 200 }),
+    )
+    const result = await findActiveModel({
+      fetch: mockFetch,
+      serverUrl: new URL("http://localhost:4096"),
+      sessionID: "s1",
+    })
+    expect(result).toBeNull()
+  })
 })
 ```
+
+> **Note:** Three additional tests (network throw, invalid JSON, non-array JSON) added during code review to enforce the 'never throws' invariant. The original plan version had only the first 3 tests.
 
 This shapes the API: `findActiveModel` is exported, takes `{ fetch, serverUrl, sessionID }`, returns `{ providerID, modelID } | null`. Pure function, no opencode dependency, easy to test.
 
@@ -259,16 +295,18 @@ export async function findActiveModel(input: {
   sessionID: string
 }): Promise<{ providerID: string; modelID: string } | null> {
   const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/message`, input.serverUrl)
-  let res: Response
+  let messages: Array<{
+    info: { role: string; model?: { providerID?: string; modelID?: string } }
+  }>
   try {
-    res = await input.fetch(new Request(url.toString(), { method: "GET" }))
+    const res = await input.fetch(new Request(url.toString(), { method: "GET" }))
+    if (!res.ok) return null
+    const parsed = await res.json()
+    if (!Array.isArray(parsed)) return null
+    messages = parsed
   } catch {
     return null
   }
-  if (!res.ok) return null
-  const messages = (await res.json()) as Array<{
-    info: { role: string; model?: { providerID?: string; modelID?: string } }
-  }>
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (
@@ -282,6 +320,8 @@ export async function findActiveModel(input: {
   return null
 }
 ```
+
+> **Note:** This implementation hardens against `res.json()` throwing and a non-array JSON payload — refinements added during code review of the original Task 4 implementation. The original plan version had a narrower try/catch.
 
 **Step 2: Run tests to verify they pass**
 
