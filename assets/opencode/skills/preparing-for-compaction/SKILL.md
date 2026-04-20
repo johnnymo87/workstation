@@ -23,10 +23,12 @@ The user wants to continue working but needs to compact. The automatic compactio
 
 3. **Commit and push.** Persisted context that isn't pushed doesn't survive. Follow the session close protocol.
 
-4. **Provide a resumption prompt.** Give the user a ready-made message they can paste after compaction. It should:
+4. **Draft and apply a resumption prompt.** Draft a concise message for the post-compaction session. It should:
    - Reference the durable artifacts by name (bead IDs, plan file paths)
    - State what to do first (e.g., "run `bd ready`", "read the plan file at ...")
-   - Be short enough to type/paste comfortably
+   - Be passed to the `self_compact_and_resume` tool as the `prompt` argument to automate the handoff.
+
+   *Note: If the `self_compact_and_resume` tool is not available (e.g., older opencode version, plugin disabled), fall back to printing the prompt for the user to paste after `/compact`.*
 
 ## What to Persist
 
@@ -42,6 +44,8 @@ Think about what you'd want if you were starting fresh with no memory:
 Don't persist what's already obvious from the codebase, git history, or existing docs. Focus on conversational context that would be lost.
 
 ## Example Resumption Prompt
+
+When calling the `self_compact_and_resume` tool, pass a string similar to this as the `prompt` argument:
 
 ```
 We were working on [X]. Context is in:
