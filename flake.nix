@@ -56,6 +56,7 @@
       datadog-mcp-cli = p.callPackage ./pkgs/datadog-mcp-cli { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       gws = p.callPackage ./pkgs/gws { };
+      oc-cost = p.callPackage ./pkgs/oc-cost { };
     };
 
     # Custom pinentry that fetches GPG passphrase from 1Password
