@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
+import type { Event } from "@opencode-ai/sdk"
 
 export async function findActiveModel(input: {
   fetch: typeof fetch
@@ -81,8 +82,11 @@ export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
   callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
 }) {
-  return async (input: { event: { type: string; properties?: any } }) => {
+  return async (input: { event: Event }) => {
     if (input.event.type !== "session.compacted") return
+    // TS now narrows input.event to EventSessionCompacted, so properties.sessionID
+    // is typed as string (not optional). The runtime guard below is defensive
+    // against future SDK schema changes.
     const sessionID = input.event.properties?.sessionID
     if (!sessionID) return
     const entry = deps.pending.get(sessionID)
