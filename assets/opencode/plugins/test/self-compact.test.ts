@@ -184,4 +184,23 @@ describe("createOnCompacted event handler", () => {
     ).rejects.toThrow("boom")
     expect(pending.has("s1")).toBe(false)
   })
+
+  it("removes the pending entry before awaiting callPromptAsync (no double-delivery race)", async () => {
+    const pending = new Map<string, PendingResume>()
+    pending.set("s1", { prompt: "resume", createdAt: Date.now() })
+    let observedDuringCall: boolean | undefined
+    const callPromptAsync = vi.fn().mockImplementation(async () => {
+      // While callPromptAsync is in-flight, the pending entry must already
+      // be gone — otherwise a re-entrant session.compacted event for the
+      // same session would also see it and double-deliver.
+      observedDuringCall = pending.has("s1")
+    })
+    const handler = createOnCompacted({ pending, callPromptAsync })
+    await handler({
+      event: { type: "session.compacted", properties: { sessionID: "s1" } },
+    } as any)
+    expect(callPromptAsync).toHaveBeenCalledOnce()
+    expect(observedDuringCall).toBe(false)
+    expect(pending.has("s1")).toBe(false)
+  })
 })
