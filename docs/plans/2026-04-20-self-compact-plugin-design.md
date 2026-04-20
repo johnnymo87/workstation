@@ -40,13 +40,17 @@ These shaped the design. The full ChatGPT briefing is at `/tmp/research-opencode
 
 2. **Naive "summarize then prompt_async" is racy.** If the tool calls both back-to-back, the resumption prompt may be enqueued *before* the loop consumes the compaction marker. Worse, opencode wraps mid-turn user messages with `<system-reminder>` and treats them as interruptions — not as a clean fresh turn. So the resumption prompt could end up against an un-compacted context, or rendered awkwardly.
 
-3. **The right pattern is split-phase via plugin event hook.** Tool stashes the prompt and triggers compaction. Event handler (subscribed to `session.compacted`) waits for idle, then enqueues. This guarantees the prompt arrives as a fresh user turn against the post-compact context.
+3. **The right pattern is split-phase via plugin event hook.** Tool stashes the prompt and triggers compaction. Event handler (subscribed to `session.compacted`) waits for idle, then enqueues. This guarantees the prompt arrives as a fresh user turn against the post-compact context. **Verified:** event is emitted by `Bus.publish(Event.Compacted, { sessionID })` in `packages/opencode/src/session/compaction.ts:292`. Plugin event hook signature is `event?: (input: { event: Event }) => Promise<void>` (`packages/plugin/src/index.ts:149`).
 
-4. **Use `ctx.client.post(...)` not the SDK wrapper.** There is an open opencode issue: "client.session.summarize hangs forever in Plugin". Pigeon also documented that `ctx.client.session.promptAsync()` silently fails in serve mode. Using the SDK's lower-level `client.post({ url, body })` keeps the in-process Hono transport but bypasses the unreliable generated wrappers.
+4. **Use raw `fetch` against the in-process server, not the SDK wrappers.** There is an open opencode issue: "client.session.summarize hangs forever in Plugin". Pigeon documented that `ctx.client.session.promptAsync()` silently fails in serve mode. **Pattern (verified in pigeon):** capture `internalFetch = sdkClientConfig?.fetch ?? globalThis.fetch` from `ctx.client.config.fetch`, then call `internalFetch(new Request(\`${ctx.serverUrl}/session/${id}/summarize\`, { method, headers, body }))`. This uses the in-process Hono transport in TUI mode while bypassing the unreliable generated SDK wrappers.
 
-5. **Model discovery: walk messages backward.** Opencode core itself derives the active model by walking backward through messages and taking the newest user message with `info.model`. There's no cleaner session-level "current model" field. We mirror this.
+   ChatGPT proposed `ctx.client.post(...)`, but the SDK doesn't expose a public `.post` method on `OpencodeClient` — `_client` is `protected`. Pigeon's `internalFetch` workaround is the verified, in-production pattern.
+
+5. **Model discovery: walk messages backward.** Opencode core itself derives the active model by walking backward through messages and taking the newest user message with `info.model`. There's no cleaner session-level "current model" field. We mirror this — same approach pigeon uses in `compact-ingest.ts`.
 
 6. **`auto: false` is correct for user-initiated compaction.** It is the same value `/compact` passes from the TUI and `pigeon` passes from `/compact` swipe-replies.
+
+7. **Status discriminator is `type`, not `status`.** `SessionStatus.Info` is `{ type: "idle" | "busy" | "retry", ... }` (`packages/opencode/src/session/status.ts:7`). The `GET /session/status` endpoint returns *all* sessions as a `Record<string, Info>`, not a single session's status. Absence of an entry implies idle (`SessionStatus.get` defaults to `{ type: "idle" }`). For per-session status, we either fetch the full record and pick our entry, or subscribe to the `session.status` event (more efficient but extra plumbing). MVP can rely on the natural ordering: `session.compacted` is published *after* the compaction work runs in the prompt loop, and `prompt_async` is fire-and-forget into opencode's queue, so we may not need to gate on idle at all. We'll decide during implementation.
 
 ## Architecture
 
@@ -62,7 +66,7 @@ These shaped the design. The full ChatGPT briefing is at `/tmp/research-opencode
 └── users/dev/opencode-config.nix    # UPDATED: register the plugin
 ```
 
-### Plugin structure
+### Plugin structure (sketch — exact shapes finalized during implementation)
 
 ```typescript
 import type { Plugin } from "@opencode-ai/plugin"
@@ -74,11 +78,68 @@ interface PendingResume {
 }
 
 const STALE_MS = 30 * 60 * 1000  // 30 minutes
-const POLL_INTERVAL_MS = 250
-const POLL_MAX_ATTEMPTS = 20      // ~5s total
 
 const plugin: Plugin = async (ctx) => {
   const pending = new Map<string, PendingResume>()
+
+  // Mirror pigeon's pattern: use the SDK's underlying fetch to keep the
+  // in-process Hono transport in TUI mode while bypassing the unreliable
+  // generated SDK wrappers (client.session.summarize / promptAsync are
+  // known to hang or silently fail in plugin context).
+  const sdkClientConfig: any = (ctx.client as any).config
+  const internalFetch: typeof fetch =
+    sdkClientConfig?.fetch ?? globalThis.fetch
+
+  async function callSummarize(sessionID: string, providerID: string, modelID: string) {
+    const url = new URL(
+      `/session/${encodeURIComponent(sessionID)}/summarize`,
+      ctx.serverUrl,
+    )
+    const res = await internalFetch(
+      new Request(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerID, modelID, auto: false }),
+        signal: AbortSignal.timeout(10_000),
+      }),
+    )
+    if (!res.ok) throw new Error(`summarize failed: ${res.status} ${await res.text()}`)
+  }
+
+  async function callPromptAsync(sessionID: string, text: string) {
+    const url = new URL(
+      `/session/${encodeURIComponent(sessionID)}/prompt_async`,
+      ctx.serverUrl,
+    )
+    const res = await internalFetch(
+      new Request(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parts: [{ type: "text", text }],
+          noReply: false,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      }),
+    )
+    if (!res.ok) throw new Error(`prompt_async failed: ${res.status} ${await res.text()}`)
+  }
+
+  async function findActiveModel(sessionID: string): Promise<{ providerID: string; modelID: string } | null> {
+    const url = new URL(`/session/${encodeURIComponent(sessionID)}/message`, ctx.serverUrl)
+    const res = await internalFetch(new Request(url.toString(), { method: "GET" }))
+    if (!res.ok) return null
+    const messages = (await res.json()) as Array<{
+      info: { role: string; model?: { providerID?: string; modelID?: string } }
+    }>
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.info.role === "user" && m.info.model?.providerID && m.info.model?.modelID) {
+        return { providerID: m.info.model.providerID, modelID: m.info.model.modelID }
+      }
+    }
+    return null
+  }
 
   return {
     tool: {
@@ -99,25 +160,20 @@ const plugin: Plugin = async (ctx) => {
             if (now - p.createdAt > STALE_MS) pending.delete(sid)
           }
 
-          // Stash the prompt
-          pending.set(toolCtx.sessionID, { prompt: args.prompt, createdAt: now })
-
-          // Discover active model (walk messages backward)
-          const model = await findActiveModel(ctx.client, toolCtx.sessionID)
+          const model = await findActiveModel(toolCtx.sessionID)
           if (!model) {
-            pending.delete(toolCtx.sessionID)
-            return "Cannot determine active model; aborting compaction."
+            return "Cannot determine active model; aborting compaction. (No user message with model metadata found in this session.)"
           }
 
-          // Trigger compaction via raw POST
-          await ctx.client.post({
-            url: `/session/${encodeURIComponent(toolCtx.sessionID)}/summarize`,
-            body: {
-              providerID: model.providerID,
-              modelID: model.modelID,
-              auto: false,
-            },
-          })
+          // Stash AFTER model lookup succeeds so we don't leave orphan state on failure
+          pending.set(toolCtx.sessionID, { prompt: args.prompt, createdAt: now })
+
+          try {
+            await callSummarize(toolCtx.sessionID, model.providerID, model.modelID)
+          } catch (err) {
+            pending.delete(toolCtx.sessionID)
+            throw err
+          }
 
           return "Compaction triggered. Your resumption prompt will be enqueued automatically once compaction completes."
         },
@@ -126,43 +182,24 @@ const plugin: Plugin = async (ctx) => {
 
     async event(input) {
       if (input.event.type !== "session.compacted") return
-
-      const sessionID = input.event.properties?.sessionID
+      const sessionID = (input.event as any).properties?.sessionID
       if (!sessionID) return
       const entry = pending.get(sessionID)
       if (!entry) return
 
-      // Bounded poll for idle
-      for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
-        const status = await ctx.client.session.status({ path: { sessionID } })
-        if (status?.status === "idle") break
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+      try {
+        await callPromptAsync(sessionID, entry.prompt)
+      } finally {
+        pending.delete(sessionID)
       }
-
-      // Enqueue resumption prompt as a fresh user turn
-      await ctx.client.post({
-        url: `/session/${encodeURIComponent(sessionID)}/prompt_async`,
-        body: {
-          parts: [{ type: "text", text: entry.prompt }],
-          noReply: false,
-        },
-      })
-
-      pending.delete(sessionID)
     },
   }
-}
-
-async function findActiveModel(client, sessionID) {
-  // Use ctx.client.post or appropriate SDK helper to GET session messages
-  // Walk backward, return first user message's info.model
-  // Returns { providerID, modelID } | null
 }
 
 export default plugin
 ```
 
-The exact SDK call shapes (`client.session.status`, message-listing) need to be confirmed against the version of `@opencode-ai/plugin` currently shipped with our anomalyco/opencode fork during implementation.
+The exact `Event` discriminator shape (`input.event.type` vs. `input.event.event.type`) and the precise `properties` shape need to be verified against the `@opencode-ai/plugin` version we ship — the type cast `(input.event as any)` is a placeholder during the design phase. We'll tighten the types in implementation.
 
 ### Skill update
 
@@ -253,12 +290,13 @@ After deployment, manual steps to verify end-to-end:
 
 ## Risks & Open Questions (for implementation)
 
-1. **Event name verification.** ChatGPT cited `session.compacted`. Need to confirm against opencode source — search `packages/opencode` for the actual event emission. Adjust if different.
-2. **Plugin SDK shape.** The `event` hook signature and `ctx.client.session.status` shape need to be verified against the SDK version we ship.
+1. ~~**Event name verification.**~~ ✅ Verified: `session.compacted` is published with `{ sessionID }` properties (`compaction.ts:292`).
+2. **Exact `Event` discriminator shape in the plugin hook.** The plugin hook receives `{ event: Event }`. We need to confirm whether the type discriminator is `event.type` (e.g., `"session.compacted"`) or nested deeper. Will resolve by reading `@opencode-ai/plugin` types at implementation time.
 3. **Race: tool returns before event fires.** The tool returns synchronously; the event handler fires later. If something interrupts between them (process crash, plugin reload), the pending prompt is lost. MVP accepts this — user can re-invoke the skill. Future improvement: persist pending state to disk.
 4. **Duplicate sessions.** The `pending` Map is per-process; if a session is reopened in a new opencode process before the event fires, the pending prompt is lost. MVP accepts.
 5. **Multi-step compactions / failed compactions.** What if `summarize` succeeds but the session crashes before `session.compacted` fires? Pending prompt sits stale until evicted at 30min. Acceptable.
 6. **TUI rendering of injected prompts.** Historical opencode TUI bugs reportedly mishandled `prompt_async`-injected prompts. We'll discover and report any rendering oddities during smoke testing.
+7. **Should we gate enqueueing on idle?** ChatGPT recommended polling `session.status` for idle before calling `prompt_async`. But: (a) `prompt_async` is fire-and-forget into opencode's queue — busy state shouldn't matter; (b) `session.compacted` is published *after* the compaction work, so by the time we receive it, the busy state from the compaction has already cleared. **Decision deferred to implementation:** start without idle gating, add it only if smoke testing reveals timing issues.
 
 ## Pigeon Integration (Post-MVP, Sketched)
 
