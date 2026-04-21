@@ -27,6 +27,19 @@ lib.mkIf isCloudbox {
 
       log() { echo "[disk-cleanup] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
+      # Make the GitHub token available so `gh auth git-credential` (configured
+      # as the credential helper for https://github.com in home.base.nix) can
+      # authenticate `git fetch` against private repos. Without this, fetches
+      # of private HTTPS remotes (mono, internal-frontends, etc.) fail and
+      # the worktree-pruning step skips those repos. Login shells export this
+      # via home.cloudbox.nix, but systemd user units inherit a minimal env.
+      GH_TOKEN_FILE="/run/secrets/github_api_token"
+      if [ -r "$GH_TOKEN_FILE" ]; then
+        export GH_TOKEN="$(cat "$GH_TOKEN_FILE")"
+      else
+        log "WARN: $GH_TOKEN_FILE not readable; private fetches will fail"
+      fi
+
       # --- 1. Nix garbage collection ---
       cleanup_nix() {
         log "Pruning nix generations..."
