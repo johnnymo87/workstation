@@ -206,6 +206,9 @@ in
     # Google Workspace CLI
     localPkgs.gws
 
+    # OpenCode usage and cost reporting
+    localPkgs.oc-cost
+
     # Mobile shell (survives sleep/wake, network changes)
     pkgs.mosh
 
