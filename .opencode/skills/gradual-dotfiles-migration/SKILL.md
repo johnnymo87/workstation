@@ -219,7 +219,7 @@ lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
 | Neovim | Workstation | Dotfiles + overlays | ccremote.lua, sessions.lua via Pattern 1 |
 | Bash | Workstation | Workstation + dotfiles bridges | HM owns shell files; legacy `~/.bashrc.d/*.bashrc` can migrate one-by-one |
 | SSH | Workstation | Dotfiles | Need full migration |
-| GPG | Workstation | Workstation (pinentry-op) | 1Password Touch ID integration |
+| GPG | Workstation | Workstation (auto-start) | Used only for verifying others' signatures; commit signing uses SSH (`programs.git.signing.format = "ssh"`) |
 | Tmux | Workstation | Workstation | Fully migrated |
 | Claude | Workstation | Workstation | Fully migrated |
 

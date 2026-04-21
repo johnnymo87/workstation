@@ -106,7 +106,7 @@ echo $GOOGLE_GENERATIVE_AI_API_KEY | head -c 10
 | Projects dir | `~/projects/` | `~/projects/` | `~/Code/` |
 | System type | `x86_64-linux` | `aarch64-linux` | `aarch64-darwin` |
 | Secrets | sops-nix (HM module, age key in `~/.config/sops/age/`) | sops-nix (NixOS module, `/run/secrets/`) | macOS Keychain |
-| GPG signing | Disabled | Forwarded from macOS | Local (pinentry-op) |
+| Commit signing | Disabled | Per-device SSH key (`~/.ssh/id_ed25519_signing`) | Per-device SSH key (`~/.ssh/id_ed25519_signing`) |
 | Flake config name | `homeConfigurations.livia` | `homeConfigurations.dev` | Embedded in `darwinConfigurations` |
 
 ## Relevant files

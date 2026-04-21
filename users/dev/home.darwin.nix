@@ -5,7 +5,7 @@
 # On Darwin, we disable programs that conflict with existing dotfiles.
 # As we migrate each program to HM, remove the corresponding mkForce false.
 # See: /tmp/research-nix-darwin-dotfiles-conflict-answer.md
-{ config, pkgs, lib, localPkgs, assetsPath, isDarwin, pinentry-op, projects, ... }:
+{ config, pkgs, lib, localPkgs, assetsPath, isDarwin, projects, ... }:
 
 lib.mkIf isDarwin {
   # Dotfiles repository still hosts many legacy bash snippets on macOS.
@@ -67,7 +67,6 @@ lib.mkIf isDarwin {
     })
     pkgs.google-cloud-sdk
     pkgs.cloudflared
-    pinentry-op
     (pkgs.writeShellApplication {
       name = "pigeon-setup-secrets";
       text = ''
@@ -397,39 +396,12 @@ lib.mkIf isDarwin {
   # SSH: manages .ssh/config
   programs.ssh.enable = lib.mkForce false;
 
-  # 1Password secret reference for GPG passphrase
-  # pinentry-op fetches from this 1Password item using Touch ID
   home.sessionVariables = {
-    OP_GPG_SECRET_REF = "op://Automation/gpg-passphrase/password";
     # Enable Exa AI-backed websearch and codesearch tools in OpenCode.
     # These call mcp.exa.ai with no API key (free tier). If rate-limited (429),
     # obtain a free key at exa.ai and set OPENCODE_ENABLE_EXA=https://mcp.exa.ai/mcp?exaApiKey=<key>
     OPENCODE_ENABLE_EXA = "1";
   };
-
-  # GPG: fully managed by home-manager on Darwin
-  # Agent runs locally (auto-starts on demand), keys live here, forwarded to devbox via SSH
-  #
-  # Uses pinentry-op to fetch passphrase from 1Password (with Touch ID).
-  # Set OP_GPG_SECRET_REF env var to your 1Password secret reference.
-  # Falls back to pinentry-mac GUI if 1Password fails.
-  services.gpg-agent = {
-    enable = true;
-    defaultCacheTtl = 86400;    # 24 hours
-    maxCacheTtl = 86400;        # 24 hours
-    enableExtraSocket = false;  # We set path manually in extraConfig
-    grabKeyboardAndMouse = false;
-    extraConfig = ''
-      pinentry-program ${pinentry-op}/bin/pinentry-op
-      # Pin extra-socket path for stable SSH RemoteForward config
-      extra-socket ${config.home.homeDirectory}/.gnupg/S.gpg-agent.extra
-    '';
-  };
-
-  # Disable home-manager's launchd socket-activated service (doesn't work with gpg-agent)
-  # gpg-agent --supervised expects systemd-style LISTEN_FDS, not launchd's launch_activate_socket()
-  # Instead, let GnuPG auto-start the agent on demand (upstream recommended approach)
-  launchd.agents.gpg-agent.enable = lib.mkForce false;
 
   # On Darwin, dotfiles creates symlinks that HM also wants to manage.
   # Remove dotfiles symlinks before HM tries to create its own.

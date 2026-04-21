@@ -59,9 +59,6 @@
       oc-cost = p.callPackage ./pkgs/oc-cost { };
     };
 
-    # Custom pinentry that fetches GPG passphrase from 1Password
-    pinentry-op = darwinPkgs.callPackage ./pkgs/pinentry-op { };
-
     # macOS host facts
     mac = import ./hosts/Y0FMQX93RR-2/vars.nix;
 
@@ -185,7 +182,6 @@
           home-manager.useUserPackages = true;
           home-manager.backupFileExtension = "hm-backup";
           home-manager.extraSpecialArgs = {
-            inherit pinentry-op;
             localPkgs = localPkgsFor darwinSystem;
             devenvPkg = devenv.packages.${darwinSystem}.devenv;
             assetsPath = ./assets;
