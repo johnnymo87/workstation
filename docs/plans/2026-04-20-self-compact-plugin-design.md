@@ -335,7 +335,9 @@ We'll choose between these when we get to that work. Either way, MVP doesn't nee
 
 ## Addendum 2026-04-21: Architecture Reversal (Idle-Triggered Summarize)
 
-**Status of original architecture:** Implemented through Tasks 0-12, deployed, smoke-tested — and **deadlocks**. Do not use the v1 plugin to invoke compaction; the implementation lives on `main` but the active code path is broken until the v2 redesign in `docs/plans/2026-04-21-self-compact-idle-trigger-plan.md` lands.
+**Status of original architecture:** Implemented through Tasks 0-12, deployed, smoke-tested — and **deadlocks**. Superseded by the v2 idle-triggered architecture, which **landed and smoke-test passed on 2026-04-21**. The v2 implementation is the active code on `main` (commits `dcc6162..df3d3d5`) and is described in `docs/plans/2026-04-21-self-compact-idle-trigger-plan.md`.
+
+**v2 smoke test result (2026-04-21):** Tool `self_compact_and_resume` completed in `duration=0` (stash-and-return as designed); subsequent `POST /summarize` ran from the idle handler and completed cleanly in `duration=81796ms` (~82s — actual model summarization time, not a hang); `session.compacted` bus event fired; `POST /prompt_async` enqueued the resumption prompt; new session loop started with the resumption prompt as the first user message. The v1 deadlock signature (>4-minute hang ending in manual `/abort`) did not recur. Log evidence: `~/.local/share/opencode/log/2026-04-21T125635.log` lines ~5300-5346.
 
 ### What we got wrong
 

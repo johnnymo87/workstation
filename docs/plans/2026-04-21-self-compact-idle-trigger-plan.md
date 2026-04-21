@@ -1,5 +1,7 @@
 # Self-Compact v2: Idle-Triggered Summarize Implementation Plan
 
+**Status: COMPLETED 2026-04-21.** All 8 tasks landed on `main` (commits `dcc6162..df3d3d5`); live smoke test passed (see addendum in `2026-04-20-self-compact-plugin-design.md` for evidence).
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Fix the deadlock in v1 of the self-compact plugin by moving the `POST /summarize` trigger out of the tool's `execute` and into a `session.status` event handler that fires when the session goes idle (after the agent's tool-call turn closes).
