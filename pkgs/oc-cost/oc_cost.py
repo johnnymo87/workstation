@@ -204,6 +204,48 @@ def query_size_buckets(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> 
     return [dict(r) for r in cur.fetchall()]
 
 
+def compute_cost_components(by_model: list[dict], active_days: int) -> dict:
+    """Compute cost components, applying each model's own rates.
+
+    Mutates each `by_model` row in place to add `cost_usd` (None for
+    unknown models). Returns a dict with per-component totals plus
+    daily_avg, monthly_proj, and a list of unpriced model names.
+    """
+    cache_reads = cache_writes = uncached_input = output = 0.0
+    unpriced: list[str] = []
+
+    for row in by_model:
+        rates = price_for(row["model"])
+        if rates is None:
+            row["cost_usd"] = None
+            unpriced.append(row["model"])
+            continue
+        # USD = tokens * rate / 1e6
+        cr = row["cache_read"]  * rates["cache_read"]  / 1e6
+        cw = row["cache_write"] * rates["cache_write"] / 1e6
+        un = row["uncached"]    * rates["input"]       / 1e6
+        ou = row["output"]      * rates["output"]      / 1e6
+        row["cost_usd"] = cr + cw + un + ou
+        cache_reads    += cr
+        cache_writes   += cw
+        uncached_input += un
+        output         += ou
+
+    total = cache_reads + cache_writes + uncached_input + output
+    daily_avg = total / active_days if active_days > 0 else 0.0
+
+    return {
+        "cache_reads":     cache_reads,
+        "cache_writes":    cache_writes,
+        "uncached_input":  uncached_input,
+        "output":          output,
+        "total":           total,
+        "daily_avg":       daily_avg,
+        "monthly_proj":    daily_avg * 30,
+        "unpriced_models": unpriced,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     print(f"args = {args!r}", file=sys.stderr)

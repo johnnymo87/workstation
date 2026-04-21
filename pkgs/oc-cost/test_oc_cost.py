@@ -303,5 +303,66 @@ class TestQuerySizeBuckets(unittest.TestCase):
         self.assertEqual(buckets["300k+"], 1)
 
 
+class TestCostComponents(unittest.TestCase):
+    def test_per_model_rates_applied_separately(self):
+        # CORRECTNESS FIX #1: components must use each model's own rates,
+        # not the dominant model's rates.
+        by_model = [
+            {"model": "claude-opus-4-6", "msgs": 1, "cache_read": 1_000_000,
+             "cache_write": 0, "uncached": 0, "output": 0},
+            {"model": "claude-sonnet-4-6", "msgs": 1, "cache_read": 1_000_000,
+             "cache_write": 0, "uncached": 0, "output": 0},
+        ]
+        components = oc_cost.compute_cost_components(by_model, active_days=1)
+        # Opus cache_read = $0.50/M, Sonnet cache_read = $0.30/M.
+        # Total cache_reads = 1.00 * 0.50 + 1.00 * 0.30 = $0.80
+        self.assertAlmostEqual(components["cache_reads"], 0.80, places=4)
+        self.assertAlmostEqual(components["total"], 0.80, places=4)
+        self.assertEqual(components["unpriced_models"], [])
+
+    def test_unknown_models_excluded_from_total(self):
+        # CORRECTNESS FIX #2: unknown-rate rows are excluded from cost
+        # totals and surfaced in unpriced_models.
+        by_model = [
+            {"model": "claude-opus-4-6", "msgs": 1, "cache_read": 1_000_000,
+             "cache_write": 0, "uncached": 0, "output": 0},
+            {"model": "future-model-9000", "msgs": 1, "cache_read": 999_999_999,
+             "cache_write": 0, "uncached": 0, "output": 0},
+        ]
+        components = oc_cost.compute_cost_components(by_model, active_days=1)
+        # Only the priced opus row contributes: 1.0M * $0.50 = $0.50
+        self.assertAlmostEqual(components["cache_reads"], 0.50, places=4)
+        self.assertAlmostEqual(components["total"], 0.50, places=4)
+        self.assertEqual(components["unpriced_models"], ["future-model-9000"])
+
+    def test_includes_per_model_cost_in_by_model(self):
+        # by_model rows should be annotated with their own cost_usd in place.
+        by_model = [
+            {"model": "claude-opus-4-6", "msgs": 1, "cache_read": 1_000_000,
+             "cache_write": 0, "uncached": 0, "output": 0},
+        ]
+        oc_cost.compute_cost_components(by_model, active_days=1)
+        self.assertAlmostEqual(by_model[0]["cost_usd"], 0.50, places=4)
+
+    def test_unknown_model_gets_none_cost(self):
+        by_model = [
+            {"model": "future-model-9000", "msgs": 1, "cache_read": 1_000_000,
+             "cache_write": 0, "uncached": 0, "output": 0},
+        ]
+        oc_cost.compute_cost_components(by_model, active_days=1)
+        self.assertIsNone(by_model[0]["cost_usd"])
+
+    def test_daily_avg_and_monthly_proj(self):
+        by_model = [
+            {"model": "claude-opus-4-6", "msgs": 1, "cache_read": 0,
+             "cache_write": 1_000_000, "uncached": 0, "output": 0},
+        ]
+        components = oc_cost.compute_cost_components(by_model, active_days=2)
+        # 1.0M * $6.25 cache_write = $6.25 over 2 days.
+        self.assertAlmostEqual(components["total"], 6.25, places=4)
+        self.assertAlmostEqual(components["daily_avg"], 3.125, places=4)
+        self.assertAlmostEqual(components["monthly_proj"], 3.125 * 30, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()
