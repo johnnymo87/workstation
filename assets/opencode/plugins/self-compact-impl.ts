@@ -237,6 +237,12 @@ export async function callSummarizeHttp(
   ctx: CallContext,
   input: { sessionID: string; providerID: string; modelID: string },
 ): Promise<void> {
+  // No client-side timeout. POST /summarize is a long-running synchronous
+  // endpoint: the server runs the prompt loop to completion (multiple
+  // minutes for long sessions). The 10s AbortSignal.timeout that lived
+  // here in v1 was masking the deadlock; with the deadlock fixed in v2,
+  // the timeout would just spuriously cancel legitimate long
+  // summarizations. Pigeon's daemon does the same — no timeout.
   const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/summarize`, ctx.serverUrl)
   const res = await ctx.fetch(
     new Request(url.toString(), {
@@ -247,7 +253,6 @@ export async function callSummarizeHttp(
         modelID: input.modelID,
         auto: false,
       }),
-      signal: AbortSignal.timeout(10_000),
     }),
   )
   if (!res.ok) throw new Error(`summarize failed: ${res.status} ${await res.text()}`)
