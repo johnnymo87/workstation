@@ -56,6 +56,7 @@
       gclpr = p.callPackage ./pkgs/gclpr { };
       gws = p.callPackage ./pkgs/gws { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
+      self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
     };
 
     # macOS host facts
