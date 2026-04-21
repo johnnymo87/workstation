@@ -447,6 +447,11 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     };
   };
 
+  # Allowed signers for git SSH-signature verification.
+  # Lists every per-device SSH signing key trusted to sign as our identity.
+  # Add a new line here when adding a new host or rotating a key, then re-apply.
+  home.file.".config/git/allowed_signers".source = "${assetsPath}/git/allowed_signers";
+
   # GPG - shared settings (both platforms)
   programs.gpg = {
     enable = true;
