@@ -24,12 +24,10 @@ Port forwarding runs via **persistent SSH tunnel launchd agents** on macOS (alwa
 |-------|----------|---------|
 | `devbox-dev-tunnel` | `devbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay |
 | `cloudbox-dev-tunnel` | `cloudbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay |
-| `devbox-gpg-tunnel` | `devbox-gpg-tunnel` | GPG agent forwarding only |
-| `cloudbox-gpg-tunnel` | `cloudbox-gpg-tunnel` | GPG agent forwarding only |
 
 Check tunnel status:
 ```bash
-launchctl list | grep -E '(dev|gpg)-tunnel'
+launchctl list | grep dev-tunnel
 ```
 
 Restart a tunnel:
@@ -316,64 +314,44 @@ systemctl --user enable --now pull-workstation.timer
 
 See [Automated Updates](../automated-updates/SKILL.md) for full details on the update pipeline.
 
-## GPG Agent Forwarding
+## Commit Signing
 
-The devbox is configured to forward your local GPG agent so you can sign commits on the remote machine using your local keys (and Touch ID via 1Password).
+Each host (macOS, devbox, cloudbox) has its own SSH signing key at
+`~/.ssh/id_ed25519_signing`. Git is configured with `gpg.format = ssh`
+and signs commits locally on whichever host you are using; no agent
+forwarding is involved.
+
+GitHub validates SSH-signed commits via each host's public key registered
+under [Settings → SSH and GPG keys](https://github.com/settings/keys) as a
+**Signing Key**. Local verification (`git verify-commit`, `git log
+--show-signature`) uses `~/.config/git/allowed_signers`, deployed via
+home-manager from `assets/git/allowed_signers`.
 
 ### Symptoms
-- `gpg --card-status` on devbox hangs or says "No such device"
-- Commits fail with "error: gpg failed to sign the data"
-- You see `gpg: problem with fast path key listing: Forbidden - ignored`
 
-### Fix: Stale Local Socket
-If the local agent socket (`~/.gnupg/S.gpg-agent.extra`) gets into a bad state (e.g. after sleep/wake), the connection breaks.
+- `git commit` fails with `error: gpg failed to sign the data`
+- `git log --show-signature` shows `No principal matched`
+- GitHub shows commits as "Unverified"
 
-Run this **locally on macOS** to reload the agent:
+### Diagnose
+
 ```bash
-gpg-connect-agent reloadagent /bye
+git config --get gpg.format                   # expect: ssh
+git config --get user.signingkey              # expect: ~/.ssh/id_ed25519_signing.pub
+git config --get gpg.ssh.allowedSignersFile   # expect: ~/.config/git/allowed_signers
+ls -la ~/.ssh/id_ed25519_signing*             # both files present, private key 0600
+ssh-keygen -l -f ~/.ssh/id_ed25519_signing.pub   # fingerprint should match the
+                                                 # corresponding line in
+                                                 # ~/.config/git/allowed_signers
 ```
 
-### Fix: Stale Remote Forwarded Socket
-If reconnecting still leaves GPG broken on devbox, the remote socket path can be stale.
+If `gpg.format` is missing or returns `openpgp`, home-manager has not
+applied the SSH-signing config yet — re-run `nix run home-manager -- switch
+--flake .#<host>` (or `darwin-rebuild` on macOS).
 
-Run this on **devbox**:
-```bash
-rm -f /run/user/1000/gnupg/S.gpg-agent
-```
+### Add a new host's signing key
 
-Then reconnect from macOS and test on devbox:
-```bash
-echo test | gpg --clearsign >/dev/null && echo ok
-```
-
-### Hardening Note
-`scripts/update-ssh-config.sh` configures `StreamLocalBindUnlink yes` on `devbox-gpg-tunnel` and `cloudbox-gpg-tunnel`.
-This lets SSH automatically unlink stale remote unix sockets before binding forwarded sockets.
-
-### Note: Fast Path Warning
-You may see this warning when running GPG commands on devbox:
-`gpg: problem with fast path key listing: Forbidden - ignored`
-
-**This is normal and harmless.** It happens because we forward the restricted `extra` socket, which blocks certain administrative commands (like listing secret keys in fast mode). GnuPG automatically falls back to the standard mode, and signing works fine.
-
-### Persistent Tunnel
-
-Dedicated `launchd` agents on macOS keep the GPG forwarding alive in the background:
-- `devbox-gpg-tunnel` — forwards GPG agent socket to devbox
-- `cloudbox-gpg-tunnel` — forwards GPG agent socket to cloudbox
-
-These use isolated SSH hosts (`devbox-gpg-tunnel`, `cloudbox-gpg-tunnel`) that only
-forward the GPG socket, avoiding port contention with interactive `*-tunnel` sessions.
-
-Check tunnel status on macOS:
-```bash
-launchctl list | grep gpg-tunnel
-```
-
-If a tunnel is down, restart it:
-```bash
-launchctl kickstart -k gui/$(id -u)/org.nix-community.home.devbox-gpg-tunnel
-launchctl kickstart -k gui/$(id -u)/org.nix-community.home.cloudbox-gpg-tunnel
-```
-
-`opencode-launch` warns if the forwarded socket is missing before launching a session.
+1. On the new host: `ssh-keygen -t ed25519 -N '' -C '<email> (<host> signing)' -f ~/.ssh/id_ed25519_signing`
+2. Append the new pubkey to `assets/git/allowed_signers` with the format `<email> namespaces="git" <pubkey> <hostname-tag>`
+3. Apply home-manager on every host so the updated `allowed_signers` propagates: `nix run home-manager -- switch --flake .#<host>` (or `darwin-rebuild` on macOS)
+4. Register the pubkey at <https://github.com/settings/ssh/new> with type **Signing Key** (NOT Authentication Key)
