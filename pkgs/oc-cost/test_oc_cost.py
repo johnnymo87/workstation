@@ -168,12 +168,18 @@ class TestResolveWindow(unittest.TestCase):
 
 
 
-def make_test_db(messages: list[dict]) -> sqlite3.Connection:
+def make_test_db(messages: list[dict], sessions: list[dict] | None = None) -> sqlite3.Connection:
     """Build an in-memory SQLite DB matching opencode.db's schema.
 
     Each `messages` dict needs keys: id, session_id, time_created (ms),
     and message-data fields (role, modelID, providerID, tokens). We wrap
     the message-data fields into a JSON string for the `data` column.
+
+    If `sessions` is provided, also create a `session` table populated
+    with those rows (each must have `id`, `parent_id` keys; parent_id
+    may be None for primary sessions). When `sessions` is None, no
+    session table is created -- callers exercising query_by_kind must
+    pass sessions explicitly.
     """
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -187,6 +193,20 @@ def make_test_db(messages: list[dict]) -> sqlite3.Connection:
         )
         """
     )
+    if sessions is not None:
+        conn.execute(
+            """
+            CREATE TABLE session (
+                id text PRIMARY KEY,
+                parent_id text
+            )
+            """
+        )
+        for s in sessions:
+            conn.execute(
+                "INSERT INTO session (id, parent_id) VALUES (?, ?)",
+                (s["id"], s.get("parent_id")),
+            )
     for m in messages:
         data = {k: v for k, v in m.items() if k not in ("id", "session_id", "time_created")}
         conn.execute(
@@ -317,6 +337,94 @@ class TestQuerySizeBuckets(unittest.TestCase):
         self.assertEqual(buckets["150-200k"], 1)
         self.assertEqual(buckets["200-300k"], 1)
         self.assertEqual(buckets["300k+"], 1)
+
+
+class TestQueryByKind(unittest.TestCase):
+    """Tests for query_by_kind: split usage between primary sessions
+    (parent_id IS NULL) and subagent sessions (parent_id IS NOT NULL).
+    """
+
+    def test_classifies_primary_vs_subagent(self):
+        d0 = 1800000000000
+        sessions = [
+            {"id": "primary1",  "parent_id": None},
+            {"id": "primary2",  "parent_id": None},
+            {"id": "subagent1", "parent_id": "primary1"},
+            {"id": "subagent2", "parent_id": "primary1"},
+        ]
+        msgs = [
+            assistant_msg("m1", "primary1",  d0 + 1, cache_read=1000, cache_write=100, out=50),
+            assistant_msg("m2", "primary1",  d0 + 2, cache_read=2000, cache_write=200, out=80),
+            assistant_msg("m3", "primary2",  d0 + 3, cache_read=500,  cache_write=50,  out=20),
+            assistant_msg("m4", "subagent1", d0 + 4, cache_read=300,  cache_write=30,  out=15, inp=100),
+            assistant_msg("m5", "subagent2", d0 + 5, cache_read=400,  cache_write=40,  out=10, inp=200),
+        ]
+        conn = make_test_db(msgs, sessions=sessions)
+        rows = oc_cost.query_by_kind(conn, d0, d0 + DAY_MS)
+        self.assertEqual(len(rows), 2)
+        kinds = {r["kind"]: r for r in rows}
+        # Primary: 2 sessions, 3 msgs, sums of m1+m2+m3
+        self.assertEqual(kinds["primary"]["sessions"], 2)
+        self.assertEqual(kinds["primary"]["msgs"], 3)
+        self.assertEqual(kinds["primary"]["cache_read"], 3500)
+        self.assertEqual(kinds["primary"]["cache_write"], 350)
+        self.assertEqual(kinds["primary"]["output"], 150)
+        self.assertEqual(kinds["primary"]["uncached"], 0)
+        # Subagent: 2 sessions, 2 msgs, sums of m4+m5
+        self.assertEqual(kinds["subagent"]["sessions"], 2)
+        self.assertEqual(kinds["subagent"]["msgs"], 2)
+        self.assertEqual(kinds["subagent"]["cache_read"], 700)
+        self.assertEqual(kinds["subagent"]["cache_write"], 70)
+        self.assertEqual(kinds["subagent"]["output"], 25)
+        self.assertEqual(kinds["subagent"]["uncached"], 300)
+
+    def test_only_primary(self):
+        d0 = 1800000000000
+        sessions = [{"id": "p1", "parent_id": None}]
+        msgs = [assistant_msg("m1", "p1", d0 + 1, cache_read=100)]
+        conn = make_test_db(msgs, sessions=sessions)
+        rows = oc_cost.query_by_kind(conn, d0, d0 + DAY_MS)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "primary")
+        self.assertEqual(rows[0]["sessions"], 1)
+
+
+class TestParseArgsByKind(unittest.TestCase):
+    def test_by_kind_default_false(self):
+        args = oc_cost.parse_args([])
+        self.assertFalse(args.by_kind)
+
+    def test_by_kind_flag(self):
+        args = oc_cost.parse_args(["--by-kind"])
+        self.assertTrue(args.by_kind)
+
+
+class TestRenderJsonByKind(unittest.TestCase):
+    def test_by_kind_in_json_when_present(self):
+        report = {
+            "meta": {
+                "db_path": "/x.db",
+                "window": {"start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
+                "active_days": 1,
+            },
+            "daily": [],
+            "by_model": [],
+            "cost_components": {
+                "cache_reads": 0.0, "cache_writes": 0.0, "uncached_input": 0.0,
+                "output": 0.0, "total": 0.0, "daily_avg": 0.0,
+                "monthly_proj": 0.0, "unpriced_models": [],
+            },
+            "size_buckets": [],
+            "by_kind": [
+                {"kind": "primary",  "sessions": 1, "msgs": 1,
+                 "cache_read": 100, "cache_write": 10, "uncached": 0, "output": 5,
+                 "cost_usd": 0.50},
+            ],
+        }
+        out = oc_cost.render_json(report)
+        parsed = json.loads(out)
+        self.assertIn("by_kind", parsed)
+        self.assertEqual(parsed["by_kind"][0]["kind"], "primary")
 
 
 class TestCostComponents(unittest.TestCase):

@@ -112,6 +112,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--until", help="ISO date YYYY-MM-DD (exclusive UTC midnight).")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of formatted text.")
     parser.add_argument("--db", help="Override path to opencode.db.")
+    parser.add_argument(
+        "--by-kind", action="store_true", dest="by_kind",
+        help=(
+            "Add a primary-vs-subagent breakdown section. Subagent sessions "
+            "are those whose row in the session table has a non-null parent_id."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -215,6 +222,72 @@ def query_size_buckets(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> 
             MAX(prompt_size) AS max_size
         FROM per_msg
         GROUP BY bucket ORDER BY MIN(prompt_size)
+        """,
+        {"start_ms": start_ms, "end_ms": end_ms},
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def query_by_kind(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
+    """Return per-kind aggregates: 'primary' vs 'subagent'.
+
+    A session is 'subagent' if its row in the `session` table has a
+    non-null `parent_id` (i.e. it was spawned by another session, e.g.
+    via the Task tool); otherwise 'primary'.
+
+    Schema dependency: requires the `session` table to exist with at
+    least (`id`, `parent_id`) columns. Real opencode.db has this; the
+    test fixture must opt in via `make_test_db(..., sessions=...)`.
+    """
+    # Same WHERE as _BASE_WHERE but with the join we need.
+    cur = conn.execute(
+        """
+        SELECT
+            CASE WHEN s.parent_id IS NULL THEN 'primary' ELSE 'subagent' END AS kind,
+            COUNT(DISTINCT m.session_id) AS sessions,
+            COUNT(*) AS msgs,
+            SUM(COALESCE(json_extract(m.data, '$.tokens.cache.read'),  0)) AS cache_read,
+            SUM(COALESCE(json_extract(m.data, '$.tokens.cache.write'), 0)) AS cache_write,
+            SUM(COALESCE(json_extract(m.data, '$.tokens.input'),       0)) AS uncached,
+            SUM(COALESCE(json_extract(m.data, '$.tokens.output'),      0)) AS output
+        FROM message m
+        JOIN session s ON s.id = m.session_id
+        WHERE json_extract(m.data, '$.role') = 'assistant'
+          AND json_extract(m.data, '$.tokens.cache.read') IS NOT NULL
+          AND m.time_created BETWEEN :start_ms AND :end_ms
+        GROUP BY kind
+        ORDER BY kind
+        """,
+        {"start_ms": start_ms, "end_ms": end_ms},
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def query_by_model_and_kind(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
+    """Return per-(model, kind) aggregates for cost computation.
+
+    Used by main() when --by-kind is set, so each kind row can be priced
+    using the actual model mix it ran (rather than approximating with a
+    blended rate). The orchestrator post-processes these into per-kind
+    totals via compute_cost_components(), once per kind.
+    """
+    cur = conn.execute(
+        """
+        SELECT
+            json_extract(m.data, '$.modelID') AS model,
+            CASE WHEN s.parent_id IS NULL THEN 'primary' ELSE 'subagent' END AS kind,
+            COUNT(*) AS msgs,
+            SUM(COALESCE(json_extract(m.data, '$.tokens.cache.read'),  0)) AS cache_read,
+            SUM(COALESCE(json_extract(m.data, '$.tokens.cache.write'), 0)) AS cache_write,
+            SUM(COALESCE(json_extract(m.data, '$.tokens.input'),       0)) AS uncached,
+            SUM(COALESCE(json_extract(m.data, '$.tokens.output'),      0)) AS output
+        FROM message m
+        JOIN session s ON s.id = m.session_id
+        WHERE json_extract(m.data, '$.role') = 'assistant'
+          AND json_extract(m.data, '$.tokens.cache.read') IS NOT NULL
+          AND m.time_created BETWEEN :start_ms AND :end_ms
+        GROUP BY model, kind
+        ORDER BY kind, cache_read DESC
         """,
         {"start_ms": start_ms, "end_ms": end_ms},
     )
@@ -410,12 +483,62 @@ def render_text(report: dict) -> str:
             f"{b['max_size'] / 1000:>7.1f}"
         )
 
+    # Optional: primary-vs-subagent breakdown (only when --by-kind was set)
+    by_kind = report.get("by_kind")
+    if by_kind:
+        lines.append("\n\n  Primary vs Subagent (priced per-model)\n")
+        lines.append("KIND       SESSIONS  MSGS    CACHE_RD(M)  CACHE_WR(M)  OUTPUT(M)        COST")
+        lines.append("-" * 80)
+        kind_total = 0.0
+        for k in by_kind:
+            cost_tag = (
+                _fmt_usd(k["cost_usd"]).rjust(11)
+                if k.get("cost_usd") is not None
+                else "  (no rate)"
+            )
+            if k.get("cost_usd") is not None:
+                kind_total += k["cost_usd"]
+            lines.append(
+                f"{k['kind']:<10} {str(k['sessions']):>8}  {str(k['msgs']):>5}  "
+                f"{k['cache_read'] / 1e6:>10.1f}  "
+                f"{k['cache_write'] / 1e6:>10.1f}  "
+                f"{k['output'] / 1e6:>8.1f}  {cost_tag}"
+            )
+        lines.append("-" * 80)
+        # The kind_total may diverge slightly from cost_components.total because
+        # unpriced models are excluded from both (so they cancel out).
+        lines.append(f"  {'(kind subtotal)':<43}{_fmt_usd(kind_total):>33}")
+
     lines.append(
         f"\nPeriod: {daily[0]['day']} to {daily[-1]['day']} "
         f"({len(daily)} active days)"
     )
     lines.append(f"Database: {meta['db_path']}\n")
     return "\n".join(lines)
+
+
+def _split_by_model_into_kinds(
+    by_model_kind: list[dict],
+) -> dict[str, list[dict]]:
+    """Group rows from query_by_model_and_kind by kind.
+
+    Returns {"primary": [...], "subagent": [...]} where each row has the
+    by_model shape (model, msgs, cache_read, cache_write, uncached, output)
+    so it can be passed to compute_cost_components(). Empty kinds are
+    omitted from the dict.
+    """
+    out: dict[str, list[dict]] = {}
+    for row in by_model_kind:
+        kind = row["kind"]
+        out.setdefault(kind, []).append({
+            "model":       row["model"],
+            "msgs":        row["msgs"],
+            "cache_read":  row["cache_read"],
+            "cache_write": row["cache_write"],
+            "uncached":    row["uncached"],
+            "output":      row["output"],
+        })
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -449,6 +572,45 @@ def main(argv: list[str] | None = None) -> int:
         "cost_components": components,
         "size_buckets": buckets,
     }
+
+    if args.by_kind:
+        try:
+            by_model_kind = query_by_model_and_kind(conn, start_ms, end_ms)
+        except sqlite3.OperationalError as e:
+            # Defensive: if the session table is missing for some reason,
+            # skip the breakdown rather than failing the whole report.
+            print(
+                f"Warning: --by-kind unavailable ({e}); skipping breakdown.",
+                file=sys.stderr,
+            )
+            by_model_kind = []
+        if by_model_kind:
+            grouped = _split_by_model_into_kinds(by_model_kind)
+            kind_summary: list[dict] = []
+            for kind, rows in grouped.items():
+                # compute_cost_components mutates `rows` to add per-row cost_usd
+                kc = compute_cost_components(rows, active_days=max(len(daily), 1))
+                # Aggregate across models within this kind
+                kind_summary.append({
+                    "kind":         kind,
+                    "sessions":     None,  # filled in below from query_by_kind
+                    "msgs":         sum(r["msgs"]        for r in rows),
+                    "cache_read":   sum(r["cache_read"]  for r in rows),
+                    "cache_write":  sum(r["cache_write"] for r in rows),
+                    "uncached":     sum(r["uncached"]    for r in rows),
+                    "output":       sum(r["output"]      for r in rows),
+                    "cost_usd":     kc["total"] if kc["total"] > 0 else None,
+                })
+            # Backfill sessions count from the simpler query
+            session_counts = {
+                r["kind"]: r["sessions"]
+                for r in query_by_kind(conn, start_ms, end_ms)
+            }
+            for k in kind_summary:
+                k["sessions"] = session_counts.get(k["kind"], 0)
+            # Stable order: primary first, then subagent
+            kind_summary.sort(key=lambda r: (r["kind"] != "primary", r["kind"]))
+            report["by_kind"] = kind_summary
 
     if args.json:
         print(render_json(report))
