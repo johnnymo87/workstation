@@ -53,25 +53,26 @@
    `~/projects/opencode-patched/patches/` and update `apply.sh` to apply
    it after the vim patch. Then the auto-update workflow will rebuild.
 
-3. **Open an upstream issue / PR against `sst/opencode`** with the
-   shell repro (4 concurrent `prompt_async` from 4 distinct
-   `x-opencode-directory` headers → multiple parallel turns + 400
-   "prefill" from Claude). ChatGPT confirmed no existing upstream issue
-   names this exact failure mode.
+3. **Open an upstream issue / PR against `anomalyco/opencode`** (NOT
+   `sst/opencode` — that's a different project) with the shell repro
+   (4 concurrent `prompt_async` from 4 distinct `x-opencode-directory`
+   headers → multiple parallel turns + 400 "prefill" from Claude).
+   ChatGPT confirmed no existing upstream issue names this exact
+   failure mode.
 
 **Key facts learned (don't re-investigate):**
 
-- The bug is in upstream `sst/opencode` HEAD too, not just our patched
-  fork. `SessionRunState.runners` is created via `InstanceState.make()`
-  which keys per-`Instance.directory`. Verified at v1.14.19 in
-  `packages/opencode/src/session/run-state.ts` (line ~33) and
-  `packages/opencode/src/effect/instance-state.ts` (line ~65,
+- The bug is in upstream `anomalyco/opencode` HEAD too, not just our
+  patched fork. `SessionRunState.runners` is created via
+  `InstanceState.make()` which keys per-`Instance.directory`. Verified
+  at v1.14.19 in `packages/opencode/src/session/run-state.ts` (line ~33)
+  and `packages/opencode/src/effect/instance-state.ts` (line ~65,
   `ScopedCache.get(self.cache, yield* directory)`).
 - The HTTP middleware at
   `packages/opencode/src/server/routes/instance/middleware.ts`
   derives the Instance from `x-opencode-directory` header.
 - `opencode-patched` builds against tag `v${version}` of
-  `anomalyco/opencode` (which mirrors `sst/opencode`). Build CI is
+  `anomalyco/opencode` (the upstream — NOT `sst/opencode`). Build CI is
   `~/projects/opencode-patched/.github/workflows/build-release.yml`.
 - Anthropic Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 do NOT support
   assistant-message prefill — confirmed by ChatGPT against Anthropic
