@@ -3,6 +3,7 @@ import {
   findActiveModel,
   createSelfCompactTool,
   createOnCompacted,
+  createOnStatus,
   callSummarizeHttp,
   callPromptAsyncHttp,
 } from "../self-compact-impl"
@@ -240,5 +241,145 @@ describe("callPromptAsyncHttp", () => {
       parts: [{ type: "text", text: "hello" }],
       noReply: false,
     })
+  })
+})
+
+describe("createOnStatus (v2: idle-triggered summarize)", () => {
+  it("ignores non-status events", async () => {
+    const pending = new Map<string, PendingResume>()
+    const callSummarize = vi.fn()
+    const findActiveModel = vi.fn()
+    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    await handler({ event: { type: "session.compacted", properties: { sessionID: "ses_x" } } })
+    expect(callSummarize).not.toHaveBeenCalled()
+  })
+
+  it("ignores non-idle status events", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+    ])
+    const callSummarize = vi.fn()
+    const findActiveModel = vi.fn()
+    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    await handler({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "ses_x", status: { type: "busy" } },
+      },
+    })
+    expect(callSummarize).not.toHaveBeenCalled()
+  })
+
+  it("ignores idle status for sessions without a pending entry", async () => {
+    const pending = new Map<string, PendingResume>()
+    const callSummarize = vi.fn()
+    const findActiveModel = vi.fn()
+    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    await handler({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "ses_x", status: { type: "idle" } },
+      },
+    })
+    expect(callSummarize).not.toHaveBeenCalled()
+  })
+
+  it("ignores idle status for entries already in 'summarizing' phase (no double-trigger)", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["ses_x", { prompt: "p", phase: "summarizing", createdAt: Date.now() }],
+    ])
+    const callSummarize = vi.fn()
+    const findActiveModel = vi.fn()
+    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    await handler({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "ses_x", status: { type: "idle" } },
+      },
+    })
+    expect(callSummarize).not.toHaveBeenCalled()
+  })
+
+  it("on idle for awaitingTurnEnd entry: promotes to summarizing then fires summarize", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+    ])
+    const callSummarize = vi.fn().mockResolvedValue(undefined)
+    const findActiveModel = vi
+      .fn()
+      .mockResolvedValue({ providerID: "anthropic", modelID: "claude" })
+    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    await handler({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "ses_x", status: { type: "idle" } },
+      },
+    })
+    expect(findActiveModel).toHaveBeenCalledWith({ sessionID: "ses_x" })
+    expect(callSummarize).toHaveBeenCalledWith({
+      sessionID: "ses_x",
+      providerID: "anthropic",
+      modelID: "claude",
+    })
+    expect(pending.get("ses_x")?.phase).toBe("summarizing")
+  })
+
+  it("evicts pending entry if findActiveModel returns null (no model means no compaction)", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+    ])
+    const callSummarize = vi.fn()
+    const findActiveModel = vi.fn().mockResolvedValue(null)
+    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    await handler({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "ses_x", status: { type: "idle" } },
+      },
+    })
+    expect(callSummarize).not.toHaveBeenCalled()
+    expect(pending.has("ses_x")).toBe(false)
+  })
+
+  it("evicts pending entry if callSummarize throws (no retry; user re-invokes the skill)", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+    ])
+    const callSummarize = vi.fn().mockRejectedValue(new Error("boom"))
+    const findActiveModel = vi.fn().mockResolvedValue({ providerID: "a", modelID: "m" })
+    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    await handler({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "ses_x", status: { type: "idle" } },
+      },
+    })
+    expect(pending.has("ses_x")).toBe(false)
+  })
+
+  it("phase promotion happens BEFORE await — re-entrant idle event for same session does not double-trigger", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+    ])
+    let summarizeCalls = 0
+    const callSummarize = vi.fn().mockImplementation(async () => {
+      summarizeCalls++
+      // While summarize is "in flight", simulate a re-entrant idle event:
+      await handler({
+        event: {
+          type: "session.status",
+          properties: { sessionID: "ses_x", status: { type: "idle" } },
+        },
+      })
+    })
+    const findActiveModel = vi.fn().mockResolvedValue({ providerID: "a", modelID: "m" })
+    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    await handler({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "ses_x", status: { type: "idle" } },
+      },
+    })
+    expect(summarizeCalls).toBe(1)
   })
 })
