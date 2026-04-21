@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from typing import Optional
 
@@ -62,8 +63,49 @@ def price_for(model_id: str) -> Optional[dict[str, float]]:
     return PRICES[best_key] if best_key else None
 
 
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value}")
+    return n
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments.
+
+    --days and --since/--until are mutually exclusive. We enforce this with
+    a custom check rather than argparse's add_mutually_exclusive_group
+    because we want --days to coexist with neither --since nor --until being
+    given (the default), but reject --days alongside *either* of them.
+    """
+    parser = argparse.ArgumentParser(
+        prog="oc-cost",
+        description=(
+            "Report OpenCode token usage and API cost "
+            "from ~/.local/share/opencode/opencode.db."
+        ),
+    )
+    parser.add_argument(
+        "--days", type=_positive_int, default=14,
+        help="Look back N days (default: 14). Mutually exclusive with --since/--until.",
+    )
+    parser.add_argument("--since", help="ISO date YYYY-MM-DD (UTC midnight).")
+    parser.add_argument("--until", help="ISO date YYYY-MM-DD (exclusive UTC midnight).")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of formatted text.")
+    parser.add_argument("--db", help="Override path to opencode.db.")
+
+    args = parser.parse_args(argv)
+
+    days_explicit = "--days" in (argv or [])
+    if days_explicit and (args.since or args.until):
+        parser.error("--days cannot be combined with --since/--until")
+
+    return args
+
+
 def main(argv: list[str] | None = None) -> int:
-    print("oc-cost: not implemented yet", file=sys.stderr)
+    args = parse_args(argv)
+    print(f"args = {args!r}", file=sys.stderr)
     return 0
 
 

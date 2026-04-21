@@ -67,5 +67,46 @@ class TestPriceFor(unittest.TestCase):
             oc_cost.PRICES = original
 
 
+class TestParseArgs(unittest.TestCase):
+    def test_defaults(self):
+        args = oc_cost.parse_args([])
+        self.assertEqual(args.days, 14)
+        self.assertIsNone(args.since)
+        self.assertIsNone(args.until)
+        self.assertFalse(args.json)
+        self.assertIsNone(args.db)
+
+    def test_days(self):
+        args = oc_cost.parse_args(["--days", "30"])
+        self.assertEqual(args.days, 30)
+
+    def test_days_must_be_positive(self):
+        with self.assertRaises(SystemExit):
+            oc_cost.parse_args(["--days", "0"])
+        with self.assertRaises(SystemExit):
+            oc_cost.parse_args(["--days", "-1"])
+
+    def test_since_until(self):
+        args = oc_cost.parse_args(["--since", "2026-04-01", "--until", "2026-04-15"])
+        self.assertEqual(args.since, "2026-04-01")
+        self.assertEqual(args.until, "2026-04-15")
+
+    def test_days_mutex_with_since(self):
+        with self.assertRaises(SystemExit):
+            oc_cost.parse_args(["--days", "7", "--since", "2026-04-01"])
+
+    def test_days_mutex_with_until(self):
+        with self.assertRaises(SystemExit):
+            oc_cost.parse_args(["--days", "7", "--until", "2026-04-15"])
+
+    def test_json_flag(self):
+        args = oc_cost.parse_args(["--json"])
+        self.assertTrue(args.json)
+
+    def test_db_path(self):
+        args = oc_cost.parse_args(["--db", "/tmp/x.db"])
+        self.assertEqual(args.db, "/tmp/x.db")
+
+
 if __name__ == "__main__":
     unittest.main()
