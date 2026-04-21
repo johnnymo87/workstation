@@ -4,161 +4,117 @@
 
 ---
 
-## RESUMPTION CONTEXT (compaction handoff, 2026-04-20)
+## RESUMPTION CONTEXT (compaction handoff, 2026-04-21)
 
-**This section is durable context for the post-compaction self.** Read it
-first. The plan tasks below are still the canonical reference, but this
-section captures conversational state that the auto-summary will lose.
+**This section is durable context for the post-compaction self.** Read
+this first; the plan body below is the canonical task reference but this
+section is the moment-in-time state.
 
-### Where we are
+### What just happened (THIS compaction is itself the smoke test)
 
-- **Done:** Tasks 0-9. Plugin code is functional, fully type-safe, 18/18
-  tests pass, typecheck clean. Working tree clean.
-- **Stopped:** mid-execution at the agreed checkpoint between Task 9 (code
-  complete) and Task 10 (nix registration — first task that touches the
-  live env).
-- **Unpushed:** 20 commits ahead of `origin/main` (from `eadf903` through
-  `199b0a0`). DO NOT push until Task 13 smoke test passes — user's explicit
-  ground rule. Verify with `git log --oneline origin/main..HEAD | wc -l`.
-- **User just said:** "Continue with Tasks 10-12" (per a structured choice).
-  After Task 12, stop for user-driven Task 13 (manual smoke test).
-- **Working directory:** `/home/dev/projects/workstation`, branch `main`,
-  no worktree (working directly on main per user's explicit ground rule).
+You are reading this immediately after `self_compact_and_resume` was
+invoked for the FIRST TIME on this session. The pre-compaction self
+called the tool with this very resumption prompt as input. The fact that
+you are running, with this message as your first user input, is the
+smoke test working end-to-end.
 
-### What's next, in order
+**Your first job: confirm the smoke test passed.** Things to verify:
 
-1. **Task 10** — register the plugin in `users/dev/opencode-config.nix`.
-   Insertion point is line 109 (right after the existing
-   `compaction-context.ts` registration). Mechanical change.
-2. **Task 11** — rewrite `assets/opencode/skills/preparing-for-compaction/SKILL.md`
-   to call `self_compact_and_resume` as the final step instead of presenting
-   the resumption prompt for user copy-paste. **THIS IS JUDGMENT WORK** —
-   read the existing skill carefully (only 54 lines) and preserve its
-   "Care about the continuity of the work" ethos. See plan Task 11 for the
-   spec; preserve assess/persist/commit-and-push as steps 1-3, replace step
-   4 with "draft prompt + call the tool". Add a fallback note for when the
-   tool isn't available.
-3. **Task 12** — `nix run home-manager -- switch --flake .#dev` from
-   `/home/dev/projects/workstation`. First command that mutates the live
-   environment. After it completes, verify
-   `ls -la ~/.config/opencode/plugins/self-compact.ts` is a symlink into
-   `${assetsPath}/opencode/plugins/self-compact.ts`.
-4. **STOP and check in with user before Task 13.** Task 13 is manual smoke
-   test — user does it.
-5. **Task 14** — push to origin AND mark design doc implemented (one final
-   commit on the design doc updating the status header).
+1. You received this resumption prompt as a fresh user message (look up
+   in the conversation: did the auto-compaction summary appear, then
+   this prompt as the first new user turn?).
+2. You have access to the same tool set, including `self_compact_and_resume`
+   itself — `bash`, `read`, `edit`, `write`, `task`, etc. should all be
+   present.
+3. Working tree is clean and on `main` with 9 unpushed commits.
+4. The conversation should feel "fresh" — the auto-summary replaces the
+   pre-compaction transcript with a synthesized recap.
 
-### Critical environment quirks (will burn you if forgotten)
+If any of those don't hold, the smoke test had a problem; report what
+you observe to the user and we'll debug.
+
+### Where the work stands (Tasks 0-12 done, only Task 14 remains)
+
+- **Done:** Tasks 0-12. Plugin coded, tested (18/18), nix-registered,
+  skill rewritten, deployed. Plus three post-Task-12 fixes the original
+  plan didn't anticipate (see "Iterations" below).
+- **In flight:** Task 13 (smoke test) — that's literally what is
+  happening right now.
+- **Remaining:** Task 14 — push the 9 unpushed commits AND mark the
+  design doc implemented. ONLY do this after the user confirms the
+  smoke test passed (the user is the human-in-the-loop here).
+- **Working dir:** `/home/dev/projects/workstation`, branch `main`,
+  9 commits ahead of `origin/main`.
+
+### Three post-Task-12 iterations the plan body doesn't capture
+
+After the original Task 12 home-manager apply, three more fixes were
+needed before the plugin actually worked. Commits on `main`:
+
+1. **`15509c5 fix(self-compact): deploy via mkOutOfStoreSymlink so Bun can resolve runtime deps`**
+   — The plugin imports `tool` from `@opencode-ai/plugin` at runtime
+   (which transitively pulls zod). When deployed as a plain symlink into
+   the nix store, Bun's import resolver walks up from the resolved
+   real-path looking for `node_modules/` and finds none. Fix: use
+   `mkOutOfStoreSymlink` (matching pigeon's pattern) so Bun resolves
+   from the working-tree path where `node_modules/` is co-located.
+   ChatGPT consulted on this; their recommended LONG-term refactor is a
+   config-dir `package.json` + real-file approach (see
+   `/tmp/answer-01.md` if it survives, or recreate the question).
+   Recorded as deferred follow-up in the design doc next time it's
+   touched.
+
+2. **`92fcb88 fix(self-compact): split entry from impl so opencode loader sees only default export`**
+   — opencode's plugin loader iterates `Object.entries(mod)` and calls
+   EVERY exported function as a plugin factory (see
+   `/home/dev/projects/opencode/packages/opencode/src/plugin/index.ts:81-87`).
+   Our six named test-helper exports were getting called with
+   `PluginInput` and throwing on `input.sessionID`. Fix: moved helpers
+   to `assets/opencode/plugins/self-compact-impl.ts`; main entry now
+   only exports `default`. Pigeon does the same. Tests updated to
+   import from `-impl`.
+
+3. **Branch consolidation:** the user's `feat/oc-cost` branch (7
+   unrelated commits) was rebased onto `main`'s self-compact fixes,
+   then ff-merged into `main`, then deleted. History is now linear,
+   single branch. The user explicitly chose this consolidation.
+
+### Critical environment quirks (still apply)
 
 - **gpg-agent is unresponsive in this shell.** Every commit MUST use
-  `--no-gpg-sign`. The repo has `commit.gpgsign = true` globally; without
-  the flag, commits fail. If gpg-agent has recovered by the time you
-  resume, plain `git commit` will work — but check with a test commit
-  first.
-- **No `sleep` in bash invocations.** Hangs in this env. For waits, use
-  bounded loops or `timeout`. (See `~/projects/workstation/assets/opencode/AGENTS.md`.)
-- **Use `workdir` parameter on the bash tool**, not `cd /foo && cmd` patterns.
-  (Exception: chained git commands like `git add ... && git commit ...` are fine.)
-- **Devbox runs Node 22.21.1, npm 10.9.4** — the vitest harness is
-  installed at `assets/opencode/plugins/node_modules/`; run tests from
-  that workdir as `npm test` and `npm run typecheck`.
+  `--no-gpg-sign`. Without the flag commits fail.
+- **No `sleep` in bash.** Hangs. Use bounded loops, `timeout`, or
+  direct condition checks. See `assets/opencode/AGENTS.md`.
+- **Use bash tool's `workdir` parameter**, not `cd /foo && cmd`.
+- **Host is cloudbox**, not devbox. The home-manager target is
+  `.#cloudbox`, not `.#dev`. (The original resumption brief said
+  `.#dev`; that was wrong, the assertPlatform script caught it.)
 
-### Subagent dispatch notes (for Tasks 10-11)
+### What "smoke test passed" means → Task 14 next steps
 
-- Use `subagent_type: "implementer"` for code/config changes per
-  user-level AGENTS.md routing rules.
-- For prompt drafting, copy the implementer-prompt template structure from
-  `~/.config/opencode/skills/superpowers/subagent-driven-development/implementer-prompt.md`.
-- One implementer subagent during Tasks 7-8 ignored an explicit "STOP and
-  report" instruction (drove by with `properties?: any`); be vigilant
-  about this in remaining tasks. Re-dispatch via the same `task_id` to
-  resume an existing subagent session, or fresh task for a clean slate.
-- Per agreed cadence (set early in conversation): batch reviews per task
-  rather than per-step; for Tasks 10-12 the changes are mechanical/light
-  enough that a single spec review per task is sufficient (no separate
-  code-quality pass). Task 11's skill rewrite warrants a more careful
-  review (it's prose).
+If the user confirms the smoke test passed:
 
-### Anti-overbuild guardrails for the remaining tasks
+1. Push the 9 unpushed commits: `git push` (after `git pull --rebase`
+   per session-close protocol; should be a fast-forward).
+2. Update `docs/plans/2026-04-20-self-compact-plugin-design.md` —
+   change the status header to mark "Implemented 2026-04-21". Commit
+   that with `--no-gpg-sign` and push.
+3. Optionally: clean up this RESUMPTION CONTEXT section from the plan
+   file (it served its purpose).
+4. Optionally: file a follow-up issue or design-doc note for the
+   ChatGPT-recommended refactor (config-dir `package.json` +
+   real-file deployment) — this would untangle the working-tree
+   coupling that mkOutOfStoreSymlink introduces.
 
-- Task 10 is exactly ONE new line in `opencode-config.nix`. Don't refactor
-  surrounding lines. If alphabetical ordering is the norm, place after
-  `compaction-context.ts` and before plugin registrations that come later
-  alphabetically.
-- Task 11's skill rewrite should NOT bloat the skill. Original is 54 lines.
-  Final should be similar length or shorter — the new tool removes a step,
-  not adds work.
-- Task 12 is a single command. Don't add `--show-trace` or other flags
-  unless rebuild fails. If the build fails, capture the full error and
-  report — don't try to "fix" nix issues by guessing.
+### Files
 
-### Course corrections during 0-9 (so you understand the current shape)
-
-The plan code blocks reflect the FINAL shape after these in-flight changes
-(captured in the per-task "Note:" sections in the plan):
-
-1. **Task 0** corrected the internalFetch path from
-   `(ctx.client as any).config?.fetch` (in original plan) to
-   `(ctx.client as any)._client?.getConfig?.()?.fetch` (verified pigeon
-   pattern). Commit `eadf903`.
-2. **Tasks 3+4** hardened `findActiveModel` to honor a "returns null,
-   never throws" contract (catches `res.json()` exceptions and non-array
-   payloads). Commits `4b907fb` (red) + `d9d0042` (green) + `79ecb17` (plan).
-3. **Tasks 7+8** fixed a race in `createOnCompacted`: pop pending entry
-   synchronously BEFORE awaiting `callPromptAsync` so re-entrant
-   `session.compacted` events don't double-deliver. Commits `6ac5e4f` (red) +
-   `5779a10` (green) + `a50d47b` (plan).
-4. **Task 9** went through three iterations on the event handler's
-   parameter type:
-   - Started with loose `{ properties?: { sessionID?: string } }` (failed to compile when wired)
-   - Tightened to `{ event: Event }` from `@opencode-ai/sdk` (commit `29ce36e`) — compiles but treats a leaky abstraction as the wire contract
-   - Final: structural `PluginBusEvent` boundary type + `isSessionCompacted` named type predicate (commit `3ec2823`). Imports only `EventSessionCompacted`, not the full Event union. Bonus: removed the `as any` casts from the 5 event-handler tests.
-   - Decision was informed by ChatGPT consult at
-     `/tmp/research-opencode-plugin-event-type-answer.md` (and the question at
-     `/tmp/research-opencode-plugin-event-type-question.md`). Pigeon's plugin
-     also uses an equivalent wide-boundary pattern (`event.type as string` +
-     `event.properties as Record<string, unknown>`) for the same reason
-     — the SDK Event union lags the runtime.
-
-### Files in play
-
-**Created/owned by this work (`assets/opencode/plugins/`):**
-- `self-compact.ts` — the plugin (190 lines; final shape)
-- `test/self-compact.test.ts` — 18 vitest tests (no `as any` on event payloads)
-- `package.json`, `tsconfig.json`, `vitest.config.ts`, `.gitignore` — harness
-
-**To be modified by Task 10:**
-- `users/dev/opencode-config.nix` — add ONE line at ~line 109 registering
-  `self-compact.ts` alongside the existing plugins:
-  ```nix
-  xdg.configFile."opencode/plugins/self-compact.ts".source = "${assetsPath}/opencode/plugins/self-compact.ts";
-  ```
-
-**To be modified by Task 11:**
-- `assets/opencode/skills/preparing-for-compaction/SKILL.md` — rewrite to
-  call the new tool. Source-of-truth lives here; it's symlinked to
-  `~/.config/opencode/skills/preparing-for-compaction/SKILL.md` via
-  home-manager.
-
-**Reference docs (don't modify):**
-- `docs/plans/2026-04-20-self-compact-plugin-design.md` — the "why"
-- `docs/plans/2026-04-20-self-compact-plugin-plan.md` — this file (the "what")
-
-**Verification artifacts:**
-- ChatGPT consult on event typing: `/tmp/research-opencode-plugin-event-type-question.md`
-  and `/tmp/research-opencode-plugin-event-type-answer.md` (may not survive `/tmp` clear)
-- ChatGPT consult on architecture: `/tmp/research-opencode-self-compact-question.md`
-  and `/tmp/research-opencode-self-compact-answer.md` (also may not survive)
-
-### Done criteria (still applies, see end of file)
-
-- ✅ Plugin file exists, registered via home-manager, deployed
-  → Tasks 10 + 12
-- ✅ All vitest tests pass → DONE (18/18 today)
-- ✅ Skill `preparing-for-compaction` instructs the agent to call the tool
-  → Task 11
-- ✅ Smoke test in real TUI session → Task 13 (user-driven)
-- ✅ All commits pushed to origin/main → Task 14 (post-smoke-test)
+- `assets/opencode/plugins/self-compact.ts` — slim entry, only `default` export
+- `assets/opencode/plugins/self-compact-impl.ts` — all helpers + tests' targets
+- `assets/opencode/plugins/test/self-compact.test.ts` — 18 vitest tests
+- `users/dev/opencode-config.nix` — registration via mkOutOfStoreSymlink (lines 116-122)
+- `assets/opencode/skills/preparing-for-compaction/SKILL.md` — the updated skill (Task 11)
+- `docs/plans/2026-04-20-self-compact-plugin-design.md` — the why
+- `docs/plans/2026-04-20-self-compact-plugin-plan.md` — this file
 
 ---
 
