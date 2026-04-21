@@ -82,16 +82,6 @@ lib.mkIf isDevbox {
     }
   '';
 
-  # Mask GPG agent units for forwarding (systemd-specific)
-  # Masks both sockets AND service to prevent any local agent from starting
-  home.activation.maskGpgAgentUnits = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    mkdir -p "$HOME/.config/systemd/user"
-    for unit in gpg-agent.service gpg-agent.socket gpg-agent-extra.socket gpg-agent-browser.socket gpg-agent-ssh.socket; do
-      ln -sf /dev/null "$HOME/.config/systemd/user/$unit"
-    done
-    ${pkgs.systemd}/bin/systemctl --user daemon-reload 2>/dev/null || true
-  '';
-
   # Assemble gws config files from sops secrets at activation time.
   # Creates two config directories for multi-account support:
   #   ~/.config/gws/         (jonathan.mohrbacher@gmail.com)
@@ -189,17 +179,6 @@ lib.mkIf isDevbox {
     else
       echo "assembleGwsCredentials: skipping gws-alt (secrets not available)"
     fi
-  '';
-
-  # Ensure GPG socket directory exists before SSH tries to bind RemoteForward
-  systemd.user.tmpfiles.rules = [
-    "d %t/gnupg 0700 - - -"
-  ];
-
-  # GPG common.conf for devbox: no-autostart prevents local agent from clobbering
-  # the forwarded socket. Do NOT use use-keyboxd here (causes issues with no-autostart).
-  home.file.".gnupg/common.conf".text = ''
-    no-autostart
   '';
 
   # Backup /persist to a local tarball (cloud volume not included in Hetzner snapshots)
