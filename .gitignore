@@ -19,3 +19,8 @@ session-ses_*.md
 
 # Worktrees
 .worktrees/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
