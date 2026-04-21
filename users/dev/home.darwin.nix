@@ -194,51 +194,6 @@ lib.mkIf isDarwin {
     };
   };
 
-  # Persistent SSH tunnels for GPG agent forwarding.
-  # Keeps RemoteForward /run/user/1000/gnupg/S.gpg-agent alive so headless
-  # sessions can sign commits without an interactive SSH session.
-  # Uses dedicated *-gpg-tunnel SSH hosts that ONLY forward the GPG socket,
-  # avoiding port contention with interactive *-tunnel sessions.
-   launchd.agents.devbox-gpg-tunnel = {
-    enable = true;
-    config = {
-      ProgramArguments = [
-        "${pkgs.openssh}/bin/ssh"
-        "-N"              # No remote command
-        "-o" "ExitOnForwardFailure=yes"
-        "-o" "ServerAliveInterval=30"
-        "-o" "ServerAliveCountMax=3"
-        "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
-        "devbox-gpg-tunnel"
-      ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-gpg-tunnel.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-gpg-tunnel.err.log";
-    };
-  };
-
-  launchd.agents.cloudbox-gpg-tunnel = {
-    enable = true;
-    config = {
-      ProgramArguments = [
-        "${pkgs.openssh}/bin/ssh"
-        "-N"              # No remote command
-        "-o" "ExitOnForwardFailure=yes"
-        "-o" "ServerAliveInterval=30"
-        "-o" "ServerAliveCountMax=3"
-        "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
-        "cloudbox-gpg-tunnel"
-      ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-gpg-tunnel.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-gpg-tunnel.err.log";
-    };
-  };
-
   # Persistent SSH tunnels for development port forwarding.
   # Keeps LocalForward ports (dev servers, OAuth callbacks) and RemoteForward
   # ports (CDP, chatgpt-relay) alive without a dedicated terminal tab.
