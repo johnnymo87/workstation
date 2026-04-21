@@ -8,45 +8,61 @@ description: Measures OpenCode prompt caching efficiency and API costs via SQLit
 ## Quick Check
 
 ```bash
-node .opencode/skills/tracking-cache-costs/analyze.mjs
+oc-cost                              # last 14 days
+oc-cost --days 30                    # custom window
+oc-cost --since 2026-04-01           # date-bounded
+oc-cost --json | jq '.cost_components.monthly_proj'
 ```
 
-The script queries the OpenCode SQLite database directly (`~/.local/share/opencode/opencode.db`). If `sqlite3` is not on PATH, it auto-wraps with `nix-shell -p sqlite`.
+`oc-cost` is a packaged Python CLI in `pkgs/oc-cost/` that queries the
+OpenCode SQLite database (`~/.local/share/opencode/opencode.db`) directly.
+It replaces the older `analyze.mjs` script that used to live in this skill
+directory.
 
-Set the analysis window with `DAYS`:
-
-```bash
-DAYS=30 node .opencode/skills/tracking-cache-costs/analyze.mjs
-```
-
-Output includes:
+Output sections:
 - Daily cache read/write/uncached ratios
 - Per-model cost breakdown (Anthropic API rates)
-- Cost component analysis (cache reads vs writes vs uncached vs output)
+- Cost components — applies each model's own rates, not a dominant-model
+  approximation
 - Daily average and monthly projection
 - Prompt size distribution (bucketed)
+- Unpriced models (any model id not in `oc-cost`'s pricing table)
 
 ## Interpreting Results
 
-| Write % | Assessment | Action |
-|---------|-----------|--------|
-| <10% | Healthy | No action needed |
-| 10-20% | Moderate | Check for short sessions or frequent subagent spawning |
-| 20-40% | Poor | Cache busting likely -- tool reordering or file tree churn |
-| >40% | Severe | Investigate immediately, major cost impact |
+| Write % | Assessment | Action                                                     |
+|---------|------------|------------------------------------------------------------|
+| <10%    | Healthy    | No action needed                                           |
+| 10-20%  | Moderate   | Check for short sessions or frequent subagent spawning     |
+| 20-40%  | Poor       | Cache busting likely -- tool reordering or file tree churn |
+| >40%    | Severe     | Investigate immediately, major cost impact                 |
 
 **Root causes of high writes**: tool definition order instability (prefix-based cache busted by reordering), file tree changes in system prompt, only 4 cache breakpoints in current opencode, short sessions / subagent spawning.
 
 ## Pricing Notes
 
 - **Opus 4.6 and Sonnet 4.6**: flat pricing across the full 1M context window. No >200k surcharge.
-- **Older models (Opus 4, 4.1)**: may have different pricing tiers for >200k context. The analysis script uses flat rates.
-- **Vertex AI / Bedrock**: pricing may differ from Anthropic direct API rates. The script uses Anthropic's published rates.
+- **Older models (Opus 4, 4.1)**: may have different pricing tiers for >200k context. `oc-cost` uses flat rates.
+- **Vertex AI / Bedrock**: pricing may differ from Anthropic direct API rates. `oc-cost` uses Anthropic's published rates.
 - Pricing source: https://docs.anthropic.com/en/docs/about-claude/pricing
+- New models without an entry in the `PRICES` dict appear in `unpriced_models` and are excluded from the cost total. Add them to `pkgs/oc-cost/oc_cost.py`.
 
 ## Ad-Hoc Queries
 
-For custom analysis, query the DB directly:
+For most investigations, prefer `oc-cost --json | jq` to ad-hoc SQL:
+
+```bash
+# Top-line monthly projection
+oc-cost --json | jq .cost_components.monthly_proj
+
+# Per-model cost subtotals
+oc-cost --json | jq '.by_model[] | {model, cost_usd}'
+
+# Daily totals as TSV
+oc-cost --json | jq -r '.daily[] | [.day, .msgs, .cache_read, .cache_write] | @tsv'
+```
+
+For shapes `oc-cost` doesn't expose, query the DB directly:
 
 ```bash
 nix-shell -p sqlite --run "sqlite3 -header -column ~/.local/share/opencode/opencode.db \"
