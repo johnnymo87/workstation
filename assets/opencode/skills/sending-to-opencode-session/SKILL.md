@@ -51,6 +51,7 @@ Other sources of session IDs:
 - Telegram pigeon notifications include the session ID on its own line.
 - `lgtm-sessions` lists active lgtm-dispatched sessions with their IDs.
 - `opencode attach <url> --session <id>` — the IDs you'd attach to.
+- **Your own session's ID:** `echo $OPENCODE_SESSION_ID` from inside any bash tool call. Injected by the `shell-env` plugin (`assets/opencode/plugins/shell-env.ts`) so an agent can hand its own ID to a peer for back-and-forth messaging.
 
 ## How It Works
 

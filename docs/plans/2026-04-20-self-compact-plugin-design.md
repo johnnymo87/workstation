@@ -30,7 +30,7 @@ Equip the agent with a tool that, when called, compacts its own session **and** 
 - Must work in opencode TUI (primary use case).
 - Must not depend on pigeon being running.
 - Distributed via home-manager / nix from the workstation monorepo.
-- Single-file plugin if reasonable; matches existing workstation plugin convention (`compaction-context.ts`, `non-interactive-env.ts`).
+- Single-file plugin if reasonable; matches existing workstation plugin convention (`compaction-context.ts`, `shell-env.ts`).
 
 ## Key Findings (verified by source-reading + ChatGPT consultation)
 
