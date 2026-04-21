@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import os
+import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
@@ -246,9 +248,197 @@ def compute_cost_components(by_model: list[dict], active_days: int) -> dict:
     }
 
 
+_DEFAULT_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
+
+
+def connect(db_path: str) -> sqlite3.Connection:
+    """Open opencode.db in read-only mode. Exits 1 on missing or wrong-schema DB."""
+    if not os.path.exists(db_path):
+        print(
+            f"Database not found: {db_path}. "
+            f"Set --db or check OPENCODE_DATA_DIR.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    uri = f"file:{db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    # Confirm it's an OpenCode DB.
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='message'"
+    )
+    if cur.fetchone() is None:
+        print(
+            f"Not an OpenCode database (missing 'message' table): {db_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return conn
+
+
+def _fmt_usd(n: float) -> str:
+    return f"${n:.2f}"
+
+
+def _pct(part: float, total: float) -> str:
+    return f"{(part / total * 100):.1f}" if total > 0 else "0.0"
+
+
+def _ms_to_iso(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def render_json(report: dict) -> str:
+    return json.dumps(report, indent=2, sort_keys=True)
+
+
+def render_text(report: dict) -> str:
+    lines: list[str] = []
+    daily = report["daily"]
+    by_model = report["by_model"]
+    components = report["cost_components"]
+    buckets = report["size_buckets"]
+    meta = report["meta"]
+
+    if not daily:
+        lines.append(
+            f"\n  No usage data in window {meta['window']['start']} → "
+            f"{meta['window']['end']}.\n"
+        )
+        lines.append(f"Database: {meta['db_path']}\n")
+        return "\n".join(lines)
+
+    # Daily section
+    lines.append(f"\n  OpenCode Usage Report ({meta['active_days']} active days)\n")
+    lines.append("DATE        MSGS   READ%  WRITE%  UNCACHED%")
+    lines.append("-" * 52)
+    for d in daily:
+        total = d["cache_read"] + d["cache_write"] + d["uncached"]
+        lines.append(
+            f"{d['day']}  {str(d['msgs']):>5}  "
+            f"{_pct(d['cache_read'], total):>5}%  "
+            f"{_pct(d['cache_write'], total):>5}%    "
+            f"{_pct(d['uncached'], total):>5}%"
+        )
+
+    # Per-model section
+    lines.append("\n\n  Per-Model Cost Breakdown\n")
+    lines.append("MODEL                          MSGS   CACHE_RD(M)  CACHE_WR(M)  OUTPUT(M)   COST")
+    lines.append("-" * 90)
+    grand_cache_read = grand_cache_write = grand_output = 0
+    grand_total = 0.0
+    for m in by_model:
+        cr_M = m["cache_read"]  / 1e6
+        cw_M = m["cache_write"] / 1e6
+        ou_M = m["output"]      / 1e6
+        grand_cache_read  += m["cache_read"]
+        grand_cache_write += m["cache_write"]
+        grand_output      += m["output"]
+        if m["cost_usd"] is not None:
+            grand_total += m["cost_usd"]
+            cost_tag = _fmt_usd(m["cost_usd"]).rjust(10)
+        else:
+            cost_tag = "  (no rate)"
+        name = m["model"][:28] + ".." if len(m["model"]) > 28 else m["model"]
+        lines.append(
+            f"{name:<30} {str(m['msgs']):>5}  "
+            f"{cr_M:>10.1f}  {cw_M:>10.1f}  {ou_M:>8.1f}  {cost_tag}"
+        )
+    lines.append("-" * 90)
+    lines.append(
+        f"{'TOTAL':<30} {'':>5}  "
+        f"{grand_cache_read / 1e6:>10.1f}  "
+        f"{grand_cache_write / 1e6:>10.1f}  "
+        f"{grand_output / 1e6:>8.1f}  "
+        f"{_fmt_usd(grand_total):>10}"
+    )
+
+    # Cost components section
+    total = components["total"]
+    lines.append("\n\n  Cost Components (per-model rates applied separately)\n")
+    lines.append(
+        f"  Cache reads:   {_fmt_usd(components['cache_reads']):>10}  "
+        f"({_pct(components['cache_reads'], total)}%)"
+    )
+    lines.append(
+        f"  Cache writes:  {_fmt_usd(components['cache_writes']):>10}  "
+        f"({_pct(components['cache_writes'], total)}%)"
+    )
+    lines.append(
+        f"  Uncached in:   {_fmt_usd(components['uncached_input']):>10}  "
+        f"({_pct(components['uncached_input'], total)}%)"
+    )
+    lines.append(
+        f"  Output:        {_fmt_usd(components['output']):>10}  "
+        f"({_pct(components['output'], total)}%)"
+    )
+    lines.append(f"  {'─' * 30}")
+    lines.append(f"  Total:         {_fmt_usd(total):>10}")
+    lines.append(f"  Daily avg:     {_fmt_usd(components['daily_avg']):>10}")
+    lines.append(f"  Monthly proj:  {_fmt_usd(components['monthly_proj']):>10}")
+    if components["unpriced_models"]:
+        lines.append(
+            f"\n  Unpriced models (excluded from total): "
+            f"{', '.join(components['unpriced_models'])}"
+        )
+
+    # Size buckets section
+    total_msgs = sum(b["msgs"] for b in buckets)
+    lines.append("\n\n  Prompt Size Distribution\n")
+    lines.append("BUCKET       MSGS    %     MIN(k)   MAX(k)")
+    lines.append("-" * 50)
+    for b in buckets:
+        lines.append(
+            f"{b['bucket']:<12} {str(b['msgs']):>5}  "
+            f"{_pct(b['msgs'], total_msgs):>5}%  "
+            f"{b['min_size'] / 1000:>7.1f}  "
+            f"{b['max_size'] / 1000:>7.1f}"
+        )
+
+    lines.append(
+        f"\nPeriod: {daily[0]['day']} to {daily[-1]['day']} "
+        f"({len(daily)} active days)"
+    )
+    lines.append(f"Database: {meta['db_path']}\n")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    print(f"args = {args!r}", file=sys.stderr)
+    db_path = args.db or _DEFAULT_DB
+    now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    start_ms, end_ms = resolve_window(args, now_ms)
+
+    conn = connect(db_path)
+
+    try:
+        daily   = query_daily(conn, start_ms, end_ms)
+        by_model = query_by_model(conn, start_ms, end_ms)
+        buckets = query_size_buckets(conn, start_ms, end_ms)
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            print("Database busy. Retry in a moment.", file=sys.stderr)
+            return 2
+        raise
+
+    components = compute_cost_components(by_model, active_days=max(len(daily), 1))
+
+    report = {
+        "meta": {
+            "db_path": db_path,
+            "window": {"start": _ms_to_iso(start_ms), "end": _ms_to_iso(end_ms)},
+            "active_days": len(daily),
+        },
+        "daily": daily,
+        "by_model": by_model,
+        "cost_components": components,
+        "size_buckets": buckets,
+    }
+
+    if args.json:
+        print(render_json(report))
+    else:
+        print(render_text(report))
     return 0
 
 

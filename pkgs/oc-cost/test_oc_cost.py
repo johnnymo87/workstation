@@ -366,3 +366,50 @@ class TestCostComponents(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+class TestRenderJson(unittest.TestCase):
+    def test_schema(self):
+        report = {
+            "meta": {
+                "db_path": "/x/y.db",
+                "window": {"start": "2026-04-06T00:00:00Z", "end": "2026-04-20T00:00:00Z"},
+                "active_days": 14,
+            },
+            "daily": [{"day": "2026-04-06", "msgs": 1, "cache_read": 100,
+                       "cache_write": 10, "uncached": 5, "output": 20}],
+            "by_model": [{"model": "claude-opus-4-6", "msgs": 1,
+                          "cache_read": 100, "cache_write": 10,
+                          "uncached": 5, "output": 20, "cost_usd": 0.5}],
+            "cost_components": {
+                "cache_reads": 0.1, "cache_writes": 0.2, "uncached_input": 0.3,
+                "output": 0.4, "total": 1.0, "daily_avg": 0.07,
+                "monthly_proj": 2.1, "unpriced_models": [],
+            },
+            "size_buckets": [{"bucket": "0-50k", "msgs": 1, "min_size": 100, "max_size": 100}],
+        }
+        out = oc_cost.render_json(report)
+        parsed = json.loads(out)
+        self.assertEqual(set(parsed.keys()),
+                         {"meta", "daily", "by_model", "cost_components", "size_buckets"})
+        self.assertEqual(parsed["cost_components"]["total"], 1.0)
+
+
+class TestConnect(unittest.TestCase):
+    def test_missing_db_raises_systemexit(self):
+        with self.assertRaises(SystemExit):
+            oc_cost.connect("/nonexistent/path/to/opencode.db")
+
+    def test_wrong_schema_raises_systemexit(self):
+        # Create a real (but empty) sqlite file with no `message` table.
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE other (x int)")
+            conn.commit()
+            conn.close()
+            with self.assertRaises(SystemExit):
+                oc_cost.connect(path)
+        finally:
+            import os
+            os.unlink(path)
