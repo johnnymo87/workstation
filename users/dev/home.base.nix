@@ -762,6 +762,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
 
       CURL="${pkgs.curl}/bin/curl"
       JQ="${pkgs.jq}/bin/jq"
+      FLOCK="${pkgs.util-linux}/bin/flock"
 
       show_help() {
         cat <<'HELP_EOF'
@@ -778,10 +779,22 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
         --cwd DIR          Set x-opencode-directory header (default: $PWD)
         --url URL          opencode serve base URL
                            (default: $OPENCODE_URL or http://127.0.0.1:4096)
+        --no-lock          Skip the per-session flock (default: lock enabled)
         -h, --help         Show this help
 
       Environment:
-        OPENCODE_URL       Override the default opencode serve URL
+        OPENCODE_URL          Override the default opencode serve URL
+        OPENCODE_SEND_NO_LOCK If set to 1, skip the per-session flock
+
+      Concurrency note (race-condition mitigation):
+        opencode serve has a known race where concurrent prompt_async requests
+        to the same session id from DIFFERENT working directories
+        (x-opencode-directory headers) bypass the per-session busy guard,
+        causing parallel LLM turns and 400 "does not support assistant
+        message prefill" from Anthropic. By default, this script holds an
+        flock on /tmp/opencode-send-<session_id>.lock for the POST so two
+        invocations targeting the same session serialize at the wrapper
+        level. Pass --no-lock to bypass.
 
       Examples:
         opencode-send --list
@@ -795,6 +808,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       cwd=""
       session_id=""
       message=""
+      no_lock="''${OPENCODE_SEND_NO_LOCK:-0}"
 
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -828,6 +842,10 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
             ;;
           --url=*)
             OPENCODE_URL="''${1#*=}"
+            shift
+            ;;
+          --no-lock)
+            no_lock=1
             shift
             ;;
           --)
@@ -956,26 +974,66 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       body="$( "$JQ" -nc --arg text "$message" \
         '{parts: [{type: "text", text: $text}]}' )"
 
-      http_status="$( "$CURL" -sS -o /tmp/opencode-send-resp.$$ -w '%{http_code}' \
-        -X POST \
-        -H "Content-Type: application/json" \
-        -H "x-opencode-directory: $cwd" \
-        --data "$body" \
-        "$OPENCODE_URL/session/$session_id/prompt_async" )" || {
-        echo "Error: POST to opencode serve failed" >&2
-        rm -f /tmp/opencode-send-resp.$$
-        exit 1
+      # POST the prompt. By default we hold an flock on a per-target-session
+      # lock file to mitigate the opencode serve race where concurrent
+      # prompt_async requests from different x-opencode-directory headers
+      # bypass the per-session busy guard. Two opencode-send invocations
+      # targeting the same session id will serialize at the wrapper level.
+      # See --help for details. Pass --no-lock or set OPENCODE_SEND_NO_LOCK=1
+      # to bypass.
+      resp_file="/tmp/opencode-send-resp.$$"
+
+      do_post() {
+        "$CURL" -sS -o "$resp_file" -w '%{http_code}' \
+          -X POST \
+          -H "Content-Type: application/json" \
+          -H "x-opencode-directory: $cwd" \
+          --data "$body" \
+          "$OPENCODE_URL/session/$session_id/prompt_async"
       }
+
+      if [[ "$no_lock" == "1" ]]; then
+        http_status="$( do_post )" || {
+          echo "Error: POST to opencode serve failed" >&2
+          rm -f "$resp_file"
+          exit 1
+        }
+      else
+        # Per-target-session lock file under /tmp (sticky bit makes shared use
+        # safe). flock holds until either the inner curl finishes or the
+        # entire script exits, whichever comes first; opening fd 9 ties the
+        # lifetime to this shell.
+        lock_file="/tmp/opencode-send-$session_id.lock"
+        : > /dev/null  # ensure pipefail is fine in this branch
+        exec 9>"$lock_file" || {
+          echo "Error: cannot open lock file $lock_file" >&2
+          exit 1
+        }
+        if ! "$FLOCK" -w 30 9; then
+          echo "Error: timed out waiting for flock on $lock_file (>30s)" >&2
+          exec 9>&-
+          exit 1
+        fi
+        http_status="$( do_post )" || {
+          echo "Error: POST to opencode serve failed (under flock $lock_file)" >&2
+          rm -f "$resp_file"
+          "$FLOCK" -u 9 || true
+          exec 9>&-
+          exit 1
+        }
+        "$FLOCK" -u 9 || true
+        exec 9>&-
+      fi
 
       if [[ "$http_status" -lt 200 || "$http_status" -ge 300 ]]; then
         echo "Error: opencode serve returned HTTP $http_status" >&2
-        cat /tmp/opencode-send-resp.$$ >&2 || true
+        cat "$resp_file" >&2 || true
         echo >&2
-        rm -f /tmp/opencode-send-resp.$$
+        rm -f "$resp_file"
         exit 1
       fi
 
-      rm -f /tmp/opencode-send-resp.$$
+      rm -f "$resp_file"
       echo "Sent to $session_id (cwd=$cwd, ''${#message} chars)"
     '';
   };
