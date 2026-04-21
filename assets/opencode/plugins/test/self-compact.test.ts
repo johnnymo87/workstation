@@ -141,7 +141,7 @@ describe("createSelfCompactTool (v2: stash-and-return)", () => {
 describe("createOnCompacted event handler", () => {
   it("ignores events that are not session.compacted", async () => {
     const pending = new Map<string, PendingResume>()
-    pending.set("s1", { prompt: "x", createdAt: Date.now() })
+    pending.set("s1", { prompt: "x", phase: "summarizing", createdAt: Date.now() })
     const callPromptAsync = vi.fn()
     const handler = createOnCompacted({ pending, callPromptAsync })
     await handler({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
@@ -159,7 +159,7 @@ describe("createOnCompacted event handler", () => {
 
   it("calls callPromptAsync with the stashed prompt and clears state", async () => {
     const pending = new Map<string, PendingResume>()
-    pending.set("s1", { prompt: "resume now", createdAt: Date.now() })
+    pending.set("s1", { prompt: "resume now", phase: "summarizing", createdAt: Date.now() })
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
     const handler = createOnCompacted({ pending, callPromptAsync })
     await handler({
@@ -171,7 +171,7 @@ describe("createOnCompacted event handler", () => {
 
   it("clears state even if callPromptAsync throws", async () => {
     const pending = new Map<string, PendingResume>()
-    pending.set("s1", { prompt: "resume", createdAt: Date.now() })
+    pending.set("s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() })
     const callPromptAsync = vi.fn().mockRejectedValue(new Error("boom"))
     const handler = createOnCompacted({ pending, callPromptAsync })
     await expect(
@@ -182,7 +182,7 @@ describe("createOnCompacted event handler", () => {
 
   it("removes the pending entry before awaiting callPromptAsync (no double-delivery race)", async () => {
     const pending = new Map<string, PendingResume>()
-    pending.set("s1", { prompt: "resume", createdAt: Date.now() })
+    pending.set("s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() })
     let observedDuringCall: boolean | undefined
     const callPromptAsync = vi.fn().mockImplementation(async () => {
       // While callPromptAsync is in-flight, the pending entry must already

@@ -35,43 +35,54 @@ const STALE_MS = 30 * 60 * 1000
 
 export interface PendingResume {
   prompt: string
+  /**
+   * State machine discriminator.
+   *
+   * - `awaitingTurnEnd`: the tool has stashed the entry; the onStatus handler
+   *   is waiting for the session to go idle so it can fire POST /summarize.
+   * - `summarizing`: onStatus has fired summarize; the entry is held until
+   *   onCompacted pops it and enqueues the resumption prompt.
+   *
+   * Without this field, onStatus cannot distinguish "first idle after queue"
+   * (should fire summarize) from "second idle while summarize is in flight"
+   * (must not double-trigger). See addendum to v1 design doc for rationale.
+   */
+  phase: "awaitingTurnEnd" | "summarizing"
   createdAt: number
 }
 
+/**
+ * v2 tool: stash-and-return.
+ *
+ * The tool's only job is to record the resumption prompt under the current
+ * session's ID and return immediately. The actual `POST /summarize` trigger
+ * lives in `createOnStatus`, which fires when the session goes idle (i.e.,
+ * after this turn — and any nested tool calls — closes).
+ *
+ * This is the deadlock fix from v1: calling `POST /summarize` from inside a
+ * tool's `execute` causes mutual await with the outer prompt loop. By doing
+ * nothing but a Map insert here, we cannot deadlock.
+ */
 export function createSelfCompactTool(deps: {
   pending: Map<string, PendingResume>
-  callSummarize: (input: {
-    sessionID: string
-    providerID: string
-    modelID: string
-  }) => Promise<void>
-  findActiveModel: (input: { sessionID: string }) => Promise<{ providerID: string; modelID: string } | null>
 }) {
   return {
     async execute(args: { prompt: string }, toolCtx: { sessionID: string }): Promise<string> {
-      // Evict stale entries
       const now = Date.now()
+      // Evict stale entries so the Map doesn't grow without bound across the
+      // process lifetime. 30 minutes is generous; a real compaction takes
+      // seconds to a few minutes.
       for (const [sid, entry] of deps.pending) {
         if (now - entry.createdAt > STALE_MS) deps.pending.delete(sid)
       }
-
-      const model = await deps.findActiveModel({ sessionID: toolCtx.sessionID })
-      if (!model) {
-        return "Cannot determine active model; aborting compaction. (No user message with model metadata found in this session.)"
-      }
-
-      deps.pending.set(toolCtx.sessionID, { prompt: args.prompt, createdAt: now })
-      try {
-        await deps.callSummarize({
-          sessionID: toolCtx.sessionID,
-          providerID: model.providerID,
-          modelID: model.modelID,
-        })
-      } catch (err) {
-        deps.pending.delete(toolCtx.sessionID)
-        throw err
-      }
-      return "Compaction triggered. Your resumption prompt will be enqueued automatically once compaction completes."
+      // Last-write-wins on duplicate calls within a session (acceptable for
+      // MVP — see design doc "Risks for v2").
+      deps.pending.set(toolCtx.sessionID, {
+        prompt: args.prompt,
+        phase: "awaitingTurnEnd",
+        createdAt: now,
+      })
+      return "Compaction queued; will run when this turn ends."
     },
   }
 }
