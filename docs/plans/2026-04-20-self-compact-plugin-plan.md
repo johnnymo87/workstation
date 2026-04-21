@@ -4,117 +4,18 @@
 
 ---
 
-## RESUMPTION CONTEXT (compaction handoff, 2026-04-21)
+## SUPERSEDED 2026-04-21
 
-**This section is durable context for the post-compaction self.** Read
-this first; the plan body below is the canonical task reference but this
-section is the moment-in-time state.
+**This v1 plan is historical.** Tasks 0-12 were implemented and committed; the resulting plugin **deadlocks** when invoked. Task 13's smoke test failed for that reason. Task 14 is replaced.
 
-### What just happened (THIS compaction is itself the smoke test)
+**See instead:**
 
-You are reading this immediately after `self_compact_and_resume` was
-invoked for the FIRST TIME on this session. The pre-compaction self
-called the tool with this very resumption prompt as input. The fact that
-you are running, with this message as your first user input, is the
-smoke test working end-to-end.
+- `docs/plans/2026-04-21-self-compact-idle-trigger-plan.md` — v2 implementation plan (idle-triggered summarize)
+- `docs/plans/2026-04-20-self-compact-plugin-design.md` "Addendum 2026-04-21: Architecture Reversal" — root-cause analysis and v2 design
 
-**Your first job: confirm the smoke test passed.** Things to verify:
+**Why the deadlock:** Calling `POST /summarize` from inside a tool's `execute` causes the route's `await SessionPrompt.loop()` to join the outer (currently-running) loop's callback queue — but the outer loop can only resolve when our tool returns, which can only happen when summarize resolves. Mutual await. The 10s `AbortSignal.timeout` did not save us. The fix is to move the summarize trigger to a `session.status` event handler that fires after the agent's turn closes (the session goes idle, the outer loop is gone, summarize-triggered loop runs cleanly).
 
-1. You received this resumption prompt as a fresh user message (look up
-   in the conversation: did the auto-compaction summary appear, then
-   this prompt as the first new user turn?).
-2. You have access to the same tool set, including `self_compact_and_resume`
-   itself — `bash`, `read`, `edit`, `write`, `task`, etc. should all be
-   present.
-3. Working tree is clean and on `main` with 9 unpushed commits.
-4. The conversation should feel "fresh" — the auto-summary replaces the
-   pre-compaction transcript with a synthesized recap.
-
-If any of those don't hold, the smoke test had a problem; report what
-you observe to the user and we'll debug.
-
-### Where the work stands (Tasks 0-12 done, only Task 14 remains)
-
-- **Done:** Tasks 0-12. Plugin coded, tested (18/18), nix-registered,
-  skill rewritten, deployed. Plus three post-Task-12 fixes the original
-  plan didn't anticipate (see "Iterations" below).
-- **In flight:** Task 13 (smoke test) — that's literally what is
-  happening right now.
-- **Remaining:** Task 14 — push the 9 unpushed commits AND mark the
-  design doc implemented. ONLY do this after the user confirms the
-  smoke test passed (the user is the human-in-the-loop here).
-- **Working dir:** `/home/dev/projects/workstation`, branch `main`,
-  9 commits ahead of `origin/main`.
-
-### Three post-Task-12 iterations the plan body doesn't capture
-
-After the original Task 12 home-manager apply, three more fixes were
-needed before the plugin actually worked. Commits on `main`:
-
-1. **`15509c5 fix(self-compact): deploy via mkOutOfStoreSymlink so Bun can resolve runtime deps`**
-   — The plugin imports `tool` from `@opencode-ai/plugin` at runtime
-   (which transitively pulls zod). When deployed as a plain symlink into
-   the nix store, Bun's import resolver walks up from the resolved
-   real-path looking for `node_modules/` and finds none. Fix: use
-   `mkOutOfStoreSymlink` (matching pigeon's pattern) so Bun resolves
-   from the working-tree path where `node_modules/` is co-located.
-   ChatGPT consulted on this; their recommended LONG-term refactor is a
-   config-dir `package.json` + real-file approach (see
-   `/tmp/answer-01.md` if it survives, or recreate the question).
-   Recorded as deferred follow-up in the design doc next time it's
-   touched.
-
-2. **`92fcb88 fix(self-compact): split entry from impl so opencode loader sees only default export`**
-   — opencode's plugin loader iterates `Object.entries(mod)` and calls
-   EVERY exported function as a plugin factory (see
-   `/home/dev/projects/opencode/packages/opencode/src/plugin/index.ts:81-87`).
-   Our six named test-helper exports were getting called with
-   `PluginInput` and throwing on `input.sessionID`. Fix: moved helpers
-   to `assets/opencode/plugins/self-compact-impl.ts`; main entry now
-   only exports `default`. Pigeon does the same. Tests updated to
-   import from `-impl`.
-
-3. **Branch consolidation:** the user's `feat/oc-cost` branch (7
-   unrelated commits) was rebased onto `main`'s self-compact fixes,
-   then ff-merged into `main`, then deleted. History is now linear,
-   single branch. The user explicitly chose this consolidation.
-
-### Critical environment quirks (still apply)
-
-- **gpg-agent is unresponsive in this shell.** Every commit MUST use
-  `--no-gpg-sign`. Without the flag commits fail.
-- **No `sleep` in bash.** Hangs. Use bounded loops, `timeout`, or
-  direct condition checks. See `assets/opencode/AGENTS.md`.
-- **Use bash tool's `workdir` parameter**, not `cd /foo && cmd`.
-- **Host is cloudbox**, not devbox. The home-manager target is
-  `.#cloudbox`, not `.#dev`. (The original resumption brief said
-  `.#dev`; that was wrong, the assertPlatform script caught it.)
-
-### What "smoke test passed" means → Task 14 next steps
-
-If the user confirms the smoke test passed:
-
-1. Push the 9 unpushed commits: `git push` (after `git pull --rebase`
-   per session-close protocol; should be a fast-forward).
-2. Update `docs/plans/2026-04-20-self-compact-plugin-design.md` —
-   change the status header to mark "Implemented 2026-04-21". Commit
-   that with `--no-gpg-sign` and push.
-3. Optionally: clean up this RESUMPTION CONTEXT section from the plan
-   file (it served its purpose).
-4. Optionally: file a follow-up issue or design-doc note for the
-   ChatGPT-recommended refactor (config-dir `package.json` +
-   real-file deployment) — this would untangle the working-tree
-   coupling that mkOutOfStoreSymlink introduces.
-
-### Files
-
-- `assets/opencode/plugins/self-compact.ts` — slim entry, only `default` export
-- `assets/opencode/plugins/self-compact-impl.ts` — all helpers + tests' targets
-- `assets/opencode/plugins/test/self-compact.test.ts` — 18 vitest tests
-- `users/dev/opencode-config.nix` — registration via mkOutOfStoreSymlink (lines 116-122)
-- `assets/opencode/skills/preparing-for-compaction/SKILL.md` — the updated skill (Task 11)
-- `docs/plans/2026-04-20-self-compact-plugin-design.md` — the why
-- `docs/plans/2026-04-20-self-compact-plugin-plan.md` — this file
+**Body below preserved unchanged** as the historical record of how Tasks 0-12 were planned and executed. Three post-Task-12 fixes that aren't reflected in the body are documented in `git log` (`15509c5` mkOutOfStoreSymlink, `92fcb88` default-only export, plus the `feat/oc-cost` branch consolidation).
 
 ---
 

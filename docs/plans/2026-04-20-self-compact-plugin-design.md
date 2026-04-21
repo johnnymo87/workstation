@@ -330,3 +330,154 @@ We'll choose between these when we get to that work. Either way, MVP doesn't nee
 - Opencode prompt loop (queued message handling): `~/projects/opencode/packages/opencode/src/session/prompt.ts:631,706`
 - Plugin SDK tool definition: `~/projects/opencode/packages/plugin/src/tool.ts`
 - Plugin SDK type surface: `~/projects/opencode/packages/plugin/src/index.ts`
+
+---
+
+## Addendum 2026-04-21: Architecture Reversal (Idle-Triggered Summarize)
+
+**Status of original architecture:** Implemented through Tasks 0-12, deployed, smoke-tested — and **deadlocks**. Do not use the v1 plugin to invoke compaction; the implementation lives on `main` but the active code path is broken until the v2 redesign in `docs/plans/2026-04-21-self-compact-idle-trigger-plan.md` lands.
+
+### What we got wrong
+
+The v1 design assumed `POST /session/:id/summarize` from inside the tool's `execute` would trigger compaction the same way the TUI's `/compact` slash-command does. **It does not — when called mid-turn it deadlocks.**
+
+### Root cause (verified from opencode source + log evidence)
+
+The HTTP route at `packages/opencode/src/server/routes/session.ts:516-539` does:
+
+```ts
+await SessionCompaction.create({...})  // writes the compaction marker part
+await SessionPrompt.loop({ sessionID }) // <-- runs the prompt loop synchronously
+```
+
+`SessionPrompt.loop` checks `start(sessionID)` (`prompt.ts:239-248`); if a loop is already running for that session it returns `undefined`, and `loop()` then enqueues a callback and `await`s the existing loop's resolution (`prompt.ts:278-284`):
+
+```ts
+const abort = resume_existing ? resume(sessionID) : start(sessionID)
+if (!abort) {
+  return new Promise<MessageV2.WithParts>((resolve, reject) => {
+    const callbacks = state()[sessionID].callbacks
+    callbacks.push({ resolve, reject })
+  })
+}
+```
+
+When our plugin tool's `execute` calls `POST /summarize`:
+
+1. The outer prompt loop is currently mid-turn (it's waiting for our `execute` to return).
+2. `/summarize` calls `SessionPrompt.loop` → joins the outer loop's callback queue → awaits its resolution.
+3. The outer loop can only resolve once our tool returns.
+4. Our tool can only return once `await callSummarizeHttp` resolves.
+5. **Mutual await. Deadlock.**
+
+The 10-second `AbortSignal.timeout(10_000)` we placed on `callSummarizeHttp` does not save us. The in-process Hono fetch may or may not honor client-side AbortSignals; even when it does, the abort only cancels the client's fetch — the server's `await loop()` keeps waiting indefinitely.
+
+**Log evidence** (`~/.local/share/opencode/log/2026-04-21T025630.log`):
+- 02:59:32 — first `POST /summarize` arrives at server
+- 03:03:30 — same request still pending after ~4 minutes; **user manually `POST /abort`** which kills the deadlocked outer loop
+- After revert + a fresh user `/message` POST (which kicks a fresh idle-state loop), 03:05:10's second `/summarize` from idle completes naturally; `session.compacted` fires at 03:06:54; `prompt_async` lands at 03:06:54+1ms; resumption-prompt enqueue path works correctly **once the trigger fires from idle**.
+
+So the split-phase architecture (tool stash → bus event → prompt_async) is sound. **What's wrong is the trigger location: summarize must fire from outside any active turn, never from inside a tool's `execute`.**
+
+### Cross-checks
+
+- **Pigeon does not exhibit this.** Pigeon's `ingestCompactCommand` (`pigeon/packages/daemon/src/worker/compact-ingest.ts:47`) calls the same `POST /summarize` endpoint, but from a daemon process — the session is always idle when pigeon hits it. Pigeon was never the proof-of-concept this design assumed.
+- **The TUI does not exhibit this.** The TUI's `/compact` slash-command (`opencode/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:466-470`) calls `sdk.client.session.summarize(...)` — but only as a user-initiated keyboard action when no prompt loop is active.
+- **No upstream issue covers this.** Of the 25 compaction-related issues searched on `anomalyco/opencode`, none describe plugin-tool-triggered summarize. The closest, #16395 ("Compacting status never appears in TUI"), is about a missing `session.time.compacting` field — orthogonal to our deadlock.
+
+### Tangential discoveries
+
+These don't affect the redesign but were learned during RCA:
+
+1. **The TUI streaming you see during interactive `/compact` is just the normal assistant message-part stream.** `SessionCompaction.process` calls `processor.process(...)` which is the same processor used for any LLM turn; the TUI subscribes to `message.part.updated` and renders. There is no "compaction-mode" rendering path. So a working v2 will get the streaming UX automatically — provided the trigger fires when the TUI isn't already showing "tool running" overlay.
+2. **`session.time.compacting` is a dead field.** `sync.tsx:463` checks it for the "compacting" status indicator but compaction.ts never sets it. Upstream issue #16395, no PR.
+3. **`session.idle` is "deprecated"** but still emitted (`status.ts:36-41`). The non-deprecated event is `session.status` with `status.type === "idle"` (`status.ts:62-71`). Use `session.status` in v2 and discriminate on `status.type`.
+4. **`/compact` text via `prompt_async` does NOT invoke the slash command.** Slash commands are TUI command-palette entries (`session/index.tsx:447-455`), not server-interpreted. Sending the literal text would just be enqueued as a user message saying "/compact". Not a viable shortcut.
+
+### The v2 architecture
+
+**Tool's `execute` becomes a no-op stash.** It captures `(sessionID, prompt)` into the in-memory `pending` map, marks the entry's phase as `awaitingTurnEnd`, and returns immediately ("Compaction queued; will run when this turn ends.").
+
+**A new event handler subscribes to `session.status`.** When the status transitions to `idle` for a session that has a `pending` entry in phase `awaitingTurnEnd`:
+1. Promote the entry to phase `summarizing`.
+2. Look up the active model (existing `findActiveModel` logic).
+3. Fire `POST /summarize` from the now-idle state. Drop the 10-second timeout (match pigeon: no client-side timeout).
+4. Do not await deeply — the call is fire-and-let-the-loop-do-its-thing; we don't actually need its return value because the existing `session.compacted` handler does the next step.
+
+**The existing `session.compacted` handler is unchanged.** When the bus event fires after compaction completes, the handler pops the pending entry and `POST /prompt_async`s the resumption prompt. (This already worked correctly in the v1 smoke test; the only thing that didn't work was getting compaction to start in the first place.)
+
+**End-to-end flow:**
+
+```
+LLM emits tool call: self_compact_and_resume(prompt="...")
+  ↓
+Tool execute: pending.set(sessionID, {prompt, phase: 'awaitingTurnEnd'})
+Tool execute: returns "Compaction queued; will run when this turn ends."
+  ↓
+LLM ack's tool result, finishes turn (no follow-up planned)
+  ↓
+SessionPrompt.loop sets status.type = 'idle' on exit (prompt.ts:267)
+  ↓
+Bus publishes session.status { sessionID, status: { type: 'idle' } }
+  ↓
+Plugin onStatus handler:
+  - sees pending[sessionID].phase === 'awaitingTurnEnd'
+  - flips phase to 'summarizing'
+  - findActiveModel → POST /summarize from idle (works correctly)
+  ↓
+Server: SessionCompaction.create → SessionPrompt.loop runs from idle
+  → assistant message of mode=compaction streams parts → TUI renders
+  ↓
+Compaction completes, Bus publishes session.compacted
+  ↓
+Plugin onCompacted handler (unchanged from v1):
+  - pops pending entry
+  - POST /prompt_async with resumption text
+  ↓
+Resumption prompt arrives as next user turn (with full TUI streaming UX)
+```
+
+### Why this works without re-introducing the deadlock
+
+When `onStatus` fires `POST /summarize`, the outer prompt loop has already `await`ed its `defer(() => cancel(sessionID))` (`prompt.ts:286`) which calls `SessionStatus.set(..., {type: 'idle'})` which is what published the event we're handling. The outer loop is gone. The summarize-triggered `loop()` call sees `start(sessionID)` succeed (no existing loop), gets a real abort signal, and runs to completion.
+
+There IS a subtle timing question: is there a race where `onStatus` fires `POST /summarize` so quickly that the outer loop's cleanup hasn't fully torn down its state? The defer/cancel is synchronous (`prompt.ts:257-269`) and `SessionStatus.set` is synchronous (`status.ts:61-75`). The bus event fires synchronously inside `set`. So by the time our handler runs, the outer loop's state entry is already `delete`d (`prompt.ts:266`). The race is impossible. (We could also defensively `await` a microtask before firing summarize; cheap insurance.)
+
+### What stays from v1
+
+- `assets/opencode/plugins/self-compact.ts` (entry, only `default` export) — file structure unchanged
+- `assets/opencode/plugins/self-compact-impl.ts` — most helpers reused
+  - `findActiveModel` — unchanged
+  - `callSummarizeHttp` — drop `AbortSignal.timeout(10_000)`; otherwise unchanged
+  - `callPromptAsyncHttp` — keep `AbortSignal.timeout(10_000)` (this one is genuinely fast)
+  - `PluginBusEvent` + `isSessionCompacted` type predicate — unchanged
+  - `createOnCompacted` factory — unchanged
+- Test harness (`vitest`, `package.json`, etc.) — unchanged
+- Deployment via `mkOutOfStoreSymlink` — unchanged
+- Skill `assets/opencode/skills/preparing-for-compaction/SKILL.md` — minor update to expectation-setting language (the agent should know the tool returns instantly; compaction happens after the turn closes)
+
+### What changes from v1
+
+- `createSelfCompactTool.execute` — drops `findActiveModel` call, drops `callSummarize` call, drops the try/catch+pending.delete. Now: stash entry, return string. Add `phase: 'awaitingTurnEnd' | 'summarizing'` to the `PendingResume` shape.
+- New factory `createOnStatus(deps)` — takes `pending`, `findActiveModel`, `callSummarize`. Handler fires on `session.status` events; checks for `idle` + matching pending entry in `awaitingTurnEnd` phase; promotes to `summarizing` then triggers summarize. Includes its own `isSessionStatusIdle` type predicate paralleling `isSessionCompacted`.
+- `self-compact.ts` — must register BOTH `onStatus` and `onCompacted`. The plugin's `event` hook receives a single `(input: { event }) => Promise<void>` function; we'll compose them by dispatching internally on `event.type`.
+
+### Decisions
+
+- **Listen to `session.status` (not `session.idle`).** `session.idle` is marked deprecated upstream. `session.status` carries the discriminated state directly.
+- **Drop `AbortSignal.timeout(10_000)` on summarize.** It's wrong for a long-running endpoint and was masking the real problem. Match pigeon (no timeout).
+- **Add `phase` to PendingResume.** Without it, the status-handler can't distinguish "first idle after queue" (should fire summarize) from "second idle after summarize completes" (no-op, the compacted handler will run separately) from "post-compaction idle" (no-op). Phase makes the state machine explicit.
+- **Same `pending` Map.** Don't introduce a second map for `summarizing` state. Single source of truth, single state machine.
+- **No Map snapshot via JSON.** State doesn't need to survive process restart for MVP. v1's note about "stale entries evicted at 30 min" still applies.
+- **No retry on summarize failure.** If summarize fails (network, model error), evict the pending entry and log. User re-invokes the skill. Matches v1's no-retry stance for prompt_async.
+- **The current broken code stays on main.** It's not invoked unless the agent calls the tool, which the skill currently directs it to do. We'll update the skill in v2's first task to set the expectation that the tool returns instantly.
+
+### Risks for v2
+
+- **What if the LLM follows up with another tool call before the turn ends?** The status won't go idle until that nested turn completes. That's actually correct: we WANT to wait for the full turn to finish. Risk: if the LLM emits an infinite tool-call loop after self_compact_and_resume, we never fire summarize. Mitigation: 30-min stale-eviction (already present).
+- **What if multiple `self_compact_and_resume` calls happen in the same turn?** Last-write-wins on the pending entry. Acceptable for MVP.
+- **What if the user starts a new turn (sends a message) between the tool returning and idle firing?** The status briefly goes idle (between the assistant turn ending and the new user message starting a new loop), our handler fires summarize, the new user message gets enqueued behind the compaction. Order: user message → compaction → summarize completes → resumption prompt → new user message (?). Need to confirm during smoke test. Worst case: user message arrives in the post-compaction context, before the resumption prompt. Probably acceptable.
+
+### Implementation plan
+
+See `docs/plans/2026-04-21-self-compact-idle-trigger-plan.md`.
