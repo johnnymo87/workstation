@@ -64,9 +64,12 @@ lib.mkIf isCloudbox {
           [ -d "$repo_dir/.worktrees" ] || continue
           repo_name=$(basename "$repo_dir")
 
-          # Fetch and prune remote refs
-          git -C "$repo_dir" fetch --prune origin 2>/dev/null || {
-            log "WARN: fetch failed for $repo_name, skipping"
+          # Fetch and prune remote refs. Capture stderr so we can include the
+          # first error line in the WARN; otherwise auth/network failures are
+          # invisible in the journal.
+          fetch_err=$(git -C "$repo_dir" fetch --prune origin 2>&1 >/dev/null) || {
+            first_err=$(printf '%s\n' "$fetch_err" | head -1)
+            log "WARN: fetch failed for $repo_name, skipping: $first_err"
             continue
           }
 
