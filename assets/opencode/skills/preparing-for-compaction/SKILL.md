@@ -28,6 +28,12 @@ The user wants to continue working but needs to compact. The automatic compactio
    - State what to do first (e.g., "run `bd ready`", "read the plan file at ...")
    - Be passed to the `self_compact_and_resume` tool as the `prompt` argument to automate the handoff.
 
+   **How the tool behaves (v2):**
+   - It returns INSTANTLY with a "Compaction queued" message — no waiting.
+   - Compaction begins automatically after THIS turn closes (i.e., once you stop responding). Do NOT call other tools or generate more text trying to "wait for" or "verify" the compaction — that just delays it.
+   - The TUI will visibly stream the compaction summary token-by-token once it starts.
+   - When compaction completes, the resumption prompt arrives as the next user message — a fresh turn begins automatically.
+
    *Note: If the `self_compact_and_resume` tool is not available (e.g., older opencode version, plugin disabled), fall back to printing the prompt for the user to paste after `/compact`.*
 
 ## What to Persist
