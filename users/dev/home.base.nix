@@ -218,7 +218,6 @@ in
   # Work tools (macOS + cloudbox only)
   ++ lib.optionals (isDarwin || isCloudbox) [
     localPkgs.acli
-    localPkgs.datadog-mcp-cli
     # Bazel mono repo needs zip at build time and java for ktlint execution.
     # rules_kotlin <2.3.0 falls back to system PATH for java:
     # https://github.com/bazelbuild/rules_kotlin/pull/1452

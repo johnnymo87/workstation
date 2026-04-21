@@ -335,9 +335,15 @@ in
       fi
     '');
 
-  # Inject Datadog MCP config with API key auth into opencode.json
-  # Uses datadog_mcp_cli proxy binary with --site us3 and DD_API_KEY/DD_APP_KEY
-  # Disabled by default — enable manually or via dedicated agent when needed
+  # Inject Datadog MCP config (remote HTTP transport) into opencode.json
+  # Uses Datadog's hosted MCP server with DD_API_KEY/DD_APPLICATION_KEY headers.
+  # Endpoint host is mcp.<DD_SITE>; site is us3 for our org.
+  # Disabled by default — enable manually or via dedicated agent when needed.
+  #
+  # NOTE: We previously used the local datadog_mcp_cli stdio proxy, but Datadog
+  # broke its hardcoded api.us3.datadoghq.com/api/unstable/mcp-server/mcp path
+  # (returns 404) and hasn't shipped a fixed binary. Remote HTTP is now the
+  # recommended path per docs.datadoghq.com/bits_ai/mcp_server/setup/.
   home.activation.injectDatadogMcpSecrets = lib.mkIf isDarwin
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
@@ -361,16 +367,17 @@ in
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
-          --arg cmd "${localPkgs.datadog-mcp-cli}/bin/datadog_mcp_cli" \
+          --arg url "https://mcp.us3.datadoghq.com/api/unstable/mcp-server/mcp" \
           --arg api_key "''${dd_api_key}" \
           --arg app_key "''${dd_app_key}" \
           '.mcp.datadog = {
-            "type": "local",
-            "command": [$cmd, "--site", "us3"],
+            "type": "remote",
+            "url": $url,
             "enabled": false,
-            "environment": {
+            "oauth": false,
+            "headers": {
               "DD_API_KEY": $api_key,
-              "DD_APP_KEY": $app_key
+              "DD_APPLICATION_KEY": $app_key
             }
           }' "$runtime" > "$tmp"
 
@@ -407,16 +414,17 @@ in
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
-          --arg cmd "${localPkgs.datadog-mcp-cli}/bin/datadog_mcp_cli" \
+          --arg url "https://mcp.us3.datadoghq.com/api/unstable/mcp-server/mcp" \
           --arg api_key "''${dd_api_key}" \
           --arg app_key "''${dd_app_key}" \
           '.mcp.datadog = {
-            "type": "local",
-            "command": [$cmd, "--site", "us3"],
+            "type": "remote",
+            "url": $url,
             "enabled": false,
-            "environment": {
+            "oauth": false,
+            "headers": {
               "DD_API_KEY": $api_key,
-              "DD_APP_KEY": $app_key
+              "DD_APPLICATION_KEY": $app_key
             }
           }' "$runtime" > "$tmp"
 
