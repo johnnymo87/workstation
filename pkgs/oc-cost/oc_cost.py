@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -125,6 +126,82 @@ def resolve_window(args: argparse.Namespace, now_ms: int) -> tuple[int, int]:
         end = _parse_date_to_ms(args.until, end_of_day=True) if args.until else now_ms
         return start, end
     return now_ms - args.days * 86_400_000, now_ms
+
+
+
+# Reused WHERE clause keeps the three queries in sync.
+_BASE_WHERE = """
+    json_extract(data, '$.role') = 'assistant'
+    AND json_extract(data, '$.tokens.cache.read') IS NOT NULL
+    AND time_created BETWEEN :start_ms AND :end_ms
+"""
+
+
+def query_daily(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
+    cur = conn.execute(
+        f"""
+        SELECT date(time_created/1000, 'unixepoch') AS day,
+               COUNT(*) AS msgs,
+               SUM(COALESCE(json_extract(data, '$.tokens.cache.read'),  0)) AS cache_read,
+               SUM(COALESCE(json_extract(data, '$.tokens.cache.write'), 0)) AS cache_write,
+               SUM(COALESCE(json_extract(data, '$.tokens.input'),       0)) AS uncached,
+               SUM(COALESCE(json_extract(data, '$.tokens.output'),      0)) AS output
+        FROM message
+        WHERE {_BASE_WHERE}
+        GROUP BY day ORDER BY day
+        """,
+        {"start_ms": start_ms, "end_ms": end_ms},
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def query_by_model(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
+    cur = conn.execute(
+        f"""
+        SELECT json_extract(data, '$.modelID') AS model,
+               COUNT(*) AS msgs,
+               SUM(COALESCE(json_extract(data, '$.tokens.cache.read'),  0)) AS cache_read,
+               SUM(COALESCE(json_extract(data, '$.tokens.cache.write'), 0)) AS cache_write,
+               SUM(COALESCE(json_extract(data, '$.tokens.input'),       0)) AS uncached,
+               SUM(COALESCE(json_extract(data, '$.tokens.output'),      0)) AS output
+        FROM message
+        WHERE {_BASE_WHERE}
+        GROUP BY model ORDER BY cache_read DESC
+        """,
+        {"start_ms": start_ms, "end_ms": end_ms},
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def query_size_buckets(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
+    cur = conn.execute(
+        f"""
+        WITH per_msg AS (
+            SELECT
+                COALESCE(json_extract(data, '$.tokens.cache.read'),  0) +
+                COALESCE(json_extract(data, '$.tokens.cache.write'), 0) +
+                COALESCE(json_extract(data, '$.tokens.input'),       0) AS prompt_size
+            FROM message
+            WHERE {_BASE_WHERE}
+        )
+        SELECT
+            CASE
+                WHEN prompt_size <=  50000 THEN '0-50k'
+                WHEN prompt_size <= 100000 THEN '50-100k'
+                WHEN prompt_size <= 150000 THEN '100-150k'
+                WHEN prompt_size <= 200000 THEN '150-200k'
+                WHEN prompt_size <= 300000 THEN '200-300k'
+                ELSE '300k+'
+            END AS bucket,
+            COUNT(*) AS msgs,
+            MIN(prompt_size) AS min_size,
+            MAX(prompt_size) AS max_size
+        FROM per_msg
+        GROUP BY bucket ORDER BY MIN(prompt_size)
+        """,
+        {"start_ms": start_ms, "end_ms": end_ms},
+    )
+    return [dict(r) for r in cur.fetchall()]
 
 
 def main(argv: list[str] | None = None) -> int:
