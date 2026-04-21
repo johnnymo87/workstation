@@ -131,7 +131,7 @@ lib.mkIf isCloudbox {
               print(entry)
       " | while read -r orphan; do
           log "Removing orphan Bazel output base: $orphan"
-          sudo rm -rf "$BAZEL_BASE/$orphan"
+          sudo rm -rf "$BAZEL_BASE/$orphan" 2>&1 || log "WARN: failed to remove $orphan, continuing"
         done
 
         log "Bazel cleanup complete"
@@ -213,7 +213,12 @@ lib.mkIf isCloudbox {
       IOSchedulingClass = "idle";
       Environment = [
         "HOME=%h"
-        "PATH=${pkgs.nix}/bin:${pkgs.git}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+        # /run/wrappers/bin must precede /run/current-system/sw/bin so `sudo`
+        # resolves to the setuid wrapper, not the non-setuid symlink in
+        # /run/current-system/sw/bin (which exits 1 with "sudo: must be owned
+        # by uid 0 and have the setuid bit set" and aborts the script under
+        # `set -e`).
+        "PATH=${pkgs.nix}/bin:${pkgs.git}/bin:/run/wrappers/bin:/run/current-system/sw/bin"
       ];
     };
   };
