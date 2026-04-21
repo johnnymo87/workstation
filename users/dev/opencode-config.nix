@@ -107,7 +107,6 @@ in
    # Plugins (SRP: non-interactive env, compaction context, subagent routing)
     xdg.configFile."opencode/plugins/non-interactive-env.ts".source = "${assetsPath}/opencode/plugins/non-interactive-env.ts";
     xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
-    xdg.configFile."opencode/plugins/self-compact.ts".source = "${assetsPath}/opencode/plugins/self-compact.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
@@ -116,6 +115,17 @@ in
    };
 
    # OpenCode plugins deployed via out-of-store symlink (path resolved at activation, not eval)
+   # self-compact uses runtime value imports from `@opencode-ai/plugin` (the `tool` helper)
+   # and needs `zod`, so it must deploy from a path with a co-located `node_modules`.
+   # See docs/plans/2026-04-20-self-compact-plugin-design.md for the deferred refactor
+   # to a config-dir `package.json` + real-file approach (cleaner long-term).
+    xdg.configFile."opencode/plugins/self-compact.ts".source =
+      config.lib.file.mkOutOfStoreSymlink (
+        if isDarwin
+        then "${config.home.homeDirectory}/Code/workstation/assets/opencode/plugins/self-compact.ts"
+        else "${config.home.homeDirectory}/projects/workstation/assets/opencode/plugins/self-compact.ts"
+      );
+
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
       config.lib.file.mkOutOfStoreSymlink (
         if isDarwin
