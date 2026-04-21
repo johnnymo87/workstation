@@ -114,17 +114,17 @@ in
      source = "${assetsPath}/opencode/plugins/subagent-routing.ts";
    };
 
-   # OpenCode plugins deployed via out-of-store symlink (path resolved at activation, not eval)
-   # self-compact uses runtime value imports from `@opencode-ai/plugin` (the `tool` helper)
-   # and needs `zod`, so it must deploy from a path with a co-located `node_modules`.
-   # See docs/plans/2026-04-20-self-compact-plugin-design.md for the deferred refactor
-   # to a config-dir `package.json` + real-file approach (cleaner long-term).
-    xdg.configFile."opencode/plugins/self-compact.ts".source =
-      config.lib.file.mkOutOfStoreSymlink (
-        if isDarwin
-        then "${config.home.homeDirectory}/Code/workstation/assets/opencode/plugins/self-compact.ts"
-        else "${config.home.homeDirectory}/projects/workstation/assets/opencode/plugins/self-compact.ts"
-      );
+    # self-compact deployed as a Nix-built self-contained JS bundle.
+    # See docs/plans/2026-04-21-self-compact-bundle-design.md.
+    # The bundle inlines @opencode-ai/plugin and zod, so no node_modules
+    # is needed at runtime; opencode loads the .js directly. This eliminates
+    # the per-machine "remember to run bun install" footgun that bit us
+    # on devbox earlier on 2026-04-21.
+    xdg.configFile."opencode/plugins/self-compact.js".source =
+      "${localPkgs.self-compact-plugin}/self-compact.js";
+    # Sourcemap deployed alongside the bundle for stack-trace readability.
+    xdg.configFile."opencode/plugins/self-compact.js.map".source =
+      "${localPkgs.self-compact-plugin}/self-compact.js.map";
 
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
       config.lib.file.mkOutOfStoreSymlink (
