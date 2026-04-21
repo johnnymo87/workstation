@@ -1,10 +1,104 @@
 # oc-cost Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **READ THE RESUMPTION NOTES BELOW FIRST.** Several plan details have been corrected during execution.
+
+---
+
+## Resumption Notes (2026-04-21)
+
+**Tasks 0-6 are DONE and pushed to origin/main.** The current state is captured in
+the most recent commits on `main`:
+
+```
+58bd535 feat(oc-cost): compute cost components per-model     ← Task 6 (unsigned)
+b1ff41c feat(oc-cost): add SQL queries against in-memory fixtures   ← Task 5
+6344c44 feat(oc-cost): add resolve_window() for time bounds          ← Task 4
+ae98a50 feat(oc-cost): add CLI arg parsing with mutex windows        ← Task 3
+f8bb04f test(oc-cost): pin longest-prefix invariant against dict order ← Task 2 + extra regression test
+d0900e1 chore: ignore Python __pycache__ and bytecode                ← infrastructure
+8179aab feat(oc-cost): add PRICES table and price_for()              ← Task 2
+180192b feat(oc-cost): scaffold package (no-op CLI)                  ← Task 1
+```
+
+(SHAs are from a parallel chain produced by another session; they replaced the
+SHAs shown in early portions of this plan. Tree contents are identical.)
+
+**Working mode going forward:** Work directly on `main`, not on a feature branch.
+The user (Jonathan) keeps `origin/main` constantly fast-forwarded across multiple
+machines (cloudbox, devbox, darwin) and multiple parallel Claude sessions. He has
+told the other Claudes the same thing: **don't worry about coordinating commits;
+just FF and push.** Conflicts on `pkgs/oc-cost/` are unlikely because no other
+session is touching it.
+
+**Push protocol per AGENTS.md "Landing the Plane":**
+1. `git pull --rebase` before each push (origin moves frequently; expect it)
+2. `git push` — required-status-check rule violation messages are normal
+3. `git status` — must show "up to date with origin/main"
+
+**Do NOT push without rebasing first.** Multiple machines push to main at the
+same time; force-push is forbidden.
+
+**Plan corrections discovered during execution (already applied to commits, NOT
+re-edited into the task bodies below — fix as you encounter):**
+
+1. **Task 4 timestamp constants** — plan body shows `1808841600000` (2027-04-20)
+   and `1806796800000` (2027-04-01). The committed test file uses the correct
+   2026 values: `1776686400000` and `1775001600000`. If you re-derive constants,
+   ALWAYS pass `-u` to `date`: `date -u -d "2026-04-20T12:00:00Z" +%s%3N`.
+
+2. **Task 4 `test_until_only` math** — plan body shows `+ 14 * 86_400_000`. Correct
+   value is `+ 15 * 86_400_000` (consistent with `test_since_and_until` two lines
+   above). End-of-day-inclusive semantics push the bound to next-day midnight.
+
+3. **Task 2 has an extra regression test** committed beyond the plan: in
+   `pkgs/oc-cost/test_oc_cost.py`, `test_longest_prefix_wins_regardless_of_dict_order`
+   monkeypatches PRICES with adversarial insertion order to actually pin the
+   longest-prefix invariant (the original `test_prefix_fallback` was order-dependent).
+   Total test count is **30** at end of Task 6 (not 29 as plan body says).
+
+**Subtle gotcha pre-flagged for Task 7:** The Task 3 mutex check uses
+`"--days" in (argv or [])` to detect explicit `--days` (vs default 14). This is
+a string-membership check on raw argv — works for current tests but brittle
+(would also trigger on `--days-since-foo` if such a flag existed; misses `--days=7`
+short-form). Don't refactor it during Task 7 unless `main()` integration exposes
+the brittleness.
+
+**SSH commit signing is NOW WORKING** on cloudbox after `home-manager switch`.
+Future commits sign automatically with `~/.ssh/id_ed25519_signing.pub`. The
+unsigned `58bd535` (Task 6) on origin/main is the one exception; live with it.
+
+**Stash to PRESERVE — do not drop:** `stash@{0}` is the user's in-progress
+work (datadog-mcp-cli removal + opencode-config tweak). Earlier in this session
+the stash got dropped and was recovered from `git fsck --unreachable`. If it
+goes missing again, recover via:
+
+```
+git fsck --unreachable 2>&1 | grep "unreachable commit"
+# Find the one with subject "WIP: datadog-mcp-cli removal..."
+git stash store -m "WIP: datadog-mcp-cli removal + opencode-config tweak (mine, in progress) [restored]" <SHA>
+```
+
+**Test count by task (running total, including the extra regression test):**
+| Task | Tests added | Cumulative |
+|---|---|---|
+| 2 | 6 (5 from plan + 1 extra) | 6 |
+| 3 | 8 | 14 |
+| 4 | 6 | 20 |
+| 5 | 5 | 25 |
+| 6 | 5 | 30 |
+| 7 | 3 | **33** (not 32) |
+
+**Verification at the end of each task:**
+- `python3 -m unittest pkgs/oc-cost/test_oc_cost.py 2>&1 | tail -3` → "OK"
+- `git add pkgs/oc-cost && nix build .#oc-cost` → succeeds (must `git add` first; nix flakes ignore untracked files)
+- After Task 7: `./result/bin/oc-cost --days 7` → real report against live opencode.db
+
+---
 
 **Goal:** Ship a Python CLI `oc-cost` that reads `~/.local/share/opencode/opencode.db` and prints OpenCode token usage and API cost, replacing the ad-hoc `analyze.mjs` script in `.opencode/skills/tracking-cache-costs/`.
 
-**Architecture:** Single-file Python script with no third-party dependencies, packaged via `python3.pkgs.buildPythonApplication` (matching `pkgs/pinentry-op/`). Source lives inline at `pkgs/oc-cost/oc_cost.py`. Wired into the Nix package set in `flake.nix:54-58` and added to the user package list in `users/dev/home.base.nix:197`. Deployed on cloudbox via `nix run home-manager -- switch --flake .#dev`.
+**Architecture:** Single-file Python script with no third-party dependencies, packaged via `python3.pkgs.buildPythonApplication` (matching `pkgs/pinentry-op/`). Source lives inline at `pkgs/oc-cost/oc_cost.py`. Wired into the Nix package set in `flake.nix:54-58` and added to the user package list in `users/dev/home.base.nix:197`. Deployed on cloudbox via `nix run home-manager -- switch --flake .#cloudbox` (NOTE: `.#dev` is for devbox; cloudbox uses `.#cloudbox` despite earlier text saying "shares the `dev` home config").
 
 **Tech Stack:** Python 3 stdlib only (`sqlite3`, `argparse`, `json`, `datetime`, `unittest`); Nix (`buildPythonApplication`); home-manager.
 
@@ -16,8 +110,8 @@
 
 - All file paths are repo-relative unless absolute.
 - "Run" commands assume `cwd = /home/dev/projects/workstation`.
-- "Cloudbox" deployment uses `nix run home-manager -- switch --flake .#dev` (per `AGENTS.md`); cloudbox shares the `dev` home config with devbox.
-- Each task ends with a commit. Trunk-based; commits land on a feature branch (see Task 0).
+- "Cloudbox" deployment uses `nix run home-manager -- switch --flake .#cloudbox` (corrected from `.#dev` which fails with "flake target #dev is for devbox, but running on cloudbox").
+- ~~Each task ends with a commit. Trunk-based; commits land on a feature branch (see Task 0).~~ **OBSOLETE per resumption notes:** Each task ends with a commit on `main`, immediately pushed (with `pull --rebase` first).
 - Skills referenced with `@`: @verification-before-completion, @test-driven-development, @systematic-debugging.
 
 ---
