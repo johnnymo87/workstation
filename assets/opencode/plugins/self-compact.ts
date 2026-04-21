@@ -6,6 +6,7 @@ import {
   callPromptAsyncHttp,
   callSummarizeHttp,
   createOnCompacted,
+  createOnStatus,
   createSelfCompactTool,
   findActiveModel,
 } from "./self-compact-impl"
@@ -22,7 +23,15 @@ const plugin: Plugin = async (ctx) => {
   const callCtx: CallContext = { fetch: internalFetch, serverUrl: ctx.serverUrl }
   const pending = new Map<string, PendingResume>()
 
-  const toolImpl = createSelfCompactTool({
+  const toolImpl = createSelfCompactTool({ pending })
+
+  // v2 split-phase architecture:
+  //   1. Tool execute → stash entry, return instantly (no deadlock).
+  //   2. onStatus (idle) → fire POST /summarize from outside the turn.
+  //   3. onCompacted → enqueue resumption prompt via POST /prompt_async.
+  // The plugin SDK accepts a single `event` hook per plugin; we dispatch
+  // internally by event type. Each handler filters its own events.
+  const onStatus = createOnStatus({
     pending,
     callSummarize: (input) => callSummarizeHttp(callCtx, input),
     findActiveModel: ({ sessionID }) =>
@@ -39,8 +48,9 @@ const plugin: Plugin = async (ctx) => {
       self_compact_and_resume: tool({
         description:
           "Compact the current session and queue a resumption prompt that will be processed " +
-          "as the first user message of the post-compaction turn. Use this as the final step " +
-          "of the preparing-for-compaction skill, after persisting durable context.",
+          "as the first user message of the post-compaction turn. The tool returns immediately; " +
+          "compaction runs after this turn closes (you don't need to wait or follow up). Use as " +
+          "the final step of the preparing-for-compaction skill, after persisting durable context.",
         args: {
           prompt: tool.schema
             .string()
@@ -51,7 +61,13 @@ const plugin: Plugin = async (ctx) => {
         },
       }),
     },
-    event: onCompacted,
+    event: async (input) => {
+      // Both handlers filter internally on event.type; safe to call both
+      // for every event. Order doesn't matter — they cover disjoint event
+      // types (session.status vs session.compacted).
+      await onStatus(input)
+      await onCompacted(input)
+    },
   }
 }
 
