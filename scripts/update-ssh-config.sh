@@ -63,19 +63,6 @@ Host devbox-tunnel
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
     RemoteForward 2850 127.0.0.1:2850
-
-# Persistent GPG agent forwarding (kept alive by launchd on macOS).
-# GPG forwarding is isolated here so it doesn't contend with interactive
-# SSH sessions or claim LocalForward ports from devbox-tunnel.
-Host devbox-gpg-tunnel
-    HostName $DEVBOX_IP
-    User dev
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
-    # Rebind stale socket when tunnel reconnects
-    StreamLocalBindUnlink yes
-    # GPG agent forwarding
-    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
 $DEVBOX_MARKER_END
 EOF
 
@@ -129,17 +116,6 @@ Host cloudbox-tunnel
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
     RemoteForward 2850 127.0.0.1:2850
-
-# Persistent GPG agent forwarding (kept alive by launchd on macOS).
-Host cloudbox-gpg-tunnel
-    HostName $CLOUDBOX_IP
-    User dev
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
-    # Rebind stale socket when tunnel reconnects
-    StreamLocalBindUnlink yes
-    # GPG agent forwarding
-    RemoteForward /run/user/1000/gnupg/S.gpg-agent /Users/${USER}/.gnupg/S.gpg-agent.extra
 $CLOUDBOX_MARKER_END
 EOF
 
