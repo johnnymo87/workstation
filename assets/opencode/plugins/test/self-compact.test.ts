@@ -5,8 +5,8 @@ import {
   createOnCompacted,
   callSummarizeHttp,
   callPromptAsyncHttp,
-} from "../self-compact"
-import type { PendingResume } from "../self-compact"
+} from "../self-compact-impl"
+import type { PendingResume } from "../self-compact-impl"
 
 describe("findActiveModel", () => {
   it("returns the model from the most recent user message that has model info", async () => {
