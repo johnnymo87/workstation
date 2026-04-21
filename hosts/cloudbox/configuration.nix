@@ -318,6 +318,13 @@ in
         "HOME=/home/dev"
         "OPENCODE_URL=http://127.0.0.1:4096"
         "LGTM_PROJECTS_DIR=/home/dev/projects"
+        # When the agent submits APPROVE on a PR by one of these authors,
+        # Phase 4 of the review prompt instructs it to immediately enable
+        # GitHub auto-merge (gh pr merge --auto --squash) so dependency
+        # bumps don't sit approved-but-unmerged. Dependabot doesn't
+        # auto-merge itself; renovate is listed defensively in case scope
+        # expands. Mirror this list with lgtm.yml's `authors` allowlist.
+        "LGTM_AUTO_APPROVE_AUTHORS=dependabot[bot],renovate[bot]"
       ];
       ExecStart = "${pkgs.writeShellScript "lgtm-run" ''
         set -euo pipefail
