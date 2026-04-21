@@ -1,0 +1,6 @@
+# Force the classic Node-style hoisted node_modules layout.
+# Our deployment story (and opencode's plugin runtime) relies on the
+# standard upward-walk module resolution; the alternative "isolated"
+# linker creates a structure that breaks this.
+[install]
+linker = "hoisted"
