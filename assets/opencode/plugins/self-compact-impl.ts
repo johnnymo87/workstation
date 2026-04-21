@@ -117,6 +117,27 @@ function isSessionCompacted(event: PluginBusEvent): event is EventSessionCompact
   )
 }
 
+/**
+ * Narrows a `PluginBusEvent` to a `session.status` event whose status is
+ * `idle`. The discriminator inside `properties.status` is `type` (per
+ * `~/projects/opencode/packages/opencode/src/session/status.ts:9-21`),
+ * NOT `status` — easy to confuse because the outer property holding the
+ * status object is also called `status`. The v1 design doc finding #7
+ * captured an earlier instance of this footgun.
+ */
+function isSessionIdle(event: PluginBusEvent): event is {
+  type: "session.status"
+  properties: { sessionID: string; status: { type: "idle" } }
+} {
+  if (event.type !== "session.status") return false
+  const props = event.properties
+  if (!props || typeof props !== "object") return false
+  const p = props as Record<string, unknown>
+  if (typeof p.sessionID !== "string") return false
+  const status = p.status as { type?: unknown } | undefined
+  return !!status && status.type === "idle"
+}
+
 export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
   callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
@@ -133,6 +154,76 @@ export function createOnCompacted(deps: {
     // skill if the prompt fails to deliver).
     deps.pending.delete(sessionID)
     await deps.callPromptAsync({ sessionID, text: entry.prompt })
+  }
+}
+
+/**
+ * v2 idle-triggered summarize handler.
+ *
+ * When the session that just went idle has a pending entry in
+ * `awaitingTurnEnd` phase, this handler:
+ *
+ *   1. Promotes the entry to `summarizing` synchronously (BEFORE awaiting
+ *      anything) so a re-entrant idle event for the same session can't
+ *      double-trigger.
+ *   2. Looks up the session's active model.
+ *   3. Fires `POST /summarize` from the now-idle session.
+ *
+ * On model lookup failure or summarize throw, the entry is evicted (no
+ * retry; the user re-invokes the skill). On success, the entry is left in
+ * `summarizing` phase for `createOnCompacted` to pop when the
+ * `session.compacted` bus event arrives.
+ *
+ * This is the deadlock-free path: by the time `SessionStatus.set(..., idle)`
+ * publishes its bus event, the outer prompt loop has already cleared its
+ * `prompt.ts` state (`prompt.ts:265-267`), so our subsequent `loop()` call
+ * via `POST /summarize` gets a fresh `start(sessionID)` signal rather than
+ * joining an existing loop's callback queue. See addendum to v1 design doc
+ * for the full RCA.
+ */
+export function createOnStatus(deps: {
+  pending: Map<string, PendingResume>
+  callSummarize: (input: {
+    sessionID: string
+    providerID: string
+    modelID: string
+  }) => Promise<void>
+  findActiveModel: (input: {
+    sessionID: string
+  }) => Promise<{ providerID: string; modelID: string } | null>
+}) {
+  return async ({ event }: { event: PluginBusEvent }) => {
+    if (!isSessionIdle(event)) return
+    const { sessionID } = event.properties
+    const entry = deps.pending.get(sessionID)
+    if (!entry) return
+    if (entry.phase !== "awaitingTurnEnd") return
+
+    // Promote phase synchronously BEFORE awaiting anything so a re-entrant
+    // idle event for the same session can't double-trigger summarize.
+    entry.phase = "summarizing"
+
+    const model = await deps.findActiveModel({ sessionID })
+    if (!model) {
+      // No model means we can't proceed; evict the entry. User will re-invoke
+      // the skill if they still want to compact.
+      deps.pending.delete(sessionID)
+      return
+    }
+
+    try {
+      await deps.callSummarize({
+        sessionID,
+        providerID: model.providerID,
+        modelID: model.modelID,
+      })
+      // On success, leave the entry in 'summarizing' phase. The
+      // session.compacted handler will pop it when compaction completes.
+    } catch {
+      // Summarize failed; evict so the next idle doesn't retry. User
+      // re-invokes the skill if they still want to compact.
+      deps.pending.delete(sessionID)
+    }
   }
 }
 
