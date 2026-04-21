@@ -271,27 +271,6 @@ lib.mkIf isCloudbox {
     echo "assembleGwsCredentials: client_secret.json and credentials.json assembled"
   '';
 
-  # Mask GPG agent units for forwarding (systemd-specific)
-  # Masks both sockets AND service to prevent any local agent from starting
-  home.activation.maskGpgAgentUnits = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    mkdir -p "$HOME/.config/systemd/user"
-    for unit in gpg-agent.service gpg-agent.socket gpg-agent-extra.socket gpg-agent-browser.socket gpg-agent-ssh.socket; do
-      ln -sf /dev/null "$HOME/.config/systemd/user/$unit"
-    done
-    ${pkgs.systemd}/bin/systemctl --user daemon-reload 2>/dev/null || true
-  '';
-
-  # Ensure GPG socket directory exists before SSH tries to bind RemoteForward
-  systemd.user.tmpfiles.rules = [
-    "d %t/gnupg 0700 - - -"
-  ];
-
-  # GPG common.conf: no-autostart prevents local agent from clobbering
-  # the forwarded socket from macOS.
-  home.file.".gnupg/common.conf".text = ''
-    no-autostart
-  '';
-
   # Generate ensure-projects script from declarative manifest
   home.file.".local/bin/ensure-projects" = {
     executable = true;
