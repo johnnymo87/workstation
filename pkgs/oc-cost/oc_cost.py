@@ -45,6 +45,21 @@ PRICES: dict[str, dict[str, float]] = {
     "claude-haiku-3-5": {
         "input": 0.80, "output": 4, "cache_write": 1.0, "cache_read": 0.08,
     },
+    # Gemini 3.1 Pro Preview (Vertex AI / AI Studio).
+    # Rates are for the <=200k context tier as published 2026-04. The >200k
+    # tier doubles input ($4.00) and bumps output to $18.00 / cache_read to
+    # $0.40 -- not modelled here because oc-cost has no per-request context
+    # window data.
+    #
+    # IMPORTANT: Google bills cache CREATION at the standard input rate
+    # ($2.00/MTok) AND charges a separate token-hour STORAGE fee
+    # (~$4.50/MTok-hour) for as long as the cache lives. oc-cost's schema
+    # only captures per-token rates, so we set cache_write to the creation
+    # rate ($2.00). This UNDERCOUNTS Gemini cache cost for long-lived
+    # caches; the storage component is invisible to this tool. See README.
+    "gemini-3.1-pro-preview": {
+        "input": 2.00, "output": 12.00, "cache_write": 2.00, "cache_read": 0.20,
+    },
 }
 
 

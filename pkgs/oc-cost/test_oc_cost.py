@@ -43,6 +43,22 @@ class TestPriceFor(unittest.TestCase):
     def test_unknown_with_at_suffix_returns_none(self):
         self.assertIsNone(oc_cost.price_for("totally-unknown@default"))
 
+    def test_gemini_3_1_pro_preview(self):
+        # Google publishes <=200k tier rates for gemini-3.1-pro-preview as
+        # input=$2.00/MTok, output=$12.00/MTok, cache_read=$0.20/MTok. Cache
+        # writes are billed by token-hour storage, not per-token, so we
+        # approximate cache_write at the standard input rate ($2.00/MTok)
+        # which is what's actually charged at the cache-creation event.
+        # The token-hour storage component (~$4.50/MTok-hour) is not
+        # captured by oc-cost's schema and will undercount Gemini cache
+        # cost for long-lived caches. See README.md for context.
+        rates = oc_cost.price_for("gemini-3.1-pro-preview")
+        self.assertIsNotNone(rates)
+        self.assertEqual(rates["input"], 2.00)
+        self.assertEqual(rates["output"], 12.00)
+        self.assertEqual(rates["cache_read"], 0.20)
+        self.assertEqual(rates["cache_write"], 2.00)
+
     def test_longest_prefix_wins_regardless_of_dict_order(self):
         # Regression test for the analyze.mjs bug: when multiple keys
         # match by prefix, the LONGEST one must win, not the first
