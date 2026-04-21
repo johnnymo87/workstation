@@ -108,5 +108,46 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.db, "/tmp/x.db")
 
 
+class TestResolveWindow(unittest.TestCase):
+    # Pinned "now" for deterministic tests: 2026-04-20T12:00:00Z
+    NOW_MS = 1776686400000  # see: date -u -d "2026-04-20T12:00:00Z" +%s%3N
+
+    def test_days_default(self):
+        args = oc_cost.parse_args([])
+        start, end = oc_cost.resolve_window(args, self.NOW_MS)
+        self.assertEqual(end, self.NOW_MS)
+        self.assertEqual(start, self.NOW_MS - 14 * 86_400_000)
+
+    def test_days_custom(self):
+        args = oc_cost.parse_args(["--days", "7"])
+        start, end = oc_cost.resolve_window(args, self.NOW_MS)
+        self.assertEqual(end - start, 7 * 86_400_000)
+
+    def test_since_only(self):
+        args = oc_cost.parse_args(["--since", "2026-04-01"])
+        start, end = oc_cost.resolve_window(args, self.NOW_MS)
+        # 2026-04-01T00:00:00Z = 1775001600000
+        self.assertEqual(start, 1775001600000)
+        self.assertEqual(end, self.NOW_MS)
+
+    def test_since_and_until(self):
+        args = oc_cost.parse_args(["--since", "2026-04-01", "--until", "2026-04-15"])
+        start, end = oc_cost.resolve_window(args, self.NOW_MS)
+        self.assertEqual(start, 1775001600000)            # 2026-04-01
+        # --until is *exclusive* end-of-day: 2026-04-16T00:00:00Z
+        self.assertEqual(end, 1775001600000 + 15 * 86_400_000)
+
+    def test_until_only(self):
+        args = oc_cost.parse_args(["--until", "2026-04-15"])
+        start, end = oc_cost.resolve_window(args, self.NOW_MS)
+        self.assertEqual(start, 0)
+        self.assertEqual(end, 1775001600000 + 15 * 86_400_000)  # 2026-04-16T00:00:00Z
+
+    def test_malformed_since(self):
+        args = oc_cost.parse_args(["--since", "not-a-date"])
+        with self.assertRaises(ValueError):
+            oc_cost.resolve_window(args, self.NOW_MS)
+
+
 if __name__ == "__main__":
     unittest.main()

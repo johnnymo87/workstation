@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from typing import Optional
 
 # Anthropic per-model rates in USD per million tokens.
@@ -101,6 +102,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--days cannot be combined with --since/--until")
 
     return args
+
+
+def _parse_date_to_ms(s: str, end_of_day: bool = False) -> int:
+    """Parse YYYY-MM-DD as UTC midnight, return unix milliseconds.
+
+    If end_of_day, return the *next* day's UTC midnight (exclusive end).
+    Raises ValueError on malformed input.
+    """
+    dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if end_of_day:
+        # Add 1 day so --until 2026-04-15 includes all of April 15.
+        dt = dt.replace(hour=0, minute=0, second=0)
+        return int(dt.timestamp() * 1000) + 86_400_000
+    return int(dt.timestamp() * 1000)
+
+
+def resolve_window(args: argparse.Namespace, now_ms: int) -> tuple[int, int]:
+    """Return (start_ms, end_ms) for the requested window."""
+    if args.since or args.until:
+        start = _parse_date_to_ms(args.since) if args.since else 0
+        end = _parse_date_to_ms(args.until, end_of_day=True) if args.until else now_ms
+        return start, end
+    return now_ms - args.days * 86_400_000, now_ms
 
 
 def main(argv: list[str] | None = None) -> int:
