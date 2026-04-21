@@ -87,65 +87,54 @@ describe("findActiveModel", () => {
   })
 })
 
-describe("self_compact_and_resume tool", () => {
-  it("stashes the prompt, looks up model, and calls summarize", async () => {
-    const pending = new Map<string, { prompt: string; createdAt: number }>()
-    const callSummarize = vi.fn().mockResolvedValue(undefined)
-    const findActiveModel = vi.fn().mockResolvedValue({
-      providerID: "anthropic",
-      modelID: "claude-3-5-sonnet",
+describe("createSelfCompactTool (v2: stash-and-return)", () => {
+  it("stashes pending entry with phase 'awaitingTurnEnd' and returns instantly", async () => {
+    const pending = new Map<string, PendingResume>()
+    const tool = createSelfCompactTool({ pending })
+    const result = await tool.execute(
+      { prompt: "resume here" },
+      { sessionID: "ses_abc" },
+    )
+    expect(result).toMatch(/queued/i)
+    expect(pending.get("ses_abc")).toMatchObject({
+      prompt: "resume here",
+      phase: "awaitingTurnEnd",
     })
-    const tool = createSelfCompactTool({ pending, callSummarize, findActiveModel })
-    const result = await tool.execute({ prompt: "resume here" }, { sessionID: "s1" })
-    expect(findActiveModel).toHaveBeenCalledWith({ sessionID: "s1" })
-    expect(callSummarize).toHaveBeenCalledWith({
-      sessionID: "s1",
-      providerID: "anthropic",
-      modelID: "claude-3-5-sonnet",
-    })
-    expect(pending.get("s1")?.prompt).toBe("resume here")
-    expect(typeof pending.get("s1")?.createdAt).toBe("number")
-    expect(result).toMatch(/Compaction triggered/i)
+    expect(typeof pending.get("ses_abc")?.createdAt).toBe("number")
   })
 
-  it("returns an error message and does not stash when model lookup returns null", async () => {
-    const pending = new Map()
-    const callSummarize = vi.fn()
-    const findActiveModel = vi.fn().mockResolvedValue(null)
-    const tool = createSelfCompactTool({ pending, callSummarize, findActiveModel })
-    const result = await tool.execute({ prompt: "resume" }, { sessionID: "s1" })
-    expect(callSummarize).not.toHaveBeenCalled()
-    expect(pending.size).toBe(0)
-    expect(result).toMatch(/Cannot determine active model/i)
+  it("does NOT perform any HTTP work from execute (deadlock vector removed)", async () => {
+    // The factory should not even accept findActiveModel/callSummarize as deps anymore.
+    // If this test compiles AND passes, the API surface is correct: execute
+    // takes only a `pending` Map as a dependency, so there is no path by which
+    // it could reach into HTTP/SDK calls during a tool turn.
+    const pending = new Map<string, PendingResume>()
+    const tool = createSelfCompactTool({ pending })
+    const result = await tool.execute({ prompt: "x" }, { sessionID: "ses_abc" })
+    expect(result).toMatch(/queued/i)
+    expect(pending.has("ses_abc")).toBe(true)
   })
 
-  it("removes stashed entry when summarize throws", async () => {
-    const pending = new Map()
-    const callSummarize = vi.fn().mockRejectedValue(new Error("boom"))
-    const findActiveModel = vi.fn().mockResolvedValue({
-      providerID: "p",
-      modelID: "m",
+  it("evicts stale entries (>30min) before stashing", async () => {
+    const pending = new Map<string, PendingResume>()
+    const STALE_MS = 30 * 60 * 1000
+    pending.set("ses_old", {
+      prompt: "ancient",
+      phase: "awaitingTurnEnd",
+      createdAt: Date.now() - STALE_MS - 1,
     })
-    const tool = createSelfCompactTool({ pending, callSummarize, findActiveModel })
-    await expect(
-      tool.execute({ prompt: "resume" }, { sessionID: "s1" }),
-    ).rejects.toThrow("boom")
-    expect(pending.size).toBe(0)
+    const tool = createSelfCompactTool({ pending })
+    await tool.execute({ prompt: "fresh" }, { sessionID: "ses_new" })
+    expect(pending.has("ses_old")).toBe(false)
+    expect(pending.has("ses_new")).toBe(true)
   })
 
-  it("evicts stale entries (>30min) on each call", async () => {
-    const pending = new Map<string, { prompt: string; createdAt: number }>()
-    pending.set("old-session", { prompt: "stale", createdAt: Date.now() - 31 * 60 * 1000 })
-    pending.set("recent-session", { prompt: "fresh", createdAt: Date.now() - 5 * 60 * 1000 })
-    const tool = createSelfCompactTool({
-      pending,
-      callSummarize: vi.fn().mockResolvedValue(undefined),
-      findActiveModel: vi.fn().mockResolvedValue({ providerID: "p", modelID: "m" }),
-    })
-    await tool.execute({ prompt: "new" }, { sessionID: "s1" })
-    expect(pending.has("old-session")).toBe(false)
-    expect(pending.has("recent-session")).toBe(true)
-    expect(pending.has("s1")).toBe(true)
+  it("overwrites a prior pending entry for the same session (last-write-wins)", async () => {
+    const pending = new Map<string, PendingResume>()
+    const tool = createSelfCompactTool({ pending })
+    await tool.execute({ prompt: "first" }, { sessionID: "ses_x" })
+    await tool.execute({ prompt: "second" }, { sessionID: "ses_x" })
+    expect(pending.get("ses_x")?.prompt).toBe("second")
   })
 })
 
