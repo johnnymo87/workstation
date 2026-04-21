@@ -420,7 +420,15 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
   # Git
   programs.git = {
     enable = true;
-    signing.key = "0C0EF2DF7ADD5DD9";
+    # Per-device SSH commit signing. Each host generates its own
+    # ~/.ssh/id_ed25519_signing key (out-of-band; not deployed by nix).
+    # GitHub verifies via the host's pubkey registered as a Signing Key;
+    # local verification uses ~/.config/git/allowed_signers (see below).
+    signing = {
+      format = "ssh";
+      key = "~/.ssh/id_ed25519_signing.pub";
+      signByDefault = true;
+    };
     ignores = [];
     settings = {
       user.name = "Jonathan Mohrbacher";
@@ -428,8 +436,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       init.defaultBranch = "main";
       push.autoSetupRemote = true;
       pull.rebase = true;
-      commit.gpgsign = true;
-      gpg.format = "openpgp";
+      "gpg \"ssh\"".allowedSignersFile = "~/.config/git/allowed_signers";
       diff.algorithm = "patience";  # Better diffs for code with repeated patterns
       rerere.enabled = true;        # Remember conflict resolutions for rebase
       # Use the gh CLI as the git credential helper for GitHub HTTPS remotes.
