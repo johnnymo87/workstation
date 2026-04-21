@@ -1,5 +1,5 @@
 ---
-name: sending-to-opencode-session
+name: opencode-send
 description: Use when you need to post a message into another OpenCode session running on the same machine (cross-session coordination, kicking off work in a parallel session, or relaying results between sessions).
 ---
 

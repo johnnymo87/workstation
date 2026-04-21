@@ -1,5 +1,5 @@
 ---
-name: launching-headless-sessions
+name: opencode-launch
 description: Launch headless opencode sessions from CLI. Use when you need to start a new opencode session in the background to work on a task in parallel, or when spawning work on a specific directory.
 allowed-tools: [Bash, Read]
 ---

@@ -751,7 +751,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
   # /session/<id>/prompt_async). Bypasses the pigeon daemon entirely — this is
   # purely local opencode-to-opencode messaging.
   #
-  # See assets/opencode/skills/sending-to-opencode-session/SKILL.md for usage.
+  # See assets/opencode/skills/opencode-send/SKILL.md for usage.
   home.file.".local/bin/opencode-send" = {
     executable = true;
     text = ''

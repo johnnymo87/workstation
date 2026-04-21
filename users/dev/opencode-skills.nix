@@ -18,11 +18,11 @@ let
     "ask-question"
     "beads"
     "formatting-slack-messages"
-    "launching-headless-sessions"
+    "opencode-launch"
     "notify-telegram"
     "preparing-for-compaction"
     "searching-sessions"
-    "sending-to-opencode-session"
+    "opencode-send"
     "using-chatgpt-relay-from-devbox"
     "using-gws"
   ];
