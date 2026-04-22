@@ -122,6 +122,43 @@ pkgs.writeShellApplication {
     # Step 4: compute socket path.
     sock="/tmp/nvim-''${pane_id#%}.sock"
     log "socket=$sock"
-    # TODO (Task 5): RPC into nvim
+    # Step 5: wait until the nvim RPC server is ready AND the helper
+    # module has been required.
+    # shellcheck disable=SC2016
+    if ! timeout 5 bash -c '
+      sock="$1"
+      until [ -S "$sock" ] && \
+            nvim --server "$sock" --remote-expr \
+              "luaeval(\"pcall(require, '"'"'user.oc_auto_attach'"'"') and 1 or 0\")" \
+              2>/dev/null | grep -qx 1
+      do
+        # Pace the loop without using `sleep` (which hangs in this environment).
+        read -t 0.1 -r _ < <(:) 2>/dev/null || true
+      done
+    ' _ "$sock"; then
+      log "nvim at $sock not ready (or helper not loaded) after 5s; giving up"
+      exit 0
+    fi
+    log "nvim at $sock is ready"
+
+    # Step 6: invoke the helper. We pass the payload as JSON encoded by jq,
+    # then decode it inside Lua via vim.json.decode to bulletproof against
+    # any quoting hazards in sid/dir/url.
+    payload="$(jq -nc \
+      --arg sid "$sid" \
+      --arg dir "$session_dir" \
+      --arg url "$OPENCODE_URL" \
+      '{sid:$sid, dir:$dir, url:$url}')"
+
+    # jq -Rs '.' emits a JSON string literal, which doubles as a valid
+    # Vimscript double-quoted string literal — that's what luaeval reads as _A.
+    expr="luaeval(\"require('user.oc_auto_attach').open(vim.json.decode(_A))\", $(printf '%s' "$payload" | jq -Rs '.'))"
+
+    if ! nvim --server "$sock" --remote-expr "$expr" >/dev/null; then
+      log "nvim RPC call failed; giving up"
+      exit 0
+    fi
+
+    log "tab opened in pane $pane_id for $sid"
   '';
 }
