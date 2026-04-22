@@ -84,22 +84,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-a31eFmYwQFuWuqmEuZNfkelAQdvD3vMk1RY30F+buFc=";
+      hash = "sha256-6rWXMs9y2PxzmdxiuiXbVwSQ9vz14JFXL60oxCQssfA=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-Zwg4U8i0cK7ygXkNYMmpFRY1QpgjDCpnULPlCi3EzTc=";
+      hash = "sha256-mDZV9Lo5YdrRTorKErQO3CiCK9Jp5EH6SYdmMCnmQew=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-+dTHVYrxNlbu6MyiqG4e0+uYbKoc2a7EiPcS1nUCnAs=";
+      hash = "sha256-KZHD6DtkYFRxrKg/1JjvPI5xIlve8TbMOdT9NHN5DG0=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-GpAbtjH/xEVfa7I2W0vNhRn6jUTF2UQRl9MZzmbmo6M=";
+      hash = "sha256-5Up4Bw+EmbYZgTGVvh7SWbvTC4g3bmo27RJENMGLao4=";
       isZip = true;
     };
   };
