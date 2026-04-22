@@ -24,6 +24,7 @@ let
     "searching-sessions"
     "opencode-send"
     "swarm-messaging"
+    "swarm-shaped-work"
     "using-chatgpt-relay-from-devbox"
     "using-gws"
   ];
