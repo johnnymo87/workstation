@@ -23,7 +23,7 @@ repo but not deployed to any machine yet.
 |-------|-------|---------|
 | [opencode-launch](skills/opencode-launch/SKILL.md) | cross | Spawn a headless opencode session in a given dir with an initial prompt. The basic primitive for swarm spin-up. |
 | [opencode-send](skills/opencode-send/SKILL.md) | cross | Post a message into another local opencode session. Auto-routes through pigeon for `ses_*` targets (durable, retry, race-safe); `--direct` is the legacy escape hatch. |
-| [swarm-messaging](skills/swarm-messaging/SKILL.md) | cross | Sender + receiver protocol: `<swarm_message>` envelope, message kinds, priority, threading via `--reply-to`, replay via `swarm.read`. |
+| [swarm-messaging](skills/swarm-messaging/SKILL.md) | cross | Sender + receiver protocol: `<swarm_message>` envelope, message kinds, priority, threading via `--reply-to`, replay via `swarm_read`. |
 | [swarm-shaped-work](skills/swarm-shaped-work/SKILL.md) | cross | When to swarm vs. iterate sequentially. Coordinator + workers topology. Spin-up sequence (`opencode-launch` × N → tell coordinator the worker ids → kick off). |
 
 ### Session Workflow

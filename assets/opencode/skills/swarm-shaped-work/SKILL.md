@@ -137,7 +137,7 @@ Useful conventions:
 - **Workers report status to coordinator**: `pigeon-send --kind status.update ses_<coordinator> "Done with <X>; PR at <url>"`.
 - **Workers coordinate directly**: `pigeon-send --kind status.update ses_<peer-worker> "API deployed"` — no need to bounce off the coordinator if only the peer needs to know.
 - **Threading replies**: `pigeon-send --reply-to <their-msg-id> ...` so receivers can follow conversation chains.
-- **Backlog / replay**: receivers can call the `swarm.read` opencode tool to fetch their inbox if they suspect they missed a message.
+- **Backlog / replay**: receivers can call the `swarm_read` opencode tool to fetch their inbox if they suspect they missed a message.
 
 ## Tear-Down
 
@@ -169,5 +169,5 @@ Old swarm messages stay in the daemon's `swarm_messages` table. They aren't auto
 
 - [`opencode-launch`](../opencode-launch/SKILL.md) — spawn headless sessions.
 - [`opencode-send`](../opencode-send/SKILL.md) — sender CLI (auto-routes through pigeon).
-- [`swarm-messaging`](../swarm-messaging/SKILL.md) — sender + receiver protocol; envelope format; kinds; replay via `swarm.read`.
+- [`swarm-messaging`](../swarm-messaging/SKILL.md) — sender + receiver protocol; envelope format; kinds; replay via `swarm_read`.
 - pigeon repo `swarm-architecture` / `swarm-operations` skills — daemon internals if you need to debug delivery.

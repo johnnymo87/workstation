@@ -88,7 +88,7 @@ Receiving agents should:
 
 Messages sent via `--direct` arrive as a plain user message with no envelope.
 
-The `swarm-messaging` skill is the dedicated guide for the receiving side and goes deeper on kinds, priorities, and replay via `swarm.read`.
+The `swarm-messaging` skill is the dedicated guide for the receiving side and goes deeper on kinds, priorities, and replay via `swarm_read`.
 
 ## Why Auto-Route?
 
@@ -98,7 +98,7 @@ You also get for free:
 
 - **Durable delivery.** The daemon persists every message before returning 202. Restarts and crashes don't lose messages.
 - **Retry with backoff.** If `prompt_async` returns 5xx or the target is briefly unreachable, the arbiter retries with `[1s, 2s, 5s, 15s, 60s]` schedule, MAX_ATTEMPTS=10.
-- **Replay.** Receivers can call the `swarm.read` opencode tool to fetch their inbox if they think they missed something.
+- **Replay.** Receivers can call the `swarm_read` opencode tool to fetch their inbox if they think they missed something.
 
 `--direct` is preserved as the escape hatch for cases where you specifically want the legacy path (e.g. debugging the daemon or proving a bug exists).
 

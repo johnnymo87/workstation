@@ -65,7 +65,9 @@ Steps:
 
 ## Replay
 
-If you suspect you missed messages (e.g. you were busy on a long tool call), call the `swarm.read` tool with no args to fetch your inbox. Pass `since: <msg_id>` to fetch only messages newer than a known cursor.
+If you suspect you missed messages (e.g. you were busy on a long tool call), call the `swarm_read` tool with no args to fetch your inbox. Pass `since: <msg_id>` to fetch only messages newer than a known cursor.
+
+(Tool name is `swarm_read` — Anthropic's tool-name regex `^[a-zA-Z0-9_-]{1,128}$` doesn't allow periods, so the underscore form is required.)
 
 The tool is registered by the opencode-pigeon plugin and routes to `GET /swarm/inbox?session=<your_id>` on the local pigeon daemon.
 
