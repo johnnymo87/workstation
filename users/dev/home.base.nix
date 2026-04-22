@@ -63,6 +63,15 @@ let
         exit 1
       }
 
+      # Auto-attach to nvim+tmux if we're on a host with a graphical workflow.
+      # Fully detached so the launch returns immediately and Ctrl+C on the
+      # launcher can't signal the child. Missing oc-auto-attach (e.g. cloudbox
+      # headless) is silently tolerated. Log to /tmp/oc-auto-attach.log for
+      # debuggability.
+      if command -v oc-auto-attach >/dev/null 2>&1; then
+        setsid nohup oc-auto-attach "$session_id" </dev/null >>/tmp/oc-auto-attach.log 2>&1 & disown
+      fi
+
       echo "Session launched: $session_id"
       echo "Directory: $directory"
       echo ""
