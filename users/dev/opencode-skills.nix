@@ -23,6 +23,7 @@ let
     "preparing-for-compaction"
     "searching-sessions"
     "opencode-send"
+    "swarm-messaging"
     "using-chatgpt-relay-from-devbox"
     "using-gws"
   ];
