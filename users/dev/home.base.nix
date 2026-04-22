@@ -200,6 +200,9 @@ in
     # Headless opencode session launcher
     opencode-launch
 
+    # nvim wrapper with deterministic --listen socket (used by oc-auto-attach)
+    localPkgs.nvims
+
     # GitHub CLI
     pkgs.gh
 
