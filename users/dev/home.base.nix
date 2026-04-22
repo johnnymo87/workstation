@@ -1294,6 +1294,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       require("user.settings")
       require("user.mappings")
       require("user.tabby")             -- OpenCode session tab labels
+      require("user.oc_auto_attach")    -- external RPC: oc-auto-attach calls open({sid,dir,url})
       require("user.cursor_highlight")  -- Ctrl+K cursor crosshair toggle
       require("user.telescope")         -- treesitter + telescope + keymaps
       require("mini.align").setup()     -- text alignment (ga/gA)
