@@ -105,18 +105,30 @@ pkgs.writeShellApplication {
         log "no tmux server running; skipping"
         exit 0
       fi
-      nvims_path="$(command -v nvims || true)"
-      if [ -z "$nvims_path" ]; then
-        log "nvims not found on PATH; skipping"
-        exit 0
+      # If a window with this name already exists in the current tmux
+      # session, prefer reusing it over creating yet another window.
+      # This is defense-in-depth: the earlier list-panes scan should have
+      # caught it, but if two sessions race in the same dir, we don't want
+      # to proliferate windows.
+      existing_pane="$(tmux list-panes -t ":$window_name" -F '#{pane_id}|#{pane_current_command}' 2>/dev/null \
+        | awk -F'|' '$2=="nvim" {print $1; exit}' || true)"
+      if [ -n "$existing_pane" ]; then
+        pane_id="$existing_pane"
+        log "reusing existing window $window_name pane $pane_id"
+      else
+        nvims_path="$(command -v nvims || true)"
+        if [ -z "$nvims_path" ]; then
+          log "nvims not found on PATH; skipping"
+          exit 0
+        fi
+        pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
+          -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
+        if [ -z "$pane_id" ]; then
+          log "tmux new-window failed; giving up"
+          exit 0
+        fi
+        log "created new pane $pane_id (window $window_name)"
       fi
-      pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
-        -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
-      if [ -z "$pane_id" ]; then
-        log "tmux new-window failed; giving up"
-        exit 0
-      fi
-      log "created new pane $pane_id (window $window_name)"
     fi
 
     # Step 4: compute socket path.
