@@ -1038,6 +1038,152 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     '';
   };
 
+  home.file.".local/bin/pigeon-send" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      set -euo pipefail
+
+      DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
+
+      CURL="${pkgs.curl}/bin/curl"
+      JQ="${pkgs.jq}/bin/jq"
+
+      show_help() {
+        cat <<'HELP_EOF'
+      Usage:
+        pigeon-send [OPTIONS] <to-session-id> <payload>
+        pigeon-send [OPTIONS] <to-session-id> -        # read payload from stdin
+
+      Send a swarm message to another opencode session via the local
+      pigeon daemon. The daemon delivers asynchronously with retry,
+      exactly-once-per-msg-id semantics, and at-most-one in-flight
+      delivery per target session (single-writer arbiter).
+
+      Options:
+        --from <id>        Sender session id (default: $OPENCODE_SESSION_ID)
+        --kind <kind>      Message kind (default: chat). Examples:
+                           task.assign, status.update, clarification.request,
+                           clarification.reply, artifact.handoff
+        --priority <p>     urgent | normal (default) | low
+        --reply-to <id>    Quote a previous msg_id for threading
+        --msg-id <id>      Caller-supplied idempotency key
+        --url <url>        Daemon URL (default: $PIGEON_DAEMON_URL or
+                           http://127.0.0.1:4731)
+        -h, --help         Show this help
+
+      Environment:
+        OPENCODE_SESSION_ID  Auto-set by the shell-env plugin in opencode
+                             sessions; used as the default --from
+        PIGEON_DAEMON_URL    Override daemon URL
+
+      Examples:
+        pigeon-send ses_abc "frontend tests are failing on COPS-6107"
+        echo "long status update" | pigeon-send --kind status.update ses_abc -
+        pigeon-send --priority urgent --kind task.assign \
+                    --reply-to msg_def ses_abc "please run the diff"
+      HELP_EOF
+      }
+
+      to=""
+      from="''${OPENCODE_SESSION_ID:-}"
+      kind="chat"
+      priority="normal"
+      reply_to=""
+      msg_id=""
+      payload=""
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -h|--help) show_help; exit 0 ;;
+          --from)       from="$2";       shift 2 ;;
+          --from=*)     from="''${1#*=}";       shift ;;
+          --kind)       kind="$2";       shift 2 ;;
+          --kind=*)     kind="''${1#*=}";       shift ;;
+          --priority)   priority="$2";   shift 2 ;;
+          --priority=*) priority="''${1#*=}";   shift ;;
+          --reply-to)   reply_to="$2";   shift 2 ;;
+          --reply-to=*) reply_to="''${1#*=}";   shift ;;
+          --msg-id)     msg_id="$2";     shift 2 ;;
+          --msg-id=*)   msg_id="''${1#*=}";     shift ;;
+          --url)        DAEMON_URL="$2"; shift 2 ;;
+          --url=*)      DAEMON_URL="''${1#*=}"; shift ;;
+          --) shift; break ;;
+          -*)
+            if [[ "$1" == "-" ]]; then break; fi
+            echo "Unknown option: $1" >&2
+            show_help >&2
+            exit 1
+            ;;
+          *) break ;;
+        esac
+      done
+
+      if [[ $# -lt 1 ]]; then
+        echo "Error: <to-session-id> is required" >&2
+        show_help >&2
+        exit 1
+      fi
+      to="$1"; shift
+
+      if [[ $# -lt 1 ]]; then
+        echo "Error: <payload> is required (or pass '-' for stdin)" >&2
+        exit 1
+      fi
+      if [[ "$1" == "-" ]]; then payload="$(cat)"; else payload="$1"; fi
+      shift || true
+
+      if [[ $# -gt 0 ]]; then
+        echo "Error: unexpected extra arguments: $*" >&2
+        echo "Hint: quote multi-word payloads." >&2
+        exit 1
+      fi
+
+      if [[ -z "$from" ]]; then
+        echo "Error: --from required (or set OPENCODE_SESSION_ID)" >&2
+        exit 1
+      fi
+      if [[ -z "$payload" ]]; then
+        echo "Error: payload is empty" >&2
+        exit 1
+      fi
+
+      body="$( "$JQ" -nc \
+        --arg from "$from" \
+        --arg to "$to" \
+        --arg kind "$kind" \
+        --arg priority "$priority" \
+        --arg reply_to "$reply_to" \
+        --arg msg_id "$msg_id" \
+        --arg payload "$payload" \
+        '{from: $from, to: $to, kind: $kind, priority: $priority, payload: $payload}
+          + (if $reply_to == "" then {} else {reply_to: $reply_to} end)
+          + (if $msg_id == "" then {} else {msg_id: $msg_id} end)' )"
+
+      resp_file="/tmp/pigeon-send-resp.$$"
+      http_status="$( "$CURL" -sS -o "$resp_file" -w '%{http_code}' \
+        -X POST -H "Content-Type: application/json" \
+        --data "$body" \
+        "$DAEMON_URL/swarm/send" )" || {
+          echo "Error: POST to pigeon daemon failed" >&2
+          rm -f "$resp_file"
+          exit 1
+        }
+
+      if [[ "$http_status" -lt 200 || "$http_status" -ge 300 ]]; then
+        echo "Error: pigeon daemon returned HTTP $http_status" >&2
+        cat "$resp_file" >&2 || true
+        echo >&2
+        rm -f "$resp_file"
+        exit 1
+      fi
+
+      msg_id_out="$( "$JQ" -r '.msg_id // ""' < "$resp_file" )"
+      rm -f "$resp_file"
+      echo "Queued $msg_id_out -> $to (kind=$kind priority=$priority, ''${#payload} chars)"
+    '';
+  };
+
   # common.conf is platform-specific - see home.linux.nix and home.darwin.nix
 
   # Tmux
