@@ -780,7 +780,18 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
         --url URL          opencode serve base URL
                            (default: $OPENCODE_URL or http://127.0.0.1:4096)
         --no-lock          Skip the per-session flock (default: lock enabled)
+        --direct           Skip pigeon routing and POST directly to opencode
+                           serve (legacy/debug only; bypasses durable
+                           delivery and the single-writer arbiter)
         -h, --help         Show this help
+
+      Default routing:
+        When the target id matches ^ses_ AND the pigeon daemon at
+        $PIGEON_DAEMON_URL (default http://127.0.0.1:4731) is reachable
+        AND --direct is NOT set, this script execs pigeon-send instead
+        of POSTing to opencode serve. That gives durable delivery, retry,
+        replay, and at-most-one-in-flight-per-target serialization.
+        Use --direct to bypass for debugging.
 
       Environment:
         OPENCODE_URL          Override the default opencode serve URL
@@ -809,6 +820,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       session_id=""
       message=""
       no_lock="''${OPENCODE_SEND_NO_LOCK:-0}"
+      direct_mode=0
 
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -846,6 +858,10 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
             ;;
           --no-lock)
             no_lock=1
+            shift
+            ;;
+          --direct)
+            direct_mode=1
             shift
             ;;
           --)
@@ -945,6 +961,16 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       # Default cwd to current directory if not specified
       if [[ -z "$cwd" ]]; then
         cwd="$PWD"
+      fi
+
+      # Auto-route via pigeon when target looks like an opencode session id
+      # (ses_*) AND pigeon daemon is reachable AND --direct was NOT passed.
+      # pigeon gives durable delivery, retry, replay, and the single-writer
+      # arbiter that fixes the prompt_async race architecturally.
+      if [[ "$direct_mode" != "1" && "$session_id" =~ ^ses_ ]]; then
+        if "$CURL" -sf -m 2 "''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}/health" >/dev/null 2>&1; then
+          exec pigeon-send --from "''${OPENCODE_SESSION_ID:-unknown}" "$session_id" "$message"
+        fi
       fi
 
       # Pre-flight: verify the session exists.
