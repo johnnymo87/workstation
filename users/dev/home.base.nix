@@ -203,6 +203,9 @@ in
     # nvim wrapper with deterministic --listen socket (used by oc-auto-attach)
     localPkgs.nvims
 
+    # Auto-attach launched sessions to nvim+tmux (calls into nvims via RPC)
+    localPkgs.oc-auto-attach
+
     # GitHub CLI
     pkgs.gh
 
