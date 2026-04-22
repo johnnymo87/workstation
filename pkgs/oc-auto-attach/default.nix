@@ -70,7 +70,58 @@ pkgs.writeShellApplication {
 
     log "session $sid dir=$session_dir"
 
-    # TODO (Task 4): project key + tmux window discovery
+    # Step 2: compute project key for editor routing.
+    # Collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>.
+    if [[ "$session_dir" =~ ^"''${HOME}/projects/"([^/]+)(/.*)?$ ]]; then
+      project_key="''${HOME}/projects/''${BASH_REMATCH[1]}"
+      window_name="''${BASH_REMATCH[1]}"
+    else
+      project_key="$session_dir"
+      window_name="$(basename "$session_dir")"
+    fi
+    log "project_key=$project_key window_name=$window_name"
+
+    # Step 3: find an existing tmux pane that's running nvim with cwd
+    # equal to (or a descendant of) project_key. Prefer exact match.
+    pane_id=""
+    while IFS='|' read -r p_id p_cmd p_path; do
+      [ "$p_cmd" = "nvim" ] || continue
+      if [ "$p_path" = "$project_key" ]; then
+        pane_id="$p_id"
+        break  # exact match wins
+      fi
+      if [[ "$p_path" == "$project_key"/* ]] && [ -z "$pane_id" ]; then
+        pane_id="$p_id"  # remember as fallback, keep looking for exact
+      fi
+    done < <(tmux list-panes -a -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)
+
+    if [ -n "$pane_id" ]; then
+      log "matched existing pane $pane_id"
+    else
+      # Are we inside a tmux session at all? If not, there's no useful place
+      # to put the window. (oc-auto-attach is meaningful only in a graphical
+      # tmux+nvim workflow.)
+      if [ -z "''${TMUX:-}" ] && ! tmux has-session 2>/dev/null; then
+        log "no tmux server running; skipping"
+        exit 0
+      fi
+      nvims_path="$(command -v nvims || true)"
+      if [ -z "$nvims_path" ]; then
+        log "nvims not found on PATH; skipping"
+        exit 0
+      fi
+      pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
+        -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
+      if [ -z "$pane_id" ]; then
+        log "tmux new-window failed; giving up"
+        exit 0
+      fi
+      log "created new pane $pane_id (window $window_name)"
+    fi
+
+    # Step 4: compute socket path.
+    sock="/tmp/nvim-''${pane_id#%}.sock"
+    log "socket=$sock"
     # TODO (Task 5): RPC into nvim
   '';
 }
