@@ -90,6 +90,29 @@ Messages sent via `--direct` arrive as a plain user message with no envelope.
 
 The `swarm-messaging` skill is the dedicated guide for the receiving side and goes deeper on kinds, priorities, and replay via `swarm_read`.
 
+## Attaching to a Pigeon-Routed Session
+
+When attaching to a session that's owned by `opencode serve` (which is the case
+for any session reached by pigeon's auto-route), use `opencode attach`, **not
+`opencode -s`**:
+
+```bash
+opencode attach http://127.0.0.1:4096 --session ses_FOO
+```
+
+`opencode -s ses_FOO` spawns a NEW worker process with its own in-process
+server and an isolated event bus. It loads the session row from the shared
+SQLite at startup but never receives live updates from the long-running
+`opencode serve` — meaning swarm messages, `prompt_async` deliveries, and
+remote prompts won't appear until you quit and reopen the TUI.
+
+`opencode attach` is a thin client that subscribes to opencode-serve's
+`/event` SSE stream, so everything flows live.
+
+If you launch via `opencode-launch` or pigeon `/launch` on a host with
+`oc-auto-attach` installed, attach happens automatically — see the
+auto-attach section in the `opencode-launch` skill.
+
 ## Why Auto-Route?
 
 The legacy `--direct` path has a known race: two `prompt_async` calls to the same session from **different** `x-opencode-directory` headers bypass the per-session busy guard, producing parallel LLM turns and a 400 "does not support assistant message prefill" from Anthropic. Auto-routing through pigeon fixes this architecturally — the daemon is the single writer per target, with at-most-one in-flight `prompt_async` per session id.
