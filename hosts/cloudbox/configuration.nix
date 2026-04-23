@@ -308,7 +308,15 @@ in
     description = "LGTM PR review cycle";
     wants = [ "network-online.target" ];
     after = [ "network-online.target" "opencode-serve.service" ];
-    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.coreutils pkgs.bash ];
+    # `openssh` is defense-in-depth: lgtm's `git fetch` passes
+    # `--recurse-submodules=no` so submodule recursion never invokes
+    # ssh, but if any other code path (or a future regression) tries
+    # to ssh, this at least keeps the binary discoverable. Without it
+    # git fails with `cannot run ssh: No such file or directory` and
+    # surfacing that error is harder to debug than an auth failure.
+    # Real-world trigger: food-truck/mono#2841, where a submodule
+    # gitlink + missing ssh broke every cycle on 2026-04-23.
+    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.coreutils pkgs.bash pkgs.openssh ];
     serviceConfig = {
       Type = "oneshot";
       User = "dev";
