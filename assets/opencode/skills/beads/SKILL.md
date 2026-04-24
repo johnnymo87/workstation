@@ -76,6 +76,37 @@ Before ending or if context is long:
 - [ ] Blockers documented in issue notes
 - [ ] Run `bd sync` if daemon not running
 
+## Git Hook Policy (workstation-specific)
+
+**Do not install bd's git hooks in this environment.** The `bd` binary on
+devbox/cloudbox/macOS is wrapped (see `pkgs/beads/default.nix` in the
+workstation flake) so that `bd init` always runs with `--skip-hooks` injected.
+This is intentional. Reasons:
+
+- Upstream's inline `pre-commit` hook has a worktree bug: it resolves the main
+  repo's `.beads/` directory into a `BEADS_DIR` shell variable but never
+  exports it, so `bd sync --flush-only` fails inside any worktree, blocking
+  every commit unless you pass `git commit --no-verify`.
+- The bd daemon already auto-flushes JSONL on a 30s debounce, and we run
+  `bd sync` explicitly at session end (Landing the Plane). The pre-commit
+  flush adds latency to every commit for negligible safety benefit.
+
+**Implications for future-Claude:**
+
+- Don't manually run `bd hooks install`, `bd doctor --fix` (when it offers to
+  install hooks), or copy hooks from `examples/git-hooks/` in the bd source.
+  The wrapper only intercepts `bd init`; those other commands will silently
+  install hooks if invoked.
+- If a `.git/hooks/pre-commit` or `.git/hooks/post-merge` whose content starts
+  with `# bd (beads)` reappears in any repo, delete it. It got there because
+  someone ran one of the explicit install commands above.
+- `bd init` itself is safe — the wrapper handles it. New `.beads/` directories
+  will be created without the offending hooks.
+
+If you ever genuinely want hooks (e.g., on a non-workstation machine where
+the wrapper isn't present), pass `--skip-hooks=false` explicitly to opt back
+in.
+
 ## Reference Files
 
 | Topic | File |
