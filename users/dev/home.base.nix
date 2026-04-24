@@ -6,7 +6,11 @@ let
 
   opencode-launch = pkgs.writeShellApplication {
     name = "opencode-launch";
-    runtimeInputs = [ pkgs.curl pkgs.jq ];
+    # util-linux provides setsid (needed to fully detach the auto-attach child
+    # process from the launcher). Without it, callers with a restricted PATH
+    # (systemd units, the pigeon worker) hit "setsid: command not found" and
+    # the auto-attach trigger silently no-ops.
+    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux ];
     text = ''
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
 
