@@ -218,6 +218,7 @@ in
 
     # Auto-attach launched sessions to nvim+tmux (calls into nvims via RPC)
     localPkgs.oc-auto-attach
+    localPkgs.reset-workspace
 
     # GitHub CLI
     pkgs.gh
