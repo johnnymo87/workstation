@@ -59,13 +59,22 @@ repo but not deployed to any machine yet.
 
 ## Bash Environment
 
-**Do NOT use `sleep` in bash commands.** It hangs in this environment for
-reasons that are not fully understood. If you need to wait for something
-(a server to start, a process to exit, a file to appear), use one of:
+`sleep` itself works. Short, standalone sleeps are fine — `sleep 5` and
+`date && sleep 5 && date` behave normally.
 
-- Check the condition directly and immediately (most servers are ready
-  fast enough that no wait is needed).
-- Poll with a bounded loop:
+What is *suspected* (but not fully understood) to hang is **long, multi-step
+bash one-liners that include a `sleep`** — e.g. a single command that chains
+`sleep`, `gh`, `grep`, and another `gh` call together with `&&`, `;`, or
+pipes. Treat that pattern as the smell.
+
+Practical guidance:
+
+- When you need to wait *and then* run several follow-up steps, split the
+  wait into its own bash invocation: one tool call for `sleep N`, then a
+  separate tool call for the rest. Don't bundle them into one long chain.
+- Prefer not to wait at all when you can check the condition directly
+  (most servers are ready fast enough that no sleep is needed).
+- For waiting on a condition, a bounded poll is still the cleanest option:
   ```bash
   for i in $(seq 1 20); do
     ss -tlnp | grep -q ":$PORT " && break
@@ -73,8 +82,6 @@ reasons that are not fully understood. If you need to wait for something
   ```
 - Use `wait` for backgrounded child processes you actually own.
 - Use `timeout` to bound an operation.
-
-This applies to ALL bash invocations, not just gws auth.
 
 ## Backgrounding Long-Running Processes
 
