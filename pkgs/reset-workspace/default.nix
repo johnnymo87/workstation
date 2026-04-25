@@ -52,7 +52,6 @@ EOF
 
     # ---- Step 1: Snapshot tmux manifest ----
     log "snapshotting tmux panes running nvim/nvims..."
-    : "$YES"
 
     MANIFEST=$(tmux list-panes -a \
       -F '#{pane_id}'$'\t'''#{window_name}'$'\t'''#{pane_current_command}'$'\t'''#{pane_current_path}' 2>/dev/null \
@@ -69,6 +68,27 @@ EOF
       done
     fi
 
-    log "(Tasks 2-7 not yet implemented — exiting)"
+    # ---- Step 2: Confirm with user ----
+    SESSION_COUNT=$(curl -sf "$OPENCODE_URL/session" 2>/dev/null | jq -r 'length' 2>/dev/null || echo "?")
+    log ""
+    log "About to:"
+    log "  1. SIGKILL $MANIFEST_COUNT nvim/nvims process(es)"
+    log "  2. DELETE $SESSION_COUNT opencode session(s) via HTTP API"
+    log "  3. Restart opencode-serve.service (this Claude session's TUI will reconnect)"
+    log "  4. Respawn nvims in $MANIFEST_COUNT pane(s)"
+    log ""
+
+    if [ "$YES" -ne 1 ]; then
+      printf '[reset-workspace] Continue? [y/N] ' >&2
+      read -r REPLY
+      case "$REPLY" in
+        [yY]|[yY][eE][sS]) ;;
+        *) die "aborted by user" ;;
+      esac
+    else
+      log "(--yes: skipping confirmation)"
+    fi
+
+    log "(Tasks 3-7 not yet implemented — exiting)"
   '';
 }
