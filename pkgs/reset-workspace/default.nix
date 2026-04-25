@@ -89,6 +89,41 @@ EOF
       log "(--yes: skipping confirmation)"
     fi
 
-    log "(Tasks 3-7 not yet implemented — exiting)"
+    # ---- Step 3: Kill all nvims ----
+    if [ "$MANIFEST_COUNT" -gt 0 ]; then
+      log "killing all nvim/nvims processes (SIGKILL)..."
+      # Use -x nvim. This matches both `nvim` (the TTY frontend)
+      # and `nvim --embed` (the embedded server) because both have
+      # `comm` field = `nvim`.
+      if pkill -9 -u dev -x nvim 2>/dev/null; then
+        log "  pkill returned matches"
+      else
+        log "  pkill returned no matches (none running, or already dead)"
+      fi
+
+      # Poll each pane until its current command is no longer nvim/nvims.
+      log "polling panes for return to shell..."
+      printf '%s\n' "$MANIFEST" | while IFS=$'\t' read -r pane _window _cmd _path; do
+        DEADLINE=$(($(date +%s) + 10))
+        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+          CUR=$(tmux display-message -t "$pane" -p '#{pane_current_command}' 2>/dev/null || echo "GONE")
+          if [ "$CUR" = "GONE" ]; then
+            log "  $pane: pane no longer exists (skipping)"
+            break
+          fi
+          if [ "$CUR" != "nvim" ] && [ "$CUR" != "nvims" ]; then
+            log "  $pane: now running $CUR"
+            break
+          fi
+          # Sub-second poll without sleep (per AGENTS.md no-sleep policy)
+          read -t 0.1 -r _ < <(:) 2>/dev/null || true
+        done
+        if [ "$CUR" = "nvim" ] || [ "$CUR" = "nvims" ]; then
+          log "  $pane: WARNING — still running $CUR after 10s"
+        fi
+      done
+    fi
+
+    log "(Tasks 4-7 not yet implemented — exiting)"
   '';
 }
