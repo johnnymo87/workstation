@@ -273,7 +273,9 @@ EOF
         [ -n "$sid" ] || continue
         log "  restoring $sid"
         # oc-auto-attach exits 0 even on internal failure (by design).
-        # Pipe its own stderr through to our log for visibility.
+        # Merge its stderr into our stdout so any errors land in the
+        # systemd journal alongside our own logs (without our log()
+        # prefix — they're prefixed with [oc-auto-attach] already).
         if ! /home/dev/.nix-profile/bin/oc-auto-attach "$sid" 2>&1; then
           log "  WARNING: oc-auto-attach $sid returned non-zero"
         fi
