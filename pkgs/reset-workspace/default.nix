@@ -124,8 +124,12 @@ EOF
           continue
         fi
 
-        # Attempt 1: -s ses_xxx in argv.
-        sid=$(printf '%s' "$cmdline" | grep -oE -- '-s ses_[A-Za-z0-9]+' | head -1 | awk '{print $2}' || true)
+        # Match both -s ses_xxx (short form, used by `opencode -s ...`) and
+        # --session ses_xxx (long form, used by `opencode attach ... --session
+        # ses_xxx`, which is how oc-auto-attach launches restored TUIs).
+        # `opencode attach` clients have no log file, so this argv match is
+        # the only path that captures restored TUIs on subsequent resets.
+        sid=$(printf '%s' "$cmdline" | grep -oE -- '(--session|-s) ses_[A-Za-z0-9]+' | head -1 | awk '{print $2}' || true)
 
         # Attempt 2: log file fallback.
         if [ -z "$sid" ]; then
