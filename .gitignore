@@ -10,7 +10,11 @@ secrets/*.dec.*
 *.swp
 *~
 .nvim.lua
-.beads/
+
+# beads has its own .beads/.gitignore that correctly excludes the DB,
+# sockets, and daemon files while keeping issues.jsonl tracked. We do
+# NOT blanket-ignore .beads/ here, because that would also hide the
+# JSONL source-of-truth which IS supposed to be committed.
 
 # OpenCode user configuration (managed per-machine)
 .opencode/*
