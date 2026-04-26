@@ -390,13 +390,29 @@ in
     };
   };
 
-  # Daily 3 AM restart of leaky long-running services.
-  # opencode-serve leaks from ~350 MB to 8-13 GB over days.
+  # Nightly workspace reset (3 AM). Replaces the previous serve-only
+  # restart with a full workspace reset (kill nvims, clear opencode
+  # sessions, restart opencode-serve, respawn nvims). The serve restart
+  # still happens — that was the original purpose (memory hygiene) — but
+  # now it's bundled with the rest of the reset.
+  #
+  # Runs as user `dev` so it can drive the user's tmux server.
+  # Passwordless `sudo systemctl restart opencode-serve` works because
+  # `dev` is in the `wheel` group and `security.sudo.wheelNeedsPassword`
+  # is false (set elsewhere in this file).
   systemd.services.nightly-restart-background = {
-    description = "Restart long-running background services to reclaim leaked memory";
-    serviceConfig.Type = "oneshot";
+    description = "Nightly workspace reset (kill nvims, restart opencode-serve, respawn)";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      Environment = [
+        "TMUX_TMPDIR=/tmp/tmux-1000"
+        "PATH=/run/current-system/sw/bin:/home/dev/.nix-profile/bin"
+      ];
+    };
     script = ''
-      /run/current-system/sw/bin/systemctl restart opencode-serve.service
+      /home/dev/.nix-profile/bin/reset-workspace --yes
     '';
   };
 
