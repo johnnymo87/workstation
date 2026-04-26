@@ -22,6 +22,9 @@ pkgs.writeShellApplication {
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
     YES=0
 
+    # Save original args for the flock re-exec below.
+    ORIG_ARGS=("$@")
+
     log() {
       printf '[reset-workspace] %s\n' "$*" >&2
     }
@@ -55,7 +58,7 @@ EOF
     if [ "''${RESET_WORKSPACE_LOCKED:-}" != "1" ]; then
       export RESET_WORKSPACE_LOCKED=1
       RET=0
-      flock -n -E 99 "$LOCK" "$0" "$@" || RET=$?
+      flock -n -E 99 "$LOCK" "$0" ''${ORIG_ARGS[@]+"''${ORIG_ARGS[@]}"} || RET=$?
       if [ "$RET" -eq 99 ]; then
         die "another reset-workspace is running (lock $LOCK held)"
       fi
