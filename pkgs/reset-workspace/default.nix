@@ -147,6 +147,25 @@ EOF
       log "  deleted $DELETED session(s), $FAILED failure(s)"
     fi
 
-    log "(Tasks 5-7 not yet implemented — exiting)"
+    # ---- Step 5: Restart opencode-serve ----
+    log "restarting opencode-serve.service..."
+    if ! sudo systemctl restart opencode-serve.service; then
+      die "failed to restart opencode-serve"
+    fi
+
+    log "polling /global/health for serve readiness..."
+    DEADLINE=$(($(date +%s) + 30))
+    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+      if curl -sf "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+        log "  serve healthy"
+        break
+      fi
+      read -t 0.5 -r _ < <(:) 2>/dev/null || true
+    done
+    if ! curl -sf "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+      die "opencode-serve did not become healthy within 30s"
+    fi
+
+    log "(Tasks 6-7 not yet implemented — exiting)"
   '';
 }
