@@ -166,6 +166,21 @@ EOF
       die "opencode-serve did not become healthy within 30s"
     fi
 
-    log "(Tasks 6-7 not yet implemented — exiting)"
+    # ---- Step 6: Respawn nvims in each manifest pane ----
+    if [ "$MANIFEST_COUNT" -gt 0 ]; then
+      log "respawning nvims in $MANIFEST_COUNT pane(s)..."
+      printf '%s\n' "$MANIFEST" | while IFS=$'\t' read -r pane _window _cmd path; do
+        # Verify pane still exists
+        if ! tmux display-message -t "$pane" -p '#{pane_id}' >/dev/null 2>&1; then
+          log "  $pane: pane no longer exists, skipping respawn"
+          continue
+        fi
+        # cd to original path, then nvims. Single send-keys to keep it atomic.
+        tmux send-keys -t "$pane" "cd $path && nvims" Enter || true
+        log "  $pane: sent 'cd $path && nvims'"
+      done
+    fi
+
+    log "(Task 7 not yet implemented — exiting)"
   '';
 }
