@@ -169,13 +169,12 @@ EOF
     OPENCODE_COUNT=''${OPENCODE_COUNT:-0}
 
     # ---- Step 2: Confirm with user ----
-    SESSION_COUNT=$(curl -sf "$OPENCODE_URL/session" 2>/dev/null | jq -r 'length' 2>/dev/null || echo "?")
     log ""
     log "About to:"
     log "  1. SIGKILL $MANIFEST_COUNT nvim/nvims process(es)"
-    log "  2. DELETE $SESSION_COUNT opencode session(s) via HTTP API"
-    log "  3. Restart opencode-serve.service (this Claude session's TUI will reconnect)"
-    log "  4. Respawn nvims in $MANIFEST_COUNT pane(s)"
+    log "  2. Restart opencode-serve.service (this Claude session's TUI will reconnect)"
+    log "  3. Respawn nvims in $MANIFEST_COUNT pane(s)"
+    log "  4. Restore $OPENCODE_COUNT opencode TUI(s) via oc-auto-attach"
     log ""
 
     if [ "$YES" -ne 1 ]; then
