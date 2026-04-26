@@ -165,7 +165,12 @@ EOF
     # ---- Step 5: Restart opencode-serve ----
     log "restarting opencode-serve.service..."
     # Passwordless sudo works via wheel group + security.sudo.wheelNeedsPassword=false (set in hosts/cloudbox/configuration.nix).
-    if ! sudo systemctl restart opencode-serve.service; then
+    # Use absolute path /run/wrappers/bin/sudo because:
+    #   1. NixOS ships the working setuid sudo at /run/wrappers/bin/sudo.
+    #   2. /run/current-system/sw/bin/sudo is a non-setuid symlink that
+    #      sudo itself refuses to exec from. systemd units with restricted
+    #      PATH won't find the wrapper unless explicitly named.
+    if ! /run/wrappers/bin/sudo systemctl restart opencode-serve.service; then
       die "failed to restart opencode-serve"
     fi
 
