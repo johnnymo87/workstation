@@ -263,6 +263,25 @@ EOF
       done
     fi
 
+    # ---- Step 6.5: Restore opencode TUIs via oc-auto-attach ----
+    # OPENCODE_MANIFEST was captured in Step 2 (one session id per line).
+    # oc-auto-attach handles its own polling for nvim socket + helper
+    # readiness, project-key resolution, and pane creation.
+    if [ "$OPENCODE_COUNT" -gt 0 ]; then
+      log "restoring $OPENCODE_COUNT opencode TUI(s)..."
+      while IFS= read -r sid; do
+        [ -n "$sid" ] || continue
+        log "  restoring $sid"
+        # oc-auto-attach exits 0 even on internal failure (by design).
+        # Pipe its own stderr through to our log for visibility.
+        if ! /home/dev/.nix-profile/bin/oc-auto-attach "$sid" 2>&1; then
+          log "  WARNING: oc-auto-attach $sid returned non-zero"
+        fi
+      done <<< "$OPENCODE_MANIFEST"
+    else
+      log "no opencode TUIs to restore"
+    fi
+
     # ---- Step 7: Verify nvim sockets exist ----
     if [ "$MANIFEST_COUNT" -gt 0 ]; then
       log "verifying nvim sockets..."
