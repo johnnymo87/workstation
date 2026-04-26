@@ -117,7 +117,10 @@ EOF
         fi
 
         # Skip opencode-serve itself (we restart it, we don't restore it).
-        if printf '%s' "$cmdline" | grep -qw 'serve'; then
+        # Check argv[1] specifically — `grep -qw serve` against the full cmdline
+        # would false-positive on TUIs whose cwd or args happen to contain "serve"
+        # (e.g. `opencode -d /home/dev/projects/serve/`).
+        if printf '%s' "$cmdline" | awk '{print $2}' | grep -qx 'serve'; then
           continue
         fi
 
