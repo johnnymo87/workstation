@@ -83,6 +83,88 @@ EOF
       done
     fi
 
+    # ---- Step 2: Snapshot live opencode TUIs/processes ----
+    # Walk every opencode process owned by `dev`, except `opencode serve`.
+    # We identify "opencode" by basename of /proc/$pid/exe (handles the
+    # wrapped binary path), NOT by argv match — argv-based matching also
+    # captures the bundled lua-language-server (path: .cache/opencode/bin/...).
+    # For each opencode process, derive the session id:
+    #   1. Parse `-s ses_xxx` from /proc/<pid>/cmdline if present.
+    #   2. Otherwise grep the open log file for the first GET /session/ses_xxx line.
+    # Skip with WARNING if neither attempt yields a valid id.
+    log "snapshotting live opencode TUIs..."
+
+    OPENCODE_MANIFEST=""
+
+    # Tolerate empty pgrep result (no matches => exit 1) under set -e.
+    OC_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
+
+    if [ -z "$OC_PIDS" ]; then
+      log "  no opencode processes found"
+    else
+      for pid in $OC_PIDS; do
+        # Skip if process is gone (race) or unreadable.
+        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+        [ -n "$cmdline" ] || continue
+
+        # Authoritative filter: /proc/$pid/exe must basename-match opencode
+        # or the wrapped variant (.opencode-wrapped). This excludes
+        # lua-language-server etc. that live under .cache/opencode/.
+        exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+        exe_base=$(basename "$exe")
+        if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
+          continue
+        fi
+
+        # Skip opencode-serve itself (we restart it, we don't restore it).
+        if printf '%s' "$cmdline" | grep -qw 'serve'; then
+          continue
+        fi
+
+        # Attempt 1: -s ses_xxx in argv.
+        sid=$(printf '%s' "$cmdline" | grep -oE -- '-s ses_[A-Za-z0-9]+' | head -1 | awk '{print $2}' || true)
+
+        # Attempt 2: log file fallback.
+        if [ -z "$sid" ]; then
+          # shellcheck disable=SC2012
+          log_file=$(ls -la "/proc/$pid/fd/" 2>/dev/null \
+            | awk '/-> .*opencode\/log\/.*\.log$/ { print $NF; exit }' || true)
+          if [ -n "$log_file" ] && [ -r "$log_file" ]; then
+            sid=$(grep -oE 'path=/session/ses_[A-Za-z0-9]+' "$log_file" 2>/dev/null \
+              | head -1 \
+              | sed 's|^path=/session/||' || true)
+          fi
+        fi
+
+        # Validate.
+        if [ -z "$sid" ]; then
+          log "  WARNING: skipping pid=$pid (no session id) cmdline=$cmdline"
+          continue
+        fi
+        if ! printf '%s' "$sid" | grep -qxE 'ses_[A-Za-z0-9]+'; then
+          log "  WARNING: skipping pid=$pid (invalid sid='$sid')"
+          continue
+        fi
+
+        log "  pid=$pid -> $sid"
+        OPENCODE_MANIFEST="''${OPENCODE_MANIFEST}''${sid}"$'\n'
+      done
+
+      # Deduplicate.
+      OPENCODE_MANIFEST=$(printf '%s' "$OPENCODE_MANIFEST" | awk 'NF && !seen[$0]++')
+
+      if [ -z "$OPENCODE_MANIFEST" ]; then
+        OPENCODE_COUNT=0
+        log "  (no session ids captured)"
+      else
+        OPENCODE_COUNT=$(printf '%s\n' "$OPENCODE_MANIFEST" | wc -l)
+        log "  captured $OPENCODE_COUNT session id(s)"
+      fi
+    fi
+
+    # If we never set OPENCODE_COUNT (e.g. no opencode processes at all), set it now.
+    OPENCODE_COUNT=''${OPENCODE_COUNT:-0}
+
     # ---- Step 2: Confirm with user ----
     SESSION_COUNT=$(curl -sf "$OPENCODE_URL/session" 2>/dev/null | jq -r 'length' 2>/dev/null || echo "?")
     log ""
