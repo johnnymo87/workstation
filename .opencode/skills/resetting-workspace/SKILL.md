@@ -10,12 +10,13 @@ description: Use when the user wants a fresh start on cloudbox — to kill all n
 ## What it does (in order)
 
 1. Snapshots the tmux panes currently running `nvim`/`nvims`.
-2. Confirms with the user (skip with `--yes`).
-3. SIGKILLs all `nvim` processes owned by `dev`.
-4. DELETEs every opencode session via the HTTP API.
+2. Snapshots live opencode TUIs/processes (one session id per non-serve `opencode` process).
+3. Confirms with the user (skip with `--yes`).
+4. SIGKILLs all `nvim` processes owned by `dev`.
 5. Restarts `opencode-serve.service` (passwordless sudo).
 6. Respawns `nvims` in each manifest pane (with original cwd).
-7. Verifies each `/tmp/nvim-${PANE#%}.sock` exists.
+7. Restores each captured opencode TUI via `oc-auto-attach <session-id>`.
+8. Verifies each `/tmp/nvim-${PANE#%}.sock` exists.
 
 Concurrent runs are blocked by `flock /tmp/reset-workspace.lock`.
 
@@ -43,8 +44,12 @@ sudo systemctl start nightly-restart-background.service
 ## Caveats
 
 - This Claude session's TUI will reconnect when serve restarts. Brief flicker.
-- All in-flight headless opencode workers (e.g., spawned via `opencode-launch` or pigeon `/launch`) will be killed when their session is deleted. Don't run during important headless work.
+- All in-flight headless opencode workers (e.g., spawned via `opencode-launch` or pigeon `/launch`) will have their PROCESSES killed by the SIGKILL pass and their session ids captured. Post-respawn, those sessions get a TUI restored via `oc-auto-attach` — but the headless worker is NOT re-launched (we only restore TUIs, not arbitrary headless invocations). Sessions persist in the DB.
 - nvim is treated as disposable — no graceful quit, no `:wa`. By design (cloudbox nvim is purely a host for opencode tabs).
+
+## Sessions persist across resets
+
+Unlike the original design, `reset-workspace` no longer DELETEs opencode sessions. Sessions accumulate in the DB across resets (today: ~1500 sessions). A sibling cleanup job for stale session pruning is on the backlog — see git history of this skill or `bd` for details.
 
 ## Related
 
