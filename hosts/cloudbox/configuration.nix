@@ -407,7 +407,7 @@ in
       User = "dev";
       Group = "dev";
       Environment = [
-        "TMUX_TMPDIR=/tmp/tmux-1000"
+        "TMUX_TMPDIR=/tmp"
         "PATH=/run/current-system/sw/bin:/home/dev/.nix-profile/bin"
       ];
     };
