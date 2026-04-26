@@ -50,6 +50,18 @@ EOF
       esac
     done
 
+    # ---- Concurrency: re-exec under flock if not already locked ----
+    LOCK="/tmp/reset-workspace.lock"
+    if [ "''${RESET_WORKSPACE_LOCKED:-}" != "1" ]; then
+      export RESET_WORKSPACE_LOCKED=1
+      RET=0
+      flock -n -E 99 "$LOCK" "$0" "$@" || RET=$?
+      if [ "$RET" -eq 99 ]; then
+        die "another reset-workspace is running (lock $LOCK held)"
+      fi
+      exit "$RET"
+    fi
+
     # ---- Step 1: Snapshot tmux manifest ----
     log "snapshotting tmux panes running nvim/nvims..."
 
@@ -149,6 +161,7 @@ EOF
 
     # ---- Step 5: Restart opencode-serve ----
     log "restarting opencode-serve.service..."
+    # Passwordless sudo works via wheel group + security.sudo.wheelNeedsPassword=false (set in hosts/cloudbox/configuration.nix).
     if ! sudo systemctl restart opencode-serve.service; then
       die "failed to restart opencode-serve"
     fi
@@ -181,6 +194,26 @@ EOF
       done
     fi
 
-    log "(Task 7 not yet implemented — exiting)"
+    # ---- Step 7: Verify nvim sockets exist ----
+    if [ "$MANIFEST_COUNT" -gt 0 ]; then
+      log "verifying nvim sockets..."
+      printf '%s\n' "$MANIFEST" | while IFS=$'\t' read -r pane _window _cmd _path; do
+        DEADLINE=$(($(date +%s) + 5))
+        # pane_id is %N — strip the %
+        SOCK="/tmp/nvim-''${pane#%}.sock"
+        # Re-poll until found or deadline (sockets appear within ~1s typically)
+        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+          [ -S "$SOCK" ] && break
+          read -t 0.2 -r _ < <(:) 2>/dev/null || true
+        done
+        if [ -S "$SOCK" ]; then
+          log "  $pane: socket $SOCK ✓"
+        else
+          log "  $pane: WARNING — socket $SOCK missing"
+        fi
+      done
+    fi
+
+    log "reset-workspace complete"
   '';
 }
