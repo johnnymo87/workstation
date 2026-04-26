@@ -224,29 +224,6 @@ EOF
       done
     fi
 
-    # ---- Step 4: Delete all opencode sessions ----
-    log "fetching opencode session list..."
-    if ! IDS=$(curl -sf "$OPENCODE_URL/session" 2>/dev/null | jq -r '.[].id' 2>/dev/null); then
-      log "  WARNING: failed to fetch session list (serve may be down)"
-      IDS=""
-    fi
-
-    if [ -z "$IDS" ]; then
-      log "  no sessions to delete"
-    else
-      DELETED=0
-      FAILED=0
-      while IFS= read -r id; do
-        if curl -sf -X DELETE "$OPENCODE_URL/session/$id" -o /dev/null; then
-          DELETED=$((DELETED + 1))
-        else
-          FAILED=$((FAILED + 1))
-          log "  WARNING: failed to delete $id"
-        fi
-      done <<< "$IDS"
-      log "  deleted $DELETED session(s), $FAILED failure(s)"
-    fi
-
     # ---- Step 5: Restart opencode-serve ----
     log "restarting opencode-serve.service..."
     # Passwordless sudo works via wheel group + security.sudo.wheelNeedsPassword=false (set in hosts/cloudbox/configuration.nix).
