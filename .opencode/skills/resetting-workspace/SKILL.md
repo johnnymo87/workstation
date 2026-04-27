@@ -46,6 +46,7 @@ sudo systemctl start nightly-restart-background.service
 - This Claude session's TUI will reconnect when serve restarts. Brief flicker.
 - All in-flight headless opencode workers (e.g., spawned via `opencode-launch` or pigeon `/launch`) will have their PROCESSES killed by the SIGKILL pass and their session ids captured. Post-respawn, those sessions get a TUI restored via `oc-auto-attach` — but the headless worker is NOT re-launched (we only restore TUIs, not arbitrary headless invocations). Sessions persist in the DB.
 - nvim is treated as disposable — no graceful quit, no `:wa`. By design (cloudbox nvim is purely a host for opencode tabs).
+- **Cgroup gotcha (fixed 2026-04-26).** Earlier versions of `reset-workspace` would silently die when invoked from an opencode-agent bash tool whose TUI was attached to `opencode-serve.service`. Steps 1–5 (snapshot + kill nvims + fire systemctl restart) ran, but the SIGTERM cascade from `KillMode=control-group` killed the script itself before steps 6–7 (respawn nvims, restore TUIs) could run. The script now self-detaches into a `systemd-run --user --scope` transient unit at entry if it detects `opencode-serve.service` in its own cgroup. See `docs/plans/2026-04-26-reset-workspace-cgroup-survival-design.md` for details.
 
 ## Sessions persist across resets
 
