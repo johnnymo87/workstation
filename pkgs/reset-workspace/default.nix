@@ -123,94 +123,77 @@ EOF
       done
     fi
 
-    # ---- Step 2: Snapshot live opencode TUIs/processes ----
-    # Walk every opencode process owned by `dev`, except `opencode serve`.
-    # We identify "opencode" by basename of /proc/$pid/exe (handles the
-    # wrapped binary path), NOT by argv match — argv-based matching also
-    # captures the bundled lua-language-server (path: .cache/opencode/bin/...).
-    # For each opencode process, derive the session id:
-    #   1. Parse `-s ses_xxx` from /proc/<pid>/cmdline if present.
-    #   2. Otherwise grep the open log file for the first GET /session/ses_xxx line.
-    # Skip with WARNING if neither attempt yields a valid id.
-    log "snapshotting live opencode TUIs..."
+    # ---- Step 2: Snapshot live opencode attach clients ----
+    # Restoration scope: ONLY sessions launched via Telegram /launch or
+    # `opencode-launch` CLI. Both produce TUI processes with cmdline of the
+    # form `<binary>/opencode attach <url> --session ses_xxx` -- the sid is
+    # reliably in argv. Bare `:te opencode` TUIs (no --session) are NOT
+    # restored across reset; they are intended for ad-hoc work. See
+    # docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md
+    log "snapshotting live opencode attach clients..."
 
     OPENCODE_MANIFEST=""
+    OPENCODE_BARE_COUNT=0  # observability: bare TUIs we are NOT restoring
 
-    # Tolerate empty pgrep result (no matches => exit 1) under set -e.
-    OC_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
-
-    if [ -z "$OC_PIDS" ]; then
-      log "  no opencode processes found"
-    else
-      for pid in $OC_PIDS; do
-        # Skip if process is gone (race) or unreadable.
-        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
-        [ -n "$cmdline" ] || continue
-
-        # Authoritative filter: /proc/$pid/exe must basename-match opencode
-        # or the wrapped variant (.opencode-wrapped). This excludes
-        # lua-language-server etc. that live under .cache/opencode/.
-        exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
-        exe_base=$(basename "$exe")
-        if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
-          continue
-        fi
-
-        # Skip opencode-serve itself (we restart it, we don't restore it).
-        # Check argv[1] specifically — `grep -qw serve` against the full cmdline
-        # would false-positive on TUIs whose cwd or args happen to contain "serve"
-        # (e.g. `opencode -d /home/dev/projects/serve/`).
-        if printf '%s' "$cmdline" | awk '{print $2}' | grep -qx 'serve'; then
-          continue
-        fi
-
-        # Match both -s ses_xxx (short form, used by `opencode -s ...`) and
-        # --session ses_xxx (long form, used by `opencode attach ... --session
-        # ses_xxx`, which is how oc-auto-attach launches restored TUIs).
-        # `opencode attach` clients have no log file, so this argv match is
-        # the only path that captures restored TUIs on subsequent resets.
-        sid=$(printf '%s' "$cmdline" | grep -oE -- '(--session|-s) ses_[A-Za-z0-9]+' | head -1 | awk '{print $2}' || true)
-
-        # Attempt 2: log file fallback.
-        if [ -z "$sid" ]; then
-          # shellcheck disable=SC2012
-          log_file=$(ls -la "/proc/$pid/fd/" 2>/dev/null \
-            | awk '/-> .*opencode\/log\/.*\.log$/ { print $NF; exit }' || true)
-          if [ -n "$log_file" ] && [ -r "$log_file" ]; then
-            sid=$(grep -oE 'path=/session/ses_[A-Za-z0-9]+' "$log_file" 2>/dev/null \
-              | head -1 \
-              | sed 's|^path=/session/||' || true)
-          fi
-        fi
-
-        # Validate.
-        if [ -z "$sid" ]; then
-          log "  WARNING: skipping pid=$pid (no session id) cmdline=$cmdline"
-          continue
-        fi
-        if ! printf '%s' "$sid" | grep -qxE 'ses_[A-Za-z0-9]+'; then
-          log "  WARNING: skipping pid=$pid (invalid sid='$sid')"
-          continue
-        fi
-
-        log "  pid=$pid -> $sid"
-        OPENCODE_MANIFEST="''${OPENCODE_MANIFEST}''${sid}"$'\n'
-      done
-
-      # Deduplicate.
-      OPENCODE_MANIFEST=$(printf '%s' "$OPENCODE_MANIFEST" | awk 'NF && !seen[$0]++')
-
-      if [ -z "$OPENCODE_MANIFEST" ]; then
-        OPENCODE_COUNT=0
-        log "  (no session ids captured)"
-      else
-        OPENCODE_COUNT=$(printf '%s\n' "$OPENCODE_MANIFEST" | wc -l)
-        log "  captured $OPENCODE_COUNT session id(s)"
+    # Loose pgrep + strict per-pid validation. Strict regex anchors on the
+    # binary path prefix, the literal `attach` subcommand, an http(s) url,
+    # and a syntactically valid sid -- false positives are essentially
+    # impossible.
+    OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
+    for pid in $OC_ATTACH_PIDS; do
+      # Authoritative exe filter: skip non-opencode processes that pgrep
+      # over-matched (e.g. a transient `grep "opencode attach"` running
+      # alongside reset). Without this, those processes trigger misleading
+      # "no --session in argv" WARNINGs that pollute the journal.
+      exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+      exe_base=$(basename "$exe")
+      if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
+        continue
       fi
+
+      cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//')
+      [ -n "$cmdline" ] || continue
+
+      if [[ "$cmdline" =~ ^[^[:space:]]+/opencode[[:space:]]+attach[[:space:]]+https?://[^[:space:]]+[[:space:]]+--session[[:space:]]+(ses_[A-Za-z0-9]+)$ ]]; then
+        sid="''${BASH_REMATCH[1]}"
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
+        log "  pid=$pid sid=$sid cwd=$cwd"
+        OPENCODE_MANIFEST="''${OPENCODE_MANIFEST}''${sid}"$'\n'
+      else
+        log "  WARNING: skipping pid=$pid (no --session in argv) cmdline=$cmdline"
+      fi
+    done
+
+    # Observability: enumerate bare opencode TUIs that will NOT be restored.
+    # We log them so each reset's journal makes it obvious what was dropped.
+    OC_ALL_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
+    for pid in $OC_ALL_PIDS; do
+      exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+      exe_base=$(basename "$exe")
+      if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
+        continue
+      fi
+      cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//')
+      [ -n "$cmdline" ] || continue
+      arg2=$(printf '%s' "$cmdline" | awk '{print $2}')
+      # Skip serve (we restart it, not restore it) and attach clients
+      # (already enumerated in the strict loop above).
+      [ "$arg2" = "serve" ] && continue
+      [ "$arg2" = "attach" ] && continue
+      cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
+      log "  WARNING: bare opencode TUI pid=$pid cwd=$cwd will NOT be restored across reset (use /launch or opencode-launch for restorable sessions)"
+      OPENCODE_BARE_COUNT=$((OPENCODE_BARE_COUNT + 1))
+    done
+
+    # Dedupe captured sids.
+    OPENCODE_MANIFEST=$(printf '%s' "$OPENCODE_MANIFEST" | awk 'NF && !seen[$0]++')
+    if [ -z "$OPENCODE_MANIFEST" ]; then
+      OPENCODE_COUNT=0
+    else
+      OPENCODE_COUNT=$(printf '%s\n' "$OPENCODE_MANIFEST" | wc -l)
     fi
 
-    # If we never set OPENCODE_COUNT (e.g. no opencode processes at all), set it now.
-    OPENCODE_COUNT=''${OPENCODE_COUNT:-0}
+    log "  captured $OPENCODE_COUNT restorable session(s); $OPENCODE_BARE_COUNT bare TUI(s) skipped"
 
     # ---- Step 2: Confirm with user ----
     log ""
