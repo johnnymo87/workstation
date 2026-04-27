@@ -21,6 +21,7 @@ let
     "opencode-launch"
     "notify-telegram"
     "preparing-for-compaction"
+    "reviewing-github-prs"
     "searching-sessions"
     "opencode-send"
     "swarm-messaging"

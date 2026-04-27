@@ -34,7 +34,7 @@ repo but not deployed to any machine yet.
 | [preparing-for-compaction](skills/preparing-for-compaction/SKILL.md) | cross | Persist durable context before compaction so work survives. Beads + plan files + resumption prompt. |
 | [searching-sessions](skills/searching-sessions/SKILL.md) | cross | `oc-search` patterns for grepping past session transcripts (PRs, Jira tickets, commands, payloads). |
 | [beads](skills/beads/SKILL.md) | cross | Activate `bd` issue tracking when work spans multiple sessions or has complex dependencies. |
-| [reviewing-github-prs](skills/reviewing-github-prs/SKILL.md) | repo-only | Posting PR reviews on GitHub with inline comments via `gh` CLI. Not deployed; reach into source if needed. |
+| [reviewing-github-prs](skills/reviewing-github-prs/SKILL.md) | cross | Choosing the right response shape (threaded inline reply vs fresh review vs top-level issue comment) when posting on a PR, plus the `gh` CLI mechanics for each. |
 
 ### External Services
 
