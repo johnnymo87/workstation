@@ -915,8 +915,10 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
           exit 1
         fi
 
-        json="$( "$CURL" -sf -m 10 "$OPENCODE_URL/session" )" || {
-          echo "Error: GET $OPENCODE_URL/session failed" >&2
+        # Cross-project list. /session would be filtered to the project derived
+        # from x-opencode-directory which is almost never what we want.
+        json="$( "$CURL" -sf -m 10 "$OPENCODE_URL/experimental/session?limit=100" )" || {
+          echo "Error: GET $OPENCODE_URL/experimental/session failed" >&2
           exit 1
         }
 
