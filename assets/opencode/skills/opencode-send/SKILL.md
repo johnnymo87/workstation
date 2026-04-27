@@ -25,6 +25,17 @@ cat plan.md | opencode-send ses_abc123 -
 opencode-send --direct ses_abc123 "hello"
 ```
 
+### Verify pigeon is up before relying on auto-route
+
+```bash
+curl -sf "${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}/health"
+# expected: {"ok":true,"service":"pigeon-daemon"}
+```
+
+If this fails, `opencode-send` silently falls through to the legacy
+`--direct` path. The output line tells you which path was taken
+(`Queued ...` = pigeon, `Sent to ...` = direct).
+
 ## Two Paths, One CLI
 
 | Path | When | What it does |
@@ -53,13 +64,27 @@ If you don't know which path was taken, check the output line:
 
 ## Finding The Session ID
 
-`opencode-send --list` prints the local sessions sorted by last-updated:
+`opencode-send --list` prints local sessions across **all projects**, sorted
+by last-updated (uses `GET /experimental/session` which is the cross-project
+endpoint):
 
 ```
 ID                                UPDATED     DIRECTORY                                 TITLE
 ses_268183fceffep6ViEE20s5XWc8    3m          /home/dev                                 PDF code extraction from page 2
 ses_272a9b9b8ffeVBXCz6SQmsJF4l    1h          /home/dev/projects/pigeon                 Implement opencode-send CLI
+ses_24e8ff295ffeyV8o35YuK63g2u    2d          /home/dev/projects/mono                   Coordinator: COPS-6107 swarm
 ```
+
+By default the list returns up to 100 sessions, ordered by most-recent
+update across the entire local opencode database (one row per
+`session_id`, not per project).
+
+> **Why not `GET /session`?** That endpoint exists but is filtered to the
+> single project derived from the request's `x-opencode-directory` header.
+> If you ran `opencode-send --list` from `/home/dev/projects/workstation`
+> you'd only see sessions whose owning project also resolves to that
+> directory's project — typically a tiny subset. The cross-project
+> endpoint is the right thing for a "who else is around?" query.
 
 Other sources of session ids:
 
@@ -89,6 +114,23 @@ Receiving agents should:
 Messages sent via `--direct` arrive as a plain user message with no envelope.
 
 The `swarm-messaging` skill is the dedicated guide for the receiving side and goes deeper on kinds, priorities, and replay via `swarm_read`.
+
+## Verifying Delivery
+
+Auto-route prints `Queued msg_<id> -> ses_<target>` on success. That's
+acceptance into pigeon's SQLite, not delivery to the receiving session.
+To confirm delivery, query the daemon:
+
+```bash
+curl -sf "${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}/swarm/inbox?session=$TARGET_SESSION_ID&limit=5" \
+  | jq '.messages[] | {msg_id, handed_off_at, payload: (.payload | .[0:80])}'
+```
+
+`handed_off_at: <timestamp>` (non-null) means the receiving opencode-serve
+accepted the prompt. Treat that as proof-of-delivery. Null after several
+seconds means the arbiter is still retrying — `--direct` path delivered
+synchronously so the same data is unavailable there. See
+`swarm-messaging` skill for the longer treatment.
 
 ## Attaching to a Pigeon-Routed Session
 
@@ -130,7 +172,13 @@ You also get for free:
 - **Pigeon must be reachable for auto-route.** If `curl /health` fails (no pigeon installed, daemon down), `opencode-send` silently falls through to direct mode. Verify by checking the output line — `Queued ...` means pigeon path, `Sent to ...` means direct.
 - **You can interrupt a busy session.** If the target is mid-turn, your message lands on the queue and runs after the current turn completes. Avoid sending to an active session unless that's intentional.
 - **Cross-session messages are visible in the target's transcript** as a regular user message (envelope-wrapped on the pigeon path). They show up in `oc-search` and the TUI history like any other prompt.
-- **`POST /session/<id>/prompt_async` returns 204 for any id** (real or fake). The direct path does a pre-flight `GET /session/<id>` to catch typos; the pigeon path queues regardless and the arbiter surfaces the 404 as a retry-then-fail.
+- **`POST /session/<id>/prompt_async` returns 204 for any id** (real or
+  fake). The direct path catches typos via a pre-flight `GET /session/<id>`
+  (404 → exit 1). The pigeon path also catches them, but indirectly:
+  the arbiter's `registry.resolve()` does the same pre-flight, throws on
+  404, and surfaces it as a retry-then-fail (max 10 attempts, ~85s of
+  backoff). Either way, typos don't silently disappear — the difference
+  is latency.
 
 ## Options
 
@@ -163,5 +211,5 @@ See the `swarm-messaging` skill for the full sender + receiver protocol.
 | Default transport | Pigeon (auto-route for `ses_*`) | Architecturally fixes the prompt_async race, gives durable delivery + retry + replay |
 | Escape hatch | `--direct` flag | Legacy path retained for debug / explicit bypass |
 | Implementation | Bash + curl + jq | Matches `oc-search` / `lgtm-sessions` style; trivial to audit |
-| Discovery | `--list` via `GET /session` | Lets agents find targets without leaving the shell |
+| Discovery | `--list` via `GET /experimental/session` | Cross-project list; the project-scoped `GET /session` would only show sessions belonging to the calling cwd's project, which is usually wrong for swarm coordination. |
 | Auto-route guard | `^ses_` regex + pigeon `/health` 2xx | Falls through to direct if pigeon is missing or unreachable, so the wrapper degrades gracefully |
