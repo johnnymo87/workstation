@@ -13,9 +13,11 @@ lib.mkIf isCloudbox {
       PATH="${lib.makeBinPath [
         pkgs.coreutils
         pkgs.findutils
+        pkgs.gh
         pkgs.git
         pkgs.gnugrep
         pkgs.gnused
+        pkgs.jq
         pkgs.nix
         pkgs.python3
       ]}:$PATH"
@@ -64,6 +66,21 @@ lib.mkIf isCloudbox {
           [ -d "$repo_dir/.worktrees" ] || continue
           repo_name=$(basename "$repo_dir")
 
+          # Resolve org/repo slug from origin URL once per repo, for `gh` calls
+          # used by the lgtm pr-N pruning step below. Falls back to "" so the
+          # `gh` step is skipped when the URL doesn't match a known shape.
+          repo_slug=""
+          origin_url=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || echo "")
+          case "$origin_url" in
+            https://github.com/*)
+              repo_slug="''${origin_url#https://github.com/}"
+              ;;
+            git@github.com:*)
+              repo_slug="''${origin_url#git@github.com:}"
+              ;;
+          esac
+          repo_slug="''${repo_slug%.git}"
+
           # Fetch and prune remote refs. Capture stderr so we can include the
           # first error line in the WARN; otherwise auth/network failures are
           # invisible in the journal.
@@ -76,6 +93,26 @@ lib.mkIf isCloudbox {
           for wt_dir in "$repo_dir"/.worktrees/*/; do
             [ -d "$wt_dir" ] || continue
             wt_name=$(basename "$wt_dir")
+
+            # lgtm pr-N worktrees are detached-HEAD checkouts of refs/pull/N/head.
+            # The generic merged/aged checks below can't catch them: there's no
+            # local branch (so `branch=HEAD`), the PR head SHA is rarely on
+            # origin/main directly (squash merges), and `last_commit_epoch` is
+            # the PR commit time which keeps moving. So they accumulated
+            # forever -- one ~14 GB pile across mono/internal-frontends/culops.
+            # Source: lgtm/src/worktree.ts createWorktree (named pr-<N>).
+            # Fix: ask GitHub for state and prune if MERGED or CLOSED.
+            if [[ "$wt_name" =~ ^pr-([0-9]+)$ ]] && [ -n "$repo_slug" ]; then
+              pr_num="''${BASH_REMATCH[1]}"
+              pr_state=$(gh pr view "$pr_num" --json state --repo "$repo_slug" 2>/dev/null \
+                | jq -r '.state // empty' 2>/dev/null || echo "")
+              if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
+                log "Removing lgtm pr-$pr_num worktree ($pr_state): $repo_name/$wt_name"
+                git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
+                continue
+              fi
+              # OPEN / unknown -> leave alone, fall through to generic checks
+            fi
 
             # Check if merged into origin/main
             head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null) || continue
