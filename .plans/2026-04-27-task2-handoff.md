@@ -2,7 +2,42 @@
 
 **Date:** 2026-04-27
 **Author:** Claude (post-compaction execution session)
-**Status:** Stopped at Task 3 per resumption-prompt escape clause.
+**Status:** ✅ RESOLVED 2026-04-27 22:35Z. Prefill fix shipped on opencode-patched v1.14.28-patched, deployed to cloudbox via home-manager, and verified in production. See "RESOLVED" section directly below.
+
+---
+
+## RESOLVED 2026-04-27 22:35Z
+
+The deferred build/install/verify chain (`.plans/2026-04-27-v1.14.28-stack-refresh.md`) ran end-to-end in the second execution session. Both forks now ship v1.14.28 binaries that include the prefill fix.
+
+**Shipped artifacts:**
+- `johnnymo87/opencode-cached@312013e` — caching patch refresh for v1.14.28 (3-way merge handled all 8 file targets cleanly; only minor inline conflicts in `agent.ts` import + `transform.ts` import path).
+- `johnnymo87/opencode-cached` release `v1.14.28-cached` (assets used: caching.patch served from raw `main` per `opencode-patched/patches/apply.sh:25`, NOT from release assets — plan was wrong about this; release binaries are unused but published anyway).
+- `johnnymo87/opencode-patched@c4f4027` — prefill-fix patch refreshed for v1.14.28 (done in prior execution session).
+- `johnnymo87/opencode-patched` release [`v1.14.28-patched`](https://github.com/johnnymo87/opencode-patched/releases/tag/v1.14.28-patched) — release body edited inline to include 6th-patch (Prefill Race Fix) section + reference to design doc. Followup item: update `build-release.yml` template lines 209-215 so future v1.14.28+ rebuilds default to advertising 6 patches (currently still says 5).
+- `johnnymo87/workstation` PR #141 → squash-merged as `383fcc3` "chore(deps): update opencode-patched to 1.14.28". Auto-update workflow keyed on the version-string change and bumped 4 platform hashes + the version literal in `users/dev/home.base.nix`.
+- Cloudbox `opencode --version` = `1.14.28` post `nix run home-manager -- switch --flake .#cloudbox`.
+
+**Production verification (prefill repro):**
+
+| Metric | Before (v1.14.25 unpatched) | After (v1.14.28 + prefill-fix) |
+|---|---|---|
+| User rows | 4 | 4 |
+| Assistant rows | 8 | 1 |
+| Distinct cwds in assistants | 4 | 1 (matches session.directory) |
+| Prefill 400 errors | 4 | 0 |
+| Wrong-cwd assistants | 7 | 0 |
+
+Captures at `/tmp/repro-before-fix.txt` and `/tmp/repro-after-fix.txt`. Serve log shows exactly ONE `creating instance directory=/tmp/repro-prefill` event and ONE `session.prompt step=0 / step=1 / exiting` cycle for the test session, confirming `withSessionInstance` collapsed all 4 racing requests into the same Instance and the busy guard held.
+
+**One observation worth recording:** the original Plan 2 spec (lines 105-119) predicted "4 assistants per user, all in same cwd" as the success state. Reality is "1 assistant per user when 4 prompts race within the same session window" — because `prompt_async`'s busy guard rejects concurrent prompts rather than queueing them, which is the documented `prompt_async` semantic. The fix's CRITICAL invariants (zero prefill errors, single Instance, no DB corruption, fire-and-forget 204 preserved) all hold.
+
+**Candidate follow-up (NOT shipping today, raised by user during execution):** consider whether `prompt_async` should QUEUE rather than DROP concurrent prompts. The current drop-on-busy behavior is fine for normal TUI usage (a user can't physically race themselves) but silently loses the 2nd/3rd/4th prompt if a programmatic caller batches multiple prompts to the same session within milliseconds. Implementation would belong in `SessionPrompt.Service.prompt(...)` (NOT the route layer or `withSessionInstance`), as a per-Instance FIFO drained by a worker as the runner slot frees. Open design questions: FIFO cap size, whether command/abort/init share the queue, how queued state surfaces to the caller (who already accepted 204). File as a follow-up issue if a real workflow needs it; the alternative is a separate synchronous `/prompt` route that 503s on busy and lets the caller retry.
+
+**Ops findings during execution:**
+- Disk filled to 100% mid-Task-1 because of accumulated lgtm `pr-N` worktrees. Implementer autonomously loaded `cleaning-disk` skill, recovered 51GB. Wrote (uncommitted, surfaced separately to user) an enhancement to `users/dev/disk-cleanup.nix` that auto-prunes lgtm `pr-N` worktrees whose corresponding GitHub PR is MERGED or CLOSED. The implementer left this as `stash@{0}` for user decision: ship as a separate commit, file as a follow-up issue, or discard.
+- The plan's Task 3 assumption "caching.patch ships as a release asset on opencode-cached" is wrong — `opencode-patched/patches/apply.sh:25` fetches from `https://raw.githubusercontent.com/johnnymo87/opencode-cached/main/patches/caching.patch`, so what matters is `opencode-cached/main` HEAD, which we confirmed via `git ls-remote`.
+- The killed serve auto-respawned: when Task 7 needed a fresh binary, killing the existing `opencode serve --port 4096` PID caused the TUI to silently relaunch a new serve on the same port using the now-current `~/.nix-profile/bin/opencode` (which had been swapped to v1.14.28 by home-manager). The session never lost its connection. Useful to know for future binary swaps.
 
 ---
 
