@@ -7,6 +7,35 @@ description: Use when the user wants a fresh start on cloudbox — to kill all n
 
 `reset-workspace` is a single command that fully resets the cloudbox dev environment.
 
+## What survives a reset
+
+reset-workspace restores opencode TUIs **only** for sessions launched via:
+
+- Telegram `/launch`
+- `opencode-launch` (CLI)
+
+Both produce a TUI process with cmdline `<binary>/opencode attach <url>
+--session ses_xxx`. The sid is captured from `/proc/<pid>/cmdline` during
+step 2; if the process is alive at snapshot time, the session is restored
+into a tmux window for its project's cwd via `oc-auto-attach`.
+
+**Bare `:te opencode` TUIs (no `--session` in argv) are NOT restored.**
+They are intended for ad-hoc / throwaway work. To make a session
+re-survivable, launch it via `/launch` or `opencode-launch`.
+
+Each reset's journal includes a summary line of the form:
+
+```
+captured N restorable session(s); M bare TUI(s) skipped
+```
+
+If you expected a session to be restored and it wasn't, check the journal
+for `pid=... sid=... cwd=...` (success) vs `WARNING: bare opencode TUI
+pid=... cwd=...` (skipped) lines.
+
+See `docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md` for the
+rationale.
+
 ## What it does (in order)
 
 1. Snapshots the tmux panes currently running `nvim`/`nvims`.
