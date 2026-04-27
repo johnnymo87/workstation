@@ -20,7 +20,7 @@ Before posting anything, identify what you are responding to and what the existi
 
 | If you are... | Use this shape | Why |
 |---|---|---|
-| ...replying to a specific existing inline comment (Gemini, human, prior agent — anything posted as an inline review comment on a line of the diff) | **Threaded reply** to that comment via `POST /pulls/{n}/comments` with `in_reply_to` | Preserves the conversation thread on that line; reviewer gets a notification on the thread they care about; future readers see your reasoning attached to the code in question |
+| ...replying to a specific existing inline comment (Gemini, human, prior agent — anything posted as an inline review comment on a line of the diff) | **Threaded reply** via `POST /pulls/{n}/comments/{comment_id}/replies` | Preserves the conversation thread on that line; reviewer gets a notification on the thread they care about; future readers see your reasoning attached to the code in question |
 | ...you have several things to say, some inline-attachable to lines of the diff and some general | **Fresh review** with `event=COMMENT` and a `comments[]` array (each comment with `path` + `line` + `side`) | One submission, one notification, properly threaded per file/line |
 | ...you have to address an existing inline comment AND post unrelated session notes | **Threaded reply** to the inline comment first, **then** a separate top-level issue comment for the session notes | Don't bury the threaded reply inside a wall-of-text issue comment. The reviewer subscribed to the inline thread, not to the issue feed |
 | ...your response is genuinely PR-wide (session summary, status update, "I'm bailing because X", "auto-merge enabled") and there are no specific inline comments to address | **Top-level issue comment** via `POST /issues/{n}/comments` | Fits the scope of what you're saying |
@@ -65,18 +65,40 @@ gh api repos/{owner}/{repo}/pulls/{number}/comments \
 
 ### Threaded reply to an existing inline comment
 
-This is what you should reach for first when there's an inline comment to address.
+This is what you should reach for first when there's an inline comment to address. Use the dedicated `/replies` endpoint:
+
+```bash
+gh api -X POST repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies \
+  -f body='Your reply text here.'
+```
+
+`{comment_id}` is the integer `id` field from the listing query above (the parent comment id, in the URL path — not in the body). The body is just `{"body": "..."}` — no `path`, `line`, or `side` needed; those are inherited from the parent.
+
+The reply will appear threaded under the original comment in the GitHub UI, and the comment author gets a notification on the thread they originally subscribed to.
+
+**Verify it threaded correctly** by re-listing comments and confirming your new comment has `in_reply_to_id == {comment_id}`:
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{number}/comments \
-  --method POST \
-  -f body="Your reply text here." \
+  --jq '.[] | select(.in_reply_to_id == {comment_id}) | {id, user: .user.login, body_preview: (.body[0:80])}'
+```
+
+#### Constraints
+
+- `{comment_id}` must be a **thread-root** comment (`in_reply_to_id: null` in listings). GitHub does not support replies-to-replies; you can only reply to the top of a thread. If you want to add to an existing back-and-forth, still reply to the root — your reply will appear at the bottom of the thread.
+- The reply inherits the parent's `path`, `line`, `side`, and `commit_id`. You cannot retarget.
+
+#### Alternative form (less recommended)
+
+The same effect can be achieved via `POST /pulls/{n}/comments` with an `in_reply_to` body parameter:
+
+```bash
+gh api -X POST repos/{owner}/{repo}/pulls/{number}/comments \
+  -f body='Your reply text here.' \
   -F in_reply_to={comment_id}
 ```
 
-`{comment_id}` is the integer `id` field from the listing query above. `in_reply_to` is `-F` (numeric) not `-f` (string).
-
-The reply will appear threaded under the original comment in the GitHub UI, and the comment author gets a notification on the thread they originally subscribed to.
+Per GitHub's API docs: *"When in_reply_to is specified, all parameters other than body in the request body are ignored."* So `path`/`line`/`side`/`commit_id` are silently dropped. This works but is easier to misuse — prefer the dedicated `/replies` endpoint above.
 
 ### Fresh review with inline comments
 
@@ -158,7 +180,7 @@ JSONEOF
 
 **Inline comments must be on lines in the diff.** You can comment on added lines, removed lines, and context lines within diff hunks. You cannot comment on lines outside the diff. If you want to discuss a line outside the diff, use a top-level issue comment and reference the file/line in prose.
 
-**Don't conflate `in_reply_to` (numeric, existing comment id) with `in_reply_to_id` (the field name returned in listings).** When *posting* a reply you send `in_reply_to=N`; when *reading* comments back, the same relationship is exposed as `in_reply_to_id` on the response. Confusing for one minute, then it sticks.
+**Don't conflate `in_reply_to` (the alternative-form body parameter) with `in_reply_to_id` (the field name returned in listings).** Only matters if you're using the alternative `POST /pulls/{n}/comments` form — when *posting* you'd send `in_reply_to=N`, but when *reading* comments back the same relationship is exposed as `in_reply_to_id`. The dedicated `/replies` endpoint avoids this entirely (the parent id is in the URL path, not the body).
 
 **Threaded replies don't take a `path`/`line`/`side`.** They inherit those from the parent comment. If you find yourself wanting to attach a reply to a *different* line, that's not a reply — that's a new inline comment, post it as part of a fresh review.
 
