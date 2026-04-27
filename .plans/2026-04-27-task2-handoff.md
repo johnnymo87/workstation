@@ -4,6 +4,55 @@
 **Author:** Claude (post-compaction execution session)
 **Status:** Stopped at Task 3 per resumption-prompt escape clause.
 
+---
+
+## UPDATE 2026-04-27 (later same evening)
+
+User chose Option C-NOW (target upstream v1.14.28, which had landed in the
+hours since the original handoff was written). After investigation, the
+caching patch in `johnnymo87/opencode-cached` was found to need substantial
+refactoring against v1.14.28 (3 of 8 files have non-trivial drift; one is a
+major upstream refactor of `agent.ts` from the `zod(...).transform(...)`
+pattern to `Schema.decodeTo(...)` / `SchemaGetter.transform` patterns).
+
+Decision: **SPLIT execution.**
+- **Done now (this session):** refresh `prefill-fix.patch` to apply against
+  v1.14.28 (single-line drift; one import path renamed from
+  `@opencode-ai/shared/util/error` to `@opencode-ai/core/util/error`).
+  Pushed as commit
+  [`c4f402754b06c6b95e9c0a662667a62956a8d9ae`](https://github.com/johnnymo87/opencode-patched/commit/c4f4027)
+  on opencode-patched. Verified by sequential dry-run application of the
+  full opencode-patched stack (vim + tool-fix + mcp-reconnect +
+  eager-input-streaming + prefill-fix) against a fresh v1.14.28 clone.
+- **Deferred to a future session:** the caching-patch refresh on
+  `opencode-cached`, the build dispatches on both forks, the workstation
+  hash bump, the home-manager apply, and the post-fix prefill-repro
+  verification. Captured in detail at
+  `.plans/2026-04-27-v1.14.28-stack-refresh.md` (full plan with bite-sized
+  tasks, written for an agent with zero prior context).
+
+State summary right now:
+- `opencode-patched@main` HEAD = `c4f4027` (prefill-fix patch refreshed for
+  v1.14.28).
+- `opencode-cached@main` HEAD = unchanged from this morning. Still ships
+  `v1.14.25-cached`. Two failed `workflow_dispatch` runs in the morning
+  confirmed `caching.patch` won't apply to v1.14.28 without a manual port.
+- No new release has been cut on either fork.
+- `users/dev/home.base.nix` still pins opencode v1.14.25 (the existing
+  `v1.14.25-patched` release, NOT including the prefill fix).
+- The prefill bug is still reproducible against the running binary.
+
+To resume from here, follow `.plans/2026-04-27-v1.14.28-stack-refresh.md`
+starting at Task 1 (caching patch refresh on opencode-cached). Tasks 2-7 of
+that plan run unchanged from the SPLIT outcome.
+
+The original handoff (below) is preserved verbatim for historical context
+about why we ended up at this decision tree.
+
+---
+
+## Original handoff (2026-04-27, earlier in the same session)
+
 ## What's done
 
 - `prefill-fix.patch` (489 lines, wraps 24 `/:sessionID/...` routes in opencode v1.14.25) is committed and pushed to `johnnymo87/opencode-patched` as commit
