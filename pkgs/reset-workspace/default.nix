@@ -9,6 +9,7 @@ pkgs.writeShellApplication {
     procps         # pkill, pgrep
     util-linux     # flock
     coreutils      # timeout
+    systemd        # systemd-run for cgroup re-exec
   ];
   text = ''
     # reset-workspace [--yes]
@@ -33,6 +34,45 @@ pkgs.writeShellApplication {
       log "FATAL: $*"
       exit 1
     }
+
+    # ---- Process detachment: re-exec into a fresh user systemd scope ----
+    # This script kills processes that are likely to be ancestors of its own
+    # invoker — specifically nvim (step 4: pkill -9 -u dev -x nvim) and
+    # opencode-serve.service (step 5: sudo systemctl restart, which kills
+    # the whole service cgroup by default). If we don't detach, we die from:
+    #   - SIGHUP propagating from the killed ancestor nvim's PTY collapse, OR
+    #   - SIGTERM from systemd's KillMode=control-group cgroup-wide kill.
+    #
+    # `systemd-run --user --scope` wraps us in a transient .scope unit that:
+    #   - Lives in /user.slice/.../app.slice/run-pXXX.scope (fresh cgroup,
+    #     outside opencode-serve.service)
+    #   - Is reparented under user@1000.service (no nvim ancestor)
+    #   - Has its own session leader (no controlling TTY → no PTY-collapse SIGHUP)
+    #
+    # We do this unconditionally (gated only by the loop-guard env var) because
+    # the cost on the happy path is ~10ms and the failure modes it prevents
+    # are silent + subtle. Set RESET_WORKSPACE_NO_DETACH=1 to opt out (for
+    # debugging only — known-broken in production-like invocation contexts).
+    # See: docs/plans/2026-04-26-reset-workspace-cgroup-survival-design.md
+    if [ "''${RESET_WORKSPACE_DETACHED:-}" != "1" ] \
+       && [ "''${RESET_WORKSPACE_NO_DETACH:-}" != "1" ]; then
+      log "detaching into fresh user systemd scope..."
+      export RESET_WORKSPACE_DETACHED=1
+      # --collect: GC the transient scope as soon as we exit.
+      # --quiet: suppress the "Running scope as unit run-rXXX.scope" banner.
+      # No --pty/--pipe: those flags are service-only and rejected in --scope mode.
+      # In --scope mode the re-exec'd process just inherits our stdin/stdout/stderr,
+      # which is what we want (the script runs synchronously, attached to whatever
+      # terminal/pipe the caller gave us; the [y/N] prompt path still works because
+      # interactive humans hit it via a terminal).
+      # XDG_RUNTIME_DIR: required for --user (path to the user manager's socket).
+      # Fall back to running in-place if systemd-run is unavailable or fails.
+      if ! exec env XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/''$(id -u)}" \
+           systemd-run --user --scope --collect --quiet -- "$0" "$@"; then
+        log "WARNING: systemd-run --user --scope failed; running in-place (script may die mid-flight)"
+        # Continue past the re-exec block. The flock re-exec below will still run.
+      fi
+    fi
 
     # Parse args
     while [ $# -gt 0 ]; do
