@@ -133,7 +133,9 @@ EOF
     log "snapshotting live opencode attach clients..."
 
     OPENCODE_MANIFEST=""
-    OPENCODE_BARE_COUNT=0  # observability: bare TUIs we are NOT restoring
+    OPENCODE_STRICT_RAW=0     # strict-attach pgrep matches (raw, before dedupe)
+    OPENCODE_BARE_RESOLVED=0  # bare TUIs whose cwd resolved to a sid via opencode-serve
+    OPENCODE_BARE_SKIPPED=0   # bare TUIs whose cwd had no resolvable sid (or unreadable cwd)
 
     # Loose pgrep + strict per-pid validation. Strict regex anchors on the
     # binary path prefix, the literal `attach` subcommand, an http(s) url,
@@ -151,21 +153,25 @@ EOF
         continue
       fi
 
-      cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//')
+      cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//' || true)
       [ -n "$cmdline" ] || continue
 
       if [[ "$cmdline" =~ ^[^[:space:]]+/opencode[[:space:]]+attach[[:space:]]+https?://[^[:space:]]+[[:space:]]+--session[[:space:]]+(ses_[A-Za-z0-9]+)$ ]]; then
         sid="''${BASH_REMATCH[1]}"
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
         log "  pid=$pid sid=$sid cwd=$cwd"
+        OPENCODE_STRICT_RAW=$((OPENCODE_STRICT_RAW + 1))
         OPENCODE_MANIFEST="''${OPENCODE_MANIFEST}''${sid}"$'\n'
       else
         log "  WARNING: skipping pid=$pid (no --session in argv) cmdline=$cmdline"
       fi
     done
 
-    # Observability: enumerate bare opencode TUIs that will NOT be restored.
-    # We log them so each reset's journal makes it obvious what was dropped.
+    # Resolve bare opencode TUIs to sids via opencode-serve.
+    # For each bare TUI alive, look up the most-recent root session for its
+    # cwd; if found, restore it as an attach client by appending the sid to
+    # OPENCODE_MANIFEST. opencode-serve is alive at this point (we restart
+    # it later in step 5), so the API is always reachable here.
     OC_ALL_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
     for pid in $OC_ALL_PIDS; do
       exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
@@ -173,16 +179,35 @@ EOF
       if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
         continue
       fi
-      cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//')
+      cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//' || true)
       [ -n "$cmdline" ] || continue
       arg2=$(printf '%s' "$cmdline" | awk '{print $2}')
       # Skip serve (we restart it, not restore it) and attach clients
       # (already enumerated in the strict loop above).
       [ "$arg2" = "serve" ] && continue
       [ "$arg2" = "attach" ] && continue
-      cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
-      log "  WARNING: bare opencode TUI pid=$pid cwd=$cwd will NOT be restored across reset (use /launch or opencode-launch for restorable sessions)"
-      OPENCODE_BARE_COUNT=$((OPENCODE_BARE_COUNT + 1))
+
+      cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
+      if [ -z "$cwd" ]; then
+        log "  WARNING: bare opencode TUI pid=$pid has no readable cwd; skipping"
+        OPENCODE_BARE_SKIPPED=$((OPENCODE_BARE_SKIPPED + 1))
+        continue
+      fi
+
+      resolved_sid=$(curl -fsS --get "$OPENCODE_URL/session" \
+        --data-urlencode "directory=$cwd" \
+        --data-urlencode "roots=true" \
+        --data-urlencode "limit=1" 2>/dev/null \
+        | jq -r '.[0].id // empty' 2>/dev/null || true)
+
+      if [ -n "$resolved_sid" ] && printf '%s' "$resolved_sid" | grep -qxE 'ses_[A-Za-z0-9]+'; then
+        log "  pid=$pid (bare-resolved) sid=$resolved_sid cwd=$cwd"
+        OPENCODE_MANIFEST="''${OPENCODE_MANIFEST}''${resolved_sid}"$'\n'
+        OPENCODE_BARE_RESOLVED=$((OPENCODE_BARE_RESOLVED + 1))
+      else
+        log "  WARNING: bare opencode TUI pid=$pid cwd=$cwd has no resolvable session in DB; skipping restoration"
+        OPENCODE_BARE_SKIPPED=$((OPENCODE_BARE_SKIPPED + 1))
+      fi
     done
 
     # Dedupe captured sids.
@@ -193,7 +218,7 @@ EOF
       OPENCODE_COUNT=$(printf '%s\n' "$OPENCODE_MANIFEST" | wc -l)
     fi
 
-    log "  captured $OPENCODE_COUNT restorable session(s); $OPENCODE_BARE_COUNT bare TUI(s) skipped"
+    log "  captured $OPENCODE_COUNT restorable session(s) (raw: $OPENCODE_STRICT_RAW strict-attach + $OPENCODE_BARE_RESOLVED bare-resolved; dedupe may collapse); $OPENCODE_BARE_SKIPPED bare TUI(s) skipped"
 
     # ---- Step 2: Confirm with user ----
     log ""
