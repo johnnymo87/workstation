@@ -9,32 +9,48 @@ description: Use when the user wants a fresh start on cloudbox — to kill all n
 
 ## What survives a reset
 
-reset-workspace restores opencode TUIs **only** for sessions launched via:
+reset-workspace restores opencode TUIs in two ways:
 
-- Telegram `/launch`
-- `opencode-launch` (CLI)
+1. **Direct (argv-based)**: TUIs launched via Telegram `/launch` or
+   `opencode-launch` (CLI) carry their session id in the
+   `--session ses_xxx` argv, captured directly by step 2's strict
+   regex.
 
-Both produce a TUI process with cmdline `<binary>/opencode attach <url>
---session ses_xxx`. The sid is captured from `/proc/<pid>/cmdline` during
-step 2; if the process is alive at snapshot time, the session is restored
-into a tmux window for its project's cwd via `oc-auto-attach`.
+2. **Resolved (cwd-based)**: Bare `:te opencode` TUIs have no sid in
+   argv, but step 2 resolves their `/proc/<pid>/cwd` to the
+   most-recent root session for that directory via
+   `GET $OPENCODE_URL/session?directory=...&roots=true&limit=1`.
+   Restored TUIs come back as `opencode attach` clients (regardless of
+   how they were originally launched).
 
-**Bare `:te opencode` TUIs (no `--session` in argv) are NOT restored.**
-They are intended for ad-hoc / throwaway work. To make a session
-re-survivable, launch it via `/launch` or `opencode-launch`.
+A bare TUI is only skipped if its cwd has no matching root session in
+opencode.db (rare — only if the TUI was opened but never used to create
+or load a session).
+
+**Edge case:** two bare TUIs in the *same* cwd will both resolve to the
+same sid (the most-recently-updated one) and dedupe to a single
+restoration. The user effectively loses one of the two windows.
+A future enhancement (a runtime manifest under
+`$XDG_RUNTIME_DIR/opencode/tui/<pid>.json`) would resolve this precisely.
 
 Each reset's journal includes a summary line of the form:
 
 ```
-captured N restorable session(s); M bare TUI(s) skipped
+captured N restorable session(s) (raw: M strict-attach + K bare-resolved; dedupe may collapse); J bare TUI(s) skipped
 ```
 
-If you expected a session to be restored and it wasn't, check the journal
-for `pid=... sid=... cwd=...` (success) vs `WARNING: bare opencode TUI
-pid=... cwd=...` (skipped) lines.
+The "raw: …; dedupe may collapse" wording is intentional: M and K are
+pre-dedupe counts (raw TUIs / pgrep matches) and may exceed N when sids
+collide.
 
-See `docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md` for the
-rationale.
+If you expected a session to be restored and it wasn't, check the journal for:
+- `pid=... sid=... cwd=...` (strict-attach success)
+- `pid=... (bare-resolved) sid=... cwd=...` (bare-resolved success)
+- `WARNING: bare opencode TUI pid=... cwd=...` (skipped)
+
+See `docs/plans/2026-04-27-bare-tui-restoration-design.md` for the
+design rationale, including the deferred tear-down-rebuild
+simplification.
 
 ## What it does (in order)
 
