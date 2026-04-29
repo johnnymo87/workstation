@@ -8,8 +8,17 @@
 --              {sid="ses_...", dir="/abs/path", url="http://127.0.0.1:4096"})'
 --
 -- The dir field MUST be the exact session.directory from
--- `GET /session/<id>` (NOT the collapsed project root). This avoids known
--- `opencode attach --session` cwd-mismatch bugs.
+-- `GET /session/<id>` (NOT the collapsed project root). It is used both as
+-- the cwd of the spawned attach process AND passed via `--dir` to the
+-- `opencode attach` invocation. The latter is load-bearing: opencode-serve
+-- runs with WorkingDirectory=/home/dev (cloudbox) so its default
+-- `Instance.directory` is `/home/dev`. The TUI's event-filter at
+-- packages/opencode/src/cli/cmd/tui/context/event.ts:28 silently drops
+-- session events whose `event.directory` (= the session's actual directory)
+-- doesn't match `project.instance.directory()` (= /home/dev for a
+-- no-`--dir` attach). Without `--dir`, every TUI for a session OUTSIDE
+-- /home/dev freezes. See docs/plans/2026-04-28-attach-tui-frozen-fix-design.md
+-- for the full causal chain. (Tracked: workstation-gsi.)
 
 local M = {}
 
@@ -40,6 +49,7 @@ function M.open(opts)
     vim.fn.jobstart({
       "opencode", "attach", opts.url,
       "--session", opts.sid,
+      "--dir", opts.dir,
     }, {
       term = true,
       cwd = opts.dir,
