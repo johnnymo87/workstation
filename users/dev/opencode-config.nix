@@ -190,6 +190,7 @@ in
   home.activation.installOpencodePlugins = let
     opencodePluginPins = {
       "@ex-machina/opencode-anthropic-auth" = "1.8.0";
+      "opencode-beads" = "0.6.0";
     };
     pinJson = builtins.toJSON opencodePluginPins;
     # Hosts where opencode-serve runs as a systemd user/system service.
