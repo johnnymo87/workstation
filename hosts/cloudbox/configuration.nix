@@ -378,6 +378,15 @@ in
       WorkingDirectory = "/home/dev";
       Environment = [
         "HOME=/home/dev"
+        # Vertex AI: Gemini 3.x preview models (incl. gemini-3.1-pro-preview used
+        # by subagents on cloudbox) are only deployed to the "global" location.
+        # Without this, the @ai-sdk/google-vertex provider defaults to a regional
+        # endpoint (us-central1) which 404s. Mirrors the bash export in
+        # users/dev/home.base.nix:1358 — that one only covers interactive shells,
+        # systemd services need it set explicitly. See error:
+        #   "Publisher Model projects/<proj>/locations/us-central1/publishers/
+        #    google/models/gemini-3.1-pro-preview was not found ..."
+        "GOOGLE_CLOUD_LOCATION=global"
       ];
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
