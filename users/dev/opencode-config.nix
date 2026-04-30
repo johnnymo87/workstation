@@ -190,7 +190,7 @@ in
       echo '{"name":"opencode-config","private":true}' > package.json
     fi
     
-    npm install @ex-machina/opencode-anthropic-auth@1.6.1 --no-save >/dev/null 2>&1
+    npm install @ex-machina/opencode-anthropic-auth@1.8.0 --no-save >/dev/null 2>&1
   '';
 
   # Inject Basecamp MCP secrets from macOS Keychain into opencode.json
