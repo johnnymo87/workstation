@@ -589,7 +589,16 @@ in
     git curl wget htop jq unzip
     ripgrep fd fzf
     gnumake gcc
-    tmux direnv neovim
+    tmux direnv
+    # NOTE: neovim intentionally NOT here. The dev user gets nvim via
+    # home-manager (programs.neovim with the full plugin set, including
+    # nvim-treesitter). Putting bare `neovim` on the system path shadowed
+    # the home-manager wrapper in non-login shells (system-path beats
+    # ~/.nix-profile in PATH order), causing init.lua to fail with
+    # `module 'nvim-treesitter.configs' not found` and breaking
+    # :FetchJiraTicket / oc-auto-attach. Pigeon's systemd `path` still
+    # references pkgs.neovim explicitly for its `nvim --server` RPC client,
+    # which doesn't need the plugin set.
     gh gnupg pinentry-curses
     nodejs  # For pigeon
   ];
