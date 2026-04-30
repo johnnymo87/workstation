@@ -150,44 +150,90 @@ lib.mkIf isCloudbox {
         log "Worktree cleanup complete"
       }
 
-      # --- 3. Bazel orphan output bases ---
+      # --- 3. Bazel cache purge ---
+      # Unconditionally nuke per-workspace output bases, the shared
+      # --disk_cache, and the external repository cache. This trades
+      # next-day "cold build" cost for never running out of disk.
+      # Replaces the prior orphan-only logic, which couldn't recover
+      # space from live worktrees (the actual source of bloat).
+      # Design: docs/plans/2026-04-29-bazel-cache-nightly-purge-design.md
       cleanup_bazel() {
-        [ -d "$BAZEL_BASE" ] || return 0
-        log "Scanning for orphan Bazel output bases..."
+        log "Purging Bazel caches..."
+        local bazel_freed_kb=0
+        local before_kb after_kb
 
-        python3 -c "
-      import hashlib, os, sys
+        # 3a. Per-workspace output bases (~/.cache/bazel/_bazel_dev/<hash>/).
+        # Skip 'install/' (Bazel's installer cache, not workspace-specific,
+        # ~189 MB; deleting it forces a re-extract for nothing).
+        if [ -d "$BAZEL_BASE" ]; then
+          for entry_path in "$BAZEL_BASE"/*; do
+            [ -d "$entry_path" ] || continue
+            entry=$(basename "$entry_path")
+            [ "$entry" = "install" ] && continue
 
-      base = '$BAZEL_BASE'
-      projects = '$PROJECTS'
+            # Server safety: if a live JVM holds this base, skip it.
+            # Stale lock files are common; an actual server has
+            # server/server.pid.txt with a live PID.
+            local pid_file="$entry_path/server/server.pid.txt"
+            if [ -f "$pid_file" ]; then
+              local server_pid
+              server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+              if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+                local cwd_hint=""
+                if [ -f "$entry_path/lock" ]; then
+                  cwd_hint=$(grep -oP '(?<=^cwd=).*' "$entry_path/lock" 2>/dev/null || echo "?")
+                fi
+                log "WARN: skipping output base $entry, server PID $server_pid alive (cwd=$cwd_hint)"
+                continue
+              fi
+            fi
 
-      # Build map of all known workspace hashes
-      known = set()
-      for repo in os.listdir(projects):
-          repo_path = os.path.join(projects, repo)
-          if not os.path.isdir(repo_path):
-              continue
-          known.add(hashlib.md5(repo_path.encode()).hexdigest())
-          wt_dir = os.path.join(repo_path, '.worktrees')
-          if os.path.isdir(wt_dir):
-              for wt in os.listdir(wt_dir):
-                  wt_path = os.path.join(wt_dir, wt)
-                  if os.path.isdir(wt_path):
-                      known.add(hashlib.md5(wt_path.encode()).hexdigest())
+            local size_kb size_h err_out
+            size_kb=$(du -sk "$entry_path" 2>/dev/null | cut -f1 || true)
+            size_h=$(du -sh "$entry_path" 2>/dev/null | cut -f1 || true)
+            if err_out=$(sudo rm -rf "$entry_path" 2>&1); then
+              log "Removed output base $entry (''${size_h:-?})"
+              bazel_freed_kb=$((bazel_freed_kb + ''${size_kb:-0}))
+            else
+              log "WARN: failed to remove output base $entry: $err_out"
+            fi
+          done
+        fi
 
-      # Find orphans
-      for entry in os.listdir(base):
-          if entry == 'install':
-              continue
-          path = os.path.join(base, entry)
-          if os.path.isdir(path) and entry not in known:
-              print(entry)
-      " | while read -r orphan; do
-          log "Removing orphan Bazel output base: $orphan"
-          sudo rm -rf "$BAZEL_BASE/$orphan" 2>&1 || log "WARN: failed to remove $orphan, continuing"
-        done
+        # 3b. Shared --disk_cache (~/bazel-diskcache, configured in
+        # mono/.bazelrc:109 as --disk_cache=bazel-cache/diskcache/ ...).
+        # Bazel's own GC keeps this at <=10 GB. Removing the contents
+        # (not the dir) avoids "directory not found" errors on next build.
+        # Leave tmp/ alone in case Bazel has in-flight writes there.
+        local diskcache="$HOME/bazel-diskcache"
+        if [ -d "$diskcache" ]; then
+          before_kb=$(du -sk "$diskcache" 2>/dev/null | cut -f1 || true)
+          for sub in ac cas gc; do
+            [ -d "$diskcache/$sub" ] && rm -rf "$diskcache/$sub" 2>/dev/null || true
+          done
+          after_kb=$(du -sk "$diskcache" 2>/dev/null | cut -f1 || true)
+          local diff_kb=$((''${before_kb:-0} - ''${after_kb:-0}))
+          if [ "$diff_kb" -gt 0 ]; then
+            log "Purged ~/bazel-diskcache ($((diff_kb / 1024)) MB freed)"
+            bazel_freed_kb=$((bazel_freed_kb + diff_kb))
+          fi
+        fi
 
-        log "Bazel cleanup complete"
+        # 3c. External repository cache (~/bazel-cache/repository).
+        # Downloaded Maven jars, source tarballs, etc. Refetching costs
+        # network time on the next build.
+        local repocache="$HOME/bazel-cache/repository"
+        if [ -d "$repocache" ]; then
+          before_kb=$(du -sk "$repocache" 2>/dev/null | cut -f1 || true)
+          if rm -rf "$repocache" 2>/dev/null; then
+            log "Purged ~/bazel-cache/repository ($((''${before_kb:-0} / 1024)) MB freed)"
+            bazel_freed_kb=$((bazel_freed_kb + ''${before_kb:-0}))
+          else
+            log "WARN: failed to remove ~/bazel-cache/repository"
+          fi
+        fi
+
+        log "Bazel cleanup complete: $((bazel_freed_kb / 1024)) MB freed total"
       }
 
       # --- 4. Safe cache cleanup ---
