@@ -3,7 +3,6 @@
 #
 # Closely mirrors home.devbox.nix but without:
 #   - /persist volume checks (GCP uses single persistent boot disk)
-#   - claude_personal_oauth_token (work machine, uses work auth)
 # And uses #cloudbox for the pull-workstation HM flake target.
 { config, pkgs, lib, projects, isCloudbox, ... }:
 
@@ -60,6 +59,13 @@ lib.mkIf isCloudbox {
 
     if [ -r /run/secrets/cloudflare_api_token ]; then
       export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+    fi
+
+    # Personal Claude subscription token (not work account)
+    # Enables @ex-machina/opencode-anthropic-auth plugin to call Anthropic directly
+    # for ad-hoc opencode runs. opencode-serve also exports this (see hosts/cloudbox).
+    if [ -r /run/secrets/claude_personal_oauth_token ]; then
+      export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
     fi
 
     # Gemini API key for OpenCode's @ai-sdk/google provider (direct API)

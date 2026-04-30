@@ -4,7 +4,8 @@
 #   - No /persist volume or bind mounts (single persistent boot disk)
 #   - SSH via GCP OS Login (handled by google-compute-config.nix in hardware.nix)
 #   - No my-podcasts consumer (personal project)
-#   - No claude_personal_oauth_token (work machine)
+#   - claude_personal_oauth_token IS present (mirrors devbox so opencode-serve
+#     can use the personal Claude subscription via @ex-machina/opencode-anthropic-auth)
 #   - No R2/OpenAI secrets (not needed here)
 #   - Pigeon uses CCR_MACHINE_ID=cloudbox
 #   - Firewall disabled (google-compute-config defers to GCP firewall)
@@ -59,6 +60,14 @@ in
         mode = "0400";
       };
       cloudflare_api_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      # Personal Claude subscription token (not work account)
+      # Consumed by @ex-machina/opencode-anthropic-auth plugin in opencode-serve
+      # and exposed as CLAUDE_CODE_OAUTH_TOKEN for headless/cron Claude Code usage.
+      claude_personal_oauth_token = {
         owner = "dev";
         group = "dev";
         mode = "0400";
@@ -374,6 +383,14 @@ in
         set -euo pipefail
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+        # Personal Claude subscription auth for @ex-machina/opencode-anthropic-auth.
+        # Lets opencode call Anthropic directly (anthropic/claude-*) instead of
+        # going through google-vertex-anthropic. The default model is still set
+        # by opencodeOverlay in users/dev/opencode-config.nix; this just makes
+        # the anthropic provider work when selected.
+        if [ -r /run/secrets/claude_personal_oauth_token ]; then
+          export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
+        fi
         export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
         if [ -r /run/secrets/google_cloud_project ]; then
           export GOOGLE_CLOUD_PROJECT="$(cat /run/secrets/google_cloud_project)"
