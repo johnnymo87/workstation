@@ -55,12 +55,13 @@ let
 
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
-  # Platform overlay: Claude via Vertex AI (macOS + cloudbox)
-  # Model metadata comes from models.dev (auto-fetched by OpenCode); this overlay
-  # sets the default model to route through Google Vertex AI.
+  # Platform overlay: Atlassian MCP wiring (macOS + cloudbox)
+  # The default model comes from opencode.base.json (anthropic/claude-opus-4-7),
+  # which uses the @ex-machina/opencode-anthropic-auth plugin. Auth is provided
+  # by CLAUDE_CODE_OAUTH_TOKEN (cloudbox: sops; macOS: opencode auth login or
+  # Keychain). The Vertex AI provider (google-vertex-anthropic/...) remains
+  # available at runtime for fallback if you need to flip via /model.
   opencodeOverlay = lib.optionalAttrs (isDarwin || isCloudbox) {
-    model = "google-vertex-anthropic/claude-opus-4-7@default";
-
     mcp = (opencodeBase.mcp or {}) // {
       atlassian = {
         type = "local";
