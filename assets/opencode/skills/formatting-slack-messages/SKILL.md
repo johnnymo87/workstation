@@ -29,6 +29,7 @@ This skill is the cheat sheet. Read it before writing any Slack message.
 | Bullet list | `- item` or `• item` per line | same — bullets work |
 | Numbered list | `1. item` per line | same |
 | Nested list | unreliable — avoid; flatten or use sub-bullets at one level | — |
+| Table | (none — wrap an aligned plaintext table in a ``` code block ```) | `\| col \| col \|` pipe syntax renders literally |
 | Line break | `\n` in the API string, real newline in editors | — |
 
 ## The Most Common Mistake
@@ -82,6 +83,26 @@ Inside backticks (single or triple), Slack disables all other formatting. So `` 
 
 Triple-backtick code blocks **do not** support a language hint — `` ```python `` is fine syntax but the `python` is rendered as part of the first line of code. Just use plain triple backticks.
 
+## Tables: Use a Code Block
+
+Slack's mrkdwn has **no table syntax**. The CommonMark `| col | col |` / `|---|---|` pipe-and-dash form renders as literal pipes and dashes, with no column alignment.
+
+The only reliable way to render a table is to format it as monospaced plaintext (column-aligned with spaces) and wrap the whole thing in a triple-backtick code block:
+
+```
+Model                       Cost        Messages
+claude-opus-4-7@default     $3,016.46   11,935
+claude-opus-4-6@default     $  262.06    2,472
+gemini-3.1-pro-preview      $  132.91    5,232
+
+Total:                      $3,411.42   (through Apr 29)
+```
+
+Notes:
+- Pad columns with spaces so they align at the widest cell. Right-align numeric columns by left-padding with spaces.
+- Inside the code block, no formatting applies — `*bold*`, `$`, `()`, etc. all render as literal characters, which is usually what you want for tabular data.
+- For very wide tables consider transposing (one row per record, with `*Field:*` labels) — Slack's mobile clients wrap long code blocks awkwardly.
+
 ## When Posting via the Slack MCP
 
 The MCP exposes a `content_type` parameter on `slack_conversations_add_message`:
@@ -103,7 +124,8 @@ Before sending any non-trivial Slack message via the MCP:
 2. Scan for `[` followed eventually by `](` — convert to angle-bracket links.
 3. Scan for lines starting with `#` — drop the hashes, bold the line if you want emphasis.
 4. If using bullet lists with nesting beyond one level, flatten — Slack's nested-list rendering is inconsistent.
-5. Pass `content_type: "text/plain"` to the MCP.
+5. Scan for `|` pipe-and-dash table syntax — convert to a column-aligned plaintext table inside a triple-backtick code block.
+6. Pass `content_type: "text/plain"` to the MCP.
 
 ## Why Slack Did This
 
