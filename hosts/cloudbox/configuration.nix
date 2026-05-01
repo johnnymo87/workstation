@@ -370,7 +370,18 @@ in
     description = "OpenCode headless serve";
     wantedBy = [ "multi-user.target" ];
     after = [ "network.target" "sops-nix.service" ];
-    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" ];
+    # NOTE: NixOS treats each `path` entry as a package directory and
+    # auto-appends `/bin` and `/sbin` when composing PATH. So pass
+    # `/home/dev/.local` (NOT `/home/dev/.local/bin`) — it expands to
+    # `/home/dev/.local/bin` and `/home/dev/.local/sbin`. Appended LAST
+    # so nix-managed binaries always win on name collisions (e.g. a
+    # misbehaving `gh` dropped in ~/.local/bin would not shadow the nix
+    # one). Required by the lgtm multi-reviewer feature: dispatched
+    # review sessions invoke `lgtm-gh` (a stub wrapper at
+    # ~/.local/bin/lgtm-gh until the production wrapper ships
+    # nix-managed) for state-changing GitHub operations. See lgtm:
+    # docs/plans/2026-04-30-multi-reviewer-identity-design.md.
+    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" "/home/dev/.local" ];
     serviceConfig = {
       Type = "simple";
       User = "dev";
