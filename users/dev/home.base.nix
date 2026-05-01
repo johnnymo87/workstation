@@ -251,6 +251,26 @@ in
     pkgs.awscli2       # AWS CLI (EKS kubeconfig credential plugin, ba exec SSO)
     pkgs.kubelogin     # Azure AD credential plugin for kubectl
     pkgs.kubectl       # Kubernetes CLI (for AKS clusters)
+  ]
+  # dd-cli wrapper (cloudbox only).
+  # The actual binary is installed by home.activation.installDdCli below into
+  # ~/.local/share/uv/tools/dd-cli/bin/dd. This wrapper lands in
+  # ~/.nix-profile/bin/dd which beats coreutils dd in non-interactive shells
+  # (opencode/claude-spawned children) where ~/.local/bin is not on PATH.
+  ++ lib.optionals isCloudbox [
+    (pkgs.writeShellApplication {
+      name = "dd";
+      runtimeInputs = [ ];
+      text = ''
+        dd_cli="$HOME/.local/share/uv/tools/dd-cli/bin/dd"
+        if [ -x "$dd_cli" ]; then
+          exec "$dd_cli" "$@"
+        fi
+        # Fallback to coreutils dd if dd-cli isn't installed yet (e.g. first
+        # home-manager switch before activation has run, or checkout missing).
+        exec /run/current-system/sw/bin/dd "$@"
+      '';
+    })
   ];
 
   # Bazel user config (~/.bazelrc) — work machines only
