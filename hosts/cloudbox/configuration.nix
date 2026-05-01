@@ -13,6 +13,17 @@
 
 let
   enableLgtm = true;  # AI-powered PR review daemon (flip to true to activate)
+
+  # oc-auto-attach is a self-packaged shell tool (pkgs/oc-auto-attach) that the
+  # pigeon daemon shells out to after a `/launch` telegram command, to open the
+  # new session in the right tmux+nvim window. We pin its absolute path here
+  # because the daemon runs under systemd with a locked-down PATH that does NOT
+  # include ~/.nix-profile/bin (where home-manager installs it for the user).
+  # Without this, the spawn returns ENOENT and is silently swallowed — sessions
+  # launched from telegram never auto-attach. The same package is *also*
+  # installed into the user's profile via users/dev/home.base.nix, so the CLI
+  # `opencode-launch` keeps working as before.
+  oc-auto-attach = pkgs.callPackage ../../pkgs/oc-auto-attach { };
 in
 {
   # Guard: abort activation if applying the wrong host's config.
@@ -288,6 +299,9 @@ in
         "HOME=/home/dev"
         "NODE_ENV=production"
         "CCR_MACHINE_ID=cloudbox"
+        # Absolute path to oc-auto-attach so launch-ingest.ts can find it
+        # despite the locked-down systemd PATH. See let-binding above.
+        "OC_AUTO_ATTACH_BIN=${oc-auto-attach}/bin/oc-auto-attach"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
