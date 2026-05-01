@@ -11,6 +11,12 @@
     "slack_*": false
   },
   "agent": {
+    "build": {
+      "variant": "xhigh"
+    },
+    "plan": {
+      "variant": "xhigh"
+    },
     "slack": {
       "tools": {
         "slack_*": true
