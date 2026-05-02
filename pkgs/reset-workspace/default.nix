@@ -126,9 +126,10 @@ EOF
     # ---- Step 2: Snapshot live opencode attach clients ----
     # Restoration scope: ONLY sessions launched via Telegram /launch or
     # `opencode-launch` CLI. Both produce TUI processes with cmdline of the
-    # form `<binary>/opencode attach <url> --session ses_xxx` -- the sid is
-    # reliably in argv. Bare `:te opencode` TUIs (no --session) are NOT
-    # restored across reset; they are intended for ad-hoc work. See
+    # form `<binary>/opencode attach <url> --session ses_xxx [--dir <path>]`
+    # -- the sid is reliably in argv. Bare `:te opencode` TUIs (no
+    # --session) are NOT restored across reset; they are intended for
+    # ad-hoc work. See
     # docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md
     log "snapshotting live opencode attach clients..."
 
@@ -141,6 +142,14 @@ EOF
     # binary path prefix, the literal `attach` subcommand, an http(s) url,
     # and a syntactically valid sid -- false positives are essentially
     # impossible.
+    #
+    # Note: the cmdline may have additional argv after the sid (notably
+    # `--dir <path>`, which oc-auto-attach has been emitting since
+    # 2026-04-28; see assets/nvim/lua/user/oc_auto_attach.lua). The match
+    # therefore does NOT anchor with $ at the end -- it just requires that
+    # `--session ses_xxx` appears somewhere after the url, with either a
+    # space or end-of-string after the sid (so we don't capture a partial
+    # token).
     OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
     for pid in $OC_ATTACH_PIDS; do
       # Authoritative exe filter: skip non-opencode processes that pgrep
@@ -156,8 +165,8 @@ EOF
       cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//' || true)
       [ -n "$cmdline" ] || continue
 
-      if [[ "$cmdline" =~ ^[^[:space:]]+/opencode[[:space:]]+attach[[:space:]]+https?://[^[:space:]]+[[:space:]]+--session[[:space:]]+(ses_[A-Za-z0-9]+)$ ]]; then
-        sid="''${BASH_REMATCH[1]}"
+      if [[ "$cmdline" =~ ^[^[:space:]]+/opencode[[:space:]]+attach[[:space:]]+https?://[^[:space:]]+([[:space:]]+.*)?[[:space:]]+--session[[:space:]]+(ses_[A-Za-z0-9]+)([[:space:]]|$) ]]; then
+        sid="''${BASH_REMATCH[2]}"
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
         log "  pid=$pid sid=$sid cwd=$cwd"
         OPENCODE_STRICT_RAW=$((OPENCODE_STRICT_RAW + 1))
