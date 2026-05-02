@@ -430,6 +430,25 @@ in
           export GOOGLE_CLOUD_PROJECT="$(cat /run/secrets/google_cloud_project)"
         fi
         export GOOGLE_APPLICATION_CREDENTIALS="/home/dev/.config/gcloud/application_default_credentials.json"
+        # Atlassian credentials for any opencode-serve-spawned subprocess that
+        # needs Jira/Confluence (e.g. lgtm's nvim atlassian fetch in
+        # buildContextPacket -- see lgtm-wa9). Mirrors the interactive-shell
+        # exports in users/dev/home.cloudbox.nix:77-91; systemd services don't
+        # source ~/.bashrc so they need their own copy. The four secrets are
+        # already declared in sops.secrets above; this just plumbs them into
+        # the service environment.
+        if [ -r /run/secrets/atlassian_api_token ]; then
+          export ATLASSIAN_API_TOKEN="$(cat /run/secrets/atlassian_api_token)"
+        fi
+        if [ -r /run/secrets/atlassian_site ]; then
+          export ATLASSIAN_SITE="$(cat /run/secrets/atlassian_site)"
+        fi
+        if [ -r /run/secrets/atlassian_email ]; then
+          export ATLASSIAN_EMAIL="$(cat /run/secrets/atlassian_email)"
+        fi
+        if [ -r /run/secrets/atlassian_cloud_id ]; then
+          export ATLASSIAN_CLOUD_ID="$(cat /run/secrets/atlassian_cloud_id)"
+        fi
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
       # Cap the always-on headless server so it can't monopolize RAM alone.
