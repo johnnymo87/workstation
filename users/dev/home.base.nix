@@ -1194,6 +1194,15 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       fi
       to="$1"; shift
 
+      # Cheap shape check: the daemon will also reject this, but failing here
+      # gives the sender an instant, clearer error and skips the round-trip.
+      # Mirrors opencode-serve's own zod prefix check; only filters typos
+      # and category errors (e.g. passing a coordinator name like "lgtm").
+      if [[ ! "$to" =~ ^ses_[A-Za-z0-9_-]+$ ]]; then
+        echo "pigeon-send: 'to' must be a session id starting with 'ses_' (got: $to)" >&2
+        exit 2
+      fi
+
       if [[ $# -lt 1 ]]; then
         echo "Error: <payload> is required (or pass '-' for stdin)" >&2
         exit 1
