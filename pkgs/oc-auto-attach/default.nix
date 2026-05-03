@@ -7,6 +7,7 @@ pkgs.writeShellApplication {
     jq
     tmux
     coreutils      # timeout
+    gawk           # awk (used in the "find existing window by name" branch)
   ];
   text = ''
     # oc-auto-attach <session-id>
@@ -110,8 +111,20 @@ pkgs.writeShellApplication {
       # This is defense-in-depth: the earlier list-panes scan should have
       # caught it, but if two sessions race in the same dir, we don't want
       # to proliferate windows.
-      existing_pane="$(tmux list-panes -t ":$window_name" -F '#{pane_id}|#{pane_current_command}' 2>/dev/null \
-        | awk -F'|' '$2=="nvim" {print $1; exit}' || true)"
+      #
+      # Implemented in pure bash (no awk pipeline) because under
+      # `set -o pipefail` a missing awk in PATH would abort the whole
+      # script before we could fall through to `tmux new-window`. We hit
+      # exactly that on cloudbox: the systemd-launched daemon's PATH did
+      # not include awk, so /launch silently failed for any project
+      # without a pre-existing tmux window.
+      existing_pane=""
+      while IFS='|' read -r ep_id ep_cmd; do
+        if [ "$ep_cmd" = "nvim" ]; then
+          existing_pane="$ep_id"
+          break
+        fi
+      done < <(tmux list-panes -t ":$window_name" -F '#{pane_id}|#{pane_current_command}' 2>/dev/null || true)
       if [ -n "$existing_pane" ]; then
         pane_id="$existing_pane"
         log "reusing existing window $window_name pane $pane_id"
