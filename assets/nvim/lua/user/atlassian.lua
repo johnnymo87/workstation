@@ -10,7 +10,8 @@ local function get_atlassian_site()
 end
 
 -- Helper function to convert HTML to Markdown using pandoc
-local function html_to_markdown(html_content)
+local function html_to_markdown(html_content, warnings)
+  local warnings = warnings or {}
   if not html_content or html_content == "" then
     return ""
   end
@@ -20,11 +21,7 @@ local function html_to_markdown(html_content)
     html_content
   )
   if vim.v.shell_error ~= 0 then
-    vim.notify(
-      "Error converting HTML to Markdown. Shell error: " .. vim.v.shell_error ..
-      ". Output: " .. markdown_content,
-      vim.log.levels.ERROR
-    )
+    table.insert(warnings, "Error converting HTML to Markdown. Shell error: " .. vim.v.shell_error .. ". Output: " .. markdown_content)
     return "Error converting content to Markdown."
   end
 
@@ -52,7 +49,8 @@ local function html_to_markdown(html_content)
 end
 
 -- Helper function to format comments with XML-style nesting
-local function format_comments(comments, indent_level)
+local function format_comments(comments, indent_level, warnings)
+  local warnings = warnings or {}
   local indent_level = indent_level or 0
   local indent = string.rep("  ", indent_level)
   local lines = {}
@@ -76,7 +74,7 @@ local function format_comments(comments, indent_level)
       body_html = "Comment body (structured format not fully supported)"
     end
 
-    local body_markdown = html_to_markdown(body_html)
+    local body_markdown = html_to_markdown(body_html, warnings)
     local body_lines = vim.split(body_markdown, "\n", {plain = true})
 
     for _, line in ipairs(body_lines) do
@@ -94,7 +92,8 @@ local function format_comments(comments, indent_level)
 end
 
 -- Helper function to get comment parent information
-local function get_comment_parent(comment_id, comment_type, email, api_token)
+local function get_comment_parent(comment_id, comment_type, email, api_token, warnings)
+  local warnings = warnings or {}
   local endpoint = comment_type == "ConfluenceInlineComment" and "inline-comments" or "footer-comments"
   local command = string.format(
     "curl --fail --silent --show-error --request GET " ..
@@ -118,7 +117,8 @@ local function get_comment_parent(comment_id, comment_type, email, api_token)
 end
 
 -- Helper function to build comment hierarchy
-local function build_comment_hierarchy(comments, email, api_token)
+local function build_comment_hierarchy(comments, email, api_token, warnings)
+  local warnings = warnings or {}
   local comment_map = {}
   local roots = {}
 
@@ -135,7 +135,7 @@ local function build_comment_hierarchy(comments, email, api_token)
 
   -- Second pass: build hierarchy
   for _, comment in ipairs(comments) do
-    local parent_id = get_comment_parent(comment.commentId, comment.__typename, email, api_token)
+    local parent_id = get_comment_parent(comment.commentId, comment.__typename, email, api_token, warnings)
     local comment_data = comment_map[comment.commentId]
 
     if parent_id and comment_map[parent_id] then
@@ -149,7 +149,8 @@ local function build_comment_hierarchy(comments, email, api_token)
 end
 
 -- Helper function to format confluence comments with hierarchy
-local function format_confluence_comments(comments, indent_level)
+local function format_confluence_comments(comments, indent_level, warnings)
+  local warnings = warnings or {}
   local indent_level = indent_level or 0
   local indent = string.rep("  ", indent_level)
   local lines = {}
@@ -162,7 +163,7 @@ local function format_confluence_comments(comments, indent_level)
     table.insert(lines, indent .. "  " .. comment.author .. " (Comment ID: " .. comment.id .. ")")
 
     -- Convert comment body HTML to markdown
-    local body_markdown = html_to_markdown(comment.body)
+    local body_markdown = html_to_markdown(comment.body, warnings)
     local body_lines = vim.split(body_markdown, "\n", {plain = true})
 
     for _, line in ipairs(body_lines) do
@@ -173,7 +174,7 @@ local function format_confluence_comments(comments, indent_level)
 
     -- Handle nested replies
     if #comment.children > 0 then
-      local child_lines = format_confluence_comments(comment.children, indent_level + 1)
+      local child_lines = format_confluence_comments(comment.children, indent_level + 1, warnings)
       for _, line in ipairs(child_lines) do
         table.insert(lines, line)
       end
@@ -186,7 +187,8 @@ local function format_confluence_comments(comments, indent_level)
 end
 
 -- Helper function to download attachments for a Jira ticket
-local function download_jira_attachments(ticket_key, attachments, email, api_token)
+local function download_jira_attachments(ticket_key, attachments, email, api_token, warnings)
+  local warnings = warnings or {}
   if not attachments or #attachments == 0 then
     return 0
   end
@@ -198,7 +200,7 @@ local function download_jira_attachments(ticket_key, attachments, email, api_tok
   vim.fn.system(mkdir_cmd)
 
   if vim.v.shell_error ~= 0 then
-    vim.notify("Warning: Could not create attachments directory", vim.log.levels.WARN)
+    table.insert(warnings, "Warning: Could not create attachments directory")
     return 0
   end
 
@@ -226,10 +228,7 @@ local function download_jira_attachments(ticket_key, attachments, email, api_tok
       if vim.v.shell_error == 0 then
         download_count = download_count + 1
       else
-        vim.notify(
-          string.format("Warning: Failed to download %s", filename),
-          vim.log.levels.WARN
-        )
+        table.insert(warnings, string.format("Warning: Failed to download %s", filename))
       end
     end
   end
@@ -237,43 +236,43 @@ local function download_jira_attachments(ticket_key, attachments, email, api_tok
   return download_count
 end
 
--- Function to fetch Jira ticket content
-function M.fetch_jira_ticket(ticket_key)
+function M.get_jira_content(ticket_key)
+  local warnings = {}
+
   if not ticket_key or ticket_key == "" then
-    vim.notify("Error: Ticket key is required.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: Ticket key is required."
+  end
+
+  local site = os.getenv("ATLASSIAN_SITE")
+  if not site or site == "" then
+    return nil, "Error: ATLASSIAN_SITE environment variable is not set. Set it in macOS Keychain (atlassian-site) or sops (cloudbox)."
   end
 
   local api_token = os.getenv("ATLASSIAN_API_TOKEN")
   if not api_token or api_token == "" then
-    vim.notify("Error: ATLASSIAN_API_TOKEN environment variable is not set.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: ATLASSIAN_API_TOKEN environment variable is not set."
   end
 
   -- Check dependencies
   if vim.fn.executable("curl") == 0 then
-    vim.notify("Error: 'curl' command not found in PATH.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: 'curl' command not found in PATH."
   end
   if vim.fn.executable("jq") == 0 then
-    vim.notify("Error: 'jq' command not found in PATH.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: 'jq' command not found in PATH."
   end
   if vim.fn.executable("pandoc") == 0 then
-    vim.notify("Error: 'pandoc' command not found in PATH.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: 'pandoc' command not found in PATH."
   end
 
   local email = os.getenv("ATLASSIAN_EMAIL")
   if not email or email == "" then
-    vim.notify("Error: ATLASSIAN_EMAIL environment variable is not set.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: ATLASSIAN_EMAIL environment variable is not set."
   end
 
   -- Fetch ticket data
   local fetch_ticket_command = string.format(
     "curl --fail --silent --show-error --request GET " ..
-    "--url 'https://" .. get_atlassian_site() .. "/rest/api/3/issue/%s?fields=key,summary,description,attachment&expand=renderedFields' " ..
+    "--url 'https://" .. site .. "/rest/api/3/issue/%s?fields=key,summary,description,attachment&expand=renderedFields' " ..
     "--user '%s:%s' " ..
     "--header 'Accept: application/json' " ..
     "| jq '{ \"key\": .key, \"summary\": .fields.summary, \"description\": .renderedFields.description, \"attachments\": .fields.attachment }'",
@@ -282,29 +281,21 @@ function M.fetch_jira_ticket(ticket_key)
     api_token
   )
 
-  vim.notify("Fetching Jira ticket data for " .. ticket_key .. "...", vim.log.levels.INFO)
-
   local ticket_output = vim.fn.system(fetch_ticket_command)
   if vim.v.shell_error ~= 0 then
-    vim.notify(
-      "Error fetching ticket data from Jira. Shell error: " .. vim.v.shell_error ..
-      ". Output: " .. ticket_output,
-      vim.log.levels.ERROR
-    )
-    return
+    return nil, "Error fetching ticket data from Jira. Shell error: " .. vim.v.shell_error .. ". Output: " .. ticket_output
   end
 
   -- Parse ticket JSON
   local ok, ticket_data = pcall(vim.json.decode, ticket_output)
   if not ok or type(ticket_data) ~= "table" then
-    vim.notify("Error: Failed to parse ticket JSON response: " .. (ticket_data or "Invalid JSON"), vim.log.levels.ERROR)
-    return
+    return nil, "Error: Failed to parse ticket JSON response: " .. (ticket_data or "Invalid JSON")
   end
 
   -- Fetch comments
   local fetch_comments_command = string.format(
     "curl --fail --silent --show-error --request GET " ..
-    "--url 'https://" .. get_atlassian_site() .. "/rest/api/3/issue/%s/comment?expand=renderedBody' " ..
+    "--url 'https://" .. site .. "/rest/api/3/issue/%s/comment?expand=renderedBody' " ..
     "--user '%s:%s' " ..
     "--header 'Accept: application/json' " ..
     "| jq '.comments'",
@@ -321,69 +312,94 @@ function M.fetch_jira_ticket(ticket_key)
     if comments_ok and type(parsed_comments) == "table" then
       comments_data = parsed_comments
     else
-      vim.notify("Warning: Could not parse comments, continuing without them.", vim.log.levels.WARN)
+      table.insert(warnings, "Warning: Could not parse comments, continuing without them.")
     end
   else
-    vim.notify("Warning: Could not fetch comments, continuing without them.", vim.log.levels.WARN)
+    table.insert(warnings, "Warning: Could not fetch comments, continuing without them.")
   end
 
   -- Download attachments
   local attachment_count = 0
+  local attachments_dir = ""
   if ticket_data.attachments and #ticket_data.attachments > 0 then
-    vim.notify("Downloading attachments...", vim.log.levels.INFO)
-    attachment_count = download_jira_attachments(ticket_key, ticket_data.attachments, email, api_token)
+    attachment_count = download_jira_attachments(ticket_key, ticket_data.attachments, email, api_token, warnings)
+    if attachment_count > 0 then
+      local home = os.getenv("HOME")
+      attachments_dir = string.format("%s/.cache/atlassian-attachments/jira/%s", home, ticket_key)
+    end
   end
 
   -- Prepare content
-  local lines_to_insert = {}
+  local markdown_lines = {}
 
   -- Title line
-  local title = (ticket_data.key or "Unknown") .. " " .. (ticket_data.summary or "No summary")
-  table.insert(lines_to_insert, title)
-  table.insert(lines_to_insert, "")
+  local raw_title = (ticket_data.key or "Unknown") .. " " .. (ticket_data.summary or "No summary")
+  table.insert(markdown_lines, raw_title)
+  table.insert(markdown_lines, "")
 
   -- Add attachment note if any were downloaded
   if attachment_count > 0 then
     local attachments_path = string.format("~/.cache/atlassian-attachments/jira/%s/", ticket_key)
-    table.insert(lines_to_insert, string.format("> **Attachments downloaded to**: `%s`", attachments_path))
-    table.insert(lines_to_insert, "")
+    table.insert(markdown_lines, string.format("> **Attachments downloaded to**: `%s`", attachments_path))
+    table.insert(markdown_lines, "")
   end
 
   -- Description
   if ticket_data.description and ticket_data.description ~= "" then
-    local description_markdown = html_to_markdown(ticket_data.description)
+    local description_markdown = html_to_markdown(ticket_data.description, warnings)
     local description_lines = vim.split(description_markdown, "\n", {plain = true})
     for _, line in ipairs(description_lines) do
-      table.insert(lines_to_insert, line)
+      table.insert(markdown_lines, line)
     end
   else
-    table.insert(lines_to_insert, "No description available.")
+    table.insert(markdown_lines, "No description available.")
   end
 
-  table.insert(lines_to_insert, "")
+  table.insert(markdown_lines, "")
 
   -- Comments section
   if #comments_data > 0 then
-    table.insert(lines_to_insert, "<comments>")
+    table.insert(markdown_lines, "<comments>")
 
-    -- Build comment hierarchy (simple approach - just list them in order for now)
-    -- TODO: Could enhance this to properly nest replies based on parentId
-    local comment_lines = format_comments(comments_data, 1)
+    local comment_lines = format_comments(comments_data, 1, warnings)
     for _, line in ipairs(comment_lines) do
-      table.insert(lines_to_insert, line)
+      table.insert(markdown_lines, line)
     end
 
-    table.insert(lines_to_insert, "</comments>")
+    table.insert(markdown_lines, "</comments>")
+  end
+
+  return {
+    title = ticket_data.summary or "No summary",
+    markdown_lines = markdown_lines,
+    attachment_count = attachment_count,
+    attachments_dir = attachments_dir,
+    warnings = warnings
+  }
+end
+
+-- Function to fetch Jira ticket content and insert into buffer
+function M.fetch_jira_ticket(ticket_key)
+  vim.notify("Fetching Jira ticket data for " .. ticket_key .. "...", vim.log.levels.INFO)
+
+  local content, err = M.get_jira_content(ticket_key)
+  if not content then
+    vim.notify(err, vim.log.levels.ERROR)
+    return
+  end
+
+  for _, w in ipairs(content.warnings) do
+    vim.notify(w, vim.log.levels.WARN)
   end
 
   -- Insert into buffer
   local bufnr = vim.api.nvim_get_current_buf()
   local cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1
-  vim.api.nvim_buf_set_lines(bufnr, cursor_row, cursor_row, false, lines_to_insert)
+  vim.api.nvim_buf_set_lines(bufnr, cursor_row, cursor_row, false, content.markdown_lines)
 
-  if attachment_count > 0 then
+  if content.attachment_count > 0 then
     vim.notify(
-      string.format("Jira ticket content inserted with %d image(s) downloaded.", attachment_count),
+      string.format("Jira ticket content inserted with %d image(s) downloaded.", content.attachment_count),
       vim.log.levels.INFO
     )
   else
@@ -392,7 +408,8 @@ function M.fetch_jira_ticket(ticket_key)
 end
 
 -- Helper function to download attachments for a page
-local function download_attachments(page_id, email, api_token)
+local function download_attachments(page_id, email, api_token, warnings)
+  local warnings = warnings or {}
   -- Create attachments directory
   local home = os.getenv("HOME")
   local attachments_dir = string.format("%s/.cache/atlassian-attachments/confluence/%s", home, page_id)
@@ -400,7 +417,7 @@ local function download_attachments(page_id, email, api_token)
   vim.fn.system(mkdir_cmd)
 
   if vim.v.shell_error ~= 0 then
-    vim.notify("Warning: Could not create attachments directory", vim.log.levels.WARN)
+    table.insert(warnings, "Warning: Could not create attachments directory")
     return 0
   end
 
@@ -417,14 +434,14 @@ local function download_attachments(page_id, email, api_token)
 
   local attachments_json = vim.fn.system(list_cmd)
   if vim.v.shell_error ~= 0 then
-    vim.notify("Warning: Could not list attachments", vim.log.levels.WARN)
+    table.insert(warnings, "Warning: Could not list attachments")
     return 0
   end
 
   -- Parse attachments
   local ok, attachments_data = pcall(vim.json.decode, attachments_json)
   if not ok or type(attachments_data) ~= "table" or not attachments_data.results then
-    vim.notify("Warning: Could not parse attachments", vim.log.levels.WARN)
+    table.insert(warnings, "Warning: Could not parse attachments")
     return 0
   end
 
@@ -432,7 +449,7 @@ local function download_attachments(page_id, email, api_token)
   local download_count = 0
   for _, attachment in ipairs(attachments_data.results) do
     local media_type = attachment.extensions and attachment.extensions.mediaType
-    if media_type == "image/png" then
+    if media_type and media_type:match("^image/") then
       local attachment_id = attachment.id:gsub("^att", "")
       local filename = attachment.title
       local output_path = string.format("%s/%s", attachments_dir, filename)
@@ -453,10 +470,7 @@ local function download_attachments(page_id, email, api_token)
       if vim.v.shell_error == 0 then
         download_count = download_count + 1
       else
-        vim.notify(
-          string.format("Warning: Failed to download %s", filename),
-          vim.log.levels.WARN
-        )
+        table.insert(warnings, string.format("Warning: Failed to download %s", filename))
       end
     end
   end
@@ -464,43 +478,42 @@ local function download_attachments(page_id, email, api_token)
   return download_count
 end
 
--- Function to fetch Confluence page content with comments
-function M.fetch_page_content(page_id)
+function M.get_page_content(page_id)
+  local warnings = {}
+
   if not page_id or page_id == "" then
-    vim.notify("Error: Page ID is required.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: Page ID is required."
+  end
+
+  local site = os.getenv("ATLASSIAN_SITE")
+  if not site or site == "" then
+    return nil, "Error: ATLASSIAN_SITE environment variable is not set. Set it in macOS Keychain (atlassian-site) or sops (cloudbox)."
   end
 
   local api_token = os.getenv("ATLASSIAN_API_TOKEN")
   if not api_token or api_token == "" then
-    vim.notify("Error: ATLASSIAN_API_TOKEN environment variable is not set.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: ATLASSIAN_API_TOKEN environment variable is not set."
   end
 
   -- Check dependencies
   if vim.fn.executable("curl") == 0 then
-    vim.notify("Error: 'curl' command not found in PATH.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: 'curl' command not found in PATH."
   end
   if vim.fn.executable("jq") == 0 then
-    vim.notify("Error: 'jq' command not found in PATH.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: 'jq' command not found in PATH."
   end
   if vim.fn.executable("pandoc") == 0 then
-    vim.notify("Error: 'pandoc' command not found in PATH.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: 'pandoc' command not found in PATH."
   end
 
   local email = os.getenv("ATLASSIAN_EMAIL")
   if not email or email == "" then
-    vim.notify("Error: ATLASSIAN_EMAIL environment variable is not set.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: ATLASSIAN_EMAIL environment variable is not set."
   end
 
   local cloud_id = os.getenv("ATLASSIAN_CLOUD_ID")
   if not cloud_id or cloud_id == "" then
-    vim.notify("Error: ATLASSIAN_CLOUD_ID environment variable is not set.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: ATLASSIAN_CLOUD_ID environment variable is not set."
   end
 
   local page_ari = string.format("ari:cloud:confluence:%s:page/%s", cloud_id, page_id)
@@ -544,8 +557,7 @@ query getPageWithComments($id: ID!) {
   local temp_file = vim.fn.tempname()
   local file = io.open(temp_file, "w")
   if not file then
-    vim.notify("Error: Could not create temporary file for GraphQL request.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: Could not create temporary file for GraphQL request."
   end
   file:write(graphql_payload)
   file:close()
@@ -553,7 +565,7 @@ query getPageWithComments($id: ID!) {
   -- Execute GraphQL query
   local graphql_command = string.format(
     "curl --fail --silent --show-error --request POST " ..
-    "--url 'https://" .. get_atlassian_site() .. "/gateway/api/graphql' " ..
+    "--url 'https://" .. site .. "/gateway/api/graphql' " ..
     "--user '%s:%s' " ..
     "--header 'Accept: application/json' " ..
     "--header 'Content-Type: application/json' " ..
@@ -564,8 +576,6 @@ query getPageWithComments($id: ID!) {
     temp_file
   )
 
-  vim.notify("Fetching Confluence page data for " .. page_id .. "...", vim.log.levels.INFO)
-
   local graphql_output = vim.fn.system(graphql_command)
 
   -- Clean up temporary file
@@ -573,35 +583,26 @@ query getPageWithComments($id: ID!) {
 
   -- Check for shell errors
   if vim.v.shell_error ~= 0 then
-    vim.notify(
-      "Error fetching page data from Confluence GraphQL API. Shell error: " .. vim.v.shell_error ..
-      ". Output: " .. graphql_output,
-      vim.log.levels.ERROR
-    )
-    return
+    return nil, "Error fetching page data from Confluence GraphQL API. Shell error: " .. vim.v.shell_error .. ". Output: " .. graphql_output
   end
 
   if graphql_output == "" or graphql_output == nil then
-    vim.notify("Error: No data received from Confluence GraphQL API.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: No data received from Confluence GraphQL API."
   end
 
   -- Parse the GraphQL response
   local ok, response = pcall(vim.json.decode, graphql_output)
   if not ok or type(response) ~= "table" then
-    vim.notify("Error: Failed to parse GraphQL response: " .. (response or "Invalid JSON"), vim.log.levels.ERROR)
-    return
+    return nil, "Error: Failed to parse GraphQL response: " .. (response or "Invalid JSON")
   end
 
   if response.errors then
-    vim.notify("GraphQL errors: " .. vim.json.encode(response.errors), vim.log.levels.ERROR)
-    return
+    return nil, "GraphQL errors: " .. vim.json.encode(response.errors)
   end
 
   local page_data = response.data and response.data.confluence and response.data.confluence.page
   if not page_data then
-    vim.notify("Error: No page data found in GraphQL response.", vim.log.levels.ERROR)
-    return
+    return nil, "Error: No page data found in GraphQL response."
   end
 
   local title = page_data.title or "Title not found"
@@ -609,38 +610,40 @@ query getPageWithComments($id: ID!) {
   local comments = page_data.comments or {}
 
   -- Convert HTML body to Markdown
-  local markdown_body = html_to_markdown(html_body)
+  local markdown_body = html_to_markdown(html_body, warnings)
   if markdown_body == "Error converting content to Markdown." then
     markdown_body = "Error converting page body to Markdown."
   end
 
   -- Download attachments
-  vim.notify("Downloading attachments...", vim.log.levels.INFO)
-  local attachment_count = download_attachments(page_id, email, api_token)
+  local attachment_count = download_attachments(page_id, email, api_token, warnings)
+  local attachments_dir = ""
+  if attachment_count > 0 then
+    local home = os.getenv("HOME")
+    attachments_dir = string.format("%s/.cache/atlassian-attachments/confluence/%s", home, page_id)
+  end
 
   -- Prepare lines to insert
-  local lines_to_insert = {}
-  table.insert(lines_to_insert, title)
-  table.insert(lines_to_insert, "") -- Blank line
+  local markdown_lines = {}
+  table.insert(markdown_lines, title)
+  table.insert(markdown_lines, "") -- Blank line
 
   -- Add attachment note if any were downloaded
   if attachment_count > 0 then
     local attachments_path = string.format("~/.cache/atlassian-attachments/confluence/%s/", page_id)
-    table.insert(lines_to_insert, string.format("> **Attachments downloaded to**: `%s`", attachments_path))
-    table.insert(lines_to_insert, "")
+    table.insert(markdown_lines, string.format("> **Attachments downloaded to**: `%s`", attachments_path))
+    table.insert(markdown_lines, "")
   end
 
   -- Split markdown_body into lines and add them
   for _, line in ipairs(vim.split(markdown_body, "\n", {plain = true})) do
-    table.insert(lines_to_insert, line)
+    table.insert(markdown_lines, line)
   end
 
   -- Process comments if any exist
   if #comments > 0 then
-    vim.notify("Processing " .. #comments .. " comments...", vim.log.levels.INFO)
-
     -- Build comment hierarchy
-    local comment_hierarchy = build_comment_hierarchy(comments, email, api_token)
+    local comment_hierarchy = build_comment_hierarchy(comments, email, api_token, warnings)
 
     -- Separate inline and footer comments
     local inline_comments = {}
@@ -654,28 +657,51 @@ query getPageWithComments($id: ID!) {
       end
     end
 
-    table.insert(lines_to_insert, "")
+    table.insert(markdown_lines, "")
 
     -- Add inline comments section
     if #inline_comments > 0 then
-      table.insert(lines_to_insert, "<inline-comments>")
-      local inline_comment_lines = format_confluence_comments(inline_comments, 1)
+      table.insert(markdown_lines, "<inline-comments>")
+      local inline_comment_lines = format_confluence_comments(inline_comments, 1, warnings)
       for _, line in ipairs(inline_comment_lines) do
-        table.insert(lines_to_insert, line)
+        table.insert(markdown_lines, line)
       end
-      table.insert(lines_to_insert, "</inline-comments>")
-      table.insert(lines_to_insert, "")
+      table.insert(markdown_lines, "</inline-comments>")
+      table.insert(markdown_lines, "")
     end
 
     -- Add footer comments section
     if #footer_comments > 0 then
-      table.insert(lines_to_insert, "<footer-comments>")
-      local footer_comment_lines = format_confluence_comments(footer_comments, 1)
+      table.insert(markdown_lines, "<footer-comments>")
+      local footer_comment_lines = format_confluence_comments(footer_comments, 1, warnings)
       for _, line in ipairs(footer_comment_lines) do
-        table.insert(lines_to_insert, line)
+        table.insert(markdown_lines, line)
       end
-      table.insert(lines_to_insert, "</footer-comments>")
+      table.insert(markdown_lines, "</footer-comments>")
     end
+  end
+
+  return {
+    title = title,
+    markdown_lines = markdown_lines,
+    attachment_count = attachment_count,
+    attachments_dir = attachments_dir,
+    warnings = warnings
+  }
+end
+
+-- Function to fetch Confluence page content and insert into buffer
+function M.fetch_page_content(page_id)
+  vim.notify("Fetching Confluence page data for " .. page_id .. "...", vim.log.levels.INFO)
+
+  local content, err = M.get_page_content(page_id)
+  if not content then
+    vim.notify(err, vim.log.levels.ERROR)
+    return
+  end
+
+  for _, w in ipairs(content.warnings) do
+    vim.notify(w, vim.log.levels.WARN)
   end
 
   -- Get current buffer and cursor position
@@ -683,11 +709,11 @@ query getPageWithComments($id: ID!) {
   local cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1
 
   -- Insert lines at the current cursor position
-  vim.api.nvim_buf_set_lines(bufnr, cursor_row, cursor_row, false, lines_to_insert)
+  vim.api.nvim_buf_set_lines(bufnr, cursor_row, cursor_row, false, content.markdown_lines)
 
-  if attachment_count > 0 then
+  if content.attachment_count > 0 then
     vim.notify(
-      string.format("Confluence page content inserted with %d attachment(s) downloaded.", attachment_count),
+      string.format("Confluence page content inserted with %d attachment(s) downloaded.", content.attachment_count),
       vim.log.levels.INFO
     )
   else
