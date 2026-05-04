@@ -361,6 +361,23 @@ in
         set -euo pipefail
         export PATH="/home/dev/.nix-profile/bin:/home/dev/.local/bin:$PATH"
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        # Atlassian credentials for buildContextPacket's Jira/Confluence fetch
+        # (lgtm-wa9). The pure-TS path early-exits when ATLASSIAN_API_TOKEN is
+        # absent, so the daemon still runs degraded; these exports are what
+        # turn the feature on. Mirrors opencode-serve.service's pattern above.
+        # Secrets are already declared in sops.secrets; this just plumbs them in.
+        if [ -r /run/secrets/atlassian_api_token ]; then
+          export ATLASSIAN_API_TOKEN="$(cat /run/secrets/atlassian_api_token)"
+        fi
+        if [ -r /run/secrets/atlassian_site ]; then
+          export ATLASSIAN_SITE="$(cat /run/secrets/atlassian_site)"
+        fi
+        if [ -r /run/secrets/atlassian_email ]; then
+          export ATLASSIAN_EMAIL="$(cat /run/secrets/atlassian_email)"
+        fi
+        if [ -r /run/secrets/atlassian_cloud_id ]; then
+          export ATLASSIAN_CLOUD_ID="$(cat /run/secrets/atlassian_cloud_id)"
+        fi
         if [ ! -d /home/dev/projects/lgtm/node_modules ]; then
           cd /home/dev/projects/lgtm
           ${pkgs.nodejs}/bin/npm install
