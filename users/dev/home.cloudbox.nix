@@ -195,6 +195,15 @@ lib.mkIf isCloudbox {
       export DD_APP_KEY="$(cat /run/secrets/dd_app_key)"
     fi
 
+    # BuildBuddy CLI + bb-test-log helper. BUILDBUDDY_HOST is the org-branded
+    # subdomain (no scheme); BUILDBUDDY_API_KEY is the org read API key.
+    if [ -r /run/secrets/buildbuddy_host ]; then
+      export BUILDBUDDY_HOST="$(cat /run/secrets/buildbuddy_host)"
+    fi
+    if [ -r /run/secrets/buildbuddy_api_key ]; then
+      export BUILDBUDDY_API_KEY="$(cat /run/secrets/buildbuddy_api_key)"
+    fi
+
     # Google Workspace CLI: point to assembled credentials
     export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/gws"
 

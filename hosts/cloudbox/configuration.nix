@@ -154,6 +154,19 @@ in
         group = "dev";
         mode = "0400";
       };
+      # BuildBuddy host + org API key (read-only). Used by `bb` CLI and the
+      # bb-test-log helper to fetch raw test logs from the BuildBuddy
+      # enterprise API. See assets/opencode/skills/using-buildbuddy.
+      buildbuddy_host = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      buildbuddy_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Azure DevOps PAT (for private Maven/artifact registry)
       azure_devops_pat = {
         owner = "dev";

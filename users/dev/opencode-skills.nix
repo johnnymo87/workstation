@@ -36,6 +36,7 @@ let
     "creating-pull-requests"
     "slack-mcp-setup"
     "using-atlassian"
+    "using-buildbuddy"
     "using-gcloud-bq-cli"
     "working-with-kubernetes"
   ];

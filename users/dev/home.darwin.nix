@@ -346,6 +346,17 @@ lib.mkIf isDarwin {
         esac
       }
 
+      # BuildBuddy CLI + bb-test-log helper (from macOS Keychain).
+      # BUILDBUDDY_HOST is the org-branded subdomain (no scheme, no path),
+      # BUILDBUDDY_API_KEY is the org read API key. Provision with:
+      #   security add-generic-password -a "$USER" -s buildbuddy-host -w 'your-org.buildbuddy.io'
+      #   security add-generic-password -a "$USER" -s buildbuddy-api-key -w 'YOUR_KEY'
+      BUILDBUDDY_HOST_VAL="$(/usr/bin/security find-generic-password -s buildbuddy-host -w 2>/dev/null)" && export BUILDBUDDY_HOST="$BUILDBUDDY_HOST_VAL"
+      unset BUILDBUDDY_HOST_VAL
+
+      BUILDBUDDY_API_KEY_VAL="$(/usr/bin/security find-generic-password -s buildbuddy-api-key -w 2>/dev/null)" && export BUILDBUDDY_API_KEY="$BUILDBUDDY_API_KEY_VAL"
+      unset BUILDBUDDY_API_KEY_VAL
+
       # Azure DevOps PAT for private artifact registry (from macOS Keychain)
       AZDO_VAL="$(/usr/bin/security find-generic-password -s azure-devops-pat -w 2>/dev/null)" && export SYSTEM_ACCESSTOKEN="$AZDO_VAL"
       unset AZDO_VAL

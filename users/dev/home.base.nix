@@ -192,6 +192,114 @@ let
       done
     '';
   });
+
+  # bb-test-log: fetch the raw, untruncated test.log of a single target from a
+  # BuildBuddy invocation. Built on top of the BuildBuddy enterprise HTTP API
+  # (GetAction → GetFile). The bb CLI itself only exposes whole-build logs via
+  # `bb view`, which is subject to the same UI/bazel truncation that drove us
+  # to need this in the first place.
+  #
+  # Reads BUILDBUDDY_HOST and BUILDBUDDY_API_KEY from env. Both are provisioned
+  # per-platform via the standard secrets pattern (sops on cloudbox, Keychain
+  # on macOS). See assets/opencode/skills/using-buildbuddy/SKILL.md.
+  bb-test-log = pkgs.writeShellApplication {
+    name = "bb-test-log";
+    runtimeInputs = [ pkgs.curl pkgs.jq ];
+    text = ''
+      usage() {
+        cat >&2 <<USAGE
+      Usage: bb-test-log <invocation-id-or-url> <target-label> [attempt]
+
+      Fetch the raw test.log for a target from a BuildBuddy invocation and
+      write it to stdout.
+
+      Arguments:
+        invocation-id-or-url  Either a bare UUID (e.g.
+                              3be19ca0-7f9e-4ade-813f-05aec2f06cd2) or a full
+                              invocation URL (e.g.
+                              https://your-org.buildbuddy.io/invocation/UUID).
+        target-label          Bazel label, e.g.
+                              //path/to:test_target_name
+        attempt               Optional 1-based attempt index. Defaults to
+                              "last" (the most recent attempt). Useful when a
+                              test was retried and you want a specific run.
+
+      Environment:
+        BUILDBUDDY_HOST       e.g. your-org.buildbuddy.io (no scheme).
+        BUILDBUDDY_API_KEY    Org-scoped API key (header x-buildbuddy-api-key).
+
+      Examples:
+        bb-test-log "$URL" //some:test > /tmp/test.log
+        bb-test-log "$INVOCATION_ID" //some:test 2 > /tmp/attempt2.log
+      USAGE
+        exit 2
+      }
+
+      if [ $# -lt 2 ]; then usage; fi
+      if [ -z "''${BUILDBUDDY_API_KEY:-}" ]; then
+        echo "bb-test-log: BUILDBUDDY_API_KEY is not set" >&2
+        exit 2
+      fi
+      if [ -z "''${BUILDBUDDY_HOST:-}" ]; then
+        echo "bb-test-log: BUILDBUDDY_HOST is not set" >&2
+        exit 2
+      fi
+
+      invocation=$1
+      label=$2
+      attempt=''${3:-last}
+
+      # Accept either a bare invocation ID or a full URL.
+      if [[ "$invocation" == http*://*/invocation/* ]]; then
+        invocation=''${invocation##*/invocation/}
+        invocation=''${invocation%%[?#]*}
+      fi
+
+      api="https://''${BUILDBUDDY_HOST}/api/v1"
+      auth_header="x-buildbuddy-api-key: ''${BUILDBUDDY_API_KEY}"
+
+      # 1. List actions for the target → collect every attempt's test.log URI
+      #    in chronological order (the API returns them in attempt order).
+      selector=$(jq -nc --arg i "$invocation" --arg l "$label" \
+        '{selector: {invocation_id: $i, target_label: $l}}')
+
+      uris=$(curl -sS \
+        -H "$auth_header" \
+        -H 'Content-Type: application/json' \
+        -d "$selector" \
+        "$api/GetAction" \
+        | jq -r '[.action[]
+                  | select(.file)
+                  | (.file[] | select(.name == "test.log").uri)] | .[]')
+
+      if [ -z "$uris" ]; then
+        echo "bb-test-log: no test.log found for $label in $invocation" >&2
+        echo "  (target may not have run, may not be a test, or label may be wrong)" >&2
+        exit 1
+      fi
+
+      if [ "$attempt" = "last" ]; then
+        uri=$(echo "$uris" | tail -n1)
+      else
+        uri=$(echo "$uris" | sed -n "''${attempt}p")
+        if [ -z "$uri" ]; then
+          count=$(echo "$uris" | wc -l)
+          echo "bb-test-log: no attempt #$attempt; available count: $count" >&2
+          exit 1
+        fi
+      fi
+
+      echo "bb-test-log: fetching $uri" >&2
+
+      # 2. Stream the raw blob to stdout. The GetFile response body IS the
+      #    file contents (no JSON wrapper), despite the JSON request.
+      curl -sS \
+        -H "$auth_header" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -nc --arg u "$uri" '{uri: $u}')" \
+        "$api/GetFile"
+    '';
+  };
 in
 {
   # NOTE: home.username and home.homeDirectory are set per-host
@@ -241,6 +349,11 @@ in
   # Work tools (macOS + cloudbox only)
   ++ lib.optionals (isDarwin || isCloudbox) [
     localPkgs.acli
+    # BuildBuddy CLI (Bazelisk wrapper + bb subcommands like login, view).
+    # The bb-test-log helper below is the API-backed escape hatch for
+    # fetching raw, untruncated per-target test logs.
+    localPkgs.bb
+    bb-test-log
     # Bazel mono repo needs zip at build time and java for ktlint execution.
     # rules_kotlin <2.3.0 falls back to system PATH for java:
     # https://github.com/bazelbuild/rules_kotlin/pull/1452
