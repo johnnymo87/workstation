@@ -252,26 +252,18 @@ in
     pkgs.kubelogin     # Azure AD credential plugin for kubectl
     pkgs.kubectl       # Kubernetes CLI (for AKS clusters)
   ]
-  # dd-cli wrapper (cloudbox only).
-  # The actual binary is installed by home.activation.installDdCli below into
-  # ~/.local/share/uv/tools/dd-cli/bin/dd. This wrapper lands in
-  # ~/.nix-profile/bin/dd which beats coreutils dd in non-interactive shells
-  # (opencode/claude-spawned children) where ~/.local/bin is not on PATH.
-  ++ lib.optionals isCloudbox [
-    (pkgs.writeShellApplication {
-      name = "dd";
-      runtimeInputs = [ ];
-      text = ''
-        dd_cli="$HOME/.local/share/uv/tools/dd-cli/bin/dd"
-        if [ -x "$dd_cli" ]; then
-          exec "$dd_cli" "$@"
-        fi
-        # Fallback to coreutils dd if dd-cli isn't installed yet (e.g. first
-        # home-manager switch before activation has run, or checkout missing).
-        exec /run/current-system/sw/bin/dd "$@"
-      '';
-    })
-  ];
+  # NOTE: dd-cli (Datadog CLI) is installed by home.activation.installDdCli
+  # below as `dd-cli` in ~/.local/share/uv/tools/dd-cli/bin/dd-cli, symlinked
+  # by uv onto $PATH. We deliberately do NOT install a wrapper named `dd`:
+  # GNU coreutils ships its own `dd` (the disk-copy utility), and on agent-
+  # spawned non-interactive shells the bundled coreutils ends up earlier on
+  # PATH than ~/.nix-profile/bin, so any `dd`-named shim loses the race and
+  # `dd <subcommand>` silently errors as a bad coreutils operand. Using a
+  # unique entrypoint (`dd-cli`) sidesteps the precedence problem entirely
+  # and works across every agent harness, not just opencode. See the
+  # interactive `dd()` shell function in programs.bash.initExtra below for
+  # the human-ergonomics shortcut.
+  ;
 
   # Bazel user config (~/.bazelrc) — work machines only
   home.file.".bazelrc" = lib.mkIf (isDarwin || isCloudbox) {
@@ -1400,6 +1392,16 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       # Checkout default branch (from deprecated-dotfiles)
       gcom() {
         git fetch origin && git checkout "origin/$(git remote show origin | grep 'HEAD branch:' | awk '{ print $3 }')"
+      }
+
+      # Datadog CLI shortcut for humans. Agents and scripts must call
+      # `dd-cli` directly — non-interactive shells (e.g. `bash -c '...'`
+      # spawned by agent tooling) do not source this initExtra, so this
+      # function is invisible to them and bare `dd` resolves to coreutils
+      # for those callers. See the comment above the dd-cli activation
+      # block for full context.
+      dd() {
+        command dd-cli "$@"
       }
       '';
   };
