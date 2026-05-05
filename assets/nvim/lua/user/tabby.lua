@@ -77,9 +77,30 @@ local function cleanup_cache()
   end
 end
 
+-- Catppuccin Mocha palette, matched to tmux (see users/dev/tmux.*.nix).
+-- Selected tab uses mauve to mirror the active-window pill in tmux's status bar.
+local function apply_highlights()
+  local mocha = {
+    bg        = "#1e1e2e",
+    fg        = "#cdd6f4",
+    surface_0 = "#313244",
+    mauve     = "#cba6f7",
+  }
+  vim.api.nvim_set_hl(0, "TabLineFill", { bg = mocha.bg })
+  vim.api.nvim_set_hl(0, "TabLine",     { fg = mocha.fg, bg = mocha.surface_0 })
+  vim.api.nvim_set_hl(0, "TabLineSel",  { fg = mocha.bg, bg = mocha.mauve, bold = true })
+end
+
 function M.setup()
   local ok, tabby = pcall(require, "tabby")
   if not ok then return end
+
+  apply_highlights()
+  -- Re-apply on colorscheme changes so our overrides survive theme reloads.
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = vim.api.nvim_create_augroup("TabbyCatppuccinHighlights", { clear = true }),
+    callback = apply_highlights,
+  })
 
   tabby.setup({
     line = function(line)
