@@ -127,6 +127,33 @@ Before sending any non-trivial Slack message via the MCP:
 5. Scan for `|` pipe-and-dash table syntax — convert to a column-aligned plaintext table inside a triple-backtick code block.
 6. Pass `content_type: "text/plain"` to the MCP.
 
+## After-Send Verification: Don't Trust the Read APIs as Ground Truth
+
+This is the most common Claude failure mode with this MCP and it has burned multiple sessions. **Read it carefully.**
+
+When you call `slack_conversations_history`, `slack_conversations_replies`, or `slack_conversations_search_messages` to look at a message you just posted, the `Text` field you get back is a **lossy plain-text extraction of the rendered message, not the raw mrkdwn source**. That extraction strips or alters:
+
+- `*` and `_` formatting markers (because they're rendering as bold/italic, not as literal characters).
+- Apostrophes — `Karen's` shows up as `Karens`. This is a tokenizer artifact in the extraction layer, NOT something Slack did to your source.
+- Em dashes, en dashes, arrows, and other Unicode punctuation — `OnTrac→p44` may come back as `OnTracp44`.
+- Triple-backtick code-block markers (the content survives, but the fences are gone).
+- Leading `>` on blockquoted lines.
+- Most emoji shortcodes get rendered to actual emoji (or stripped from the extraction).
+- The `>` and `<` characters get HTML-escaped to `&gt;` / `&lt;` in the extracted text — that does NOT mean Slack stored your message that way. It means Slack rendered your `>` as a literal `>` in the page HTML, and the API serializes that HTML-encoded.
+
+**Cumulative effect:** A perfectly-formatted message can come back from the read API looking like word-soup — no bold, smushed-together words where arrows used to be, missing apostrophes, no code blocks. Naive Claudes (including me, more than once) take one look at that and panic-repost a "corrected" plain-ASCII version, which is both wrong and embarrassing.
+
+**Rules of thumb:**
+
+1. **The substantive words, numbers, and line breaks ARE faithful.** If those are right in the read-API output, your message is almost certainly fine. Trust the structure, not the punctuation.
+2. **Missing `*`s mean bold WORKED**, not that it failed. Same for `_` and italics.
+3. **`&gt;` in the extraction is normal** for any literal `>` you wrote. It does NOT mean Slack got the wrong character.
+4. **Missing apostrophes mean the API tokenizer is lossy**, not that your message lost them.
+5. **The only ground-truth verification is to look in the actual Slack UI** (open the channel in a browser if you have one, or have a human eyeball it). The MCP's read APIs cannot confirm formatting fidelity — they can only confirm that the message landed at all.
+6. If a human tells you "the message looks fine" and you're staring at scary-looking read-API output, **believe the human**. The read API is the red herring, not the message.
+
+**When you genuinely need to confirm formatting:** ask the human to spot-check, or post a small test message with known-distinctive content into a low-traffic channel and ask. Do not iterate on formatting fixes based solely on read-API roundtrips.
+
 ## Why Slack Did This
 
 Slack's mrkdwn predates CommonMark's market dominance. They chose a syntax inspired by IRC/early-2010s chat conventions (single `*` for bold, `_` for italic) and have kept it for backward compatibility. It's not going to change. Treat mrkdwn as a separate dialect and you'll stop fighting it.
