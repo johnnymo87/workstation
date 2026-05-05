@@ -55,15 +55,21 @@ let
 
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
-  # Platform overlay: Atlassian MCP wiring (macOS + cloudbox)
-  # The default model comes from opencode.base.json (anthropic/claude-opus-4-7),
-  # which uses the @ex-machina/opencode-anthropic-auth plugin. Auth is provided
-  # by CLAUDE_CODE_OAUTH_TOKEN (cloudbox: sops; macOS: opencode auth login or
-  # Keychain). github-copilot/claude-opus-4.7 was tried briefly but rejected:
-  # Copilot caps context at 200k and limits Opus thinking to medium, while
-  # Anthropic recommends xhigh. Vertex AI (google-vertex-anthropic/...) and
-  # github-copilot remain available at runtime via /model for fallback.
+  # Platform overlay: default model + Atlassian MCP wiring (macOS + cloudbox).
+  # Routes the default through Google Vertex AI (google-vertex-anthropic/
+  # claude-opus-4-7@default). Auth comes from gcloud Application Default
+  # Credentials (~/.config/gcloud/application_default_credentials.json on
+  # cloudbox; macOS via `gcloud auth application-default login`). Devbox skips
+  # this overlay and uses opencode.base.json's anthropic/claude-opus-4-7
+  # default (auth via @ex-machina/opencode-anthropic-auth plugin +
+  # CLAUDE_CODE_OAUTH_TOKEN from sops). anthropic/claude-opus-4-7 and
+  # github-copilot/claude-opus-4.7 remain reachable at runtime via /model
+  # for fallback. github-copilot was tried as default but rejected: Copilot
+  # caps context at 200k and limits Opus thinking to medium, while Anthropic
+  # recommends xhigh.
   opencodeOverlay = lib.optionalAttrs (isDarwin || isCloudbox) {
+    model = "google-vertex-anthropic/claude-opus-4-7@default";
+
     mcp = (opencodeBase.mcp or {}) // {
       atlassian = {
         type = "local";
