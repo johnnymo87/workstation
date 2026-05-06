@@ -54,11 +54,15 @@ acli jira workitem create --project PROJ --type Task \
   --assignee "$ATLASSIAN_ASSIGNEE_ID"
 ```
 
+**Format gotcha — always use GitHub-Flavored Markdown, never Jira wiki markup.** `acli` (and the underlying Atlassian Cloud REST API v3) expects descriptions and comment bodies in Markdown — `# heading`, `**bold**`, `` `code` ``, `[text](url)`, `| col | col |` tables — and converts to ADF on the way in. Jira wiki markup (`h2.`, `*bold*`, `{{code}}`, `[text|url]`, `|| col || col ||`) renders as literal text and is the most common mistake when an LLM drafts a ticket. If you see your description rendering with literal `h2.` or `{{...}}` in the Jira UI, you used wiki markup — re-edit with Markdown.
+
 ### Add a comment (acli)
 
 ```bash
 acli jira workitem comment create --key PROJ-1234 --body "Reduces manual QA burden."
 ```
+
+Comment bodies follow the same rule: **Markdown only, never wiki markup.**
 
 ### JQL search (acli)
 
