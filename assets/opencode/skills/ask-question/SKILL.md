@@ -66,9 +66,9 @@ Help me draft a technical research question about a problem I've encountered, th
    ```bash
    ask-question -f /tmp/research-{topic-slug}-question.md \
                 -o /tmp/research-{topic-slug}-answer.md \
-                -t 1200000
+                -t 1800000
    ```
 
-   Always use a timeout of at least 20 minutes (`-t 1200000`). ChatGPT's deep research mode can take several minutes for complex questions.
+   Always use a timeout of at least 30 minutes (`-t 1800000`). ChatGPT's deep research mode regularly takes 20+ minutes for complex questions, and a too-short timeout will kill the request before the answer comes back. For especially deep questions, prefer 45-60 minutes (`-t 2700000` or `-t 3600000`).
 
    After ask-question returns, discuss the response with the user. Summarize key insights and recommendations.
