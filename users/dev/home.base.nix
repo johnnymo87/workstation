@@ -548,10 +548,20 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       fi
     ''));
 
-  # Cap JetBrains kotlin-lsp JVM heap — each OpenCode session spawns its
-  # own instance; without a cap they grow to ~1.5 GB each.
-  # IJ_JAVA_OPTIONS is read by JetBrains tools only (not generic JVMs).
-  home.sessionVariables = lib.mkIf (isDarwin || isCloudbox) {
+  # Default editor for all interactive shells.
+  # NixOS sets EDITOR=nano in /etc/set-environment by default, which leaks into
+  # GUI apps that read $EDITOR — notably the opencode TUI's `/export` slash
+  # command (packages/opencode/src/cli/cmd/tui/util/editor.ts), which spawns
+  # $VISUAL || $EDITOR. Without this override, /export opens nano.
+  # home.sessionVariables is sourced by ~/.profile (login shells) and
+  # propagates to anything launched from that shell, including opencode.
+  home.sessionVariables = {
+    EDITOR = "nvim";
+    VISUAL = "nvim";
+  } // lib.optionalAttrs (isDarwin || isCloudbox) {
+    # Cap JetBrains kotlin-lsp JVM heap — each OpenCode session spawns its
+    # own instance; without a cap they grow to ~1.5 GB each.
+    # IJ_JAVA_OPTIONS is read by JetBrains tools only (not generic JVMs).
     IJ_JAVA_OPTIONS = "-Xms128m -Xmx1024m -XX:MaxMetaspaceSize=256m -XX:+UseSerialGC";
   };
 
