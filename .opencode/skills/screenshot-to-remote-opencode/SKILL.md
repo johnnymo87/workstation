@@ -1,15 +1,20 @@
 ---
-name: screenshot-to-devbox
-description: Use when you need to share a screenshot with OpenCode running on the devbox over SSH, since Ctrl+V image paste doesn't work remotely
+name: screenshot-to-remote-opencode
+description: Use when you need to share a screenshot with OpenCode running on a remote NixOS host (devbox or cloudbox) over SSH, since Ctrl+V image paste doesn't work remotely
 ---
 
-# Screenshot to Devbox
+# Screenshot to Remote OpenCode
 
 ## Overview
 
-Claude Code supports pasting images from the clipboard with Ctrl+V, but this only works when Claude Code can access the local OS clipboard. Over SSH, the remote Claude Code process can't see your Mac's clipboard.
+OpenCode (and Claude Code) supports pasting images from the clipboard with
+Ctrl+V, but this only works when the agent can access the local OS clipboard.
+Over SSH, the remote agent process can't see your Mac's clipboard.
 
-**Solution:** Take a screenshot locally, upload it to the devbox, and reference the path.
+**Solution:** Take a screenshot locally, upload it to the remote NixOS host
+(devbox or cloudbox), and reference the path. The `screenshot-to-devbox`
+helper script is named for historical reasons but the mechanism is generic
+to any remote SSH'd opencode session.
 
 ## Usage
 
