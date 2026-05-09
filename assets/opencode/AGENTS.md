@@ -84,6 +84,21 @@ Practical guidance:
 - Use `wait` for backgrounded child processes you actually own.
 - Use `timeout` to bound an operation.
 
+## Host Identification
+
+The `shell-env.ts` plugin injects `OPENCODE_HOSTNAME` into every bash tool
+call. Use it to disambiguate which machine you're on without spawning a
+subprocess:
+
+```bash
+echo $OPENCODE_HOSTNAME    # devbox | cloudbox | <macOS hostname> | penguin (crostini)
+```
+
+The repo-level `AGENTS.md` (in any workstation checkout) has a full host
+table mapping hostnames to flake targets and rebuild commands; this env var
+is the primitive. Don't assume "devbox" — `cloudbox` and `devbox` are both
+NixOS hosts running on `dev@` and look identical from inside opencode.
+
 ## Backgrounding Long-Running Processes
 
 A bare `nohup ... &` can die when the parent shell is interrupted. To fully
