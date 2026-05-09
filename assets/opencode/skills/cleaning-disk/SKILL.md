@@ -1,11 +1,11 @@
 ---
 name: cleaning-disk
-description: Reclaim disk space on devbox (NixOS) and macOS. Covers Nix store/generations, Python caches (uv/pip), application caches (Playwright, datalab), and project-specific bloat. Use when disk space is low or for regular maintenance.
+description: Reclaim disk space on any NixOS host (devbox, cloudbox) or macOS. Covers Nix store/generations, Python caches (uv/pip), application caches (Playwright, datalab), and project-specific bloat. Use when disk space is low or for regular maintenance.
 ---
 
 # Cleaning Disk
 
-Systematic disk cleanup for devbox (NixOS) and macOS workstations.
+Systematic disk cleanup for NixOS hosts (devbox, cloudbox) and macOS workstations.
 
 ## Automated Cleanup (cloudbox only)
 
