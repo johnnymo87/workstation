@@ -50,7 +50,7 @@ Host devbox-tunnel
     ForwardAgent yes
     ServerAliveInterval 60
     ServerAliveCountMax 3
-    # Development tunnels (see troubleshooting-devbox skill for details)
+    # Development tunnels (see troubleshooting-nixos-host skill for details)
     LocalForward 4000 localhost:4000
     LocalForward 4003 localhost:4003
     LocalForward 4005 localhost:4005

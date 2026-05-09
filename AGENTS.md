@@ -76,7 +76,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) | GCP ARM VM provisioning with nixos-anywhere |
 | [Setting Up Crostini](.opencode/skills/setting-up-crostini/SKILL.md) | Chromebook Crostini setup with Nix + home-manager |
 | [Rebuilding](.opencode/skills/rebuilding/SKILL.md) | How to apply changes to any NixOS host (devbox, cloudbox) |
-| [Troubleshooting Devbox](.opencode/skills/troubleshooting-devbox/SKILL.md) | SSH issues, host keys, NixOS problems |
+| [Troubleshooting NixOS Host](.opencode/skills/troubleshooting-nixos-host/SKILL.md) | SSH issues, host keys, NixOS problems (devbox + cloudbox) |
 | [Automated Updates](.opencode/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
 | [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
 | [Growing Neovim Config](.opencode/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
