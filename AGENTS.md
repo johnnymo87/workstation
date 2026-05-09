@@ -1,18 +1,33 @@
 # Workstation
 
-NixOS devbox + nix-darwin macOS configuration with standalone home-manager.
+NixOS hosts (devbox on Hetzner, cloudbox on GCP) + nix-darwin (macOS) + Crostini (Chromebook), all sharing standalone home-manager.
+
+## Host Identification (READ FIRST)
+
+**Always check `$OPENCODE_HOSTNAME` (injected into every bash call by `assets/opencode/plugins/shell-env.ts`) or run `hostname` at the start of any session.** This repo configures four first-class hosts; do NOT assume "devbox" — `cloudbox` and `devbox` are both NixOS, both run on `dev@`, and look superficially identical from inside an opencode session. Skills and configs that look "devbox-shaped" usually apply to both NixOS hosts; check `hostname` before reaching for host-specific guidance.
+
+| `hostname` returns | Host kind | NixOS rebuild | Home-manager |
+|---|---|---|---|
+| `devbox` | NixOS on Hetzner | `sudo nixos-rebuild switch --flake .#devbox` | `nix run home-manager -- switch --flake .#dev` |
+| `cloudbox` | NixOS on GCP ARM | `sudo nixos-rebuild switch --flake .#cloudbox` | `nix run home-manager -- switch --flake .#cloudbox` |
+| `Y0FMQX93RR-2` (or similar) | macOS (nix-darwin) | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (covers both) | (combined) |
+| `penguin` (Chromebook Crostini) | Crostini | (no NixOS rebuild) | `nix run home-manager -- switch --flake .#livia` |
+
+Note the home-manager target name is asymmetric: devbox uses `.#dev` (legacy name kept for compatibility), cloudbox uses `.#cloudbox`, crostini uses `.#livia`. See the [Rebuilding](.opencode/skills/rebuilding/SKILL.md) skill for the canonical commands and their host-detection logic.
 
 ## Quick Start
 
-**Devbox (NixOS):**
+**NixOS hosts (devbox or cloudbox):**
 ```bash
-sudo nixos-rebuild switch --flake .#devbox            # System changes
-nix run home-manager -- switch --flake .#dev           # User changes (fast, no sudo)
+sudo nixos-rebuild switch --flake ".#$(hostname)"      # System changes
+# Home-manager target differs per host (see table above):
+nix run home-manager -- switch --flake .#dev           # devbox
+nix run home-manager -- switch --flake .#cloudbox      # cloudbox
 ```
 
 **macOS (nix-darwin):**
 ```bash
-sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2   # System + user changes
+sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2      # System + user combined
 ```
 
 ## Managing Projects
@@ -116,6 +131,10 @@ After `nixos-anywhere`:
 3. Apply system: `sudo nixos-rebuild switch --flake .#devbox`
 4. Apply home: `nix run home-manager -- switch --flake .#dev`
 5. Projects auto-clone on next login (or run `~/.local/bin/ensure-projects`)
+
+## Fresh Cloudbox Setup
+
+See [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) for the full nixos-anywhere flow on a GCP ARM instance. Post-provisioning home-manager command is `nix run home-manager -- switch --flake .#cloudbox` (note the target name, not `.#dev`).
 
 ## Fresh macOS Setup
 
