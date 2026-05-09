@@ -1,18 +1,33 @@
 # Workstation
 
-NixOS devbox + nix-darwin macOS configuration with standalone home-manager.
+NixOS hosts (devbox on Hetzner, cloudbox on GCP) + nix-darwin (macOS) + Crostini (Chromebook), all sharing standalone home-manager.
+
+## Host Identification (READ FIRST)
+
+**Always check `$OPENCODE_HOSTNAME` (injected into every bash call by `assets/opencode/plugins/shell-env.ts`) or run `hostname` at the start of any session.** This repo configures four first-class hosts; do NOT assume "devbox" — `cloudbox` and `devbox` are both NixOS, both run on `dev@`, and look superficially identical from inside an opencode session. Skills and configs that look "devbox-shaped" usually apply to both NixOS hosts; check `hostname` before reaching for host-specific guidance.
+
+| `hostname` returns | Host kind | NixOS rebuild | Home-manager |
+|---|---|---|---|
+| `devbox` | NixOS on Hetzner | `sudo nixos-rebuild switch --flake .#devbox` | `nix run home-manager -- switch --flake .#dev` |
+| `cloudbox` | NixOS on GCP ARM | `sudo nixos-rebuild switch --flake .#cloudbox` | `nix run home-manager -- switch --flake .#cloudbox` |
+| `Y0FMQX93RR-2` (or similar) | macOS (nix-darwin) | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (covers both) | (combined) |
+| `penguin` (Chromebook Crostini) | Crostini | (no NixOS rebuild) | `nix run home-manager -- switch --flake .#livia` |
+
+Note the home-manager target name is asymmetric: devbox uses `.#dev` (legacy name kept for compatibility), cloudbox uses `.#cloudbox`, crostini uses `.#livia`. See the [Rebuilding](.opencode/skills/rebuilding/SKILL.md) skill for the canonical commands and their host-detection logic.
 
 ## Quick Start
 
-**Devbox (NixOS):**
+**NixOS hosts (devbox or cloudbox):**
 ```bash
-sudo nixos-rebuild switch --flake .#devbox            # System changes
-nix run home-manager -- switch --flake .#dev           # User changes (fast, no sudo)
+sudo nixos-rebuild switch --flake ".#$(hostname)"      # System changes
+# Home-manager target differs per host (see table above):
+nix run home-manager -- switch --flake .#dev           # devbox
+nix run home-manager -- switch --flake .#cloudbox      # cloudbox
 ```
 
 **macOS (nix-darwin):**
 ```bash
-sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2   # System + user changes
+sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2      # System + user combined
 ```
 
 ## Managing Projects
@@ -61,13 +76,13 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) | GCP ARM VM provisioning with nixos-anywhere |
 | [Setting Up Crostini](.opencode/skills/setting-up-crostini/SKILL.md) | Chromebook Crostini setup with Nix + home-manager |
 | [Rebuilding](.opencode/skills/rebuilding/SKILL.md) | How to apply changes to any NixOS host (devbox, cloudbox) |
-| [Troubleshooting Devbox](.opencode/skills/troubleshooting-devbox/SKILL.md) | SSH issues, host keys, NixOS problems |
+| [Troubleshooting NixOS Host](.opencode/skills/troubleshooting-nixos-host/SKILL.md) | SSH issues, host keys, NixOS problems (devbox + cloudbox) |
 | [Automated Updates](.opencode/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
 | [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
 | [Growing Neovim Config](.opencode/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
 | [Gradual Dotfiles Migration](.opencode/skills/gradual-dotfiles-migration/SKILL.md) | Migrating from dotfiles to home-manager on Darwin |
 | [Clipboard (gclpr & OSC 52)](.opencode/skills/clipboard/SKILL.md) | Copy/paste over mosh/SSH via gclpr TCP bridge |
-| [Screenshot to Devbox](.opencode/skills/screenshot-to-devbox/SKILL.md) | Sharing screenshots with remote OpenCode |
+| [Screenshot to Remote OpenCode](.opencode/skills/screenshot-to-remote-opencode/SKILL.md) | Sharing screenshots with remote OpenCode (devbox/cloudbox over SSH) |
 | [OpenCode Agents](.opencode/skills/opencode-agents/SKILL.md) | Agent set rationale, what was kept/removed and why |
 | [Tracking Cache Costs](.opencode/skills/tracking-cache-costs/SKILL.md) | Measuring OpenCode prompt caching efficiency |
 | [Configuring GWS](.opencode/skills/configuring-gws/SKILL.md) | Adding, debugging gws accounts and OAuth credentials |
@@ -116,6 +131,10 @@ After `nixos-anywhere`:
 3. Apply system: `sudo nixos-rebuild switch --flake .#devbox`
 4. Apply home: `nix run home-manager -- switch --flake .#dev`
 5. Projects auto-clone on next login (or run `~/.local/bin/ensure-projects`)
+
+## Fresh Cloudbox Setup
+
+See [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) for the full nixos-anywhere flow on a GCP ARM instance. Post-provisioning home-manager command is `nix run home-manager -- switch --flake .#cloudbox` (note the target name, not `.#dev`).
 
 ## Fresh macOS Setup
 

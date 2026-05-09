@@ -147,7 +147,7 @@ When falling back to **OSC 52**, it is primarily for **copy** (yank → local cl
 
 ## Images
 
-OSC 52 and gclpr only handle **text**. For sharing images with Claude Code over SSH, use the [screenshot-to-devbox](../screenshot-to-devbox/SKILL.md) helper script, which:
+OSC 52 and gclpr only handle **text**. For sharing images with Claude Code over SSH, use the [screenshot-to-remote-opencode](../screenshot-to-remote-opencode/SKILL.md) helper script, which:
 
 1. Takes a screenshot on macOS
 2. Uploads it to the devbox via scp

@@ -119,4 +119,4 @@ Notion access tokens expire in 1 hour. OpenCode persists a refresh token alongsi
 - `assets/opencode/opencode.base.json` — the `mcp.notion` entry
 - `users/dev/opencode-config.nix` — `mergeOpencode` activation that writes `~/.config/opencode/opencode.json`
 - `clipboard` skill — also covers Mac↔devbox bridging over SSH/mosh
-- `troubleshooting-devbox` skill — for deeper SSH session weirdness
+- `troubleshooting-nixos-host` skill — for deeper SSH session weirdness

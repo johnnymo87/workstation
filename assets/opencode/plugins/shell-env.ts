@@ -1,14 +1,19 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import * as os from "node:os"
 
 /**
  * Injects environment variables into every bash tool invocation via the
  * `shell.env` hook (see opencode/packages/opencode/src/tool/bash.ts).
  *
- * Two purposes:
+ * Three purposes:
  * 1. Force non-interactive defaults so commands never wait on a TTY.
  * 2. Expose session metadata (OPENCODE_SESSION_ID) so an agent can discover
  *    its own session ID — needed for opencode-to-opencode handoffs via
  *    `opencode-send <id> "msg"`.
+ * 3. Expose the host's hostname (OPENCODE_HOSTNAME) so an agent can
+ *    disambiguate which machine it is on (devbox / cloudbox / macOS /
+ *    crostini) without spawning a `hostname` subprocess. See the "Host
+ *    Identification" section in the repo-level AGENTS.md.
  */
 const plugin: Plugin = async () => ({
   "shell.env": async (input, output) => {
@@ -20,6 +25,10 @@ const plugin: Plugin = async () => ({
 
     // Session self-awareness: lets agents tell peers their own session ID.
     if (input.sessionID) output.env.OPENCODE_SESSION_ID = input.sessionID
+
+    // Host self-awareness: kills the "agent thinks it's on devbox when it's
+    // on cloudbox" failure mode. Cheap (sync, no IO).
+    output.env.OPENCODE_HOSTNAME = os.hostname()
   },
 })
 

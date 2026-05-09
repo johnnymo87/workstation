@@ -1,13 +1,16 @@
 ---
-name: troubleshooting-devbox
-description: Use when SSH connection fails, host key mismatch, NixOS issues, CPU/IO contention (high load), or verifying devbox is properly configured
+name: troubleshooting-nixos-host
+description: Use on any NixOS host (devbox on Hetzner, cloudbox on GCP) when SSH connection fails, host key mismatch, NixOS issues, CPU/IO contention (high load), or verifying the host is properly configured
 ---
 
-# Troubleshooting Devbox
+# Troubleshooting NixOS Host (devbox / cloudbox)
 
 ## Overview
 
-Common issues and fixes for the Hetzner NixOS remote development environment.
+Common issues and fixes for the NixOS remote development environments — `devbox`
+(Hetzner) and `cloudbox` (GCP ARM). Most content is generic to both hosts;
+sections that are truly host-specific (Hetzner rescue mode, `hcloud` commands)
+are marked **(devbox-only)** inline.
 
 ## Connection Model
 
@@ -89,17 +92,17 @@ ssh -o StrictHostKeyChecking=accept-new devbox
 
 ## Verify NixOS Installation
 
-Check NixOS version:
+Check NixOS version (substitute `devbox` or `cloudbox` for `<host>`):
 
 ```bash
-ssh devbox 'nixos-version'
+ssh <host> 'nixos-version'
 # Expected: 24.11... (Vicuna)
 ```
 
 Check tools are installed:
 
 ```bash
-ssh devbox 'tmux -V && nvim --version | head -1 && mise --version'
+ssh <host> 'tmux -V && nvim --version | head -1 && mise --version'
 ```
 
 ## NixOS Configuration Issues
@@ -107,22 +110,22 @@ ssh devbox 'tmux -V && nvim --version | head -1 && mise --version'
 View current system generation:
 
 ```bash
-ssh devbox 'sudo nix-env --list-generations --profile /nix/var/nix/profiles/system'
+ssh <host> 'sudo nix-env --list-generations --profile /nix/var/nix/profiles/system'
 ```
 
 Rollback to previous generation:
 
 ```bash
-ssh devbox 'sudo nixos-rebuild switch --rollback'
+ssh <host> 'sudo nixos-rebuild switch --rollback'
 ```
 
 Check system journal for errors:
 
 ```bash
-ssh devbox 'journalctl -b --priority=err'
+ssh <host> 'journalctl -b --priority=err'
 ```
 
-## nixos-anywhere Deployment Failed
+## nixos-anywhere Deployment Failed (devbox-only)
 
 If deployment fails mid-way, the server may be in an inconsistent state.
 
@@ -150,7 +153,7 @@ Or just destroy and recreate:
 /rebuild
 ```
 
-## Verify SSH Hardening
+## Verify SSH Hardening (devbox-only)
 
 ```bash
 # Should fail (root login disabled):
@@ -162,15 +165,16 @@ ssh dev@$(hcloud server ip devbox) 'echo test'
 
 ## Connection Timeout / Slow
 
-Check latency:
+Check latency (devbox via Hetzner):
 
 ```bash
 ping -c 5 $(hcloud server ip devbox)
 ```
 
 Helsinki datacenter latency from US East: ~100-150ms (acceptable for terminal work).
+For cloudbox, use the GCP external IP (`gcloud compute instances describe cloudbox --format='value(networkInterfaces[0].accessConfigs[0].natIP)'`).
 
-## Server Not Responding
+## Server Not Responding (devbox-only)
 
 Check Hetzner console:
 
@@ -265,19 +269,19 @@ journalctl -b -1 -u nix-daemon | tail -5
 NixOS can accumulate old generations. Clean up:
 
 ```bash
-ssh devbox 'sudo nix-collect-garbage --delete-older-than 7d'
-ssh devbox 'sudo nix-store --optimise'
+ssh <host> 'sudo nix-collect-garbage --delete-older-than 7d'
+ssh <host> 'sudo nix-store --optimise'
 ```
 
 Check disk usage:
 
 ```bash
-ssh devbox 'df -h /'
+ssh <host> 'df -h /'
 ```
 
 ## Systemd User Timers
 
-The devbox runs several user-level timers for automation.
+Both NixOS hosts run several user-level timers for automation.
 
 ### Check Timer Status
 

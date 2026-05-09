@@ -1,20 +1,22 @@
 ---
-name: using-chatgpt-relay-from-devbox
-description: Send ChatGPT queries from devbox via ask-question CLI. Use when /ask-question fails with "Server not running" or when setting up chatgpt-relay for first time on devbox.
+name: using-chatgpt-relay
+description: Send ChatGPT queries from any remote NixOS host (devbox or cloudbox) via the ask-question CLI. Use when /ask-question fails with "Server not running" or when setting up chatgpt-relay for the first time on a new host.
 allowed-tools: [Bash, Read]
 ---
 
-# Using chatgpt-relay from Devbox
+# Using chatgpt-relay
 
-The `ask-question` CLI runs on devbox and talks to `ask-question-server` running on macOS with a real browser.
+The `ask-question` CLI runs on a remote NixOS host (devbox or cloudbox) and
+talks to `ask-question-server` running on macOS with a real browser. The
+relay is an SSH reverse-tunnel pattern, not host-specific.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  DEVBOX (NixOS)                                                         │
+│  REMOTE NIXOS HOST (devbox or cloudbox)                                 │
 │                                                                         │
-│  Claude Code → /ask-question → ask-question CLI                         │
+│  OpenCode → /ask-question → ask-question CLI                            │
 │                                      │                                  │
 │                                      │ HTTP POST                        │
 │                                      ▼                                  │
@@ -46,22 +48,27 @@ ask-question-server         # Keep running
 
 ### 2. On macOS: Create SSH reverse tunnel
 
-When connecting to devbox, add a reverse tunnel:
+When connecting to the remote host, add a reverse tunnel (substitute
+`devbox` or `cloudbox` for `<host>`):
 
 ```bash
-ssh -R 3033:localhost:3033 devbox
+ssh -R 3033:localhost:3033 <host>
 ```
 
 Or add to your SSH config:
 
 ```
-Host devbox
-    HostName <devbox-ip>
+Host <host>
+    HostName <host-ip>
     User dev
     RemoteForward 3033 localhost:3033
 ```
 
-### 3. On devbox: Install the CLI
+In this repo the persistent tunnel launchd agents (`devbox-dev-tunnel`,
+`cloudbox-dev-tunnel`) already carry port 3033 — see the
+`troubleshooting-nixos-host` skill for the full port table.
+
+### 3. On the remote host: Install the CLI
 
 ```bash
 cd ~/projects/chatgpt-relay
@@ -69,7 +76,7 @@ npm install
 npm link
 ```
 
-### 4. On devbox: Verify connection
+### 4. On the remote host: Verify connection
 
 ```bash
 # Check tunnel is working
@@ -121,7 +128,7 @@ they're immediately falsifiable by writing the code.
 
 ### "Server not running or not responding"
 
-1. **Check tunnel on devbox:**
+1. **Check tunnel on the remote host:**
    ```bash
    curl -s http://localhost:3033/health
    ```
@@ -135,8 +142,8 @@ they're immediately falsifiable by writing the code.
 
 3. **Reconnect with tunnel:**
    ```bash
-   # On macOS, reconnect to devbox with -R flag
-   ssh -R 3033:localhost:3033 devbox
+   # On macOS, reconnect to the remote host with -R flag
+   ssh -R 3033:localhost:3033 <host>   # devbox or cloudbox
    ```
 
 ### "No session found" or "Login required"
