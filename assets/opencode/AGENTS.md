@@ -41,7 +41,7 @@ repo but not deployed to any machine yet.
 | Skill | Scope | Purpose |
 |-------|-------|---------|
 | [ask-question](skills/ask-question/SKILL.md) | cross | Draft a technical research question and send to ChatGPT for investigation. |
-| [using-chatgpt-relay-from-devbox](skills/using-chatgpt-relay-from-devbox/SKILL.md) | cross | Send ChatGPT queries from devbox via `ask-question` CLI. Setup + troubleshooting for the chatgpt-relay. |
+| [using-chatgpt-relay](skills/using-chatgpt-relay/SKILL.md) | cross | Send ChatGPT queries from any remote NixOS host (devbox or cloudbox) via `ask-question` CLI. Setup + troubleshooting for the chatgpt-relay. |
 | [using-gws](skills/using-gws/SKILL.md) | cross | Google Workspace APIs (Gmail, Drive, Docs, Sheets, Calendar) via the `gws` CLI. Account switching, available services, common commands. |
 | [using-atlassian](skills/using-atlassian/SKILL.md) | work-only | Read/write Jira tickets, fetch Confluence pages, JQL search, comments, attachment downloads. |
 | [formatting-slack-messages](skills/formatting-slack-messages/SKILL.md) | cross | Slack mrkdwn dialect quirks (single-asterisk bold, underscore italic, no headers, angle-bracket links). |
