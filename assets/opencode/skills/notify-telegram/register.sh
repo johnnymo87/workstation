@@ -70,7 +70,10 @@ echo "Runtime: $RUNTIME_DIR/notify_label"
 # Step 4: Register with nvim if in nvim terminal
 if [[ -n "${NVIM:-}" ]]; then
     echo -n "Registering with nvim... "
-    if nvim --server "$NVIM" --remote-expr "execute('CCRegister $LABEL')" >/dev/null 2>&1; then
+    # </dev/null prevents nvim from terminal-probing on a tty, which would
+    # leak escape sequences into the calling terminal and can cause the call
+    # to fail spuriously. See workstation-qmg.
+    if nvim --server "$NVIM" --remote-expr "execute('CCRegister $LABEL')" </dev/null >/dev/null 2>&1; then
         echo "OK"
     else
         echo "SKIPPED (ccremote plugin not loaded?)"

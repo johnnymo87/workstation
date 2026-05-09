@@ -149,13 +149,20 @@ pkgs.writeShellApplication {
     log "socket=$sock"
     # Step 5: wait until the nvim RPC server is ready AND the helper
     # module has been required.
+    #
+    # The </dev/null on the inner `nvim --remote-expr` is load-bearing:
+    # when invoked with stdin attached to a tty (e.g. running this script
+    # interactively from a tmux pane), neovim 0.11 does terminal capability
+    # probing that corrupts/empties --remote-expr's stdout — the loop then
+    # never sees "1", grep -qx 1 never matches, and we hit the 5s timeout.
+    # See workstation-qmg for the full root-cause analysis.
     # shellcheck disable=SC2016
     if ! timeout 5 bash -c '
       sock="$1"
       until [ -S "$sock" ] && \
             nvim --server "$sock" --remote-expr \
               "luaeval(\"pcall(require, '"'"'user.oc_auto_attach'"'"') and 1 or 0\")" \
-              2>/dev/null | grep -qx 1
+              </dev/null 2>/dev/null | grep -qx 1
       do
         # Pace the loop without using `sleep` (which hangs in this environment).
         read -t 0.1 -r _ < <(:) 2>/dev/null || true
@@ -179,7 +186,10 @@ pkgs.writeShellApplication {
     # Vimscript double-quoted string literal — that's what luaeval reads as _A.
     expr="luaeval(\"require('user.oc_auto_attach').open(vim.json.decode(_A))\", $(printf '%s' "$payload" | jq -Rs '.'))"
 
-    if ! nvim --server "$sock" --remote-expr "$expr" >/dev/null; then
+    # </dev/null prevents nvim from terminal-probing on a tty (see Step 5
+    # comment for the full story); without it, capability sequences leak
+    # into the calling terminal and the call can also fail spuriously.
+    if ! nvim --server "$sock" --remote-expr "$expr" </dev/null >/dev/null; then
       log "nvim RPC call failed; giving up"
       exit 0
     fi
