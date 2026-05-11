@@ -482,8 +482,8 @@ in
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
       # Cap the always-on headless server so it can't monopolize RAM alone.
-      MemoryMax = "10G";
-      MemoryHigh = "8G";
+      MemoryMax = "24G";
+      MemoryHigh = "20G";
       OOMScoreAdjust = "500";
       Restart = "always";
       RestartSec = 10;
@@ -645,8 +645,8 @@ in
     experimental-features = [ "nix-command" "flakes" ];
     trusted-users = [ "root" "@wheel" ];
     auto-optimise-store = true;
-    max-jobs = 2;   # Half of 4 cores — leave capacity for interactive work
-    cores = 2;      # Max 2 cores per individual build derivation
+    max-jobs = 8;   # Half of 16 cores — leave capacity for interactive work
+    cores = 4;      # Max 4 cores per individual build derivation
     extra-substituters = [
       "https://devenv.cachix.org"
     ];
@@ -713,13 +713,13 @@ in
   };
 
   # Soft memory limit on user slice: throttle (not kill) when dev workload
-  # exceeds 30 GB. Leaves ~2 GB for system/kernel/buffers. Also cap user
-  # swap usage so system services always have swap headroom.
+  # exceeds 56 GB. Leaves ~6 GB for system/kernel/buffers on the 64 GB box.
+  # Also cap user swap usage so system services always have swap headroom.
   systemd.slices."user-1000" = {
     description = "User slice for UID 1000 (dev)";
     sliceConfig = {
-      MemoryHigh = "30G";
-      MemorySwapMax = "12G";
+      MemoryHigh = "56G";
+      MemorySwapMax = "24G";
       TasksMax = 4096;      # Enough for Bazel's symlink-forest threads; still caps runaway fan-out
     };
   };

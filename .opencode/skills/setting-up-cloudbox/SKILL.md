@@ -19,7 +19,7 @@ Cloudbox is a GCP C4a Axion (aarch64-linux) VM running NixOS, provisioned via ni
 gcloud compute instances create cloudbox \
   --project=my-gcp-project \
   --zone=us-east1-b \
-  --machine-type=c4a-standard-4 \
+  --machine-type=c4a-standard-16 \
   --image-family=ubuntu-2404-lts-arm64 \
   --image-project=ubuntu-os-cloud \
   --boot-disk-size=200GB \
