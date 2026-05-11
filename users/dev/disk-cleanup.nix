@@ -24,7 +24,7 @@ lib.mkIf isCloudbox {
 
       PROJECTS="$HOME/projects"
       BAZEL_BASE="$HOME/.cache/bazel/_bazel_$(whoami)"
-      WORKTREE_MAX_AGE_DAYS=28
+      WORKTREE_MAX_AGE_DAYS=14
       NIX_KEEP_GENERATIONS=3
 
       log() { echo "[disk-cleanup] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
