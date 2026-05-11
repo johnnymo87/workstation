@@ -1714,7 +1714,7 @@ Note: the design doc landed on main pre-branch. The plan doc (this file) should 
 
 **Step 3: Push and open PR**
 
-Use the `creating-pull-requests` skill. Suggested PR title:
+Use the `shepherding-pull-requests` skill. Suggested PR title:
 
 > feat(oc-cost): replace analyze.mjs with packaged Python CLI
 

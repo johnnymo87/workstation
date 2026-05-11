@@ -413,7 +413,7 @@ git push -u origin host-confusion-fix
 
 **Step 3: Open PR using `gh`**
 
-Use the creating-pull-requests skill conventions (PR title format,
+Use the shepherding-pull-requests skill conventions (PR title format,
 description template). Title: `fix: reduce host confusion (devbox vs cloudbox bias)`
 
 **Step 4: Wait for CI / merge**

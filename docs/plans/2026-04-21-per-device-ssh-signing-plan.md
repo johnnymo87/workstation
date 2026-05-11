@@ -833,7 +833,7 @@ git push -u origin <branch-name>
 
 **Step 2: Open a PR if working in PR-based flow.**
 
-PR title and description follow the repo conventions — see the `creating-pull-requests` skill if uncertain.
+PR title and description follow the repo conventions — see the `shepherding-pull-requests` skill if uncertain.
 
 **Step 3: Clean up the scratchpad.**
 

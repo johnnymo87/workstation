@@ -33,7 +33,7 @@ let
   # Work-only skills (macOS + cloudbox)
   workOnlySkills = [
     "cleaning-disk"
-    "creating-pull-requests"
+    "shepherding-pull-requests"
     "slack-mcp-setup"
     "using-atlassian"
     "using-buildbuddy"

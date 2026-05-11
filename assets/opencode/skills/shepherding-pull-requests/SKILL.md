@@ -1,9 +1,11 @@
 ---
-name: creating-pull-requests
-description: Use when creating pull requests on macOS or cloudbox. Enforces PR title format, description template, pre-PR checks, and post-PR monitoring.
+name: shepherding-pull-requests
+description: Use when opening a pull request OR when an open PR you authored needs attention -- waiting on CI, reviewer comments, or anything between "PR created" and "PR landed". The PR is your responsibility until it lands; this skill covers the whole arc, not just the create step.
 ---
 
-# Creating Pull Requests
+# Shepherding Pull Requests
+
+A PR being open is not the end of the work — it's the middle of it. Opening the PR creates a coordination cost on the reviewer's plate; walking away mid-flight pushes the rest of that cost (chasing CI, addressing comments, re-requesting review) back onto the user. The job is to land the PR or hand it off with an honest, current status. Everything in this skill is in service of that disposition.
 
 ## PR Lifecycle
 
@@ -22,10 +24,11 @@ digraph pr_lifecycle {
     "Check lgtm scope" [shape=box];
     "Sleep 5 min" [shape=box];
     "Check CI + fetch reviews + comments" [shape=box];
-    "Exit conditions met?" [shape=diamond];
+    "Anything to fix?" [shape=diamond];
     "Fix + push" [shape=box];
     "lgtm-bound?" [shape=diamond];
     "Re-request lgtm reviewer" [shape=box];
+    "Exit conditions met?" [shape=diamond];
     "Done" [shape=doublecircle];
 
     "Pre-PR checks" -> "Conflicts?";
@@ -41,13 +44,15 @@ digraph pr_lifecycle {
     "Create PR" -> "Check lgtm scope";
     "Check lgtm scope" -> "Sleep 5 min";
     "Sleep 5 min" -> "Check CI + fetch reviews + comments";
-    "Check CI + fetch reviews + comments" -> "Exit conditions met?";
-    "Exit conditions met?" -> "Done" [label="CI green +\ncomments resolved +\n(if lgtm-bound: fresh\nnon-bot APPROVAL)"];
-    "Exit conditions met?" -> "Fix + push" [label="otherwise"];
+    "Check CI + fetch reviews + comments" -> "Anything to fix?";
+    "Anything to fix?" -> "Fix + push" [label="yes (failing CI,\nunresolved comments)"];
+    "Anything to fix?" -> "Exit conditions met?" [label="no"];
     "Fix + push" -> "lgtm-bound?";
     "lgtm-bound?" -> "Re-request lgtm reviewer" [label="yes, latest non-bot\nreview is non-APPROVED"];
     "lgtm-bound?" -> "Sleep 5 min" [label="no, or latest non-bot\nreview was APPROVED"];
     "Re-request lgtm reviewer" -> "Sleep 5 min";
+    "Exit conditions met?" -> "Done" [label="CI green +\ncomments resolved +\n(if lgtm-bound: non-bot\nAPPROVAL on record)"];
+    "Exit conditions met?" -> "Sleep 5 min" [label="no (still waiting\non CI or reviewer)"];
 }
 ```
 
@@ -124,7 +129,25 @@ This replays only your branch-tip commits onto `origin/<trunk>`, dropping everyt
 
 ## Post-PR Monitoring
 
-After creating the PR, enter a monitoring loop. No maximum iterations -- loop until exit conditions (below) are all met in the same iteration.
+This is where most of the actual shepherding happens, and where it's easiest to bail early. Two failure modes to watch for in yourself:
+
+- **Treating "PR created" as a terminal state.** It isn't. CI hasn't run yet, no human has looked, no inline comments exist to address. Returning to the user at this point with a PR URL is handing them a tool to do work you were going to do; that's only the right move if you're genuinely blocked or out of scope.
+- **Treating the loop as a checklist to satisfy rather than an outcome to own.** The exit conditions below describe the *minimum* state at which you can fairly say "this PR is landed or as landed as I can get it." If you find yourself looking for a reason to declare victory, you've inverted the disposition.
+
+The right framing: you're holding the PR until it's merged or until there's a real human decision the user has to make. Sleeping for five minutes between checks is cheap; bailing and making the user pick up the thread is expensive.
+
+After creating the PR, enter the monitoring loop. No maximum iterations -- loop until exit conditions (below) are all met in the same iteration.
+
+### Approval is durable
+
+Worth stating up front because it shapes the whole loop: **once a non-bot reviewer has APPROVED, that approval stays valid through subsequent pushes for inline-only feedback.** GitHub does not auto-dismiss approvals on push (unless the repo opts into that setting, which none of ours do). You do not need a fresh re-approval every time you address a leftover Gemini thread or fix a typo a human pointed out — the reviewer signed off on the substance; mopping up cosmetic feedback doesn't reopen the substance.
+
+This matters in two places:
+
+- **Re-requesting review**: don't, after an APPROVED. It's noise to the reviewer and (on lgtm-bound repos) wastes a tier-0 reawaken slot.
+- **Exit conditions**: an earlier-than-last-push APPROVAL still counts. You don't have to wait for them to come back and re-approve.
+
+If the reviewer wanted to re-prove correctness on every push, they would have left `CHANGES_REQUESTED` instead of `APPROVED`. Trust the verdict they actually gave.
 
 ### Once, before the loop: determine if this PR is lgtm-bound
 
