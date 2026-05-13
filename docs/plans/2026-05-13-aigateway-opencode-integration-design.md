@@ -305,30 +305,23 @@ Both would slot into `users/dev/home.cloudbox.nix` as
 on macOS. Add them if the muscle memory of writing the underlying
 commands by hand turns out to be friction in practice.
 
-### Component 6 — locking `GOOGLE_CLOUD_LOCATION=global` for interactive shells
+### Component 6 — locking `GOOGLE_CLOUD_LOCATION=global` (already done)
 
-The overridden baseURL hardcodes `/locations/global/` in its path. Right
-now `GOOGLE_CLOUD_LOCATION=global` is set in `opencode-serve.service`'s
-`Environment=` block (`hosts/cloudbox/configuration.nix:444`), but NOT in
-the user's interactive shell. If you run `opencode` in a TUI directly
-(not via opencode-serve), opencode's `google-vertex-anthropic` autoloader
-falls back to its built-in default of `"global"`, which currently lines
-up — but only by coincidence. If anything ever exports a different value
-in the user's bash, the SDK would set `options.location` to that value
-while our overridden URL still says `global`, producing a quiet split-brain
-where the SDK thinks it's hitting `us-central1` (or whatever) and the
-gateway forwards to `global`.
+The overridden baseURL hardcodes `/locations/global/` in its path. For
+the gateway and opencode to agree, every code path that loads
+`google-vertex-anthropic` must set `GOOGLE_CLOUD_LOCATION=global`.
 
-Fix: add `GOOGLE_CLOUD_LOCATION = "global";` to `home.sessionVariables` in
-`users/dev/home.cloudbox.nix`. That covers interactive bash and any
-opencode launched from it. Combined with the existing
-`opencode-serve.service` `Environment=` setting, every code path that
-loads `google-vertex-anthropic` on cloudbox now agrees on `global`.
+Audit confirmed this is already the case on cloudbox:
 
-(We could push this to `home.base.nix` so devbox + crostini also lock to
-`global`, but devbox isn't on Vertex and crostini isn't either, so the
-override would be inert noise. Keep it on cloudbox until a second host
-needs it.)
+- `hosts/cloudbox/configuration.nix:444` — `opencode-serve.service`'s
+  `Environment=` block.
+- `users/dev/home.base.nix:1539` — interactive bash via `initExtra`
+  (cross-host; comment there mentions Gemini-on-Vertex as the original
+  motivation, but the export benefits us too).
+
+No action required for this component. Future macOS branch will need a
+parallel verification — `home.base.nix` covers macOS too via the
+shared `initExtra`, so likely also a no-op there.
 
 ## What this design does NOT do
 
