@@ -557,7 +557,12 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
           else
             current=""
             if [ -x "$HOME/.local/bin/ba" ]; then
-              current=$("$HOME/.local/bin/ba" --version 2>/dev/null \
+              # `ba --version` writes the version string to stderr (not stdout),
+              # so we must merge with `2>&1` rather than discard with `2>/dev/null`.
+              # Otherwise grep sees empty input, $current stays empty, the
+              # equality check below always fails, and ba reinstalls on every
+              # `home-manager switch`.
+              current=$("$HOME/.local/bin/ba" --version 2>&1 \
                 | ${pkgs.gnugrep}/bin/grep -oP 'v?\K[0-9]+\.[0-9]+\.[0-9]+' \
                 | head -1 || true)
             fi
