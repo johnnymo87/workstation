@@ -514,6 +514,56 @@ in
     };
   };
 
+  # Aigateway: local Anthropic-on-Vertex proxy that captures per-request
+  # attribution to a Postgres ledger. Source lives in the mono repo
+  # (~/projects/mono/wonder/data/aigateway/); this unit wraps its
+  # dev/start.sh which (1) bazel-builds the server.jar + migrate.jar then
+  # (2) brings up Docker Compose (Postgres + Redis + Spring Boot on :8080).
+  #
+  # First boot: ~2 min for the Bazel build on a clean cache. Subsequent
+  # boots: ~10 sec.
+  #
+  # Disabled by default — enable with `sudo systemctl enable --now
+  # aigateway.service`. The home-manager activation
+  # `injectAigatewayBaseUrl` keys off this unit's `is-enabled` state to
+  # decide whether to point opencode at the gateway.
+  systemd.services.aigateway = {
+    description = "AI Gateway (local Anthropic-on-Vertex proxy)";
+    after = [ "docker.service" "network-online.target" ];
+    wants = [ "network-online.target" ];
+    requires = [ "docker.service" ];
+    # Disabled by default — operator opts in.
+    wantedBy = [ ];
+
+    # Fail loudly if the mono checkout is missing — this is an opt-in unit; silent
+    # success would let downstream activation point opencode at a non-existent gateway.
+    unitConfig.AssertFileIsExecutable =
+      "/home/dev/projects/mono/wonder/data/aigateway/dev/start.sh";
+
+    # bazel lives at /home/dev/.local/bin/bazel (symlink into ~/.nix-profile),
+    # docker is in system path, coreutils via system path. Same recipe as
+    # opencode-serve.
+    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" "/home/dev/.local" ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/mono/wonder/data/aigateway/dev";
+      # `start.sh -d` runs the bazel build in foreground then `docker
+      # compose up -d`. After detach, the service "succeeds" — but we
+      # need the unit to stay active so `is-enabled`/`is-active` reflect
+      # operator intent. Type=oneshot + RemainAfterExit handles that.
+      RemainAfterExit = true;
+      ExecStart = "/home/dev/projects/mono/wonder/data/aigateway/dev/start.sh -d";
+      ExecStop = "${pkgs.docker}/bin/docker compose down";
+      # Bazel + Docker Compose can take a while on first boot.
+      TimeoutStartSec = "10min";
+      Restart = "on-failure";
+      RestartSec = 30;
+    };
+  };
+
   # Nightly workspace reset (3 AM). Replaces the previous serve-only
   # restart with a full workspace reset (kill nvims, clear opencode
   # sessions, restart opencode-serve, respawn nvims). The serve restart
