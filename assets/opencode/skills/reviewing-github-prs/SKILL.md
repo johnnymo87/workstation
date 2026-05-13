@@ -83,6 +83,8 @@ gh api repos/{owner}/{repo}/pulls/{number}/comments \
   --jq '.[] | select(.in_reply_to_id == {comment_id}) | {id, user: .user.login, body_preview: (.body[0:80])}'
 ```
 
+**After replying, mark the thread resolved** — see §"Resolving review threads" below. Replying without resolving leaves the thread visually unresolved on the diff, even when you've discharged your end of the conversation.
+
 #### Constraints
 
 - `{comment_id}` must be a **thread-root** comment (`in_reply_to_id: null` in listings). GitHub does not support replies-to-replies; you can only reply to the top of a thread. If you want to add to an existing back-and-forth, still reply to the root — your reply will appear at the bottom of the thread.
@@ -99,6 +101,82 @@ gh api -X POST repos/{owner}/{repo}/pulls/{number}/comments \
 ```
 
 Per GitHub's API docs: *"When in_reply_to is specified, all parameters other than body in the request body are ignored."* So `path`/`line`/`side`/`commit_id` are silently dropped. This works but is easier to misuse — prefer the dedicated `/replies` endpoint above.
+
+### Resolving review threads
+
+GitHub tracks two separate things on an inline comment thread:
+
+- **The reply chain** — what you posted via the threaded-reply mechanism above.
+- **Resolution state** — a separate boolean (`isResolved`) that controls whether the thread is collapsed/struck-through in the diff UI.
+
+These are independent. Posting a reply does **not** resolve the thread. A reviewer scrolling the diff sees an unresolved thread regardless of how many replies are on it. You have to mark resolved explicitly.
+
+**When to resolve:** as soon as you've posted your reply — whether the reply was an acceptance ("fixed in <sha>"), a pushback with reasoning, or a deferral with explanation. You've discharged your end of the thread; resolution signals "no further action from me." If the reviewer disagrees, they reopen with one click. Leaving threads unresolved out of caution is worse — the reviewer can't tell which threads still need your attention from which are awaiting their judgment.
+
+**Mechanics — two-step:**
+
+The REST `pulls/{n}/comments` endpoints don't expose resolution state. You need GraphQL: first fetch the thread's GraphQL node ID for the comment you replied to, then call the `resolveReviewThread` mutation.
+
+Step 1: Get thread node IDs (do this once per loop iteration, not per thread):
+
+```bash
+gh api graphql -f query='
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100) {
+          nodes {
+            id
+            isResolved
+            comments(first: 1) { nodes { databaseId } }
+          }
+        }
+      }
+    }
+  }' \
+  -F owner={owner} -F repo={repo} -F number={number} \
+  --jq '.data.repository.pullRequest.reviewThreads.nodes[] | {thread_id: .id, resolved: .isResolved, root_comment_id: .comments.nodes[0].databaseId}'
+```
+
+This gives you a mapping from REST comment IDs (the same `id` you used when replying via `/comments/{id}/replies`) to GraphQL thread node IDs (`PRRT_…`).
+
+Step 2: Resolve the thread for the comment you just replied to:
+
+```bash
+gh api graphql -f query='
+  mutation($threadId: ID!) {
+    resolveReviewThread(input: { threadId: $threadId }) {
+      thread { isResolved }
+    }
+  }' \
+  -f threadId={thread_node_id} \
+  --jq '.data.resolveReviewThread.thread.isResolved'
+```
+
+Returns `true` on success.
+
+**Reopening:** the symmetric mutation is `unresolveReviewThread` with the same input shape. Use sparingly — if you're reopening your own resolution it usually means you didn't actually finish the thread.
+
+**Filtering to unresolved threads** (useful in the shepherding loop to find what still needs attention):
+
+```bash
+gh api graphql -f query='
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100) {
+          nodes {
+            id
+            isResolved
+            comments(first: 1) { nodes { databaseId author { login } body } }
+          }
+        }
+      }
+    }
+  }' \
+  -F owner={owner} -F repo={repo} -F number={number} \
+  --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | {thread_id: .id, root_id: .comments.nodes[0].databaseId, author: .comments.nodes[0].author.login, preview: (.comments.nodes[0].body[0:120])}'
+```
 
 ### Fresh review with inline comments
 
@@ -183,6 +261,8 @@ JSONEOF
 **Don't conflate `in_reply_to` (the alternative-form body parameter) with `in_reply_to_id` (the field name returned in listings).** Only matters if you're using the alternative `POST /pulls/{n}/comments` form — when *posting* you'd send `in_reply_to=N`, but when *reading* comments back the same relationship is exposed as `in_reply_to_id`. The dedicated `/replies` endpoint avoids this entirely (the parent id is in the URL path, not the body).
 
 **Threaded replies don't take a `path`/`line`/`side`.** They inherit those from the parent comment. If you find yourself wanting to attach a reply to a *different* line, that's not a reply — that's a new inline comment, post it as part of a fresh review.
+
+**Replying without resolving.** Posting a reply does not change the thread's `isResolved` state. The reviewer scrolling the diff sees an unresolved thread regardless of how many replies are on it. After every reply (acceptance, pushback, or deferral), call `resolveReviewThread` — see §"Resolving review threads" above. The two are independent operations and both are required to discharge the thread.
 
 ## Useful companion commands
 
