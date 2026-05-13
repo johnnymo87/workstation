@@ -201,6 +201,12 @@ in
         group = "dev";
         mode = "0400";
       };
+      # aigateway dev-checkout path (org-identifying directory name, treated as a secret to keep it out of public source)
+      aigateway_dir = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # ba CLI GitHub repo path (org/repo, org-identifying)
       ba_cli_repo = {
         owner = "dev";
@@ -516,10 +522,10 @@ in
   };
 
   # Aigateway: local Anthropic-on-Vertex proxy that captures per-request
-  # attribution to a Postgres ledger. Source lives in the mono repo
-  # (~/projects/mono/wonder/data/aigateway/); this unit wraps its
-  # dev/start.sh which (1) bazel-builds the server.jar + migrate.jar then
-  # (2) brings up Docker Compose (Postgres + Redis + Spring Boot on :8080).
+  # attribution to a Postgres ledger. The path to the dev checkout is held
+  # in the `aigateway_dir` sops secret; the start.sh script in that dir
+  # (1) bazel-builds the server.jar + migrate.jar then (2) brings up
+  # Docker Compose (Postgres + Redis + Spring Boot on :8080).
   #
   # First boot: ~2 min for the Bazel build on a clean cache. Subsequent
   # boots: ~10 sec.
@@ -536,10 +542,11 @@ in
     # Disabled by default — operator opts in.
     wantedBy = [ ];
 
-    # Fail loudly if the mono checkout is missing — this is an opt-in unit; silent
-    # success would let downstream activation point opencode at a non-existent gateway.
-    unitConfig.AssertFileIsExecutable =
-      "/home/dev/projects/mono/wonder/data/aigateway/dev/start.sh";
+    # Path to the dev checkout (org-identifying directory name) lives in
+    # the aigateway_dir sops secret; the bash shim resolves it at runtime.
+    # Drop AssertFileIsExecutable — it requires a literal path, which we
+    # can't have. The bash `cd` in ExecStart fails loudly if the path is
+    # missing or the secret is unavailable.
 
     # bazel lives at /home/dev/.local/bin/bazel (symlink into ~/.nix-profile),
     # docker is in system path, coreutils via system path. Same recipe as
@@ -550,14 +557,16 @@ in
       Type = "oneshot";
       User = "dev";
       Group = "dev";
-      WorkingDirectory = "/home/dev/projects/mono/wonder/data/aigateway/dev";
+      # No WorkingDirectory — handled by `cd` in the shim.
       # `start.sh -d` runs the bazel build in foreground then `docker
       # compose up -d`. After detach, the service "succeeds" — but we
       # need the unit to stay active so `is-enabled`/`is-active` reflect
       # operator intent. Type=oneshot + RemainAfterExit handles that.
       RemainAfterExit = true;
-      ExecStart = "/home/dev/projects/mono/wonder/data/aigateway/dev/start.sh -d";
-      ExecStop = "${pkgs.docker}/bin/docker compose down";
+      # `cd "$(cat ...)"` resolves at every start. exec replaces the bash
+      # process so systemd tracks start.sh's PID, not the bash wrapper.
+      ExecStart = "${pkgs.bash}/bin/bash -c 'cd \"$(cat /run/secrets/aigateway_dir)\" && exec ./start.sh -d'";
+      ExecStop = "${pkgs.bash}/bin/bash -c 'cd \"$(cat /run/secrets/aigateway_dir)\" && exec ${pkgs.docker}/bin/docker compose down'";
       # Bazel + Docker Compose can take a while on first boot.
       TimeoutStartSec = "10min";
       Restart = "on-failure";
