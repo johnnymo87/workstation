@@ -466,6 +466,8 @@ in
       set -euo pipefail
 
       runtime="$HOME/.config/opencode/opencode.json"
+      hash_file="$HOME/.cache/workstation/aigateway-url.hash"
+      mkdir -p "$(dirname "$hash_file")"
 
       # Trigger: aigateway.service is running. `is-active` returns
       # "active" once ExecStart succeeds (RemainAfterExit keeps that
@@ -500,19 +502,45 @@ in
             "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        exit 0
+        new_hash="DIRECT-VERTEX"
+      else
+        full_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models"
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq --arg url "$full_url" \
+            '.provider."google-vertex-anthropic".options.baseURL = $url' \
+            "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "aigateway: pointed opencode at $full_url" >&2
+        new_hash="$(printf '%s' "$full_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
       fi
 
-      full_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models"
-
-      if [[ -f "$runtime" ]]; then
-        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
-        ${pkgs.jq}/bin/jq --arg url "$full_url" \
-          '.provider."google-vertex-anthropic".options.baseURL = $url' \
-          "$runtime" > "$tmp"
-        mv "$tmp" "$runtime"
+      # Auto-restart opencode-serve only when the effective URL changed.
+      # Same sudo dance as installOpencodePlugins for the same reasons
+      # (sudo path-sanitization, errexit-mask interactions): use absolute
+      # paths to systemctl, capture exit code into a variable. Hash file
+      # is updated ONLY after a successful restart so the next rebuild
+      # retries on failure.
+      old_hash=""
+      [ -r "$hash_file" ] && old_hash="$(cat "$hash_file")"
+      if [[ "$new_hash" != "$old_hash" ]]; then
+        echo "aigateway: baseURL changed ($old_hash -> $new_hash); restarting opencode-serve" >&2
+        sudo_err="$(mktemp)"
+        sudo_rc=0
+        /run/wrappers/bin/sudo -n /run/current-system/sw/bin/systemctl restart opencode-serve.service 2>"$sudo_err" || sudo_rc=$?
+        if [ "$sudo_rc" -eq 0 ]; then
+          echo "$new_hash" > "$hash_file"
+          echo "aigateway: opencode-serve restarted; hash file updated" >&2
+        else
+          {
+            echo "aigateway: WARNING — opencode-serve restart failed (sudo exit $sudo_rc):"
+            ${pkgs.gnused}/bin/sed 's/^/  /' "$sudo_err"
+            echo "aigateway: hash file NOT updated; next rebuild will retry"
+          } >&2
+        fi
+        rm -f "$sudo_err"
       fi
-      echo "aigateway: pointed opencode at $full_url" >&2
     '');
 
   # Inject Datadog MCP config (remote HTTP transport) into opencode.json
