@@ -1534,6 +1534,18 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       gp = "git push";
     };
     initExtra = ''
+      # Source home-manager session vars (PATH additions, EDITOR, etc.) for
+      # interactive non-login shells. Home-manager only writes these to
+      # ~/.profile, which bash sources for login shells only -- so mosh
+      # reattach, nested `bash`, or terminals launched without `-l` end up
+      # missing $HOME/.local/bin (where `ba`, `oc-search`, etc. live).
+      # The script is idempotent (guarded by $__HM_SESS_VARS_SOURCED), so
+      # sourcing it here after .profile already ran is a no-op.
+      # Background: nix-community/home-manager#5474, #2445.
+      if [ -f "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh" ]; then
+        . "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh"
+      fi
+
       # Vertex AI: Gemini 3.x models require the "global" endpoint.
       # Without this, OpenCode defaults to "us-east5" which 404s on newer models.
       export GOOGLE_CLOUD_LOCATION="global"
