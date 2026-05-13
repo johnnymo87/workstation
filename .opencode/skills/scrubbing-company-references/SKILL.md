@@ -45,12 +45,81 @@ Current env vars managed this way:
 | `ATLASSIAN_API_TOKEN` | `atlassian-api-token` | `atlassian_api_token` |
 | `BASECAMP_ACCOUNT_ID` | `basecamp-account-id` | N/A |
 | `GOOGLE_CLOUD_PROJECT` | `google-cloud-project` | `google_cloud_project` |
+| `BUILDBUDDY_HOST` | `buildbuddy-host` | `buildbuddy_host` |
+| `BUNDLE_<HOST>` (composed) | `bundle-source-host` + `bundle-source-token` | `bundle_source_host` + `bundle_source_token` |
 
 **To add a new env var:**
 1. macOS: Add Keychain read in `users/dev/home.darwin.nix` initExtra
 2. Cloudbox: Add sops secret in `hosts/cloudbox/configuration.nix`, add read in
    `users/dev/home.cloudbox.nix` initExtra, encrypt value in `secrets/cloudbox.yaml`
 3. Reference as `$VAR_NAME` in code and docs
+
+### 1a. Vendor-Encoded Env Var Names
+
+Some tools mandate env var names that themselves encode the vendor host —
+e.g., Bundler's `BUNDLE_<HOST_UPPER_WITH_DOTS_AS_DOUBLE_UNDERSCORES>` for
+private gem source credentials. The literal name `BUNDLE_FURY__FRESHREALM__COM`
+in source leaks the host even when the value is in a secret store.
+
+Solution: store the host as a separate secret too, then compose the env var
+name dynamically at shell init:
+
+```bash
+# Cloudbox (sops): both bundle_source_host and bundle_source_token
+if [ -r /run/secrets/bundle_source_host ] && [ -r /run/secrets/bundle_source_token ]; then
+  _bundle_host="$(cat /run/secrets/bundle_source_host)"
+  _bundle_var="BUNDLE_$(printf '%s' "$_bundle_host" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')"
+  export "$_bundle_var=$(cat /run/secrets/bundle_source_token)"
+  unset _bundle_host _bundle_var
+fi
+
+# macOS (Keychain): bundle-source-host and bundle-source-token
+_bundle_host="$(/usr/bin/security find-generic-password -s bundle-source-host -w 2>/dev/null)"
+_bundle_token="$(/usr/bin/security find-generic-password -s bundle-source-token -w 2>/dev/null)"
+if [ -n "$_bundle_host" ] && [ -n "$_bundle_token" ]; then
+  _bundle_var="BUNDLE_$(printf '%s' "$_bundle_host" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')"
+  export "$_bundle_var=$_bundle_token"
+  unset _bundle_var
+fi
+unset _bundle_host _bundle_token
+```
+
+The same pattern generalizes to any tool with a `<TOOL>_<HOST>=...` env var
+convention. If only one such host is needed, two secrets (`<tool>_source_host`
+and `<tool>_source_token`) cover it; if multiple, store a list and loop.
+
+### 1b. Templating Secrets Into Config Files
+
+When a config file in `$HOME` (`~/.bazelrc`, `~/.npmrc`, etc.) needs an
+org-identifying URL or hostname, **do not use `home.file.<path>`** — that
+embeds the value in the Nix store as a publicly-readable file. Instead, use
+a `home.activation.generate<File>` script that reads from sops/Keychain at
+activation time and writes the file directly.
+
+Pattern (see `home.activation.generateNpmrc` and `generateBazelrc` in
+`users/dev/home.base.nix` for working examples):
+
+```nix
+home.activation.generateFooConfig = lib.mkIf (isDarwin || isCloudbox)
+  (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    OUT="$HOME/.foorc"
+    rm -f "$OUT"
+    VALUE=""
+    ${if isCloudbox then ''
+      [ -r /run/secrets/foo_url ] && VALUE=$(cat /run/secrets/foo_url)
+    '' else ''
+      VALUE=$(/usr/bin/security find-generic-password -s foo-url -w 2>/dev/null || true)
+    ''}
+    {
+      echo "# Managed by home-manager — edits will be overwritten"
+      [ -n "$VALUE" ] && echo "url = $VALUE"
+    } > "$OUT"
+  '');
+```
+
+Trade-off: home-manager won't symlink-manage the file, so it survives
+home-manager removal (orphan); accept that for the sake of keeping the secret
+out of the Nix store and out of source.
 
 ### 2. Anonymize (documentation examples)
 
@@ -76,19 +145,23 @@ References with no documentation value -- delete or reword.
 Before committing, run these checks:
 
 ```bash
-# Primary patterns
-rg -i "wonder" --glob '!docs/plans/*' --glob '!.git/*'
-rg "cops-[0-9]" -i --glob '!docs/plans/*' --glob '!.git/*'
+# Primary patterns (company name + vendor hosts)
+rg -i "wonder|freshrealm" --glob '!docs/plans/*' --glob '!.git/*' --glob '!**/issues.jsonl'
+rg "cops-[0-9]" -i --glob '!docs/plans/*' --glob '!.git/*' --glob '!**/issues.jsonl'
 
 # IDs and domains
-rg "70497edc|712020:|3963715585|3963191313" --glob '!.git/*'
+rg "70497edc|712020:|3963715585|3963191313" --glob '!.git/*' --glob '!**/issues.jsonl'
 
-# Email patterns (check for company domains)
-rg "@(wonder|company-name)\." --glob '!.git/*'
+# Email patterns (check for company / vendor domains)
+rg "@(wonder|freshrealm|company-name)\." --glob '!.git/*' --glob '!**/issues.jsonl'
+
+# GCS bucket leaks (bucket names often encode the GCP project)
+rg "storage\.googleapis\.com/[a-z0-9-]+|gs://" --glob '!docs/plans/*' --glob '!.git/*' --glob '!**/issues.jsonl'
 ```
 
-All should return zero matches (excluding plan docs which may reference the
-scrubbing effort itself).
+All should return zero matches (excluding plan docs, which may reference the
+scrubbing effort itself, and `.beads/issues.jsonl`, which preserves issue
+history that may legitimately mention these as past context).
 
 ## Adding New Org Config
 

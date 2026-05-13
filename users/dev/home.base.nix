@@ -379,8 +379,11 @@ in
   ;
 
   # Bazel user config (~/.bazelrc) — work machines only
-  home.file.".bazelrc" = lib.mkIf (isDarwin || isCloudbox) {
-    text = lib.concatStringsSep "\n" ([
+  # Generated at activation time so the GCS remote-cache URL (which encodes
+  # the GCP project name) can be templated in from sops/Keychain instead of
+  # being hardcoded in source. Mirrors the generateNpmrc pattern below.
+  home.activation.generateBazelrc = lib.mkIf (isDarwin || isCloudbox) (lib.hm.dag.entryAfter [ "writeBoundary" ] (let
+    staticHeader = lib.concatStringsSep "\n" [
       "# Managed by home-manager — edits will be overwritten"
       ""
       "# Show test errors inline"
@@ -389,9 +392,8 @@ in
       "# Local disk and repository caches"
       "common --disk_cache ~/bazel-diskcache --repository_cache ~/bazel-cache/repository"
       ""
-      "# GCS remote cache — shared across worktrees and machines"
-      "# Local disk_cache is checked first (fast); remote is fallback + shared warming"
-      "common --remote_cache=https://storage.googleapis.com/wonder-sandbox-bazel-cache"
+    ];
+    staticFooter = lib.concatStringsSep "\n" ([
       "common --remote_upload_local_results"
       ""
       "# Reap idle Bazel servers after 15 min (default 3h) to free RAM across worktrees"
@@ -415,7 +417,42 @@ in
       "# Auto-shutdown server when system is low on memory"
       "startup --shutdown_on_low_sys_mem"
     ]);
-  };
+  in ''
+    BAZELRC_PATH="$HOME/.bazelrc"
+    rm -f "$BAZELRC_PATH"
+    REMOTE_CACHE_URL=""
+
+    ${if isCloudbox then ''
+      SECRET_PATH="/run/secrets/bazel_remote_cache_url"
+      if [ -r "$SECRET_PATH" ]; then
+        REMOTE_CACHE_URL=$(cat "$SECRET_PATH")
+      else
+        echo "Warning: bazel remote cache URL secret not found at $SECRET_PATH"
+      fi
+    '' else ''
+      if /usr/bin/security find-generic-password -s bazel-remote-cache-url -w >/dev/null 2>&1; then
+        REMOTE_CACHE_URL=$(/usr/bin/security find-generic-password -s bazel-remote-cache-url -w)
+      else
+        echo "Warning: bazel remote cache URL not found in macOS Keychain (bazel-remote-cache-url)"
+      fi
+    ''}
+
+    {
+      cat <<'STATIC_HEADER_EOF'
+${staticHeader}
+STATIC_HEADER_EOF
+      if [ -n "$REMOTE_CACHE_URL" ]; then
+        echo "# GCS remote cache — shared across worktrees and machines"
+        echo "# Local disk_cache is checked first (fast); remote is fallback + shared warming"
+        echo "common --remote_cache=$REMOTE_CACHE_URL"
+      else
+        echo "# Remote cache URL not available; skipping --remote_cache"
+      fi
+      cat <<'STATIC_FOOTER_EOF'
+${staticFooter}
+STATIC_FOOTER_EOF
+    } > "$BAZELRC_PATH"
+  ''));
 
   # Azure DevOps npm registry auth (~/.npmrc) — work machines only
   # Uses npm's native ${ENV_VAR} interpolation; ADO_NPM_PAT_B64 is exported
@@ -1261,7 +1298,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
         PIGEON_DAEMON_URL    Override daemon URL
 
       Examples:
-        pigeon-send ses_abc "frontend tests are failing on COPS-6107"
+        pigeon-send ses_abc "frontend tests are failing on PROJ-6107"
         echo "long status update" | pigeon-send --kind status.update ses_abc -
         pigeon-send --priority urgent --kind task.assign \
                     --reply-to msg_def ses_abc "please run the diff"

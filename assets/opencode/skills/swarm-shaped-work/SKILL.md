@@ -57,7 +57,7 @@ The mechanism is the existing tools — there's no `swarm spawn` command. You or
 
 Write down (in the planning session, on paper, in a doc — somewhere durable):
 
-- The coordinator's purpose: "hold the design for COPS-1234, field human decisions, broker integration timing".
+- The coordinator's purpose: "hold the design for PROJ-1234, field human decisions, broker integration timing".
 - For each worker: which dir, what slice, what hand-off points it owns.
 - The communication graph: who needs to know what from whom. (E.g. "worker A → worker B at proto-published, worker B → worker C at deploy-complete".)
 
@@ -65,7 +65,7 @@ Write down (in the planning session, on paper, in a doc — somewhere durable):
 
 ```bash
 opencode-launch <coordinator-dir> "$(cat <<'PROMPT'
-You are the coordinator for COPS-1234. Read the design doc at docs/plans/...
+You are the coordinator for PROJ-1234. Read the design doc at docs/plans/...
 You will spawn workers and broker decisions. Workers will message you via
 swarm IPC. The human will reach you via Telegram.
 
@@ -92,7 +92,7 @@ For each worker, launch from its own dir with a prompt that includes:
 
 ```bash
 opencode-launch <worker-dir> "$(cat <<'PROMPT'
-You are the BE worker for COPS-1234. Your slice: implement the GraphQL
+You are the BE worker for PROJ-1234. Your slice: implement the GraphQL
 endpoints for X.
 
 Coordinator: ses_<coordinator-id>

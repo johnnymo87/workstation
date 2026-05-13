@@ -49,7 +49,7 @@ The legacy `opencode-send <ses_*> "..."` command **also** auto-routes through pi
 ### Examples
 
 ```bash
-pigeon-send ses_abc "frontend tests are failing on COPS-6107"
+pigeon-send ses_abc "frontend tests are failing on PROJ-6107"
 
 echo "long status update" | pigeon-send --kind status.update ses_abc -
 

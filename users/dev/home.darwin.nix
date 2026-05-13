@@ -375,8 +375,20 @@ lib.mkIf isDarwin {
       unset BUNDLE_VAL
       BUNDLE_VAL="$(/usr/bin/security find-generic-password -s bundle-gems-graphql-pro -w 2>/dev/null)" && export BUNDLE_GEMS__GRAPHQL__PRO="$BUNDLE_VAL"
       unset BUNDLE_VAL
-      BUNDLE_VAL="$(/usr/bin/security find-generic-password -s bundle-fury-freshrealm-com -w 2>/dev/null)" && export BUNDLE_FURY__FRESHREALM__COM="$BUNDLE_VAL"
-      unset BUNDLE_VAL
+      # Vendor-encoded private gem source: Bundler env var name is
+      # BUNDLE_<HOST_UPPER_WITH_DOTS_AS_DOUBLE_UNDERSCORES>. Compose dynamically
+      # from a Keychain-stored host so the vendor name doesn't appear in source.
+      # Provision with:
+      #   security add-generic-password -a "$USER" -s bundle-source-host  -w 'fury.example.com'
+      #   security add-generic-password -a "$USER" -s bundle-source-token -w 'TOKEN'
+      _bundle_host="$(/usr/bin/security find-generic-password -s bundle-source-host -w 2>/dev/null)"
+      _bundle_token="$(/usr/bin/security find-generic-password -s bundle-source-token -w 2>/dev/null)"
+      if [ -n "$_bundle_host" ] && [ -n "$_bundle_token" ]; then
+        _bundle_var="BUNDLE_$(printf '%s' "$_bundle_host" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')"
+        export "$_bundle_var=$_bundle_token"
+        unset _bundle_var
+      fi
+      unset _bundle_host _bundle_token
 
       # Datadog CLI credentials (from macOS Keychain)
       export DD_SITE="us3.datadoghq.com"

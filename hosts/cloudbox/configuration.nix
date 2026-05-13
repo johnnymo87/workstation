@@ -257,7 +257,22 @@ in
         group = "dev";
         mode = "0400";
       };
-      bundle_fury_freshrealm_com = {
+      # Generic-named per scrubbing-company-references skill: the host name
+      # (which encodes the vendor) is itself stored as a separate secret and
+      # composed at activation time into the Bundler-required env var name.
+      bundle_source_host = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      bundle_source_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      # Bazel remote cache URL — the bucket name encodes the GCP project,
+      # so it lives in sops and is templated into ~/.bazelrc at activation.
+      bazel_remote_cache_url = {
         owner = "dev";
         group = "dev";
         mode = "0400";

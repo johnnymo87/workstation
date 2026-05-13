@@ -72,7 +72,7 @@ endpoint):
 ID                                UPDATED     DIRECTORY                                 TITLE
 ses_268183fceffep6ViEE20s5XWc8    3m          /home/dev                                 PDF code extraction from page 2
 ses_272a9b9b8ffeVBXCz6SQmsJF4l    1h          /home/dev/projects/pigeon                 Implement opencode-send CLI
-ses_24e8ff295ffeyV8o35YuK63g2u    2d          /home/dev/projects/mono                   Coordinator: COPS-6107 swarm
+ses_24e8ff295ffeyV8o35YuK63g2u    2d          /home/dev/projects/mono                   Coordinator: PROJ-6107 swarm
 ```
 
 By default the list returns up to 100 sessions, ordered by most-recent

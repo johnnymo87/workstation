@@ -182,8 +182,13 @@ lib.mkIf isCloudbox {
     if [ -r /run/secrets/bundle_gems_graphql_pro ]; then
       export BUNDLE_GEMS__GRAPHQL__PRO="$(cat /run/secrets/bundle_gems_graphql_pro)"
     fi
-    if [ -r /run/secrets/bundle_fury_freshrealm_com ]; then
-      export BUNDLE_FURY__FRESHREALM__COM="$(cat /run/secrets/bundle_fury_freshrealm_com)"
+    # Bundler env var name is BUNDLE_<HOST_UPPER_WITH_DOTS_AS_DOUBLE_UNDERSCORES>.
+    # Compose dynamically so the vendor-encoded host doesn't appear in source.
+    if [ -r /run/secrets/bundle_source_host ] && [ -r /run/secrets/bundle_source_token ]; then
+      _bundle_host="$(cat /run/secrets/bundle_source_host)"
+      _bundle_var="BUNDLE_$(printf '%s' "$_bundle_host" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')"
+      export "$_bundle_var=$(cat /run/secrets/bundle_source_token)"
+      unset _bundle_host _bundle_var
     fi
 
     # Datadog CLI credentials (dd-cli)
