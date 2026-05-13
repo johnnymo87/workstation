@@ -439,6 +439,82 @@ in
       fi
     '');
 
+  # Inject (or strip) the aigateway baseURL override on cloudbox.
+  # Trigger: `aigateway.service` is currently active AND we have a
+  # GOOGLE_CLOUD_PROJECT secret. When both conditions hold: set
+  # `provider.google-vertex-anthropic.options.baseURL` to a URL pointing
+  # at the local Docker gateway, with the project baked into the path.
+  # Otherwise: strip the override so opencode falls back to direct Vertex.
+  #
+  # Why is-active and not is-enabled? NixOS unit files live in the
+  # read-only /etc/systemd/system (symlinks into the Nix store), so
+  # `systemctl enable/disable` fails ("Read-only file system") and
+  # `is-enabled` returns "linked" permanently. `is-active` is the signal
+  # the operator actually controls via `systemctl start`/`stop`.
+  # Persistence across reboot is not preserved (unit is wantedBy = [ ]) —
+  # explicit design choice for an opt-in tool.
+  #
+  # The path shape MUST match what @ai-sdk/google-vertex/anthropic
+  # generates by default — verified against
+  # node_modules/.bun/@ai-sdk+google-vertex@4.0.112+.../anthropic/index.js
+  # (the `getBaseURL` function). If that SDK version drifts in opencode's
+  # bundled deps, this hardcoded path may need to move with it. Verified
+  # against opencode commit at the time of writing — see design doc
+  # 2026-05-13-aigateway-opencode-integration-design.md.
+  home.activation.injectAigatewayBaseUrl = lib.mkIf isCloudbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      # Trigger: aigateway.service is running. `is-active` returns
+      # "active" once ExecStart succeeds (RemainAfterExit keeps that
+      # state). "activating" means start.sh is mid-build but we still
+      # treat it as opt-in. Anything else (inactive, failed, unknown)
+      # means the operator hasn't started it or it crashed.
+      active_state="$(/run/current-system/sw/bin/systemctl is-active aigateway.service 2>/dev/null || true)"
+      case "$active_state" in
+        active|activating) gateway_enabled=1 ;;
+        *)                 gateway_enabled=0 ;;
+      esac
+
+      project=""
+      if [ -r /run/secrets/google_cloud_project ]; then
+        project="$(cat /run/secrets/google_cloud_project)"
+      fi
+
+      if [[ "$gateway_enabled" = "0" ]] || [[ -z "$project" ]]; then
+        if [[ "$gateway_enabled" = "0" ]]; then
+          echo "aigateway: aigateway.service is not running (state=$active_state); opencode pointed at direct Vertex" >&2
+        else
+          echo "aigateway: GOOGLE_CLOUD_PROJECT secret unavailable; opencode pointed at direct Vertex" >&2
+        fi
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.provider."google-vertex-anthropic".options.baseURL)
+                            | if .provider."google-vertex-anthropic".options == {}
+                              then del(.provider."google-vertex-anthropic".options) else . end
+                            | if .provider."google-vertex-anthropic" == {}
+                              then del(.provider."google-vertex-anthropic") else . end
+                            | if .provider == {} then del(.provider) else . end' \
+            "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        exit 0
+      fi
+
+      full_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models"
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq --arg url "$full_url" \
+          '.provider."google-vertex-anthropic".options.baseURL = $url' \
+          "$runtime" > "$tmp"
+        mv "$tmp" "$runtime"
+      fi
+      echo "aigateway: pointed opencode at $full_url" >&2
+    '');
+
   # Inject Datadog MCP config (remote HTTP transport) into opencode.json
   # Uses Datadog's hosted MCP server with DD_API_KEY/DD_APPLICATION_KEY headers.
   # Endpoint host is mcp.<DD_SITE>; site is us3 for our org.
