@@ -14,7 +14,7 @@ Secrets are managed with sops-nix using age encryption. They're encrypted in the
 | `github_ssh_key` | Git operations | Deployed to `~/.ssh/id_ed25519_github` |
 | `cloudflared_tunnel_token` | Cloudflare tunnel | Systemd service reads from `/run/secrets/` |
 | `cloudflare_api_token` | Wrangler CLI | Exported as `CLOUDFLARE_API_TOKEN` in bash |
-| `claude_personal_oauth_token` | Headless Claude Code | Exported as `CLAUDE_CODE_OAUTH_TOKEN` in bash |
+| `claude_personal_oauth_token` | Personal Anthropic subscription auth for the `@ex-machina/opencode-anthropic-auth` opencode plugin (Claude Code is not installed; the env-var name is what the plugin requires). | Exported as `CLAUDE_CODE_OAUTH_TOKEN` in bash and in opencode-serve's systemd service. |
 | `ccr_api_key` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
 | `telegram_bot_token` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
 | `telegram_chat_id` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |

@@ -1,6 +1,6 @@
 ---
 name: automated-updates
-description: How the devbox automatically updates llm-agents (claude-code) via GitHub Actions and systemd timers. Use when debugging update failures or understanding the update flow.
+description: How NixOS hosts (devbox, cloudbox) automatically update self-packaged dependencies (currently just `beads`) via GitHub Actions and apply the resulting flake-locked changes via a systemd timer. Use when debugging update failures or understanding the update flow.
 ---
 
 # Automated Updates

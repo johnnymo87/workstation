@@ -102,9 +102,8 @@ in
   # still live in each project's AGENTS.md.
   xdg.configFile."opencode/AGENTS.md".source = "${assetsPath}/opencode/AGENTS.md";
 
-   # Custom agents via OpenCode-native markdown format
-   # OpenCode loads agents from ~/.config/opencode/agents/ with tools as YAML map
-   # (NOT Claude Code-style ~/.claude/agents/ with comma-separated tools string)
+   # Custom agents via OpenCode-native markdown format.
+   # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
    xdg.configFile."opencode/agents/slack.md".source = patchAgent "slack" "${assetsPath}/opencode/agents/slack.md";
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/oracle.md".source = patchAgent "oracle" "${assetsPath}/opencode/agents/oracle.md";

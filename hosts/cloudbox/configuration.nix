@@ -5,7 +5,9 @@
 #   - SSH via GCP OS Login (handled by google-compute-config.nix in hardware.nix)
 #   - No my-podcasts consumer (personal project)
 #   - claude_personal_oauth_token IS present (mirrors devbox so opencode-serve
-#     can use the personal Claude subscription via @ex-machina/opencode-anthropic-auth)
+#     can authenticate as the personal Anthropic subscription via the
+#     @ex-machina/opencode-anthropic-auth opencode plugin; Claude Code itself
+#     is not installed)
 #   - No R2/OpenAI secrets (not needed here)
 #   - Pigeon uses CCR_MACHINE_ID=cloudbox
 #   - Firewall disabled (google-compute-config defers to GCP firewall)
@@ -75,9 +77,12 @@ in
         group = "dev";
         mode = "0400";
       };
-      # Personal Claude subscription token (not work account)
-      # Consumed by @ex-machina/opencode-anthropic-auth plugin in opencode-serve
-      # and exposed as CLAUDE_CODE_OAUTH_TOKEN for headless/cron Claude Code usage.
+      # Personal Anthropic subscription token. Consumed by the
+      # @ex-machina/opencode-anthropic-auth opencode plugin (loaded by
+      # opencode-serve below) to authenticate against the Anthropic API as
+      # the personal subscription. Despite the secret name and the
+      # CLAUDE_CODE_OAUTH_TOKEN env-var name (which the plugin requires
+      # verbatim), Claude Code itself is not installed.
       claude_personal_oauth_token = {
         owner = "dev";
         group = "dev";
@@ -462,11 +467,15 @@ in
         set -euo pipefail
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
-        # Personal Claude subscription auth for @ex-machina/opencode-anthropic-auth.
-        # Lets opencode call Anthropic directly (anthropic/claude-*) instead of
-        # going through google-vertex-anthropic. The default model is still set
-        # by opencodeOverlay in users/dev/opencode-config.nix; this just makes
-        # the anthropic provider work when selected.
+        # Personal Anthropic subscription auth for the
+        # @ex-machina/opencode-anthropic-auth opencode plugin. Lets opencode
+        # call Anthropic directly (anthropic/claude-*) using the personal
+        # subscription instead of going through google-vertex-anthropic. The
+        # default model is still set by opencodeOverlay in
+        # users/dev/opencode-config.nix; this just makes the anthropic
+        # provider work when the user (or a subagent) selects it. The plugin
+        # requires the env var to be named CLAUDE_CODE_OAUTH_TOKEN exactly --
+        # don't rename it.
         if [ -r /run/secrets/claude_personal_oauth_token ]; then
           export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
         fi

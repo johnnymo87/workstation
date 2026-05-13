@@ -7,14 +7,17 @@ description: Use when you need to share a screenshot with OpenCode running on a 
 
 ## Overview
 
-OpenCode (and Claude Code) supports pasting images from the clipboard with
-Ctrl+V, but this only works when the agent can access the local OS clipboard.
-Over SSH, the remote agent process can't see your Mac's clipboard.
+OpenCode supports pasting images from the clipboard with Ctrl+V, but this
+only works when the agent can access the local OS clipboard. Over SSH, the
+remote opencode process can't see your Mac's clipboard.
 
 **Solution:** Take a screenshot locally, upload it to the remote NixOS host
 (devbox or cloudbox), and reference the path. The `screenshot-to-devbox`
 helper script is named for historical reasons but the mechanism is generic
-to any remote SSH'd opencode session.
+to any remote SSH'd opencode session. The remote upload directory
+(`~/.cache/claude-images/`) is also a historical name -- nothing reads
+it that requires that exact path; renaming would just churn the script
+and existing remote contents.
 
 ## Usage
 
@@ -35,7 +38,7 @@ This will:
 2. Upload the selection to `~/.cache/claude-images/` on devbox
 3. Copy the remote path to your clipboard
 
-Then in your SSH session with Claude Code:
+Then in your SSH'd opencode session:
 ```
 Analyze this image: /home/dev/.cache/claude-images/screenshot-20240115-143022-12345-67890.png
 ```
@@ -45,7 +48,7 @@ Analyze this image: /home/dev/.cache/claude-images/screenshot-20240115-143022-12
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DEVBOX_HOST` | `devbox` | SSH host alias |
-| `SCREENSHOT_REMOTE_DIR` | `~/.cache/claude-images` | Remote directory for uploads |
+| `SCREENSHOT_REMOTE_DIR` | `~/.cache/claude-images` | Remote directory for uploads (historical name) |
 
 ## How It Works
 

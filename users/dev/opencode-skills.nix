@@ -19,7 +19,6 @@ let
     "beads"
     "formatting-slack-messages"
     "opencode-launch"
-    "notify-telegram"
     "preparing-for-compaction"
     "reviewing-github-prs"
     "searching-sessions"
@@ -40,14 +39,6 @@ let
     "using-gcloud-bq-cli"
     "working-with-kubernetes"
   ];
-
-  # notify-telegram has a script that needs to be executable
-  notifyTelegramScript = {
-    ".config/opencode/skills/notify-telegram/register.sh" = {
-      source = "${assetsPath}/opencode/skills/notify-telegram/register.sh";
-      executable = true;
-    };
-  };
 
   # beads has additional reference files
   beadsReferences = {
@@ -161,7 +152,6 @@ in
   home.file =
     mkSkills crossPlatformSkills
     // beadsReferences
-    // notifyTelegramScript
     // superpowersSkills
     // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills

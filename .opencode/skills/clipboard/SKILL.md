@@ -147,13 +147,13 @@ When falling back to **OSC 52**, it is primarily for **copy** (yank → local cl
 
 ## Images
 
-OSC 52 and gclpr only handle **text**. For sharing images with Claude Code over SSH, use the [screenshot-to-remote-opencode](../screenshot-to-remote-opencode/SKILL.md) helper script, which:
+OSC 52 and gclpr only handle **text**. For sharing images with a remote opencode session over SSH, use the [screenshot-to-remote-opencode](../screenshot-to-remote-opencode/SKILL.md) helper script, which:
 
 1. Takes a screenshot on macOS
 2. Uploads it to the devbox via scp
 3. Copies the remote path to clipboard
 
-Then paste the path into Claude Code:
+Then paste the path into your opencode session:
 ```
 Analyze this image: /home/dev/.cache/claude-images/screenshot-20240115-143022-12345.png
 ```

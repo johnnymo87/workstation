@@ -51,8 +51,13 @@
         group = "dev";
         mode = "0400";
       };
-      # Personal Claude subscription token (not work account)
-      # For headless/cron Claude Code usage on devbox
+      # Personal Anthropic subscription token. Despite the env-var-style name
+      # of the secret (which mirrors the historical CLAUDE_CODE_OAUTH_TOKEN
+      # convention used by the @ex-machina/opencode-anthropic-auth opencode
+      # plugin), Claude Code itself is not installed on devbox -- this token is
+      # consumed by the opencode plugin to authenticate as the personal
+      # Anthropic subscription when opencode-serve makes anthropic/claude-*
+      # requests.
       claude_personal_oauth_token = {
         owner = "dev";
         group = "dev";
@@ -663,9 +668,6 @@
   };
 
   systemd.tmpfiles.rules = [
-    # Claude state
-    "d /persist/claude 0700 dev dev -"
-    "L+ /home/dev/.claude - - - - /persist/claude"
     # Projects directory on local SSD (not cloud volume)
     "d /home/dev/projects 0755 dev dev -"
     # SSH directory on persistent volume (for devbox key)

@@ -46,7 +46,6 @@ repo but not deployed to any machine yet.
 | [using-atlassian](skills/using-atlassian/SKILL.md) | work-only | Read/write Jira tickets, fetch Confluence pages, JQL search, comments, attachment downloads. |
 | [formatting-slack-messages](skills/formatting-slack-messages/SKILL.md) | cross | Slack mrkdwn dialect quirks (single-asterisk bold, underscore italic, no headers, angle-bracket links). |
 | [slack-mcp-setup](skills/slack-mcp-setup/SKILL.md) | work-only | Set up the Slack MCP server with an `xoxp` User OAuth token. macOS Keychain or cloudbox sops. |
-| [notify-telegram](skills/notify-telegram/SKILL.md) | cross | Enable Telegram notifications when this Claude finishes tasks (`/notify-telegram`). |
 
 ### Platform Tooling
 

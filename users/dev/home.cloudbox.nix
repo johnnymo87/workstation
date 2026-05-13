@@ -61,9 +61,11 @@ lib.mkIf isCloudbox {
       export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
     fi
 
-    # Personal Claude subscription token (not work account)
-    # Enables @ex-machina/opencode-anthropic-auth plugin to call Anthropic directly
-    # for ad-hoc opencode runs. opencode-serve also exports this (see hosts/cloudbox).
+    # Personal Anthropic subscription token. Consumed by the
+    # @ex-machina/opencode-anthropic-auth opencode plugin (in ad-hoc CLI
+    # opencode runs from this shell; opencode-serve gets its own copy in
+    # hosts/cloudbox/configuration.nix). Claude Code is not installed --
+    # the env var name is what the plugin requires, not what consumes it.
     if [ -r /run/secrets/claude_personal_oauth_token ]; then
       export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
     fi
