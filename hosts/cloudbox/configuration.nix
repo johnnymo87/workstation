@@ -433,7 +433,8 @@ in
   systemd.services.opencode-serve = {
     description = "OpenCode headless serve";
     wantedBy = [ "multi-user.target" ];
-    after = [ "network.target" "sops-nix.service" ];
+    after = [ "network.target" "sops-nix.service" "aigateway.service" ];
+    wants = [ "aigateway.service" ];
     # NOTE: NixOS treats each `path` entry as a package directory and
     # auto-appends `/bin` and `/sbin` when composing PATH. So pass
     # `/home/dev/.local` (NOT `/home/dev/.local/bin`) — it expands to
