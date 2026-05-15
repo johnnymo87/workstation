@@ -275,21 +275,81 @@ describe("context-usage plugin hook", () => {
     expect(output.system).toEqual(["existing header"])
   })
 
-  it("falls back to globalThis.fetch when ctx.client has no _client", async () => {
-    // Simulates a non-TUI client where the _client.getConfig trick is unavailable.
-    // We can't easily mock globalThis.fetch in a focused way, so just assert that
-    // the plugin doesn't throw when constructing the closure. The earlier silent-
-    // error case already proves graceful failure at call time.
+  it("is silent and does not throw when the helper throws synchronously (bad serverUrl)", async () => {
+    // Force fetchLatestAssistantUsage to throw synchronously before its own
+    // try/catch is entered: new URL(path, undefined) throws TypeError.
+    // This exercises the outer try/catch added in commit 210af21.
+    const mockFetch = vi.fn() // should never be called
     const ctx = {
-      client: {}, // no _client
+      client: {
+        _client: { getConfig: () => ({ fetch: mockFetch }) },
+      },
       project: {} as any,
       directory: "/tmp",
       worktree: "/tmp",
       experimental_workspace: { register: () => {} },
-      serverUrl: new URL("http://localhost:4096"),
+      serverUrl: undefined as any, // forces new URL() to throw inside the helper
       $: {} as any,
     }
     const hooks = await contextUsagePlugin(ctx as any)
-    expect(hooks["experimental.chat.system.transform"]).toBeDefined()
+    const output = { system: ["existing header"] }
+    await expect(
+      hooks["experimental.chat.system.transform"]!(
+        { sessionID: "s1", model: { limit: { context: 1_000_000 } } as any },
+        output,
+      ),
+    ).resolves.toBeUndefined()
+    expect(output.system).toEqual(["existing header"])
+  })
+
+  it("falls back to globalThis.fetch when ctx.client has no _client", async () => {
+    // Spy on globalThis.fetch so we can verify the fallback actually wires it up.
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify([
+              {
+                info: {
+                  role: "assistant",
+                  tokens: {
+                    total: 1234,
+                    input: 0,
+                    output: 0,
+                    cache: { read: 0, write: 0 },
+                  },
+                },
+              },
+            ]),
+            { status: 200 },
+          ),
+      )
+    try {
+      const ctx = {
+        client: {}, // no _client
+        project: {} as any,
+        directory: "/tmp",
+        worktree: "/tmp",
+        experimental_workspace: { register: () => {} },
+        serverUrl: new URL("http://localhost:4096"),
+        $: {} as any,
+      }
+      const hooks = await contextUsagePlugin(ctx as any)
+      const output = { system: ["existing header"] }
+      await hooks["experimental.chat.system.transform"]!(
+        { sessionID: "s1", model: { limit: { context: 1_000_000 } } as any },
+        output,
+      )
+      // The hook called the real globalThis.fetch (our spy) because _client was absent.
+      expect(spy).toHaveBeenCalledTimes(1)
+      const req = spy.mock.calls[0][0] as Request
+      expect(req.url).toBe("http://localhost:4096/session/s1/message")
+      // And the line was injected based on the spy's response.
+      expect(output.system).toHaveLength(2)
+      expect(output.system[1]).toContain("1,234")
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
