@@ -185,7 +185,7 @@ describe("context-usage plugin hook", () => {
   }
 
   it("pushes a formatted usage line when last-turn tokens are available", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(
+    const mockFetch = vi.fn().mockImplementation(async () =>
       new Response(
         JSON.stringify([
           {

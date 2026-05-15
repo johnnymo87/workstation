@@ -18,31 +18,37 @@ import { fetchLatestAssistantUsage } from "./context-usage-impl"
 const plugin: Plugin = async (ctx) => {
   // Same trick as self-compact.ts: capture the in-process Hono fetch when
   // the SDK client is running in TUI mode; fall back to the global fetch.
-  const sdkClientConfig: any = (ctx.client as any)._client?.getConfig?.()
+  const sdkClientConfig = (ctx.client as any)._client?.getConfig?.() as
+    | { fetch?: typeof fetch }
+    | undefined
   const internalFetch: typeof fetch =
     sdkClientConfig?.fetch ?? globalThis.fetch
 
   return {
     "experimental.chat.system.transform": async (input, output) => {
-      const contextLimit = input.model?.limit?.context
-      if (!contextLimit || contextLimit === 0) return
+      try {
+        const contextLimit = input.model?.limit?.context
+        if (!contextLimit || contextLimit === 0) return
 
-      const used = await fetchLatestAssistantUsage({
-        fetch: internalFetch,
-        serverUrl: ctx.serverUrl,
-        sessionID: input.sessionID,
-      })
-      if (used === null) return
+        const used = await fetchLatestAssistantUsage({
+          fetch: internalFetch,
+          serverUrl: ctx.serverUrl,
+          sessionID: input.sessionID,
+        })
+        if (used === null) return
 
-      const pct = ((used / contextLimit) * 100).toFixed(1)
-      const line =
-        `Context usage: ${used.toLocaleString()} / ${contextLimit.toLocaleString()} ` +
-        `tokens (${pct}%) as of last turn.`
+        const pct = ((used / contextLimit) * 100).toFixed(1)
+        const line =
+          `Context usage: ${used.toLocaleString("en-US")} / ${contextLimit.toLocaleString("en-US")} ` +
+          `tokens (${pct}%) as of last turn.`
 
-      // Push AFTER the existing first element (the cacheable header) so
-      // llm.ts:120-124's 2-part rejoin keeps the header byte-identical
-      // across turns.
-      output.system.push(line)
+        // Push AFTER the existing first element (the cacheable header) so
+        // llm.ts:120-124's 2-part rejoin keeps the header byte-identical
+        // across turns.
+        output.system.push(line)
+      } catch {
+        // Plugin must never break a session.
+      }
     },
   }
 }
