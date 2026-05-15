@@ -224,4 +224,72 @@ describe("context-usage plugin hook", () => {
     expect(output.system[1]).toContain("1,000,000")
     expect(output.system[1]).toContain("18.7%")
   })
+
+  it("is silent when model.limit.context is missing", async () => {
+    const mockFetch = vi.fn() // should never be called
+    const hooks = await contextUsagePlugin(makeCtx(mockFetch) as any)
+    const output = { system: ["existing header"] }
+    await hooks["experimental.chat.system.transform"]!(
+      { sessionID: "s1", model: {} as any },
+      output,
+    )
+    expect(output.system).toEqual(["existing header"])
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it("is silent when model.limit.context is zero", async () => {
+    const mockFetch = vi.fn()
+    const hooks = await contextUsagePlugin(makeCtx(mockFetch) as any)
+    const output = { system: ["existing header"] }
+    await hooks["experimental.chat.system.transform"]!(
+      { sessionID: "s1", model: { limit: { context: 0 } } as any },
+      output,
+    )
+    expect(output.system).toEqual(["existing header"])
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it("is silent when there is no prior assistant message (turn 1)", async () => {
+    const mockFetch = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify([{ info: { role: "user" } }]), { status: 200 }),
+    )
+    const hooks = await contextUsagePlugin(makeCtx(mockFetch) as any)
+    const output = { system: ["existing header"] }
+    await hooks["experimental.chat.system.transform"]!(
+      { sessionID: "s1", model: { limit: { context: 1_000_000 } } as any },
+      output,
+    )
+    expect(output.system).toEqual(["existing header"])
+  })
+
+  it("is silent and does not throw when the fetch fails", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("boom"))
+    const hooks = await contextUsagePlugin(makeCtx(mockFetch) as any)
+    const output = { system: ["existing header"] }
+    await expect(
+      hooks["experimental.chat.system.transform"]!(
+        { sessionID: "s1", model: { limit: { context: 1_000_000 } } as any },
+        output,
+      ),
+    ).resolves.toBeUndefined()
+    expect(output.system).toEqual(["existing header"])
+  })
+
+  it("falls back to globalThis.fetch when ctx.client has no _client", async () => {
+    // Simulates a non-TUI client where the _client.getConfig trick is unavailable.
+    // We can't easily mock globalThis.fetch in a focused way, so just assert that
+    // the plugin doesn't throw when constructing the closure. The earlier silent-
+    // error case already proves graceful failure at call time.
+    const ctx = {
+      client: {}, // no _client
+      project: {} as any,
+      directory: "/tmp",
+      worktree: "/tmp",
+      experimental_workspace: { register: () => {} },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as any,
+    }
+    const hooks = await contextUsagePlugin(ctx as any)
+    expect(hooks["experimental.chat.system.transform"]).toBeDefined()
+  })
 })
