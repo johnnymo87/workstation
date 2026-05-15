@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest"
-import { fetchLatestAssistantUsage } from "../context-usage-impl"
+import { fetchLatestAssistantUsage } from "../lib/context-usage-impl"
 
 describe("fetchLatestAssistantUsage", () => {
   it("returns tokens.total from the latest assistant message", async () => {

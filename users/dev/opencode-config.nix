@@ -114,7 +114,7 @@ in
      xdg.configFile."opencode/plugins/shell-env.ts".source = "${assetsPath}/opencode/plugins/shell-env.ts";
     xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
     xdg.configFile."opencode/plugins/context-usage.ts".source = "${assetsPath}/opencode/plugins/context-usage.ts";
-    xdg.configFile."opencode/plugins/context-usage-impl.ts".source = "${assetsPath}/opencode/plugins/context-usage-impl.ts";
+    xdg.configFile."opencode/plugins/lib/context-usage-impl.ts".source = "${assetsPath}/opencode/plugins/lib/context-usage-impl.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.

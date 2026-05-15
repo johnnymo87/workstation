@@ -1,5 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { fetchLatestAssistantUsage } from "./context-usage-impl"
+import { fetchLatestAssistantUsage } from "./lib/context-usage-impl"
 
 /**
  * Injects a single "Context usage: X / Y tokens (Z%) as of last turn." line
