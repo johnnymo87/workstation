@@ -163,3 +163,65 @@ describe("fetchLatestAssistantUsage", () => {
     )
   })
 })
+
+import contextUsagePlugin from "../context-usage"
+
+describe("context-usage plugin hook", () => {
+  // Helper: build a ctx with a mocked _client.getConfig().fetch
+  function makeCtx(mockFetch: typeof fetch) {
+    return {
+      client: {
+        _client: {
+          getConfig: () => ({ fetch: mockFetch }),
+        },
+      },
+      project: {} as any,
+      directory: "/tmp",
+      worktree: "/tmp",
+      experimental_workspace: { register: () => {} },
+      serverUrl: new URL("http://localhost:4096"),
+      $: {} as any,
+    }
+  }
+
+  it("pushes a formatted usage line when last-turn tokens are available", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            info: {
+              role: "assistant",
+              tokens: {
+                total: 187234,
+                input: 0,
+                output: 0,
+                cache: { read: 0, write: 0 },
+              },
+            },
+          },
+        ]),
+        { status: 200 },
+      ),
+    )
+    const hooks = await contextUsagePlugin(makeCtx(mockFetch) as any)
+    const hook = hooks["experimental.chat.system.transform"]
+    expect(hook).toBeDefined()
+
+    const output = { system: ["existing header"] }
+    await hook!(
+      {
+        sessionID: "s1",
+        model: { limit: { context: 1_000_000 } } as any,
+      },
+      output,
+    )
+    expect(output.system).toHaveLength(2)
+    expect(output.system[0]).toBe("existing header") // header unchanged
+    expect(output.system[1]).toMatch(
+      /^Context usage: [\d,]+ \/ [\d,]+ tokens \([\d.]+%\) as of last turn\.$/,
+    )
+    expect(output.system[1]).toContain("187,234")
+    expect(output.system[1]).toContain("1,000,000")
+    expect(output.system[1]).toContain("18.7%")
+  })
+})
