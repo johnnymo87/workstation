@@ -105,23 +105,7 @@ EOF
       exit "$RET"
     fi
 
-    # ---- Step 1: Snapshot tmux manifest ----
-    log "snapshotting tmux panes running nvim/nvims..."
 
-    MANIFEST=$(tmux list-panes -a \
-      -F '#{pane_id}'$'\t'''#{window_name}'$'\t'''#{pane_current_command}'$'\t'''#{pane_current_path}' 2>/dev/null \
-      | awk -F'\t' '$3 == "nvim" || $3 == "nvims" { print }' || true)
-
-    if [ -z "$MANIFEST" ]; then
-      log "no nvim/nvims panes found"
-      MANIFEST_COUNT=0
-    else
-      MANIFEST_COUNT=$(printf '%s\n' "$MANIFEST" | wc -l)
-      log "found $MANIFEST_COUNT nvim/nvims pane(s):"
-      printf '%s\n' "$MANIFEST" | while IFS=$'\t' read -r pane window cmd path; do
-        log "  $pane  $window  ($cmd)  $path"
-      done
-    fi
 
     # ---- Step 2: Snapshot live opencode attach clients ----
     # Restoration scope: ONLY sessions launched via Telegram /launch or
@@ -232,10 +216,9 @@ EOF
     # ---- Step 2: Confirm with user ----
     log ""
     log "About to:"
-    log "  1. SIGKILL $MANIFEST_COUNT nvim/nvims process(es)"
+    log "  1. SIGKILL all dev-owned nvim processes"
     log "  2. Restart opencode-serve.service (this Claude session's TUI will reconnect)"
-    log "  3. Respawn nvims in $MANIFEST_COUNT pane(s)"
-    log "  4. Restore $OPENCODE_COUNT opencode TUI(s) via oc-auto-attach"
+    log "  3. Launch recommendation session referencing $OPENCODE_COUNT captured sid(s)"
     log ""
 
     if [ "$YES" -ne 1 ]; then
@@ -250,38 +233,13 @@ EOF
     fi
 
     # ---- Step 3: Kill all nvims ----
-    if [ "$MANIFEST_COUNT" -gt 0 ]; then
-      log "killing all nvim/nvims processes (SIGKILL)..."
-      # Use -x nvim. This matches both `nvim` (the TTY frontend)
-      # and `nvim --embed` (the embedded server) because both have
-      # `comm` field = `nvim`.
-      if pkill -9 -u dev -x nvim 2>/dev/null; then
-        log "  pkill returned matches"
-      else
-        log "  pkill returned no matches (none running, or already dead)"
-      fi
-
-      # Poll each pane until its current command is no longer nvim/nvims.
-      log "polling panes for return to shell..."
-      printf '%s\n' "$MANIFEST" | while IFS=$'\t' read -r pane _window _cmd _path; do
-        DEADLINE=$(($(date +%s) + 10))
-        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-          CUR=$(tmux display-message -t "$pane" -p '#{pane_current_command}' 2>/dev/null || echo "GONE")
-          if [ "$CUR" = "GONE" ]; then
-            log "  $pane: pane no longer exists (skipping)"
-            break
-          fi
-          if [ "$CUR" != "nvim" ] && [ "$CUR" != "nvims" ]; then
-            log "  $pane: now running $CUR"
-            break
-          fi
-          # Sub-second poll without sleep (per AGENTS.md no-sleep policy)
-          read -t 0.1 -r _ < <(:) 2>/dev/null || true
-        done
-        if [ "$CUR" = "nvim" ] || [ "$CUR" = "nvims" ]; then
-          log "  $pane: WARNING — still running $CUR after 10s"
-        fi
-      done
+    log "killing all nvim/nvims processes (SIGKILL)..."
+    # -x nvim matches both `nvim` (TTY frontend) and `nvim --embed`
+    # (embedded server) because both have comm = `nvim`.
+    if pkill -9 -u dev -x nvim 2>/dev/null; then
+      log "  pkill returned matches"
+    else
+      log "  pkill returned no matches (none running, or already dead)"
     fi
 
     # ---- Step 5: Restart opencode-serve ----
@@ -309,60 +267,49 @@ EOF
       die "opencode-serve did not become healthy within 30s"
     fi
 
-    # ---- Step 6: Respawn nvims in each manifest pane ----
-    if [ "$MANIFEST_COUNT" -gt 0 ]; then
-      log "respawning nvims in $MANIFEST_COUNT pane(s)..."
-      printf '%s\n' "$MANIFEST" | while IFS=$'\t' read -r pane _window _cmd path; do
-        # Verify pane still exists
-        if ! tmux display-message -t "$pane" -p '#{pane_id}' >/dev/null 2>&1; then
-          log "  $pane: pane no longer exists, skipping respawn"
-          continue
-        fi
-        # cd to original path, then nvims. Single send-keys to keep it atomic.
-        tmux send-keys -t "$pane" "cd $path && nvims" Enter || true
-        log "  $pane: sent 'cd $path && nvims'"
-      done
-    fi
-
-    # ---- Step 6.5: Restore opencode TUIs via oc-auto-attach ----
-    # OPENCODE_MANIFEST was captured in Step 2 (one session id per line).
-    # oc-auto-attach handles its own polling for nvim socket + helper
-    # readiness, project-key resolution, and pane creation.
-    if [ "$OPENCODE_COUNT" -gt 0 ]; then
-      log "restoring $OPENCODE_COUNT opencode TUI(s)..."
-      while IFS= read -r sid; do
-        [ -n "$sid" ] || continue
-        log "  restoring $sid"
-        # oc-auto-attach exits 0 even on internal failure (by design).
-        # Merge its stderr into our stdout so any errors land in the
-        # systemd journal alongside our own logs (without our log()
-        # prefix — they're prefixed with [oc-auto-attach] already).
-        if ! /home/dev/.nix-profile/bin/oc-auto-attach "$sid" 2>&1; then
-          log "  WARNING: oc-auto-attach $sid returned non-zero"
-        fi
-      done <<< "$OPENCODE_MANIFEST"
+    # ---- Step 6: Write manifest + launch recommendation session ----
+    # Replaces the old auto-restore (nvim respawn + oc-auto-attach loop).
+    # The recommendation session reads the manifest, enriches each sid via
+    # opencode-serve, messages the user via Telegram with conversational
+    # recommendations, and re-opens only the chosen sessions on reply.
+    # Design: docs/plans/2026-05-16-recommendation-driven-reset-design.md
+    MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"
+    if [ -n "''$OPENCODE_MANIFEST" ]; then
+      printf '%s\n' "''$OPENCODE_MANIFEST" > "''$MANIFEST_PATH"
+      log "wrote ''$OPENCODE_COUNT sid(s) to ''$MANIFEST_PATH"
     else
-      log "no opencode TUIs to restore"
+      : > "''$MANIFEST_PATH"
+      log "wrote empty ''$MANIFEST_PATH (no captured sids)"
     fi
 
-    # ---- Step 7: Verify nvim sockets exist ----
-    if [ "$MANIFEST_COUNT" -gt 0 ]; then
-      log "verifying nvim sockets..."
-      printf '%s\n' "$MANIFEST" | while IFS=$'\t' read -r pane _window _cmd _path; do
-        DEADLINE=$(($(date +%s) + 5))
-        # pane_id is %N — strip the %
-        SOCK="/tmp/nvim-''${pane#%}.sock"
-        # Re-poll until found or deadline (sockets appear within ~1s typically)
-        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-          [ -S "$SOCK" ] && break
-          read -t 0.2 -r _ < <(:) 2>/dev/null || true
-        done
-        if [ -S "$SOCK" ]; then
-          log "  $pane: socket $SOCK ✓"
-        else
-          log "  $pane: WARNING — socket $SOCK missing"
-        fi
-      done
+    if [ "''$OPENCODE_COUNT" -eq 0 ]; then
+      log "no sessions to recommend; skipping recommendation session launch"
+    elif ! command -v opencode-launch >/dev/null 2>&1; then
+      log "WARNING: opencode-launch not on PATH; cannot spawn recommendation session"
+    else
+      log "launching recommendation session in ~ ..."
+      # The prompt is intentionally loose/judgmental. The recommendation
+      # session does its own enrichment via the opencode-serve HTTP API.
+      # See design doc for the rationale.
+      RECOMMENDATION_PROMPT=''$(cat <<'PROMPT'
+You're the morning recommendation agent. The user has just gone through a nightly reset of their workspace. Read the file at /tmp/reset-workspace-last-manifest.txt -- it contains one opencode session id per line, representing sessions that had a live TUI at reset time.
+
+For each sid, fetch its metadata from GET http://127.0.0.1:4096/session/<sid> and look at the title, directory, and last update time. If useful, also fetch recent messages from GET http://127.0.0.1:4096/session/<sid>/message to get a sense of whether the session was mid-task or wrapped up.
+
+Build a short, conversational Telegram message recommending which sessions to reopen and why. Be opinionated. Group by project. If something looks finished (a PR landed, a question got resolved), say so. If something looks mid-flight, say that too. Number the recommendations so the user can refer to them by number.
+
+Then use the question tool to ask the user which to reopen. Accept free-form replies like "1,3,5", "all", "none", "the mono ones".
+
+When they reply, parse their selection and for each chosen sid, run `oc-auto-attach <sid>` in a bash tool. Report a brief summary of what was opened.
+
+If the manifest file is missing or empty, message the user "Nightly reset complete, no sessions to recommend." and exit.
+PROMPT
+)
+      # opencode-launch first arg is directory, second is the prompt.
+      # ~ resolves inside opencode-launch via "''${directory/#\~/$HOME}".
+      if ! opencode-launch '~' "''$RECOMMENDATION_PROMPT" 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
+        log "WARNING: opencode-launch failed (non-zero exit); recommendation session not started"
+      fi
     fi
 
     log "reset-workspace complete"
