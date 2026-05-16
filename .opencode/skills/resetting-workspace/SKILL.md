@@ -31,11 +31,11 @@ revision -- both feed the manifest the recommendation session reads):
 
 1. **Direct (argv-based)**: TUIs launched via Telegram `/launch` or
    `opencode-launch` (CLI) carry their session id in the
-   `--session ses_xxx` argv, captured directly by step 2's strict
+   `--session ses_xxx` argv, captured directly by step 1's strict
    regex.
 
 2. **Resolved (cwd-based)**: Bare `:te opencode` TUIs have no sid in
-   argv; step 2 resolves their `/proc/<pid>/cwd` to the
+   argv; step 1 resolves their `/proc/<pid>/cwd` to the
    most-recent root session for that directory via
    `GET $OPENCODE_URL/session?directory=...&roots=true&limit=1`.
 
@@ -68,7 +68,7 @@ Concurrent runs are blocked by `flock /tmp/reset-workspace.lock`.
 
 - After landing changes to `nvims`, `oc-auto-attach`, or anything else that needs a fresh process to take effect.
 - When opencode-serve has bloated past ~6 GB (memory hygiene).
-- When the auto-attach plumbing is misbehaving and you want a known-good baseline.
+- When tabs have accumulated past what you want to deal with and you want the recommendation flow to help you sort out what's worth reopening.
 
 ## Nightly autonomous run
 
