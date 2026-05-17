@@ -31,6 +31,35 @@ pkgs.writeShellApplication {
       printf '[oc-auto-attach] %s\n' "$*" >&2
     }
 
+    # classify_pane <pane_cmd>
+    #
+    # Decides what oc-auto-attach should do with a pane it has matched
+    # by cwd. Prints exactly one token to stdout:
+    #
+    #   REUSE       — pane already has nvim in the foreground; caller
+    #                 should proceed to the socket-wait + RPC path.
+    #   SEND_NVIMS  — pane has a shell prompt; caller should
+    #                 `tmux send-keys C-c` then `send-keys nvims Enter`
+    #                 to start nvims in this pane, then proceed.
+    #   SKIP        — pane has something else in the foreground (a
+    #                 long-running tool the user doesn't want clobbered).
+    #                 Caller should `tmux select-window` so the user
+    #                 sees we noticed, log a hint, then exit 0.
+    classify_pane() {
+      local cmd="$1"
+      case "$cmd" in
+        nvim)
+          printf 'REUSE\n'
+          ;;
+        bash|zsh|fish|sh)
+          printf 'SEND_NVIMS\n'
+          ;;
+        *)
+          printf 'SKIP\n'
+          ;;
+      esac
+    }
+
     if [ $# -ne 1 ]; then
       log "usage: oc-auto-attach <session-id>"
       exit 0
