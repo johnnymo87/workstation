@@ -255,15 +255,21 @@ EOF
     fi
 
     log "polling /global/health for serve readiness..."
+    # --max-time 3 is load-bearing: without it, a single hung curl (e.g. TCP
+    # connected before serve's HTTP listener was ready, then read blocked
+    # indefinitely) wedges the whole script. Observed in the wild on
+    # 2026-05-16: curl parked for 6+ hours despite serve being healthy.
+    # The bash `while` can't re-check the deadline while wait4()'d on the
+    # curl child.
     DEADLINE=$(($(date +%s) + 30))
     while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-      if curl -sf "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+      if curl -sf --max-time 3 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
         log "  serve healthy"
         break
       fi
       read -t 0.5 -r _ < <(:) 2>/dev/null || true
     done
-    if ! curl -sf "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+    if ! curl -sf --max-time 3 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
       die "opencode-serve did not become healthy within 30s"
     fi
 
