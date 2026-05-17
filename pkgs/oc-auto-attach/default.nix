@@ -114,19 +114,25 @@ pkgs.writeShellApplication {
     # Step 3: find an existing tmux pane that's running nvim with cwd
     # equal to (or a descendant of) project_key. Prefer exact match.
     pane_id=""
+    pane_cmd=""
+    # Scan all panes for one whose pane_current_path matches the project,
+    # regardless of foreground command. We capture the command too so we
+    # can branch on it in Step 3.5.
     while IFS='|' read -r p_id p_cmd p_path; do
-      [ "$p_cmd" = "nvim" ] || continue
       if [ "$p_path" = "$project_key" ]; then
         pane_id="$p_id"
+        pane_cmd="$p_cmd"
         break  # exact match wins
       fi
       if [[ "$p_path" == "$project_key"/* ]] && [ -z "$pane_id" ]; then
-        pane_id="$p_id"  # remember as fallback, keep looking for exact
+        # Remember descendant as fallback; keep looking for exact.
+        pane_id="$p_id"
+        pane_cmd="$p_cmd"
       fi
     done < <(tmux list-panes -a -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)
 
     if [ -n "$pane_id" ]; then
-      log "matched existing pane $pane_id"
+      log "matched existing pane $pane_id (cmd=$pane_cmd)"
     else
       # Are we inside a tmux session at all? If not, there's no useful place
       # to put the window. (oc-auto-attach is meaningful only in a graphical
@@ -147,16 +153,34 @@ pkgs.writeShellApplication {
       # exactly that on cloudbox: the systemd-launched daemon's PATH did
       # not include awk, so /launch silently failed for any project
       # without a pre-existing tmux window.
+      # Defense-in-depth: the main scan should have caught a window for this
+      # project by pane_current_path, but if pane_current_path is stale (some
+      # shells don't fire OSC 7 reliably) or two sessions raced in the same
+      # cwd, we also check for a window literally named $window_name. Within
+      # that window, prefer a pane already running nvim (instant REUSE),
+      # else a pane sitting at a shell prompt (SEND_NVIMS), else the first
+      # pane we see (which will route through SKIP if it's some other tool
+      # the user doesn't want clobbered).
       existing_pane=""
+      existing_pane_cmd=""
+      existing_pane_priority=0   # 0=nothing, 1=other, 2=shell, 3=nvim
       while IFS='|' read -r ep_id ep_cmd; do
-        if [ "$ep_cmd" = "nvim" ]; then
+        case "$ep_cmd" in
+          nvim)               this_priority=3 ;;
+          bash|zsh|fish|sh)   this_priority=2 ;;
+          *)                  this_priority=1 ;;
+        esac
+        if [ "$this_priority" -gt "$existing_pane_priority" ]; then
           existing_pane="$ep_id"
-          break
+          existing_pane_cmd="$ep_cmd"
+          existing_pane_priority="$this_priority"
+          [ "$this_priority" -eq 3 ] && break   # nvim is best; stop early
         fi
       done < <(tmux list-panes -t ":$window_name" -F '#{pane_id}|#{pane_current_command}' 2>/dev/null || true)
       if [ -n "$existing_pane" ]; then
         pane_id="$existing_pane"
-        log "reusing existing window $window_name pane $pane_id"
+        pane_cmd="$existing_pane_cmd"
+        log "reusing existing window $window_name pane $pane_id (cmd=$pane_cmd)"
       else
         nvims_path="$(command -v nvims || true)"
         if [ -z "$nvims_path" ]; then
@@ -169,9 +193,49 @@ pkgs.writeShellApplication {
           log "tmux new-window failed; giving up"
           exit 0
         fi
+        # Brand new window: we know nvims is the entrypoint, so the
+        # foreground is (or will be momentarily) nvim. Skip the
+        # send-keys branch in Step 3.5 and go straight to socket-wait.
+        pane_cmd="nvim"
         log "created new pane $pane_id (window $window_name)"
       fi
     fi
+
+    # Step 3.5: Decide what to do with $pane_id based on its foreground.
+    #
+    # By this point pane_id is non-empty (we either matched or created)
+    # and pane_cmd reflects the pane's foreground command. classify_pane
+    # tells us which branch to take.
+    action="$(classify_pane "$pane_cmd")"
+    log "classify_pane: $action"
+    case "$action" in
+      REUSE)
+        # Foreground is already nvim — bring the window to focus and
+        # proceed to Step 4 (socket + RPC).
+        tmux select-window -t "$pane_id" 2>/dev/null || true
+        ;;
+      SEND_NVIMS)
+        # Shell prompt. Clear any half-typed command line with C-c,
+        # then send `nvims\n`. nvims will exec into `nvim --listen
+        # /tmp/nvim-<pane>.sock`, which Step 4-5 will pick up.
+        tmux send-keys -t "$pane_id" C-c 2>/dev/null || true
+        tmux send-keys -t "$pane_id" 'nvims' Enter 2>/dev/null || true
+        tmux select-window -t "$pane_id" 2>/dev/null || true
+        log "sent C-c + 'nvims' to pane $pane_id; waiting for nvim to come up"
+        ;;
+      SKIP)
+        # Some other tool is running in the matched pane (opencode,
+        # tail -f, top, etc). Don't clobber. Just bring it to focus
+        # and ask the user to launch nvims themselves.
+        tmux select-window -t "$pane_id" 2>/dev/null || true
+        log "found existing window for $project_key with $pane_cmd running; not launching nvims — start it yourself, then re-run oc-auto-attach $sid"
+        exit 0
+        ;;
+      *)
+        log "classify_pane returned unexpected token: $action; bailing"
+        exit 0
+        ;;
+    esac
 
     # Step 4: compute socket path.
     sock="/tmp/nvim-''${pane_id#%}.sock"
