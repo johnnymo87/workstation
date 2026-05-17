@@ -26,6 +26,16 @@ let
   # installed into the user's profile via users/dev/home.base.nix, so the CLI
   # `opencode-launch` keeps working as before.
   oc-auto-attach = pkgs.callPackage ../../pkgs/oc-auto-attach { };
+
+  # nvims is the nvim launcher (pkgs/nvims) that oc-auto-attach spawns when it
+  # needs to create a new tmux window for a launched session. Same locked-down
+  # PATH problem as oc-auto-attach above: without an absolute path injected
+  # into the pigeon-daemon service env, `command -v nvims` returns empty and
+  # the script's "tmux new-window -- nvims" branch silently skips. End result:
+  # /launch into a project with no existing nvim pane runs headlessly inside
+  # opencode-serve with no plugin loaded, completes with no Telegram
+  # notification, and the user is left hanging. See workstation-1lp.
+  nvims = pkgs.callPackage ../../pkgs/nvims { };
 in
 {
   # Guard: abort activation if applying the wrong host's config.
@@ -341,6 +351,9 @@ in
         # Absolute path to oc-auto-attach so launch-ingest.ts can find it
         # despite the locked-down systemd PATH. See let-binding above.
         "OC_AUTO_ATTACH_BIN=${oc-auto-attach}/bin/oc-auto-attach"
+        # Absolute path to nvims so oc-auto-attach can spawn it when it has
+        # to create a fresh tmux window. Same locked-down-PATH reasoning.
+        "OC_NVIMS_BIN=${nvims}/bin/nvims"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail

@@ -31,6 +31,42 @@ pkgs.writeShellApplication {
       printf '[oc-auto-attach] %s\n' "$*" >&2
     }
 
+    # resolve_nvims: locate the `nvims` launcher.
+    #
+    # Precedence:
+    #   1. $OC_NVIMS_BIN (absolute path), if set and executable.
+    #   2. `command -v nvims` on PATH.
+    #
+    # Prints the resolved path on stdout (0) or nothing (1).
+    #
+    # We honor $OC_NVIMS_BIN so the pigeon-daemon systemd unit on cloudbox
+    # can inject ''${pkgs.nvims}/bin/nvims explicitly: the unit's PATH is a
+    # locked-down nix-store list that does NOT include ~/.nix-profile/bin,
+    # so a bare `command -v nvims` returns empty and the launcher silently
+    # skips creating a TUI — which in turn means no pigeon plugin loads
+    # and the launched session completes with no Telegram notification.
+    # See workstation-1lp for the full incident writeup.
+    #
+    # A stale $OC_NVIMS_BIN (set but not -x) warns and falls back, so an
+    # outdated systemd env can never strand an interactive caller who
+    # has nvims on PATH.
+    resolve_nvims() {
+      if [ -n "''${OC_NVIMS_BIN:-}" ]; then
+        if [ -x "$OC_NVIMS_BIN" ]; then
+          printf '%s\n' "$OC_NVIMS_BIN"
+          return 0
+        fi
+        log "OC_NVIMS_BIN=$OC_NVIMS_BIN is set but not executable; falling back to PATH"
+      fi
+      local found
+      found="$(command -v nvims || true)"
+      if [ -n "$found" ]; then
+        printf '%s\n' "$found"
+        return 0
+      fi
+      return 1
+    }
+
     # classify_pane <pane_cmd>
     #
     # Decides what oc-auto-attach should do with a pane it has matched
@@ -182,11 +218,11 @@ pkgs.writeShellApplication {
         pane_cmd="$existing_pane_cmd"
         log "reusing existing window $window_name pane $pane_id (cmd=$pane_cmd)"
       else
-        nvims_path="$(command -v nvims || true)"
-        if [ -z "$nvims_path" ]; then
-          log "nvims not found on PATH; skipping"
+        if ! nvims_path="$(resolve_nvims)"; then
+          log "nvims not resolvable (neither OC_NVIMS_BIN nor PATH); skipping"
           exit 0
         fi
+        log "resolved nvims at $nvims_path"
         pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
           -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
         if [ -z "$pane_id" ]; then
