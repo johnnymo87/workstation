@@ -2,22 +2,16 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { fetchLatestAssistantUsage } from "./lib/context-usage-impl"
 
 /**
- * Injects a single "Context usage: X / Y tokens (Z%) as of last turn." line
- * into the system prompt on every LLM call, so the model has situational
- * awareness about its own working memory.
+ * Injects a single synthetic "Context usage" user message at the very end
+ * of the chat history, so the model has situational awareness about its own
+ * working memory.
  *
- * Silent on turn 1 (no prior assistant message to read tokens from), silent
- * on fetch errors (returns without modifying output.system), and silent
- * when the model has no usable `limit.context` (some local providers).
- *
- * The actual judgment about *when* to act on the number lives in the
- * "Managing Your Own Context" section of ~/.config/opencode/AGENTS.md.
- *
- * See docs/plans/2026-05-15-context-usage-nudge-design.md.
+ * This message is marked with cache: "never" and kind: "opencode_context_usage"
+ * so that opencode's cache breakpoint selection specifically ignores it.
+ * This prevents the dynamic counter from busting the prompt cache for the
+ * entire chat history.
  */
 const plugin: Plugin = async (ctx) => {
-  // Same trick as self-compact.ts: capture the in-process Hono fetch when
-  // the SDK client is running in TUI mode; fall back to the global fetch.
   const sdkClientConfig = (ctx.client as any)._client?.getConfig?.() as
     | { fetch?: typeof fetch }
     | undefined
@@ -25,27 +19,32 @@ const plugin: Plugin = async (ctx) => {
     sdkClientConfig?.fetch ?? globalThis.fetch
 
   return {
-    "experimental.chat.system.transform": async (input, output) => {
+    "experimental.chat.messages.transform": async (input, output) => {
       try {
-        const contextLimit = input.model?.limit?.context
+        const inContext = input as { sessionID?: string; model?: any }
+        const contextLimit = inContext.model?.limit?.context
         if (!contextLimit || contextLimit === 0) return
 
         const used = await fetchLatestAssistantUsage({
           fetch: internalFetch,
           serverUrl: ctx.serverUrl,
-          sessionID: input.sessionID,
+          sessionID: inContext.sessionID || ctx.sessionID,
         })
         if (used === null) return
 
         const pct = ((used / contextLimit) * 100).toFixed(1)
-        const line =
-          `Context usage: ${used.toLocaleString("en-US")} / ${contextLimit.toLocaleString("en-US")} ` +
-          `tokens (${pct}%) as of last turn.`
-
-        // Push AFTER the existing first element (the cacheable header) so
-        // llm.ts:120-124's 2-part rejoin keeps the header byte-identical
-        // across turns.
-        output.system.push(line)
+        
+        output.messages.push({
+          info: { role: "user" } as any,
+          parts: [{ 
+            type: "text", 
+            text: `<context_usage>\nContext usage as of the previous turn: ${used.toLocaleString("en-US")} / ${contextLimit.toLocaleString("en-US")} tokens (${pct}%).\nIf usage is high, proactively compact or summarize before continuing.\n</context_usage>`,
+            metadata: {
+              cache: "never",
+              kind: "opencode_context_usage"
+            }
+          }]
+        })
       } catch {
         // Plugin must never break a session.
       }
