@@ -1,26 +1,29 @@
 {
   lib,
-  buildGoModule,
+  buildGo126Module,
   fetchFromGitHub,
+  icu,
 }:
 
-buildGoModule rec {
+# Beads requires Go 1.26.x (go.mod declares `go 1.26.2`). Our pinned nixpkgs
+# (nixos-25.11) still ships go_1_25 as the default `buildGoModule`, but ships
+# `buildGo126Module` (backed by go_1_26) alongside. Use that explicitly.
+buildGo126Module rec {
   pname = "beads";
-  version = "0.49.1";
+  version = "1.0.4";
 
   src = fetchFromGitHub {
     owner = "steveyegge";
     repo = "beads";
     rev = "v${version}";
-    hash = "sha256-roOyTMy9nKxH2Bk8MnP4h2CDjStwK6z0ThQhFcM64QI=";
+    hash = "sha256-a356lk3dWJg2VzXmvBL0xVYUMgICDY/6s6A5km8cjBU=";
   };
 
-  vendorHash = "sha256-YU+bRLVlWtHzJ1QPzcKJ70f+ynp8lMoIeFlm+29BNPE=";
+  vendorHash = "sha256-gTOYABrdQ9T5uxW5QEE8hRWH6AnCPFE/hbB2t1OJTrY=";
 
-  # Remove go version constraint that requires newer Go than nixpkgs provides
-  postPatch = ''
-    sed -i '/^toolchain /d' go.mod
-  '';
+  # Beads 1.0+ uses github.com/dolthub/go-icu-regex (CGo bindings to ICU4C)
+  # for MySQL-compatible regex, so we need ICU headers + libs at build time.
+  buildInputs = [ icu ];
 
   subPackages = [ "cmd/bd" ];
 

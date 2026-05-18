@@ -37,6 +37,12 @@ beads.right.meta.json
 .sync.lock
 sync_base.jsonl
 
+# Beads 1.0+ embedded-mode local state (Dolt-backed). Per-machine, not
+# version-controlled. Created on first run of `bd` 1.0.x against a 0.x DB.
+embeddeddolt/
+backup/
+export-state.json
+
 # NOTE: Do NOT add negation patterns (e.g., !issues.jsonl) here.
 # They would override fork protection in .git/info/exclude, allowing
 # contributors to accidentally commit upstream issue databases.
