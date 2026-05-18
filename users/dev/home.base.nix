@@ -326,7 +326,6 @@ in
 
     # Auto-attach launched sessions to nvim+tmux (calls into nvims via RPC)
     localPkgs.oc-auto-attach
-    localPkgs.reset-workspace
 
     # GitHub CLI
     pkgs.gh
@@ -345,6 +344,12 @@ in
 
     # JavaScript runtime (used by pigeon and other projects)
     pkgs.bun
+  ]
+  # Linux-only tools (devbox, cloudbox, crostini). reset-workspace shells out
+  # to systemd-run for cgroup re-exec and sudo systemctl restart, so it can't
+  # even evaluate on Darwin under the newer stricter nixpkgs platform checks.
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+    localPkgs.reset-workspace
   ]
   # Work tools (macOS + cloudbox only)
   ++ lib.optionals (isDarwin || isCloudbox) [
