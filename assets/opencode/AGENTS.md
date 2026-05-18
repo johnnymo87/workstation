@@ -83,42 +83,6 @@ Practical guidance:
 - Use `wait` for backgrounded child processes you actually own.
 - Use `timeout` to bound an operation.
 
-## Managing Your Own Context
-
-You can see your current context usage in every system prompt as a line
-like `Context usage: 187,234 / 1,000,000 tokens (18.7%) as of last turn.`
-It's there so you have the same situational awareness about your own
-working memory that a human collaborator would have about theirs.
-
-A few things worth knowing:
-
-- Long sessions tend to drift. Past roughly 200k tokens of absolute
-  usage, even on a model with a 1M window, the conversation often
-  becomes less focused: stale tool outputs crowd out current state,
-  early decisions get re-litigated, and the cost-per-turn climbs. The
-  exact number isn't magic — 180k is fine, 220k is fine — but the
-  region is real.
-
-- When you notice you're in that region, the question to ask is "is
-  this a good moment to compact?" — not "must I compact now?" A good
-  moment is a natural break: a task finished, a plan written, a
-  decision made, before starting the next chunk. A bad moment is
-  mid-edit, mid-debug, or partway through a tool-call chain whose
-  state would be hard to reconstruct from a summary.
-
-- If it's a good moment, the `preparing-for-compaction` skill is the
-  established path: persist durable context (beads, plan files), draft
-  a resumption prompt, then call `self_compact_and_resume`.
-
-- If it isn't, keep working. The hard ceiling at the model's actual
-  context limit will auto-compact if you blow through it; that's a
-  safety net, not a goal. The number in the footer is for your
-  judgment, not for a threshold check.
-
-- Don't announce the number unprompted, and don't pad turns with
-  "context is at X" status updates — the user can see it too. Just
-  let it inform when you raise the question of compacting.
-
 ## Host Identification
 
 The `shell-env.ts` plugin injects `OPENCODE_HOSTNAME` into every bash tool
