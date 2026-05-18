@@ -33,6 +33,31 @@ export async function findActiveModel(input: {
 
 const STALE_MS = 30 * 60 * 1000
 
+/**
+ * Diagnostic logger for the self-compact regression hunt (workstation issue:
+ * post-1.15 bump, the resumption prompt no longer lands after compaction).
+ *
+ * Writes to stderr (which opencode-patched merges into its log files) with a
+ * `[self-compact]` tag so we can `grep` for the trail across the four
+ * boundaries we suspect:
+ *
+ *   1. tool execute        — did the model actually queue a resumption?
+ *   2. onStatus(idle)      — did the plugin see the session go idle and fire summarize?
+ *   3. onCompacted         — did the session.compacted bus event reach the plugin?
+ *   4. HTTP POSTs          — did /summarize and /prompt_async succeed at the HTTP layer?
+ *
+ * Keep this lightweight — no JSON.stringify of large objects, no PII beyond
+ * sessionID prefix. Remove (or downgrade) once root cause is fixed.
+ */
+function debug(stage: string, fields: Record<string, unknown> = {}) {
+  const parts = [`[self-compact] ${stage}`]
+  for (const [k, v] of Object.entries(fields)) {
+    parts.push(`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+  }
+  // eslint-disable-next-line no-console
+  console.error(parts.join(" "))
+}
+
 export interface PendingResume {
   prompt: string
   /**
@@ -81,6 +106,11 @@ export function createSelfCompactTool(deps: {
         prompt: args.prompt,
         phase: "awaitingTurnEnd",
         createdAt: now,
+      })
+      debug("tool.execute stash", {
+        sessionID: toolCtx.sessionID,
+        promptChars: args.prompt.length,
+        pendingSize: deps.pending.size,
       })
       return "Compaction queued; will run when this turn ends."
     },
@@ -143,17 +173,38 @@ export function createOnCompacted(deps: {
   callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
 }) {
   return async ({ event }: { event: PluginBusEvent }) => {
+    if (event.type === "session.compacted") {
+      debug("onCompacted event observed", {
+        sessionID:
+          (event.properties as { sessionID?: string } | undefined)?.sessionID ?? "unknown",
+        pendingSize: deps.pending.size,
+        pendingKeys: Array.from(deps.pending.keys()),
+      })
+    }
     if (!isSessionCompacted(event)) return
     const { sessionID } = event.properties
     const entry = deps.pending.get(sessionID)
-    if (!entry) return
+    if (!entry) {
+      debug("onCompacted no-entry", { sessionID, pendingSize: deps.pending.size })
+      return
+    }
     // Remove the entry synchronously BEFORE the await so a re-entrant
     // session.compacted event for the same session doesn't observe it
     // and double-deliver. If callPromptAsync throws, the entry is still
     // gone — matches MVP design (no automatic retry; user re-invokes the
     // skill if the prompt fails to deliver).
     deps.pending.delete(sessionID)
-    await deps.callPromptAsync({ sessionID, text: entry.prompt })
+    debug("onCompacted firing prompt_async", { sessionID, promptChars: entry.prompt.length })
+    try {
+      await deps.callPromptAsync({ sessionID, text: entry.prompt })
+      debug("onCompacted prompt_async OK", { sessionID })
+    } catch (err) {
+      debug("onCompacted prompt_async FAILED", {
+        sessionID,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
   }
 }
 
@@ -197,19 +248,29 @@ export function createOnStatus(deps: {
     const { sessionID } = event.properties
     const entry = deps.pending.get(sessionID)
     if (!entry) return
-    if (entry.phase !== "awaitingTurnEnd") return
+    if (entry.phase !== "awaitingTurnEnd") {
+      debug("onStatus skip non-awaiting", { sessionID, phase: entry.phase })
+      return
+    }
 
     // Promote phase synchronously BEFORE awaiting anything so a re-entrant
     // idle event for the same session can't double-trigger summarize.
     entry.phase = "summarizing"
+    debug("onStatus idle promote", { sessionID, pendingSize: deps.pending.size })
 
     const model = await deps.findActiveModel({ sessionID })
     if (!model) {
       // No model means we can't proceed; evict the entry. User will re-invoke
       // the skill if they still want to compact.
+      debug("onStatus no-model evict", { sessionID })
       deps.pending.delete(sessionID)
       return
     }
+    debug("onStatus firing summarize", {
+      sessionID,
+      providerID: model.providerID,
+      modelID: model.modelID,
+    })
 
     try {
       await deps.callSummarize({
@@ -217,11 +278,16 @@ export function createOnStatus(deps: {
         providerID: model.providerID,
         modelID: model.modelID,
       })
+      debug("onStatus summarize OK", { sessionID })
       // On success, leave the entry in 'summarizing' phase. The
       // session.compacted handler will pop it when compaction completes.
-    } catch {
+    } catch (err) {
       // Summarize failed; evict so the next idle doesn't retry. User
       // re-invokes the skill if they still want to compact.
+      debug("onStatus summarize FAILED evict", {
+        sessionID,
+        error: err instanceof Error ? err.message : String(err),
+      })
       deps.pending.delete(sessionID)
     }
   }
@@ -244,6 +310,7 @@ export async function callSummarizeHttp(
   // the timeout would just spuriously cancel legitimate long
   // summarizations. Pigeon's daemon does the same — no timeout.
   const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/summarize`, ctx.serverUrl)
+  debug("callSummarizeHttp request", { sessionID: input.sessionID, url: url.pathname })
   const res = await ctx.fetch(
     new Request(url.toString(), {
       method: "POST",
@@ -255,6 +322,7 @@ export async function callSummarizeHttp(
       }),
     }),
   )
+  debug("callSummarizeHttp response", { sessionID: input.sessionID, status: res.status })
   if (!res.ok) throw new Error(`summarize failed: ${res.status} ${await res.text()}`)
 }
 
@@ -263,6 +331,11 @@ export async function callPromptAsyncHttp(
   input: { sessionID: string; text: string },
 ): Promise<void> {
   const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/prompt_async`, ctx.serverUrl)
+  debug("callPromptAsyncHttp request", {
+    sessionID: input.sessionID,
+    url: url.pathname,
+    textChars: input.text.length,
+  })
   const res = await ctx.fetch(
     new Request(url.toString(), {
       method: "POST",
@@ -274,5 +347,6 @@ export async function callPromptAsyncHttp(
       signal: AbortSignal.timeout(10_000),
     }),
   )
+  debug("callPromptAsyncHttp response", { sessionID: input.sessionID, status: res.status })
   if (!res.ok) throw new Error(`prompt_async failed: ${res.status} ${await res.text()}`)
 }
