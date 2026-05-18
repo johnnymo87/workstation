@@ -74,7 +74,7 @@ acli jira workitem search --jql \
 ### Read arbitrary Jira fields (acli)
 
 ```bash
-acli jira workitem view --key PROJ-1234 --json | jq '.fields.customfield_10001'
+acli jira workitem view PROJ-1234 --json | jq '.fields.customfield_10001'
 ```
 
 ## Org Config

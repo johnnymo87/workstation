@@ -59,13 +59,13 @@ acli jira workitem create \
 
 ```bash
 # Full JSON
-acli jira workitem view --key PROJ-1234 --json | jq .
+acli jira workitem view PROJ-1234 --json | jq .
 
 # Specific field
-acli jira workitem view --key PROJ-1234 --json | jq '.fields.summary'
+acli jira workitem view PROJ-1234 --json | jq '.fields.summary'
 
 # Custom field example
-acli jira workitem view --key PROJ-1234 --json | jq '.fields.customfield_10001'
+acli jira workitem view PROJ-1234 --json | jq '.fields.customfield_10001'
 ```
 
 Note: description comes back as ADF (Atlassian Document Format) JSON, not Markdown. For rendered Markdown of a ticket's description + comments + attachments, use **nvim** instead.
@@ -79,7 +79,7 @@ acli jira workitem edit \
   --description-file desc-updated.md
 
 acli jira workitem edit --key PROJ-1234 --assignee "user@example.com"
-acli jira workitem edit --key PROJ-1234 --status "In Review"
+acli jira workitem transition --key PROJ-1234 --status "In Review"
 ```
 
 ### Delete
@@ -110,18 +110,18 @@ acli jira workitem comment list --key PROJ-1234 --json | jq .
 acli jira workitem comment create --key PROJ-1234 \
   --body "This reduces manual QA burden."
 
-# Update last comment
-acli jira workitem comment update --key PROJ-1234 \
+# Update last comment from the same author
+acli jira workitem comment create --key PROJ-1234 \
   --edit-last \
   --body "Updated: added retry logic."
 
 # Update specific comment
 acli jira workitem comment update --key PROJ-1234 \
-  --comment-id 123456 \
+  --id 123456 \
   --body "Updated comment"
 
 # Delete
-acli jira workitem comment delete --comment-id 123456
+acli jira workitem comment delete --key PROJ-1234 --id 123456
 ```
 
 ### Example: Create a Bug Ticket
