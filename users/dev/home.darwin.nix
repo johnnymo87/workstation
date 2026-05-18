@@ -49,15 +49,6 @@ lib.mkIf isDarwin {
         # Keep a stable alias while bash migration is in progress.
         alias ssdb='screenshot-to-devbox'
 
-        # nvims: launch nvim with a unique RPC socket so external tools
-        # (oc-auto-attach, ccremote, etc.) can drive this nvim instance.
-        # Inside any nvim terminal split, $NVIM is auto-set by nvim itself,
-        # so callers can address the parent server without an explicit path.
-        # Migrated out of dotfiles/.bashrc.d/claude.bashrc 2026-05-13.
-        nvims() {
-            local socket="/tmp/nvim-''${RANDOM}-$$.sock"
-            nvim --listen "$socket" "$@"
-        }
       '';
 
       # Darwin common.conf - empty (no special options needed locally)
