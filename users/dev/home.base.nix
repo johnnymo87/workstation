@@ -84,7 +84,8 @@ let
     '';
   };
 
-  # Patched opencode with prompt caching (PR #5422) + vim (PR #12679) + tool fix (PR #16751) + MCP reconnect (#15247) + Opus 4.7
+  # Patched opencode with prompt caching, prompt-loop byte identity, cache-aligned compaction,
+  # vim, tool fix, MCP reconnect, eager input streaming workaround, and prefill fix.
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
   #
@@ -97,22 +98,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-69sty5Trd6dR4WgQoMUMqLyX84DVVO8HclUBF7K9SWE=";
+      hash = "sha256-K5HY+8dh3tqdGQ8OW3CzUd829mPlyN8w7aB6BX33A74=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-pZsQzRcPXQdRjziwp+DrUuAtolRnLIMCEx1s+MkeoYY=";
+      hash = "sha256-+1GuSPgfDOjIQrwaLOcMAwrinsmZc//QdJVhrJ26CnI=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-PqGHyIWXI4uMBH3SuMgUpNiyRa/v7zY9pBRaax9+Lo8=";
+      hash = "sha256-lbawLzCjZOxfQE2zQIPRM4iBMtdLcNU35LLOCAoXAhs=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-HnurqfK1hjvzrvHQ/wV1wfW9wjps2Fn58IPC4NoWO+w=";
+      hash = "sha256-+OiVE2xAuDV5Ygn9TPpkPQRLPATob35VvZ+adKlnCNA=";
       isZip = true;
     };
   };
@@ -156,7 +157,7 @@ let
       runHook postInstall
     '';
     meta = {
-      description = "OpenCode with prompt caching + vim + tool fix + MCP reconnect";
+      description = "OpenCode with prompt caching and local patches";
       homepage = "https://github.com/johnnymo87/opencode-patched";
       mainProgram = "opencode";
     };
