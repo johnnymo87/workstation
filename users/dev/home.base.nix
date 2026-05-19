@@ -15,14 +15,48 @@ let
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
 
       usage() {
-        echo "Usage: opencode-launch [directory] <prompt>"
+        echo "Usage: opencode-launch [--model provider/model[@variant]] [directory] <prompt>"
         echo ""
         echo "Launch a headless opencode session."
         echo ""
         echo "  opencode-launch ~/projects/pigeon \"fix the test\""
         echo "  opencode-launch \"fix the test\"  # uses current directory"
+        echo "  opencode-launch --model google-vertex-anthropic/claude-opus-4-7@default ~/projects/pigeon \"review the PR\""
         exit 1
       }
+
+      model_spec=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --model)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+              echo "Error: --model requires provider/model[@variant]" >&2
+              exit 1
+            fi
+            model_spec="$2"
+            shift 2
+            ;;
+          --model=*)
+            model_spec="''${1#--model=}"
+            if [ -z "$model_spec" ]; then
+              echo "Error: --model requires provider/model[@variant]" >&2
+              exit 1
+            fi
+            shift
+            ;;
+          --)
+            shift
+            break
+            ;;
+          -*)
+            echo "Error: unknown option: $1" >&2
+            usage
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
 
       if [ $# -eq 0 ]; then
         usage
@@ -37,6 +71,25 @@ let
 
       # Resolve ~ to $HOME
       directory="''${directory/#\~/$HOME}"
+
+      if [ -n "$model_spec" ]; then
+        model_provider="''${model_spec%%/*}"
+        model_rest="''${model_spec#*/}"
+        if [ "$model_provider" = "$model_spec" ] || [ -z "$model_provider" ] || [ -z "$model_rest" ]; then
+          echo "Error: --model must be provider/model[@variant]" >&2
+          exit 1
+        fi
+
+        model_id="''${model_rest%@*}"
+        model_variant=""
+        if [ "$model_id" != "$model_rest" ]; then
+          model_variant="''${model_rest##*@}"
+        fi
+        if [ -z "$model_id" ] || { [ "$model_id" != "$model_rest" ] && [ -z "$model_variant" ]; }; then
+          echo "Error: --model must be provider/model[@variant]" >&2
+          exit 1
+        fi
+      fi
 
       # Health check
       if ! curl -sf "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
@@ -58,11 +111,22 @@ let
         exit 1
       fi
 
+      if [ -n "$model_spec" ]; then
+        prompt_payload=$(jq -n \
+          --arg p "$prompt" \
+          --arg provider "$model_provider" \
+          --arg model "$model_id" \
+          --arg variant "$model_variant" \
+          '{parts: [{type: "text", text: $p}], model: {providerID: $provider, modelID: $model}} + (if $variant == "" then {} else {variant: $variant} end)')
+      else
+        prompt_payload=$(jq -n --arg p "$prompt" '{parts: [{type: "text", text: $p}]}')
+      fi
+
       # Send prompt
       curl -sf -X POST "$OPENCODE_URL/session/$session_id/prompt_async" \
         -H "x-opencode-directory: $directory" \
         -H "Content-Type: application/json" \
-        -d "$(jq -n --arg p "$prompt" '{parts: [{type: "text", text: $p}]}')" >/dev/null || {
+        -d "$prompt_payload" >/dev/null || {
         echo "Error: failed to send prompt to session $session_id" >&2
         exit 1
       }
