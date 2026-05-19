@@ -31,20 +31,14 @@ buildGo126Module rec {
 
   # Wrap `bd` so that `bd init` always passes `--skip-hooks`.
   #
-  # Why: upstream `bd init` (cmd/bd/init.go ~L585) installs git hooks by
-  # default into .git/hooks/ for SQLite-backed repos. The pre-commit hook it
-  # writes (cmd/bd/init_git_hooks.go -> installGitHooks) is the inline variant
-  # which has a worktree bug: it correctly resolves the main repo's .beads
-  # directory into a `BEADS_DIR` shell variable, but never exports it nor cd's
-  # to the main repo before running `bd sync --flush-only`. Result: every
-  # commit inside any worktree of a beads-tracked repo fails with
-  #   Error: Failed to flush bd changes to JSONL
-  # forcing `git commit --no-verify` as a workaround.
+  # Why: workstation policy is to keep git hook installation explicit. Beads
+  # 1.0.4 no longer installs hooks during non-interactive `bd init`, but this
+  # wrapper preserves the policy if upstream changes that default or if another
+  # init path would otherwise add hooks silently.
   #
-  # Even fixing the worktree bug doesn't address the larger objection: the
-  # bd daemon already auto-flushes on a 30s debounce and we run `bd sync`
-  # manually at session end, so the pre-commit gate is overhead with
-  # negligible safety benefit in this workflow.
+  # The active hook surface in 1.0 is `bd hooks install` and `bd doctor --fix`.
+  # We leave those available as deliberate user actions, but `bd init` should
+  # not make future commits depend on beads hook behavior as a side effect.
   #
   # Upstream offers no env var or config knob to disable hook installation
   # globally — only the per-invocation `--skip-hooks` flag on `bd init`. So
