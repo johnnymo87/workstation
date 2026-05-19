@@ -163,7 +163,8 @@ See [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) for the
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   # bd 1.0 flushes writes to Dolt automatically via dolt.auto-commit=on.
+   # If a Dolt remote is configured, sync it explicitly with bd dolt pull/push.
    git push
    git status  # MUST show "up to date with origin"
    ```
