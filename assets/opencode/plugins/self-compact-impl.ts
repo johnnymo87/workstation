@@ -108,6 +108,16 @@ export interface PendingResume {
   createdAt: number
 }
 
+const SHARED_PENDING_KEY = Symbol.for("opencode.selfCompact.pendingResumes")
+
+export function getSharedPendingResumes(): Map<string, PendingResume> {
+  const global = globalThis as typeof globalThis & {
+    [SHARED_PENDING_KEY]?: Map<string, PendingResume>
+  }
+  global[SHARED_PENDING_KEY] ??= new Map<string, PendingResume>()
+  return global[SHARED_PENDING_KEY]
+}
+
 /**
  * v2 tool: stash-and-return.
  *

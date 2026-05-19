@@ -2,13 +2,13 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import {
   type CallContext,
-  type PendingResume,
   callPromptAsyncHttp,
   callSummarizeHttp,
   createOnCompacted,
   createOnStatus,
   createSelfCompactTool,
   findActiveModel,
+  getSharedPendingResumes,
 } from "./self-compact-impl"
 
 // IMPORTANT: only the default export should be a plugin factory.
@@ -21,7 +21,7 @@ const plugin: Plugin = async (ctx) => {
   const sdkClientConfig: any = (ctx.client as any)._client?.getConfig?.()
   const internalFetch: typeof fetch = sdkClientConfig?.fetch ?? globalThis.fetch
   const callCtx: CallContext = { fetch: internalFetch, serverUrl: ctx.serverUrl }
-  const pending = new Map<string, PendingResume>()
+  const pending = getSharedPendingResumes()
 
   const toolImpl = createSelfCompactTool({ pending })
 

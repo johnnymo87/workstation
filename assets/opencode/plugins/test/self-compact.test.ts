@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest"
 import {
   createDebugLogger,
+  getSharedPendingResumes,
   findActiveModel,
   createSelfCompactTool,
   createOnCompacted,
@@ -117,6 +118,30 @@ describe("findActiveModel", () => {
 })
 
 describe("createSelfCompactTool (v2: stash-and-return)", () => {
+  it("shares pending entries across plugin instances in the same process", async () => {
+    const pendingA = getSharedPendingResumes()
+    pendingA.clear()
+    const pendingB = getSharedPendingResumes()
+
+    expect(pendingB).toBe(pendingA)
+
+    const tool = createSelfCompactTool({ pending: pendingA })
+    await tool.execute({ prompt: "resume across instances" }, { sessionID: "ses_shared" })
+    pendingA.get("ses_shared")!.phase = "summarizing"
+
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    const handler = createOnCompacted({ pending: pendingB, callPromptAsync })
+    await handler({
+      event: { type: "session.compacted", properties: { sessionID: "ses_shared" } },
+    })
+
+    expect(callPromptAsync).toHaveBeenCalledWith({
+      sessionID: "ses_shared",
+      text: "resume across instances",
+    })
+    expect(pendingA.has("ses_shared")).toBe(false)
+  })
+
   it("stashes pending entry with phase 'awaitingTurnEnd' and returns instantly", async () => {
     const pending = new Map<string, PendingResume>()
     const tool = createSelfCompactTool({ pending })
