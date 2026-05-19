@@ -60,6 +60,16 @@ PRICES: dict[str, dict[str, float]] = {
     "gemini-3.1-pro-preview": {
         "input": 2.00, "output": 12.00, "cache_write": 2.00, "cache_read": 0.20,
     },
+    # GPT-5.5 Standard (OpenAI provider).
+    # Rates from LiteLLM/model pricing + models.dev discussion, observed 2026-05:
+    # input=$5/MTok, cached input=$0.50/MTok, output=$30/MTok. OpenAI-style
+    # automatic prompt caching does not expose Anthropic-style cache creation
+    # charges, so cache_write is 0.0 in this schema. Requests above 272k prompt
+    # tokens have higher rates (input=$10, cache_read=$1, output=$45), which
+    # oc-cost does not model yet because pricing is currently per model row.
+    "gpt-5.5": {
+        "input": 5.00, "output": 30.00, "cache_write": 0.00, "cache_read": 0.50,
+    },
 }
 
 

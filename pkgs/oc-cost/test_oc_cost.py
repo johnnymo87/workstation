@@ -59,6 +59,18 @@ class TestPriceFor(unittest.TestCase):
         self.assertEqual(rates["cache_read"], 0.20)
         self.assertEqual(rates["cache_write"], 2.00)
 
+    def test_gpt_5_5_standard(self):
+        # GPT-5.5 standard pricing: input=$5.00/MTok,
+        # cached input=$0.50/MTok, output=$30.00/MTok. OpenAI-style
+        # automatic prompt caching does not expose an Anthropic-style
+        # cache-write charge, so cache_write is 0.0 in this schema.
+        rates = oc_cost.price_for("gpt-5.5")
+        self.assertIsNotNone(rates)
+        self.assertEqual(rates["input"], 5.00)
+        self.assertEqual(rates["output"], 30.00)
+        self.assertEqual(rates["cache_read"], 0.50)
+        self.assertEqual(rates["cache_write"], 0.00)
+
     def test_longest_prefix_wins_regardless_of_dict_order(self):
         # Regression test for the analyze.mjs bug: when multiple keys
         # match by prefix, the LONGEST one must win, not the first
@@ -467,6 +479,21 @@ class TestCostComponents(unittest.TestCase):
         ]
         oc_cost.compute_cost_components(by_model, active_days=1)
         self.assertAlmostEqual(by_model[0]["cost_usd"], 0.50, places=4)
+
+    def test_gpt_5_5_openai_style_cached_input_cost(self):
+        by_model = [
+            {"model": "gpt-5.5", "msgs": 1, "cache_read": 1_000_000,
+             "cache_write": 1_000_000, "uncached": 1_000_000, "output": 1_000_000},
+        ]
+        components = oc_cost.compute_cost_components(by_model, active_days=1)
+
+        # input $5 + cached input $0.50 + output $30 + no cache-write charge.
+        self.assertAlmostEqual(components["uncached_input"], 5.00, places=4)
+        self.assertAlmostEqual(components["cache_reads"], 0.50, places=4)
+        self.assertAlmostEqual(components["cache_writes"], 0.00, places=4)
+        self.assertAlmostEqual(components["output"], 30.00, places=4)
+        self.assertAlmostEqual(components["total"], 35.50, places=4)
+        self.assertAlmostEqual(by_model[0]["cost_usd"], 35.50, places=4)
 
     def test_unknown_model_gets_none_cost(self):
         by_model = [
