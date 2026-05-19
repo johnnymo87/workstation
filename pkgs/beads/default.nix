@@ -13,7 +13,7 @@ buildGo126Module rec {
   version = "1.0.4";
 
   src = fetchFromGitHub {
-    owner = "steveyegge";
+    owner = "gastownhall";
     repo = "beads";
     rev = "v${version}";
     hash = "sha256-a356lk3dWJg2VzXmvBL0xVYUMgICDY/6s6A5km8cjBU=";
@@ -86,7 +86,7 @@ buildGo126Module rec {
 
   meta = with lib; {
     description = "A distributed issue tracker designed for AI-supervised coding workflows";
-    homepage = "https://github.com/steveyegge/beads";
+    homepage = "https://github.com/gastownhall/beads";
     license = licenses.mit;
     sourceProvenance = with sourceTypes; [ fromSource ];
     mainProgram = "bd";
