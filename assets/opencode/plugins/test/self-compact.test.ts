@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest"
 import {
+  createDebugLogger,
   findActiveModel,
   createSelfCompactTool,
   createOnCompacted,
@@ -8,6 +9,33 @@ import {
   callPromptAsyncHttp,
 } from "../self-compact-impl"
 import type { PendingResume } from "../self-compact-impl"
+
+describe("createDebugLogger", () => {
+  it("writes each diagnostic line to stderr and the durable sink", () => {
+    const stderr = vi.fn()
+    const appendLine = vi.fn()
+    const debug = createDebugLogger({ stderr, appendLine, now: () => "2026-05-18T00:00:00.000Z" })
+
+    debug("stage", { sessionID: "ses_abc", pendingSize: 2 })
+
+    expect(stderr).toHaveBeenCalledWith("[self-compact] stage sessionID=ses_abc pendingSize=2")
+    expect(appendLine).toHaveBeenCalledWith(
+      "2026-05-18T00:00:00.000Z [self-compact] stage sessionID=ses_abc pendingSize=2",
+    )
+  })
+
+  it("does not throw when durable sink write fails", () => {
+    const debug = createDebugLogger({
+      stderr: vi.fn(),
+      appendLine: () => {
+        throw new Error("disk full")
+      },
+      now: () => "2026-05-18T00:00:00.000Z",
+    })
+
+    expect(() => debug("stage")).not.toThrow()
+  })
+})
 
 describe("findActiveModel", () => {
   it("returns the model from the most recent user message that has model info", async () => {

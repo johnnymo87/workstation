@@ -56,15 +56,12 @@ let
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # Platform overlay: Atlassian MCP wiring (macOS + cloudbox).
-  # The default model comes from opencode.base.json (anthropic/claude-opus-4-7),
-  # which uses the @ex-machina/opencode-anthropic-auth plugin. Auth is provided
-  # by CLAUDE_CODE_OAUTH_TOKEN (cloudbox: sops claude_personal_oauth_token,
-  # exported by opencode-serve's start wrapper; macOS: opencode auth login or
-  # Keychain). google-vertex-anthropic/claude-opus-4-7@default and
+  # The default model and model-specific options come from opencode.base.json.
+  # For OpenAI GPT-5.x, OpenCode defaults to medium reasoning unless a variant
+  # or model option overrides it, so the base config pins gpt-5.5 to xhigh.
+  # google-vertex-anthropic/claude-opus-4-7@default and
   # github-copilot/claude-opus-4.7 remain reachable at runtime via /model
-  # for fallback. github-copilot was tried as default but rejected: Copilot
-  # caps context at 200k and limits Opus thinking to medium, while Anthropic
-  # recommends xhigh. Vertex was tried as default (commit 8f12f28, reverted
+  # for fallback. Vertex was tried as default (commit 8f12f28, reverted
   # 2026-05-15) but burned ~$870/day vs anthropic/* with caching working
   # better through the personal subscription path.
   opencodeOverlay = lib.optionalAttrs (isDarwin || isCloudbox) {

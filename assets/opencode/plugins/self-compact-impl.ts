@@ -1,4 +1,6 @@
 import type { EventSessionCompacted } from "@opencode-ai/sdk"
+import { appendFileSync, mkdirSync } from "node:fs"
+import { dirname, join } from "node:path"
 
 export async function findActiveModel(input: {
   fetch: typeof fetch
@@ -37,8 +39,8 @@ const STALE_MS = 30 * 60 * 1000
  * Diagnostic logger for the self-compact regression hunt (workstation issue:
  * post-1.15 bump, the resumption prompt no longer lands after compaction).
  *
- * Writes to stderr (which opencode-patched merges into its log files) with a
- * `[self-compact]` tag so we can `grep` for the trail across the four
+ * Writes to stderr and a durable state-file sink with a `[self-compact]` tag
+ * so we can inspect the trail across the four
  * boundaries we suspect:
  *
  *   1. tool execute        — did the model actually queue a resumption?
@@ -49,14 +51,44 @@ const STALE_MS = 30 * 60 * 1000
  * Keep this lightweight — no JSON.stringify of large objects, no PII beyond
  * sessionID prefix. Remove (or downgrade) once root cause is fixed.
  */
-function debug(stage: string, fields: Record<string, unknown> = {}) {
-  const parts = [`[self-compact] ${stage}`]
-  for (const [k, v] of Object.entries(fields)) {
-    parts.push(`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+export function createDebugLogger(deps: {
+  stderr: (line: string) => void
+  appendLine?: (line: string) => void
+  now?: () => string
+}) {
+  return (stage: string, fields: Record<string, unknown> = {}) => {
+    const parts = [`[self-compact] ${stage}`]
+    for (const [k, v] of Object.entries(fields)) {
+      parts.push(`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+    }
+    const line = parts.join(" ")
+    deps.stderr(line)
+    try {
+      deps.appendLine?.(`${(deps.now ?? (() => new Date().toISOString()))()} ${line}`)
+    } catch {
+      // Diagnostics must never affect compaction behavior.
+    }
   }
-  // eslint-disable-next-line no-console
-  console.error(parts.join(" "))
 }
+
+function debugLogPath(): string {
+  if (process.env.OPENCODE_SELF_COMPACT_LOG) return process.env.OPENCODE_SELF_COMPACT_LOG
+  const stateHome = process.env.XDG_STATE_HOME ??
+    (process.env.HOME ? join(process.env.HOME, ".local", "state") : "/tmp")
+  return join(stateHome, "opencode", "self-compact.log")
+}
+
+const debug = createDebugLogger({
+  stderr: (line) => {
+    // eslint-disable-next-line no-console
+    console.error(line)
+  },
+  appendLine: (line) => {
+    const path = debugLogPath()
+    mkdirSync(dirname(path), { recursive: true })
+    appendFileSync(path, `${line}\n`, "utf8")
+  },
+})
 
 export interface PendingResume {
   prompt: string

@@ -391,7 +391,7 @@ in
     # surfacing that error is harder to debug than an auth failure.
     # Real-world trigger: food-truck/mono#2841, where a submodule
     # gitlink + missing ssh broke every cycle on 2026-04-23.
-    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.coreutils pkgs.bash pkgs.openssh ];
+    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.curl pkgs.coreutils pkgs.bash pkgs.openssh ];
     serviceConfig = {
       Type = "oneshot";
       User = "dev";
@@ -522,6 +522,15 @@ in
         fi
         if [ -r /run/secrets/atlassian_cloud_id ]; then
           export ATLASSIAN_CLOUD_ID="$(cat /run/secrets/atlassian_cloud_id)"
+        fi
+        # BuildBuddy credentials for `bb-test-log` and API helpers launched
+        # from OpenCode sessions. Mirrors the interactive-shell exports in
+        # users/dev/home.cloudbox.nix; systemd services don't source ~/.bashrc.
+        if [ -r /run/secrets/buildbuddy_host ]; then
+          export BUILDBUDDY_HOST="$(cat /run/secrets/buildbuddy_host)"
+        fi
+        if [ -r /run/secrets/buildbuddy_api_key ]; then
+          export BUILDBUDDY_API_KEY="$(cat /run/secrets/buildbuddy_api_key)"
         fi
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";

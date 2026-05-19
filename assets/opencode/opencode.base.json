@@ -27,6 +27,21 @@
     "opencode-beads",
     "@ex-machina/opencode-anthropic-auth"
   ],
+  "provider": {
+    "openai": {
+      "models": {
+        "gpt-5.5": {
+          "options": {
+            "reasoningEffort": "xhigh",
+            "reasoningSummary": "auto",
+            "include": [
+              "reasoning.encrypted_content"
+            ]
+          }
+        }
+      }
+    }
+  },
   "lsp": {
     "kotlin-ls": {
       "disabled": true
