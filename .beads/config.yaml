@@ -22,6 +22,15 @@
 # Disable auto-import from JSONL when it's newer than database
 # no-auto-import: false
 
+# bd 1.0 defaults auto-export and auto-import to true. Keep JSONL changes
+# explicit until upstream embedded-mode data-loss issues #4033/#3948 are fixed.
+export:
+  auto: false
+  git-add: false
+
+import:
+  auto: false
+
 # Enable JSON output by default
 # json: false
 
