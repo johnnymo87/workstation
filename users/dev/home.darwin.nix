@@ -1,62 +1,15 @@
 # macOS-specific home-manager configuration
 # Contains Darwin-only scripts, aliases, and settings
-#
-# GRADUAL MIGRATION STRATEGY:
-# On Darwin, we disable programs that conflict with existing dotfiles.
-# As we migrate each program to HM, remove the corresponding mkForce false.
-# See: /tmp/research-nix-darwin-dotfiles-conflict-answer.md
 { config, pkgs, lib, localPkgs, assetsPath, isDarwin, projects, ... }:
 
 lib.mkIf isDarwin {
-  # Dotfiles repository still hosts many legacy bash snippets on macOS.
-  # We let HM own ~/.bashrc.d and bridge individual files via out-of-store symlinks
-  # so snippets can migrate to workstation one-by-one.
-  home.file = let
-    dotfilesDir = "${config.home.homeDirectory}/Code/dotfiles";
-    legacyBashrcFiles = [
-      "asdf.bashrc"
-      "base.bashrc"
-      "chrome-debug.bashrc"
-      "copy-paste.bashrc"
-      "cpp.bashrc"
-      "direnv.bashrc"
-      "docker.bashrc"
-      "git.bashrc"
-      "go.bashrc"
-      "gpg.bashrc"
-      "kubectl.bashrc"
-      "mac.bashrc"
-      "mcp.bashrc"
-      "minecraft.bashrc"
-      "mise.bashrc"
-      "nix.bashrc"
-      "nodenv.bashrc"
-      "py.bashrc"
-      "rb.bashrc"
-      "rust.bashrc"
-      "unknown-origin.bashrc"
-    ];
-  in
-    lib.listToAttrs (map
-      (name: {
-        name = ".bashrc.d/${name}";
-        value.source = config.lib.file.mkOutOfStoreSymlink "${dotfilesDir}/.bashrc.d/${name}";
-      })
-      legacyBashrcFiles)
-    // {
-      ".bashrc.d/home-manager.bashrc".text = ''
-        # Home-manager bridge (Darwin)
-        # Keep a stable alias while bash migration is in progress.
-        alias ssdb='screenshot-to-devbox'
+  home.file = {
+    # Darwin common.conf - empty (no special options needed locally)
+    ".gnupg/common.conf".text = "";
 
-      '';
-
-      # Darwin common.conf - empty (no special options needed locally)
-      ".gnupg/common.conf".text = "";
-
-      # gclpr clipboard bridge trusted keys (macOS server)
-      ".gclpr/trusted".text = "122dcc14fa37068a2d604a736279c32f9aa1a38958a76f292f61812421544670\n";
-    };
+    # gclpr clipboard bridge trusted keys (macOS server)
+    ".gclpr/trusted".text = "122dcc14fa37068a2d604a736279c32f9aa1a38958a76f292f61812421544670\n";
+  };
 
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
   # Note: No runtimeInputs for openssh - we want the system SSH which supports UseKeychain
@@ -260,19 +213,14 @@ lib.mkIf isDarwin {
     };
   };
 
-  # ============================================================
-  # DISABLED PROGRAMS (using existing dotfiles instead)
-  # Remove these overrides one-by-one as you migrate to HM
-  # ============================================================
-
-  # Bash is now managed by home-manager. Legacy snippets are sourced from ~/.bashrc.d.
+  # Bash (Darwin-specific layer on top of home.base.nix).
   programs.bash = {
     # Homebrew bash (used by iTerm2 Custom Command) doesn't have SYS_BASHRC
     # compiled in, so it skips /etc/bashrc for non-login interactive shells.
     # Source it explicitly to pick up nix-darwin's set-environment (PATH with
     # /etc/profiles/per-user/$USER/bin, TERMINFO_DIRS, XDG_*, etc.).
-    # mkBefore so it runs before home.base.nix's initExtra (which sources
-    # ~/.bashrc.d scripts that depend on the nix-darwin PATH).
+    # mkBefore so it runs before home.base.nix's initExtra and the
+    # mkAfter block below (Keychain reads depend on /usr/bin/security on PATH).
     initExtra = lib.mkMerge [
       (lib.mkBefore ''
         if [ -z "$__ETC_BASHRC_SOURCED" ] && [ -r /etc/bashrc ]; then
@@ -405,10 +353,6 @@ lib.mkIf isDarwin {
       unset JENKINS_API_TOKEN_VAL
       JENKINS_USER_VAL="$(/usr/bin/security find-generic-password -s jenkins-user -w 2>/dev/null)" && export JENKINS_USER="$JENKINS_USER_VAL"
       unset JENKINS_USER_VAL
-
-      for file in ~/.bashrc.d/*.bashrc; do
-        [ -r "$file" ] && source "$file"
-      done
     '')
     ];
     shellAliases = {
