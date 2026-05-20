@@ -532,6 +532,16 @@ in
         if [ -r /run/secrets/buildbuddy_api_key ]; then
           export BUILDBUDDY_API_KEY="$(cat /run/secrets/buildbuddy_api_key)"
         fi
+        # Datadog credentials for `dd-cli` launched from OpenCode sessions.
+        # Mirrors the interactive-shell exports in users/dev/home.cloudbox.nix;
+        # systemd services don't source ~/.bashrc.
+        export DD_SITE="us3.datadoghq.com"
+        if [ -r /run/secrets/dd_api_key ]; then
+          export DD_API_KEY="$(cat /run/secrets/dd_api_key)"
+        fi
+        if [ -r /run/secrets/dd_app_key ]; then
+          export DD_APP_KEY="$(cat /run/secrets/dd_app_key)"
+        fi
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
       # Cap the always-on headless server so it can't monopolize RAM alone.
