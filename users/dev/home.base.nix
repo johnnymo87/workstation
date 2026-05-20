@@ -15,7 +15,7 @@ let
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
 
       usage() {
-        echo "Usage: opencode-launch [--model provider/model[@variant]] [directory] <prompt>"
+        echo "Usage: opencode-launch [--model provider/model] [directory] <prompt>"
         echo ""
         echo "Launch a headless opencode session."
         echo ""
@@ -30,7 +30,7 @@ let
         case "$1" in
           --model)
             if [ $# -lt 2 ] || [ -z "$2" ]; then
-              echo "Error: --model requires provider/model[@variant]" >&2
+              echo "Error: --model requires provider/model" >&2
               exit 1
             fi
             model_spec="$2"
@@ -39,7 +39,7 @@ let
           --model=*)
             model_spec="''${1#--model=}"
             if [ -z "$model_spec" ]; then
-              echo "Error: --model requires provider/model[@variant]" >&2
+              echo "Error: --model requires provider/model" >&2
               exit 1
             fi
             shift
@@ -76,17 +76,13 @@ let
         model_provider="''${model_spec%%/*}"
         model_rest="''${model_spec#*/}"
         if [ "$model_provider" = "$model_spec" ] || [ -z "$model_provider" ] || [ -z "$model_rest" ]; then
-          echo "Error: --model must be provider/model[@variant]" >&2
+          echo "Error: --model must be provider/model" >&2
           exit 1
         fi
 
-        model_id="''${model_rest%@*}"
-        model_variant=""
-        if [ "$model_id" != "$model_rest" ]; then
-          model_variant="''${model_rest##*@}"
-        fi
-        if [ -z "$model_id" ] || { [ "$model_id" != "$model_rest" ] && [ -z "$model_variant" ]; }; then
-          echo "Error: --model must be provider/model[@variant]" >&2
+        model_id="$model_rest"
+        if [ -z "$model_id" ]; then
+          echo "Error: --model must be provider/model" >&2
           exit 1
         fi
       fi
@@ -116,8 +112,7 @@ let
           --arg p "$prompt" \
           --arg provider "$model_provider" \
           --arg model "$model_id" \
-          --arg variant "$model_variant" \
-          '{parts: [{type: "text", text: $p}], model: {providerID: $provider, modelID: $model}} + (if $variant == "" then {} else {variant: $variant} end)')
+          '{parts: [{type: "text", text: $p}], model: {providerID: $provider, modelID: $model}}')
       else
         prompt_payload=$(jq -n --arg p "$prompt" '{parts: [{type: "text", text: $p}]}')
       fi
