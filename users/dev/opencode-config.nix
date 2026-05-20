@@ -6,7 +6,30 @@
 let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
-  geminiModel = "google-vertex/gemini-3.1-pro-preview";
+  geminiModel = "google-vertex/gemini-3.5-flash";
+  gemini35FlashModel = {
+    id = "gemini-3.5-flash";
+    name = "Gemini 3.5 Flash";
+    family = "gemini-flash";
+    release_date = "2026-05-19";
+    attachment = true;
+    reasoning = true;
+    temperature = true;
+    tool_call = true;
+    cost = {
+      input = 1.5;
+      output = 9;
+      cache_read = 0.15;
+    };
+    limit = {
+      context = 1048576;
+      output = 65536;
+    };
+    modalities = {
+      input = [ "text" "image" "video" "audio" "pdf" ];
+      output = [ "text" ];
+    };
+  };
 
   # Patch agent files if needed to override the sonnet hardcoded model
   patchAgent = name: src:
@@ -67,6 +90,13 @@ let
       model = "anthropic/claude-opus-4-7";
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
+      provider = (opencodeBase.provider or {}) // {
+        "google-vertex" = (opencodeBase.provider."google-vertex" or {}) // {
+          models = ((opencodeBase.provider."google-vertex" or {}).models or {}) // {
+            "gemini-3.5-flash" = gemini35FlashModel;
+          };
+        };
+      };
       mcp = (opencodeBase.mcp or {}) // {
         atlassian = {
           type = "local";
