@@ -24,9 +24,22 @@ gcloud compute instances create cloudbox \
   --image-project=ubuntu-os-cloud \
   --boot-disk-size=200GB \
   --boot-disk-type=hyperdisk-balanced \
+  --boot-disk-provisioned-iops=6000 \
+  --boot-disk-provisioned-throughput=280 \
   --no-address \
   --metadata=enable-oslogin=FALSE
 ```
+
+> **Note on disk performance:** The IOPS / throughput values above are
+> *provisioned* tiers on top of hyperdisk-balanced's baseline (3,000 IOPS,
+> 140 MB/s). The 6,000 / 280 settings are sized for sustained concurrent
+> Bazel builds across multiple worktrees plus many opencode sessions.
+> Without them, two simultaneous `bazel build` runs on freshly-wiped output
+> bases will saturate the disk and the box will spend ~70% of wall time
+> blocked on I/O (visible as high `wa` in `top` and high `full` values in
+> `/proc/pressure/io`). Online resize is supported:
+> `gcloud compute disks update cloudbox --provisioned-iops=N --provisioned-throughput=N`.
+> Approximate cost in us-east1: +$15/mo IOPS + $5.60/mo throughput ≈ +$20/mo.
 
 ### Critical C4a constraints
 
