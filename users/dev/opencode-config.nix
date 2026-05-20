@@ -7,6 +7,7 @@ let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
   geminiModel = "google-vertex/gemini-3.5-flash";
+  geminiVariant = "high";
   gemini35FlashModel = {
     id = "gemini-3.5-flash";
     name = "Gemini 3.5 Flash";
@@ -31,11 +32,12 @@ let
     };
   };
 
-  # Patch agent files if needed to override the sonnet hardcoded model
+  # Patch agent files if needed to override the sonnet hardcoded model.
+  # Gemini 3.5 Flash uses Gemini-native thinking levels, not xhigh.
   patchAgent = name: src:
     if useGeminiForAgents then
       pkgs.runCommand "''${name}-gemini.md" {} ''
-        sed 's|model: anthropic/claude-sonnet-4-6|model: ${geminiModel}|' ${src} > $out
+        ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-4-6|model: ${geminiModel}\nvariant: ${geminiVariant}|' ${src} > $out
       ''
     else
       src;
@@ -88,6 +90,11 @@ let
   opencodeOverlay =
     (lib.optionalAttrs isDevbox {
       model = "anthropic/claude-opus-4-7";
+    })
+    // (lib.optionalAttrs isCloudbox {
+      # Cloudbox uses Vertex/ADC for Google models; hide the direct
+      # Google Generative AI API provider to avoid selecting google/* by mistake.
+      disabled_providers = [ "google" ];
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
       provider = (opencodeBase.provider or {}) // {
