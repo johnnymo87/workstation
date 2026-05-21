@@ -61,6 +61,8 @@
       oc-cost = p.callPackage ./pkgs/oc-cost { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
+    } // nixpkgs.lib.optionalAttrs (system == devboxSystem) {
+      terraform = p.callPackage ./pkgs/terraform { };
     };
 
     # macOS host facts

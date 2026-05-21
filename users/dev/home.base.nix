@@ -1,6 +1,6 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, localPkgs, devenvPkg, assetsPath, isDarwin, isCloudbox, isCrostini, ... }:
+{ config, pkgs, lib, localPkgs, devenvPkg, assetsPath, isDarwin, isDevbox, isCloudbox, isCrostini, ... }:
 
 let
 
@@ -410,6 +410,10 @@ in
   # even evaluate on Darwin under the newer stricter nixpkgs platform checks.
   ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
     localPkgs.reset-workspace
+  ]
+  # Terraform CLI required by infra repositories on the remote Linux work hosts.
+  ++ lib.optionals (isDevbox || isCloudbox) [
+    localPkgs.terraform
   ]
   # Work tools (macOS + cloudbox only)
   ++ lib.optionals (isDarwin || isCloudbox) [
