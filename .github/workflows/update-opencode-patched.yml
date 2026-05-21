@@ -38,15 +38,12 @@ jobs:
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
           if [ "$current" = "$latest" ]; then
-            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
-            echo "Already on $current"
+            echo "Version unchanged ($current); will check for hash drift."
           else
-            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
-            echo "Update available: $current -> $latest"
+            echo "Version bump: $current -> $latest"
           fi
 
       - name: Compute hashes
-        if: steps.check.outputs.up_to_date == 'false'
         id: hashes
         run: |
           version="${{ steps.check.outputs.latest }}"
@@ -62,7 +59,6 @@ jobs:
           done
 
       - name: Update home.base.nix
-        if: steps.check.outputs.up_to_date == 'false'
         run: |
           file="users/dev/home.base.nix"
           version="${{ steps.check.outputs.latest }}"
@@ -80,10 +76,15 @@ jobs:
           git diff "$file"
 
       - name: Create PR
-        if: steps.check.outputs.up_to_date == 'false'
         env:
           GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
         run: |
+          file="users/dev/home.base.nix"
+          if git diff --quiet "$file"; then
+            echo "No drift in $file; nothing to PR."
+            exit 0
+          fi
+
           version="${{ steps.check.outputs.latest }}"
           branch="auto/update-opencode-patched"
 
