@@ -205,6 +205,12 @@ in
         group = "dev";
         mode = "0400";
       };
+      # PagerDuty MCP User API token
+      pagerduty_user_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # GCP project name (org-identifying)
       google_cloud_project = {
         owner = "dev";

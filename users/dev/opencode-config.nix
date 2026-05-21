@@ -78,6 +78,14 @@ let
     sopsSecret = "atlassian_alt_site";
   };
 
+  pagerduty-mcp = pkgs.writeShellApplication {
+    name = "pagerduty-mcp";
+    runtimeInputs = [ pkgs.uv ];
+    text = ''
+      exec uvx --from 'pagerduty-mcp==0.17.0' pagerduty-mcp "$@"
+    '';
+  };
+
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # Platform overlay:
@@ -466,6 +474,88 @@ in
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject PagerDuty MCP secrets from macOS Keychain into opencode.json.
+  # Uses PagerDuty's official local stdio server in read-only mode (no
+  # --enable-write-tools). Disabled by default; enable only when needed.
+  home.activation.injectPagerDutyMcpSecrets = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      pd_api_key="$(/usr/bin/security find-generic-password -s pagerduty-user-api-key -w 2>/dev/null || true)"
+
+      if [[ -z "''${pd_api_key}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.pagerduty)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "PagerDuty API token not found in Keychain; removed mcp.pagerduty from config" >&2
+        exit 0
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --arg command "${pagerduty-mcp}/bin/pagerduty-mcp" \
+          --arg api_key "''${pd_api_key}" \
+          '.mcp.pagerduty = {
+            "type": "local",
+            "command": [$command],
+            "enabled": false,
+            "environment": {
+              "PAGERDUTY_USER_API_KEY": $api_key
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject PagerDuty MCP secrets from sops on cloudbox into opencode.json.
+  # Same pattern as Darwin, but reads from /run/secrets/ instead of Keychain.
+  home.activation.injectPagerDutyMcpSecretsSops = lib.mkIf isCloudbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      pd_api_key=""
+      if [ -r /run/secrets/pagerduty_user_api_key ]; then
+        pd_api_key="$(cat /run/secrets/pagerduty_user_api_key)"
+      fi
+
+      if [[ -z "''${pd_api_key}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.pagerduty)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "PagerDuty API token not found in sops; removed mcp.pagerduty from config" >&2
+        exit 0
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --arg command "${pagerduty-mcp}/bin/pagerduty-mcp" \
+          --arg api_key "''${pd_api_key}" \
+          '.mcp.pagerduty = {
+            "type": "local",
+            "command": [$command],
+            "enabled": false,
+            "environment": {
+              "PAGERDUTY_USER_API_KEY": $api_key
             }
           }' "$runtime" > "$tmp"
 
