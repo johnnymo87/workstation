@@ -12,10 +12,28 @@ import {
 import type { PendingResume } from "../self-compact-impl"
 
 describe("createDebugLogger", () => {
-  it("writes each diagnostic line to stderr and the durable sink", () => {
+  it("writes each diagnostic line to the durable sink without stderr by default", () => {
     const stderr = vi.fn()
     const appendLine = vi.fn()
     const debug = createDebugLogger({ stderr, appendLine, now: () => "2026-05-18T00:00:00.000Z" })
+
+    debug("stage", { sessionID: "ses_abc", pendingSize: 2 })
+
+    expect(stderr).not.toHaveBeenCalled()
+    expect(appendLine).toHaveBeenCalledWith(
+      "2026-05-18T00:00:00.000Z [self-compact] stage sessionID=ses_abc pendingSize=2",
+    )
+  })
+
+  it("can still write diagnostics to stderr when explicitly enabled", () => {
+    const stderr = vi.fn()
+    const appendLine = vi.fn()
+    const debug = createDebugLogger({
+      stderr,
+      stderrEnabled: true,
+      appendLine,
+      now: () => "2026-05-18T00:00:00.000Z",
+    })
 
     debug("stage", { sessionID: "ses_abc", pendingSize: 2 })
 

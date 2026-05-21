@@ -39,8 +39,8 @@ const STALE_MS = 30 * 60 * 1000
  * Diagnostic logger for the self-compact regression hunt (workstation issue:
  * post-1.15 bump, the resumption prompt no longer lands after compaction).
  *
- * Writes to stderr and a durable state-file sink with a `[self-compact]` tag
- * so we can inspect the trail across the four
+ * Writes to a durable state-file sink with a `[self-compact]` tag so we can
+ * inspect the trail across the four
  * boundaries we suspect:
  *
  *   1. tool execute        — did the model actually queue a resumption?
@@ -49,10 +49,12 @@ const STALE_MS = 30 * 60 * 1000
  *   4. HTTP POSTs          — did /summarize and /prompt_async succeed at the HTTP layer?
  *
  * Keep this lightweight — no JSON.stringify of large objects, no PII beyond
- * sessionID prefix. Remove (or downgrade) once root cause is fixed.
+ * sessionID prefix. Stderr is opt-in only because opencode renders plugin
+ * stderr as red TUI output.
  */
 export function createDebugLogger(deps: {
   stderr: (line: string) => void
+  stderrEnabled?: boolean
   appendLine?: (line: string) => void
   now?: () => string
 }) {
@@ -62,7 +64,7 @@ export function createDebugLogger(deps: {
       parts.push(`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     }
     const line = parts.join(" ")
-    deps.stderr(line)
+    if (deps.stderrEnabled) deps.stderr(line)
     try {
       deps.appendLine?.(`${(deps.now ?? (() => new Date().toISOString()))()} ${line}`)
     } catch {
@@ -83,6 +85,7 @@ const debug = createDebugLogger({
     // eslint-disable-next-line no-console
     console.error(line)
   },
+  stderrEnabled: process.env.OPENCODE_SELF_COMPACT_STDERR === "1",
   appendLine: (line) => {
     const path = debugLogPath()
     mkdirSync(dirname(path), { recursive: true })
