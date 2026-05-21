@@ -29,6 +29,24 @@ lib.mkIf isCloudbox {
 
       log() { echo "[disk-cleanup] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
+      remove_worktree_if_clean() {
+        local repo_dir="$1" wt_dir="$2" repo_name="$3" wt_name="$4" label="$5"
+        local status_out
+
+        if ! status_out=$(git -C "$wt_dir" status --porcelain --untracked-files=all 2>/dev/null); then
+          log "WARN: keeping $label because status failed: $repo_name/$wt_name"
+          return 0
+        fi
+
+        if [ -n "$status_out" ]; then
+          log "WARN: keeping $label with uncommitted changes: $repo_name/$wt_name"
+          return 0
+        fi
+
+        log "Removing $label: $repo_name/$wt_name"
+        git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
+      }
+
       # Make the GitHub token available so `gh auth git-credential` (configured
       # as the credential helper for https://github.com in home.base.nix) can
       # authenticate `git fetch` against private repos. Without this, fetches
@@ -107,8 +125,7 @@ lib.mkIf isCloudbox {
               pr_state=$(gh pr view "$pr_num" --json state --repo "$repo_slug" 2>/dev/null \
                 | jq -r '.state // empty' 2>/dev/null || echo "")
               if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
-                log "Removing lgtm pr-$pr_num worktree ($pr_state): $repo_name/$wt_name"
-                git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
+                remove_worktree_if_clean "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "lgtm pr-$pr_num worktree ($pr_state)"
                 continue
               fi
               # OPEN / unknown -> leave alone, fall through to generic checks
@@ -117,8 +134,7 @@ lib.mkIf isCloudbox {
             # Check if merged into origin/main
             head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null) || continue
             if git -C "$repo_dir" merge-base --is-ancestor "$head_sha" origin/main 2>/dev/null; then
-              log "Removing merged worktree: $repo_name/$wt_name"
-              git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
+              remove_worktree_if_clean "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "merged worktree"
               continue
             fi
 
