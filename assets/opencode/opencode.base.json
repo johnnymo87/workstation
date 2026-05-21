@@ -28,7 +28,17 @@
     "@ex-machina/opencode-anthropic-auth"
   ],
   "provider": {
+    "anthropic": {
+      "options": {
+        "timeout": 300000,
+        "chunkTimeout": 120000
+      }
+    },
     "openai": {
+      "options": {
+        "timeout": 300000,
+        "chunkTimeout": 120000
+      },
       "models": {
         "gpt-5.5": {
           "options": {
@@ -39,6 +49,18 @@
             ]
           }
         }
+      }
+    },
+    "google-vertex": {
+      "options": {
+        "timeout": 300000,
+        "chunkTimeout": 120000
+      }
+    },
+    "google-vertex-anthropic": {
+      "options": {
+        "timeout": 300000,
+        "chunkTimeout": 120000
       }
     }
   },
