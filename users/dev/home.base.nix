@@ -411,8 +411,8 @@ in
   ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
     localPkgs.reset-workspace
   ]
-  # Terraform CLI required by infra repositories on the remote Linux work hosts.
-  ++ lib.optionals (isDevbox || isCloudbox) [
+  # Terraform CLI required by infra repositories on work hosts.
+  ++ lib.optionals (isDarwin || isCloudbox) [
     localPkgs.terraform
   ]
   # Work tools (macOS + cloudbox only)
