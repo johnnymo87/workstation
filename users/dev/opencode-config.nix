@@ -6,6 +6,7 @@
 let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
+  devboxModel = "anthropic/claude-opus-4-7";
   geminiModel = "google-vertex/gemini-3.5-flash";
   geminiVariant = "high";
   gemini35FlashModel = {
@@ -89,15 +90,16 @@ let
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # Platform overlay:
-  # - devbox defaults to the Anthropic subscription path, so Telegram-launched
-  #   opencode-serve sessions do not depend on the OpenAI API key.
+  # - devbox + crostini default to the Anthropic subscription path, so sessions
+  #   do not depend on the OpenAI API key.
+  # - cloudbox + macOS default to Vertex Gemini 3.5 Flash on high thinking.
   # - macOS + cloudbox get Atlassian MCP wiring.
   # OpenAI GPT-5.5 remains in opencode.base.json as a runtime fallback; its
   # provider options stay there because OpenCode defaults GPT-5.x to medium
   # reasoning unless a variant or model option overrides it.
   opencodeOverlay =
-    (lib.optionalAttrs isDevbox {
-      model = "anthropic/claude-opus-4-7";
+    (lib.optionalAttrs (isDevbox || isCrostini) {
+      model = devboxModel;
     })
     // (lib.optionalAttrs isCloudbox {
       # Cloudbox uses Vertex/ADC for Google models; hide the direct
@@ -105,6 +107,11 @@ let
       disabled_providers = [ "google" ];
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
+      model = geminiModel;
+      agent = {
+        build.variant = geminiVariant;
+        plan.variant = geminiVariant;
+      };
       provider = (opencodeBase.provider or {}) // {
         "google-vertex" = (opencodeBase.provider."google-vertex" or {}) // {
           models = ((opencodeBase.provider."google-vertex" or {}).models or {}) // {
