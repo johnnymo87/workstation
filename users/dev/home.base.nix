@@ -144,7 +144,8 @@ let
   };
 
   # Patched opencode with prompt caching, prompt-loop byte identity, cache-aligned compaction,
-  # vim, tool fix, MCP reconnect, eager input streaming workaround, and prefill fix.
+  # vim, tool fix, MCP reconnect, eager input streaming workaround, prefill fix, and
+  # bus eager subscribe (PR #27959 backport — v1.15.0-only; drop when bumping to >1.15.0).
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
   #
@@ -157,34 +158,46 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-Vpqe2tpimisVfckgon8e68iEN+P3V70oBdb1OZiduCU=";
+      hash = "sha256-tkWCh2AUlzLH2SIbD4teRrTc/Lnx7NP0MrBPrvBVWI8=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-1/r6TZuPN7iRDCOobJ8Yv4faMxLleHHamuiseDBEXEQ=";
+      hash = "sha256-Id1X9v02Uod2B+2g79gk0pmesEXLH2rDvgJrsIbYUm0=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-r2t2slfmKxLymsPU7yHPY1U0/GfcN0vagIwN9cvGzJ4=";
+      hash = "sha256-PWG5TrK2CtS7sSR8diBKIQwZLiWKT6Ncnf3K0naqF1c=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-atzRUb38P89Ih7lY86mf7npN10gQ+MlkzV/KYF2ck3Q=";
+      hash = "sha256-YF/FZx/ZmTzTgxjw1HQCcSByxfKVBDrkX3K7gJOpfHo=";
       isZip = true;
     };
   };
 
   opencode = let
-    version = "1.15.0";
+    # `upstreamVersion` is the OpenCode version we're patching. `patchedRevision`
+    # bumps when we re-release the same upstream version with updated patches
+    # (e.g. adding a new local patch). Release tag is
+    # `v${upstreamVersion}-patched${patchedRevision == "" ? "" : ".${patchedRevision}"}`.
+    # Bump `patchedRevision` (and the hashes above) for patch-only updates.
+    # Bump `upstreamVersion` (and reset `patchedRevision` to "") for upstream
+    # version bumps -- and check whether any patches in opencode-patched can be
+    # dropped because they're now upstream (see check-sunset.yml in that repo).
+    upstreamVersion = "1.15.0";
+    patchedRevision = "1";  # ".1" suffix — drop to "" on next upstream version bump
+    tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
+    releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
+    version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
     inherit version;
     src = pkgs.fetchurl {
-      url = "https://github.com/johnnymo87/opencode-patched/releases/download/v${version}-patched/${platformInfo.asset}";
+      url = "https://github.com/johnnymo87/opencode-patched/releases/download/${releaseTag}/${platformInfo.asset}";
       hash = platformInfo.hash;
     };
     nativeBuildInputs = [ pkgs.makeWrapper ]
