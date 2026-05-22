@@ -138,6 +138,29 @@ The right framing: you're holding the PR until it's merged or until there's a re
 
 After creating the PR, enter the monitoring loop. No maximum iterations -- loop until exit conditions (below) are all met in the same iteration.
 
+### Tooling: monitor-pr.py
+
+A companion script bundled with this skill does steps 1-4 of the loop body (sleep, check CI, fetch reviews, fetch inline comments) in one invocation, and prints the exact action to take next:
+
+```bash
+python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py [PR]
+```
+
+Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate -- Anthropic's prompt-cache TTL is 5 minutes, and a single bash call that blocks the model longer than that expires the warm cache. **You are expected to re-invoke the script in a loop**; the script owns the within-60s pacing, you own the loop and the fix step.
+
+| Exit code | Meaning | What to do |
+|---|---|---|
+| `0` | All exit conditions met | Done. PR is landable. |
+| `1` | Action needed (CI failed / unresolved threads / non-APPROVED review predates HEAD) | Read stdout for the specific action, do it (step 5 below), then re-invoke. |
+| `2` | Unrecoverable error (could not query GitHub) | Surface to user; don't silently retry. |
+| `3` | Budget elapsed, still idle-waiting (CI pending or lgtm-bound waiting on APPROVAL) | Re-invoke immediately. |
+
+`--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness, so the manual grep in "Once, before the loop" can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
+
+**What the script does NOT do:** step 5 (the fix step -- investigating failed CI, replying to inline threads, calling `resolveReviewThread`, pushing fixes, re-requesting review). Those stay yours. The script just tells you what to fix and lets you back in to do it.
+
+The text loop body below documents the same logic by hand. Read it to understand what the script is doing -- and use it directly when working in an environment that doesn't have the script deployed.
+
 ### Approval is durable
 
 Worth stating up front because it shapes the whole loop: **once a non-bot reviewer has APPROVED, that approval stays valid through subsequent pushes for inline-only feedback.** GitHub does not auto-dismiss approvals on push (unless the repo opts into that setting, which none of ours do). You do not need a fresh re-approval every time you address a leftover Gemini thread or fix a typo a human pointed out — the reviewer signed off on the substance; mopping up cosmetic feedback doesn't reopen the substance.
@@ -177,6 +200,8 @@ If `~/projects/lgtm/lgtm.yml` doesn't exist on this machine (e.g. devbox), treat
 Cache the answer in a shell var (e.g. `LGTM_BOUND=yes`) for the loop.
 
 ### Loop body
+
+> **Preferred:** invoke `monitor-pr.py` (see "Tooling" above) instead of doing steps 1-4 by hand. The script encodes the same logic and returns exit codes that map to "done" / "fix this" / "still waiting." The text below is the canonical spec the script implements -- read it to understand what the script is doing, and follow it directly when the script isn't deployed on this host.
 
 1. **Sleep 60 seconds** -- `sleep 60` (in its own bash invocation, not chained with subsequent `gh` calls -- see AGENTS.md guidance on bundled sleeps). Do not use `sleep 300`: Anthropic prompt-cache TTL is 5 minutes, so a 5-minute idle gap can expire the warm cache and make the next turn pay full prompt input cost.
 2. **Check CI**:
@@ -221,7 +246,7 @@ Loop exits only when **all** of the following are true in the same iteration:
 - All CI checks pass (pending -> sleep again)
 - Every thread-root inline comment has your reply AND is marked resolved (bot AND human threads). Use the unresolved-threads filter query in `reviewing-github-prs` to verify before exiting.
 - **If lgtm-bound**: the most recent review from a non-bot reviewer has `state == "APPROVED"`. An earlier-than-last-push approval still counts -- once they've signed off, fixes for inline-only feedback do not invalidate it. (If a reviewer wanted you to re-prove correctness, they would have left `CHANGES_REQUESTED` instead of `APPROVED`.)
-- **If not lgtm-bound**: no review-state requirement; the first two bullets are sufficient.
+- **If not lgtm-bound**: no *positive* review-state requirement (you don't need an APPROVED). But an outstanding `CHANGES_REQUESTED` or `COMMENTED` from a non-bot reviewer on the current HEAD still blocks exit -- if a human asked for changes you don't ship over them. Only stale non-APPROVED reviews (commit predates HEAD) call for a re-request; non-APPROVED reviews on the current HEAD are an idle-wait until the reviewer updates their verdict.
 
 ### Common mistakes
 

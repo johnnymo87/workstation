@@ -63,6 +63,14 @@ let
     };
   };
 
+  # shepherding-pull-requests has an executable monitoring python script
+  shepherdingExtras = {
+    ".config/opencode/skills/shepherding-pull-requests/monitor-pr.py" = {
+      source = "${assetsPath}/opencode/skills/shepherding-pull-requests/monitor-pr.py";
+      executable = true;
+    };
+  };
+
   # Superpowers skills: symlink the entire upstream skills directory
   # Uses out-of-store symlink since the repo is cloned via projects.nix, not in the Nix store
   superpowersSkills = {
@@ -157,6 +165,7 @@ in
     // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills
       // atlassianExtras
+      // shepherdingExtras
     );
 
   # Fetch Confluence-based skills during activation (macOS + cloudbox only)
