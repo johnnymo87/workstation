@@ -144,8 +144,11 @@ let
   };
 
   # Patched opencode with prompt caching, prompt-loop byte identity, cache-aligned compaction,
-  # vim, tool fix, MCP reconnect, eager input streaming workaround, prefill fix, and
-  # bus eager subscribe (PR #27959 backport — v1.15.0-only; drop when bumping to >1.15.0).
+  # Gemini empty parts fix, vim, tool fix, MCP reconnect, eager input streaming workaround, and
+  # prefill fix. Targets opencode v1.15.10 — the bus-eager-subscribe.patch (PR #27959) was
+  # DROPPED on 2026-05-25 because the fix ships in v1.15.5+. Related: PR #27825 (sync events
+  # on injected bus, the load-bearing fix for the dropped-Telegram-notifications bug) is also
+  # in v1.15.10.
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
   #
@@ -158,22 +161,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-tkWCh2AUlzLH2SIbD4teRrTc/Lnx7NP0MrBPrvBVWI8=";
+      hash = "sha256-DSwdKKQ4dT1J9XtUJQsiofrrGmmgrnMRaY2XUWjhGr0=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-Id1X9v02Uod2B+2g79gk0pmesEXLH2rDvgJrsIbYUm0=";
+      hash = "sha256-EroLK/i9DQRPU8s0b5Fdx6Yawce0kXIJvqNKyQI6c/Q=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-PWG5TrK2CtS7sSR8diBKIQwZLiWKT6Ncnf3K0naqF1c=";
+      hash = "sha256-GZSSpeewC0UBZbesTjaUP6ukkArA3tuhc3RfRJaCoR8=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-YF/FZx/ZmTzTgxjw1HQCcSByxfKVBDrkX3K7gJOpfHo=";
+      hash = "sha256-iSF6ZxuxfEk2EUuG32dVRiUn7OCbjlIb7ryEPgf8RoY=";
       isZip = true;
     };
   };
@@ -187,7 +190,7 @@ let
     # Bump `upstreamVersion` (and reset `patchedRevision` to "") for upstream
     # version bumps -- and check whether any patches in opencode-patched can be
     # dropped because they're now upstream (see check-sunset.yml in that repo).
-    upstreamVersion = "1.15.0";
+    upstreamVersion = "1.15.10";
     patchedRevision = "1";  # ".1" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
