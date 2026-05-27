@@ -111,6 +111,22 @@ let
       agent = {
         build.variant = geminiVariant;
         plan.variant = geminiVariant;
+        # Route the built-in `compaction` agent to Gemini 3.5 Flash. This is the
+        # cheap fix for compaction cost on Opus-heavy sessions: Opus pays
+        # ~$2.50 per compaction call AND writes 200-400k cache tokens that no
+        # subsequent call ever reads (compaction is one-shot summarization),
+        # so we pay the 25% cache-write premium for zero benefit. Routing
+        # compaction to Flash zeros out both the per-call cost and the
+        # wasted cache-write premium. Measured impact: ~$60 / 8 days of
+        # compaction spend, ~$22 of which was pure cache-write waste.
+        #
+        # The deeper structural fix is upstream PR anomalyco/opencode#25100
+        # ("feat(opencode): cache-aligned compaction to reuse prefix cache"),
+        # which makes the compaction request share its prefix with the main
+        # agent loop so the dropped messages serve from cache (~90% cheaper
+        # per compaction). Open as of 2026-05-27, not yet merged. If/when it
+        # lands upstream, revisit whether this override is still needed.
+        compaction.model = geminiModel;
       };
       provider = (opencodeBase.provider or {}) // {
         "google-vertex" = (opencodeBase.provider."google-vertex" or {}) // {
