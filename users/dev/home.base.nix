@@ -27,7 +27,7 @@ let
         echo "Favorite Models:"
         echo "  - google-vertex/gemini-3.5-flash                  (Fast, reasoning-enabled)"
         echo "  - google-vertex-anthropic/claude-opus-4-7@default      (High reasoning via Vertex gateway)"
-        echo "  - anthropic/claude-opus-4-7                       (Direct Claude 3.7)"
+        echo "  - anthropic/claude-opus-4-7                       (Direct Claude 4.7 Opus)"
         echo "  - openai/gpt-5.5                                  (GPT 5.5)"
         echo ""
         echo "Examples:"
