@@ -15,14 +15,27 @@ let
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
 
       usage() {
+        local exit_code="''${1:-1}"
         echo "Usage: opencode-launch [--model provider/model] [directory] <prompt>"
         echo ""
         echo "Launch a headless opencode session."
         echo ""
+        echo "Options:"
+        echo "  -h, --help                     Show this help message"
+        echo "  --model <provider/model>       Specify the model to run"
+        echo ""
+        echo "Favorite Models:"
+        echo "  - google-vertex/gemini-3.5-flash                  (Fast, reasoning-enabled)"
+        echo "  - google-vertex-anthropic/claude-opus-4-7@default      (High reasoning via Vertex gateway)"
+        echo "  - anthropic/claude-opus-4-7                       (Direct Claude 3.7)"
+        echo "  - anthropic/claude-sonnet-4-6                     (Claude 3.5 Sonnet)"
+        echo ""
+        echo "Examples:"
         echo "  opencode-launch ~/projects/pigeon \"fix the test\""
         echo "  opencode-launch \"fix the test\"  # uses current directory"
+        echo "  opencode-launch --model google-vertex/gemini-3.5-flash \"run pytest and fix any errors\""
         echo "  opencode-launch --model google-vertex-anthropic/claude-opus-4-7@default ~/projects/pigeon \"review the PR\""
-        exit 1
+        exit "$exit_code"
       }
 
       model_spec=""
@@ -43,6 +56,9 @@ let
               exit 1
             fi
             shift
+            ;;
+          -h|--help)
+            usage 0
             ;;
           --)
             shift
