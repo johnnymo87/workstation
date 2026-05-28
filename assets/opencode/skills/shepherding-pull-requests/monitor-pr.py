@@ -82,13 +82,18 @@ def run_cmd(cmd):
 def get_pr_info(pr_num=None):
     """Top-level PR metadata via `gh pr view`. Note: `reviews` here is a
     *summary* that does NOT include user.type. We re-fetch reviews via the
-    REST API (get_reviews) when we need bot/human disambiguation."""
+    REST API (get_reviews) when we need bot/human disambiguation.
+
+    `author.login` is used by latest_non_bot_review to exclude self-reviews
+    -- GitHub auto-creates an empty `state=COMMENTED` review wrapper every
+    time the PR author posts an inline reply to a comment thread, and those
+    must not be treated as reviewer verdicts."""
     cmd = ["gh", "pr", "view"]
     if pr_num:
         cmd.append(str(pr_num))
     cmd.extend([
         "--json",
-        "number,url,state,reviewDecision,headRefName,baseRefName,headRefOid",
+        "number,url,state,reviewDecision,headRefName,baseRefName,headRefOid,author",
     ])
     out = run_cmd(cmd)
     return json.loads(out)
@@ -268,17 +273,27 @@ def detect_lgtm_bound(owner, repo):
 
 # --- Review classification -------------------------------------------------
 
-def latest_non_bot_review(reviews):
+def latest_non_bot_review(reviews, author_login=None):
     """From the REST /reviews payload, return the most recent review per
-    non-bot reviewer. Bots are identified by `user.type == "Bot"` (the only
-    correct test; see get_reviews docstring). Returns a dict
-    {login: {state, submitted_at}} containing only humans (or lgtm-dispatched
-    sessions, which run under real human PATs and look identical to humans
-    here -- that's intentional per SKILL.md "Two reviews, two roles").
+    non-bot, non-author reviewer. Bots are identified by `user.type == "Bot"`
+    (the only correct test; see get_reviews docstring). Returns a dict
+    {login: {state, submitted_at}} containing only third-party humans (or
+    lgtm-dispatched sessions, which run under real human PATs and look
+    identical to humans here -- that's intentional per SKILL.md "Two
+    reviews, two roles").
 
     Only non-PENDING review states are considered: a reviewer hitting
     "Approve" or "Request changes" generates a non-PENDING review. PENDING
-    states are drafts the reviewer hasn't submitted yet -- ignore them."""
+    states are drafts the reviewer hasn't submitted yet -- ignore them.
+
+    Self-reviews (login == author_login) are skipped: GitHub auto-creates
+    an empty `state=COMMENTED` review wrapper every time the PR author
+    posts a threaded inline reply, and the API surfaces those as
+    indistinguishable from a real review verdict. The author cannot
+    meaningfully gate their own PR (GitHub refuses APPROVE/REQUEST_CHANGES
+    from the author outright), so dropping every self-review here is safe
+    and prevents false-positive blocked-on-review states. Pass
+    `author_login=None` to disable filtering (e.g. for unit tests)."""
     latest = {}  # login -> review dict
     for r in reviews:
         user = r.get("user") or {}
@@ -288,6 +303,9 @@ def latest_non_bot_review(reviews):
             continue
         login = user.get("login")
         if not login:
+            continue
+        # Skip self-reviews -- see docstring above.
+        if author_login is not None and login == author_login:
             continue
         # Reviews are returned in chronological order; keep the latest.
         prev = latest.get(login)
@@ -307,6 +325,7 @@ def evaluate_iteration(pr_num, owner, repo, lgtm_bound):
     findings AND a recommended exit code (or None to keep polling)."""
     pr = get_pr_info(pr_num)
     head_sha = pr.get("headRefOid")
+    author_login = (pr.get("author") or {}).get("login")
 
     ci_status, ci_msg = check_ci(pr_num)
     try:
@@ -322,7 +341,7 @@ def evaluate_iteration(pr_num, owner, repo, lgtm_bound):
     unresolved = [t for t in threads if not t["isResolved"]]
 
     reviews = get_reviews(owner, repo, pr_num)
-    non_bot_latest = latest_non_bot_review(reviews)
+    non_bot_latest = latest_non_bot_review(reviews, author_login=author_login)
 
     # Print iteration status
     print(f"  CI:        {ci_status:<8} ({ci_msg})")
