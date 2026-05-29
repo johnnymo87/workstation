@@ -587,11 +587,30 @@
   time.timeZone = "America/New_York";
   i18n.defaultLocale = "en_US.UTF-8";
 
-  # Enable running dynamically linked binaries (needed for npm packages)
+  # Enable running dynamically linked binaries (needed for npm packages).
+  #
+  # The library set below is the Electron/Chromium runtime closure required by
+  # the prebuilt npm Cypress binary (bundled Electron) so it can run headless
+  # browser e2e tests on NixOS (e.g. internal-frontends Cypress suites).
+  # Without it the prebuilt binary dies with
+  #   "error while loading shared libraries: libglib-2.0.so.0 ..."
+  # (glib is just the first of the full Electron runtime set).
+  # The list mirrors nixpkgs' own `cypress` derivation buildInputs/
+  # runtimeDependencies plus the standard Electron deps. nix-ld feeds these
+  # through `lib.makeLibraryPath`/`getLib`, so plain package names resolve to
+  # the correct lib output. Paired with `xorg.xvfb` in environment.systemPackages
+  # below — Cypress spawns `Xvfb` directly for its virtual display.
   programs.nix-ld.enable = true;
   programs.nix-ld.libraries = with pkgs; [
     # Common libraries for npm native binaries
     stdenv.cc.cc.lib
+    # Electron / Chromium runtime libraries (prebuilt Cypress binary)
+    glib nss nspr atk at-spi2-atk at-spi2-core cups dbus gtk3
+    gdk-pixbuf pango cairo expat libdrm libgbm libxkbcommon
+    alsa-lib libnotify libsecret udev libGL fontconfig freetype
+    xorg.libX11 xorg.libXcomposite xorg.libXdamage xorg.libXext
+    xorg.libXfixes xorg.libXrandr xorg.libxcb xorg.libXScrnSaver
+    xorg.libXtst xorg.libxshmfence xorg.libXrender xorg.libXi
   ];
 
   # Nix settings
@@ -638,6 +657,7 @@
     # which doesn't need the plugin set.
     gh gnupg pinentry-curses
     python314 ffmpeg uv
+    xorg.xvfb  # Provides `Xvfb`; prebuilt Cypress spawns it for headless e2e
   ];
 
   # SSH server
