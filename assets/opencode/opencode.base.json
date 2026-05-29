@@ -32,6 +32,26 @@
       "options": {
         "timeout": 300000,
         "chunkTimeout": 120000
+      },
+      "models": {
+        "claude-opus-4-7": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "xhigh"
+          }
+        },
+        "claude-opus-4-8": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "xhigh"
+          }
+        }
       }
     },
     "openai": {
@@ -61,6 +81,26 @@
       "options": {
         "timeout": 300000,
         "chunkTimeout": 120000
+      },
+      "models": {
+        "claude-opus-4-7@default": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "xhigh"
+          }
+        },
+        "claude-opus-4-8@default": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "xhigh"
+          }
+        }
       }
     }
   },
