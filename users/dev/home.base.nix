@@ -720,7 +720,14 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       key = "~/.ssh/id_ed25519_signing.pub";
       signByDefault = true;
     };
-    ignores = [];
+    ignores = [
+      # lgtm (https://github.com/johnnymo87/lgtm) writes review dotfiles into
+      # the worktree it dispatches against (.lgtm-context.md, .lgtm-reviewer,
+      # .lgtm-review-prompt.md, .lgtm-rereview-prompt.md, plus attachments).
+      # When lgtm reuses an existing worktree, these surface as untracked in
+      # `git status`; ignore them globally so dev worktrees stay clean.
+      ".lgtm-*"
+    ];
     settings = {
       user.name = "Jonathan Mohrbacher";
       user.email = "jonathan.mohrbacher@gmail.com";
