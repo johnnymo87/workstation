@@ -61,6 +61,11 @@
       },
       "models": {
         "gpt-5.5": {
+          "cost": {
+            "input": 5,
+            "output": 30,
+            "cache_read": 0.5
+          },
           "options": {
             "reasoningEffort": "xhigh",
             "reasoningSummary": "auto",
