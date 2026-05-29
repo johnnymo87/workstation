@@ -161,10 +161,14 @@ let
 
   # Patched opencode with prompt caching, prompt-loop byte identity, cache-aligned compaction,
   # Gemini empty parts fix, vim, tool fix, MCP reconnect, eager input streaming workaround, and
-  # prefill fix. Targets opencode v1.15.10 — the bus-eager-subscribe.patch (PR #27959) was
-  # DROPPED on 2026-05-25 because the fix ships in v1.15.5+. Related: PR #27825 (sync events
-  # on injected bus, the load-bearing fix for the dropped-Telegram-notifications bug) is also
-  # in v1.15.10.
+  # instance-state-partition fix. Targets opencode v1.15.12 — prefill-fix.patch was DROPPED
+  # on 2026-05-28 because v1.15.12 ships an equivalent upstream fix in workspace-routing.ts
+  # (release-notes line: "Used the persisted session directory for existing-session requests").
+  # v1.15.12 also lands upstream PR #29769, which generalizes adaptive reasoning support to
+  # opus-4-7-or-later — so claude-opus-4-8 now gets the {low, medium, high, xhigh, max}
+  # variant set with summarized thinking display, instead of falling into the legacy
+  # {high, max} branch (which opus-4-8 rejects with "'thinking.type.enabled' is not
+  # supported for this model. Use 'thinking.type.adaptive'...").
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
   #
@@ -177,22 +181,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-0aFsPrPtjflyMZzEiAIkKq1SqD6nJ+w6erploVaL4d0=";
+      hash = "sha256-Kk+YRaR57ILB81EubUpHIJxm7zolRRGD3NyR9kKNCAU=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-oiM4Q2D3UIcH5ta5AzME3zHSQ3GcPbvOqo3telczCFM=";
+      hash = "sha256-lx90utNGc5vNfzPn+x8IkAxHzUDbK9EwBxpDOjM8YLc=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-J9Qyq+F0YjY35eCLJrFX9e4rMHFpxeyP468gJ2eZNUM=";
+      hash = "sha256-v4/os108TrlqHnyoLlvA4edLsI9MM/aUJor13duOCJk=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-U1mmg9/nM0TU0HuIGrRRMdlolZXknRWspXBzws1dBF0=";
+      hash = "sha256-/MBol6AnmFnlYeZZpVncLaA9i5BXYemoZVVo5+s1N0s=";
       isZip = true;
     };
   };
@@ -206,8 +210,8 @@ let
     # Bump `upstreamVersion` (and reset `patchedRevision` to "") for upstream
     # version bumps -- and check whether any patches in opencode-patched can be
     # dropped because they're now upstream (see check-sunset.yml in that repo).
-    upstreamVersion = "1.15.10";
-    patchedRevision = "2";  # ".2" suffix — drop to "" on next upstream version bump
+    upstreamVersion = "1.15.12";
+    patchedRevision = "";  # ".2" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
