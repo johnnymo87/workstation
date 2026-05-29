@@ -705,6 +705,21 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
   home.sessionVariables = {
     EDITOR = "nvim";
     VISUAL = "nvim";
+    # Raise opencode's default output-token cap from 32k to 64k. Per Anthropic
+    # (https://docs.anthropic.com/en/build-with-claude/effort): "When running
+    # Claude Opus 4.7/4.8 at xhigh or max effort, set a large max_tokens so the
+    # model has room to think and act across subagents and tool calls.
+    # Starting at 64k tokens and tuning from there is a reasonable default."
+    # Pairs with the xhigh adaptive default we set for opus 4.7/4.8 in
+    # assets/opencode/opencode.base.json. This is a cap, not a forced
+    # allocation: models still emit only what they want, but xhigh runs no
+    # longer get truncated at 32k. Other models are unaffected (their own
+    # model.limit.output still wins via Math.min in
+    # packages/opencode/src/provider/transform.ts:1262). NOTE: this only
+    # covers interactive shells (sourced via ~/.profile); the opencode-serve
+    # systemd unit on devbox/cloudbox needs the same var added to its own
+    # Environment list -- see hosts/{devbox,cloudbox}/configuration.nix.
+    OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX = "65536";
   } // lib.optionalAttrs (isDarwin || isCloudbox) {
     # Cap JetBrains kotlin-lsp JVM heap — each OpenCode session spawns its
     # own instance; without a cap they grow to ~1.5 GB each.

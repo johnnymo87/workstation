@@ -258,6 +258,12 @@
       Environment = [
         "HOME=/home/dev"
         "OPENCODE_ENABLE_EXA=1"
+        # Raise opencode's default output-token cap from 32k to 64k to match
+        # Anthropic's recommendation for opus 4.7/4.8 at xhigh effort. Mirrors
+        # the home.sessionVariables entry in users/dev/home.base.nix — that one
+        # only covers interactive shells, opencode-serve needs it set
+        # explicitly. See full rationale there.
+        "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"
       ];
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
