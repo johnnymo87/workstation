@@ -6,7 +6,7 @@
 let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
-  devboxModel = "anthropic/claude-opus-4-7";
+  devboxModel = "anthropic/claude-opus-4-8";
   geminiModel = "google-vertex/gemini-3.5-flash";
   geminiVariant = "high";
   gemini35FlashModel = {
