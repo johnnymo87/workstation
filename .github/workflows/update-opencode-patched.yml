@@ -28,26 +28,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Current version from nix file
-          current=$(grep 'version = ' users/dev/home.base.nix | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "current=$current" >> "$GITHUB_OUTPUT"
+          file="users/dev/home.base.nix"
 
-          # Latest published release from opencode-patched.
-          # Workstation tracks release availability only; a missing release (build failure) is the blocker.
-          latest=$(gh api repos/johnnymo87/opencode-patched/releases/latest --jq '.tag_name' | sed 's/^v//;s/-patched$//')
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          # Current pinned identity from the nix file. home.base.nix derives
+          # releaseTag/version from these two vars, so they are the source of truth.
+          current_ver=$(grep 'upstreamVersion = ' "$file" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+          current_rev=$(grep 'patchedRevision = ' "$file" | head -1 | sed 's/.*patchedRevision = "\([^"]*\)".*/\1/')
+          echo "current_ver=$current_ver" >> "$GITHUB_OUTPUT"
+          echo "current_rev=$current_rev" >> "$GITHUB_OUTPUT"
 
-          if [ "$current" = "$latest" ]; then
-            echo "Version unchanged ($current); will check for hash drift."
+          # Latest published release from opencode-patched, tracked faithfully
+          # (base "vX-patched" or a manual "vX-patched.N" re-release -- whichever
+          # is marked latest). A missing release (upstream build failure) is the blocker.
+          latest_tag=$(gh api repos/johnnymo87/opencode-patched/releases/latest --jq '.tag_name')
+          latest_ver=$(echo "$latest_tag" | sed 's/^v//;s/-patched.*//')
+          latest_rev=$(echo "$latest_tag" | sed -n 's/.*-patched\.\([0-9][0-9]*\)$/\1/p')
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "latest_ver=$latest_ver" >> "$GITHUB_OUTPUT"
+          echo "latest_rev=$latest_rev" >> "$GITHUB_OUTPUT"
+
+          if [ "$current_ver" = "$latest_ver" ] && [ "$current_rev" = "$latest_rev" ]; then
+            echo "Identity unchanged (v${current_ver}-patched${current_rev:+.$current_rev}); will check for hash drift."
           else
-            echo "Version bump: $current -> $latest"
+            echo "Release bump: v${current_ver}-patched${current_rev:+.$current_rev} -> ${latest_tag}"
           fi
 
       - name: Compute hashes
         id: hashes
         run: |
-          version="${{ steps.check.outputs.latest }}"
-          base="https://github.com/johnnymo87/opencode-patched/releases/download/v${version}-patched"
+          base="https://github.com/johnnymo87/opencode-patched/releases/download/${{ steps.check.outputs.latest_tag }}"
 
           for asset in opencode-linux-arm64.tar.gz opencode-darwin-arm64.zip opencode-linux-x64.tar.gz opencode-darwin-x64.zip; do
             hash=$(nix-prefetch-url "${base}/${asset}" 2>/dev/null)
@@ -61,10 +70,12 @@ jobs:
       - name: Update home.base.nix
         run: |
           file="users/dev/home.base.nix"
-          version="${{ steps.check.outputs.latest }}"
 
-          # Update version
-          sed -i "s/version = \"${{ steps.check.outputs.current }}\"/version = \"${version}\"/" "$file"
+          # Update the version identity. releaseTag/version in home.base.nix are
+          # derived from these two vars, so we only rewrite upstreamVersion and
+          # patchedRevision (latest_rev is "" for base releases, "N" for .N).
+          sed -i "s/upstreamVersion = \"[^\"]*\"/upstreamVersion = \"${{ steps.check.outputs.latest_ver }}\"/" "$file"
+          sed -i "s/\(patchedRevision = \)\"[^\"]*\"/\1\"${{ steps.check.outputs.latest_rev }}\"/" "$file"
 
           # Update hashes - match the line containing each asset name and replace the hash on that line
           sed -i '/opencode-linux-arm64\.tar\.gz/,/hash =/{s|hash = "sha256-[^"]*"|hash = "${{ steps.hashes.outputs.linux_arm64 }}"|;}' "$file"
@@ -72,7 +83,7 @@ jobs:
           sed -i '/opencode-linux-x64\.tar\.gz/,/hash =/{s|hash = "sha256-[^"]*"|hash = "${{ steps.hashes.outputs.linux_x64 }}"|;}' "$file"
           sed -i '/opencode-darwin-x64\.zip/,/hash =/{s|hash = "sha256-[^"]*"|hash = "${{ steps.hashes.outputs.darwin_x64 }}"|;}' "$file"
 
-          echo "Updated $file to v${version}"
+          echo "Updated $file to ${{ steps.check.outputs.latest_tag }}"
           git diff "$file"
 
       - name: Create PR
@@ -85,7 +96,8 @@ jobs:
             exit 0
           fi
 
-          version="${{ steps.check.outputs.latest }}"
+          version="${{ steps.check.outputs.latest_ver }}"
+          tag="${{ steps.check.outputs.latest_tag }}"
           branch="auto/update-opencode-patched"
 
           git checkout -B "$branch"
@@ -102,7 +114,7 @@ jobs:
           else
             pr_url=$(gh pr create \
               --title "chore(deps): update opencode-patched to ${version}" \
-              --body "Automated update of \`opencode-patched\` to \`v${version}-patched\` (caching + vim)." \
+              --body "Automated update of \`opencode-patched\` to \`${tag}\` (caching + vim)." \
               --label "dependencies,automated" \
               --head "$branch")
             pr_number=$(gh pr view "$branch" --json number -q '.number')
