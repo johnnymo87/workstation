@@ -477,6 +477,55 @@ def estimate(rows: list[dict]) -> dict:
     }
 
 
+def reconcile(
+    by_model: list[dict],
+    pct_threshold: float = 5.0,
+    usd_threshold: float = 5.0,
+) -> dict:
+    """Compare estimated vs recorded cost per row and flag material gaps.
+
+    Does NOT mutate the input rows; returns new row dicts that copy the
+    input fields and add: `delta` (= recorded_cost - est_cost), `delta_pct`
+    (delta as a percentage of est_cost), and `flagged`.
+
+    Flag rule is OR, per the design doc (§3.4): a row is flagged when
+    abs(delta) > usd_threshold OR abs(delta_pct) > pct_threshold. The OR
+    (not AND) ensures both a high-dollar drift and a high-percentage drift
+    are caught -- this is what surfaces OpenCode's models.dev-driven recorded
+    over-count on Vertex opus.
+
+    delta_pct is guarded against a zero estimate: when est_cost == 0 it is
+    0.0 if delta is also 0, else +/-inf (which always trips the pct test).
+    """
+    rows: list[dict] = []
+    total_est = 0.0
+    total_recorded = 0.0
+    for row in by_model:
+        est = row.get("est_cost", 0.0) or 0.0
+        recorded = row.get("recorded_cost", 0.0) or 0.0
+        delta = recorded - est
+        if est != 0:
+            delta_pct = delta / est * 100.0
+        elif delta == 0:
+            delta_pct = 0.0
+        else:
+            delta_pct = float("inf") if delta > 0 else float("-inf")
+        flagged = abs(delta) > usd_threshold or abs(delta_pct) > pct_threshold
+        new_row = dict(row)
+        new_row["delta"] = delta
+        new_row["delta_pct"] = delta_pct
+        new_row["flagged"] = flagged
+        rows.append(new_row)
+        total_est += est
+        total_recorded += recorded
+    return {
+        "rows": rows,
+        "total_est": total_est,
+        "total_recorded": total_recorded,
+        "total_delta": total_recorded - total_est,
+    }
+
+
 def compute_cost_components(by_model: list[dict], active_days: int) -> dict:
     """Compute cost components, applying each model's own rates.
 

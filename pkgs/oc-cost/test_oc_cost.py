@@ -739,3 +739,55 @@ class TestEstimate(unittest.TestCase):
         self.assertEqual(rows[0]["cache_write"], 0)
         self.assertEqual(rows[0]["recorded_cost"], 0.0)
 
+
+class TestReconcile(unittest.TestCase):
+    def test_flags_material_delta(self):
+        # estimated $5.00, recorded $7.43 -> delta +$2.43, ~48% -> flagged
+        # (OR rule: 48% > 5%, even though $2.43 < $5).
+        by_model = [{"provider": "google-vertex-anthropic", "model": "claude-opus-4-7@default",
+                     "msgs": 10, "est_cost": 5.00, "recorded_cost": 7.43}]
+        rec = oc_cost.reconcile(by_model, pct_threshold=5.0, usd_threshold=5.0)
+        row = rec["rows"][0]
+        self.assertAlmostEqual(row["delta"], 2.43, places=2)
+        self.assertTrue(row["flagged"])  # 48% > 5%
+
+    def test_small_delta_not_flagged(self):
+        by_model = [{"provider": "openai", "model": "gpt-5.5", "msgs": 5,
+                     "est_cost": 100.0, "recorded_cost": 101.0}]
+        rec = oc_cost.reconcile(by_model, pct_threshold=5.0, usd_threshold=5.0)
+        self.assertFalse(rec["rows"][0]["flagged"])  # 1% and $1 both under thresholds
+
+    def test_high_pct_small_dollar_is_flagged(self):
+        # est $1.00, recorded $1.50 -> delta $0.50 (50%). OR rule flags it
+        # (50% > 5%) even though $0.50 < $5. The bogus AND rule would suppress it.
+        by_model = [{"provider": "p", "model": "m", "est_cost": 1.00, "recorded_cost": 1.50}]
+        rec = oc_cost.reconcile(by_model, pct_threshold=5.0, usd_threshold=5.0)
+        self.assertTrue(rec["rows"][0]["flagged"])
+
+    def test_large_dollar_small_pct_is_flagged(self):
+        # est $1000, recorded $1040 -> delta $40 (4%). $40 > $5 flags it
+        # even though 4% < 5%.
+        by_model = [{"provider": "p", "model": "m", "est_cost": 1000.0, "recorded_cost": 1040.0}]
+        rec = oc_cost.reconcile(by_model, pct_threshold=5.0, usd_threshold=5.0)
+        self.assertTrue(rec["rows"][0]["flagged"])
+
+    def test_zero_estimate_does_not_crash(self):
+        # est $0.00, recorded $6.00 -> must not raise ZeroDivisionError.
+        by_model = [{"provider": "p", "model": "m", "est_cost": 0.0, "recorded_cost": 6.0}]
+        rec = oc_cost.reconcile(by_model, pct_threshold=5.0, usd_threshold=5.0)
+        row = rec["rows"][0]
+        self.assertAlmostEqual(row["delta"], 6.0, places=6)
+        self.assertTrue(row["flagged"])  # $6 > $5
+
+    def test_totals(self):
+        by_model = [
+            {"provider": "p", "model": "a", "est_cost": 5.0, "recorded_cost": 7.43},
+            {"provider": "p", "model": "b", "est_cost": 100.0, "recorded_cost": 101.0},
+        ]
+        rec = oc_cost.reconcile(by_model, pct_threshold=5.0, usd_threshold=5.0)
+        self.assertAlmostEqual(rec["total_est"], 105.0, places=6)
+        self.assertAlmostEqual(rec["total_recorded"], 108.43, places=6)
+        self.assertAlmostEqual(rec["total_delta"], 3.43, places=6)
+        # order preserved
+        self.assertEqual([r["model"] for r in rec["rows"]], ["a", "b"])
+
