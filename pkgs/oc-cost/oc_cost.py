@@ -376,6 +376,107 @@ def query_by_model_and_kind(conn: sqlite3.Connection, start_ms: int, end_ms: int
     return [dict(r) for r in cur.fetchall()]
 
 
+def query_message_rows(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
+    """Query all assistant message rows with token counts and recorded cost."""
+    cur = conn.execute(
+        f"""
+        SELECT json_extract(data, '$.providerID') AS provider,
+               json_extract(data, '$.modelID') AS model,
+               date(time_created/1000, 'unixepoch') AS day,
+               COALESCE(json_extract(data, '$.tokens.input'), 0) AS input,
+               COALESCE(json_extract(data, '$.tokens.output'), 0) AS output,
+               COALESCE(json_extract(data, '$.tokens.reasoning'), 0) AS reasoning,
+               COALESCE(json_extract(data, '$.tokens.cache.read'), 0) AS cache_read,
+               COALESCE(json_extract(data, '$.tokens.cache.write'), 0) AS cache_write,
+               COALESCE(json_extract(data, '$.cost'), 0.0) AS recorded_cost
+        FROM message
+        WHERE {_BASE_WHERE}
+        """,
+        {"start_ms": start_ms, "end_ms": end_ms},
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def estimate(rows: list[dict]) -> dict:
+    """Aggregate per-message estimation data per provider and model."""
+    by_model_map = {}
+    unpriced_list = []
+    unpriced_seen = set()
+
+    for row in rows:
+        provider = row["provider"]
+        model = row["model"]
+        key = (provider, model)
+
+        tokens = {
+            "input": row["input"],
+            "output": row["output"],
+            "reasoning": row["reasoning"],
+            "cache": {
+                "read": row["cache_read"],
+                "write": row["cache_write"],
+            }
+        }
+
+        cost_usd, tier_label = cost_for_message(provider, model, tokens)
+
+        if key not in by_model_map:
+            rate_entry = rate_for(provider, model)
+            priced = rate_entry is not None
+
+            by_model_map[key] = {
+                "provider": provider,
+                "model": model,
+                "msgs": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cache_read": 0,
+                "cache_write": 0,
+                "est_cost": 0.0,
+                "recorded_cost": 0.0,
+                "tiers": {"base": 0, "long_context": 0, "unpriced": 0},
+                "priced": priced,
+            }
+
+        agg = by_model_map[key]
+        agg["msgs"] += 1
+        agg["input"] += row["input"]
+        agg["output"] += row["output"]
+        agg["reasoning"] += row["reasoning"]
+        agg["cache_read"] += row["cache_read"]
+        agg["cache_write"] += row["cache_write"]
+        agg["recorded_cost"] += row["recorded_cost"]
+
+        if cost_usd is not None:
+            agg["est_cost"] += cost_usd
+
+        if tier_label in agg["tiers"]:
+            agg["tiers"][tier_label] += 1
+
+        if tier_label == "unpriced":
+            if key not in unpriced_seen:
+                unpriced_seen.add(key)
+                unpriced_list.append(key)
+
+    by_model_list = list(by_model_map.values())
+
+    # Sort by_model deterministically:
+    # 1. est_cost descending
+    # 2. recorded_cost descending
+    # 3. provider ascending
+    # 4. model ascending
+    by_model_list.sort(key=lambda x: (-x["est_cost"], -x["recorded_cost"], x["provider"], x["model"]))
+
+    total_est = sum(item["est_cost"] for item in by_model_list if item["priced"])
+
+    return {
+        "by_model": by_model_list,
+        "total_est": total_est,
+        "unpriced": unpriced_list,
+    }
+
+
 def compute_cost_components(by_model: list[dict], active_days: int) -> dict:
     """Compute cost components, applying each model's own rates.
 

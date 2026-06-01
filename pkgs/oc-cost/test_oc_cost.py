@@ -241,6 +241,8 @@ def assistant_msg(
     cache_write: int = 0,
     inp: int = 0,
     out: int = 0,
+    reasoning: int = 0,
+    cost: float = 0.0,
 ) -> dict:
     return {
         "id": msg_id,
@@ -249,9 +251,11 @@ def assistant_msg(
         "role": "assistant",
         "modelID": model,
         "providerID": provider,
+        "cost": cost,
         "tokens": {
             "input": inp,
             "output": out,
+            "reasoning": reasoning,
             "cache": {"read": cache_read, "write": cache_write},
         },
     }
@@ -638,4 +642,100 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
         finally:
             if original is not None:
                 oc_cost.RATES = original
+
+
+class TestEstimate(unittest.TestCase):
+    def test_aggregates_estimated_cost_per_provider_model(self):
+        d0 = 1800000000000
+        msgs = [
+            assistant_msg("m1", "s1", d0+1, model="claude-opus-4-7@default",
+                          provider="google-vertex-anthropic", cache_read=1_000_000),  # $0.50
+            assistant_msg("m2", "s1", d0+2, model="gpt-5.5", provider="openai",
+                          inp=272001, out=0),  # over 272k -> $2.72001
+        ]
+        conn = make_test_db(msgs)
+        rows = oc_cost.query_message_rows(conn, d0, d0 + DAY_MS)
+        est = oc_cost.estimate(rows)
+        by = {(r["provider"], r["model"]): r for r in est["by_model"]}
+        self.assertAlmostEqual(by[("google-vertex-anthropic", "claude-opus-4-7@default")]["est_cost"], 0.50, places=6)
+        self.assertAlmostEqual(by[("openai", "gpt-5.5")]["est_cost"], 272001*10.0/1e6, places=9)
+
+    def test_unpriced_excluded_from_total_and_listed(self):
+        d0 = 1800000000000
+        msgs = [assistant_msg("m1","s1",d0+1, model="mystery", provider="weird", cache_read=1_000_000)]
+        conn = make_test_db(msgs)
+        est = oc_cost.estimate(oc_cost.query_message_rows(conn, d0, d0+DAY_MS))
+        self.assertEqual(est["total_est"], 0.0)
+        self.assertIn(("weird", "mystery"), est["unpriced"])
+
+    def test_recorded_cost_summed(self):
+        d0 = 1800000000000
+        msgs = [
+            assistant_msg("m1", "s1", d0+1, model="gpt-5.5", provider="openai",
+                          inp=100, cost=0.15),
+            assistant_msg("m2", "s1", d0+2, model="gpt-5.5", provider="openai",
+                          inp=200, cost=0.25),
+        ]
+        conn = make_test_db(msgs)
+        rows = oc_cost.query_message_rows(conn, d0, d0 + DAY_MS)
+        est = oc_cost.estimate(rows)
+        by = {(r["provider"], r["model"]): r for r in est["by_model"]}
+        self.assertAlmostEqual(by[("openai", "gpt-5.5")]["recorded_cost"], 0.40, places=6)
+
+    def test_tier_counts(self):
+        d0 = 1800000000000
+        msgs = [
+            # gpt-5.5 base context: threshold is 272000
+            assistant_msg("m1", "s1", d0+1, model="gpt-5.5", provider="openai",
+                          inp=100000),  # base
+            assistant_msg("m2", "s1", d0+2, model="gpt-5.5", provider="openai",
+                          inp=300000),  # long_context
+            # and let's add one unpriced
+            assistant_msg("m3", "s1", d0+3, model="unknown", provider="weird"),  # unpriced
+        ]
+        conn = make_test_db(msgs)
+        rows = oc_cost.query_message_rows(conn, d0, d0 + DAY_MS)
+        est = oc_cost.estimate(rows)
+        by = {(r["provider"], r["model"]): r for r in est["by_model"]}
+        gpt_row = by[("openai", "gpt-5.5")]
+        self.assertEqual(gpt_row["tiers"]["base"], 1)
+        self.assertEqual(gpt_row["tiers"]["long_context"], 1)
+        self.assertEqual(gpt_row["tiers"]["unpriced"], 0)
+
+        weird_row = by[("weird", "unknown")]
+        self.assertEqual(weird_row["tiers"]["base"], 0)
+        self.assertEqual(weird_row["tiers"]["long_context"], 0)
+        self.assertEqual(weird_row["tiers"]["unpriced"], 1)
+
+    def test_query_message_rows_filtering(self):
+        d0 = 1800000000000
+        msgs = [
+            # Inside window, role='assistant', cache_read is present (non-null) -> should be included
+            assistant_msg("m1", "s1", d0 + 1000, cache_read=100),
+            # Outside window -> should be excluded
+            assistant_msg("m2", "s1", d0 - 1000, cache_read=200),
+            # role='user' -> should be excluded
+            {
+                "id": "u1", "session_id": "s1", "time_created": d0 + 1500,
+                "role": "user", "tokens": {"input": 0, "output": 0, "cache": {"read": 0}},
+            },
+            # cache_read is null -> should be excluded
+            {
+                "id": "m3", "session_id": "s1", "time_created": d0 + 2000,
+                "role": "assistant", "modelID": "gpt-5", "providerID": "openai",
+                "tokens": {"input": 100, "output": 50},
+            }
+        ]
+        conn = make_test_db(msgs)
+        rows = oc_cost.query_message_rows(conn, d0, d0 + DAY_MS)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider"], "anthropic")
+        self.assertEqual(rows[0]["model"], "claude-opus-4-6")
+        self.assertEqual(rows[0]["day"], "2027-01-15") # d0 is 1800000000000 ms, which is 2027-01-15
+        self.assertEqual(rows[0]["input"], 0)
+        self.assertEqual(rows[0]["output"], 0)
+        self.assertEqual(rows[0]["reasoning"], 0)
+        self.assertEqual(rows[0]["cache_read"], 100)
+        self.assertEqual(rows[0]["cache_write"], 0)
+        self.assertEqual(rows[0]["recorded_cost"], 0.0)
 
