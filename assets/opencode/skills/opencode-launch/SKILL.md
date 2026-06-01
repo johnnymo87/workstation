@@ -16,6 +16,9 @@ opencode-launch ~/projects/pigeon "fix the failing test in src/auth.ts"
 
 # Launch in the current directory
 opencode-launch "run the build and fix any type errors"
+
+# Launch a worker with the Slack MCP enabled (read + write)
+opencode-launch --mcp slack ~/projects/pigeon "summarize the last hour of #incidents"
 ```
 
 ## What This Does
@@ -27,6 +30,43 @@ opencode-launch "run the build and fix any type errors"
 
 The session runs headless. The pigeon plugin inside the session auto-registers
 with the daemon, so you will receive Telegram notifications for stop/question events.
+
+## Enabling MCP Server Tools (`--mcp`)
+
+MCP-server tools (slack, atlassian, etc.) are globally disabled by default. The
+repeatable `--mcp <server>` flag turns a server on **for the launched session**:
+
+```bash
+opencode-launch --mcp slack ~/projects/pigeon "summarize #incidents today"
+opencode-launch --mcp slack --mcp atlassian ~/projects/foo "cross-post the ticket"
+```
+
+For each `--mcp X`, `opencode-launch`:
+
+1. `POST /mcp/X/connect` (workspace-scoped via the `x-opencode-directory` header).
+   There is **no auto-connect** — referencing a disabled server's tools without
+   connecting first does nothing, so this step is required.
+2. Folds `{"X_*": true}` into the `tools` map of the initial `prompt_async` body,
+   enabling the whole `X_*` tool set for that prompt.
+
+It composes with `--model`. Unlike pinning to a dedicated agent (e.g. the `slack`
+subagent, which strips read/write/bash), the worker keeps its full toolset and
+gains the MCP tools on top.
+
+Key caveats:
+
+- **Host availability.** The slack MCP is configured only on **macOS and
+  cloudbox** (devbox/crostini have no slack block). `--mcp <server>` on a host
+  where the server isn't configured fails with
+  `Error: MCP server '<server>' is not configured on this host` (exit 1).
+- **slack is read + write.** `--mcp slack` enables `slack_*`, which **includes
+  the post-message tool** (`slack_conversations_add_message`). A session launched
+  this way can post to Slack — grant it deliberately, especially for swarm
+  workers.
+- **Per-message scope.** The `tools` override applies to the launch prompt's full
+  agent loop (multi-step tool use within that turn works). A *later, separate*
+  prompt to the same session (e.g. via `opencode-send`) is **not** covered and
+  would need its own enablement.
 
 ## Auto-Attach to nvim+tmux
 
