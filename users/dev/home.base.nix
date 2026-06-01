@@ -10,19 +10,20 @@ let
     # process from the launcher). Without it, callers with a restricted PATH
     # (systemd units, the pigeon worker) hit "setsid: command not found" and
     # the auto-attach trigger silently no-ops.
-    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux ];
+    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.gawk ];
     text = ''
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
 
       usage() {
         local exit_code="''${1:-1}"
-        echo "Usage: opencode-launch [--model provider/model] [directory] <prompt>"
+        echo "Usage: opencode-launch [--model provider/model] [--mcp server] [directory] <prompt>"
         echo ""
         echo "Launch a headless opencode session."
         echo ""
         echo "Options:"
         echo "  -h, --help                     Show this help message"
         echo "  --model <provider/model>       Specify the model to run"
+        echo "  --mcp <server>                 Enable an MCP server's tools (repeatable)"
         echo ""
         echo "Favorite Models:"
         echo "  - google-vertex/gemini-3.5-flash                  (Fast, reasoning-enabled)"
@@ -35,10 +36,21 @@ let
         echo "  opencode-launch \"fix the test\"  # uses current directory"
         echo "  opencode-launch --model google-vertex/gemini-3.5-flash \"run pytest and fix any errors\""
         echo "  opencode-launch --model google-vertex-anthropic/claude-opus-4-7@default ~/projects/pigeon \"review the PR\""
+        echo "  opencode-launch --mcp slack ~/projects/pigeon \"summarize #incidents today\""
         exit "$exit_code"
       }
 
+      build_mcp_tools_json() {
+        local tools_json='{}'
+        local srv
+        for srv in $(printf '%s\n' "$@" | awk 'NF' | sort -u); do
+          tools_json=$(jq -c --arg k "''${srv}_*" '. + {($k): true}' <<<"$tools_json")
+        done
+        printf '%s\n' "$tools_json"
+      }
+
       model_spec=""
+      mcp_servers=()
       while [ $# -gt 0 ]; do
         case "$1" in
           --model)
@@ -55,6 +67,23 @@ let
               echo "Error: --model requires provider/model" >&2
               exit 1
             fi
+            shift
+            ;;
+          --mcp)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+              echo "Error: --mcp requires a server name" >&2
+              exit 1
+            fi
+            mcp_servers+=("$2")
+            shift 2
+            ;;
+          --mcp=*)
+            mcp_server="''${1#--mcp=}"
+            if [ -z "$mcp_server" ]; then
+              echo "Error: --mcp requires a server name" >&2
+              exit 1
+            fi
+            mcp_servers+=("$mcp_server")
             shift
             ;;
           -h|--help)
@@ -123,14 +152,37 @@ let
         exit 1
       fi
 
+      mcp_tools_json='{}'
+      if [ "''${#mcp_servers[@]}" -gt 0 ]; then
+        for srv in $(printf '%s\n' "''${mcp_servers[@]}" | awk 'NF' | sort -u); do
+          connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST "$OPENCODE_URL/mcp/$srv/connect" \
+            -H "x-opencode-directory: $directory")
+          if [ "$connect_code" = "404" ]; then
+            echo "Error: MCP server '$srv' is not configured on this host" >&2
+            exit 1
+          elif [ "$connect_code" != "200" ]; then
+            echo "Error: failed to connect MCP server '$srv' (HTTP $connect_code)" >&2
+            exit 1
+          fi
+        done
+        mcp_tools_json=$(build_mcp_tools_json "''${mcp_servers[@]}")
+      fi
+
       if [ -n "$model_spec" ]; then
         prompt_payload=$(jq -n \
           --arg p "$prompt" \
           --arg provider "$model_provider" \
           --arg model "$model_id" \
-          '{parts: [{type: "text", text: $p}], model: {providerID: $provider, modelID: $model}}')
+          --argjson tools "$mcp_tools_json" \
+          '{parts: [{type: "text", text: $p}], model: {providerID: $provider, modelID: $model}}
+           + (if ($tools | length) > 0 then {tools: $tools} else {} end)')
       else
-        prompt_payload=$(jq -n --arg p "$prompt" '{parts: [{type: "text", text: $p}]}')
+        prompt_payload=$(jq -n \
+          --arg p "$prompt" \
+          --argjson tools "$mcp_tools_json" \
+          '{parts: [{type: "text", text: $p}]}
+           + (if ($tools | length) > 0 then {tools: $tools} else {} end)')
       fi
 
       # Send prompt
