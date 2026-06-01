@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import os
 import json
@@ -124,10 +125,13 @@ def price_for(model_id: str) -> Optional[dict[str, float]]:
     return PRICES[best_key] if best_key else None
 
 
-def rate_for(provider: str, model_id: str) -> Optional[dict]:
+def rate_for(provider: Optional[str], model_id: Optional[str]) -> Optional[dict]:
     """Look up a rate-book entry for (provider, model). Strips @suffix, tries
     exact match, then longest-prefix match on the model component within the
-    same provider. Returns None if unknown."""
+    same provider. Returns None if unknown or if either id is missing (a real
+    DB can contain assistant rows with a null providerID/modelID)."""
+    if not provider or not model_id:
+        return None
     base = model_id.split("@", 1)[0]
     if (provider, base) in RATES:
         return RATES[(provider, base)]
@@ -199,6 +203,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Add a primary-vs-subagent breakdown section. Subagent sessions "
             "are those whose row in the session table has a non-null parent_id."
+        ),
+    )
+    parser.add_argument(
+        "--reconcile", action="store_true",
+        help=(
+            "Expand the full per-(provider,model) reconciliation table comparing "
+            "our estimate against OpenCode's recorded $.cost, plus the unpriced list. "
+            "A one-line reconciliation summary is always shown regardless of this flag."
         ),
     )
 
@@ -600,6 +612,15 @@ def _fmt_usd(n: float) -> str:
     return f"${n:.2f}"
 
 
+def _short_label(label: str, width: int = 40) -> str:
+    """Truncate a provider/model label to `width`, keeping the TAIL (model id
+    + version + @suffix) rather than the common provider prefix, so otherwise
+    near-identical rows (e.g. .../claude-opus-4-7 vs -4-6) stay distinguishable."""
+    if len(label) <= width:
+        return label
+    return ".." + label[-(width - 2):]
+
+
 def _pct(part: float, total: float) -> str:
     return f"{(part / total * 100):.1f}" if total > 0 else "0.0"
 
@@ -608,17 +629,31 @@ def _ms_to_iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _json_safe_recrow(row: dict) -> dict:
+    """Copy a reconciliation row, coercing a non-finite delta_pct (the
+    zero-estimate +/-inf sentinel) to None so render_json emits valid,
+    RFC 8259-compliant JSON (no bare Infinity/NaN literals)."""
+    out = dict(row)
+    dpct = out.get("delta_pct")
+    if not (isinstance(dpct, (int, float)) and math.isfinite(dpct)):
+        out["delta_pct"] = None
+    return out
+
+
 def render_json(report: dict) -> str:
-    return json.dumps(report, indent=2, sort_keys=True)
+    # allow_nan=False guarantees we never emit non-standard Infinity/NaN tokens;
+    # report values are pre-sanitized in main() so this should never trip.
+    return json.dumps(report, indent=2, sort_keys=True, allow_nan=False)
 
 
 def render_text(report: dict) -> str:
     lines: list[str] = []
     daily = report["daily"]
-    by_model = report["by_model"]
-    components = report["cost_components"]
+    est = report["estimate"]
+    rec = report["reconciliation"]
     buckets = report["size_buckets"]
     meta = report["meta"]
+    reconcile_full = meta.get("reconcile", False)
 
     if not daily:
         lines.append(
@@ -641,66 +676,67 @@ def render_text(report: dict) -> str:
             f"{_pct(d['uncached'], total):>5}%"
         )
 
-    # Per-model section
-    lines.append("\n\n  Per-Model Cost Breakdown\n")
-    lines.append("MODEL                          MSGS   CACHE_RD(M)  CACHE_WR(M)  OUTPUT(M)   COST")
-    lines.append("-" * 90)
-    grand_cache_read = grand_cache_write = grand_output = 0
-    grand_total = 0.0
-    for m in by_model:
+    # Per-model estimated cost section (own rate book, per-request tiers).
+    lines.append("\n\n  Per-Model Estimated Cost (own rate book, per-request tiers)\n")
+    lines.append("PROVIDER/MODEL                           MSGS   CACHE_RD(M)  CACHE_WR(M)  OUTPUT(M)       EST$")
+    lines.append("-" * 100)
+    for m in est["by_model"]:
         cr_M = m["cache_read"]  / 1e6
         cw_M = m["cache_write"] / 1e6
         ou_M = m["output"]      / 1e6
-        grand_cache_read  += m["cache_read"]
-        grand_cache_write += m["cache_write"]
-        grand_output      += m["output"]
-        if m["cost_usd"] is not None:
-            grand_total += m["cost_usd"]
-            cost_tag = _fmt_usd(m["cost_usd"]).rjust(10)
+        if m["priced"]:
+            cost_tag = _fmt_usd(m["est_cost"]).rjust(10)
         else:
-            cost_tag = "  (no rate)"
-        name = m["model"][:28] + ".." if len(m["model"]) > 28 else m["model"]
+            cost_tag = " (unpriced)"
+        name = _short_label(f"{m['provider']}/{m['model']}", 40)
         lines.append(
-            f"{name:<30} {str(m['msgs']):>5}  "
+            f"{name:<40} {str(m['msgs']):>5}  "
             f"{cr_M:>10.1f}  {cw_M:>10.1f}  {ou_M:>8.1f}  {cost_tag}"
         )
-    lines.append("-" * 90)
+    lines.append("-" * 100)
     lines.append(
-        f"{'TOTAL':<30} {'':>5}  "
-        f"{grand_cache_read / 1e6:>10.1f}  "
-        f"{grand_cache_write / 1e6:>10.1f}  "
-        f"{grand_output / 1e6:>8.1f}  "
-        f"{_fmt_usd(grand_total):>10}"
+        f"{'TOTAL (estimated, priced only)':<40} {'':>5}  "
+        f"{'':>10}  {'':>10}  {'':>8}  "
+        f"{_fmt_usd(est['total_est']):>10}"
     )
 
-    # Cost components section
-    total = components["total"]
-    lines.append("\n\n  Cost Components (per-model rates applied separately)\n")
+    # Reconciliation summary line (always shown).
+    lines.append("\n\n  Reconciliation (estimated vs recorded $.cost)\n")
     lines.append(
-        f"  Cache reads:   {_fmt_usd(components['cache_reads']):>10}  "
-        f"({_pct(components['cache_reads'], total)}%)"
+        f"  Estimated: {_fmt_usd(rec['total_est'])}   |   "
+        f"Recorded: {_fmt_usd(rec['total_recorded'])}   |   "
+        f"Δ (recorded−estimated): {_fmt_usd(rec['total_delta'])}"
     )
-    lines.append(
-        f"  Cache writes:  {_fmt_usd(components['cache_writes']):>10}  "
-        f"({_pct(components['cache_writes'], total)}%)"
-    )
-    lines.append(
-        f"  Uncached in:   {_fmt_usd(components['uncached_input']):>10}  "
-        f"({_pct(components['uncached_input'], total)}%)"
-    )
-    lines.append(
-        f"  Output:        {_fmt_usd(components['output']):>10}  "
-        f"({_pct(components['output'], total)}%)"
-    )
-    lines.append(f"  {'─' * 30}")
-    lines.append(f"  Total:         {_fmt_usd(total):>10}")
-    lines.append(f"  Daily avg:     {_fmt_usd(components['daily_avg']):>10}")
-    lines.append(f"  Monthly proj:  {_fmt_usd(components['monthly_proj']):>10}")
-    if components["unpriced_models"]:
-        lines.append(
-            f"\n  Unpriced models (excluded from total): "
-            f"{', '.join(components['unpriced_models'])}"
-        )
+
+    if reconcile_full:
+        # Full per-(provider,model) reconciliation table (priced rows only).
+        lines.append("")
+        lines.append("PROVIDER/MODEL                           MSGS        EST$   RECORDED$        Δ$      Δ%   FLAG")
+        lines.append("-" * 100)
+        for r in rec["rows"]:
+            name = _short_label(f"{r['provider']}/{r['model']}", 40)
+            dpct = r.get("delta_pct")
+            pct_tag = f"{dpct:>6.1f}" if isinstance(dpct, (int, float)) else "   n/a"
+            flag_tag = "  FLAG" if r.get("flagged") else ""
+            lines.append(
+                f"{name:<40} {str(r.get('msgs', '')):>5}  "
+                f"{_fmt_usd(r['est_cost']):>10}  "
+                f"{_fmt_usd(r['recorded_cost']):>10}  "
+                f"{_fmt_usd(r['delta']):>8}  {pct_tag}{flag_tag}"
+            )
+
+        # Unpriced models: recorded cost known, estimate is n/a. Excluded from
+        # the estimated total; never silently folded into $0.
+        unpriced_rows = [m for m in est["by_model"] if not m["priced"]]
+        if unpriced_rows:
+            lines.append("")
+            lines.append("  Unpriced (excluded from estimate; recorded shown for reference):")
+            for m in unpriced_rows:
+                label = f"{m['provider']}/{m['model']}"
+                lines.append(
+                    f"    {label:<44} msgs {str(m['msgs']):>6}   "
+                    f"recorded {_fmt_usd(m['recorded_cost'])}   estimated n/a"
+                )
 
     # Size buckets section
     total_msgs = sum(b["msgs"] for b in buckets)
@@ -783,7 +819,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         daily   = query_daily(conn, start_ms, end_ms)
-        by_model = query_by_model(conn, start_ms, end_ms)
+        rows    = query_message_rows(conn, start_ms, end_ms)
         buckets = query_size_buckets(conn, start_ms, end_ms)
     except sqlite3.OperationalError as e:
         if "locked" in str(e).lower():
@@ -791,17 +827,32 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         raise
 
-    components = compute_cost_components(by_model, active_days=max(len(daily), 1))
+    # Headline cost is our own per-request tier-aware estimate; recorded $.cost
+    # is shown alongside via reconciliation. Only priced rows are reconciled;
+    # unpriced models are surfaced separately (never folded into $0).
+    est = estimate(rows)
+    priced_rows = [r for r in est["by_model"] if r["priced"]]
+    rec = reconcile(priced_rows)
 
     report = {
         "meta": {
             "db_path": db_path,
             "window": {"start": _ms_to_iso(start_ms), "end": _ms_to_iso(end_ms)},
             "active_days": len(daily),
+            "reconcile": args.reconcile,
         },
         "daily": daily,
-        "by_model": by_model,
-        "cost_components": components,
+        "estimate": {
+            "total_est": est["total_est"],
+            "by_model": est["by_model"],
+            "unpriced": [list(t) for t in est["unpriced"]],
+        },
+        "reconciliation": {
+            "rows": [_json_safe_recrow(r) for r in rec["rows"]],
+            "total_est": rec["total_est"],
+            "total_recorded": rec["total_recorded"],
+            "total_delta": rec["total_delta"],
+        },
         "size_buckets": buckets,
     }
 

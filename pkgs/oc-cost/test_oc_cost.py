@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -528,24 +529,41 @@ class TestRenderJson(unittest.TestCase):
                 "db_path": "/x/y.db",
                 "window": {"start": "2026-04-06T00:00:00Z", "end": "2026-04-20T00:00:00Z"},
                 "active_days": 14,
+                "reconcile": False,
             },
             "daily": [{"day": "2026-04-06", "msgs": 1, "cache_read": 100,
                        "cache_write": 10, "uncached": 5, "output": 20}],
-            "by_model": [{"model": "claude-opus-4-6", "msgs": 1,
-                          "cache_read": 100, "cache_write": 10,
-                          "uncached": 5, "output": 20, "cost_usd": 0.5}],
-            "cost_components": {
-                "cache_reads": 0.1, "cache_writes": 0.2, "uncached_input": 0.3,
-                "output": 0.4, "total": 1.0, "daily_avg": 0.07,
-                "monthly_proj": 2.1, "unpriced_models": [],
+            "estimate": {
+                "total_est": 0.5,
+                "by_model": [{"provider": "anthropic", "model": "claude-opus-4-6",
+                              "msgs": 1, "input": 5, "output": 20, "reasoning": 0,
+                              "cache_read": 100, "cache_write": 10,
+                              "est_cost": 0.5, "recorded_cost": 0.5,
+                              "tiers": {"base": 1, "long_context": 0, "unpriced": 0},
+                              "priced": True}],
+                "unpriced": [],
+            },
+            "reconciliation": {
+                "rows": [{"provider": "anthropic", "model": "claude-opus-4-6",
+                          "msgs": 1, "est_cost": 0.5, "recorded_cost": 0.5,
+                          "delta": 0.0, "delta_pct": 0.0, "flagged": False}],
+                "total_est": 0.5, "total_recorded": 0.5, "total_delta": 0.0,
             },
             "size_buckets": [{"bucket": "0-50k", "msgs": 1, "min_size": 100, "max_size": 100}],
         }
         out = oc_cost.render_json(report)
         parsed = json.loads(out)
         self.assertEqual(set(parsed.keys()),
-                         {"meta", "daily", "by_model", "cost_components", "size_buckets"})
-        self.assertEqual(parsed["cost_components"]["total"], 1.0)
+                         {"meta", "daily", "estimate", "reconciliation", "size_buckets"})
+        self.assertEqual(parsed["estimate"]["total_est"], 0.5)
+        self.assertEqual(parsed["reconciliation"]["total_delta"], 0.0)
+
+    def test_render_json_rejects_non_finite(self):
+        # delta_pct must be sanitized BEFORE render_json; a raw inf would make
+        # allow_nan=False raise, which is the safety net we want.
+        bad = {"reconciliation": {"rows": [{"delta_pct": float("inf")}]}}
+        with self.assertRaises(ValueError):
+            oc_cost.render_json(bad)
 
 
 class TestConnect(unittest.TestCase):
@@ -790,4 +808,125 @@ class TestReconcile(unittest.TestCase):
         self.assertAlmostEqual(rec["total_delta"], 3.43, places=6)
         # order preserved
         self.assertEqual([r["model"] for r in rec["rows"]], ["a", "b"])
+
+
+class TestParseArgsReconcile(unittest.TestCase):
+    def test_reconcile_default_false(self):
+        self.assertFalse(oc_cost.parse_args([]).reconcile)
+
+    def test_reconcile_flag(self):
+        self.assertTrue(oc_cost.parse_args(["--reconcile"]).reconcile)
+
+
+class TestRateForGuard(unittest.TestCase):
+    def test_none_model_returns_none(self):
+        self.assertIsNone(oc_cost.rate_for("openai", None))
+
+    def test_none_provider_returns_none(self):
+        self.assertIsNone(oc_cost.rate_for(None, "gpt-5.5"))
+
+    def test_cost_for_message_handles_none_ids(self):
+        toks = {"input": 100, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+        cost, tier = oc_cost.cost_for_message(None, None, toks)
+        self.assertIsNone(cost)
+        self.assertEqual(tier, "unpriced")
+
+
+def _write_db_file(messages: list[dict]) -> str:
+    """Write messages to a temp on-disk sqlite DB (connect() needs a file path
+    for its mode=ro URI) and return the path. Caller is responsible for unlink."""
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE message (
+            id text PRIMARY KEY,
+            session_id text NOT NULL,
+            time_created integer NOT NULL,
+            time_updated integer NOT NULL,
+            data text NOT NULL
+        )
+        """
+    )
+    for m in messages:
+        data = {k: v for k, v in m.items() if k not in ("id", "session_id", "time_created")}
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (m["id"], m["session_id"], m["time_created"], m["time_created"], json.dumps(data)),
+        )
+    conn.commit()
+    conn.close()
+    return path
+
+
+class TestMainIntegration(unittest.TestCase):
+    """End-to-end: main() over a real on-disk DB, JSON output."""
+
+    def test_end_to_end_json_reconcile(self):
+        import io
+        import contextlib
+        import os as _os
+        d0 = 1800000000000  # 2027-01-15 UTC
+        msgs = [
+            # priced: est $0.50, but recorded inflated to $2.93 -> flagged
+            assistant_msg("m1", "s1", d0 + 1, model="claude-opus-4-7@default",
+                          provider="google-vertex-anthropic", cache_read=1_000_000, cost=2.93),
+            # unpriced: recorded $1.00, no rate-book entry
+            assistant_msg("m2", "s1", d0 + 2, model="mystery", provider="weird",
+                          cache_read=1_000_000, cost=1.00),
+        ]
+        path = _write_db_file(msgs)
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = oc_cost.main(["--db", path, "--json",
+                                   "--since", "2027-01-01", "--until", "2027-01-31",
+                                   "--reconcile"])
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            # No non-standard JSON tokens.
+            self.assertNotIn("Infinity", out)
+            self.assertNotIn("NaN", out)
+            parsed = json.loads(out)
+            self.assertEqual(set(parsed.keys()),
+                             {"meta", "daily", "estimate", "reconciliation", "size_buckets"})
+            self.assertTrue(parsed["meta"]["reconcile"])
+            # estimate: only the priced opus contributes ($0.50); mystery unpriced.
+            self.assertAlmostEqual(parsed["estimate"]["total_est"], 0.50, places=6)
+            self.assertIn(["weird", "mystery"], parsed["estimate"]["unpriced"])
+            # reconciliation: only priced rows; opus flagged (recorded 2.93 >> est 0.50).
+            recrows = parsed["reconciliation"]["rows"]
+            self.assertEqual(len(recrows), 1)
+            opus = recrows[0]
+            self.assertEqual(opus["model"], "claude-opus-4-7@default")
+            self.assertTrue(opus["flagged"])
+            self.assertAlmostEqual(parsed["reconciliation"]["total_recorded"], 2.93, places=6)
+            self.assertAlmostEqual(parsed["reconciliation"]["total_est"], 0.50, places=6)
+            self.assertAlmostEqual(parsed["reconciliation"]["total_delta"], 2.43, places=6)
+        finally:
+            _os.unlink(path)
+
+    def test_end_to_end_text_runs(self):
+        import io
+        import contextlib
+        import os as _os
+        d0 = 1800000000000
+        msgs = [
+            assistant_msg("m1", "s1", d0 + 1, model="gpt-5.5", provider="openai",
+                          inp=1000, out=500, cost=0.02),
+        ]
+        path = _write_db_file(msgs)
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = oc_cost.main(["--db", path, "--since", "2027-01-01", "--until", "2027-01-31"])
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn("Per-Model Estimated Cost", out)
+            self.assertIn("Reconciliation", out)
+        finally:
+            _os.unlink(path)
 
