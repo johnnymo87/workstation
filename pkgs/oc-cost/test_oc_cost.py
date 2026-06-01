@@ -564,3 +564,78 @@ class TestConnect(unittest.TestCase):
         finally:
             import os
             os.unlink(path)
+
+
+class TestRateBookAndCostForMessage(unittest.TestCase):
+    def test_rate_for_provider_model(self):
+        e = oc_cost.rate_for("openai", "gpt-5.5")
+        self.assertIsNotNone(e)
+        self.assertEqual(e["input"], 5.0)
+        self.assertEqual(e["tier"]["threshold"], 272000)
+
+    def test_rate_for_strips_at_suffix(self):
+        e = oc_cost.rate_for("google-vertex-anthropic", "claude-opus-4-7@default")
+        self.assertIsNotNone(e)
+        self.assertEqual(e["input"], 5.0)
+        self.assertNotIn("tier", e)  # Vertex current-gen opus is FLAT
+
+    def test_rate_for_unknown_returns_none(self):
+        self.assertIsNone(oc_cost.rate_for("openai", "totally-unknown"))
+
+    def test_flat_model_ignores_huge_context(self):
+        # opus is flat: 1M cache_read at $0.50 regardless of context size
+        toks = {"input": 0, "output": 0, "reasoning": 0,
+                "cache": {"read": 1_000_000, "write": 0}}
+        cost, tier = oc_cost.cost_for_message("google-vertex-anthropic",
+                                              "claude-opus-4-7@default", toks)
+        self.assertAlmostEqual(cost, 0.50, places=6)
+        self.assertEqual(tier, "base")
+
+    def test_gpt55_under_threshold_uses_base(self):
+        # context = input + cache.read + cache.write = 271999 (< 272000)
+        toks = {"input": 271999, "output": 0, "reasoning": 0,
+                "cache": {"read": 0, "write": 0}}
+        cost, tier = oc_cost.cost_for_message("openai", "gpt-5.5", toks)
+        self.assertAlmostEqual(cost, 271999 * 5.0 / 1e6, places=9)
+        self.assertEqual(tier, "base")
+
+    def test_gpt55_over_threshold_uses_tier_for_whole_request(self):
+        # context = 272001 (>= 272000): ALL tokens at tier rates
+        toks = {"input": 272001, "output": 1000, "reasoning": 500,
+                "cache": {"read": 0, "write": 0}}
+        cost, tier = oc_cost.cost_for_message("openai", "gpt-5.5", toks)
+        expected = (272001 * 10.0 + (1000 + 500) * 45.0) / 1e6
+        self.assertAlmostEqual(cost, expected, places=9)
+        self.assertEqual(tier, "long_context")
+
+    def test_reasoning_billed_at_output_rate(self):
+        toks = {"input": 0, "output": 1_000_000, "reasoning": 1_000_000,
+                "cache": {"read": 0, "write": 0}}
+        cost, _ = oc_cost.cost_for_message("openai", "gpt-5.5", toks)
+        self.assertAlmostEqual(cost, 60.0, places=6)  # 2M * $30/M base
+
+    def test_unknown_model_cost_is_none(self):
+        toks = {"input": 100, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+        cost, tier = oc_cost.cost_for_message("openai", "nope", toks)
+        self.assertIsNone(cost)
+        self.assertEqual(tier, "unpriced")
+
+    def test_longest_prefix_wins_regardless_of_dict_order_rates(self):
+        original = getattr(oc_cost, "RATES", None)
+        try:
+            oc_cost.RATES = {
+                ("openai", "gpt-5"): {
+                    "input": 15, "output": 75, "cache_read": 1.5, "cache_write": 18.75
+                },
+                ("openai", "gpt-5.5"): {
+                    "input": 5, "output": 30, "cache_read": 0.5, "cache_write": 0
+                },
+            }
+            e = oc_cost.rate_for("openai", "gpt-5.5-snapshot")
+            self.assertIsNotNone(e)
+            self.assertEqual(e["input"], 5)
+            self.assertEqual(e["output"], 30)
+        finally:
+            if original is not None:
+                oc_cost.RATES = original
+

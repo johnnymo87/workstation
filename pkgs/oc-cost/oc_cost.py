@@ -73,6 +73,38 @@ PRICES: dict[str, dict[str, float]] = {
 }
 
 
+# Per-million-token rates in USD, keyed by (providerID, model base id).
+# Source of truth = official provider pricing pages (NOT models.dev, which
+# wrongly tiers current-gen Vertex Claude). "tier" is optional; when present
+# it is a WHOLE-REQUEST long-context tier applied to all token categories once
+# context (input + cache.read + cache.write) >= threshold.
+RATES: dict[tuple[str, str], dict] = {
+    # --- Anthropic Claude: FLAT across full context (Anthropic + Vertex + Bedrock,
+    #     current gen). models.dev's >200K Vertex tier is a parsing artifact. ---
+    ("anthropic", "claude-opus-4-7"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    ("anthropic", "claude-opus-4-8"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    ("anthropic", "claude-opus-4-6"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    ("anthropic", "claude-sonnet-4-6"):            {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
+    ("google-vertex-anthropic", "claude-opus-4-7"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    ("google-vertex-anthropic", "claude-opus-4-8"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    ("google-vertex-anthropic", "claude-opus-4-6"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    ("google-vertex-anthropic", "claude-sonnet-4-6"): {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
+    # --- Google Gemini (Vertex) ---
+    ("google-vertex", "gemini-3.5-flash"):  {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5},
+    # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
+    # pricing (whole-request selection above 200K input tokens).
+    ("google-vertex", "gemini-3.1-pro-preview"): {
+        "input": 2, "output": 12, "cache_read": 0.20, "cache_write": 2,
+        "tier": {"threshold": 200000, "input": 4, "output": 18, "cache_read": 0.40, "cache_write": 4},
+    },
+    # --- OpenAI ---
+    ("openai", "gpt-5.5"): {
+        "input": 5, "output": 30, "cache_read": 0.50, "cache_write": 0,
+        "tier": {"threshold": 272000, "input": 10, "output": 45, "cache_read": 1, "cache_write": 0},
+    },
+}
+
+
 def price_for(model_id: str) -> Optional[dict[str, float]]:
     """Look up per-million-token rates for a model id.
 
@@ -90,6 +122,46 @@ def price_for(model_id: str) -> Optional[dict[str, float]]:
             if best_key is None or len(key) > len(best_key):
                 best_key = key
     return PRICES[best_key] if best_key else None
+
+
+def rate_for(provider: str, model_id: str) -> Optional[dict]:
+    """Look up a rate-book entry for (provider, model). Strips @suffix, tries
+    exact match, then longest-prefix match on the model component within the
+    same provider. Returns None if unknown."""
+    base = model_id.split("@", 1)[0]
+    if (provider, base) in RATES:
+        return RATES[(provider, base)]
+    best: Optional[tuple[str, str]] = None
+    for (prov, key) in RATES:
+        if prov == provider and base.startswith(key):
+            if best is None or len(key) > len(best[1]):
+                best = (prov, key)
+    return RATES[best] if best else None
+
+
+def cost_for_message(provider: str, model_id: str, tokens: dict) -> tuple[Optional[float], str]:
+    """Return (cost_usd, tier_label) for one request. tier_label is one of
+    'base' | 'long_context' | 'unpriced'. cost is None when unpriced.
+    Whole-request tier selection: context = input + cache.read + cache.write."""
+    entry = rate_for(provider, model_id)
+    if entry is None:
+        return None, "unpriced"
+    inp = tokens.get("input", 0) or 0
+    out = tokens.get("output", 0) or 0
+    reasoning = tokens.get("reasoning", 0) or 0
+    cache = tokens.get("cache", {}) or {}
+    cr = cache.get("read", 0) or 0
+    cw = cache.get("write", 0) or 0
+    context = inp + cr + cw
+    tier = entry.get("tier")
+    if tier and context >= tier["threshold"]:
+        r, label = tier, "long_context"
+    else:
+        r, label = entry, "base"
+    cost = (inp * r["input"] + out * r["output"] + reasoning * r["output"]
+            + cr * r["cache_read"] + cw * r["cache_write"]) / 1_000_000
+    return cost, label
+
 
 
 def _positive_int(value: str) -> int:
