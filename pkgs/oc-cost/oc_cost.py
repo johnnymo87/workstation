@@ -406,19 +406,25 @@ def connect(db_path: str) -> sqlite3.Connection:
         sys.exit(1)
     uri = f"file:{db_path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    # Confirm it's an OpenCode DB.
-    cur = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='message'"
-    )
-    if cur.fetchone() is None:
-        conn.close()
-        print(
-            f"Not an OpenCode database (missing 'message' table): {db_path}",
-            file=sys.stderr,
+    try:
+        conn.row_factory = sqlite3.Row
+        # Confirm it's an OpenCode DB.
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='message'"
         )
-        sys.exit(1)
-    return conn
+        if cur.fetchone() is None:
+            print(
+                f"Not an OpenCode database (missing 'message' table): {db_path}",
+                file=sys.stderr,
+            )
+            conn.close()
+            sys.exit(1)
+        return conn
+    except Exception:
+        # A corrupt file or non-SQLite path can raise during the probe; don't
+        # leak the open connection/file descriptor.
+        conn.close()
+        raise
 
 
 def _fmt_usd(n: float) -> str:
