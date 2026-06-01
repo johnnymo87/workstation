@@ -8,12 +8,8 @@ set -o errexit -o nounset -o pipefail
 # Given server names as args, print a compact JSON object mapping each
 # "<server>_*" -> true, de-duplicated and stable-ordered. No args -> {}.
 build_mcp_tools_json() {
-  local tools_json='{}'
-  local srv
-  for srv in $(printf '%s\n' "$@" | awk 'NF' | sort -u); do
-    tools_json=$(jq -c --arg k "${srv}_*" '. + {($k): true}' <<<"$tools_json")
-  done
-  printf '%s\n' "$tools_json"
+  printf '%s\n' "$@" | jq -R -s -c '
+    split("\n") | map(select(. != "")) | unique | map({(. + "_*"): true}) | add // {}'
 }
 
 fail=0

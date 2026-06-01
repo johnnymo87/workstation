@@ -10,7 +10,7 @@ let
     # process from the launcher). Without it, callers with a restricted PATH
     # (systemd units, the pigeon worker) hit "setsid: command not found" and
     # the auto-attach trigger silently no-ops.
-    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.gawk ];
+    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux ];
     text = ''
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
 
@@ -41,12 +41,8 @@ let
       }
 
       build_mcp_tools_json() {
-        local tools_json='{}'
-        local srv
-        for srv in $(printf '%s\n' "$@" | awk 'NF' | sort -u); do
-          tools_json=$(jq -c --arg k "''${srv}_*" '. + {($k): true}' <<<"$tools_json")
-        done
-        printf '%s\n' "$tools_json"
+        printf '%s\n' "$@" | jq -R -s -c '
+          split("\n") | map(select(. != "")) | unique | map({(. + "_*"): true}) | add // {}'
       }
 
       model_spec=""
@@ -154,7 +150,7 @@ let
 
       mcp_tools_json='{}'
       if [ "''${#mcp_servers[@]}" -gt 0 ]; then
-        for srv in $(printf '%s\n' "''${mcp_servers[@]}" | awk 'NF' | sort -u); do
+        for srv in $(printf '%s\n' "''${mcp_servers[@]}" | sort -u); do
           connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
             -X POST "$OPENCODE_URL/mcp/$srv/connect" \
             -H "x-opencode-directory: $directory")
