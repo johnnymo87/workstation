@@ -12,68 +12,6 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
-# Anthropic per-model rates in USD per million tokens.
-# Source: https://docs.anthropic.com/en/docs/about-claude/pricing
-# Update manually when rates change or new models land.
-PRICES: dict[str, dict[str, float]] = {
-    "claude-opus-4-7": {
-        "input": 5, "output": 25, "cache_write": 6.25, "cache_read": 0.50,
-    },
-    "claude-opus-4-6": {
-        "input": 5, "output": 25, "cache_write": 6.25, "cache_read": 0.50,
-    },
-    "claude-opus-4-5": {
-        "input": 5, "output": 25, "cache_write": 6.25, "cache_read": 0.50,
-    },
-    "claude-opus-4-1": {
-        "input": 15, "output": 75, "cache_write": 18.75, "cache_read": 1.50,
-    },
-    "claude-opus-4": {
-        "input": 15, "output": 75, "cache_write": 18.75, "cache_read": 1.50,
-    },
-    "claude-sonnet-4-6": {
-        "input": 3, "output": 15, "cache_write": 3.75, "cache_read": 0.30,
-    },
-    "claude-sonnet-4-5": {
-        "input": 3, "output": 15, "cache_write": 3.75, "cache_read": 0.30,
-    },
-    "claude-sonnet-4": {
-        "input": 3, "output": 15, "cache_write": 3.75, "cache_read": 0.30,
-    },
-    "claude-haiku-4-5": {
-        "input": 1, "output": 5, "cache_write": 1.25, "cache_read": 0.10,
-    },
-    "claude-haiku-3-5": {
-        "input": 0.80, "output": 4, "cache_write": 1.0, "cache_read": 0.08,
-    },
-    # Gemini 3.1 Pro Preview (Vertex AI / AI Studio).
-    # Rates are for the <=200k context tier as published 2026-04. The >200k
-    # tier doubles input ($4.00) and bumps output to $18.00 / cache_read to
-    # $0.40 -- not modelled here because oc-cost has no per-request context
-    # window data.
-    #
-    # IMPORTANT: Google bills cache CREATION at the standard input rate
-    # ($2.00/MTok) AND charges a separate token-hour STORAGE fee
-    # (~$4.50/MTok-hour) for as long as the cache lives. oc-cost's schema
-    # only captures per-token rates, so we set cache_write to the creation
-    # rate ($2.00). This UNDERCOUNTS Gemini cache cost for long-lived
-    # caches; the storage component is invisible to this tool. See README.
-    "gemini-3.1-pro-preview": {
-        "input": 2.00, "output": 12.00, "cache_write": 2.00, "cache_read": 0.20,
-    },
-    # GPT-5.5 Standard (OpenAI provider).
-    # Rates from LiteLLM/model pricing + models.dev discussion, observed 2026-05:
-    # input=$5/MTok, cached input=$0.50/MTok, output=$30/MTok. OpenAI-style
-    # automatic prompt caching does not expose Anthropic-style cache creation
-    # charges, so cache_write is 0.0 in this schema. Requests above 272k prompt
-    # tokens have higher rates (input=$10, cache_read=$1, output=$45), which
-    # oc-cost does not model yet because pricing is currently per model row.
-    "gpt-5.5": {
-        "input": 5.00, "output": 30.00, "cache_write": 0.00, "cache_read": 0.50,
-    },
-}
-
-
 # Per-million-token rates in USD, keyed by (providerID, model base id).
 # Source of truth = official provider pricing pages (NOT models.dev, which
 # wrongly tiers current-gen Vertex Claude). "tier" is optional; when present
@@ -106,25 +44,6 @@ RATES: dict[tuple[str, str], dict] = {
 }
 
 
-def price_for(model_id: str) -> Optional[dict[str, float]]:
-    """Look up per-million-token rates for a model id.
-
-    Strips an @suffix (e.g. "@default", "@vertex"), tries an exact match,
-    then falls back to the longest prefix match in PRICES.
-    Returns None if no match is found.
-    """
-    base = model_id.split("@", 1)[0]
-    if base in PRICES:
-        return PRICES[base]
-    # Longest-prefix match so claude-opus-4-6-foo prefers 4-6 over 4.
-    best_key: Optional[str] = None
-    for key in PRICES:
-        if base.startswith(key):
-            if best_key is None or len(key) > len(best_key):
-                best_key = key
-    return PRICES[best_key] if best_key else None
-
-
 def rate_for(provider: Optional[str], model_id: Optional[str]) -> Optional[dict]:
     """Look up a rate-book entry for (provider, model). Strips @suffix, tries
     exact match, then longest-prefix match on the model component within the
@@ -143,7 +62,9 @@ def rate_for(provider: Optional[str], model_id: Optional[str]) -> Optional[dict]
     return RATES[best] if best else None
 
 
-def cost_for_message(provider: str, model_id: str, tokens: dict) -> tuple[Optional[float], str]:
+def cost_for_message(
+    provider: Optional[str], model_id: Optional[str], tokens: dict
+) -> tuple[Optional[float], str]:
     """Return (cost_usd, tier_label) for one request. tier_label is one of
     'base' | 'long_context' | 'unpriced'. cost is None when unpriced.
     Whole-request tier selection: context = input + cache.read + cache.write."""
@@ -273,24 +194,6 @@ def query_daily(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[di
     return [dict(r) for r in cur.fetchall()]
 
 
-def query_by_model(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
-    cur = conn.execute(
-        f"""
-        SELECT json_extract(data, '$.modelID') AS model,
-               COUNT(*) AS msgs,
-               SUM(COALESCE(json_extract(data, '$.tokens.cache.read'),  0)) AS cache_read,
-               SUM(COALESCE(json_extract(data, '$.tokens.cache.write'), 0)) AS cache_write,
-               SUM(COALESCE(json_extract(data, '$.tokens.input'),       0)) AS uncached,
-               SUM(COALESCE(json_extract(data, '$.tokens.output'),      0)) AS output
-        FROM message
-        WHERE {_BASE_WHERE}
-        GROUP BY model ORDER BY cache_read DESC
-        """,
-        {"start_ms": start_ms, "end_ms": end_ms},
-    )
-    return [dict(r) for r in cur.fetchall()]
-
-
 def query_size_buckets(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
     cur = conn.execute(
         f"""
@@ -322,77 +225,28 @@ def query_size_buckets(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> 
     return [dict(r) for r in cur.fetchall()]
 
 
-def query_by_kind(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
-    """Return per-kind aggregates: 'primary' vs 'subagent'.
+def session_kind_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map session id -> 'primary' | 'subagent'.
 
-    A session is 'subagent' if its row in the `session` table has a
-    non-null `parent_id` (i.e. it was spawned by another session, e.g.
-    via the Task tool); otherwise 'primary'.
-
-    Schema dependency: requires the `session` table to exist with at
-    least (`id`, `parent_id`) columns. Real opencode.db has this; the
-    test fixture must opt in via `make_test_db(..., sessions=...)`.
+    A session is 'subagent' if its `session` table row has a non-null
+    `parent_id` (it was spawned by another session, e.g. via the Task tool);
+    otherwise 'primary'. Used by main() to classify per-message rows for the
+    --by-kind breakdown. Requires the `session` table (real opencode.db has
+    it; raises sqlite3.OperationalError if absent, which main() handles).
     """
-    # Same WHERE as _BASE_WHERE but with the join we need.
-    cur = conn.execute(
-        """
-        SELECT
-            CASE WHEN s.parent_id IS NULL THEN 'primary' ELSE 'subagent' END AS kind,
-            COUNT(DISTINCT m.session_id) AS sessions,
-            COUNT(*) AS msgs,
-            SUM(COALESCE(json_extract(m.data, '$.tokens.cache.read'),  0)) AS cache_read,
-            SUM(COALESCE(json_extract(m.data, '$.tokens.cache.write'), 0)) AS cache_write,
-            SUM(COALESCE(json_extract(m.data, '$.tokens.input'),       0)) AS uncached,
-            SUM(COALESCE(json_extract(m.data, '$.tokens.output'),      0)) AS output
-        FROM message m
-        JOIN session s ON s.id = m.session_id
-        WHERE json_extract(m.data, '$.role') = 'assistant'
-          AND json_extract(m.data, '$.tokens.cache.read') IS NOT NULL
-          AND m.time_created BETWEEN :start_ms AND :end_ms
-        GROUP BY kind
-        ORDER BY kind
-        """,
-        {"start_ms": start_ms, "end_ms": end_ms},
-    )
-    return [dict(r) for r in cur.fetchall()]
-
-
-def query_by_model_and_kind(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
-    """Return per-(model, kind) aggregates for cost computation.
-
-    Used by main() when --by-kind is set, so each kind row can be priced
-    using the actual model mix it ran (rather than approximating with a
-    blended rate). The orchestrator post-processes these into per-kind
-    totals via compute_cost_components(), once per kind.
-    """
-    cur = conn.execute(
-        """
-        SELECT
-            json_extract(m.data, '$.modelID') AS model,
-            CASE WHEN s.parent_id IS NULL THEN 'primary' ELSE 'subagent' END AS kind,
-            COUNT(*) AS msgs,
-            SUM(COALESCE(json_extract(m.data, '$.tokens.cache.read'),  0)) AS cache_read,
-            SUM(COALESCE(json_extract(m.data, '$.tokens.cache.write'), 0)) AS cache_write,
-            SUM(COALESCE(json_extract(m.data, '$.tokens.input'),       0)) AS uncached,
-            SUM(COALESCE(json_extract(m.data, '$.tokens.output'),      0)) AS output
-        FROM message m
-        JOIN session s ON s.id = m.session_id
-        WHERE json_extract(m.data, '$.role') = 'assistant'
-          AND json_extract(m.data, '$.tokens.cache.read') IS NOT NULL
-          AND m.time_created BETWEEN :start_ms AND :end_ms
-        GROUP BY model, kind
-        ORDER BY kind, cache_read DESC
-        """,
-        {"start_ms": start_ms, "end_ms": end_ms},
-    )
-    return [dict(r) for r in cur.fetchall()]
+    cur = conn.execute("SELECT id, parent_id FROM session")
+    return {
+        row["id"]: ("subagent" if row["parent_id"] is not None else "primary")
+        for row in cur.fetchall()
+    }
 
 
 def query_message_rows(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> list[dict]:
     """Query all assistant message rows with token counts and recorded cost."""
     cur = conn.execute(
         f"""
-        SELECT json_extract(data, '$.providerID') AS provider,
+        SELECT session_id AS session_id,
+               json_extract(data, '$.providerID') AS provider,
                json_extract(data, '$.modelID') AS model,
                date(time_created/1000, 'unixepoch') AS day,
                COALESCE(json_extract(data, '$.tokens.input'), 0) AS input,
@@ -538,48 +392,6 @@ def reconcile(
     }
 
 
-def compute_cost_components(by_model: list[dict], active_days: int) -> dict:
-    """Compute cost components, applying each model's own rates.
-
-    Mutates each `by_model` row in place to add `cost_usd` (None for
-    unknown models). Returns a dict with per-component totals plus
-    daily_avg, monthly_proj, and a list of unpriced model names.
-    """
-    cache_reads = cache_writes = uncached_input = output = 0.0
-    unpriced: list[str] = []
-
-    for row in by_model:
-        rates = price_for(row["model"])
-        if rates is None:
-            row["cost_usd"] = None
-            unpriced.append(row["model"])
-            continue
-        # USD = tokens * rate / 1e6
-        cr = row["cache_read"]  * rates["cache_read"]  / 1e6
-        cw = row["cache_write"] * rates["cache_write"] / 1e6
-        un = row["uncached"]    * rates["input"]       / 1e6
-        ou = row["output"]      * rates["output"]      / 1e6
-        row["cost_usd"] = cr + cw + un + ou
-        cache_reads    += cr
-        cache_writes   += cw
-        uncached_input += un
-        output         += ou
-
-    total = cache_reads + cache_writes + uncached_input + output
-    daily_avg = total / active_days if active_days > 0 else 0.0
-
-    return {
-        "cache_reads":     cache_reads,
-        "cache_writes":    cache_writes,
-        "uncached_input":  uncached_input,
-        "output":          output,
-        "total":           total,
-        "daily_avg":       daily_avg,
-        "monthly_proj":    daily_avg * 30,
-        "unpriced_models": unpriced,
-    }
-
-
 _DEFAULT_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 
 
@@ -649,11 +461,7 @@ def render_json(report: dict) -> str:
 def render_text(report: dict) -> str:
     lines: list[str] = []
     daily = report["daily"]
-    est = report["estimate"]
-    rec = report["reconciliation"]
-    buckets = report["size_buckets"]
     meta = report["meta"]
-    reconcile_full = meta.get("reconcile", False)
 
     if not daily:
         lines.append(
@@ -662,6 +470,11 @@ def render_text(report: dict) -> str:
         )
         lines.append(f"Database: {meta['db_path']}\n")
         return "\n".join(lines)
+
+    est = report["estimate"]
+    rec = report["reconciliation"]
+    buckets = report["size_buckets"]
+    reconcile_full = meta.get("reconcile", False)
 
     # Daily section
     lines.append(f"\n  OpenCode Usage Report ({meta['active_days']} active days)\n")
@@ -754,8 +567,8 @@ def render_text(report: dict) -> str:
     # Optional: primary-vs-subagent breakdown (only when --by-kind was set)
     by_kind = report.get("by_kind")
     if by_kind:
-        lines.append("\n\n  Primary vs Subagent (priced per-model)\n")
-        lines.append("KIND       SESSIONS  MSGS    CACHE_RD(M)  CACHE_WR(M)  OUTPUT(M)        COST")
+        lines.append("\n\n  Primary vs Subagent (estimated, per-request tiers)\n")
+        lines.append("KIND       SESSIONS  MSGS    CACHE_RD(M)  CACHE_WR(M)  OUTPUT(M)       EST$")
         lines.append("-" * 80)
         kind_total = 0.0
         for k in by_kind:
@@ -773,7 +586,7 @@ def render_text(report: dict) -> str:
                 f"{k['output'] / 1e6:>8.1f}  {cost_tag}"
             )
         lines.append("-" * 80)
-        # The kind_total may diverge slightly from cost_components.total because
+        # The kind subtotal can differ from the overall estimated total because
         # unpriced models are excluded from both (so they cancel out).
         lines.append(f"  {'(kind subtotal)':<43}{_fmt_usd(kind_total):>33}")
 
@@ -785,28 +598,41 @@ def render_text(report: dict) -> str:
     return "\n".join(lines)
 
 
-def _split_by_model_into_kinds(
-    by_model_kind: list[dict],
-) -> dict[str, list[dict]]:
-    """Group rows from query_by_model_and_kind by kind.
+def summarize_by_kind(rows: list[dict], kind_map: dict[str, str]) -> list[dict]:
+    """Build a primary-vs-subagent summary from per-message rows.
 
-    Returns {"primary": [...], "subagent": [...]} where each row has the
-    by_model shape (model, msgs, cache_read, cache_write, uncached, output)
-    so it can be passed to compute_cost_components(). Empty kinds are
-    omitted from the dict.
+    Classifies each message row by its session's kind (defaulting to
+    'primary' when a session id is absent from the map), then runs the
+    same per-request tier-aware `estimate()` over each kind's rows. Returns
+    rows shaped for the render/JSON by-kind section: kind, sessions (distinct
+    session ids in that kind), msgs, token sums, recorded_cost, and est-derived
+    cost_usd (None when nothing priced). Primary is listed before subagent.
     """
-    out: dict[str, list[dict]] = {}
-    for row in by_model_kind:
-        kind = row["kind"]
-        out.setdefault(kind, []).append({
-            "model":       row["model"],
-            "msgs":        row["msgs"],
-            "cache_read":  row["cache_read"],
-            "cache_write": row["cache_write"],
-            "uncached":    row["uncached"],
-            "output":      row["output"],
+    buckets: dict[str, list[dict]] = {"primary": [], "subagent": []}
+    sessions: dict[str, set] = {"primary": set(), "subagent": set()}
+    for r in rows:
+        kind = kind_map.get(r.get("session_id"), "primary")
+        buckets[kind].append(r)
+        sessions[kind].add(r.get("session_id"))
+
+    summary: list[dict] = []
+    for kind in ("primary", "subagent"):
+        krows = buckets[kind]
+        if not krows:
+            continue
+        kest = estimate(krows)
+        summary.append({
+            "kind":          kind,
+            "sessions":      len(sessions[kind]),
+            "msgs":          len(krows),
+            "cache_read":    sum(r["cache_read"]  for r in krows),
+            "cache_write":   sum(r["cache_write"] for r in krows),
+            "uncached":      sum(r["input"]       for r in krows),
+            "output":        sum(r["output"]      for r in krows),
+            "recorded_cost": sum(r["recorded_cost"] for r in krows),
+            "cost_usd":      kest["total_est"] if kest["total_est"] > 0 else None,
         })
-    return out
+    return summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -818,82 +644,60 @@ def main(argv: list[str] | None = None) -> int:
     conn = connect(db_path)
 
     try:
-        daily   = query_daily(conn, start_ms, end_ms)
-        rows    = query_message_rows(conn, start_ms, end_ms)
-        buckets = query_size_buckets(conn, start_ms, end_ms)
-    except sqlite3.OperationalError as e:
-        if "locked" in str(e).lower():
-            print("Database busy. Retry in a moment.", file=sys.stderr)
-            return 2
-        raise
-
-    # Headline cost is our own per-request tier-aware estimate; recorded $.cost
-    # is shown alongside via reconciliation. Only priced rows are reconciled;
-    # unpriced models are surfaced separately (never folded into $0).
-    est = estimate(rows)
-    priced_rows = [r for r in est["by_model"] if r["priced"]]
-    rec = reconcile(priced_rows)
-
-    report = {
-        "meta": {
-            "db_path": db_path,
-            "window": {"start": _ms_to_iso(start_ms), "end": _ms_to_iso(end_ms)},
-            "active_days": len(daily),
-            "reconcile": args.reconcile,
-        },
-        "daily": daily,
-        "estimate": {
-            "total_est": est["total_est"],
-            "by_model": est["by_model"],
-            "unpriced": [list(t) for t in est["unpriced"]],
-        },
-        "reconciliation": {
-            "rows": [_json_safe_recrow(r) for r in rec["rows"]],
-            "total_est": rec["total_est"],
-            "total_recorded": rec["total_recorded"],
-            "total_delta": rec["total_delta"],
-        },
-        "size_buckets": buckets,
-    }
-
-    if args.by_kind:
         try:
-            by_model_kind = query_by_model_and_kind(conn, start_ms, end_ms)
+            daily   = query_daily(conn, start_ms, end_ms)
+            rows    = query_message_rows(conn, start_ms, end_ms)
+            buckets = query_size_buckets(conn, start_ms, end_ms)
         except sqlite3.OperationalError as e:
-            # Defensive: if the session table is missing for some reason,
-            # skip the breakdown rather than failing the whole report.
-            print(
-                f"Warning: --by-kind unavailable ({e}); skipping breakdown.",
-                file=sys.stderr,
-            )
-            by_model_kind = []
-        if by_model_kind:
-            grouped = _split_by_model_into_kinds(by_model_kind)
-            kind_summary: list[dict] = []
-            for kind, rows in grouped.items():
-                # compute_cost_components mutates `rows` to add per-row cost_usd
-                kc = compute_cost_components(rows, active_days=max(len(daily), 1))
-                # Aggregate across models within this kind
-                kind_summary.append({
-                    "kind":         kind,
-                    "sessions":     None,  # filled in below from query_by_kind
-                    "msgs":         sum(r["msgs"]        for r in rows),
-                    "cache_read":   sum(r["cache_read"]  for r in rows),
-                    "cache_write":  sum(r["cache_write"] for r in rows),
-                    "uncached":     sum(r["uncached"]    for r in rows),
-                    "output":       sum(r["output"]      for r in rows),
-                    "cost_usd":     kc["total"] if kc["total"] > 0 else None,
-                })
-            # Backfill sessions count from the simpler query
-            session_counts = {
-                r["kind"]: r["sessions"]
-                for r in query_by_kind(conn, start_ms, end_ms)
-            }
-            for k in kind_summary:
-                k["sessions"] = session_counts.get(k["kind"], 0)
-            # Stable order: primary first, then subagent
-            kind_summary.sort(key=lambda r: (r["kind"] != "primary", r["kind"]))
-            report["by_kind"] = kind_summary
+            if "locked" in str(e).lower():
+                print("Database busy. Retry in a moment.", file=sys.stderr)
+                return 2
+            raise
+
+        # Headline cost is our own per-request tier-aware estimate; recorded
+        # $.cost is shown alongside via reconciliation. Only priced rows are
+        # reconciled; unpriced models are surfaced separately (never $0).
+        est = estimate(rows)
+        priced_rows = [r for r in est["by_model"] if r["priced"]]
+        rec = reconcile(priced_rows)
+
+        report = {
+            "meta": {
+                "db_path": db_path,
+                "window": {"start": _ms_to_iso(start_ms), "end": _ms_to_iso(end_ms)},
+                "active_days": len(daily),
+                "reconcile": args.reconcile,
+            },
+            "daily": daily,
+            "estimate": {
+                "total_est": est["total_est"],
+                "by_model": est["by_model"],
+                "unpriced": [list(t) for t in est["unpriced"]],
+            },
+            "reconciliation": {
+                "rows": [_json_safe_recrow(r) for r in rec["rows"]],
+                "total_est": rec["total_est"],
+                "total_recorded": rec["total_recorded"],
+                "total_delta": rec["total_delta"],
+            },
+            "size_buckets": buckets,
+        }
+
+        if args.by_kind:
+            try:
+                kind_map = session_kind_map(conn)
+            except sqlite3.OperationalError as e:
+                # Defensive: if the session table is missing, skip the
+                # breakdown rather than failing the whole report.
+                print(
+                    f"Warning: --by-kind unavailable ({e}); skipping breakdown.",
+                    file=sys.stderr,
+                )
+                kind_map = None
+            if kind_map is not None:
+                report["by_kind"] = summarize_by_kind(rows, kind_map)
+    finally:
+        conn.close()
 
     if args.json:
         print(render_json(report))

@@ -15,89 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oc_cost  # noqa: E402
 
 
-class TestPriceFor(unittest.TestCase):
-    def test_exact_match(self):
-        rates = oc_cost.price_for("claude-opus-4-6")
-        self.assertIsNotNone(rates)
-        self.assertEqual(rates["input"], 5)
-        self.assertEqual(rates["output"], 25)
-        self.assertEqual(rates["cache_write"], 6.25)
-        self.assertEqual(rates["cache_read"], 0.50)
-
-    def test_strips_at_suffix(self):
-        # Real-world model IDs from opencode.db look like
-        # "claude-opus-4-6@default" or "...@vertex".
-        rates = oc_cost.price_for("claude-opus-4-6@default")
-        self.assertIsNotNone(rates)
-        self.assertEqual(rates["input"], 5)
-
-    def test_prefix_fallback(self):
-        # Variants like "claude-sonnet-4-5-20251022" should match
-        # claude-sonnet-4-5 by prefix.
-        rates = oc_cost.price_for("claude-sonnet-4-5-20251022")
-        self.assertIsNotNone(rates)
-        self.assertEqual(rates["input"], 3)  # sonnet-4-5 input rate
-
-    def test_unknown_returns_none(self):
-        self.assertIsNone(oc_cost.price_for("totally-unknown-model"))
-
-    def test_unknown_with_at_suffix_returns_none(self):
-        self.assertIsNone(oc_cost.price_for("totally-unknown@default"))
-
-    def test_gemini_3_1_pro_preview(self):
-        # Google publishes <=200k tier rates for gemini-3.1-pro-preview as
-        # input=$2.00/MTok, output=$12.00/MTok, cache_read=$0.20/MTok. Cache
-        # writes are billed by token-hour storage, not per-token, so we
-        # approximate cache_write at the standard input rate ($2.00/MTok)
-        # which is what's actually charged at the cache-creation event.
-        # The token-hour storage component (~$4.50/MTok-hour) is not
-        # captured by oc-cost's schema and will undercount Gemini cache
-        # cost for long-lived caches. See README.md for context.
-        rates = oc_cost.price_for("gemini-3.1-pro-preview")
-        self.assertIsNotNone(rates)
-        self.assertEqual(rates["input"], 2.00)
-        self.assertEqual(rates["output"], 12.00)
-        self.assertEqual(rates["cache_read"], 0.20)
-        self.assertEqual(rates["cache_write"], 2.00)
-
-    def test_gpt_5_5_standard(self):
-        # GPT-5.5 standard pricing: input=$5.00/MTok,
-        # cached input=$0.50/MTok, output=$30.00/MTok. OpenAI-style
-        # automatic prompt caching does not expose an Anthropic-style
-        # cache-write charge, so cache_write is 0.0 in this schema.
-        rates = oc_cost.price_for("gpt-5.5")
-        self.assertIsNotNone(rates)
-        self.assertEqual(rates["input"], 5.00)
-        self.assertEqual(rates["output"], 30.00)
-        self.assertEqual(rates["cache_read"], 0.50)
-        self.assertEqual(rates["cache_write"], 0.00)
-
-    def test_longest_prefix_wins_regardless_of_dict_order(self):
-        # Regression test for the analyze.mjs bug: when multiple keys
-        # match by prefix, the LONGEST one must win, not the first
-        # iterated. We monkeypatch PRICES with a deliberately
-        # adversarial insertion order (short key first) to prove the
-        # invariant doesn't depend on how PRICES happens to be ordered.
-        original = oc_cost.PRICES
-        try:
-            oc_cost.PRICES = {
-                "claude-opus-4": {  # SHORT key first -- adversarial
-                    "input": 15, "output": 75, "cache_write": 18.75, "cache_read": 1.50,
-                },
-                "claude-opus-4-7": {
-                    "input": 5, "output": 25, "cache_write": 6.25, "cache_read": 0.50,
-                },
-            }
-            rates = oc_cost.price_for("claude-opus-4-7-snapshot-20260101")
-            self.assertIsNotNone(rates)
-            # Must pick claude-opus-4-7 (longer) over claude-opus-4 (shorter).
-            # A first-match-wins implementation would return $15/$75 here.
-            self.assertEqual(rates["input"], 5)
-            self.assertEqual(rates["output"], 25)
-        finally:
-            oc_cost.PRICES = original
-
-
 class TestParseArgs(unittest.TestCase):
     def test_defaults(self):
         args = oc_cost.parse_args([])
@@ -315,24 +232,6 @@ class TestQueryDaily(unittest.TestCase):
         self.assertEqual(rows[0]["cache_read"], 100)
 
 
-class TestQueryByModel(unittest.TestCase):
-    def test_groups_by_model_orders_by_cache_read_desc(self):
-        d0 = 1800000000000
-        msgs = [
-            assistant_msg("m1", "s1", d0 + 1000, model="claude-opus-4-6", cache_read=500, out=100),
-            assistant_msg("m2", "s1", d0 + 2000, model="claude-sonnet-4-6", cache_read=1000, out=50),
-            assistant_msg("m3", "s1", d0 + 3000, model="claude-opus-4-6", cache_read=200, out=30),
-        ]
-        conn = make_test_db(msgs)
-        rows = oc_cost.query_by_model(conn, d0, d0 + DAY_MS)
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["model"], "claude-sonnet-4-6")
-        self.assertEqual(rows[0]["cache_read"], 1000)
-        self.assertEqual(rows[1]["model"], "claude-opus-4-6")
-        self.assertEqual(rows[1]["cache_read"], 700)
-        self.assertEqual(rows[1]["output"], 130)
-
-
 class TestQuerySizeBuckets(unittest.TestCase):
     def test_buckets(self):
         d0 = 1800000000000
@@ -356,54 +255,59 @@ class TestQuerySizeBuckets(unittest.TestCase):
         self.assertEqual(buckets["300k+"], 1)
 
 
-class TestQueryByKind(unittest.TestCase):
-    """Tests for query_by_kind: split usage between primary sessions
-    (parent_id IS NULL) and subagent sessions (parent_id IS NOT NULL).
-    """
+class TestByKind(unittest.TestCase):
+    """Tests for the migrated --by-kind path: session_kind_map +
+    summarize_by_kind run the new tier-aware estimate() per kind."""
 
-    def test_classifies_primary_vs_subagent(self):
+    def test_session_kind_map_classifies(self):
         d0 = 1800000000000
         sessions = [
-            {"id": "primary1",  "parent_id": None},
-            {"id": "primary2",  "parent_id": None},
-            {"id": "subagent1", "parent_id": "primary1"},
-            {"id": "subagent2", "parent_id": "primary1"},
+            {"id": "p1", "parent_id": None},
+            {"id": "sub1", "parent_id": "p1"},
         ]
-        msgs = [
-            assistant_msg("m1", "primary1",  d0 + 1, cache_read=1000, cache_write=100, out=50),
-            assistant_msg("m2", "primary1",  d0 + 2, cache_read=2000, cache_write=200, out=80),
-            assistant_msg("m3", "primary2",  d0 + 3, cache_read=500,  cache_write=50,  out=20),
-            assistant_msg("m4", "subagent1", d0 + 4, cache_read=300,  cache_write=30,  out=15, inp=100),
-            assistant_msg("m5", "subagent2", d0 + 5, cache_read=400,  cache_write=40,  out=10, inp=200),
-        ]
-        conn = make_test_db(msgs, sessions=sessions)
-        rows = oc_cost.query_by_kind(conn, d0, d0 + DAY_MS)
-        self.assertEqual(len(rows), 2)
-        kinds = {r["kind"]: r for r in rows}
-        # Primary: 2 sessions, 3 msgs, sums of m1+m2+m3
-        self.assertEqual(kinds["primary"]["sessions"], 2)
-        self.assertEqual(kinds["primary"]["msgs"], 3)
-        self.assertEqual(kinds["primary"]["cache_read"], 3500)
-        self.assertEqual(kinds["primary"]["cache_write"], 350)
-        self.assertEqual(kinds["primary"]["output"], 150)
-        self.assertEqual(kinds["primary"]["uncached"], 0)
-        # Subagent: 2 sessions, 2 msgs, sums of m4+m5
-        self.assertEqual(kinds["subagent"]["sessions"], 2)
-        self.assertEqual(kinds["subagent"]["msgs"], 2)
-        self.assertEqual(kinds["subagent"]["cache_read"], 700)
-        self.assertEqual(kinds["subagent"]["cache_write"], 70)
-        self.assertEqual(kinds["subagent"]["output"], 25)
-        self.assertEqual(kinds["subagent"]["uncached"], 300)
+        conn = make_test_db([assistant_msg("m1", "p1", d0 + 1, cache_read=1)], sessions=sessions)
+        kmap = oc_cost.session_kind_map(conn)
+        self.assertEqual(kmap["p1"], "primary")
+        self.assertEqual(kmap["sub1"], "subagent")
 
-    def test_only_primary(self):
+    def test_summarize_by_kind_estimates_per_kind(self):
         d0 = 1800000000000
-        sessions = [{"id": "p1", "parent_id": None}]
-        msgs = [assistant_msg("m1", "p1", d0 + 1, cache_read=100)]
-        conn = make_test_db(msgs, sessions=sessions)
-        rows = oc_cost.query_by_kind(conn, d0, d0 + DAY_MS)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["kind"], "primary")
-        self.assertEqual(rows[0]["sessions"], 1)
+        # Two primary messages (opus, flat $0.50 each via 1M cache_read) and
+        # one subagent message (gpt-5.5, 1M input -> $5.00).
+        rows = oc_cost.query_message_rows(
+            make_test_db([
+                assistant_msg("m1", "p1", d0 + 1, model="claude-opus-4-7@default",
+                              provider="google-vertex-anthropic", cache_read=1_000_000),
+                assistant_msg("m2", "p2", d0 + 2, model="claude-opus-4-7@default",
+                              provider="google-vertex-anthropic", cache_read=1_000_000),
+                assistant_msg("m3", "sub1", d0 + 3, model="gpt-5.5", provider="openai",
+                              inp=1_000_000),
+            ]),
+            d0, d0 + DAY_MS,
+        )
+        kmap = {"p1": "primary", "p2": "primary", "sub1": "subagent"}
+        summary = oc_cost.summarize_by_kind(rows, kmap)
+        by = {s["kind"]: s for s in summary}
+        # Primary listed before subagent.
+        self.assertEqual([s["kind"] for s in summary], ["primary", "subagent"])
+        self.assertEqual(by["primary"]["sessions"], 2)
+        self.assertEqual(by["primary"]["msgs"], 2)
+        self.assertAlmostEqual(by["primary"]["cost_usd"], 1.00, places=6)  # 2 * $0.50
+        self.assertEqual(by["subagent"]["sessions"], 1)
+        self.assertEqual(by["subagent"]["msgs"], 1)
+        # 1M input >= 272K threshold -> long_context tier ($10/M) -> $10.00.
+        self.assertAlmostEqual(by["subagent"]["cost_usd"], 10.00, places=6)
+
+    def test_summarize_by_kind_unknown_session_defaults_primary(self):
+        d0 = 1800000000000
+        rows = oc_cost.query_message_rows(
+            make_test_db([assistant_msg("m1", "orphan", d0 + 1, cache_read=100)]),
+            d0, d0 + DAY_MS,
+        )
+        summary = oc_cost.summarize_by_kind(rows, {})  # empty map
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["kind"], "primary")
+        self.assertEqual(summary[0]["sessions"], 1)
 
 
 class TestParseArgsByKind(unittest.TestCase):
@@ -423,19 +327,17 @@ class TestRenderJsonByKind(unittest.TestCase):
                 "db_path": "/x.db",
                 "window": {"start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"},
                 "active_days": 1,
+                "reconcile": False,
             },
             "daily": [],
-            "by_model": [],
-            "cost_components": {
-                "cache_reads": 0.0, "cache_writes": 0.0, "uncached_input": 0.0,
-                "output": 0.0, "total": 0.0, "daily_avg": 0.0,
-                "monthly_proj": 0.0, "unpriced_models": [],
-            },
+            "estimate": {"total_est": 0.5, "by_model": [], "unpriced": []},
+            "reconciliation": {"rows": [], "total_est": 0.5,
+                               "total_recorded": 0.5, "total_delta": 0.0},
             "size_buckets": [],
             "by_kind": [
                 {"kind": "primary",  "sessions": 1, "msgs": 1,
                  "cache_read": 100, "cache_write": 10, "uncached": 0, "output": 5,
-                 "cost_usd": 0.50},
+                 "recorded_cost": 0.5, "cost_usd": 0.50},
             ],
         }
         out = oc_cost.render_json(report)
@@ -444,84 +346,6 @@ class TestRenderJsonByKind(unittest.TestCase):
         self.assertEqual(parsed["by_kind"][0]["kind"], "primary")
 
 
-class TestCostComponents(unittest.TestCase):
-    def test_per_model_rates_applied_separately(self):
-        # CORRECTNESS FIX #1: components must use each model's own rates,
-        # not the dominant model's rates.
-        by_model = [
-            {"model": "claude-opus-4-6", "msgs": 1, "cache_read": 1_000_000,
-             "cache_write": 0, "uncached": 0, "output": 0},
-            {"model": "claude-sonnet-4-6", "msgs": 1, "cache_read": 1_000_000,
-             "cache_write": 0, "uncached": 0, "output": 0},
-        ]
-        components = oc_cost.compute_cost_components(by_model, active_days=1)
-        # Opus cache_read = $0.50/M, Sonnet cache_read = $0.30/M.
-        # Total cache_reads = 1.00 * 0.50 + 1.00 * 0.30 = $0.80
-        self.assertAlmostEqual(components["cache_reads"], 0.80, places=4)
-        self.assertAlmostEqual(components["total"], 0.80, places=4)
-        self.assertEqual(components["unpriced_models"], [])
-
-    def test_unknown_models_excluded_from_total(self):
-        # CORRECTNESS FIX #2: unknown-rate rows are excluded from cost
-        # totals and surfaced in unpriced_models.
-        by_model = [
-            {"model": "claude-opus-4-6", "msgs": 1, "cache_read": 1_000_000,
-             "cache_write": 0, "uncached": 0, "output": 0},
-            {"model": "future-model-9000", "msgs": 1, "cache_read": 999_999_999,
-             "cache_write": 0, "uncached": 0, "output": 0},
-        ]
-        components = oc_cost.compute_cost_components(by_model, active_days=1)
-        # Only the priced opus row contributes: 1.0M * $0.50 = $0.50
-        self.assertAlmostEqual(components["cache_reads"], 0.50, places=4)
-        self.assertAlmostEqual(components["total"], 0.50, places=4)
-        self.assertEqual(components["unpriced_models"], ["future-model-9000"])
-
-    def test_includes_per_model_cost_in_by_model(self):
-        # by_model rows should be annotated with their own cost_usd in place.
-        by_model = [
-            {"model": "claude-opus-4-6", "msgs": 1, "cache_read": 1_000_000,
-             "cache_write": 0, "uncached": 0, "output": 0},
-        ]
-        oc_cost.compute_cost_components(by_model, active_days=1)
-        self.assertAlmostEqual(by_model[0]["cost_usd"], 0.50, places=4)
-
-    def test_gpt_5_5_openai_style_cached_input_cost(self):
-        by_model = [
-            {"model": "gpt-5.5", "msgs": 1, "cache_read": 1_000_000,
-             "cache_write": 1_000_000, "uncached": 1_000_000, "output": 1_000_000},
-        ]
-        components = oc_cost.compute_cost_components(by_model, active_days=1)
-
-        # input $5 + cached input $0.50 + output $30 + no cache-write charge.
-        self.assertAlmostEqual(components["uncached_input"], 5.00, places=4)
-        self.assertAlmostEqual(components["cache_reads"], 0.50, places=4)
-        self.assertAlmostEqual(components["cache_writes"], 0.00, places=4)
-        self.assertAlmostEqual(components["output"], 30.00, places=4)
-        self.assertAlmostEqual(components["total"], 35.50, places=4)
-        self.assertAlmostEqual(by_model[0]["cost_usd"], 35.50, places=4)
-
-    def test_unknown_model_gets_none_cost(self):
-        by_model = [
-            {"model": "future-model-9000", "msgs": 1, "cache_read": 1_000_000,
-             "cache_write": 0, "uncached": 0, "output": 0},
-        ]
-        oc_cost.compute_cost_components(by_model, active_days=1)
-        self.assertIsNone(by_model[0]["cost_usd"])
-
-    def test_daily_avg_and_monthly_proj(self):
-        by_model = [
-            {"model": "claude-opus-4-6", "msgs": 1, "cache_read": 0,
-             "cache_write": 1_000_000, "uncached": 0, "output": 0},
-        ]
-        components = oc_cost.compute_cost_components(by_model, active_days=2)
-        # 1.0M * $6.25 cache_write = $6.25 over 2 days.
-        self.assertAlmostEqual(components["total"], 6.25, places=4)
-        self.assertAlmostEqual(components["daily_avg"], 3.125, places=4)
-        self.assertAlmostEqual(components["monthly_proj"], 3.125 * 30, places=4)
-
-
-if __name__ == "__main__":
-    unittest.main()
 class TestRenderJson(unittest.TestCase):
     def test_schema(self):
         report = {
