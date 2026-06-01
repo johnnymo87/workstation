@@ -692,7 +692,6 @@ class TestMainIntegration(unittest.TestCase):
     def test_end_to_end_json_reconcile(self):
         import io
         import contextlib
-        import os as _os
         d0 = 1800000000000  # 2027-01-15 UTC
         msgs = [
             # priced: est $0.50, but recorded inflated to $2.93 -> flagged
@@ -731,7 +730,7 @@ class TestMainIntegration(unittest.TestCase):
             self.assertAlmostEqual(parsed["reconciliation"]["total_est"], 0.50, places=6)
             self.assertAlmostEqual(parsed["reconciliation"]["total_delta"], 2.43, places=6)
         finally:
-            _os.unlink(path)
+            os.unlink(path)
 
     def test_end_to_end_text_runs(self):
         import io

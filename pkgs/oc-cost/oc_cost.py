@@ -412,6 +412,7 @@ def connect(db_path: str) -> sqlite3.Connection:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='message'"
     )
     if cur.fetchone() is None:
+        conn.close()
         print(
             f"Not an OpenCode database (missing 'message' table): {db_path}",
             file=sys.stderr,
@@ -611,9 +612,10 @@ def summarize_by_kind(rows: list[dict], kind_map: dict[str, str]) -> list[dict]:
     buckets: dict[str, list[dict]] = {"primary": [], "subagent": []}
     sessions: dict[str, set] = {"primary": set(), "subagent": set()}
     for r in rows:
-        kind = kind_map.get(r.get("session_id"), "primary")
+        sid = r.get("session_id") or ""
+        kind = kind_map.get(sid, "primary")
         buckets[kind].append(r)
-        sessions[kind].add(r.get("session_id"))
+        sessions[kind].add(sid)
 
     summary: list[dict] = []
     for kind in ("primary", "subagent"):
