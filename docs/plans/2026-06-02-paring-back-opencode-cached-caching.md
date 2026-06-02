@@ -283,6 +283,60 @@ diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src
    rate over 24h vs the current fork. First-party MUST show no regression before
    nvj.6 (archive). Roll back (revert hashes) if uncached climbs or cache_write jumps.
 
+## DEPLOY + GATE STATUS (nvj.4, 2026-06-02)
+
+**Deployed.** opencode-patched PR #15 merged → built `v1.15.13-patched.2` (CI run
+26829384638) → workstation `ffac48a` bumped 4 hashes + `patchedRevision="2"` →
+`home-manager switch .#cloudbox` → **direct** `systemctl restart opencode-serve`
+(safe: my session is `opencode` PID 2076575 under tmux/neovim in `user@1000.service`,
+NOT in the serve's system cgroup — verified `served-by-1568995=no`; the prior
+session's cgroup-kill risk did not apply this time). Serve now PID 2776098 running
+`/nix/store/k775j7vkyvnsrzshrysbfl906nwcl0yh-opencode-patched-1.15.13.2`.
+
+**Cutover timestamp:** `2026-06-02T15:24:59Z`.
+
+**Fork .1 baseline (pre-cutover window 03:00:04Z→15:24:59Z, 12.4h) — the target:**
+
+| provider | msgs | uncached% | write/(r+w)% |
+|---|---|---|---|
+| google-vertex-anthropic | 417 | **0.00%** | 6.08% |
+| anthropic (first-party) | 279 | **0.00%** | 4.62% |
+| google-vertex (Gemini, N/A) | 580 | 28.53% | 0.00% |
+
+**Early post-cutover .2 (first ~minutes):** first-party `anthropic` 7 msgs **0.00%
+uncached**, 1.09% write — no regression. `google-vertex-anthropic`: 0 samples yet.
+
+**GATE NOT YET CLOSED — re-measure after ≥24h of .2 traffic.** Need both
+anthropic-family routes to match baseline (uncached ~0%, write-rate not materially
+higher). Re-run this (read-only) against `~/.local/share/opencode/opencode.db`,
+`start = 2026-06-02T15:24:59Z`:
+
+```python
+import sqlite3,json,datetime
+db="/home/dev/.local/share/opencode/opencode.db"
+con=sqlite3.connect(f"file:{db}?mode=ro",uri=True,timeout=10); cur=con.cursor()
+def ms(s): return int(datetime.datetime.strptime(s,"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()*1000)
+start=ms("2026-06-02T15:24:59Z")
+agg={}
+for (data,) in cur.execute("select data from message where time_created>=?",(start,)):
+    try: d=json.loads(data)
+    except: continue
+    if d.get("role")!="assistant": continue
+    t=d.get("tokens") or {}; c=t.get("cache") or {}
+    inp=t.get("input",0) or 0; rd=c.get("read",0) or 0; wr=c.get("write",0) or 0
+    if inp+rd+wr==0: continue
+    p=d.get("providerID","?"); a=agg.setdefault(p,{"msgs":0,"input":0,"read":0,"write":0})
+    a["msgs"]+=1; a["input"]+=inp; a["read"]+=rd; a["write"]+=wr
+for p,a in sorted(agg.items(),key=lambda x:-x[1]["msgs"]):
+    tot=a["input"]+a["read"]+a["write"]; unc=100*a["input"]/tot if tot else 0
+    wrt=100*a["write"]/(a["read"]+a["write"]) if (a["read"]+a["write"]) else 0
+    print(f"{p:28} msgs={a['msgs']:>4} uncached={unc:.2f}% write/(r+w)={wrt:.2f}%")
+```
+
+**Pass rule:** `google-vertex-anthropic` AND `anthropic` both ≤ ~1% uncached and
+write-rate not materially above baseline (6%/4.6%). **Rollback** = revert hashes +
+`patchedRevision="1"` in `home.base.nix`, switch, restart. Only after PASS → nvj.6 archive.
+
 ## Out of scope
 
 `caching.patch` (opencode-cached) is ONLY the applyCaching/config/tool system. The
