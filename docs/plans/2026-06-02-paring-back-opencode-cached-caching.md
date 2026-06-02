@@ -178,6 +178,42 @@ identical workloads vs the deployed fork binary, isolated `XDG_DATA_HOME`:
 - cache_write spikes on either route → restore #3 (+#4) as a focused micro-patch.
 - 400s with reasoning → micro-patch #5 is mandatory (it already is in the build).
 
+## A/B RESULTS (2026-06-02) — full drop VALIDATED
+
+Built `v1.15.13 + 8 non-caching local patches + thinking-skip micro-patch`,
+**no `caching.patch`** (binary:
+`/tmp/opencode/stacktest/opencode-src/packages/opencode/dist/opencode-linux-arm64/bin/opencode`).
+All 8 non-caching patches apply clean to pristine — no entanglement with
+`caching.patch`.
+
+**Vertex Opus tool-loop (isolated data dir, 7 steps) — UPSTREAM `applyCaching`:**
+
+| step | input | cache_read | cache_write | uncached% |
+|---|---|---|---|---|
+| 0 | 2 | 0 | 25,240 | 0.0% |
+| 1 | 2 | 25,240 | 172 | 0.0% |
+| 7 | 2 | 26,166 | 140 | 0.0% |
+
+`cache_read` grows every step; `cache_write` = cold-start + tiny deltas;
+write/read 14.6% (cold-start dominated). **Exactly matches the deployed fork
+binary** (which was 0% uncached, cache_read 0→25,504, cache_write ~156 deltas).
+=> Upstream moving-tail caches Vertex (the hard, no-auto-cache case) identically.
+The low cache_write means **no tool-prefix busting** — the fork's `sortTools` +
+dedicated tool breakpoint (#3/#4) are NOT load-bearing for our toolset.
+
+**First-party Anthropic:** could not measure in the isolated harness — the
+OAuth plugin (`@ex-machina/opencode-anthropic-auth`) won't activate outside the
+production serve (`ProviderAuthError` even with `auth.json` copied +
+`CLAUDE_CODE_OAUTH_TOKEN` set + temp serve). **Deferred to deploy-verification
+(`nvj.4`) on the real serve.** Strong basis for parity: shared `applyCaching`
+selection; first-party is the *easier* case (Anthropic API auto-extends the
+prefix → only ~3% uncached even *with* the fork bug); tool-stability is
+provider-agnostic and Vertex proved it stable.
+
+**Decision:** FULL DROP of `caching.patch` + keep the thinking-skip micro-patch
+is **validated**. Remaining design = the thinking-skip patch only (capability
+#5). Gate first-party empirical confirmation at `nvj.4` before finalizing/archiving.
+
 ## Out of scope
 
 `caching.patch` (opencode-cached) is ONLY the applyCaching/config/tool system. The
