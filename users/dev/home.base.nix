@@ -229,22 +229,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-u6xYerPC8qcvlzZ4ff85Ny052Igqa8WmieyVXCXG0Oc=";
+      hash = "sha256-hLb/0MZNDTSbc03hAb5a45q/XdnuFc6Rbb24bluOiPY=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-efHMqz95XwfdrU6rlWM8HcvHsqEvmBRU0ytTIJ5MCzA=";
+      hash = "sha256-tDLeUFgpJ4AcqmaJS0Jz6Bc51UV1TPgIUe8Wr/S89/0=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-v23TturvgbxrkHWjxst1JoaPPOw2BaATmeYLJ/SASmg=";
+      hash = "sha256-sxhU+1FlvL8Cbt6t9NUsIiel+gZAIQyhppVvODHxtYk=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-c2RHFaWZFquXHS3TQleSB5U2RwxNrBy9wRKRb46WOKI=";
+      hash = "sha256-ZqydRBZRzUiK4bE2LHmOC7Er7baNvk+XN/uAleMiyCY=";
       isZip = true;
     };
   };
@@ -259,7 +259,7 @@ let
     # version bumps -- and check whether any patches in opencode-patched can be
     # dropped because they're now upstream (see check-sunset.yml in that repo).
     upstreamVersion = "1.15.13";
-    patchedRevision = "1";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "2";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
