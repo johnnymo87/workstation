@@ -214,6 +214,75 @@ provider-agnostic and Vertex proved it stable.
 is **validated**. Remaining design = the thinking-skip patch only (capability
 #5). Gate first-party empirical confirmation at `nvj.4` before finalizing/archiving.
 
+## READY-TO-USE: `cache-thinking-skip.patch` (the lone survivor)
+
+Generated + verified 2026-06-02: applies clean to pristine v1.15.13 AND atop the
+full non-caching local stack (prompt-loop-cache, cache-aligned-compaction,
+gemini-empty-parts, vim, tool-fix, mcp-reconnect, eager-input-streaming,
+instance-state-partition). Drop this file at `opencode-patched/patches/cache-thinking-skip.patch`:
+
+```diff
+diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
+--- a/packages/opencode/src/provider/transform.ts
++++ b/packages/opencode/src/provider/transform.ts
+@@ -375,13 +375,26 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
+     const shouldUseContentOptions = !useMessageLevelOptions && Array.isArray(msg.content) && msg.content.length > 0
+ 
+     if (shouldUseContentOptions) {
+-      const lastContent = msg.content[msg.content.length - 1]
+-      if (
+-        lastContent &&
+-        typeof lastContent === "object" &&
+-        lastContent.type !== "tool-approval-request" &&
+-        lastContent.type !== "tool-approval-response"
+-      ) {
++      // Mark the last CACHEABLE block: scan backwards and skip trailing
++      // reasoning/redacted-reasoning (Anthropic rejects cache_control on thinking
++      // blocks -> HTTP 400, cf anomalyco/opencode#17883) and tool-approval
++      // pseudo-blocks. Upstream marked content[length-1] blindly.
++      let lastContent: any = undefined
++      for (let i = msg.content.length - 1; i >= 0; i--) {
++        const c = msg.content[i]
++        if (
++          c &&
++          typeof c === "object" &&
++          c.type !== "reasoning" &&
++          c.type !== "redacted-reasoning" &&
++          c.type !== "tool-approval-request" &&
++          c.type !== "tool-approval-response"
++        ) {
++          lastContent = c
++          break
++        }
++      }
++      if (lastContent) {
+         lastContent.providerOptions = mergeDeep(lastContent.providerOptions ?? {}, providerOptions)
+         continue
+       }
+```
+
+(A copy also lives at `/tmp/opencode/cache-thinking-skip.patch` until /tmp is cleared.)
+
+### nvj.3 implementation steps (opencode-patched repo)
+1. Add `patches/cache-thinking-skip.patch` (above).
+2. Edit `patches/apply.sh`: **remove** the "Patch 1: Caching (fetched from
+   opencode-cached)" block (the `curl` of `CACHING_PATCH_URL` + its apply), and
+   **add** an apply step for `cache-thinking-skip.patch`. This is what cuts the
+   production dependency on opencode-cached (unblocks nvj.6 archive).
+3. Update `.github/workflows/build-release.yml` release-notes body (drop "patch #1
+   Prompt caching … via opencode-cached"; renumber) and the `notify-on-failure`
+   caching-patch references.
+4. Update opencode-patched README (caching now upstream; only thinking-skip local).
+5. Deploy via the established chain: `gh workflow run build-release.yml --field
+   version=1.15.13 --field revision=2` → bump 4 hashes + `patchedRevision="2"` in
+   `users/dev/home.base.nix` (verify arm64 via `nix store prefetch-file`) → push →
+   `nix run home-manager -- switch --flake .#cloudbox` → restart serve via the
+   **cgroup-safe detached timer** (`sudo systemd-run --on-active=15s --unit=… systemctl
+   restart opencode-serve.service`; bash lives in that cgroup, KillMode=control-group).
+6. **nvj.4 GATE:** measure Vertex AND first-party Anthropic uncached% + cache_write
+   rate over 24h vs the current fork. First-party MUST show no regression before
+   nvj.6 (archive). Roll back (revert hashes) if uncached climbs or cache_write jumps.
+
 ## Out of scope
 
 `caching.patch` (opencode-cached) is ONLY the applyCaching/config/tool system. The
