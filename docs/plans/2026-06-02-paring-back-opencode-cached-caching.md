@@ -337,6 +337,28 @@ for p,a in sorted(agg.items(),key=lambda x:-x[1]["msgs"]):
 write-rate not materially above baseline (6%/4.6%). **Rollback** = revert hashes +
 `patchedRevision="1"` in `home.base.nix`, switch, restart. Only after PASS → nvj.6 archive.
 
+## nvj.5 (upstream PR) — WON'T DO (2026-06-02)
+
+Investigated and **deliberately not submitting** an upstream PR:
+- The thinking-skip is **defensive** — even the fork's `caching.patch` shipped it with
+  no reproducing test. Reasoning blocks are normally **first** in assistant content,
+  so a *trailing* reasoning block only arises in rare/corrupted shapes (e.g.
+  interrupted-stream reconstruction, cf `tool-fix.patch`). No deterministic real repro.
+- Upstream `dev` `applyCaching` **does** still `mark content[length-1]` blindly (bug
+  present), and the content-options path covers `google-vertex-anthropic`/`openrouter`
+  (first-party `anthropic` uses the message-level path, unaffected).
+- Issue **#17883 is a different repro** (plugin-injected *system* blocks, v1.2.27);
+  `Fixes #17883` would be inaccurate, and Issue-First policy needs an accurate link.
+- `anomalyco/opencode` has a **vouch/denounce** system tied to the `johnnymo87`
+  identity and explicitly denounces low-quality AI PRs + requires "how to reproduce".
+- Our patch also uses `let`/`any`, violating their style (would need a `findLast()`
+  rewrite).
+
+**Decision (user):** keep the local `cache-thinking-skip.patch` as cheap defensive
+insurance; do not open the PR. `check-sunset.yml` still tracks #17883 as a loose
+sunset signal. If a real trailing-reasoning 400 is ever observed in production, revisit
+with a genuine repro + upstream-style rewrite.
+
 ## Out of scope
 
 `caching.patch` (opencode-cached) is ONLY the applyCaching/config/tool system. The
