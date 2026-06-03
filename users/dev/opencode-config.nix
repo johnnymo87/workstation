@@ -438,7 +438,11 @@ in
       fi
 
       # Token present: inject Slack MCP config with xoxp auth
-      # MCP is disabled by default; enable manually or use dedicated slack agent when needed
+      # MCP is disabled by default; enable manually or use dedicated slack agent when needed.
+      # Two variants: `slack` (read + write, SLACK_MCP_ADD_MESSAGE_TOOL=true) and
+      # `slack-ro` (read-only; omits SLACK_MCP_ADD_MESSAGE_TOOL so the korotovsky
+      # server registers read tools only). slack-ro is used by lgtm's read-only
+      # gather session (`opencode-launch --mcp slack-ro`) so it structurally cannot post.
       if [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
@@ -451,6 +455,14 @@ in
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
+            }
+          }
+          | .mcp."slack-ro" = {
+            "type": "local",
+            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "enabled": false,
+            "environment": {
+              "SLACK_MCP_XOXP_TOKEN": $xoxp
             }
           }' "$runtime" > "$tmp"
 
@@ -473,18 +485,21 @@ in
         xoxp_token="$(cat /run/secrets/slack_mcp_xoxp_token)"
       fi
 
-      # If token is missing or empty, delete mcp.slack and exit cleanly
+      # If token is missing or empty, delete both slack variants and exit cleanly
       if [[ -z "''${xoxp_token}" ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
-          ${pkgs.jq}/bin/jq 'del(.mcp.slack)' "$runtime" > "$tmp"
+          ${pkgs.jq}/bin/jq 'del(.mcp.slack) | del(.mcp."slack-ro")' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Slack MCP xoxp token not found in sops; removed mcp.slack from config" >&2
+        echo "Slack MCP xoxp token not found in sops; removed mcp.slack + mcp.slack-ro from config" >&2
         exit 0
       fi
 
-      # Token present: inject Slack MCP config with xoxp auth
+      # Token present: inject Slack MCP config with xoxp auth.
+      # Two variants: `slack` (read + write) and `slack-ro` (read-only; omits
+      # SLACK_MCP_ADD_MESSAGE_TOOL so only read tools register). slack-ro is used
+      # by lgtm's read-only gather session so it structurally cannot post.
       if [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
@@ -497,6 +512,14 @@ in
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
+            }
+          }
+          | .mcp."slack-ro" = {
+            "type": "local",
+            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "enabled": false,
+            "environment": {
+              "SLACK_MCP_XOXP_TOKEN": $xoxp
             }
           }' "$runtime" > "$tmp"
 

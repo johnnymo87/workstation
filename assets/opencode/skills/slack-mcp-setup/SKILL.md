@@ -16,13 +16,32 @@ No browser cookie scraping -- tokens don't expire unless revoked.
 ## Architecture
 
 - **Slack MCP** is injected into opencode.json with the xoxp token from Keychain (macOS) or sops (cloudbox)
-- **MCP is disabled by default** (`"enabled": false`) to keep slack tools out of normal sessions
-- To use Slack: manually enable the MCP, or delegate to the `slack` agent
+- Two server variants are injected:
+  - **`slack`** — read **+ write** (`SLACK_MCP_ADD_MESSAGE_TOOL=true`, so the post-message tool is registered)
+  - **`slack-ro`** — read-**only** (omits `SLACK_MCP_ADD_MESSAGE_TOOL`, so only read tools register; cannot post). Used by lgtm's read-only gather session (`opencode-launch --mcp slack-ro`).
+- **Both are disabled by default** (`"enabled": false`) to keep slack tools out of normal sessions
+- To use Slack: delegate to the `slack` agent, or launch with `--mcp slack` / `--mcp slack-ro`
 
 **Why disabled by default?**
 - Prevents accidental Slack API calls from main agents
 - Reduces MCP server startup overhead when not needed
 - Slack tools only available when explicitly enabled
+
+> **What `SLACK_MCP_ADD_MESSAGE_TOOL` actually does (common gotcha):** it enables
+> the **write** tool (`conversations_add_message`) **only**. The korotovsky server
+> registers **all read tools by default** regardless of this env var. So if a
+> session is missing the Slack *read* tools, that is **not** a server or
+> token-scope problem — it is an **opencode gating/connection** issue:
+> 1. the global `tools: {"slack_*": false, "slack-ro_*": false}` gate disables the
+>    tools for every agent except the `slack` subagent, and
+> 2. `enabled: false` means the server is never auto-connected — a session only
+>    gets Slack if something runs `POST /mcp/<server>/connect` (which is what
+>    `opencode-launch --mcp <server>` does).
+>
+> Note also that `--mcp` folds the tools into a **single prompt** (per-turn
+> scope), and the in-memory connect is **lost on an opencode-serve restart**
+> (no auto-reconnect while `enabled: false`). For durable interactive Slack use,
+> delegate to the `@slack` subagent rather than relying on a per-turn `--mcp` fold.
 
 ## Getting the xoxp Token
 
@@ -88,8 +107,9 @@ nix run home-manager -- switch --flake .#cloudbox     # Injects into opencode.js
 ## Verify (both platforms)
 
 ```bash
-jq '.mcp.slack' ~/.config/opencode/opencode.json
-# Should show type, command, enabled: false, and environment with SLACK_MCP_XOXP_TOKEN
+jq '{slack: .mcp.slack, "slack-ro": .mcp."slack-ro"}' ~/.config/opencode/opencode.json
+# Both should show type, command, enabled: false, and environment with SLACK_MCP_XOXP_TOKEN.
+# slack also has SLACK_MCP_ADD_MESSAGE_TOOL: "true"; slack-ro must NOT (read-only).
 ```
 
 ## Token Refresh

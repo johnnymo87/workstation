@@ -8,7 +8,8 @@
     }
   },
   "tools": {
-    "slack_*": false
+    "slack_*": false,
+    "slack-ro_*": false
   },
   "agent": {
     "build": {
