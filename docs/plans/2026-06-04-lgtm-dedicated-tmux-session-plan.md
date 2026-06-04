@@ -169,15 +169,10 @@ verbatim — they are harmless when acting on a session the user isn't attached 
 
 **Step 4: Build to verify it evaluates + passes shellcheck**
 
-Run: `nix build ~/projects/workstation#nixosConfigurations.cloudbox.config... ` — simpler:
-
-Run: `cd ~/projects/workstation && nix-build -E 'with import <nixpkgs> {}; callPackage ./pkgs/oc-auto-attach {}' --no-out-link`
-Expected: builds successfully (shellcheck passes). If shellcheck flags the
-`<<< "$panes_src"` or the empty-array cases, fix per its message.
-
-> If `nix-build -E` is awkward in this flake, instead run a full
-> `sudo nixos-rebuild build --flake .#cloudbox` (build only, no switch) — it
-> compiles the package and surfaces shellcheck failures without activating.
+Run: `cd ~/projects/workstation && nix build .#oc-auto-attach --no-link`
+Expected: builds successfully (the shellcheck baked into `writeShellApplication`
+passes). If shellcheck flags the `<<< "$panes_src"` herestring or anything else,
+fix per its message and rebuild.
 
 **Step 5: Commit**
 
@@ -256,7 +251,11 @@ with:
 
 **Step 4: Build to verify**
 
-Run: `cd ~/projects/workstation && sudo nixos-rebuild build --flake .#cloudbox`
+`opencode-launch` is defined inline in `home.base.nix`, and cloudbox uses
+*standalone* home-manager (not a NixOS module), so build the home activation
+package — that evaluates the `opencode-launch` derivation and runs its shellcheck:
+
+Run: `cd ~/projects/workstation && nix build .#homeConfigurations.cloudbox.activationPackage --no-link`
 Expected: builds successfully (shellcheck on `opencode-launch` passes).
 
 **Step 5: Commit**
