@@ -96,8 +96,33 @@ pkgs.writeShellApplication {
       esac
     }
 
+    # Optional leading --tmux-session <name>: confine all pane discovery and
+    # window creation to that one tmux session (create it detached if absent).
+    # Used by background callers (lgtm) so launches never steal the user's
+    # focus -- the user isn't attached to that session during normal work.
+    target_session=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --tmux-session)
+          if [ $# -lt 2 ] || [ -z "$2" ]; then
+            log "--tmux-session requires a name"
+            exit 0
+          fi
+          target_session="$2"
+          shift 2
+          ;;
+        --tmux-session=*)
+          target_session="''${1#--tmux-session=}"
+          shift
+          ;;
+        *)
+          break
+          ;;
+      esac
+    done
+
     if [ $# -ne 1 ]; then
-      log "usage: oc-auto-attach <session-id>"
+      log "usage: oc-auto-attach [--tmux-session <name>] <session-id>"
       exit 0
     fi
     sid="$1"
@@ -107,6 +132,14 @@ pkgs.writeShellApplication {
       log "invalid session id: $sid"
       exit 0
     fi
+
+    # Validate the tmux session name (tmux forbids '.' and ':'; this also
+    # blocks any shell-interpolation hazard).
+    if [ -n "$target_session" ] && ! [[ "$target_session" =~ ^[A-Za-z0-9_-]+$ ]]; then
+      log "invalid tmux session name: $target_session"
+      exit 0
+    fi
+    [ -n "$target_session" ] && log "confining to tmux session: $target_session"
 
     # Step 1: wait for session to be visible with a non-empty directory.
     #
@@ -174,6 +207,14 @@ pkgs.writeShellApplication {
     # Scan all panes for one whose pane_current_path matches the project,
     # regardless of foreground command. We capture the command too so we
     # can branch on it in Step 3.5.
+    # Source of panes to scan: the whole tmux server (-a) by default, or just
+    # the confined session (-s -t =<name>) when --tmux-session was given.
+    if [ -n "$target_session" ]; then
+      panes_src="$(tmux list-panes -s -t "=$target_session" -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
+    else
+      panes_src="$(tmux list-panes -a -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
+    fi
+
     while IFS='|' read -r p_id p_cmd p_path; do
       if [ "$p_path" = "$project_key" ]; then
         pane_id="$p_id"
@@ -185,10 +226,35 @@ pkgs.writeShellApplication {
         pane_id="$p_id"
         pane_cmd="$p_cmd"
       fi
-    done < <(tmux list-panes -a -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)
+    done <<< "$panes_src"
 
     if [ -n "$pane_id" ]; then
       log "matched existing pane $pane_id (cmd=$pane_cmd)"
+    elif [ -n "$target_session" ]; then
+      # Confined-session create path: no pane matched inside $target_session,
+      # so make a window there (creating the session itself if needed). We
+      # deliberately skip the "are we inside tmux?" bail and the by-name
+      # defense-in-depth scan used by the default path -- the -s scan above
+      # already covered every window in this session, and new-session will
+      # start a tmux server if none exists.
+      if ! nvims_path="$(resolve_nvims)"; then
+        log "nvims not resolvable (neither OC_NVIMS_BIN nor PATH); skipping"
+        exit 0
+      fi
+      log "resolved nvims at $nvims_path"
+      if tmux has-session -t "=$target_session" 2>/dev/null; then
+        pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
+          -t "$target_session:" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
+      else
+        pane_id="$(tmux new-session -d -P -F '#{pane_id}' \
+          -s "$target_session" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
+      fi
+      if [ -z "$pane_id" ]; then
+        log "tmux window/session create failed in $target_session; giving up"
+        exit 0
+      fi
+      pane_cmd="nvim"
+      log "created pane $pane_id in session $target_session (window $window_name)"
     else
       # Are we inside a tmux session at all? If not, there's no useful place
       # to put the window. (oc-auto-attach is meaningful only in a graphical
