@@ -109,23 +109,43 @@ pkgs.writeShellApplication {
     fi
 
     # Step 1: wait for session to be visible with a non-empty directory.
+    #
+    # Timeout is generous (30s, not 5s): cloudbox runs many concurrent
+    # sessions on one `opencode serve` event loop and routinely sits at
+    # load ~5. Under contention that event loop stalls in a binary way --
+    # GET /session/<id> either returns in ~20ms or blocks for 5-15s+ until
+    # the loop frees -- even though the session exists. A tight 5s window
+    # made the launcher (and manual re-runs) intermittently log "not ready"
+    # for perfectly healthy sessions; 5-15s stalls were observed live.
     session_dir=""
     # shellcheck disable=SC2016
-    if ! session_dir="$(timeout 5 bash -c '
+    if ! session_dir="$(timeout 30 bash -c '
       sid="$1"
       url="$2"
+      # Pace the loop without `sleep` (keeping the original sleep-free
+      # design) via a held-open pipe on fd 9. The <> open keeps the pipe
+      # open with no writer producing data, so `read -t` blocks for the
+      # full interval and then times out. A plain `read -t 0.2 < <(:)`
+      # EOFs instantly (the `:` writer exits the moment the subshell
+      # starts), making the pace a silent no-op that busy-spins curl --
+      # the worst thing to do while the server is already slow under load.
+      exec 9<> <(:)
       while :; do
-        body="$(curl -sf "$url/session/$sid" 2>/dev/null || true)"
+        # --connect-timeout fails fast if serve is not listening yet;
+        # --max-time caps a single hung request so a stalled event loop
+        # cannot consume the whole 30s window -- we cut at 3s and re-probe,
+        # catching the loop the instant it frees (responses are near-instant
+        # once unblocked).
+        body="$(curl -sf --connect-timeout 2 --max-time 3 "$url/session/$sid" 2>/dev/null || true)"
         dir="$(printf "%s" "$body" | jq -r ".directory // empty" 2>/dev/null || true)"
         if [ -n "$dir" ] && [ "$dir" != "null" ]; then
           printf "%s" "$dir"
           exit 0
         fi
-        # Pace the loop without using `sleep` (which hangs in this environment).
-        read -t 0.1 -r _ < <(:) 2>/dev/null || true
+        read -t 0.2 -r -u 9 _ || true
       done
     ' _ "$sid" "$OPENCODE_URL")"; then
-      log "session $sid not ready after 5s; giving up"
+      log "session $sid not ready after 30s; giving up"
       exit 0
     fi
 
@@ -283,21 +303,26 @@ pkgs.writeShellApplication {
     # when invoked with stdin attached to a tty (e.g. running this script
     # interactively from a tmux pane), neovim 0.11 does terminal capability
     # probing that corrupts/empties --remote-expr's stdout — the loop then
-    # never sees "1", grep -qx 1 never matches, and we hit the 5s timeout.
+    # never sees "1", grep -qx 1 never matches, and we hit the timeout below.
     # See workstation-qmg for the full root-cause analysis.
+    # Timeout bumped 5s -> 15s for the same load reason as Step 1: under
+    # contention nvim startup plus helper-module load can take longer than
+    # 5s, which surfaced as "nvim not ready" misfires in the log.
     # shellcheck disable=SC2016
-    if ! timeout 5 bash -c '
+    if ! timeout 15 bash -c '
       sock="$1"
+      # Held-open pipe on fd 9 for real pacing -- see Step 1 for why a
+      # plain `read -t < <(:)` would EOF instantly and busy-spin.
+      exec 9<> <(:)
       until [ -S "$sock" ] && \
             nvim --server "$sock" --remote-expr \
               "luaeval(\"pcall(require, '"'"'user.oc_auto_attach'"'"') and 1 or 0\")" \
               </dev/null 2>/dev/null | grep -qx 1
       do
-        # Pace the loop without using `sleep` (which hangs in this environment).
-        read -t 0.1 -r _ < <(:) 2>/dev/null || true
+        read -t 0.2 -r -u 9 _ || true
       done
     ' _ "$sock"; then
-      log "nvim at $sock not ready (or helper not loaded) after 5s; giving up"
+      log "nvim at $sock not ready (or helper not loaded) after 15s; giving up"
       exit 0
     fi
     log "nvim at $sock is ready"
