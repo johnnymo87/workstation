@@ -18,7 +18,7 @@ and read-only SQLite queries against `~/.local/share/opencode/opencode.db`
 - **What process emitted the calls:** the persistent headless server
   **`opencode-serve.service`** (`opencode serve --port 4096`), running the
   installed **`opencode-patched-1.15.13.2`** binary → user-agent
-  `opencode/1.15.13`, egress 34.24.187.96. This single server backs *all*
+  `opencode/1.15.13`, egress REDACTED. This single server backs *all*
   automated and attached sessions on the box.
 - **What drove the work (automation, not a human):**
   1. **`lgtm-run.service`** — a systemd timer firing **every 10 min** all night
@@ -138,7 +138,7 @@ Sessions created in window, by `model` + `agent`:
 The opus `build` top-level sessions (32 of them) are overwhelmingly titled
 **"Review PR with .lgtm-review-prompt.md"** / "LGTM PR review" (lgtm dispatch),
 plus a handful of dev sessions ("Forecast events JSON API design", "Upgrading
-OpenCode to 1.16", "Fulfiller items polymorphic associations", COPS-* work).
+OpenCode to 1.16", "Fulfiller items polymorphic associations", PROJ-* work).
 The gemini sessions are the `implementer`/`code-reviewer`/`spec-reviewer`
 **subagents** these orchestrators fan out → confirms the
 subagent-driven-development pattern on the default gemini model.
@@ -161,8 +161,8 @@ as established.
 
 Dead-zone check (23:30 Jun-4 → 02:30 Jun-5, when *new* session creation was
 ~0 but the audit surge continued): the sessions still generating parts were a
-handful of **long-lived opus `build` dev sessions** (COPS-6244, "Prod→UAT
-weekly reset", COPS-4774, FBM e2e, COPS-6234) plus a few gemini subagents and
+handful of **long-lived opus `build` dev sessions** (PROJ-6244, "Prod→UAT
+weekly reset", PROJ-4774, FBM e2e, PROJ-6234) plus a few gemini subagents and
 one lgtm gather ("Enrich review context packet"). Sustained gemini calls with
 ~0 new sessions = a small set of persistent sessions retry-storming (their
 gemini compaction/subagent calls hitting the exhausted gemini quota), not fresh

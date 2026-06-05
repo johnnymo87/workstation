@@ -17,7 +17,7 @@ SELECT
   ) AS model,
   COUNT(DISTINCT IFNULL(operation.id, insertId)) AS call_count
 FROM
-  `wonder-sandbox.vertex_ai_audit_logs.cloudaudit_googleapis_com_data_access`
+  `my-gcp-project.vertex_ai_audit_logs.cloudaudit_googleapis_com_data_access`
 WHERE
   timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
   AND (

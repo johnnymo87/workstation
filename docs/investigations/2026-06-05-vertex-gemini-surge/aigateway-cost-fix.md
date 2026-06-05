@@ -3,7 +3,7 @@
 **Date:** 2026-06-05
 **Host:** cloudbox
 **Repo:** `mono` (worktree `~/projects/mono-aigateway`, branch `no-jira-aigateway-cost-fix` off `origin/main`)
-**Service:** `wonder/data/aigateway`
+**Service:** `your-org/data/aigateway`
 **Running stack:** docker-compose project `dev` (`dev-gateway-1`, `dev-postgres-1`, `dev-redis-1`), ports 8080/5432/6379
 
 ## Summary
@@ -45,7 +45,7 @@ Diffstat (mono): 7 files changed, +496/-22, plus 1 new migration.
 Opus rows: 0% populated. Haiku rows: ~100% populated.
 
 ### Mechanism (verified by reading `origin/main`)
-- [`PriceTable.kt`](../../../../mono/wonder/data/aigateway/server/PriceTable.kt)
+- [`PriceTable.kt`](../../../../mono/your-org/data/aigateway/server/PriceTable.kt)
   `prices` map had `claude-opus-4-7`, `-4-5`, `claude-sonnet-4-5`,
   `claude-haiku-4-5` — but **not** `claude-opus-4-8`.
 - `PriceTable.compute()` strips the Vertex `@<version>` suffix
@@ -185,14 +185,14 @@ publisher. The live Gemini test below resolved the caller email correctly.
 Every change was written test-first (RED → GREEN). Full suite:
 
 ```
-//wonder/data/aigateway/db:db-ktlint-test                              PASSED
-//wonder/data/aigateway/server:server_lib-ktlint-test                 PASSED
-//wonder/data/aigateway/server/testing:AuthFilterTest                 PASSED (+ktlint)
-//wonder/data/aigateway/server/testing:EmailResolverTest              PASSED (+ktlint)
-//wonder/data/aigateway/server/testing:LedgerWriterTest               PASSED (+ktlint)
-//wonder/data/aigateway/server/testing:PriceTableTest                 PASSED (+ktlint)
-//wonder/data/aigateway/server/testing:ProxyControllerTest            PASSED (+ktlint)
-//wonder/data/aigateway/server/testing:UsageParserTest                PASSED (+ktlint)
+//your-org/data/aigateway/db:db-ktlint-test                              PASSED
+//your-org/data/aigateway/server:server_lib-ktlint-test                 PASSED
+//your-org/data/aigateway/server/testing:AuthFilterTest                 PASSED (+ktlint)
+//your-org/data/aigateway/server/testing:EmailResolverTest              PASSED (+ktlint)
+//your-org/data/aigateway/server/testing:LedgerWriterTest               PASSED (+ktlint)
+//your-org/data/aigateway/server/testing:PriceTableTest                 PASSED (+ktlint)
+//your-org/data/aigateway/server/testing:ProxyControllerTest            PASSED (+ktlint)
+//your-org/data/aigateway/server/testing:UsageParserTest                PASSED (+ktlint)
 Executed 14 tests: 14 pass.
 ```
 
@@ -214,7 +214,7 @@ New/changed tests:
 ## 5. Deploy verification (live, against the running `dev` stack)
 
 Rebuilt jars from the worktree, staged compose files + jars into the running
-stack's working dir (`~/projects/mono/wonder/data/aigateway/dev/`), then
+stack's working dir (`~/projects/mono/your-org/data/aigateway/dev/`), then
 rebuilt **only** `migrate` + `gateway` (postgres/redis untouched → existing
 ledger preserved, so the migration was validated against the real 11,476 rows).
 
@@ -234,7 +234,7 @@ with a real `gcloud auth print-access-token` → HTTP 200,
 `X-Gateway-Request-Id: a6affe6a-...`. Ledger:
 ```
 request_id           | a6affe6a-d7af-4a11-a02b-8dbe7576644a
-user_email           | jmohrbacher@wonder.com
+user_email           | user@company.com
 model                | claude-opus-4-8@default
 http_status          | 200
 input_tokens         | 16
@@ -252,7 +252,7 @@ context_tier         | under_200k
 `promptTokenCount=7, thoughtsTokenCount=13`. Ledger:
 ```
 request_id           | ed6b5c05-d2e2-470b-919c-da39c9bc54d7
-user_email           | jmohrbacher@wonder.com
+user_email           | user@company.com
 model                | gemini-3.5-flash
 region               | global
 http_status          | 200
@@ -306,14 +306,14 @@ through the fixed gateway — additional live proof under real traffic.
 ## 6. Files changed (mono PR)
 
 ```
-M wonder/data/aigateway/server/PriceTable.kt           (+ opus-4-8, gemini-3.5-flash)
-M wonder/data/aigateway/server/UsageParser.kt          (+ parseGemini dialect)
-M wonder/data/aigateway/server/ProxyController.kt       (publisher routing + keep usage on unknown price)
-M wonder/data/aigateway/server/testing/PriceTableTest.kt
-M wonder/data/aigateway/server/testing/UsageParserTest.kt
-M wonder/data/aigateway/server/testing/ProxyControllerTest.kt
-M wonder/data/aigateway/server/testing/LedgerWriterTest.kt
-A wonder/data/aigateway/db/migrations/V20260605181028__relax_cost_breakdown_consistency_allow_tokens_without_dollars.sql
+M your-org/data/aigateway/server/PriceTable.kt           (+ opus-4-8, gemini-3.5-flash)
+M your-org/data/aigateway/server/UsageParser.kt          (+ parseGemini dialect)
+M your-org/data/aigateway/server/ProxyController.kt       (publisher routing + keep usage on unknown price)
+M your-org/data/aigateway/server/testing/PriceTableTest.kt
+M your-org/data/aigateway/server/testing/UsageParserTest.kt
+M your-org/data/aigateway/server/testing/ProxyControllerTest.kt
+M your-org/data/aigateway/server/testing/LedgerWriterTest.kt
+A your-org/data/aigateway/db/migrations/V20260605181028__relax_cost_breakdown_consistency_allow_tokens_without_dollars.sql
 ```
 No BUILD changes needed (`server_lib` globs `*.kt`; `migration_files` globs
 `migrations/*.sql`).

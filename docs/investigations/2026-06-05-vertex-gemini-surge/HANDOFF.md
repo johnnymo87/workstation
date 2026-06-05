@@ -12,7 +12,7 @@ an **automated overnight workload that amplifies SUCCESSFUL gemini calls ~35×**
 an application-level retry-rescheduler, risking a large recurring bill.
 
 ### Established facts (hard evidence)
-- Host **cloudbox**, user jmohrbacher@wonder.com, egress IP 34.24.187.96, UA `opencode/1.15.13`.
+- Host **cloudbox**, user user@company.com, egress IP REDACTED, UA `opencode/1.15.13`.
 - Overnight 2026-06-04 15:00 → 2026-06-05 07:00 UTC: **~72,500 deduped SUCCESSFUL**
   gemini-3.5-flash Vertex calls (status OK; only 7 RESOURCE_EXHAUSTED, 2 cancelled).
   DB recorded only **~2,033 gemini step-starts** in that window → **~35× amplification
@@ -76,9 +76,9 @@ No emergency mitigation taken; lgtm-run.timer still enabled.
 - [TODO] Decide whether to push oc-cost commit `c3f2894`.
 
 ## Key references
-- bq dataset: `wonder-sandbox.vertex_ai_audit_logs.cloudaudit_googleapis_com_data_access`
+- bq dataset: `my-gcp-project.vertex_ai_audit_logs.cloudaudit_googleapis_com_data_access`
   (call-counts only, NO tokens → can't price from audit alone; pricing needs oc-cost + tokens).
-- Looker dashboard: https://lookerstudio.google.com/reporting/e7e82a5b-80ce-463e-881f-cd1c39195bae
+- Looker dashboard: https://lookerstudio.google.com/reporting/REDACTED
 - Jira AGENT epic (Vertex AI Gateway): AGENT-2; Phase 1 dashboard = AGENT-1 (Done).
 - oc-cost: ~/projects/workstation/pkgs/oc-cost/ (test: `cd pkgs/oc-cost && python3 -m unittest test_oc_cost -v`).
 
@@ -118,7 +118,7 @@ No emergency mitigation taken; lgtm-run.timer still enabled.
   Nix-managed opencode.json (workstation users/dev/opencode-config.nix) to shrink blast radius.
 
 ### aigateway = newly-discovered cost data source (user tip)
-- Spring Boot+PG+Redis proxy at mono `wonder/data/aigateway` (source on **origin/main**, NOT in
+- Spring Boot+PG+Redis proxy at mono `your-org/data/aigateway` (source on **origin/main**, NOT in
   the docs-branch working tree; built jars in dev/). Running docker-compose project "dev"
   (dev-gateway-1/dev-postgres-1/dev-redis-1, ports 8080/5432/6379). Ledger table
   `gateway_request_log` has tokens + DOLLARS (which BQ audit logs lack). Query:

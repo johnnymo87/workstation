@@ -49,7 +49,7 @@ rows. Only the Vertex audit log (call counts) reveals the volume.
 
 Spotted via the Vertex AI audit-log dashboard (per-user call counts) showing a gemini
 spike. Confirmed in BigQuery
-(`wonder-sandbox.vertex_ai_audit_logs.cloudaudit_googleapis_com_data_access`), deduping
+(`my-gcp-project.vertex_ai_audit_logs.cloudaudit_googleapis_com_data_access`), deduping
 streaming double-logging with `COUNT(DISTINCT IFNULL(operation.id, insertId))`. The storm
 ended at 07:00 UTC to the second — the 03:00 EDT `nightly-restart-background.service`
 restarting `opencode-serve` killed it (it was terminated, not self-resolved).
@@ -124,7 +124,7 @@ design defect, not a fork regression. The `opencode-patched` stack does not touc
 |---|---|---|---|
 | **Fix 1 (cure)** | Cap per-step retries (~5–8) + add jitter to backoff | new patch in `opencode-patched/patches/`, against retry.ts:180 / processor.ts:810 | **Deploying** (this session) |
 | Fix 2 | Move compaction + global default off gemini; consider dedicated/raised gemini quota | workstation Nix `opencode-config.nix` (`opencode.json:8,154`) | Planned |
-| Fix 3 | aigateway: add `claude-opus-4-8` pricing (fix opus NULL) + gemini support | mono `wonder/data/aigateway` | In progress (worker) |
+| Fix 3 | aigateway: add `claude-opus-4-8` pricing (fix opus NULL) + gemini support | mono `your-org/data/aigateway` | In progress (worker) |
 | Fix 4 | Durable LLM-audit capture (service=llm + retry/error lines → ~/.local/state) | workstation `opencode-llm-audit.nix` | **Done, live** |
 | Fix 5 | lgtm defense-in-depth: never launch unkillable session; bound subagent wall-clock; cost circuit-breaker | `~/projects/lgtm` | Planned |
 | Fix 6 | pigeon: dedup the `session.status` retry notifier (stop Telegram flood) | pigeon opencode-plugin | Planned (cosmetic) |
