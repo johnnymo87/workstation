@@ -174,3 +174,45 @@ AND the aigateway worker. After the restart, do this:
 Worker session IDs: w1 retry-rootcause `ses_1671e4e42ffeae5UKWFHuB1ZjR` (done) · w2 forward-capture
 `ses_1671e01ccffeVwWgxKSj0y9wlq` (done) · w3 aigateway `ses_1670df706ffeIwMdzaEcSoTaGA` (resume) ·
 w4 retry-cap deploy `ses_166faf734ffen83FtybOn5O5Y0` (in progress).
+
+---
+
+## UPDATE 2026-06-05 ~15:10 EDT — durable cure + gemini routing IN FLIGHT (compacting)
+
+State: BOTH primary fixes are LIVE & verified. Now making the cure durable + enabling gemini routing.
+
+### Verified done & live
+- CURE live: opencode-serve runs capped `opencode-patched-1.15.13.3` (RETRY_JITTER_RATIO present in
+  running binary; absent in old k775). MAX_RETRIES=8 + jitter.
+- aigateway fix live: opus `claude-opus-4-8` now records tokens+dollars (264 rows/$43 last hr, was 0%);
+  gemini parse+price works; unpriced models keep tokens. mono PR #3373 (food-truck/mono, OPEN).
+- forward-capture live (~/.local/state/opencode-llm-audit/llm.log). RCA in this dir + /tmp.
+
+### In flight (worker `ses_16663d5f5ffe2NUO3Ryz6vW6V0`, ~/projects/workstation)
+- Pushed opencode-patched main (retry-cap 6fa9663). Triggered capped release **v1.16.2-patched.1**
+  (build-release.yml run in ~/projects/opencode-patched, ~3min build).
+- Worker tasks: (A) bump workstation off the local --impure 1.15.13.3 pin (commit 1af8073) to the
+  published capped **v1.16.2-patched.1** so a PURE `home-manager switch` works + automation tracks
+  capped; (B) enable gemini routing (provider.google-vertex.options.baseURL → localhost:8080
+  /v1beta1/.../publishers/google, reversible, per aigateway-cost-fix.md §7); then ONE pure switch +
+  detached opencode-serve restart; then push publishable workstation commits.
+- DEADLINE context: workstation update-opencode-patched.yml cron ~18:00 EDT bumps to latest release —
+  publishing capped v1.16.2-patched.1 before then makes automation track the CAPPED version.
+
+### POST-RESTART VERIFICATION (do after the worker's detached restart)
+1. `systemctl status opencode-serve` active; `readlink -f /proc/$(systemctl show opencode-serve -p MainPID --value)/exe`
+   → should be a **v1.16.2-patched.1** store path (NOT k775 1.15.13.2, NOT the uncapped 1.16.2 path
+   `nisvz7...`). Confirm cap: `rg -ac RETRY_JITTER_RATIO <storepath>/bin/.opencode-wrapped` ≥1.
+2. Gemini routing live: make/await a gemini call, confirm a `gateway_request_log` row for a gemini model
+   with tokens+dollars (`docker exec dev-postgres-1 psql -U aigateway -d aigateway -c "..."`), and the
+   forward-capture log shows gemini providerID=google-vertex going via the gateway.
+3. Pure build worked (no --impure): check worker report durable-cure-gemini-routing.md.
+4. Read worker report: durable-cure-gemini-routing.md (changes, hashes, rollback, push/PR result).
+5. Rollback if broken: generation 379 (capped 1.15.13.3) `<gen379>/activate && sudo systemctl restart opencode-serve`. NOT gen 378 (uncapped 1.16.2).
+
+### Remaining after that (lower pri)
+- Fix 2 config hardening (non-gemini compaction/default) — reduces gemini blast radius.
+- Watch tonight's cycle via forward-capture + BQ to PROVE the cap holds (no session.id repeating; gemini calls/hr bounded).
+- Low: upstream title-cost issue; sync dashboard queries to infra PR #3215; push oc-cost commit c3f2894; rotate plaintext secrets in opencode.json.
+
+Worker IDs: w3 aigateway `ses_1670df706ffeIwMdzaEcSoTaGA` (DONE, PR #3373) · w5 durable-cure+gemini-routing `ses_16663d5f5ffe2NUO3Ryz6vW6V0` (in flight).
