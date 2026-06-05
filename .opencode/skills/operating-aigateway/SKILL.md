@@ -54,8 +54,8 @@ home-manager switch --flake .#cloudbox
 ```
 
 If eval fails with `access to absolute path '/home' is forbidden in pure
-evaluation mode`, append `--impure` (an unrelated local-build path currently
-forces impure eval).
+evaluation mode` (caused by any absolute-path reference in the flake), append
+`--impure`.
 
 > `gemini-3.5-flash` is the GLOBAL DEFAULT model on cloudbox, so routing it makes
 > every session depend on the gateway being up — there is no auto-bypass when the
