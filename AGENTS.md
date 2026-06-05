@@ -89,6 +89,8 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Atlassian Multi-Instance](.opencode/skills/atlassian-multi-instance/SKILL.md) | Adding, removing, debugging Atlassian instance profiles |
 | [Setting Up Notion MCP](.opencode/skills/setting-up-notion-mcp/SKILL.md) | First-time OAuth + headless devbox SSH-L dance for Notion's hosted MCP |
 | [Resetting Workspace](.opencode/skills/resetting-workspace/SKILL.md) | Manual + nightly cloudbox reset (kill nvims, clear sessions, restart serve) |
+| [Auditing OpenCode LLM Calls](.opencode/skills/auditing-opencode-llm-calls/SKILL.md) | Durable LLM-call capture on cloudbox; attribute surges by agent/model/session |
+| [Operating the aigateway](.opencode/skills/operating-aigateway/SKILL.md) | Deploy/route/debug the LLM cost-capture proxy on cloudbox; query the ledger; add prices; roll back |
 
 ## Structure
 
