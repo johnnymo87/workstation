@@ -24,6 +24,7 @@ let
         echo "  -h, --help                     Show this help message"
         echo "  --model <provider/model>       Specify the model to run"
         echo "  --mcp <server>                 Enable an MCP server's tools (repeatable)"
+        echo "  --tmux-session <name>          Confine auto-attach to a dedicated tmux session"
         echo ""
         echo "Favorite Models:"
         echo "  - google-vertex/gemini-3.5-flash                  (Fast, reasoning-enabled)"
@@ -47,6 +48,7 @@ let
 
       model_spec=""
       mcp_servers=()
+      tmux_session=""
       while [ $# -gt 0 ]; do
         case "$1" in
           --model)
@@ -80,6 +82,22 @@ let
               exit 1
             fi
             mcp_servers+=("$mcp_server")
+            shift
+            ;;
+          --tmux-session)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+              echo "Error: --tmux-session requires a name" >&2
+              exit 1
+            fi
+            tmux_session="$2"
+            shift 2
+            ;;
+          --tmux-session=*)
+            tmux_session="''${1#--tmux-session=}"
+            if [ -z "$tmux_session" ]; then
+              echo "Error: --tmux-session requires a name" >&2
+              exit 1
+            fi
             shift
             ;;
           -h|--help)
@@ -196,7 +214,12 @@ let
       # headless) is silently tolerated. Log to /tmp/oc-auto-attach.log for
       # debuggability.
       if command -v oc-auto-attach >/dev/null 2>&1; then
-        setsid nohup oc-auto-attach "$session_id" </dev/null >>/tmp/oc-auto-attach.log 2>&1 & disown
+        oc_attach_args=()
+        if [ -n "$tmux_session" ]; then
+          oc_attach_args+=(--tmux-session "$tmux_session")
+        fi
+        # ''${arr[@]+"..."} guards the empty-array expansion under `set -u`.
+        setsid nohup oc-auto-attach ''${oc_attach_args[@]+"''${oc_attach_args[@]}"} "$session_id" </dev/null >>/tmp/oc-auto-attach.log 2>&1 & disown
       fi
 
       echo "Session launched: $session_id"
