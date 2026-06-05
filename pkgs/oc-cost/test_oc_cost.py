@@ -642,6 +642,381 @@ class TestParseArgsReconcile(unittest.TestCase):
         self.assertTrue(oc_cost.parse_args(["--reconcile"]).reconcile)
 
 
+class TestParseArgsVertex(unittest.TestCase):
+    def _clear_env(self):
+        for k in ("OC_COST_VERTEX_AUDIT_TABLE", "OC_COST_VERTEX_PROJECT",
+                  "OC_COST_VERTEX_PRINCIPAL"):
+            os.environ.pop(k, None)
+
+    def test_vertex_reconcile_default_false(self):
+        self._clear_env()
+        args = oc_cost.parse_args([])
+        self.assertFalse(args.vertex_reconcile)
+        self.assertIsNone(args.vertex_audit_table)
+        self.assertIsNone(args.vertex_project)
+        self.assertIsNone(args.vertex_principal)
+
+    def test_vertex_reconcile_flag(self):
+        self.assertTrue(oc_cost.parse_args(["--vertex-reconcile"]).vertex_reconcile)
+
+    def test_vertex_flags_explicit(self):
+        args = oc_cost.parse_args([
+            "--vertex-reconcile",
+            "--vertex-audit-table", "proj:ds.tbl",
+            "--vertex-project", "billing-proj",
+            "--vertex-principal", "me@example.com",
+        ])
+        self.assertEqual(args.vertex_audit_table, "proj:ds.tbl")
+        self.assertEqual(args.vertex_project, "billing-proj")
+        self.assertEqual(args.vertex_principal, "me@example.com")
+
+    def test_vertex_flags_env_fallback(self):
+        self._clear_env()
+        os.environ["OC_COST_VERTEX_AUDIT_TABLE"] = "envproj:envds.envtbl"
+        os.environ["OC_COST_VERTEX_PROJECT"] = "env-billing"
+        os.environ["OC_COST_VERTEX_PRINCIPAL"] = "env@example.com"
+        try:
+            args = oc_cost.parse_args([])
+            self.assertEqual(args.vertex_audit_table, "envproj:envds.envtbl")
+            self.assertEqual(args.vertex_project, "env-billing")
+            self.assertEqual(args.vertex_principal, "env@example.com")
+        finally:
+            self._clear_env()
+
+    def test_explicit_flag_overrides_env(self):
+        self._clear_env()
+        os.environ["OC_COST_VERTEX_AUDIT_TABLE"] = "envproj:envds.envtbl"
+        try:
+            args = oc_cost.parse_args(["--vertex-audit-table", "cli:cli.cli"])
+            self.assertEqual(args.vertex_audit_table, "cli:cli.cli")
+        finally:
+            self._clear_env()
+
+
+class TestBuildVertexQuery(unittest.TestCase):
+    START = 1775001600000  # 2026-04-01T00:00:00Z
+    END = 1776297600000    # 2026-04-16T00:00:00Z
+
+    def test_normalizes_colon_table_to_backticked_dotted(self):
+        sql = oc_cost.build_vertex_query("proj:ds.tbl", self.START, self.END, None)
+        self.assertIn("`proj.ds.tbl`", sql)
+        # The bq-style colon must not survive into standard SQL.
+        self.assertNotIn("proj:ds.tbl", sql)
+
+    def test_accepts_already_dotted_table(self):
+        sql = oc_cost.build_vertex_query("proj.ds.tbl", self.START, self.END, None)
+        self.assertIn("`proj.ds.tbl`", sql)
+
+    def test_includes_dedupe_and_model_regex(self):
+        sql = oc_cost.build_vertex_query("p:d.t", self.START, self.END, None)
+        self.assertIn("COUNT(DISTINCT IFNULL(operation.id, insertId))", sql)
+        self.assertIn("/publishers/[^/]+/models/([^/]+)", sql)
+        self.assertIn("REGEXP_EXTRACT", sql)
+
+    def test_includes_time_window(self):
+        sql = oc_cost.build_vertex_query("p:d.t", self.START, self.END, None)
+        self.assertIn(f"TIMESTAMP_MILLIS({self.START})", sql)
+        self.assertIn(f"TIMESTAMP_MILLIS({self.END})", sql)
+
+    def test_principal_filter_present_when_given(self):
+        sql = oc_cost.build_vertex_query("p:d.t", self.START, self.END, "me@example.com")
+        self.assertIn("principalEmail", sql)
+        self.assertIn("'me@example.com'", sql)
+
+    def test_principal_filter_absent_when_none(self):
+        sql = oc_cost.build_vertex_query("p:d.t", self.START, self.END, None)
+        self.assertNotIn("principalEmail", sql)
+
+    def test_principal_single_quote_escaped(self):
+        # A single quote in the principal must be escaped (doubled) so it can't
+        # break out of the string literal / inject SQL.
+        sql = oc_cost.build_vertex_query("p:d.t", self.START, self.END, "a'b@x.com")
+        self.assertIn("'a''b@x.com'", sql)
+
+
+class TestDbCallCountsByVertexModel(unittest.TestCase):
+    def test_sums_vertex_providers_and_strips_at_suffix(self):
+        by_model = [
+            {"provider": "google-vertex-anthropic", "model": "claude-opus-4-7@default", "msgs": 10},
+            {"provider": "google-vertex-anthropic", "model": "claude-opus-4-7@us", "msgs": 5},
+            {"provider": "google-vertex", "model": "gemini-3.5-flash", "msgs": 7},
+        ]
+        counts = oc_cost.db_call_counts_by_vertex_model(by_model)
+        # Two opus rows with different @suffix collapse to one normalized key.
+        self.assertEqual(counts["claude-opus-4-7"], 15)
+        self.assertEqual(counts["gemini-3.5-flash"], 7)
+
+    def test_excludes_non_vertex_providers(self):
+        by_model = [
+            {"provider": "anthropic", "model": "claude-opus-4-7", "msgs": 100},
+            {"provider": "openai", "model": "gpt-5.5", "msgs": 50},
+            {"provider": "github-copilot", "model": "claude-opus-4.6", "msgs": 9},
+            {"provider": "google-vertex", "model": "gemini-3.5-flash", "msgs": 3},
+        ]
+        counts = oc_cost.db_call_counts_by_vertex_model(by_model)
+        self.assertEqual(counts, {"gemini-3.5-flash": 3})
+
+    def test_empty_input(self):
+        self.assertEqual(oc_cost.db_call_counts_by_vertex_model([]), {})
+
+
+class TestReconcileVertex(unittest.TestCase):
+    def _row(self, rec, model):
+        return next(r for r in rec["rows"] if r["model"] == model)
+
+    def test_undercount_flagged_with_positive_delta(self):
+        # gemini DB sees 19646 calls, Vertex actually 31002 -> +11356 (57.8%).
+        rec = oc_cost.reconcile_vertex(
+            {"gemini-3.5-flash": 19646}, {"gemini-3.5-flash": 31002}
+        )
+        row = self._row(rec, "gemini-3.5-flash")
+        self.assertEqual(row["db_calls"], 19646)
+        self.assertEqual(row["vertex_calls"], 31002)
+        self.assertEqual(row["delta"], 11356)  # vertex - db
+        self.assertAlmostEqual(row["delta_pct"], 11356 / 19646 * 100, places=4)
+        self.assertTrue(row["flagged"])
+
+    def test_model_only_in_vertex_zero_db(self):
+        # claude-haiku-4-5: titles run on it, no message row -> db_calls 0.
+        rec = oc_cost.reconcile_vertex({}, {"claude-haiku-4-5": 4123})
+        row = self._row(rec, "claude-haiku-4-5")
+        self.assertEqual(row["db_calls"], 0)
+        self.assertEqual(row["vertex_calls"], 4123)
+        self.assertEqual(row["delta"], 4123)
+        self.assertEqual(row["delta_pct"], float("inf"))  # zero baseline
+        self.assertTrue(row["flagged"])
+
+    def test_model_only_in_db_zero_vertex(self):
+        rec = oc_cost.reconcile_vertex({"gemini-3.5-flash": 100}, {})
+        row = self._row(rec, "gemini-3.5-flash")
+        self.assertEqual(row["db_calls"], 100)
+        self.assertEqual(row["vertex_calls"], 0)
+        self.assertEqual(row["delta"], -100)
+        self.assertTrue(row["flagged"])  # -100% trips pct rule
+
+    def test_near_one_to_one_not_flagged(self):
+        # opus reconciles ~1:1: tiny gap, neither threshold tripped.
+        rec = oc_cost.reconcile_vertex(
+            {"claude-opus-4-7": 35280}, {"claude-opus-4-7": 35291},
+            pct_threshold=5.0, count_threshold=50,
+        )
+        row = self._row(rec, "claude-opus-4-7")
+        self.assertEqual(row["delta"], 11)
+        self.assertFalse(row["flagged"])
+
+    def test_zero_delta_zero_db_not_flagged(self):
+        rec = oc_cost.reconcile_vertex({"m": 0}, {"m": 0})
+        row = self._row(rec, "m")
+        self.assertEqual(row["delta_pct"], 0.0)
+        self.assertFalse(row["flagged"])
+
+    def test_or_rule_big_count_small_pct_flagged(self):
+        # db 100000, vertex 100060 -> delta 60 (0.06%). count rule (60>50) flags.
+        rec = oc_cost.reconcile_vertex(
+            {"m": 100000}, {"m": 100060}, pct_threshold=5.0, count_threshold=50,
+        )
+        self.assertTrue(self._row(rec, "m")["flagged"])
+
+    def test_or_rule_small_count_big_pct_flagged(self):
+        # db 10, vertex 40 -> delta 30 (300%). pct rule flags even though 30<50.
+        rec = oc_cost.reconcile_vertex(
+            {"m": 10}, {"m": 40}, pct_threshold=5.0, count_threshold=50,
+        )
+        self.assertTrue(self._row(rec, "m")["flagged"])
+
+    def test_totals_and_sort(self):
+        rec = oc_cost.reconcile_vertex(
+            {"a": 100, "b": 5}, {"a": 110, "b": 50, "c": 7},
+        )
+        self.assertEqual(rec["total_db"], 105)
+        self.assertEqual(rec["total_vertex"], 167)
+        self.assertEqual(rec["total_delta"], 62)
+        # Sorted by descending vertex_calls: a(110), b(50), c(7).
+        self.assertEqual([r["model"] for r in rec["rows"]], ["a", "b", "c"])
+
+
+class _FakeProc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class TestRunBqQuery(unittest.TestCase):
+    def test_success_parses_json_rows(self):
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return _FakeProc(0, '[{"model":"x","vertex_calls":"5"}]', "")
+
+        rows = oc_cost.run_bq_query("SELECT 1", project="bill", _run=fake_run)
+        self.assertEqual(rows, [{"model": "x", "vertex_calls": "5"}])
+        # SQL passed as the final positional arg; project threaded through.
+        self.assertEqual(captured["argv"][0], "bq")
+        self.assertIn("SELECT 1", captured["argv"])
+        self.assertTrue(any("--project_id=bill" == a for a in captured["argv"]))
+        self.assertTrue(any("--format=json" == a for a in captured["argv"]))
+
+    def test_no_project_omits_project_flag(self):
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return _FakeProc(0, "[]", "")
+
+        oc_cost.run_bq_query("SELECT 1", project=None, _run=fake_run)
+        self.assertFalse(any(a.startswith("--project_id") for a in captured["argv"]))
+
+    def test_empty_stdout_returns_empty_list(self):
+        rows = oc_cost.run_bq_query("Q", _run=lambda *a, **k: _FakeProc(0, "", ""))
+        self.assertEqual(rows, [])
+
+    def test_bq_missing_raises_vertex_query_error(self):
+        def fake_run(argv, **kwargs):
+            raise FileNotFoundError("no bq")
+
+        with self.assertRaises(oc_cost.VertexQueryError):
+            oc_cost.run_bq_query("Q", _run=fake_run)
+
+    def test_nonzero_exit_raises_with_stderr(self):
+        def fake_run(argv, **kwargs):
+            return _FakeProc(1, "", "permission denied on table")
+
+        with self.assertRaises(oc_cost.VertexQueryError) as cm:
+            oc_cost.run_bq_query("Q", _run=fake_run)
+        self.assertIn("permission denied", str(cm.exception))
+
+    def test_bad_json_raises(self):
+        def fake_run(argv, **kwargs):
+            return _FakeProc(0, "this is not json", "")
+
+        with self.assertRaises(oc_cost.VertexQueryError):
+            oc_cost.run_bq_query("Q", _run=fake_run)
+
+
+class TestFetchVertexCounts(unittest.TestCase):
+    def test_reduces_rows_to_int_counts(self):
+        def runner(sql, project):
+            return [
+                {"model": "claude-opus-4-7", "vertex_calls": "35291"},
+                {"model": "gemini-3.5-flash", "vertex_calls": "31002"},
+            ]
+
+        counts = oc_cost.fetch_vertex_counts(
+            "p:d.t", "bill", 1, 2, None, runner=runner
+        )
+        self.assertEqual(counts, {"claude-opus-4-7": 35291, "gemini-3.5-flash": 31002})
+
+    def test_null_model_bucketed_as_unknown(self):
+        def runner(sql, project):
+            return [
+                {"model": None, "vertex_calls": "9"},
+                {"model": "", "vertex_calls": "1"},
+                {"model": "x", "vertex_calls": "3"},
+            ]
+
+        counts = oc_cost.fetch_vertex_counts("p:d.t", None, 1, 2, None, runner=runner)
+        self.assertEqual(counts["x"], 3)
+        self.assertEqual(counts["(unknown)"], 10)  # 9 + 1 summed
+
+    def test_runner_receives_built_sql_and_project(self):
+        captured = {}
+
+        def runner(sql, project):
+            captured["sql"] = sql
+            captured["project"] = project
+            return []
+
+        oc_cost.fetch_vertex_counts("proj:ds.tbl", "bill", 100, 200,
+                                    "me@x.com", runner=runner)
+        self.assertIn("`proj.ds.tbl`", captured["sql"])
+        self.assertIn("TIMESTAMP_MILLIS(100)", captured["sql"])
+        self.assertIn("'me@x.com'", captured["sql"])
+        self.assertEqual(captured["project"], "bill")
+
+    def test_default_runner_is_module_run_bq_query(self):
+        # When no runner is injected, fetch_vertex_counts must late-bind to the
+        # module-level run_bq_query (so it is monkeypatchable, e.g. by main()).
+        called = {}
+        orig = oc_cost.run_bq_query
+
+        def fake(sql, project):
+            called["hit"] = True
+            return []
+
+        oc_cost.run_bq_query = fake
+        try:
+            oc_cost.fetch_vertex_counts("p:d.t", None, 1, 2, None)
+            self.assertTrue(called.get("hit"))
+        finally:
+            oc_cost.run_bq_query = orig
+
+
+class TestVertexReconciliationReport(unittest.TestCase):
+    BY_MODEL = [
+        {"provider": "google-vertex-anthropic", "model": "claude-opus-4-7@default", "msgs": 35280},
+        {"provider": "google-vertex", "model": "gemini-3.5-flash", "msgs": 19646},
+        {"provider": "openai", "model": "gpt-5.5", "msgs": 18869},  # non-vertex, ignored
+    ]
+
+    def test_skipped_when_no_audit_table(self):
+        args = oc_cost.parse_args(["--vertex-reconcile"])
+        args.vertex_audit_table = None
+        rep = oc_cost.vertex_reconciliation_report(args, self.BY_MODEL, 1, 2)
+        self.assertEqual(rep["status"], "skipped")
+        self.assertIn("audit", rep["reason"].lower())
+
+    def test_error_status_on_query_failure(self):
+        args = oc_cost.parse_args(["--vertex-reconcile", "--vertex-audit-table", "p:d.t"])
+
+        def runner(sql, project):
+            raise oc_cost.VertexQueryError("boom: permission denied")
+
+        rep = oc_cost.vertex_reconciliation_report(args, self.BY_MODEL, 1, 2, runner=runner)
+        self.assertEqual(rep["status"], "error")
+        self.assertIn("boom", rep["reason"])
+
+    def test_ok_status_reconciles_and_flags(self):
+        args = oc_cost.parse_args([
+            "--vertex-reconcile", "--vertex-audit-table", "p:d.t",
+            "--vertex-principal", "me@x.com",
+        ])
+
+        def runner(sql, project):
+            return [
+                {"model": "claude-opus-4-7", "vertex_calls": "35291"},  # ~1:1
+                {"model": "gemini-3.5-flash", "vertex_calls": "31002"},  # undercount
+                {"model": "claude-haiku-4-5", "vertex_calls": "4123"},   # invisible
+            ]
+
+        rep = oc_cost.vertex_reconciliation_report(args, self.BY_MODEL, 1, 2, runner=runner)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(rep["principal"], "me@x.com")
+        self.assertEqual(rep["audit_table"], "p:d.t")
+        by = {r["model"]: r for r in rep["rows"]}
+        self.assertFalse(by["claude-opus-4-7"]["flagged"])
+        self.assertTrue(by["gemini-3.5-flash"]["flagged"])
+        self.assertEqual(by["claude-haiku-4-5"]["db_calls"], 0)
+        self.assertTrue(by["claude-haiku-4-5"]["flagged"])
+        # delta_pct for the zero-db haiku row must be JSON-safe (no raw inf).
+        self.assertIsNone(by["claude-haiku-4-5"]["delta_pct"])
+        # Whole report must be RFC-8259 JSON-serializable.
+        json.dumps(rep, allow_nan=False)
+
+    def test_project_derived_from_table_when_unset(self):
+        args = oc_cost.parse_args(["--vertex-reconcile", "--vertex-audit-table", "myproj:ds.t"])
+        captured = {}
+
+        def runner(sql, project):
+            captured["project"] = project
+            return []
+
+        rep = oc_cost.vertex_reconciliation_report(args, self.BY_MODEL, 1, 2, runner=runner)
+        self.assertEqual(captured["project"], "myproj")  # parsed from table
+        self.assertEqual(rep["project"], "myproj")
+
+
 class TestRateForGuard(unittest.TestCase):
     def test_none_model_returns_none(self):
         self.assertIsNone(oc_cost.rate_for("openai", None))
@@ -730,6 +1105,111 @@ class TestMainIntegration(unittest.TestCase):
             self.assertAlmostEqual(parsed["reconciliation"]["total_est"], 0.50, places=6)
             self.assertAlmostEqual(parsed["reconciliation"]["total_delta"], 2.43, places=6)
         finally:
+            os.unlink(path)
+
+    def _clear_vertex_env(self):
+        for k in ("OC_COST_VERTEX_AUDIT_TABLE", "OC_COST_VERTEX_PROJECT",
+                  "OC_COST_VERTEX_PRINCIPAL"):
+            os.environ.pop(k, None)
+
+    def test_end_to_end_json_vertex_reconcile(self):
+        import io
+        import contextlib
+        self._clear_vertex_env()
+        d0 = 1800000000000  # 2027-01-15 UTC
+        msgs = [
+            assistant_msg("m1", "s1", d0 + 1, model="claude-opus-4-7@default",
+                          provider="google-vertex-anthropic", cache_read=1_000_000),
+            assistant_msg("m2", "s1", d0 + 2, model="gemini-3.5-flash",
+                          provider="google-vertex", inp=1000),
+        ]
+        path = _write_db_file(msgs)
+
+        def fake_bq(sql, project):
+            return [
+                {"model": "claude-opus-4-7", "vertex_calls": "1"},     # ~1:1
+                {"model": "gemini-3.5-flash", "vertex_calls": "50"},   # undercount
+                {"model": "claude-haiku-4-5", "vertex_calls": "30"},   # invisible titles
+            ]
+
+        orig = oc_cost.run_bq_query
+        oc_cost.run_bq_query = fake_bq
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = oc_cost.main(["--db", path, "--json",
+                                   "--since", "2027-01-01", "--until", "2027-01-31",
+                                   "--vertex-reconcile",
+                                   "--vertex-audit-table", "proj:ds.tbl"])
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertNotIn("Infinity", out)
+            self.assertNotIn("NaN", out)
+            parsed = json.loads(out)
+            self.assertIn("vertex_reconciliation", parsed)
+            vr = parsed["vertex_reconciliation"]
+            self.assertEqual(vr["status"], "ok")
+            by = {r["model"]: r for r in vr["rows"]}
+            self.assertFalse(by["claude-opus-4-7"]["flagged"])
+            self.assertTrue(by["gemini-3.5-flash"]["flagged"])
+            self.assertTrue(by["claude-haiku-4-5"]["flagged"])
+            self.assertEqual(by["claude-haiku-4-5"]["db_calls"], 0)
+        finally:
+            oc_cost.run_bq_query = orig
+            os.unlink(path)
+
+    def test_vertex_reconcile_skips_without_table(self):
+        import io
+        import contextlib
+        self._clear_vertex_env()
+        d0 = 1800000000000
+        msgs = [assistant_msg("m1", "s1", d0 + 1, model="claude-opus-4-7@default",
+                              provider="google-vertex-anthropic", cache_read=1_000_000)]
+        path = _write_db_file(msgs)
+        try:
+            buf = io.StringIO()
+            err = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                rc = oc_cost.main(["--db", path, "--json",
+                                   "--since", "2027-01-01", "--until", "2027-01-31",
+                                   "--vertex-reconcile"])
+            self.assertEqual(rc, 0)  # non-fatal
+            parsed = json.loads(buf.getvalue())
+            self.assertEqual(parsed["vertex_reconciliation"]["status"], "skipped")
+            # A clear note went to stderr.
+            self.assertIn("vertex", err.getvalue().lower())
+        finally:
+            os.unlink(path)
+
+    def test_vertex_reconcile_text_section(self):
+        import io
+        import contextlib
+        self._clear_vertex_env()
+        d0 = 1800000000000
+        msgs = [assistant_msg("m1", "s1", d0 + 1, model="gemini-3.5-flash",
+                              provider="google-vertex", inp=1000)]
+        path = _write_db_file(msgs)
+
+        def fake_bq(sql, project):
+            return [{"model": "gemini-3.5-flash", "vertex_calls": "50"},
+                    {"model": "claude-haiku-4-5", "vertex_calls": "30"}]
+
+        orig = oc_cost.run_bq_query
+        oc_cost.run_bq_query = fake_bq
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = oc_cost.main(["--db", path,
+                                   "--since", "2027-01-01", "--until", "2027-01-31",
+                                   "--vertex-reconcile",
+                                   "--vertex-audit-table", "proj:ds.tbl"])
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn("Vertex Call Reconciliation", out)
+            self.assertIn("claude-haiku-4-5", out)
+            self.assertIn("FLAG", out)
+        finally:
+            oc_cost.run_bq_query = orig
             os.unlink(path)
 
     def test_end_to_end_text_runs(self):

@@ -9,6 +9,7 @@ import sys
 import os
 import json
 import sqlite3
+import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -132,6 +133,45 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Expand the full per-(provider,model) reconciliation table comparing "
             "our estimate against OpenCode's recorded $.cost, plus the unpriced list. "
             "A one-line reconciliation summary is always shown regardless of this flag."
+        ),
+    )
+    parser.add_argument(
+        "--vertex-reconcile", action="store_true", dest="vertex_reconcile",
+        help=(
+            "Reconcile DB-recorded Vertex call counts against the ACTUAL number of "
+            "Vertex API calls in a BigQuery audit-log table (queried via the `bq` CLI "
+            "for the same time window). Surfaces auxiliary/small-model calls (e.g. "
+            "session-title generation on haiku/flash) that never get a message row and "
+            "are therefore invisible to message-based accounting. Requires "
+            "--vertex-audit-table (or $OC_COST_VERTEX_AUDIT_TABLE); degrades gracefully "
+            "if `bq` is missing or the query fails."
+        ),
+    )
+    parser.add_argument(
+        "--vertex-audit-table", dest="vertex_audit_table",
+        default=os.environ.get("OC_COST_VERTEX_AUDIT_TABLE"),
+        help=(
+            "BigQuery Vertex audit-log table as PROJECT:DATASET.TABLE (or "
+            "PROJECT.DATASET.TABLE). Defaults to $OC_COST_VERTEX_AUDIT_TABLE. "
+            "Required for --vertex-reconcile."
+        ),
+    )
+    parser.add_argument(
+        "--vertex-project", dest="vertex_project",
+        default=os.environ.get("OC_COST_VERTEX_PROJECT"),
+        help=(
+            "GCP project to bill the audit-log query against (bq --project_id). "
+            "Defaults to $OC_COST_VERTEX_PROJECT, else the project component of "
+            "--vertex-audit-table."
+        ),
+    )
+    parser.add_argument(
+        "--vertex-principal", dest="vertex_principal",
+        default=os.environ.get("OC_COST_VERTEX_PRINCIPAL"),
+        help=(
+            "Filter the audit log to a single principalEmail. Defaults to "
+            "$OC_COST_VERTEX_PRINCIPAL. When unset, ALL principals in the table are "
+            "counted (noted in the output)."
         ),
     )
 
@@ -392,6 +432,283 @@ def reconcile(
     }
 
 
+# --- Vertex audit-log reconciliation -------------------------------------
+#
+# oc-cost's per-model call count is derived from `message` rows: in OpenCode
+# every recorded LLM call produces exactly one assistant message (one
+# step-start part -> one message), so estimate()'s per-model `msgs` is a
+# faithful count of the calls oc-cost can SEE. But some LLM calls are never
+# written as a message at all -- most notably session-TITLE generation, which
+# runs on a small model (haiku/flash) and whose result lands only in the
+# session.title column. Those calls are invisible to message-based accounting,
+# so small models are silently undercounted.
+#
+# This reconciliation surfaces the gap by comparing the DB-derived per-model
+# call count against the ACTUAL number of Vertex API calls in a BigQuery audit
+# log table, queried via the `bq` CLI (pure stdlib: we shell out, no pip deps).
+
+# Providers that route to Vertex; only these are comparable to the Vertex
+# audit log. Matched by prefix so future google-vertex-* providers are covered.
+_VERTEX_PROVIDER_PREFIX = "google-vertex"
+
+# Bucket key for audit-log rows whose model could not be parsed from
+# resourceName (so their calls are surfaced, never silently dropped).
+_UNKNOWN_MODEL = "(unknown)"
+
+
+class VertexQueryError(Exception):
+    """Raised when the `bq` audit-log query cannot be run or parsed.
+
+    main() catches this and degrades gracefully (clear note, non-fatal)."""
+
+
+def _normalize_audit_table(table: str) -> str:
+    """Turn a bq-style `PROJECT:DATASET.TABLE` (or already-dotted
+    `PROJECT.DATASET.TABLE`) into a backtick-quoted standard-SQL reference.
+
+    bq separates the project from the dataset with a colon; standard SQL uses a
+    dot. We swap the first colon for a dot and wrap the whole thing in
+    backticks."""
+    return "`" + table.replace(":", ".", 1) + "`"
+
+
+def build_vertex_query(
+    table: str, start_ms: int, end_ms: int, principal: Optional[str]
+) -> str:
+    """Build the standard-SQL query that counts distinct Vertex calls per model
+    in [start_ms, end_ms).
+
+    - Model is parsed from protopayload_auditlog.resourceName.
+    - Streaming double-logging is collapsed with
+      COUNT(DISTINCT IFNULL(operation.id, insertId)).
+    - When `principal` is given, restrict to that principalEmail (single quotes
+      doubled to keep the string literal safe).
+
+    start_ms/end_ms are embedded as integer literals (they are ints, so there is
+    nothing to inject); principal is the only free-text input and is escaped."""
+    ref = _normalize_audit_table(table)
+    where = [
+        f"timestamp >= TIMESTAMP_MILLIS({int(start_ms)})",
+        f"timestamp < TIMESTAMP_MILLIS({int(end_ms)})",
+    ]
+    if principal:
+        safe = principal.replace("'", "''")
+        where.append(
+            f"protopayload_auditlog.authenticationInfo.principalEmail = '{safe}'"
+        )
+    where_sql = "\n  AND ".join(where)
+    return (
+        "SELECT\n"
+        "  REGEXP_EXTRACT(protopayload_auditlog.resourceName, "
+        "r'/publishers/[^/]+/models/([^/]+)') AS model,\n"
+        "  COUNT(DISTINCT IFNULL(operation.id, insertId)) AS vertex_calls\n"
+        f"FROM {ref}\n"
+        f"WHERE {where_sql}\n"
+        "GROUP BY model"
+    )
+
+
+def run_bq_query(sql: str, project: Optional[str] = None, *,
+                 _run=subprocess.run, timeout: int = 120) -> list[dict]:
+    """Run a standard-SQL query via the `bq` CLI and return its JSON rows.
+
+    Shells out exactly as a user would (no pip deps). `_run` is injectable so
+    tests stay hermetic. Raises VertexQueryError -- never a bare OSError or
+    CalledProcessError -- so main() can degrade gracefully when `bq` is absent
+    or the query fails."""
+    argv = ["bq", "--quiet", "--format=json"]
+    if project:
+        argv.append(f"--project_id={project}")
+    argv += ["query", "--use_legacy_sql=false", "--max_rows=1000000", sql]
+    try:
+        proc = _run(argv, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as e:
+        raise VertexQueryError(
+            "`bq` CLI not found on PATH; install the Google Cloud SDK or skip "
+            "--vertex-reconcile."
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise VertexQueryError(f"bq query timed out after {timeout}s") from e
+    if proc.returncode != 0:
+        raise VertexQueryError(
+            f"bq query failed (exit {proc.returncode}): "
+            f"{(proc.stderr or '').strip()}"
+        )
+    out = (proc.stdout or "").strip()
+    if not out:
+        return []
+    try:
+        data = json.loads(out)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise VertexQueryError(f"could not parse bq JSON output: {e}") from e
+    if not isinstance(data, list):
+        raise VertexQueryError("unexpected bq JSON output (expected a list)")
+    return data
+
+
+def fetch_vertex_counts(
+    table: str,
+    project: Optional[str],
+    start_ms: int,
+    end_ms: int,
+    principal: Optional[str],
+    *,
+    runner=None,
+) -> dict[str, int]:
+    """Query the Vertex audit log and return {model: deduped_call_count}.
+
+    `runner(sql, project) -> list[dict]` is the BigQuery seam; it defaults to
+    the module-level run_bq_query, looked up at call time so it stays
+    monkeypatchable for hermetic tests. Audit rows whose model could not be
+    parsed from resourceName are summed under the _UNKNOWN_MODEL bucket so their
+    calls are surfaced rather than silently dropped. Counts come back from bq as
+    JSON strings, so they are coerced to int."""
+    if runner is None:
+        runner = run_bq_query
+    sql = build_vertex_query(table, start_ms, end_ms, principal)
+    counts: dict[str, int] = {}
+    for row in runner(sql, project):
+        model = row.get("model") or _UNKNOWN_MODEL
+        try:
+            n = int(row.get("vertex_calls") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        counts[model] = counts.get(model, 0) + n
+    return counts
+
+
+def reconcile_vertex(
+    db_counts: dict[str, int],
+    vertex_counts: dict[str, int],
+    pct_threshold: float = 5.0,
+    count_threshold: int = 50,
+) -> dict:
+    """Compare DB-derived per-model call counts against actual Vertex call
+    counts and flag material gaps.
+
+    delta = vertex_calls - db_calls (positive => the DB UNDERCOUNTS, i.e. real
+    Vertex calls that never became a message row -- the small-model title/aux
+    leak). delta_pct is relative to db_calls (the DB is our baseline), mirroring
+    the estimated-vs-recorded reconcile()'s use of the estimate as baseline.
+
+    Flag rule is the same OR pattern as reconcile(): a row is flagged when
+    abs(delta) > count_threshold OR abs(delta_pct) > pct_threshold. delta_pct is
+    guarded against a zero baseline: 0.0 when delta is also 0, else +/-inf
+    (which always trips the pct test) -- this is exactly the haiku case where
+    db_calls == 0 but Vertex recorded thousands of title calls.
+
+    Rows are sorted by descending vertex_calls (highest-volume models first),
+    ties broken by model name."""
+    models = set(db_counts) | set(vertex_counts)
+    rows: list[dict] = []
+    total_db = 0
+    total_vertex = 0
+    for model in models:
+        db = int(db_counts.get(model, 0) or 0)
+        vertex = int(vertex_counts.get(model, 0) or 0)
+        delta = vertex - db
+        if db != 0:
+            delta_pct = delta / db * 100.0
+        elif delta == 0:
+            delta_pct = 0.0
+        else:
+            delta_pct = float("inf") if delta > 0 else float("-inf")
+        flagged = abs(delta) > count_threshold or abs(delta_pct) > pct_threshold
+        rows.append({
+            "model": model,
+            "db_calls": db,
+            "vertex_calls": vertex,
+            "delta": delta,
+            "delta_pct": delta_pct,
+            "flagged": flagged,
+        })
+        total_db += db
+        total_vertex += vertex
+    rows.sort(key=lambda r: (-r["vertex_calls"], r["model"]))
+    return {
+        "rows": rows,
+        "total_db": total_db,
+        "total_vertex": total_vertex,
+        "total_delta": total_vertex - total_db,
+    }
+
+
+def db_call_counts_by_vertex_model(by_model: list[dict]) -> dict[str, int]:
+    """Reduce estimate()'s per-(provider,model) rows to a per-model call count
+    for Vertex providers only, keyed the way the Vertex audit log names models.
+
+    Only rows whose provider routes through Vertex are kept (others -- direct
+    Anthropic, OpenAI, Copilot -- never hit Vertex and are not comparable). The
+    DB model id carries an OpenCode @suffix (e.g. `claude-opus-4-7@default`)
+    that is not part of the published Vertex model name, so it is stripped; rows
+    that then collapse to the same model are summed."""
+    counts: dict[str, int] = {}
+    for row in by_model:
+        provider = row.get("provider") or ""
+        if not provider.startswith(_VERTEX_PROVIDER_PREFIX):
+            continue
+        model = (row.get("model") or "").split("@", 1)[0]
+        counts[model] = counts.get(model, 0) + int(row.get("msgs", 0) or 0)
+    return counts
+
+
+def _derive_project(table: str) -> str:
+    """The project component of a PROJECT:DATASET.TABLE / PROJECT.DATASET.TABLE."""
+    return table.replace(":", ".", 1).split(".", 1)[0]
+
+
+def vertex_reconciliation_report(
+    args: argparse.Namespace,
+    by_model: list[dict],
+    start_ms: int,
+    end_ms: int,
+    *,
+    runner=None,
+) -> dict:
+    """Orchestrate the Vertex reconciliation into a JSON-serializable status dict.
+
+    Returns one of:
+      {"status": "skipped", "reason": ...}  -- no audit table configured
+      {"status": "error",   "reason": ...}  -- bq missing / query failed
+      {"status": "ok", "audit_table", "project", "principal", "rows",
+       "total_db", "total_vertex", "total_delta"}
+
+    Never raises for the expected failure modes (missing table, VertexQueryError):
+    those are turned into skipped/error statuses so the caller stays non-fatal.
+    delta_pct on each row is sanitized (the zero-baseline +/-inf -> None) so the
+    whole report is RFC-8259 JSON-safe."""
+    table = args.vertex_audit_table
+    if not table:
+        return {
+            "status": "skipped",
+            "reason": (
+                "no Vertex audit table configured; pass --vertex-audit-table "
+                "PROJECT:DATASET.TABLE or set $OC_COST_VERTEX_AUDIT_TABLE."
+            ),
+        }
+    project = args.vertex_project or _derive_project(table)
+    principal = args.vertex_principal
+    try:
+        vertex_counts = fetch_vertex_counts(
+            table, project, start_ms, end_ms, principal, runner=runner
+        )
+    except VertexQueryError as e:
+        return {"status": "error", "reason": str(e)}
+
+    db_counts = db_call_counts_by_vertex_model(by_model)
+    rec = reconcile_vertex(db_counts, vertex_counts)
+    return {
+        "status": "ok",
+        "audit_table": table,
+        "project": project,
+        "principal": principal,
+        "rows": [_json_safe_recrow(r) for r in rec["rows"]],
+        "total_db": rec["total_db"],
+        "total_vertex": rec["total_vertex"],
+        "total_delta": rec["total_delta"],
+    }
+
+
 _DEFAULT_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 
 
@@ -597,6 +914,49 @@ def render_text(report: dict) -> str:
         # unpriced models are excluded from both (so they cancel out).
         lines.append(f"  {'(kind subtotal)':<43}{_fmt_usd(kind_total):>33}")
 
+    # Optional: Vertex audit-log call reconciliation (only when --vertex-reconcile)
+    vr = report.get("vertex_reconciliation")
+    if vr:
+        lines.append(
+            "\n\n  Vertex Call Reconciliation "
+            "(DB-recorded calls vs actual Vertex API calls)\n"
+        )
+        status = vr.get("status")
+        if status == "skipped":
+            lines.append(f"  (skipped: {vr.get('reason', '')})")
+        elif status == "error":
+            lines.append(f"  (unavailable: {vr.get('reason', '')})")
+        else:
+            principal = vr.get("principal") or "all principals"
+            lines.append(
+                f"  Audit table: {vr.get('audit_table')}   "
+                f"Project: {vr.get('project')}   Principal: {principal}"
+            )
+            lines.append("")
+            lines.append(
+                "MODEL                                    DB_CALLS  VERTEX_CALLS"
+                "         Δ       Δ%   FLAG"
+            )
+            lines.append("-" * 100)
+            for r in vr.get("rows", []):
+                dpct = r.get("delta_pct")
+                pct_tag = (
+                    f"{dpct:>8.1f}" if isinstance(dpct, (int, float)) else "     n/a"
+                )
+                flag_tag = "   FLAG" if r.get("flagged") else ""
+                name = _short_label(r.get("model", ""), 40)
+                lines.append(
+                    f"{name:<40} {r.get('db_calls', 0):>8}  "
+                    f"{r.get('vertex_calls', 0):>12}  "
+                    f"{r.get('delta', 0):>+8}  {pct_tag}{flag_tag}"
+                )
+            lines.append("-" * 100)
+            lines.append(
+                f"{'TOTAL':<40} {vr.get('total_db', 0):>8}  "
+                f"{vr.get('total_vertex', 0):>12}  "
+                f"{vr.get('total_delta', 0):>+8}"
+            )
+
     lines.append(
         f"\nPeriod: {daily[0]['day']} to {daily[-1]['day']} "
         f"({len(daily)} active days)"
@@ -704,6 +1064,20 @@ def main(argv: list[str] | None = None) -> int:
                 kind_map = None
             if kind_map is not None:
                 report["by_kind"] = summarize_by_kind(rows, kind_map)
+
+        if args.vertex_reconcile:
+            vr = vertex_reconciliation_report(args, est["by_model"], start_ms, end_ms)
+            report["vertex_reconciliation"] = vr
+            if vr["status"] == "skipped":
+                print(
+                    f"Note: --vertex-reconcile skipped: {vr['reason']}",
+                    file=sys.stderr,
+                )
+            elif vr["status"] == "error":
+                print(
+                    f"Warning: --vertex-reconcile failed: {vr['reason']}",
+                    file=sys.stderr,
+                )
     finally:
         conn.close()
 
