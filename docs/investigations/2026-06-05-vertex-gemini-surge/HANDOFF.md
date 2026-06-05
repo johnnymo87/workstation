@@ -143,3 +143,34 @@ No emergency mitigation taken; lgtm-run.timer still enabled.
 ### Security (worker 1 side-note, out of scope)
 - opencode.json holds plaintext secrets: Slack `xoxp-` (line ~135/150), Datadog DD_API_KEY/
   DD_APPLICATION_KEY (~72-73), PagerDuty key (~88). Rotate + move to sops/Keychain.
+
+---
+
+## POST-RESTART RESUME PLAN (read this if opencode-serve was just restarted)
+
+The retry-cap deploy worker (`ses_166faf734ffen83FtybOn5O5Y0`) deploys Fix 1 and then
+**restarts opencode-serve via a detached process**, which kills the orchestrator session
+AND the aigateway worker. After the restart, do this:
+
+1. **Verify the cure is live:**
+   - `systemctl status opencode-serve` → active (running), started just now.
+   - `curl -s localhost:8080/actuator/health` (aigateway) still UP.
+   - Read `~/projects/workstation/docs/investigations/2026-06-05-vertex-gemini-surge/retry-cap-deploy.md`
+     for the new nix store path; confirm the new opencode-patched build contains the cap
+     (grep the built JS for the MAX_RETRIES constant / a `Schedule.recurs`). Old path (rollback):
+     `/nix/store/k775j7vkyvnsrzshrysbfl906nwcl0yh-opencode-patched-1.15.13.2`.
+   - `/tmp/retry-cap-deploy.log` shows the restart command output.
+2. **Resume the aigateway worker** (`ses_1670df706ffeIwMdzaEcSoTaGA`): its git worktree off
+   origin/main + edits persist on disk. Re-prompt it (opencode-send / prompt) to "continue
+   where you left off — check your worktree git status first." Task: add `claude-opus-4-8` to
+   PriceTable (fix opus NULL) + gemini support; deliver aigateway-cost-fix.md + mono PR.
+3. **Remaining work:** Fix 2 config hardening (non-gemini compaction/default in workstation
+   Nix); then the low-pri list (upstream title-cost issue, dashboard query sync to PR #3215,
+   oc-cost push decision, rotate plaintext secrets).
+4. **Watch the next overnight cycle** via the forward-capture log (~/.local/state/opencode-llm-audit/llm.log)
+   and BQ to confirm the cap stopped the runaway (no session.id repeating abnormally; gemini
+   calls/hr stay bounded).
+
+Worker session IDs: w1 retry-rootcause `ses_1671e4e42ffeae5UKWFHuB1ZjR` (done) · w2 forward-capture
+`ses_1671e01ccffeVwWgxKSj0y9wlq` (done) · w3 aigateway `ses_1670df706ffeIwMdzaEcSoTaGA` (resume) ·
+w4 retry-cap deploy `ses_166faf734ffen83FtybOn5O5Y0` (in progress).
