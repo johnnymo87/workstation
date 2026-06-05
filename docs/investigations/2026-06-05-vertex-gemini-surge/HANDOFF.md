@@ -81,3 +81,65 @@ No emergency mitigation taken; lgtm-run.timer still enabled.
 - Looker dashboard: https://lookerstudio.google.com/reporting/e7e82a5b-80ce-463e-881f-cd1c39195bae
 - Jira AGENT epic (Vertex AI Gateway): AGENT-2; Phase 1 dashboard = AGENT-1 (Done).
 - oc-cost: ~/projects/workstation/pkgs/oc-cost/ (test: `cd pkgs/oc-cost && python3 -m unittest test_oc_cost -v`).
+
+---
+
+## UPDATE 2026-06-05 PM — ROOT CAUSE CONFIRMED + new findings (supersedes the "pigeon/lgtm rescheduler" theory)
+
+### ROOT CAUSE (worker 1, see lgtm-retry-rootcause.md): uncapped per-step retry in OpenCode core
+- The 35× is **OpenCode core's per-step LLM retry policy, which has NO attempt cap**.
+  `packages/opencode/src/session/retry.ts:175-198` (`policy()`) — no `Schedule.recurs`/max —
+  applied at `processor.ts:810-840`. A stuck step re-issues the ENTIRE Vertex stream every
+  30s (backoff cap) **forever**, until the error stops classifying retryable.
+- Each retry = a fresh Vertex call **logged status OK**; DB writes one assistant message per
+  *step* (`prompt.ts:1347-1362`). 72,500 calls / 2,033 steps ≈ 35× = avg Vertex requests/step.
+- Amplified calls are SUCCESSFUL (not 429) because the triggers are: in-band mid-stream errors
+  under HTTP 200, ECONNRESET/header-timeouts, or post-stream finish-step throwing retryable
+  (the `tool-fix.patch` reason). Only ~7 hard 429s logged all night.
+- Gemini-specific only because gemini's tight `google-vertex` quota trips those conditions;
+  opus (`google-vertex-anthropic`, separate quota) rarely fires → reconciles 1:1.
+- **Pigeon/lgtm are NOT the amplifier.** The Telegram "🤖 Retry … Next attempt" is just a
+  NOTIFIER forwarding OpenCode's `session.status{type:"retry"}` (pigeon opencode-plugin
+  index.ts:604-633, no dedup → floods Telegram). Pigeon's own retries are delivery-only, capped
+  at 10. lgtm is the work *source* (gather + reviewer subagents + compaction + default all on
+  gemini, every 10 min) and its gather timeout→DELETE stop-gap leaks (gather.ts:188-191,199-210).
+- **Discriminator that proved it (my BQ + gateway cross-check):** during the storm hours
+  (03:00–06:00 UTC) opus was only 63–466/hr while gemini hit 7,488/hr. Whole-session reruns
+  would have surged opus too; they didn't → amplification is gemini-quota-specific, matching
+  the per-step retry firing on gemini's overloaded/exhausted conditions.
+
+### THE CURE (worker 1 Fix 1) — not yet implemented
+- Cap per-step retries: in `retry.ts:180` add `|| meta.attempt > MAX_RETRIES → Cause.done`,
+  or compose `Schedule.recurs(N)` at `processor.ts:810`. Cap ~5–8. Add jitter to `delay()`.
+- Ship as a NEW patch in `~/projects/opencode-patched/patches/` (deployed binary =
+  `opencode-patched-1.15.13.2`; existing patches don't touch retry). **Deploy = rebuild
+  opencode-patched + restart opencode-serve, which BOUNCES ALL SESSIONS — do deliberately.**
+- Fix 2 (config hardening, complements): set non-gemini `compaction`/default model in the
+  Nix-managed opencode.json (workstation users/dev/opencode-config.nix) to shrink blast radius.
+
+### aigateway = newly-discovered cost data source (user tip)
+- Spring Boot+PG+Redis proxy at mono `wonder/data/aigateway` (source on **origin/main**, NOT in
+  the docs-branch working tree; built jars in dev/). Running docker-compose project "dev"
+  (dev-gateway-1/dev-postgres-1/dev-redis-1, ports 8080/5432/6379). Ledger table
+  `gateway_request_log` has tokens + DOLLARS (which BQ audit logs lack). Query:
+  `docker exec dev-postgres-1 psql -U aigateway -d aigateway -c "..."`.
+- **Only proxies google-vertex-anthropic (opus + haiku titles); gemini bypasses it.**
+- **Bug found:** 10,790 opus rows have NULL tokens+dollars because `PriceTable.kt` lacks
+  `claude-opus-4-8` (has 4-7/4-5) → compute() throws → ProxyController:182-195 nulls usage+cost.
+  Haiku works (in table). → aigateway worker dispatched (see below).
+- The haiku ledger rows are the "invisible-to-oc-cost" title calls — cross-confirms the title
+  counting-artifact (mechanism #1).
+
+### Worker status
+- Worker 1 (lgtm/pigeon retry) — **DONE** → lgtm-retry-rootcause.md.
+- Worker 2 (forward-capture) — **DONE + WORKING**: capturing `service=llm` attribution +
+  retry lines to ~/.local/state/opencode-llm-audit/llm.log (verified live). home-manager change
+  STAGED-not-committed in workstation. Next storm will be attributable by session.id/model/agent.
+- Worker 3 aigateway (`ses_1670df706ffeIwMdzaEcSoTaGA`, opus, mono worktree off origin/main) —
+  IN PROGRESS: add claude-opus-4-8 pricing (fix opus NULL) + gemini support (parse usageMetadata,
+  price, proxy google publisher path). Gateway redeploy is safe; the opencode gemini-routing flip
+  is GATED (gemini is the global default — broken route breaks everything). → aigateway-cost-fix.md.
+
+### Security (worker 1 side-note, out of scope)
+- opencode.json holds plaintext secrets: Slack `xoxp-` (line ~135/150), Datadog DD_API_KEY/
+  DD_APPLICATION_KEY (~72-73), PagerDuty key (~88). Rotate + move to sops/Keychain.

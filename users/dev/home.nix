@@ -8,6 +8,7 @@
     ./home.devbox.nix
     ./home.cloudbox.nix
     ./disk-cleanup.nix
+    ./opencode-llm-audit.nix
     ./home.crostini.nix
     ./home.darwin.nix
     ./opencode-config.nix
