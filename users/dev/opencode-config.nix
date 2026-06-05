@@ -611,10 +611,19 @@ in
 
   # Inject (or strip) the aigateway baseURL override on cloudbox.
   # Trigger: `aigateway.service` is currently active AND we have a
-  # GOOGLE_CLOUD_PROJECT secret. When both conditions hold: set
-  # `provider.google-vertex-anthropic.options.baseURL` to a URL pointing
+  # GOOGLE_CLOUD_PROJECT secret. When both conditions hold: set both
+  # `provider.google-vertex-anthropic.options.baseURL` (Claude) AND
+  # `provider.google-vertex.options.baseURL` (Gemini) to URLs pointing
   # at the local Docker gateway, with the project baked into the path.
-  # Otherwise: strip the override so opencode falls back to direct Vertex.
+  # Otherwise: strip the overrides so opencode falls back to direct Vertex.
+  #
+  # NOTE: Gemini (`google-vertex/gemini-3.5-flash`) is the GLOBAL DEFAULT
+  # model on cloudbox, so routing it through the gateway means every
+  # session (interactive + opencode-serve/pigeon/Telegram) depends on the
+  # gateway being up. The gateway parses Gemini `usageMetadata` and prices
+  # `gemini-3.5-flash`; unpriced Gemini models still ledger tokens (NULL
+  # dollars). Verified live 2026-06-05 — see investigation report
+  # docs/investigations/2026-06-05-vertex-gemini-surge/aigateway-cost-fix.md.
   #
   # Why is-active and not is-enabled? NixOS unit files live in the
   # read-only /etc/systemd/system (symlinks into the Nix store), so
@@ -668,6 +677,11 @@ in
                               then del(.provider."google-vertex-anthropic".options) else . end
                             | if .provider."google-vertex-anthropic" == {}
                               then del(.provider."google-vertex-anthropic") else . end
+                            | del(.provider."google-vertex".options.baseURL)
+                            | if .provider."google-vertex".options == {}
+                              then del(.provider."google-vertex".options) else . end
+                            | if .provider."google-vertex" == {}
+                              then del(.provider."google-vertex") else . end
                             | if .provider == {} then del(.provider) else . end' \
             "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
@@ -675,15 +689,20 @@ in
         new_hash="DIRECT-VERTEX"
       else
         full_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models"
+        # Gemini base URL shape differs from anthropic: v1beta1, publishers/google,
+        # NO trailing /models (the @ai-sdk/google-vertex `getBaseURL` appends
+        # /models/<id>:streamGenerateContent itself). Verified live 2026-06-05.
+        gemini_url="http://localhost:8080/v1beta1/projects/$project/locations/global/publishers/google"
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
-          ${pkgs.jq}/bin/jq --arg url "$full_url" \
-            '.provider."google-vertex-anthropic".options.baseURL = $url' \
+          ${pkgs.jq}/bin/jq --arg url "$full_url" --arg gemini_url "$gemini_url" \
+            '.provider."google-vertex-anthropic".options.baseURL = $url
+             | .provider."google-vertex".options.baseURL = $gemini_url' \
             "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "aigateway: pointed opencode at $full_url" >&2
-        new_hash="$(printf '%s' "$full_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
+        echo "aigateway: pointed opencode at $full_url (anthropic) and $gemini_url (gemini)" >&2
+        new_hash="$(printf '%s\n%s' "$full_url" "$gemini_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
       fi
 
       # Auto-restart opencode-serve only when the effective URL changed.
