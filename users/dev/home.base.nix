@@ -253,22 +253,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-QCeeuFlVCw+Quyo8TtCik7+TPL2IeIN79Ryzzvy4VIQ=";
+      hash = "sha256-hLb/0MZNDTSbc03hAb5a45q/XdnuFc6Rbb24bluOiPY=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-26OC4GjE95nq+/51phSvSQRgr39gLr3kqbzrOiAIMrE=";
+      hash = "sha256-tDLeUFgpJ4AcqmaJS0Jz6Bc51UV1TPgIUe8Wr/S89/0=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-e2oQirOw61sFc5F5oul0um8/IZaOUkrwQU26t5CozdU=";
+      hash = "sha256-sxhU+1FlvL8Cbt6t9NUsIiel+gZAIQyhppVvODHxtYk=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-2DVxxoVbratjWiG8lHgrm8IgyvOZY2ChDmB2dr6Cgxk=";
+      hash = "sha256-ZqydRBZRzUiK4bE2LHmOC7Er7baNvk+XN/uAleMiyCY=";
       isZip = true;
     };
   };
@@ -282,19 +282,34 @@ let
     # Bump `upstreamVersion` (and reset `patchedRevision` to "") for upstream
     # version bumps -- and check whether any patches in opencode-patched can be
     # dropped because they're now upstream (see check-sunset.yml in that repo).
-    upstreamVersion = "1.16.2";
-    patchedRevision = "";  # ".N" suffix — drop to "" on next upstream version bump
+    # LOCAL RETRY-CAP DEPLOY (2026-06-05, cloudbox): reverts the accidental
+    # auto-bump to 1.16.2 (commit 0fab4cc, from update-opencode-patched.yml,
+    # which shipped an UNCAPPED 1.16.2 — see VERSION SAFETY in retry-cap-deploy.md)
+    # and pins back to the deployed 1.15.13 base with patchedRevision "3", whose
+    # aarch64 binary is built LOCALLY from opencode-patched + patches/retry-cap.patch
+    # (the per-step retry attempt cap + jitter fix). Not a published release.
+    # Rollback: restore upstreamVersion="1.15.13"/patchedRevision="2" + the prior
+    # block and `home-manager switch`, or activate the prior home-manager generation
+    # (old store path /nix/store/k775j7vkyvnsrzshrysbfl906nwcl0yh-opencode-patched-1.15.13.2).
+    upstreamVersion = "1.15.13";
+    patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
+    # Locally-built capped tarball for cloudbox (aarch64). Other platforms keep the
+    # released fetchurl path (unused on cloudbox; v1.15.13-patched.3 is not published).
+    localBuildTarball = /home/dev/.cache/opencode-retry-cap-deploy/opencode-linux-arm64.tar.gz;
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
     inherit version;
-    src = pkgs.fetchurl {
-      url = "https://github.com/johnnymo87/opencode-patched/releases/download/${releaseTag}/${platformInfo.asset}";
-      hash = platformInfo.hash;
-    };
+    src =
+      if pkgs.stdenv.hostPlatform.system == "aarch64-linux"
+      then localBuildTarball
+      else pkgs.fetchurl {
+        url = "https://github.com/johnnymo87/opencode-patched/releases/download/${releaseTag}/${platformInfo.asset}";
+        hash = platformInfo.hash;
+      };
     nativeBuildInputs = [ pkgs.makeWrapper ]
       ++ lib.optionals platformInfo.isZip [ pkgs.unzip ]
       ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
