@@ -230,16 +230,17 @@ let
     '';
   };
 
-  # Patched opencode with prompt caching, prompt-loop byte identity, cache-aligned compaction,
-  # Gemini empty parts fix, vim, tool fix, MCP reconnect, eager input streaming workaround, and
-  # instance-state-partition fix. Targets opencode v1.15.12 — prefill-fix.patch was DROPPED
-  # on 2026-05-28 because v1.15.12 ships an equivalent upstream fix in workspace-routing.ts
-  # (release-notes line: "Used the persisted session directory for existing-session requests").
-  # v1.15.12 also lands upstream PR #29769, which generalizes adaptive reasoning support to
-  # opus-4-7-or-later — so claude-opus-4-8 now gets the {low, medium, high, xhigh, max}
-  # variant set with summarized thinking display, instead of falling into the legacy
-  # {high, max} branch (which opus-4-8 rejects with "'thinking.type.enabled' is not
-  # supported for this model. Use 'thinking.type.adaptive'...").
+  # Patched opencode with prompt-loop byte identity, cache-aligned compaction,
+  # Gemini empty parts fix, vim, tool fix, MCP reconnect, instance-state-partition
+  # fix, and cache thinking-skip. Targets opencode v1.16.2.
+  # eager-input-streaming.patch was DROPPED on 2026-06-05: v1.16.0+ sets
+  # toolStreaming=false upstream in ProviderTransform.options() for
+  # @ai-sdk/google-vertex/anthropic + non-claude @ai-sdk/anthropic, covering our use.
+  # (Adaptive reasoning for opus-4-7+ from upstream PR #29769 — landed in v1.15.12 —
+  # remains in v1.16.2, so claude-opus-4-8 keeps the {low, medium, high, xhigh, max}
+  # variant set with summarized thinking display instead of the legacy {high, max}
+  # branch that opus-4-8 rejects with "'thinking.type.enabled' is not supported for
+  # this model. Use 'thinking.type.adaptive'...".)
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
   #
@@ -252,22 +253,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-hLb/0MZNDTSbc03hAb5a45q/XdnuFc6Rbb24bluOiPY=";
+      hash = "sha256-QCeeuFlVCw+Quyo8TtCik7+TPL2IeIN79Ryzzvy4VIQ=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-tDLeUFgpJ4AcqmaJS0Jz6Bc51UV1TPgIUe8Wr/S89/0=";
+      hash = "sha256-26OC4GjE95nq+/51phSvSQRgr39gLr3kqbzrOiAIMrE=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-sxhU+1FlvL8Cbt6t9NUsIiel+gZAIQyhppVvODHxtYk=";
+      hash = "sha256-e2oQirOw61sFc5F5oul0um8/IZaOUkrwQU26t5CozdU=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-ZqydRBZRzUiK4bE2LHmOC7Er7baNvk+XN/uAleMiyCY=";
+      hash = "sha256-2DVxxoVbratjWiG8lHgrm8IgyvOZY2ChDmB2dr6Cgxk=";
       isZip = true;
     };
   };
@@ -281,8 +282,8 @@ let
     # Bump `upstreamVersion` (and reset `patchedRevision` to "") for upstream
     # version bumps -- and check whether any patches in opencode-patched can be
     # dropped because they're now upstream (see check-sunset.yml in that repo).
-    upstreamVersion = "1.15.13";
-    patchedRevision = "2";  # ".N" suffix — drop to "" on next upstream version bump
+    upstreamVersion = "1.16.2";
+    patchedRevision = "";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
