@@ -35,6 +35,18 @@ pkgs.writeShellApplication {
       exit 1
     }
 
+    # Print a pid and all of its descendant pids, one per line. Used to
+    # attribute `opencode attach` processes to the lgtm tmux session BEFORE we
+    # kill it (after the kill, children reparent to init and become
+    # unattributable).
+    collect_subtree() {
+      local root="$1" child
+      printf '%s\n' "$root"
+      for child in $(pgrep -P "$root" 2>/dev/null || true); do
+        collect_subtree "$child"
+      done
+    }
+
     # ---- Process detachment: re-exec into a fresh user systemd scope ----
     # This script kills processes that are likely to be ancestors of its own
     # invoker — specifically nvim (step 4: pkill -9 -u dev -x nvim) and
@@ -115,6 +127,27 @@ EOF
     # --session) are NOT restored across reset; they are intended for
     # ad-hoc work. See
     # docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md
+
+    # ---- Step 1.5: Tear down the lgtm junk-drawer tmux session ----
+    # lgtm confines its OpenCode launches to a tmux session literally named
+    # `lgtm` (see lgtm src/dispatch.ts LGTM_TMUX_SESSION + workstation
+    # oc-auto-attach --tmux-session). Those review sessions are noise in the
+    # morning recommendations, so we capture their attach-client PIDs (whole
+    # process subtree of each pane, while the tree is still intact), exclude
+    # them from the snapshot below, then kill the session outright. `=lgtm`
+    # is an exact-match so a session named e.g. `lgtm-foo` is untouched.
+    LGTM_PIDS=" "
+    if tmux has-session -t '=lgtm' 2>/dev/null; then
+      while read -r pane_pid; do
+        [ -n "$pane_pid" ] || continue
+        while read -r d; do
+          LGTM_PIDS="''${LGTM_PIDS}''${d} "
+        done < <(collect_subtree "$pane_pid")
+      done < <(tmux list-panes -s -t '=lgtm' -F '#{pane_pid}' 2>/dev/null || true)
+      log "tearing down lgtm tmux session (excluding its sessions from recommendations); pids:$LGTM_PIDS"
+      tmux kill-session -t '=lgtm' 2>/dev/null || true
+    fi
+
     log "snapshotting live opencode attach clients..."
 
     OPENCODE_MANIFEST=""
@@ -136,6 +169,7 @@ EOF
     # token).
     OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
     for pid in $OC_ATTACH_PIDS; do
+      case "$LGTM_PIDS" in *" $pid "*) log "  skipping pid=$pid (lgtm junk-drawer session)"; continue ;; esac
       # Authoritative exe filter: skip non-opencode processes that pgrep
       # over-matched (e.g. a transient `grep "opencode attach"` running
       # alongside reset). Without this, those processes trigger misleading
@@ -167,6 +201,7 @@ EOF
     # it later in step 5), so the API is always reachable here.
     OC_ALL_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
     for pid in $OC_ALL_PIDS; do
+      case "$LGTM_PIDS" in *" $pid "*) log "  skipping pid=$pid (lgtm junk-drawer session)"; continue ;; esac
       exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
       exe_base=$(basename "$exe")
       if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
