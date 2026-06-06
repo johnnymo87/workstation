@@ -360,6 +360,15 @@ in
         # Absolute path to nvims so oc-auto-attach can spawn it when it has
         # to create a fresh tmux window. Same locked-down-PATH reasoning.
         "OC_NVIMS_BIN=${nvims}/bin/nvims"
+        # Absolute paths to tmux/pgrep so the /current-state command's
+        # main-session enumeration (main-session-allowlist.ts) can shell out
+        # to them despite the locked-down systemd PATH. Same reasoning as
+        # OC_AUTO_ATTACH_BIN above. The daemon shares the host /tmp
+        # (PrivateTmp=no) and runs as dev (uid 1000) with no TMUX_TMPDIR
+        # override, so it reaches the user's default tmux socket at
+        # /tmp/tmux-1000/default where the `main` session lives.
+        "TMUX_BIN=${pkgs.tmux}/bin/tmux"
+        "PGREP_BIN=${pkgs.procps}/bin/pgrep"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
