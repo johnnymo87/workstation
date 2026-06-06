@@ -567,12 +567,29 @@ in
 
   # Aigateway: local Anthropic-on-Vertex proxy that captures per-request
   # attribution to a Postgres ledger. The path to the dev checkout is held
-  # in the `aigateway_dir` sops secret; the start.sh script in that dir
-  # (1) bazel-builds the server.jar + migrate.jar then (2) brings up
-  # Docker Compose (Postgres + Redis + Spring Boot on :8080).
+  # in the `aigateway_dir` sops secret; that dir holds the docker-compose.yml
+  # plus the staged server.jar / migrate.jar (Postgres + Redis + Spring Boot
+  # on :8080).
   #
-  # First boot: ~2 min for the Bazel build on a clean cache. Subsequent
-  # boots: ~10 sec.
+  # LIFECYCLE-ONLY, NOT A FROM-SCRATCH BOOTSTRAP. The unit starts/stops the
+  # already-deployed stack; it does NOT build code. Initial deploy and code
+  # rollouts are the manual `bazel build` + `cp jars` + `docker compose up -d
+  # --build` flow documented in the operating-aigateway skill. This unit used
+  # to `exec ./start.sh -d` (bazel build then compose up), but start.sh is
+  # only tracked on mono `origin/main`; when the working tree sits on any
+  # other branch the script vanishes and the unit can't start — so we drive
+  # `docker compose` directly instead (no monorepo-branch dependency).
+  #
+  # LEDGER IS EPHEMERAL: dev-postgres-1 has no named volume, so the
+  # gateway_request_log lives only in the container's writable layer.
+  # Therefore:
+  #   - ExecStop is `docker compose stop` (NEVER `down` — down removes the
+  #     container and destroys the ledger).
+  #   - ExecStart is `up -d --no-recreate` so a restart/boot never recreates
+  #     (and thus never wipes) the postgres container.
+  #   - restartIfChanged = false so `nixos-rebuild switch` deploys a changed
+  #     unit definition WITHOUT bouncing the live stateful stack; the new
+  #     definition takes effect on the next reboot or manual restart.
   #
   # Disabled by default — enable with `sudo systemctl enable --now
   # aigateway.service`. The home-manager activation
@@ -597,21 +614,34 @@ in
     # opencode-serve.
     path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" "/home/dev/.local" ];
 
+    # Never let `nixos-rebuild switch` restart this unit on a config change:
+    # a restart would (a) briefly drop gemini's global-default route and
+    # (b) — with the historical ExecStop=down — destroy the ephemeral ledger.
+    # The new definition applies on the next reboot or explicit
+    # `systemctl restart aigateway`.
+    restartIfChanged = false;
+
     serviceConfig = {
       Type = "oneshot";
       User = "dev";
       Group = "dev";
       # No WorkingDirectory — handled by `cd` in the shim.
-      # `start.sh -d` runs the bazel build in foreground then `docker
-      # compose up -d`. After detach, the service "succeeds" — but we
-      # need the unit to stay active so `is-enabled`/`is-active` reflect
-      # operator intent. Type=oneshot + RemainAfterExit handles that.
+      # `docker compose up -d` returns once the stack is detached. The unit
+      # then "succeeds" — but we need it to stay active so `is-enabled` /
+      # `is-active` reflect operator intent. Type=oneshot + RemainAfterExit
+      # handles that.
       RemainAfterExit = true;
-      # `cd "$(cat ...)"` resolves at every start. exec replaces the bash
-      # process so systemd tracks start.sh's PID, not the bash wrapper.
-      ExecStart = "${pkgs.bash}/bin/bash -c 'cd \"$(cat /run/secrets/aigateway_dir)\" && exec ./start.sh -d'";
-      ExecStop = "${pkgs.bash}/bin/bash -c 'cd \"$(cat /run/secrets/aigateway_dir)\" && exec ${pkgs.docker}/bin/docker compose down'";
-      # Bazel + Docker Compose can take a while on first boot.
+      # `cd "$(cat ...)"` resolves the compose dir at every start; the cd
+      # fails loudly if the secret/path is missing. `--no-recreate` makes
+      # this idempotent and ledger-safe: it creates containers on first boot
+      # but only STARTS existing (stopped) ones afterward, never recreating
+      # the volume-less postgres. exec replaces bash so systemd tracks docker.
+      ExecStart = "${pkgs.bash}/bin/bash -c 'cd \"$(cat /run/secrets/aigateway_dir)\" && exec ${pkgs.docker}/bin/docker compose up -d --no-recreate'";
+      # `stop`, NOT `down`: down removes containers and the ephemeral ledger
+      # dies with them. stop leaves the stopped containers intact for the
+      # next `up -d --no-recreate` to restart in place.
+      ExecStop = "${pkgs.bash}/bin/bash -c 'cd \"$(cat /run/secrets/aigateway_dir)\" && exec ${pkgs.docker}/bin/docker compose stop'";
+      # Pulling base images on first boot can take a while.
       TimeoutStartSec = "10min";
       Restart = "on-failure";
       RestartSec = 30;
