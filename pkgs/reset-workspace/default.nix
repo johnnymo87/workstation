@@ -36,9 +36,10 @@ pkgs.writeShellApplication {
     }
 
     # Print a pid and all of its descendant pids, one per line. Used to
-    # attribute `opencode attach` processes to the lgtm tmux session BEFORE we
-    # kill it (after the kill, children reparent to init and become
-    # unattributable).
+    # build the `main` tmux session allowlist (Step 1.6): a captured
+    # `opencode attach` TUI is restored only if its pid is a descendant of a
+    # `main` pane (snapshot the tree while it's intact -- after the nvim kill
+    # children reparent to init and become unattributable).
     collect_subtree() {
       local root="$1" child
       printf '%s\n' "$root"
@@ -119,35 +120,58 @@ EOF
 
 
 
-    # ---- Step 2: Snapshot live opencode attach clients ----
-    # Restoration scope: ONLY sessions launched via Telegram /launch or
-    # `opencode-launch` CLI. Both produce TUI processes with cmdline of the
-    # form `<binary>/opencode attach <url> --session ses_xxx [--dir <path>]`
-    # -- the sid is reliably in argv. Bare `:te opencode` TUIs (no
-    # --session) are NOT restored across reset; they are intended for
-    # ad-hoc work. See
-    # docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md
-
     # ---- Step 1.5: Tear down the lgtm junk-drawer tmux session ----
     # lgtm confines its OpenCode launches to a tmux session literally named
     # `lgtm` (see lgtm src/dispatch.ts LGTM_TMUX_SESSION + workstation
-    # oc-auto-attach --tmux-session). Those review sessions are noise in the
-    # morning recommendations, so we capture their attach-client PIDs (whole
-    # process subtree of each pane, while the tree is still intact), exclude
-    # them from the snapshot below, then kill the session outright. `=lgtm`
-    # is an exact-match so a session named e.g. `lgtm-foo` is untouched.
-    LGTM_PIDS=" "
+    # oc-auto-attach --tmux-session). We tear it down for memory hygiene.
+    # Its exclusion from the recommendation manifest is now handled
+    # structurally by the `main` allowlist (Step 1.6) -- we no longer
+    # enumerate its pids here (the old denylist leaked: orphaned lgtm attach
+    # clients whose pane had been torn down were reparented to init, escaped
+    # the subtree walk, and landed in the manifest). `=lgtm` is an
+    # exact-match so a session named e.g. `lgtm-foo` is untouched.
     if tmux has-session -t '=lgtm' 2>/dev/null; then
-      while read -r pane_pid; do
-        [ -n "$pane_pid" ] || continue
-        while read -r d; do
-          LGTM_PIDS="''${LGTM_PIDS}''${d} "
-        done < <(collect_subtree "$pane_pid")
-      done < <(tmux list-panes -s -t '=lgtm' -F '#{pane_pid}' 2>/dev/null || true)
-      log "tearing down lgtm tmux session (excluding its sessions from recommendations); pids:$LGTM_PIDS"
+      log "tearing down lgtm junk-drawer tmux session"
       tmux kill-session -t '=lgtm' 2>/dev/null || true
     fi
 
+    # ---- Step 1.6: Build the `main` tmux session allowlist ----
+    # The user's interactive opencode TUIs all live in the `main` tmux
+    # session: oc-auto-attach with no --tmux-session creates windows in the
+    # current/default session (which is `main`), whereas lgtm passes
+    # --tmux-session lgtm. We capture the whole process subtree of every
+    # `main` pane while the tree is intact, then capture a TUI's sid below
+    # ONLY if its pid is in this set. This allowlist is robust where the old
+    # lgtm denylist was leaky: orphaned attach clients (pane gone, process
+    # reparented to init) belong to no pane subtree and so are correctly
+    # dropped. `=main` is an exact match. If `main` is absent the allowlist
+    # stays empty and the manifest ends up empty -- intentional: with no
+    # main session there is nothing the user wants restored.
+    MAIN_PIDS=" "
+    if tmux has-session -t '=main' 2>/dev/null; then
+      while read -r pane_pid; do
+        [ -n "$pane_pid" ] || continue
+        while read -r d; do
+          MAIN_PIDS="''${MAIN_PIDS}''${d} "
+        done < <(collect_subtree "$pane_pid")
+      done < <(tmux list-panes -s -t '=main' -F '#{pane_pid}' 2>/dev/null || true)
+      log "main-session allowlist pids:$MAIN_PIDS"
+    else
+      log "WARNING: no 'main' tmux session found; nothing to restore (manifest will be empty)"
+    fi
+
+    # ---- Step 2: Snapshot live opencode attach clients ----
+    # Restoration scope: ONLY opencode TUIs in the `main` tmux session
+    # (allowlist built in Step 1.6). The strict loop matches TUIs launched
+    # via Telegram /launch or `opencode-launch` CLI, whose cmdline is of the
+    # form `<binary>/opencode attach <url> --session ses_xxx [--dir <path>]`
+    # -- the sid is reliably in argv. The bare loop resolves `:te opencode`
+    # TUIs (no --session) by cwd. In BOTH loops a TUI is captured only if
+    # its pid is a descendant of a `main` pane, so lgtm review TUIs (a
+    # different tmux session) and orphaned attach clients (pane torn down ->
+    # reparented to init -> no session) are excluded. See
+    # docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md and
+    # docs/plans/2026-06-04-reset-workspace-exclude-lgtm-plan.md.
     log "snapshotting live opencode attach clients..."
 
     OPENCODE_MANIFEST=""
@@ -169,16 +193,20 @@ EOF
     # token).
     OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
     for pid in $OC_ATTACH_PIDS; do
-      case "$LGTM_PIDS" in *" $pid "*) log "  skipping pid=$pid (lgtm junk-drawer session)"; continue ;; esac
       # Authoritative exe filter: skip non-opencode processes that pgrep
       # over-matched (e.g. a transient `grep "opencode attach"` running
       # alongside reset). Without this, those processes trigger misleading
-      # "no --session in argv" WARNINGs that pollute the journal.
+      # "no --session in argv" WARNINGs that pollute the journal. Run before
+      # the allowlist check so pgrep false-matches don't generate skip noise.
       exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
       exe_base=$(basename "$exe")
       if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
         continue
       fi
+      # main-session allowlist: capture only TUIs whose pid is a descendant
+      # of a `main` pane (excludes lgtm review TUIs and orphaned attach
+      # clients, which live in a different tmux session or none).
+      case "$MAIN_PIDS" in *" $pid "*) ;; *) log "  skipping pid=$pid (not in main tmux session)"; continue ;; esac
 
       cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//' || true)
       [ -n "$cmdline" ] || continue
@@ -201,7 +229,6 @@ EOF
     # it later in step 5), so the API is always reachable here.
     OC_ALL_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
     for pid in $OC_ALL_PIDS; do
-      case "$LGTM_PIDS" in *" $pid "*) log "  skipping pid=$pid (lgtm junk-drawer session)"; continue ;; esac
       exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
       exe_base=$(basename "$exe")
       if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
@@ -214,6 +241,11 @@ EOF
       # (already enumerated in the strict loop above).
       [ "$arg2" = "serve" ] && continue
       [ "$arg2" = "attach" ] && continue
+      # main-session allowlist: capture only bare TUIs in the `main` tmux
+      # session. Placed after the serve/attach/exe filters so background
+      # daemons (opencode-serve, headless workers) don't generate skip-log
+      # noise on every run.
+      case "$MAIN_PIDS" in *" $pid "*) ;; *) log "  skipping bare TUI pid=$pid (not in main tmux session)"; continue ;; esac
 
       cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
       if [ -z "$cwd" ]; then
