@@ -216,3 +216,31 @@ State: BOTH primary fixes are LIVE & verified. Now making the cure durable + ena
 - Low: upstream title-cost issue; sync dashboard queries to infra PR #3215; push oc-cost commit c3f2894; rotate plaintext secrets in opencode.json.
 
 Worker IDs: w3 aigateway `ses_1670df706ffeIwMdzaEcSoTaGA` (DONE, PR #3373) · w5 durable-cure+gemini-routing `ses_16663d5f5ffe2NUO3Ryz6vW6V0` (in flight).
+
+---
+
+## ✅ RESOLVED 2026-06-06 ~13:50 EDT — durable cure + gemini routing VERIFIED LIVE
+
+Post-restart verification (serve restarted, new PID on the durable binary) all PASS:
+- **Running serve binary** = `/nix/store/fwmg3h82vk2dl34zrzkz93898njhd01c-opencode-patched-1.16.2.1/bin/.opencode-wrapped`
+  (pure-built, durably pinned via published release — no more --impure). Cap markers in the
+  RUNNING binary: RETRY_JITTER_RATIO=1, MAX_RETRIES=2, attempt-cap `attempt>na)return`=1, --version 1.16.2.
+- **Gemini routes through the gateway with tokens+dollars**: gateway_request_log gemini-3.5-flash rows,
+  http_status 200, input/output_tokens + total_dollars populated. Runtime opencode.json has both
+  anthropic + gemini → localhost:8080; hash file = dc629052…
+- **CAP HOLDS (runaway dead)**: 918 gemini calls today across **902 distinct input sizes**; max
+  identical-call repeat = **3**; peak 475 calls/hr; $27/day total. vs runaway 72,517 calls/night
+  (~35×), $1.5–2.5k. No single-session identical-stream re-issue pattern.
+- **Git**: origin/main @ 3e8bbb2 — TASK A 39a8080 (capped v1.16.2-patched.1 bump) · TASK B 96c2cd6
+  (gemini routing) · report 52538c9 · skills 3e8bbb2. HEAD publishable (no /home path); tree clean.
+- **Deadline neutralized**: v1.16.2-patched.1 is releases/latest → update-opencode-patched.yml cron
+  tracks the CAPPED version.
+
+### Remaining (optional / low-pri, NOT blocking)
+- Fix 2 config hardening (move default/compaction off gemini) — now LOWER value since gemini is capped
+  + observable through the gateway; blast radius already mitigated.
+- Low: upstream title-cost issue; sync dashboard queries to infra PR #3215; push oc-cost commit
+  c3f2894; rotate plaintext secrets in opencode.json (Slack/Datadog/PagerDuty).
+- mono PR #3373 (aigateway opus cost + gemini support) — open, shepherd to merge.
+
+INCIDENT CLOSED: durable retry-cap cure + cost observability deployed and verified.
