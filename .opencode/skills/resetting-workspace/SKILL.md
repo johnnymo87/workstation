@@ -26,16 +26,34 @@ opencode session in `~` with a baked-in prompt instructing it to:
 You wake up to: no tabs if you ignored the Telegram message, exactly
 the tabs you asked for if you replied.
 
-The snapshot captures TUIs in two ways (unchanged from the prior
-revision -- both feed the manifest the recommendation session reads):
+**Capture scope: the `main` tmux session only (allowlist).** Before
+snapshotting, the script builds an allowlist of every pid in the
+process subtree of every pane in your interactive `main` tmux session.
+A TUI is captured only if its pid is in that set. This is why you only
+ever get your `main` session back: lgtm review TUIs (which live in a
+separate `lgtm` tmux session) and orphaned attach clients (whose pane
+was torn down, leaving the process reparented to init and in no
+session) are structurally excluded. If there is no `main` session the
+allowlist is empty and the manifest comes out empty.
+
+> Why an allowlist? The prior revision used a *denylist* — capture every
+> `opencode attach` process, then subtract the lgtm tmux subtree. It
+> leaked: orphaned lgtm attach clients weren't in any pane subtree, so
+> they slipped past the subtraction and dominated the morning
+> recommendations. The allowlist (capture only what's in `main`) is
+> robust against orphans and any future junk-drawer sessions. See
+> workstation commit `4b47b82`.
+
+Within that `main` scope, the snapshot captures TUIs in two ways --
+both feed the manifest the recommendation session reads:
 
 1. **Direct (argv-based)**: TUIs launched via Telegram `/launch` or
    `opencode-launch` (CLI) carry their session id in the
-   `--session ses_xxx` argv, captured directly by step 1's strict
+   `--session ses_xxx` argv, captured directly by the strict-attach
    regex.
 
 2. **Resolved (cwd-based)**: Bare `:te opencode` TUIs have no sid in
-   argv; step 1 resolves their `/proc/<pid>/cwd` to the
+   argv; the bare loop resolves their `/proc/<pid>/cwd` to the
    most-recent root session for that directory via
    `GET $OPENCODE_URL/session?directory=...&roots=true&limit=1`.
 
@@ -44,21 +62,27 @@ Each reset's journal includes a summary line of the form:
     captured N restorable session(s) (raw: M strict-attach + K bare-resolved; dedupe may collapse); J bare TUI(s) skipped
 
 If a TUI you expected to see in the recommendation message was missing,
-check the journal for that line and the per-pid context lines above
-it. If the recommendation session itself failed to spawn (e.g.
-opencode-launch missing from PATH), you'll see a `WARNING:
-opencode-launch failed` or `WARNING: opencode-launch not on PATH`
-line.
+it most likely wasn't in the `main` tmux session at reset time. The
+journal logs `main-session allowlist pids:...` for the set it built and
+`skipping pid=... (not in main tmux session)` for each excluded
+process — check those plus the per-pid context lines. If the
+recommendation session itself failed to spawn (e.g. opencode-launch
+missing from PATH), you'll see a `WARNING: opencode-launch failed` or
+`WARNING: opencode-launch not on PATH` line.
 
 ## What it does (in order)
 
-1. Snapshots live opencode TUIs (one session id per non-serve `opencode`
-   process; both argv-based and cwd-resolved branches).
-2. Confirms with the user (skip with `--yes`).
-3. SIGKILLs all `nvim` processes owned by `dev`.
-4. Restarts `opencode-serve.service` (passwordless sudo).
-5. Writes the captured sids to `/tmp/reset-workspace-last-manifest.txt`.
-6. Launches a headless opencode session in `~` with a baked-in prompt
+1. Tears down the `lgtm` junk-drawer tmux session (memory hygiene; its
+   sessions are excluded from recommendations structurally, not by pid).
+2. Builds the `main` tmux session allowlist (pid subtree of every
+   `main` pane).
+3. Snapshots live opencode TUIs whose pid is in the allowlist (both
+   argv-based and cwd-resolved branches).
+4. Confirms with the user (skip with `--yes`).
+5. SIGKILLs all `nvim` processes owned by `dev`.
+6. Restarts `opencode-serve.service` (passwordless sudo).
+7. Writes the captured sids to `/tmp/reset-workspace-last-manifest.txt`.
+8. Launches a headless opencode session in `~` with a baked-in prompt
    that handles enrichment, Telegram messaging, and selective re-open
    on reply.
 
@@ -88,7 +112,7 @@ sudo systemctl start nightly-restart-background.service
 ## Caveats
 
 - This Claude session's TUI will reconnect when serve restarts. Brief flicker.
-- All in-flight headless opencode workers (e.g., spawned via `opencode-launch` or pigeon `/launch`) will have their PROCESSES killed by the SIGKILL pass and their session ids captured in the snapshot. Those captured sids are written to the manifest the recommendation session sees, so they'll appear in the morning Telegram recommendation alongside everything else — but no TUI is auto-restored. The session itself persists in the DB.
+- Opencode workers spawned via `opencode-launch` or pigeon `/launch` get a TUI attached (via `oc-auto-attach`) in whatever tmux session is current at launch — usually `main`, in which case their sid is captured and shows up in the morning recommendation (no TUI is auto-restored; the session persists in the DB). A worker whose TUI landed outside `main`, or that has no tmux TUI at all, is not in the allowlist and won't be recommended, though its session still persists in the DB. Any nvim host dies in the SIGKILL pass regardless.
 - nvim is treated as disposable — no graceful quit, no `:wa`. By design (cloudbox nvim is purely a host for opencode tabs).
 - **Cgroup gotcha (fixed 2026-04-26).** Earlier versions of `reset-workspace` would silently die when invoked from an opencode-agent bash tool whose TUI was attached to `opencode-serve.service`. Steps 1–5 (snapshot + kill nvims + fire systemctl restart) ran, but the SIGTERM cascade from `KillMode=control-group` killed the script itself before steps 6–7 (respawn nvims, restore TUIs) could run. The script now self-detaches into a `systemd-run --user --scope` transient unit at entry if it detects `opencode-serve.service` in its own cgroup. See `docs/plans/2026-04-26-reset-workspace-cgroup-survival-design.md` for details.
 - **Recommendation session failure mode.** If the recommendation session fails to spawn, crashes mid-work, never sends a Telegram message, or you're offline / ignoring Telegram, no tabs come back. This is intentional — the alternative (auto-restore as a fallback) would re-introduce the wall-of-tabs problem the recommendation flow was designed to solve. Observe via `journalctl -u nightly-restart-background.service` (look for the `[reset-workspace]` `wrote N sid(s) ...` / `launching recommendation session in ~ ...` lines, or for `WARNING:` lines if it didn't get that far).
@@ -101,5 +125,6 @@ Unlike the original design, `reset-workspace` no longer DELETEs opencode session
 
 - Design (current revision): `docs/plans/2026-05-16-recommendation-driven-reset-design.md`
 - Plan (current revision): `docs/plans/2026-05-16-recommendation-driven-reset-plan.md`
+- Capture scoping (main allowlist): workstation commit `4b47b82`, which supersedes the lgtm-denylist plan `docs/plans/2026-06-04-reset-workspace-exclude-lgtm-plan.md`.
 - Original design: `docs/plans/2026-04-24-reset-workspace-design.md`
 - Companion skill: `.opencode/skills/automated-updates/SKILL.md` (other timer-driven jobs).
