@@ -37,15 +37,42 @@ jobs:
           echo "current_ver=$current_ver" >> "$GITHUB_OUTPUT"
           echo "current_rev=$current_rev" >> "$GITHUB_OUTPUT"
 
-          # Latest published release from opencode-patched, tracked faithfully
-          # (base "vX-patched" or a manual "vX-patched.N" re-release -- whichever
-          # is marked latest). A missing release (upstream build failure) is the blocker.
-          latest_tag=$(gh api repos/johnnymo87/opencode-patched/releases/latest --jq '.tag_name')
+          # Version hold (see `opencodePatchedHold` in home.base.nix). While
+          # non-empty, track the highest revision on the held upstream line instead
+          # of releases/latest, so an auto-bump can never carry us onto a new line
+          # (e.g. the 1.16 line whose v2 schema migration corrupts opencode.db).
+          # Empty = legacy behavior (track releases/latest faithfully).
+          hold=$(grep 'opencodePatchedHold = ' "$file" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+          echo "hold=$hold" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$hold" ]; then
+            # Highest "vX-patched.N" on the held line (sort by the numeric .N field;
+            # a base "vX-patched" with no .N sorts as 0, below any revision).
+            latest_tag=$(gh api repos/johnnymo87/opencode-patched/releases --paginate \
+              --jq ".[].tag_name | select(startswith(\"v${hold}-patched\"))" \
+              | sort -t. -k4 -n | tail -1)
+            if [ -z "$latest_tag" ]; then
+              echo "Held at ${hold}; no v${hold}-patched* release found. Nothing to do."
+              exit 0
+            fi
+          else
+            # Latest published release, tracked faithfully (base "vX-patched" or a
+            # manual "vX-patched.N" re-release -- whichever is marked latest). A
+            # missing release (upstream build failure) is the blocker.
+            latest_tag=$(gh api repos/johnnymo87/opencode-patched/releases/latest --jq '.tag_name')
+          fi
           latest_ver=$(echo "$latest_tag" | sed 's/^v//;s/-patched.*//')
           latest_rev=$(echo "$latest_tag" | sed -n 's/.*-patched\.\([0-9][0-9]*\)$/\1/p')
           echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
           echo "latest_ver=$latest_ver" >> "$GITHUB_OUTPUT"
           echo "latest_rev=$latest_rev" >> "$GITHUB_OUTPUT"
+
+          # Defense in depth: even if the selection above ever regressed, never
+          # bump off the held line.
+          if [ -n "$hold" ] && [ "$latest_ver" != "$hold" ]; then
+            echo "Held at ${hold}; refusing to bump to ${latest_ver}."
+            exit 0
+          fi
 
           if [ "$current_ver" = "$latest_ver" ] && [ "$current_rev" = "$latest_rev" ]; then
             echo "Identity unchanged (v${current_ver}-patched${current_rev:+.$current_rev}); will check for hash drift."

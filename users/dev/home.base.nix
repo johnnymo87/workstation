@@ -301,6 +301,13 @@ let
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
+    # Cron hold: while non-empty, update-opencode-patched.yml tracks the highest
+    # "v${opencodePatchedHold}-patched.N" release instead of releases/latest, so an
+    # auto-bump can never carry us onto a new upstream line. Held at 1.15.13 for the
+    # V2 DB corruption reason above (research session ses_15fe27082ffe8lANCIdYmfi7TT);
+    # set to "" to resume tracking the newest release. Greppable marker only — it
+    # does not feed the derivation.
+    opencodePatchedHold = "1.15.13";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
