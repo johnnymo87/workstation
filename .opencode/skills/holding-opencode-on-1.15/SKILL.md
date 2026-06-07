@@ -1,6 +1,6 @@
 ---
 name: holding-opencode-on-1.15
-description: Use when touching the opencode version pin in home.base.nix, considering an opencode 1.16.x upgrade, or debugging opencode.db corruption — blank/empty launched sessions, "NOT NULL constraint failed: session_message.seq", or a re-migrated v2 schema on cloudbox/devbox.
+description: Use when touching the opencode version pin in home.base.nix, considering an opencode 1.16.x upgrade, or debugging opencode.db corruption — blank/empty launched sessions, subagent/Task dispatch or opencode-launch failing with "NOT NULL constraint failed: session_message.seq", or a re-migrated v2 schema on cloudbox/devbox.
 ---
 
 # Holding OpenCode on the 1.15 Line (v1.16 V2 DB Corruption)
@@ -11,9 +11,11 @@ description: Use when touching the opencode version pin in home.base.nix, consid
 - v1.16 introduced a **v2 event-sourced session schema**. Its migration rewrites the
   shared `~/.local/share/opencode/opencode.db` into a v2 schema that the 1.15 line
   **cannot write**, and that crashes new sessions. There is **no released upstream fix**.
-- cloudbox is currently healthy: serve + profile + `opencode-launch` all on 1.15.13.3,
-  the DB has been repaired (v2 `seq` column removed), and it survived the 03:00 nightly
-  restart. The config pin is durable (committed in `home.base.nix`).
+- cloudbox AND devbox have both been repaired (v2 `seq` column removed) and run on
+  1.15.13.3: serve + profile + `opencode-launch` all healthy. The config pin is durable
+  (committed in `home.base.nix`). devbox was re-poisoned and repaired again on 2026-06-07
+  via the runbook below (subagent dispatch / `opencode-launch` had started failing with
+  the `seq` error).
 - Full upstream investigation: `~/projects/opencode/DB-CORRUPTION-RESEARCH.md` (untracked).
 - Related but different failure mode: see the `fixing-opencode-db` skill (SIGABRT/core-dump
   from individual corrupt rows; binary-search repair). This skill is about the **v1.16 v2
@@ -92,38 +94,73 @@ print("session_message cols:", cols, "-> POISONED" if "seq" in cols else "-> ok 
 PY
 ```
 
-Other tells: `opencode-launch` sessions are blank in the TUI; serve logs / journal show
-`NOT NULL constraint failed: session_message.seq`; `session_message` has `seq` and the
-`migration` table exists.
+Other tells: `opencode-launch` sessions are blank in the TUI; **subagent / Task-tool
+dispatch fails** (each new session/message insert hits the `seq` constraint) while your
+already-running session's own tools keep working; serve logs / journal show `NOT NULL
+constraint failed: session_message.seq`; `session_message` has `seq` and the `migration`
+table exists.
 
 ## Repairing a re-poisoned DB
 
-`session_message` is a re-derivable projection (and is usually empty after the v2 wipe), so
-the fix is to **drop the `seq` column and recreate the 1.15 schema** — `message`/`part`/
-`session` (the real history) are untouched. The clean May-31 backup
-`opencode.db.bak.20260531-171450` (pre-v2, no `seq`) is the fallback; the 8 GB
-`opencode.db.poisoned-v2.*` holds orphaned v2 data.
+`session_message` is a re-derivable projection (33 rows on devbox 2026-06-07; often empty
+after the v2 wipe), so the fix is to **remove the v2 `seq` column** — `message`/`part`/
+`session` (the real history) are untouched.
 
-**Critical gotcha:** stopping `opencode-serve` from inside an opencode session **kills your
-own session** (you run inside the serve's cgroup). Run the disruptive part as a **detached
-root transient unit** so it survives:
+A ready-to-run, host-agnostic script lives next to this skill: [`fix.sh`](fix.sh). It
+performs every step below and logs to `/tmp/opencode/oc-fix.log`.
+
+**Step 0 — back up first; do NOT assume a clean backup exists.** cloudbox had the pre-v2
+`opencode.db.bak.20260531-171450`; **devbox had none** (only an April snapshot predating the
+`session_message` table). Take a consistent *online* snapshot (safe against the live serve —
+`cp` of a DB with a `-wal` is not):
 
 ```bash
-sudo systemd-run --unit=oc-fix-$(date +%H%M%S) \
-  /run/current-system/sw/bin/bash /path/to/fix.sh   # use the setuid /run/wrappers/bin/sudo
+python3 -c 'import sqlite3,os;s=sqlite3.connect(os.path.expanduser("~/.local/share/opencode/opencode.db"));d=sqlite3.connect(os.path.expanduser("~/.local/share/opencode/opencode.db.bak-"+__import__("datetime").date.today().isoformat()+"-prerepair"));s.backup(d);s.close();d.close()'
+```
+If the repair goes wrong, restore this snapshot and restart the serve to return to the
+status quo (poisoned but established sessions still work).
+
+**Service scope.** On devbox `opencode-serve.service` is a **system** unit
+(`/etc/systemd/system/opencode-serve.service`) → use `sudo systemctl`. Note `systemctl
+--user` **fails from an opencode bash tool shell** (no `DBUS_SESSION_BUS_ADDRESS` /
+`XDG_RUNTIME_DIR`) — don't let that mislead you into thinking it's a user unit. Confirm with
+`systemctl cat opencode-serve.service`.
+
+**Gotcha (refined): run it detached — then the session usually SURVIVES.** Running
+`systemctl stop opencode-serve` *directly in a tool call* kills that call (it's in the
+serve's cgroup). A **detached root transient unit** returns immediately, so the launching
+call completes; the serve then bounces in ~9s and the session **reconnects and survives** (no
+session death observed on devbox 2026-06-07). Launch it (setuid `/run/wrappers/bin/sudo`,
+absolute paths — transient units get a stripped PATH):
+
+```bash
+# Stage the bundled script where root can read it, then launch detached:
+mkdir -p /tmp/opencode && cp .opencode/skills/holding-opencode-on-1.15/fix.sh /tmp/opencode/oc-fix.sh
+/run/wrappers/bin/sudo --non-interactive /run/current-system/sw/bin/systemd-run \
+  --unit=oc-fix-$(date +%H%M%S) --collect \
+  /run/current-system/sw/bin/bash /tmp/opencode/oc-fix.sh
 ```
 
-The fix script (template proven on 2026-06-07; logs to `/tmp/opencode/oc-fix.log`) must:
-1. set an explicit `PATH` (transient units get a stripped PATH — this broke the first attempt),
+What the script does (proven on cloudbox AND devbox 2026-06-07):
+1. set explicit `PATH` (stripped in transient units — broke the first cloudbox attempt) and
+   a `trap ... EXIT` that restarts the serve so it is never left down,
 2. `systemctl stop opencode-serve.service`,
-3. kill any remaining standalone procs holding `opencode.db` (re-poisoners), poll `/proc/*/fd`,
-4. `DROP TABLE session_message` then recreate it with the 1.15 schema (id, session_id FK,
-   type, time_created, time_updated, data + 3 indexes); `PRAGMA quick_check`,
-5. `chown dev:dev` the db files,
+3. kill any proc still holding `opencode.db` (poll `/proc/*/fd`) — on devbox this was a
+   **leftover 1.15 `.opencode-wrapped`**, not necessarily a 1.16 re-poisoner, so do it even
+   when no 1.16 stray is visible,
+4. **`ALTER TABLE session_message DROP COLUMN seq`** (SQLite ≥3.35; devbox has 3.50.4) —
+   preferred over DROP TABLE because it keeps the rows/FK/indexes. You MUST drop the two
+   `seq`-based indexes first or the column drop fails: `session_message_session_type_seq_idx`
+   and the UNIQUE `session_message_session_seq_idx`. The two 1.15 secondary indexes
+   (`session_message_time_created_idx`, `session_message_session_time_created_id_idx`) plus
+   the implicit `id` PK stay. *Fallback* if `DROP COLUMN` is unsupported: `DROP TABLE
+   session_message` then recreate with that schema. Run `PRAGMA wal_checkpoint(TRUNCATE)`
+   before the DDL and `PRAGMA quick_check` after,
+5. `chown dev:dev` the `opencode.db`, `-wal`, `-shm` files,
 6. `systemctl start opencode-serve.service` (comes up on the pinned 1.15.13.3 profile),
-7. self-verify: health, `readlink /proc/<MainPID>/exe` is `...-1.15.13.3`, and a test
-   `opencode-launch` produces ≥1 message.
-   Use a `trap ... EXIT` that restarts the serve so it is never left down.
+7. self-verify: `is-active`, health, `readlink /proc/<MainPID>/exe` is `...-1.15.13.3`, and
+   `session_message` has no `seq` column. After the session reconnects, confirm a real
+   subagent dispatch / `opencode-launch` produces ≥1 message (the original failing path).
 
 ## Verifying a good state
 
