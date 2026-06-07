@@ -253,22 +253,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-ylNLmALAoLZxruu3WOUZpC5S1xZZe07CAsdWbGLMXPY=";
+      hash = "sha256-1y5XiK3DliXhHo1QE4sz80Jzpz2cvjgQ4YhWssyEV+4=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-Og1Vb543zv3BrxjJdNnY+BMM2PH5mZNJyjhMi1NMYgM=";
+      hash = "sha256-V5/Ys5Ot6pe+bI21Xj/yXsaaG65j0d1J/2sG4TtDoJ8=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-eK/+lS/2bnf5pI6R/8FtrAlRHaIHlbPIGLMIWNBNsSc=";
+      hash = "sha256-bLFb1T+X7N79lDbX71uhyR4vJz2BuhZbD58HSVwM6/g=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-peusqNY4VqtVeqEZmeepIogx9uowsE0gnyBEx3mlodY=";
+      hash = "sha256-1cWHHxyfUOYQVYK3lRVsyab8gspOXOYTuK9sYRbHsQM=";
       isZip = true;
     };
   };
@@ -294,8 +294,8 @@ let
     # home-manager generation (380 / 379, both the local capped 1.15.13.3 build,
     # store path /nix/store/wmf3lc23s0avsf2n3311dn0l4bngk1hm-opencode-patched-1.15.13.3);
     # do NOT roll back to generation 378 (uncapped 1.16.2).
-    upstreamVersion = "1.16.2";
-    patchedRevision = "1";  # ".N" suffix — drop to "" on next upstream version bump
+    upstreamVersion = "1.15.13";
+    patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
