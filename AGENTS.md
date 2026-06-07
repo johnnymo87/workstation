@@ -91,6 +91,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Resetting Workspace](.opencode/skills/resetting-workspace/SKILL.md) | Manual + nightly cloudbox reset (kill nvims, clear sessions, restart serve) |
 | [Auditing OpenCode LLM Calls](.opencode/skills/auditing-opencode-llm-calls/SKILL.md) | Durable LLM-call capture on cloudbox; attribute surges by agent/model/session |
 | [Operating the aigateway](.opencode/skills/operating-aigateway/SKILL.md) | Deploy/route/debug the LLM cost-capture proxy on cloudbox; query the ledger; add prices; roll back |
+| [Holding OpenCode on 1.15](.opencode/skills/holding-opencode-on-1.15/SKILL.md) | Why opencode is pinned to 1.15.13-patched.3; the v1.16 v2-schema DB corruption; detecting/repairing a re-poisoned opencode.db |
 
 ## Structure
 

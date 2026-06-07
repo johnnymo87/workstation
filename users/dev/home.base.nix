@@ -282,18 +282,20 @@ let
     # Bump `upstreamVersion` (and reset `patchedRevision` to "") for upstream
     # version bumps -- and check whether any patches in opencode-patched can be
     # dropped because they're now upstream (see check-sunset.yml in that repo).
-    # RETRY-CAP CURE, made durable (2026-06-05, cloudbox): THE CURE for the
-    # Vertex/Gemini retry runaway is the per-step retry attempt cap (MAX_RETRIES=8)
-    # + backoff jitter (opencode-patched patches/retry-cap.patch). It first shipped
-    # as a LOCAL --impure 1.15.13.3 build (commit 1af8073, a /home tarball pin that
-    # broke pure eval); this bump replaces that with the PUBLISHED capped release
-    # v1.16.2-patched.1 (opencode-patched HEAD 6fa9663) so pure `home-manager switch`
-    # works and update-opencode-patched.yml tracks a capped version going forward.
-    # See docs/investigations/2026-06-05-vertex-gemini-surge/{retry-cap-deploy.md,
-    # durable-cure-gemini-routing.md}. Rollback: activate the prior capped
-    # home-manager generation (380 / 379, both the local capped 1.15.13.3 build,
-    # store path /nix/store/wmf3lc23s0avsf2n3311dn0l4bngk1hm-opencode-patched-1.15.13.3);
-    # do NOT roll back to generation 378 (uncapped 1.16.2).
+    # V2 DB CORRUPTION HOLD (2026-06-07, cloudbox): DO NOT bump to 1.16.x. The
+    # v1.16 v2 event-sourced session schema migration
+    # (20260604172448_event_sourced_session_input) rewrites ~/.local/share/opencode/
+    # opencode.db to a v2 schema (session_message.seq NOT NULL, event/event_sequence
+    # tables) that the 1.15.x line cannot write, and crashes new sessions with
+    # "NOT NULL constraint failed: session_message.seq". A stray 1.16.2 process
+    # sharing the same DB will silently re-migrate (poison) it. Upstream has no
+    # released fix as of this date (see ~/projects/opencode/DB-CORRUPTION-RESEARCH.md;
+    # issues #31119/#30953/#31072, none merged/released).
+    #
+    # We pin to the PUBLISHED capped 1.15.13 base. v1.15.13-patched.3 re-includes
+    # the retry-cap.patch Vertex/Gemini runaway cure (MAX_RETRIES=8 + jitter) that
+    # the earlier published .2 lacked — cut via build-release.yml on branch
+    # release/v1.15. Bumping upstreamVersion to 1.16.x again will re-corrupt the DB.
     upstreamVersion = "1.15.13";
     patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
