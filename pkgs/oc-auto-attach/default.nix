@@ -67,6 +67,27 @@ pkgs.writeShellApplication {
       return 1
     }
 
+    # list_session_panes <session-name>
+    #
+    # Emit "pane_id|pane_current_command|pane_current_path" for every pane in
+    # the named tmux session ONLY.
+    #
+    # We filter `list-panes -a` on #{session_name} rather than the seemingly
+    # obvious session-confined scan (-s with a "=<name>" target). That target
+    # is NOT robust: tmux resolves "=<name>" through the WINDOW namespace of
+    # the active session first, so if the user has a window literally named
+    # <name> (e.g. an nvim editing ~/projects/<name>), the target matches that
+    # window and `-s` then lists ITS session -- usually `main`. That made
+    # lgtm-dispatched review/gather tabs land in the user's `main` session
+    # instead of the dedicated `lgtm` session. The #{session_name} filter
+    # matches the session name exactly and is immune to the collision.
+    # Regression test: test-project-key.sh (list_session_panes tmux tests).
+    list_session_panes() {
+      local session="$1"
+      tmux list-panes -a -f "#{==:#{session_name},$session}" \
+        -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true
+    }
+
     # classify_pane <pane_cmd>
     #
     # Decides what oc-auto-attach should do with a pane it has matched
@@ -208,9 +229,11 @@ pkgs.writeShellApplication {
     # regardless of foreground command. We capture the command too so we
     # can branch on it in Step 3.5.
     # Source of panes to scan: the whole tmux server (-a) by default, or just
-    # the confined session (-s -t =<name>) when --tmux-session was given.
+    # the confined session when --tmux-session was given. The confined scan
+    # goes through list_session_panes, which filters on #{session_name} to
+    # avoid the window/session name collision documented on that function.
     if [ -n "$target_session" ]; then
-      panes_src="$(tmux list-panes -s -t "=$target_session" -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
+      panes_src="$(list_session_panes "$target_session")"
     else
       panes_src="$(tmux list-panes -a -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
     fi

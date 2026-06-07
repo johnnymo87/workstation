@@ -40,6 +40,20 @@ resolve_nvims() {
   return 1
 }
 
+# list_session_panes <session-name>: emit "pane_id|cmd|path" for every pane in
+# the named session ONLY. We filter `list-panes -a` on #{session_name} rather
+# than `list-panes -s -t "=<name>"` because the latter is NOT a robust session
+# target: tmux resolves "=<name>" through the WINDOW namespace of the active
+# session first, so a window literally named <name> (e.g. an nvim editing
+# ~/projects/<name>) hijacks the scan and returns that window's session
+# (usually `main`) instead of the session called <name>. Mirror of the
+# production function in default.nix; exercised by the tmux tests below.
+list_session_panes() {
+  local session="$1"
+  tmux list-panes -a -f "#{==:#{session_name},$session}" \
+    -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true
+}
+
 # ---- test infrastructure ----------------------------------------------------
 
 assert_eq() {
@@ -128,6 +142,64 @@ set -e
 assert_eq ""  "$none_out" "resolve_nvims: nothing available -> empty stdout"
 assert_exit "1" "$none_rc"  "resolve_nvims: nothing available -> exit 1"
 
+# ---- list_session_panes tests (real tmux) -----------------------------------
+#
+# Regression for the window/session name collision: when a window in the
+# user's `main` session is literally named the same as the confined target
+# session (e.g. `lgtm`, because they have nvim open on ~/projects/lgtm), the
+# old `list-panes -s -t "=lgtm"` scan resolved to that window's session and
+# leaked `main`'s panes -- so lgtm-dispatched review/gather tabs landed in
+# `main`. list_session_panes must return ONLY the target session's panes.
+#
+# Needs a real tmux; SKIP if absent (e.g. stripped CI shell).
+if command -v tmux >/dev/null 2>&1; then
+  scan_sock="oc_aa_scan_test_$$"
+  scan_tmpdir="$(mktemp -d)"
+  scan_cleanup() {
+    # `command tmux` so this is correct whether or not the tmux shadow
+    # function (defined below) is active when the EXIT trap fires.
+    command tmux -L "$scan_sock" kill-server 2>/dev/null || true
+    rm -rf "$scan_tmpdir"
+  }
+  trap 'rm -rf "$nvims_tmpdir"; scan_cleanup' EXIT
+
+  mkdir -p "$scan_tmpdir/proj-a" "$scan_tmpdir/proj-b"
+
+  # Isolated tmux server (-L) so we never touch the user's real sessions.
+  # Session `lgtm` holds a pane whose cwd is proj-a (what we want to find).
+  tmux -L "$scan_sock" new-session -d -s lgtm -c "$scan_tmpdir/proj-a" -n protos
+  # Session `main` holds a pane whose cwd is proj-b, in a window NAMED `lgtm`
+  # -- the collision that fooled the old `-s -t "=lgtm"` scan.
+  tmux -L "$scan_sock" new-session -d -s main -c "$scan_tmpdir/proj-b" -n placeholder
+  tmux -L "$scan_sock" rename-window -t main:0 lgtm
+
+  # Point list_session_panes at the isolated server for the duration of the
+  # scan tests by shadowing `tmux` with a wrapper that injects -L.
+  tmux() { command tmux -L "$scan_sock" "$@"; }
+
+  scan_out="$(list_session_panes lgtm)"
+
+  case "$scan_out" in
+    *"$scan_tmpdir/proj-a"*)
+      printf 'PASS  list_session_panes: returns target session pane\n' ;;
+    *)
+      printf 'FAIL  list_session_panes: returns target session pane\n        out: %s\n' "$scan_out"; exit 1 ;;
+  esac
+
+  case "$scan_out" in
+    *"$scan_tmpdir/proj-b"*)
+      printf 'FAIL  list_session_panes: leaks main-session pane via window-name collision\n        out: %s\n' "$scan_out"; exit 1 ;;
+    *)
+      printf 'PASS  list_session_panes: ignores same-named window in another session\n' ;;
+  esac
+
+  unset -f tmux
+  scan_cleanup
+  trap 'rm -rf "$nvims_tmpdir"' EXIT
+else
+  printf 'SKIP  list_session_panes tmux tests (tmux not on PATH)\n'
+fi
+
 # ---- production-script integration check ------------------------------------
 #
 # The unit tests above exercise a mirror of the helper logic. This check
@@ -156,6 +228,40 @@ if [ -n "$oc_aa" ]; then
   fi
 else
   printf 'SKIP  production-script integration check (oc-auto-attach not on PATH)\n'
+fi
+
+# ---- production-source check (default.nix) -----------------------------------
+#
+# The artifact check above greps the *deployed* binary, which lags the source
+# until a rebuild+switch. This check greps the default.nix sibling directly so
+# a source-level regression (reintroducing the fragile confined scan) trips
+# immediately, before deploy. The session-scan command form survives Nix's
+# '' string verbatim (no ${ } or '' sequences), so a literal grep is reliable.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+default_nix="$script_dir/default.nix"
+if [ -f "$default_nix" ]; then
+  if grep -q 'list_session_panes()' "$default_nix"; then
+    printf 'PASS  source defines list_session_panes\n'
+  else
+    printf 'FAIL  source defines list_session_panes\n        not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  if grep -q 'list-panes -a -f' "$default_nix"; then
+    printf 'PASS  source scans session via #{session_name} filter\n'
+  else
+    printf 'FAIL  source scans session via #{session_name} filter\n        "list-panes -a -f" not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  # The fragile form that caused review/gather tabs to land in `main` must
+  # never come back for the confined scan.
+  if grep -q 'list-panes -s -t "=' "$default_nix"; then
+    printf 'FAIL  source still uses fragile confined scan (list-panes -s -t "=...")\n        in: %s\n' "$default_nix"
+    exit 1
+  else
+    printf 'PASS  source has no fragile confined scan (list-panes -s -t "=...")\n'
+  fi
+else
+  printf 'SKIP  production-source check (default.nix not next to test)\n'
 fi
 
 echo "all oc-auto-attach helper tests passed"
