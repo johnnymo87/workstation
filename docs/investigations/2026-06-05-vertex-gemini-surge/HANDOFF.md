@@ -244,3 +244,58 @@ Post-restart verification (serve restarted, new PID on the durable binary) all P
 - mono PR #3373 (aigateway opus cost + gemini support) — open, shepherd to merge.
 
 INCIDENT CLOSED: durable retry-cap cure + cost observability deployed and verified.
+
+---
+
+## ⚠️ SUPERSEDED 2026-06-07 (cloudbox) — rolled BACK off 1.16.2.1: v1.16 corrupts opencode.db; now HELD on capped v1.15.13-patched.3
+
+The "RESOLVED on v1.16.2-patched.1" section above is **superseded**. The retry-cap
+cure was right; the **1.16 base was not**. We are now durably held on the capped
+**v1.15.13** line. The retry-cap runaway fix is preserved (re-included in `.3`).
+
+### Why we rolled back (the new root cause)
+- **1.16's v2 event-sourced session schema migration** `20260604172448_event_sourced_session_input`
+  rewrites `~/.local/share/opencode/opencode.db` to a v2 schema (`session_message.seq NOT NULL`
+  + `event`/`event_sequence` tables) that the 1.15.x line **cannot write**, crashing new
+  sessions with `NOT NULL constraint failed: session_message.seq`.
+- Worse, a **stray 1.16.2 process sharing the same DB silently re-migrates (poisons) it** — so
+  even a 1.15 serve gets a v2 DB underneath it. `opencode-launch` runs API calls against the
+  background `opencode-serve` (port 4096); a mismatched 1.16.2 launcher binary against a 1.15.13
+  serve triggers the migration and breaks message writes.
+- **Upstream has no released fix** (issues #31119 / #30953 / #31072 / #17270 / #29908 / #30963 —
+  none merged or released). Research session `ses_15fe27082ffe8lANCIdYmfi7TT`; notes in
+  `~/projects/opencode/DB-CORRUPTION-RESEARCH.md`.
+
+### What we did
+- **DB repair (history preserved):** dropped & recreated the empty `session_message` table under
+  the 1.15 schema (removed `seq NOT NULL`), keeping all 99k+ messages / ~1 week of June 1–6
+  history. Chosen over restoring the May-31 backup precisely to save that history. Ran inside a
+  detached root `systemd-run` unit so stopping `opencode-serve` couldn't kill the session.
+- **Killed 12 stranded 1.16.2 processes** that were holding the sidelined
+  `opencode.db.poisoned-v2.*` files.
+- **Cut & published capped `v1.15.13-patched.3`** (re-derived `retry-cap.patch` against v1.15.13's
+  `MessageV2` namespace; built via `build-release.yml` on branch `release/v1.15`).
+- **Pinned** `users/dev/home.base.nix` to `v1.15.13-patched.3` + `home-manager switch`; verified
+  serve healthy on 1.15.13.3, `opencode-launch` end-to-end, survived the 03:00 nightly restart.
+  (The auto-bump bot independently landed the same `.3` pin via PR #161 / `0e780f3`.)
+- **Made the auto-bump cron hold-aware** so it can never re-introduce 1.16.x: added
+  `opencodePatchedHold = "1.15.13"` to `home.base.nix` and taught `update-opencode-patched.yml`
+  to track the highest `v1.15.13-patched.N` instead of `releases/latest`, with a defense-in-depth
+  guard refusing to bump off the held line (empty marker = legacy behavior). Commit `b17079d`.
+  - Verified: deterministic harness 8/8 + a live read of the real releases (which DO contain
+    `v1.16.2-patched`/`.1`) select `.3` and exclude 1.16.x; a dispatched cron run honored the
+    hold and opened **no** PR. (Note: `releases/latest` is currently `.3`, so the run alone
+    doesn't distinguish hold-vs-legacy — the discriminating proof is the harness + live read.)
+
+### Reference / runbook
+- **Skill:** `.opencode/skills/holding-opencode-on-1.15/SKILL.md` (registered in `AGENTS.md`) —
+  cause, re-poison detection, and the drop-`seq` repair runbook.
+- **Plan:** `docs/plans/2026-06-06-durable-capped-1.15-hold.md` (Phase 2 = pin + hold the cron).
+
+### Lift-hold (when upstream ships a 1.16.x DB-corruption fix)
+Refresh `opencode-patched@main` onto the fixed 1.16.x, cut a capped release, set
+`opencodePatchedHold = ""` in `home.base.nix`, bump + `home-manager switch`. The cron then
+resumes tracking `releases/latest` automatically.
+
+### Optional cleanup (not blocking)
+- Remove the ~8 GB orphaned `opencode.db.poisoned-v2.20260606-221830*` files on cloudbox.
