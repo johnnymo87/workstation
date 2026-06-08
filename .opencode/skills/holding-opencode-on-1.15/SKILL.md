@@ -5,7 +5,7 @@ description: Use when touching the opencode version pin in home.base.nix, consid
 
 # Holding OpenCode on the 1.15 Line (v1.16 V2 DB Corruption)
 
-## TL;DR (current state as of 2026-06-07)
+## TL;DR (current state as of 2026-06-08)
 
 - **opencode is deliberately pinned to `v1.15.13-patched.3`.** Do **NOT** bump to 1.16.x.
 - v1.16 introduced a **v2 event-sourced session schema**. Its migration rewrites the
@@ -16,6 +16,12 @@ description: Use when touching the opencode version pin in home.base.nix, consid
   (committed in `home.base.nix`). devbox was re-poisoned and repaired again on 2026-06-07
   via the runbook below (subagent dispatch / `opencode-launch` had started failing with
   the `seq` error).
+- **2026-06-08 upstream re-check: still nothing fixed — hold stands.** No release > **v1.16.2**
+  (no v1.16.3, no v1.17). `dev` is now 95 commits past v1.16.2 but `migration.ts` and
+  `event.ts` have **zero** commits since v1.16.2: the racy seq logic and the event-log-deleting
+  migration are both still live on `dev`. Every corruption issue is still OPEN; the only delta
+  vs 06-07 is that previously-unassigned issues now have owners (investigation, not resolution).
+  See "Upstream status" below for the per-issue/PR table.
 - Full upstream investigation: `~/projects/opencode/DB-CORRUPTION-RESEARCH.md` (untracked).
 - Related but different failure mode: see the `fixing-opencode-db` skill (SIGABRT/core-dump
   from individual corrupt rows; binary-search repair). This skill is about the **v1.16 v2
@@ -38,9 +44,22 @@ kills a new session's first-message turn — so `opencode-launch`'d sessions com
 (0 messages, never advance past creation). Established sessions look fine because display
 reads `message`/`part`, not `session_message`.
 
-Upstream issues, all OPEN / unreleased as of 2026-06-07: #31119 ("no such column: name"),
+Upstream issues, all OPEN / unreleased as of 2026-06-08: #31119 ("no such column: name"),
 #30953 (account_state mismatch), #29908 (legacy rows → 400), #31072 (commitSyncEvent `seq`
 race), #30963 (event-log-deleting migration). None merged into a release.
+
+### A fresh DB does NOT make 1.16 safe (#31072)
+
+The migration crashes (#31119, #30953, #17270, #29908) only fire against a **pre-existing**
+DB, so it is tempting to think "just delete `opencode.db` and 1.16 is fine." It is not.
+**#31072** corrupts a **fresh** DB too: `commitSyncEvent` (`packages/core/src/event.ts`)
+computes the next event `seq` in JS as `latest + 1` and then upserts that static value, so
+two concurrent writers (parallel subagents, or a subagent racing a parent update) both grab
+the same seq and the loser's event is silently dropped. The subagent `session` row exists but
+never projects its first message — the agent dies before doing any work. The issue reports
+**331 of 333 subagent sessions (99.4%) orphaned** on one real production DB. This is the same
+"blank launched session" symptom we see, and it is why tossing the DB never rescued 1.16. As
+of 2026-06-08 there is **no fix PR in flight** for #31072 and the racy code is still on `dev`.
 
 ## The core fragility: one shared DB, mixed binaries
 
@@ -170,6 +189,33 @@ curl -sf http://127.0.0.1:4096/global/health                                    
 readlink -f ~/.nix-profile/bin/opencode                                                           # ...-1.15.13.3
 # session_message has NO seq column (see detection script); no 1.16.x procs running
 ```
+
+## Upstream status (re-checked 2026-06-08)
+
+Latest released tags: **v1.16.0**, **v1.16.2** (no v1.16.1, no v1.16.3, no v1.17). `dev`
+is 95 commits past v1.16.2, but `packages/core/src/database/migration.ts` and
+`packages/core/src/event.ts` have **zero** commits since v1.16.2 — the destructive
+`20260604172448_event_sourced_session_input/migration.sql` (`DELETE FROM session_message /
+event / event_sequence / session_input / workspace`) and the racy `seq = latest + 1` are
+both still live on `dev`. Re-run this check before any 1.16 reconsideration:
+
+```bash
+cd ~/projects/opencode && git fetch --all --tags --prune
+git tag --list 'v1.16*' 'v1.17*' --sort=-creatordate
+git log --oneline v1.16.2..origin/dev -- packages/core/src/database/migration.ts packages/core/src/event.ts
+```
+
+| # | Title | State (06-08) | Assignee | Fix |
+|---|---|---|---|---|
+| 31119 | no such column: name (migration) | OPEN | StarpTech | PR #31121 open (mergeable, **not merged**) |
+| 30953 | account_state mismatch on upgrade | OPEN | nexxeln | none |
+| 17270 | CREATE TABLE account skip | OPEN | rekram1-node | none |
+| 29908 | legacy rows → 400 on load | OPEN | jlongster | PR #29965 open |
+| **31072** | **subagent first-message seq race (bites fresh DB)** | OPEN | StarpTech | **no PR** |
+| 30963 | migration deletes entire event log | OPEN | kitlangton | none |
+
+Delta vs 06-07: several previously-unassigned issues now have owners. That is investigation
+progress, **not** a fix — none have merged to `dev`, let alone shipped in a tag > v1.16.2.
 
 ## What "done with the hold" looks like (future)
 
