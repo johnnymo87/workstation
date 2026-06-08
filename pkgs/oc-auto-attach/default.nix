@@ -117,11 +117,18 @@ pkgs.writeShellApplication {
       esac
     }
 
-    # Optional leading --tmux-session <name>: confine all pane discovery and
-    # window creation to that one tmux session (create it detached if absent).
-    # Used by background callers (lgtm) so launches never steal the user's
-    # focus -- the user isn't attached to that session during normal work.
-    target_session=""
+    # Leading --tmux-session <name> confines all pane discovery and window
+    # creation to one tmux session (created detached if absent), overriding
+    # the default. Confining to a dedicated non-`main` session lets background
+    # callers (lgtm) launch without stealing the user's focus, since they
+    # aren't attached to that session.
+    #
+    # The default is `main`: with no flag, launches land deterministically in
+    # the user's primary session instead of whatever session tmux happens to
+    # consider "current" -- which was nondeterministic for headless callers
+    # (systemd, the pigeon daemon, the recommendation session) not attached to
+    # tmux. An empty --tmux-session= is coerced back to `main` below.
+    target_session="main"
     while [ $# -gt 0 ]; do
       case "$1" in
         --tmux-session)
@@ -141,6 +148,8 @@ pkgs.writeShellApplication {
           ;;
       esac
     done
+    # Coerce an empty override (--tmux-session=) back to the default.
+    target_session="''${target_session:-main}"
 
     if [ $# -ne 1 ]; then
       log "usage: oc-auto-attach [--tmux-session <name>] <session-id>"
@@ -155,12 +164,13 @@ pkgs.writeShellApplication {
     fi
 
     # Validate the tmux session name (tmux forbids '.' and ':'; this also
-    # blocks any shell-interpolation hazard).
-    if [ -n "$target_session" ] && ! [[ "$target_session" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    # blocks any shell-interpolation hazard). target_session is always set
+    # (defaults to `main`), so no empty-string guard is needed.
+    if ! [[ "$target_session" =~ ^[A-Za-z0-9_-]+$ ]]; then
       log "invalid tmux session name: $target_session"
       exit 0
     fi
-    [ -n "$target_session" ] && log "confining to tmux session: $target_session"
+    log "confining to tmux session: $target_session"
 
     # Step 1: wait for session to be visible with a non-empty directory.
     #
@@ -225,18 +235,13 @@ pkgs.writeShellApplication {
     # equal to (or a descendant of) project_key. Prefer exact match.
     pane_id=""
     pane_cmd=""
-    # Scan all panes for one whose pane_current_path matches the project,
-    # regardless of foreground command. We capture the command too so we
-    # can branch on it in Step 3.5.
-    # Source of panes to scan: the whole tmux server (-a) by default, or just
-    # the confined session when --tmux-session was given. The confined scan
-    # goes through list_session_panes, which filters on #{session_name} to
-    # avoid the window/session name collision documented on that function.
-    if [ -n "$target_session" ]; then
-      panes_src="$(list_session_panes "$target_session")"
-    else
-      panes_src="$(tmux list-panes -a -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
-    fi
+    # Scan panes for one whose pane_current_path matches the project,
+    # regardless of foreground command. We capture the command too so we can
+    # branch on it in Step 3.5. Discovery is always confined to
+    # $target_session (default `main`) via list_session_panes, which filters
+    # on #{session_name} to avoid the window/session name collision
+    # documented on that function.
+    panes_src="$(list_session_panes "$target_session")"
 
     while IFS='|' read -r p_id p_cmd p_path; do
       if [ "$p_path" = "$project_key" ]; then
@@ -253,13 +258,12 @@ pkgs.writeShellApplication {
 
     if [ -n "$pane_id" ]; then
       log "matched existing pane $pane_id (cmd=$pane_cmd)"
-    elif [ -n "$target_session" ]; then
-      # Confined-session create path: no pane matched inside $target_session,
-      # so make a window there (creating the session itself if needed). We
-      # deliberately skip the "are we inside tmux?" bail and the by-name
-      # defense-in-depth scan used by the default path -- the -s scan above
-      # already covered every window in this session, and new-session will
-      # start a tmux server if none exists.
+    else
+      # No pane matched inside $target_session, so make a window there
+      # (creating the session itself if absent). We don't need an "are we
+      # inside tmux?" bail or a by-name defense-in-depth scan: the
+      # list_session_panes scan above already covered every window in this
+      # session, and new-session will start a tmux server if none exists.
       if ! nvims_path="$(resolve_nvims)"; then
         log "nvims not resolvable (neither OC_NVIMS_BIN nor PATH); skipping"
         exit 0
@@ -278,72 +282,6 @@ pkgs.writeShellApplication {
       fi
       pane_cmd="nvim"
       log "created pane $pane_id in session $target_session (window $window_name)"
-    else
-      # Are we inside a tmux session at all? If not, there's no useful place
-      # to put the window. (oc-auto-attach is meaningful only in a graphical
-      # tmux+nvim workflow.)
-      if [ -z "''${TMUX:-}" ] && ! tmux has-session 2>/dev/null; then
-        log "no tmux server running; skipping"
-        exit 0
-      fi
-      # If a window with this name already exists in the current tmux
-      # session, prefer reusing it over creating yet another window.
-      # This is defense-in-depth: the earlier list-panes scan should have
-      # caught it, but if two sessions race in the same dir, we don't want
-      # to proliferate windows.
-      #
-      # Implemented in pure bash (no awk pipeline) because under
-      # `set -o pipefail` a missing awk in PATH would abort the whole
-      # script before we could fall through to `tmux new-window`. We hit
-      # exactly that on cloudbox: the systemd-launched daemon's PATH did
-      # not include awk, so /launch silently failed for any project
-      # without a pre-existing tmux window.
-      # Defense-in-depth: the main scan should have caught a window for this
-      # project by pane_current_path, but if pane_current_path is stale (some
-      # shells don't fire OSC 7 reliably) or two sessions raced in the same
-      # cwd, we also check for a window literally named $window_name. Within
-      # that window, prefer a pane already running nvim (instant REUSE),
-      # else a pane sitting at a shell prompt (SEND_NVIMS), else the first
-      # pane we see (which will route through SKIP if it's some other tool
-      # the user doesn't want clobbered).
-      existing_pane=""
-      existing_pane_cmd=""
-      existing_pane_priority=0   # 0=nothing, 1=other, 2=shell, 3=nvim
-      while IFS='|' read -r ep_id ep_cmd; do
-        case "$ep_cmd" in
-          nvim)               this_priority=3 ;;
-          bash|zsh|fish|sh)   this_priority=2 ;;
-          *)                  this_priority=1 ;;
-        esac
-        if [ "$this_priority" -gt "$existing_pane_priority" ]; then
-          existing_pane="$ep_id"
-          existing_pane_cmd="$ep_cmd"
-          existing_pane_priority="$this_priority"
-          [ "$this_priority" -eq 3 ] && break   # nvim is best; stop early
-        fi
-      done < <(tmux list-panes -t ":$window_name" -F '#{pane_id}|#{pane_current_command}' 2>/dev/null || true)
-      if [ -n "$existing_pane" ]; then
-        pane_id="$existing_pane"
-        pane_cmd="$existing_pane_cmd"
-        log "reusing existing window $window_name pane $pane_id (cmd=$pane_cmd)"
-      else
-        if ! nvims_path="$(resolve_nvims)"; then
-          log "nvims not resolvable (neither OC_NVIMS_BIN nor PATH); skipping"
-          exit 0
-        fi
-        log "resolved nvims at $nvims_path"
-        pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
-          -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
-        if [ -z "$pane_id" ]; then
-          log "tmux new-window failed; giving up"
-          exit 0
-        fi
-        # Brand new window: we know nvims is the entrypoint, so the
-        # foreground is (or will be momentarily) nvim. Skip the
-        # send-keys branch in Step 3.5 and go straight to socket-wait.
-        pane_cmd="nvim"
-        log "created new pane $pane_id (window $window_name)"
-      fi
     fi
 
     # Step 3.5: Decide what to do with $pane_id based on its foreground.
