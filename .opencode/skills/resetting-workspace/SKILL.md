@@ -21,7 +21,11 @@ opencode session in `~` with a baked-in prompt instructing it to:
 3. Send a conversational Telegram message recommending which sessions
    to reopen and why, with numbered options.
 4. Wait for your Telegram reply (free-form: "1,3", "all", "none", etc).
-5. For each chosen sid, exec `oc-auto-attach <sid>` to create the tab.
+5. For each chosen sid, exec `oc-auto-attach --tmux-session main <sid>`
+   to create the tab. The `--tmux-session main` is mandatory: the
+   recommendation session is headless (not attached to tmux), so a bare
+   `oc-auto-attach` would drop the tab into whatever session tmux deems
+   "current" instead of the user's `main` session.
 
 You wake up to: no tabs if you ignored the Telegram message, exactly
 the tabs you asked for if you replied.

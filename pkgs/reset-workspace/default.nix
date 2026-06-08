@@ -373,7 +373,7 @@ Build a short, conversational Telegram message recommending which sessions to re
 
 Then use the question tool to ask the user which to reopen. Accept free-form replies like "1,3,5", "all", "none", "the mono ones".
 
-When they reply, parse their selection and for each chosen sid, run `oc-auto-attach <sid>` in a bash tool. Report a brief summary of what was opened.
+When they reply, parse their selection and for each chosen sid, run `oc-auto-attach --tmux-session main <sid>` in a bash tool. ALWAYS pass `--tmux-session main` -- you are a headless session not attached to tmux, so without it the reopened tab lands in whatever session tmux considers "current" rather than reliably in the user's `main` session. Report a brief summary of what was opened.
 
 If the manifest file is missing or empty, message the user "Nightly reset complete, no sessions to recommend." and exit.
 PROMPT
