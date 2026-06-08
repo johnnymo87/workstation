@@ -24,7 +24,7 @@ let
         echo "  -h, --help                     Show this help message"
         echo "  --model <provider/model>       Specify the model to run"
         echo "  --mcp <server>                 Enable an MCP server's tools (repeatable)"
-        echo "  --tmux-session <name>          Confine auto-attach to a dedicated tmux session"
+        echo "  --tmux-session <name>          Auto-attach in this tmux session (default: main)"
         echo ""
         echo "Favorite Models:"
         echo "  - google-vertex/gemini-3.5-flash                  (Fast, reasoning-enabled)"
@@ -48,7 +48,11 @@ let
 
       model_spec=""
       mcp_servers=()
-      tmux_session=""
+      # Default the auto-attach target to the user's primary `main` tmux
+      # session so headless launches (no $TMUX) land deterministically there
+      # instead of whatever session tmux considers "current". --tmux-session
+      # <name> overrides for dedicated background sessions (e.g. lgtm).
+      tmux_session="main"
       while [ $# -gt 0 ]; do
         case "$1" in
           --model)
@@ -533,6 +537,13 @@ in
 
     # JavaScript runtime (used by pigeon and other projects)
     pkgs.bun
+
+    # Bazel BUILD/Starlark formatter + linter (bazelbuild/buildtools).
+    # `buildifier` formats/lints BUILD files in the mono Bazel monorepo to
+    # match what Gemini/CI enforce (`buildifier -r .`). Standalone Go binary
+    # with no org-specific config, so it lives in the shared list (applies to
+    # cloudbox and devbox alike) like the other generic CLIs above.
+    pkgs.buildifier
   ]
   # Linux-only tools (devbox, cloudbox, crostini). reset-workspace shells out
   # to systemd-run for cgroup re-exec and sudo systemctl restart, so it can't
