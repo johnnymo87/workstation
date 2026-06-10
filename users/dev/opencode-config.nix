@@ -79,11 +79,16 @@ let
     sopsSecret = "atlassian_alt_site";
   };
 
+  # --enable-write-tools surfaces the incident write tools (resolve, acknowledge,
+  # reassign, add notes, etc.) in addition to the read tools. The MCP is still
+  # enabled:false by default, so write tools only load when the operator
+  # deliberately switches the server on. Requires a token whose user can manage
+  # the target incidents.
   pagerduty-mcp = pkgs.writeShellApplication {
     name = "pagerduty-mcp";
     runtimeInputs = [ pkgs.uv ];
     text = ''
-      exec uvx --from 'pagerduty-mcp==0.17.0' pagerduty-mcp "$@"
+      exec uvx --from 'pagerduty-mcp==0.17.0' pagerduty-mcp --enable-write-tools "$@"
     '';
   };
 
@@ -540,8 +545,10 @@ in
     '');
 
   # Inject PagerDuty MCP secrets from macOS Keychain into opencode.json.
-  # Uses PagerDuty's official local stdio server in read-only mode (no
-  # --enable-write-tools). Disabled by default; enable only when needed.
+  # Uses PagerDuty's official local stdio server with write tools enabled
+  # (see the pagerduty-mcp wrapper). Disabled by default; enabling the server
+  # loads both read and write (resolve/ack/reassign) tools, so enable only when
+  # you intend to act on incidents.
   home.activation.injectPagerDutyMcpSecrets = lib.mkIf isDarwin
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail

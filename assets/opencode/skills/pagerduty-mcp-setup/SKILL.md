@@ -5,7 +5,7 @@ description: Use when setting up or rotating PagerDuty MCP auth for OpenCode on 
 
 # PagerDuty MCP Setup
 
-Uses PagerDuty's official local MCP server with a PagerDuty User API token. The workstation wrapper is Nix-managed, pins `pagerduty-mcp==0.17.0`, injects the token from platform secret storage, and starts the server in read-only mode by default.
+Uses PagerDuty's official local MCP server with a PagerDuty User API token. The workstation wrapper is Nix-managed, pins `pagerduty-mcp==0.17.0`, injects the token from platform secret storage, and runs with `--enable-write-tools` so incident actions (resolve/acknowledge/reassign) are available. The MCP is `enabled: false` by default, so write tools only load when you deliberately switch the server on.
 
 | Platform | Token storage | Injection trigger |
 |----------|---------------|-------------------|
@@ -15,9 +15,9 @@ Uses PagerDuty's official local MCP server with a PagerDuty User API token. The 
 ## Architecture
 
 - `users/dev/opencode-config.nix` injects `.mcp.pagerduty` into `~/.config/opencode/opencode.json` after `mergeOpencode`.
-- The MCP command points at a Nix `writeShellApplication` wrapper with `pkgs.uv` in `runtimeInputs`; the wrapper runs `uvx --from 'pagerduty-mcp==0.17.0' pagerduty-mcp`.
-- The MCP is `enabled: false` by default to avoid normal-session startup cost and accidental PagerDuty calls.
-- The server is read-only because the wrapper does not pass `--enable-write-tools`.
+- The MCP command points at a Nix `writeShellApplication` wrapper with `pkgs.uv` in `runtimeInputs`; the wrapper runs `uvx --from 'pagerduty-mcp==0.17.0' pagerduty-mcp --enable-write-tools`.
+- The MCP is `enabled: false` by default to avoid normal-session startup cost and accidental PagerDuty calls. **Enabling it loads both read and write tools** (resolve/acknowledge/reassign incidents), so enable only when you intend to act.
+- Write tools require a token whose user can manage the target incidents. A User API token acts as that user, so if you can resolve/ack the incident in the PagerDuty UI, the token can too.
 - If the token is missing, activation deletes `.mcp.pagerduty` so stale credentials do not linger.
 
 ## Get A Token
@@ -29,7 +29,7 @@ Create a PagerDuty User API token from PagerDuty user settings:
 3. In API Access, create a new API User Token.
 4. Copy it once and store it immediately.
 
-Use a user token with the minimum account permissions needed for read-only queries. Do not commit account domains, schedule URLs, schedule IDs, team names, service names, or token values.
+Use a user token whose account permissions cover both reading and acting on the incidents you care about (resolve/acknowledge/reassign). Do not commit account domains, schedule URLs, schedule IDs, team names, service names, or token values.
 
 ## macOS Setup
 
@@ -103,7 +103,7 @@ Rotate when the token is revoked, compromised, no longer has needed permissions,
 
 ## Tools
 
-PagerDuty documents 64 tools across 14 domains. The workstation default exposes only the 42 read-only tools because write tools require `--enable-write-tools`, which is intentionally not configured.
+PagerDuty documents 64 tools across 14 domains. The workstation wrapper passes `--enable-write-tools`, so **both read and write tools are available when the server is enabled**. Because the MCP is `enabled: false` by default, write tools never load in ordinary sessions — they appear only after you deliberately switch the server on. The read tools below are always part of the surface; the write tools (next paragraph) are the addition.
 
 | Domain | Read tools |
 |--------|------------|
@@ -122,7 +122,7 @@ PagerDuty documents 64 tools across 14 domains. The workstation default exposes 
 | Event Orchestrations | `list_event_orchestrations`, `get_event_orchestration`, `get_event_orchestration_router`, `get_event_orchestration_service`, `get_event_orchestration_global` |
 | Status Pages | `list_status_pages`, `list_status_page_severities`, `list_status_page_impacts`, `list_status_page_statuses`, `get_status_page_post`, `list_status_page_post_updates` |
 
-Write tools include creating/updating incidents, services, teams, schedules, event orchestration rules, status page posts, and schedule overrides. Do not enable them without an explicit design and safety review.
+Write tools include resolving/acknowledging/reassigning/creating/updating incidents, adding incident notes, and managing services, teams, schedules, event orchestration rules, status page posts, and schedule overrides. They load whenever the server is enabled, so treat enabling the PagerDuty MCP as arming destructive actions: switch it on to act, switch it off when done.
 
 ## Troubleshooting
 

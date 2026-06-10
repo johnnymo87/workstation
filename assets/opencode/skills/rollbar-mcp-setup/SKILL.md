@@ -19,7 +19,7 @@ disabled by default.
 
 - `users/dev/opencode-config.nix` injects `.mcp.rollbar` into `~/.config/opencode/opencode.json` after `mergeOpencode`.
 - The MCP command points at a Nix `writeShellApplication` wrapper with `pkgs.nodejs` in `runtimeInputs`; the wrapper runs `npx -y '@rollbar/mcp-server@0.5.0'`.
-- The MCP is `enabled: false` by default to avoid normal-session startup cost and accidental Rollbar calls.
+- The MCP is `enabled: false` by default to avoid normal-session startup cost and accidental Rollbar calls. `update-item` (resolve/assign) is a write tool and works only when the stored token has `write` scope.
 - If the token is missing, activation deletes `.mcp.rollbar` so stale credentials do not linger.
 - First run downloads the npm package into `~/.npm`; subsequent runs are cached. The wrapper needs outbound network on first use.
 
@@ -36,11 +36,16 @@ its own set; new projects start with four tokens, one per scope:
 | `post_server_item` | Sending events / source maps (not used here) |
 | `post_client_item` | Client-side event sending (not used here) |
 
+The workstation deployment uses a **read+write** token so the full triage flow —
+investigate *and* resolve — works. `read` alone is enough for every read tool;
+`update-item` (resolve/assign) additionally needs `write`.
+
 Steps:
 
 1. Open Rollbar -> select the project -> Settings -> Project Access Tokens.
-2. Use the existing `read`-scoped token, or create a new token with `read` scope
-   (add `write` only if you want `update-item` to resolve/assign from the agent).
+2. Use a token that has **both `read` and `write`** scopes (or create one). For a
+   read-only posture, a `read`-only token still works for everything except
+   `update-item`.
 3. Copy it.
 
 > Note: since April 2025, **newly created tokens are encrypted and shown only
@@ -54,7 +59,7 @@ Do not commit account names, project names, project counters, or token values.
 Store the token in Keychain:
 
 ```bash
-security add-generic-password -a "$USER" -s rollbar-access-token -w "ROLLBAR_PROJECT_READ_TOKEN" -U
+security add-generic-password -a "$USER" -s rollbar-access-token -w "ROLLBAR_PROJECT_RW_TOKEN" -U
 ```
 
 Apply:
@@ -159,7 +164,7 @@ curl -s "https://api.pagerduty.com/incidents/$INCIDENT_ID/alerts" \
 Rotate when the token is revoked, compromised, no longer has needed permissions,
 or per your Rollbar access policy.
 
-1. Create or regenerate a `read`-scoped Rollbar project access token.
+1. Create or regenerate a Rollbar project access token with `read`+`write` scopes.
 2. Store it using the macOS or cloudbox setup command above.
 3. Apply the platform config.
 4. Restart OpenCode.
@@ -172,7 +177,7 @@ or per your Rollbar access policy.
 | No `.mcp.rollbar` entry | Token missing from Keychain or sops; re-store and re-apply. |
 | MCP status is failed | Run the generated command from `.mcp.rollbar.command` manually; check `npx`/network errors and that node can reach the npm registry. |
 | Rollbar returns unauthorized | Token revoked, copied incorrectly, lacks `read` scope, or belongs to a different project. Rotate it. |
-| `update-item` fails with permission error | Token lacks `write` scope; the default read token is intentionally read-only. |
+| `update-item` fails with permission error | Stored token lacks `write` scope. The workstation token should be read+write; re-mint with both scopes and re-store. |
 | `sudo must be owned by uid 0` | In OpenCode bash on cloudbox, use `/run/wrappers/bin/sudo` for the sops command. |
 | Wrong project's items | Token is project-scoped. Use the token for the project the error lives in, or wire multi-project config. |
 
