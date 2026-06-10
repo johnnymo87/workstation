@@ -211,6 +211,12 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Rollbar MCP project access token (read scope)
+      rollbar_access_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # GCP project name (org-identifying)
       google_cloud_project = {
         owner = "dev";

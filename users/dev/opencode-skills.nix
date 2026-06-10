@@ -33,6 +33,7 @@ let
   workOnlySkills = [
     "cleaning-disk"
     "pagerduty-mcp-setup"
+    "rollbar-mcp-setup"
     "shepherding-pull-requests"
     "slack-mcp-setup"
     "using-atlassian"

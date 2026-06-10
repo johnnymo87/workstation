@@ -87,6 +87,18 @@ let
     '';
   };
 
+  # Rollbar's official MCP server (stdio). Read-oriented tools (get-item-details,
+  # list-items, get-deployments, get-top-items, get-version, get-replay) need only
+  # a project access token with `read` scope; update-item additionally needs `write`.
+  # Pinned to avoid surprise upstream changes, mirroring the pagerduty-mcp wrapper.
+  rollbar-mcp = pkgs.writeShellApplication {
+    name = "rollbar-mcp";
+    runtimeInputs = [ pkgs.nodejs ];
+    text = ''
+      exec npx -y '@rollbar/mcp-server@0.5.0' "$@"
+    '';
+  };
+
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # Platform overlay:
@@ -602,6 +614,89 @@ in
             "enabled": false,
             "environment": {
               "PAGERDUTY_USER_API_KEY": $api_key
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject Rollbar MCP secrets from macOS Keychain into opencode.json.
+  # Uses Rollbar's official local stdio server. Disabled by default; enable only
+  # when triaging an error. Token is a project access token (read scope is enough
+  # for the read tools the triage flow uses).
+  home.activation.injectRollbarMcpSecrets = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      rollbar_token="$(/usr/bin/security find-generic-password -s rollbar-access-token -w 2>/dev/null || true)"
+
+      if [[ -z "''${rollbar_token}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.rollbar)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "Rollbar access token not found in Keychain; removed mcp.rollbar from config" >&2
+        exit 0
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --arg command "${rollbar-mcp}/bin/rollbar-mcp" \
+          --arg token "''${rollbar_token}" \
+          '.mcp.rollbar = {
+            "type": "local",
+            "command": [$command],
+            "enabled": false,
+            "environment": {
+              "ROLLBAR_ACCESS_TOKEN": $token
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject Rollbar MCP secrets from sops on cloudbox into opencode.json.
+  # Same pattern as Darwin, but reads from /run/secrets/ instead of Keychain.
+  home.activation.injectRollbarMcpSecretsSops = lib.mkIf isCloudbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      rollbar_token=""
+      if [ -r /run/secrets/rollbar_access_token ]; then
+        rollbar_token="$(cat /run/secrets/rollbar_access_token)"
+      fi
+
+      if [[ -z "''${rollbar_token}" ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.rollbar)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "Rollbar access token not found in sops; removed mcp.rollbar from config" >&2
+        exit 0
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --arg command "${rollbar-mcp}/bin/rollbar-mcp" \
+          --arg token "''${rollbar_token}" \
+          '.mcp.rollbar = {
+            "type": "local",
+            "command": [$command],
+            "enabled": false,
+            "environment": {
+              "ROLLBAR_ACCESS_TOKEN": $token
             }
           }' "$runtime" > "$tmp"
 
