@@ -52,6 +52,15 @@
             },
             "effort": "xhigh"
           }
+        },
+        "claude-fable-5": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "xhigh"
+          }
         }
       }
     },
