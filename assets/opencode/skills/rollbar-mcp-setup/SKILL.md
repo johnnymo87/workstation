@@ -101,20 +101,38 @@ jq '{type:.mcp.rollbar.type, command:.mcp.rollbar.command, enabled:.mcp.rollbar.
 
 ## Using Rollbar
 
-Enable temporarily, then restart OpenCode:
+> **WARNING — Gemini incompatibility.** Like the PagerDuty MCP, these tools
+> expose optional/union parameters that Vertex **Gemini** function-calling
+> rejects (`schema didn't specify the schema type field`). cloudbox **and macOS
+> both default to Gemini**, so flipping `enabled: true` in the *shared*
+> `~/.config/opencode/opencode.json` breaks every concurrent Gemini-routed
+> session. Claude models are fine. **Don't globally enable on a Gemini-default
+> host** — use a per-session launch instead.
+
+### Recommended: per-session on a Claude model
+
+`opencode-launch --mcp` connects the server for one launched session only; pair
+it with a Claude model. Global config stays `enabled: false` (Gemini-safe):
+
+```bash
+opencode-launch --mcp rollbar --mcp pagerduty \
+  --model google-vertex-anthropic/claude-opus-4-8 \
+  ~/projects/<dir> "diagnose Rollbar item #<counter> for PD incident <id>"
+```
+
+### Global enable (only on an all-Claude host, or if no Gemini session is running)
+
+Flip on, restart OpenCode, **disable when done**:
 
 ```bash
 (umask 0077; jq '.mcp.rollbar.enabled = true' ~/.config/opencode/opencode.json > /tmp/oc.json) && mv /tmp/oc.json ~/.config/opencode/opencode.json
-```
-
-Disable after use:
-
-```bash
+# ...use it, then revert:
 (umask 0077; jq '.mcp.rollbar.enabled = false' ~/.config/opencode/opencode.json > /tmp/oc.json) && mv /tmp/oc.json ~/.config/opencode/opencode.json
 ```
 
 OpenCode reads config at startup. Quit and restart OpenCode after changing MCP
-enablement or after applying new secrets.
+enablement or after applying new secrets. A `home-manager switch` also resets
+`enabled` to false by design.
 
 ## Tools
 
@@ -138,7 +156,9 @@ workstation wrapper currently wires the single-token env var only.
 ## Paged-About-Rollbar Triage Flow
 
 This MCP is the Rollbar half of the on-call flow; PagerDuty is the other half
-(see `pagerduty-mcp-setup`). Enable both, restart OpenCode, then:
+(see `pagerduty-mcp-setup`). Launch a Claude session with both connected (see
+"Recommended: per-session on a Claude model" above — `opencode-launch --mcp
+rollbar --mcp pagerduty --model <claude>`), then:
 
 1. **PagerDuty:** `get_incident` / `list_alerts_from_incident` for the paging
    incident.

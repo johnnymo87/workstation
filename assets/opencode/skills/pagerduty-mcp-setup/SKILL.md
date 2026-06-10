@@ -77,19 +77,43 @@ jq '{type:.mcp.pagerduty.type, command:.mcp.pagerduty.command, enabled:.mcp.page
 
 ## Using PagerDuty
 
-Enable temporarily, then restart OpenCode:
+> **WARNING — Gemini incompatibility.** These MCP tools expose optional/union
+> parameters (e.g. `get_incident`'s `query_model` = `anyOf[Model, null]`) that
+> Vertex **Gemini** function-calling rejects: `Unable to submit request because
+> ... schema didn't specify the schema type field`. cloudbox **and macOS both
+> default to Gemini**, so flipping `enabled: true` in the *shared*
+> `~/.config/opencode/opencode.json` breaks every concurrent Gemini-routed
+> session on the box (the whole request fails, not just the tool). Claude models
+> tolerate these schemas fine. **Do not globally enable these MCPs on a
+> Gemini-default host.**
+
+### Recommended: per-session on a Claude model
+
+Use `opencode-launch --mcp` to connect the server for one launched session only,
+paired with a Claude model so Gemini never sees the schemas. The global config
+stays `enabled: false` (Gemini-safe):
+
+```bash
+opencode-launch --mcp pagerduty \
+  --model google-vertex-anthropic/claude-opus-4-8 \
+  ~/projects/<dir> "triage PagerDuty incident <id>"
+```
+
+Add `--mcp rollbar` to the same launch for the full paged-about-Rollbar flow.
+(Note: `--mcp` enables tools for that launch prompt's agent loop; a later
+`opencode-send` to the same session is not covered.)
+
+### Global enable (only on an all-Claude host, or if no Gemini session is running)
+
+Flip on, restart OpenCode, **disable when done**:
 
 ```bash
 (umask 0077; jq '.mcp.pagerduty.enabled = true' ~/.config/opencode/opencode.json > /tmp/oc.json) && mv /tmp/oc.json ~/.config/opencode/opencode.json
-```
-
-Disable after use:
-
-```bash
+# ...use it, then revert:
 (umask 0077; jq '.mcp.pagerduty.enabled = false' ~/.config/opencode/opencode.json > /tmp/oc.json) && mv /tmp/oc.json ~/.config/opencode/opencode.json
 ```
 
-OpenCode reads config at startup. Quit and restart OpenCode after changing MCP enablement or after applying new secrets.
+OpenCode reads config at startup. Quit and restart OpenCode after changing MCP enablement or after applying new secrets. A `home-manager switch` also resets `enabled` to false by design.
 
 ## Rotation
 
