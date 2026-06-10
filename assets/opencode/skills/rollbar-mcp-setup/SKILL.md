@@ -120,6 +120,12 @@ opencode-launch --mcp rollbar --mcp pagerduty \
   ~/projects/<dir> "diagnose Rollbar item #<counter> for PD incident <id>"
 ```
 
+> The `google-vertex-anthropic/` provider prefix is stable on cloudbox + macOS,
+> but the Claude version suffix **drifts over time** — `claude-opus-4-8` is just
+> the current example (2026-06). Use whatever Claude model your interactive
+> sessions use (model picker, or `grep claude users/dev/opencode-config.nix`).
+> Any `claude-*` id works; the point is "not Gemini."
+
 ### Global enable (only on an all-Claude host, or if no Gemini session is running)
 
 Flip on, restart OpenCode, **disable when done**:
