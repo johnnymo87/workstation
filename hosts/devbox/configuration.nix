@@ -245,42 +245,16 @@
     wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
   };
 
-  systemd.services.opencode-serve = {
-    description = "OpenCode headless serve";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "network.target" "sops-nix.service" ];
-    path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" ];
-    serviceConfig = {
-      Type = "simple";
-      User = "dev";
-      Group = "dev";
-      WorkingDirectory = "/home/dev";
-      Environment = [
-        "HOME=/home/dev"
-        "OPENCODE_ENABLE_EXA=1"
-        # Raise opencode's default output-token cap from 32k to 64k to match
-        # Anthropic's recommendation for opus 4.7/4.8 at xhigh effort. Mirrors
-        # the home.sessionVariables entry in users/dev/home.base.nix — that one
-        # only covers interactive shells, opencode-serve needs it set
-        # explicitly. See full rationale there.
-        "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"
-      ];
-      ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
-        set -euo pipefail
-        export GH_TOKEN="$(cat /run/secrets/github_api_token)"
-        export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
-        export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
-        export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
-        exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
-      ''}";
-      # P3: Cap the always-on headless server so it can't monopolize RAM alone.
-      MemoryMax = "10G";
-      MemoryHigh = "8G";
-      OOMScoreAdjust = "500";
-      Restart = "always";
-      RestartSec = 10;
-    };
-  };
+  # opencode-serve now runs as a systemd USER service (under user@1000.service),
+  # NOT a system service. It was moved so that sessions it spawns are already
+  # inside the user manager's cgroup, which lets
+  # ~/projects/eternal-machinery/bin/devenv-up place devenv into dev-daemons.slice
+  # via `systemd-run --user --scope` (its "Context B" branch) instead of trying
+  # to cross from a system service into the dev@ user bus via
+  # `--machine=dev@.host` (which fails with "Permission denied"). The service
+  # definition now lives in users/dev/home.devbox.nix
+  # (systemd.user.services.opencode-serve). Linger (users.users.dev.linger below)
+  # keeps user@1000.service up at boot so the service starts without a login.
 
   # Daily 3 AM restart of leaky long-running services.
   # opencode-serve leaks from ~350 MB to 8-13 GB over days.
@@ -288,7 +262,12 @@
     description = "Restart long-running background services to reclaim leaked memory";
     serviceConfig.Type = "oneshot";
     script = ''
-      /run/current-system/sw/bin/systemctl restart opencode-serve.service
+      # opencode-serve is a USER service now (see users/dev/home.devbox.nix).
+      # Restart it in the dev user manager via the machine transport. This
+      # oneshot runs as root, which can reach user@1000 even with an empty
+      # environment (verified: `systemctl --user -M dev@.host ...`). Linger
+      # keeps user@1000.service up so the manager is always reachable.
+      /run/current-system/sw/bin/systemctl --user -M dev@.host restart opencode-serve.service
       /run/current-system/sw/bin/systemctl restart pigeon-daemon.service
     '';
   };
@@ -452,8 +431,13 @@
 
   systemd.services.fp-digest = {
     description = "Foreign Policy Digest daily podcast generation";
-    wants = [ "network-online.target" "opencode-serve.service" ];
-    after = [ "network-online.target" "opencode-serve.service" ];
+    # opencode-serve is a USER service now (see users/dev/home.devbox.nix); a
+    # system service cannot order against a user unit, so the dependency is
+    # dropped. fp-digest reaches opencode over its HTTP port (127.0.0.1:4096),
+    # which is up continuously thanks to linger + Restart=always on the user
+    # service — so the explicit ordering is no longer needed.
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
 
     path = [ pkgs.python314 pkgs.ffmpeg pkgs.uv pkgs.bash pkgs.coreutils ];
 

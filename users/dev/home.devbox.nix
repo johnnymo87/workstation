@@ -371,6 +371,63 @@ lib.mkIf isDevbox {
     };
   };
 
+  # OpenCode headless serve — runs in the USER manager (user@1000.service),
+  # NOT as a system service. This is deliberate: sessions opencode spawns then
+  # live in a cgroup under /user.slice/.../user@1000.service/..., so
+  # ~/projects/eternal-machinery/bin/devenv-up takes its "Context B" branch
+  # (plain `systemd-run --user --scope`, no `--machine=dev@.host`) and can place
+  # devenv into dev-daemons.slice. A SYSTEM service cannot reach the dev@ user
+  # bus via `--machine=dev@.host` (it fails with "Permission denied" / "Transport
+  # endpoint is not connected"), which is why this was moved out of
+  # hosts/devbox/configuration.nix. Requires linger (users.users.dev.linger =
+  # true in the devbox system config) so user@1000.service is up at boot.
+  # Mirrors the crostini user service in home.crostini.nix.
+  systemd.user.services.opencode-serve = {
+    Unit = {
+      Description = "OpenCode headless serve";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "simple";
+      WorkingDirectory = config.home.homeDirectory;
+      Environment = [
+        "HOME=${config.home.homeDirectory}"
+        "OPENCODE_ENABLE_EXA=1"
+        # Raise opencode's default output-token cap from 32k to 64k to match
+        # Anthropic's recommendation for opus 4.7/4.8 at xhigh effort. The
+        # home.sessionVariables entry in home.base.nix only covers interactive
+        # shells; a systemd service needs it set explicitly.
+        "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"
+        # opencode shells out to git/gh/node/rg/etc.; a user service does not
+        # inherit the interactive login PATH, so set it explicitly. Order mirrors
+        # the previous system service's
+        #   path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" ];
+        "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
+      ];
+      ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
+        set -euo pipefail
+        export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
+        export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
+        export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
+        exec ${config.home.homeDirectory}/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
+      ''}";
+      # Cap the always-on headless server so it can't monopolize RAM alone.
+      # (The parent user-1000.slice already has MemoryHigh=12G; these are
+      # per-service caps. The memory controller is delegated to user@.service
+      # on cgroup v2, so these apply within the user manager.)
+      MemoryMax = "10G";
+      MemoryHigh = "8G";
+      OOMScoreAdjust = 500;
+      Restart = "always";
+      RestartSec = 10;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
   # Sibling slices under user@1000.service for explicit placement of
   # agent workloads and devenv stacks. Processes do NOT land here
   # automatically — they're reached via systemd-run --user --scope

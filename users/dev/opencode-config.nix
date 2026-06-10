@@ -280,9 +280,6 @@ in
       "opencode-beads" = "0.6.0";
     };
     pinJson = builtins.toJSON opencodePluginPins;
-    # Hosts where opencode-serve runs as a systemd user/system service.
-    # NixOS hosts (devbox, cloudbox) only; macOS uses launchd / no serve.
-    hasOpencodeServe = isDevbox || isCloudbox;
   in lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     set -euo pipefail
     export PATH="${pkgs.nodejs}/bin:${pkgs.jq}/bin:$PATH"
@@ -338,11 +335,36 @@ in
     # populated cache on next request. Only on hosts where the service exists,
     # and only when we actually invalidated something (to avoid disrupting
     # active sessions on every home-manager switch).
-    ${lib.optionalString hasOpencodeServe ''
+    ${lib.optionalString isDevbox ''
       if [ "$cache_invalidated" = "1" ]; then
-        # opencode-serve must restart to pick up the freshly resolved plugin.
-        # Use sudo since the service is system-level (devbox + cloudbox both
-        # have wheelNeedsPassword=false).
+        # devbox: opencode-serve is a USER service (see home.devbox.nix), so
+        # restart it in the user manager — no sudo. Ensure XDG_RUNTIME_DIR is set
+        # so `systemctl --user` can reach the user bus even when this activation
+        # runs from a context that didn't export it. Use the absolute systemctl
+        # path (the activation PATH is minimal). Capture the exit code into a
+        # variable (the `cmd || rc=$?` pattern) to stay robust to home-manager's
+        # set -e / errexit-mask interactions.
+        export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$UID}"
+        restart_rc=0
+        /run/current-system/sw/bin/systemctl --user restart opencode-serve.service || restart_rc=$?
+        if [ "$restart_rc" -eq 0 ]; then
+          echo "installOpencodePlugins: restarted opencode-serve (user) after cache invalidation"
+        else
+          # Don't fail the whole activation — the service has Restart=always and
+          # the nightly timer restarts it too. Surface the failure clearly.
+          {
+            echo "installOpencodePlugins: WARNING — user opencode-serve restart failed (exit $restart_rc)."
+            echo "installOpencodePlugins: cache was invalidated but service still running stale plugin."
+            echo "installOpencodePlugins: run manually: systemctl --user restart opencode-serve"
+          } >&2
+        fi
+      fi
+    ''}
+    ${lib.optionalString isCloudbox ''
+      if [ "$cache_invalidated" = "1" ]; then
+        # cloudbox: opencode-serve is a system service; restart with sudo.
+        # Use sudo since the service is system-level (cloudbox has
+        # wheelNeedsPassword=false).
         #
         # Two non-obvious requirements (both learned the hard way 2026-04-30):
         #   1. Use the absolute path to systemctl. sudo sanitizes PATH
