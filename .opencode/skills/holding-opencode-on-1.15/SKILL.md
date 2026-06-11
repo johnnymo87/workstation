@@ -1,33 +1,38 @@
 ---
 name: holding-opencode-on-1.15
-description: Use when touching the opencode version pin in home.base.nix, considering an opencode 1.16.x upgrade, or debugging opencode.db corruption — blank/empty launched sessions, subagent/Task dispatch or opencode-launch failing with "NOT NULL constraint failed: session_message.seq", or a re-migrated v2 schema on cloudbox/devbox.
+description: Use when touching the opencode version pin in home.base.nix, planning or executing the 1.15→1.17 cutover, considering an opencode 1.16.x/1.17.x upgrade, or debugging opencode.db corruption — blank/empty launched sessions, subagent/Task dispatch or opencode-launch failing with "NOT NULL constraint failed: session_message.seq" or "table session_message has no column named seq", or a re-migrated v2 schema on cloudbox/devbox.
 ---
 
 # Holding OpenCode on the 1.15 Line (v1.16 V2 DB Corruption)
 
-## TL;DR (current state as of 2026-06-08)
+## TL;DR (current state as of 2026-06-11)
 
-- **opencode is deliberately pinned to `v1.15.13-patched.3`.** Do **NOT** bump to 1.16.x.
-- v1.16 introduced a **v2 event-sourced session schema**. Its migration rewrites the
-  shared `~/.local/share/opencode/opencode.db` into a v2 schema that the 1.15 line
-  **cannot write**, and that crashes new sessions. There is **no released upstream fix**.
-- cloudbox AND devbox have both been repaired (v2 `seq` column removed) and run on
-  1.15.13.3: serve + profile + `opencode-launch` all healthy. The config pin is durable
-  (committed in `home.base.nix`). devbox was re-poisoned and repaired again on 2026-06-07
-  via the runbook below (subagent dispatch / `opencode-launch` had started failing with
-  the `seq` error).
-- **2026-06-08 upstream re-check: still nothing fixed — hold stands.** No release > **v1.16.2**
-  (no v1.16.3, no v1.17). `dev` is now 95 commits past v1.16.2 but `migration.ts` and
-  `event.ts` have **zero** commits since v1.16.2: the racy seq logic and the event-log-deleting
-  migration are both still live on `dev`. Every corruption issue is still OPEN; the only delta
-  vs 06-07 is that previously-unassigned issues now have owners (investigation, not resolution).
-  See "Upstream status" below for the per-issue/PR table.
+- **opencode is currently still pinned to `v1.15.13-patched.3`** — but the hold is
+  **cleared to lift via a cutover**, not held indefinitely. Empirical testing on
+  **2026-06-11** disproved the corruption fears for our topology (details below).
+  Don't bump the pin ad hoc; follow the cutover runbook:
+  `docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md`.
+- **What flipped:** the original fear was that v1.16/1.17 corrupts the DB even fresh
+  (#31072) and that migrating an existing DB wipes/breaks it. Both were tested
+  against real **v1.17.2** on copies of the live DB:
+  - **#31072 does NOT reproduce here.** 42 subagent sessions across in-process,
+    multi-process (13-way), and combined stress → **0 orphaned, 0 missing
+    `session_message`, 0 duplicate `(aggregate_id,seq)`**. The race can't bite our
+    one-DB topology: `commitSyncEvent` reads `latest` *inside* a `BEGIN IMMEDIATE`
+    transaction, and a 1-permit semaphore serializes all transactions per process.
+  - **Migrating loads our history fine.** 64/64 sampled sessions load (#29908 does
+    not bite us); the destructive migration won't re-fire (all 32 already applied).
+    The only catch is self-inflicted (see "Lifting the hold").
+- **The historical hazard was real but self-inflicted:** running **mixed 1.15 + 1.16
+  binaries on the one shared DB** caused split-brain (`NOT NULL constraint failed:
+  session_message.seq`). cloudbox/devbox were repaired (v2 `seq` column dropped) and
+  ran on 1.15.13.3. A clean, all-at-once cutover (no mixed binaries) avoids this.
 - Full upstream investigation: `~/projects/opencode/DB-CORRUPTION-RESEARCH.md` (untracked).
 - Related but different failure mode: see the `fixing-opencode-db` skill (SIGABRT/core-dump
   from individual corrupt rows; binary-search repair). This skill is about the **v1.16 v2
   schema migration** specifically.
 
-## Why we can't run 1.16.x
+## Why the v2 schema broke 1.15 (the original cause — now a transition hazard, not a wall)
 
 The fork `johnnymo87/opencode-patched` tracks upstream `anomalyco/opencode`. In v1.16.0,
 PR #29068 moved schema ownership into `packages/core` and added a custom migration engine
@@ -44,22 +49,43 @@ kills a new session's first-message turn — so `opencode-launch`'d sessions com
 (0 messages, never advance past creation). Established sessions look fine because display
 reads `message`/`part`, not `session_message`.
 
-Upstream issues, all OPEN / unreleased as of 2026-06-08: #31119 ("no such column: name"),
+**The crucial nuance (why this is no longer a wall):** that failure is a **mixed-version**
+problem — a 1.15 *projector* writing the *v2* schema. It is **not** a defect that makes 1.17
+itself unusable. Run 1.17 *everywhere* (no 1.15 writer on the DB) and the symptom disappears;
+that's what the cutover does. The corruption issues below are real upstream bugs but, per the
+2026-06-11 testing, do not reproduce on our topology.
+
+Upstream issues, all still OPEN as of 2026-06-11: #31119 ("no such column: name"),
 #30953 (account_state mismatch), #29908 (legacy rows → 400), #31072 (commitSyncEvent `seq`
-race), #30963 (event-log-deleting migration). None merged into a release.
+race), #30963 (event-log-deleting migration). None merged into a release — but see
+"Upstream status" for why each is inert for us.
 
-### A fresh DB does NOT make 1.16 safe (#31072)
+### #31072 (the subagent seq race) — does NOT reproduce on our topology
 
-The migration crashes (#31119, #30953, #17270, #29908) only fire against a **pre-existing**
-DB, so it is tempting to think "just delete `opencode.db` and 1.16 is fine." It is not.
-**#31072** corrupts a **fresh** DB too: `commitSyncEvent` (`packages/core/src/event.ts`)
-computes the next event `seq` in JS as `latest + 1` and then upserts that static value, so
-two concurrent writers (parallel subagents, or a subagent racing a parent update) both grab
-the same seq and the loser's event is silently dropped. The subagent `session` row exists but
-never projects its first message — the agent dies before doing any work. The issue reports
-**331 of 333 subagent sessions (99.4%) orphaned** on one real production DB. This is the same
-"blank launched session" symptom we see, and it is why tossing the DB never rescued 1.16. As
-of 2026-06-08 there is **no fix PR in flight** for #31072 and the racy code is still on `dev`.
+**This was the scariest claim and it did not hold up under testing (2026-06-11).**
+
+The issue says `commitSyncEvent` (`packages/core/src/event.ts`) computes the next event
+`seq` as `latest + 1` in JS and upserts a static value, so two concurrent writers grab the
+same seq and the loser's event is silently dropped — reporting **331/333 subagent sessions
+(99.4%) orphaned** on one production DB (a Windows **desktop** install). The issue is still
+OPEN (no fix PR for #31072).
+
+But the *current* code (v1.16.2 == v1.17.2 for this path) is **not** an unguarded upsert:
+
+- `commitSyncEvent` reads `latest` **inside** `db.transaction(…, { behavior: "immediate" })`
+  → `BEGIN IMMEDIATE` takes a RESERVED lock before the read, so read-compute-write is atomic.
+- Intra-process, `sqlite.bun.ts` gates the single `bun:sqlite` connection behind a
+  `Semaphore.make(1)` (1 permit), held for the whole transaction — so two fibers (parallel
+  subagents) **cannot** interleave. Task subagents run **in-process** (`tool/task.ts` →
+  `Effect.forkIn`), not as separate processes.
+- Cross-process writers serialize via `BEGIN IMMEDIATE` + `busy_timeout = 5000`.
+
+**Empirical result on a fresh v1.17.2 v2 DB:** 42 subagent sessions across in-process
+(10 parallel), multi-process (12 concurrent `opencode run` + serve = 13-way), and combined
+worst-case (4 procs × 8 parallel) → **0 orphaned, 0 missing `session_message`, 0 duplicate
+`(aggregate_id,seq)`, `quick_check ok`.** The reporter's 99.4% was almost certainly the
+desktop app's genuinely multi-process design on an older snapshot, which our headless
+serve does not reproduce.
 
 ## The core fragility: one shared DB, mixed binaries
 
@@ -69,6 +95,15 @@ the `opencode-serve.service` plus every standalone `opencode` / `opencode-launch
 is a **stray 1.16.x process** opening that shared DB: it silently runs the v2 migration and
 **re-poisons** the DB out from under the running 1.15 serve. This is exactly what happened on
 2026-06-06 (a 1.16.2 process re-migrated the DB at ~23:44 after a partial rollback).
+
+**Topology reality (measured 2026-06-11): cloudbox is heavily multi-writer, not single-serve.**
+At a typical moment ~**15 processes** held `opencode.db` open: the systemd serve (`:4096`)
+**plus ~14 standalone `opencode` TUIs** (started from interactive shells, each embedding its
+own server on its own port). They are not `opencode attach` clients (those are thin HTTP
+clients of the serve). This is harmless on 1.15 (no v2 write path) and safe on 1.17 (the
+intra-process semaphore + cross-process `BEGIN IMMEDIATE` serialize writers — see #31072
+above), but it is **why the cutover must stop every opencode process at once**: a single
+stray binary of the *other* major version on the shared DB is what causes split-brain.
 
 **Therefore the pin must cover every entry point:** the serve, the profile `opencode`
 (what `opencode-launch`'s auto-attach and any direct `opencode` use), and any nightly/
@@ -190,40 +225,58 @@ readlink -f ~/.nix-profile/bin/opencode                                         
 # session_message has NO seq column (see detection script); no 1.16.x procs running
 ```
 
-## Upstream status (re-checked 2026-06-08)
+## Upstream status (re-checked 2026-06-11)
 
-Latest released tags: **v1.16.0**, **v1.16.2** (no v1.16.1, no v1.16.3, no v1.17). `dev`
-is 95 commits past v1.16.2, but `packages/core/src/database/migration.ts` and
-`packages/core/src/event.ts` have **zero** commits since v1.16.2 — the destructive
-`20260604172448_event_sourced_session_input/migration.sql` (`DELETE FROM session_message /
-event / event_sequence / session_input / workspace`) and the racy `seq = latest + 1` are
-both still live on `dev`. Re-run this check before any 1.16 reconsideration:
+Released tags now: **v1.16.0, v1.16.2, v1.17.0, v1.17.1, v1.17.2** (v1.17.2 tagged
+2026-06-10). The six corruption issues are **all still OPEN** (last activity 06-05..06-07,
+before v1.17.2), and `migration.ts` is **unchanged** v1.16.2→v1.17.2; `event.ts` changed
+only via a logger refactor (#31310) and a typed-app-layer-graph refactor (#31531), neither
+touching the seq logic. So at the *file* level 1.17.2 == v1.16.2 for the DB paths — **yet
+empirical testing (above) shows those paths are safe on our topology.** "Issue OPEN" here
+means "nobody upstream closed it," not "it breaks us." Re-run before any reconsideration:
 
 ```bash
 cd ~/projects/opencode && git fetch --all --tags --prune
 git tag --list 'v1.16*' 'v1.17*' --sort=-creatordate
-git log --oneline v1.16.2..origin/dev -- packages/core/src/database/migration.ts packages/core/src/event.ts
+git log --oneline v1.16.2..v1.17.2 -- packages/core/src/database/migration.ts packages/core/src/event.ts
 ```
 
-| # | Title | State (06-08) | Assignee | Fix |
+| # | Title | State (06-11) | In v1.17.2? | Bites us? |
 |---|---|---|---|---|
-| 31119 | no such column: name (migration) | OPEN | StarpTech | PR #31121 open (mergeable, **not merged**) |
-| 30953 | account_state mismatch on upgrade | OPEN | nexxeln | none |
-| 17270 | CREATE TABLE account skip | OPEN | rekram1-node | none |
-| 29908 | legacy rows → 400 on load | OPEN | jlongster | PR #29965 open |
-| **31072** | **subagent first-message seq race (bites fresh DB)** | OPEN | StarpTech | **no PR** |
-| 30963 | migration deletes entire event log | OPEN | kitlangton | none |
+| 31119 | no such column: name (migration) | OPEN | bug present; PR #31121 **unmerged** | No — only on legacy drizzle journal; our DB already migrated |
+| 30953 | account_state mismatch on upgrade | OPEN | present | No — already migrated |
+| 17270 | CREATE TABLE account skip | OPEN | present | No — already migrated |
+| 29908 | legacy rows → 400 on load | OPEN | present; PR #29965 **unmerged** | **No — tested: 64/64 old sessions load** |
+| **31072** | subagent first-message seq race | OPEN | present | **No — tested: 0/42 subagents orphaned** (BEGIN IMMEDIATE + semaphore) |
+| 30963 | migration deletes entire event log | OPEN | present | No — won't re-fire (all 32 migrations already applied) |
 
-Delta vs 06-07: several previously-unassigned issues now have owners. That is investigation
-progress, **not** a fix — none have merged to `dev`, let alone shipped in a tag > v1.16.2.
+## Lifting the hold (the cutover)
 
-## What "done with the hold" looks like (future)
+The corruption issues are **no longer a reason to stay on 1.15** — they don't reproduce on
+our single-DB headless topology (validated 2026-06-11 against v1.17.2 on copies of the live
+DB). What remains is **operational**, not waiting for upstream:
 
-Stay on the 1.15 line until upstream ships a released fix for the v2 migration corruption
-(track the issues above and `DB-CORRUPTION-RESEARCH.md`). Only then test 1.16.x against a
-**copy** of the DB before any host bump, and ensure no 1.15 and 1.16 binaries ever share the
-same live DB during a transition. Also gate any `update-opencode-patched` automation so it
-does not auto-bump `upstreamVersion` back into the 1.16 line.
+1. Cut a `v1.17.2-patched` fork release carrying our patches (retry-cap, caching, vim) — they
+   don't touch the DB layer, so DB behavior == upstream v1.17.2.
+2. Execute the **atomic** cutover (stop *every* opencode process first — see multi-writer note):
+   `docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md`.
+3. Pick a DB strategy: **fresh + archive** (recommended; clean/fast, history stays searchable
+   via the archived file) or **migrate in place** (keeps sessions live-resumable but carries
+   4.2 GB bloat). **Migrate requires re-adding `session_message.seq`** that our `fix.sh` repair
+   dropped — without it 1.17 can't write (`table session_message has no column named seq`):
+
+   ```sql
+   DELETE FROM session_message;            -- stale, re-derivable projection rows
+   ALTER TABLE session_message ADD COLUMN seq integer NOT NULL;
+   CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message (session_id, seq);
+   CREATE INDEX session_message_session_type_seq_idx ON session_message (session_id, type, seq);
+   ```
+4. Gate `update-opencode-patched` to track the 1.17 line.
+
+**Known open fast-follow (not a DB issue, not a blocker):** on 1.16.x, `self_compact_and_resume`
+sometimes left the post-compaction resumption message sitting with no turn firing. Couldn't
+repro headlessly (needs the interactive serve+TUI compaction→resume flow). Verify during an
+interactive 1.17 trial; file/fix separately.
 
 ## Cross-references
 
@@ -231,4 +284,5 @@ does not auto-bump `upstreamVersion` back into the 1.16 line.
 - `rebuilding` — host → flake-target mapping for `home-manager switch`.
 - `auditing-opencode-llm-calls` / `operating-aigateway` — the serve's model routing.
 - `~/projects/opencode/DB-CORRUPTION-RESEARCH.md` — upstream issue/PR investigation.
+- `docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md` — the validated cutover procedure.
 - `home.base.nix` commits `88713e1` (.2 hold) and `8923b77` (.3 retry-cap) on `main`.
