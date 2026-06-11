@@ -234,17 +234,19 @@ let
     '';
   };
 
-  # Patched opencode with prompt-loop byte identity, cache-aligned compaction,
-  # Gemini empty parts fix, vim, tool fix, MCP reconnect, instance-state-partition
-  # fix, and cache thinking-skip. Targets opencode v1.16.2.
-  # eager-input-streaming.patch was DROPPED on 2026-06-05: v1.16.0+ sets
-  # toolStreaming=false upstream in ProviderTransform.options() for
-  # @ai-sdk/google-vertex/anthropic + non-claude @ai-sdk/anthropic, covering our use.
-  # (Adaptive reasoning for opus-4-7+ from upstream PR #29769 — landed in v1.15.12 —
-  # remains in v1.16.2, so claude-opus-4-8 keeps the {low, medium, high, xhigh, max}
-  # variant set with summarized thinking display instead of the legacy {high, max}
-  # branch that opus-4-8 rejects with "'thinking.type.enabled' is not supported for
-  # this model. Use 'thinking.type.adaptive'...".)
+  # Patched opencode targeting opencode v1.17.2. Patch set (release/v1.17 branch
+  # of opencode-patched, see patches/apply.sh there):
+  #   gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim.
+  # DROPPED for the 1.17 line (see workstation
+  # docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md):
+  #   - prompt-loop-cache (#25367) + cache-aligned-compaction (#25100): cost-cache
+  #     opts; dropped pending a measured cache-economics pass on 1.17 (whether they
+  #     still help on the rewritten event-sourced loop is unverified; tracking-cache-costs).
+  #   - eager-input-streaming: SUPERSEDED by upstream v1.17.2 transform.ts options()
+  #     (sets toolStreaming=false for vertex/anthropic + non-claude anthropic).
+  #   - instance-state-partition: 1.17 refactored the instance/HTTP layer; dropped.
+  #     RISK: re-verify the Question tool does not hang on submit (cutover Phase 4).
+  #   - mcp-reconnect: 1.17 remote MCP conn is oauth-aware; needs re-engineering. Deferred.
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
   #
@@ -257,22 +259,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-1y5XiK3DliXhHo1QE4sz80Jzpz2cvjgQ4YhWssyEV+4=";
+      hash = "sha256-WbuLZTkLQRa0ftTFsPv6EtTJc1xQWmRUJ+g9s01Wuus=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-V5/Ys5Ot6pe+bI21Xj/yXsaaG65j0d1J/2sG4TtDoJ8=";
+      hash = "sha256-EUHDnFyqsV1uTMU8D3dVO19mMV7DJis1ozJu4y0wKZo=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-bLFb1T+X7N79lDbX71uhyR4vJz2BuhZbD58HSVwM6/g=";
+      hash = "sha256-GV+OcLOcUKB5M6Btkw8Zl/TgWk0DyBS7I6kvoee0Urk=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-1cWHHxyfUOYQVYK3lRVsyab8gspOXOYTuK9sYRbHsQM=";
+      hash = "sha256-q/tD9m87FiaxgcdzhHCvfG36nDaRauaQe4IlMHMf6uY=";
       isZip = true;
     };
   };
@@ -286,22 +288,22 @@ let
     # Bump `upstreamVersion` (and reset `patchedRevision` to "") for upstream
     # version bumps -- and check whether any patches in opencode-patched can be
     # dropped because they're now upstream (see check-sunset.yml in that repo).
-    # V2 DB CORRUPTION HOLD (2026-06-07, cloudbox): DO NOT bump to 1.16.x. The
-    # v1.16 v2 event-sourced session schema migration
-    # (20260604172448_event_sourced_session_input) rewrites ~/.local/share/opencode/
-    # opencode.db to a v2 schema (session_message.seq NOT NULL, event/event_sequence
-    # tables) that the 1.15.x line cannot write, and crashes new sessions with
-    # "NOT NULL constraint failed: session_message.seq". A stray 1.16.2 process
-    # sharing the same DB will silently re-migrate (poison) it. Upstream has no
-    # released fix as of this date (see ~/projects/opencode/DB-CORRUPTION-RESEARCH.md;
-    # issues #31119/#30953/#31072, none merged/released).
+    # CUTOVER IN PROGRESS (2026-06-11): the v1.16/1.17 "V2 DB corruption" HOLD has
+    # been CLEARED. The DB-corruption fears (subagent seq race #31072, destructive
+    # migration #29908) were empirically disproven for our topology on real v1.17.2
+    # (42-subagent stress: 0 orphans/0 missing/0 dup seq; old history loads; the
+    # migration won't re-fire). Full evidence + the atomic-cutover procedure:
+    #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
+    #   .opencode/skills/holding-opencode-on-1.15/SKILL.md
     #
-    # We pin to the PUBLISHED capped 1.15.13 base. v1.15.13-patched.3 re-includes
-    # the retry-cap.patch Vertex/Gemini runaway cure (MAX_RETRIES=8 + jitter) that
-    # the earlier published .2 lacked — cut via build-release.yml on branch
-    # release/v1.15. Bumping upstreamVersion to 1.16.x again will re-corrupt the DB.
-    upstreamVersion = "1.15.13";
-    patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
+    # This pins v1.17.2-patched.2 (retry-cap runaway cure preserved). This change is
+    # STAGED on branch opencode-1.17-cutover and must NOT be `home-manager switch`ed
+    # piecemeal: cloudbox is ~15-way multi-writer on the shared opencode.db, so the
+    # switch must stop ALL opencode processes at once (serve + every standalone TUI)
+    # from a plain SSH shell — see the runbook Phase 3. Doing the switch from inside
+    # an opencode session will kill that session mid-cutover.
+    upstreamVersion = "1.17.2";
+    patchedRevision = "2";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
@@ -311,7 +313,7 @@ let
     # V2 DB corruption reason above (research session ses_15fe27082ffe8lANCIdYmfi7TT);
     # set to "" to resume tracking the newest release. Greppable marker only — it
     # does not feed the derivation.
-    opencodePatchedHold = "1.15.13";
+    opencodePatchedHold = "1.17.2";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
