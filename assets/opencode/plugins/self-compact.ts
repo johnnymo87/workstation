@@ -9,6 +9,7 @@ import {
   createSelfCompactTool,
   findActiveModel,
   getSharedPendingResumes,
+  waitForSessionIdleHttp,
 } from "./self-compact-impl"
 
 // IMPORTANT: only the default export should be a plugin factory.
@@ -41,6 +42,12 @@ const plugin: Plugin = async (ctx) => {
   const onCompacted = createOnCompacted({
     pending,
     callPromptAsync: (input) => callPromptAsyncHttp(callCtx, input),
+    // Wait for the runner to go idle before resuming. session.compacted fires while the
+    // compaction loop is still Running; firing prompt_async then gets discarded by
+    // Runner.ensureRunning. See createOnCompacted's waitForIdle doc for the full RCA.
+    // ctx.directory scopes /session/status to this session's instance (the raw in-process
+    // fetch injects no directory, so /session/status would otherwise hit the wrong instance).
+    waitForIdle: (input) => waitForSessionIdleHttp(callCtx, { ...input, directory: ctx.directory }),
   })
 
   return {

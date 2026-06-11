@@ -35,6 +35,13 @@ export async function findActiveModel(input: {
 
 const STALE_MS = 30 * 60 * 1000
 
+// Bounded poll for the post-compaction idle. session.compacted is published from inside
+// the still-running compaction loop, so the runner needs a moment to finish and go idle
+// before prompt_async can start a fresh loop. 120 * 250ms = 30s is a generous ceiling;
+// in practice the runner goes idle within ~1s of session.compacted.
+const DEFAULT_IDLE_POLL_ATTEMPTS = 120
+const DEFAULT_IDLE_POLL_INTERVAL_MS = 250
+
 /**
  * Diagnostic logger for the self-compact regression hunt (workstation issue:
  * post-1.15 bump, the resumption prompt no longer lands after compaction).
@@ -216,6 +223,25 @@ function isSessionIdle(event: PluginBusEvent): event is {
 export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
   callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
+  /**
+   * Resolves true once the session's runner is idle, false on timeout.
+   *
+   * This is the v3 deadlock/discard fix. `session.compacted` is published from
+   * INSIDE the still-running compaction loop (compaction.ts publishes Event.Compacted
+   * mid-`runLoop`), so at the instant we receive it the session's `Runner` is still
+   * in state `Running`. If we fired `prompt_async` now, `Runner.ensureRunning`
+   * (opencode effect/runner.ts) would hit its `Running` branch, which awaits the
+   * existing run and SILENTLY DISCARDS the new loop — the resumption message would be
+   * persisted but never processed (the 1.17.2 regression). Waiting for idle guarantees
+   * `ensureRunning` hits the `Idle` branch and starts a fresh loop.
+   *
+   * Polling the authoritative status (rather than waiting for an idle bus EVENT) makes
+   * this order-independent: the loop-end `session.status: idle` event and this
+   * `session.compacted` event are published nearly simultaneously and can be delivered
+   * to the plugin in either order, so an event-driven "fire on next idle" approach would
+   * intermittently miss.
+   */
+  waitForIdle: (input: { sessionID: string }) => Promise<boolean>
 }) {
   return async ({ event }: { event: PluginBusEvent }) => {
     if (event.type === "session.compacted") {
@@ -233,15 +259,26 @@ export function createOnCompacted(deps: {
       debug("onCompacted no-entry", { sessionID, pendingSize: deps.pending.size })
       return
     }
-    // Remove the entry synchronously BEFORE the await so a re-entrant
+    // Remove the entry synchronously BEFORE any await so a re-entrant
     // session.compacted event for the same session doesn't observe it
-    // and double-deliver. If callPromptAsync throws, the entry is still
+    // and double-deliver. If delivery later fails, the entry is still
     // gone — matches MVP design (no automatic retry; user re-invokes the
     // skill if the prompt fails to deliver).
     deps.pending.delete(sessionID)
-    debug("onCompacted firing prompt_async", { sessionID, promptChars: entry.prompt.length })
+    const text = entry.prompt
+
+    debug("onCompacted waiting for idle", { sessionID })
+    const idle = await deps.waitForIdle({ sessionID })
+    if (!idle) {
+      // Runner never went idle within the poll window; bail without firing so we
+      // don't post a message that ensureRunning would discard. User re-invokes.
+      debug("onCompacted gave up (session never went idle)", { sessionID })
+      return
+    }
+
+    debug("onCompacted firing prompt_async", { sessionID, promptChars: text.length })
     try {
-      await deps.callPromptAsync({ sessionID, text: entry.prompt })
+      await deps.callPromptAsync({ sessionID, text })
       debug("onCompacted prompt_async OK", { sessionID })
     } catch (err) {
       debug("onCompacted prompt_async FAILED", {
@@ -369,6 +406,65 @@ export async function callSummarizeHttp(
   )
   debug("callSummarizeHttp response", { sessionID: input.sessionID, status: res.status })
   if (!res.ok) throw new Error(`summarize failed: ${res.status} ${await res.text()}`)
+}
+
+/**
+ * Polls `GET /session/status` until the given session's runner is idle.
+ *
+ * The status endpoint returns a `Record<sessionID, { type: "idle" | "busy" | "retry" }>`.
+ * A session that is ABSENT from the map has no live runner, which is also idle (the
+ * runner deletes itself on idle). Returns true the first time the session reads idle,
+ * or false after `attempts` polls. A failed/malformed status read is treated as
+ * "unknown — keep polling" so we never fire prematurely.
+ *
+ * IMPORTANT: `/session/status` has no sessionID in its path, so opencode's
+ * workspace-routing scopes it by the `directory` query param (falling back to the
+ * serve's process.cwd() — the wrong instance — if absent). The plugin's internalFetch
+ * is the raw in-process app.fetch and does NOT inject a directory, so we MUST pass the
+ * compacted session's directory explicitly (the plugin supplies ctx.directory, which the
+ * plugin host guarantees equals the session's directory). Without it the map comes back
+ * empty and we'd treat the session as idle immediately — defeating the whole fix.
+ */
+export async function waitForSessionIdleHttp(
+  ctx: CallContext,
+  input: {
+    sessionID: string
+    directory?: string
+    attempts?: number
+    intervalMs?: number
+    sleep?: (ms: number) => Promise<void>
+  },
+): Promise<boolean> {
+  const attempts = input.attempts ?? DEFAULT_IDLE_POLL_ATTEMPTS
+  const intervalMs = input.intervalMs ?? DEFAULT_IDLE_POLL_INTERVAL_MS
+  const sleep = input.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const url = new URL("/session/status", ctx.serverUrl)
+  if (input.directory) url.searchParams.set("directory", input.directory)
+
+  for (let i = 0; i < attempts; i++) {
+    let idle = false
+    try {
+      const res = await ctx.fetch(new Request(url.toString(), { method: "GET" }))
+      if (res.ok) {
+        const parsed = await res.json()
+        if (parsed && typeof parsed === "object") {
+          const status = (parsed as Record<string, { type?: string } | undefined>)[input.sessionID]
+          // Absent session = no runner = idle; otherwise idle iff type === "idle".
+          idle = !status || status.type === "idle"
+        }
+      }
+    } catch {
+      // Treat a read failure as "unknown"; keep polling rather than firing.
+      idle = false
+    }
+    if (idle) {
+      debug("waitForSessionIdle idle", { sessionID: input.sessionID, attempt: i })
+      return true
+    }
+    if (i < attempts - 1) await sleep(intervalMs)
+  }
+  debug("waitForSessionIdle timeout", { sessionID: input.sessionID, attempts })
+  return false
 }
 
 export async function callPromptAsyncHttp(

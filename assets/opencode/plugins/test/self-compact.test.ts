@@ -8,6 +8,7 @@ import {
   createOnStatus,
   callSummarizeHttp,
   callPromptAsyncHttp,
+  waitForSessionIdleHttp,
 } from "../self-compact-impl"
 import type { PendingResume } from "../self-compact-impl"
 
@@ -148,7 +149,7 @@ describe("createSelfCompactTool (v2: stash-and-return)", () => {
     pendingA.get("ses_shared")!.phase = "summarizing"
 
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
-    const handler = createOnCompacted({ pending: pendingB, callPromptAsync })
+    const handler = createOnCompacted({ pending: pendingB, callPromptAsync, waitForIdle: async () => true })
     await handler({
       event: { type: "session.compacted", properties: { sessionID: "ses_shared" } },
     })
@@ -215,7 +216,7 @@ describe("createOnCompacted event handler", () => {
     const pending = new Map<string, PendingResume>()
     pending.set("s1", { prompt: "x", phase: "summarizing", createdAt: Date.now() })
     const callPromptAsync = vi.fn()
-    const handler = createOnCompacted({ pending, callPromptAsync })
+    const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => true })
     await handler({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
     expect(callPromptAsync).not.toHaveBeenCalled()
     expect(pending.has("s1")).toBe(true)
@@ -224,7 +225,7 @@ describe("createOnCompacted event handler", () => {
   it("ignores session.compacted for sessions without a pending prompt", async () => {
     const pending = new Map<string, PendingResume>()
     const callPromptAsync = vi.fn()
-    const handler = createOnCompacted({ pending, callPromptAsync })
+    const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => true })
     await handler({ event: { type: "session.compacted", properties: { sessionID: "unknown" } } })
     expect(callPromptAsync).not.toHaveBeenCalled()
   })
@@ -233,7 +234,7 @@ describe("createOnCompacted event handler", () => {
     const pending = new Map<string, PendingResume>()
     pending.set("s1", { prompt: "resume now", phase: "summarizing", createdAt: Date.now() })
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
-    const handler = createOnCompacted({ pending, callPromptAsync })
+    const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => true })
     await handler({
       event: { type: "session.compacted", properties: { sessionID: "s1" } },
     })
@@ -245,7 +246,7 @@ describe("createOnCompacted event handler", () => {
     const pending = new Map<string, PendingResume>()
     pending.set("s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() })
     const callPromptAsync = vi.fn().mockRejectedValue(new Error("boom"))
-    const handler = createOnCompacted({ pending, callPromptAsync })
+    const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => true })
     await expect(
       handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } }),
     ).rejects.toThrow("boom")
@@ -262,7 +263,7 @@ describe("createOnCompacted event handler", () => {
       // same session would also see it and double-deliver.
       observedDuringCall = pending.has("s1")
     })
-    const handler = createOnCompacted({ pending, callPromptAsync })
+    const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => true })
     await handler({
       event: { type: "session.compacted", properties: { sessionID: "s1" } },
     })
@@ -452,5 +453,127 @@ describe("createOnStatus (v2: idle-triggered summarize)", () => {
       },
     })
     expect(summarizeCalls).toBe(1)
+  })
+})
+
+describe("createOnCompacted (v3: wait for the runner to go idle before resuming)", () => {
+  // Regression: on 1.17.2 session.compacted is published from INSIDE the still-running
+  // compaction loop. Firing prompt_async then hits Runner.ensureRunning's "Running"
+  // branch, which silently discards the new loop, so the resumption message is persisted
+  // but never processed. The fix waits until the session reports idle before firing.
+  it("does NOT fire prompt_async until waitForIdle resolves", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() }],
+    ])
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    let releaseIdle!: (v: boolean) => void
+    const idle = new Promise<boolean>((r) => (releaseIdle = r))
+    const waitForIdle = vi.fn().mockReturnValue(idle)
+    const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle })
+
+    const done = handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } })
+    await Promise.resolve()
+    // Runner still Running: must not have fired yet (this is the bug we are fixing).
+    expect(waitForIdle).toHaveBeenCalledWith({ sessionID: "s1" })
+    expect(callPromptAsync).not.toHaveBeenCalled()
+
+    releaseIdle(true)
+    await done
+    expect(callPromptAsync).toHaveBeenCalledWith({ sessionID: "s1", text: "resume" })
+  })
+
+  it("does NOT fire prompt_async if the session never goes idle (waitForIdle false)", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() }],
+    ])
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    const waitForIdle = vi.fn().mockResolvedValue(false)
+    const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle })
+    await handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } })
+    expect(callPromptAsync).not.toHaveBeenCalled()
+    expect(pending.has("s1")).toBe(false)
+  })
+
+  it("removes the pending entry before awaiting waitForIdle (no double-delivery on re-entrant compacted)", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() }],
+    ])
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    let observedDuringWait: boolean | undefined
+    const waitForIdle = vi.fn().mockImplementation(async () => {
+      observedDuringWait = pending.has("s1")
+      return true
+    })
+    const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle })
+    await handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } })
+    expect(observedDuringWait).toBe(false)
+    expect(callPromptAsync).toHaveBeenCalledOnce()
+  })
+})
+
+describe("waitForSessionIdleHttp", () => {
+  const statusResponse = (map: Record<string, { type: string }>) =>
+    new Response(JSON.stringify(map), { status: 200, headers: { "Content-Type": "application/json" } })
+
+  it("GETs /session/status scoped by directory and returns true when the session is idle", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(statusResponse({ s1: { type: "idle" } }))
+    const ok = await waitForSessionIdleHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", directory: "/home/dev/projects/foo", attempts: 5, intervalMs: 0, sleep: async () => {} },
+    )
+    expect(ok).toBe(true)
+    const req = fetchFn.mock.calls[0][0] as Request
+    const url = new URL(req.url)
+    expect(url.pathname).toBe("/session/status")
+    expect(url.searchParams.get("directory")).toBe("/home/dev/projects/foo")
+    expect(req.method).toBe("GET")
+  })
+
+  it("treats a session absent from the status map (no runner) as idle", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(statusResponse({ other: { type: "busy" } }))
+    const ok = await waitForSessionIdleHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", attempts: 3, intervalMs: 0, sleep: async () => {} },
+    )
+    expect(ok).toBe(true)
+  })
+
+  it("polls until the session transitions from busy to idle", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(statusResponse({ s1: { type: "busy" } }))
+      .mockResolvedValueOnce(statusResponse({ s1: { type: "busy" } }))
+      .mockResolvedValueOnce(statusResponse({ s1: { type: "idle" } }))
+    const sleep = vi.fn().mockResolvedValue(undefined)
+    const ok = await waitForSessionIdleHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", attempts: 10, intervalMs: 5, sleep },
+    )
+    expect(ok).toBe(true)
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(sleep).toHaveBeenCalledTimes(2)
+  })
+
+  it("returns false after exhausting attempts while still busy", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(statusResponse({ s1: { type: "busy" } }))
+    const ok = await waitForSessionIdleHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", attempts: 4, intervalMs: 0, sleep: async () => {} },
+    )
+    expect(ok).toBe(false)
+    expect(fetchFn).toHaveBeenCalledTimes(4)
+  })
+
+  it("keeps polling (does not crash or early-return idle) when a status read fails", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("boom", { status: 500 }))
+      .mockResolvedValueOnce(statusResponse({ s1: { type: "idle" } }))
+    const ok = await waitForSessionIdleHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", attempts: 5, intervalMs: 0, sleep: async () => {} },
+    )
+    expect(ok).toBe(true)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
   })
 })
