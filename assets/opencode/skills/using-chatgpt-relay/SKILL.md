@@ -68,13 +68,28 @@ In this repo the persistent tunnel launchd agents (`devbox-dev-tunnel`,
 `cloudbox-dev-tunnel`) already carry port 3033 — see the
 `troubleshooting-nixos-host` skill for the full port table.
 
-### 3. On the remote host: Install the CLI
+### 3. On the remote host: the CLI is already installed
+
+On the NixOS hosts (devbox + cloudbox) the `ask-question` CLI is installed
+declaratively as a Nix package (`pkgs/ask-question`, wired into
+`home.base.nix` under `isDevbox || isCloudbox`). There is **no** `npm install`
+/ `npm link` step, and the repo is **not** cloned on these hosts — only the
+client is packaged. The `ask-question-server` and `ask-question-login` halves
+need playwright + a browser and run only on macOS (`~/Code/chatgpt-relay`).
+
+If `ask-question` is missing (e.g. on a freshly provisioned host), apply
+home-manager:
 
 ```bash
-cd ~/projects/chatgpt-relay
-npm install
-npm link
+# devbox
+nix run home-manager -- switch --flake ~/projects/workstation#dev
+# cloudbox
+nix run home-manager -- switch --flake ~/projects/workstation#cloudbox
 ```
+
+To bump the pinned version, edit `pkgs/ask-question/default.nix` (`rev` +
+`src.hash`, plus `undiciVersion` and the node-modules `outputHash` if the
+upstream lockfile changed), then re-apply.
 
 ### 4. On the remote host: Verify connection
 

@@ -52,6 +52,7 @@
     # Self-packaged tools (updated via nix-update in CI)
     localPkgsFor = system: let p = pkgsFor system; in {
       acli = p.callPackage ./pkgs/acli { };
+      ask-question = p.callPackage ./pkgs/ask-question { };
       bb = p.callPackage ./pkgs/bb { };
       beads = p.callPackage ./pkgs/beads { };
       gclpr = p.callPackage ./pkgs/gclpr { };

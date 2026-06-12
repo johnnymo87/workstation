@@ -554,6 +554,13 @@ in
   ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
     localPkgs.reset-workspace
   ]
+  # chatgpt-relay client CLI. `ask-question` POSTs prompts to
+  # ask-question-server (running on macOS) over the localhost:3033 SSH
+  # reverse tunnel, which exists on both NixOS hosts. The server/login halves
+  # stay on macOS. See pkgs/ask-question + the using-chatgpt-relay skill.
+  ++ lib.optionals (isDevbox || isCloudbox) [
+    localPkgs.ask-question
+  ]
   # Terraform CLI required by infra repositories on work hosts.
   ++ lib.optionals (isDarwin || isCloudbox) [
     localPkgs.terraform
