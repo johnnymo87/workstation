@@ -41,6 +41,15 @@
         mode = "0600";
         path = "/home/dev/.ssh/id_ed25519_github";
       };
+      # DoltHub credential (Ed25519 JWK keypair) used by `bd dolt push/pull`
+      # to back up the git-free beads issue DB to DoltHub. The same keypair is
+      # shared across all hosts; home.activation.deployDoltCreds materializes it
+      # at ~/.dolt/creds/<keyid>.jwk and points config_global.json at it.
+      dolthub_jwk = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       cloudflared_tunnel_token = {
         owner = "cloudflared";
         group = "cloudflared";

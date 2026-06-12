@@ -184,6 +184,41 @@ lib.mkIf isDevbox {
     fi
   '';
 
+  # Deploy the shared DoltHub credential used by `bd dolt push/pull` to back up
+  # the git-free beads issue DB (remote configured in .beads/config.yaml). The
+  # Ed25519 JWK keypair lives in sops; we materialize it as a real 0600 file at
+  # ~/.dolt/creds/<keyid>.jwk and point ~/.dolt/config_global.json at it via the
+  # "user.creds" key (merged, not clobbered). The keyid is derived from the
+  # public key and is therefore stable/known up front, identical on every host.
+  home.activation.deployDoltCreds = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+    set -euo pipefail
+
+    keyid="6fnahnt9ls5iud8ac4eulmqf535p13co1jcjrluch86ve"
+    secret="/run/secrets/dolthub_jwk"
+
+    if [ ! -r "$secret" ]; then
+      echo "deployDoltCreds: skipping (sops secret not available)"
+    else
+      creds_dir="$HOME/.dolt/creds"
+      mkdir -p "$creds_dir"
+
+      tmp="$(mktemp "$creds_dir/$keyid.jwk.tmp.XXXXXX")"
+      cat "$secret" > "$tmp"
+      mv "$tmp" "$creds_dir/$keyid.jwk"
+      chmod 600 "$creds_dir/$keyid.jwk"
+
+      # Point dolt at this credential without dropping any other config keys.
+      cfg="$HOME/.dolt/config_global.json"
+      existing="{}"
+      [ -f "$cfg" ] && existing="$(cat "$cfg")"
+      ctmp="$(mktemp "$HOME/.dolt/config_global.json.tmp.XXXXXX")"
+      printf '%s' "$existing" | ${pkgs.jq}/bin/jq --arg k "$keyid" '.["user.creds"] = $k' > "$ctmp"
+      mv "$ctmp" "$cfg"
+
+      echo "deployDoltCreds: dolt credential deployed"
+    fi
+  '';
+
   # Backup /persist to a local tarball (cloud volume not included in Hetzner snapshots)
   home.file.".local/bin/backup-persist" = {
     executable = true;
