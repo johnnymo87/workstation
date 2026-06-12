@@ -39,13 +39,6 @@ Uses OpenAI auth configured via sops-nix (`openai_api_key` secret on devbox).
 
 **Output:** Structured JSON with verdict (pass/fail/uncertain), confidence score, issues with severity and suggested next checks. Verdicts drive automated pass/fail decisions, so severity must be precise.
 
-### slack (subagent)
-**Purpose:** Slack research — searching and analyzing conversations.
-**Model:** (inherits default)
-**Tools:** Slack MCP tools only (no file access)
-**When to use:** Finding discussions, decisions, or context from Slack.
-**Note:** Requires Slack MCP to be configured and enabled. Currently Darwin-only (tokens from macOS Keychain).
-
 ## Agents We Removed (and Why)
 
 In Feb 2025 we inherited 6 agents from "Oh My OpenCode" (OMO) and cut them all:

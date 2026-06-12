@@ -17,11 +17,6 @@
     },
     "plan": {
       "variant": "xhigh"
-    },
-    "slack": {
-      "tools": {
-        "slack_*": true
-      }
     }
   },
   "plugin": [

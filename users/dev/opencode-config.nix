@@ -186,7 +186,6 @@ in
 
    # Custom agents via OpenCode-native markdown format.
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
-   xdg.configFile."opencode/agents/slack.md".source = patchAgent "slack" "${assetsPath}/opencode/agents/slack.md";
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/oracle.md".source = patchAgent "oracle" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/vision-qa.md".source = patchAgent "vision-qa" "${assetsPath}/opencode/agents/vision-qa.md";
