@@ -259,22 +259,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-WbuLZTkLQRa0ftTFsPv6EtTJc1xQWmRUJ+g9s01Wuus=";
+      hash = "sha256-e3yAkQW8Tbu+o6pA1PurAImTzeH2hMVhkTjsqSnX7ac=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-EUHDnFyqsV1uTMU8D3dVO19mMV7DJis1ozJu4y0wKZo=";
+      hash = "sha256-QcUb4KamrKVSZezoQ2z6Mvodzh54QAC4e7v1UY70REk=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-GV+OcLOcUKB5M6Btkw8Zl/TgWk0DyBS7I6kvoee0Urk=";
+      hash = "sha256-iaxQBMBOIs2TyOtAGZEUSDim/fDELBjZkkLV/x2JGvw=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-q/tD9m87FiaxgcdzhHCvfG36nDaRauaQe4IlMHMf6uY=";
+      hash = "sha256-5KnsiJockZd55e1yubelC78YymWu5YLgFYJ/itR7hYU=";
       isZip = true;
     };
   };
@@ -296,14 +296,15 @@ let
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #   .opencode/skills/holding-opencode-on-1.15/SKILL.md
     #
-    # This pins v1.17.2-patched.2 (retry-cap runaway cure preserved). This change is
-    # STAGED on branch opencode-1.17-cutover and must NOT be `home-manager switch`ed
-    # piecemeal: cloudbox is ~15-way multi-writer on the shared opencode.db, so the
-    # switch must stop ALL opencode processes at once (serve + every standalone TUI)
-    # from a plain SSH shell — see the runbook Phase 3. Doing the switch from inside
-    # an opencode session will kill that session mid-cutover.
+    # This pins v1.17.2-patched.3, which RE-ADDS instance-state-partition.patch (the
+    # Question-tool-hang-on-submit fix that was provisionally dropped at the 1.17
+    # cutover — see workstation-gwd). retry-cap runaway cure still preserved.
+    # NOTE: cloudbox is ~15-way multi-writer on the shared opencode.db, so a switch
+    # that swaps the opencode binary should stop ALL opencode processes at once (serve
+    # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
+    # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.2";
-    patchedRevision = "2";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
