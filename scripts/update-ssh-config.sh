@@ -104,9 +104,9 @@ Host cloudbox-tunnel
     ForwardAgent yes
     ServerAliveInterval 60
     ServerAliveCountMax 3
-    # OpenCode OAuth callback
-    LocalForward 1455 localhost:1455
     # mcp-remote OAuth callbacks (default + alt Atlassian instances)
+    # Note: LocalForward 1455 (OpenCode OAuth) is owned exclusively by
+    # devbox-tunnel; duplicating it here clashes under ExitOnForwardFailure.
     LocalForward 3334 localhost:3334
     LocalForward 3335 localhost:3335
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
