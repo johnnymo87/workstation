@@ -117,6 +117,34 @@
           }
         },
         "claude-fable-5@default": {
+          "id": "claude-fable-5@default",
+          "name": "Claude Fable 5",
+          "family": "claude-fable",
+          "release_date": "2026-06-09",
+          "attachment": true,
+          "reasoning": true,
+          "tool_call": true,
+          "temperature": false,
+          "cost": {
+            "input": 10,
+            "output": 50,
+            "cache_read": 1,
+            "cache_write": 12.5
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
           "options": {
             "thinking": {
               "type": "adaptive",
