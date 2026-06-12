@@ -13,6 +13,23 @@ lib.mkIf isCloudbox {
 
   home.stateVersion = "25.11";
 
+  # SSH alias for driving the macOS box from a cloudbox-side agent. Reaches the
+  # Mac via the reverse tunnel (cloudbox 127.0.0.1:2222 -> Mac :22) maintained by
+  # the Mac's cloudbox-dev-tunnel LaunchAgent (see scripts/update-ssh-config.sh).
+  # Auth: ~/.ssh/id_mac (trusted in the Mac's authorized_keys). For hands-off
+  # remote cutovers / darwin-rebuild.
+  programs.ssh.matchBlocks.mac = {
+    hostname = "127.0.0.1";
+    port = 2222;
+    user = "jonathan.mohrbacher";
+    identityFile = "~/.ssh/id_mac";
+    identitiesOnly = true;
+    extraOptions = {
+      StrictHostKeyChecking = "accept-new";
+      UserKnownHostsFile = "~/.ssh/known_hosts_mac";
+    };
+  };
+
   # Constrain vitest worker count — default uses all cores, which starves
   # opencode sessions and devenv services when tests run in watch mode.
   home.sessionVariables.VITEST_MAX_WORKERS = "2";  # 4-core box, keep 50% free

@@ -116,6 +116,9 @@ Host cloudbox-tunnel
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
     RemoteForward 2850 127.0.0.1:2850
+    # reverse SSH: lets a cloudbox-side agent ssh back into the Mac
+    # (cloudbox 127.0.0.1:2222 -> Mac :22) for remote-driven cutovers / darwin-rebuild
+    RemoteForward 2222 127.0.0.1:22
 $CLOUDBOX_MARKER_END
 EOF
 

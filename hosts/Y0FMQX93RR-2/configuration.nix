@@ -49,4 +49,14 @@
 
   # State version (nix-darwin uses integers 1-6)
   system.stateVersion = 6;
+
+  # Passwordless sudo for darwin-rebuild so a remote driver agent (e.g. an
+  # opencode session on cloudbox reaching in over the reverse SSH tunnel) can
+  # run system rebuilds / opencode cutovers hands-off. Scoped to the
+  # darwin-rebuild wrapper. NOTE: darwin-rebuild activates arbitrary system
+  # config, so this is effectively standing passwordless root for ${mac.username};
+  # accepted deliberately for unattended remote rebuilds.
+  environment.etc."sudoers.d/darwin-rebuild".text = ''
+    ${mac.username} ALL=(root) NOPASSWD: /run/current-system/sw/bin/darwin-rebuild
+  '';
 }
