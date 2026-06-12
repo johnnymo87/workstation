@@ -86,6 +86,14 @@ in
         group = "dev";
         mode = "0400";
       };
+      # DoltHub REST API token (distinct from the dolthub_jwk push/pull cred):
+      # authenticates the v1alpha1 REST API used to *create* DoltHub databases
+      # (POST /api/v1alpha1/database). Exported as DOLTHUB_API_TOKEN.
+      dolthub_api_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       cloudflared_tunnel_token = {
         owner = "cloudflared";
         group = "cloudflared";

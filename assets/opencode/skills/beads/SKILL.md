@@ -163,8 +163,20 @@ DBs). Concrete facts learned wiring this up:
   `dolthub_jwk` sops secret and materialized to `~/.dolt/creds/<keyid>.jwk` +
   `config_global.json` by `home.activation.deployDoltCreds` (NixOS hosts read
   `/run/secrets`; crostini symlinks the HM-sops secret; macOS reads Keychain
-  item `dolthub-jwk`). A new project needs **no** new cred — just create the
-  DoltHub DB, `bd dolt remote add`, and push.
+  item `dolthub-jwk`). A new project needs **no** new push cred.
+- **Creating the DB needs a *different* token.** DoltHub does NOT auto-create a
+  DB on push (pushing to a nonexistent DB fails with `permission denied`). The
+  `dolthub_jwk` push cred can't create DBs — that's the **remotesapi** (gRPC).
+  DB creation goes through the **v1alpha1 REST API**, authed with a separate
+  DoltHub API token (`dolthub.com/settings/tokens`), stored as the
+  `dolthub_api_token` sops secret (exported `DOLTHUB_API_TOKEN`). Create + wire:
+  ```
+  curl -s -X POST https://www.dolthub.com/api/v1alpha1/database \
+    -H "authorization: token $DOLTHUB_API_TOKEN" -H 'content-type: application/json' \
+    -d '{"ownerName":"jmohrbacher","repoName":"<repo>","visibility":"private"}'
+  bd dolt remote add origin https://doltremoteapi.dolthub.com/jmohrbacher/<repo>
+  bd dolt push
+  ```
 - **Embedded push handles every remote type — no `dolt` binary needed.**
   `bd dolt push`/`pull` works via bd's in-process engine for DoltHub
   (remotesapi), **git+https**, AND **git+ssh** remotes alike. Verified
@@ -180,20 +192,27 @@ DBs). Concrete facts learned wiring this up:
   Adding a remote / changing `sync.remote` writes `.beads/config.yaml` and
   makes a `bd: update sync.remote` commit on the host repo despite stealth
   mode. Expect it and push it (or revert if unwanted).
-- **Verify a backup.** DoltHub/git+https remotes: clone and count —
-  `nix run nixpkgs#dolt -- clone jmohrbacher/<repo> /tmp/x && cd /tmp/x && nix run nixpkgs#dolt -- sql -q 'select count(*) from issues'`
-  and compare to `bd stats`. git+ssh remotes (can't `dolt clone` with nixpkgs
-  1.59.10): confirm the ref landed with
-  `git ls-remote <url> refs/dolt/data` (a non-empty hash = push succeeded).
+- **Verify a backup.** Count issues straight off DoltHub via the REST API and
+  compare to `bd stats`:
+  ```
+  curl -s -G https://www.dolthub.com/api/v1alpha1/jmohrbacher/<repo>/main \
+    -H "authorization: token $DOLTHUB_API_TOKEN" \
+    --data-urlencode 'q=select count(*) from issues'
+  ```
 
-### Per-repo git-backed dolt (alternative to DoltHub)
+### Do NOT use git-backed dolt for these repos (anti-pattern)
 
-Most non-workstation trackers store dolt data **inside their own GitHub repo**
-under `refs/dolt/data` instead of DoltHub — governance-friendly (work issues
-stay in the work repo) and needs no DoltHub DB or shared cred, just existing
-git auth. Set it up exactly like DoltHub but with a git URL:
-`bd dolt remote add origin git+https://github.com/<org>/<repo>.git` (or
-`git+ssh://git@github.com/<org>/<repo>.git`), then `bd dolt push`.
+`bd dolt remote add origin git+ssh://…/<repo>.git` (git-backed dolt) *works* —
+bd's embedded engine pushes/pulls over git+ssh and git+https fine — **but it
+writes the tracker into the code repo's git** as `refs/dolt/data` AND a
+`refs/heads/__dolt_remote_info__` **branch**, polluting the repo (the branch
+shows in GitHub's branch list, PR base pickers, etc.). We tried git-backed for
+mono/protos/internal-frontends/pigeon/culops/lgtm on 2026-06-12 and reverted —
+all six now use **DoltHub private DBs** (above). If you find these refs on a
+code remote, delete them:
+`git push <url> :refs/dolt/data :refs/heads/__dolt_remote_info__`.
+(The dolt 1.88.1+ requirement only affects standalone `dolt clone` of a git+ssh
+remote, never `bd dolt push/pull` — but that's moot now since we use DoltHub.)
 
 **Migrating a legacy sqlite tracker (`metadata.json` = `{"database":"beads.db"}`):**
 bd ≥0.58 removed the sqlite backend, so current `bd` can't read old `beads.db`.
