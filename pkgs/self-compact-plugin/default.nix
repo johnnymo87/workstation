@@ -68,7 +68,7 @@ let
     # registry, but locks the result so subsequent builds are pure.
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-1M4cYayPbrE08LfmACU2C2PmoJk2hpGqi864UPdRfSk=";
+    outputHash = "sha256-IlzyZGBB4zd3/APruLkRCbDZDQc0e+/s/Z3i0J6mVhE=";
 
     dontFixup = true;
   };
