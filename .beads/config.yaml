@@ -71,3 +71,5 @@ import:
 # - github.repo
 
 sync.remote: "git+ssh://git@github.com/johnnymo87/workstation.git"
+
+no-git-ops: true

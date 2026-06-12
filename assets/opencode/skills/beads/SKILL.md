@@ -6,7 +6,7 @@ allowed-tools: [Bash, Read]
 
 # Beads Issue Tracking
 
-Git-backed issue tracker for persistent memory across sessions. JSONL is source of truth (committed to git), SQLite is local cache (gitignored).
+Dolt-powered issue tracker for persistent memory across sessions. In Git-Free/Stealth mode, issue tracking is completely decoupled from Git, and issues are stored in a locally gitignored Dolt database. Sharing and backups are done via Dolt's native cloud/remote replication.
 
 ## Session Activation
 
@@ -49,8 +49,9 @@ bd update bd-a1b2 --design "Decided approach A because..."
 # Close when done
 bd close bd-a1b2 --reason "Completed: summary of what was done"
 
-# Sync (usually automatic via daemon)
-bd sync                     # Full cycle: export→commit→pull→push
+# Sync & Cloud Backup (Dolt native replication)
+bd dolt push                # Push database changes to Dolt remote (cloud backup)
+bd dolt pull                # Pull database changes from Dolt remote
 ```
 
 **IDs use hash format** like `bd-a1b2`, not sequential numbers.
@@ -74,7 +75,7 @@ Before ending or if context is long:
 - [ ] All `in_progress` items have current notes
 - [ ] Discovered work captured as new issues
 - [ ] Blockers documented in issue notes
-- [ ] Run `bd sync` if daemon not running
+- [ ] Run `bd dolt push` if configured with a remote to sync database changes to the cloud
 
 ## Git Hook Policy (workstation-specific)
 
@@ -106,6 +107,45 @@ This is intentional. Reasons:
 If you ever genuinely want hooks (e.g., on a non-workstation machine where
 the wrapper isn't present), pass `--skip-hooks=false` explicitly to opt back
 in.
+
+## Git-Free & Dolt Cloud Sync Configuration
+
+To decouple Beads issue tracking completely from your Git workspace and use Dolt-native cloud replication for backup/sync:
+
+### 1. Initialize Beads in Git-Free / Stealth Mode
+Initialize with `--stealth` or configure `no-git-ops` to disable automatic Git operations and pre-commit hook hooks:
+```bash
+bd config set no-git-ops true
+```
+This forces Beads to skip Git staging, auto-commits, and Git-hooks, running purely local database reads and writes.
+
+### 2. Ignore JSONL exports from Git
+To keep your Git repository clean and free of JSONL files (such as `issues.jsonl` and `interactions.jsonl`), ensure they are removed from Git tracking and gitignored in `.beads/.gitignore`:
+```bash
+git rm --cached .beads/issues.jsonl .beads/interactions.jsonl
+```
+And add to `.beads/.gitignore`:
+```gitignore
+*.jsonl
+```
+
+### 3. Add a Dolt Remote (Cloud Backup)
+Point your Beads database to a shared remote (like a GitHub repo, DoltHub, S3, or GCS) using the wrapper command:
+```bash
+# GitHub (using Dolt's git-backed refs format under refs/dolt/data)
+bd dolt remote add origin git+ssh://git@github.com/org/repo.git
+
+# DoltHub
+bd dolt remote add origin https://doltremoteapi.dolthub.com/org/beads
+
+# S3 or GCS
+bd dolt remote add origin aws://[bucket]/path/to/repo
+```
+Once added, you can synchronize with the cloud using native database replication:
+```bash
+bd dolt push
+bd dolt pull
+```
 
 ## Reference Files
 
