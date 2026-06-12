@@ -165,18 +165,45 @@ DBs). Concrete facts learned wiring this up:
   `/run/secrets`; crostini symlinks the HM-sops secret; macOS reads Keychain
   item `dolthub-jwk`). A new project needs **no** new cred — just create the
   DoltHub DB, `bd dolt remote add`, and push.
-- **Embedded push needs no `dolt` binary.** `bd dolt push`/`pull` to a DoltHub
-  (remotesapi) remote works via bd's in-process engine. The standalone `dolt`
-  CLI is only needed to *generate* creds (`nix run nixpkgs#dolt -- creds new`)
-  or for **git+ssh** remotes — which also require dolt **1.88.1+** (nixpkgs has
-  only 1.59.10). That version gap is why we use DoltHub, not git+ssh.
+- **Embedded push handles every remote type — no `dolt` binary needed.**
+  `bd dolt push`/`pull` works via bd's in-process engine for DoltHub
+  (remotesapi), **git+https**, AND **git+ssh** remotes alike. Verified
+  2026-06-12: workstation→DoltHub; lgtm + pigeon→git+ssh `johnnymo87`;
+  culops/mono/protos/internal-frontends→git+https work orgs. The standalone
+  `dolt` CLI is only needed to *generate* creds (`nix run nixpkgs#dolt -- creds
+  new`) or to *clone for verification* — and standalone `dolt clone` of a
+  **git+ssh** remote is what needs dolt **1.88.1+** (nixpkgs has only 1.59.10).
+  That version gap does NOT block `bd dolt push/pull` over git+ssh; it only
+  means you can't verify a git+ssh backup with `dolt clone` (use
+  `git ls-remote <url> refs/dolt/data` instead).
 - **GOTCHA — `bd dolt remote add` commits to git even under `no-git-ops`.**
   Adding a remote / changing `sync.remote` writes `.beads/config.yaml` and
   makes a `bd: update sync.remote` commit on the host repo despite stealth
   mode. Expect it and push it (or revert if unwanted).
-- **Verify a backup by cloning:**
+- **Verify a backup.** DoltHub/git+https remotes: clone and count —
   `nix run nixpkgs#dolt -- clone jmohrbacher/<repo> /tmp/x && cd /tmp/x && nix run nixpkgs#dolt -- sql -q 'select count(*) from issues'`
-  and compare to `bd stats`.
+  and compare to `bd stats`. git+ssh remotes (can't `dolt clone` with nixpkgs
+  1.59.10): confirm the ref landed with
+  `git ls-remote <url> refs/dolt/data` (a non-empty hash = push succeeded).
+
+### Per-repo git-backed dolt (alternative to DoltHub)
+
+Most non-workstation trackers store dolt data **inside their own GitHub repo**
+under `refs/dolt/data` instead of DoltHub — governance-friendly (work issues
+stay in the work repo) and needs no DoltHub DB or shared cred, just existing
+git auth. Set it up exactly like DoltHub but with a git URL:
+`bd dolt remote add origin git+https://github.com/<org>/<repo>.git` (or
+`git+ssh://git@github.com/<org>/<repo>.git`), then `bd dolt push`.
+
+**Migrating a legacy sqlite tracker (`metadata.json` = `{"database":"beads.db"}`):**
+bd ≥0.58 removed the sqlite backend, so current `bd` can't read old `beads.db`.
+If a populated `.beads/embeddeddolt` already exists, that dolt data is the real
+current state — just flip `metadata.json` to dolt mode and add a remote (do NOT
+re-import a stale `issues.jsonl`; check the embeddeddolt issue count first). If
+there's only sqlite, reconstruct a JSONL straight from the `.db` via SQL
+(`json_object`/`json_group_array` over issues+dependencies+labels) and
+`bd init --from-jsonl --prefix <p>`. Old `bd` binaries don't help: 0.57 forces
+a dolt-server, 0.55 is schema-incompatible.
 
 ## Reference Files
 
