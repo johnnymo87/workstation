@@ -409,6 +409,42 @@ lib.mkIf isDarwin {
     fi
   '';
 
+  # Deploy the shared DoltHub credential used by `bd dolt push/pull` to back up
+  # the git-free beads issue DB (remote configured in .beads/config.yaml). macOS
+  # has no sops, so the Ed25519 JWK keypair lives in the Keychain. Populate it
+  # once with (the value is the single-line JWK from ~/.dolt/creds/<keyid>.jwk):
+  #   security add-generic-password -a "$USER" -s dolthub-jwk -w '<jwk-json>'
+  # This writes a real 0600 ~/.dolt/creds/<keyid>.jwk and points
+  # config_global.json at it. Skips cleanly if the Keychain entry is absent.
+  home.activation.deployDoltCreds = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+    set -euo pipefail
+
+    keyid="6fnahnt9ls5iud8ac4eulmqf535p13co1jcjrluch86ve"
+    jwk="$(/usr/bin/security find-generic-password -s dolthub-jwk -w 2>/dev/null || true)"
+
+    if [ -z "$jwk" ]; then
+      echo "deployDoltCreds: skipping (dolthub-jwk not in Keychain; run: security add-generic-password -a \"\$USER\" -s dolthub-jwk -w '<jwk-json>')"
+    else
+      creds_dir="$HOME/.dolt/creds"
+      mkdir -p "$creds_dir"
+
+      tmp="$(mktemp "$creds_dir/$keyid.jwk.tmp.XXXXXX")"
+      printf '%s' "$jwk" > "$tmp"
+      mv "$tmp" "$creds_dir/$keyid.jwk"
+      chmod 600 "$creds_dir/$keyid.jwk"
+
+      # Point dolt at this credential without dropping any other config keys.
+      cfg="$HOME/.dolt/config_global.json"
+      existing="{}"
+      [ -f "$cfg" ] && existing="$(cat "$cfg")"
+      ctmp="$(mktemp "$HOME/.dolt/config_global.json.tmp.XXXXXX")"
+      printf '%s' "$existing" | ${pkgs.jq}/bin/jq --arg k "$keyid" '.["user.creds"] = $k' > "$ctmp"
+      mv "$ctmp" "$cfg"
+
+      echo "deployDoltCreds: dolt credential deployed"
+    fi
+  '';
+
   home.activation.prepareForHM = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
     if [ -L ~/.bashrc ]; then rm -f ~/.bashrc; fi
     if [ -L ~/.bash_profile ]; then rm -f ~/.bash_profile; fi

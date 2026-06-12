@@ -27,6 +27,10 @@ lib.mkIf isCrostini {
       ccr_api_key = {};
       telegram_bot_token = {};
       telegram_chat_id = {};
+      # DoltHub credential (Ed25519 JWK) for `bd dolt push/pull` beads backup.
+      # Lands at config.sops.secrets.dolthub_jwk.path; symlinked into dolt's
+      # creds dir by home.activation.deployDoltCreds below.
+      dolthub_jwk = {};
     };
   };
 
@@ -159,6 +163,34 @@ lib.mkIf isCrostini {
       commit.gpgsign = lib.mkForce false;
     };
   };
+
+  # Deploy the shared DoltHub credential used by `bd dolt push/pull` to back up
+  # the git-free beads issue DB (remote configured in .beads/config.yaml). The
+  # home-manager sops module decrypts secrets asynchronously (systemd user
+  # service), so we do NOT read the secret content at activation time. Instead we
+  # symlink dolt's creds path to the sops-managed secret (resolved lazily when
+  # dolt reads it) and write the non-secret config_global.json pointer
+  # deterministically. The keyid is stable and identical on every host.
+  home.activation.deployDoltCreds = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    set -euo pipefail
+
+    keyid="6fnahnt9ls5iud8ac4eulmqf535p13co1jcjrluch86ve"
+    creds_dir="$HOME/.dolt/creds"
+    mkdir -p "$creds_dir"
+
+    # Dangling-safe: the target is populated by the sops-nix user service.
+    ln -sfn "${config.sops.secrets.dolthub_jwk.path}" "$creds_dir/$keyid.jwk"
+
+    # Point dolt at this credential without dropping any other config keys.
+    cfg="$HOME/.dolt/config_global.json"
+    existing="{}"
+    [ -f "$cfg" ] && existing="$(cat "$cfg")"
+    ctmp="$(mktemp "$HOME/.dolt/config_global.json.tmp.XXXXXX")"
+    printf '%s' "$existing" | ${pkgs.jq}/bin/jq --arg k "$keyid" '.["user.creds"] = $k' > "$ctmp"
+    mv "$ctmp" "$cfg"
+
+    echo "deployDoltCreds: dolt credential symlinked + configured"
+  '';
 
   # Ensure declared projects are cloned (runs during home-manager switch)
   home.activation.ensureProjects = let
