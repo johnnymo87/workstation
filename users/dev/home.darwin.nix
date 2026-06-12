@@ -2,6 +2,23 @@
 # Contains Darwin-only scripts, aliases, and settings
 { config, pkgs, lib, localPkgs, assetsPath, isDarwin, projects, ... }:
 
+let
+  sshTunnelCommand = host: ''
+    while true; do
+      echo "$(${pkgs.coreutils}/bin/date -Is) starting ${host} tunnel" >&2
+      ${pkgs.openssh}/bin/ssh \
+        -N \
+        -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o IgnoreUnknown=UseKeychain \
+        ${host}
+      status=$?
+      echo "$(${pkgs.coreutils}/bin/date -Is) ${host} tunnel exited with status $status; retrying in 10s" >&2
+      ${pkgs.coreutils}/bin/sleep 10
+    done
+  '';
+in
 lib.mkIf isDarwin {
   home.file = {
     # Darwin common.conf - empty (no special options needed locally)
@@ -154,16 +171,13 @@ lib.mkIf isDarwin {
     enable = true;
     config = {
       ProgramArguments = [
-        "${pkgs.openssh}/bin/ssh"
-        "-N"              # No remote command
-        "-o" "ExitOnForwardFailure=no"
-        "-o" "ServerAliveInterval=30"
-        "-o" "ServerAliveCountMax=3"
-        "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
-        "devbox-tunnel"
+        "/bin/sh"
+        "-c"
+        (sshTunnelCommand "devbox-tunnel")
       ];
       RunAtLoad = true;
       KeepAlive = true;
+      StartInterval = 30;  # Safety net if activation leaves the agent loaded but idle
       ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.out.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.err.log";
@@ -174,16 +188,13 @@ lib.mkIf isDarwin {
     enable = true;
     config = {
       ProgramArguments = [
-        "${pkgs.openssh}/bin/ssh"
-        "-N"              # No remote command
-        "-o" "ExitOnForwardFailure=no"
-        "-o" "ServerAliveInterval=30"
-        "-o" "ServerAliveCountMax=3"
-        "-o" "IgnoreUnknown=UseKeychain"  # Host * has Apple-only UseKeychain
-        "cloudbox-tunnel"
+        "/bin/sh"
+        "-c"
+        (sshTunnelCommand "cloudbox-tunnel")
       ];
       RunAtLoad = true;
       KeepAlive = true;
+      StartInterval = 30;  # Safety net if activation leaves the agent loaded but idle
       ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.out.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.err.log";
@@ -462,6 +473,12 @@ lib.mkIf isDarwin {
     rm -f ~/.config/nvim/lua/ccremote.lua 2>/dev/null || true
     rm -f ~/.config/nvim/lua/pigeon.lua 2>/dev/null || true
     rm -f ~/.bazelrc 2>/dev/null || true
+  '';
+
+  home.activation.startDevTunnels = lib.hm.dag.entryAfter [ "setupLaunchAgents" ] ''
+    for agent in devbox-dev-tunnel cloudbox-dev-tunnel; do
+      /bin/launchctl kickstart -k "gui/$UID/org.nix-community.home.$agent" 2>/dev/null || true
+    done
   '';
 
   # Tmux extra config (disable if you have existing tmux config)
