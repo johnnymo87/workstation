@@ -84,13 +84,16 @@ devbox/cloudbox/macOS is wrapped (see `pkgs/beads/default.nix` in the
 workstation flake) so that `bd init` always runs with `--skip-hooks` injected.
 This is intentional. Reasons:
 
-- Upstream's inline `pre-commit` hook has a worktree bug: it resolves the main
-  repo's `.beads/` directory into a `BEADS_DIR` shell variable but never
-  exports it, so `bd sync --flush-only` fails inside any worktree, blocking
-  every commit unless you pass `git commit --no-verify`.
-- The bd daemon already auto-flushes JSONL on a 30s debounce, and we run
-  `bd sync` explicitly at session end (Landing the Plane). The pre-commit
-  flush adds latency to every commit for negligible safety benefit.
+- We run beads **git-free** (`no-git-ops: true`, JSONL gitignored), so bd must
+  never stage, commit, or run git hooks against the repo. Backups go to DoltHub
+  via `bd dolt push`, not git.
+- `bd sync` — the old export→commit→push cycle those hooks invoked — was
+  removed upstream in v0.56.0 and is gone from the 1.0 binary entirely
+  (`bd sync` now errors with `unknown command`).
+- Upstream's historical inline `pre-commit` hook also had a worktree bug (it
+  resolved the main repo's `.beads/` into `BEADS_DIR` but never exported it,
+  breaking commits inside worktrees), which is the original reason the wrapper
+  injects `--skip-hooks`.
 
 **Implications for future-Claude:**
 
@@ -113,7 +116,7 @@ in.
 To decouple Beads issue tracking completely from your Git workspace and use Dolt-native cloud replication for backup/sync:
 
 ### 1. Initialize Beads in Git-Free / Stealth Mode
-Initialize with `--stealth` or configure `no-git-ops` to disable automatic Git operations and pre-commit hook hooks:
+Initialize with `--stealth` or configure `no-git-ops` to disable automatic Git operations and pre-commit hooks:
 ```bash
 bd config set no-git-ops true
 ```
@@ -146,6 +149,34 @@ Once added, you can synchronize with the cloud using native database replication
 bd dolt push
 bd dolt pull
 ```
+
+### Workstation setup (DoltHub) — how this is actually wired
+
+The workstation repos use **DoltHub private DBs**, one per project:
+`https://doltremoteapi.dolthub.com/jmohrbacher/<repo>` (e.g. `…/workstation`).
+Private DBs need DoltHub Pro (~$0 under the 100 MB free tier for these small
+DBs). Concrete facts learned wiring this up:
+
+- **Shared credential, deployed via sops.** A single Ed25519 dolt cred (keyid
+  `6fnahnt9ls5iud8ac4eulmqf535p13co1jcjrluch86ve`), associated with the DoltHub
+  account, is reused by every project and every host. It's stored as the
+  `dolthub_jwk` sops secret and materialized to `~/.dolt/creds/<keyid>.jwk` +
+  `config_global.json` by `home.activation.deployDoltCreds` (NixOS hosts read
+  `/run/secrets`; crostini symlinks the HM-sops secret; macOS reads Keychain
+  item `dolthub-jwk`). A new project needs **no** new cred — just create the
+  DoltHub DB, `bd dolt remote add`, and push.
+- **Embedded push needs no `dolt` binary.** `bd dolt push`/`pull` to a DoltHub
+  (remotesapi) remote works via bd's in-process engine. The standalone `dolt`
+  CLI is only needed to *generate* creds (`nix run nixpkgs#dolt -- creds new`)
+  or for **git+ssh** remotes — which also require dolt **1.88.1+** (nixpkgs has
+  only 1.59.10). That version gap is why we use DoltHub, not git+ssh.
+- **GOTCHA — `bd dolt remote add` commits to git even under `no-git-ops`.**
+  Adding a remote / changing `sync.remote` writes `.beads/config.yaml` and
+  makes a `bd: update sync.remote` commit on the host repo despite stealth
+  mode. Expect it and push it (or revert if unwanted).
+- **Verify a backup by cloning:**
+  `nix run nixpkgs#dolt -- clone jmohrbacher/<repo> /tmp/x && cd /tmp/x && nix run nixpkgs#dolt -- sql -q 'select count(*) from issues'`
+  and compare to `bd stats`.
 
 ## Reference Files
 
