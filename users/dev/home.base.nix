@@ -288,13 +288,12 @@ let
     # Bump `upstreamVersion` (and reset `patchedRevision` to "") for upstream
     # version bumps -- and check whether any patches in opencode-patched can be
     # dropped because they're now upstream (see check-sunset.yml in that repo).
-    # CUTOVER IN PROGRESS (2026-06-11): the v1.16/1.17 "V2 DB corruption" HOLD has
-    # been CLEARED. The DB-corruption fears (subagent seq race #31072, destructive
+    # CUTOVER DONE (2026-06-11): the old v1.16/1.17 "V2 DB corruption" HOLD was
+    # CLEARED. The DB-corruption fears (subagent seq race #31072, destructive
     # migration #29908) were empirically disproven for our topology on real v1.17.2
     # (42-subagent stress: 0 orphans/0 missing/0 dup seq; old history loads; the
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
-    #   .opencode/skills/holding-opencode-on-1.15/SKILL.md
     #
     # This pins v1.17.2-patched.3, which RE-ADDS instance-state-partition.patch (the
     # Question-tool-hang-on-submit fix that was provisionally dropped at the 1.17
@@ -310,10 +309,10 @@ let
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
     # Cron hold: while non-empty, update-opencode-patched.yml tracks the highest
     # "v${opencodePatchedHold}-patched.N" release instead of releases/latest, so an
-    # auto-bump can never carry us onto a new upstream line. Held at 1.15.13 for the
-    # V2 DB corruption reason above (research session ses_15fe27082ffe8lANCIdYmfi7TT);
-    # set to "" to resume tracking the newest release. Greppable marker only — it
-    # does not feed the derivation.
+    # auto-bump can never carry us onto a new upstream line. Held at 1.17.2 to stay on
+    # the current upstream line (the old 1.15 V2 DB-corruption hold is history; see the
+    # cutover runbook). Set to "" to resume tracking the newest release. Greppable
+    # marker only — it does not feed the derivation.
     opencodePatchedHold = "1.17.2";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {

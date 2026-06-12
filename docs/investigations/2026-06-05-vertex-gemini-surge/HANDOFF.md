@@ -288,8 +288,9 @@ cure was right; the **1.16 base was not**. We are now durably held on the capped
     doesn't distinguish hold-vs-legacy — the discriminating proof is the harness + live read.)
 
 ### Reference / runbook
-- **Skill:** `.opencode/skills/holding-opencode-on-1.15/SKILL.md` (registered in `AGENTS.md`) —
-  cause, re-poison detection, and the drop-`seq` repair runbook.
+- **Skill (removed 2026-06-11):** the `holding-opencode-on-1.15` skill documented the
+  cause, re-poison detection, and the drop-`seq` repair runbook. Removed after the 1.17.2
+  cutover made the 1.15 hold obsolete; see `docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md`.
 - **Plan:** `docs/plans/2026-06-06-durable-capped-1.15-hold.md` (Phase 2 = pin + hold the cron).
 
 ### Lift-hold (when upstream ships a 1.16.x DB-corruption fix)
