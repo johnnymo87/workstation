@@ -26,8 +26,8 @@
   "provider": {
     "anthropic": {
       "options": {
-        "timeout": 300000,
-        "chunkTimeout": 120000
+        "timeout": 600000,
+        "chunkTimeout": 300000
       },
       "models": {
         "claude-opus-4-7": {
@@ -61,8 +61,8 @@
     },
     "openai": {
       "options": {
-        "timeout": 300000,
-        "chunkTimeout": 120000
+        "timeout": 600000,
+        "chunkTimeout": 300000
       },
       "models": {
         "gpt-5.5": {
@@ -83,14 +83,14 @@
     },
     "google-vertex": {
       "options": {
-        "timeout": 300000,
-        "chunkTimeout": 120000
+        "timeout": 600000,
+        "chunkTimeout": 300000
       }
     },
     "google-vertex-anthropic": {
       "options": {
-        "timeout": 300000,
-        "chunkTimeout": 120000
+        "timeout": 600000,
+        "chunkTimeout": 300000
       },
       "models": {
         "claude-opus-4-7@default": {
