@@ -31,6 +31,8 @@ lib.mkIf isCrostini {
       # Lands at config.sops.secrets.dolthub_jwk.path; symlinked into dolt's
       # creds dir by home.activation.deployDoltCreds below.
       dolthub_jwk = {};
+      # DoltHub REST API token for creating DoltHub databases (v1alpha1 API)
+      dolthub_api_token = {};
     };
   };
 
@@ -59,6 +61,11 @@ lib.mkIf isCrostini {
 
     if [ -r "${config.sops.secrets.gemini_api_key.path}" ]; then
       export GOOGLE_GENERATIVE_AI_API_KEY="$(cat "${config.sops.secrets.gemini_api_key.path}")"
+    fi
+
+    # DoltHub REST API token for creating DoltHub databases (v1alpha1 API)
+    if [ -r "${config.sops.secrets.dolthub_api_token.path}" ]; then
+      export DOLTHUB_API_TOKEN="$(cat "${config.sops.secrets.dolthub_api_token.path}")"
     fi
   '';
 

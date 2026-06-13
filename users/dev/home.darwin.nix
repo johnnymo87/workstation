@@ -243,6 +243,10 @@ lib.mkIf isDarwin {
       GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" && export GH_TOKEN="$GH_TOKEN_VAL"
       unset GH_TOKEN_VAL
 
+      # DoltHub REST API token for creating DoltHub databases (from macOS Keychain)
+      DOLTHUB_VAL="$(/usr/bin/security find-generic-password -s dolthub-api-token -w 2>/dev/null)" && export DOLTHUB_API_TOKEN="$DOLTHUB_VAL"
+      unset DOLTHUB_VAL
+
       # Atlassian config (from macOS Keychain)
       ATLASSIAN_SITE_VAL="$(/usr/bin/security find-generic-password -s atlassian-site -w 2>/dev/null)" && export ATLASSIAN_SITE="$ATLASSIAN_SITE_VAL"
       unset ATLASSIAN_SITE_VAL

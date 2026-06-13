@@ -39,6 +39,11 @@ lib.mkIf isDevbox {
       export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
     fi
 
+    # DoltHub REST API token for creating DoltHub databases (v1alpha1 API)
+    if [ -r /run/secrets/dolthub_api_token ]; then
+      export DOLTHUB_API_TOKEN="$(cat /run/secrets/dolthub_api_token)"
+    fi
+
     # Personal Anthropic subscription token. Consumed by the
     # @ex-machina/opencode-anthropic-auth opencode plugin (in ad-hoc CLI
     # opencode runs from this shell; opencode-serve gets its own copy in
