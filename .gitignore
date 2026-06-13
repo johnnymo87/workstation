@@ -28,3 +28,6 @@ session-ses_*.md
 __pycache__/
 *.pyc
 *.pyo
+
+# beads tracker (git-free/stealth dolt)
+.beads/
