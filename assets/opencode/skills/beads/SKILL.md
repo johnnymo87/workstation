@@ -152,8 +152,12 @@ bd dolt pull
 
 ### Workstation setup (DoltHub) — how this is actually wired
 
-The workstation repos use **DoltHub private DBs**, one per project:
-`https://doltremoteapi.dolthub.com/jmohrbacher/<repo>` (e.g. `…/workstation`).
+**Every tracker — personal AND work — uses a DoltHub private DB** under
+`jmohrbacher/<repo>` (`https://doltremoteapi.dolthub.com/jmohrbacher/<repo>`,
+e.g. `…/workstation`). **Never git+https or git+ssh**, regardless of whether
+the code repo lives in a personal (`johnnymo87`) or a work GitHub org —
+git-backed dolt pollutes the code repo's git (see anti-pattern below). All
+trackers are also **stealth** (`.beads` gitignored, `no-git-ops: true`).
 Private DBs need DoltHub Pro (~$0 under the 100 MB free tier for these small
 DBs). Concrete facts learned wiring this up:
 
@@ -177,17 +181,14 @@ DBs). Concrete facts learned wiring this up:
   bd dolt remote add origin https://doltremoteapi.dolthub.com/jmohrbacher/<repo>
   bd dolt push
   ```
-- **Embedded push handles every remote type — no `dolt` binary needed.**
-  `bd dolt push`/`pull` works via bd's in-process engine for DoltHub
-  (remotesapi), **git+https**, AND **git+ssh** remotes alike. Verified
-  2026-06-12: workstation→DoltHub; lgtm + pigeon→git+ssh `johnnymo87`;
-  culops/mono/protos/internal-frontends→git+https work orgs. The standalone
-  `dolt` CLI is only needed to *generate* creds (`nix run nixpkgs#dolt -- creds
-  new`) or to *clone for verification* — and standalone `dolt clone` of a
-  **git+ssh** remote is what needs dolt **1.88.1+** (nixpkgs has only 1.59.10).
-  That version gap does NOT block `bd dolt push/pull` over git+ssh; it only
-  means you can't verify a git+ssh backup with `dolt clone` (use
-  `git ls-remote <url> refs/dolt/data` instead).
+- **Embedded push needs no `dolt` binary.** `bd dolt push`/`pull` to a DoltHub
+  (remotesapi) remote works via bd's in-process engine. (bd *can* also push
+  over git+https/git+ssh, but we deliberately do NOT — see the anti-pattern
+  below.) The standalone `dolt` CLI is only needed to *generate* creds
+  (`nix run nixpkgs#dolt -- creds new`) or to *clone a DoltHub DB for
+  verification/backup* (`nix run nixpkgs#dolt -- clone jmohrbacher/<repo>
+  /tmp/x`). Confirmed across both personal and work trackers — workstation,
+  pigeon, chatgpt-relay, mono, internal-frontends, protos — all on DoltHub.
 - **GOTCHA — `bd dolt remote add` commits to git even under `no-git-ops`.**
   Adding a remote / changing `sync.remote` writes `.beads/config.yaml` and
   makes a `bd: update sync.remote` commit on the host repo despite stealth
@@ -199,6 +200,11 @@ DBs). Concrete facts learned wiring this up:
     -H "authorization: token $DOLTHUB_API_TOKEN" \
     --data-urlencode 'q=select count(*) from issues'
   ```
+- **Deleting a DoltHub DB is UI-only.** The v1alpha1 API has create/fork but
+  **no delete endpoint**, so a database can only be removed from its DoltHub
+  settings page (`https://www.dolthub.com/repositories/jmohrbacher/<repo>/settings`,
+  Danger Zone → Delete). Always `nix run nixpkgs#dolt -- clone jmohrbacher/<repo>
+  /tmp/<repo>-backup` first.
 
 ### Do NOT use git-backed dolt for these repos (anti-pattern)
 
