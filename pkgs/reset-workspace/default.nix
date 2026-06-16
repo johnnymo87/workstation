@@ -310,15 +310,28 @@ EOF
     fi
 
     # ---- Step 5: Restart opencode-serve ----
+    # Host-aware restart. opencode-serve runs as a USER unit on devbox
+    # (~/.config/systemd/user/opencode-serve.service; restart via
+    # `systemctl --user`, no sudo) and as a SYSTEM unit on cloudbox
+    # (hosts/cloudbox/configuration.nix; restart via passwordless sudo).
+    # Prefer the user unit when it is active so this shared script is portable.
+    # On cloudbox there is no user opencode-serve unit, so `is-active --quiet`
+    # returns non-zero and we fall through to the sudo path (cloudbox unchanged).
     log "restarting opencode-serve.service..."
-    # Passwordless sudo works via wheel group + security.sudo.wheelNeedsPassword=false (set in hosts/cloudbox/configuration.nix).
-    # Use absolute path /run/wrappers/bin/sudo because:
-    #   1. NixOS ships the working setuid sudo at /run/wrappers/bin/sudo.
-    #   2. /run/current-system/sw/bin/sudo is a non-setuid symlink that
-    #      sudo itself refuses to exec from. systemd units with restricted
-    #      PATH won't find the wrapper unless explicitly named.
-    if ! /run/wrappers/bin/sudo systemctl restart opencode-serve.service; then
-      die "failed to restart opencode-serve"
+    if systemctl --user is-active --quiet opencode-serve.service; then
+      log "  opencode-serve is a user unit; restarting via systemctl --user"
+      if ! systemctl --user restart opencode-serve.service; then
+        die "failed to restart opencode-serve (user unit)"
+      fi
+    else
+      # Passwordless sudo works via wheel group + security.sudo.wheelNeedsPassword=false.
+      # Use absolute path /run/wrappers/bin/sudo because NixOS ships the working
+      # setuid sudo there; /run/current-system/sw/bin/sudo is a non-setuid symlink
+      # sudo refuses to exec from.
+      log "  opencode-serve is a system unit; restarting via sudo"
+      if ! /run/wrappers/bin/sudo systemctl restart opencode-serve.service; then
+        die "failed to restart opencode-serve (system unit)"
+      fi
     fi
 
     log "polling /global/health for serve readiness..."
