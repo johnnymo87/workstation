@@ -702,6 +702,10 @@ in
       ];
     };
     script = ''
+      # Restart pigeon-daemon (system unit) FIRST so the recommendation
+      # session spawned inside reset-workspace registers with a fresh daemon.
+      # Symmetric with devbox (hosts/devbox/configuration.nix).
+      /run/wrappers/bin/sudo systemctl restart pigeon-daemon.service
       /home/dev/.nix-profile/bin/reset-workspace --yes
     '';
   };
