@@ -273,19 +273,33 @@
   # (systemd.user.services.opencode-serve). Linger (users.users.dev.linger below)
   # keeps user@1000.service up at boot so the service starts without a login.
 
-  # Daily 3 AM restart of leaky long-running services.
-  # opencode-serve leaks from ~350 MB to 8-13 GB over days.
+  # Daily 3 AM workspace reset (cloudbox parity). reset-workspace snapshots
+  # live opencode TUIs in the `main` tmux session, SIGKILLs all nvims,
+  # restarts opencode-serve (leaks ~350 MB -> 8-13 GB over days), and spawns a
+  # headless recommendation session that Telegrams which sessions to reopen.
+  # devbox nvim is disposable (an opencode-tab host only), so the SIGKILL is
+  # safe. Wiping TUIs nightly also keeps interactive process ages < 24h, so the
+  # reap-stale-opencode reaper never surprise-kills a live interactive session.
+  #
+  # Runs as User=dev so reset-workspace's `systemd-run --user --scope` re-exec
+  # and `systemctl --user restart opencode-serve.service` work (serve is a USER
+  # unit on devbox; linger keeps user@1000 up). pigeon-daemon (a SYSTEM unit) is
+  # restarted FIRST via passwordless sudo so the recommendation session, spawned
+  # last inside reset-workspace, registers with a fresh daemon.
   systemd.services.nightly-restart-background = {
-    description = "Restart long-running background services to reclaim leaked memory";
-    serviceConfig.Type = "oneshot";
+    description = "Nightly workspace reset (kill nvims, restart opencode-serve, recommend)";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      Environment = [
+        "TMUX_TMPDIR=/tmp"
+        "PATH=/run/current-system/sw/bin:/home/dev/.nix-profile/bin"
+      ];
+    };
     script = ''
-      # opencode-serve is a USER service now (see users/dev/home.devbox.nix).
-      # Restart it in the dev user manager via the machine transport. This
-      # oneshot runs as root, which can reach user@1000 even with an empty
-      # environment (verified: `systemctl --user -M dev@.host ...`). Linger
-      # keeps user@1000.service up so the manager is always reachable.
-      /run/current-system/sw/bin/systemctl --user -M dev@.host restart opencode-serve.service
-      /run/current-system/sw/bin/systemctl restart pigeon-daemon.service
+      /run/wrappers/bin/sudo systemctl restart pigeon-daemon.service
+      /home/dev/.nix-profile/bin/reset-workspace --yes
     '';
   };
 
