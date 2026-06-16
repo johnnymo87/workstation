@@ -25,6 +25,7 @@ let
     "opencode-send"
     "swarm-messaging"
     "swarm-shaped-work"
+    "understanding-workspace-reset"
     "using-chatgpt-relay"
     "using-gws"
   ];

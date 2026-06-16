@@ -35,6 +35,7 @@ repo but not deployed to any machine yet.
 | [searching-sessions](skills/searching-sessions/SKILL.md) | cross | `oc-search` patterns for grepping past session transcripts (PRs, Jira tickets, commands, payloads). |
 | [beads](skills/beads/SKILL.md) | cross | Activate `bd` issue tracking when work spans multiple sessions or has complex dependencies. |
 | [reviewing-github-prs](skills/reviewing-github-prs/SKILL.md) | cross | Choosing the right response shape (threaded inline reply vs fresh review vs top-level issue comment) when posting on a PR, plus the `gh` CLI mechanics for each. |
+| [understanding-workspace-reset](skills/understanding-workspace-reset/SKILL.md) | cross | Consumer-side facts for the headless morning recommendation agent: the manifest == live `main`-tmux TUIs, why a session may be missing, and reopen via `oc-auto-attach --tmux-session main`. Companion to the repo-local `resetting-workspace`. |
 
 ### External Services
 
