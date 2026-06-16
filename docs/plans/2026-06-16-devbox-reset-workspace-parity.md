@@ -24,8 +24,11 @@
 
 ## Out of scope
 
-- The narrow `reap-stale-opencode` activity-check fix (alternative the user did not pick). The reaper stays as-is on both hosts as a backstop.
 - Stale opencode DB session pruning (tracked separately upstream of this work).
+
+## Follow-up: reaper removed (2026-06-16)
+
+After parity landed, `reap-stale-opencode` (service + timer) was **removed from both hosts**. Rationale: process-ancestry tracing showed every opencode TUI on devbox is hosted under `nvim` (directly, or via an `nvim :terminal` bash whose PTY master is nvim) — so the nightly `pkill -9 nvim` reaps them all via PTY hangup. Launched/headless sessions run inside `opencode-serve` (restarted nightly), not as standalone workers. The reaper's only practical behaviour was the age-based interactive kill that caused the 2026-06-16 incident; it is now redundant. Minor residual: an orphaned `opencode attach` client (nvim gone, reparented to init) could survive a night, but the serve restart disrupts it — acceptable.
 
 ## Design decision: pigeon-daemon restart (both hosts)
 
