@@ -234,7 +234,7 @@ let
     '';
   };
 
-  # Patched opencode targeting opencode v1.17.2. Patch set (release/v1.17 branch
+  # Patched opencode targeting opencode v1.17.7. Patch set (release/v1.17 branch
   # of opencode-patched, see patches/apply.sh there):
   #   gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim.
   # DROPPED for the 1.17 line (see workstation
@@ -244,8 +244,10 @@ let
   #     still help on the rewritten event-sourced loop is unverified; tracking-cache-costs).
   #   - eager-input-streaming: SUPERSEDED by upstream v1.17.2 transform.ts options()
   #     (sets toolStreaming=false for vertex/anthropic + non-claude anthropic).
-  #   - instance-state-partition: 1.17 refactored the instance/HTTP layer; dropped.
-  #     RISK: re-verify the Question tool does not hang on submit (cutover Phase 4).
+  #   - instance-state-partition: FIXED UPSTREAM in v1.17.7 (commit 87c33b3, issue
+  #     #29772 — plugin client calls reuse the active listener instance). Verified
+  #     droppable via upstream regression test (Gate 1) + live Question-tool repro
+  #     (Gate 2: 14 ask/reply round-trips, active plugin, 0 partition warnings).
   #   - mcp-reconnect: 1.17 remote MCP conn is oauth-aware; needs re-engineering. Deferred.
   # https://github.com/johnnymo87/opencode-patched
   # All 4 platforms built by the patched fork's CI
@@ -259,22 +261,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-GFF6QowmqFItGdYztdcx95mRG23ZzPkVpKD+92Wzji0=";
+      hash = "sha256-r9WS6WPykI2GCakoaWy0FXR0V+ax39HNmgoctYS0HXU=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-r3PJu5voYEaQDkcbTXFUHtN3BZ7DGqksH4laeV8fkFg=";
+      hash = "sha256-RTi9Nj3dnnRZTot13NeqJuHhVZcCNOhJjabYRW5YHug=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-Ppvg8aOlymRWSq1W5740uJbTqTiDMJ2BxUFKBvuNBTE=";
+      hash = "sha256-PgyIxBvYNVdioW8HoO0ANMd1hvx9p480W2jGUjjUudM=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-XAWR91EMe2y0XUcdbsq55B0Is3CJCWijDO7H6y9fCuY=";
+      hash = "sha256-hcEXm0rQnQP5utrXuG9VRRzHBeuVaKoVYMTJ4gyXG20=";
       isZip = true;
     };
   };
@@ -295,26 +297,28 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.4-patched (upstream bump 1.17.2 -> 1.17.4, 2026-06-12, see
-    # workstation-88o). All 6 patches carried forward; vim.patch was re-ported for
-    # v1.17.4 (prompt/index.tsx send-path .catch drift). instance-state-partition.patch
-    # (the Question-tool-hang-on-submit fix) + retry-cap runaway cure both preserved.
+    # This pins v1.17.7-patched (upstream bump 1.17.4 -> 1.17.7, 2026-06-16). The
+    # 5-patch set (gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim)
+    # applies clean on v1.17.7; cache-thinking-skip + tool-fix were re-ported for
+    # v1.17.7 type drift. instance-state-partition.patch was DROPPED — fixed upstream
+    # by 87c33b3 (issue #29772), verified via Gate 1 (regression test) + Gate 2 (live
+    # Question-tool repro). retry-cap runaway cure preserved.
     # NOTE: cloudbox is ~15-way multi-writer on the shared opencode.db, so a switch
     # that swaps the opencode binary should stop ALL opencode processes at once (serve
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
-    upstreamVersion = "1.17.4";
+    upstreamVersion = "1.17.7";
     patchedRevision = "";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
     # Cron hold: while non-empty, update-opencode-patched.yml tracks the highest
     # "v${opencodePatchedHold}-patched.N" release instead of releases/latest, so an
-    # auto-bump can never carry us onto a new upstream line. Held at 1.17.4 to stay on
+    # auto-bump can never carry us onto a new upstream line. Held at 1.17.7 to stay on
     # the current upstream line (the old 1.15 V2 DB-corruption hold is history; see the
     # cutover runbook). Set to "" to resume tracking the newest release. Greppable
     # marker only — it does not feed the derivation.
-    opencodePatchedHold = "1.17.4";
+    opencodePatchedHold = "1.17.7";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
