@@ -13,6 +13,23 @@ pkgs.writeShellApplication {
     #
     # If the user passes their own --listen, we honor it and skip our injection.
 
+    # Force EDITOR/VISUAL=nvim for nvim and everything it spawns.
+    #
+    # oc-auto-attach launches nvim via `tmux new-window -- nvims`, so nvim
+    # (and the `opencode attach` TUI it jobstart()s) inherit the *tmux server's*
+    # environment. On NixOS that server carries EDITOR=nano from
+    # /etc/set-environment, because home.sessionVariables (EDITOR/VISUAL=nvim)
+    # only propagate through ~/.profile (login shells) -- which the tmux server
+    # never sourced. The opencode TUI resolves its editor as
+    # `process.env.VISUAL || process.env.EDITOR`, so ctrl+x x / `/export`
+    # opened nano instead of nvim. Exporting here (the single chokepoint every
+    # auto-attached nvim passes through) fixes nvim itself and every child it
+    # spawns, regardless of how the tmux server got its environment. When nvims
+    # is launched from an interactive shell these are already nvim, so this is
+    # idempotent.
+    export EDITOR=nvim
+    export VISUAL=nvim
+
     # If caller already passed --listen, don't override.
     for arg in "$@"; do
       case "$arg" in

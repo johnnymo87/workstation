@@ -588,6 +588,22 @@
   time.timeZone = "America/New_York";
   i18n.defaultLocale = "en_US.UTF-8";
 
+  # Default editor: nvim, not nano.
+  #
+  # nixpkgs' programs/environment.nix sets `environment.variables.EDITOR =
+  # lib.mkDefault "nano"`, which renders into /etc/set-environment (sourced by
+  # /etc/profile). Anything that sources /etc/profile but NOT the user's
+  # ~/.profile -- notably the tmux server when it's first started outside an
+  # interactive login shell -- inherits EDITOR=nano. That leaks into the
+  # `opencode attach` TUIs that oc-auto-attach spawns inside tmux/nvim, so
+  # ctrl+x x / `/export` (which resolve `process.env.VISUAL || EDITOR`) opened
+  # nano. A plain assignment (priority 100) overrides the mkDefault (1000)
+  # without mkForce. NOTE: takes effect for tmux servers started AFTER the next
+  # `nixos-rebuild switch` + tmux-server restart; the nvims wrapper
+  # (pkgs/nvims) also forces EDITOR/VISUAL=nvim as a cross-platform, restart-
+  # free belt-and-suspenders for the auto-attach path.
+  environment.variables.EDITOR = "nvim";
+
   # Enable running dynamically linked binaries (needed for npm packages).
   #
   # The library set below is the Electron/Chromium runtime closure required by
