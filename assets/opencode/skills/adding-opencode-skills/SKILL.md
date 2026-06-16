@@ -65,6 +65,9 @@ That's it.
    ```
    Then merge into `home.file = ... // yourSkillExtras;` (mirror `atlassianExtras`).
 4. Verify Nix evaluates: `nix flake check --no-build`.
+4b. **`git add` the new skill dir before switching** — Nix flakes only snapshot
+   git-tracked files, so an untracked `SKILL.md` deploys as a dangling symlink
+   (see Gotchas §7). Staging is enough; you don't have to commit yet.
 5. Apply on the host you're logged into:
    - **devbox:** `nix run home-manager -- switch --flake .#dev`
    - **cloudbox:** `nix run home-manager -- switch --flake .#cloudbox`
@@ -144,6 +147,32 @@ Default `home.file."path".source = ...` deploys read-only and **not executable**
 };
 ```
 Existing examples: `notifyTelegramScript`, `atlassianExtras`'s `confluence-to-md.sh`.
+
+### 7. New SKILL.md left git-untracked → dangling symlink, "failed to load skill"
+
+`assetsPath` comes from the flake source, and **Nix flakes only snapshot
+git-tracked files** (tracked or staged in the index). If you register a new
+skill in `opencode-skills.nix` (a tracked file — its edit *is* seen) but never
+`git add` the new `assets/opencode/skills/<name>/SKILL.md`, the switch builds a
+generation that knows to deploy the skill but copies **no content** for it. You
+get a deployed symlink pointing at a store path that lacks the file — a dangling
+link — and OpenCode logs:
+
+```
+level=ERROR message="failed to load skill" skill=~/.config/opencode/skills/<name>/SKILL.md
+  error="Error: ENOENT: no such file or directory, open '.../SKILL.md'"
+```
+
+It looks like a parse error but it's a *missing-file* error. Confirm with:
+```bash
+f=~/.config/opencode/skills/<name>/SKILL.md
+readlink "$f"; [ -e "$f" ] && echo PRESENT || echo "DANGLING"
+```
+
+**Prevent:** `git add` the new skill dir/files **before** `home-manager switch`
+(staging is enough — Nix reads the index; you don't have to commit yet).
+**Fix an already-broken deploy:** `git add` the file, then re-run the switch; the
+new generation copies real content and the symlink resolves.
 
 ## Quick Reference
 
