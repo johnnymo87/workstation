@@ -33,6 +33,7 @@ let
   # Work-only skills (macOS + cloudbox)
   workOnlySkills = [
     "cleaning-disk"
+    "escalating-azure-aks-rbac"
     "pagerduty-mcp-setup"
     "rollbar-mcp-setup"
     "shepherding-pull-requests"
@@ -99,6 +100,7 @@ let
   confluenceSkills = [
     # Add entries as pages are created:
     { pageId = "4909269028"; skillName = "working-with-kubernetes"; fileName = "INTERNAL.md"; }
+    { pageId = "5386600450"; skillName = "escalating-azure-aks-rbac"; fileName = "INTERNAL.md"; }
   ];
 
   # Activation script: fetch Confluence pages into skill directories
