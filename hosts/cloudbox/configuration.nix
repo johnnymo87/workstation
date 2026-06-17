@@ -588,9 +588,20 @@ in
         fi
         exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
       ''}";
-      # Cap the always-on headless server so it can't monopolize RAM alone.
-      MemoryMax = "24G";
-      MemoryHigh = "20G";
+      # Cap the always-on headless server so it can't monopolize RAM alone,
+      # but size the cap to its real working set. On this 64 GiB box the serve
+      # cgroup (daemon + per-session node workers) runs a ~29 GiB working set
+      # under heavy concurrent use (15+ attached sessions). The old 20G high
+      # cap sat *below* that, so the kernel throttled the cgroup with non-stop
+      # reclaim (277k memory.high breaches in 8h) and spilled ~9 GiB to zram
+      # for no protective benefit (0 OOM kills, never reached the hard max).
+      # Raise high to 32G so the working set stays resident; max to 40G for
+      # burst headroom. Even if a heavy bazel build (~16G) collides with
+      # opencode pinned at its cap, 32+16+system stays under 64G, and
+      # OOMScoreAdjust=500 remains the backstop that sacrifices serve first if
+      # the *whole system* runs out.
+      MemoryMax = "40G";
+      MemoryHigh = "32G";
       OOMScoreAdjust = "500";
       Restart = "always";
       RestartSec = 10;
