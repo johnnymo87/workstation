@@ -7,6 +7,22 @@
 
 ---
 
+> **⚠ Version-ref correction (added 2026-06-17 after design review).** The
+> file:line citations below were read against **origin/dev `10b6672be`** (a newer
+> opencode rewrite), which is **neither the deployed build nor the patch target.**
+> cloudbox actually runs **`1.17.7-patched`** (upstream v1.17.7, the older
+> `release/v1.17` line). The two hot paths cited here (GlobalBus broadcast fan-out
+> + `project copy refresh`) were confirmed on the **deployed** v1.17.7 by the
+> orphan-session investigation (`docs/investigations/2026-06-17-...`), but on the
+> newer line (`10b6672be` / local wip `0b7038baa`) `project/copy.ts` is **absent**
+> and `event.ts` is refactored to `Bus.subscribeAll` — i.e. 2 of the 3 bottlenecks
+> may already be fixed upstream. Treat the specific line numbers here as
+> illustrative of the *old* line; any decision must re-verify against a **pinned**
+> ref (see the measurement gate in
+> `docs/plans/2026-06-17-process-per-session-design.md` §3).
+
+---
+
 ## Executive Summary
 
 Expecting `opencode serve` to distribute its workload across multiple CPU cores out-of-the-box is a **category error**. 
