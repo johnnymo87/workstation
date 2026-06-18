@@ -370,3 +370,68 @@ only if it independently pays.
 - Public repo: `scrubbing-company-references` before every commit; fixtures carry
   shape + synthetic content only.
 - Conservative on commits/pushes: the user controls commit/compact cadence.
+
+---
+
+## Decisions & corrections (2026-06-17, during SDD execution)
+
+### Premise correction — "upgrade removes the hot paths" is FALSE
+Design Critical #1 hedged that a newer line "**may** have removed 2 of 3 bottlenecks,"
+based on local wip `0b7038baa`. Ground-truthing the live upstream
+(`anomalyco/opencode`, the renamed `sst/opencode`; old slug 301-redirects) shows:
+
+| Ref | `packages/core/src/project/copy.ts` (ProjectCopy) |
+|---|---|
+| v1.4.11 / v1.4.14 (Apr) | absent |
+| v1.15.13 (May) | absent |
+| v1.16.2 | **present** |
+| v1.17.7 (V0) / v1.17.8 / dev | **present** |
+
+ProjectCopy was **added in v1.16**, not removed by a newer line. The per-connection
+`GlobalBus.on("event", listener)` fan-out is **still present at dev** (`handlers/event.ts:55`).
+The only ProjectCopy-free codebase is the stale local wip `0b7038baa` (April v1.4.x base,
+predates the feature) — a downgrade, not an upgrade. **Upgrading v1.17.7 → v1.17.8/dev
+removes neither hot path.**
+
+### Scope decisions
+- **V2-stock = v1.17.8** (tag commit `11e47f91496005aab4d7c5a2d0a7da5d2651b4ac`,
+  `anomalyco/opencode`, no fork patches) — pinned as a **control** to *empirically
+  confirm* "upgrade does not flatten the A/B slopes," not as a likely winner.
+- **V2-ported dropped** from Phase-0 (it was "only if V2-stock passes"; moot).
+- The decision narrows to **patch (V1) vs replace (V3)**, with V2-stock as control.
+- Codified in `serve-bench` commit `e92ab79`.
+
+### Operational target: dedicated scratch GCP ARM VM
+Builds + the live A/B/C matrix run on a throwaway cloudbox-shape VM (not the live
+cloudbox, to avoid disrupting the serve + ~29 attach clients).
+
+## Operational session runbook (the LAST phase — run only when harness is code-complete)
+
+> Sequencing reality: the scratch VM can't run profitably until M2.3-splice, M3, M4,
+> M5, M6, M7 exist. All of that is **unit work doable on cloudbox** (unit tests don't
+> need a clean host). Provision the VM only at the end, run, then delete (billing).
+
+**Build mechanics** (from opencode-patched `build-release.yml`, confirmed):
+`git clone --depth 1 --branch vX https://github.com/anomalyco/opencode.git` →
+`patches/apply.sh .` (git apply) → `bun install` →
+`cd packages/opencode && bun run script/build.ts --all` →
+`dist/opencode-linux-arm64/bin/opencode`. The shim is **not** a git-apply patch; M2.3
+`instrument.ts` must splice it into source at the raw `uiRoute`/`server.ts` layer
+(Effect HttpApi). V0 is also available as a prebuilt release asset (for M2.4 A/A vs
+source-built+shim).
+
+**Runbook:**
+1. `gcloud compute instances create serve-bench-scratch --machine-type=c4a-standard-16
+   --image-family=ubuntu-2404-lts-arm64 --image-project=ubuntu-os-cloud
+   --boot-disk-size=100GB --boot-disk-type=hyperdisk-balanced --zone=<zone>
+   --project=<proj>` (+ external IP or IAP for egress). Match cloudbox machine type so
+   core count / per-core perf are comparable.
+2. Install `bun` + `git` (+ build-essential). Get `serve-bench` onto the VM (it is
+   local-only/no remote → rsync/scp, or finally register it on GitHub = Open Decision #1).
+3. Source-build V0+shim, V1+shim (needs M3 patch), V2-stock+shim; download V0 prebuilt.
+4. M2.3 smoke: boot each in an isolated `makeRunEnv`; `curl /__bench/metrics` → 200 +
+   histogram; `curl /global/health` → healthy.
+5. M2.4 A/A: prebuilt-V0 vs source-built-V0+shim + shim-on/off + scrape-rate sweep.
+6. M5 snapshot + M6 A/B/C matrix (M7 orchestrator, gate-before-recreate, ≥2 randomized
+   runs) → M7.2 verdict enum → M7.3 report. M8 read-only memory scan.
+7. Pull artifacts back; `gcloud compute instances delete serve-bench-scratch` (stop billing).
