@@ -432,6 +432,16 @@ in
     path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.curl pkgs.coreutils pkgs.bash pkgs.openssh ];
     serviceConfig = {
       Type = "oneshot";
+      # lgtm run mode (LGTM_DISPATCH_MODE=run) spawns detached `opencode run`
+      # children that must OUTLIVE the cycle's ExecStart — the watchdog reaps
+      # their completion on a later cycle. The default KillMode=control-group
+      # SIGKILLs the entire service cgroup when ExecStart exits, and a detached
+      # child (new process group via spawn's {detached:true}) does NOT escape the
+      # cgroup, so it gets killed one event in (observed: food-truck/mono#3569
+      # died right after step_start). KillMode=process kills only the main
+      # process on deactivation, leaving the detached review/assist children
+      # alive to finish and self-reap. Harmless for serve mode (no children).
+      KillMode = "process";
       User = "dev";
       Group = "dev";
       WorkingDirectory = "/home/dev/projects/lgtm";
