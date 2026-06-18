@@ -426,8 +426,10 @@ source-built+shim).
    --boot-disk-size=100GB --boot-disk-type=hyperdisk-balanced --zone=<zone>
    --project=<proj>` (+ external IP or IAP for egress). Match cloudbox machine type so
    core count / per-core perf are comparable.
-2. Install `bun` + `git` (+ build-essential). Get `serve-bench` onto the VM (it is
-   local-only/no remote → rsync/scp, or finally register it on GitHub = Open Decision #1).
+2. Install `bun` + `git` (+ build-essential). Get `serve-bench` onto the VM: it now
+   lives in a **private GitHub repo** (resolved Open Decision #1) → `git clone` with a
+   token. (Zone/project for step 1 come from the operator's `gcloud config`, kept out of
+   this public doc per `scrubbing-company-references`.)
 3. Source-build V0+shim, V1+shim (needs M3 patch), V2-stock+shim; download V0 prebuilt.
 4. M2.3 smoke: boot each in an isolated `makeRunEnv`; `curl /__bench/metrics` → 200 +
    histogram; `curl /global/health` → healthy.
@@ -435,3 +437,67 @@ source-built+shim).
 6. M5 snapshot + M6 A/B/C matrix (M7 orchestrator, gate-before-recreate, ≥2 randomized
    runs) → M7.2 verdict enum → M7.3 report. M8 read-only memory scan.
 7. Pull artifacts back; `gcloud compute instances delete serve-bench-scratch` (stop billing).
+
+---
+
+## M9 — Operational layer (post-harness; the work between "code-complete" and "verdict")
+
+> **Status (2026-06-18):** the M0–M8 harness is code-complete (`serve-bench` @ `f185752`,
+> 250 tests, on private GitHub `johnnymo87/serve-bench`). The harness is **pure core +
+> injected seams**; the *real* implementations behind those seams were deferred. M9 is
+> that deferred operational layer. Without it the runbook above cannot run — the
+> orchestrator/load-drivers/gate today only have FAKE (test) deps, and `build`/`run`/`aa`/
+> `calibrate` are CLI placeholders.
+
+### Strategy (chosen): write on cloudbox → shake out on ONE local V0 build → clean VM for the measured matrix
+Implement and unit-test the glue on cloudbox; do a single heavy V0 build + full end-to-end
+smoke locally to catch integration bugs cheaply (numbers will be noisy — that's fine for
+shakeout, NOT for the verdict); provision the throwaway VM ONLY for the real measured
+matrix. This matches "de-risk end-to-end on V0 before V1/V2 exist" and minimizes VM billing.
+
+### What's missing (the seams that need real impls)
+- **Build/run CLI**: `serve-bench build <variant>` (wire `buildVariant` + `nodeBuildRunner`
+  + staged fork `patchesDir` from opencode-patched + serve-bench `localPatchesDir`) and
+  `serve-bench run` (assemble the orchestrator with real deps + write `results/<run>`).
+- **Runtime deps** (orchestrator): real `startRuntime` (boot serve in `makeRunEnv`, await
+  `/global/health`), `stopProcessTree`, `measureWalBytes` (stat the run DB `-wal`),
+  `recreateEnv` (`snapshot.recreate`), `assertNoLeftoverProcs`, seeded `shuffle`.
+- **Load-driver deps**: real `TestADeps` (SSE subscribe `/event` + collector sample on the
+  serve PID-set + shim `/__bench/metrics` + host CPU), `TestBDeps.runReconnectBurst`
+  (fire N reconnects, poll `/global/health`, sample RSS), `TestCDeps.runSessions` (serve:
+  create session + send prompt via the serve HTTP API; V3: spawn `opencode run`; capture
+  the 7 phase marks + outcome from event stream / DB).
+- **opencode integration discovery** (riskiest — reverse-engineer real opencode): serve
+  HTTP API (session-create + prompt endpoints/payloads), real SQLite **DB schema** →
+  `GateConfig` mapping + live-session query, **custom-provider config** to route a model's
+  `baseURL` → the mock, and the **recorded-profile capture format** (http-recorder /
+  aigateway ledger) + parser → `RawChunk[]`.
+- **Stats/aggregation**: slope fitting (CPU/health/wall vs load level) + confidence
+  intervals + run-to-run agreement (`runsAgree`) → the verdict engine's `VerdictInput`;
+  and `results/<run>` artifacts → `report-model.json` for `cli report`.
+- **Real profile capture + calibration**: capture actual LLM traffic, scrub, run the
+  real-vs-scrubbed calibration gate on a local build.
+
+### Task breakdown (dependency-ordered)
+- **M9.0 — opencode integration discovery (SPIKE, do FIRST; gates M9.3/M9.4).** Against a
+  local opencode build/install on cloudbox, document: serve HTTP API (session + prompt),
+  `/event` SSE + `/global/health` contracts, the SQLite schema (sessions / owner /
+  `info.error` / live-session set), the custom-provider config for the mock, and the
+  capture format. Output: a discovery note (bead) + the `GateConfig` field mapping.
+- **M9.1 — build CLI + orchestration** (`serve-bench build`).
+- **M9.2 — runtime/process deps** (orchestrator real impls).
+- **M9.3 — load-driver deps** (real A/B/C deps; needs M9.0).
+- **M9.4 — mock wiring + profile capture + calibration** (needs M9.0).
+- **M9.5 — stats/aggregation layer** (slopes + CIs + `runsAgree` → `VerdictInput`;
+  artifacts → `report-model.json`). Pure-ish, unit-testable on cloudbox.
+- **M9.6 — `serve-bench run` CLI** (assemble orchestrator + real deps + artifact writing).
+- **M9.7 — local V0 shakeout** (cloudbox): one V0 build → end-to-end build→boot→A/B/C
+  (small N)→gate→aggregate→verdict→report. Fix integration bugs. Numbers discarded.
+- **M9.8 — VM clean matrix run** (the experiment): provision VM, build V0/V1/V2-stock/V3,
+  run the full randomized matrix, pull artifacts, render the verdict, delete the VM.
+
+### VM checkpoints to validate during M9.8 (flagged during unit phase)
+- M3.2 singleflight: the `get→Deferred.make→set` race; `Deferred.complete(_, Effect.done(exit))`
+  vs canonical `Deferred.done`; the effect-beta API/version.
+- V2-stock (v1.17.8 `11e47f91`) actually building; fork patch filenames matching at build time.
+- The bench-shim splice still applying cleanly to the built source.
