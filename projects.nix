@@ -46,6 +46,11 @@
     url = "git@github.com:johnnymo87/opencode-patched.git";
   };
 
+  # Shared libraries (consumed by other projects as git dependencies)
+  sticky-router = {
+    url = "git@github.com:johnnymo87/sticky-router.git";
+  };
+
   # Add more projects as needed:
   # my-project = { url = "git@github.com:org/repo.git"; };
 }
