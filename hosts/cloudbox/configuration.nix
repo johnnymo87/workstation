@@ -115,6 +115,19 @@ in
         group = "dev";
         mode = "0400";
       };
+      # TeamClaude proxy.apiKey. This is a COPY of proxy.apiKey in the
+      # writable runtime config at /home/dev/.config/teamclaude.json (which
+      # TeamClaude owns and rewrites on OAuth-token refresh). The two MUST
+      # match. The teamclaude.service reads its apiKey from that config file,
+      # NOT from here — this secret exists so (a) the verification curl can
+      # authenticate and (b) the claude-failover-proxy router can send it as
+      # CFP_TEAMCLAUDE_API_KEY (8fe.14 / T13). Rotating means regenerating in
+      # both places.
+      teamclaude_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Pigeon daemon secrets
       ccr_api_key = {
         owner = "dev";
@@ -613,6 +626,63 @@ in
       MemoryMax = "40G";
       MemoryHigh = "32G";
       OOMScoreAdjust = "500";
+      Restart = "always";
+      RestartSec = 10;
+    };
+  };
+
+  # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
+  # router forwards to when work Claude-on-Vertex spend is over budget
+  # (8fe.15 PREREQ). Runs `@karpeleslab/teamclaude` (zero-dep Node) from the
+  # dev checkout at ~/projects/teamclaude (reconstructable via ensure-projects).
+  #
+  # CONFIG IS RUNTIME STATE, NOT NIX-MANAGED. TeamClaude reads + REWRITES
+  # /home/dev/.config/teamclaude.json (OAuth access/refresh tokens auto-refresh
+  # and are written back), so the config must be writable + persistent — it is
+  # NOT in the nix store and NOT a read-only sops mount. The OAuth accounts are
+  # added out-of-band via the interactive `teamclaude login` flow (see
+  # claude-failover-proxy docs/plans/2026-06-19-teamclaude-cloudbox-deploy.md);
+  # this unit only RUNS the already-seeded config. With zero accounts the server
+  # exits 1 ("No accounts configured") and Restart=always would crash-loop, so
+  # accounts must exist before this unit is (re)started.
+  #
+  # BIND + AUTH: index.js calls server.listen(port) with no host, so it binds
+  # all interfaces (not 127.0.0.1 — we can't pass a host without patching the
+  # checkout). Two backstops keep :3456 private: (1) cloudbox runs NO NixOS
+  # firewall and relies on GCP's default-deny ingress (3456 is not opened), and
+  # (2) TeamClaude's own auth gate (server.js) requires x-api-key === the config
+  # proxy.apiKey for any NON-localhost client. The router connects via
+  # 127.0.0.1 (localhost-exempt) but sends the key anyway.
+  #
+  # Auto-starts on boot (wantedBy multi-user.target) per the deploy decision.
+  systemd.services.teamclaude = {
+    description = "TeamClaude (personal Claude Max rotator for failover)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" ];
+    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" ];
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev";
+      Environment = [
+        "HOME=/home/dev"
+        # Pin the config path explicitly so it never depends on XDG_CONFIG_HOME.
+        # Matches the default getConfigPath() resolution for the dev user.
+        "TEAMCLAUDE_CONFIG=/home/dev/.config/teamclaude.json"
+      ];
+      ExecStart = "${pkgs.writeShellScript "teamclaude-start" ''
+        set -euo pipefail
+        if [ ! -f /home/dev/projects/teamclaude/src/index.js ]; then
+          echo "teamclaude checkout missing at ~/projects/teamclaude (run ensure-projects)" >&2
+          exit 1
+        fi
+        if [ ! -f /home/dev/.config/teamclaude.json ]; then
+          echo "teamclaude config missing at ~/.config/teamclaude.json (seed + login first)" >&2
+          exit 1
+        fi
+        exec ${pkgs.nodejs}/bin/node /home/dev/projects/teamclaude/src/index.js server --headless
+      ''}";
       Restart = "always";
       RestartSec = 10;
     };
