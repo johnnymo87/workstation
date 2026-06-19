@@ -199,9 +199,17 @@ in
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
-   xdg.configFile."opencode/plugins/subagent-routing.ts" = lib.mkIf (isDarwin || isCloudbox) {
-     source = "${assetsPath}/opencode/plugins/subagent-routing.ts";
-   };
+    xdg.configFile."opencode/plugins/subagent-routing.ts" = lib.mkIf (isDarwin || isCloudbox) {
+      source = "${assetsPath}/opencode/plugins/subagent-routing.ts";
+    };
+    # session-header injects x-opencode-session into google-vertex-anthropic
+    # requests so the cloudbox claude-failover-proxy can do sticky / idle-migrate
+    # routing (cache-affinity). Cloudbox-only: that is the only host whose
+    # google-vertex-anthropic baseURL is (or will be, see T13) the router.
+    xdg.configFile."opencode/plugins/session-header.ts" = lib.mkIf isCloudbox {
+      source = "${assetsPath}/opencode/plugins/session-header.ts";
+    };
+
 
     # self-compact deployed as a Nix-built self-contained JS bundle.
     # See docs/plans/2026-04-21-self-compact-bundle-design.md.
