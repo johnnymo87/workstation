@@ -152,6 +152,8 @@ WHERE session_id=@sid AND serve_id=@serve AND instance_uuid=@uuid AND owner_gene
 
 ## M4 — Serve-side lease participation (opencode-patched) — **HIGH BLAST RADIUS**
 
+> **Detailed implementation-ready spike:** `docs/plans/2026-06-20-mn9r-m4-serve-lease-plan.md` (recon-verified insertion points + exact lease CAS SQL + 7 TDD tasks). It surfaces two design gaps this section assumed away — **D1 serve identity bootstrap** (serve_instance is pigeon-minted today) and **D2 behavior when no assignment exists** — both needing a decision before coding.
+
 **Why:** the core of mn9r — serves must hold a fenced lease to run a session's agent loop. Depends on M1 (contract) + M2 (shared DB pin).
 
 **New patch `serve-lease.patch` (+ maybe a new `packages/core/src/serve/` module). Insertion points (v1.17.7):**
