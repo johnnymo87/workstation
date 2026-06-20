@@ -12,10 +12,10 @@ name: Update claude-failover-proxy
 #   - the GitHub API asset URL embeds a per-release numeric asset id, so we bump
 #     the asset id in the url AND the hash AND the version together.
 #
-# REQUIREMENT: the UPDATE_TOKEN Actions secret must have contents:read on
-# johnnymo87/claude-failover-proxy. The sops github_api_token (classic) is known
-# to work; if UPDATE_TOKEN lacks cfp access, point this workflow at a dedicated
-# secret instead.
+# TOKENS: the cfp-read steps use CFP_READ_TOKEN (a dedicated Actions secret set
+# from the sops github_api_token, which has contents:read on the private cfp
+# repo — UPDATE_TOKEN does NOT, it 404s). The PR step keeps UPDATE_TOKEN, the
+# established token for opening auto-merge PRs on this repo.
 
 on:
   schedule:
@@ -43,8 +43,9 @@ jobs:
       - name: Check for new release
         id: check
         env:
-          # cfp is PRIVATE: github.token can't read it, so use the PAT.
-          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+          # cfp is PRIVATE: github.token / UPDATE_TOKEN can't read it (404); use
+          # the dedicated cfp-read PAT.
+          GH_TOKEN: ${{ secrets.CFP_READ_TOKEN }}
         run: |
           file="pkgs/claude-failover-proxy/default.nix"
           current=$(grep 'version = ' "$file" | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -68,7 +69,7 @@ jobs:
         if: steps.check.outputs.up_to_date == 'false'
         id: asset
         env:
-          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+          GH_TOKEN: ${{ secrets.CFP_READ_TOKEN }}
         run: |
           tag="${{ steps.check.outputs.tag }}"
           name="claude-failover-proxy-linux-arm64"
