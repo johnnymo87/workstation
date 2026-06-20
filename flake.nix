@@ -55,6 +55,7 @@
       ask-question = p.callPackage ./pkgs/ask-question { };
       bb = p.callPackage ./pkgs/bb { };
       beads = p.callPackage ./pkgs/beads { };
+      claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       gws = p.callPackage ./pkgs/gws { };
       nvims = p.callPackage ./pkgs/nvims { };
