@@ -54,11 +54,28 @@ T13a PHASE 2 = DONE + VERIFIED. No new PAT was needed: the EXISTING sops
 T13a is COMPLETE. Router live on :8789; reproducible daemon builds + CI
 auto-update both wired and verified.
 
-T13b = NOT STARTED, HELD for explicit user go-ahead (high blast radius: flips
-live opencode Claude routing). Open design questions still pending (read cfp
-src/server.ts + src/backends.ts forwardToVertex for the baseURL path shape;
-split the strip-branch so vertex-anthropic follows cfp.service health while
-gemini stays on aigateway.service). See the T13b section below.
+T13b = CODE LANDED + verified-without-activating (commit `bb02024`); NOT yet
+activated. `users/dev/opencode-config.nix` `injectAigatewayBaseUrl` is now
+decoupled: claude (google-vertex-anthropic) -> cfp router `127.0.0.1:8789`
+(fallback aigateway:8080 if cfp down, then direct Vertex); gemini (google-vertex)
+stays on aigateway:8080. Design questions RESOLVED from source: forwardToVertex
+(backends.ts) re-bases the incoming pathname+search onto CFP_AIGATEWAY_URL, so
+the claude baseURL is the same Vertex path at :8789; session stickiness keys on
+the x-opencode-session header (T12, deployed). VERIFIED statically: home
+activationPackage builds; the jq toggle filter is correct for router-up /
+router-down(->aigateway) / both-down(->strip); router<->aigateway transparency
+confirmed (identical responses on :8789 vs :8080; the :8789 request appears in
+dev-gateway-1 logs — 503s were only the aigateway EmailResolver rejecting the VM
+SA token, NOT a router fault).
+
+ACTIVATION PENDING (handed off): the activating `home-manager switch --flake
+.#cloudbox` restarts opencode-serve, which kills any agent session running inside
+the opencode-serve.service cgroup — so it must run from a LOGIN shell. A
+Claude-on-macOS session will SSH into cloudbox and run it + verify. Post-switch
+checks: claude baseURL=:8789, gemini=:8080 in ~/.config/opencode/opencode.json;
+cfp journald shows real traffic. ROLLBACK: `sudo systemctl stop
+claude-failover-proxy && home-manager switch` (claude reverts to aigateway:8080)
+OR `git revert bb02024 && switch`.
 
 - Coordination: bkdw (`ses_128ece55bffeGfKs52gPTQBJZq`) is synced through the
   Phase 2 pushes (told to `git pull --rebase`); they're idle on zao4 (PR #4),
