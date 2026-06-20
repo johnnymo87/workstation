@@ -108,6 +108,12 @@ lib.mkIf isDarwin {
         NODE_ENV = "production";
         CCR_MACHINE_ID = "macbook";
         OPENCODE_URL = "http://127.0.0.1:4096";
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for rationale). pigeon revive spawns opencode that
+        # must hit the same DB; a launchd agent doesn't source ~/.profile.
+        # macOS data dir = ~/.local/share/opencode (xdg-basedir fallback).
+        OPENCODE_DB = "${config.home.homeDirectory}/.local/share/opencode/opencode.db";
+        OPENCODE_DISABLE_CHANNEL_DB = "1";
         PATH = lib.concatStringsSep ":" [
           "${pkgs.nodejs}/bin"
           "${pkgs.neovim}/bin"
@@ -132,6 +138,11 @@ lib.mkIf isDarwin {
       ProgramArguments = [
         "${pkgs.writeShellScript "opencode-serve-start" ''
           export HOME="${config.home.homeDirectory}"
+          # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+          # sessionVariables for rationale). A launchd agent doesn't source
+          # ~/.profile, so the sessionVariables copy doesn't reach it.
+          export OPENCODE_DB="${config.home.homeDirectory}/.local/share/opencode/opencode.db"
+          export OPENCODE_DISABLE_CHANNEL_DB=1
           export PATH="${lib.concatStringsSep ":" [
             "${pkgs.git}/bin"
             "${pkgs.openssh}/bin"

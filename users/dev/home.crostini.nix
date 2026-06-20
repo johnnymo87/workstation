@@ -105,6 +105,11 @@ lib.mkIf isCrostini {
         "HOME=${config.home.homeDirectory}"
         "NODE_ENV=production"
         "CCR_MACHINE_ID=chromebook"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for rationale). pigeon revive spawns opencode that
+        # must hit the same DB; a user service doesn't source ~/.profile.
+        "OPENCODE_DB=${config.home.homeDirectory}/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
         "PATH=${lib.makeBinPath [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ]}"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
@@ -138,6 +143,11 @@ lib.mkIf isCrostini {
       WorkingDirectory = config.home.homeDirectory;
       Environment = [
         "HOME=${config.home.homeDirectory}"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for rationale). A user service doesn't source
+        # ~/.profile, so the sessionVariables copy doesn't reach it.
+        "OPENCODE_DB=${config.home.homeDirectory}/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
         "PATH=${lib.makeBinPath [
           pkgs.git pkgs.openssh pkgs.fzf pkgs.ripgrep pkgs.gh pkgs.bun
           pkgs.nodejs pkgs.curl pkgs.wget pkgs.jq pkgs.fd pkgs.unzip

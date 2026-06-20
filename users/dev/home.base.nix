@@ -838,6 +838,22 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     # systemd unit on devbox/cloudbox needs the same var added to its own
     # Environment list -- see hosts/{devbox,cloudbox}/configuration.nix.
     OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX = "65536";
+    # mn9r M2: pin opencode's SQLite DB to ONE absolute file so every writer
+    # (serve, TUIs, pigeon revive, opencode-launch workers, lgtm run) resolves
+    # the same database. opencode's resolver (storage/db.ts getPath) honours an
+    # absolute OPENCODE_DB verbatim, bypassing the channel-suffixed default
+    # (opencode-<channel>.db) that a from-source `bun run` or dev build would
+    # otherwise write to -> latent split-brain (a stale opencode-local.db
+    # already exists on cloudbox from exactly this). OPENCODE_DISABLE_CHANNEL_DB
+    # is belt-and-suspenders for any path that ever leaves OPENCODE_DB unset.
+    # Required by the K-serve pool (mn9r) where multiple serves share one DB.
+    # NOTE: this only covers interactive shells (sourced via ~/.profile); the
+    # systemd/launchd serve + pigeon units each need their own copy -- see
+    # hosts/{devbox,cloudbox}/configuration.nix and home.{devbox,crostini,darwin}.nix.
+    # Path matches Global.Path.data = xdgData/opencode (xdg-basedir falls back
+    # to ~/.local/share on every platform incl. macOS absent $XDG_DATA_HOME).
+    OPENCODE_DB = "${config.home.homeDirectory}/.local/share/opencode/opencode.db";
+    OPENCODE_DISABLE_CHANNEL_DB = "1";
   } // lib.optionalAttrs (isDarwin || isCloudbox) {
     # Cap JetBrains kotlin-lsp JVM heap — each OpenCode session spawns its
     # own instance; without a cap they grow to ~1.5 GB each.

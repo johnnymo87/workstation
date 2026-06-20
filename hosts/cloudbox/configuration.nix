@@ -396,6 +396,11 @@ in
         "HOME=/home/dev"
         "NODE_ENV=production"
         "CCR_MACHINE_ID=cloudbox"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for full rationale). pigeon revive spawns opencode
+        # that must hit the same DB; a system service doesn't source ~/.profile.
+        "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
         # Absolute path to oc-auto-attach so launch-ingest.ts can find it
         # despite the locked-down systemd PATH. See let-binding above.
         "OC_AUTO_ATTACH_BIN=${oc-auto-attach}/bin/oc-auto-attach"
@@ -468,6 +473,11 @@ in
         "HOME=/home/dev"
         "OPENCODE_URL=http://127.0.0.1:4096"
         "LGTM_PROJECTS_DIR=/home/dev/projects"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for rationale). lgtm run-mode spawns detached
+        # `opencode run` children that inherit this env and must hit the same DB.
+        "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
         # When the agent submits APPROVE on a PR by one of these authors,
         # Phase 4 of the review prompt instructs it to immediately enable
         # GitHub auto-merge (gh pr merge --auto --squash) so dependency
@@ -555,6 +565,12 @@ in
         # only covers interactive shells, opencode-serve needs it set
         # explicitly. See full rationale there.
         "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for full rationale). Required by the K-serve pool —
+        # every serve must share one DB. A system service doesn't source
+        # ~/.profile, so the sessionVariables copy doesn't reach it.
+        "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
       ];
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
@@ -846,6 +862,11 @@ in
       Environment = [
         "TMUX_TMPDIR=/tmp"
         "PATH=/run/current-system/sw/bin:/home/dev/.nix-profile/bin"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for rationale). reset-workspace spawns a headless
+        # recommendation opencode session that must hit the same DB.
+        "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
       ];
     };
     script = ''

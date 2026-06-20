@@ -439,6 +439,11 @@ lib.mkIf isDevbox {
         # home.sessionVariables entry in home.base.nix only covers interactive
         # shells; a systemd service needs it set explicitly.
         "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for full rationale). A user service does not source
+        # ~/.profile, so the sessionVariables copy doesn't reach it.
+        "OPENCODE_DB=${config.home.homeDirectory}/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
         # opencode shells out to git/gh/node/rg/etc.; a user service does not
         # inherit the interactive login PATH, so set it explicitly. Order mirrors
         # the previous system service's

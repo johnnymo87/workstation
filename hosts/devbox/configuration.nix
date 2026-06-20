@@ -241,6 +241,11 @@
         "HOME=/home/dev"
         "NODE_ENV=production"
         "CCR_MACHINE_ID=devbox"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for full rationale). pigeon revive spawns opencode
+        # that must hit the same DB; a system service doesn't source ~/.profile.
+        "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
@@ -297,6 +302,11 @@
       Environment = [
         "TMUX_TMPDIR=/tmp"
         "PATH=/run/current-system/sw/bin:/home/dev/.nix-profile/bin"
+        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+        # sessionVariables for rationale). reset-workspace spawns a headless
+        # recommendation opencode session that must hit the same DB.
+        "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
+        "OPENCODE_DISABLE_CHANNEL_DB=1"
       ];
     };
     script = ''
