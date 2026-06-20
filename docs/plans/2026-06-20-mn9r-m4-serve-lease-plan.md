@@ -1,6 +1,6 @@
 # mn9r M4 — Serve-Side Lease Participation Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. This is the **HIGH-BLAST-RADIUS** core of mn9r. Do NOT start coding until the two "Design decisions to confirm" (below) are answered by the user.
+> **For Claude:** REQUIRED SUB-SKILL: execute via **superpowers:subagent-driven-development** (SDD) — fresh `implementer` subagent per task, `spec-reviewer` + `code-reviewer` between tasks, orchestrator reviews each. This is the **HIGH-BLAST-RADIUS** core of mn9r. **Design decisions RESOLVED 2026-06-20: D1a + D2a** (see §"Design decisions" below — both gaps are now decided; the plan reflects them).
 
 **Goal:** Make the opencode `serve` process hold a fenced, time-boxed lease (against pigeon's routing DB) for the duration of a session's agent run, so that under the K-serve pool exactly one process ever runs a given session's loop — and an old-epoch / superseded serve cannot keep running after a cutover or reassignment.
 
@@ -37,23 +37,20 @@
 
 ---
 
-## ⚠️ Design decisions to confirm BEFORE coding
+## ✅ Design decisions — RESOLVED 2026-06-20: **D1a + D2a**
 
-These two gaps are NOT mechanical — the master plan assumed them away. Recommendations given; **confirm with user**.
+### D1 — Serve identity bootstrap → **D1a CHOSEN: serve self-registers + self-heartbeats (touches pigeon)**
+The serve generates its own `instance_uuid` (`randomUUID()`), takes `serve_id` from a new env `OPENCODE_SERVE_ID` (set per-unit by M5; for M4 tests, supplied directly), and **upserts its own `serve_instance` row** on boot (endpoint = `127.0.0.1:<port>`, `binary_epoch` = current, `health_state='healthy'`, `heartbeat_at=now`), then **self-heartbeats** on a timer fiber. **Pigeon-side change required** (this milestone now spans the pigeon repo too):
+- `seedServes()` (`packages/daemon/src/routing/serve-registry.ts`) must STOP minting `instance_uuid` / owning liveness. It should reconcile by `serve_id` — never overwrite the serve-owned `instance_uuid` / `heartbeat_at` / `health_state`. Config (`PIGEON_SERVE_ENDPOINTS`) may still seed the *expected* serve_id↔endpoint mapping, but the live identity row is the serve's.
+- **Retire (or demote to secondary) the HTTP `ServeHealthPoller`** (`serve-health-poller.ts`): liveness now comes from the serve's self-written `heartbeat_at` + the existing `isServeHealthy` staleness check (`heartbeat_at > now - staleServeMs`). Keep a fallback path or feature-gate the swap so pigeon doesn't go blind if a serve predates self-registration.
+- Rationale: serve owns its own liveness (correct long-term); avoids the D1b boot-ordering dependency and the split where pigeon heartbeats a process it doesn't run.
+- **D1b REJECTED** (serve reads pigeon-minted identity): keeps the awkward "pigeon heartbeats someone else's process" model and a boot-ordering dependency.
 
-### D1 — Serve identity bootstrap (serve_id + instance_uuid)
-Today pigeon mints both and the serve never touches `serve_instance`. For the serve to form a lease token it must know its own `serve_id` and `instance_uuid`. **Options:**
-- **D1a (recommended): serve self-registers `serve_instance` on boot.** Serve generates its own `instance_uuid` (`randomUUID()`), derives `serve_id` from a new env `OPENCODE_SERVE_ID` (set per-unit by M5, e.g. `serve-4101`), and upserts its `serve_instance` row (endpoint = its `127.0.0.1:<port>`, `binary_epoch` = current, `health_state='healthy'`, `heartbeat_at=now`). **Requires a pigeon-side change**: pigeon's `seedServes()` must stop minting/owning identity and instead *read* serve-published rows (or reconcile by `serve_id`). This is cleaner long-term (serve owns its own liveness) but **touches pigeon → bumps M4 scope into the pigeon repo** and must keep the HTTP health poller working (or retire it in favor of serve self-heartbeat).
-- **D1b: serve reads its pigeon-minted identity.** Serve learns `serve_id` by matching its own endpoint against `serve_instance.endpoint`, then reads the `instance_uuid` pigeon assigned. No pigeon change, but a **boot ordering dependency** (pigeon must have seeded the row first) and the serve heartbeat stays pigeon's job (HTTP poll) — the serve only writes leases, not its instance row.
-- Decision affects whether M4 stays opencode-only or also edits pigeon.
-
-### D2 — Behavior when no assignment exists for (session, this serve)
-`acquireCAS` only succeeds if pigeon already wrote `session_assignment(session, desired_serve_id=me, gen)`. In the pre-M5 / direct-`:4096` world there are no assignments. **Options:**
-- **D2a (recommended): lease is gated + fail-open-when-unrouted.** If `OPENCODE_ROUTING_DB` unset ⇒ feature off (today's behavior). If set but no assignment for this session ⇒ run WITHOUT a lease (log once). Enforce the lease ONLY for sessions pigeon has actually assigned to this serve. This keeps direct sessions working and makes the patch safe to ship before M5/router-everywhere.
-- **D2b: serve self-creates an assignment.** Serve writes `session_assignment(desired_serve_id=me)` if absent, then acquires. Simpler enforcement but **breaks pigeon's HRW placement authority** (serve unilaterally claims placement) — rejected unless the broker design (zao4) explicitly delegates placement to whoever-starts-first.
-- Decision sets whether "unassigned session on a pooled serve" is a hard error, a silent no-lease run, or a self-claim.
-
-**My recommendation: D1a + D2a** if we accept a small pigeon-side change (serve self-registration + self-heartbeat, retiring the HTTP poller); otherwise **D1b + D2a** to keep M4 strictly opencode-patched. Either way **D2a** (gated, fail-open-when-unrouted) is the safe enforcement posture.
+### D2 — No assignment for (session, this serve) → **D2a CHOSEN: gated + fail-open-when-unrouted**
+- `OPENCODE_ROUTING_DB` **unset** ⇒ feature OFF — today's behavior byte-for-byte (safe to ship before M5).
+- Set **and** a `session_assignment` exists for this session pointing at this serve ⇒ acquire/enforce the lease (fail the run if acquire fails on an *assigned* session).
+- Set but **no assignment** ⇒ run WITHOUT a lease (log once). Direct/pre-pool sessions keep working.
+- **D2b REJECTED** (serve self-creates assignment): usurps pigeon's HRW placement authority.
 
 ---
 
@@ -85,9 +82,13 @@ Today pigeon mints both and the serve never touches `serve_instance`. For the se
 **Files:** extend `pigeon` `test/routing/lease-cas-concurrency.test.ts` to fork ONE worker that drives the opencode `routing-lease.ts` adapter (or a thin harness around it) alongside the better-sqlite3 workers.
 **Steps:** red (worker not wired) → green (wire it) → assert the existing zero-overlap invariant still holds with a mixed-binding writer set. This is the cross-binding multi-writer proof. Commit. *(If D1a, this also covers serve self-registration.)*
 
-### Task 3: Serve identity + boot fence + heartbeat (`serve.ts`)
-**Files:** Modify `packages/opencode/src/cli/cmd/serve.ts` (insert between line 20 and 22). Test: `test/cli/serve/serve-process.test.ts`.
-**Per D1 decision:** generate/discover `instance_uuid` + `serve_id`; assert `routing_meta.binary_epoch` (refuse start if a stale `OPENCODE_BINARY_EPOCH` is pinned and < current — or skip if we don't pin epoch on serve); (D1a) upsert `serve_instance`; `Effect.forkScoped` a heartbeat fiber (`Effect.repeat(Schedule.spaced(...))`) that updates `serve_instance.heartbeat_at` (D1a) — process-level, once; `Effect.addFinalizer` to mark the serve dead/draining on shutdown. Gate the whole block on `Flag.OPENCODE_ROUTING_DB`. Red: extend serve-process test to assert a `serve_instance` row appears after boot when routing env set, and is gone/dead after scope close. Green. Commit.
+### Task 3: Serve self-registration + boot fence + self-heartbeat (`serve.ts`) — **D1a**
+**Files:** Modify `packages/opencode/src/cli/cmd/serve.ts` (insert between line 20 and 22) + add `OPENCODE_SERVE_ID` to `flag.ts`. Reuse the `routing-lease.ts` connection from Task 1 (add `registerSelf`/`heartbeat`/`markDead` methods there). Test: `test/cli/serve/serve-process.test.ts`.
+**Steps:** generate `instance_uuid` (`randomUUID()`); read `serve_id` from `Flag.OPENCODE_SERVE_ID`; assert `routing_meta` schema/checksum (fail closed); **upsert own `serve_instance` row** (endpoint `127.0.0.1:<port>`, current `binary_epoch`, `health_state='healthy'`, `heartbeat_at=now`); `Effect.forkScoped` a self-heartbeat fiber (`Effect.repeat(Schedule.spaced(...))`, cadence < `staleServeMs`) updating `serve_instance.heartbeat_at`; `Effect.addFinalizer` to mark the row `draining`/dead on shutdown. Gate the whole block on `Flag.OPENCODE_ROUTING_DB`. Red: extend serve-process test to assert a `serve_instance` row appears with the serve-minted `instance_uuid` after boot (routing env set) and flips dead/gone after scope close. Green. Commit.
+
+### Task 3b: Pigeon-side reconcile + retire HTTP poller (pigeon repo) — **D1a**
+**Files (pigeon):** `packages/daemon/src/routing/serve-registry.ts` (`seedServes`), `packages/daemon/src/routing/serve-health-poller.ts`, wiring in `packages/daemon/src/index.ts`. Tests under `packages/daemon/test/routing/`.
+**Steps:** (1) Change `seedServes()` to reconcile by `serve_id` WITHOUT overwriting serve-owned `instance_uuid`/`heartbeat_at`/`health_state` (config still maps expected serve_id↔endpoint; the live identity row is the serve's). Red: test that an existing serve-written row survives a `seedServes()` call (instance_uuid + heartbeat preserved). (2) Retire/demote `ServeHealthPoller`: liveness = serve self-heartbeat staleness via existing `isServeHealthy`; feature-gate or keep a fallback so pigeon doesn't go blind for a serve that predates self-registration. Red: test that a serve with a fresh self-written `heartbeat_at` is `isServeHealthy` even with the poller off; a stale one is not. Green + commit. **Single writer on pigeon (sibling pre-cleared); use explicit-pathspec commits; PR + ff to main like M1.**
 
 ### Task 4: Agent-loop lease wrap (`prompt.ts:1407`)
 **Files:** Modify `packages/opencode/src/session/prompt.ts:1407`. Test: `test/session/prompt.test.ts`.
@@ -99,7 +100,7 @@ Today pigeon mints both and the serve never touches `serve_instance`. For the se
 **Behavior:** before a long/side-effecting step, check the local lease deadline; if it can't be renewed before a safety margin, pause/cancel the run (fail-closed — never proceed past the deadline). Red (simulate a renewal failure → loop must stop) → green → commit.
 
 ### Task 6: Generate patch + register + full-chain verify
-**Steps:** `git diff` the opencode changes → `opencode-patched/patches/serve-lease.patch`; add `serve-lease` to `apply.sh` `PATCHES` (after `createnext-readback`) + header entry #9; run the **full** `apply.sh` chain on a fresh v1.17.7 worktree (`git apply --check` all 9) and run the session/serve test subset green with the full stack. Commit + push opencode-patched. *(If D1a: separate pigeon commit + PR for serve self-registration.)*
+**Steps:** `git diff` the opencode changes → `opencode-patched/patches/serve-lease.patch`; add `serve-lease` to `apply.sh` `PATCHES` (after `createnext-readback`) + header entry #9; run the **full** `apply.sh` chain on a fresh v1.17.7 worktree (`git apply --check` all 9) and run the session/serve test subset green with the full stack. Commit + push opencode-patched. The pigeon-side D1a change lands separately (Task 3b: PR + ff to pigeon main, like M1).
 
 ### Task 7: Canary p99 measurement (inline-vs-Worker gate)
 Run the serve under the pool-probe / a representative active-session load with lease writes ON; capture event-loop p99 (the harness from the Phase-0 measurement work). If p99 regresses materially, open a follow-up to move lease I/O to a Bun Worker. Record the result in the bead. (Does not block M4 landing if inline is acceptable.)
