@@ -504,6 +504,18 @@ lib.mkIf isDevbox {
   # NixOS firewall does NOT open TCP 3456, and (2) the proxy's own auth gate
   # requires x-api-key for non-localhost clients. opencode connects via 127.0.0.1
   # (localhost-exempt), so no key is needed locally.
+  #
+  # PLUGIN REQUIRED (do NOT remove @ex-machina/opencode-anthropic-auth):
+  # TeamClaude only swaps the OAuth bearer token — it does NOT shape the request.
+  # Claude Max OAuth needs a Claude-Code-shaped request (anthropic-beta:
+  # oauth-2025-04-20, ?beta=true, a "You are Claude Code" system identity, mcp_
+  # tool prefixes) or Anthropic 429s opus/sonnet and TeamClaude retry-loops
+  # forever (opencode hangs). That shaping comes from the opencode plugin.
+  # `injectTeamclaudeBaseUrl` (opencode-config.nix) keeps the plugin shape-only by
+  # seeding a non-expiring dummy oauth credential so it shapes requests without
+  # refreshing tokens (a refresh would rotate the shared Claude-Code client_id
+  # grant and break TeamClaude's tokens with invalid_grant). See that activation's
+  # header comment for the full rationale.
   systemd.user.services.teamclaude = {
     Unit = {
       Description = "TeamClaude (multi-account Claude Max rotator)";

@@ -283,6 +283,12 @@ in
   # The activation script below handles the invalidation; do not skip it.
   home.activation.installOpencodePlugins = let
     opencodePluginPins = {
+      # REQUIRED for the devbox TeamClaude routing — this plugin shapes opencode's
+      # requests into Claude-Code OAuth form (anthropic-beta, ?beta=true, "You are
+      # Claude Code" system identity, mcp_ tool prefixes) which premium models
+      # require; TeamClaude only swaps the token, it does NOT shape. Removing it
+      # makes opus/sonnet 429 and TeamClaude retry-loop forever. See
+      # injectTeamclaudeBaseUrl below for the full coexistence rationale.
       "@ex-machina/opencode-anthropic-auth" = "1.8.0";
       "opencode-beads" = "0.6.0";
     };
@@ -884,16 +890,33 @@ in
   # Point opencode's first-party `anthropic` provider at the local TeamClaude
   # rotator (devbox) when its user service is active; otherwise strip the
   # override so opencode talks to api.anthropic.com directly. TeamClaude proxies
-  # /v1/* to api.anthropic.com and INJECTS the active Max account's OAuth token
-  # (the client's auth is swapped), and exempts localhost from its x-api-key
-  # gate — so 127.0.0.1:3456/v1 with no key is all opencode needs.
+  # /v1/* to api.anthropic.com and SWAPS IN the active Max account's OAuth bearer
+  # token, and exempts localhost from its x-api-key gate — so 127.0.0.1:3456/v1
+  # with no key is all the *transport* opencode needs.
+  #
+  # BUT TeamClaude only swaps the token; it does NOT shape the request. Claude Max
+  # OAuth tokens require a Claude-Code-shaped request (anthropic-beta:
+  # oauth-2025-04-20, ?beta=true, a "You are Claude Code" system identity, mcp_
+  # tool prefixes) or Anthropic 429s the premium models (opus/sonnet) — which
+  # TeamClaude then misreads as quota and retries forever, hanging opencode. The
+  # @ex-machina/opencode-anthropic-auth plugin is what produces that shaping, so
+  # IT MUST STAY LOADED (see opencode.base.json + opencodePluginPins above). The
+  # plugin also auto-refreshes its own OAuth credential, and since it shares
+  # Claude Code's client_id with TeamClaude over the same accounts, that refresh
+  # rotates the grant family and invalidates TeamClaude's tokens (invalid_grant).
+  # Fix: the seed step below writes a NON-EXPIRING DUMMY oauth credential into
+  # opencode's auth store so the plugin stays in oauth mode (shapes requests +
+  # zeros cost) but never refreshes; TeamClaude overwrites the dummy bearer anyway
+  # and remains the sole token owner. (Tradeoff: when TeamClaude is down the
+  # direct-Anthropic fallback can't authenticate with the dummy — acceptable on
+  # this play box; stop teamclaude AND re-`opencode auth login` to go fully direct.)
   #
   # Gated + auto-fallback (mirrors injectAigatewayBaseUrl): the override only
   # takes effect once accounts are seeded (`teamclaude login`) and the unit is
   # started, and reverts to direct Anthropic the moment teamclaude.service is
   # stopped + this activation re-runs — so stopping the service is a clean
-  # rollback. opencode-serve (a USER service on devbox) is restarted only when
-  # the effective URL changes.
+  # rollback. opencode-serve (a USER service on devbox) is restarted when the
+  # effective URL changes OR the dummy credential is freshly seeded.
   #
   # Path shape: api.anthropic.com base is .../v1 and @ai-sdk/anthropic appends
   # /messages, so the override is .../v1 (no trailing /messages). The
@@ -918,6 +941,8 @@ in
           anthropic_url="http://127.0.0.1:3456/v1" ;;
       esac
 
+      seeded=0
+
       if [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
         ${pkgs.jq}/bin/jq --arg a "$anthropic_url" '
@@ -932,14 +957,42 @@ in
         mv "$tmp" "$runtime"
       fi
 
+      # When routing through TeamClaude, make the @ex-machina/opencode-anthropic-auth
+      # plugin SHAPE-ONLY: seed a non-expiring dummy oauth credential so the plugin
+      # stays in oauth mode (shapes the Claude-Code request + zeros cost) but never
+      # refreshes. TeamClaude owns + rotates the real tokens and overwrites the dummy
+      # bearer. (See the header comment for the full rationale.) Enforced on every
+      # switch while teamclaude is active, so a stray `opencode auth login` can't
+      # reintroduce the refresh conflict; idempotent via the sorted-key compare. When
+      # teamclaude is stopped (anthropic_url empty) we DON'T touch the auth store, so
+      # going direct just needs a real `opencode auth login`.
+      if [[ -n "$anthropic_url" ]]; then
+        auth="$HOME/.local/share/opencode/auth.json"
+        mkdir -p "$(dirname "$auth")"
+        [[ -f "$auth" ]] || echo '{}' > "$auth"
+        want="$(${pkgs.jq}/bin/jq -cnS '{type:"oauth",access:"teamclaude-managed-noop",refresh:"teamclaude-managed-noop",expires:4102444800000}')"
+        have="$(${pkgs.jq}/bin/jq -cS '.anthropic // empty' "$auth" 2>/dev/null || true)"
+        if [[ "$have" != "$want" ]]; then
+          atmp="$(mktemp "''${auth}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq '.anthropic = {type:"oauth",access:"teamclaude-managed-noop",refresh:"teamclaude-managed-noop",expires:4102444800000}' \
+            "$auth" > "$atmp"
+          mv "$atmp" "$auth"
+          chmod 600 "$auth"
+          seeded=1
+          echo "teamclaude: seeded non-expiring dummy anthropic oauth credential (plugin shape-only; teamclaude owns tokens)" >&2
+        fi
+      fi
+
       echo "teamclaude: anthropic -> ''${anthropic_url:-<direct Anthropic>} (teamclaude=$tc_state)" >&2
       new_hash="$(printf '%s' "$anthropic_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
 
-      # Restart opencode-serve (user service) only when the effective URL changed.
+      # Restart opencode-serve (user service) when the effective URL changed OR the
+      # dummy credential was freshly seeded — the plugin's loader decides oauth-mode
+      # (shaping) at provider init, so a fresh seed needs a reload to take effect.
       old_hash=""
       [ -r "$hash_file" ] && old_hash="$(cat "$hash_file")"
-      if [[ "$new_hash" != "$old_hash" ]]; then
-        echo "teamclaude: baseURL changed ($old_hash -> $new_hash); restarting opencode-serve (user)" >&2
+      if [[ "$new_hash" != "$old_hash" || "$seeded" == "1" ]]; then
+        echo "teamclaude: state changed (url hash $old_hash -> $new_hash, seeded=$seeded); restarting opencode-serve (user)" >&2
         restart_rc=0
         $sc --user restart opencode-serve.service || restart_rc=$?
         if [ "$restart_rc" -eq 0 ]; then
