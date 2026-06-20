@@ -1,0 +1,139 @@
+name: Update claude-failover-proxy
+
+# Auto-bumps pkgs/claude-failover-proxy/default.nix to the latest cfp release.
+#
+# Unlike update-bb / update-opencode-patched, the source repo
+# (johnnymo87/claude-failover-proxy) is PRIVATE, so:
+#   - every `gh api`/`gh release` call needs a token with contents:read on it
+#     (the default github.token only covers THIS repo) -> we use UPDATE_TOKEN
+#     for ALL steps, not just the PR step;
+#   - the asset is pulled with `gh release download` (authenticated; handles the
+#     GitHub->S3 redirect) rather than nix-prefetch-url on a public URL;
+#   - the GitHub API asset URL embeds a per-release numeric asset id, so we bump
+#     the asset id in the url AND the hash AND the version together.
+#
+# REQUIREMENT: the UPDATE_TOKEN Actions secret must have contents:read on
+# johnnymo87/claude-failover-proxy. The sops github_api_token (classic) is known
+# to work; if UPDATE_TOKEN lacks cfp access, point this workflow at a dedicated
+# secret instead.
+
+on:
+  schedule:
+    # Daily at 07:45 UTC (offset from update-bb @ 07:30 to avoid a stampede)
+    - cron: '45 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: update-claude-failover-proxy
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Check for new release
+        id: check
+        env:
+          # cfp is PRIVATE: github.token can't read it, so use the PAT.
+          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: |
+          file="pkgs/claude-failover-proxy/default.nix"
+          current=$(grep 'version = ' "$file" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+          # Latest release tag, e.g. "v0.1.0" -> version "0.1.0" (no leading v).
+          tag=$(gh api repos/johnnymo87/claude-failover-proxy/releases/latest --jq '.tag_name')
+          latest="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+          if [ "$current" = "$latest" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "Already on $current"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+            echo "Update available: $current -> $latest"
+          fi
+
+      - name: Resolve asset id + hash
+        if: steps.check.outputs.up_to_date == 'false'
+        id: asset
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: |
+          tag="${{ steps.check.outputs.tag }}"
+          name="claude-failover-proxy-linux-arm64"
+
+          # Per-release numeric asset id (embedded in the API asset URL).
+          asset_id=$(gh api "repos/johnnymo87/claude-failover-proxy/releases/tags/${tag}" \
+            --jq ".assets[] | select(.name==\"${name}\") | .id")
+          if [ -z "$asset_id" ]; then
+            echo "asset ${name} not found on ${tag}" >&2
+            exit 1
+          fi
+          echo "asset_id=$asset_id" >> "$GITHUB_OUTPUT"
+
+          # Authenticated download of the private asset (handles the S3 redirect),
+          # then compute the flat-file SRI hash fetchurl expects.
+          gh release download "$tag" \
+            --repo johnnymo87/claude-failover-proxy \
+            --pattern "$name" \
+            --output asset.bin --clobber
+          h=$(nix-prefetch-url "file://$PWD/asset.bin" 2>/dev/null)
+          sri=$(nix hash convert --hash-algo sha256 --to sri "$h")
+          echo "sri=$sri" >> "$GITHUB_OUTPUT"
+          echo "asset_id=$asset_id sri=$sri"
+          rm -f asset.bin
+
+      - name: Update default.nix
+        if: steps.check.outputs.up_to_date == 'false'
+        run: |
+          file="pkgs/claude-failover-proxy/default.nix"
+          version="${{ steps.check.outputs.latest }}"
+          asset_id="${{ steps.asset.outputs.asset_id }}"
+          sri="${{ steps.asset.outputs.sri }}"
+
+          sed -i "s|version = \"${{ steps.check.outputs.current }}\"|version = \"${version}\"|" "$file"
+          sed -i "s|releases/assets/[0-9][0-9]*|releases/assets/${asset_id}|" "$file"
+          sed -i "s|hash = \"sha256-[^\"]*\"|hash = \"${sri}\"|" "$file"
+
+          echo "Updated $file to ${version} (asset ${asset_id})"
+          git diff "$file"
+
+      - name: Create PR
+        if: steps.check.outputs.up_to_date == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: |
+          version="${{ steps.check.outputs.latest }}"
+          branch="auto/update-claude-failover-proxy"
+
+          git checkout -B "$branch"
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore(deps): update claude-failover-proxy to ${version}"
+          git push -u origin "$branch" --force
+
+          # gh pr view matches merged/closed PRs too -- only skip if truly open
+          pr_state=$(gh pr view "$branch" --json state -q '.state' 2>/dev/null || echo "NONE")
+          if [ "$pr_state" = "OPEN" ]; then
+            echo "PR already open for $branch, force-pushed update"
+          else
+            pr_url=$(gh pr create \
+              --title "chore(deps): update claude-failover-proxy to ${version}" \
+              --body "Automated update of \`claude-failover-proxy\` to \`${version}\` (private release asset; bumps version, asset id, and hash)." \
+              --label "dependencies,automated" \
+              --head "$branch")
+            pr_number=$(gh pr view "$branch" --json number -q '.number')
+            gh pr merge "$pr_number" --auto --squash
+          fi
