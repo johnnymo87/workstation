@@ -54,28 +54,36 @@ T13a PHASE 2 = DONE + VERIFIED. No new PAT was needed: the EXISTING sops
 T13a is COMPLETE. Router live on :8789; reproducible daemon builds + CI
 auto-update both wired and verified.
 
-T13b = CODE LANDED + verified-without-activating (commit `bb02024`); NOT yet
-activated. `users/dev/opencode-config.nix` `injectAigatewayBaseUrl` is now
-decoupled: claude (google-vertex-anthropic) -> cfp router `127.0.0.1:8789`
-(fallback aigateway:8080 if cfp down, then direct Vertex); gemini (google-vertex)
-stays on aigateway:8080. Design questions RESOLVED from source: forwardToVertex
-(backends.ts) re-bases the incoming pathname+search onto CFP_AIGATEWAY_URL, so
-the claude baseURL is the same Vertex path at :8789; session stickiness keys on
-the x-opencode-session header (T12, deployed). VERIFIED statically: home
-activationPackage builds; the jq toggle filter is correct for router-up /
-router-down(->aigateway) / both-down(->strip); router<->aigateway transparency
-confirmed (identical responses on :8789 vs :8080; the :8789 request appears in
-dev-gateway-1 logs — 503s were only the aigateway EmailResolver rejecting the VM
-SA token, NOT a router fault).
+T13b = COMPLETE + VERIFIED LIVE (commit `bb02024`). `users/dev/opencode-config.nix`
+`injectAigatewayBaseUrl` is decoupled: claude (google-vertex-anthropic) -> cfp
+router `127.0.0.1:8789` (fallback aigateway:8080 if cfp down, then direct Vertex);
+gemini (google-vertex) stays on aigateway:8080. Design questions RESOLVED from
+source: forwardToVertex (backends.ts) re-bases the incoming pathname+search onto
+CFP_AIGATEWAY_URL, so the claude baseURL is the same Vertex path at :8789; session
+stickiness keys on the x-opencode-session header (T12, deployed).
 
-ACTIVATION PENDING (handed off): the activating `home-manager switch --flake
-.#cloudbox` restarts opencode-serve, which kills any agent session running inside
-the opencode-serve.service cgroup — so it must run from a LOGIN shell. A
-Claude-on-macOS session will SSH into cloudbox and run it + verify. Post-switch
-checks: claude baseURL=:8789, gemini=:8080 in ~/.config/opencode/opencode.json;
-cfp journald shows real traffic. ROLLBACK: `sudo systemctl stop
-claude-failover-proxy && home-manager switch` (claude reverts to aigateway:8080)
-OR `git revert bb02024 && switch`.
+ACTIVATION DONE: the `home-manager switch --flake .#cloudbox` was applied
+automatically by the `pull-workstation` user service at 2026-06-19 21:50:41 (it
+runs from a login/user context OUTSIDE the opencode-serve cgroup, so it can run the
+switch the on-box agent cannot); opencode-serve restarted 21:50:42. A macOS SSH
+session independently confirmed config + service health. POST-ACTIVATION
+VERIFICATION (on-box cloudbox session, 22:00):
+- opencode.json: claude baseURL = `http://127.0.0.1:8789/.../publishers/anthropic/models`;
+  gemini = `http://localhost:8080/v1beta1/.../publishers/google` (UNCHANGED). OK
+- claude-failover-proxy.service, opencode-serve.service, aigateway.service all active;
+  :8789 listening. OK
+- LIVE TRAFFIC PROVEN: `ss -tnp` shows ESTABLISHED connections from opencode workers
+  (`.opencode-wrapp`) to 127.0.0.1:8789 — the on-box Claude session's own calls flow
+  opencode -> cfp :8789 -> aigateway :8080 -> Vertex. (cfp does NOT log per-request to
+  journald; only the startup banner — an empty journal is expected, not a defect.)
+ROLLBACK (if ever needed): `sudo systemctl stop claude-failover-proxy &&
+home-manager switch` (claude falls back to aigateway:8080) OR `git revert bb02024
+&& switch`.
+
+LESSON: `pull-workstation` (home.cloudbox.nix) runs `git pull --ff-only` + a
+home-manager switch every 4h (and 10min post-boot); it SKIPS when the tree is dirty.
+So a hands-off T13b would have self-activated on the next cycle; the macOS-SSH handoff
+served as independent verification rather than the sole activation path.
 
 - Coordination: bkdw (`ses_128ece55bffeGfKs52gPTQBJZq`) is synced through the
   Phase 2 pushes (told to `git pull --rebase`); they're idle on zao4 (PR #4),
