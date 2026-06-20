@@ -779,62 +779,80 @@ in
       hash_file="$HOME/.cache/workstation/aigateway-url.hash"
       mkdir -p "$(dirname "$hash_file")"
 
-      # Trigger: aigateway.service is running. `is-active` returns
-      # "active" once ExecStart succeeds (RemainAfterExit keeps that
-      # state). "activating" means start.sh is mid-build but we still
-      # treat it as opt-in. Anything else (inactive, failed, unknown)
-      # means the operator hasn't started it or it crashed.
-      active_state="$(/run/current-system/sw/bin/systemctl is-active aigateway.service 2>/dev/null || true)"
-      case "$active_state" in
-        active|activating) gateway_enabled=1 ;;
-        *)                 gateway_enabled=0 ;;
-      esac
+      # Provider routing toggles (DECOUPLED as of T13b / 8fe.14):
+      #   - gemini (google-vertex)            follows aigateway.service
+      #   - claude (google-vertex-anthropic)  follows claude-failover-proxy.service
+      #     (the cfp budget-gated Vertex<->Max failover router on :8789).
+      # `is-active` returns "active" once ExecStart succeeds (RemainAfterExit
+      # keeps that for the oneshot aigateway); "activating" is also treated as
+      # opt-in. Anything else (inactive/failed/unknown) means not running.
+      sc=/run/current-system/sw/bin/systemctl
+      aigw_state="$($sc is-active aigateway.service 2>/dev/null || true)"
+      cfp_state="$($sc is-active claude-failover-proxy.service 2>/dev/null || true)"
 
       project=""
       if [ -r /run/secrets/google_cloud_project ]; then
         project="$(cat /run/secrets/google_cloud_project)"
       fi
 
-      if [[ "$gateway_enabled" = "0" ]] || [[ -z "$project" ]]; then
-        if [[ "$gateway_enabled" = "0" ]]; then
-          echo "aigateway: aigateway.service is not running (state=$active_state); opencode pointed at direct Vertex" >&2
-        else
-          echo "aigateway: GOOGLE_CLOUD_PROJECT secret unavailable; opencode pointed at direct Vertex" >&2
-        fi
-        if [[ -f "$runtime" ]]; then
-          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
-          ${pkgs.jq}/bin/jq 'del(.provider."google-vertex-anthropic".options.baseURL)
-                            | if .provider."google-vertex-anthropic".options == {}
-                              then del(.provider."google-vertex-anthropic".options) else . end
-                            | if .provider."google-vertex-anthropic" == {}
-                              then del(.provider."google-vertex-anthropic") else . end
-                            | del(.provider."google-vertex".options.baseURL)
-                            | if .provider."google-vertex".options == {}
-                              then del(.provider."google-vertex".options) else . end
-                            | if .provider."google-vertex" == {}
-                              then del(.provider."google-vertex") else . end
-                            | if .provider == {} then del(.provider) else . end' \
-            "$runtime" > "$tmp"
-          mv "$tmp" "$runtime"
-        fi
-        new_hash="DIRECT-VERTEX"
+      # Desired baseURL per provider ("" => strip the override => opencode's
+      # built-in direct-Vertex default).
+      anthropic_url=""
+      gemini_url=""
+      if [ -z "$project" ]; then
+        echo "aigateway/cfp: GOOGLE_CLOUD_PROJECT secret unavailable; both providers -> direct Vertex" >&2
       else
-        full_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models"
-        # Gemini base URL shape differs from anthropic: v1beta1, publishers/google,
-        # NO trailing /models (the @ai-sdk/google-vertex `getBaseURL` appends
+        # Gemini: aigateway only — cfp is anthropic-only and NEVER routes gemini.
+        # Shape differs from anthropic: v1beta1, publishers/google, NO trailing
+        # /models (the @ai-sdk/google-vertex `getBaseURL` appends
         # /models/<id>:streamGenerateContent itself). Verified live 2026-06-05.
-        gemini_url="http://localhost:8080/v1beta1/projects/$project/locations/global/publishers/google"
-        if [[ -f "$runtime" ]]; then
-          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
-          ${pkgs.jq}/bin/jq --arg url "$full_url" --arg gemini_url "$gemini_url" \
-            '.provider."google-vertex-anthropic".options.baseURL = $url
-             | .provider."google-vertex".options.baseURL = $gemini_url' \
-            "$runtime" > "$tmp"
-          mv "$tmp" "$runtime"
-        fi
-        echo "aigateway: pointed opencode at $full_url (anthropic) and $gemini_url (gemini)" >&2
-        new_hash="$(printf '%s\n%s' "$full_url" "$gemini_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
+        case "$aigw_state" in
+          active|activating)
+            gemini_url="http://localhost:8080/v1beta1/projects/$project/locations/global/publishers/google" ;;
+        esac
+        # Claude: prefer the cfp router (:8789). It re-bases the incoming Vertex
+        # path onto its CFP_AIGATEWAY_URL (:8080), so the upstream call is
+        # byte-identical to hitting the aigateway directly (verified). Use
+        # 127.0.0.1 (cfp binds IPv4 *:8789; "localhost" may resolve to ::1).
+        # Fallback when the router is down: the aigateway directly — preserves the
+        # cost ledger AND is the exact pre-T13b behavior, so simply stopping
+        # claude-failover-proxy.service + re-running this activation is a clean
+        # rollback. If BOTH are down, leave it stripped (direct Vertex).
+        case "$cfp_state" in
+          active|activating)
+            anthropic_url="http://127.0.0.1:8789/v1/projects/$project/locations/global/publishers/anthropic/models" ;;
+          *)
+            case "$aigw_state" in
+              active|activating)
+                anthropic_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models" ;;
+            esac ;;
+        esac
       fi
+
+      # Apply: set baseURL when non-empty, else delete it; then prune any
+      # options/provider objects we emptied so the merged config stays clean.
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq --arg a "$anthropic_url" --arg g "$gemini_url" '
+            (if $a == "" then del(.provider."google-vertex-anthropic".options.baseURL)
+             else .provider."google-vertex-anthropic".options.baseURL = $a end)
+          | (if $g == "" then del(.provider."google-vertex".options.baseURL)
+             else .provider."google-vertex".options.baseURL = $g end)
+          | (if .provider."google-vertex-anthropic".options == {}
+             then del(.provider."google-vertex-anthropic".options) else . end)
+          | (if .provider."google-vertex-anthropic" == {}
+             then del(.provider."google-vertex-anthropic") else . end)
+          | (if .provider."google-vertex".options == {}
+             then del(.provider."google-vertex".options) else . end)
+          | (if .provider."google-vertex" == {}
+             then del(.provider."google-vertex") else . end)
+          | (if .provider == {} then del(.provider) else . end)' \
+          "$runtime" > "$tmp"
+        mv "$tmp" "$runtime"
+      fi
+
+      echo "aigateway/cfp: claude -> ''${anthropic_url:-<direct Vertex>} (cfp=$cfp_state); gemini -> ''${gemini_url:-<direct Vertex>} (aigw=$aigw_state)" >&2
+      new_hash="$(printf '%s\n%s' "$anthropic_url" "$gemini_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
 
       # Auto-restart opencode-serve only when the effective URL changed.
       # Same sudo dance as installOpencodePlugins for the same reasons
