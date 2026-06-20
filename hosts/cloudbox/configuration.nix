@@ -36,6 +36,12 @@ let
   # opencode-serve with no plugin loaded, completes with no Telegram
   # notification, and the user is left hanging. See workstation-1lp.
   nvims = pkgs.callPackage ../../pkgs/nvims { };
+
+  # claude-failover-proxy (cfp): the budget-gated Vertex->Max failover router
+  # (8fe.14 / T13). Packaged from the private GitHub release asset; see
+  # pkgs/claude-failover-proxy/default.nix. NixOS configs don't receive the
+  # flake's localPkgs, so callPackage it directly here for the systemd service.
+  claude-failover-proxy = pkgs.callPackage ../../pkgs/claude-failover-proxy { };
 in
 {
   # Guard: abort activation if applying the wrong host's config.
@@ -768,6 +774,56 @@ in
       TimeoutStartSec = "10min";
       Restart = "on-failure";
       RestartSec = 30;
+    };
+  };
+
+  # claude-failover-proxy (cfp) — the budget-gated failover ROUTER that sits in
+  # front of the work aigateway (under-budget -> Vertex) and TeamClaude
+  # (over-budget -> personal Claude Max), session-sticky with idle migration
+  # (8fe.14 / T13a). Listens on :8789. opencode's google-vertex-anthropic
+  # baseURL is flipped to this in T13b; until then nothing points at it, so it
+  # is safe to run. Like teamclaude it binds all interfaces; :8789 stays private
+  # via GCP's default-deny ingress (no NixOS firewall on cloudbox) — it is NOT
+  # in the GCP-opened port set. Startup is network-tolerant: index.ts binds the
+  # port and logs the listening line before any upstream call (the TeamClaude
+  # availability probe runs voided in a 60s interval), so the unit stays up even
+  # if aigateway/teamclaude are momentarily down.
+  #
+  # Auto-starts on boot (wantedBy multi-user.target).
+  systemd.services.claude-failover-proxy = {
+    description = "claude-failover-proxy (budget-gated Vertex->Max failover router)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" "teamclaude.service" ];
+    wants = [ "teamclaude.service" ];
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      # Creates/owns /var/lib/claude-failover-proxy for the spend ledger.
+      StateDirectory = "claude-failover-proxy";
+      Environment = [
+        "CFP_LISTEN_PORT=8789"
+        "CFP_AIGATEWAY_URL=http://127.0.0.1:8080"
+        "CFP_TEAMCLAUDE_URL=http://127.0.0.1:3456"
+        "CFP_BUDGET_DOLLARS=100"
+        "CFP_IDLE_MIGRATE_SECONDS=300"
+        "CFP_RESET_HOUR=0"
+        # Budget rolls over at local midnight; ET matches the system tz and the
+        # 3 AM ET nightly-reset convention. Set explicitly so it never falls
+        # back to UTC under systemd.
+        "CFP_TZ=America/New_York"
+        "CFP_STATE_PATH=/var/lib/claude-failover-proxy/spend.json"
+      ];
+      # CFP_TEAMCLAUDE_API_KEY is a RAW value (not KEY=VALUE) so it can't go via
+      # EnvironmentFile; export it from the sops secret in a shell shim (same
+      # pattern as aigateway). set -e makes a missing/unreadable secret fail loud.
+      ExecStart = "${pkgs.writeShellScript "claude-failover-proxy-start" ''
+        set -euo pipefail
+        export CFP_TEAMCLAUDE_API_KEY="$(${pkgs.coreutils}/bin/cat /run/secrets/teamclaude_api_key)"
+        exec ${claude-failover-proxy}/bin/claude-failover-proxy
+      ''}";
+      Restart = "on-failure";
+      RestartSec = 10;
     };
   };
 
