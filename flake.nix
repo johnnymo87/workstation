@@ -63,6 +63,7 @@
       oc-cost = p.callPackage ./pkgs/oc-cost { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
+      teamclaude = p.callPackage ./pkgs/teamclaude { };
     } // nixpkgs.lib.optionalAttrs (system == devboxSystem || system == darwinSystem) {
       terraform = p.callPackage ./pkgs/terraform { };
     };

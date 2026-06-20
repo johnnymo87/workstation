@@ -1,6 +1,6 @@
 # Devbox-specific home-manager configuration
 # Contains systemd services, sops secrets, and other devbox-only features
-{ config, pkgs, lib, projects, isDevbox, ... }:
+{ config, pkgs, lib, localPkgs, projects, isDevbox, ... }:
 
 lib.mkIf isDevbox {
   # Linux devbox identity
@@ -460,6 +460,66 @@ lib.mkIf isDevbox {
       MemoryMax = "10G";
       MemoryHigh = "8G";
       OOMScoreAdjust = 500;
+      Restart = "always";
+      RestartSec = 10;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # TeamClaude CLI on PATH so the interactive seed flow works:
+  #   teamclaude login        # PKCE OAuth, one per Max account (needs TTY+browser)
+  #   teamclaude accounts     # verify
+  # Nix-packaged (pkgs/teamclaude) — pulled + installed by home-manager, no checkout.
+  home.packages = [ localPkgs.teamclaude ];
+
+  # TeamClaude: multi-account Claude Max rotator. A local Anthropic-API proxy on
+  # 127.0.0.1:3456 that rotates across personal Max accounts and injects the
+  # active account's OAuth token. devbox is the "play" box (no Vertex/aigateway),
+  # so this is the personal-Claude analog of cloudbox's cfp router — minus the
+  # budget gating, which is meaningless without Vertex spend to cap. opencode is
+  # pointed at it by `injectTeamclaudeBaseUrl` in opencode-config.nix (gated on
+  # this unit being active, with auto-fallback to direct Anthropic).
+  #
+  # CONFIG IS RUNTIME STATE (NOT nix-managed): teamclaude reads + REWRITES
+  # ~/.config/teamclaude.json (OAuth tokens auto-refresh + persist), so it must
+  # stay writable + persistent. Accounts are added out-of-band via the
+  # interactive `teamclaude login` (PKCE OAuth, needs a TTY + browser); this unit
+  # only RUNS an already-seeded config.
+  #
+  # SEED-FIRST: with zero accounts the server exits 1 ("No accounts configured")
+  # and Restart=always would crash-loop. ConditionPathExists gates the unit on
+  # the config file so it stays inactive (not failed) until you've logged in; the
+  # StartLimit caps any residual loop (e.g. config present but empty). After
+  # `teamclaude login`, run `systemctl --user enable --now teamclaude`.
+  #
+  # BIND + AUTH: index.js listens on all interfaces (can't pass a host without
+  # patching the checkout), but two backstops keep :3456 private — (1) devbox's
+  # NixOS firewall does NOT open TCP 3456, and (2) the proxy's own auth gate
+  # requires x-api-key for non-localhost clients. opencode connects via 127.0.0.1
+  # (localhost-exempt), so no key is needed locally.
+  systemd.user.services.teamclaude = {
+    Unit = {
+      Description = "TeamClaude (multi-account Claude Max rotator)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      ConditionPathExists = "%h/.config/teamclaude.json";
+      StartLimitIntervalSec = 300;
+      StartLimitBurst = 5;
+    };
+    Service = {
+      Type = "simple";
+      WorkingDirectory = config.home.homeDirectory;
+      Environment = [
+        "HOME=${config.home.homeDirectory}"
+        # Pin the config path so it never depends on XDG_CONFIG_HOME.
+        "TEAMCLAUDE_CONFIG=${config.home.homeDirectory}/.config/teamclaude.json"
+        # A user service does not inherit the interactive login PATH; node is
+        # already baked into the wrapper, but keep the standard set for parity.
+        "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
+      ];
+      ExecStart = "${localPkgs.teamclaude}/bin/teamclaude server --headless";
       Restart = "always";
       RestartSec = 10;
     };

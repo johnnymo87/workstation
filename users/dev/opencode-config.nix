@@ -881,6 +881,79 @@ in
       fi
     '');
 
+  # Point opencode's first-party `anthropic` provider at the local TeamClaude
+  # rotator (devbox) when its user service is active; otherwise strip the
+  # override so opencode talks to api.anthropic.com directly. TeamClaude proxies
+  # /v1/* to api.anthropic.com and INJECTS the active Max account's OAuth token
+  # (the client's auth is swapped), and exempts localhost from its x-api-key
+  # gate — so 127.0.0.1:3456/v1 with no key is all opencode needs.
+  #
+  # Gated + auto-fallback (mirrors injectAigatewayBaseUrl): the override only
+  # takes effect once accounts are seeded (`teamclaude login`) and the unit is
+  # started, and reverts to direct Anthropic the moment teamclaude.service is
+  # stopped + this activation re-runs — so stopping the service is a clean
+  # rollback. opencode-serve (a USER service on devbox) is restarted only when
+  # the effective URL changes.
+  #
+  # Path shape: api.anthropic.com base is .../v1 and @ai-sdk/anthropic appends
+  # /messages, so the override is .../v1 (no trailing /messages). The
+  # `anthropic.options` object also carries timeout/chunkTimeout from
+  # opencode.base.json, so the empty-object prune below never deletes it.
+  home.activation.injectTeamclaudeBaseUrl = lib.mkIf isDevbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+      hash_file="$HOME/.cache/workstation/teamclaude-url.hash"
+      mkdir -p "$(dirname "$hash_file")"
+
+      # devbox opencode-serve + teamclaude are USER services; reach the user bus.
+      export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$UID}"
+      sc=/run/current-system/sw/bin/systemctl
+      tc_state="$($sc --user is-active teamclaude.service 2>/dev/null || true)"
+
+      anthropic_url=""
+      case "$tc_state" in
+        active|activating)
+          anthropic_url="http://127.0.0.1:3456/v1" ;;
+      esac
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq --arg a "$anthropic_url" '
+            (if $a == "" then del(.provider.anthropic.options.baseURL)
+             else .provider.anthropic.options.baseURL = $a end)
+          | (if (.provider.anthropic.options // {}) == {}
+             then del(.provider.anthropic.options) else . end)
+          | (if (.provider.anthropic // {}) == {}
+             then del(.provider.anthropic) else . end)
+          | (if (.provider // {}) == {} then del(.provider) else . end)' \
+          "$runtime" > "$tmp"
+        mv "$tmp" "$runtime"
+      fi
+
+      echo "teamclaude: anthropic -> ''${anthropic_url:-<direct Anthropic>} (teamclaude=$tc_state)" >&2
+      new_hash="$(printf '%s' "$anthropic_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
+
+      # Restart opencode-serve (user service) only when the effective URL changed.
+      old_hash=""
+      [ -r "$hash_file" ] && old_hash="$(cat "$hash_file")"
+      if [[ "$new_hash" != "$old_hash" ]]; then
+        echo "teamclaude: baseURL changed ($old_hash -> $new_hash); restarting opencode-serve (user)" >&2
+        restart_rc=0
+        $sc --user restart opencode-serve.service || restart_rc=$?
+        if [ "$restart_rc" -eq 0 ]; then
+          echo "$new_hash" > "$hash_file"
+          echo "teamclaude: opencode-serve restarted; hash file updated" >&2
+        else
+          {
+            echo "teamclaude: WARNING — opencode-serve restart failed (exit $restart_rc)."
+            echo "teamclaude: hash file NOT updated; next switch will retry."
+          } >&2
+        fi
+      fi
+    '');
+
   # Inject Datadog MCP config (remote HTTP transport) into opencode.json
   # Uses Datadog's hosted MCP server with DD_API_KEY/DD_APPLICATION_KEY headers.
   # Endpoint host is mcp.<DD_SITE>; site is us3 for our org.
