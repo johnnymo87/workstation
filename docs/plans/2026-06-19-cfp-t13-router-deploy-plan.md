@@ -11,15 +11,44 @@ Stand up the cfp router as a cloudbox systemd service and flip ONLY the
 keep going to the aigateway. Split into T13a (package + service, NO routing
 change) then T13b (the baseURL flip).
 
-## STATUS (as of compaction)
-- `pkgs/claude-failover-proxy/default.nix` — WRITTEN, NOT yet verified (no nix
-  build run; needs token). Uses the ld.so-wrapper approach (see below).
-- Nothing else wired yet. flake.nix, configuration.nix, opencode-config.nix
-  UNTOUCHED. No commits yet for this work except this plan + the package file.
-- Coordination: bkdw (`ses_128ece55bffeGfKs52gPTQBJZq`) CLEARED me to land first;
-  they deferred their `pigeon-daemon.service` edits and will rebase onto me.
-  Their untracked file `docs/plans/2026-06-19-zao4-pigeon-ingress-router-plan.md`
-  is THEIRS — do not touch.
+## STATUS (updated 2026-06-20)
+T13a PHASE 1 = DONE + VERIFIED on cloudbox; router is LIVE on :8789.
+- `pkgs/claude-failover-proxy/default.nix` — BUILT + RAN. Verified by temporarily
+  injecting GITHUB_TOKEN into the nix-daemon env (a /run drop-in), building the
+  FOD via the daemon (rc=0), and running the wrapper (threw the expected
+  `CFP_TEAMCLAUDE_API_KEY is required`). Drop-in removed, daemon clean. FOD now
+  cached in the store. This also proved the daemon-env GITHUB_TOKEN -> FOD
+  `netrcImpureEnvVars` path end-to-end. (Committed: package 16c5e63.)
+- `flake.nix` localPkgsFor entry — committed `172e46d`.
+- `hosts/cloudbox/configuration.nix` cfp systemd service — committed `3e0fc41`,
+  `nixos-rebuild switch`'d. `systemctl is-active` = active; journald
+  `listening on port 8789, budget: $100`; `ss` shows :8789 held by the
+  `ld-linux-aarch6` wrapper proc; `/var/lib/claude-failover-proxy` created;
+  `curl POST /v1/messages` => HTTP 401 (serving + routing to aigateway path).
+  Reads CFP_TEAMCLAUDE_API_KEY from the existing /run/secrets/teamclaude_api_key
+  via shell shim. Env: budget=100, reset_hour=0, CFP_TZ=America/New_York.
+- The FAST client-env `nix build` path is CONFIRMED DEAD (404: the daemon does
+  not inherit the shell's GITHUB_TOKEN; `configurable-impure-env` is not enabled
+  daemon-side). Token MUST come from the daemon env.
+
+T13a PHASE 2 = TODO (needs the fine-grained PAT):
+- sops `nix_daemon_github_token` (KEY=VALUE `GITHUB_TOKEN=<pat>`) — declaring it
+  REQUIRES the key to already exist in secrets/cloudbox.yaml or sops activation
+  fails for EVERYONE on the box. So add the value to cloudbox.yaml BEFORE
+  committing/switching the declaration.
+- `systemd.services.nix-daemon.serviceConfig.EnvironmentFile = [ "-/run/secrets/nix_daemon_github_token" ]`
+  + `restartUnits = [ "nix-daemon.service" ]` on the secret. This makes fresh /
+  GC'd FOD builds reproducible without the manual token dance. (Router already
+  runs off the cached package, so this is hardening, not a blocker for liveness.)
+- `.github/workflows/update-claude-failover-proxy.yml` (PAT as Actions secret).
+- chicken-and-egg for a FRESH machine (bead `fsw`): first cfp FOD build needs the
+  daemon token before EnvironmentFile is active -> pre-seed the token or rely on
+  a cached/substituted output.
+
+- Coordination: bkdw (`ses_128ece55bffeGfKs52gPTQBJZq`) CLEARED me to land first
+  and has the Phase 1 push (told to `git pull --rebase`). Ping again before the
+  Phase 2 configuration.nix edit. Their untracked file
+  `docs/plans/2026-06-19-zao4-pigeon-ingress-router-plan.md` is THEIRS.
 
 ## CRITICAL packaging findings (empirically verified on cloudbox 2026-06-19)
 The release asset is a `bun build --compile` single-file executable
