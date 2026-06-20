@@ -31,24 +31,39 @@ T13a PHASE 1 = DONE + VERIFIED on cloudbox; router is LIVE on :8789.
   not inherit the shell's GITHUB_TOKEN; `configurable-impure-env` is not enabled
   daemon-side). Token MUST come from the daemon env.
 
-T13a PHASE 2 = TODO (needs the fine-grained PAT):
-- sops `nix_daemon_github_token` (KEY=VALUE `GITHUB_TOKEN=<pat>`) — declaring it
-  REQUIRES the key to already exist in secrets/cloudbox.yaml or sops activation
-  fails for EVERYONE on the box. So add the value to cloudbox.yaml BEFORE
-  committing/switching the declaration.
-- `systemd.services.nix-daemon.serviceConfig.EnvironmentFile = [ "-/run/secrets/nix_daemon_github_token" ]`
-  + `restartUnits = [ "nix-daemon.service" ]` on the secret. This makes fresh /
-  GC'd FOD builds reproducible without the manual token dance. (Router already
-  runs off the cached package, so this is hardening, not a blocker for liveness.)
-- `.github/workflows/update-claude-failover-proxy.yml` (PAT as Actions secret).
-- chicken-and-egg for a FRESH machine (bead `fsw`): first cfp FOD build needs the
-  daemon token before EnvironmentFile is active -> pre-seed the token or rely on
-  a cached/substituted output.
+T13a PHASE 2 = DONE + VERIFIED. No new PAT was needed: the EXISTING sops
+`github_api_token` reads the private cfp asset (HTTP 200), so we reused it.
+- `hosts/cloudbox/configuration.nix` (commit `1c8c7da`): a `sops.templates`
+  block renders `GITHUB_TOKEN=<github_api_token>` to
+  /run/secrets/rendered/nix-daemon-github-token, and
+  `systemd.services.nix-daemon.serviceConfig.EnvironmentFile` loads it
+  (`-` optional prefix; restartUnits bounces the daemon on render). VERIFIED:
+  forced a clean re-fetch of the inner fetchurl FOD with NO shell GITHUB_TOKEN
+  and it succeeded -> the daemon now supplies the token (the last unverified
+  link is closed). Single source of truth (reuses github_api_token, no 2nd PAT).
+- `.github/workflows/update-claude-failover-proxy.yml` (commits `a69c409`,
+  `dddf2a7`): daily poller. cfp is PRIVATE so the default github.token AND
+  UPDATE_TOKEN 404 on it; we set a dedicated `CFP_READ_TOKEN` Actions secret
+  (value = the sops github_api_token) for the check + asset steps, keeping
+  UPDATE_TOKEN for the PR step. VERIFIED via workflow_dispatch: check step
+  authenticated, reported "Already on 0.1.0", PR steps skipped. Update path
+  (asset-id resolve + gh release download + nix hash) validated locally.
+  NOTE: CFP_READ_TOKEN is the BROAD classic github_api_token; if preferred,
+  swap it for a fine-grained PAT scoped to cfp contents:read.
 
-- Coordination: bkdw (`ses_128ece55bffeGfKs52gPTQBJZq`) CLEARED me to land first
-  and has the Phase 1 push (told to `git pull --rebase`). Ping again before the
-  Phase 2 configuration.nix edit. Their untracked file
-  `docs/plans/2026-06-19-zao4-pigeon-ingress-router-plan.md` is THEIRS.
+T13a is COMPLETE. Router live on :8789; reproducible daemon builds + CI
+auto-update both wired and verified.
+
+T13b = NOT STARTED, HELD for explicit user go-ahead (high blast radius: flips
+live opencode Claude routing). Open design questions still pending (read cfp
+src/server.ts + src/backends.ts forwardToVertex for the baseURL path shape;
+split the strip-branch so vertex-anthropic follows cfp.service health while
+gemini stays on aigateway.service). See the T13b section below.
+
+- Coordination: bkdw (`ses_128ece55bffeGfKs52gPTQBJZq`) is synced through the
+  Phase 2 pushes (told to `git pull --rebase`); they're idle on zao4 (PR #4),
+  entirely in the pigeon repo, deferring pigeon-daemon.service env to their M6+.
+  Their file `docs/plans/2026-06-19-zao4-pigeon-ingress-router-plan.md` is THEIRS.
 
 ## CRITICAL packaging findings (empirically verified on cloudbox 2026-06-19)
 The release asset is a `bun build --compile` single-file executable
