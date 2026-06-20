@@ -932,6 +932,23 @@ in
   nix.daemonCPUSchedPolicy = "batch";
   nix.daemonIOSchedClass = "idle";
 
+  # Feed a GitHub token into the nix-daemon's environment so fixed-output
+  # derivations that fetch PRIVATE GitHub release assets can authenticate
+  # (pkgs/claude-failover-proxy uses netrcImpureEnvVars = [ "GITHUB_TOKEN" ]).
+  # impureEnvVars are read from the BUILDER's env = the nix-daemon process (NOT
+  # the invoking shell), so the token must live in the daemon env. We REUSE the
+  # existing github_api_token secret (verified: it reads the private cfp release
+  # asset, HTTP 200) rather than minting a second PAT; a sops template wraps its
+  # raw value in the KEY=VALUE form EnvironmentFile requires. The '-' prefix
+  # makes the file optional so the daemon still starts if sops hasn't rendered it
+  # yet (early boot); restartUnits bounces the daemon once it's (re)rendered.
+  sops.templates."nix-daemon-github-token" = {
+    content = "GITHUB_TOKEN=${config.sops.placeholder.github_api_token}";
+    restartUnits = [ "nix-daemon.service" ];
+  };
+  systemd.services.nix-daemon.serviceConfig.EnvironmentFile =
+    [ "-${config.sops.templates."nix-daemon-github-token".path}" ];
+
   # Garbage collection
   nix.gc = {
     automatic = true;
