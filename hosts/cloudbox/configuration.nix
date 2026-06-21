@@ -570,6 +570,12 @@ in
     # kill all K serves and their live sessions). Restarts happen only via the
     # explicit opencode-serve-pool.target fan-out (M5.8 hooks / M6 cutover).
     restartIfChanged = false;
+    # M5.8/M6 fan-out: a systemd target's Wants= does NOT propagate restart to
+    # its units, so `systemctl restart opencode-serve-pool.target` alone is a
+    # no-op on the serves. PartOf makes the target propagate stop/restart down
+    # to every instance, so ONE target restart bounces all K serves (and a
+    # target stop drains the pool). Start is still via the target's Wants=.
+    partOf = [ "opencode-serve-pool.target" ];
     # NOTE: NixOS treats each `path` entry as a package directory and
     # auto-appends `/bin` and `/sbin` when composing PATH. So pass
     # `/home/dev/.local` (NOT `/home/dev/.local/bin`) — it expands to
