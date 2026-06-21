@@ -1,6 +1,20 @@
 # NixOS system configuration for devbox
 { config, pkgs, lib, ... }:
 
+let
+  # mn9r M5: serve-pool descriptor (single source of truth in
+  # users/dev/serve-pool.nix). devbox = K=2 on ports 4096/4097, serve-0 == :4096.
+  # routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB, set in the
+  # systemd.user opencode-serve@ pool in users/dev/home.devbox.nix) and pigeon
+  # (PIGEON_DAEMON_DB_PATH, below) open for the session-lease CAS (DM5-1). It is
+  # pigeon's EXISTING unified daemon DB (this service's WorkingDirectory/data/
+  # pigeon-daemon.db default — verified present), which holds pigeon's swarm/
+  # outbox state AND the routing tables in one file; a fresh path would orphan
+  # that state. pigeon already created the routing schema there (checksum
+  # e5c8e409..., version 1) so serves boot-assert clean.
+  servePool = (import ../../users/dev/serve-pool.nix).forHost.devbox;
+  routingDbPath = "/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
+in
 {
   # Guard: abort activation if applying the wrong host's config.
   # Devbox and cloudbox share arch and user — applying the wrong flake target
@@ -246,6 +260,15 @@
         # that must hit the same DB; a system service doesn't source ~/.profile.
         "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
         "OPENCODE_DISABLE_CHANNEL_DB=1"
+        # mn9r M5: the K serve endpoints in port order (index i -> serve-<i>, so
+        # this MUST match servePool.ports ordering — both come from
+        # users/dev/serve-pool.nix). PIGEON_SERVE_LIVENESS=self flips pigeon off
+        # its HTTP health-poller onto the serves' own heartbeats (M4 D1a), and
+        # PIGEON_DAEMON_DB_PATH pins the routing DB to the same file the serves
+        # open as OPENCODE_ROUTING_DB (DM5-1). Mirrors the cloudbox pigeon config.
+        "PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}"
+        "PIGEON_SERVE_LIVENESS=self"
+        "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
