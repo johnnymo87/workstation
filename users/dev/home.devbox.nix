@@ -2,6 +2,26 @@
 # Contains systemd services, sops secrets, and other devbox-only features
 { config, pkgs, lib, localPkgs, projects, isDevbox, ... }:
 
+let
+  # mn9r M5: serve-pool descriptor (single source of truth in serve-pool.nix).
+  # devbox = K=2 on ports 4096/4097, serve-0 == :4096. routingDbPath is the file
+  # BOTH the serves (OPENCODE_ROUTING_DB) and pigeon (PIGEON_DAEMON_DB_PATH) open
+  # for the session-lease CAS (DM5-1). It is pigeon's EXISTING unified daemon DB
+  # (the devbox pigeon system service's WorkingDirectory/data/pigeon-daemon.db
+  # default — verified present on devbox), which holds pigeon's swarm/outbox
+  # state AND the routing tables in ONE file; pointing both env vars at a fresh
+  # path would orphan that state. pigeon already created the routing schema there
+  # (checksum e5c8e409..., version 1), so serves boot-assert clean.
+  servePool = (import ./serve-pool.nix).forHost.devbox;
+  routingDbPath = "${config.home.homeDirectory}/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
+  # port -> OPENCODE_SERVE_ID lookup for the templated unit's ExecStart, where
+  # the systemd instance specifier %i is the port. Generated from the same list
+  # as PIGEON_SERVE_ENDPOINTS (devbox pigeon config) so serve-<i> can never drift
+  # from endpoint i.
+  serveIdCase = lib.concatStringsSep "\n" (lib.imap0
+    (i: port: "          ${toString port}) export OPENCODE_SERVE_ID=serve-${toString i} ;;")
+    servePool.ports);
+in
 lib.mkIf isDevbox {
   # Linux devbox identity
   home.username = "dev";
@@ -411,22 +431,46 @@ lib.mkIf isDevbox {
     };
   };
 
-  # OpenCode headless serve — runs in the USER manager (user@1000.service),
-  # NOT as a system service. This is deliberate: sessions opencode spawns then
-  # live in a cgroup under /user.slice/.../user@1000.service/..., so
-  # ~/projects/eternal-machinery/bin/devenv-up takes its "Context B" branch
-  # (plain `systemd-run --user --scope`, no `--machine=dev@.host`) and can place
-  # devenv into dev-daemons.slice. A SYSTEM service cannot reach the dev@ user
-  # bus via `--machine=dev@.host` (it fails with "Permission denied" / "Transport
-  # endpoint is not connected"), which is why this was moved out of
-  # hosts/devbox/configuration.nix. Requires linger (users.users.dev.linger =
-  # true in the devbox system config) so user@1000.service is up at boot.
-  # Mirrors the crostini user service in home.crostini.nix.
-  systemd.user.services.opencode-serve = {
+  # OpenCode headless serve POOL — K=2 templated user units (instance %i = port)
+  # in the USER manager (user@1000.service), NOT system services. User-manager
+  # placement is deliberate: sessions opencode spawns then live in a cgroup under
+  # /user.slice/.../user@1000.service/..., so ~/projects/eternal-machinery/bin/
+  # devenv-up takes its "Context B" branch (plain `systemd-run --user --scope`,
+  # no `--machine=dev@.host`) and can place devenv into dev-daemons.slice. A
+  # SYSTEM service cannot reach the dev@ user bus via `--machine=dev@.host` (it
+  # fails with "Permission denied" / "Transport endpoint is not connected"),
+  # which is why this lives here and not hosts/devbox/configuration.nix. Requires
+  # linger (users.users.dev.linger = true in the devbox system config) so
+  # user@1000.service is up at boot. Mirrors the crostini user service.
+  #
+  # mn9r M5: serve-0 binds 4096, so the existing :4096 consumers (pigeon
+  # OPENCODE_URL, lgtm, TUIs) keep working until M7. Setting OPENCODE_ROUTING_DB
+  # (Environment below) activates the dormant M4 serve-side per-session lease CAS
+  # against pigeon's routing DB. The cloudbox analog is the system templated
+  # `opencode-serve@` in hosts/cloudbox/configuration.nix.
+  systemd.user.services."opencode-serve@" = {
     Unit = {
-      Description = "OpenCode headless serve";
+      Description = "OpenCode headless serve (pool instance, port %i)";
       After = [ "network-online.target" ];
       Wants = [ "network-online.target" ];
+      # M5.8/M6 fan-out: a target's Wants= does NOT propagate restart to its
+      # units, so `systemctl --user restart opencode-serve-pool.target` alone is
+      # a no-op on the serves. PartOf makes the target propagate stop/restart
+      # down to every instance, so ONE target restart bounces all K serves (and
+      # a target stop drains the pool). Start is still via the target's Wants=.
+      PartOf = [ "opencode-serve-pool.target" ];
+      # DM5-2: devbox pigeon is a SYSTEM unit, so this USER unit cannot order
+      # After= it. A serve fails closed until pigeon has seeded the routing
+      # schema (pigeon creates it when it inits the router); Restart=always
+      # (below) just retries a too-early serve until the schema is up.
+      # DM5-7: do NOT bounce the pool on routine `home-manager switch` (that
+      # would kill all K serves + their live sessions). NixOS `restartIfChanged
+      # = false` has no home-manager analog; sd-switch's X-SwitchMethod=keep-old
+      # is the equivalent (honored by the default systemd.user.startServices=
+      # sd-switch) — it leaves a running instance untouched on switch. Restarts
+      # happen only via the explicit opencode-serve-pool.target fan-out (M5.8
+      # hooks / M6 cutover).
+      X-SwitchMethod = "keep-old";
     };
     Service = {
       Type = "simple";
@@ -440,10 +484,16 @@ lib.mkIf isDevbox {
         # shells; a systemd service needs it set explicitly.
         "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"
         # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
-        # sessionVariables for full rationale). A user service does not source
+        # sessionVariables for full rationale). Required by the K-serve pool —
+        # every serve must share one DB. A user service does not source
         # ~/.profile, so the sessionVariables copy doesn't reach it.
         "OPENCODE_DB=${config.home.homeDirectory}/.local/share/opencode/opencode.db"
         "OPENCODE_DISABLE_CHANNEL_DB=1"
+        # mn9r M5/M4 activation: each serve runs the per-session lease CAS against
+        # pigeon's routing DB (the SAME file as pigeon's PIGEON_DAEMON_DB_PATH,
+        # DM5-1). Until this var was set the M4 serve-lease code in the binary
+        # stayed dormant.
+        "OPENCODE_ROUTING_DB=${routingDbPath}"
         # opencode shells out to git/gh/node/rg/etc.; a user service does not
         # inherit the interactive login PATH, so set it explicitly. Order mirrors
         # the previous system service's
@@ -452,21 +502,47 @@ lib.mkIf isDevbox {
       ];
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
+        PORT="$1"
+        # DM5-4: the serve id must match pigeon's seedServes order (endpoint i ->
+        # serve-<i>). Generated from servePool.ports so it cannot drift.
+        case "$PORT" in
+${serveIdCase}
+          *) echo "opencode-serve@: port $PORT not in serve-pool.nix"; exit 1 ;;
+        esac
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
         export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
         export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
-        exec ${config.home.homeDirectory}/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
-      ''}";
-      # Cap the always-on headless server so it can't monopolize RAM alone.
-      # (The parent user-1000.slice already has MemoryHigh=12G; these are
-      # per-service caps. The memory controller is delegated to user@.service
-      # on cgroup v2, so these apply within the user manager.)
-      MemoryMax = "10G";
-      MemoryHigh = "8G";
+        exec ${config.home.homeDirectory}/.nix-profile/bin/opencode serve --port "$PORT" --hostname 127.0.0.1
+      ''} %i";
+      # DM5-5: PER-INSTANCE memory cap. The old single serve was capped at 10G
+      # max / 8G high for the whole serve. Under K=2 the load spreads across 2
+      # cgroups, so cap each instance at 5G max / 4G high: aggregate 2x5=10G max,
+      # 2x4=8G high preserves the old envelope within the parent user-1000.slice
+      # MemoryHigh=12G. The memory controller is delegated to user@.service on
+      # cgroup v2, so these apply within the user manager.
+      MemoryMax = "5G";
+      MemoryHigh = "4G";
       OOMScoreAdjust = 500;
       Restart = "always";
       RestartSec = 10;
+    };
+    # NOTE: no Install.WantedBy — a template unit cannot be enabled directly. The
+    # opencode-serve-pool.target (below) Wants each instance and is itself
+    # WantedBy default.target, so it pulls the K serves in on login/boot.
+  };
+
+  # mn9r M5: the serve-pool target. WantedBy default.target so the pool boots; it
+  # Wants each templated instance (opencode-serve@<port>.service) so starting the
+  # target pulls them all in, and PartOf on the instances (above) makes ONE
+  # `systemctl --user restart opencode-serve-pool.target` fan out to all K (the
+  # M5.8 restart-hook and M6 cutover both bounce the pool through this target).
+  # keep-old keeps the target itself from being restarted on routine switches.
+  systemd.user.targets.opencode-serve-pool = {
+    Unit = {
+      Description = "OpenCode serve pool (K warm serves on one opencode.db)";
+      Wants = map (p: "opencode-serve@${toString p}.service") servePool.ports;
+      X-SwitchMethod = "keep-old";
     };
     Install = {
       WantedBy = [ "default.target" ];
