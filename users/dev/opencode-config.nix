@@ -117,6 +117,15 @@ let
   opencodeOverlay =
     (lib.optionalAttrs (isDevbox || isCrostini) {
       model = devboxModel;
+      # Route the built-in `compaction` agent to Opus on devbox/crostini too.
+      # Without this, compaction inherits opencode.base.json's top-level default
+      # (openai/gpt-5.5), which is billed per-token AND hits OpenAI usage caps —
+      # leaving sessions stuck retrying "usage limit reached" forever (the
+      # cloudbox/darwin branch already routes compaction to cheap Gemini Flash).
+      # On devbox/crostini Opus runs via the Claude Max subscription (teamclaude
+      # on devbox / anthropic-auth OAuth on crostini), so there is no per-token
+      # cost; Vertex Gemini Flash isn't available here anyway.
+      agent.compaction.model = devboxModel;
     })
     // (lib.optionalAttrs isCloudbox {
       # Cloudbox uses Vertex/ADC for Google models; hide the direct
