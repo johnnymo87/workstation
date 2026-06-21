@@ -14,8 +14,8 @@ pkgs.writeShellApplication {
   text = ''
     # reset-workspace [--yes]
     #
-    # Tear down all nvims and opencode sessions, restart opencode-serve,
-    # bring nvims back up as `nvims`. See:
+    # Tear down all nvims and opencode sessions, restart the opencode serve pool
+    # (opencode-serve-pool.target), bring nvims back up as `nvims`. See:
     # docs/plans/2026-04-24-reset-workspace-design.md
     #
     # --yes  Skip the confirmation prompt (used by the nightly systemd unit).
@@ -50,15 +50,16 @@ pkgs.writeShellApplication {
 
     # ---- Process detachment: re-exec into a fresh user systemd scope ----
     # This script kills processes that are likely to be ancestors of its own
-    # invoker — specifically nvim (step 4: pkill -9 -u dev -x nvim) and
-    # opencode-serve.service (step 5: sudo systemctl restart, which kills
-    # the whole service cgroup by default). If we don't detach, we die from:
+    # invoker — specifically nvim (step 4: pkill -9 -u dev -x nvim) and the
+    # opencode serve pool (step 5: systemctl restart opencode-serve-pool.target,
+    # whose PartOf= instances are killed cgroup-wide by default). If we don't
+    # detach, we die from:
     #   - SIGHUP propagating from the killed ancestor nvim's PTY collapse, OR
     #   - SIGTERM from systemd's KillMode=control-group cgroup-wide kill.
     #
     # `systemd-run --user --scope` wraps us in a transient .scope unit that:
-    #   - Lives in /user.slice/.../app.slice/run-pXXX.scope (fresh cgroup,
-    #     outside opencode-serve.service)
+    #   - Lives in /user.slice/.../app.slice/run-pXXX.scope (a fresh cgroup,
+    #     outside every opencode-serve@<port>.service instance's cgroup)
     #   - Is reparented under user@1000.service (no nvim ancestor)
     #   - Has its own session leader (no controlling TTY → no PTY-collapse SIGHUP)
     #
@@ -95,8 +96,8 @@ pkgs.writeShellApplication {
           cat <<EOF
 Usage: reset-workspace [--yes]
 
-Tear down all nvims and opencode sessions, restart opencode-serve,
-bring nvims back up as \`nvims\`.
+Tear down all nvims and opencode sessions, restart the opencode serve pool
+(opencode-serve-pool.target), bring nvims back up as \`nvims\`.
 
   --yes, -y    Skip the confirmation prompt.
 EOF
@@ -284,7 +285,7 @@ EOF
     log ""
     log "About to:"
     log "  1. SIGKILL all dev-owned nvim processes"
-    log "  2. Restart opencode-serve.service (this Claude session's TUI will reconnect)"
+      log "  2. Restart opencode-serve-pool.target (this Claude session's TUI will reconnect)"
     log "  3. Launch recommendation session referencing $OPENCODE_COUNT captured sid(s)"
     log ""
 
@@ -309,28 +310,36 @@ EOF
       log "  pkill returned no matches (none running, or already dead)"
     fi
 
-    # ---- Step 5: Restart opencode-serve ----
-    # Host-aware restart. opencode-serve runs as a USER unit on devbox
-    # (~/.config/systemd/user/opencode-serve.service; restart via
-    # `systemctl --user`, no sudo) and as a SYSTEM unit on cloudbox
+    # ---- Step 5: Restart the opencode serve pool ----
+    # mn9r M5: opencode-serve is no longer a single unit — it's a K-serve pool
+    # behind opencode-serve-pool.target (templated opencode-serve@<port>.service
+    # instances, PartOf the target so ONE target restart fans out to all K). The
+    # old `opencode-serve.service` unit no longer exists, which broke the nightly
+    # reset (03:00: "Unit opencode-serve.service not found"). Restart the target.
+    #
+    # Host-aware restart. The pool target runs as a USER target on devbox
+    # (~/.config/systemd/user/opencode-serve-pool.target; restart via
+    # `systemctl --user`, no sudo) and as a SYSTEM target on cloudbox
     # (hosts/cloudbox/configuration.nix; restart via passwordless sudo).
-    # Prefer the user unit when it is active so this shared script is portable.
-    # On cloudbox there is no user opencode-serve unit, so `is-active --quiet`
-    # returns non-zero and we fall through to the sudo path (cloudbox unchanged).
-    log "restarting opencode-serve.service..."
-    if systemctl --user is-active --quiet opencode-serve.service; then
-      log "  opencode-serve is a user unit; restarting via systemctl --user"
-      if ! systemctl --user restart opencode-serve.service; then
-        die "failed to restart opencode-serve (user unit)"
+    # Prefer the user target when it is active so this shared script is portable.
+    # On cloudbox there is no user pool target, so `is-active --quiet` returns
+    # non-zero and we fall through to the sudo path (cloudbox restarts the system
+    # target). The target's PartOf= linkage makes the restart propagate to every
+    # opencode-serve@<port>.service instance (a target's Wants= alone would NOT).
+    log "restarting opencode-serve-pool.target..."
+    if systemctl --user is-active --quiet opencode-serve-pool.target; then
+      log "  opencode-serve-pool is a user target; restarting via systemctl --user"
+      if ! systemctl --user restart opencode-serve-pool.target; then
+        die "failed to restart opencode-serve-pool (user target)"
       fi
     else
       # Passwordless sudo works via wheel group + security.sudo.wheelNeedsPassword=false.
       # Use absolute path /run/wrappers/bin/sudo because NixOS ships the working
       # setuid sudo there; /run/current-system/sw/bin/sudo is a non-setuid symlink
       # sudo refuses to exec from.
-      log "  opencode-serve is a system unit; restarting via sudo"
-      if ! /run/wrappers/bin/sudo systemctl restart opencode-serve.service; then
-        die "failed to restart opencode-serve (system unit)"
+      log "  opencode-serve-pool is a system target; restarting via sudo"
+      if ! /run/wrappers/bin/sudo systemctl restart opencode-serve-pool.target; then
+        die "failed to restart opencode-serve-pool (system target)"
       fi
     fi
 
