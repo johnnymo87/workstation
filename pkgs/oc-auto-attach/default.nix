@@ -27,6 +27,13 @@ pkgs.writeShellApplication {
 
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
 
+    # Pigeon daemon discovery endpoint. In a K-serve pool, opencode-serve
+    # processes do NOT share an in-memory event bus, so a session's turns are
+    # only streamed by the serve that actually runs its agent loop. Pigeon's
+    # GET /route?session_id=<sid> reports the owning serve; we attach the TUI
+    # there. Default matches opencode-send's PIGEON_DAEMON_URL convention.
+    PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
+
     log() {
       printf '[oc-auto-attach] %s\n' "$*" >&2
     }
@@ -65,6 +72,24 @@ pkgs.writeShellApplication {
         return 0
       fi
       return 1
+    }
+
+    # parse_serve_url <route-json-body> <fallback-url>
+    #
+    # Extract .apiBase from a pigeon `GET /route` JSON body and print it.
+    # Falls back to <fallback-url> whenever the body is empty, not JSON, or
+    # .apiBase is absent/null/empty. Pure (no network): the caller does the
+    # curl and hands the body in, which keeps this unit-testable in
+    # test-project-key.sh. The fallback guarantees that any pigeon hiccup
+    # degrades to the pre-pool single-serve behavior, never worse.
+    parse_serve_url() {
+      local body="$1" fallback="$2" api
+      api="$(printf '%s' "$body" | jq -r '.apiBase // empty' 2>/dev/null || true)"
+      if [ -n "$api" ] && [ "$api" != "null" ]; then
+        printf '%s\n' "$api"
+      else
+        printf '%s\n' "$fallback"
+      fi
     }
 
     # list_session_panes <session-name>
@@ -172,6 +197,21 @@ pkgs.writeShellApplication {
     fi
     log "confining to tmux session: $target_session"
 
+    # Step 0: resolve which serve in the pool owns (runs) this session, and
+    # attach the TUI there. opencode-serve's streaming event bus is in-memory
+    # per process; with K>1 serves sharing one opencode.db, pigeon places a
+    # session on one serve via rendezvous hashing, and ONLY that serve emits
+    # the session's turn events. A TUI hardwired to a different serve renders
+    # stale (misses telegram/swarm-delivered turns) -- the exact symptom this
+    # resolves. Any failure (pigeon down, non-2xx, empty/garbage body, no
+    # apiBase) degrades to $OPENCODE_URL, i.e. the pre-pool single-serve
+    # behavior, so this is strictly safe. We use $serve_url for both the
+    # session-dir probe below and the `opencode attach` URL handed to nvim.
+    route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
+      "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
+    serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
+    log "serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
+
     # Step 1: wait for session to be visible with a non-empty directory.
     #
     # Timeout is generous (30s, not 5s): cloudbox runs many concurrent
@@ -208,7 +248,7 @@ pkgs.writeShellApplication {
         fi
         read -t 0.2 -r -u 9 _ || true
       done
-    ' _ "$sid" "$OPENCODE_URL")"; then
+    ' _ "$sid" "$serve_url")"; then
       log "session $sid not ready after 30s; giving up"
       exit 0
     fi
@@ -360,7 +400,7 @@ pkgs.writeShellApplication {
     payload="$(jq -nc \
       --arg sid "$sid" \
       --arg dir "$session_dir" \
-      --arg url "$OPENCODE_URL" \
+      --arg url "$serve_url" \
       '{sid:$sid, dir:$dir, url:$url}')"
 
     # jq -Rs '.' emits a JSON string literal, which doubles as a valid

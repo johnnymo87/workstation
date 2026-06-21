@@ -40,6 +40,22 @@ resolve_nvims() {
   return 1
 }
 
+# parse_serve_url <route-json-body> <fallback-url>: extract .apiBase from a
+# pigeon GET /route JSON body and print it. Falls back to <fallback-url> when
+# the body is empty, not JSON, or .apiBase is absent/null/empty. Pure (no
+# network) so the production caller does the curl and hands the body in.
+# Mirror of the production function in default.nix; exercised by the tests
+# below and kept in lockstep by the source-grep guard at the bottom.
+parse_serve_url() {
+  local body="$1" fallback="$2" api
+  api="$(printf '%s' "$body" | jq -r '.apiBase // empty' 2>/dev/null || true)"
+  if [ -n "$api" ] && [ "$api" != "null" ]; then
+    printf '%s\n' "$api"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
 # list_session_panes <session-name>: emit "pane_id|cmd|path" for every pane in
 # the named session ONLY. We filter `list-panes -a` on #{session_name} rather
 # than `list-panes -s -t "=<name>"` because the latter is NOT a robust session
@@ -141,6 +157,44 @@ none_rc=$?
 set -e
 assert_eq ""  "$none_out" "resolve_nvims: nothing available -> empty stdout"
 assert_exit "1" "$none_rc"  "resolve_nvims: nothing available -> exit 1"
+
+# ---- parse_serve_url tests --------------------------------------------------
+#
+# Pool-aware serve resolution: oc-auto-attach asks pigeon's GET /route which
+# serve owns a session, then attaches the TUI there. parse_serve_url is the
+# pure parse+fallback core. The whole point is that ANY malformed/absent
+# response degrades to the caller's fallback (today's :4096), so the fix can
+# never be worse than the pre-pool behavior. Needs jq (a runtimeInput of the
+# package); SKIP if absent in a stripped shell.
+fallback_url="http://127.0.0.1:4096"
+if command -v jq >/dev/null 2>&1; then
+  # Happy path: a real /route body routes the TUI to the owning serve (:4097).
+  route_body='{"sessionId":"ses_x","serveId":"serve-1","apiBase":"http://127.0.0.1:4097","eventUrl":"http://127.0.0.1:4097/event?session_ids=ses_x"}'
+  assert_eq "http://127.0.0.1:4097" "$(parse_serve_url "$route_body" "$fallback_url")" \
+    "parse_serve_url: valid route body -> apiBase (owning serve)"
+
+  # Empty body (pigeon down / curl failed) -> fallback.
+  assert_eq "$fallback_url" "$(parse_serve_url "" "$fallback_url")" \
+    "parse_serve_url: empty body -> fallback"
+
+  # Non-JSON garbage (proxy error page, partial read) -> fallback.
+  assert_eq "$fallback_url" "$(parse_serve_url "not json at all" "$fallback_url")" \
+    "parse_serve_url: non-JSON body -> fallback"
+
+  # Valid JSON but no apiBase field -> fallback.
+  assert_eq "$fallback_url" "$(parse_serve_url '{"sessionId":"ses_x"}' "$fallback_url")" \
+    "parse_serve_url: JSON without apiBase -> fallback"
+
+  # apiBase present but null -> fallback.
+  assert_eq "$fallback_url" "$(parse_serve_url '{"apiBase":null}' "$fallback_url")" \
+    "parse_serve_url: apiBase null -> fallback"
+
+  # apiBase present but empty string -> fallback.
+  assert_eq "$fallback_url" "$(parse_serve_url '{"apiBase":""}' "$fallback_url")" \
+    "parse_serve_url: apiBase empty string -> fallback"
+else
+  printf 'SKIP  parse_serve_url tests (jq not on PATH)\n'
+fi
 
 # ---- list_session_panes tests (real tmux) -----------------------------------
 #
@@ -259,6 +313,26 @@ if [ -f "$default_nix" ]; then
     exit 1
   else
     printf 'PASS  source has no fragile confined scan (list-panes -s -t "=...")\n'
+  fi
+  # Pool-aware serve resolution must be present in the source: the
+  # parse_serve_url helper, the PIGEON_DAEMON_URL env, and the /route query.
+  if grep -q 'parse_serve_url()' "$default_nix"; then
+    printf 'PASS  source defines parse_serve_url\n'
+  else
+    printf 'FAIL  source defines parse_serve_url\n        not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  if grep -q 'PIGEON_DAEMON_URL' "$default_nix"; then
+    printf 'PASS  source honors PIGEON_DAEMON_URL\n'
+  else
+    printf 'FAIL  source honors PIGEON_DAEMON_URL\n        PIGEON_DAEMON_URL never referenced in: %s\n' "$default_nix"
+    exit 1
+  fi
+  if grep -q '/route?session_id=' "$default_nix"; then
+    printf 'PASS  source queries pigeon /route?session_id=\n'
+  else
+    printf 'FAIL  source queries pigeon /route?session_id=\n        "/route?session_id=" not found in: %s\n' "$default_nix"
+    exit 1
   fi
 else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
