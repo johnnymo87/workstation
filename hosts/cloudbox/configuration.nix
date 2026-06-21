@@ -42,6 +42,19 @@ let
   # pkgs/claude-failover-proxy/default.nix. NixOS configs don't receive the
   # flake's localPkgs, so callPackage it directly here for the systemd service.
   claude-failover-proxy = pkgs.callPackage ../../pkgs/claude-failover-proxy { };
+
+  # mn9r M5: serve-pool descriptor (single source of truth in
+  # users/dev/serve-pool.nix). cloudbox = K=4 on ports 4096..4099, serve-0 ==
+  # :4096. routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB) and
+  # pigeon (PIGEON_DAEMON_DB_PATH) open for the session-lease CAS (DM5-1).
+  servePool = (import ../../users/dev/serve-pool.nix).forHost.cloudbox;
+  routingDbPath = "/home/dev/${(import ../../users/dev/serve-pool.nix).routingDbSubpath}";
+  # port -> OPENCODE_SERVE_ID lookup for the templated unit's ExecStart, where
+  # the systemd instance specifier %i is the port. Generated from the same list
+  # as PIGEON_SERVE_ENDPOINTS so serve-<i> can never drift from endpoint i.
+  serveIdCase = lib.concatStringsSep "\n" (lib.imap0
+    (i: port: "          ${toString port}) export OPENCODE_SERVE_ID=serve-${toString i} ;;")
+    servePool.ports);
 in
 {
   # Guard: abort activation if applying the wrong host's config.
@@ -401,6 +414,15 @@ in
         # that must hit the same DB; a system service doesn't source ~/.profile.
         "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
         "OPENCODE_DISABLE_CHANNEL_DB=1"
+        # mn9r M5: the K serve endpoints in port order (index i -> serve-<i>, so
+        # this MUST match servePool.ports ordering — both come from
+        # users/dev/serve-pool.nix). PIGEON_SERVE_LIVENESS=self flips pigeon off
+        # its HTTP health-poller onto the serves' own heartbeats (M4 D1a), and
+        # PIGEON_DAEMON_DB_PATH pins the routing DB to the same file the serves
+        # open as OPENCODE_ROUTING_DB (DM5-1).
+        "PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}"
+        "PIGEON_SERVE_LIVENESS=self"
+        "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
         # Absolute path to oc-auto-attach so launch-ingest.ts can find it
         # despite the locked-down systemd PATH. See let-binding above.
         "OC_AUTO_ATTACH_BIN=${oc-auto-attach}/bin/oc-auto-attach"
@@ -444,7 +466,7 @@ in
   systemd.services.lgtm-run = lib.mkIf enableLgtm {
     description = "LGTM PR review cycle";
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" "opencode-serve.service" ];
+    after = [ "network-online.target" "opencode-serve-pool.target" ];
     # `openssh` is defense-in-depth: lgtm's `git fetch` passes
     # `--recurse-submodules=no` so submodule recursion never invokes
     # ssh, but if any other code path (or a future regression) tries
@@ -526,11 +548,22 @@ in
     };
   };
 
-  systemd.services.opencode-serve = {
-    description = "OpenCode headless serve";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "network.target" "sops-nix.service" "aigateway.service" ];
-    wants = [ "aigateway.service" ];
+  # mn9r M5: K-serve pool. Templated unit (instance %i = port) so one restart of
+  # opencode-serve-pool.target fans out to all K serves. serve-0 binds 4096, so
+  # the existing :4096 consumers (pigeon OPENCODE_URL, lgtm, TUIs) keep working
+  # until M7. Setting OPENCODE_ROUTING_DB (in Environment below) activates the
+  # dormant M4 serve-side session-lease path.
+  systemd.services."opencode-serve@" = {
+    description = "OpenCode headless serve (pool instance, port %i)";
+    after = [ "network.target" "sops-nix.service" "aigateway.service" "pigeon-daemon.service" ];
+    # DM5-2: a serve fails closed until pigeon has seeded the routing schema
+    # (pigeon creates it when it inits the router). Order after pigeon and lean
+    # on Restart=always so a too-early serve just retries until the schema is up.
+    wants = [ "aigateway.service" "pigeon-daemon.service" ];
+    # DM5-7: do NOT bounce the pool on routine home/system rebuilds (that would
+    # kill all K serves and their live sessions). Restarts happen only via the
+    # explicit opencode-serve-pool.target fan-out (M5.8 hooks / M6 cutover).
+    restartIfChanged = false;
     # NOTE: NixOS treats each `path` entry as a package directory and
     # auto-appends `/bin` and `/sbin` when composing PATH. So pass
     # `/home/dev/.local` (NOT `/home/dev/.local/bin`) — it expands to
@@ -571,9 +604,21 @@ in
         # ~/.profile, so the sessionVariables copy doesn't reach it.
         "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
         "OPENCODE_DISABLE_CHANNEL_DB=1"
+        # mn9r M5/M4 activation: each serve participates in the per-session lease
+        # CAS against pigeon's routing DB (the SAME file as the pigeon-daemon's
+        # PIGEON_DAEMON_DB_PATH, DM5-1). Until this var was set the M4 serve-lease
+        # code shipped in the binary stayed dormant.
+        "OPENCODE_ROUTING_DB=${routingDbPath}"
       ];
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
+        PORT="$1"
+        # DM5-4: the serve id must match pigeon's seedServes order (endpoint i ->
+        # serve-<i>). Generated from servePool.ports so it cannot drift.
+        case "$PORT" in
+${serveIdCase}
+          *) echo "opencode-serve@: port $PORT not in serve-pool.nix"; exit 1 ;;
+        esac
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
         # Personal Anthropic subscription auth for the
@@ -631,26 +676,33 @@ in
         if [ -r /run/secrets/dd_app_key ]; then
           export DD_APP_KEY="$(cat /run/secrets/dd_app_key)"
         fi
-        exec /home/dev/.nix-profile/bin/opencode serve --port 4096 --hostname 127.0.0.1
-      ''}";
-      # Cap the always-on headless server so it can't monopolize RAM alone,
-      # but size the cap to its real working set. On this 64 GiB box the serve
-      # cgroup (daemon + per-session node workers) runs a ~29 GiB working set
-      # under heavy concurrent use (15+ attached sessions). The old 20G high
-      # cap sat *below* that, so the kernel throttled the cgroup with non-stop
-      # reclaim (277k memory.high breaches in 8h) and spilled ~9 GiB to zram
-      # for no protective benefit (0 OOM kills, never reached the hard max).
-      # Raise high to 32G so the working set stays resident; max to 40G for
-      # burst headroom. Even if a heavy bazel build (~16G) collides with
-      # opencode pinned at its cap, 32+16+system stays under 64G, and
-      # OOMScoreAdjust=500 remains the backstop that sacrifices serve first if
-      # the *whole system* runs out.
-      MemoryMax = "40G";
-      MemoryHigh = "32G";
+        exec /home/dev/.nix-profile/bin/opencode serve --port "$PORT" --hostname 127.0.0.1
+      ''} %i";
+      # DM5-5: PER-INSTANCE memory cap. The old single serve was capped at
+      # 40G/32G for the whole serve cgroup (~29 GiB observed working set across
+      # 15+ attached sessions). Under K=4 the load spreads across 4 cgroups, so
+      # cap each instance at 9G max / 7G high: aggregate 4x9=36G max, 4x7=28G
+      # high stays under the old 40G ceiling with burst headroom on this 62 GiB
+      # box, and OOMScoreAdjust=500 still sacrifices a serve first if the whole
+      # system runs out.
+      MemoryMax = "9G";
+      MemoryHigh = "7G";
       OOMScoreAdjust = "500";
       Restart = "always";
       RestartSec = 10;
     };
+  };
+
+  # mn9r M5: the serve-pool target. wantedBy multi-user so the pool boots; it
+  # `wants` each templated instance (opencode-serve@<port>.service) so starting
+  # the target pulls them all in, and ONE `systemctl restart
+  # opencode-serve-pool.target` fans out to all K serves (the M5.8 restart-hook
+  # and M6 cutover both bounce the pool through this target).
+  systemd.targets.opencode-serve-pool = {
+    description = "OpenCode serve pool (K warm serves on one opencode.db)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "pigeon-daemon.service" ];
+    wants = map (p: "opencode-serve@${toString p}.service") servePool.ports;
   };
 
   # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
@@ -1087,6 +1139,9 @@ in
   systemd.tmpfiles.rules = [
     "d /home/dev/.ssh 0700 dev dev -"
     "d /home/dev/projects 0755 dev dev -"
+    # mn9r M5: routing DB dir (DM5-1) shared by pigeon (PIGEON_DAEMON_DB_PATH)
+    # and the serve pool (OPENCODE_ROUTING_DB).
+    "d /home/dev/.local/share/pigeon 0755 dev dev -"
   ];
 
   # User account with stable UID/GID
