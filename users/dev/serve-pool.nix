@@ -43,10 +43,13 @@ rec {
   forHost = builtins.mapAttrs (_: mk) portsByHost;
 
   # DM5-1 routing DB: a serve's OPENCODE_ROUTING_DB and pigeon's
-  # PIGEON_DAEMON_DB_PATH must be the SAME file. Relative to the owning user's
-  # home dir (parallels the M2 opencode.db pin under .local/share/opencode);
-  # prepend "${homeDir}/" at the use site.
-  routingDbSubpath = ".local/share/pigeon/pigeon-daemon.db";
+  # PIGEON_DAEMON_DB_PATH must be the SAME file. NOTE: pigeon-daemon.db is
+  # pigeon's UNIFIED daemon DB (swarm messaging + outbox + routing all in one
+  # file, src/storage/*.ts + src/routing/*.ts), so the routing DB is NOT a
+  # dedicated file we can freely relocate — it must be pigeon's actual daemon DB
+  # or we'd orphan pigeon's swarm/outbox state. The path therefore lives at the
+  # consumer (it's pigeon's existing WorkingDirectory/data path per host), not
+  # here; serve-pool.nix owns only the drift-critical ports/endpoints/serveIds.
 
   inherit endpointsFor serveIdsFor;
 }

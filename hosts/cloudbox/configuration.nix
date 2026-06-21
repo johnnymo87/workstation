@@ -46,9 +46,15 @@ let
   # mn9r M5: serve-pool descriptor (single source of truth in
   # users/dev/serve-pool.nix). cloudbox = K=4 on ports 4096..4099, serve-0 ==
   # :4096. routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB) and
-  # pigeon (PIGEON_DAEMON_DB_PATH) open for the session-lease CAS (DM5-1).
+  # pigeon (PIGEON_DAEMON_DB_PATH) open for the session-lease CAS (DM5-1). It is
+  # pigeon's EXISTING unified daemon DB (the pigeon service's
+  # WorkingDirectory/data/pigeon-daemon.db default) — that single file holds
+  # pigeon's swarm/outbox state AND the routing tables, so we point both env
+  # vars at it rather than a fresh path (a fresh path would orphan pigeon's
+  # swarm/outbox state and force a re-seed). pigeon already created the routing
+  # schema there (checksum e5c8e409..., version 1), so serves boot-assert clean.
   servePool = (import ../../users/dev/serve-pool.nix).forHost.cloudbox;
-  routingDbPath = "/home/dev/${(import ../../users/dev/serve-pool.nix).routingDbSubpath}";
+  routingDbPath = "/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
   # port -> OPENCODE_SERVE_ID lookup for the templated unit's ExecStart, where
   # the systemd instance specifier %i is the port. Generated from the same list
   # as PIGEON_SERVE_ENDPOINTS so serve-<i> can never drift from endpoint i.
@@ -1139,9 +1145,6 @@ ${serveIdCase}
   systemd.tmpfiles.rules = [
     "d /home/dev/.ssh 0700 dev dev -"
     "d /home/dev/projects 0755 dev dev -"
-    # mn9r M5: routing DB dir (DM5-1) shared by pigeon (PIGEON_DAEMON_DB_PATH)
-    # and the serve pool (OPENCODE_ROUTING_DB).
-    "d /home/dev/.local/share/pigeon 0755 dev dev -"
   ];
 
   # User account with stable UID/GID
