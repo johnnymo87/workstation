@@ -261,22 +261,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-YvWjn2YSh5NW4WASEEMGhOsYEVpG0iPgpNmt919jth4=";
+      hash = "sha256-L7sCT2ILGr96LEvwCOOoC9SBJ8aaZGRhrVUs6udwvn0=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-U3z8yypam88uwraT8MT1I3I4wzLieqwV7vHhF0FZxFs=";
+      hash = "sha256-um+zEfXqLJY7rqoTCXNrC4ugM6cB5ZzpNweTgIXYbjY=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-XIUwRGkz4rXVMUzPAFeWw+wCLi4QbZnIpaV25zI/Y6g=";
+      hash = "sha256-M0aSRuLgP+NZqIPRJRLAujgTvH2wn+ZwTLxzGBYso5g=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-XejH4Hx6pxo2Yhf1TqSZEoWFQhoBXwMf7YrzrmGajbU=";
+      hash = "sha256-T19lIbRc123bXIdGrM0pPAdRiiqb4deb+6a4LuVnQKk=";
       isZip = true;
     };
   };
@@ -297,18 +297,22 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched (upstream bump 1.17.4 -> 1.17.7, 2026-06-16). The
-    # 5-patch set (gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim)
-    # applies clean on v1.17.7; cache-thinking-skip + tool-fix were re-ported for
-    # v1.17.7 type drift. instance-state-partition.patch was DROPPED — fixed upstream
-    # by 87c33b3 (issue #29772), verified via Gate 1 (regression test) + Gate 2 (live
-    # Question-tool repro). retry-cap runaway cure preserved.
+    # This pins v1.17.7-patched.1 (same upstream 1.17.7, re-released 2026-06-21 with
+    # the mn9r M3/M4 patches added — built via build-release.yml -f version=1.17.7
+    # -f revision=1, staying on the 1.17.7 hold line). The 9-patch set is:
+    # gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim,
+    # sqlite-foreign-key-wrap, event-session-scope (#7, x8wi), createnext-readback
+    # (#8, mn9r M3), serve-lease (#9, mn9r M4). serve-lease adds serve-side session
+    # leases + the OPENCODE_ROUTING_DB/OPENCODE_SERVE_ID flags; the WHOLE feature is
+    # gated on OPENCODE_ROUTING_DB, so until M5 sets that env this binary is
+    # byte-behaviorally a no-op vs the old 5-patch build (M4 stays DORMANT).
+    # instance-state-partition.patch remains DROPPED (fixed upstream by 87c33b3).
     # NOTE: cloudbox is ~15-way multi-writer on the shared opencode.db, so a switch
     # that swaps the opencode binary should stop ALL opencode processes at once (serve
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "1";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
