@@ -1,22 +1,39 @@
-# Opus-aware teamclaude fork — Design
+# Opus-aware teamclaude fork — Design (R2)
 
-> **For the reviewer:** This is a DESIGN doc (the "what and why"), not a task-by-task
-> plan. It is self-contained: §1 gives the problem and the code-level root cause, §2 the
-> prior-art survey, and §3–§10 the proposed design. The next step after approval is an
-> implementation plan (separate doc). Please scrutinize §6 (reactive backstop) and §10
-> (open questions) hardest — those are where the design is least certain.
+> **For the reviewer:** DESIGN doc (the "what and why"), not a task-by-task plan.
+> Self-contained. **R2** supersedes R1 after a Vertex Opus 4.8 review and a real-payload
+> capture from devbox that together forced a data-model pivot (see §0). The next step
+> after approval is an implementation plan (separate doc, via writing-plans).
 
-**Status:** Design approved by user (2026-06-21) via brainstorming. Nothing implemented.
-Decisions settled during brainstorming are recorded inline as **[decision]**. Next step:
-Vertex Opus 4.8 review → revise → writing-plans.
+**Status:** R2, revised 2026-06-21 after review + evidence capture. Decisions are recorded
+inline as **[decision]**. Items closed from the R1 review are mapped in §13.
 
-**Upstream:** `KarpelesLab/teamclaude` (MIT). Installed/runtime version on devbox: **1.0.7**
-(nix-packaged from the npm tarball, `pkgs/teamclaude/default.nix`). HEAD at survey time:
-`654ace1`. The gap described here exists in both 1.0.7 and HEAD.
+**Upstream:** `KarpelesLab/teamclaude` (MIT). devbox runtime: **1.0.7** (nix-packaged npm
+tarball, `pkgs/teamclaude/default.nix`). Survey HEAD: `654ace1`. Gap exists in both.
 
-**Scope of this doc:** a *focused fork* (upstreamable later, not now) that makes the proxy
-aware of Anthropic's per-model **Opus weekly** limit and fails over across Claude Max
-accounts accordingly.
+**Scope:** a *focused fork* (upstreamable later, not now) that makes the proxy aware of
+Anthropic's **per-model scoped weekly limits** (Opus in particular) and fails over across
+Claude Max accounts accordingly, on the **base-URL relay only**.
+
+---
+
+## 0. What changed in R2 (changelog)
+The R1 design tracked a flat `seven_day_opus` field and added per-field buckets
+(`unified7dOpus`). A review (3 blockers, 5 majors) plus a captured `/api/oauth/usage`
+payload changed three things:
+
+1. **Data model pivot [decision].** The authoritative structure is a generic **`limits[]`
+   array** (each entry: `kind, group, percent, severity, resets_at, scope.model, is_active`).
+   The flat `seven_day_opus` field *exists* but is **`null` unless an Opus-scoped limit is
+   active**, so building on it would silently no-op. R2 drives everything off `limits[]`.
+2. **MITM relay scoped out [decision].** A second relay (`mitm.js`) selects an account
+   *per-CONNECT* before any request body exists; per-request model-awareness is structurally
+   impossible there. R2 covers the **base-URL relay only** (what devbox/opencode uses) and
+   documents the caveat.
+3. **Evidence-first [decision].** Root cause is a strong hypothesis, **not proven** (the
+   live surviving account currently shows *no active Opus scope*). We enabled `--log-to`
+   capture on devbox to record the next real limit response, and design the reactive
+   backstop defensively (structured signals, not message strings).
 
 ---
 
@@ -25,230 +42,240 @@ accounts accordingly.
 ### 1.1 Symptom
 Heavy Opus agentic workloads on devbox (default model `anthropic/claude-opus-4-8`, routed
 through teamclaude at `127.0.0.1:3456`) intermittently surface Anthropic's verbatim
-`The usage limit has been reached` error to opencode — which opencode's `SessionRetry`
-then retries and pigeon's plugin surfaces as a "🤖 Retry … Next attempt at …" notice —
-**even though teamclaude reports both accounts as healthy** (e.g. one account at 3% of the
-5h window / 10% of the unified weekly, status `allowed`).
+`The usage limit has been reached` to opencode (opencode `SessionRetry` retries it; pigeon
+surfaces a "🤖 Retry … Next attempt" notice) **while teamclaude reports both accounts
+healthy** (one account 3% of 5h / ~10% unified weekly, status `allowed`).
 
-### 1.2 Why (code-level)
-teamclaude tracks exactly three Claude-Max quota buckets and **no per-model Opus bucket
-exists anywhere in the codebase** (`grep -ri opus` → zero hits). Specifically:
-
-- **Passive headers** (`account-manager.js:340-367`) read
-  `anthropic-ratelimit-unified-5h-utilization`, `-7d-utilization`, `-status`, plus the
-  standard `tokens`/`requests` limits. There is **no per-model breakdown** in these headers.
-- **Active usage probe** (`oauth.js:202-206`, opt-in, added by upstream PR #36) normalizes
-  only `five_hour`, `seven_day`, **`seven_day_sonnet`** from `/api/oauth/usage`. Anthropic's
-  usage endpoint also returns a **`seven_day_opus`** bucket on Max plans, but teamclaude
-  never reads it. This probe is **off by default**.
+### 1.2 Why (code-level — verified against src/)
+teamclaude tracks three Claude-Max buckets and has **no per-model Opus concept** (`grep -ri
+opus src/` → 0 hits):
+- **Passive headers** (`account-manager.js:340-367`) read `anthropic-ratelimit-unified-5h-
+  utilization`, `-7d-utilization`, `-status`, plus standard tokens/requests. **No per-model
+  breakdown.**
+- **Active usage probe** (`oauth.js:201-206`, opt-in via `quotaProbeSeconds`) normalizes only
+  `five_hour`, `seven_day`, **`seven_day_sonnet`**. Never reads any Opus bucket.
 - **Proactive failover** `_isNearQuota()` (`account-manager.js:213-233`) trips only on
-  `unified5h ≥ threshold`, `unified7d ≥ threshold`, or the standard token/request limits.
-  It does **not** consider any Opus bucket, and notably does **not** consult
-  `unifiedStatus` (stored at `:359` but never read) — so an account Anthropic has flagged
-  `rejected` is still treated as available while 5h/7d utilization is low.
-- **Reactive path** (`server.js:299-326`) special-cases **HTTP 429 only**, and
-  **cancels the response body** (`:308`) without inspecting it. It cannot distinguish a
-  subscription/Opus usage-limit from a transient throttle, and if Anthropic delivers the
-  Opus limit as anything other than a clean 429 (e.g. a mid-stream SSE `error` event inside
-  a 200 stream — the common shape for subscription "usage limit reached"), teamclaude
-  treats it as a normal success, updates quota from the (low) headers, and **streams the
-  error straight through** with no failover and no log line.
+  `unified5h`/`unified7d`/standard ≥ threshold. It does **not** consult `unifiedStatus`
+  (stored `:359`, never read) nor any per-model bucket.
+- **Reactive path** (`server.js:299-326`) special-cases **HTTP 429 only** and `cancel()`s
+  the body unread (`:308`). A limit delivered as a mid-stream SSE `error` inside a 200 (the
+  common subscription shape) is streamed straight through with no failover, no log line.
 
-**Net:** an account can be at its Opus weekly cap while its unified 5h/7d utilization is
-low. teamclaude sees only the latter, considers the account healthy, never fails over, and
-passes the limit through. The user's "two accounts, far from limits" intuition is correct
-*about the unified buckets* and blind *to the Opus bucket* — exactly the gap.
-
-### 1.3 Adjacent (out-of-scope) facts
-The currently-observed outage is amplified because the second account is **operationally
-dead** (access token expired, refresh token `invalid_grant` — the documented OAuth-grant
-poisoning from sharing Claude Code's `client_id`), so there is effectively no failover
-target. Fixing that is an **auth** problem, explicitly a non-goal here (§3). This design
-makes failover *correct*; it does not resurrect dead accounts.
+### 1.3 Status: strong hypothesis, not proven
+The verbatim "usage limit has been reached" *rules out* the issue-#5 IP-throttle (whose
+message is "Server is temporarily limiting requests (not your usage limit)"). But the live
+capture (§2.5) shows the surviving account currently has **no active Opus-scoped limit** —
+so we have not yet observed the exact limiting bucket/wire-shape. The `--log-to` capture
+(§2.5) is in place to confirm on the next real event. (Separately, the second account is
+operationally dead — expired token + `invalid_grant` refresh — which removes the only
+failover target; that is an **auth** problem, a non-goal here.)
 
 ---
 
 ## 2. Prior art (upstream issues/PRs)
-- **Issue #1** "Support Sonnet 7-day usage in the quota view" — maintainer states the
-  **passive-only design philosophy**: "the proxy never calls the Anthropic API itself, it
-  only learns quota from the traffic." Per-model buckets "aren't in the
-  `anthropic-ratelimit-unified-*` headers … only in `/api/oauth/usage`." Establishes the
-  Sonnet pattern but stops at Sonnet.
-- **PR #36** "Opt-in background quota probe (+ Sonnet 7d bar, closes #1)" — the probe we
-  extend; **Sonnet-only**, opt-in.
-- **PR #2** "Add Sonnet 7-day usage bar" — earlier attempt, closed for *actively* polling
-  (violated passive-only). We deliberately accept active polling.
-- **Issue #5 / PR #25** — the "Server is temporarily limiting requests (not your usage
-  limit)" 429 is **keyed on the proxy's outbound IP** → hits *all* accounts at once; the
-  right response is back-off, not failover. This is the trap the reactive backstop (§6)
-  must avoid.
-- **PR #22** "strip fast mode …" — a sibling class of bug: `/fast` priority-tier 429s were
-  misread as quota exhaustion and penalized all accounts. Same underlying weakness
-  (misclassifying non-quota 429s).
-- Full-text search of all issues+PRs for `opus` / `seven_day_opus` / `per-model`: **no
-  results.** This is an unreported gap; we do not depend on any upstream work landing.
+- **Issue #1** (Sonnet 7d view) — maintainer states the **passive-only** philosophy: the
+  proxy never calls Anthropic itself. Per-model buckets are only in `/api/oauth/usage`.
+- **PR #36** — opt-in background probe; **Sonnet-only**.
+- **PR #2** — earlier Sonnet attempt, closed for *active polling* (we accept active polling).
+- **Issue #5 / PR #25** — the "temporarily limiting requests" 429 is **IP-keyed** (hits all
+  accounts; must back off, not fail over). The trap §6 must avoid.
+- **PR #22** — `/fast` priority-tier 429s misread as quota exhaustion; same misclassification
+  family.
+- No issue/PR mentions `opus`/`seven_day_opus`/`per-model`. Unreported gap; no dependency on
+  upstream work landing. *(PR/issue numbers are external; not verifiable from the tree.)*
+
+## 2.5 Captured evidence (devbox, account 0, healthy) [decision: fixture-driven]
+Real `GET /api/oauth/usage` (beta `oauth-2025-04-20`), saved as fixture
+`fixtures/usage-account0-healthy.json`:
+- Top-level buckets: `five_hour`, `seven_day`, `seven_day_opus`(**null**),
+  `seven_day_sonnet`, `seven_day_cowork`, `seven_day_oauth_apps`, `seven_day_omelette`,
+  `extra_usage`, `spend`, `limits`, plus opaque flags.
+- **`limits[]`** (authoritative): e.g.
+  - `{kind:"session", group:"session", percent:3, severity:"normal", resets_at, scope:null, is_active:false}`
+  - `{kind:"weekly_all", group:"weekly", percent:11, severity:"normal", resets_at, scope:null, is_active:true}`
+  - `{kind:"weekly_scoped", group:"weekly", percent:4, severity:"normal", resets_at, scope:{model:{id:null,display_name:"Sonnet"}}, is_active:false}`
+- **No Opus-scoped entry** present for this account right now; **no `five_hour_opus`** →
+  Opus cap is **weekly-only** (resolves R1 review m4).
+- **Scales:** bucket `utilization` and `limits[].percent` are **0–100**.
+  `normalizeUsageBucket` (`oauth.js:151-154`) divides by 100 when `>1` (→ 0–1) and parses
+  ISO `resets_at` → ms; reuse it for `limits[]`.
+
+**Implication:** model the per-scope limits generically from `limits[]` (match
+`scope.model.display_name` case-insensitively, use `percent`, `severity`, `is_active`,
+`resets_at`). Do **not** depend on the flat `seven_day_opus` field.
 
 ---
 
 ## 3. Goals / Non-goals
-**Goal [decision]:** Track the per-model **Opus weekly** quota (`seven_day_opus`) and
-perform **per-request, model-aware failover** across accounts, so Opus traffic rotates
-before/when an account's Opus cap is hit instead of passing the limit through.
+**Goal [decision]:** Track per-model **scoped weekly** limits from `limits[]` and perform
+**per-request, model-aware failover** so a request whose model matches an active/severe
+scoped limit rotates to an account where that scope is healthy, instead of passing the
+limit through.
 
-**Non-goals [decision — YAGNI]:**
-- Graceful Opus→Sonnet degradation (we 429 instead, §7).
-- General error-classification beyond the Opus backstop.
-- Auth self-healing / auto-relogin for dead accounts.
-- Metrics/alerting beyond surfacing Opus state in the existing status output.
+**Non-goals [decision — YAGNI]:** graceful Opus→Sonnet degradation; general error
+classification beyond the scoped backstop; auth self-healing/auto-relogin; metrics beyond
+surfacing scoped state in existing status outputs; **the `mitm.js`/forward-proxy relay**
+(unified-only failover there; documented caveat).
 
-(The generalized model in §4 *subsumes* Sonnet tracking for free; we add no Sonnet-specific
-behavior.)
-
----
-
-## 4. Architecture — generalized per-model quota (Approach A) [decision]
-Make quota **model-class-aware**, implemented *additively* over upstream's field style so
-the diff stays focused and upstreamable:
-
-- Add `unified7dOpus` + `unified7dOpusReset` to `emptyQuota()` and `PERSISTED_QUOTA_FIELDS`
-  (mirrors the existing `unified7dSonnet` pair).
-- `modelClass(modelId)` helper: `/opus/i → "opus"`, `/sonnet/i → "sonnet"`, else `null`.
-- `_isNearQuota(account, modelClass)` and `getActiveAccount(modelClass)` take the class.
-  Near-quota for a class = `unified5h ≥ t` **OR** `unified7d ≥ t` **OR** (class-specific
-  weekly `≥ t`). Opus/Sonnet are sub-limits *within* the unified weekly, so both gates apply.
-
-Rejected alternatives: **B** (Opus special-case overlay — minimal diff but doesn't
-generalize) and **C** (two-pass selection — more confusing control flow). A was chosen for
-"proper design, best fit," treating per-model limits as first-class.
+**Hard dependency [decision, from review M4]:** proactive scoped failover **requires the
+usage probe on** (`quotaProbeSeconds > 0`); passive headers carry no per-model data. With
+the probe off, scoped limits are handled **reactively only** (§6).
 
 ---
 
-## 5. Components & data flow
+## 4. Architecture — `limits[]`-driven model-class quota [decision]
+Generic over model scope (subsumes Opus + Sonnet + future), additive to upstream:
 
-### 5a. Background poller (always-on) [decision]
-Extend the existing `prober`. Every `pollIntervalSec` (default **90s**), for each enabled,
-non-dead account: refresh token if expiring, call `fetchUsage`, update all buckets.
-`fetchUsage` (`oauth.js`) gains `sevenDayOpus: normalizeUsageBucket(data?.seven_day_opus)`.
-**Idle accounts are polled too**, so a failover target's Opus state is known-good *before*
-we switch to it. Poll volume (~2 accounts / 90s ≈ 1.3 req/min) is negligible vs. the
-IP-throttle concern (§2, Issue #5). The existing free passive header reads on every
-`/v1/messages` response are **retained** as a real-time complement to the poll.
+- **Quota model:** add a normalized `scopedLimits` map to each account's quota:
+  `{ "<modelKeyLowercased>": { utilization (0-1), resetAt (ms), severity, isActive } }`,
+  derived from `limits[]` entries with `group:"weekly"` and `scope.model` set. Keep the
+  existing unified `unified5h`/`unified7d` (still useful + free from headers). Persist the
+  scoped map (extend `PERSISTED_QUOTA_FIELDS`).
+- **`modelClass(modelId)`** helper (`/opus/i`→`"opus"`, `/sonnet/i`→`"sonnet"`, else
+  `null`). Robust to opencode's provider-prefixed id (`anthropic/claude-opus-4-8`) and the
+  wire value (`claude-opus-4-…`).
+- **Near-quota for a class** = `unified5h ≥ t` **OR** `unified7d ≥ t` **OR** (a matching
+  active scoped limit is near: `scopedLimits[class].isActive && (severity ≠ "normal" ||
+  utilization ≥ t_scoped)`). Generic gating **[decision]** applies to whichever scope
+  matches the request model (Opus and Sonnet uniformly). This *is* a deliberate behavior
+  change for Sonnet (was display-only) — driven by `is_active`/`severity` so it only fires
+  on a real active scope (review M5: accepted + tested, not a silent regression).
 
-### 5b. Per-request model-aware selection (`server.js`) [decision]
-The request body is already buffered (`server.js:79`). Parse JSON → `model` → `modelClass`,
-pass to `getActiveAccount(class)`. Pick the current account if available for that class;
-else rotate to one that is; else → §7. Non-Opus requests keep using an Opus-exhausted
-account (its unified/Sonnet capacity is preserved).
-
-### 5c. Reactive Opus backstop [decision] — see §6.
-
-### 5d. All-Opus-exhausted [decision]
-`getActiveAccount("opus")` returns null → respond **429** with `retry-after` = soonest
-`unified7dOpusReset` across accounts (extend `computeRetryAfter`). opencode's retry then
-backs off until Opus actually frees up.
+Rejected: R1's per-field `unified7dOpus` (null/conditional, §0/§2.5); Opus-only overlay
+(the `limits[]` loop makes generic essentially free).
 
 ---
 
-## 6. Reactive Opus backstop (highest-risk section)
-Proactive polling has lag (poll interval + the sub-threshold window), so we also react to
-upstream limit signals — but **only genuine per-account usage limits**, never the IP-keyed
-"Server is temporarily limiting requests" throttle (the PR #22/#25 trap, which affects all
-accounts and must *back off*, not fail over).
+## 5. Components & data flow (base-URL relay)
 
-- **Pre-stream limit** (error status, or `anthropic-ratelimit-unified-status: rejected`,
-  before any body bytes are forwarded): set the account's `unified7dOpus = 1` with reset
-  from `anthropic-ratelimit-unified-7d-reset` (fallback: a sane default), then **re-dispatch
-  to another account** — transparent retry, like the existing 429 re-dispatch.
-- **Mid-stream limit** (an SSE `error` event carrying a usage-limit message *after* bytes
-  already flowed): we cannot transparently retry (bytes are already sent to the client). So
-  we **mark the bucket** via a lightweight scan of streamed error events and return as-is;
-  opencode's `SessionRetry` re-dispatches, which now routes to a fresh account.
+### 5a. Background poller (reuse `quotaProbeSeconds`) [decision, review M3]
+**No new config keys.** Extend the existing prober. `fetchUsage` (`oauth.js`) additionally
+parses `limits[]` into the normalized `scopedLimits` map (and may keep populating
+`seven_day_sonnet`/`seven_day_opus` for display). Poll every `quotaProbeSeconds` (fork
+deploy default **90**, floor 30 already enforced `index.js:726`); idle accounts polled too
+so failover targets are known-good. Passive header reads on each response remain.
 
-**Disambiguation rule:** only signals whose shape indicates a *per-account usage limit*
-touch the Opus bucket. The IP-throttle "temporarily limiting requests" 429 must continue to
-use the existing back-off-and-retry path and must **not** mark any Opus bucket.
+### 5b. Per-request model-aware selection [decision] — stateless [review M1]
+Request body already buffered (`server.js:80-84`). Parse JSON (guarded; fallback to
+unified-only on failure/missing `model`) → `modelClass`. Introduce a **stateless**
+`bestAccountFor(modelClass)` that returns the pick **without** mutating `currentIndex`,
+`probing`, `requalify`, or emitting "Switched to account" logs. Only commit rotation state
+(`currentIndex`, logs) when the **primary** account actually changes — never per-request —
+to avoid the mixed Opus/Sonnet thrash + log-spam M1 identified. Enumerate the ripple:
+`_isAvailable`, `_isNearQuota`, `_pickBestAvailable`, `_selectNext`, `_switchOnSessionReset`,
+`selectActiveAccount` all gain an optional `modelClass` and must stay class-free by default.
 
-**Why this is risky (reviewer, please attack):**
-1. Reliable detection of a mid-stream usage-limit requires scanning the SSE byte stream the
-   proxy currently relays verbatim — added parsing surface and a possible perf/correctness
-   cost on the hot path.
-2. The exact wire shape of an Opus-specific limit (status code, headers, body/`error.type`,
-   whether `unified-status: rejected` is even emitted for the Opus sub-limit) is **not yet
-   empirically confirmed**. **Mitigation:** before finalizing detection predicates, capture
-   a real Opus-limit response with `teamclaude server --log-to <dir>` and pin the predicates
-   to observed fields (same evidence-first method the maintainer asked for in Issue #1).
+### 5c. Reactive scoped backstop — see §6.
+
+### 5d. All-scope-exhausted [decision] — generalized retry-after [review M2]
+When `bestAccountFor(class)` returns null → **429** with `retry-after` = **soonest of all
+known resets**. **Rewrite** `computeRetryAfter` (`server.js:486-495`, today only
+`rateLimitedUntil`/`resetsAt`, ignoring unified resets for Max accounts) to take the min of
+`rateLimitedUntil, unified5hReset, unified7dReset, scopedLimits[*].resetAt, resetsAt`, and
+**unify** it with the `_selectNext` all-unavailable fallback (`account-manager.js:309-319`)
+so the two "soonest reset" computations cannot diverge.
+
+---
+
+## 6. Reactive scoped backstop (highest-risk; defensive) [decision]
+Proactive polling lags (interval + sub-threshold window), so also react to upstream limit
+signals — but **only genuine per-account usage limits**, never the IP-keyed throttle.
+
+- **Pre-stream limit** (error status, before bytes forwarded): **buffer and parse the 429
+  body** (replacing the blind `cancel()` for the *terminal/non-retry* case only), match a
+  **structured** discriminator from the §2.5/`--log-to` capture (`error.type`/code; and
+  `anthropic-ratelimit-unified-status` *if* the capture shows it correlates to the scope —
+  prior is it's unified-only, review B2/Q2). Mark the matching `scopedLimits[class]`
+  exhausted (`utilization=1`, `resetAt` from the response/limits) and **re-dispatch to
+  another account**. **Do not** ship message-string matching as the primary predicate.
+- **Mid-stream limit** (SSE `error` event after bytes flowed): **extend `parseSSEUsage`**
+  (`server.js:430-434,459`, which already JSON-parses every `data:` event — so this is a few
+  lines, ~zero marginal cost; review m1) with an `else if (data.type==='error')` arm. Mark
+  the bucket; cannot transparently retry (bytes sent), so opencode's retry re-dispatches and
+  now routes to a fresh account.
+- **Disambiguation:** only structured per-account usage-limit signals touch `scopedLimits`;
+  the "temporarily limiting requests" 429 keeps the existing back-off path (review B2).
+- **Reset source [review m2]:** prefer the matching `limits[].resets_at`; fall back to
+  `anthropic-ratelimit-unified-7d-reset` (approximate — documented).
+- **Observability [review "missing #8"]:** `console.log` once whenever the backstop fires
+  (pre- or mid-stream), else it's as invisible as the current bug.
+
+**Residual risk:** exact limit wire-shape unconfirmed until the `--log-to` capture catches a
+real event; predicates are written against the capture, defaulting to back-off (never
+mis-mark) on anything unrecognized.
 
 ---
 
 ## 7. Terminal behavior [decision]
-No graceful degradation. When all accounts' Opus is exhausted → **429 + Opus-aware
-Retry-After** (§5d). Predictable; no surprise mid-stream errors for the caller beyond the
-single one that opencode retries.
+No graceful degradation. All matching scopes exhausted → **429 + generalized Retry-After**
+(§5d). opencode backs off until the scope frees.
 
 ---
 
-## 8. Config & defaults [decision]
-All new keys optional:
-- `pollIntervalSec` — default **90**.
-- `usageProbe` — flips to **on by default** (was opt-in upstream).
-- `switchThresholds` — optional per-class override map; default reuses the single
-  `switchThreshold` (0.98) for all classes.
-- **Unknown Opus data** (poll hasn't populated it yet) ⇒ treated as **available**; the §6
-  backstop covers the gap. We never block on unknown.
+## 8. Config & defaults [decision, review M3/M4]
+- **Reuse `quotaProbeSeconds`** (no `pollIntervalSec`/`usageProbe`). Fork deploy config sets
+  it to **90**; **upstream default stays off** (preserves passive-only philosophy — the
+  on-by-default flip is fork-deploy-only, not part of the upstreamable diff).
+- Optional per-class `switchThresholds` override; default reuse `switchThreshold` (0.98) for
+  unified, **scoped default 0.90** [review Q3] for early rotation given poll lag (severity is
+  the primary signal; threshold secondary).
+- Unknown scoped data (probe hasn't populated / `null`) ⇒ **available**; backstop covers it.
 
 ---
 
 ## 9. Error handling / edge cases
-- **Dead account** (invalid_grant on poll/refresh): mark `status:"error"`, skip in
-  selection, log loudly once, back off (don't crash/spin). All-dead ⇒ clear error response.
-- **Body parse failure / missing `model`:** fall back to unified-only selection.
-- **Opus reset expiry:** extend the existing `_clearExpiredQuotas` pattern to the Opus pair.
-- **IP-throttle vs usage-limit:** disambiguated by signal shape (§6); only usage-limits
-  touch the Opus bucket.
-- **Status surfacing:** add `unified7dOpus` to `/teamclaude/status` and the TUI bar (free,
-  needed for debugging; not "observability" scope creep).
+- **Dead account** (invalid_grant): `status:"error"`, skipped, logged once, backoff; all-dead
+  ⇒ clear error.
+- **Body parse failure / missing `model`:** unified-only selection (guarded `JSON.parse`;
+  cheap pre-scan optional, review m7).
+- **Scope reset expiry:** extend `_clearExpiredQuotas` for `scopedLimits[*].resetAt`.
+- **Wire-drift visibility [review m6]:** if a probe returns `seven_day_sonnet`/Sonnet scope
+  but the expected Opus key/scope shape is absent, log once so silent drift is visible.
+- **Concurrency window [review "missing #7"]:** up to *in-flight count* Opus requests can
+  pass before headers/poll/backstop mark the bucket; acceptable, documented bound.
+- **Status surfacing [review m3]:** add scoped (Opus/Sonnet) to **all three**:
+  `/teamclaude/status` (`getStatus` spreads quota — near-free), the TUI bar
+  (`tui.js:548-554`), **and** the `teamclaude status` CLI printer (`index.js:497-507`).
 
----
-
-## 10. Testing (extend existing CI; Node 18–24)
-Unit:
-- `fetchUsage` normalizes `seven_day_opus`.
-- `modelClass()` classification (opus/sonnet/other/missing).
-- `_isNearQuota(acct, "opus")` trips on the Opus bucket while unified is low.
-- `getActiveAccount("opus")`: fails over to an account with free Opus; returns null when all
-  Opus-exhausted; a non-Opus request still uses an Opus-exhausted account.
-- `computeRetryAfter` = soonest Opus reset.
-- Backstop: a real Opus-limit signal marks Opus + fails over; an IP-throttle 429 does
-  **not** mark Opus and uses back-off.
-- Persistence round-trips the Opus fields.
-
-Integration: mock upstream returning an Opus limit (pre-stream and mid-stream) → assert
-failover / state-update respectively.
-
----
+## 10. Testing (extend existing CI; Node 18–24) [decision: real fixtures]
+Commit captured fixtures (the §2.5 healthy payload + the first real limit response once
+`--log-to` catches one) and assert against them, not hand-authored guesses. Unit:
+`fetchUsage` parses `limits[]`→`scopedLimits` (incl. null Opus); `modelClass()`;
+`_isNearQuota(acct,"opus")` trips on an active Opus scope while unified low; **stateless
+`bestAccountFor`** does not mutate `currentIndex`/logs; mixed Opus/Sonnet sequence causes no
+primary thrash; `computeRetryAfter` = soonest across *all* reset fields; backstop marks scope
+on a structured limit but **not** on an IP-throttle 429; persistence round-trips
+`scopedLimits`. Integration: mock upstream pre-stream + mid-stream limit → assert
+re-dispatch / state-update.
 
 ## 11. Deployment — GitHub fork + fetchFromGitHub [decision]
-- Fork to `github.com/<you>/teamclaude` as focused commits atop upstream (upstreamable
-  later).
-- Repackage `pkgs/teamclaude/default.nix`: swap `fetchurl`(npm tarball) → `fetchFromGitHub
-  (owner, repo, rev, hash)`, keeping the zero-dep vendoring (still no `node_modules`).
-  Devbox already consumes this package.
-- **Open question (reviewer/user):** unify cloudbox onto the same nix package (drop its
-  ad-hoc `~/projects/teamclaude` checkout) for reproducibility, vs. keep cloudbox on a
-  checkout synced to the fork. Note cloudbox currently runs from a checkout partly for the
-  interactive `teamclaude login` flow.
+Fork to `github.com/<you>/teamclaude` (focused commits). Repackage `pkgs/teamclaude/
+default.nix`: `fetchurl`(npm) → `fetchFromGitHub(owner,repo,rev,hash)`, keep zero-dep
+vendoring (note `fetchFromGitHub` pulls the whole repo incl. `test/`; harmless; expect a new
+`hash` per fork commit — review n3). **cloudbox: unify on the nix package** [decision, review
+Q4] (drop the ad-hoc `~/projects/teamclaude` checkout; `teamclaude login` runs from the
+packaged binary — it needs a browser/stdin, not a source checkout). Validate the package
+builds the `bin` from `fetchFromGitHub` during deploy.
 
----
+## 12. Open questions (remaining)
+1. **B2 wire-shape** — exact status/headers/`error.type` of a real scoped limit: **pending**
+   the `--log-to` capture; predicates finalized once observed (defensive default until then).
+2. **Does a scoped limit appear in `limits[]` only when near/active**, or always at low
+   percent? The healthy capture shows Sonnet scope present at 4%/`is_active:false` but **no
+   Opus scope at all** — so Opus scope may be plan/usage-conditional. Confirm via a capture
+   when Opus has been exercised; affects whether absence ⇒ "available" is always safe.
 
-## 12. Open questions for the reviewer
-1. **§6 detection predicates** — is the mid-stream SSE scan worth the hot-path complexity,
-   or should the backstop be pre-stream-only (accept that mid-stream limits only update
-   state on the *next* request)? Need the captured-response evidence to decide.
-2. **Wire shape** — does Anthropic emit `anthropic-ratelimit-unified-status: rejected` for
-   the Opus sub-limit specifically, or only for the unified weekly? If the former, a cheap
-   header check may replace most of the body scanning.
-3. **Threshold for Opus** — is reusing 0.98 right given poll lag, or should Opus default to
-   a more conservative margin (e.g. 0.95)?
-4. **cloudbox deployment** — unify on nix package or keep checkout (§11)?
-5. **Generalization scope** — is folding Sonnet into the same model-class machinery (vs.
-   leaving upstream's Sonnet code as-is and only adding Opus) worth the extra refactor?
+## 13. R1 review items → resolution
+- **B1** (seven_day_opus unverified) → field exists but null/conditional; **pivoted to
+  `limits[]`** (§0/§2.5/§4). **B2** (429 body discarded; unverified discriminator) →
+  buffer-on-terminal + structured predicates + `--log-to` capture; defensive default (§6).
+  **B3** (mitm.js) → **scoped out** (§0/§3). 
+- **M1** (stateful currentIndex) → stateless `bestAccountFor`, commit only on primary switch
+  (§5b). **M2** (computeRetryAfter) → generalized + unified with `_selectNext` (§5d). **M3**
+  (config collision) → reuse `quotaProbeSeconds` (§8). **M4** (on-by-default / upstreamable)
+  → fork-deploy-only default + explicit hard dependency (§3/§8). **M5** (Sonnet gating) →
+  accepted as deliberate, severity/is_active-driven, tested (§4).
+- **m1** extend `parseSSEUsage` not a new scanner; **m2** prefer `limits[].resets_at`; **m3**
+  CLI printer; **m4** weekly-only Opus confirmed; **m5** root cause = hypothesis (§1.3);
+  **m6** wire-drift log; **m7** guarded parse / `/opus/i`. **n1–n3** line-ref/PR/nix caveats
+  noted.
