@@ -226,14 +226,15 @@ pkgs.writeShellApplication {
     if ! session_dir="$(timeout 30 bash -c '
       sid="$1"
       url="$2"
-      # Pace the loop without `sleep` (keeping the original sleep-free
-      # design) via a held-open pipe on fd 9. The <> open keeps the pipe
-      # open with no writer producing data, so `read -t` blocks for the
-      # full interval and then times out. A plain `read -t 0.2 < <(:)`
-      # EOFs instantly (the `:` writer exits the moment the subshell
-      # starts), making the pace a silent no-op that busy-spins curl --
-      # the worst thing to do while the server is already slow under load.
-      exec 9<> <(:)
+      # Pace the loop with a fractional `sleep` so we re-probe ~5x/sec
+      # without busy-spinning curl -- the worst thing to do while the
+      # server is already slow under load. We previously used a held-open
+      # process-substitution pipe on fd 9 (`exec 9<> <(:)` + `read -t`) to
+      # stay sleep-free, but macOS/Darwin rejects reopening that pipe via
+      # /dev/fd/N in read-write mode (EACCES "Permission denied") on every
+      # bash version, leaving fd 9 unopened and the loop busy-spinning. A
+      # plain fractional `sleep` is portable (coreutils sleep is a
+      # runtimeInput) and does the same pacing on Linux and macOS.
       while :; do
         # --connect-timeout fails fast if serve is not listening yet;
         # --max-time caps a single hung request so a stalled event loop
@@ -246,7 +247,7 @@ pkgs.writeShellApplication {
           printf "%s" "$dir"
           exit 0
         fi
-        read -t 0.2 -r -u 9 _ || true
+        sleep 0.2
       done
     ' _ "$sid" "$serve_url")"; then
       log "session $sid not ready after 30s; giving up"
@@ -378,15 +379,14 @@ pkgs.writeShellApplication {
     # shellcheck disable=SC2016
     if ! timeout 15 bash -c '
       sock="$1"
-      # Held-open pipe on fd 9 for real pacing -- see Step 1 for why a
-      # plain `read -t < <(:)` would EOF instantly and busy-spin.
-      exec 9<> <(:)
+      # Fractional `sleep` for pacing -- see Step 1 for why we dropped the
+      # `exec 9<> <(:)` + `read -t` fd trick (macOS EACCES on /dev/fd RW).
       until [ -S "$sock" ] && \
             nvim --server "$sock" --remote-expr \
               "luaeval(\"pcall(require, '"'"'user.oc_auto_attach'"'"') and 1 or 0\")" \
               </dev/null 2>/dev/null | grep -qx 1
       do
-        read -t 0.2 -r -u 9 _ || true
+        sleep 0.2
       done
     ' _ "$sock"; then
       log "nvim at $sock not ready (or helper not loaded) after 15s; giving up"
