@@ -37,7 +37,7 @@ lib.mkIf isDarwin {
     (pkgs.writeShellScriptBin "opencode-serve-pool-restart" ''
       # Generated from serve-pool.nix
       ${lib.concatStringsSep "\n" (lib.imap0 (i: _: ''
-        launchctl kickstart -k "gui/\$(id -u)/org.nix-community.home.opencode-serve-${toString i}"
+        launchctl kickstart -k "gui/$(id -u)/org.nix-community.home.opencode-serve-${toString i}"
       '') servePool.ports)}
     '')
     (pkgs.writeShellApplication {
