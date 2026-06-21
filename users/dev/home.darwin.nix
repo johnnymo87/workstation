@@ -3,6 +3,9 @@
 { config, pkgs, lib, localPkgs, assetsPath, isDarwin, projects, ... }:
 
 let
+  servePool = (import ./serve-pool.nix).forHost.darwin;
+  routingDbPath = "/Users/jonathan.mohrbacher/Code/pigeon/packages/daemon/data/pigeon-daemon.db";
+
   sshTunnelCommand = host: ''
     while true; do
       echo "$(${pkgs.coreutils}/bin/date -Is) starting ${host} tunnel" >&2
@@ -31,6 +34,12 @@ lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
   # Note: No runtimeInputs for openssh - we want the system SSH which supports UseKeychain
   home.packages = [
+    (pkgs.writeShellScriptBin "opencode-serve-pool-restart" ''
+      # Generated from serve-pool.nix
+      ${lib.concatStringsSep "\n" (lib.imap0 (i: _: ''
+        launchctl kickstart -k "gui/\$(id -u)/org.nix-community.home.opencode-serve-${toString i}"
+      '') servePool.ports)}
+    '')
     (pkgs.writeShellApplication {
       name = "screenshot-to-devbox";
       text = builtins.readFile "${assetsPath}/scripts/screenshot-to-devbox.sh";
@@ -67,173 +76,181 @@ lib.mkIf isDarwin {
   ];
 
   # Cloudflare Tunnel launchd agent with Keychain-sourced token
-  launchd.agents.cloudflared-ccr = {
-    enable = true;
-    config = {
-      ProgramArguments = [
-        "/bin/sh" "-c"
-        ''
-          TUNNEL_TOKEN="$(/usr/bin/security find-generic-password -s cloudflared-tunnel-token -w)"
-          exec ${pkgs.cloudflared}/bin/cloudflared tunnel --no-autoupdate run --token "$TUNNEL_TOKEN"
-        ''
-      ];
-      RunAtLoad = false;  # Start manually, not at login
-      KeepAlive = false;  # Don't auto-restart
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudflared-ccr.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudflared-ccr.err.log";
-    };
-  };
-
-  # Pigeon daemon launchd agent — secrets from macOS Keychain
-  # Run `pigeon-setup-secrets` once in a terminal to populate Keychain
-  launchd.agents.pigeon-daemon = {
-    enable = true;
-    config = {
-      ProgramArguments = [
-        "/bin/sh" "-c"
-        ''
-          SEC="/usr/bin/security"
-          export CCR_WORKER_URL="$($SEC find-generic-password -s ccr-worker-url -w)"
-          export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
-          export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
-          export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
-          cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
-          exec ${pkgs.nodejs}/bin/node \
-            "${config.home.homeDirectory}/Code/pigeon/node_modules/tsx/dist/cli.mjs" \
-            src/index.ts
-        ''
-      ];
-      EnvironmentVariables = {
-        HOME = config.home.homeDirectory;
-        NODE_ENV = "production";
-        CCR_MACHINE_ID = "macbook";
-        OPENCODE_URL = "http://127.0.0.1:4096";
-        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
-        # sessionVariables for rationale). pigeon revive spawns opencode that
-        # must hit the same DB; a launchd agent doesn't source ~/.profile.
-        # macOS data dir = ~/.local/share/opencode (xdg-basedir fallback).
-        OPENCODE_DB = "${config.home.homeDirectory}/.local/share/opencode/opencode.db";
-        OPENCODE_DISABLE_CHANNEL_DB = "1";
-        PATH = lib.concatStringsSep ":" [
-          "${pkgs.nodejs}/bin"
-          "${pkgs.neovim}/bin"
-          "/usr/bin"
-          "/bin"
+  launchd.agents = {
+    cloudflared-ccr = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh" "-c"
+          ''
+            TUNNEL_TOKEN="$(/usr/bin/security find-generic-password -s cloudflared-tunnel-token -w)"
+            exec ${pkgs.cloudflared}/bin/cloudflared tunnel --no-autoupdate run --token "$TUNNEL_TOKEN"
+          ''
         ];
+        RunAtLoad = false;  # Start manually, not at login
+        KeepAlive = false;  # Don't auto-restart
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudflared-ccr.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudflared-ccr.err.log";
       };
-      RunAtLoad = true;
-      KeepAlive = true;
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.err.log";
     };
-  };
 
-  # OpenCode headless serve (for launching sessions from CLI or Telegram)
-  # Uses a wrapper script so we can read GOOGLE_CLOUD_PROJECT from Keychain
-  # at launch time -- headless sessions need this to find the
-  # google-vertex-anthropic provider.
-  launchd.agents.opencode-serve = {
-    enable = true;
-    config = {
-      ProgramArguments = [
-        "${pkgs.writeShellScript "opencode-serve-start" ''
-          export HOME="${config.home.homeDirectory}"
+    # Pigeon daemon launchd agent — secrets from macOS Keychain
+    # Run `pigeon-setup-secrets` once in a terminal to populate Keychain
+    pigeon-daemon = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh" "-c"
+          ''
+            SEC="/usr/bin/security"
+            export CCR_WORKER_URL="$($SEC find-generic-password -s ccr-worker-url -w)"
+            export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
+            export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
+            export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
+            cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
+            exec ${pkgs.nodejs}/bin/node \
+              "${config.home.homeDirectory}/Code/pigeon/node_modules/tsx/dist/cli.mjs" \
+              src/index.ts
+          ''
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          NODE_ENV = "production";
+          CCR_MACHINE_ID = "macbook";
+          OPENCODE_URL = "http://127.0.0.1:4096";
+          PIGEON_SERVE_ENDPOINTS = servePool.endpointsCsv;
+          PIGEON_SERVE_LIVENESS = "self";
+          PIGEON_DAEMON_DB_PATH = routingDbPath;
           # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
-          # sessionVariables for rationale). A launchd agent doesn't source
-          # ~/.profile, so the sessionVariables copy doesn't reach it.
-          export OPENCODE_DB="${config.home.homeDirectory}/.local/share/opencode/opencode.db"
-          export OPENCODE_DISABLE_CHANNEL_DB=1
-          export PATH="${lib.concatStringsSep ":" [
-            "${pkgs.git}/bin"
-            "${pkgs.openssh}/bin"
-            "${pkgs.fzf}/bin"
-            "${pkgs.ripgrep}/bin"
-            "${pkgs.gh}/bin"
-            "${pkgs.bun}/bin"
-            "/etc/profiles/per-user/${config.home.username}/bin"
+          # sessionVariables for rationale). pigeon revive spawns opencode that
+          # must hit the same DB; a launchd agent doesn't source ~/.profile.
+          # macOS data dir = ~/.local/share/opencode (xdg-basedir fallback).
+          OPENCODE_DB = "${config.home.homeDirectory}/.local/share/opencode/opencode.db";
+          OPENCODE_DISABLE_CHANNEL_DB = "1";
+          PATH = lib.concatStringsSep ":" [
+            "${pkgs.nodejs}/bin"
+            "${pkgs.neovim}/bin"
             "/usr/bin"
             "/bin"
-          ]}"
-
-          # GitHub API token from macOS Keychain
-          GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" \
-            && export GH_TOKEN="$GH_TOKEN_VAL"
-
-          # Google Vertex AI: project from Keychain, ADC from gcloud config
-          GCP_VAL="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null)" \
-            && export GOOGLE_CLOUD_PROJECT="$GCP_VAL"
-          export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
-
-          exec opencode serve --port 4096 --hostname 127.0.0.1
-        ''}"
-      ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/opencode-serve.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/opencode-serve.err.log";
-    };
-  };
-
-  # Persistent SSH tunnels for development port forwarding.
-  # Keeps LocalForward ports (dev servers, OAuth callbacks) and RemoteForward
-  # ports (CDP, chatgpt-relay) alive without a dedicated terminal tab.
-  # Uses the *-tunnel SSH hosts defined in update-ssh-config.sh.
-  launchd.agents.devbox-dev-tunnel = {
-    enable = true;
-    config = {
-      ProgramArguments = [
-        "/bin/sh"
-        "-c"
-        (sshTunnelCommand "devbox-tunnel")
-      ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      StartInterval = 30;  # Safety net if activation leaves the agent loaded but idle
-      ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.err.log";
-    };
-  };
-
-  launchd.agents.cloudbox-dev-tunnel = {
-    enable = true;
-    config = {
-      ProgramArguments = [
-        "/bin/sh"
-        "-c"
-        (sshTunnelCommand "cloudbox-tunnel")
-      ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      StartInterval = 30;  # Safety net if activation leaves the agent loaded but idle
-      ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.err.log";
-    };
-  };
-
-  # gclpr clipboard server.
-  # Exposes macOS pbcopy/pbpaste over signed TCP so remote sessions (via SSH
-  # RemoteForward) can copy/paste to the local clipboard through mosh.
-  launchd.agents.gclpr-server = {
-    enable = true;
-    config = {
-      ProgramArguments = [
-        "${localPkgs.gclpr}/bin/gclpr"
-        "server"
-      ];
-      EnvironmentVariables = {
-        HOME = config.home.homeDirectory;
-        LANG = "en_US.UTF-8";
-        LC_CTYPE = "en_US.UTF-8";
+          ];
+        };
+        RunAtLoad = true;
+        KeepAlive = true;
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/pigeon-daemon.err.log";
       };
-      RunAtLoad = true;
-      KeepAlive = true;
-      ThrottleInterval = 30;
-      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gclpr-server.out.log";
-      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gclpr-server.err.log";
     };
-  };
+
+    # Persistent SSH tunnels for development port forwarding.
+    # Keeps LocalForward ports (dev servers, OAuth callbacks) and RemoteForward
+    # ports (CDP, chatgpt-relay) alive without a dedicated terminal tab.
+    # Uses the *-tunnel SSH hosts defined in update-ssh-config.sh.
+    devbox-dev-tunnel = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh"
+          "-c"
+          (sshTunnelCommand "devbox-tunnel")
+        ];
+        RunAtLoad = true;
+        KeepAlive = true;
+        StartInterval = 30;  # Safety net if activation leaves the agent loaded but idle
+        ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-dev-tunnel.err.log";
+      };
+    };
+
+    cloudbox-dev-tunnel = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh"
+          "-c"
+          (sshTunnelCommand "cloudbox-tunnel")
+        ];
+        RunAtLoad = true;
+        KeepAlive = true;
+        StartInterval = 30;  # Safety net if activation leaves the agent loaded but idle
+        ThrottleInterval = 120;  # Outlast server-side ClientAliveInterval cleanup (~90s)
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-dev-tunnel.err.log";
+      };
+    };
+
+    # gclpr clipboard server.
+    # Exposes macOS pbcopy/pbpaste over signed TCP so remote sessions (via SSH
+    # RemoteForward) can copy/paste to the local clipboard through mosh.
+    gclpr-server = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${localPkgs.gclpr}/bin/gclpr"
+          "server"
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          LANG = "en_US.UTF-8";
+          LC_CTYPE = "en_US.UTF-8";
+        };
+        RunAtLoad = true;
+        KeepAlive = true;
+        ThrottleInterval = 30;
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gclpr-server.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gclpr-server.err.log";
+      };
+    };
+  } // (builtins.listToAttrs (lib.imap0 (i: port: {
+    name = "opencode-serve-${toString i}";
+    value = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${pkgs.writeShellScript "opencode-serve-start-${toString i}" ''
+            export HOME="${config.home.homeDirectory}"
+            # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
+            # sessionVariables for rationale). A launchd agent doesn't source
+            # ~/.profile, so the sessionVariables copy doesn't reach it.
+            export OPENCODE_DB="${config.home.homeDirectory}/.local/share/opencode/opencode.db"
+            export OPENCODE_DISABLE_CHANNEL_DB=1
+            export PATH="${lib.concatStringsSep ":" [
+              "${pkgs.git}/bin"
+              "${pkgs.openssh}/bin"
+              "${pkgs.fzf}/bin"
+              "${pkgs.ripgrep}/bin"
+              "${pkgs.gh}/bin"
+              "${pkgs.bun}/bin"
+              "/etc/profiles/per-user/${config.home.username}/bin"
+              "/usr/bin"
+              "/bin"
+            ]}"
+
+            # GitHub API token from macOS Keychain
+            GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null)" \
+              && export GH_TOKEN="$GH_TOKEN_VAL"
+
+            # Google Vertex AI: project from Keychain, ADC from gcloud config
+            GCP_VAL="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null)" \
+              && export GOOGLE_CLOUD_PROJECT="$GCP_VAL"
+            export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
+            export GOOGLE_CLOUD_LOCATION="global"
+
+            # mn9r M5/M4 activation: each serve runs the per-session lease CAS against
+            # pigeon's routing DB (the SAME file as pigeon's PIGEON_DAEMON_DB_PATH, DM5-1).
+            export OPENCODE_ROUTING_DB="${routingDbPath}"
+            export OPENCODE_SERVE_ID="serve-${toString i}"
+
+            exec opencode serve --port ${toString port} --hostname 127.0.0.1
+          ''}"
+        ];
+        RunAtLoad = true;
+        KeepAlive = true;
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/opencode-serve-${toString i}.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/opencode-serve-${toString i}.err.log";
+      };
+    };
+  }) servePool.ports));
 
   # Bash (Darwin-specific layer on top of home.base.nix).
   programs.bash = {
