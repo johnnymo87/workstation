@@ -23,6 +23,14 @@ class-free machinery.
 **Tech Stack:** Node 18+ (ESM, zero runtime deps), `node:test` + `node:assert/strict`,
 Nix (`fetchFromGitHub`) for deployment. Two repos (see below).
 
+**Status:** R2, revised after a Vertex Opus 4.8 plan review
+(`fixtures/review-plan-vertex-opus.md`). R1→R2 changes are inline as **[R2]**:
+MAJOR-1 mid-stream classifier status-gate; MAJOR-2 cloudbox `localPkgs`→`callPackage`;
+MINOR-1 `percent===1` boundary; MINOR-2 `_selectNext` reactivation guard + test;
+MINOR-3 `scopedResetFromHeaders` defined+tested; MINOR-4 `scopedThreshold` config
+wiring; MINOR-5 m6 drift-log dropped (rationale recorded); plus the NITs and a
+Task 5.2 split.
+
 **Authoritative inputs (read before starting):**
 - Design: `docs/plans/2026-06-21-teamclaude-opus-aware-fork-design.md` (R2; §13 maps review items).
 - Real payload fixture: `docs/plans/2026-06-21-teamclaude-opus-aware-fork-fixtures/usage-account0-healthy.json`.
@@ -214,6 +222,14 @@ test('parses a synthetic ACTIVE opus weekly_scoped entry', () => {
   assert.equal(u.scopedLimits.opus.resetAt, Date.parse('2026-06-26T04:00:00Z'));
 });
 
+test('[R2] scoped percent uses the 0–100 scale at the boundary (1 → 0.01, not 1.0)', () => {
+  const payload = { limits: [
+    { kind: 'weekly_scoped', group: 'weekly', percent: 1, severity: 'normal',
+      resets_at: '2026-06-26T04:00:00Z', scope: { model: { display_name: 'Opus' } }, is_active: true },
+  ]};
+  assert.equal(parseUsagePayload(payload).scopedLimits.opus.utilization, 0.01);
+});
+
 test('ignores session/non-weekly and unscoped limits; tolerates missing limits[]', () => {
   // NOTE: payload percents are 0–100; normalizeUsageBucket only divides when >1,
   // so use an unambiguous value (50 → 0.5), never exactly 1 (1% vs 100% is ambiguous).
@@ -240,10 +256,14 @@ export function parseUsagePayload(data) {
       const display = lim?.scope?.model?.display_name;
       if (!display) continue;               // unscoped weekly (weekly_all) → handled by sevenDay
       const cls = modelClass(display) || String(display).toLowerCase();
-      const norm = normalizeUsageBucket({ utilization: lim.percent, resets_at: lim.resets_at });
+      // [R2] MINOR-1: limits[].percent is DEFINITIVELY a 0–100 scale, so divide
+      // directly (clamped) — do NOT reuse normalizeUsageBucket's ">1 ? /100 : x"
+      // heuristic, which would read percent:1 (a 1%-used scope) as 1.0 = 100%.
+      const pct = typeof lim.percent === 'number' ? lim.percent : parseFloat(lim.percent);
+      const utilization = Number.isFinite(pct) ? Math.max(0, Math.min(1, pct / 100)) : null;
       scopedLimits[cls] = {
-        utilization: norm ? norm.utilization : null,
-        resetAt: norm ? norm.resetAt : null,
+        utilization,
+        resetAt: normalizeUsageBucket({ resets_at: lim.resets_at })?.resetAt ?? null,
         severity: lim.severity ?? null,
         isActive: !!lim.is_active,
       };
@@ -426,6 +446,7 @@ test('an INACTIVE scope never gates', () => {
 
 **Step 3 — implement:**
 - ctor: `constructor(accounts, switchThreshold = 0.98, scopedThreshold = 0.90)` and store `this.scopedThreshold = scopedThreshold;`.
+- **[R2] MINOR-4:** wire the config key so it's not hardcoded per deploy. In `src/index.js` near line 114, add `const scopedThreshold = config.scopedThreshold || 0.90;` and pass it: `new AccountManager(accounts, threshold, scopedThreshold)` (index.js:115). (Optional/declarative; design §8 framed scoped configurability as optional. Severity is still the primary signal.)
 - `_isNearQuota(account, modelClass = null)` — after the existing unified/standard checks, before `return false;`:
 ```js
     if (modelClass && account.quota.scopedLimits) {
@@ -546,6 +567,12 @@ test('getActiveAccountFor returns null when every account is constrained for the
     return this._pickBestAvailable(modelClass);
   }
 ```
+
+> **[R2] NIT-2:** the divert path uses `_pickBestAvailable` (not `_selectNext`), so —
+> unlike rotation — it does **not** set `probing` on a diverted account whose weekly
+> window is still unknown. That's intended (the diverted account isn't `currentIndex`,
+> and probing/requalify is a primary-rotation concern); its quota is still learned on
+> its next live response/probe. No action needed; documented so it isn't mistaken for a bug.
 
 **Step 4 — run green:** `node --test test/scoped-selection.test.js` → PASS.
 
@@ -718,7 +745,35 @@ Refactor `_selectNext`'s all-unavailable fallback (account-manager.js:306-319) t
       }
     }
 ```
-(Leave the `soonestTime <= Date.now()` reactivation block below it unchanged.)
+**[R2] MINOR-2 — not strictly behavior-preserving; add a reactivation guard.** The old
+fallback used a *first-truthy* reset (`rateLimitedUntil || unified5hReset || …`), so a
+throttled account was judged on `rateLimitedUntil` alone. `_soonestResetMs` takes the
+*min across all* fields, so a throttled account that also carries an already-passed quota
+reset (e.g. a `unified7dReset` set without `unified7d`, which `_clearExpiredQuotas` won't
+null) could yield a past `soonestTime` and be **prematurely reactivated** by the
+unchanged block below. Guard it: a throttled account must not reactivate before its
+`rateLimitedUntil`. In the reactivation block (account-manager.js:321-327), change the
+condition to also require the throttle to have elapsed:
+```js
+    if (soonestAccount && soonestTime <= Date.now() &&
+        (!soonestAccount.rateLimitedUntil || soonestAccount.rateLimitedUntil <= Date.now())) {
+```
+(Wording note: this is "behavior-equivalent for the cases the suite exercises" plus this
+guard — not "behavior-preserving.")
+
+**Add the regression test** (`test/retry-after.test.js`):
+```js
+test('[R2] a throttled account with a stale quota reset is NOT reactivated early', () => {
+  const am = new AccountManager([oauth('a')], 0.98, 0.90);
+  const a = am.accounts[0];
+  a.status = 'throttled';
+  a.rateLimitedUntil = Date.now() + 60_000;        // throttle still active
+  a.quota.unified7dReset = Date.now() - 1000;      // stale reset in another field
+  const picked = am._selectNext();                 // all unavailable → fallback
+  assert.equal(picked, null);                      // must NOT reactivate before throttle
+  assert.equal(a.status, 'throttled');
+});
+```
 
 **Step 4 — run green:** `node --test test/retry-after.test.js test/rotation-priority.test.js` → PASS.
 
@@ -767,7 +822,7 @@ test('computeRetryAfterSeconds = soonest future reset across accounts (≥1s), d
 ```js
     const retryAfter = accountManager.computeRetryAfterSeconds();
 ```
-  (remove the now-unused `const status = accountManager.getStatus();` on that line) and **delete** the module-private `computeRetryAfter` function (server.js:486-495).
+  (remove the now-unused `const status = accountManager.getStatus();` on that line) and **delete** the module-private `computeRetryAfter` function (server.js:486-496 — whole function incl. closing brace; its only caller was server.js:212).
 
 **Step 4 — run green:** `node --test test/retry-after.test.js test/server-429.test.js` → PASS.
 
@@ -804,7 +859,11 @@ test('getStatus surfaces scopedLimits for each account', () => {
 });
 ```
 
-**Step 2 — run red:** `node --test test/status-scoped.test.js` → (likely PASS already, since `quota: {...a.quota}` spreads it — this is a guard test. If it passes, keep it as a regression guard and proceed; the printer change below is verified manually.)
+**Step 2 — run red:** `node --test test/status-scoped.test.js` → **[R2] NIT-4:** this is a
+*regression guard*, not strict red→green (it likely PASSES already because
+`getStatus()` does `quota: {...a.quota}`, server.js account-manager.js:608, so
+`scopedLimits` is spread automatically). Keep it as the guard and proceed; the CLI
+printer edit below is the actual change, verified in the Phase 6.3 smoke-test.
 
 **Step 3 — implement** the CLI printer (`src/index.js:500-502`) — append an Opus/Sonnet summary derived from `scopedLimits`:
 ```js
@@ -819,6 +878,12 @@ test('getStatus surfaces scopedLimits for each account', () => {
         }
         console.log(line);
 ```
+> **[R2] NIT-6:** this appends to the line built *inside* the
+> `if (q.unified5h != null || q.unified7d != null || q.unified7dSonnet != null)` block
+> (index.js:497). An account with `scopedLimits` but null unified data would fall to the
+> `else` (API-key) branch and not print the scoped line — but the probe always populates
+> unified + scoped together, so in practice the guard holds. Acceptable; noted so it isn't
+> a surprise.
 
 **Step 4 — verify:** `node --test test/status-scoped.test.js` → PASS. Manual: `node src/index.js status` against a running server shows the scoped line (deferred to Phase 6 deploy smoke-test).
 
@@ -885,11 +950,17 @@ test('IP-throttle 429 is NOT a usage limit (back off, never mark scope)', () => 
   assert.equal(r.kind, 'throttle');
 });
 
-test('a structured per-account usage limit is recognized', () => {
+test('a structured per-account usage limit is recognized (explicit type)', () => {
   const r = classifyLimitResponse(429,
     {},
     { type: 'error', error: { type: 'usage_limit_error', message: 'The usage limit has been reached' } });
   assert.equal(r.kind, 'usage_limit');
+});
+
+test('[R2] the design PRIMARY shape: message-based usage limit inside a 200, shared rate_limit_error type', () => {
+  const r = classifyLimitResponse(200, {},
+    { type: 'error', error: { type: 'rate_limit_error', message: 'The usage limit has been reached' } });
+  assert.equal(r.kind, 'usage_limit');   // must NOT collapse to unknown at status 200
 });
 
 test('unrecognized → unknown (caller backs off, never marks a scope)', () => {
@@ -920,11 +991,15 @@ export function classifyLimitResponse(status, headers = {}, bodyJson = null) {
   if (THROTTLE_RE.test(msg)) return { kind: 'throttle' };
 
   // Structured per-account usage limit (primary predicate). 'rate_limit_error'
-  // is ambiguous (also the throttle's type), so require a usage-limit signal
-  // that the throttle does NOT carry.
+  // is ambiguous (it is ALSO the throttle's type), so we do NOT key on type for
+  // it; instead match the verbatim usage-limit message. THROTTLE_RE already ran
+  // first, so this stays IP-throttle-safe regardless of status.
+  // [R2] MAJOR-1: do NOT gate the message clause on status===429 — the design's
+  // PRIMARY shape is a mid-stream SSE error inside a 200, which the mid-stream
+  // arm classifies with status=200. Gating on 429 made that path unreachable.
   const isUsageLimit =
-    type === 'usage_limit_error' ||
-    (status === 429 && /usage limit has been reached/i.test(msg));
+    type === 'usage_limit_error' ||                 // forward-compatible bonus (unverified type)
+    /usage limit has been reached/i.test(msg);      // observed §1.1 verbatim message
   if (isUsageLimit) {
     return { kind: 'usage_limit', scope: scopeFromBody(err) };
   }
@@ -949,11 +1024,13 @@ git add src/limit-classify.js test/limit-classify.test.js
 git commit -m "feat: conservative usage-limit vs IP-throttle classifier"
 ```
 
-### Task 5.2: `markScopeExhausted` + mid-stream SSE error arm
+### Task 5.2a: `markScopeExhausted` (account-manager unit)
+
+> **[R2] Area-5 split:** Task 5.2 was overloaded (two source + two test files). Split
+> into 5.2a (the pure account-manager method) and 5.2b (the server wiring).
 
 **Files:**
 - Modify: `src/account-manager.js` (add `markScopeExhausted`)
-- Modify: `src/server.js` (`parseSSEUsage` error arm + observability)
 - Test: add to `test/scoped-limits.test.js`
 
 **Step 1 — failing test** (append to `test/scoped-limits.test.js`):
@@ -971,8 +1048,7 @@ test('markScopeExhausted sets the class exhausted with a reset', () => {
 
 **Step 2 — run red:** `node --test test/scoped-limits.test.js` → FAIL.
 
-**Step 3 — implement:**
-- `src/account-manager.js`:
+**Step 3 — implement** in `src/account-manager.js`:
 ```js
   /** Reactively mark a model class exhausted for an account (backstop path). */
   markScopeExhausted(accountIndex, modelClass, resetAtMs = null) {
@@ -986,23 +1062,54 @@ test('markScopeExhausted sets the class exhausted with a reset', () => {
     console.log(`[TeamClaude] Marked "${account.name}" ${modelClass} scope exhausted (reactive backstop)`);
   }
 ```
-- `src/server.js` `parseSSEUsage` — needs the account's model class to mark the right scope. Thread `modelClass` into `streamResponse`/`parseSSEUsage` (add param), then add the error arm:
+
+**Step 4 — run green:** `node --test test/scoped-limits.test.js` → PASS.
+
+**Step 5 — commit:**
+```bash
+git add src/account-manager.js test/scoped-limits.test.js
+git commit -m "feat: markScopeExhausted for the reactive backstop"
+```
+
+### Task 5.2b: Mid-stream SSE error arm (server wiring + integration test)
+
+**Files:**
+- Modify: `src/server.js` (static import + thread `modelClass` into `streamResponse`/`parseSSEUsage` + error arm)
+- Test: add to `test/server-model-routing.test.js`
+
+**Step 1 — failing test** (`test/server-model-routing.test.js`): a mock upstream that
+responds `200` with `content-type: text/event-stream` and emits a single event
+`data: {"type":"error","error":{"type":"rate_limit_error","message":"The usage limit has been reached"}}`
+for an Opus request; assert the request's account has its `opus` scope marked
+(`scopedLimits.opus.utilization === 1`). **Note [R2] MAJOR-1:** the body uses the
+shared `rate_limit_error` type + the verbatim message (the design's primary shape),
+NOT the invented `usage_limit_error` — so this test would have FAILED under R1's
+`status===429` gate and is the regression guard for that fix.
+
+**Step 2 — run red:** `node --test test/server-model-routing.test.js` → FAIL.
+
+**Step 3 — implement** in `src/server.js`:
+- Add a **static** import at the top: `import { classifyLimitResponse } from './limit-classify.js';` (do NOT use a dynamic `await import(...)` — keep `parseSSEUsage` synchronous as today).
+- Thread `modelClass` as a param into `streamResponse` (server.js:407; pass it at the call site server.js:361) and into `parseSSEUsage` (server.js:459; pass it at both call sites server.js:434 and :450).
+- Add the error arm inside `parseSSEUsage`, after the `message_delta` branch:
 ```js
     } else if (data.type === 'error' && modelClass) {
-      const { classifyLimitResponse } = await importClassifier();   // or static import at top
       const c = classifyLimitResponse(200, {}, data);
       if (c.kind === 'usage_limit') {
+        console.log(`[TeamClaude] Mid-stream usage-limit (${c.scope || modelClass}) — marking scope`);
         accountManager.markScopeExhausted(accountIndex, c.scope || modelClass, null);
       }
     }
 ```
-  (Prefer a static `import { classifyLimitResponse } from './limit-classify.js';` at the top of server.js; make `parseSSEUsage` synchronous as today and call it directly.) The client already received the error mid-stream; opencode's retry re-dispatches and now routes to a fresh account.
+The client already received the error mid-stream (bytes are forwarded at server.js:421
+before parse), so we cannot transparently retry; opencode's own retry re-dispatches and
+now routes to a fresh account.
 
-**Step 4 — run green:** `node --test test/scoped-limits.test.js` → PASS. Add an integration test in `test/server-model-routing.test.js` that streams an SSE `data: {"type":"error","error":{"type":"usage_limit_error",...}}` and asserts the scope is marked (mock upstream emitting `text/event-stream`).
+**Step 4 — run green:** `node --test test/server-model-routing.test.js test/server-429.test.js` → PASS.
 
 **Step 5 — commit:**
 ```bash
-git add src/account-manager.js src/server.js test/scoped-limits.test.js test/server-model-routing.test.js
+git add src/server.js test/server-model-routing.test.js
 git commit -m "feat: mid-stream SSE usage-limit backstop marks the scope"
 ```
 
@@ -1012,19 +1119,40 @@ git commit -m "feat: mid-stream SSE usage-limit backstop marks the scope"
 - Modify: `src/server.js` (429 handling, terminal branch only)
 - Test: add to `test/server-model-routing.test.js` (and ensure `test/server-429.test.js` stays green)
 
-**Step 1 — failing test:** an upstream that 429s with a structured
-`usage_limit_error` body for account `a`'s opus but 200s for `b`; assert the Opus
-request ends up served by `b` (re-dispatched) and `a`'s opus scope is marked.
-Also assert the existing IP-throttle 429 test (`server-429.test.js`) is unchanged
-(those bodies are `rate_limit_error` / no usage-limit signal → back-off path).
+> **[R2] sequencing:** this task restructures the same 429 block + recursive calls that
+> Task 2.4 already edited to thread `modelClass`. 2.4 must land first; when rewriting the
+> block here, **preserve `modelClass` as the trailing arg on every `forwardRequest(...)`
+> call** (the two new re-dispatch calls below, plus the untouched ones).
 
-**Step 2 — run red:** new test FAIL; `server-429.test.js` must stay PASS.
-
-**Step 3 — implement** in `forwardRequest`'s 429 block (server.js:299-326). Today
-the body is `cancel()`ed unread. Change **only the terminal (retryCount >=
-maxRetries) path** to buffer+classify before throttling:
+**Step 1 — failing tests:**
+- (a) **Unit** (`test/server.test.js` or `test/limit-classify.test.js`): `scopedResetFromHeaders` returns ms from the unified-7d-reset header, else null:
 ```js
-      // Terminal: buffer the body once to distinguish a per-account usage limit
+import { scopedResetFromHeaders } from '../src/server.js';  // export it for the test
+test('[R2] scopedResetFromHeaders reads unified-7d-reset (×1000) or null', () => {
+  assert.equal(scopedResetFromHeaders({ 'anthropic-ratelimit-unified-7d-reset': '1700000000' }), 1700000000000);
+  assert.equal(scopedResetFromHeaders({}), null);
+});
+```
+- (b) **Integration** (`test/server-model-routing.test.js`): an upstream that, for the
+Opus request, **persistently 429s** (so the terminal `retryCount >= maxRetries` branch
+is reached — set `retry-after: 1` to keep the test fast) with body
+`{type:'error',error:{type:'rate_limit_error',message:'The usage limit has been reached'}}`;
+assert account `a`'s `opus` scope is marked (`scopedLimits.opus.utilization === 1`) and
+the request re-dispatches. **[R2] MAJOR-1:** shared `rate_limit_error` type + verbatim
+message (the design's shape), not the invented `usage_limit_error`.
+
+**Step 2 — run red:** new tests FAIL; `server-429.test.js` must stay PASS (its body is
+`{error:{type:'rate_limit_error'}}` with **no message** → classifier `unknown` →
+existing back-off; verify).
+
+**Step 3 — implement** in `forwardRequest`'s 429 block (server.js:299-326). **[R2] NIT-3
+— the reorder is mandatory:** today line 308 does an *unconditional*
+`await upstreamRes.body?.cancel();`. You must **move** that cancel so it runs **only on
+the non-terminal path**; the terminal path reads the body instead (a response body can be
+either cancelled or read, never both). Concretely, after the `retryAfter` clamp
+(server.js:304-306), **delete the `:308` cancel** and restructure:
+```js
+      // Terminal: buffer the body ONCE to distinguish a per-account usage limit
       // (→ mark scope, re-dispatch) from the IP-keyed throttle (→ back off).
       if (retryCount >= maxRetries) {
         let bodyJson = null;
@@ -1032,7 +1160,7 @@ maxRetries) path** to buffer+classify before throttling:
         const headers = Object.fromEntries(upstreamRes.headers.entries());
         const c = classifyLimitResponse(429, headers, bodyJson);
         if (c.kind === 'usage_limit' && modelClass) {
-          const resetMs = scopedResetFromHeaders(headers);   // limits[].resets_at unavailable here; see below
+          const resetMs = scopedResetFromHeaders(headers);   // approximate; limits[].resets_at not in headers
           accountManager.markScopeExhausted(account.index, c.scope || modelClass, resetMs);
           console.log(`[TeamClaude] Usage-limit on "${account.name}" (${c.scope || modelClass}) — re-dispatching`);
           return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, modelClass);
@@ -1042,16 +1170,27 @@ maxRetries) path** to buffer+classify before throttling:
         accountManager.markRateLimited(account.index, retryAfter);
         return forwardRequest(req, res, body, accountManager, upstream, retryCount + 1, hooks, reqId, ctx, logDir, modelClass);
       }
-      // Non-terminal: keep the blind cancel + wait-and-retry (unchanged).
+      // Non-terminal: discard the body (we will retry the same account), wait, retry.
       await upstreamRes.body?.cancel();
 ```
-  where `scopedResetFromHeaders(headers)` reads `anthropic-ratelimit-unified-7d-reset` (×1000) as an **approximate** fallback (design §6 m2), or null. (Note: the earlier non-terminal path keeps `cancel()`; only the terminal branch reads the body.) Reorder so the `cancel()` only runs on the non-terminal path.
+Add the helper (export it so test (a) can import it), near `computeRetryAfterSeconds`'s
+old home / top of `server.js`:
+```js
+// [R2] MINOR-3: approximate scoped reset from the unified weekly header (design §6 m2).
+// limits[].resets_at is NOT available on a 429's headers, so this is the documented
+// fallback; null when absent → markScopeExhausted falls back to unified7dReset.
+export function scopedResetFromHeaders(headers = {}) {
+  const r = headers['anthropic-ratelimit-unified-7d-reset'];
+  const n = parseInt(r, 10);
+  return Number.isFinite(n) ? n * 1000 : null;
+}
+```
 
-**Step 4 — run green:** `node --test test/server-model-routing.test.js test/server-429.test.js` → PASS.
+**Step 4 — run green:** `node --test test/server-model-routing.test.js test/server-429.test.js test/limit-classify.test.js` → PASS.
 
 **Step 5 — commit:**
 ```bash
-git add src/server.js test/server-model-routing.test.js
+git add src/server.js test/server-model-routing.test.js test/limit-classify.test.js
 git commit -m "feat: pre-stream terminal-429 usage-limit backstop with re-dispatch"
 ```
 
@@ -1133,10 +1272,26 @@ git commit -m "teamclaude: build opus-aware fork from fetchFromGitHub"
 ### Task 6.2: Unify cloudbox on the nix package
 
 **Files:**
-- Modify: `hosts/cloudbox/configuration.nix` (the `systemd.services.teamclaude` `ExecStart`, ~lines 744-771)
+- Modify: `hosts/cloudbox/configuration.nix` (the `let` block ~16-64, and the `systemd.services.teamclaude` `ExecStart`, ~lines 744-775)
 
-**Step 1 — implement** — replace the `~/projects/teamclaude/src/index.js` checkout
-launch with the packaged binary (mirroring devbox's `home.devbox.nix:615`):
+**[R2] MAJOR-2 — `localPkgs` is NOT in scope here.** `hosts/cloudbox/configuration.nix`
+is a NixOS *system* module declared `{ config, pkgs, lib, ... }:` (configuration.nix:14)
+— it does **not** receive the flake's `localPkgs` (the file says so at
+configuration.nix:42-44 and demonstrates the fix for `claude-failover-proxy` at :44).
+Devbox's `localPkgs.teamclaude` works only because `home.devbox.nix` is a home-manager
+module that takes `localPkgs` in its arg set. So `callPackage` it here, do not copy the
+devbox reference.
+
+**Step 1a — implement** — add a let-binding next to `claude-failover-proxy`
+(configuration.nix:44):
+```nix
+  teamclaude = pkgs.callPackage ../../pkgs/teamclaude { };
+```
+
+**Step 1b — implement** — replace the `~/projects/teamclaude/src/index.js` checkout
+launch (configuration.nix:760-771) with the packaged binary, and drop the checkout
+existence check + the now-obsolete `~/projects/teamclaude` comment block
+(configuration.nix:722-730, :762-765):
 ```nix
       ExecStart = "${pkgs.writeShellScript "teamclaude-start" ''
         set -euo pipefail
@@ -1144,15 +1299,14 @@ launch with the packaged binary (mirroring devbox's `home.devbox.nix:615`):
           echo "teamclaude config missing at ~/.config/teamclaude.json (seed + login first)" >&2
           exit 1
         fi
-        exec ${localPkgs.teamclaude}/bin/teamclaude server --headless
+        exec ${teamclaude}/bin/teamclaude server --headless
       ''}";
 ```
-(Confirm how `localPkgs`/the teamclaude package is in scope in this module — devbox uses `localPkgs.teamclaude`; wire the same overlay/arg into `hosts/cloudbox/configuration.nix`. Drop the now-obsolete `~/projects/teamclaude` comment block and the checkout existence check.)
 
-**Step 2 — verify:** `nixos-rebuild build --flake .#cloudbox` (dry build on macOS may
-not be possible; if so, defer the actual switch to a cloudbox session and just
-ensure `nix flake check`/eval succeeds here). Note `login` runs from the packaged
-binary (needs TTY+browser), not the checkout (design §11 / review Q4).
+**Step 2 — verify:** `nix flake check` / eval succeeds on this macOS host; the actual
+aarch64-linux build + `nixos-rebuild switch --flake .#cloudbox` is deferred to a cloudbox
+session (can't cross-build here). Note `login` runs from the packaged binary (needs
+TTY+browser), not the checkout (design §11 / review Q4).
 
 **Step 3 — commit:**
 ```bash
@@ -1171,9 +1325,15 @@ ssh devbox 'systemctl --user restart teamclaude && sleep 2 && teamclaude status'
 
 **Step 2 — smoke checks (devbox):**
 - `teamclaude status` shows the new scoped line (no crash).
-- Enable the probe in the **deploy config** (fork-default-on is config, not code):
-  `ssh devbox 'teamclaude probe 90 && sleep 95 && teamclaude status'` → scoped
-  Sonnet appears (Opus only if an Opus scope is active for the account).
+- Enable the probe (fork-default-on is **config, not code** — design §8). `teamclaude probe 90`
+  **persists** `quotaProbeSeconds: 90` into the runtime `~/.config/teamclaude.json`, which
+  is durable (NOT nix-managed): `ssh devbox 'teamclaude probe 90 && sleep 95 && teamclaude status'`
+  → scoped Sonnet appears (Opus only if an Opus scope is active).
+  **[R2] Area-1 caveat:** because it lives in the writable runtime config, the setting
+  survives restarts but would be lost on a *full reseed*. So also add `"quotaProbeSeconds": 90`
+  to the documented seed/login runbook (the same runbook that does `teamclaude login`), so a
+  reseed restores it. There is no server-start CLI flag for the interval — the server reads it
+  only from config (index.js:273).
 - Drive a real Opus request through `127.0.0.1:3456` and confirm no regression.
 
 **Step 3:** (cloudbox switch performed from a cloudbox session later; note in `workstation-5woc`.)
@@ -1228,5 +1388,7 @@ contradicts it.
 3. **Concurrency window** → up to in-flight-count Opus requests can pass before headers/poll/backstop mark the bucket (design §9; documented bound, not fixed).
 4. **`fetchFromGitHub` hash churn** → every fork commit changes the hash (review n3); Phase 6.1 documents the bump.
 5. **MITM path** unaffected by all of the above (scoped out, design §3) — `--mitm`/`HTTPS_PROXY` traffic gets unified-only failover.
+6. **[R2] m6 drift-log intentionally dropped** (design §13 listed it resolved) — logging "Opus scope absent" would be noise, because §2.5/§12.2 found Opus-scope absence is the *normal healthy* state (the captured account has no Opus entry). Recorded here so design §13 and the plan agree; revisit only if Phase 7 shows absence is ever unsafe.
+7. **[R2] NIT-5 non-goal** — the backstop covers only (a) pre-stream terminal 429 and (b) mid-stream SSE `error`. A non-streaming `200` carrying an error JSON is **not** covered; this is almost certainly not a real limit shape, so it's an accepted non-goal (revisit if Phase 7's capture says otherwise).
 </content>
 </invoke>
