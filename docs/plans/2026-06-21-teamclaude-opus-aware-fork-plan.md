@@ -23,13 +23,16 @@ class-free machinery.
 **Tech Stack:** Node 18+ (ESM, zero runtime deps), `node:test` + `node:assert/strict`,
 Nix (`fetchFromGitHub`) for deployment. Two repos (see below).
 
-**Status:** R2, revised after a Vertex Opus 4.8 plan review
-(`fixtures/review-plan-vertex-opus.md`). R1→R2 changes are inline as **[R2]**:
-MAJOR-1 mid-stream classifier status-gate; MAJOR-2 cloudbox `localPkgs`→`callPackage`;
-MINOR-1 `percent===1` boundary; MINOR-2 `_selectNext` reactivation guard + test;
-MINOR-3 `scopedResetFromHeaders` defined+tested; MINOR-4 `scopedThreshold` config
-wiring; MINOR-5 m6 drift-log dropped (rationale recorded); plus the NITs and a
-Task 5.2 split.
+**Status:** R2.1, **APPROVED-FOR-IMPLEMENTATION** by a second Vertex Opus 4.8 pass
+(`fixtures/review-plan-R2-vertex-opus.md`). R1→R2 changes are tagged **[R2]** (from
+`fixtures/review-plan-vertex-opus.md`): MAJOR-1 mid-stream classifier status-gate;
+MAJOR-2 cloudbox `localPkgs`→`callPackage`; MINOR-1 `percent===1` boundary; MINOR-2
+`_selectNext` reactivation guard + test; MINOR-3 `scopedResetFromHeaders` defined+tested;
+MINOR-4 `scopedThreshold` config wiring; MINOR-5 m6 drift-log dropped; NITs + Task 5.2
+split. R2→R2.1 changes are tagged **[R2.1]** (from the re-review's fresh pass): MINOR-A
+bounded reactive `resetAt` (never null); MINOR-C retry-after ignores past resets
+(`_soonestResetMs onlyFuture`); MINOR-B reactive-mark reconciliation deferred to Phase 7
+(now bounded by MINOR-A).
 
 **Authoritative inputs (read before starting):**
 - Design: `docs/plans/2026-06-21-teamclaude-opus-aware-fork-design.md` (R2; §13 maps review items).
@@ -715,9 +718,14 @@ test('_soonestResetMs takes the min across all reset fields incl scoped', () => 
 
 **Step 3 — implement** in `src/account-manager.js`:
 ```js
-  /** Soonest future reset across every known window for one account (ms epoch),
-   *  or null. Single source of truth for "when could this account come back". */
-  _soonestResetMs(account) {
+  /** Soonest reset across every known window for one account (ms epoch), or null.
+   *  Single source of truth for "when could this account come back". With
+   *  { onlyFuture: true } it ignores already-passed timestamps — use that for
+   *  retry-after (we never want to advertise a past/1s window because an unpaired
+   *  stale field, e.g. unified7dReset set without unified7d, dragged the min into
+   *  the past). The reactivation path leaves it false so it can DETECT a past
+   *  reset (see MINOR-2 guard). [R2.1] MINOR-C. */
+  _soonestResetMs(account, { onlyFuture = false } = {}) {
     const q = account.quota;
     const candidates = [
       account.rateLimitedUntil,
@@ -725,9 +733,11 @@ test('_soonestResetMs takes the min across all reset fields incl scoped', () => 
       q.resetsAt ? new Date(q.resetsAt).getTime() : null,
     ];
     if (q.scopedLimits) for (const sl of Object.values(q.scopedLimits)) candidates.push(sl?.resetAt ?? null);
+    const now = Date.now();
     let soonest = null;
     for (const c of candidates) {
       if (c == null || !Number.isFinite(c)) continue;
+      if (onlyFuture && c <= now) continue;
       if (soonest == null || c < soonest) soonest = c;
     }
     return soonest;
@@ -800,6 +810,15 @@ test('computeRetryAfterSeconds = soonest future reset across accounts (≥1s), d
   const s = am.computeRetryAfterSeconds();
   assert.ok(s >= 25 && s <= 31, `got ${s}`);                      // ~30s, the soonest
 });
+
+test('[R2.1] MINOR-C: a stale past reset does NOT floor retry-after to 1s', () => {
+  const am = new AccountManager([oauth('a')], 0.98, 0.90);
+  const a = am.accounts[0];
+  a.rateLimitedUntil = Date.now() + 30_000;     // real throttle window ~30s
+  a.quota.unified7dReset = Date.now() - 5000;   // unpaired stale past field
+  const s = am.computeRetryAfterSeconds();
+  assert.ok(s >= 25 && s <= 31, `expected ~30s, got ${s}`);       // not 1s
+});
 ```
 
 **Step 2 — run red:** `node --test test/retry-after.test.js` → FAIL.
@@ -807,11 +826,12 @@ test('computeRetryAfterSeconds = soonest future reset across accounts (≥1s), d
 **Step 3 — implement:**
 - `src/account-manager.js`:
 ```js
-  /** Seconds until the soonest account reset (min 1), or 60 if nothing known. */
+  /** Seconds until the soonest FUTURE account reset (min 1), or 60 if nothing known.
+   *  [R2.1] MINOR-C: onlyFuture so an unpaired stale past reset can't floor this to 1s. */
   computeRetryAfterSeconds() {
     let soonest = Infinity;
     for (const a of this.accounts) {
-      const r = this._soonestResetMs(a);
+      const r = this._soonestResetMs(a, { onlyFuture: true });
       if (r != null && r < soonest) soonest = r;
     }
     if (soonest === Infinity) return 60;
@@ -1044,6 +1064,17 @@ test('markScopeExhausted sets the class exhausted with a reset', () => {
   assert.equal(sl.isActive, true);
   assert.equal(sl.resetAt, reset);
 });
+
+test('[R2.1] MINOR-A: markScopeExhausted with no known reset gets a BOUNDED (non-null) resetAt', () => {
+  const am = new AccountManager([oauth('a')], 0.98, 0.90);
+  am.markScopeExhausted(0, 'opus', null);            // no resetAtMs, no unified7dReset
+  const sl = am.accounts[0].quota.scopedLimits.opus;
+  assert.ok(sl.resetAt > Date.now(), 'must be a future bound, never null');
+  // and _clearExpiredQuotas must be able to eventually drop it
+  am.accounts[0].quota.scopedLimits.opus.resetAt = Date.now() - 1;
+  am._clearExpiredQuotas(am.accounts[0]);
+  assert.equal(am.accounts[0].quota.scopedLimits.opus, undefined);
+});
 ```
 
 **Step 2 — run red:** `node --test test/scoped-limits.test.js` → FAIL.
@@ -1055,8 +1086,15 @@ test('markScopeExhausted sets the class exhausted with a reset', () => {
     const account = this.accounts[accountIndex];
     if (!account || !modelClass) return;
     account.quota.scopedLimits ||= {};
+    // [R2.1] MINOR-A: ALWAYS give a reactive mark a bounded reset. If neither the
+    // response nor the unified weekly window tells us when it lifts, fall back to a
+    // 7-day window (the max Opus weekly span; design §6 m2 "approximate reset") so
+    // _clearExpiredQuotas can eventually drop it — never leave resetAt:null, which
+    // would make the entry non-expiring (it only sweeps truthy resetAt).
+    const WEEKLY_MS = 7 * 86400_000;
     account.quota.scopedLimits[modelClass] = {
-      utilization: 1, resetAt: resetAtMs ?? account.quota.unified7dReset ?? null,
+      utilization: 1,
+      resetAt: resetAtMs ?? account.quota.unified7dReset ?? (Date.now() + WEEKLY_MS),
       severity: 'high', isActive: true,
     };
     console.log(`[TeamClaude] Marked "${account.name}" ${modelClass} scope exhausted (reactive backstop)`);
@@ -1364,6 +1402,13 @@ discriminator exists). TDD: failing test against the real fixture first.
 only when active?) — adjust the "absence ⇒ available" assumption if the capture
 contradicts it.
 
+**Step 3b — [R2.1] reconcile reactive marks (MINOR-A/B).** With the real shape known,
+(a) tighten `markScopeExhausted`'s reset to the captured limit's real reset rather than
+the 7-day bound, and (b) make `applyUsageData` clear a prior *reactive* exhaustion for a
+class the authoritative probe now reports absent/`is_active:false` (add a `reactive: true`
+marker to reactive entries so a probe can distinguish and clear them). Tighten
+`scopeFromBody` against the captured body's scope field.
+
 **Step 4 — commit + redeploy** (Phases 6.1/6.3 hash bump + switch). Then close
 `workstation-yuz7`: remove `logDir` from devbox `teamclaude.json`, clean
 `~/.cache/teamclaude-logs` + the `.bak` files.
@@ -1390,5 +1435,6 @@ contradicts it.
 5. **MITM path** unaffected by all of the above (scoped out, design §3) — `--mitm`/`HTTPS_PROXY` traffic gets unified-only failover.
 6. **[R2] m6 drift-log intentionally dropped** (design §13 listed it resolved) — logging "Opus scope absent" would be noise, because §2.5/§12.2 found Opus-scope absence is the *normal healthy* state (the captured account has no Opus entry). Recorded here so design §13 and the plan agree; revisit only if Phase 7 shows absence is ever unsafe.
 7. **[R2] NIT-5 non-goal** — the backstop covers only (a) pre-stream terminal 429 and (b) mid-stream SSE `error`. A non-streaming `200` carrying an error JSON is **not** covered; this is almost certainly not a real limit shape, so it's an accepted non-goal (revisit if Phase 7's capture says otherwise).
+8. **[R2.1] MINOR-B reactive mark not auto-corrected by a healthy probe** — `applyUsageData` merges `scopedLimits`, and a healthy account's probe returns **no** key for a healthy class (the real fixture has no Opus entry), so a reactive mark persists until its `resetAt`. Now **bounded** by MINOR-A (≤ ~7d, usually `unified7dReset`), and fail-safe in direction (over-diverts away, never into a limit). **Phase 7 reconciliation:** once the real `limits[]`/limit shape is captured, let a probe that reports a class as absent/`is_active:false` clear a prior *reactive* exhaustion for that class (reconcile reactive marks against the authoritative `limits[]` each probe). Also revisit `scopeFromBody` returning `null` (→ marking the request's class) vs. the underlying limit possibly being unified.
 </content>
 </invoke>
