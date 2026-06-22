@@ -14,8 +14,9 @@
 # fail-open, no lease), so this file is the drift firewall.
 #
 # DM5-3 (per-device K): cloudbox 4, devbox 2, crostini 1, macOS 2. Base port
-# 4096 = serve-0 so a K=1 host is ~= today's single serve and the existing
-# :4096 consumers (pigeon OPENCODE_URL, lgtm, TUIs) keep working until M7.
+# 4096 = serve-0, the permanent anchor: clients create new sessions on it and
+# fall back to it, while session-targeted traffic is routed to the owning serve
+# via pigeon /route (mn9r M7). A K=1 host is therefore ~= the old single serve.
 let
   endpointsFor = ports: map (p: "http://127.0.0.1:${toString p}") ports;
   serveIdsFor = ports: builtins.genList (i: "serve-${toString i}") (builtins.length ports);

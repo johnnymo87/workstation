@@ -565,10 +565,14 @@ in
   };
 
   # mn9r M5: K-serve pool. Templated unit (instance %i = port) so one restart of
-  # opencode-serve-pool.target fans out to all K serves. serve-0 binds 4096, so
-  # the existing :4096 consumers (pigeon OPENCODE_URL, lgtm, TUIs) keep working
-  # until M7. Setting OPENCODE_ROUTING_DB (in Environment below) activates the
-  # dormant M4 serve-side session-lease path.
+  # opencode-serve-pool.target fans out to all K serves. serve-0 binds 4096, the
+  # permanent anchor: clients create new sessions on it and fall back to it, while
+  # M7 routes session-targeted traffic to the owning serve via pigeon /route
+  # (opencode-launch/-send, reset-workspace, opencode-llm-audit, my-podcasts, the
+  # telegram launch path). The hand-typed `opencode attach` TUI still resolves
+  # :4096 directly (tracked in 7zr7); lgtm run-mode is disabled. Setting
+  # OPENCODE_ROUTING_DB (in Environment below) activates the dormant M4 serve-side
+  # session-lease path.
   systemd.services."opencode-serve@" = {
     description = "OpenCode headless serve (pool instance, port %i)";
     after = [ "network.target" "sops-nix.service" "aigateway.service" "pigeon-daemon.service" ];
