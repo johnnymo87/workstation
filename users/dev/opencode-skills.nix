@@ -34,6 +34,7 @@ let
   workOnlySkills = [
     "cleaning-disk"
     "escalating-azure-aks-rbac"
+    "monitoring-deployments"
     "pagerduty-mcp-setup"
     "rollbar-mcp-setup"
     "shepherding-pull-requests"
@@ -74,6 +75,14 @@ let
     };
   };
 
+  # monitoring-deployments has an executable rollout-monitoring python script
+  monitoringDeploymentsExtras = {
+    ".config/opencode/skills/monitoring-deployments/monitor-rollout.py" = {
+      source = "${assetsPath}/opencode/skills/monitoring-deployments/monitor-rollout.py";
+      executable = true;
+    };
+  };
+
   # Superpowers skills: symlink the entire upstream skills directory
   # Uses out-of-store symlink since the repo is cloned via projects.nix, not in the Nix store
   superpowersSkills = {
@@ -101,6 +110,7 @@ let
     # Add entries as pages are created:
     { pageId = "4909269028"; skillName = "working-with-kubernetes"; fileName = "INTERNAL.md"; }
     { pageId = "5386600450"; skillName = "escalating-azure-aks-rbac"; fileName = "INTERNAL.md"; }
+    { pageId = "5398265910"; skillName = "monitoring-deployments"; fileName = "INTERNAL.md"; }
   ];
 
   # Activation script: fetch Confluence pages into skill directories
@@ -170,6 +180,7 @@ in
       mkSkills workOnlySkills
       // atlassianExtras
       // shepherdingExtras
+      // monitoringDeploymentsExtras
     );
 
   # Fetch Confluence-based skills during activation (macOS + cloudbox only)

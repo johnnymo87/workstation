@@ -190,7 +190,7 @@ On non-lgtm-bound repos (this workstation repo, personal projects, OSS), there i
 `~/projects/lgtm` runs an AI review daemon on a configured set of repos. If this PR is in scope, you MUST wait for a non-bot reviewer (lgtm dispatches under a real human GitHub identity) to APPROVE before exiting -- CI green + comments resolved is necessary but not sufficient. lgtm typically dispatches within ~10 min of CI going green.
 
 ```bash
-# Grep the repo key out of the YAML. Matches lines like "  food-truck/mono:"
+# Grep the repo key out of the YAML. Matches lines like "  <owner>/<repo>:"
 # (two-space indent, repo key, trailing colon). Avoids a yq dependency.
 grep -qE "^  <owner>/<repo>:" ~/projects/lgtm/lgtm.yml && echo lgtm-bound
 ```
@@ -258,3 +258,7 @@ Loop exits only when **all** of the following are true in the same iteration:
 - **Bundling sleep with the follow-up `gh` calls in one bash invocation.** Long chained one-liners that include `sleep` are a known hang risk in this environment (see AGENTS.md). Run `sleep 60` as its own tool call, then run the checks.
 - **Replying to inline comments without resolving them.** GitHub tracks thread resolution separately from the reply chain. A thread with five replies and no resolve still reads as unresolved in the diff UI. After every reply, call `resolveReviewThread`. See `reviewing-github-prs` §"Resolving review threads".
 - **Cherry-picking the easy comments.** Addressing the agreeable comments and quietly dropping the hard or controversial ones leaves threads looking abandoned and isn't actually finishing the review. Every thread gets accept / push back / escalate — see `receiving-code-review` §"Address Every Item". Use the unresolved-threads filter query (in `reviewing-github-prs`) before claiming exit conditions met.
+
+## Beyond merge: confirming the rollout
+
+On a repo with continuous deployment, a merged PR isn't live yet — the same disposition (own it until it lands) extends one phase further, to watching the change actually reach its environments. When the user cares that the change *deploys*, not just merges, hand off to the **`monitoring-deployments`** skill: it watches the merged commit roll out to each Kubernetes environment until the new image is running and healthy, and distinguishes a stuck rollout from one still in progress. Keep this skill topology-agnostic — the deploy-watching mechanics and the cluster/namespace specifics live there.

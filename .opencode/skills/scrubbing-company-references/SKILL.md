@@ -145,9 +145,14 @@ References with no documentation value -- delete or reword.
 Before committing, run these checks:
 
 ```bash
-# Primary patterns (company name + vendor hosts)
-rg -i "wonder|freshrealm" --glob '!docs/plans/*' --glob '!.git/*' --glob '!**/issues.jsonl'
+# Primary patterns (company names + product/org slugs)
+rg -i "wonder|freshrealm|food-truck|blueapron" --glob '!docs/plans/*' --glob '!.git/*' --glob '!**/issues.jsonl'
 rg "cops-[0-9]" -i --glob '!docs/plans/*' --glob '!.git/*' --glob '!**/issues.jsonl'
+
+# Container registries + AKS cluster identifiers (infra hosts/names encode org).
+# Generic patterns on purpose -- do NOT paste the private namespace/deployment
+# strings here; those live only in skill INTERNAL.md companions (Confluence).
+rg -i "azurecr\.io|akscluster" --glob '!docs/plans/*' --glob '!.git/*' --glob '!**/issues.jsonl'
 
 # IDs and domains
 rg "70497edc|712020:|3963715585|3963191313" --glob '!.git/*' --glob '!**/issues.jsonl'
