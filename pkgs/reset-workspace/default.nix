@@ -199,6 +199,25 @@ EOF
     # reparented to init -> no session) are excluded. See
     # docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md and
     # docs/plans/2026-06-04-reset-workspace-exclude-lgtm-plan.md.
+    #
+    # Defense-in-depth health gate (workstation-7sbo): the bare-TUI sid
+    # resolution below queries opencode-serve over HTTP. A wedged serve (event
+    # loop blocked but the kernel still completing the TCP handshake) accepts
+    # the connection and then blocks the read forever. That capture runs
+    # *before* the Step-5 restart, and the whole point of this tool is that
+    # restart -- so it must never be gated behind a call that depends on the
+    # possibly-wedged serve. Probe /global/health with a hard timeout first; if
+    # it fails, skip capture entirely (leave the pid lists empty so both loops
+    # below no-op) and fall straight through to the restart. The per-curl
+    # --max-time on the resolution curl is the minimal belt; this is the
+    # suspenders. See
+    # docs/investigations/2026-06-17-opencode-1.17.7-orphan-session-wedge.md Q3.
+    SERVE_HEALTHY=1
+    if ! curl -sf --max-time 3 --connect-timeout 3 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+      SERVE_HEALTHY=0
+      log "WARNING: opencode-serve at $OPENCODE_URL is unhealthy/unreachable; skipping session capture, going straight to restart"
+    fi
+
     log "snapshotting live opencode attach clients..."
 
     OPENCODE_MANIFEST=""
@@ -218,7 +237,13 @@ EOF
     # `--session ses_xxx` appears somewhere after the url, with either a
     # space or end-of-string after the sid (so we don't capture a partial
     # token).
-    OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
+    # SERVE_HEALTHY gate (workstation-7sbo): on an unhealthy serve, leave the
+    # pid list empty so this loop no-ops and we fall through to the restart.
+    if [ "$SERVE_HEALTHY" -eq 1 ]; then
+      OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
+    else
+      OC_ATTACH_PIDS=""
+    fi
     for pid in $OC_ATTACH_PIDS; do
       # Authoritative exe filter: skip non-opencode processes that pgrep
       # over-matched (e.g. a transient `grep "opencode attach"` running
@@ -252,9 +277,18 @@ EOF
     # Resolve bare opencode TUIs to sids via opencode-serve.
     # For each bare TUI alive, look up the most-recent root session for its
     # cwd; if found, restore it as an attach client by appending the sid to
-    # OPENCODE_MANIFEST. opencode-serve is alive at this point (we restart
-    # it later in step 5), so the API is always reachable here.
-    OC_ALL_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
+    # OPENCODE_MANIFEST. opencode-serve is running at this point (we restart it
+    # later in step 5), but "running" is not "responsive": a wedged serve can
+    # accept TCP and then block forever (workstation-7sbo). The SERVE_HEALTHY
+    # gate skips this loop when /global/health failed, and the resolution curl
+    # below carries a hard --max-time as a second line of defense.
+    # SERVE_HEALTHY gate (workstation-7sbo): same skip-capture behavior as the
+    # strict-attach loop above -- an empty pid list means this loop no-ops.
+    if [ "$SERVE_HEALTHY" -eq 1 ]; then
+      OC_ALL_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
+    else
+      OC_ALL_PIDS=""
+    fi
     for pid in $OC_ALL_PIDS; do
       exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
       exe_base=$(basename "$exe")
@@ -281,7 +315,14 @@ EOF
         continue
       fi
 
-      resolved_sid=$(curl -fsS --get "$OPENCODE_URL/session" \
+      # --max-time 5 --connect-timeout 3 (workstation-7sbo): a wedged-but-TCP-
+      # accepting serve would otherwise hang this read forever, before the
+      # Step-5 restart that clears the wedge. Mirrors the health-poll pattern
+      # below. The trailing 2>/dev/null||true catches only error *exits*, not a
+      # hang, so the timeout is what actually bounds it. This is belt to the
+      # SERVE_HEALTHY suspenders above (covers a serve that wedges between the
+      # probe and here, or one whose /global/health answers but /session hangs).
+      resolved_sid=$(curl -fsS --max-time 5 --connect-timeout 3 --get "$OPENCODE_URL/session" \
         --data-urlencode "directory=$cwd" \
         --data-urlencode "roots=true" \
         --data-urlencode "limit=1" 2>/dev/null \
