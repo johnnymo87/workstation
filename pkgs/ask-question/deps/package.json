@@ -1,0 +1,9 @@
+{
+  "name": "ask-question-deps",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "undici": "7.18.2"
+  }
+}

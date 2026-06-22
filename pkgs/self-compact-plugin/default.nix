@@ -1,104 +1,50 @@
 # Builds the self-compact opencode plugin as a self-contained JavaScript
-# bundle. See docs/plans/2026-04-21-self-compact-bundle-design.md for full
-# design rationale.
+# bundle. See docs/plans/2026-04-21-self-compact-bundle-design.md for the
+# original design and docs/plans/2026-06-22-durable-bun-fod-design.md for the
+# content-addressed deps migration (workstation-g9fe).
 #
 # Two stages:
-#   1. nodeModules — a fixed-output derivation (FOD) that runs
-#      `bun install --frozen-lockfile` and outputs node_modules/. Network
-#      access requires FOD; the outputHash only changes when bun.lock
-#      changes.
-#   2. bundle — a regular derivation that copies sources + node_modules,
-#      runs `bun build --target=bun --format=esm`, and runs a checkPhase
-#      that loads the built artifact under `bun --no-install` (matching
-#      opencode's runtime exactly). Outputs $out/self-compact.js (+ map).
+#   1. nodeModules — node_modules built by `importNpmLock.buildNodeModules` from
+#      the committed package-lock.json. Each dependency is fetched via fetchurl
+#      keyed by the lockfile's own SRI integrity, so this stage is
+#      content-addressed by package content (NOT a recursive hash over bun's
+#      on-disk tree). There is NO outputHash to maintain and NO bun in this
+#      stage: a nixpkgs bun OR node bump can at most trigger a normal rebuild,
+#      never a fixed-output hash mismatch. This supersedes the old bun-install
+#      FOD (and workstation-l0f6's --cpu/--os + per-system outputHash hack,
+#      both of which existed only to stabilize that recursive tree hash).
+#   2. bundle — a regular derivation that copies sources + node_modules, runs
+#      `bun build --target=bun --format=esm`, and runs a checkPhase that loads
+#      the built artifact under `bun --no-install` (matching opencode's runtime
+#      exactly). Outputs $out/self-compact.js (+ map).
+#
+# To bump deps: edit package.json, regenerate the lockfile with
+#   (cd assets/opencode/plugins && npm install --package-lock-only --ignore-scripts)
+# and commit package-lock.json. No hash edits anywhere.
 { lib
 , stdenvNoCC
 , bun
-, cacert
+, nodejs
+, importNpmLock
 }:
 
 let
   pluginSrc = ../../assets/opencode/plugins;
 
-  # Stage 1: fetch deps as an FOD. The install forces ALL platform variants
-  # of optional native deps (see --cpu/--os below), so the output tree is
-  # expected to be byte-identical on every host — outputHash.default below is
-  # platform-INDEPENDENT. outputHash.default needs updating when bun.lock
-  # changes. To refresh:
-  #   1. Set the `default` value (see outputHash) to lib.fakeHash
-  #   2. Run `nix build .#self-compact-plugin` and let it fail
-  #   3. Copy the "got: sha256-..." line into `default` (same on all hosts)
-  # If only ONE platform mismatches, add it to `overrides` instead (see there).
-  nodeModules = stdenvNoCC.mkDerivation {
-    pname = "self-compact-plugin-node-modules";
-    version = "0.1.0";
-
-    # Only the install-input files matter for the FOD hash; including the
-    # source files would make the hash churn on every plugin code change.
-    src = lib.cleanSourceWith {
-      src = pluginSrc;
-      filter = path: type:
-        let base = builtins.baseNameOf path;
-        in builtins.elem base [ "package.json" "bun.lock" "bunfig.toml" ];
+  # Stage 1: content-addressed node_modules. Read the committed manifests
+  # directly (pure eval over source files — not IFD) so this stage depends only
+  # on package.json + package-lock.json content, never on plugin code changes.
+  # --omit=dev keeps only runtime deps (matches the old `bun install
+  # --production`); the bundle inlines @opencode-ai/plugin + zod at build time.
+  nodeModules = importNpmLock.buildNodeModules {
+    package = lib.importJSON (pluginSrc + "/package.json");
+    packageLock = lib.importJSON (pluginSrc + "/package-lock.json");
+    inherit nodejs;
+    derivationArgs = {
+      pname = "self-compact-plugin-node-modules";
+      version = "0.1.0";
+      npmInstallFlags = [ "--omit=dev" ];
     };
-
-    nativeBuildInputs = [ bun cacert ];
-
-    dontConfigure = true;
-
-    buildPhase = ''
-      runHook preBuild
-
-      export HOME=$TMPDIR
-      export BUN_INSTALL_CACHE_DIR=$TMPDIR/.bun-cache
-
-      # --cpu='*' --os='*' force-install EVERY platform variant of optional
-      # native deps (here @msgpackr-extract/* pulled transitively via
-      # effect -> msgpackr). Without this, bun installs only the variant(s)
-      # matching the BUILD host's arch/os, so the recursive FOD hash differs
-      # per architecture (e.g. aarch64-linux vs darwin) — which is why a hash
-      # committed from one machine kept breaking `home-manager switch` on the
-      # others. Forcing the full superset makes node_modules identical on
-      # every platform, giving one stable hash and ending the per-machine
-      # hash tug-of-war. See workstation-l0f6.
-      bun install \
-        --frozen-lockfile \
-        --production \
-        --ignore-scripts \
-        --no-progress \
-        --cpu='*' \
-        --os='*'
-
-      runHook postBuild
-    '';
-
-    installPhase = ''
-      runHook preInstall
-      mkdir -p $out
-      cp -R node_modules $out/
-      runHook postInstall
-    '';
-
-    # FOD: hash the entire output tree. Allows network access to bun's
-    # registry, but locks the result so subsequent builds are pure.
-    outputHashMode = "recursive";
-    outputHashAlgo = "sha256";
-    # Forcing all optional platform variants (see --cpu/--os in buildPhase)
-    # makes node_modules platform-independent, so this single `default` hash
-    # is expected to hold on EVERY system. The per-system `overrides` map is
-    # an additive escape hatch: if some platform's bun ever lays the tree out
-    # differently, add ONLY that system with its reported "got:" hash. Doing
-    # so refreshes that one platform and can never re-break the others — which
-    # ends the cross-machine hash tug-of-war that motivated this. The default
-    # was verified on aarch64-linux (devbox/cloudbox). See workstation-l0f6.
-    outputHash = let
-      default = "sha256-eqQ4iTOvxw166aMJY0WghzcBltHKoq19CEvJN6pW3vM=";
-      overrides = {
-        # "aarch64-darwin" = "sha256-...";  # refresh in isolation if needed
-      };
-    in overrides.${stdenvNoCC.hostPlatform.system} or default;
-
-    dontFixup = true;
   };
 
   # Stage 2: bundle the plugin as a self-contained .js. Pure derivation
@@ -163,6 +109,10 @@ let
     '';
 
     dontFixup = true;
+
+    # Expose the deps stage so pkgs/self-compact-plugin/test.sh can assert the
+    # durability invariants (no bun, no outputHash) directly.
+    passthru = { inherit nodeModules; };
 
     meta = with lib; {
       description = "Self-contained bundle for the OpenCode self-compact plugin";

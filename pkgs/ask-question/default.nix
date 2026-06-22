@@ -8,21 +8,26 @@
 #
 # cli.js's only third-party dependency is `undici`, used purely to build an
 # Agent with headersTimeout/bodyTimeout disabled so long ChatGPT responses
-# don't trip Node fetch's hidden 5-minute timeout. undici is not in nixpkgs, so
-# we install it via a fixed-output derivation (FOD), then vendor cli.js +
-# node_modules into the store and wrap it with node. No playwright, no browser
-# download, no bundler.
+# don't trip Node fetch's hidden 5-minute timeout. We install it via
+# `importNpmLock.buildNodeModules` from a committed deps/ manifest, then vendor
+# cli.js + node_modules into the store and wrap it with node. The deps stage is
+# content-addressed by deps/package-lock.json's per-package integrity (NOT a
+# recursive hash over a bun-produced tree), so a nixpkgs bun/node bump can only
+# trigger a normal rebuild, never a fixed-output hash mismatch. No bundler, no
+# bun, no outputHash to refresh. See
+# docs/plans/2026-06-22-durable-bun-fod-design.md (workstation-g9fe).
 #
-# To bump: change `rev`, refresh `src.hash`, and set `undiciVersion` to match
-# the upstream package-lock.json (then refresh `nodeModules.outputHash`).
+# To bump the source: change `rev` + refresh `src.hash`.
+# To bump undici: edit deps/package.json, then regenerate the lockfile with
+#   (cd pkgs/ask-question/deps && npm install --package-lock-only --ignore-scripts)
+# and commit deps/package-lock.json. No hash edits.
 {
   lib,
   stdenvNoCC,
   fetchFromGitHub,
-  bun,
-  cacert,
   nodejs,
   makeWrapper,
+  importNpmLock,
 }:
 
 let
@@ -35,56 +40,17 @@ let
     hash = "sha256-QqbgWFubF0qfbPYjMSDTdaWJoqmHM7BohwQE6iehRHs=";
   };
 
-  # Exact undici version from chatgpt-relay's package-lock.json. undici has no
-  # transitive dependencies, so a one-line manifest is enough.
-  undiciVersion = "7.18.2";
-
-  # Stage 1: install undici as an FOD. Network access is allowed, but the
-  # result is pinned by outputHash. Refresh outputHash whenever undiciVersion
-  # changes:
-  #   1. set outputHash = lib.fakeHash
-  #   2. nix build .#ask-question  → copy the "got: sha256-..." line back.
-  nodeModules = stdenvNoCC.mkDerivation {
-    pname = "ask-question-node-modules";
-    inherit version;
-
-    dontUnpack = true;
-
-    nativeBuildInputs = [ bun cacert ];
-
-    buildPhase = ''
-      runHook preBuild
-
-      export HOME=$TMPDIR
-      export BUN_INSTALL_CACHE_DIR=$TMPDIR/.bun-cache
-
-      cat > package.json <<EOF
-      {
-        "name": "ask-question-deps",
-        "version": "0.0.0",
-        "private": true,
-        "dependencies": { "undici": "${undiciVersion}" }
-      }
-      EOF
-
-      bun install --no-progress --ignore-scripts
-
-      runHook postBuild
-    '';
-
-    installPhase = ''
-      runHook preInstall
-      mkdir -p $out
-      cp -R node_modules $out/
-      runHook postInstall
-    '';
-
-    # FOD: hash the entire node_modules tree.
-    outputHashMode = "recursive";
-    outputHashAlgo = "sha256";
-    outputHash = "sha256-jSRyfvA43qExaKzcySEMxmFKJCV4xPimEM5Mikj1fwM=";
-
-    dontFixup = true;
+  # Stage 1: content-addressed node_modules built by npm from the committed
+  # deps/ manifest. undici is fetched via fetchurl keyed by the lockfile's SRI
+  # integrity, so there is no outputHash and no bun in this stage.
+  nodeModules = importNpmLock.buildNodeModules {
+    package = lib.importJSON ./deps/package.json;
+    packageLock = lib.importJSON ./deps/package-lock.json;
+    inherit nodejs;
+    derivationArgs = {
+      pname = "ask-question-node-modules";
+      inherit version;
+    };
   };
 in
 stdenvNoCC.mkDerivation {
@@ -117,6 +83,10 @@ stdenvNoCC.mkDerivation {
   '';
 
   dontFixup = true;
+
+  # Expose the deps stage so pkgs/ask-question/test.sh can assert the
+  # durability invariants (no bun, no outputHash) directly.
+  passthru = { inherit nodeModules; };
 
   meta = with lib; {
     description = "chatgpt-relay client CLI: send prompts to ask-question-server over the localhost:3033 tunnel";
