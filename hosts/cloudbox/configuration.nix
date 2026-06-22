@@ -923,16 +923,17 @@ ${serveIdCase}
 
   # Nightly workspace reset (3 AM). Replaces the previous serve-only
   # restart with a full workspace reset (kill nvims, clear opencode
-  # sessions, restart opencode-serve, respawn nvims). The serve restart
-  # still happens — that was the original purpose (memory hygiene) — but
-  # now it's bundled with the rest of the reset.
+  # sessions, restart the opencode-serve-pool.target, respawn nvims). The
+  # serve restart still happens — that was the original purpose (memory
+  # hygiene, now across all K pooled serves) — but now it's bundled with
+  # the rest of the reset.
   #
   # Runs as user `dev` so it can drive the user's tmux server.
-  # Passwordless `sudo systemctl restart opencode-serve` works because
-  # `dev` is in the `wheel` group and `security.sudo.wheelNeedsPassword`
+  # Passwordless `sudo systemctl restart opencode-serve-pool.target` works
+  # because `dev` is in the `wheel` group and `security.sudo.wheelNeedsPassword`
   # is false (set elsewhere in this file).
   systemd.services.nightly-restart-background = {
-    description = "Nightly workspace reset (kill nvims, restart opencode-serve, respawn)";
+    description = "Nightly workspace reset (kill nvims, restart opencode-serve-pool, respawn)";
     serviceConfig = {
       Type = "oneshot";
       User = "dev";
