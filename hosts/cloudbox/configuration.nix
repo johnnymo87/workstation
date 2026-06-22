@@ -429,6 +429,11 @@ in
         "PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}"
         "PIGEON_SERVE_LIVENESS=self"
         "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
+        # /model provider allowlist. cloudbox has Vertex creds connected, so opt
+        # this machine into the two Vertex families on top of the anthropic/openai
+        # default. (devbox has no Vertex creds and keeps the default.) Parsed by
+        # packages/daemon/src/config.ts.
+        "PIGEON_ALLOWED_PROVIDERS=anthropic,openai,google-vertex,google-vertex-anthropic"
         # Absolute path to oc-auto-attach so launch-ingest.ts can find it
         # despite the locked-down systemd PATH. See let-binding above.
         "OC_AUTO_ATTACH_BIN=${oc-auto-attach}/bin/oc-auto-attach"

@@ -121,6 +121,11 @@ lib.mkIf isDarwin {
           PIGEON_SERVE_ENDPOINTS = servePool.endpointsCsv;
           PIGEON_SERVE_LIVENESS = "self";
           PIGEON_DAEMON_DB_PATH = routingDbPath;
+          # /model provider allowlist. macbook has Vertex creds connected, so opt
+          # this machine into the two Vertex families on top of the
+          # anthropic/openai default. (devbox has no Vertex creds and keeps the
+          # default.) Parsed by packages/daemon/src/config.ts.
+          PIGEON_ALLOWED_PROVIDERS = "anthropic,openai,google-vertex,google-vertex-anthropic";
           # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
           # sessionVariables for rationale). pigeon revive spawns opencode that
           # must hit the same DB; a launchd agent doesn't source ~/.profile.
