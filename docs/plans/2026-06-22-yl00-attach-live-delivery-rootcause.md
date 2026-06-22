@@ -127,3 +127,39 @@ cold-start filter race and must fix or avoid it.
 
 Option 2 is the most targeted and pool-aligned (per-session subscriptions are exactly the
 pool's model), but verify it cannot leak cross-directory events for the same session id.
+
+## Fix landed (devbox, 2026-06-22) — option 2
+
+User chose **option 2**. Implemented as `~/projects/opencode-patched/patches/event-cold-start-directory.patch`
+(opencode-patched commit `c32dee0`, pushed; registered last in `patches/apply.sh`, MUST apply after
+`event-session-scope`).
+
+**Exact mechanism pinned (source, v1.17.7):** the discriminator is `FSUtil.resolve`
+(`packages/core/src/fs-util.ts:225`): it returns `normalizePath(realpathSync(p))` when the path
+**exists** but only `normalizePath(pathResolve(p))` (no symlink resolution) on **ENOENT**. The
+`/event` handler binds `instance.directory` (= `InstanceRef.directory`, itself `FSUtil.resolve`d in
+`instance-store.ts:109`) at subscribe time and the bridge stamps `location.directory` (= the forked
+loop's `InstanceRef.directory`) at publish time. When the two sides resolve the same logical
+directory at different lifecycle/existence moments (or through a symlinked path), the strings differ
+and the exact-`===` directory filter (`handlers/event.ts:50-54`) silently drops the watched session's
+events. Confirmed sufficient for the fix without a separate instrumented-serve run: option 2 bypasses
+the directory comparison entirely for session-scoped events.
+
+**The fix:** in `handlers/event.ts`, collapse the two sequential `Stream.filter`s (directory, then
+session) into one. When `?session_ids=` is present and the event has a string `event.data.sessionID`,
+forward iff `sessionIds.has(sid)` — independent of directory. `sessionID` is globally unique, so no
+cross-directory leak. Non-session events and no-`session_ids` subscriptions keep directory/workspace
+scoping; `server.connected`/heartbeat/`server.instance.disposed` are unaffected (outside the filter).
+
+**TDD / verification:** added regression test "delivers watched-session events to a session-scoped
+stream emitted by a different directory instance (yl00)" to `httpapi-event.test.ts` — a `?session_ids=`
+subscriber bound to directory D2 must receive a session's `session.deleted` emitted from D1 (global
+bus; `event.location.directory !== instance.directory`). RED (5s timeout) pre-fix, GREEN post-fix.
+Full `httpapi-event.test.ts` = 7/7 pass; clean `apply.sh` on a fresh v1.17.7 worktree; the patched
+package typecheck adds **zero** new errors (one pre-existing `session/session.ts:944` TS2719 from
+`createnext-readback.patch`, unrelated to yl00).
+
+**Not yet deployed.** Cutting `v1.17.7-patched.3` (`gh workflow run build-release.yml --field
+version=1.17.7 --field revision=3`) bundles the WHOLE current `apply.sh` (serve-lease, createnext-readback,
+attach-route-resolve = 7zr7's in-flight M7, plus this) and deploying it bumps `users/dev/home.base.nix`
++ restarts live serves. Coordinate revision numbering + readiness with cloudbox 7zr7 before release.
