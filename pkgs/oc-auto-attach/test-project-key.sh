@@ -219,6 +219,14 @@ if command -v tmux >/dev/null 2>&1; then
 
   mkdir -p "$scan_tmpdir/proj-a" "$scan_tmpdir/proj-b"
 
+  # Isolate from the caller's tmux client env. A headless opencode serve
+  # inherits leaked TMUX / TMUX_PANE from the viewer pane it was launched
+  # under (same env-leak family as workstation-8iqt). Leaving them set lets
+  # the caller's environment perturb `tmux -L <sock> new-session` against the
+  # isolated server; unset them so this block is deterministic from ANY
+  # caller env (interactive shell, inside tmux, or headless serve loop).
+  unset TMUX TMUX_PANE
+
   # Isolated tmux server (-L) so we never touch the user's real sessions.
   # Session `lgtm` holds a pane whose cwd is proj-a (what we want to find).
   tmux -L "$scan_sock" new-session -d -s lgtm -c "$scan_tmpdir/proj-a" -n protos
@@ -230,6 +238,31 @@ if command -v tmux >/dev/null 2>&1; then
   # Point list_session_panes at the isolated server for the duration of the
   # scan tests by shadowing `tmux` with a wrapper that injects -L.
   tmux() { command tmux -L "$scan_sock" "$@"; }
+
+  # `new-session -d` returns as soon as the session exists, but the pane's
+  # shell may not have exec'd / chdir'd yet: a freshly forked pane can briefly
+  # report the server bootstrap command ("tmux") and the launch cwd (this
+  # repo) instead of the shell sitting in proj-a. Under heavy load that window
+  # widened enough for the assertions below to read a half-born pane and fail
+  # (workstation-kpv9: `out: %0|tmux|/home/.../workstation`). Poll until BOTH
+  # isolated panes report their expected cwd before scanning, and fail FAST
+  # with a clear setup diagnostic if they never settle -- so a half-born pane
+  # can never masquerade as a list_session_panes logic bug. (`SECONDS` is a
+  # bash builtin counting whole seconds since shell start.)
+  settle_deadline=$(( SECONDS + 5 ))
+  while :; do
+    panes_a="$(list_session_panes lgtm)"
+    panes_b="$(list_session_panes main)"
+    if [[ "$panes_a" == *"$scan_tmpdir/proj-a"* && "$panes_b" == *"$scan_tmpdir/proj-b"* ]]; then
+      break
+    fi
+    if [ "$SECONDS" -ge "$settle_deadline" ]; then
+      printf 'FAIL  list_session_panes: isolated tmux server never settled (setup)\n        lgtm: %s\n        main: %s\n' \
+        "$panes_a" "$panes_b"
+      exit 1
+    fi
+    sleep 0.1
+  done
 
   scan_out="$(list_session_panes lgtm)"
 
