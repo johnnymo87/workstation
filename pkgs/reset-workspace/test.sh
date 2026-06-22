@@ -83,6 +83,17 @@ if [ -f "$default_nix" ]; then
   want_grep "source defines pool_health_urls_from_wants" 'pool_health_urls_from_wants() {'
   want_grep "source reads the pool target Wants="         'show -p Wants --value opencode-serve-pool.target'
   want_grep "source polls each discovered serve URL"      'serve_health_urls'
+  # workstation-7sbo: the manifest-capture path must never hang against a
+  # wedged-but-TCP-accepting serve (it runs before the Step-5 restart that
+  # clears the wedge). Two layers: a hard timeout on the bare-TUI resolution
+  # curl (minimal belt) + a /global/health probe that skips capture entirely
+  # and falls straight through to the restart when the serve is unhealthy
+  # (defense-in-depth suspenders). See investigation 2026-06-17 Q3.
+  want_grep "bare-resolution curl has a hard max-time"     '--max-time 5'
+  want_grep "bare-resolution curl has a connect-timeout"   '--connect-timeout 3'
+  want_grep "source probes serve health before capture"    '$OPENCODE_URL/global/health'
+  want_grep "source sets an unhealthy-serve flag"          'SERVE_HEALTHY=0'
+  want_grep "unhealthy serve skips attach capture"         'OC_ATTACH_PIDS=""'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi
