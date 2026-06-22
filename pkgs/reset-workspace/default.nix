@@ -48,6 +48,32 @@ pkgs.writeShellApplication {
       done
     }
 
+    # pool_health_urls_from_wants <wants-string> <fallback-url>: parse a systemd
+    # `Wants=` value (space-separated unit names) and print one
+    # http://127.0.0.1:<port> per opencode-serve@<port>.service instance, in
+    # order. Falls back to <fallback-url> when no instances are found (e.g. the
+    # query failed or the pool isn't templated), preserving the pre-pool
+    # single-serve behavior. Pure (no systemd): the caller runs `systemctl show`
+    # and hands the value in (kept in lockstep with pkgs/reset-workspace/test.sh).
+    pool_health_urls_from_wants() {
+      local wants="$1" fallback="$2" unit port
+      local urls=()
+      for unit in $wants; do
+        case "$unit" in
+          opencode-serve@*.service)
+            port="''${unit#opencode-serve@}"
+            port="''${port%.service}"
+            [ -n "$port" ] && urls+=("http://127.0.0.1:$port")
+            ;;
+        esac
+      done
+      if [ "''${#urls[@]}" -eq 0 ]; then
+        printf '%s\n' "$fallback"
+      else
+        printf '%s\n' "''${urls[@]}"
+      fi
+    }
+
     # ---- Process detachment: re-exec into a fresh user systemd scope ----
     # This script kills processes that are likely to be ancestors of its own
     # invoker — specifically nvim (step 4: pkill -9 -u dev -x nvim) and the
@@ -328,6 +354,7 @@ EOF
     # opencode-serve@<port>.service instance (a target's Wants= alone would NOT).
     log "restarting opencode-serve-pool.target..."
     if systemctl --user is-active --quiet opencode-serve-pool.target; then
+      POOL_SCOPE=user
       log "  opencode-serve-pool is a user target; restarting via systemctl --user"
       if ! systemctl --user restart opencode-serve-pool.target; then
         die "failed to restart opencode-serve-pool (user target)"
@@ -337,13 +364,26 @@ EOF
       # Use absolute path /run/wrappers/bin/sudo because NixOS ships the working
       # setuid sudo there; /run/current-system/sw/bin/sudo is a non-setuid symlink
       # sudo refuses to exec from.
+      POOL_SCOPE=system
       log "  opencode-serve-pool is a system target; restarting via sudo"
       if ! /run/wrappers/bin/sudo systemctl restart opencode-serve-pool.target; then
         die "failed to restart opencode-serve-pool (system target)"
       fi
     fi
 
-    log "polling /global/health for serve readiness..."
+    # mn9r M7: confirm readiness for EVERY serve in the pool, not just serve-0.
+    # Discover the pool's endpoints from the target's Wants= (generated from
+    # serve-pool.nix, the single source of truth) using the same scope we
+    # restarted under, so this can't drift from the actual pool and degrades to
+    # $OPENCODE_URL (serve-0) if discovery yields nothing.
+    if [ "''${POOL_SCOPE:-system}" = "user" ]; then
+      pool_wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
+    else
+      pool_wants="$(/run/wrappers/bin/sudo systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
+    fi
+    mapfile -t serve_health_urls < <(pool_health_urls_from_wants "$pool_wants" "$OPENCODE_URL")
+
+    log "polling /global/health for ''${#serve_health_urls[@]} serve(s): ''${serve_health_urls[*]}"
     # --max-time 3 is load-bearing: without it, a single hung curl (e.g. TCP
     # connected before serve's HTTP listener was ready, then read blocked
     # indefinitely) wedges the whole script. Observed in the wild on
@@ -351,15 +391,22 @@ EOF
     # The bash `while` can't re-check the deadline while wait4()'d on the
     # curl child.
     DEADLINE=$(($(date +%s) + 30))
-    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-      if curl -sf --max-time 3 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
-        log "  serve healthy"
-        break
-      fi
+    pending=("''${serve_health_urls[@]}")
+    while [ "$(date +%s)" -lt "$DEADLINE" ] && [ "''${#pending[@]}" -gt 0 ]; do
+      still=()
+      for u in "''${pending[@]}"; do
+        if curl -sf --max-time 3 "$u/global/health" >/dev/null 2>&1; then
+          log "  serve healthy: $u"
+        else
+          still+=("$u")
+        fi
+      done
+      pending=(''${still[@]+"''${still[@]}"})
+      [ "''${#pending[@]}" -eq 0 ] && break
       read -t 0.5 -r _ < <(:) 2>/dev/null || true
     done
-    if ! curl -sf --max-time 3 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
-      die "opencode-serve did not become healthy within 30s"
+    if [ "''${#pending[@]}" -gt 0 ]; then
+      die "opencode serve pool did not become fully healthy within 30s (still down: ''${pending[*]})"
     fi
 
     # ---- Step 6: Write manifest + launch recommendation session ----

@@ -296,15 +296,17 @@ in
   # ~/projects/eternal-machinery/bin/devenv-up place devenv into dev-daemons.slice
   # via `systemd-run --user --scope` (its "Context B" branch) instead of trying
   # to cross from a system service into the dev@ user bus via
-  # `--machine=dev@.host` (which fails with "Permission denied"). The service
-  # definition now lives in users/dev/home.devbox.nix
-  # (systemd.user.services.opencode-serve). Linger (users.users.dev.linger below)
-  # keeps user@1000.service up at boot so the service starts without a login.
+  # `--machine=dev@.host` (which fails with "Permission denied"). mn9r M5: serve
+  # is now a K-instance pool (templated systemd.user.services."opencode-serve@"
+  # behind systemd.user.targets.opencode-serve-pool) defined in
+  # users/dev/home.devbox.nix. Linger (users.users.dev.linger below) keeps
+  # user@1000.service up at boot so the pool starts without a login.
 
   # Daily 3 AM workspace reset (cloudbox parity). reset-workspace snapshots
   # live opencode TUIs in the `main` tmux session, SIGKILLs all nvims,
-  # restarts opencode-serve (leaks ~350 MB -> 8-13 GB over days), and spawns a
-  # headless recommendation session that Telegrams which sessions to reopen.
+  # restarts the opencode-serve-pool.target (each serve leaks ~350 MB -> 8-13 GB
+  # over days), and spawns a headless recommendation session that Telegrams
+  # which sessions to reopen.
   # devbox nvim is disposable (an opencode-tab host only), so the SIGKILL is
   # safe. Every opencode TUI is hosted under nvim (directly or via an nvim
   # :terminal bash), so the SIGKILL reaps them all via PTY hangup; this is the
@@ -312,12 +314,12 @@ in
   # surprise-killed live interactive sessions, has been removed).
   #
   # Runs as User=dev so reset-workspace's `systemd-run --user --scope` re-exec
-  # and `systemctl --user restart opencode-serve.service` work (serve is a USER
-  # unit on devbox; linger keeps user@1000 up). pigeon-daemon (a SYSTEM unit) is
+  # and `systemctl --user restart opencode-serve-pool.target` work (the pool is
+  # a USER target on devbox; linger keeps user@1000 up). pigeon-daemon (a SYSTEM unit) is
   # restarted FIRST via passwordless sudo so the recommendation session, spawned
   # last inside reset-workspace, registers with a fresh daemon.
   systemd.services.nightly-restart-background = {
-    description = "Nightly workspace reset (kill nvims, restart opencode-serve, recommend)";
+    description = "Nightly workspace reset (kill nvims, restart opencode-serve-pool, recommend)";
     serviceConfig = {
       Type = "oneshot";
       User = "dev";

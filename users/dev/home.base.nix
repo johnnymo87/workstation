@@ -860,13 +860,35 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       set -euo pipefail
 
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+      # mn9r M7: pigeon discovery endpoint. In a K-serve pool a live session's
+      # event stream + TUI are hosted by the serve that OWNS it, so the
+      # `opencode attach` hint must point at that serve, resolved per-session
+      # via GET /route. Default matches opencode-launch / opencode-send.
+      PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
       PROJECTS_DIR="''${LGTM_PROJECTS_DIR:-$HOME/projects}"
 
       CURL="${pkgs.curl}/bin/curl"
       JQ="${pkgs.jq}/bin/jq"
       GIT="${pkgs.git}/bin/git"
 
-      # Health check
+      # parse_serve_url <route-json-body> <fallback-url>: extract .apiBase from
+      # a pigeon GET /route JSON body and print it. Falls back to <fallback-url>
+      # when the body is empty, not JSON, or .apiBase is absent/null/empty.
+      # Pure (no network): the caller does the curl and hands the body in, so
+      # any pigeon hiccup degrades to the pre-pool single-serve behavior, never
+      # worse. Mirror of pkgs/opencode-launch/default.nix.
+      parse_serve_url() {
+        local body="$1" fallback="$2" api
+        api="$(printf '%s' "$body" | "$JQ" -r '.apiBase // empty' 2>/dev/null || true)"
+        if [ -n "$api" ] && [ "$api" != "null" ]; then
+          printf '%s\n' "$api"
+        else
+          printf '%s\n' "$fallback"
+        fi
+      }
+
+      # Health check. Session metadata (below) comes from the shared opencode.db,
+      # so listing works against any serve; serve-0 is the canonical query node.
       if ! "$CURL" -sf -m 5 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
         echo "OpenCode server not reachable at $OPENCODE_URL" >&2
         exit 1
@@ -959,9 +981,12 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
         fi
       }
 
-      # Sort by updated desc and render table
+      # Sort by updated desc and render table. Resolve each session's OWNING
+      # serve via pigeon /route so the attach hints land on the right serve in
+      # a K-serve pool (each degrades to $OPENCODE_URL on any pigeon hiccup).
       printf '%-50s  %-12s  %-12s  %s\n' "PR" "CREATED" "UPDATED" "SESSION"
       count=0
+      attach_hints=()
       while IFS=$'\t' read -r updated created repo_full pr_num sid; do
         [ -z "$updated" ] && continue
         printf '%-50s  %-12s  %-12s  %s\n' \
@@ -969,19 +994,32 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
           "$(fmt_ago "$created")" \
           "$(fmt_ago "$updated")" \
           "$sid"
+        route_body="$( "$CURL" -sf --connect-timeout 2 --max-time 3 \
+          "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true )"
+        serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
+        attach_hints+=( "opencode attach $serve_url --session $sid" )
         count=$(( count + 1 ))
       done < <(printf '%s\n' "$tsv" | sort -t$'\t' -k1,1nr)
 
       echo
-      echo "$count session(s). Attach: opencode attach $OPENCODE_URL --session <ID>"
+      echo "$count session(s). Attach (each routed to its owning serve):"
+      for hint in "''${attach_hints[@]}"; do
+        echo "  $hint"
+      done
     '';
   };
 
   # opencode-send: post a prompt into another local OpenCode session.
   #
-  # Talks directly to opencode serve at http://127.0.0.1:4096 (POST
-  # /session/<id>/prompt_async). Bypasses the pigeon daemon entirely — this is
-  # purely local opencode-to-opencode messaging.
+  # By DEFAULT routes ses_* targets through the pigeon daemon (durable delivery,
+  # retry, replay, and the single-writer arbiter that fixes the prompt_async
+  # race). Falls back to a direct POST /session/<id>/prompt_async against
+  # opencode serve when pigeon is unreachable, the target isn't a ses_* id, or
+  # --direct is passed. mn9r M7: because the pigeon path never touches the
+  # serve-0 HTTP endpoint, the serve reachability check is deferred to the
+  # paths that actually use it (--list and direct send) — see
+  # require_serve_reachable below — so a down serve-0 can't block a send that
+  # would have gone through pigeon.
   #
   # See assets/opencode/skills/opencode-send/SKILL.md for usage.
   home.file.".local/bin/opencode-send" = {
@@ -995,6 +1033,19 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       CURL="${pkgs.curl}/bin/curl"
       JQ="${pkgs.jq}/bin/jq"
       FLOCK="${pkgs.util-linux}/bin/flock"
+
+      # require_serve_reachable: cheap health check against $OPENCODE_URL that
+      # gives a clearer error than a failed POST. mn9r M7: called ONLY on the
+      # paths that actually talk to opencode serve directly (--list and the
+      # direct send path), NOT unconditionally up front — otherwise a down
+      # serve-0 would block a ses_* send that pigeon could have routed to a
+      # healthy serve.
+      require_serve_reachable() {
+        if ! "$CURL" -sf -m 5 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
+          echo "Error: opencode serve not reachable at $OPENCODE_URL" >&2
+          exit 1
+        fi
+      }
 
       show_help() {
         cat <<'HELP_EOF'
@@ -1115,17 +1166,14 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
         esac
       done
 
-      # Health check (cheap and gives a clearer error than a failed POST)
-      if ! "$CURL" -sf -m 5 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
-        echo "Error: opencode serve not reachable at $OPENCODE_URL" >&2
-        exit 1
-      fi
-
       if [[ "$mode" == "list" ]]; then
         if [[ $# -gt 0 ]]; then
           echo "Error: --list takes no positional arguments." >&2
           exit 1
         fi
+
+        # --list talks to opencode serve directly, so gate on reachability here.
+        require_serve_reachable
 
         # Cross-project list. /session would be filtered to the project derived
         # from x-opencode-directory which is almost never what we want.
@@ -1206,6 +1254,13 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
           exec pigeon-send --from "''${OPENCODE_SESSION_ID:-unknown}" "$session_id" "$message"
         fi
       fi
+
+      # DIRECT-PATH-SERVE-GATE: we did NOT route via pigeon (--direct, a
+      # non-ses_* target, or pigeon unreachable), so from here on we POST to
+      # opencode serve directly. Gate on serve reachability now — AFTER the
+      # pigeon route above, so a healthy-pigeon ses_* send is never blocked by
+      # a down serve-0.
+      require_serve_reachable
 
       # Pre-flight: verify the session exists.
       #
