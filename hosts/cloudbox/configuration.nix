@@ -186,6 +186,32 @@ in
         group = "dev";
         mode = "0400";
       };
+      # lgtm multi-reviewer PATs (classic, repo + read:org, SSO-authorized),
+      # one per reviewer GitHub login. Decrypted to /run/secrets and then
+      # materialized to ~/.config/lgtm/tokens/<login>.pat (chmod 600, owner
+      # dev) by home.activation.deployLgtmTokens, where the nix-managed
+      # `lgtm-gh` wrapper reads them. The wrapper resolves the login from a
+      # worktree's .lgtm-reviewer and execs `gh` with GH_TOKEN set so a review
+      # posts under that identity. See lgtm:
+      # docs/plans/2026-04-30-multi-reviewer-identity-design.md and the
+      # workstation managing-secrets skill. Rotating a token: re-run
+      # `sops set secrets/cloudbox.yaml '["lgtm_token_<login>"]' '"<pat>"'`
+      # then a home-manager switch re-materializes the file.
+      lgtm_token_johnnymo87 = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      lgtm_token_Krosantos = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      lgtm_token_jamesvec = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Atlassian API token (for acli, nvim FetchJiraTicket/FetchConfluencePage)
       atlassian_api_token = {
         owner = "dev";
@@ -594,13 +620,18 @@ in
     # auto-appends `/bin` and `/sbin` when composing PATH. So pass
     # `/home/dev/.local` (NOT `/home/dev/.local/bin`) — it expands to
     # `/home/dev/.local/bin` and `/home/dev/.local/sbin`. Appended LAST
-    # so nix-managed binaries always win on name collisions (e.g. a
-    # misbehaving `gh` dropped in ~/.local/bin would not shadow the nix
-    # one). Required by the lgtm multi-reviewer feature: dispatched
-    # review sessions invoke `lgtm-gh` (a stub wrapper at
-    # ~/.local/bin/lgtm-gh until the production wrapper ships
-    # nix-managed) for state-changing GitHub operations. See lgtm:
-    # docs/plans/2026-04-30-multi-reviewer-identity-design.md.
+    # so nix-managed binaries always win on name collisions.
+    #
+    # `~/.local/bin` is KEPT (not the temporary lgtm-gh stub workaround it was
+    # originally added for in aafe051 — lgtm-gh now ships nix-managed to
+    # ~/.nix-profile/bin, already on this PATH via the /home/dev/.nix-profile
+    # entry). It stays because several user-bin tools are deployed there *only*
+    # (via home.file, never into the nix profile) and headless sessions running
+    # inside this serve legitimately invoke them — notably `opencode-send` and
+    # `pigeon-send` for swarm coordination, plus `oc-search`, `lgtm-sessions`,
+    # and `ba`. Removing it would silently ENOENT those from dispatched/launched
+    # sessions; keeping it just mirrors the interactive-shell PATH and is
+    # collision-safe (appended last). See workstation-4hm for the rationale.
     path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" "/home/dev/.local" ];
     serviceConfig = {
       Type = "simple";
