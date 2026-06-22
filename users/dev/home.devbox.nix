@@ -552,6 +552,13 @@ ${serveIdCase}
   # TeamClaude CLI on PATH so the interactive seed flow works:
   #   teamclaude login        # PKCE OAuth, one per Max account (needs TTY+browser)
   #   teamclaude accounts     # verify
+  #   teamclaude probe 90     # enable the proactive usage probe (reads
+  #                           # /api/oauth/usage every 90s; no quota spend). This
+  #                           # is what populates scoped weekly limits (Opus/Sonnet)
+  #                           # so the opus-aware failover routes proactively.
+  # NOTE: `probe` persists quotaProbeSeconds into the writable runtime config
+  # (~/.config/teamclaude.json), so it survives restarts but is LOST on a full
+  # reseed — re-run it as part of any from-scratch seed (alongside `login`).
   # Nix-packaged (pkgs/teamclaude) — pulled + installed by home-manager, no checkout.
   home.packages = [ localPkgs.teamclaude ];
 
