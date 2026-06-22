@@ -351,6 +351,39 @@ lib.mkIf isCloudbox {
     fi
   '';
 
+  # Materialize lgtm reviewer PATs from sops to the runtime location the
+  # nix-managed `lgtm-gh` wrapper (pkgs/lgtm-gh) reads. The wrapper does
+  # `cat ~/.config/lgtm/tokens/<login>.pat`, so decrypt the per-login sops
+  # secrets (system-decrypted to /run/secrets) into that dir as real files
+  # owned by dev, chmod 600, with the parent dir chmod 700 — exactly the
+  # layout the multi-reviewer design specifies. Mirrors deployDoltCreds; skips
+  # gracefully (no failure) when a secret hasn't been rendered yet (e.g. a
+  # home-manager switch before nixos-rebuild). See lgtm:
+  # docs/plans/2026-04-30-multi-reviewer-identity-design.md.
+  home.activation.deployLgtmTokens = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+    set -euo pipefail
+
+    tokens_dir="$HOME/.config/lgtm/tokens"
+    mkdir -p "$tokens_dir"
+    chmod 700 "$HOME/.config/lgtm" "$tokens_dir"
+
+    deployed=0
+    for login in johnnymo87 Krosantos jamesvec; do
+      secret="/run/secrets/lgtm_token_$login"
+      dest="$tokens_dir/$login.pat"
+      if [ ! -r "$secret" ]; then
+        echo "deployLgtmTokens: skipping $login (sops secret not available)"
+        continue
+      fi
+      tmp="$(mktemp "$tokens_dir/.$login.pat.XXXXXX")"
+      cat "$secret" > "$tmp"
+      chmod 600 "$tmp"
+      mv "$tmp" "$dest"
+      deployed=$((deployed + 1))
+    done
+    echo "deployLgtmTokens: $deployed lgtm reviewer token(s) deployed"
+  '';
+
   # Generate ensure-projects script from declarative manifest
   home.file.".local/bin/ensure-projects" = {
     executable = true;

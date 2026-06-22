@@ -58,6 +58,7 @@
       claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       gws = p.callPackage ./pkgs/gws { };
+      lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };

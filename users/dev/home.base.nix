@@ -298,6 +298,13 @@ in
     # Headless opencode session launcher
     localPkgs.opencode-launch
 
+    # Identity-resolving `gh` wrapper for lgtm's multi-reviewer feature.
+    # Dispatched review sessions invoke `lgtm-gh` (not `gh`) so the review
+    # posts under the reviewer identity lgtm wrote into .lgtm-reviewer; it
+    # resolves that login's PAT from ~/.config/lgtm/tokens/<login>.pat.
+    # Active on cloudbox (where lgtm runs); harmless elsewhere.
+    localPkgs.lgtm-gh
+
     # nvim wrapper with deterministic --listen socket (used by oc-auto-attach)
     localPkgs.nvims
 
