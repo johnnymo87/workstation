@@ -742,6 +742,14 @@ ${serveIdCase}
   # exits 1 ("No accounts configured") and Restart=always would crash-loop, so
   # accounts must exist before this unit is (re)started.
   #
+  # PROACTIVE PROBE (opus-aware scoped limits): the per-model scoped weekly-limit
+  # awareness only populates PROACTIVELY when the background quota probe is on
+  # (the reactive 429/SSE backstop is always armed). It is runtime opt-in and
+  # also NOT nix-managed (lives as quotaProbeSeconds in the same writable config).
+  # After seeding, enable it to match devbox:
+  #   TEAMCLAUDE_CONFIG=/home/dev/.config/teamclaude.json \
+  #     teamclaude probe 90   # reads /api/oauth/usage every 90s; spends NO quota
+  #
   # BIND + AUTH: index.js calls server.listen(port) with no host, so it binds
   # all interfaces (not 127.0.0.1 — the fork does not yet take a bind host).
   # Two backstops keep :3456 private: (1) cloudbox runs NO NixOS
