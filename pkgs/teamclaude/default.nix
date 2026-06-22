@@ -27,13 +27,13 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "0-unstable-2026-06-21"; # fork; bump per pinned commit
+  version = "0-unstable-2026-06-22"; # fork; bump per pinned commit
 
   src = fetchFromGitHub {
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "0aa05f0c96b66fe90ffa9c88575f95abbc028928";
-    hash = "sha256-WiBcWkGTcm9LB5o573qxhdkhheN6CCXdR5S2f3TmDS0=";
+    rev = "29173dcc93e3a16245355599016368cbbdcfe8be";
+    hash = "sha256-y5HZy05pc3QXKH7FDg4uPfgd8EGGjmrTvMf6eXgSPPM=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
