@@ -43,6 +43,11 @@ let
   # flake's localPkgs, so callPackage it directly here for the systemd service.
   claude-failover-proxy = pkgs.callPackage ../../pkgs/claude-failover-proxy { };
 
+  # teamclaude: the personal Claude Max rotator (johnnymo87/teamclaude fork,
+  # opus-aware). Same rationale as above — NixOS configs don't receive the
+  # flake's localPkgs, so callPackage pkgs/teamclaude directly for the service.
+  teamclaude = pkgs.callPackage ../../pkgs/teamclaude { };
+
   # mn9r M5: serve-pool descriptor (single source of truth in
   # users/dev/serve-pool.nix). cloudbox = K=4 on ports 4096..4099, serve-0 ==
   # :4096. routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB) and
@@ -724,8 +729,8 @@ ${serveIdCase}
 
   # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
   # router forwards to when work Claude-on-Vertex spend is over budget
-  # (8fe.15 PREREQ). Runs `@karpeleslab/teamclaude` (zero-dep Node) from the
-  # dev checkout at ~/projects/teamclaude (reconstructable via ensure-projects).
+  # (8fe.15 PREREQ). Runs the johnnymo87/teamclaude fork (opus-aware, zero-dep
+  # Node) from the nix package (pkgs/teamclaude), not a ~/projects checkout.
   #
   # CONFIG IS RUNTIME STATE, NOT NIX-MANAGED. TeamClaude reads + REWRITES
   # /home/dev/.config/teamclaude.json (OAuth access/refresh tokens auto-refresh
@@ -738,8 +743,8 @@ ${serveIdCase}
   # accounts must exist before this unit is (re)started.
   #
   # BIND + AUTH: index.js calls server.listen(port) with no host, so it binds
-  # all interfaces (not 127.0.0.1 — we can't pass a host without patching the
-  # checkout). Two backstops keep :3456 private: (1) cloudbox runs NO NixOS
+  # all interfaces (not 127.0.0.1 — the fork does not yet take a bind host).
+  # Two backstops keep :3456 private: (1) cloudbox runs NO NixOS
   # firewall and relies on GCP's default-deny ingress (3456 is not opened), and
   # (2) TeamClaude's own auth gate (server.js) requires x-api-key === the config
   # proxy.apiKey for any NON-localhost client. The router connects via
@@ -764,15 +769,11 @@ ${serveIdCase}
       ];
       ExecStart = "${pkgs.writeShellScript "teamclaude-start" ''
         set -euo pipefail
-        if [ ! -f /home/dev/projects/teamclaude/src/index.js ]; then
-          echo "teamclaude checkout missing at ~/projects/teamclaude (run ensure-projects)" >&2
-          exit 1
-        fi
         if [ ! -f /home/dev/.config/teamclaude.json ]; then
           echo "teamclaude config missing at ~/.config/teamclaude.json (seed + login first)" >&2
           exit 1
         fi
-        exec ${pkgs.nodejs}/bin/node /home/dev/projects/teamclaude/src/index.js server --headless
+        exec ${teamclaude}/bin/teamclaude server --headless
       ''}";
       Restart = "always";
       RestartSec = 10;
