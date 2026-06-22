@@ -101,6 +101,25 @@ table mapping hostnames to flake targets and rebuild commands; this env var
 is the primitive. Don't assume "devbox" — `cloudbox` and `devbox` are both
 NixOS hosts running on `dev@` and look identical from inside opencode.
 
+## Secrets in bash sessions
+
+opencode's bash tool runs **non-interactive** shells. `~/.bashrc` short-circuits
+on the interactive guard (`[[ $- == *i* ]] || return`), so the
+`programs.bash.initExtra` block in `users/dev/home.cloudbox.nix` — which exports
+the work tokens — never runs. To close that gap, the same `shell-env.ts` plugin
+reads the sops-decrypted `/run/secrets/*` files directly and injects them into
+every bash invocation (see `loadSecretEnv` in `shell-env.ts`). On cloudbox that means
+`JENKINS_API_TOKEN`, `JENKINS_USER`, `GH_TOKEN`, `GITHUB_API_TOKEN`, `BUNDLE_*`,
+`DD_API_KEY`/`DD_APP_KEY`, `BUILDBUDDY_*`, `BA_CLI_REPO`, `GOOGLE_CLOUD_PROJECT`,
+the Atlassian vars, etc. are all available in opencode bash sessions.
+
+The read is host-safe: where `/run/secrets/*` does not exist
+(devbox/crostini/macOS) each lookup returns `undefined` and nothing is injected.
+
+Note: `ba config syncsecrets` still must run from the Mac — even with
+`JENKINS_API_TOKEN` loaded, the Jenkins host is unreachable from cloudbox
+(behind the BA VPN / Mac-only network).
+
 ## Backgrounding Long-Running Processes
 
 A bare `nohup ... &` can die when the parent shell is interrupted. To fully
