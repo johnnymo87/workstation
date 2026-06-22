@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-L7sCT2ILGr96LEvwCOOoC9SBJ8aaZGRhrVUs6udwvn0=";
+      hash = "sha256-kOLhJi6WIf6rqtz6Mp+ui2tbsAAEy/S5WfGMy4D4iis=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-um+zEfXqLJY7rqoTCXNrC4ugM6cB5ZzpNweTgIXYbjY=";
+      hash = "sha256-h0SCd0O2oBpXet5Pf4/qTG4jPnlqMWsV6lc0jmCxBrY=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-M0aSRuLgP+NZqIPRJRLAujgTvH2wn+ZwTLxzGBYso5g=";
+      hash = "sha256-1/AevhW61585fr/0Frm1+OqKvW5pGzZdXikY3N+7I14=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-T19lIbRc123bXIdGrM0pPAdRiiqb4deb+6a4LuVnQKk=";
+      hash = "sha256-TY7I1vX3U/KlOkwEVuKo3XQhXCfvIrMGhARHazJsOBM=";
       isZip = true;
     };
   };
@@ -67,22 +67,25 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.1 (same upstream 1.17.7, re-released 2026-06-21 with
-    # the mn9r M3/M4 patches added — built via build-release.yml -f version=1.17.7
-    # -f revision=1, staying on the 1.17.7 hold line). The 9-patch set is:
+    # This pins v1.17.7-patched.2 (same upstream 1.17.7, re-released 2026-06-22 with
+    # the mn9r M7 attach patch added — built via build-release.yml -f version=1.17.7
+    # -f revision=2, staying on the 1.17.7 hold line). The 10-patch set is:
     # gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim,
     # sqlite-foreign-key-wrap, event-session-scope (#7, x8wi), createnext-readback
-    # (#8, mn9r M3), serve-lease (#9, mn9r M4). serve-lease adds serve-side session
-    # leases + the OPENCODE_ROUTING_DB/OPENCODE_SERVE_ID flags; the WHOLE feature is
-    # gated on OPENCODE_ROUTING_DB, so until M5 sets that env this binary is
-    # byte-behaviorally a no-op vs the old 5-patch build (M4 stays DORMANT).
+    # (#8, mn9r M3), serve-lease (#9, mn9r M4), attach-route-resolve (#10, mn9r M7,
+    # bead workstation-7zr7). serve-lease adds serve-side session leases + the
+    # OPENCODE_ROUTING_DB/OPENCODE_SERVE_ID flags; the WHOLE feature is gated on
+    # OPENCODE_ROUTING_DB, so until M5 sets that env it is byte-behaviorally a no-op.
+    # attach-route-resolve makes `opencode attach` pool-aware (self-resolve the
+    # owning serve via pigeon GET /route + reconnect on SSE drop); it only activates
+    # for `attach --session`, so default-TUI behavior is unchanged.
     # instance-state-partition.patch remains DROPPED (fixed upstream by 87c33b3).
     # NOTE: cloudbox is ~15-way multi-writer on the shared opencode.db, so a switch
     # that swaps the opencode binary should stop ALL opencode processes at once (serve
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "1";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "2";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
