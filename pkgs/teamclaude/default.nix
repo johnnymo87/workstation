@@ -1,39 +1,46 @@
-# teamclaude — @karpeleslab/teamclaude, a multi-account Claude Max proxy with
-# automatic quota-based rotation. Used on devbox as a local Anthropic-API proxy
+# teamclaude — a multi-account Claude Max proxy with automatic quota-based
+# rotation. Used on devbox/cloudbox as a local Anthropic-API proxy
 # (127.0.0.1:3456) that rotates across personal Claude Max accounts and injects
 # the active account's OAuth token.
 #
+# This builds the johnnymo87/teamclaude fork (branch opus-aware), which adds
+# per-model scoped weekly-limit awareness (Opus) with per-request model-aware
+# failover on the base-URL relay. See
+# docs/plans/2026-06-21-teamclaude-opus-aware-fork-*.
+#
 # Zero runtime dependencies (Node 18+ builtins only; verified: package.json has
 # no `dependencies`, and src/ has no bare imports). So packaging is just: fetch
-# the published npm tarball, vendor it into the store, and wrap `src/index.js`
-# with a pinned node. No node_modules, no bundler.
+# the fork source, vendor it into the store, and wrap `src/index.js` with a
+# pinned node. No node_modules, no bundler.
 #
-# To bump: change `version` and refresh `src.hash` via
-#   nix store prefetch-file --json \
-#     https://registry.npmjs.org/@karpeleslab/teamclaude/-/teamclaude-<ver>.tgz \
-#     | jq -r .hash
+# To bump: push a new commit to the fork, then update `rev` to its SHA and
+# refresh `src.hash` via
+#   nix store prefetch-file --json --unpack \
+#     https://github.com/johnnymo87/teamclaude/archive/<rev>.tar.gz | jq -r .hash
 {
   lib,
   stdenvNoCC,
-  fetchurl,
+  fetchFromGitHub,
   nodejs,
   makeWrapper,
 }:
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.0.7";
+  version = "0-unstable-2026-06-21"; # fork; bump per pinned commit
 
-  src = fetchurl {
-    url = "https://registry.npmjs.org/@karpeleslab/teamclaude/-/teamclaude-${version}.tgz";
-    hash = "sha256-fxugj/n8wlerh7GsjRSgmMZSOMT2ITVVqxQ8F9Cy16M=";
+  src = fetchFromGitHub {
+    owner = "johnnymo87";
+    repo = "teamclaude";
+    rev = "0aa05f0c96b66fe90ffa9c88575f95abbc028928";
+    hash = "sha256-WiBcWkGTcm9LB5o573qxhdkhheN6CCXdR5S2f3TmDS0=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # The npm tarball unpacks into ./package (stdenv sets sourceRoot there).
-  # ESM resolution needs the package's own package.json ("type":"module")
-  # alongside src/, so vendor the whole package, not just src/.
+  # fetchFromGitHub unpacks to the repo root (not ./package as the npm tarball
+  # did), so src/ and package.json ("type":"module", needed for ESM resolution)
+  # are already at the top level — vendor the whole tree.
   installPhase = ''
     runHook preInstall
 
