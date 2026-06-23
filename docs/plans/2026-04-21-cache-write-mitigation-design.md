@@ -61,6 +61,23 @@ The 5m vs 1h trade-off (per Anthropic pricing):
 
 Cloudbox primary sessions average **23 hours** in duration — they will see *many* 5m–1h gaps per session.
 
+> ⚠️ **Gateway coupling — the 1h TTL silently no-ops on the Vertex leg today.**
+> On cloudbox, `google-vertex-anthropic` traffic is routed through the
+> claude-failover-proxy → **aigateway** → Vertex. aigateway's
+> `VERTEX_INCOMPATIBLE_BETA_HEADERS` (in `ProxyController.kt`) **strips the
+> `extended-cache-ttl-2025-04-11` `anthropic-beta`** because Vertex rejects it.
+> That beta is what *enables* the 1h tier, so a `cache_control: { ttl: "1h" }`
+> marker emitted by Change 1 would ride along on the Vertex leg with its enabling
+> beta removed at the gateway — Anthropic-on-Vertex then ignores/downgrades it to
+> 5m (or 400s), so the 1h benefit is **silently lost on Vertex** while still
+> applying on the first-party/Max (TeamClaude) leg. Before/while shipping this:
+> 1. Either **stop stripping the beta for Vertex** — only if Vertex has since
+>    added support; verify with a `rawPredict` probe first.
+> 2. Or **scope the `ttl: "1h"` marker to the first-party/Max leg only** and keep
+>    5m on the Vertex leg.
+> See the `operating-aigateway` skill (Gotchas) and bead
+> `claude-failover-proxy-rtq` (2026-06-20 caching audit).
+
 #### Change 2: Replace tail-shift selection with stable-boundary anchor
 
 **File:** `packages/opencode/src/provider/transform.ts` (in patch around line 1187)
@@ -207,6 +224,7 @@ A meaningful win would be primary session cache-write spend dropping by **at lea
 | `@ai-sdk/anthropic@3.0.71` doesn't accept `ttl: "1h"` (ChatGPT verified mainline; pinned version is older) | Low-medium | Quick test: send a single request with the new marker shape and inspect the SDK's emitted JSON via debug logging or a test against the SDK's `convertToAnthropicMessagesPrompt`. If broken, fall back to no `ttl` field everywhere (Change 1 reverts; Changes 2+3 still help). |
 | Anchoring on last user message during tool loops misses caching opportunities for very long single-turn tool sequences | Medium | Acceptable: even with the anchor frozen on the user message, the tools+system markers (still 1h-cached) cover the bulk of token volume. The mutating tail just isn't cached, which is also true today. |
 | User has Anthropic's 1h cache disabled on their account or plan | Very low | Anthropic enables 1h ephemeral by default for all paid Claude API accounts. If denied, Anthropic returns a 400 with a clear error message — easy to spot in opencode logs. |
+| aigateway strips the `extended-cache-ttl-2025-04-11` beta on the Vertex leg, so `ttl: "1h"` silently downgrades to 5m there (cloudbox routes Vertex traffic through cfp→aigateway) | **Certain today** | See the "Gateway coupling" callout under Change 1 and the `operating-aigateway` Gotchas. Resolve before relying on 1h on Vertex: unstrip the beta (only if Vertex now supports it — `rawPredict` probe) or scope the 1h marker to the first-party/Max leg. Bead `claude-failover-proxy-rtq`. |
 | Patch conflicts with upstream changes when next regenerating against newer `sst/opencode` | Medium | Standard cost of carrying a fork patch. The existing patch already absorbs PR #5422; adding ~30 lines on top doesn't materially increase merge burden. |
 | Subagent (short, ~3.4 min) sessions don't benefit much from 1h TTL | Already known | They were 23% of cost anyway. The real target is primary sessions (77% of cost) which average 23 hours. |
 
