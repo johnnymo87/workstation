@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-uu96FLHnjWFREOsbW55yyvoUQIii5Op89YxaRPHNL7Y=";
+      hash = "sha256-YEmYb1awnSd+ngXjfYWFZxchQnNNZLa/0ls2EbEaYvs=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-tyqlyOrbfIymrRpTYeeeXD+V+fhNkOG4pqb4iTbdO9w=";
+      hash = "sha256-cC3mOSc+4LypDBBWjNUm2r+XULR82QXyie/NUw+qjAI=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-1sO9npdrFCVyCbLOCumqrSr/OzPHW+5td8Q0f5GbwcE=";
+      hash = "sha256-U/WG8ynENqNvycvstz+lyZ/Qud48MRNr/B/EPXItiOs=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-aP38BTmsDaE6bh9ZNP7vYRse8xXdnfHtNHytJtBTfWU=";
+      hash = "sha256-0LNS/9X/hUgVJBnR36KR+aK/SNvSVxMypQlciiV/jNs=";
       isZip = true;
     };
   };
@@ -67,9 +67,14 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.3 (same upstream 1.17.7, re-released 2026-06-22 with
-    # the yl00 cold-start /event fix added — built via build-release.yml -f version=1.17.7
-    # -f revision=3, staying on the 1.17.7 hold line). The 11-patch set is:
+    # This pins v1.17.7-patched.4 (same upstream 1.17.7, re-released 2026-06-23 with
+    # serve-lease Fix C+D added — built via build-release.yml -f version=1.17.7
+    # -f revision=4, staying on the 1.17.7 hold line). Fix C (bead workstation-uzig)
+    # moves the serve self-heartbeat OFF the agent event loop onto a worker_threads
+    # Worker so a CPU-heavy turn can't starve it -> no false dead-serve / "session
+    # lease lost mid-run". Fix D (bead workstation-oqa1) re-acquires on a benign
+    # owner_generation bump instead of dying. Both live inside serve-lease.patch;
+    # compiled-binary smoke-tested (mode=worker, heartbeat advances). The 11-patch set is:
     # gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim,
     # sqlite-foreign-key-wrap, event-session-scope (#7, x8wi), createnext-readback
     # (#8, mn9r M3), serve-lease (#9, mn9r M4), attach-route-resolve (#10, mn9r M7,
@@ -89,7 +94,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "4";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
