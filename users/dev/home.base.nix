@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-YEmYb1awnSd+ngXjfYWFZxchQnNNZLa/0ls2EbEaYvs=";
+      hash = "sha256-T6H06YHtaOq/SQAzYhMr3+5z9hxSyyhx0eBjrM4S9QQ=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-cC3mOSc+4LypDBBWjNUm2r+XULR82QXyie/NUw+qjAI=";
+      hash = "sha256-KId7jtNNkYl+GnhaTU6pHD8myUGWcPQB6zcEdvZxRUw=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-U/WG8ynENqNvycvstz+lyZ/Qud48MRNr/B/EPXItiOs=";
+      hash = "sha256-8Q7KFvdkiBlsh1rcTwoOwEZ2inMNX5VD/zzhtvRmgd0=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-0LNS/9X/hUgVJBnR36KR+aK/SNvSVxMypQlciiV/jNs=";
+      hash = "sha256-+7Lm19RpkGrElUS+8olkmpg5hb68B8W+6i0NhlLIy0s=";
       isZip = true;
     };
   };
@@ -67,21 +67,33 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.4 (same upstream 1.17.7, re-released 2026-06-23 with
-    # serve-lease Fix C+D added — built via build-release.yml -f version=1.17.7
-    # -f revision=4, staying on the 1.17.7 hold line). Fix C (bead workstation-uzig)
-    # moves the serve self-heartbeat OFF the agent event loop onto a worker_threads
-    # Worker so a CPU-heavy turn can't starve it -> no false dead-serve / "session
-    # lease lost mid-run". Fix D (bead workstation-oqa1) re-acquires on a benign
-    # owner_generation bump instead of dying. Both live inside serve-lease.patch;
-    # compiled-binary smoke-tested (mode=worker, heartbeat advances). The 11-patch set is:
+    # This pins v1.17.7-patched.5 (same upstream 1.17.7, re-released 2026-06-23 with
+    # project-copy-debounce added on top of patched.4 — built via build-release.yml
+    # -f version=1.17.7 -f revision=5, staying on the 1.17.7 hold line). patched.5
+    # adds #12 project-copy-debounce (bead workstation-sqd5): tames the 1.17.x
+    # reconnect-storm wedge. ProjectCopy.refreshAfterBoot runs once per location
+    # boot; a reconnect/poll storm fired N concurrent refreshes for the SAME
+    # projectID, each with unbounded-concurrency fs.isDir + a `git worktree list`
+    # subprocess per source dir (one refresh touched 136 dirs), blocking the Bun
+    # event loop (RSS ~19.6 GB, HTTP wedge — serve-0 pinned >100% CPU, Recv-Q
+    # climbing, GET /session timing out). Fix in packages/core/src/project/copy.ts:
+    # a module-scope single-flight Map<projectID,Deferred> coalesces concurrent
+    # refreshes per projectID (each location boot builds a FRESH Service via
+    # LayerMap+Layer.fresh, so the dedup MUST be module-level), and
+    # concurrency:"unbounded" -> REFRESH_CONCURRENCY=4 at both fan-out sites.
+    # patched.4 carried serve-lease Fix C+D: Fix C (bead workstation-uzig) moves the
+    # serve self-heartbeat OFF the agent event loop onto a worker_threads Worker so a
+    # CPU-heavy turn can't starve it -> no false dead-serve / "session lease lost
+    # mid-run"; Fix D (bead workstation-oqa1) re-acquires on a benign owner_generation
+    # bump instead of dying. Both live inside serve-lease.patch. The 12-patch set is:
     # gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim,
     # sqlite-foreign-key-wrap, event-session-scope (#7, x8wi), createnext-readback
     # (#8, mn9r M3), serve-lease (#9, mn9r M4), attach-route-resolve (#10, mn9r M7,
     # bead workstation-7zr7), event-cold-start-directory (#11, bead workstation-yl00 —
     # ?session_ids= gates session-scoped /event delivery on session-aggregate
     # membership instead of an exact-string directory match, fixing the cold-start
-    # live-delivery race where an attached TUI missed pigeon-injected turns).
+    # live-delivery race where an attached TUI missed pigeon-injected turns),
+    # project-copy-debounce (#12, bead workstation-sqd5, above).
     # serve-lease adds serve-side session leases + the
     # OPENCODE_ROUTING_DB/OPENCODE_SERVE_ID flags; the WHOLE feature is gated on
     # OPENCODE_ROUTING_DB, so until M5 sets that env it is byte-behaviorally a no-op.
@@ -94,7 +106,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "4";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "5";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
