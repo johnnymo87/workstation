@@ -269,6 +269,17 @@ in
         "PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}"
         "PIGEON_SERVE_LIVENESS=self"
         "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
+        # workstation-debug: widen the heartbeat-staleness window before a serve
+        # is flagged "dead". opencode serve is single-threaded; a CPU-heavy turn
+        # (or GC/swap stall) blocks its event loop and starves the 5s heartbeat
+        # fiber, so the default 15s falsely declares a live, busy serve dead and
+        # ServeHealthPoller.sweepStale → reassignFromDeadServe migrates its
+        # sessions (churn + historically killed in-flight runs). The real fix is
+        # pigeon-side (reassignFromDeadServe now skips sessions whose lease is
+        # still valid); this is defense-in-depth churn reduction. CEILING: keep
+        # <= serveLeaseTtl(30s) − serveRenewInterval(10s) = 20s, else a dead serve
+        # can linger in listHealthy past its lease expiry and get re-picked.
+        "PIGEON_SERVE_STALE_MS=20000"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
