@@ -41,9 +41,28 @@ Key files:
 - **Deployed: devbox only.** `nixos-rebuild switch` done; pigeon-daemon PID
   2899087, env live, validated (a real serve-1 false-death event occurred with
   zero gen inflation and zero lease-lost stops).
+- **Fix C (opencode-patched, main `13f79a8`, bead workstation-uzig): DONE,
+  built, pinned — awaiting only the devbox `home-manager switch`.** Serve self-
+  heartbeat moved off the agent event loop onto a `node:worker_threads` Worker
+  (inline blob, static `import {Database} from "bun:sqlite"`, own DB handle +
+  `busy_timeout`) in `packages/opencode/src/serve/heartbeat.ts`; first-beat
+  handshake + main-thread fallback (degrades to pre-Fix-C behavior, never to no
+  heartbeat); worker terminated before `markDead` (LIFO finalizers). New flags
+  `OPENCODE_HEARTBEAT_INTERVAL_MS` (prod tunable, default 5000) +
+  `OPENCODE_TEST_BLOCK_MAIN_LOOP_MS` / `OPENCODE_TEST_FORCE_HEARTBEAT_FALLBACK`
+  (test-only). RED→GREEN + fallback tests in serve-process.test.ts (5/5 pass);
+  typecheck clean (only pre-existing session.ts:944). Patch regenerated +
+  byte-identical via full apply.sh stack. **Built into `v1.17.7-patched.4`
+  (with Fix D); compiled linux-arm64 binary smoke-tested headless → logged
+  `mode=worker`, heartbeat_at advanced 2506ms/2.5s.** Pin bumped in
+  `users/dev/home.base.nix` (workstation `2232668`, all 4 hashes; arm64 fetchurl
+  verified). **REMAINING: `nix run home-manager -- switch --flake .#dev` on
+  devbox from a PLAIN SSH SHELL (not inside opencode — the switch swaps the
+  binary + restarts the serve pool and would kill the in-session serve), then
+  restart serves so the new binary runs.**
 - **Fix D (opencode-patched, main `9c59d8b`, bead workstation-oqa1):** DONE in
-  source + patch, TDD'd RED→GREEN, pushed. NOT yet built/deployed (still on
-  release `v1.17.7-patched.3`). `withSessionLease` renewal fiber now re-acquires
+  source + patch, TDD'd RED→GREEN, pushed. Built into `v1.17.7-patched.4`
+  together with Fix C (above). Deploys with the same switch. `withSessionLease` renewal fiber now re-acquires
   (rotating the lease token via a `Ref`) on a failed renew when the assignment
   still points at this serve; only a genuine reassignment to a *different* serve
   dies "session lease lost mid-run". Release finalizer releases the currently-held
