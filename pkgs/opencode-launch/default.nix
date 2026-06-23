@@ -14,8 +14,8 @@ pkgs.writeShellApplication {
       # processes don't share an in-memory event bus, MCP connections, or active
       # agent loop, so a session's prompt + MCP tools must go to the serve that
       # OWNS (runs) it. After we create the session we ask pigeon's
-      # GET /route?session_id which serve that is. Default matches
-      # opencode-send / oc-auto-attach convention.
+      # GET /route?session_id which serve that is. Default matches the
+      # oc-auto-attach convention.
       PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
 
       # parse_serve_url <route-json-body> <fallback-url>

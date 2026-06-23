@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Unit + source-guard tests for the mn9r M7 pool-aware /route migration of the
-# two inline home.base.nix clients: lgtm-sessions (attach hint) and
-# opencode-send (health-gate ordering + stale comment).
+# lgtm-sessions inline home.base.nix client (attach hint).
+#
+# (opencode-send was removed — swarm messaging now uses the swarm_send/
+# swarm_read/swarm_list plugin tools — so its source guards are gone.)
 #
 # Mirrors the pure parse_serve_url helper and exercises it directly, then
 # greps users/dev/home.base.nix so a source-level regression trips before
@@ -71,31 +73,5 @@ want_grep "lgtm-sessions honors PIGEON_DAEMON_URL"         'PIGEON_DAEMON_URL'  
 want_grep "lgtm-sessions queries pigeon /route"            '/route?session_id=$sid'              "$hb"
 want_grep "lgtm-sessions attach hint uses resolved serve"  'opencode attach $serve_url --session $sid' "$hb"
 deny_grep "lgtm-sessions drops the hardwired generic hint" 'opencode attach $OPENCODE_URL --session <ID>' "$hb"
-
-# opencode-send: the up-front serve-0 health gate must NOT block the pigeon
-# path. Health check is factored into a helper called only on the paths that
-# actually talk to $OPENCODE_URL (list + direct send). The pigeon route must
-# precede the direct-path health gate in source order.
-want_grep "opencode-send factors serve reachability into a helper" 'require_serve_reachable() {' "$hb"
-want_grep "opencode-send still routes ses_* via pigeon"            'exec pigeon-send'             "$hb"
-deny_grep "opencode-send drops stale 'bypasses pigeon' claim"      'Bypasses the pigeon daemon entirely' "$hb"
-
-# Ordering guard for the actual bug: on the direct send path the reachability
-# gate is tagged with a unique marker; it MUST come after the pigeon route so
-# that a ses_* + pigeon-up send never trips the serve-0 gate.
-if grep -qF -- 'DIRECT-PATH-SERVE-GATE' "$hb"; then
-  pigeon_line="$(grep -nF -- 'exec pigeon-send' "$hb" | head -1 | cut -d: -f1)"
-  gate_line="$(grep -nF -- 'DIRECT-PATH-SERVE-GATE' "$hb" | head -1 | cut -d: -f1)"
-  if [ -n "$pigeon_line" ] && [ -n "$gate_line" ] && [ "$pigeon_line" -lt "$gate_line" ]; then
-    echo "ok: opencode-send pigeon route precedes the direct-path serve gate"
-  else
-    echo "FAIL: opencode-send direct-path serve gate must come after the pigeon route"
-    echo "  exec pigeon-send line: ${pigeon_line:-none}; DIRECT-PATH-SERVE-GATE line: ${gate_line:-none}"
-    fail=1
-  fi
-else
-  echo "FAIL: opencode-send direct-path serve gate marker (DIRECT-PATH-SERVE-GATE) not found"
-  fail=1
-fi
 
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }

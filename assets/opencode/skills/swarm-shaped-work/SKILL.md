@@ -98,7 +98,7 @@ endpoints for X.
 Coordinator: ses_<coordinator-id>
 Other workers: FE=ses_<fe-id>, protos=ses_<protos-id>
 
-When your API is deployed, send `pigeon-send --kind status.update ses_<fe-id> "API live at /v2/foo"` so the FE can proceed.
+When your API is deployed, use the `swarm_send` tool (to=ses_<fe-id>, kind=status.update, message="API live at /v2/foo") so the FE can proceed.
 
 Plan: ...
 PROMPT
@@ -109,35 +109,36 @@ Capture each worker's session id.
 
 ### 4. Tell the coordinator the worker ids
 
-After launches, send the worker ids to the coordinator so it can name them in its mental model:
+After launches, send the worker ids to the coordinator so it can name them in its mental model. From your planning session, call the `swarm_send` tool (to=ses_<coordinator-id>) with a message like:
 
-```bash
-pigeon-send ses_<coordinator-id> "Workers spawned:
+```
+Workers spawned:
 - BE:     ses_<be-id>
 - FE:     ses_<fe-id>
 - protos: ses_<protos-id>
-- dbt:    ses_<dbt-id>"
+- dbt:    ses_<dbt-id>
 ```
 
 ### 5. Kick off the work
 
 Either:
-- Tell the coordinator to begin orchestrating ("the swarm is live; please plan and dispatch initial assignments via `pigeon-send --kind task.assign`"), OR
+- Tell the coordinator to begin orchestrating ("the swarm is live; please plan and dispatch initial assignments with the `swarm_send` tool, kind=task.assign"), OR
 - Tell each worker to begin its slice directly ("you may now start; report status to the coordinator").
 
 The first style centralizes orchestration; the second parallelizes earlier. Pick based on how much the coordinator needs to gate vs. just observe.
 
 ## Communication Patterns
 
-Once the swarm is live, all cross-session messaging goes through `pigeon-send` (or `opencode-send` which auto-routes for `ses_*` targets — see `opencode-send` and `swarm-messaging` skills).
+Once the swarm is live, all cross-session messaging goes through the `swarm_send` tool (see the `swarm-messaging` skill for the full protocol). `from` is filled in automatically from the calling session.
 
-Useful conventions:
+Useful conventions (all are `swarm_send` calls):
 
-- **Coordinator broadcasts assignments**: `pigeon-send --kind task.assign --priority urgent ses_<worker> "..."`.
-- **Workers report status to coordinator**: `pigeon-send --kind status.update ses_<coordinator> "Done with <X>; PR at <url>"`.
-- **Workers coordinate directly**: `pigeon-send --kind status.update ses_<peer-worker> "API deployed"` — no need to bounce off the coordinator if only the peer needs to know.
-- **Threading replies**: `pigeon-send --reply-to <their-msg-id> ...` so receivers can follow conversation chains.
-- **Backlog / replay**: receivers can call the `swarm_read` opencode tool to fetch their inbox if they suspect they missed a message.
+- **Coordinator broadcasts assignments**: `to=ses_<worker>, kind=task.assign, priority=urgent, message="..."`.
+- **Workers report status to coordinator**: `to=ses_<coordinator>, kind=status.update, message="Done with <X>; PR at <url>"`.
+- **Workers coordinate directly**: `to=ses_<peer-worker>, kind=status.update, message="API deployed"` — no need to bounce off the coordinator if only the peer needs to know.
+- **Threading replies**: set `reply_to=<their-msg-id>` so receivers can follow conversation chains.
+- **Discovery**: don't have a peer's id? Call `swarm_list`.
+- **Backlog / replay**: receivers can call `swarm_read` to fetch their inbox if they suspect they missed a message.
 
 ## Tear-Down
 
@@ -168,6 +169,5 @@ Old swarm messages stay in the daemon's `swarm_messages` table. They aren't auto
 ## See Also
 
 - [`opencode-launch`](../opencode-launch/SKILL.md) — spawn headless sessions.
-- [`opencode-send`](../opencode-send/SKILL.md) — sender CLI (auto-routes through pigeon).
-- [`swarm-messaging`](../swarm-messaging/SKILL.md) — sender + receiver protocol; envelope format; kinds; replay via `swarm_read`.
+- [`swarm-messaging`](../swarm-messaging/SKILL.md) — sender + receiver protocol; the `swarm_send`/`swarm_read`/`swarm_list` tools; envelope format; kinds; replay.
 - pigeon repo `swarm-architecture` / `swarm-operations` skills — daemon internals if you need to debug delivery.

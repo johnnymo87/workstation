@@ -31,7 +31,7 @@ pkgs.writeShellApplication {
     # processes do NOT share an in-memory event bus, so a session's turns are
     # only streamed by the serve that actually runs its agent loop. Pigeon's
     # GET /route?session_id=<sid> reports the owning serve; we attach the TUI
-    # there. Default matches opencode-send's PIGEON_DAEMON_URL convention.
+    # there. Default matches the standard PIGEON_DAEMON_URL convention (4731).
     PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
 
     log() {

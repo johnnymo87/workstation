@@ -22,7 +22,6 @@ let
     "preparing-for-compaction"
     "reviewing-github-prs"
     "searching-sessions"
-    "opencode-send"
     "swarm-messaging"
     "swarm-shaped-work"
     "understanding-workspace-reset"

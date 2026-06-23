@@ -108,7 +108,7 @@ opencode-launch --mcp pagerduty \
 
 Add `--mcp rollbar` to the same launch for the full paged-about-Rollbar flow.
 (Note: `--mcp` enables tools for that launch prompt's agent loop; a later
-`opencode-send` to the same session is not covered.)
+`swarm_send` into the same session is not covered.)
 
 ### Global enable (only on an all-Claude host, or if no Gemini session is running)
 

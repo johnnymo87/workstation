@@ -65,8 +65,8 @@ Key caveats:
   workers.
 - **Per-message scope.** The `tools` override applies to the launch prompt's full
   agent loop (multi-step tool use within that turn works). A *later, separate*
-  prompt to the same session (e.g. via `opencode-send`) is **not** covered and
-  would need its own enablement.
+  prompt to the same session (e.g. via a `swarm_send` from another session) is
+  **not** covered and would need its own enablement.
 
 ## Auto-Attach to nvim+tmux
 

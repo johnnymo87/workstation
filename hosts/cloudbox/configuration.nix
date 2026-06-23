@@ -637,10 +637,11 @@ in
     # originally added for in aafe051 — lgtm-gh now ships nix-managed to
     # ~/.nix-profile/bin, already on this PATH via the /home/dev/.nix-profile
     # entry). It stays because several user-bin tools are deployed there *only*
-    # (via home.file, never into the nix profile) and headless sessions running
-    # inside this serve legitimately invoke them — notably `opencode-send` and
-    # `pigeon-send` for swarm coordination, plus `oc-search`, `lgtm-sessions`,
-    # and `ba`. Removing it would silently ENOENT those from dispatched/launched
+     # (via home.file, never into the nix profile) and headless sessions running
+     # inside this serve legitimately invoke them — notably `oc-search`,
+     # `lgtm-sessions`, and `ba`. (Swarm messaging no longer uses CLIs: it goes
+     # through the swarm_send/swarm_read/swarm_list plugin tools.) Removing it
+     # would silently ENOENT those from dispatched/launched
     # sessions; keeping it just mirrors the interactive-shell PATH and is
     # collision-safe (appended last). See workstation-4hm for the rationale.
     path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" "/home/dev/.local" ];
