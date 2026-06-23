@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-kOLhJi6WIf6rqtz6Mp+ui2tbsAAEy/S5WfGMy4D4iis=";
+      hash = "sha256-uu96FLHnjWFREOsbW55yyvoUQIii5Op89YxaRPHNL7Y=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-h0SCd0O2oBpXet5Pf4/qTG4jPnlqMWsV6lc0jmCxBrY=";
+      hash = "sha256-tyqlyOrbfIymrRpTYeeeXD+V+fhNkOG4pqb4iTbdO9w=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-1/AevhW61585fr/0Frm1+OqKvW5pGzZdXikY3N+7I14=";
+      hash = "sha256-1sO9npdrFCVyCbLOCumqrSr/OzPHW+5td8Q0f5GbwcE=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-TY7I1vX3U/KlOkwEVuKo3XQhXCfvIrMGhARHazJsOBM=";
+      hash = "sha256-aP38BTmsDaE6bh9ZNP7vYRse8xXdnfHtNHytJtBTfWU=";
       isZip = true;
     };
   };
@@ -67,13 +67,17 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.2 (same upstream 1.17.7, re-released 2026-06-22 with
-    # the mn9r M7 attach patch added — built via build-release.yml -f version=1.17.7
-    # -f revision=2, staying on the 1.17.7 hold line). The 10-patch set is:
+    # This pins v1.17.7-patched.3 (same upstream 1.17.7, re-released 2026-06-22 with
+    # the yl00 cold-start /event fix added — built via build-release.yml -f version=1.17.7
+    # -f revision=3, staying on the 1.17.7 hold line). The 11-patch set is:
     # gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim,
     # sqlite-foreign-key-wrap, event-session-scope (#7, x8wi), createnext-readback
     # (#8, mn9r M3), serve-lease (#9, mn9r M4), attach-route-resolve (#10, mn9r M7,
-    # bead workstation-7zr7). serve-lease adds serve-side session leases + the
+    # bead workstation-7zr7), event-cold-start-directory (#11, bead workstation-yl00 —
+    # ?session_ids= gates session-scoped /event delivery on session-aggregate
+    # membership instead of an exact-string directory match, fixing the cold-start
+    # live-delivery race where an attached TUI missed pigeon-injected turns).
+    # serve-lease adds serve-side session leases + the
     # OPENCODE_ROUTING_DB/OPENCODE_SERVE_ID flags; the WHOLE feature is gated on
     # OPENCODE_ROUTING_DB, so until M5 sets that env it is byte-behaviorally a no-op.
     # attach-route-resolve makes `opencode attach` pool-aware (self-resolve the
@@ -85,7 +89,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "2";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
