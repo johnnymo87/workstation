@@ -126,3 +126,14 @@ sudo systemctl stop aigateway.service && home-manager switch --flake .#cloudbox
 - Migrations follow the `flyway-timestamp-migrations` convention (14-digit UTC
   version). The ledger CHECK constraint allows tokens-without-dollars but forbids
   dollars-without-tokens.
+- **1h-cache-TTL coupling:** `ProxyController.kt`'s `VERTEX_INCOMPATIBLE_BETA_HEADERS`
+  strips the `extended-cache-ttl-2025-04-11` `anthropic-beta` because Vertex
+  rejects it. Correct today (caching is flat 5m ephemeral), but it means a future
+  move to **1h cache TTL would silently no-op on the Vertex leg**: a
+  `cache_control: { ttl: "1h" }` rides along while the enabling beta is stripped
+  here, so Anthropic-on-Vertex downgrades it to 5m (or 400s). If 1h TTL is ever
+  reintroduced (see `docs/plans/2026-04-21-cache-write-mitigation-design.md`),
+  revisit this filter: either stop stripping the beta for Vertex (only if Vertex
+  has since added support — verify with a `rawPredict` probe) or scope the 1h
+  marker to the first-party/Max (TeamClaude) leg only. Bead
+  `claude-failover-proxy-rtq` (2026-06-20 caching audit).
