@@ -1083,6 +1083,13 @@ ${serveIdCase}
   };
   systemd.services.nix-daemon.serviceConfig.EnvironmentFile =
     [ "-${config.sops.templates."nix-daemon-github-token".path}" ];
+  # BOOTSTRAP CAVEAT (workstation-dl71): a switch BUILDS before it ACTIVATES, so
+  # the FIRST switch that adds/changes this token builds any fresh private cfp
+  # FOD under the still-token-less daemon -> HTTP 404 (restartUnits bounces the
+  # daemon only AFTER the build). This is one-time per token change, not a
+  # recurring failure. Recovery if a future cfp bump 404s on the fetch:
+  # `sudo systemctl restart nix-daemon` (re-reads this EnvironmentFile), then
+  # re-run the switch. Do NOT reach for `nix-store --add-fixed`.
 
   # Garbage collection
   nix.gc = {
