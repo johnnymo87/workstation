@@ -92,6 +92,46 @@ pkgs.writeShellApplication {
       fi
     }
 
+    # classify_session_probe <http_code> <body>
+    #
+    # Decide what the Step 1 readiness loop should do with ONE
+    # `GET /session/<id>` result. Prints exactly one line:
+    #
+    #   FOUND <directory>  200 with a non-empty .directory -> attach can proceed.
+    #   MISS               404: the session is absent from the shared
+    #                      opencode.db. Every serve in the K-serve pool reads
+    #                      that one DB, so a 404 from the routed owner is
+    #                      CONCLUSIVE -- waiting cannot make it appear. The loop
+    #                      gives up fast (after a short grace for the
+    #                      launch-commit race) instead of burning the whole 30s
+    #                      window on a phantom sid (workstation-ovqu).
+    #   WAIT               anything else -- empty/000 (connection refused, or a
+    #                      --max-time abort while the event loop is wedged), 5xx,
+    #                      or 200 without a directory yet -- a TRANSIENT
+    #                      condition; keep polling through the full timeout.
+    #
+    # Pure (no network): the caller does the curl and hands code+body in, which
+    # keeps this unit-testable in test-project-key.sh (kept in lockstep by the
+    # source-grep guard there).
+    classify_session_probe() {
+      local code="$1" body="$2" dir
+      if [ "$code" = "200" ]; then
+        dir="$(printf '%s' "$body" | jq -r '.directory // empty' 2>/dev/null || true)"
+        if [ -n "$dir" ] && [ "$dir" != "null" ]; then
+          printf 'FOUND %s\n' "$dir"
+          return 0
+        fi
+        printf 'WAIT\n'
+        return 0
+      fi
+      if [ "$code" = "404" ]; then
+        printf 'MISS\n'
+        return 0
+      fi
+      printf 'WAIT\n'
+      return 0
+    }
+
     # list_session_panes <session-name>
     #
     # Emit "pane_id|pane_current_command|pane_current_path" for every pane in
@@ -221,41 +261,76 @@ pkgs.writeShellApplication {
     # the loop frees -- even though the session exists. A tight 5s window
     # made the launcher (and manual re-runs) intermittently log "not ready"
     # for perfectly healthy sessions; 5-15s stalls were observed live.
+    #
+    # BUT a stall and a genuinely-absent session look DIFFERENT on the wire,
+    # and we must not treat them the same. A stall returns no HTTP response
+    # (curl --max-time abort -> http_code 000); a deleted/never-existed
+    # session returns a real HTTP 404. Because every serve in the K-serve pool
+    # reads ONE shared opencode.db, a 404 from the routed owner is CONCLUSIVE
+    # -- no amount of waiting makes the session appear. So we classify each
+    # probe (classify_session_probe) and give up FAST on a definitive 404
+    # (after OC_AA_404_GRACE_SECS of grace for the launch-commit race), while
+    # still polling the full 30s through transient 000/5xx stalls. Pre-fix this
+    # loop swallowed the 404 with `curl -sf ... || true` and hung the whole 30s
+    # on phantom sids -- e.g. a manual attach of a stale id (workstation-ovqu).
     session_dir=""
+    probe_rc=0
+    probe_body_file="$(mktemp)"
+    # classify_session_probe is consumed inside the timeout subshell below;
+    # export it so the fresh `bash -c` inherits it via the environment.
+    export -f classify_session_probe
     # shellcheck disable=SC2016
-    if ! session_dir="$(timeout 30 bash -c '
+    session_dir="$(timeout 30 bash -c '
       sid="$1"
       url="$2"
-      # Pace the loop with a fractional `sleep` so we re-probe ~5x/sec
-      # without busy-spinning curl -- the worst thing to do while the
-      # server is already slow under load. We previously used a held-open
-      # process-substitution pipe on fd 9 (`exec 9<> <(:)` + `read -t`) to
-      # stay sleep-free, but macOS/Darwin rejects reopening that pipe via
-      # /dev/fd/N in read-write mode (EACCES "Permission denied") on every
-      # bash version, leaving fd 9 unopened and the loop busy-spinning. A
-      # plain fractional `sleep` is portable (coreutils sleep is a
-      # runtimeInput) and does the same pacing on Linux and macOS.
+      bodyf="$3"
+      grace="''${OC_AA_404_GRACE_SECS:-3}"
+      # When the current run of consecutive 404s began (-1 = no active run).
+      miss_since=-1
+      # Pace the loop with a fractional `sleep` so we re-probe ~5x/sec without
+      # busy-spinning curl -- the worst thing to do while the server is already
+      # slow under load. (A plain fractional `sleep` is portable: coreutils
+      # sleep is a runtimeInput, and it paces the same on Linux and macOS,
+      # unlike the fd-9 process-substitution pipe trick we used to use, which
+      # Darwin rejects with EACCES.)
       while :; do
-        # --connect-timeout fails fast if serve is not listening yet;
-        # --max-time caps a single hung request so a stalled event loop
-        # cannot consume the whole 30s window -- we cut at 3s and re-probe,
-        # catching the loop the instant it frees (responses are near-instant
-        # once unblocked).
-        body="$(curl -sf --connect-timeout 2 --max-time 3 "$url/session/$sid" 2>/dev/null || true)"
-        dir="$(printf "%s" "$body" | jq -r ".directory // empty" 2>/dev/null || true)"
-        if [ -n "$dir" ] && [ "$dir" != "null" ]; then
-          printf "%s" "$dir"
-          exit 0
-        fi
+        # -o <file> captures the body; -w %{http_code} prints the status so we
+        # can tell a real 404 from a connect/timeout (000). --connect-timeout
+        # fails fast if the serve is not listening; --max-time caps a single
+        # hung request so a wedged event loop cannot consume the whole window.
+        # Note: NO -f -- we WANT to see the 404 status, not swallow it.
+        code="$(curl -s -o "$bodyf" -w "%{http_code}" --connect-timeout 2 --max-time 3 "$url/session/$sid" 2>/dev/null || true)"
+        body="$(cat "$bodyf" 2>/dev/null || true)"
+        verdict="$(classify_session_probe "$code" "$body")"
+        case "$verdict" in
+          "FOUND "*)
+            printf "%s" "''${verdict#FOUND }"
+            exit 0
+            ;;
+          MISS)
+            # Definitive absence. Tolerate a brief launch-commit race, then
+            # give up with a DISTINCT exit code (3) so the caller can log it as
+            # "not found" rather than the misleading "not ready after 30s".
+            if [ "$miss_since" -lt 0 ]; then miss_since="$SECONDS"; fi
+            if [ "$(( SECONDS - miss_since ))" -ge "$grace" ]; then exit 3; fi
+            ;;
+          *)
+            # WAIT: transient (000 connect/timeout, 5xx, or 200-without-dir).
+            # Reset the 404 streak and keep polling the full window.
+            miss_since=-1
+            ;;
+        esac
         sleep 0.2
       done
-    ' _ "$sid" "$serve_url")"; then
-      log "session $sid not ready after 30s; giving up"
+    ' _ "$sid" "$serve_url" "$probe_body_file")" || probe_rc=$?
+    rm -f "$probe_body_file"
+
+    if [ "$probe_rc" -eq 3 ]; then
+      log "session $sid not found (404 from $serve_url) -- absent from opencode.db; giving up"
       exit 0
     fi
-
-    if [ -z "$session_dir" ]; then
-      log "session $sid has no directory; giving up"
+    if [ "$probe_rc" -ne 0 ] || [ -z "$session_dir" ]; then
+      log "session $sid not ready after 30s; giving up"
       exit 0
     fi
 

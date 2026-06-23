@@ -56,6 +56,40 @@ parse_serve_url() {
   fi
 }
 
+# classify_session_probe <http_code> <body>: decide what the step-1 readiness
+# loop should do with ONE `GET /session/<id>` result. Prints exactly one line:
+#   FOUND <directory>  200 with a non-empty .directory -> attach can proceed.
+#   MISS               404: the session is absent from the shared opencode.db.
+#                      Every serve in the K-serve pool reads that one DB, so a
+#                      404 from the routed owner is CONCLUSIVE -- waiting cannot
+#                      make it appear. The loop gives up fast (after a short
+#                      grace for the launch-commit race) instead of burning the
+#                      whole 30s window (workstation-ovqu).
+#   WAIT               anything else -- empty/000 (connection refused, or a
+#                      --max-time abort while the event loop is wedged), 5xx, or
+#                      200 without a directory yet -- a TRANSIENT condition;
+#                      keep polling through the full timeout.
+# Mirror of the production function in default.nix; kept in lockstep by the
+# source-grep guard at the bottom. Needs jq (a runtimeInput of the package).
+classify_session_probe() {
+  local code="$1" body="$2" dir
+  if [ "$code" = "200" ]; then
+    dir="$(printf '%s' "$body" | jq -r '.directory // empty' 2>/dev/null || true)"
+    if [ -n "$dir" ] && [ "$dir" != "null" ]; then
+      printf 'FOUND %s\n' "$dir"
+      return 0
+    fi
+    printf 'WAIT\n'
+    return 0
+  fi
+  if [ "$code" = "404" ]; then
+    printf 'MISS\n'
+    return 0
+  fi
+  printf 'WAIT\n'
+  return 0
+}
+
 # list_session_panes <session-name>: emit "pane_id|cmd|path" for every pane in
 # the named session ONLY. We filter `list-panes -a` on #{session_name} rather
 # than `list-panes -s -t "=<name>"` because the latter is NOT a robust session
@@ -194,6 +228,49 @@ if command -v jq >/dev/null 2>&1; then
     "parse_serve_url: apiBase empty string -> fallback"
 else
   printf 'SKIP  parse_serve_url tests (jq not on PATH)\n'
+fi
+
+# ---- classify_session_probe tests -------------------------------------------
+#
+# The step-1 readiness loop must distinguish a DEFINITIVE 404 (the session is
+# absent from the shared opencode.db -> give up fast) from a TRANSIENT stall
+# (a 000 --max-time abort while the event loop is wedged, or a 5xx -> keep
+# polling the full 30s). Before this fix oc-auto-attach swallowed the 404 with
+# `curl -sf ... || true` and burned the whole 30s window on a session that
+# could never appear -- a manual attach of a stale/nonexistent sid hung the
+# terminal for 30s (workstation-ovqu). Needs jq (a runtimeInput); SKIP if absent.
+if command -v jq >/dev/null 2>&1; then
+  assert_eq "FOUND /home/dev/projects/workstation" \
+    "$(classify_session_probe 200 '{"directory":"/home/dev/projects/workstation"}')" \
+    "classify_session_probe: 200 + directory -> FOUND <dir>"
+
+  # The fix: a real 404 (live serve, NotFoundError body) is a definitive MISS.
+  assert_eq "MISS" \
+    "$(classify_session_probe 404 '{"name":"NotFoundError","data":{"message":"Session not found"}}')" \
+    "classify_session_probe: 404 -> MISS (definitive, fast-fail)"
+
+  # Transient: curl could not connect / --max-time aborted a wedged event loop.
+  # http_code is 000; the loop must keep polling, NOT give up like a 404.
+  assert_eq "WAIT" \
+    "$(classify_session_probe 000 '')" \
+    "classify_session_probe: 000 (connect refused / timeout) -> WAIT (transient)"
+
+  # Transient: serve returned a 5xx -> keep polling.
+  assert_eq "WAIT" \
+    "$(classify_session_probe 503 'service unavailable')" \
+    "classify_session_probe: 5xx -> WAIT (transient)"
+
+  # 200 but the session row has no directory yet -> not ready, keep polling.
+  assert_eq "WAIT" \
+    "$(classify_session_probe 200 '{"id":"ses_x"}')" \
+    "classify_session_probe: 200 without directory -> WAIT (transient)"
+
+  # 200 with an explicit null directory -> same as missing -> keep polling.
+  assert_eq "WAIT" \
+    "$(classify_session_probe 200 '{"directory":null}')" \
+    "classify_session_probe: 200 with null directory -> WAIT"
+else
+  printf 'SKIP  classify_session_probe tests (jq not on PATH)\n'
 fi
 
 # ---- list_session_panes tests (real tmux) -----------------------------------
@@ -366,6 +443,32 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source queries pigeon /route?session_id=\n        "/route?session_id=" not found in: %s\n' "$default_nix"
     exit 1
+  fi
+  # 404 fast-fail (workstation-ovqu): the step-1 readiness probe must give up
+  # fast on a DEFINITIVE 404 instead of burning the full 30s window, while
+  # still polling through transient 000/5xx stalls. Guard that the source
+  # defines the classifier and wires the bounded 404-grace fast-fail path.
+  if grep -q 'classify_session_probe()' "$default_nix"; then
+    printf 'PASS  source defines classify_session_probe\n'
+  else
+    printf 'FAIL  source defines classify_session_probe\n        not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  if grep -q 'OC_AA_404_GRACE_SECS' "$default_nix"; then
+    printf 'PASS  source fast-fails on definitive 404 (OC_AA_404_GRACE_SECS grace)\n'
+  else
+    printf 'FAIL  source fast-fails on definitive 404\n        OC_AA_404_GRACE_SECS not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  # The old swallow-everything SESSION probe (`curl -sf ... "$url/session/$sid"`
+  # with no http_code inspection) must not come back, or 404s silently burn the
+  # 30s window again. Scoped to the /session/ probe so it does not flag the
+  # /route call, which legitimately keeps `curl -sf ... || true`.
+  if grep -Eq 'curl -sf[^|]*/session/' "$default_nix"; then
+    printf 'FAIL  source still uses 404-swallowing /session probe (curl -sf .../session/...)\n        in: %s\n' "$default_nix"
+    exit 1
+  else
+    printf 'PASS  source /session probe no longer swallows the http status (curl -sf)\n'
   fi
 else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
