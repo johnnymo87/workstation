@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-T6H06YHtaOq/SQAzYhMr3+5z9hxSyyhx0eBjrM4S9QQ=";
+      hash = "sha256-usmo3mycacISGYqEWJX28n8lHQ+h/EAu6QIN4kTviRQ=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-KId7jtNNkYl+GnhaTU6pHD8myUGWcPQB6zcEdvZxRUw=";
+      hash = "sha256-Ix5JjkaN1Wvxp5XL4PI6SdORRGBy9MuWE4jTB+lm5tQ=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-8Q7KFvdkiBlsh1rcTwoOwEZ2inMNX5VD/zzhtvRmgd0=";
+      hash = "sha256-3HnnIJeh97LkZWEQEzfEfACG0OoGgW2ea0rfkE7I1ak=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-+7Lm19RpkGrElUS+8olkmpg5hb68B8W+6i0NhlLIy0s=";
+      hash = "sha256-I+XNTIbJzQY1iz8zhi7eo1Jpj24i0LYvidxhch+nlmI=";
       isZip = true;
     };
   };
@@ -67,9 +67,31 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.5 (same upstream 1.17.7, re-released 2026-06-23 with
-    # project-copy-debounce added on top of patched.4 — built via build-release.yml
-    # -f version=1.17.7 -f revision=5, staying on the 1.17.7 hold line). patched.5
+    # This pins v1.17.7-patched.6 (same upstream 1.17.7, re-released 2026-06-24 via
+    # build-release.yml -f version=1.17.7 -f revision=6, staying on the 1.17.7 hold
+    # line). patched.6 adds TWO patches from the headless-serve wedge investigation,
+    # taking the set to 13:
+    #   (a) #13 step-end-diff-bound (bead workstation-0lik, upstream #29762): bounds
+    #       Snapshot.diffFull's jsdiff structuredPatch (was context:MAX_SAFE_INTEGER
+    #       with no edit/time limit) that pinned one JS thread at 100% CPU (+~1GB
+    #       alloc) on a full-file rewrite of a sub-2MB file at step-end summary time.
+    #       New boundedFilePatch() composes a 1 MiB size pre-guard with jsdiff
+    #       {maxEditLength:4000,timeout:1000ms}; on trip it omits the optional
+    #       FileDiff.patch field (counts-only; consumers already guard typeof
+    #       patch!=="string"). Does NOT address the distinct flat-RSS read-only-
+    #       subagent spin variant (#32965).
+    #   (b) #12 project-copy-debounce EXTENDED (bead workstation-wvv2): gate
+    #       refreshAfterBoot behind OPENCODE_PROJECT_COPY_REFRESH_ON_BOOT — DEFAULT-
+    #       OFF (unset / anything but "1" disables the per-boot O(#dirs) scan; ="1"
+    #       restores the upstream every-boot behavior). Safe headless: source dirs
+    #       self-register via Project.saveProjectDirectory on open, the Move Session
+    #       dialog refreshes on demand, project identity is git-derived (not index-
+    #       derived); the explicit refresh() API is untouched (gate is only at the
+    #       boot entry). No cloudbox systemd-env step needed (binary default is off).
+    #
+    # patched.5 history (same upstream 1.17.7, re-released 2026-06-23 with
+    # project-copy-debounce added on top of patched.4 — build-release.yml
+    # -f version=1.17.7 -f revision=5). patched.5
     # adds #12 project-copy-debounce (bead workstation-sqd5): tames the 1.17.x
     # reconnect-storm wedge. ProjectCopy.refreshAfterBoot runs once per location
     # boot; a reconnect/poll storm fired N concurrent refreshes for the SAME
@@ -106,7 +128,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "5";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "6";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
