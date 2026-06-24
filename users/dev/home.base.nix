@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-usmo3mycacISGYqEWJX28n8lHQ+h/EAu6QIN4kTviRQ=";
+      hash = "sha256-VeaMRozkF525rD24SLbDaXJRs2ieKmXLXXuozOU1GXo=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-Ix5JjkaN1Wvxp5XL4PI6SdORRGBy9MuWE4jTB+lm5tQ=";
+      hash = "sha256-Aqv5wzqjtlH0CzWjCXoNLpnd8b2C9v0+UvK2cQ2uXYw=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-3HnnIJeh97LkZWEQEzfEfACG0OoGgW2ea0rfkE7I1ak=";
+      hash = "sha256-WEh4s+LVF5SIwXprTb55X9EnjYyK35xDJ8+Q697vN8k=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-I+XNTIbJzQY1iz8zhi7eo1Jpj24i0LYvidxhch+nlmI=";
+      hash = "sha256-eFLfsq1Bq8VWu4ARxQbu5RbmIay93NcOT/E65Zsbnug=";
       isZip = true;
     };
   };
@@ -67,10 +67,25 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.6 (same upstream 1.17.7, re-released 2026-06-24 via
-    # build-release.yml -f version=1.17.7 -f revision=6, staying on the 1.17.7 hold
-    # line). patched.6 adds TWO patches from the headless-serve wedge investigation,
-    # taking the set to 13:
+    # This pins v1.17.7-patched.7 (same upstream 1.17.7, re-released 2026-06-24 via
+    # build-release.yml -f version=1.17.7 -f revision=7, staying on the 1.17.7 hold
+    # line). patched.7 fixes an `opencode attach` SSE reconnect connection LEAK in
+    # the existing #10 attach-route-resolve patch (bead workstation-lyj0): the
+    # reconnect loop shared one long-lived AbortController and never closed a
+    # finished attempt's stream, so each reconnect leaked one ESTABLISHED connection
+    # up to the per-origin pool cap (256). After a rolling serve restart, 18 idle
+    # attach TUIs that all fell back to the default serve pinned ONE serve's event
+    # loop with ~4600 connections (5.9GB RSS, /global/health timing out, slow new
+    # session starts). New packages/tui/src/util/sse.ts runSseAttempt() runs each
+    # (re)connect as a discrete attempt with its own controller (force-closed in
+    # finally) + balanced abort bridge; resolveServeUrl + sdk.global.event take the
+    # short-lived per-attempt signal (also kills the AbortSignal.any listener
+    # accumulation / MaxListenersExceededWarning). NOTE: the running attach CLIENTS
+    # pick this up only when each TUI restarts (nightly reset / manual) — a profile
+    # switch updates the on-disk binary but not live processes. Patch set stays at 13.
+    #
+    # patched.6 history (same upstream 1.17.7, build-release.yml -f revision=6) added
+    # TWO patches from the headless-serve wedge investigation, taking the set to 13:
     #   (a) #13 step-end-diff-bound (bead workstation-0lik, upstream #29762): bounds
     #       Snapshot.diffFull's jsdiff structuredPatch (was context:MAX_SAFE_INTEGER
     #       with no edit/time limit) that pinned one JS thread at 100% CPU (+~1GB
@@ -128,7 +143,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "6";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "7";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
