@@ -15,23 +15,27 @@
 #     header on the cross-host hop, but honours netrc creds matched to
 #     api.github.com only;
 #   - get the token into the fetchurl sandbox via netrcImpureEnvVars, which
-#     forwards $GITHUB_TOKEN from the nix-daemon environment. On cloudbox the
-#     daemon gets it from systemd.services.nix-daemon EnvironmentFile ->
-#     sops template "nix-daemon-github-token" wrapping the github_api_token
+#     forwards $GITHUB_TOKEN from the BUILDER process's environment. On cloudbox
+#     the nix-daemon carries it via systemd.services.nix-daemon EnvironmentFile
+#     -> sops template "nix-daemon-github-token" wrapping the github_api_token
 #     secret (see hosts/cloudbox/configuration.nix).
 # pkgs.fetchurl does NOT honour nix.settings.netrc-file (builtin fetcher only),
 # so netrcImpureEnvVars + netrcPhase is the mechanism. Verified empirically on
 # cloudbox 2026-06-19 (positive build + negative control: empty token -> 404).
 #
-# BOOTSTRAP GOTCHA (workstation-dl71): a nixos-rebuild BUILDS derivations before
-# it ACTIVATES (activation is when sops renders the token + restartUnits bounces
-# the daemon). So the FIRST switch that introduces/changes the daemon token
-# builds a fresh private-asset FOD under the OLD, token-less daemon -> 404. Once
-# the daemon has been restarted with the token, later version bumps fetch fine.
-# If a bump ever 404s here, the fix is NOT `nix-store --add-fixed`; just
-# `sudo systemctl restart nix-daemon` to (re)load the EnvironmentFile, then
-# re-run the build. Confirm the daemon has the token with:
-#   sudo cat /proc/$(pgrep -x nix-daemon)/environ | tr '\0' '\n' | grep GITHUB_TOKEN
+# THE 404 GOTCHA (root cause proven 2026-06-24, bead workstation-306j -- this
+# supersedes the earlier, WRONG "bootstrap / restart the daemon" explanation):
+# a FOD's impureEnvVars are read from the env of WHATEVER PROCESS performs the
+# build. `dev` (non-root) can't write the store, so its builds are delegated to
+# the nix-daemon -> the EnvironmentFile token applies -> fetch works. But ROOT
+# OWNS the store, so `sudo nixos-rebuild` builds the FOD LOCALLY in the root
+# process, whose env (sudo strips it) has NO GITHUB_TOKEN -> empty netrc
+# password -> GitHub 404. The daemon's token is irrelevant to a root-local
+# build. `systemctl restart nix-daemon` and `nix-store --add-fixed` do NOT fix
+# this. THE FIX (in hosts/cloudbox/configuration.nix): export NIX_REMOTE=daemon
+# for sudo (Defaults env_file) so root's build is routed through the daemon too,
+# which makes the EnvironmentFile token apply. With that in place a plain
+# `sudo nixos-rebuild switch` self-serves the private fetch -- no manual steps.
 #
 # == Why a wrapper instead of autoPatchelfHook ==
 # bun --compile produces a single-file executable that appends the JS bundle as

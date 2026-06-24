@@ -1082,26 +1082,41 @@ ${serveIdCase}
   # Feed a GitHub token into the nix-daemon's environment so fixed-output
   # derivations that fetch PRIVATE GitHub release assets can authenticate
   # (pkgs/claude-failover-proxy uses netrcImpureEnvVars = [ "GITHUB_TOKEN" ]).
-  # impureEnvVars are read from the BUILDER's env = the nix-daemon process (NOT
-  # the invoking shell), so the token must live in the daemon env. We REUSE the
-  # existing github_api_token secret (verified: it reads the private cfp release
-  # asset, HTTP 200) rather than minting a second PAT; a sops template wraps its
-  # raw value in the KEY=VALUE form EnvironmentFile requires. The '-' prefix
-  # makes the file optional so the daemon still starts if sops hasn't rendered it
-  # yet (early boot); restartUnits bounces the daemon once it's (re)rendered.
+  # A FOD's impureEnvVars are read from the environment of WHATEVER PROCESS
+  # performs the build (see the NIX_REMOTE=daemon block just below for why that
+  # matters). We REUSE the existing github_api_token secret (verified: it reads
+  # the private cfp release asset, HTTP 200) rather than minting a second PAT; a
+  # sops template wraps its raw value in the KEY=VALUE form EnvironmentFile
+  # requires. The '-' prefix makes the file optional so the daemon still starts
+  # if sops hasn't rendered it yet (early boot); restartUnits bounces the daemon
+  # once it's (re)rendered.
   sops.templates."nix-daemon-github-token" = {
     content = "GITHUB_TOKEN=${config.sops.placeholder.github_api_token}";
     restartUnits = [ "nix-daemon.service" ];
   };
   systemd.services.nix-daemon.serviceConfig.EnvironmentFile =
     [ "-${config.sops.templates."nix-daemon-github-token".path}" ];
-  # BOOTSTRAP CAVEAT (workstation-dl71): a switch BUILDS before it ACTIVATES, so
-  # the FIRST switch that adds/changes this token builds any fresh private cfp
-  # FOD under the still-token-less daemon -> HTTP 404 (restartUnits bounces the
-  # daemon only AFTER the build). This is one-time per token change, not a
-  # recurring failure. Recovery if a future cfp bump 404s on the fetch:
-  # `sudo systemctl restart nix-daemon` (re-reads this EnvironmentFile), then
-  # re-run the switch. Do NOT reach for `nix-store --add-fixed`.
+
+  # ...but putting the token in the DAEMON env is only HALF the fix: it reaches
+  # the FOD build sandbox only when the DAEMON is the builder. `dev` (non-root)
+  # can't write the store, so its builds are delegated to the daemon -> token
+  # applies. ROOT, however, OWNS the store, so `sudo nixos-rebuild` builds the
+  # FOD LOCALLY in the root process, whose env (sudo strips it) carries NO
+  # GITHUB_TOKEN -> empty netrc password -> GitHub 404 on the private asset.
+  # (Root cause proven end-to-end 2026-06-24, bead workstation-306j. This is NOT
+  # the daemon-token-absence / "switch builds before it activates" bootstrap
+  # story previously believed here; `systemctl restart nix-daemon` and
+  # `nix-store --add-fixed` do NOT fix it.) Fix: force root's nix builds through
+  # the daemon too by exporting NIX_REMOTE=daemon for every sudo command, so the
+  # repo-documented `sudo nixos-rebuild switch` self-serves the private fetch.
+  # env_file is global to sudo, which is harmless: NIX_REMOTE only affects nix
+  # tools, and routing root's nix ops through the daemon is the normal
+  # multi-user behavior. (Any other host that fetches private-asset FODs would
+  # need both this and the EnvironmentFile token above.)
+  environment.etc."nix-remote-daemon.env".text = "NIX_REMOTE=daemon\n";
+  security.sudo.extraConfig = ''
+    Defaults env_file = /etc/nix-remote-daemon.env
+  '';
 
   # Garbage collection
   nix.gc = {
