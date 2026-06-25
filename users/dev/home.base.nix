@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-VeaMRozkF525rD24SLbDaXJRs2ieKmXLXXuozOU1GXo=";
+      hash = "sha256-z6t/65/kzaHO4W2ttAkNg0hSPyBjXyiGQu211mIjZi0=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-Aqv5wzqjtlH0CzWjCXoNLpnd8b2C9v0+UvK2cQ2uXYw=";
+      hash = "sha256-9KzTeFXj1mfOMLG0IgcArlYiBMkKdtQjWdJn9K4e8m4=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-WEh4s+LVF5SIwXprTb55X9EnjYyK35xDJ8+Q697vN8k=";
+      hash = "sha256-E4EJCYMxznPX2OUm05XYppBmaSdc31KbfIBMTT4C3Yg=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-eFLfsq1Bq8VWu4ARxQbu5RbmIay93NcOT/E65Zsbnug=";
+      hash = "sha256-yOS45uYqQoIjZRwloTdgyYqKQQ+Ut/Q+K/JxmQf/FXE=";
       isZip = true;
     };
   };
@@ -67,7 +67,28 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.7 (same upstream 1.17.7, re-released 2026-06-24 via
+    # This pins v1.17.7-patched.8 (same upstream 1.17.7, build-release.yml
+    # -f version=1.17.7 -f revision=8, staying on the 1.17.7 hold line). patched.8
+    # adds TWO patches over patched.7, taking the set to 15:
+    #   #14 bootstrap-disposed-filter (bead workstation-y69t): each `opencode attach`
+    #     TUI held 30-65 churning idle conns to its serve because sync.tsx re-ran the
+    #     full bootstrap() (~15 concurrent GETs) on EVERY server.instance.disposed
+    #     event — unfiltered/undebounced. That event is a GlobalBus broadcast to ALL
+    #     /global/event subscribers on a shared serve, so instance churn in other
+    #     sessions/dirs fired a re-fetch storm in every co-located TUI; Node http's
+    #     default 5s keepAliveTimeout held each burst's sockets idle. This was the
+    #     dominant accumulation on the concentrated serve-0 (mid-day profile: 16 TUIs,
+    #     ~900 conns, 2.5GB swap). Fix filters the re-bootstrap to this TUI's own
+    #     directory+workspace (consistent with the server-side /event disposed gate)
+    #     and 250ms-debounces it. NOTE: live TUIs pick this up only on restart
+    #     (nightly reset / manual) — a profile switch updates the on-disk binary, not
+    #     live processes.
+    #   #13/M3.3 globalbus-maxlisteners (bead workstation-qjk4, commit 13e3747) was
+    #     committed after the patched.7 build point, so it ships here too: uncaps the
+    #     GlobalBus event-listener count (suppresses MaxListenersExceededWarning under
+    #     N co-located TUIs).
+    #
+    # patched.7 history (same upstream 1.17.7, re-released 2026-06-24 via
     # build-release.yml -f version=1.17.7 -f revision=7, staying on the 1.17.7 hold
     # line). patched.7 fixes an `opencode attach` SSE reconnect connection LEAK in
     # the existing #10 attach-route-resolve patch (bead workstation-lyj0): the
@@ -143,7 +164,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "7";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "8";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
