@@ -1,0 +1,43 @@
+=== serve-profile 20260625T141808Z (host cloudbox) ===
+loadavg=1.90 1.36 0.76  CLK_TCK=100
+
+----- serve :4096  pid=1911351 -----
+  uptime=07:18:01 rss=1379MB swap=0MB threads=53 child_procs(LSP)=3
+  proc_cpu=7% of one core
+  hottest threads (comm %core):
+  conns: ESTAB=7 CLOSE_WAIT=0 listen_RecvQ=0
+  health_latency_s(x5): 0.001284 0.000641 0.000711 0.000472 0.000368  (snappy<0.05 | stalled>1/TIMEOUT)
+  event_rate_M=~0.2/s (4s sample; fanout cost = N x M)
+
+----- serve :4097  pid=1911179 -----
+  uptime=07:18:08 rss=672MB swap=0MB threads=31 child_procs(LSP)=0
+  proc_cpu=2% of one core
+  hottest threads (comm %core):
+  conns: ESTAB=30 CLOSE_WAIT=0 listen_RecvQ=0
+  health_latency_s(x5): 0.001824 0.000955 0.000525 0.003674 0.000520  (snappy<0.05 | stalled>1/TIMEOUT)
+  event_rate_M=~0.2/s (4s sample; fanout cost = N x M)
+
+----- serve :4098  pid=1911181 -----
+  uptime=07:18:15 rss=561MB swap=0MB threads=30 child_procs(LSP)=0
+  proc_cpu=1% of one core
+  hottest threads (comm %core):
+  conns: ESTAB=4 CLOSE_WAIT=0 listen_RecvQ=0
+  health_latency_s(x5): 0.001179 0.000796 0.000576 0.002645 0.000463  (snappy<0.05 | stalled>1/TIMEOUT)
+  event_rate_M=~0.2/s (4s sample; fanout cost = N x M)
+
+----- serve :4099  pid=1911249 -----
+  uptime=07:18:21 rss=586MB swap=0MB threads=33 child_procs(LSP)=1
+  proc_cpu=20% of one core
+  hottest threads (comm %core):
+  conns: ESTAB=4 CLOSE_WAIT=0 listen_RecvQ=0
+  health_latency_s(x5): 0.001372 0.003339 0.000486 0.003258 0.000470  (snappy<0.05 | stalled>1/TIMEOUT)
+  event_rate_M=~0.2/s (4s sample; fanout cost = N x M)
+
+=== pigeon session_assignment distribution (concentration) ===
+  serve-0 (http://127.0.0.1:4096) assigned: 1
+  serve-1 (http://127.0.0.1:4097) assigned: 3
+  serve-1 (http://127.0.0.1:4097) dormant: 22
+  serve-2 (http://127.0.0.1:4098) assigned: 2
+  serve-2 (http://127.0.0.1:4098) dormant: 116
+  serve-3 (http://127.0.0.1:4099) assigned: 1
+  serve-3 (http://127.0.0.1:4099) dormant: 56
