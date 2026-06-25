@@ -33,6 +33,22 @@ vim.opt.termguicolors = true
 vim.opt.colorcolumn = "80,121"
 vim.cmd("highlight ColorColumn ctermbg=235 guibg=#2c2d27")
 
+-- Let the terminal's background show through instead of the colorscheme's
+-- off-black. Neovim's default colorscheme paints Normal with guibg=#14161b,
+-- which reads as a less-pleasant off-black over iTerm2's inky black pane
+-- background. :highlight changes only guibg/ctermbg and leaves the foreground
+-- intact. The ColorScheme autocmd re-applies it if a theme is ever loaded.
+local function use_terminal_bg()
+  for _, g in ipairs({ "Normal", "NormalNC", "EndOfBuffer", "SignColumn" }) do
+    vim.cmd("highlight " .. g .. " guibg=NONE ctermbg=NONE")
+  end
+end
+use_terminal_bg()
+vim.api.nvim_create_autocmd("ColorScheme", {
+  group = vim.api.nvim_create_augroup("UserTerminalBg", { clear = true }),
+  callback = use_terminal_bg,
+})
+
 -- Folding (treesitter-based)
 vim.opt.foldmethod = "expr"
 vim.opt.foldexpr = "nvim_treesitter#foldexpr()"
