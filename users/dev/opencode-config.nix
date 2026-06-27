@@ -7,6 +7,10 @@ let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
   devboxModel = "anthropic/claude-opus-4-8";
+  # Cloudbox default: Opus over Vertex (no Claude Max subscription here, unlike
+  # devbox). Carries its own xhigh thinking effort from opencode.base.json's
+  # google-vertex-anthropic model options, so no variant override is needed.
+  vertexOpusModel = "google-vertex-anthropic/claude-opus-4-8@default";
   geminiModel = "google-vertex/gemini-3.5-flash";
   geminiVariant = "high";
   gemini35FlashModel = {
@@ -109,7 +113,9 @@ let
   # Platform overlay:
   # - devbox + crostini default to the Anthropic subscription path, so sessions
   #   do not depend on the OpenAI API key.
-  # - cloudbox + macOS default to Vertex Gemini 3.5 Flash on high thinking.
+  # - cloudbox defaults to Vertex Opus 4.8 (interactive primary model), while
+  #   keeping compaction + the plan-execution subagents on cheap Gemini Flash.
+  # - macOS defaults to Vertex Gemini 3.5 Flash on high thinking.
   # - macOS + cloudbox get Atlassian MCP wiring.
   # OpenAI GPT-5.5 remains in opencode.base.json as a runtime fallback; its
   # provider options stay there because OpenCode defaults GPT-5.x to medium
@@ -133,10 +139,12 @@ let
       disabled_providers = [ "google" ];
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
-      model = geminiModel;
+      # Default model differs by host:
+      #   - cloudbox -> Vertex Opus 4.8 (interactive primary model). The plan-
+      #     execution subagents + compaction stay on cheap Gemini Flash below.
+      #   - macOS    -> Gemini 3.5 Flash with high thinking (unchanged).
+      model = if isCloudbox then vertexOpusModel else geminiModel;
       agent = {
-        build.variant = geminiVariant;
-        plan.variant = geminiVariant;
         # Route the built-in `compaction` agent to Gemini 3.5 Flash. This is the
         # cheap fix for compaction cost on Opus-heavy sessions: Opus pays
         # ~$2.50 per compaction call AND writes 200-400k cache tokens that no
@@ -153,6 +161,12 @@ let
         # per compaction). Open as of 2026-05-27, not yet merged. If/when it
         # lands upstream, revisit whether this override is still needed.
         compaction.model = geminiModel;
+      } // lib.optionalAttrs isDarwin {
+        # Gemini-native high thinking for the build/plan agents on macOS only.
+        # Cloudbox defaults to Opus, which uses its own xhigh effort from
+        # opencode.base.json, so it gets no Gemini-style variant override.
+        build.variant = geminiVariant;
+        plan.variant = geminiVariant;
       };
       provider = (opencodeBase.provider or {}) // {
         "google-vertex" = (opencodeBase.provider."google-vertex" or {}) // {
