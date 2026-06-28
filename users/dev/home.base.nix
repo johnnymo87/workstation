@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-z6t/65/kzaHO4W2ttAkNg0hSPyBjXyiGQu211mIjZi0=";
+      hash = "sha256-uhEVbQF3imXnmZ+7GXWBsXcIAjMvNPrhvlUWsswTUzw=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-9KzTeFXj1mfOMLG0IgcArlYiBMkKdtQjWdJn9K4e8m4=";
+      hash = "sha256-jxwY5m8OzVsBLRxboDZS9WocfWjQUGL3+i0X8cUzy/w=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-E4EJCYMxznPX2OUm05XYppBmaSdc31KbfIBMTT4C3Yg=";
+      hash = "sha256-BpApQC0GsyVJDTYSb/gqu29sYjojLGIinKVl3bWCOdU=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-yOS45uYqQoIjZRwloTdgyYqKQQ+Ut/Q+K/JxmQf/FXE=";
+      hash = "sha256-isoNc/GhG1AhJqOieYMJwJXVvpU4D4Myt9B3sXZ9dJg=";
       isZip = true;
     };
   };
@@ -67,7 +67,30 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.8 (same upstream 1.17.7, build-release.yml
+    # This pins v1.17.7-patched.9 (same upstream 1.17.7, build-release.yml
+    # -f version=1.17.7 -f revision=9, staying on the 1.17.7 hold line). patched.9
+    # adds ONE patch over patched.8, taking the set to 16:
+    #   #15 tui-follow-owner (bead workstation-yl00): make the attached TUI's live
+    #     event stream FOLLOW a session that migrates serves mid-stream. The TUI
+    #     subscribes to a per-PROCESS /global/event firehose pinned (at attach time)
+    #     to whatever serve pigeon /route named then; attach-route-resolve only re-
+    #     resolves /route at the START of an SSE attempt and a healthy /global/event
+    #     attempt never ends on its own, so a session that migrates serves (serve-lease
+    #     idle-migration / pool reshuffle) emits its later turns only on the NEW serve's
+    #     bus while the TUI stays silently pinned to the old one — frozen until manual
+    #     re-attach. (This is the REAL yl00 cause; the earlier #11 event-cold-start-
+    #     directory patch fixed the instance-scoped /event handler, which the TUI does
+    #     not use.) Fix extends attach-route-resolve: a pure confirm-twice/degrade-hard
+    #     evaluateOwnerDrift() + a runSseAttempt() `poll` that re-checks /route every
+    #     OPENCODE_OWNER_POLL_INTERVAL_MS (default 5000) against the attempt's OWN
+    #     per-attempt signal (no AbortSignal.any off the long-lived parent — avoids the
+    #     lyj0 leak); on a confirmed owner change it ends the attempt (drifted:true) so
+    #     startSSE reconnects immediately to the new owner. Gated on a session id (no-op
+    #     for a global TUI). Live TUIs pick this up only on restart (nightly reset /
+    #     manual). NOTE: this is purely client-side; it does not stop migrations, it
+    #     just follows them.
+    #
+    # patched.8 history (same upstream 1.17.7, build-release.yml
     # -f version=1.17.7 -f revision=8, staying on the 1.17.7 hold line). patched.8
     # adds TWO patches over patched.7, taking the set to 15:
     #   #14 bootstrap-disposed-filter (bead workstation-y69t): each `opencode attach`
@@ -164,7 +187,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "8";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "9";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
