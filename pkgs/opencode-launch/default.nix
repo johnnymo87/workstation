@@ -35,6 +35,37 @@ pkgs.writeShellApplication {
         fi
       }
 
+      # resolve_model_id <catalog-json> <provider> <model-id>
+      #
+      # Resolve a (possibly bare) model id against a GET /config/providers
+      # catalog body. Prints one of:
+      #   - the resolved, fully-qualified model id (exact match, or a unique
+      #     bare -> @version expansion) on success
+      #   - "__SKIP__"      catalog empty/unparseable or provider absent ->
+      #                     caller proceeds with the id as-given (degrade)
+      #   - "__NONE__"      provider known but no model matches
+      #   - "__AMBIGUOUS__:a@x,a@y"  a bare id maps to several @versions
+      # Pure (no network): the caller does the curl and hands the body in.
+      # Kept in lockstep with pkgs/opencode-launch/test.sh by a source-grep
+      # guard in that test.
+      resolve_model_id() {
+        local catalog="$1" provider="$2" model="$3"
+        # Empty body (the common degrade path: /config/providers unreachable)
+        # makes jq exit 0 with no output, not an error -- map it to __SKIP__.
+        [ -n "$catalog" ] || { printf '__SKIP__\n'; return 0; }
+        printf '%s' "$catalog" | jq -r --arg prov "$provider" --arg m "$model" '
+          ([.providers[]? | select(.id == $prov)] | first) as $p
+          | if $p == null then "__SKIP__"
+            else ($p.models | keys) as $keys
+              | if ($keys | index($m)) then $m
+                else [ $keys[] | select((. | sub("@.*"; "")) == $m) ] as $c
+                  | if   ($c | length) == 0 then "__NONE__"
+                    elif ($c | length) == 1 then $c[0]
+                    else "__AMBIGUOUS__:" + ($c | join(",")) end
+                end
+            end' 2>/dev/null || printf '__SKIP__\n'
+      }
+
       usage() {
         local exit_code="''${1:-1}"
         echo "Usage: opencode-launch [--model provider/model] [--mcp server] [directory] <prompt>"
@@ -176,6 +207,47 @@ pkgs.writeShellApplication {
         echo "Error: opencode serve is not reachable at $OPENCODE_URL" >&2
         echo "Check: systemctl status opencode-serve (Linux) or launchctl list | grep opencode (macOS)" >&2
         exit 1
+      fi
+
+      # Resolve a (possibly bare) --model id against the serve's catalog BEFORE
+      # creating a session. prompt_async is ASYNC: an unregistered model id
+      # (e.g. "google-vertex-anthropic/claude-opus-4-8", missing the required
+      # "@default" suffix) returns HTTP 200 below and only dies later in the
+      # agent loop (Die(ProviderModelNotFoundError)) -- after we've already
+      # printed "Session launched". That is the silently-dead, no-response
+      # session the user otherwise has to notice and nudge. Resolving up front
+      # turns it into either an auto-correction (unique bare -> @version) or a
+      # loud pre-launch error. Catalog config is global (same across the pool),
+      # so OPENCODE_URL is fine here, before /route. Any catalog/jq/provider
+      # hiccup degrades to the id as-given -- never worse than before.
+      if [ -n "$model_spec" ]; then
+        providers_body="$(curl -sf --max-time 5 "$OPENCODE_URL/config/providers" 2>/dev/null || true)"
+        resolved_model="$(resolve_model_id "$providers_body" "$model_provider" "$model_id")"
+        case "$resolved_model" in
+          __SKIP__)
+            : # catalog unavailable or provider absent -> proceed unchanged
+            ;;
+          __NONE__)
+            echo "Error: model '$model_provider/$model_id' is not in this serve's catalog." >&2
+            echo "Available '$model_provider' models:" >&2
+            printf '%s' "$providers_body" | jq -r --arg prov "$model_provider" \
+              '.providers[]? | select(.id == $prov) | .models | keys[] | "  " + $prov + "/" + .' >&2 2>/dev/null || true
+            exit 1
+            ;;
+          __AMBIGUOUS__:*)
+            echo "Error: --model '$model_provider/$model_id' is ambiguous (missing @version suffix). Candidates:" >&2
+            printf '%s' "$providers_body" | jq -r --arg prov "$model_provider" --arg m "$model_id" \
+              '.providers[]? | select(.id == $prov) | .models | keys[] | select((. | sub("@.*"; "")) == $m) | "  " + $prov + "/" + .' >&2 2>/dev/null || true
+            echo "Re-run --model with the fully-qualified id." >&2
+            exit 1
+            ;;
+          *)
+            if [ "$resolved_model" != "$model_id" ]; then
+              echo "Note: --model '$model_provider/$model_id' resolved to '$model_provider/$resolved_model'" >&2
+              model_id="$resolved_model"
+            fi
+            ;;
+        esac
       fi
 
       # Create session

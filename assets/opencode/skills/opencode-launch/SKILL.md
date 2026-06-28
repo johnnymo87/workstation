@@ -31,6 +31,28 @@ opencode-launch --mcp slack ~/projects/pigeon "summarize the last hour of #incid
 The session runs headless. The pigeon plugin inside the session auto-registers
 with the daemon, so you will receive Telegram notifications for stop/question events.
 
+## Choosing the Model (`--model`)
+
+`--model <provider>/<model>` pins the launched session's model. Before creating
+the session, `opencode-launch` resolves the model id against the serve's
+`GET /config/providers` catalog:
+
+- **Bare id → auto-resolved.** A suffix-less id like
+  `google-vertex-anthropic/claude-opus-4-8` is expanded to the unique registered
+  id (`…/claude-opus-4-8@default`) and a `Note:` line is printed. This is why a
+  bare id no longer silently launches a dead session.
+- **Unknown / ambiguous id → loud pre-launch error (exit 1).** No orphan session
+  is created; the error lists the provider's available models.
+- **Catalog unreachable → degrade.** The id is sent as-given (pre-resolution
+  behavior), never worse.
+
+> Why this matters: `prompt_async` is asynchronous. An unregistered model id
+> returns HTTP 200 at launch and only dies *later* in the agent loop with
+> `Die(ProviderModelNotFoundError)` — the session is created, a title is
+> generated, the TUI opens, but the main loop never runs and you get no model
+> response. Front-loaded resolution turns that invisible failure into an
+> auto-correction or a clear error. Fully-qualified ids still work unchanged.
+
 ## Enabling MCP Server Tools (`--mcp`)
 
 MCP-server tools (slack, atlassian, etc.) are globally disabled by default. The

@@ -23,6 +23,35 @@ parse_serve_url() {
   fi
 }
 
+# resolve_model_id <catalog-json> <provider> <model-id>: resolve a (possibly
+# bare) model id against a GET /config/providers catalog body. Prints one of:
+#   - the resolved, fully-qualified model id (exact match, or a unique
+#     bare -> @version expansion) on success
+#   - "__SKIP__"      catalog empty/unparseable or provider absent -> caller
+#                     proceeds with the id as-given (degrade, never worse)
+#   - "__NONE__"      provider known but no model matches
+#   - "__AMBIGUOUS__:a@x,a@y"  a bare id maps to several @versions
+# Pure (no network): the production caller does the curl and hands the body in.
+# Mirror of the production function in default.nix; kept in lockstep by the
+# source-grep guard at the bottom.
+resolve_model_id() {
+  local catalog="$1" provider="$2" model="$3"
+  # Empty body (the common degrade path: /config/providers unreachable) makes
+  # jq exit 0 with no output, not an error -- guard it so it maps to __SKIP__.
+  [ -n "$catalog" ] || { printf '__SKIP__\n'; return 0; }
+  printf '%s' "$catalog" | jq -r --arg prov "$provider" --arg m "$model" '
+    ([.providers[]? | select(.id == $prov)] | first) as $p
+    | if $p == null then "__SKIP__"
+      else ($p.models | keys) as $keys
+        | if ($keys | index($m)) then $m
+          else [ $keys[] | select((. | sub("@.*"; "")) == $m) ] as $c
+            | if   ($c | length) == 0 then "__NONE__"
+              elif ($c | length) == 1 then $c[0]
+              else "__AMBIGUOUS__:" + ($c | join(",")) end
+          end
+      end' 2>/dev/null || printf '__SKIP__\n'
+}
+
 # ---- test infrastructure ----------------------------------------------------
 
 assert_eq() {
@@ -60,6 +89,52 @@ if command -v jq >/dev/null 2>&1; then
     "parse_serve_url: apiBase empty string -> fallback"
 else
   printf 'SKIP  parse_serve_url tests (jq not on PATH)\n'
+fi
+
+# ---- resolve_model_id tests -------------------------------------------------
+#
+# The launch-time model footgun: --model passes modelID verbatim to the async
+# prompt_async. An unregistered id (e.g. a bare 'claude-opus-4-8' missing the
+# '@default' suffix the vertex-anthropic provider requires) returns HTTP 200
+# and only dies later in the agent loop (Die(ProviderModelNotFoundError)) -- a
+# silently dead session. resolve_model_id catches it up front: auto-correct a
+# unique bare->@version match, signal NONE/AMBIGUOUS for a loud pre-launch
+# error, and SKIP (degrade) when the catalog can't disambiguate. Needs jq.
+if command -v jq >/dev/null 2>&1; then
+  catalog='{"providers":[
+    {"id":"google-vertex-anthropic","models":{"claude-opus-4-8@default":{},"claude-haiku-4-5@20251001":{},"claude-opus-4-7@default":{}}},
+    {"id":"google-vertex","models":{"gemini-3.5-flash":{},"claude-haiku-4-5@20251001":{}}},
+    {"id":"ambi","models":{"foo@v1":{},"foo@v2":{}}}
+  ]}'
+  assert_eq "claude-opus-4-8@default" \
+    "$(resolve_model_id "$catalog" google-vertex-anthropic claude-opus-4-8@default)" \
+    "resolve_model_id: exact qualified match -> unchanged"
+  assert_eq "claude-opus-4-8@default" \
+    "$(resolve_model_id "$catalog" google-vertex-anthropic claude-opus-4-8)" \
+    "resolve_model_id: bare id -> unique @version expansion (the reported bug)"
+  assert_eq "claude-haiku-4-5@20251001" \
+    "$(resolve_model_id "$catalog" google-vertex-anthropic claude-haiku-4-5)" \
+    "resolve_model_id: bare haiku -> @date expansion"
+  assert_eq "gemini-3.5-flash" \
+    "$(resolve_model_id "$catalog" google-vertex gemini-3.5-flash)" \
+    "resolve_model_id: suffix-less registered id -> unchanged"
+  assert_eq "__NONE__" \
+    "$(resolve_model_id "$catalog" google-vertex-anthropic claude-bogus-9)" \
+    "resolve_model_id: provider known, no match -> __NONE__"
+  assert_eq "__AMBIGUOUS__:foo@v1,foo@v2" \
+    "$(resolve_model_id "$catalog" ambi foo)" \
+    "resolve_model_id: bare id with multiple @versions -> __AMBIGUOUS__"
+  assert_eq "__SKIP__" \
+    "$(resolve_model_id "$catalog" no-such-provider whatever)" \
+    "resolve_model_id: provider absent -> __SKIP__ (degrade)"
+  assert_eq "__SKIP__" \
+    "$(resolve_model_id "" google-vertex-anthropic claude-opus-4-8)" \
+    "resolve_model_id: empty catalog -> __SKIP__ (degrade)"
+  assert_eq "__SKIP__" \
+    "$(resolve_model_id "not json" google-vertex-anthropic claude-opus-4-8)" \
+    "resolve_model_id: non-JSON catalog -> __SKIP__ (degrade)"
+else
+  printf 'SKIP  resolve_model_id tests (jq not on PATH)\n'
 fi
 
 # ---- production-source check (default.nix) -----------------------------------
@@ -108,6 +183,19 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source still connects MCP on hardwired $OPENCODE_URL\n        in: %s\n' "$default_nix"; exit 1
   else
     printf 'PASS  source no longer connects MCP on hardwired $OPENCODE_URL\n'
+  fi
+  # The launch-time model resolver must be present: the resolve_model_id helper
+  # and the /config/providers catalog query that feeds it. Guards against a
+  # regression that would reintroduce the silent dead-session footgun.
+  if grep -q 'resolve_model_id()' "$default_nix"; then
+    printf 'PASS  source defines resolve_model_id\n'
+  else
+    printf 'FAIL  source defines resolve_model_id\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q '/config/providers' "$default_nix"; then
+    printf 'PASS  source queries /config/providers catalog\n'
+  else
+    printf 'FAIL  source queries /config/providers catalog\n        not found in: %s\n' "$default_nix"; exit 1
   fi
 else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
