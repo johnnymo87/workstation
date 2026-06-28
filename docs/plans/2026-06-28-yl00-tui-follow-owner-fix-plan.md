@@ -1,9 +1,13 @@
 # yl00 fix plan: TUI event stream must follow the session's owning serve
 
-Status: Root cause CONFIRMED + corrected (cloudbox, 2026-06-28). Fix NOT yet started.
-Bead: workstation-yl00 (P1 bug, in_progress). Chosen approach: **option 1** (client-side,
-TUI follows owner). Overlaps workstation-7zr7 (attach client /route + reconnect) and
-serve-lease (the migration source).
+Status: IMPLEMENTED + DEPLOYED (cloudbox, 2026-06-28) as v1.17.7-patched.9
+(opencode-patched commit b1790ee, tui-follow-owner.patch). Workstation bumped to rev .9
+(home.base.nix) + home-manager switch done (non-disruptive: profile -> .9, serve PIDs
+unchanged). NOT yet live-acceptance-verified (real migration-follow) — bead kept
+in_progress; remaining-acceptance recipe is on the bead. 26 unit tests pass + typecheck
+clean + full apply.sh clean. Chosen approach: **option 1** (client-side, TUI follows
+owner). Overlaps workstation-7zr7 (attach client /route + reconnect) and serve-lease (the
+migration source).
 
 Companion docs/memories (READ THESE FIRST):
 - `docs/plans/2026-06-22-yl00-attach-live-delivery-rootcause.md` — the ORIGINAL (now-corrected)
