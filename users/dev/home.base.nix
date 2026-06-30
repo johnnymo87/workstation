@@ -241,6 +241,21 @@ let
     };
   };
 
+  # Interactive opencode pooling (workstation-jiae): a shell "placer" behind a
+  # gated shadow `opencode()` function (see programs.bash.initExtra). It pools a
+  # fresh TUI / `-s` resume onto a pool serve via pigeon and self-hosts (today's
+  # behavior) on any failure. Wired here (not flake.nix localPkgs) because it
+  # needs the real `opencode` binary defined above. K (pool size) is baked from
+  # serve-pool.nix so the placer's internal gate and the function gate agree
+  # per host (cloudbox 4, devbox 2, darwin 2, crostini 1).
+  servePool = import ./serve-pool.nix;
+  servePoolK =
+    if isCloudbox then servePool.forHost.cloudbox.k
+    else if isCrostini then servePool.forHost.crostini.k
+    else if isDarwin then servePool.forHost.darwin.k
+    else servePool.forHost.devbox.k;
+  oc-pool-attach = pkgs.callPackage ../../pkgs/oc-pool-attach { inherit opencode; k = servePoolK; };
+
   # Azure CLI with msal 1.34.0 patch and azure-devops extension (work machines)
   # NOTE: azure-cli 2.79.0 ships msal 1.33.0 which has a bug where
   # `az login --use-device-code` crashes with "Session.request() got
@@ -437,6 +452,12 @@ in
     # with no org-specific config, so it lives in the shared list (applies to
     # cloudbox and devbox alike) like the other generic CLIs above.
     pkgs.buildifier
+  ]
+  # Interactive opencode pooling placer (workstation-jiae). Only meaningful where
+  # the gated shadow opencode() function exists (K>=2 hosts); the placer also
+  # self-hosts when POOL_K<2, so this gate just avoids shipping a no-op binary.
+  ++ lib.optionals (servePoolK >= 2) [
+    oc-pool-attach
   ]
   # Linux-only tools (devbox, cloudbox, crostini). reset-workspace shells out
   # to systemd-run for cgroup re-exec and sudo systemctl restart, so it can't
@@ -1283,7 +1304,16 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
       dd() {
         command dd-cli "$@"
       }
-      '';
+    '' + lib.optionalString (servePoolK >= 2) ''
+      # Pool interactive opencode (workstation-jiae). This initExtra runs only in
+      # interactive shells (after ~/.bashrc's interactive guard, like dd()), so
+      # nvim jobstart, systemd serves, and `bash -c` agent tooling never see this
+      # function. It delegates to the oc-pool-attach placer, which pools a fresh
+      # TUI / `-s` resume onto a pool serve via pigeon and self-hosts (today's
+      # behavior) on any failure. `command` prevents the function from re-entering
+      # itself; the placer execs the real opencode by absolute store path.
+      opencode() { command oc-pool-attach "$@"; }
+    '';
   };
 
   # SSH
