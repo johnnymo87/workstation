@@ -7,15 +7,16 @@ set -o errexit -o nounset -o pipefail
 
 # ---- helpers under test (mirror of default.nix) -----------------------------
 
-# parse_serve_url <route-json-body> <fallback-url>: extract .apiBase from a
-# pigeon GET /route JSON body and print it. Falls back to <fallback-url> when
-# the body is empty, not JSON, or .apiBase is absent/null/empty. Pure (no
-# network) so the production caller does the curl and hands the body in.
-# Mirror of the production function in default.nix; kept in lockstep by the
-# source-grep guard at the bottom.
+# parse_serve_url <place-or-route-json-body> <fallback-url>: extract the owning
+# serve's base URL from a pigeon routing JSON body and print it. Accepts BOTH
+# `POST /place` (.api_base, snake_case) and `GET /route` (.apiBase, camelCase).
+# Falls back to <fallback-url> when the body is empty, not JSON, or the field is
+# absent/null/empty. Pure (no network) so the production caller does the curl
+# and hands the body in. Mirror of the production function in default.nix; kept
+# in lockstep by the source-grep guard at the bottom.
 parse_serve_url() {
   local body="$1" fallback="$2" api
-  api="$(printf '%s' "$body" | jq -r '.apiBase // empty' 2>/dev/null || true)"
+  api="$(printf '%s' "$body" | jq -r '.api_base // .apiBase // empty' 2>/dev/null || true)"
   if [ -n "$api" ] && [ "$api" != "null" ]; then
     printf '%s\n' "$api"
   else
@@ -76,7 +77,14 @@ fallback_url="http://127.0.0.1:4096"
 if command -v jq >/dev/null 2>&1; then
   route_body='{"sessionId":"ses_x","serveId":"serve-1","apiBase":"http://127.0.0.1:4097","eventUrl":"http://127.0.0.1:4097/event?session_ids=ses_x"}'
   assert_eq "http://127.0.0.1:4097" "$(parse_serve_url "$route_body" "$fallback_url")" \
-    "parse_serve_url: valid route body -> apiBase (owning serve)"
+    "parse_serve_url: valid GET /route body -> apiBase (owning serve)"
+  place_body='{"ok":true,"session_id":"ses_x","serve_id":"serve-2","api_base":"http://127.0.0.1:4098","event_url":"http://127.0.0.1:4098/event?session_ids=ses_x"}'
+  assert_eq "http://127.0.0.1:4098" "$(parse_serve_url "$place_body" "$fallback_url")" \
+    "parse_serve_url: valid POST /place body -> api_base (owning serve)"
+  assert_eq "$fallback_url" "$(parse_serve_url '{"api_base":null}' "$fallback_url")" \
+    "parse_serve_url: api_base null -> fallback"
+  assert_eq "$fallback_url" "$(parse_serve_url '{"api_base":""}' "$fallback_url")" \
+    "parse_serve_url: api_base empty string -> fallback"
   assert_eq "$fallback_url" "$(parse_serve_url "" "$fallback_url")" \
     "parse_serve_url: empty body -> fallback"
   assert_eq "$fallback_url" "$(parse_serve_url "not json at all" "$fallback_url")" \
@@ -145,7 +153,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 default_nix="$script_dir/default.nix"
 if [ -f "$default_nix" ]; then
   # The pool-aware resolution must be present: the parse_serve_url helper, the
-  # PIGEON_DAEMON_URL env, and the /route query.
+  # PIGEON_DAEMON_URL env, and the POST /place placement call.
   if grep -q 'parse_serve_url()' "$default_nix"; then
     printf 'PASS  source defines parse_serve_url\n'
   else
@@ -156,10 +164,17 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source honors PIGEON_DAEMON_URL\n        not referenced in: %s\n' "$default_nix"; exit 1
   fi
-  if grep -q '/route?session_id=' "$default_nix"; then
-    printf 'PASS  source queries pigeon /route?session_id=\n'
+  # Placement-at-create: must POST /place (active placement), NOT the old passive
+  # read-only GET /route (which 404s pre-placement and concentrated load on serve-0).
+  if grep -q 'POST "\$PIGEON_DAEMON_URL/place"' "$default_nix"; then
+    printf 'PASS  source places via pigeon POST /place\n'
   else
-    printf 'FAIL  source queries pigeon /route?session_id=\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'FAIL  source places via pigeon POST /place\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q '/route?session_id=' "$default_nix"; then
+    printf 'FAIL  source still uses passive GET /route?session_id= (should POST /place)\n        in: %s\n' "$default_nix"; exit 1
+  else
+    printf 'PASS  source no longer uses passive GET /route for placement\n'
   fi
   # The prompt and MCP-connect must target the resolved owner ($serve_url),
   # NOT the hardwired $OPENCODE_URL.

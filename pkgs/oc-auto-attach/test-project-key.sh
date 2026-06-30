@@ -41,14 +41,15 @@ resolve_nvims() {
 }
 
 # parse_serve_url <route-json-body> <fallback-url>: extract .apiBase from a
-# pigeon GET /route JSON body and print it. Falls back to <fallback-url> when
-# the body is empty, not JSON, or .apiBase is absent/null/empty. Pure (no
-# network) so the production caller does the curl and hands the body in.
-# Mirror of the production function in default.nix; exercised by the tests
-# below and kept in lockstep by the source-grep guard at the bottom.
+# pigeon GET /route or POST /place JSON body and print it. Falls back to
+# <fallback-url> when the body is empty, not JSON, or the serve-URL field is
+# absent/null/empty. Accepts BOTH `apiBase` (route, camelCase) and `api_base`
+# (place, snake_case). Pure (no network) so the production caller does the curl
+# and hands the body in. Mirror of the production function in default.nix;
+# exercised by the tests below and kept in lockstep by the source-grep guard.
 parse_serve_url() {
   local body="$1" fallback="$2" api
-  api="$(printf '%s' "$body" | jq -r '.apiBase // empty' 2>/dev/null || true)"
+  api="$(printf '%s' "$body" | jq -r '.apiBase // .api_base // empty' 2>/dev/null || true)"
   if [ -n "$api" ] && [ "$api" != "null" ]; then
     printf '%s\n' "$api"
   else
@@ -226,6 +227,19 @@ if command -v jq >/dev/null 2>&1; then
   # apiBase present but empty string -> fallback.
   assert_eq "$fallback_url" "$(parse_serve_url '{"apiBase":""}' "$fallback_url")" \
     "parse_serve_url: apiBase empty string -> fallback"
+
+  # POST /place returns snake_case api_base (GET /route returns camelCase
+  # apiBase). parse_serve_url must accept BOTH so it can parse a /place response
+  # for the authoritative owning serve as well as a /route response.
+  place_body='{"ok":true,"session_id":"ses_x","serve_id":"serve-1","api_base":"http://127.0.0.1:4097","event_url":"http://127.0.0.1:4097/event?session_ids=ses_x"}'
+  assert_eq "http://127.0.0.1:4097" "$(parse_serve_url "$place_body" "$fallback_url")" \
+    "parse_serve_url: /place api_base (snake_case) -> owning serve"
+
+  # api_base present but null/empty -> fallback (mirror the apiBase cases).
+  assert_eq "$fallback_url" "$(parse_serve_url '{"api_base":null}' "$fallback_url")" \
+    "parse_serve_url: api_base null -> fallback"
+  assert_eq "$fallback_url" "$(parse_serve_url '{"api_base":""}' "$fallback_url")" \
+    "parse_serve_url: api_base empty string -> fallback"
 else
   printf 'SKIP  parse_serve_url tests (jq not on PATH)\n'
 fi
@@ -442,6 +456,16 @@ if [ -f "$default_nix" ]; then
     printf 'PASS  source queries pigeon /route?session_id=\n'
   else
     printf 'FAIL  source queries pigeon /route?session_id=\n        "/route?session_id=" not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  # Placement (workstation-iwpj): after the session is confirmed to exist, the
+  # source must POST pigeon /place to get the authoritative owning serve so
+  # attachments distribute across the pool instead of all falling back to the
+  # default :4096. (GET /route alone 404s for never-placed sessions -> :4096.)
+  if grep -q '/place' "$default_nix"; then
+    printf 'PASS  source places sessions via pigeon POST /place\n'
+  else
+    printf 'FAIL  source places sessions via pigeon POST /place\n        "/place" not found in: %s\n' "$default_nix"
     exit 1
   fi
   # 404 fast-fail (workstation-ovqu): the step-1 readiness probe must give up

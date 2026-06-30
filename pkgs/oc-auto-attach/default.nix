@@ -83,8 +83,11 @@ pkgs.writeShellApplication {
     # test-project-key.sh. The fallback guarantees that any pigeon hiccup
     # degrades to the pre-pool single-serve behavior, never worse.
     parse_serve_url() {
+      # Accept BOTH response shapes: GET /route returns camelCase `apiBase`,
+      # POST /place returns snake_case `api_base`. Either yields the owning
+      # serve's base URL; anything malformed/absent degrades to the fallback.
       local body="$1" fallback="$2" api
-      api="$(printf '%s' "$body" | jq -r '.apiBase // empty' 2>/dev/null || true)"
+      api="$(printf '%s' "$body" | jq -r '.apiBase // .api_base // empty' 2>/dev/null || true)"
       if [ -n "$api" ] && [ "$api" != "null" ]; then
         printf '%s\n' "$api"
       else
@@ -335,6 +338,28 @@ pkgs.writeShellApplication {
     fi
 
     log "session $sid dir=$session_dir"
+
+    # Step 1.5: place the session (workstation-iwpj). The session is now
+    # CONFIRMED to exist (Step 1 FOUND), so POSTing pigeon /place cannot
+    # manufacture a phantom assignment for a stale/garbage sid (the pigeon-eup
+    # hazard that made GET /route read-only). /place is idempotent
+    # (ensureRouted = resolveRoute ?? placeSession) and load-aware (HRW +
+    # ACTIVE_TURN_CAP), and returns the authoritative owning serve. Without it,
+    # never-placed sessions 404 on GET /route and every TUI falls back to the
+    # default :4096 -- the serve-0 concentration this fixes. Any failure (pigeon
+    # down, non-2xx, empty/garbage body, no api_base) degrades to the Step-0
+    # serve_url (itself an OPENCODE_URL fallback), i.e. never worse than today.
+    place_auth=()
+    if [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ]; then
+      place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
+    fi
+    place_body="$(curl -sf --connect-timeout 2 --max-time 3 \
+      -X POST "$PIGEON_DAEMON_URL/place" \
+      -H "Content-Type: application/json" \
+      ''${place_auth[@]+"''${place_auth[@]}"} \
+      -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
+    serve_url="$(parse_serve_url "$place_body" "$serve_url")"
+    log "placed serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
 
     # Step 2: compute project key for editor routing.
     # Collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>.

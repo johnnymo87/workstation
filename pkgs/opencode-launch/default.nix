@@ -18,16 +18,18 @@ pkgs.writeShellApplication {
       # oc-auto-attach convention.
       PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
 
-      # parse_serve_url <route-json-body> <fallback-url>
+      # parse_serve_url <place-or-route-json-body> <fallback-url>
       #
-      # Extract .apiBase from a pigeon `GET /route` JSON body and print it.
-      # Falls back to <fallback-url> whenever the body is empty, not JSON, or
-      # .apiBase is absent/null/empty. Pure (no network): the caller does the
-      # curl and hands the body in. The fallback guarantees that any pigeon
-      # hiccup degrades to the pre-pool single-serve behavior, never worse.
+      # Extract the owning serve's base URL from a pigeon routing JSON body and
+      # print it. Accepts BOTH shapes: `POST /place` returns `.api_base`
+      # (snake_case) and `GET /route` returns `.apiBase` (camelCase). Falls back
+      # to <fallback-url> whenever the body is empty, not JSON, or the field is
+      # absent/null/empty. Pure (no network): the caller does the curl and hands
+      # the body in. The fallback guarantees that any pigeon hiccup degrades to
+      # the pre-pool single-serve behavior, never worse.
       parse_serve_url() {
         local body="$1" fallback="$2" api
-        api="$(printf '%s' "$body" | jq -r '.apiBase // empty' 2>/dev/null || true)"
+        api="$(printf '%s' "$body" | jq -r '.api_base // .apiBase // empty' 2>/dev/null || true)"
         if [ -n "$api" ] && [ "$api" != "null" ]; then
           printf '%s\n' "$api"
         else
@@ -263,15 +265,24 @@ pkgs.writeShellApplication {
         exit 1
       fi
 
-      # Resolve which serve in the pool OWNS this session. Placement is a pure
-      # rendezvous hash of the sid, so this is stable regardless of which serve
-      # created the row above. We send the MCP-connect + prompt to this owner
-      # so the agent loop, its MCP tools, and the TUI (which also resolves via
-      # /route) all land on the same serve. Any failure degrades to
-      # $OPENCODE_URL (the serve we created on), i.e. pre-pool behavior.
-      route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
-        "$PIGEON_DAEMON_URL/route?session_id=$session_id" 2>/dev/null || true)"
-      serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
+      # PLACE this session on a pool serve (HRW) and resolve its owner. This is
+      # the placement-at-create fix (workstation-iwpj): `GET /route` is read-only
+      # and 404s for a never-placed session, so the old passive lookup always
+      # fell back to the anchor and EVERY first turn ran on serve-0 (the other
+      # serves idled). `POST /place` runs pigeon's ensureRouted
+      # (resolveRoute ?? placeSession), which writes the session_assignment +
+      # lease via the rendezvous hash and returns the owning serve. We must place
+      # BEFORE the first prompt: placing after a turn starts bumps
+      # owner_generation and kills the in-flight run. We then send the
+      # MCP-connect + prompt to this owner so the agent loop, its MCP tools, and
+      # the TUI (which resolves via /route) all land on the same serve. Any
+      # failure (pigeon down, no healthy serve) degrades to $OPENCODE_URL (the
+      # serve we created on), i.e. pre-pool single-serve behavior -- never worse.
+      place_body="$(curl -sf --connect-timeout 2 --max-time 3 \
+        -X POST "$PIGEON_DAEMON_URL/place" \
+        -H "Content-Type: application/json" \
+        -d "{\"session_id\":\"$session_id\"}" 2>/dev/null || true)"
+      serve_url="$(parse_serve_url "$place_body" "$OPENCODE_URL")"
 
       mcp_tools_json='{}'
       if [ "''${#mcp_servers[@]}" -gt 0 ]; then
