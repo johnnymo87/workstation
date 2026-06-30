@@ -1,7 +1,7 @@
 ---
 description: Implementation subagent for plan execution — implements a single task from a plan with TDD, self-review, and commit
 mode: subagent
-model: anthropic/claude-sonnet-4-6
+model: anthropic/claude-sonnet-5
 ---
 
 # Implementer

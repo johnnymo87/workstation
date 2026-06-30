@@ -1,7 +1,7 @@
 ---
 description: Spec compliance reviewer — verifies implementation matches its specification (nothing more, nothing less)
 mode: subagent
-model: anthropic/claude-sonnet-4-6
+model: anthropic/claude-sonnet-5
 permission:
   read: allow
   glob: allow

@@ -42,7 +42,7 @@ let
   patchAgent = name: src:
     if useGeminiForAgents then
       pkgs.runCommand "''${name}-gemini.md" {} ''
-        ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-4-6|model: ${geminiModel}\nvariant: ${geminiVariant}|' ${src} > $out
+        ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-5|model: ${geminiModel}\nvariant: ${geminiVariant}|' ${src} > $out
       ''
     else
       src;

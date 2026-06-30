@@ -12,7 +12,7 @@ Their nix wiring is in `users/dev/opencode-config.nix`.
 
 ### librarian (subagent)
 **Purpose:** Documentation and OSS research — finds official docs, examples, and best practices.
-**Model:** claude-sonnet-4-6
+**Model:** claude-sonnet-5
 **Tools:** webfetch, websearch, codesearch, bash (for `gh`), read/glob/grep
 **When to use:** Unfamiliar library, need API docs, want to find how an OSS project handles something.
 **Workflow:** Discovery (Exa codesearch/websearch) -> Retrieval (webfetch) -> GitHub (gh CLI). Every claim cites a source.
