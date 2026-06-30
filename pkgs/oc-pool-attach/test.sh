@@ -42,6 +42,16 @@ classify_oc_invocation() {
   printf 'NEW\t\t%s\n' "$project"; return 0
 }
 
+parse_serve_url() {
+  local body="$1" fallback="$2" api
+  api="$(printf '%s' "$body" | jq -r '.api_base // .apiBase // empty' 2>/dev/null || true)"
+  if [ -n "$api" ] && [ "$api" != "null" ]; then
+    printf '%s\n' "$api"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
 # ---- test infrastructure ----------------------------------------------------
 
 assert_eq() {
@@ -86,4 +96,99 @@ T $'PASSTHROUGH\t\t'        -s ses_abc --model Y   # resume token + incompatible
 T $'PASSTHROUGH\t\t'        -s                     # -s with no value
 T $'PASSTHROUGH\t\t'        -s bad!sid             # sid fails ^ses_[A-Za-z0-9_-]+$
 T $'PASSTHROUGH\t\t'        proj1 proj2            # >1 positional -> ambiguous
-echo "all oc-pool-attach classify tests passed"
+
+# ---- parse_serve_url tests --------------------------------------------------
+fallback_url="http://127.0.0.1:4096"
+if command -v jq >/dev/null 2>&1; then
+  route_body='{"sessionId":"ses_x","serveId":"serve-1","apiBase":"http://127.0.0.1:4097","eventUrl":"http://127.0.0.1:4097/event?session_ids=ses_x"}'
+  assert_eq "http://127.0.0.1:4097" "$(parse_serve_url "$route_body" "$fallback_url")" \
+    "parse_serve_url: valid GET /route body -> apiBase (owning serve)"
+  place_body='{"ok":true,"session_id":"ses_x","serve_id":"serve-2","api_base":"http://127.0.0.1:4098","event_url":"http://127.0.0.1:4098/event?session_ids=ses_x"}'
+  assert_eq "http://127.0.0.1:4098" "$(parse_serve_url "$place_body" "$fallback_url")" \
+    "parse_serve_url: valid POST /place body -> api_base (owning serve)"
+  assert_eq "$fallback_url" "$(parse_serve_url '{"api_base":null}' "$fallback_url")" \
+    "parse_serve_url: api_base null -> fallback"
+  assert_eq "$fallback_url" "$(parse_serve_url '{"api_base":""}' "$fallback_url")" \
+    "parse_serve_url: api_base empty string -> fallback"
+  assert_eq "$fallback_url" "$(parse_serve_url "" "$fallback_url")" \
+    "parse_serve_url: empty body -> fallback"
+  assert_eq "$fallback_url" "$(parse_serve_url "not json at all" "$fallback_url")" \
+    "parse_serve_url: non-JSON body -> fallback"
+  assert_eq "$fallback_url" "$(parse_serve_url '{"sessionId":"ses_x"}' "$fallback_url")" \
+    "parse_serve_url: JSON without apiBase -> fallback"
+  assert_eq "$fallback_url" "$(parse_serve_url '{"apiBase":null}' "$fallback_url")" \
+    "parse_serve_url: apiBase null -> fallback"
+  assert_eq "$fallback_url" "$(parse_serve_url '{"apiBase":""}' "$fallback_url")" \
+    "parse_serve_url: apiBase empty string -> fallback"
+else
+  printf 'SKIP  parse_serve_url tests (jq not on PATH)\n'
+fi
+
+# ---- production-source check (default.nix) -----------------------------------
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+default_nix="$script_dir/default.nix"
+if [ -f "$default_nix" ]; then
+  if grep -q 'parse_serve_url()' "$default_nix"; then
+    printf 'PASS  source defines parse_serve_url\n'
+  else
+    printf 'FAIL  source defines parse_serve_url\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'classify_oc_invocation()' "$default_nix"; then
+    printf 'PASS  source defines classify_oc_invocation\n'
+  else
+    printf 'FAIL  source defines classify_oc_invocation\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'PIGEON_DAEMON_URL' "$default_nix"; then
+    printf 'PASS  source honors PIGEON_DAEMON_URL\n'
+  else
+    printf 'FAIL  source honors PIGEON_DAEMON_URL\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'POST "\$PIGEON_DAEMON_URL/place"' "$default_nix"; then
+    printf 'PASS  source places via pigeon POST /place\n'
+  else
+    printf 'FAIL  source places via pigeon POST /place\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q '"\$OPENCODE_URL/session' "$default_nix"; then
+    printf 'PASS  source references "$OPENCODE_URL/session\n'
+  else
+    printf 'FAIL  source references "$OPENCODE_URL/session\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'attach' "$default_nix" && grep -q -- '--session' "$default_nix" && grep -q -- '--dir' "$default_nix"; then
+    printf 'PASS  source runs attach with --session and --dir\n'
+  else
+    printf 'FAIL  source runs attach with --session and --dir\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q '\[ -t 0 \]' "$default_nix"; then
+    printf 'PASS  source has stdin guard [ -t 0 ]\n'
+  else
+    printf 'FAIL  source has stdin guard [ -t 0 ]\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'POOL_K' "$default_nix"; then
+    printf 'PASS  source gates on POOL_K\n'
+  else
+    printf 'FAIL  source gates on POOL_K\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'pigeon_reachable' "$default_nix"; then
+    printf 'PASS  source checks pigeon_reachable\n'
+  else
+    printf 'FAIL  source checks pigeon_reachable\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'original_args' "$default_nix"; then
+    printf 'PASS  source uses original_args fallbacks\n'
+  else
+    printf 'FAIL  source uses original_args fallbacks\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+else
+  printf 'SKIP  production-source check (default.nix not next to test)\n'
+fi
+
+echo "all oc-pool-attach tests passed"

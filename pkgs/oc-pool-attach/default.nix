@@ -39,5 +39,77 @@ pkgs.writeShellApplication {
       fi
       printf 'NEW\t\t%s\n' "$project"; return 0
     }
+
+    parse_serve_url() {
+      local body="$1" fallback="$2" api
+      api="$(printf '%s' "$body" | jq -r '.api_base // .apiBase // empty' 2>/dev/null || true)"
+      if [ -n "$api" ] && [ "$api" != "null" ]; then
+        printf '%s\n' "$api"
+      else
+        printf '%s\n' "$fallback"
+      fi
+    }
+
+    OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+    PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
+    POOL_K="${toString k}"
+    REAL_OPENCODE="${opencode}/bin/opencode"
+    original_args=("$@")
+    selfhost() { exec "$REAL_OPENCODE" "''${original_args[@]+"''${original_args[@]}"}"; }
+
+    # M4 gate + M5 stdin guard
+    [ "$POOL_K" -ge 2 ] 2>/dev/null || selfhost
+    [ -t 0 ] || selfhost
+
+    cls="$(classify_oc_invocation "$@")"
+    IFS=$'\t' read -r verb sid project <<<"$cls"
+    [ "$verb" = "PASSTHROUGH" ] && selfhost
+
+    pigeon_reachable() {
+      local code
+      code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 3 \
+        "$PIGEON_DAEMON_URL/route?session_id=ses_poolprobe" 2>/dev/null || true)"
+      [ -n "$code" ] && [ "$code" != "000" ]
+    }
+    place_auth=()
+    [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ] && place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
+
+    if [ "$verb" = "NEW" ]; then
+      pigeon_reachable || selfhost
+      curl -sf --max-time 5 "$OPENCODE_URL/global/health" >/dev/null 2>&1 || selfhost
+      dir_in="''${project:-$PWD}"
+      dir_in="''${dir_in/#\~/$HOME}"
+      [ -d "$dir_in" ] || selfhost
+      dir_in="$(cd "$dir_in" && pwd)"
+      resp="$(curl -sf -X POST "$OPENCODE_URL/session" -H "x-opencode-directory: $dir_in" 2>/dev/null || true)"
+      sid="$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null || true)"
+      [ -n "$sid" ] || selfhost
+      dir="$(printf '%s' "$resp" | jq -r '.directory // empty' 2>/dev/null || true)"
+      [ -n "$dir" ] || dir="$dir_in"
+      place="$(curl -sf --connect-timeout 2 --max-time 3 -X POST "$PIGEON_DAEMON_URL/place" \
+        -H "Content-Type: application/json" "''${place_auth[@]+"''${place_auth[@]}"}" \
+        -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
+      serve_url="$(parse_serve_url "$place" "$OPENCODE_URL")"
+      exec "$REAL_OPENCODE" attach "$serve_url" --session "$sid" --dir "$dir"
+    fi
+
+    if [ "$verb" = "RESUME" ]; then
+      body="$(curl -s -o - -w $'\n%{http_code}' --connect-timeout 2 --max-time 3 "$OPENCODE_URL/session/$sid" 2>/dev/null || true)"
+      code="''${body##*$'\n'}"
+      body="''${body%$'\n'*}"
+      [ "$code" = "200" ] || selfhost
+      dir="$(printf '%s' "$body" | jq -r '.directory // empty' 2>/dev/null || true)"
+      [ -n "$dir" ] || selfhost
+      place="$(curl -s -o - -w $'\n%{http_code}' --connect-timeout 2 --max-time 3 -X POST "$PIGEON_DAEMON_URL/place" \
+        -H "Content-Type: application/json" "''${place_auth[@]+"''${place_auth[@]}"}" \
+        -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
+      pcode="''${place##*$'\n'}"
+      pbody="''${place%$'\n'*}"
+      case "$pcode" in 2??) : ;; *) selfhost ;; esac
+      serve_url="$(parse_serve_url "$pbody" "$OPENCODE_URL")"
+      exec "$REAL_OPENCODE" attach "$serve_url" --session "$sid" --dir "$dir"
+    fi
+
+    selfhost
   '';
 }
