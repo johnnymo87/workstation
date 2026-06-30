@@ -50,6 +50,20 @@ pkgs.writeShellApplication {
       fi
     }
 
+    # split_classification <classify-output>: split the TAB-delimited
+    # "verb<TAB>sid<TAB>project" line from classify_oc_invocation into the
+    # verb/sid/project globals. Hand-rolled instead of `read -r` because `read`
+    # with IFS=$'\t' collapses consecutive tabs (tab is IFS-whitespace), which
+    # would silently drop <project> from a "NEW<TAB><TAB><project>" line and make
+    # `opencode <project>` open $PWD instead. Parameter expansion keeps empties.
+    split_classification() {
+      local c="$1"
+      verb="''${c%%$'\t'*}"
+      c="''${c#*$'\t'}"
+      sid="''${c%%$'\t'*}"
+      project="''${c#*$'\t'}"
+    }
+
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
     PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
     POOL_K="${toString k}"
@@ -57,12 +71,13 @@ pkgs.writeShellApplication {
     original_args=("$@")
     selfhost() { exec "$REAL_OPENCODE" "''${original_args[@]+"''${original_args[@]}"}"; }
 
-    # M4 gate + M5 stdin guard
+    # Self-host (today's behavior) unless pooling applies: only pool on hosts with
+    # a real pool (K>=2; M4), and never on piped/non-TTY stdin since `attach`
+    # cannot consume a piped prompt (M5).
     [ "$POOL_K" -ge 2 ] 2>/dev/null || selfhost
     [ -t 0 ] || selfhost
 
-    cls="$(classify_oc_invocation "$@")"
-    IFS=$'\t' read -r verb sid project <<<"$cls"
+    split_classification "$(classify_oc_invocation "$@")"
     [ "$verb" = "PASSTHROUGH" ] && selfhost
 
     pigeon_reachable() {
@@ -80,7 +95,7 @@ pkgs.writeShellApplication {
       dir_in="''${project:-$PWD}"
       dir_in="''${dir_in/#\~/$HOME}"
       [ -d "$dir_in" ] || selfhost
-      dir_in="$(cd "$dir_in" && pwd)"
+      dir_in="$(cd "$dir_in" && pwd)" || selfhost
       resp="$(curl -sf -X POST "$OPENCODE_URL/session" -H "x-opencode-directory: $dir_in" 2>/dev/null || true)"
       sid="$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null || true)"
       [ -n "$sid" ] || selfhost

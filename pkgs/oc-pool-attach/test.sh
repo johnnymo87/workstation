@@ -52,6 +52,14 @@ parse_serve_url() {
   fi
 }
 
+split_classification() {
+  local c="$1"
+  verb="${c%%$'\t'*}"
+  c="${c#*$'\t'}"
+  sid="${c%%$'\t'*}"
+  project="${c#*$'\t'}"
+}
+
 # ---- test infrastructure ----------------------------------------------------
 
 assert_eq() {
@@ -97,6 +105,18 @@ T $'PASSTHROUGH\t\t'        -s                     # -s with no value
 T $'PASSTHROUGH\t\t'        -s bad!sid             # sid fails ^ses_[A-Za-z0-9_-]+$
 T $'PASSTHROUGH\t\t'        proj1 proj2            # >1 positional -> ambiguous
 
+# ---- split_classification tests ---------------------------------------------
+# Regression guard: `read -r verb sid project` with IFS=$'\t' collapses the
+# empty middle field of "NEW<TAB><TAB><project>" (tab is IFS-whitespace), which
+# silently dropped <project>. split_classification must preserve empty fields.
+verb=""; sid=""; project=""
+S() { split_classification "$2"; assert_eq "$1" "$verb|$sid|$project" "split: $3"; }
+S 'NEW||'             "$(classify_oc_invocation)"            "bare -> empty sid+project"
+S 'NEW||myproj'       "$(classify_oc_invocation myproj)"     "NEW project preserved (the read-collapse bug)"
+S 'RESUME|ses_abc|'   "$(classify_oc_invocation -s ses_abc)" "RESUME sid, empty project"
+S 'RESUME|ses_abc|proj' "$(classify_oc_invocation proj -s ses_abc)" "RESUME sid + project"
+S 'PASSTHROUGH||'     "$(classify_oc_invocation run)"        "PASSTHROUGH -> empty sid+project"
+
 # ---- parse_serve_url tests --------------------------------------------------
 fallback_url="http://127.0.0.1:4096"
 if command -v jq >/dev/null 2>&1; then
@@ -138,6 +158,20 @@ if [ -f "$default_nix" ]; then
     printf 'PASS  source defines classify_oc_invocation\n'
   else
     printf 'FAIL  source defines classify_oc_invocation\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'split_classification()' "$default_nix"; then
+    printf 'PASS  source defines split_classification\n'
+  else
+    printf 'FAIL  source defines split_classification\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  # Regression guard: must NOT parse the classifier output with `read` + IFS=tab
+  # (collapses the empty middle field, dropping <project>).
+  if grep -q "IFS=\$'\\\\t' read" "$default_nix"; then
+    printf 'FAIL  source parses classify output with IFS=tab read (drops empty project field)\n        in: %s\n' "$default_nix"; exit 1
+  else
+    printf 'PASS  source avoids IFS=tab read for classify output\n'
   fi
 
   if grep -q 'PIGEON_DAEMON_URL' "$default_nix"; then
