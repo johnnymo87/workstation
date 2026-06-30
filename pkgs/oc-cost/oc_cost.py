@@ -25,16 +25,21 @@ RATES: dict[tuple[str, str], dict] = {
     ("anthropic", "claude-opus-4-8"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-opus-4-6"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-sonnet-4-6"):            {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
-    # claude-sonnet-5: launched 2026-06-30 at INTRODUCTORY pricing (2/10, cache
-    # 0.2/2.5) through 2026-08-31, after which it reverts to STANDARD 3/15 (cache
-    # 0.30/3.75 — same as sonnet-4-6). TODO(2026-08-31): bump these to 3/15/0.30/3.75.
+    # claude-sonnet-5 (launched 2026-06-30) on the FIRST-PARTY Anthropic API is at
+    # INTRODUCTORY pricing (2/10, cache 0.2/2.5) through 2026-08-31, after which it
+    # reverts to STANDARD 3/15 (cache 0.30/3.75 — same as sonnet-4-6). The intro
+    # promo is Anthropic-API-only; the Vertex route below charges standard.
+    # TODO(2026-08-31): bump these to 3/15/0.30/3.75.
     ("anthropic", "claude-sonnet-5"):              {"input": 2, "output": 10, "cache_read": 0.20, "cache_write": 2.5},
     ("google-vertex-anthropic", "claude-opus-4-7"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-4-8"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-4-6"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-sonnet-4-6"): {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
-    # See note above; same introductory-vs-standard caveat for the Vertex route.
-    ("google-vertex-anthropic", "claude-sonnet-5"):   {"input": 2, "output": 10, "cache_read": 0.20, "cache_write": 2.5},
+    # Vertex resells Claude at Anthropic's STANDARD list (3/15, cache 0.30/3.75 —
+    # same as sonnet-4-6); the Anthropic-API intro promo above is NOT honored here,
+    # so no 2026-08-31 flip is needed. cloudbox claude traffic takes this route
+    # (claude-failover-proxy -> aigateway -> Vertex).
+    ("google-vertex-anthropic", "claude-sonnet-5"):   {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
     # --- Google Gemini (Vertex) ---
     ("google-vertex", "gemini-3.5-flash"):  {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5},
     # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
