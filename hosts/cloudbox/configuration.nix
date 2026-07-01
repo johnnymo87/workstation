@@ -1159,6 +1159,12 @@ ${serveIdCase}
     gh gnupg pinentry-curses
     nodejs  # For pigeon
     xorg.xvfb  # Provides `Xvfb`; prebuilt Cypress spawns it for headless e2e
+    # teamclaude CLI on PATH so Max-account management is a plain `teamclaude
+    # login` / `teamclaude accounts` (no store-path resolution). Resolves to the
+    # module-level `teamclaude` let-binding above (same derivation the
+    # teamclaude.service runs); there is no `pkgs.teamclaude`, so the let-binding
+    # wins over `with pkgs;`. Config/tokens live in ~/.config/teamclaude.json.
+    teamclaude
   ];
 
   # Docker (for testcontainers)
