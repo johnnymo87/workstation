@@ -37,15 +37,44 @@ let
     };
   };
 
-  # Patch agent files if needed to override the sonnet hardcoded model.
-  # Gemini 3.5 Flash uses Gemini-native thinking levels, not xhigh.
+  # Patch agent model pins so each host resolves to a model it can actually
+  # reach. Two independent, order-independent rewrites:
+  #
+  #   1. sonnet-5 -> Gemini 3.5 Flash on the Gemini-for-agents hosts (macOS +
+  #      cloudbox). These are the cheap plan-execution / research subagents;
+  #      Gemini uses Gemini-native thinking levels, so add `variant: high`.
+  #
+  #   2. opus-4-N -> Vertex Anthropic (`google-vertex-anthropic/claude-opus-4-N@default`)
+  #      on cloudbox ONLY. Cloudbox has no first-party `anthropic/` auth (it
+  #      routes Anthropic through Vertex/ADC), so an opus agent left pinned to
+  #      `anthropic/claude-opus-*` reaches an unusable provider and the model
+  #      loop dies with an EMPTY response — the exact silent-failure the oracle
+  #      and vision-qa subagents were hitting. devbox/crostini keep the direct
+  #      `anthropic/claude-opus-*` pin (it is the working primary there via
+  #      TeamClaude / anthropic-auth OAuth); macOS is left untouched (status
+  #      quo — its primary is Gemini and opus agents are rare there). This
+  #      mirrors the host-conditional primary `model =` below
+  #      (`if isCloudbox then vertexOpusModel else geminiModel`). The Vertex
+  #      opus models already carry `effort: xhigh` from opencode.base.json, so
+  #      no variant override is added here.
   patchAgent = name: src:
-    if useGeminiForAgents then
-      pkgs.runCommand "''${name}-gemini.md" {} ''
-        ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-5|model: ${geminiModel}\nvariant: ${geminiVariant}|' ${src} > $out
-      ''
-    else
-      src;
+    let
+      afterSonnet =
+        if useGeminiForAgents then
+          pkgs.runCommand "${name}-gemini.md" {} ''
+            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-5|model: ${geminiModel}\nvariant: ${geminiVariant}|' ${src} > $out
+          ''
+        else
+          src;
+      afterOpus =
+        if isCloudbox then
+          pkgs.runCommand "${name}-opus-vertex.md" {} ''
+            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-opus-([0-9]+-[0-9]+)|model: google-vertex-anthropic/claude-opus-''${1}\@default|' ${afterSonnet} > $out
+          ''
+        else
+          afterSonnet;
+    in
+      afterOpus;
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -211,6 +240,7 @@ in
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/oracle.md".source = patchAgent "oracle" "${assetsPath}/opencode/agents/oracle.md";
+   xdg.configFile."opencode/agents/adversarial-reviewer.md".source = patchAgent "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
    xdg.configFile."opencode/agents/vision-qa.md".source = patchAgent "vision-qa" "${assetsPath}/opencode/agents/vision-qa.md";
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";

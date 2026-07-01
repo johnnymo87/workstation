@@ -21,16 +21,22 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### oracle (subagent)
 **Purpose:** Read-only strategic technical advisor — architecture, debugging, high-stakes decisions.
-**Model:** openai/gpt-5.4 (deliberately different from primary model for perspective diversity)
+**Model:** Opus 4.8, host-correct — `anthropic/claude-opus-4-8` on devbox/crostini/macOS, rewritten by `patchAgent` to `google-vertex-anthropic/claude-opus-4-8@default` on cloudbox (see "Host-correct model routing" below).
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
-**When to use:** Stuck after 2+ attempts, architectural decision, need a second opinion from a different model.
-**Key trait:** Cannot modify files. Gives a recommendation with effort estimate (Quick/Short/Medium/Large) and action plan. Pragmatic minimalism — biases toward simplest solution.
+**When to use:** Stuck after 2+ attempts, architectural decision, need a second opinion.
+**Key trait:** Cannot modify files. Gives a recommendation with effort estimate (Quick/Short/Medium/Large) and action plan. Pragmatic minimalism — biases toward simplest solution. Its prompt is written as ethos + judgment (terse, actionable) rather than a rigid rule-list.
 
-Uses OpenAI auth configured via sops-nix (`openai_api_key` secret on devbox).
+### adversarial-reviewer (subagent)
+**Purpose:** Skeptical, adversarial review of a **design / plan / approach before it's built** — hunts flaws, wrong assumptions, missing cases, hazards, and better alternatives.
+**Model:** Opus 4.8, host-correct (same routing as oracle: direct `anthropic/` off cloudbox, Vertex on cloudbox).
+**Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
+**When to use:** You have a design or plan and want it pressure-tested *before* writing code; you want the uncomfortable "this is solving the wrong problem" read.
+**Key trait:** Grounds every claim in the actual code/artifact (`file:line`, never fabricates); distinguishes verified findings from suspicions; reports verdict → confirmed-sound → flaws-by-severity → missing cases → concrete recommendations.
+**Complements:** oracle is the *advisor* ("what should we do?"); adversarial-reviewer is its skeptic ("here's how that goes wrong"). code-reviewer / spec-reviewer check a *finished implementation* against a spec; adversarial-reviewer checks the *design itself*, earlier. Its prompt is deliberately ethos-driven (care that the design is correct; judgment over checklist) per the Amanda Askell steer.
 
 ### vision-qa (subagent)
 **Purpose:** Visual QA analyst — analyzes screenshots and UI renders.
-**Model:** claude-opus-4-6
+**Model:** `anthropic/claude-opus-4-7` + `variant: xhigh` (rewritten to `google-vertex-anthropic/claude-opus-4-7@default` on cloudbox by `patchAgent`).
 **Tools:** read only
 **When to use:** Comparing screenshots, identifying visual regressions, analyzing canvas/WebGL output, triaging UI bugs. Also used for:
 - **Comparative analysis** — current vs reference image, systematically comparing regions and element positions
@@ -38,6 +44,27 @@ Uses OpenAI auth configured via sops-nix (`openai_api_key` secret on devbox).
 - **Automated dispatch** — called programmatically by the main agent's QA workflow (e.g., the `e2e-manual-qa` skill's vision-qa integration protocol)
 
 **Output:** Structured JSON with verdict (pass/fail/uncertain), confidence score, issues with severity and suggested next checks. Verdicts drive automated pass/fail decisions, so severity must be precise.
+
+## Host-correct model routing (`patchAgent`)
+
+Agent files are checked in with `anthropic/` model pins, but not every host can
+reach the first-party `anthropic/` provider. `patchAgent` in
+`users/dev/opencode-config.nix` rewrites the pin at deploy time so each host
+lands on a model it can actually call:
+
+- **sonnet-5 → Gemini 3.5 Flash** on macOS + cloudbox (the cheap plan-execution
+  / research subagents: implementer, spec-reviewer, code-reviewer, librarian).
+- **opus-4-N → `google-vertex-anthropic/claude-opus-4-N@default`** on **cloudbox
+  only**. Cloudbox has no working first-party `anthropic/` auth (it routes
+  Anthropic through Vertex/ADC), so an opus agent left pinned to
+  `anthropic/claude-opus-*` reaches an unusable provider and the model loop dies
+  with an **empty response** — the silent failure that hit oracle and vision-qa.
+  devbox/crostini keep the direct pin (their working primary via TeamClaude /
+  anthropic-auth OAuth); macOS is left as-is.
+
+When adding an opus-pinned agent, pin it to `anthropic/claude-opus-4-8` in the
+source file and let `patchAgent` handle cloudbox — do **not** hardcode the
+Vertex id, or you regress devbox/crostini/macOS.
 
 ## Agents We Removed (and Why)
 
@@ -64,7 +91,7 @@ In Feb 2025 we inherited 6 agents from "Oh My OpenCode" (OMO) and cut them all:
 
 ## Adding a New Agent
 
-1. Create `assets/opencode/agents/<name>.md` with YAML frontmatter (description, mode, model, permission)
-2. Add `xdg.configFile."opencode/agents/<name>.md".source = ...` to `users/dev/opencode-config.nix`
-3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox) or `darwin-rebuild switch` (macOS)
+1. Create `assets/opencode/agents/<name>.md` with YAML frontmatter (description, mode, model, permission). For opus agents, pin `anthropic/claude-opus-4-8` and let `patchAgent` route it (see "Host-correct model routing").
+2. Add `xdg.configFile."opencode/agents/<name>.md".source = patchAgent "<name>" "${assetsPath}/opencode/agents/<name>.md";` to `users/dev/opencode-config.nix` (route it through `patchAgent`, not a bare `source`, so host model rewriting applies)
+3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox), `nix run home-manager -- switch --flake .#cloudbox` (cloudbox), or `darwin-rebuild switch` (macOS)
 4. Update this skill with the agent's purpose and rationale
