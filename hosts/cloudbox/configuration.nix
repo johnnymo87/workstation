@@ -158,6 +158,16 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Anthropic enterprise (Developer Platform / api_team org) API key. The
+      # claude-failover-proxy exports it as CFP_ENTERPRISE_API_KEY to enable the
+      # opt-in enterprise failover tier (vertex -> enterprise -> max). Empty/unset
+      # => tier disabled. Rotating means regenerating the key in the Anthropic
+      # console and re-encrypting anthropic_enterprise_api_key in secrets/cloudbox.yaml.
+      anthropic_enterprise_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Pigeon daemon secrets
       ccr_api_key = {
         owner = "dev";
@@ -531,16 +541,13 @@ in
     path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.curl pkgs.coreutils pkgs.bash pkgs.openssh ];
     serviceConfig = {
       Type = "oneshot";
-      # lgtm run mode (LGTM_DISPATCH_MODE=run) spawns detached `opencode run`
-      # children that must OUTLIVE the cycle's ExecStart — the watchdog reaps
-      # their completion on a later cycle. The default KillMode=control-group
-      # SIGKILLs the entire service cgroup when ExecStart exits, and a detached
-      # child (new process group via spawn's {detached:true}) does NOT escape the
-      # cgroup, so it gets killed one event in (observed: food-truck/mono#3569
-      # died right after step_start). KillMode=process kills only the main
-      # process on deactivation, leaving the detached review/assist children
-      # alive to finish and self-reap. Harmless for serve mode (no children).
-      KillMode = "process";
+      # NB: default KillMode=control-group is correct here. The old
+      # KillMode=process was a run-mode artifact (lgtm-a3r removed run mode):
+      # it kept systemd from SIGKILLing detached `opencode run` review children
+      # when the oneshot ExecStart exited. Serve mode spawns no such children —
+      # opencode-launch is pure HTTP to the serve pool and the sessions run in
+      # opencode-serve-pool.target's own cgroup — so nothing needs to outlive
+      # the cycle. (lgtm-j6k)
       User = "dev";
       Group = "dev";
       WorkingDirectory = "/home/dev/projects/lgtm";
@@ -548,11 +555,13 @@ in
         "HOME=/home/dev"
         "OPENCODE_URL=http://127.0.0.1:4096"
         "LGTM_PROJECTS_DIR=/home/dev/projects"
-        # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
-        # sessionVariables for rationale). lgtm run-mode spawns detached
-        # `opencode run` children that inherit this env and must hit the same DB.
-        "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
-        "OPENCODE_DISABLE_CHANNEL_DB=1"
+        # NB: OPENCODE_DB / OPENCODE_DISABLE_CHANNEL_DB intentionally omitted
+        # (lgtm-j6k). Those pinned the shared opencode.db for the run-era
+        # detached `opencode run` children this service used to spawn. lgtm-a3r
+        # removed run mode: the daemon (tsx src/index.ts) only reads sessions
+        # over HTTP via OPENCODE_URL and opencode-launch is pure curl/jq — no
+        # local opencode process inherits this env. The serve pool owns the DB
+        # pin (see opencode-serve-pool env).
         # When the agent submits APPROVE on a PR by one of these authors,
         # Phase 4 of the review prompt instructs it to immediately enable
         # GitHub auto-merge (gh pr merge --auto --squash) so dependency
@@ -954,13 +963,20 @@ ${serveIdCase}
         # back to UTC under systemd.
         "CFP_TZ=America/New_York"
         "CFP_STATE_PATH=/var/lib/claude-failover-proxy/spend.json"
+        # Enterprise failover tier (opt-in). CFP_ENTERPRISE_API_KEY is exported
+        # from the sops secret in the shim below (RAW value, see note). The
+        # enterprise spend ledger defaults to spend-enterprise.json beside
+        # spend.json (same StateDirectory), so no CFP_ENTERPRISE_STATE_PATH needed.
+        "CFP_ENTERPRISE_BUDGET_DOLLARS=100"
       ];
-      # CFP_TEAMCLAUDE_API_KEY is a RAW value (not KEY=VALUE) so it can't go via
-      # EnvironmentFile; export it from the sops secret in a shell shim (same
-      # pattern as aigateway). set -e makes a missing/unreadable secret fail loud.
+      # CFP_TEAMCLAUDE_API_KEY and CFP_ENTERPRISE_API_KEY are RAW values (not
+      # KEY=VALUE) so they can't go via EnvironmentFile; export them from the sops
+      # secrets in a shell shim (same pattern as aigateway). set -e makes a
+      # missing/unreadable secret fail loud.
       ExecStart = "${pkgs.writeShellScript "claude-failover-proxy-start" ''
         set -euo pipefail
         export CFP_TEAMCLAUDE_API_KEY="$(${pkgs.coreutils}/bin/cat /run/secrets/teamclaude_api_key)"
+        export CFP_ENTERPRISE_API_KEY="$(${pkgs.coreutils}/bin/cat /run/secrets/anthropic_enterprise_api_key)"
         exec ${claude-failover-proxy}/bin/claude-failover-proxy
       ''}";
       Restart = "on-failure";
