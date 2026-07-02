@@ -85,6 +85,51 @@ Practical guidance:
 - Use `wait` for backgrounded child processes you actually own.
 - Use `timeout` to bound an operation.
 
+## Git Safety in Shared Worktrees
+
+**Never run tree-wide destructive git operations in a shared or main worktree.
+This applies to every session AND every subagent, without exception.** A swarm
+(or two sessions in the same checkout) shares one working tree and index; a
+destructive op run "to clean up" clobbers a peer's *uncommitted, untracked, or
+in-flight* data with no undo. This has already caused real data loss — a
+review subagent ran `git stash`/`git checkout` in a shared worktree and wiped a
+peer session's uncommitted SQLite DB.
+
+The banned operations (they mutate the working tree / index / refs for
+everyone, not just you):
+
+- `git reset` (especially `--hard`), `git checkout -- <path>` / `git checkout <ref>`,
+  `git restore`, `git switch`
+- `git stash` (moves everyone's uncommitted changes out from under them)
+- `git clean` (deletes untracked files — often exactly the data a peer hasn't
+  committed yet)
+- history/remote mutation you don't own: `git rebase`, `git merge`,
+  `git cherry-pick`, `git revert`, `git commit --amend`, `git push --force`
+
+Do this instead:
+
+- **Inspect read-only.** Review and verification work needs only
+  `git diff <base>..<head>`, `git show <sha>`, `git log`, `git status`,
+  `git blame`, `git rev-parse`. None of these touch the tree.
+- **Need a checked-out tree at a specific commit?** Add a *throwaway* worktree
+  instead of mutating the shared one:
+
+  ```bash
+  wt="$(mktemp -d)"; git worktree add --detach "$wt" <sha>
+  # ...operate inside "$wt"...
+  git worktree remove --force "$wt"
+  ```
+
+  `/tmp/*` is already allowed for external-directory access, so a `$(mktemp -d)`
+  worktree works out of the box.
+
+**Structural enforcement:** the read-only review/advisor subagents
+(`code-reviewer`, `spec-reviewer`, `adversarial-reviewer`, `oracle`) have these
+git subcommands denied at the permission layer (`assets/opencode/agents/*.md`),
+so the rule holds even if a subagent forgets it. That guard is a backstop, not
+a license — the convention above binds all sessions and subagents regardless of
+which agent they run as.
+
 ## Host Identification
 
 The `shell-env.ts` plugin injects `OPENCODE_HOSTNAME` into every bash tool

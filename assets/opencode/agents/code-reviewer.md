@@ -7,7 +7,24 @@ permission:
   read: allow
   glob: allow
   grep: allow
-  bash: allow
+  bash:
+    "*": allow
+    "git reset*": deny
+    "git checkout*": deny
+    "git restore*": deny
+    "git stash*": deny
+    "git clean*": deny
+    "git switch*": deny
+    "git commit*": deny
+    "git push*": deny
+    "git rebase*": deny
+    "git merge*": deny
+    "git cherry-pick*": deny
+    "git revert*": deny
+    "git apply*": deny
+    "git am*": deny
+    "git rm*": deny
+    "git mv*": deny
   write: deny
   edit: deny
 ---
