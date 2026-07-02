@@ -31,6 +31,12 @@ RATES: dict[tuple[str, str], dict] = {
     # promo is Anthropic-API-only; the Vertex route below charges standard.
     # TODO(2026-08-31): bump these to 3/15/0.30/3.75.
     ("anthropic", "claude-sonnet-5"):              {"input": 2, "output": 10, "cache_read": 0.20, "cache_write": 2.5},
+    # claude-fable-5 (Fable 5, 1M ctx, new tokenizer): flagship tier with NO
+    # introductory promo (unlike sonnet-5) — flat 10/50, cache 1/12.5 (5m write).
+    # Export-controlled 2026-06, access restored 2026-07-01. Vertex resells at the
+    # same standard list (see the vertex entry below).
+    # Source: platform.claude.com/docs/en/about-claude/pricing.
+    ("anthropic", "claude-fable-5"):               {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5},
     ("google-vertex-anthropic", "claude-opus-4-7"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-4-8"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-4-6"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
@@ -40,6 +46,10 @@ RATES: dict[tuple[str, str], dict] = {
     # so no 2026-08-31 flip is needed. cloudbox claude traffic takes this route
     # (claude-failover-proxy -> aigateway -> Vertex).
     ("google-vertex-anthropic", "claude-sonnet-5"):   {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
+    # Vertex charges Anthropic's standard list for fable-5 (same 10/50/1/12.5 as
+    # the first-party entry above; no intro promo to flip). cloudbox claude traffic
+    # takes this route (claude-failover-proxy -> aigateway -> Vertex).
+    ("google-vertex-anthropic", "claude-fable-5"):    {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5},
     # --- Google Gemini (Vertex) ---
     ("google-vertex", "gemini-3.5-flash"):  {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5},
     # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
