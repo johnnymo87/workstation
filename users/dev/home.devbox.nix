@@ -584,7 +584,7 @@ ${serveIdCase}
       ExecStart = "${pkgs.writeShellScript "opencode-serve-canary" ''
         set -u
         # User-service PATH is minimal (no coreutils/systemctl) — be explicit.
-        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl ]}
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.sudo ]}
         STATE=/tmp/opencode-serve-canary
         mkdir -p "$STATE"
         THRESHOLD=3
@@ -647,6 +647,32 @@ ${serveIdCase}
               cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
             done
           fi
+          # Deep forensics (workstation-g3iy): today's wedges spin in USERSPACE
+          # at ~2G with zero memory pressure, so cheap /proc dumps can't tell
+          # GC-thrash from a synchronous bun:sqlite scan. Capture:
+          #  - utime/stime split over 2s (pure utime = JS/GC spin; stime = syscall/IO)
+          #  - /proc io before/after (read_bytes growth = sqlite paging)
+          #  - 3x native thread stacks via eu-stack (needs sudo: yama
+          #    ptrace_scope=1 blocks non-ancestor same-uid ptrace). The bun
+          #    binary is non-PIE ET_EXEC so raw addresses are STABLE across
+          #    runs/wedges: identical frames across samples = tight-loop
+          #    fingerprint even without symbols.
+          # All best-effort; a truly frozen loop can't get worse from a brief
+          # ptrace stop, and the restart follows immediately anyway.
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            {
+              awk '{print "utime="$14, "stime="$15}' "/proc/$PID/stat" 2>/dev/null
+              cat "/proc/$PID/io" 2>/dev/null
+              sleep 2
+              awk '{print "utime="$14, "stime="$15}' "/proc/$PID/stat" 2>/dev/null
+              cat "/proc/$PID/io" 2>/dev/null
+              echo "clk_tck=100 interval=2s"
+            } > "$DUMP/cpu-io-split" 2>/dev/null || true
+            for i in 1 2 3; do
+              sudo -n timeout 10 eu-stack -p "$PID" > "$DUMP/eu-stack.$i" 2>&1 || true
+              sleep 1
+            done
+          fi
           echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
           systemctl --user restart "$UNIT"
           rm -f "$FAILFILE"
@@ -659,6 +685,51 @@ ${serveIdCase}
     Timer = {
       OnCalendar = "minutely";
       AccuracySec = "15s";
+    };
+    Install.WantedBy = [ "timers.target" ];
+  };
+
+  # Phantom-busy sweeper (workstation-utnw, 2026-07-03). When a serve dies
+  # uncleanly (canary SIGKILL, OOM, hard reboot) its in-flight assistant
+  # messages are never finalized: `time.completed` stays NULL in the message
+  # row, so every TUI that (re)loads the session renders the "working"
+  # animation forever — observed burning ~1 CPU core per TUI in a GC storm
+  # for hours. This timer finalizes provably-orphaned in-flight messages:
+  # role=assistant, no time.completed, no error, AND the row untouched for
+  # >30min (a streaming turn bumps time_updated on every part append; the
+  # 30min gate leaves headroom for long silent tool calls — and even a
+  # false positive is self-healing, since the owning serve's own completion
+  # write lands last). Writes the canonical MessageAbortedError shape so
+  # clients treat it exactly like a user abort. Safe against live serves:
+  # WAL mode, single short transaction, busy_timeout.
+  systemd.user.services.opencode-phantom-busy-sweeper = {
+    Unit.Description = "Finalize orphaned in-flight opencode messages (phantom busy)";
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.writeShellScript "opencode-phantom-busy-sweeper" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.sqlite ]}
+        DB="$HOME/.local/share/opencode/opencode.db"
+        [ -f "$DB" ] || exit 0
+        sqlite3 "$DB" "
+          PRAGMA busy_timeout=10000;
+          UPDATE message SET data = json_set(data,
+              '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
+              '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: serve died mid-turn)\"}}'))
+          WHERE json_extract(data, '\$.role') = 'assistant'
+            AND json_extract(data, '\$.time.completed') IS NULL
+            AND json_extract(data, '\$.error') IS NULL
+            AND time_updated < (strftime('%s','now') - 1800) * 1000;
+          SELECT 'finalized ' || changes() || ' orphaned message(s)';
+        "
+      ''}";
+    };
+  };
+  systemd.user.timers.opencode-phantom-busy-sweeper = {
+    Unit.Description = "Periodic phantom-busy message finalization";
+    Timer = {
+      OnCalendar = "*:0/5";
+      AccuracySec = "30s";
     };
     Install.WantedBy = [ "timers.target" ];
   };

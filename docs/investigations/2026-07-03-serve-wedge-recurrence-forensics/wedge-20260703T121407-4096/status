@@ -1,0 +1,59 @@
+Name:	.opencode-wrapp
+Umask:	0022
+State:	R (running)
+Tgid:	616793
+Ngid:	0
+Pid:	616793
+PPid:	1064
+TracerPid:	0
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+FDSize:	1024
+Groups:	1 1000 
+NStgid:	616793
+NSpid:	616793
+NSpgid:	616793
+NSsid:	616793
+Kthread:	0
+VmPeak:	135427300 kB
+VmSize:	78016648 kB
+VmLck:	       0 kB
+VmPin:	       0 kB
+VmHWM:	 1602372 kB
+VmRSS:	 1264764 kB
+RssAnon:	 1184664 kB
+RssFile:	   80100 kB
+RssShmem:	       0 kB
+VmData:	74713632 kB
+VmStk:	    1840 kB
+VmExe:	   57564 kB
+VmLib:	    5828 kB
+VmPTE:	    4140 kB
+VmSwap:	       0 kB
+HugetlbPages:	       0 kB
+CoreDumping:	0
+THP_enabled:	0
+untag_mask:	0xffffffffffffff
+Threads:	37
+SigQ:	0/124862
+SigPnd:	0000000000000000
+ShdPnd:	0000000000000000
+SigBlk:	0000000000000000
+SigIgn:	0000000001001000
+SigCgt:	00000001200044ca
+CapInh:	0000000800000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+Seccomp:	0
+Seccomp_filters:	0
+Speculation_Store_Bypass:	thread vulnerable
+SpeculationIndirectBranch:	unknown
+Cpus_allowed:	ffff
+Cpus_allowed_list:	0-15
+Mems_allowed:	0001
+Mems_allowed_list:	0
+voluntary_ctxt_switches:	22891
+nonvoluntary_ctxt_switches:	2274
