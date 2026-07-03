@@ -1,0 +1,10 @@
+--- sample 0 2026-07-03T22:06:11.258Z
+shift @ 1241:43
+processTicksAndRejections @ 1250:6
+--- sample 1 2026-07-03T22:06:38.741Z
+shift @ 1241:43
+processTicksAndRejections @ 1250:6
+--- sample 2 2026-07-03T22:07:04.769Z
+shift @ 1241:43
+processTicksAndRejections @ 1250:6
+<anon> @ /$bunfs/root/chunk-hs1fyjev.js:24
