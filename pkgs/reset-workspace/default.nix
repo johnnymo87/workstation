@@ -429,6 +429,21 @@ EOF
       log "(--yes: skipping confirmation)"
     fi
 
+    # ---- Step 2.5: Persist the manifest (workstation-3smg) ----
+    # Write the manifest BEFORE the kill/restart gauntlet: the restart branch
+    # and the post-restart health poll both die on failure, and a die there
+    # must not discard a successful capture (the manifest is the whole point
+    # of the morning-recommendation flow). After the [y/N] confirm so an
+    # aborted run doesn't clobber the previous reset's manifest.
+    MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"
+    if [ -n "''$OPENCODE_MANIFEST" ]; then
+      printf '%s\n' "''$OPENCODE_MANIFEST" > "''$MANIFEST_PATH"
+      log "wrote ''$OPENCODE_COUNT sid(s) to ''$MANIFEST_PATH"
+    else
+      : > "''$MANIFEST_PATH"
+      log "wrote empty ''$MANIFEST_PATH (no captured sids)"
+    fi
+
     # ---- Step 3: Kill all nvims ----
     log "killing all nvim/nvims processes (SIGKILL)..."
     # -x nvim matches both `nvim` (TTY frontend) and `nvim --embed`
@@ -504,21 +519,12 @@ EOF
       die "opencode serve pool did not become fully healthy within 30s (still down: ''${pending[*]})"
     fi
 
-    # ---- Step 6: Write manifest + launch recommendation session ----
-    # Replaces the old auto-restore (nvim respawn + oc-auto-attach loop).
-    # The recommendation session reads the manifest, enriches each sid via
+    # ---- Step 6: Launch recommendation session ----
+    # The manifest was already written (Step 2.5, before the kill/restart
+    # gauntlet). The recommendation session reads it, enriches each sid via
     # opencode-serve, messages the user via Telegram with conversational
     # recommendations, and re-opens only the chosen sessions on reply.
     # Design: docs/plans/2026-05-16-recommendation-driven-reset-design.md
-    MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"
-    if [ -n "''$OPENCODE_MANIFEST" ]; then
-      printf '%s\n' "''$OPENCODE_MANIFEST" > "''$MANIFEST_PATH"
-      log "wrote ''$OPENCODE_COUNT sid(s) to ''$MANIFEST_PATH"
-    else
-      : > "''$MANIFEST_PATH"
-      log "wrote empty ''$MANIFEST_PATH (no captured sids)"
-    fi
-
     if [ "''$OPENCODE_COUNT" -eq 0 ]; then
       log "no sessions to recommend; skipping recommendation session launch"
     elif ! command -v opencode-launch >/dev/null 2>&1; then

@@ -166,6 +166,15 @@ if [ -f "$default_nix" ]; then
   want_grep "bare-resolve loop still serve-gated"          'OC_ALL_PIDS=""'
   want_grep "restart reuses the precomputed scope"        '[ "$POOL_SCOPE" = "user" ]'
   want_grep "post-restart poll reuses discover_pool_urls" 'serve_health_urls < <(discover_pool_urls "$POOL_SCOPE")'
+  # workstation-3smg: the manifest write must precede the pool restart, so a
+  # restart/health-poll die can't discard a successful capture.
+  manifest_line=$(grep -n 'MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"' "$default_nix" | head -1 | cut -d: -f1)
+  restart_line=$(grep -n 'restarting opencode-serve-pool.target' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$manifest_line" ] && [ -n "$restart_line" ] && [ "$manifest_line" -lt "$restart_line" ]; then
+    echo "ok: manifest is written before the pool restart"
+  else
+    echo "FAIL: manifest write must precede the pool restart (manifest at ${manifest_line:-?}, restart at ${restart_line:-?})"; fail=1
+  fi
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi
