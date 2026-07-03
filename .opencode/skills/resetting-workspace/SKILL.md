@@ -10,10 +10,12 @@ description: Use when the user wants a fresh start on cloudbox — to kill all n
 ## What survives a reset
 
 `reset-workspace` captures the live opencode TUIs at reset time but
-does NOT auto-restore them. Instead, after the SIGKILL + serve-restart,
-it writes the captured session ids to
-`/tmp/reset-workspace-last-manifest.txt` and launches a headless
-opencode session in `~` with a baked-in prompt instructing it to:
+does NOT auto-restore them. Instead, right after capture is confirmed —
+before the SIGKILL + pool-restart gauntlet, so a failed restart can't
+discard a successful capture (workstation-3smg) — it writes the
+captured session ids to `/tmp/reset-workspace-last-manifest.txt`. Once
+the pool is back and healthy, it launches a headless opencode session
+in `~` with a baked-in prompt instructing it to:
 
 1. Read the manifest.
 2. Enrich each sid via `GET http://127.0.0.1:4096/session/<sid>` (title,
@@ -59,7 +61,13 @@ both feed the manifest the recommendation session reads:
 2. **Resolved (cwd-based)**: Bare `:te opencode` TUIs have no sid in
    argv; the bare loop resolves their `/proc/<pid>/cwd` to the
    most-recent root session for that directory via
-   `GET $OPENCODE_URL/session?directory=...&roots=true&limit=1`.
+   `GET <healthy-pool-member>/session?directory=...&roots=true&limit=1`.
+   Before either loop runs, the whole pool (not just serve-0 / 4096) is
+   probed for `/global/health`; the first serve to answer becomes the
+   resolution target. If none answer, this cwd-resolve loop is skipped,
+   but the argv-based loop above still runs — it reads `/proc` directly
+   and touches no serve, so a fully-wedged pool doesn't empty the
+   manifest (workstation-3smg).
 
 Each reset's journal includes a summary line of the form:
 
@@ -83,9 +91,13 @@ missing from PATH), you'll see a `WARNING: opencode-launch failed` or
 3. Snapshots live opencode TUIs whose pid is in the allowlist (both
    argv-based and cwd-resolved branches).
 4. Confirms with the user (skip with `--yes`).
-5. SIGKILLs all `nvim` processes owned by `dev`.
-6. Restarts `opencode-serve.service` (passwordless sudo).
-7. Writes the captured sids to `/tmp/reset-workspace-last-manifest.txt`.
+5. Writes the captured sids to `/tmp/reset-workspace-last-manifest.txt`
+   (before the kill/restart gauntlet, so a failed restart can't discard
+   the capture — workstation-3smg).
+6. SIGKILLs all `nvim` processes owned by `dev`.
+7. Restarts the opencode serve pool (`opencode-serve-pool.target`; user
+   `systemctl --user` on devbox, passwordless sudo on cloudbox) and
+   waits for every pool member to report healthy.
 8. Launches a headless opencode session in `~` with a baked-in prompt
    that handles enrichment, Telegram messaging, and selective re-open
    on reply.
