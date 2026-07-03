@@ -44,6 +44,38 @@ Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, 
 - `priority: urgent` for blocking work; `normal` (default); `low` for chatter the receiver can pull on demand.
 - `reply_to: <msg_id>` threads off a previous message — use the `msg_id` from the envelope you're answering.
 
+## Message economy — send less
+
+Every send costs the receiver a full turn: it interrupts whatever they're
+doing and spends a whole reasoning cycle on your message. The failure mode in
+practice is not messages that are too long — it's messages that didn't need to
+exist. Treat each send as expensive.
+
+**Send only when the message changes what the receiver will do:**
+
+| Send | Don't send |
+|------|-----------|
+| Task assignment (`task.assign`) | Acknowledgments ("got it", "on it", "will do") |
+| Blocking question (`clarification.request`) | Progress heartbeats ("still working", "50% done") |
+| Finished deliverable (`result`, `artifact.handoff`) | "Starting now" notices |
+| Terminal failure / blocker the receiver must act on | Restating what was already agreed |
+| Answer to a question asked of you | Courtesy pings, thanks, sign-offs |
+
+Rules of thumb:
+
+- **Batch.** If you're tempted to send a second message before the receiver
+  answered the first, fold it in. Accumulate findings into one consolidated
+  update instead of N incremental ones.
+- **Reply only when a reply is needed.** `task.assign` needs an eventual
+  `result`; a `status.update` needs no reply; a `result` needs a reply only if
+  acceptance or review is expected.
+- **Prefer pull over push.** Workers report at agreed milestones or on
+  completion — not on a timer. Anything the receiver could pull on demand
+  (`swarm_read`, inbox) should be `priority: low` or not sent at all.
+- **Default to silence.** If unsure whether a message is needed, don't send
+  it. A quiet worker making progress is the healthy state; the coordinator can
+  always ask.
+
 ## Receiving
 
 When a swarm message arrives, you'll see a user-message turn whose text is the envelope:
@@ -94,3 +126,4 @@ On terminal failure the daemon sends a `delivery.failed` message **back to you**
 - **Don't** POST to `opencode serve`'s `/session/<id>/prompt_async` directly for cross-session messaging. That route races (concurrent calls from different `x-opencode-directory` headers bypass the per-session busy guard, producing 400 "does not support assistant message prefill" from Anthropic). Always use `swarm_send`.
 - **Don't** write the `<swarm_message>` envelope into your `message` — pigeon adds it. Pre-wrapping is rejected (the close tag is forbidden in payloads) and double-wraps confuse receivers. Send only the raw payload.
 - **Don't** paste a received envelope back verbatim as your reply — send only the new payload.
+- **Don't** ack, heartbeat, or ping. If a message doesn't change what the receiver will do, it shouldn't exist (see "Message economy" above).
