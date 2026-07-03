@@ -21,6 +21,91 @@ let
   serveIdCase = lib.concatStringsSep "\n" (lib.imap0
     (i: port: "          ${toString port}) export OPENCODE_SERVE_ID=serve-${toString i} ;;")
     servePool.ports);
+  # workstation-g3iy: JS-level stack capture for wedged serves. The pool units
+  # run with BUN_INSPECT listening on 127.0.0.1:1<port> (14096/14097); this
+  # client connects, enables the JSC debugger, and pause/capture/resumes N
+  # times. JSC delivers Debugger.pause via VMTraps, which interrupt even a
+  # JIT'd busy-loop, so a frozen main thread yields real functionName@file:line
+  # frames — the one thing eu-stack cannot give us (the bun binary's symtab is
+  # stripped, so native stacks are anonymous JIT addresses). Verified live
+  # 2026-07-03 against a booting serve on :4098. NOTE: deliberately written
+  # without JS template literals — backtick-dollar-brace would collide with
+  # Nix '' escaping and is easy to get subtly wrong.
+  inspectorPauseStacks = pkgs.writeText "inspector-pause-stacks.mjs" ''
+    const wsUrl = process.argv[2];
+    const N = parseInt(process.argv[3] || "3", 10);
+    const INT = parseInt(process.argv[4] || "1000", 10);
+    setTimeout(function () { console.log("GLOBAL TIMEOUT"); process.exit(3); }, 45000);
+    const scripts = new Map();
+    let id = 0;
+    const pending = new Map();
+    const ws = new WebSocket(wsUrl);
+    function send(method, params) {
+      return new Promise(function (resolve, reject) {
+        const msgId = ++id;
+        pending.set(msgId, { resolve: resolve, reject: reject });
+        ws.send(JSON.stringify({ id: msgId, method: method, params: params || {} }));
+        setTimeout(function () {
+          if (pending.has(msgId)) { pending.delete(msgId); reject(new Error("timeout " + method)); }
+        }, 10000);
+      });
+    }
+    let pausedResolve = null;
+    ws.onmessage = function (ev) {
+      const m = JSON.parse(ev.data);
+      if (m.id && pending.has(m.id)) {
+        const p = pending.get(m.id);
+        pending.delete(m.id);
+        if (m.error) p.reject(new Error(JSON.stringify(m.error)));
+        else p.resolve(m.result);
+        return;
+      }
+      if (m.method === "Debugger.scriptParsed") {
+        scripts.set(m.params.scriptId, m.params.url || m.params.sourceURL || "<anon>");
+      } else if (m.method === "Debugger.paused" && pausedResolve) {
+        pausedResolve(m.params);
+        pausedResolve = null;
+      }
+    };
+    ws.onerror = function () { console.log("ws connect error"); process.exit(2); };
+    await new Promise(function (resolve, reject) {
+      ws.onopen = resolve;
+      setTimeout(reject, 5000);
+    }).catch(function () { console.log("ws open timeout"); process.exit(2); });
+    // Full JSC remote-inspector handshake. Inspector.initialized is REQUIRED:
+    // without it the backend accepts Debugger.pause but never delivers the
+    // interrupt (observed live 2026-07-03: bare Debugger.enable -> pause
+    // requests time out; with the handshake, pauses land).
+    await send("Inspector.enable").catch(function () {});
+    await send("Debugger.enable");
+    await send("Debugger.setBreakpointsActive", { active: true }).catch(function () {});
+    await send("Inspector.initialized").catch(function () {});
+    for (let i = 0; i < N; i++) {
+      try {
+        const pausedP = new Promise(function (r) { pausedResolve = r; });
+        await send("Debugger.pause");
+        const paused = await Promise.race([
+          pausedP,
+          new Promise(function (_, rej) {
+            setTimeout(function () { rej(new Error("pause-timeout")); }, 8000);
+          }),
+        ]);
+        const frames = (paused.callFrames || []).map(function (f) {
+          const loc = f.location || {};
+          const url = scripts.get(loc.scriptId) || loc.scriptId;
+          return (f.functionName || "<anon>") + " @ " + url + ":" + loc.lineNumber;
+        });
+        console.log("--- sample " + i + " " + new Date().toISOString());
+        console.log(frames.slice(0, 30).join("\n") || "<no frames>");
+        await send("Debugger.resume");
+      } catch (e) {
+        console.log("--- sample " + i + " FAILED: " + e.message);
+        try { await send("Debugger.resume"); } catch (e2) {}
+      }
+      await new Promise(function (r) { setTimeout(r, INT); });
+    }
+    process.exit(0);
+  '';
 in
 lib.mkIf isDevbox {
   # Linux devbox identity
@@ -503,6 +588,14 @@ lib.mkIf isDevbox {
         # the previous system service's
         #   path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" ];
         "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
+        # workstation-g3iy: always-on JSC inspector endpoint (localhost-only,
+        # port 1<serve-port> -> 14096/14097). Idle cost is one listening socket;
+        # nothing slows down until a client connects AND enables the Debugger
+        # domain. This is what lets the canary (and a human) extract NAMED JS
+        # stacks from a wedged serve via inspectorPauseStacks — the 2026-07-03
+        # location-boot burns were opaque JIT addresses without it. %i specifier
+        # expansion works in Environment= for template units.
+        "BUN_INSPECT=ws://127.0.0.1:1%i/debug"
       ];
       ExecStart = "${pkgs.writeShellScript "opencode-serve-start" ''
         set -euo pipefail
@@ -677,6 +770,18 @@ ${serveIdCase}
               sudo -n timeout 10 ${pkgs.elfutils}/bin/eu-stack -p "$PID" > "$DUMP/eu-stack.$i" 2>&1 || true
               sleep 1
             done
+            # NAMED JS stacks via the serve's BUN_INSPECT endpoint (see the
+            # serve unit Environment): pause/capture/resume 3x through the JSC
+            # debugger. VMTraps interrupt even a spinning JIT loop, so this
+            # names the exact functionName@file:line burning the main thread —
+            # the answer eu-stack's anonymous JIT frames can't give. Best-effort:
+            # older serves (pre-BUN_INSPECT restart) just fail the connect.
+            # Runtime is node (native WebSocket, v22+): nixpkgs bun 1.3.3's WS
+            # client deterministically gets NO responses from bun's inspector
+            # (all commands time out), while node 22 and bun 1.3.14 both work —
+            # verified live 2026-07-03 against serve-0.
+            timeout 50 ${pkgs.nodejs}/bin/node ${inspectorPauseStacks} \
+              "ws://127.0.0.1:1$PORT/debug" 3 1000 > "$DUMP/js-stacks" 2>&1 || true
           fi
           echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
           systemctl --user restart "$UNIT"
