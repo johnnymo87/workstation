@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-uhEVbQF3imXnmZ+7GXWBsXcIAjMvNPrhvlUWsswTUzw=";
+      hash = "sha256-xYsPjNMOnSXbmHhzQ1cMKt1gEL4g1PZ+HeuHuMMySeo=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-jxwY5m8OzVsBLRxboDZS9WocfWjQUGL3+i0X8cUzy/w=";
+      hash = "sha256-Hk8JnaSnVOxnPkOnB9Ya3Pfo+BabYvNXutpBDVaRJEQ=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-BpApQC0GsyVJDTYSb/gqu29sYjojLGIinKVl3bWCOdU=";
+      hash = "sha256-QUoARuQFJj62XVKjRCDsPcLPQiCKW/kcS9u5oeGkVnM=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-isoNc/GhG1AhJqOieYMJwJXVvpU4D4Myt9B3sXZ9dJg=";
+      hash = "sha256-sQ+eD13tM4891iShLS2Ab8V23xhQoeiHfu+q+pyXVcg=";
       isZip = true;
     };
   };
@@ -67,9 +67,24 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.9 (same upstream 1.17.7, build-release.yml
-    # -f version=1.17.7 -f revision=9, staying on the 1.17.7 hold line). patched.9
-    # adds ONE patch over patched.8, taking the set to 16:
+    # This pins v1.17.7-patched.10 (same upstream 1.17.7, build-release.yml
+    # -f version=1.17.7 -f revision=10, staying on the 1.17.7 hold line). patched.10
+    # adds ONE patch over patched.9, taking the set to 17:
+    #   #16 event-log-gate (bead workstation-bm1i): gate the durable event LOG
+    #     (EventTable inserts in core/src/event.ts commitSyncEvent) behind a lazy
+    #     read of OPENCODE_EXPERIMENTAL_WORKSPACES. In v1.17.7 every durable event
+    #     commit unconditionally INSERTs a full event row (message.updated.1 =
+    #     complete message snapshot -> O(n^2) bytes per long session; 2.8GB of a
+    #     4.3GB opencode.db on devbox) plus a dup-check SELECT, synchronously
+    #     inside the main-thread commit transaction — a workstation-g3iy wedge
+    #     suspect. Only readers in v1.17.7 are the remote-workspace sync paths
+    #     (unused here). EventSequenceTable (seq counters) still maintained.
+    #     Mirrors upstream's later gate (commit b0017bf1b9); drop on cutover past
+    #     it. Serves pick this up only on restart (nightly reset / manual).
+    #
+    # patched.9 history (same upstream 1.17.7, build-release.yml
+    # -f version=1.17.7 -f revision=9). patched.9
+    # added ONE patch over patched.8, taking the set to 16:
     #   #15 tui-follow-owner (bead workstation-yl00): make the attached TUI's live
     #     event stream FOLLOW a session that migrates serves mid-stream. The TUI
     #     subscribes to a per-PROCESS /global/event firehose pinned (at attach time)
@@ -187,7 +202,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "9";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "10";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
