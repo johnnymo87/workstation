@@ -878,11 +878,14 @@ ${serveIdCase}
         export PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk ]}
         STATE=/tmp/opencode-serve-canary
         mkdir -p "$STATE"
-        # workstation-g3iy: 2 (was 3) — wedge #11 showed inspector dispatch only
-        # lands in the wedge's shallow phase; a minute-earlier restart also
-        # shrinks user-visible freeze time. False-positive cost is one serve
-        # restart (sessions persist in the shared DB; TUIs reconnect).
-        THRESHOLD=2
+        # workstation-g3iy: 7 (was 2) — the post-boot catalog/credential burn
+        # runs ~5-6 min and COMPLETES, leaving a warm stable instance. A
+        # threshold-2 (~2-3 min) restart kills the instance mid-burn, the TUI
+        # reconnects, re-creates the instance, and re-triggers the burn =
+        # restart<->burn thrash loop. 7 (~7-8 min) outlasts one clean burn
+        # while still catching permanent wedges. Revert toward 2-3 once the
+        # burn itself is fixed in the fork.
+        THRESHOLD=7
 
         # Don't fight an in-flight reset-workspace (it stops/starts the pool
         # deliberately). Shared, non-blocking probe of its lock. fd-based form:
