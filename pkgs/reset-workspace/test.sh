@@ -141,7 +141,9 @@ if [ -f "$default_nix" ]; then
   # (defense-in-depth suspenders). See investigation 2026-06-17 Q3.
   want_grep "bare-resolution curl has a hard max-time"     '--max-time 5'
   want_grep "bare-resolution curl has a connect-timeout"   '--connect-timeout 3'
-  want_grep "source probes serve health before capture"    '$OPENCODE_URL/global/health'
+  want_grep "capture discovers the whole pool"             'mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")'
+  want_grep "capture picks a healthy member as CAPTURE_URL" 'CAPTURE_URL="$u"'
+  want_grep "no-healthy-pool still runs strict-attach"      'strict-attach capture will still run'
   want_grep "source sets an unhealthy-serve flag"          'SERVE_HEALTHY=0'
   want_grep "unhealthy serve skips attach capture"         'OC_ATTACH_PIDS=""'
   want_grep "source defines pool_scope"                    'pool_scope() {'

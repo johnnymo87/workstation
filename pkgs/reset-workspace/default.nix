@@ -249,22 +249,38 @@ EOF
     # docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md and
     # docs/plans/2026-06-04-reset-workspace-exclude-lgtm-plan.md.
     #
-    # Defense-in-depth health gate (workstation-7sbo): the bare-TUI sid
-    # resolution below queries opencode-serve over HTTP. A wedged serve (event
-    # loop blocked but the kernel still completing the TCP handshake) accepts
-    # the connection and then blocks the read forever. That capture runs
-    # *before* the Step-5 restart, and the whole point of this tool is that
-    # restart -- so it must never be gated behind a call that depends on the
-    # possibly-wedged serve. Probe /global/health with a hard timeout first; if
-    # it fails, skip capture entirely (leave the pid lists empty so both loops
-    # below no-op) and fall straight through to the restart. The per-curl
-    # --max-time on the resolution curl is the minimal belt; this is the
-    # suspenders. See
+    # Pool-aware capture health (workstation-3smg, narrowing workstation-7sbo).
+    # The bare-TUI sid resolution below queries a serve over HTTP; a wedged
+    # serve (event loop blocked, kernel still completing TCP handshakes)
+    # accepts the connection and then blocks the read forever -- and this
+    # capture runs *before* the Step-5 restart that clears the wedge, so it
+    # must never hang on a possibly-wedged serve. Any healthy pool member can
+    # resolve cwd->sid (all serves share one opencode.db), so probe the WHOLE
+    # pool -- not just serve-0 -- with a hard per-probe timeout, and use the
+    # first healthy member as CAPTURE_URL for the bare-resolve loop.
+    # SERVE_HEALTHY now gates ONLY that loop; the strict-attach loop reads
+    # sids from /proc and runs unconditionally (it needs no serve). Worst case
+    # all K members are wedged-but-accepting: K x 3s, bounded, then straight
+    # to the restart. The --max-time on the resolution curl is the belt; this
+    # probe is the suspenders. See
     # docs/investigations/2026-06-17-opencode-1.17.7-orphan-session-wedge.md Q3.
-    SERVE_HEALTHY=1
-    if ! curl -sf --max-time 3 --connect-timeout 3 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
-      SERVE_HEALTHY=0
-      log "WARNING: opencode-serve at $OPENCODE_URL is unhealthy/unreachable; skipping session capture, going straight to restart"
+    SERVE_HEALTHY=0
+    # shellcheck disable=SC2034 # CAPTURE_URL becomes a real consumer in Task 5
+    # (workstation-3smg) of docs/plans/2026-07-03-reset-workspace-pool-aware-
+    # capture-plan.md, which points the bare-resolve curl at it.
+    CAPTURE_URL="$OPENCODE_URL"
+    mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")
+    for u in "''${capture_pool_urls[@]}"; do
+      if curl -sf --max-time 3 --connect-timeout 3 "$u/global/health" >/dev/null 2>&1; then
+        SERVE_HEALTHY=1
+        # shellcheck disable=SC2034 # see disable note on the init above
+        CAPTURE_URL="$u"
+        log "capture: resolving bare-TUI sids via healthy pool serve $u"
+        break
+      fi
+    done
+    if [ "$SERVE_HEALTHY" -eq 0 ]; then
+      log "WARNING: no healthy opencode-serve in pool (''${capture_pool_urls[*]}); strict-attach capture will still run, bare-resolve capture skipped"
     fi
 
     log "snapshotting live opencode attach clients..."
