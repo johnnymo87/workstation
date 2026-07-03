@@ -129,6 +129,11 @@ want_grep() { # want_grep <desc> <fixed-string>
   if grep -qF -- "$2" "$default_nix"; then echo "ok: $1"; else
     echo "FAIL: $1"; echo "  not found in default.nix: $2"; fail=1; fi
 }
+refuse_grep() { # refuse_grep <desc> <fixed-string> — string must NOT appear
+  if grep -qF -- "$2" "$default_nix"; then
+    echo "FAIL: $1"; echo "  found in default.nix (must be absent): $2"; fail=1
+  else echo "ok: $1"; fi
+}
 if [ -f "$default_nix" ]; then
   want_grep "source defines pool_health_urls_from_wants" 'pool_health_urls_from_wants() {'
   want_grep "source reads the pool target Wants="         'show -p Wants --value opencode-serve-pool.target'
@@ -145,7 +150,10 @@ if [ -f "$default_nix" ]; then
   want_grep "capture picks a healthy member as CAPTURE_URL" 'CAPTURE_URL="$u"'
   want_grep "no-healthy-pool still runs strict-attach"      'strict-attach capture will still run'
   want_grep "source sets an unhealthy-serve flag"          'SERVE_HEALTHY=0'
-  want_grep "unhealthy serve skips attach capture"         'OC_ATTACH_PIDS=""'
+  # workstation-3smg: the 2026-07-03 empty-manifest bug WAS this gate. The
+  # strict-attach loop reads /proc only and must never be re-gated on serve
+  # health.
+  refuse_grep "strict-attach capture is ungated" 'OC_ATTACH_PIDS=""'
   want_grep "source defines pool_scope"                    'pool_scope() {'
   want_grep "source defines discover_pool_urls"            'discover_pool_urls() {'
   want_grep "pool discovery reads Wants unprivileged first" 'wants="$(systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"'

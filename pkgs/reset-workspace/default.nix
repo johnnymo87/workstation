@@ -302,13 +302,12 @@ EOF
     # `--session ses_xxx` appears somewhere after the url, with either a
     # space or end-of-string after the sid (so we don't capture a partial
     # token).
-    # SERVE_HEALTHY gate (workstation-7sbo): on an unhealthy serve, leave the
-    # pid list empty so this loop no-ops and we fall through to the restart.
-    if [ "$SERVE_HEALTHY" -eq 1 ]; then
-      OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
-    else
-      OC_ATTACH_PIDS=""
-    fi
+    # workstation-3smg: strict-attach capture reads sids straight from
+    # /proc/<pid>/cmdline and touches NO serve, so it runs unconditionally --
+    # even when every pool serve is wedged. (Previously gated on SERVE_HEALTHY,
+    # which discarded the entire manifest when serve-0 alone was unhealthy, e.g.
+    # devbox 2026-07-03.)
+    OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
     for pid in $OC_ATTACH_PIDS; do
       # Authoritative exe filter: skip non-opencode processes that pgrep
       # over-matched (e.g. a transient `grep "opencode attach"` running
