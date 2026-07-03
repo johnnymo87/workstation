@@ -163,6 +163,16 @@ let
       # on devbox / anthropic-auth OAuth on crostini), so there is no per-token
       # cost; Vertex Gemini Flash isn't available here anyway.
       agent.compaction.model = devboxModel;
+      # vision-qa (deployed below on devbox/crostini only) uses the direct
+      # Google Generative AI API here (google/gemini-3.5-flash,
+      # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY auth — no Vertex).
+      # Inject the same cost/limit catalog entry used for the Vertex flavor
+      # below so cost tracking (oc-cost/aigateway) stays accurate.
+      provider.google = (opencodeBase.provider.google or {}) // {
+        models = ((opencodeBase.provider.google or {}).models or {}) // {
+          "gemini-3.5-flash" = gemini35FlashModel;
+        };
+      };
     })
     // (lib.optionalAttrs isCloudbox {
       # Cloudbox uses Vertex/ADC for Google models; hide the direct
@@ -246,6 +256,17 @@ in
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
+   # vision-qa is API-key-only by design (no Vertex): its base pin is
+   # google/gemini-3.5-flash (Google Generative AI API, authed via
+   # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY from sops). Deploy it only
+   # on the hosts where that auth path exists — devbox + crostini. macOS has
+   # no Gemini API key (Vertex ADC only) and cloudbox deliberately disables
+   # the direct `google` provider (disabled_providers above), so neither
+   # gets the agent. Bare source, no patchAgent: the pin is already
+   # host-correct where deployed and must NOT be rewritten to Vertex.
+   xdg.configFile."opencode/agents/vision-qa.md" = lib.mkIf (isDevbox || isCrostini) {
+     source = "${assetsPath}/opencode/agents/vision-qa.md";
+   };
 
     # Plugins (SRP: shell env injection, compaction context, subagent routing)
      xdg.configFile."opencode/plugins/shell-env.ts".source = "${assetsPath}/opencode/plugins/shell-env.ts";
