@@ -35,7 +35,12 @@ let
     const wsUrl = process.argv[2];
     const N = parseInt(process.argv[3] || "3", 10);
     const INT = parseInt(process.argv[4] || "1000", 10);
-    setTimeout(function () { console.log("GLOBAL TIMEOUT"); process.exit(3); }, 45000);
+    // Global cap 240s: during a live wedge (2026-07-03 21:02Z) Debugger.enable
+    // took >60s to land — inspector dispatch waits for a VM checkpoint on the
+    // burning main thread — but DID land mid-burn and the subsequent pauses
+    // captured the burn (shift/processTicksAndRejections tick-queue drain).
+    // The old 45s global / 10s per-command windows missed it entirely.
+    setTimeout(function () { console.log("GLOBAL TIMEOUT"); process.exit(3); }, 240000);
     const scripts = new Map();
     let id = 0;
     const pending = new Map();
@@ -47,7 +52,7 @@ let
         ws.send(JSON.stringify({ id: msgId, method: method, params: params || {} }));
         setTimeout(function () {
           if (pending.has(msgId)) { pending.delete(msgId); reject(new Error("timeout " + method)); }
-        }, 10000);
+        }, 180000);
       });
     }
     let pausedResolve = null;
@@ -87,7 +92,7 @@ let
         const paused = await Promise.race([
           pausedP,
           new Promise(function (_, rej) {
-            setTimeout(function () { rej(new Error("pause-timeout")); }, 8000);
+            setTimeout(function () { rej(new Error("pause-timeout")); }, 30000);
           }),
         ]);
         const frames = (paused.callFrames || []).map(function (f) {
@@ -780,8 +785,8 @@ ${serveIdCase}
             # client deterministically gets NO responses from bun's inspector
             # (all commands time out), while node 22 and bun 1.3.14 both work —
             # verified live 2026-07-03 against serve-0.
-            timeout 50 ${pkgs.nodejs}/bin/node ${inspectorPauseStacks} \
-              "ws://127.0.0.1:1$PORT/debug" 3 1000 > "$DUMP/js-stacks" 2>&1 || true
+            timeout 250 ${pkgs.nodejs}/bin/node ${inspectorPauseStacks} \
+              "ws://127.0.0.1:1$PORT/debug" 3 500 > "$DUMP/js-stacks" 2>&1 || true
           fi
           echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
           systemctl --user restart "$UNIT"
