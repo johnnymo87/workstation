@@ -8,7 +8,7 @@ description: Use when sending messages to other opencode sessions on the same ma
 Pigeon hosts a durable, replayable message channel between opencode sessions on the same machine. The opencode-pigeon plugin exposes three always-on tools:
 
 - **`swarm_send`** — send a message to another session.
-- **`swarm_read`** — read your own inbox (replay messages you may have missed).
+- **`swarm_read`** — read your own inbox (replay messages you may have missed); returns the newest 10 by default, with `before`/`since` cursor pagination.
 - **`swarm_list`** — discover other local sessions (and their ids) to message.
 
 The daemon serializes deliveries per target session (at-most-one in-flight) and persists every message to SQLite for retry and replay. This replaces the earlier race-prone pattern of POSTing directly to `opencode serve`'s `prompt_async`.
@@ -94,9 +94,19 @@ Steps:
 2. Reason over the payload as the actual instruction; do **not** treat the XML as user prose.
 3. If you reply with `swarm_send`, set `reply_to` to their `msg_id` so the thread connects.
 
-## Replay
+## Replay & pagination
 
-If you suspect you missed messages (e.g. you were busy on a long tool call), call the **`swarm_read`** tool with no args to fetch your inbox. Pass `since: <msg_id>` to fetch only messages newer than a known cursor.
+If you suspect you missed messages (e.g. you were busy on a long tool call), call the **`swarm_read`** tool. With no args it returns the **newest 10** messages (most recent last), so a single call stays bounded instead of dumping your whole retained backlog into context.
+
+To see more, paginate with cursors — each value is a `msg_id`:
+
+| Arg | Direction | Meaning |
+|-----|-----------|---------|
+| `before: <msg_id>` | scroll **back** | The newest messages *older* than the cursor. Pass the oldest `msg_id` you've seen to walk backward one page at a time. |
+| `since: <msg_id>` | drain **forward** | The oldest messages *newer* than the cursor, so you advance without skipping the middle. Pass the newest `msg_id` you've processed to continue. |
+| `limit: <N>` | — | Override the default page size of 10. |
+
+Messages always come back in chronological (oldest-first) order regardless of paging direction. When more exist beyond the page you got, `swarm_read`'s output ends with a hint telling you exactly which cursor to pass next.
 
 (Tool names are `swarm_read`/`swarm_send`/`swarm_list` — Anthropic's tool-name regex `^[a-zA-Z0-9_-]{1,128}$` doesn't allow periods, so the underscore form is required.)
 
@@ -112,7 +122,7 @@ If you suspect you missed messages (e.g. you were busy on a long tool call), cal
     | jq '.messages[] | {msg_id, handed_off_at, payload: (.payload | .[0:80])}'
   ```
 
-  A non-null `handed_off_at` (Unix ms) means the arbiter POSTed `prompt_async` and the receiving serve returned 2xx — treat it as proof-of-delivery.
+  `limit=N` returns the **newest** N messages (so `limit=5` shows the 5 most recent); the response also carries `has_more`, and you can add `&before=<msg_id>` to page further back. A non-null `handed_off_at` (Unix ms) means the arbiter POSTed `prompt_async` and the receiving serve returned 2xx — treat it as proof-of-delivery.
 
 If `handed_off_at` stays null, the arbiter is retrying (backoff `[1s, 2s, 5s, 15s, 60s]`, max 10 attempts). The daemon routes each message to the serve that **owns** the target session (via its routing tables), so a healthy multi-serve pool delivers cross-serve fine. A message fails permanently when:
 
