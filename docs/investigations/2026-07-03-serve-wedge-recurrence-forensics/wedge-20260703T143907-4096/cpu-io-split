@@ -1,0 +1,17 @@
+utime=15682 stime=743
+rchar: 32953455
+wchar: 6014764
+syscr: 23753
+syscw: 1348
+read_bytes: 0
+write_bytes: 6467584
+cancelled_write_bytes: 487424
+utime=15890 stime=748
+rchar: 32966681
+wchar: 6014764
+syscr: 24078
+syscw: 1348
+read_bytes: 0
+write_bytes: 6467584
+cancelled_write_bytes: 487424
+clk_tck=100 interval=2s
