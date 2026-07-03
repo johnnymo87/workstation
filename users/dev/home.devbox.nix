@@ -111,6 +111,149 @@ let
     }
     process.exit(0);
   '';
+  # workstation-g3iy wedge-watcher: the missing half of the js-stacks story.
+  # Mid-wedge, inspector COMMAND DISPATCH (Inspector/Debugger.enable) needs
+  # main-loop VM checkpoints and can block >12min — the canary's on-demand
+  # inspectorPauseStacks client repeatedly arrived too late to name the
+  # enqueuer. But Debugger.pause is delivered via VMTraps and interrupts even
+  # a JIT'd busy-loop IF the Debugger domain was enabled BEFORE the burn
+  # (proven live 2026-07-03 21:02Z and 22:06Z). So: one persistent client per
+  # pool serve connects at serve start, completes the full handshake, and
+  # idles with the debugger pre-enabled. It polls /global/health client-side;
+  # on 2 consecutive fails (or a manual force-file, for end-to-end testing:
+  # `touch /tmp/opencode-wedge-watcher/<port>.force`) it pause/samples/resumes
+  # 10x and appends named frames to /tmp/opencode-wedge-watcher/. NOTE: while
+  # this holds the inspector WS, the canary's own js-stacks connect may fail —
+  # acceptable, the watcher's capture supersedes it. Same constraints as
+  # inspectorPauseStacks: no JS template literals (Nix '' escaping), node
+  # runtime (nixpkgs bun 1.3.3's WS client is broken against bun's inspector).
+  wedgeWatcher = pkgs.writeText "opencode-wedge-watcher.mjs" ''
+    import fs from "node:fs";
+    const port = process.argv[2];
+    if (!port) { console.log("usage: opencode-wedge-watcher.mjs <serve-port>"); process.exit(2); }
+    const wsUrl = "ws://127.0.0.1:1" + port + "/debug";
+    const healthUrl = "http://127.0.0.1:" + port + "/global/health";
+    const OUT = "/tmp/opencode-wedge-watcher";
+    const FORCE = OUT + "/" + port + ".force";
+    const POLL_MS = 15000;
+    const FAIL_THRESHOLD = 2;
+    const SAMPLES = 10;
+    const SAMPLE_GAP_MS = 1000;
+    const COOLDOWN_MS = 60000;
+    fs.mkdirSync(OUT, { recursive: true });
+    function log(s) { console.log(new Date().toISOString() + " " + s); }
+
+    const scripts = new Map();
+    let id = 0;
+    const pending = new Map();
+    let pausedResolve = null;
+    const ws = new WebSocket(wsUrl);
+    ws.onmessage = function (ev) {
+      const m = JSON.parse(ev.data);
+      if (m.id && pending.has(m.id)) {
+        const p = pending.get(m.id);
+        pending.delete(m.id);
+        if (m.error) p.reject(new Error(JSON.stringify(m.error)));
+        else p.resolve(m.result);
+        return;
+      }
+      if (m.method === "Debugger.scriptParsed") {
+        scripts.set(m.params.scriptId, m.params.url || m.params.sourceURL || "<anon>");
+      } else if (m.method === "Debugger.paused" && pausedResolve) {
+        pausedResolve(m.params);
+        pausedResolve = null;
+      } else if (m.method === "Debugger.paused") {
+        // Safety net: a pause that lands AFTER our per-sample timeout already
+        // gave up would otherwise leave the serve frozen forever. Fire-and-
+        // forget resume for any pause nobody is waiting on.
+        try { ws.send(JSON.stringify({ id: ++id, method: "Debugger.resume", params: {} })); } catch (e) {}
+      }
+    };
+    ws.onerror = function () { log("ws error; exiting for systemd restart"); process.exit(1); };
+    ws.onclose = function () { log("ws closed (serve restarted?); exiting for systemd restart"); process.exit(1); };
+    function send(method, params, timeoutMs) {
+      return new Promise(function (resolve, reject) {
+        const msgId = ++id;
+        pending.set(msgId, { resolve: resolve, reject: reject });
+        ws.send(JSON.stringify({ id: msgId, method: method, params: params || {} }));
+        setTimeout(function () {
+          if (pending.has(msgId)) { pending.delete(msgId); reject(new Error("timeout " + method)); }
+        }, timeoutMs || 60000);
+      });
+    }
+    await new Promise(function (resolve, reject) {
+      ws.onopen = resolve;
+      setTimeout(reject, 10000);
+    }).catch(function () { log("ws open timeout"); process.exit(1); });
+    // Full JSC handshake — Inspector.initialized is REQUIRED or pauses are
+    // accepted but never delivered (observed live 2026-07-03).
+    await send("Inspector.enable").catch(function () {});
+    await send("Debugger.enable");
+    await send("Debugger.setBreakpointsActive", { active: true }).catch(function () {});
+    await send("Inspector.initialized").catch(function () {});
+    log("debugger pre-enabled on " + wsUrl + "; polling " + healthUrl + " every " + POLL_MS + "ms");
+
+    async function healthy() {
+      try {
+        const res = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
+        return res.ok;
+      } catch (e) { return false; }
+    }
+
+    async function capture(reason) {
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const file = OUT + "/" + port + "-" + ts + ".stacks";
+      fs.appendFileSync(file, "wedge-watcher capture reason=" + reason + " port=" + port + "\n");
+      log("CAPTURE (" + reason + ") -> " + file);
+      for (let i = 0; i < SAMPLES; i++) {
+        try {
+          const pausedP = new Promise(function (r) { pausedResolve = r; });
+          await send("Debugger.pause", {}, 30000);
+          const paused = await Promise.race([
+            pausedP,
+            new Promise(function (_, rej) {
+              setTimeout(function () { rej(new Error("pause-timeout")); }, 30000);
+            }),
+          ]);
+          const frames = (paused.callFrames || []).map(function (f) {
+            const loc = f.location || {};
+            const url = scripts.get(loc.scriptId) || loc.scriptId;
+            return (f.functionName || "<anon>") + " @ " + url + ":" + loc.lineNumber;
+          });
+          fs.appendFileSync(file, "--- sample " + i + " " + new Date().toISOString() + "\n"
+            + (frames.slice(0, 40).join("\n") || "<no frames>") + "\n");
+        } catch (e) {
+          fs.appendFileSync(file, "--- sample " + i + " FAILED: " + e.message + "\n");
+        } finally {
+          pausedResolve = null;
+          try { await send("Debugger.resume", {}, 30000); } catch (e2) {}
+        }
+        await new Promise(function (r) { setTimeout(r, SAMPLE_GAP_MS); });
+      }
+      log("capture complete: " + file);
+    }
+
+    let fails = 0;
+    let lastCapture = 0;
+    while (true) {
+      let force = false;
+      try { force = fs.existsSync(FORCE); } catch (e) {}
+      if (force) {
+        try { fs.unlinkSync(FORCE); } catch (e) {}
+        await capture("force-file");
+      } else if (await healthy()) {
+        fails = 0;
+      } else {
+        fails = fails + 1;
+        log("health FAIL " + fails + "/" + FAIL_THRESHOLD);
+        if (fails >= FAIL_THRESHOLD && Date.now() - lastCapture > COOLDOWN_MS) {
+          lastCapture = Date.now();
+          await capture("health-fail-x" + fails);
+        }
+      }
+      await new Promise(function (r) { setTimeout(r, POLL_MS); });
+    }
+  '';
 in
 lib.mkIf isDevbox {
   # Linux devbox identity
@@ -654,11 +797,33 @@ ${serveIdCase}
   systemd.user.targets.opencode-serve-pool = {
     Unit = {
       Description = "OpenCode serve pool (K warm serves on one opencode.db)";
-      Wants = map (p: "opencode-serve@${toString p}.service") servePool.ports;
+      Wants = map (p: "opencode-serve@${toString p}.service") servePool.ports
+        ++ map (p: "opencode-wedge-watcher@${toString p}.service") servePool.ports;
       X-SwitchMethod = "keep-old";
     };
     Install = {
       WantedBy = [ "default.target" ];
+    };
+  };
+
+  # workstation-g3iy: per-serve wedge-watcher (see wedgeWatcher in the let
+  # block for the full rationale). Not BindsTo the serve: when the serve
+  # restarts, the WS drops, the watcher exits(1), and Restart=always
+  # reconnects it to the fresh serve — the reconnect loop IS the unit
+  # restart loop. StartLimitIntervalSec=0 because a serve in crash-loop
+  # backoff makes the watcher fail fast repeatedly by design.
+  systemd.user.services."opencode-wedge-watcher@" = {
+    Unit = {
+      Description = "Pre-enabled JSC debugger wedge-watcher for opencode-serve@%i";
+      After = [ "opencode-serve@%i.service" ];
+      StartLimitIntervalSec = 0;
+    };
+    Service = {
+      Type = "simple";
+      ExecStart = "${pkgs.nodejs}/bin/node ${wedgeWatcher} %i";
+      Restart = "always";
+      RestartSec = 10;
+      MemoryMax = "256M";
     };
   };
 
@@ -688,7 +853,11 @@ ${serveIdCase}
         export PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk ]}
         STATE=/tmp/opencode-serve-canary
         mkdir -p "$STATE"
-        THRESHOLD=3
+        # workstation-g3iy: 2 (was 3) — wedge #11 showed inspector dispatch only
+        # lands in the wedge's shallow phase; a minute-earlier restart also
+        # shrinks user-visible freeze time. False-positive cost is one serve
+        # restart (sessions persist in the shared DB; TUIs reconnect).
+        THRESHOLD=2
 
         # Don't fight an in-flight reset-workspace (it stops/starts the pool
         # deliberately). Shared, non-blocking probe of its lock. fd-based form:
