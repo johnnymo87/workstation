@@ -49,7 +49,7 @@ let
   #      routes Anthropic through Vertex/ADC), so an opus agent left pinned to
   #      `anthropic/claude-opus-*` reaches an unusable provider and the model
   #      loop dies with an EMPTY response — the exact silent-failure the oracle
-  #      and vision-qa subagents were hitting. devbox/crostini keep the direct
+  #      subagent was hitting historically. devbox/crostini keep the direct
   #      `anthropic/claude-opus-*` pin (it is the working primary there via
   #      TeamClaude / anthropic-auth OAuth); macOS is left untouched (status
   #      quo — its primary is Gemini and opus agents are rare there). This
@@ -58,7 +58,7 @@ let
   #      opus-4-8 model already carries its own `effort` setting from
   #      opencode.base.json, so no variant override is added here. (opus-4-7
   #      has no provider-level model entry anymore, and no agent is pinned
-  #      to it as of 2026-07-03; vision-qa/oracle both moved to opus-4-8.)
+  #      to it as of 2026-07-03.)
   patchAgent = name: src:
     let
       afterSonnet =
@@ -77,6 +77,26 @@ let
           afterSonnet;
     in
       afterOpus;
+
+  # vision-qa is pinned to Gemini 3.5 Flash everywhere (screenshot/UI analysis
+  # doesn't need Opus), but the *reachable* Gemini surface splits by host, same
+  # as the split used elsewhere in this file:
+  #   - devbox/crostini: no Vertex ADC, but GOOGLE_GENERATIVE_AI_API_KEY /
+  #     GEMINI_API_KEY are exported (see home.devbox.nix / home.crostini.nix /
+  #     hosts/devbox/configuration.nix) -> keep the base file's direct
+  #     `google/gemini-3.5-flash` pin (Google Generative AI API key auth).
+  #   - macOS/cloudbox: rewrite to `google-vertex/gemini-3.5-flash` (Vertex/ADC),
+  #     same as geminiModel used for the other Gemini-for-agents subagents.
+  #     Cloudbox additionally disables the direct `google` provider above, so
+  #     leaving the base pin unrewritten there would be a hard failure, not a
+  #     silent one.
+  patchVisionQa = src:
+    if useGeminiForAgents then
+      pkgs.runCommand "vision-qa-vertex.md" {} ''
+        ${pkgs.perl}/bin/perl -0pe 's|model: google/gemini-3.5-flash|model: ${geminiModel}|' ${src} > $out
+      ''
+    else
+      src;
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -236,6 +256,16 @@ let
       # on devbox / anthropic-auth OAuth on crostini), so there is no per-token
       # cost; Vertex Gemini Flash isn't available here anyway.
       agent.compaction.model = devboxModel;
+      # vision-qa (patchVisionQa above) uses the direct Google Generative AI
+      # API here (google/gemini-3.5-flash, GOOGLE_GENERATIVE_AI_API_KEY /
+      # GEMINI_API_KEY auth — no Vertex ADC on devbox/crostini). Inject the
+      # same cost/limit catalog entry used for the Vertex flavor below so
+      # cost tracking (oc-cost/aigateway) stays accurate.
+      provider.google = (opencodeBase.provider.google or {}) // {
+        models = ((opencodeBase.provider.google or {}).models or {}) // {
+          "gemini-3.5-flash" = gemini35FlashModel;
+        };
+      };
     })
     // (lib.optionalAttrs isCloudbox {
       # Cloudbox uses Vertex/ADC for Google models; hide the direct
@@ -347,7 +377,7 @@ in
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/oracle.md".source = patchAgent "oracle" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/adversarial-reviewer.md".source = patchAgent "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
-   xdg.configFile."opencode/agents/vision-qa.md".source = patchAgent "vision-qa" "${assetsPath}/opencode/agents/vision-qa.md";
+   xdg.configFile."opencode/agents/vision-qa.md".source = patchVisionQa "${assetsPath}/opencode/agents/vision-qa.md";
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
