@@ -1,6 +1,6 @@
 ---
 name: understanding-workspace-reset
-description: Use when acting as the morning recommendation agent after a nightly workspace reset (it runs headless from ~, outside the workstation repo), or when debugging from any project why an opencode session did or didn't land in /tmp/reset-workspace-last-manifest.txt. For the full mechanism and operations, defer to the workstation repo-local `resetting-workspace` skill.
+description: Use when acting as the morning workspace agent after a nightly reset (recommend/reopen sessions, then coordinate them as a swarm; it runs headless from ~, outside the workstation repo), or when debugging from any project why an opencode session did or didn't land in /tmp/reset-workspace-last-manifest.txt. For the full mechanism and operations, defer to the workstation repo-local `resetting-workspace` skill.
 ---
 
 # Understanding Workspace Reset (consumer view)
@@ -50,13 +50,16 @@ Corollary for the two launch paths:
   `oc-auto-attach --tmux-session main`, so on a graphical host it gets a `main`
   TUI and **is** captured; on a headless host it is **not**.
 
-## Morning recommendation agent runbook
+## Morning workspace agent runbook
 
-The full prompt is baked into `reset-workspace`. In order:
+The full prompt is baked into `reset-workspace`. Two phases.
+
+**Phase 1 — recommend and reopen:**
 1. Read `/tmp/reset-workspace-last-manifest.txt` (one sid per line). Missing or
    empty → message "Nightly reset complete, no sessions to recommend." and exit.
 2. Enrich each sid: `GET /session/<sid>` for title/dir/last-update; optionally
-   `GET /session/<sid>/message` to judge mid-task vs wrapped-up.
+   `GET /session/<sid>/message` to judge mid-task vs wrapped-up. Learn what each
+   session *is* (you'll coordinate it later) without absorbing transcripts.
 3. Send a short, opinionated, **project-grouped, numbered** Telegram message
    calling out finished (PR landed / question resolved) vs mid-flight work.
 4. Ask via the question tool; accept free-form (`1,3,5`, `all`, `none`,
@@ -64,3 +67,14 @@ The full prompt is baked into `reset-workspace`. In order:
 5. For each chosen sid: `oc-auto-attach --tmux-session main <sid>`, run
    **sequentially** — mono worktrees collapse to one `mono` nvim window and
    racing window/socket creation is flaky.
+
+**Phase 2 — swarm coordinator:** after reopening, the agent stays on as swarm
+coordinator for the reopened sessions, directed by the user's ongoing replies.
+- Project-manager altitude: track goals/state/blockers; delegate detail work;
+  don't read full transcripts — a light context is the job.
+- Message sessions via pigeon (`swarm_send`/`swarm_read`/`swarm_list`); load the
+  `swarm-messaging` skill first and follow its **message-economy** section:
+  send only what changes the receiver's next action; no acks, heartbeats, or
+  status pings; batch; a quiet worker is a healthy worker.
+- Status questions from the user → pull (`GET /session/<sid>/message` or own
+  notes), don't ping the worker.

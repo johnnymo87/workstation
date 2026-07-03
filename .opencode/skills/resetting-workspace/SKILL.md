@@ -28,6 +28,12 @@ in `~` with a baked-in prompt instructing it to:
    recommendation session is headless (not attached to tmux), so a bare
    `oc-auto-attach` would drop the tab into whatever session tmux deems
    "current" instead of the user's `main` session.
+6. Stay on as **swarm coordinator** for the reopened sessions: the user
+   directs priorities through ongoing replies; the agent relays via
+   pigeon (`swarm_send` etc.) at project-manager altitude, following the
+   `swarm-messaging` skill's message-economy rules (no acks/heartbeats/
+   status pings; batch; prefer pull over push). See the system-wide
+   `understanding-workspace-reset` skill for the agent-side runbook.
 
 You wake up to: no tabs if you ignored the Telegram message, exactly
 the tabs you asked for if you replied.
