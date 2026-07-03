@@ -74,6 +74,49 @@ pkgs.writeShellApplication {
       fi
     }
 
+    # pool_scope: echo "user" when the per-user pool target is active on this
+    # host (devbox), else "system" (cloudbox, where the pool is a system
+    # target). Crostini has NO pool target at all (plain opencode-serve.service,
+    # home.crostini.nix) -- it lands in the "system" branch and
+    # discover_pool_urls degrades to the $OPENCODE_URL fallback there.
+    # Single source of truth for which systemctl scope owns
+    # opencode-serve-pool.target, so capture and restart can never disagree.
+    # `systemctl --user` needs XDG_RUNTIME_DIR; the detach re-exec above
+    # guarantees it. If the detach fell back to in-place, misdetecting "system"
+    # on devbox dies at restart exactly as the old inline detection did.
+    pool_scope() {
+      if systemctl --user is-active --quiet opencode-serve-pool.target 2>/dev/null; then
+        printf 'user\n'
+      else
+        printf 'system\n'
+      fi
+    }
+
+    # discover_pool_urls <scope>: print one http://127.0.0.1:<port> health URL
+    # per pool serve, in port order, by reading the target's Wants= via the
+    # given systemctl scope and parsing it with pool_health_urls_from_wants.
+    # Degrades to $OPENCODE_URL when discovery yields nothing (pre-pool
+    # behavior; also crostini, which has no pool target). Reading unit
+    # properties needs no privilege on stock systemd, so try unprivileged
+    # first; fall back to passwordless sudo (-n: never prompt -- this runs in
+    # the capture path, which must never hang) in case a D-Bus policy
+    # restricts the read. /run/wrappers/bin/sudo is NixOS's setuid sudo
+    # (/run/current-system/sw/bin/sudo is a non-setuid symlink sudo refuses to
+    # exec from); on non-NixOS hosts it's absent and the fallback fails
+    # silently.
+    discover_pool_urls() {
+      local scope="$1" wants
+      if [ "$scope" = "user" ]; then
+        wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
+      else
+        wants="$(systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
+        if [ -z "$wants" ]; then
+          wants="$(/run/wrappers/bin/sudo -n systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
+        fi
+      fi
+      pool_health_urls_from_wants "$wants" "$OPENCODE_URL"
+    }
+
     # ---- Process detachment: re-exec into a fresh user systemd scope ----
     # This script kills processes that are likely to be ancestors of its own
     # invoker — specifically nvim (step 4: pkill -9 -u dev -x nvim) and the

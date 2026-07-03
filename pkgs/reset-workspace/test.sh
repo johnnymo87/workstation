@@ -72,6 +72,56 @@ check "ignores unrelated Wants units" \
 check "empty Wants -> fallback"   "$fb" "$(pool_health_urls_from_wants '' "$fb")"
 check "no pool units -> fallback" "$fb" "$(pool_health_urls_from_wants 'foo.service bar.service' "$fb")"
 
+# ---- scope + discovery mirrors (stubbed systemctl) ---------------------------
+# pool_scope / discover_pool_urls mirrors (lockstep with default.nix). A shell
+# function named `systemctl` shadows the real binary for the rest of this
+# script, so these run hermetically on any host. NOTE: the system branch's
+# empty-wants -> sudo-fallback path is NOT exercised here (the absolute
+# /run/wrappers/bin/sudo path is not stub-able, and calling it for real would
+# make the test host-dependent — on cloudbox it would return the REAL pool).
+# Empty-wants -> $OPENCODE_URL fallback is covered by the pure
+# pool_health_urls_from_wants checks above.
+systemctl() { # test stub; cases match the exact "$*" of each source call site
+  case "$*" in
+    "--user is-active --quiet opencode-serve-pool.target") return "${STUB_USER_ACTIVE_RC:-1}" ;;
+    "--user show -p Wants --value opencode-serve-pool.target") printf '%s\n' "${STUB_USER_WANTS:-}" ;;
+    "show -p Wants --value opencode-serve-pool.target") printf '%s\n' "${STUB_SYS_WANTS:-}" ;;
+    *) echo "unexpected systemctl call in test: $*" >&2; return 1 ;;
+  esac
+}
+
+pool_scope() {
+  if systemctl --user is-active --quiet opencode-serve-pool.target 2>/dev/null; then
+    printf 'user\n'
+  else
+    printf 'system\n'
+  fi
+}
+
+discover_pool_urls() {
+  local scope="$1" wants
+  if [ "$scope" = "user" ]; then
+    wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
+  else
+    wants="$(systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
+    if [ -z "$wants" ]; then
+      wants="$(/run/wrappers/bin/sudo -n systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
+    fi
+  fi
+  pool_health_urls_from_wants "$wants" "$OPENCODE_URL"
+}
+
+OPENCODE_URL="$fb"  # discover_pool_urls reads this global, same as the source
+
+check "pool_scope: active user target -> user"   "user"   "$(STUB_USER_ACTIVE_RC=0 pool_scope)"
+check "pool_scope: no user target -> system"     "system" "$(STUB_USER_ACTIVE_RC=1 pool_scope)"
+check "discover: user scope K=2 (devbox)" \
+  "http://127.0.0.1:4096 http://127.0.0.1:4097" \
+  "$(STUB_USER_WANTS='opencode-serve@4096.service opencode-serve@4097.service' discover_pool_urls user | tr '\n' ' ' | sed 's/ $//')"
+check "discover: system scope K=4 (cloudbox, unprivileged read)" \
+  "http://127.0.0.1:4096 http://127.0.0.1:4097 http://127.0.0.1:4098 http://127.0.0.1:4099" \
+  "$(STUB_SYS_WANTS='opencode-serve@4096.service opencode-serve@4097.service opencode-serve@4098.service opencode-serve@4099.service' discover_pool_urls system | tr '\n' ' ' | sed 's/ $//')"
+
 # ---- source guards (default.nix) --------------------------------------------
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 default_nix="$script_dir/default.nix"
@@ -94,6 +144,10 @@ if [ -f "$default_nix" ]; then
   want_grep "source probes serve health before capture"    '$OPENCODE_URL/global/health'
   want_grep "source sets an unhealthy-serve flag"          'SERVE_HEALTHY=0'
   want_grep "unhealthy serve skips attach capture"         'OC_ATTACH_PIDS=""'
+  want_grep "source defines pool_scope"                    'pool_scope() {'
+  want_grep "source defines discover_pool_urls"            'discover_pool_urls() {'
+  want_grep "pool discovery reads Wants unprivileged first" 'wants="$(systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"'
+  want_grep "pool discovery sudo fallback never prompts"    'sudo -n systemctl show'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi
