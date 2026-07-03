@@ -85,6 +85,43 @@ VACUUM;              -- needs ~DB-size free disk; leaves a DB-size WAL
 Then force `PRAGMA wal_checkpoint(TRUNCATE);` again after serves restart to
 drain the VACUUM's WAL. 2026-07-03 result: 4.5GB → 1.24GB.
 
+## Mega-session prune (per-session, keeps the live window)
+
+Sessions with thousands of messages freeze serves on binaries older than
+v1.17.7-patched.11 (`compaction-bounded-load.patch` bounds the loop's load to
+the compaction window); even on ≥.11 they bloat the DB. If the session has a
+**completed compaction**, everything before the last boundary is invisible to
+the model — deleting it only loses scrollback. Procedure (all read-only until
+the last step):
+
+1. Find the newest compaction marker and confirm it completed:
+```sql
+-- newest compaction part -> note its message_id (Cu) and tail_start_id (T)
+SELECT p.message_id, json_extract(p.data,'$.tail_start_id') FROM part p
+JOIN message m ON m.id=p.message_id
+WHERE m.session_id='<SID>' AND json_extract(p.data,'$.type')='compaction'
+ORDER BY p.message_id DESC LIMIT 1;
+-- completed = an assistant child of Cu with summary+finish and no error
+SELECT id FROM message WHERE session_id='<SID>'
+  AND json_extract(data,'$.parentID')='<Cu>'
+  AND json_extract(data,'$.role')='assistant'
+  AND json_extract(data,'$.summary')=1
+  AND json_extract(data,'$.finish') IS NOT NULL
+  AND json_extract(data,'$.error') IS NULL;
+```
+2. If completed, delete everything older than T (parts explicitly first — do
+   NOT rely on FK cascade, the CLI may have foreign_keys off):
+```sql
+BEGIN IMMEDIATE;
+DELETE FROM part WHERE message_id IN
+  (SELECT id FROM message WHERE session_id='<SID>' AND id < '<T>');
+DELETE FROM message WHERE session_id='<SID>' AND id < '<T>';
+COMMIT;
+```
+Safe while serves run (WAL, short transaction) as long as the session is not
+mid-turn. 2026-07-03: 3,947 messages / 17k parts / 39MB removed from one
+session, 55 kept; the session went from serve-poison to normal.
+
 ## Reading deep wedge forensics
 
 Canary dumps (beyond the cheap /proc files): `cpu-io-split` (utime growth with

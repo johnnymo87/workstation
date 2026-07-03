@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-xYsPjNMOnSXbmHhzQ1cMKt1gEL4g1PZ+HeuHuMMySeo=";
+      hash = "sha256-wFMTKdm2tb5YAfNNUtRGGVbKV1yjgrjPcOGihiikFk0=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-Hk8JnaSnVOxnPkOnB9Ya3Pfo+BabYvNXutpBDVaRJEQ=";
+      hash = "sha256-jHIpDy+70mCK+cIcQNRl9youIN8JSYw+tAjWj7HVNcw=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-QUoARuQFJj62XVKjRCDsPcLPQiCKW/kcS9u5oeGkVnM=";
+      hash = "sha256-2WJV2UXuCf1PICc1dm67mDKF7jgAvZj7zJcD1jmfLhA=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-sQ+eD13tM4891iShLS2Ab8V23xhQoeiHfu+q+pyXVcg=";
+      hash = "sha256-9tB5NpZgo6IAZQvhu1FyGlbETR4OGflzL12QrVZIokM=";
       isZip = true;
     };
   };
@@ -67,9 +67,21 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
-    # This pins v1.17.7-patched.10 (same upstream 1.17.7, build-release.yml
-    # -f version=1.17.7 -f revision=10, staying on the 1.17.7 hold line). patched.10
-    # adds ONE patch over patched.9, taking the set to 17:
+    # This pins v1.17.7-patched.11 (same upstream 1.17.7, build-release.yml
+    # -f version=1.17.7 -f revision=11, staying on the 1.17.7 hold line). patched.11
+    # adds ONE patch over patched.10, taking the set to 18:
+    #   #17 compaction-bounded-load (bead workstation-g3iy): bound the prompt
+    #     loop's per-iteration message load to the compaction window. Upstream
+    #     filterCompactedEffect materializes the ENTIRE session history every
+    #     loop step before discarding everything before the last completed
+    #     compaction boundary; a 17k-part session froze devbox serve-0's main
+    #     loop for minutes per touch (the recurring 2026-07-03 wedges). Lazy
+    #     50-at-a-time paging stops at the boundary — O(window) not O(history),
+    #     output identical. Serves pick it up only on restart.
+    #
+    # patched.10 history (same upstream 1.17.7, build-release.yml
+    # -f version=1.17.7 -f revision=10). patched.10
+    # added ONE patch over patched.9, taking the set to 17:
     #   #16 event-log-gate (bead workstation-bm1i): gate the durable event LOG
     #     (EventTable inserts in core/src/event.ts commitSyncEvent) behind a lazy
     #     read of OPENCODE_EXPERIMENTAL_WORKSPACES. In v1.17.7 every durable event
@@ -202,7 +214,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.7";
-    patchedRevision = "10";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "11";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
