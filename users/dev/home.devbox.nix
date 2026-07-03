@@ -483,7 +483,7 @@ lib.mkIf isDevbox {
         "HOME=${config.home.homeDirectory}"
         "OPENCODE_ENABLE_EXA=1"
         # Raise opencode's default output-token cap from 32k to 64k to match
-        # Anthropic's recommendation for opus 4.7/4.8 at xhigh effort. The
+        # Anthropic's recommendation for opus 4.7/4.8 at xhigh/high effort. The
         # home.sessionVariables entry in home.base.nix only covers interactive
         # shells; a systemd service needs it set explicitly.
         "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"

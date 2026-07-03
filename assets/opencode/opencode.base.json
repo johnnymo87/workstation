@@ -13,10 +13,10 @@
   },
   "agent": {
     "build": {
-      "variant": "xhigh"
+      "variant": "high"
     },
     "plan": {
-      "variant": "xhigh"
+      "variant": "high"
     }
   },
   "plugin": [
@@ -45,7 +45,7 @@
               "type": "adaptive",
               "display": "summarized"
             },
-            "effort": "xhigh"
+            "effort": "high"
           }
         },
         "claude-fable-5": {
@@ -108,7 +108,7 @@
               "type": "adaptive",
               "display": "summarized"
             },
-            "effort": "xhigh"
+            "effort": "high"
           }
         },
         "claude-fable-5@default": {

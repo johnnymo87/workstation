@@ -671,7 +671,7 @@ in
         #    google/models/gemini-3.1-pro-preview was not found ..."
         "GOOGLE_CLOUD_LOCATION=global"
         # Raise opencode's default output-token cap from 32k to 64k to match
-        # Anthropic's recommendation for opus 4.7/4.8 at xhigh effort. Mirrors
+        # Anthropic's recommendation for opus 4.7/4.8 at xhigh/high effort. Mirrors
         # the home.sessionVariables entry in users/dev/home.base.nix — that one
         # only covers interactive shells, opencode-serve needs it set
         # explicitly. See full rationale there.
