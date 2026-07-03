@@ -190,8 +190,38 @@ let
     await send("Inspector.enable").catch(function () {});
     await send("Debugger.enable");
     await send("Debugger.setBreakpointsActive", { active: true }).catch(function () {});
+    // Async stack traces: THE enqueuer-naming lever. During a tick-queue
+    // drain every pause lands in shift/processTicksAndRejections (checkpoint
+    // bias, proven on healthy serves too); the sync stack never names who
+    // ENQUEUED the microtask being drained. JSC records async parent chains
+    // at schedule time when this is enabled — which is why it must be armed
+    // pre-burn by this persistent watcher.
+    await send("Debugger.setAsyncStackTraceDepth", { depth: 32 }).catch(function (e) { log("asyncDepth unsupported: " + e.message); });
     await send("Inspector.initialized").catch(function () {});
     log("debugger pre-enabled on " + wsUrl + "; polling " + healthUrl + " every " + POLL_MS + "ms");
+
+    function fmtFrame(f) {
+      const loc = f.location || f;
+      const url = scripts.get(loc.scriptId) || f.url || loc.scriptId;
+      const line = loc.lineNumber !== undefined ? loc.lineNumber : "?";
+      const col = loc.columnNumber !== undefined ? loc.columnNumber : "?";
+      return (f.functionName || "<anon>") + " @ " + url + ":" + line + ":" + col;
+    }
+    function fmtPaused(paused) {
+      const out = [];
+      (paused.callFrames || []).slice(0, 40).forEach(function (f) { out.push(fmtFrame(f)); });
+      // JSC async parent chain: paused.asyncStackTrace = { callFrames,
+      // parentStackTrace } (recursively). Shape handled defensively.
+      let ast = paused.asyncStackTrace;
+      let hop = 0;
+      while (ast && hop < 8) {
+        out.push("  -- async parent " + hop + (ast.description ? " (" + ast.description + ")" : "") + " --");
+        (ast.callFrames || []).slice(0, 12).forEach(function (f) { out.push("  " + fmtFrame(f)); });
+        ast = ast.parentStackTrace || ast.parent;
+        hop = hop + 1;
+      }
+      return out.join("\n") || "<no frames>";
+    }
 
     async function healthy() {
       try {
@@ -215,13 +245,8 @@ let
               setTimeout(function () { rej(new Error("pause-timeout")); }, 30000);
             }),
           ]);
-          const frames = (paused.callFrames || []).map(function (f) {
-            const loc = f.location || {};
-            const url = scripts.get(loc.scriptId) || loc.scriptId;
-            return (f.functionName || "<anon>") + " @ " + url + ":" + loc.lineNumber;
-          });
           fs.appendFileSync(file, "--- sample " + i + " " + new Date().toISOString() + "\n"
-            + (frames.slice(0, 40).join("\n") || "<no frames>") + "\n");
+            + fmtPaused(paused) + "\n");
         } catch (e) {
           fs.appendFileSync(file, "--- sample " + i + " FAILED: " + e.message + "\n");
         } finally {

@@ -1,0 +1,8 @@
+connected 2026-07-03T23:21:53.808Z
+enabled 2026-07-03T23:21:53.889Z scripts=1069
+tracking started 2026-07-03T23:21:53.890Z
+stop requested 2026-07-03T23:23:07.496Z
+stackTraces: 32385
+== top-of-stack histogram:
+== present-anywhere-in-stack histogram:
+== example stacks:
