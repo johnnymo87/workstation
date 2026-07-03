@@ -230,6 +230,12 @@ EOF
       log "WARNING: no 'main' tmux session found; nothing to restore (manifest will be empty)"
     fi
 
+    # Determine the pool's systemd scope ONCE (workstation-3smg). Reused by the
+    # pool-aware capture probe below and the restart + readiness poll later, so
+    # capture and restart can't drift onto different scopes.
+    POOL_SCOPE="$(pool_scope)"
+    log "pool scope: $POOL_SCOPE"
+
     # ---- Step 2: Snapshot live opencode attach clients ----
     # Restoration scope: ONLY opencode TUIs in the `main` tmux session
     # (allowlist built in Step 1.6). The strict loop matches TUIs launched
