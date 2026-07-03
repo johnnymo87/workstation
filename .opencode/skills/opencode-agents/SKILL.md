@@ -34,17 +34,6 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 **Key trait:** Grounds every claim in the actual code/artifact (`file:line`, never fabricates); distinguishes verified findings from suspicions; reports verdict → confirmed-sound → flaws-by-severity → missing cases → concrete recommendations.
 **Complements:** oracle is the *advisor* ("what should we do?"); adversarial-reviewer is its skeptic ("here's how that goes wrong"). code-reviewer / spec-reviewer check a *finished implementation* against a spec; adversarial-reviewer checks the *design itself*, earlier. Its prompt is deliberately ethos-driven (care that the design is correct; judgment over checklist) per the Amanda Askell steer.
 
-### vision-qa (subagent)
-**Purpose:** Visual QA analyst — analyzes screenshots and UI renders.
-**Model:** `google/gemini-3.5-flash` + `variant: high` (direct Google Generative AI API on devbox/crostini; rewritten to `google-vertex/gemini-3.5-flash` on macOS/cloudbox by `patchVisionQa`, since those hosts have Vertex ADC instead of a Gemini API key).
-**Tools:** read only
-**When to use:** Comparing screenshots, identifying visual regressions, analyzing canvas/WebGL output, triaging UI bugs. Also used for:
-- **Comparative analysis** — current vs reference image, systematically comparing regions and element positions
-- **Batch analysis** — screenshot sequences (e.g., exploration steps), checking consistency and flagging regressions between steps
-- **Automated dispatch** — called programmatically by the main agent's QA workflow (e.g., the `e2e-manual-qa` skill's vision-qa integration protocol)
-
-**Output:** Structured JSON with verdict (pass/fail/uncertain), confidence score, issues with severity and suggested next checks. Verdicts drive automated pass/fail decisions, so severity must be precise.
-
 ## Host-correct model routing (`patchAgent`)
 
 Agent files are checked in with `anthropic/` model pins, but not every host can
@@ -58,7 +47,7 @@ lands on a model it can actually call:
   only**. Cloudbox has no working first-party `anthropic/` auth (it routes
   Anthropic through Vertex/ADC), so an opus agent left pinned to
   `anthropic/claude-opus-*` reaches an unusable provider and the model loop dies
-  with an **empty response** — the silent failure that hit oracle and vision-qa.
+  with an **empty response** — the silent failure that hit oracle.
   devbox/crostini keep the direct pin (their working primary via TeamClaude /
   anthropic-auth OAuth); macOS is left as-is.
 
@@ -78,9 +67,17 @@ In Feb 2025 we inherited 6 agents from "Oh My OpenCode" (OMO) and cut them all:
 | momus | Plan quality reviewer | 80 | Only useful as prometheus subagent. |
 | sisyphus | General "senior engineer" orchestrator | 371 | Duplicates the default OpenCode agent. No unique capability. |
 | hephaestus | Autonomous "deep worker" | 322 | Nearly identical to sisyphus but with "never ask" philosophy. Also duplicates default agent. |
-| multimodal-looker | Media file interpreter (PDFs, images) | 49 | Redundant. OpenCode's Read tool natively handles PDFs and images. Any agent with `read: allow` can do what this did. vision-qa covers the structured-analysis-of-images case. |
+| multimodal-looker | Media file interpreter (PDFs, images) | 49 | Redundant. OpenCode's Read tool natively handles PDFs and images. Any agent with `read: allow` can do what this did. |
 
 **Total removed:** 2,364 lines of agent prompts.
+
+### Later removals
+
+- **vision-qa** (removed Jul 2026, not part of the OMO set above): a read-only
+  visual-QA screenshot analyst pinned to Gemini 3.5 Flash via a bespoke
+  `patchVisionQa` nix rewrite. Removed because it was no longer used; OpenCode's
+  Read tool handles images natively, so ad-hoc image analysis needs no dedicated
+  agent.
 
 ## Design Principles
 
