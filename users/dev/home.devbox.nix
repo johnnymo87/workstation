@@ -584,7 +584,10 @@ ${serveIdCase}
       ExecStart = "${pkgs.writeShellScript "opencode-serve-canary" ''
         set -u
         # User-service PATH is minimal (no coreutils/systemctl) — be explicit.
-        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.sudo ]}
+        # gawk: awk is NOT in coreutils (first live wedge lost utime/stime silently).
+        # sudo: must be the system setuid wrapper (/run/wrappers/bin), NOT pkgs.sudo
+        # from the store ("must be owned by uid 0" otherwise).
+        export PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk ]}
         STATE=/tmp/opencode-serve-canary
         mkdir -p "$STATE"
         THRESHOLD=3
@@ -668,8 +671,10 @@ ${serveIdCase}
               cat "/proc/$PID/io" 2>/dev/null
               echo "clk_tck=100 interval=2s"
             } > "$DUMP/cpu-io-split" 2>/dev/null || true
+            # Absolute store path: sudo's secure_path hides the unit PATH from
+            # root, so a bare `eu-stack` is not found after privilege elevation.
             for i in 1 2 3; do
-              sudo -n timeout 10 eu-stack -p "$PID" > "$DUMP/eu-stack.$i" 2>&1 || true
+              sudo -n timeout 10 ${pkgs.elfutils}/bin/eu-stack -p "$PID" > "$DUMP/eu-stack.$i" 2>&1 || true
               sleep 1
             done
           fi

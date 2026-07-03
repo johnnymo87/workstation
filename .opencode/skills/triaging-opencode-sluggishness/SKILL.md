@@ -1,6 +1,6 @@
 ---
 name: triaging-opencode-sluggishness
-description: Use when opencode on devbox feels sluggish, slow, or frozen; when attach TUIs burn CPU or a session shows the busy/working shimmer forever; when opencode.db has grown to gigabytes; or after canary serve restarts leave sessions stuck mid-turn.
+description: Use when opencode on any host (devbox, cloudbox, macOS, crostini) feels sluggish, slow, or frozen; when attach TUIs burn CPU or a session shows the busy/working shimmer forever; when opencode.db has grown to gigabytes; after canary serve restarts leave sessions stuck mid-turn; or when porting the sweeper/canary/DB-maintenance tooling to another host.
 ---
 
 # Triaging OpenCode Sluggishness
@@ -34,15 +34,44 @@ persists anyway: run `systemctl --user start opencode-phantom-busy-sweeper`
 manually and check the journal for sqlite errors (busy_timeout, locked DB); a
 TUI already rendering the phantom needs a reattach to reload from the DB.
 
+Count phantoms (read-only, any host):
+
+```sql
+SELECT count(*) FROM message
+WHERE json_extract(data,'$.role')='assistant'
+  AND json_extract(data,'$.time.completed') IS NULL
+  AND json_extract(data,'$.error') IS NULL
+  AND time_updated < (strftime('%s','now')-1800)*1000;
+```
+
+The sweep itself (what the timer runs; safe against live serves — WAL mode,
+one short transaction):
+
+```sql
+PRAGMA busy_timeout=10000;
+UPDATE message SET data = json_set(data,
+    '$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
+    '$.error', json('{"name":"MessageAbortedError","data":{"message":"Aborted (phantom-busy sweeper: serve died mid-turn)"}}'))
+WHERE json_extract(data,'$.role')='assistant'
+  AND json_extract(data,'$.time.completed') IS NULL
+  AND json_extract(data,'$.error') IS NULL
+  AND time_updated < (strftime('%s','now')-1800)*1000;
+```
+
+The 30-min gate leaves headroom for long silent tool calls; a false positive
+self-heals (the owning serve's completion write lands last).
+
 ## Event-log maintenance
 
 The event table is only read by remote-workspace sync (unused here);
 `event-log-gate.patch` (opencode-patched ≥ v1.17.7-patched.10) stops writes
 unless `OPENCODE_EXPERIMENTAL_WORKSPACES` is set. On older binaries it regrows
-~50 rows/5min. Purge procedure — stop the pool with `systemctl --user stop
-opencode-serve-canary.timer opencode-serve@4096 opencode-serve@4097
-opencode-serve-pool.target`, restart with `systemctl --user start
-opencode-serve-pool.target opencode-serve-canary.timer`. If your own session
+~50 rows/5min. Purge procedure — stop ALL processes holding the DB (serves,
+standalone TUIs; find them by scanning `/proc/*/fd` for the db path). Devbox
+form: `systemctl --user stop opencode-serve-canary.timer opencode-serve@4096
+opencode-serve@4097 opencode-serve-pool.target`, restart with `systemctl --user
+start opencode-serve-pool.target opencode-serve-canary.timer` (other hosts: see
+Porting table). If your own session
 runs on the pool, wrap the whole stop→purge→start in a detached script
 (`setsid nohup script >log 2>&1 & disown`) that begins with `sleep 30` so your
 final message gets delivered before the serve dies under you:
@@ -63,6 +92,45 @@ flat stime = JS/GC spin; read_bytes growth = sqlite paging) and `eu-stack.{1,2,3
 native stacks. The bun binary is non-PIE (`ET_EXEC`), so raw addresses are
 stable across runs — identical frames across the 3 samples (or across wedges)
 fingerprint a tight loop even without symbols.
+
+## Porting to other hosts
+
+The **DB-level procedures are host-invariant** — phantom-busy sweep SQL, event
+purge + VACUUM, and the triage queries operate on `~/.local/share/opencode/`
+(opencode.db + `log/opencode.log`) identically everywhere. Only *unit
+management* differs:
+
+| Host | Serves | Manage with | Canary/sweeper today |
+|------|--------|-------------|----------------------|
+| devbox | user units `opencode-serve@4096/4097` + `opencode-serve-pool.target` | `systemctl --user` | both deployed (`users/dev/home.devbox.nix`) |
+| cloudbox | SYSTEM units `opencode-serve@4096..4099` + system `opencode-serve-pool.target` (`hosts/cloudbox/configuration.nix`) | `sudo systemctl` | NEITHER ported yet (beads workstation-utnw/bm1i notes) |
+| macOS | single launchd serve :4096 (`org.nix-community.home.opencode-serve`, `users/dev/home.darwin.nix`) | `launchctl bootout/bootstrap gui/$(id -u)` — darwin-rebuild does NOT reload it | no canary/sweeper; no journalctl — check `log show` or the plist's log paths |
+| crostini | home-manager opencode-serve | `systemctl --user` | none |
+
+The workstation checkout with the reference implementations exists on every
+host (`~/projects/workstation`; macOS: `~/Code/workstation`).
+
+Porting steps for a new host:
+1. **Sweeper** (biggest win, pure config): the SQL above is verbatim on every
+   host; wrap it in the host's scheduler — copy the
+   `opencode-phantom-busy-sweeper` service+timer from `users/dev/home.devbox.nix`.
+   Make it a USER-level unit (launchd agent on macOS) everywhere: the DB lives in
+   the user's home even where the serves are system units. First run may finalize
+   months of orphans.
+2. **event-log-gate**: needs opencode-patched ≥ v1.17.7-patched.10 (auto-PR'd to
+   `home.base.nix` by the update workflow, or bump manually) + a serve restart to
+   pick up the new binary. Verify: `SELECT count(*) FROM event;` twice a few
+   minutes apart — must be flat while serves are busy. GOTCHA: standalone
+   `opencode` TUIs (no `serve`/`attach` args) run their own in-process runtime on
+   whatever binary they launched with and keep writing events until relaunched.
+3. **Purge**: run the Event-log maintenance procedure above once, after the gate
+   is deployed (else it regrows).
+4. **Canary + deep forensics** (pool hosts only): port from
+   `users/dev/home.devbox.nix` (probe /global/health 3s, 3 consecutive fails →
+   dump forensics → restart that instance; adapt unit names/ports and
+   `systemctl --user` → `sudo systemctl` for system units). The eu-stack capture
+   uses `sudo -n` and degrades gracefully where passwordless sudo is absent
+   (yama ptrace_scope blocks same-uid non-ancestor ptrace).
 
 ## Common mistakes
 
