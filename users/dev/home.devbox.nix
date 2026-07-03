@@ -519,17 +519,28 @@ ${serveIdCase}
         export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
         exec ${config.home.homeDirectory}/.nix-profile/bin/opencode serve --port "$PORT" --hostname 127.0.0.1
       ''} %i";
-      # DM5-5: PER-INSTANCE memory cap. The old single serve was capped at 10G
-      # max / 8G high for the whole serve. Under K=2 the load spreads across 2
-      # cgroups, so cap each instance at 5G max / 4G high: aggregate 2x5=10G max,
-      # 2x4=8G high preserves the old envelope within the parent user-1000.slice
-      # MemoryHigh=12G. The memory controller is delegated to user@.service on
-      # cgroup v2, so these apply within the user manager.
-      MemoryMax = "5G";
-      MemoryHigh = "4G";
+      # DM5-5 (revised 2026-07-03, workstation-94g8): PER-INSTANCE memory cap.
+      # MemoryHigh is deliberately ABSENT. The old 4G-high/5G-max split put the
+      # serve in a 1G-wide "throttled but never killed" band: memory.high
+      # reclaim clamps usage at the soft ceiling forever, so MemoryMax/OOM/
+      # Restart=always never fire, and a serve pinned there can freeze its
+      # main JS event loop for minutes (memory.high direct-reclaim penalty on
+      # the allocating thread) while worker-thread heartbeats keep it looking
+      # healthy — the 2026-07-03 :4096 wedge (SIGTERM timeout -> SIGKILL at
+      # the nightly reset). See docs/investigations/2026-07-03-serve-4096-wedge.md.
+      # With Max-only, a ballooned serve OOM-kills fast and Restart=always
+      # recovers it in ~10s (sessions persist in the shared DB; TUIs reconnect).
+      # Budget: 6G/serve, K=2 -> 12G worst case, inside the user-1000.slice
+      # MemoryHigh=20G (hosts/devbox/configuration.nix) on the 30G host.
+      MemoryMax = "6G";
       OOMScoreAdjust = 500;
       Restart = "always";
       RestartSec = 10;
+      # A wedged serve's SIGTERM handler is a JS-level process.once — a frozen
+      # main loop provably never runs it (workstation-94g8), so waiting the
+      # default 90s just stalls the nightly reset. 15s is generous for the
+      # healthy graceful path (observed clean stops take 1-2s).
+      TimeoutStopSec = 15;
     };
     # NOTE: no Install.WantedBy — a template unit cannot be enabled directly. The
     # opencode-serve-pool.target (below) Wants each instance and is itself
@@ -551,6 +562,105 @@ ${serveIdCase}
     Install = {
       WantedBy = [ "default.target" ];
     };
+  };
+
+  # Serve-pool liveness canary (workstation-94g8, 2026-07-03 :4096 wedge).
+  # A serve can be "alive but frozen": main JS event loop stalled (so
+  # /global/health and even the JS-level SIGTERM handler are dead) while the
+  # serve-lease worker-thread heartbeat keeps pigeon's health_state green and
+  # Restart=always never fires (no OOM — see the MemoryMax-only rationale on
+  # the serve unit above). Nothing watched for that state; the 2026-07-03
+  # wedge sat invisible for >=93s until the nightly reset SIGKILLed it.
+  # This timer probes each pool member's /global/health (3s timeout) once a
+  # minute; after 3 consecutive failures it dumps cheap owner-readable
+  # forensics (/proc status/wchan/syscall + cgroup memory.*) to
+  # /tmp/opencode-serve-canary/ and restarts that one instance. Design notes
+  # in .opencode/skills/monitoring-serve-pool/SKILL.md; full post-mortem in
+  # docs/investigations/2026-07-03-serve-4096-wedge.md.
+  systemd.user.services.opencode-serve-canary = {
+    Unit.Description = "OpenCode serve pool liveness canary (restart wedged serves)";
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.writeShellScript "opencode-serve-canary" ''
+        set -u
+        # User-service PATH is minimal (no coreutils/systemctl) — be explicit.
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl ]}
+        STATE=/tmp/opencode-serve-canary
+        mkdir -p "$STATE"
+        THRESHOLD=3
+
+        # Don't fight an in-flight reset-workspace (it stops/starts the pool
+        # deliberately). Shared, non-blocking probe of its lock. fd-based form:
+        # `flock <file> <cmd>` execvp()s the command, which fails on the
+        # minimal service PATH and misreads as "lock held".
+        if [ -e /tmp/reset-workspace.lock ]; then
+          exec 9< /tmp/reset-workspace.lock
+          if ! flock -n -s 9; then
+            echo "reset-workspace in progress; skipping this run"
+            exit 0
+          fi
+          exec 9<&-
+        fi
+
+        for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
+          UNIT="opencode-serve@$PORT.service"
+          FAILFILE="$STATE/$PORT.fails"
+
+          # Only police units that are supposed to be up. Intentional stops,
+          # crash-loop backoff, etc. reset the counter.
+          if [ "$(systemctl --user is-active "$UNIT")" != "active" ]; then
+            rm -f "$FAILFILE"
+            continue
+          fi
+
+          if curl -sf --max-time 3 --connect-timeout 3 \
+               "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1; then
+            rm -f "$FAILFILE"
+            continue
+          fi
+
+          FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+          echo "$FAILS" > "$FAILFILE"
+          echo "WARNING: $UNIT failed /global/health ($FAILS/$THRESHOLD consecutive)"
+          [ "$FAILS" -lt "$THRESHOLD" ] && continue
+
+          # Wedged. Capture cheap forensics BEFORE the kill destroys them
+          # (the 2026-07-03 wedge left no stacks/PSI behind).
+          TS=$(date +%Y%m%dT%H%M%S)
+          DUMP="$STATE/wedge-$TS-$PORT"
+          mkdir -p "$DUMP"
+          PID=$(systemctl --user show "$UNIT" -p MainPID --value)
+          CG=$(systemctl --user show "$UNIT" -p ControlGroup --value)
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            for f in status wchan syscall; do
+              cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+            # Per-thread kernel wait channels (owner-readable, unlike /proc/pid/stack).
+            for t in /proc/$PID/task/*/; do
+              tid=$(basename "$t")
+              printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
+                "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
+            done
+          fi
+          if [ -n "$CG" ]; then
+            for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
+              cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+          fi
+          echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
+          systemctl --user restart "$UNIT"
+          rm -f "$FAILFILE"
+        done
+      ''}";
+    };
+  };
+  systemd.user.timers.opencode-serve-canary = {
+    Unit.Description = "Minutely OpenCode serve pool liveness canary";
+    Timer = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
+    };
+    Install.WantedBy = [ "timers.target" ];
   };
 
   # TeamClaude CLI on PATH so the interactive seed flow works:

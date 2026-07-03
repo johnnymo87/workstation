@@ -730,13 +730,20 @@ in
     "vm.user_reserve_kbytes" = 65536;     # 64 MiB — user recovery reserve
   };
 
-  # P4: Aggregate cap on user slice — throttle (not kill) when dev workload
-  # exceeds 12 GB.  Leaves ~4 GB for system/kernel/buffers.  Also cap user
-  # swap usage so the zram device doesn't saturate.
+  # P4: Aggregate cap on user slice — throttle (not kill) when the dev
+  # workload exceeds the soft ceiling.  Sized 2026-07-03 (workstation-94g8)
+  # for the CURRENT 30G host (the old 12G value dated from the 16G box):
+  # 20G leaves ~10G for system/kernel/buffers and comfortably contains the
+  # opencode serve pool worst case (K=2 x MemoryMax=6G, users/dev/
+  # home.devbox.nix) plus editors/BEAM/tools.  Slice-level High is kept (unlike
+  # the per-serve units, which are Max-only after the 2026-07-03 wedge)
+  # because at slice scope there is plenty of reclaimable page cache spread
+  # across many processes, and earlyoom (P0) backstops the kill path.
+  # Also cap user swap usage so the zram device doesn't saturate.
   systemd.slices."user-1000" = {
     description = "User slice for UID 1000 (dev)";
     sliceConfig = {
-      MemoryHigh = "12G";
+      MemoryHigh = "20G";
       MemorySwapMax = "6G";
       # TasksMax bumped from 512 -> 2048 after evidence (eternal-machinery
       # bead hedl, 2026-04-18) that 512 was too low for the real dev
