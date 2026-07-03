@@ -162,6 +162,8 @@ if [ -f "$default_nix" ]; then
   want_grep "pool discovery user-scope read"               'wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"'
   want_grep "pool discovery parses via the pure helper"    'pool_health_urls_from_wants "$wants" "$OPENCODE_URL"'
   want_grep "capture computes the pool scope once" 'POOL_SCOPE="$(pool_scope)"'
+  want_grep "bare-resolution uses the healthy capture url" '"$CAPTURE_URL/session"'
+  want_grep "bare-resolve loop still serve-gated"          'OC_ALL_PIDS=""'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi

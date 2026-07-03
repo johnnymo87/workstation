@@ -265,15 +265,11 @@ EOF
     # probe is the suspenders. See
     # docs/investigations/2026-06-17-opencode-1.17.7-orphan-session-wedge.md Q3.
     SERVE_HEALTHY=0
-    # shellcheck disable=SC2034 # CAPTURE_URL becomes a real consumer in Task 5
-    # (workstation-3smg) of docs/plans/2026-07-03-reset-workspace-pool-aware-
-    # capture-plan.md, which points the bare-resolve curl at it.
     CAPTURE_URL="$OPENCODE_URL"
     mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")
     for u in "''${capture_pool_urls[@]}"; do
       if curl -sf --max-time 3 --connect-timeout 3 "$u/global/health" >/dev/null 2>&1; then
         SERVE_HEALTHY=1
-        # shellcheck disable=SC2034 # see disable note on the init above
         CAPTURE_URL="$u"
         log "capture: resolving bare-TUI sids via healthy pool serve $u"
         break
@@ -346,8 +342,10 @@ EOF
     # accept TCP and then block forever (workstation-7sbo). The SERVE_HEALTHY
     # gate skips this loop when /global/health failed, and the resolution curl
     # below carries a hard --max-time as a second line of defense.
-    # SERVE_HEALTHY gate (workstation-7sbo): same skip-capture behavior as the
-    # strict-attach loop above -- an empty pid list means this loop no-ops.
+    # SERVE_HEALTHY gate (workstation-3smg): this loop resolves cwd->sid over
+    # HTTP, so it runs only when at least one pool member answered
+    # /global/health (CAPTURE_URL points at it). An empty pid list makes the
+    # loop no-op.
     if [ "$SERVE_HEALTHY" -eq 1 ]; then
       OC_ALL_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
     else
@@ -386,7 +384,7 @@ EOF
       # hang, so the timeout is what actually bounds it. This is belt to the
       # SERVE_HEALTHY suspenders above (covers a serve that wedges between the
       # probe and here, or one whose /global/health answers but /session hangs).
-      resolved_sid=$(curl -fsS --max-time 5 --connect-timeout 3 --get "$OPENCODE_URL/session" \
+      resolved_sid=$(curl -fsS --max-time 5 --connect-timeout 3 --get "$CAPTURE_URL/session" \
         --data-urlencode "directory=$cwd" \
         --data-urlencode "roots=true" \
         --data-urlencode "limit=1" 2>/dev/null \
