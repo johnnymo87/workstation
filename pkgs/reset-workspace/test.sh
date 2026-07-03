@@ -148,6 +148,9 @@ if [ -f "$default_nix" ]; then
   want_grep "source defines discover_pool_urls"            'discover_pool_urls() {'
   want_grep "pool discovery reads Wants unprivileged first" 'wants="$(systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"'
   want_grep "pool discovery sudo fallback never prompts"    'sudo -n systemctl show'
+  want_grep "pool_scope checks the user pool target"       'systemctl --user is-active --quiet opencode-serve-pool.target'
+  want_grep "pool discovery user-scope read"               'wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"'
+  want_grep "pool discovery parses via the pure helper"    'pool_health_urls_from_wants "$wants" "$OPENCODE_URL"'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi
