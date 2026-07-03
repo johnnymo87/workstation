@@ -137,6 +137,59 @@ let
     '';
   };
 
+  # caveman — terse-output plugin (https://github.com/JuliusBrussee/caveman).
+  # Vendored via pinned fetch because upstream's opencode support is NOT on npm
+  # (src/plugins/opencode/package.json is "private": true); the only upstream
+  # install path is an imperative `node bin/install.js --only opencode` that
+  # copies files into ~/.config/opencode/ and mutates opencode.json — both
+  # nix-managed here. We instead symlink the exact files the installer would
+  # copy (see installOpencode() in upstream bin/install.js):
+  #   - plugins/caveman/{plugin.js,package.json,caveman-config.cjs}
+  #   - commands/caveman*.md (slash commands)
+  #   - skills/caveman* (opencode auto-discovers SKILL.md dirs)
+  #   - AGENTS.md fenced ruleset block (see opencodeAgentsMd below)
+  # Deliberately skipped: cavecrew agents/skill (we keep a curated agent set,
+  # see .opencode/skills/opencode-agents/) and the caveman-shrink MCP proxy
+  # (off by default upstream).
+  # NOTE (2026-07-03): upstream PR #577 ("reduce injection when competing
+  # compression plugin detected") only patches the Claude Code hook path, not
+  # this opencode plugin — irrelevant here; we don't run ponytail anyway.
+  # To upgrade: pick a new rev, `nix flake prefetch github:JuliusBrussee/caveman/<rev>`.
+  cavemanSrc = pkgs.fetchFromGitHub {
+    owner = "JuliusBrussee";
+    repo = "caveman";
+    rev = "25d22f864ad68cc447a4cb93aefde918aa4aec9f";
+    hash = "sha256-FbmfhFaPs/SnSZdfNdErdIUHXt1FfBzErpPpLy8kdIc=";
+  };
+
+  # The plugin dir must be deployed as ONE directory symlink whose contents are
+  # REAL files (cp, not per-file symlinks). opencode's plugin loader
+  # (resolvePackageFile in packages/opencode/src/plugin/shared.ts) realpaths
+  # both the plugin dir and its package.json "main" entry and requires the
+  # entry to stay inside the dir; per-file xdg.configFile symlinks realpath
+  # into different /nix/store paths and trip that containment check — the
+  # plugin is then silently dropped (the error only surfaces as a TUI toast).
+  # caveman-config.js is renamed .cjs because package.json says
+  # "type": "module" (mirrors upstream installer).
+  cavemanOpencodePlugin = pkgs.runCommand "caveman-opencode-plugin" { } ''
+    mkdir -p $out
+    cp ${cavemanSrc}/src/plugins/opencode/plugin.js $out/plugin.js
+    cp ${cavemanSrc}/src/plugins/opencode/package.json $out/package.json
+    cp ${cavemanSrc}/src/hooks/caveman-config.js $out/caveman-config.cjs
+  '';
+
+  # User-level AGENTS.md = our authored base + caveman's always-on Tier-3
+  # ruleset, fenced with the same markers upstream's installer/uninstaller
+  # uses so the block's provenance is obvious to a reader.
+  opencodeAgentsMd = pkgs.runCommand "opencode-agents-md" {} ''
+    {
+      cat ${assetsPath}/opencode/AGENTS.md
+      printf '\n<!-- caveman-begin -->\n'
+      cat ${cavemanSrc}/src/rules/caveman-activate.md
+      printf '<!-- caveman-end -->\n'
+    } > $out
+  '';
+
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # Platform overlay:
@@ -150,7 +203,27 @@ let
   # provider options stay there because OpenCode defaults GPT-5.x to medium
   # reasoning unless a variant or model option overrides it.
   opencodeOverlay =
-    (lib.optionalAttrs (isDevbox || isCrostini) {
+    {
+      # caveman plugin (see cavemanSrc above). Two loader constraints, both
+      # learned the hard way 2026-07-03 (failures are SILENT — they surface
+      # only as session-event toasts, never in the log file):
+      #   1. Relative `plugin` entries resolve against the project CWD
+      #      (path.resolve in packages/opencode/src/plugin/shared.ts), NOT the
+      #      config dir — upstream caveman's installer writes
+      #      "./plugins/caveman/plugin.js" into the global opencode.json,
+      #      which never loads. Must be absolute.
+      #   2. When a package.json sits next to the entry file, the loader
+      #      realpaths both the plugin dir and the "main" entry and requires
+      #      containment (resolvePackageFile). Symlink-farm deployments under
+      #      ~/.config/opencode/plugins/ realpath into divergent store paths
+      #      and get dropped. Pointing straight at the store dir makes both
+      #      realpaths agree, and mergeOpencode rewrites the runtime
+      #      opencode.json with the new store path on every switch/bump.
+      plugin = (opencodeBase.plugin or [ ]) ++ [
+        "${cavemanOpencodePlugin}/plugin.js"
+      ];
+    }
+    // (lib.optionalAttrs (isDevbox || isCrostini) {
       model = devboxModel;
       # Route the built-in `compaction` agent to Opus on devbox/crostini too.
       # Without this, compaction inherits opencode.base.json's top-level default
@@ -233,8 +306,39 @@ in
 
   # User-level AGENTS.md -- global instructions for all OpenCode sessions
   # (e.g. bash environment quirks like "no sleep"). Repo-specific instructions
-  # still live in each project's AGENTS.md.
-  xdg.configFile."opencode/AGENTS.md".source = "${assetsPath}/opencode/AGENTS.md";
+  # still live in each project's AGENTS.md. Built (not raw-sourced) so the
+  # caveman ruleset block can be appended from the pinned upstream source.
+  xdg.configFile."opencode/AGENTS.md".source = opencodeAgentsMd;
+
+  # NOTE: the caveman plugin is intentionally NOT deployed under
+  # ~/.config/opencode/plugins/ — opencode loads it straight from the nix
+  # store via the absolute `plugin` entry in the managed config (see
+  # opencodeOverlay). Deploying symlinks here would trip the loader's
+  # realpath-containment check and be silently ignored.
+
+  # caveman slash commands (/caveman, /caveman-commit, ...).
+  xdg.configFile."opencode/commands/caveman.md".source =
+    "${cavemanSrc}/src/plugins/opencode/commands/caveman.md";
+  xdg.configFile."opencode/commands/caveman-commit.md".source =
+    "${cavemanSrc}/src/plugins/opencode/commands/caveman-commit.md";
+  xdg.configFile."opencode/commands/caveman-review.md".source =
+    "${cavemanSrc}/src/plugins/opencode/commands/caveman-review.md";
+  xdg.configFile."opencode/commands/caveman-compress.md".source =
+    "${cavemanSrc}/src/plugins/opencode/commands/caveman-compress.md";
+  xdg.configFile."opencode/commands/caveman-stats.md".source =
+    "${cavemanSrc}/src/plugins/opencode/commands/caveman-stats.md";
+  xdg.configFile."opencode/commands/caveman-help.md".source =
+    "${cavemanSrc}/src/plugins/opencode/commands/caveman-help.md";
+
+  # caveman skills (opencode auto-discovers SKILL.md under skills/).
+  # cavecrew intentionally omitted — its skill drives the cavecrew subagents
+  # we chose not to install.
+  xdg.configFile."opencode/skills/caveman".source = "${cavemanSrc}/skills/caveman";
+  xdg.configFile."opencode/skills/caveman-commit".source = "${cavemanSrc}/skills/caveman-commit";
+  xdg.configFile."opencode/skills/caveman-review".source = "${cavemanSrc}/skills/caveman-review";
+  xdg.configFile."opencode/skills/caveman-help".source = "${cavemanSrc}/skills/caveman-help";
+  xdg.configFile."opencode/skills/caveman-stats".source = "${cavemanSrc}/skills/caveman-stats";
+  xdg.configFile."opencode/skills/caveman-compress".source = "${cavemanSrc}/skills/caveman-compress";
 
    # Custom agents via OpenCode-native markdown format.
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
