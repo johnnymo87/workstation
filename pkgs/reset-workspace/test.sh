@@ -164,6 +164,8 @@ if [ -f "$default_nix" ]; then
   want_grep "capture computes the pool scope once" 'POOL_SCOPE="$(pool_scope)"'
   want_grep "bare-resolution uses the healthy capture url" '"$CAPTURE_URL/session"'
   want_grep "bare-resolve loop still serve-gated"          'OC_ALL_PIDS=""'
+  want_grep "restart reuses the precomputed scope"        '[ "$POOL_SCOPE" = "user" ]'
+  want_grep "post-restart poll reuses discover_pool_urls" 'serve_health_urls < <(discover_pool_urls "$POOL_SCOPE")'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi

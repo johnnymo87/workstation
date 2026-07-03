@@ -446,18 +446,16 @@ EOF
     # old `opencode-serve.service` unit no longer exists, which broke the nightly
     # reset (03:00: "Unit opencode-serve.service not found"). Restart the target.
     #
-    # Host-aware restart. The pool target runs as a USER target on devbox
-    # (~/.config/systemd/user/opencode-serve-pool.target; restart via
+    # Host-aware restart. Scope was computed ONCE as POOL_SCOPE before capture
+    # (see pool_scope), so capture and restart cannot disagree. The pool target
+    # runs as a USER target on devbox (~/.config/systemd/user/; restart via
     # `systemctl --user`, no sudo) and as a SYSTEM target on cloudbox
-    # (hosts/cloudbox/configuration.nix; restart via passwordless sudo).
-    # Prefer the user target when it is active so this shared script is portable.
-    # On cloudbox there is no user pool target, so `is-active --quiet` returns
-    # non-zero and we fall through to the sudo path (cloudbox restarts the system
-    # target). The target's PartOf= linkage makes the restart propagate to every
-    # opencode-serve@<port>.service instance (a target's Wants= alone would NOT).
+    # (hosts/cloudbox/configuration.nix; restart via passwordless sudo). The
+    # target's PartOf= linkage makes the restart propagate to every
+    # opencode-serve@<port>.service instance (a target's Wants= alone would
+    # NOT).
     log "restarting opencode-serve-pool.target..."
-    if systemctl --user is-active --quiet opencode-serve-pool.target; then
-      POOL_SCOPE=user
+    if [ "$POOL_SCOPE" = "user" ]; then
       log "  opencode-serve-pool is a user target; restarting via systemctl --user"
       if ! systemctl --user restart opencode-serve-pool.target; then
         die "failed to restart opencode-serve-pool (user target)"
@@ -467,7 +465,6 @@ EOF
       # Use absolute path /run/wrappers/bin/sudo because NixOS ships the working
       # setuid sudo there; /run/current-system/sw/bin/sudo is a non-setuid symlink
       # sudo refuses to exec from.
-      POOL_SCOPE=system
       log "  opencode-serve-pool is a system target; restarting via sudo"
       if ! /run/wrappers/bin/sudo systemctl restart opencode-serve-pool.target; then
         die "failed to restart opencode-serve-pool (system target)"
@@ -479,12 +476,7 @@ EOF
     # serve-pool.nix, the single source of truth) using the same scope we
     # restarted under, so this can't drift from the actual pool and degrades to
     # $OPENCODE_URL (serve-0) if discovery yields nothing.
-    if [ "''${POOL_SCOPE:-system}" = "user" ]; then
-      pool_wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
-    else
-      pool_wants="$(/run/wrappers/bin/sudo systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
-    fi
-    mapfile -t serve_health_urls < <(pool_health_urls_from_wants "$pool_wants" "$OPENCODE_URL")
+    mapfile -t serve_health_urls < <(discover_pool_urls "$POOL_SCOPE")
 
     log "polling /global/health for ''${#serve_health_urls[@]} serve(s): ''${serve_health_urls[*]}"
     # --max-time 3 is load-bearing: without it, a single hung curl (e.g. TCP
