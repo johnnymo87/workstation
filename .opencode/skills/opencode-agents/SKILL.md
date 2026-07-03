@@ -36,7 +36,7 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### vision-qa (subagent)
 **Purpose:** Visual QA analyst — analyzes screenshots and UI renders.
-**Model:** `anthropic/claude-opus-4-7` + `variant: xhigh` (rewritten to `google-vertex-anthropic/claude-opus-4-7@default` on cloudbox by `patchAgent`).
+**Model:** `anthropic/claude-opus-4-8` + `variant: xhigh` (rewritten to `google-vertex-anthropic/claude-opus-4-8@default` on cloudbox by `patchAgent`).
 **Tools:** read only
 **When to use:** Comparing screenshots, identifying visual regressions, analyzing canvas/WebGL output, triaging UI bugs. Also used for:
 - **Comparative analysis** — current vs reference image, systematically comparing regions and element positions

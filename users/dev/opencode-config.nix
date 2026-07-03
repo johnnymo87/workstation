@@ -55,8 +55,10 @@ let
   #      quo — its primary is Gemini and opus agents are rare there). This
   #      mirrors the host-conditional primary `model =` below
   #      (`if isCloudbox then vertexOpusModel else geminiModel`). The Vertex
-  #      opus models already carry their own `effort` setting from
-  #      opencode.base.json, so no variant override is added here.
+  #      opus-4-8 model already carries its own `effort` setting from
+  #      opencode.base.json, so no variant override is added here. (opus-4-7
+  #      has no provider-level model entry anymore, and no agent is pinned
+  #      to it as of 2026-07-03; vision-qa/oracle both moved to opus-4-8.)
   patchAgent = name: src:
     let
       afterSonnet =

@@ -735,11 +735,11 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     # Claude Opus 4.7/4.8 at xhigh or max effort, set a large max_tokens so the
     # model has room to think and act across subagents and tool calls.
     # Starting at 64k tokens and tuning from there is a reasonable default."
-    # Pairs with the xhigh/high adaptive defaults we set for opus 4.7/4.8 in
-    # assets/opencode/opencode.base.json. This is a cap, not a forced
-    # allocation: models still emit only what they want, but high/xhigh runs no
-    # longer get truncated at 32k. Other models are unaffected (their own
-    # model.limit.output still wins via Math.min in
+    # Pairs with the high adaptive default we set for opus 4.8 (and
+    # claude-fable-5) in assets/opencode/opencode.base.json. This is a cap,
+    # not a forced allocation: models still emit only what they want, but
+    # high/xhigh runs no longer get truncated at 32k. Other models are
+    # unaffected (their own model.limit.output still wins via Math.min in
     # packages/opencode/src/provider/transform.ts:1262). NOTE: this only
     # covers interactive shells (sourced via ~/.profile); the opencode-serve
     # systemd unit on devbox/cloudbox needs the same var added to its own
