@@ -332,6 +332,23 @@ Also run the `column_default` probe from "Known defect" on the same fresh clone
 — a remote can be on the right schema version yet still write-broken for
 bd ≤ 1.0.5 if the UUID defaults weren't repaired before the push.
 
+### Standalone-dolt probe compatibility (nixpkgs dolt vs newer bd)
+
+nixpkgs `dolt` (1.59.10) lags bd's embedded dolt. Where that bites
+(fleet-verified 2026-07-04):
+
+- **Fresh clones of a remote: all probes work.** Local-only tables never get
+  pushed, so a fresh clone contains only the portable tables — verified against
+  remotes written and repaired by bd 1.1.0-era tooling.
+- **A live workspace's embedded DB** (`.beads/embeddeddolt/<db>`) may fail
+  *whole-DB introspection* — `information_schema.columns` errors with
+  `table has unknown fields` when any local-only table (wisps etc.) uses a
+  newer schema feature. Per-table queries still work: use
+  `SHOW CREATE TABLE <t>` instead, or plain selects.
+- If some future format bump breaks even `dolt clone`/basic reads, verify
+  through bd itself: `bd -C <tmpdir> bootstrap --yes` + scratch write
+  (the first block of this section), or a version-matched standalone dolt.
+
 If the fresh clone still shows the guard → the remote did NOT get the migration
 (usually the split-remote trap). Fix and re-push.
 
