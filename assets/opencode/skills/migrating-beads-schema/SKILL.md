@@ -1,6 +1,6 @@
 ---
 name: migrating-beads-schema
-description: Resolves a beads (bd) schema-migration block across clones — bd "refusing to auto-apply N pending schema migrations (vNN->vMM)" on a remote-backed database (#4259), or writes blocked after a bd version bump. Use when any repo's bd shows that guard, or to migrate all beads DBs on a machine after upgrading bd. Covers single-migrator discipline, the DoltHub-vs-git split-remote trap, adopt-vs-migrate, flaky embedded-clone recovery (standalone-dolt graft), stopping a stale bd daemon, and fresh-clone verification.
+description: Resolves a beads (bd) schema-migration block across clones — bd "refusing to auto-apply N pending schema migrations (vNN->vMM)" on a remote-backed database (#4259), or writes blocked after a bd version bump, or post-migration write failures like "Field 'id' doesn't have a default value" (Error 1105). Use when any repo's bd shows that guard, or to migrate all beads DBs on a machine after upgrading bd. Covers single-migrator discipline, the DoltHub-vs-git split-remote trap, adopt-vs-migrate, flaky embedded-clone recovery (standalone-dolt graft), stopping a stale bd daemon, the 0037 stripped-UUID-default repair, and fresh-clone verification.
 allowed-tools: [Bash, Read, Edit]
 ---
 
@@ -86,9 +86,10 @@ Progress:
 - [ ] 1. Physical snapshot + jsonl export (rollback safety)
 - [ ] 2. Check the split-remote trap (canonical = DoltHub)
 - [ ] 3. BD_ALLOW_REMOTE_MIGRATE=1 bd migrate
-- [ ] 4. Local verify: guard gone, count sane, scratch write works
-- [ ] 5. bd dolt push to the CANONICAL remote
-- [ ] 6. Fresh-clone Verification (authoritative)
+- [ ] 4. Repair the stripped UUID defaults (see "Known defect" below)
+- [ ] 5. Local verify: guard gone, count sane, scratch write works
+- [ ] 6. bd dolt push to the CANONICAL remote
+- [ ] 7. Fresh-clone Verification (authoritative, incl. column_default probe)
 ```
 
 Run from the repo root. `<repo>` = repo name.
@@ -106,11 +107,23 @@ bd export --all -o /tmp/beads-<repo>-pre-$TS.jsonl
 # 3. Migrate (the env var is the deliberate "I am the sole migrator" opt-in).
 BD_ALLOW_REMOTE_MIGRATE=1 bd migrate
 
-# 4. Verify locally: guard gone, count sane, writes work.
+# 4. Repair the UUID defaults that migration 0037 just stripped (see
+#    "Known defect" below for why). $DB = metadata.json dolt_database
+#    (usually "beads"). No bd daemon may be running.
+( cd .beads/embeddeddolt/$DB
+  for t in events comments issue_snapshots compaction_snapshots wisp_events wisp_comments; do
+    nix run nixpkgs#dolt -- sql -q \
+      "ALTER TABLE $t MODIFY COLUMN id CHAR(36) NOT NULL DEFAULT (UUID());"
+  done
+  nix run nixpkgs#dolt -- add -A
+  nix run nixpkgs#dolt -- commit --author "bd repair <dev@$(hostname)>" \
+    -m "repair: restore DEFAULT (UUID()) stripped by migration 0037" )
+
+# 5. Verify locally: guard gone, count sane, writes work.
 bd status
 S=$(bd q "scratch (delete)"); bd delete "$S" --force
 
-# 5. Publish to the CANONICAL remote (see the split-remote trap below FIRST).
+# 6. Publish to the CANONICAL remote (see the split-remote trap below FIRST).
 bd dolt push
 ```
 
@@ -175,8 +188,9 @@ Progress:
 - [ ] 1. Export current local (safety + local-only diff source)
 - [ ] 2. Move embeddeddolt aside; bd bootstrap (or graft fallback)
 - [ ] 3. Verify: no guard, count sane
-- [ ] 4. Re-import ONLY the local-only ids (never a blind full import)
-- [ ] 5. Scratch write, then bd dolt push
+- [ ] 4. Probe UUID defaults; repair locally if stripped ("Known defect")
+- [ ] 5. Re-import ONLY the local-only ids (never a blind full import)
+- [ ] 6. Scratch write, then bd dolt push
 ```
 
 ```bash
@@ -252,6 +266,46 @@ sync.remote .beads/config.yaml` locally. If it's absent, either write a
 "no common ancestor" recipe) or bootstrap a pristine clone instead of
 move-aside.
 
+## Known defect: migration 0037 strips `DEFAULT (UUID())` (Error 1105)
+
+**Symptom** (fleet-verified 2026-07-04): after a v49→v53 migration — or on any
+clone of a migrated-but-unrepaired remote — every write on **bd ≤ 1.0.5** fails
+and rolls back:
+
+```
+failed to record event for <id>: record event in events: Error 1105:
+Field 'id' doesn't have a default value
+```
+
+**Root cause** (verified, refined from the original report): migration
+`0037_uuid_primary_keys` rebuilds PKs via `ADD COLUMN uuid_id … DEFAULT (UUID())`
++ rename, and Dolt **drops the expression default through that ALTER/rename —
+at migration time, on the migrator's own local**. It is NOT a DoltHub transfer
+bug: a restored default survives push→clone round-trips fine (verified on
+comptes). Every migrated DB — local and remote — is stripped unless repaired.
+
+**Why some machines never notice:** bd ≥ 1.1.0 generates event/comment ids
+app-side (UUIDv7) and doesn't rely on the column default. bd 1.0.4/1.0.5 rely
+on it and break. The schema is broken either way — repair it regardless, so
+older binaries and future tools aren't landmined.
+
+**Repair** (migrator, or any machine holding an unrepaired clone): the ALTERs
+in Procedure A step 4. Six tables locally; only four (`events`, `comments`,
+`issue_snapshots`, `compaction_snapshots`) exist on the remote — the `wisp_*`
+tables (plus `local_metadata`, `repo_mtimes`) are **local-only, never pushed**,
+so every clone must repair its own wisp tables (or recreate via bd).
+After repairing the remote's owner pushes; peers pick it up with
+`bd dolt pull` (or re-adopt).
+
+**Probe** (works on any standalone clone; expect `uuid()`, not NULL):
+
+```bash
+nix run nixpkgs#dolt -- sql -q "SELECT table_name, column_default
+  FROM information_schema.columns WHERE column_name='id' AND table_name IN
+  ('events','comments','issue_snapshots','compaction_snapshots')
+  ORDER BY table_name;"
+```
+
 ## Verification (the authoritative check — always do this)
 
 "Push complete" is not proof. Clone the **canonical remote** fresh and confirm
@@ -273,6 +327,10 @@ nix run nixpkgs#dolt -- clone jmohrbacher/<repo> /tmp/<repo>-probe
 ( cd /tmp/<repo>-probe && nix run nixpkgs#dolt -- sql -q \
   "select max(version) v, count(*) n from schema_migrations" )
 ```
+
+Also run the `column_default` probe from "Known defect" on the same fresh clone
+— a remote can be on the right schema version yet still write-broken for
+bd ≤ 1.0.5 if the UUID defaults weren't repaired before the push.
 
 If the fresh clone still shows the guard → the remote did NOT get the migration
 (usually the split-remote trap). Fix and re-push.
