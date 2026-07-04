@@ -1,6 +1,6 @@
 ---
 name: migrating-beads-schema
-description: Resolve a beads (bd) schema-migration block across clones — bd "refusing to auto-apply N pending schema migrations (vNN->vMM)" on a remote-backed database (#4259), or writes blocked after a bd version bump. Use when any repo's bd shows that guard, or to migrate all beads DBs on a machine after upgrading bd. Covers single-migrator discipline, the DoltHub-vs-git split-remote trap, adopt-vs-migrate, and fresh-clone verification.
+description: Resolves a beads (bd) schema-migration block across clones — bd "refusing to auto-apply N pending schema migrations (vNN->vMM)" on a remote-backed database (#4259), or writes blocked after a bd version bump. Use when any repo's bd shows that guard, or to migrate all beads DBs on a machine after upgrading bd. Covers single-migrator discipline, the DoltHub-vs-git split-remote trap, adopt-vs-migrate, flaky embedded-clone recovery (standalone-dolt graft), stopping a stale bd daemon, and fresh-clone verification.
 allowed-tools: [Bash, Read, Edit]
 ---
 
@@ -38,11 +38,22 @@ are blocked. So the swarm can keep reading beads; it just can't file new ones.
   for the shared trackers. See the `beads` skill (`~/.config/opencode/skills/beads/SKILL.md`)
   for the wiring, credentials, and the "do NOT use git-backed dolt" anti-pattern.
 - Repo path is `~/projects/<repo>` on NixOS/crostini, `~/Code/<repo>` on macOS.
+- **A stale `bd` daemon can hold a repo's DB open** and make the move-aside /
+  clone in Procedure B fail or corrupt. Stop it first — see "Stop a stale bd
+  daemon" below. (This is separate from a project's own daemon, e.g. pigeon's
+  *swarm* daemon is a node process, not a `bd` daemon — leave it alone.)
+- **bd's embedded clone is flaky for some repos** (seen on pigeon: corrupt
+  journal / missing `.dolt` / "table file not found"). Standalone `dolt` is
+  reliable — the graft fallback in Procedure B is the workaround.
 
 ## Step 0: Are you the designated migrator or an adopter?
 
 Only ONE machine migrates each remote. **This is a coordination decision — get
 explicit human/coordinator sign-off on which machine owns it before migrating.**
+When a coordinator publishes a list of repos it has migrated, cross-reference
+it: a repo that shows the guard but is **not** on that list has no migrator yet,
+so it's yours to migrate (Procedure A); a repo **on** the list is already done —
+adopt it (Procedure B).
 
 - **Designated migrator** (usually the machine with the freshest local work):
   → run **Procedure A** per repo.
@@ -54,7 +65,31 @@ migrated it yet) with the fresh-clone probe in "Verification". If a fresh clone
 comes down already-migrated (no guard), that remote is done — **adopt, don't
 migrate**.
 
+## Stop a stale bd daemon (before any move-aside / clone)
+
+A leftover `bd` daemon (often an old binary version) can hold the repo's
+embedded DB and corrupt a clone-in-place. Find and stop only the one for this
+repo; never a broad kill that could hit another repo's daemon or an unrelated
+process:
+
+```bash
+ls .beads/*.sock 2>/dev/null                 # a socket => a daemon is/was attached
+ps aux | grep '[b]d-real daemon'             # find the bd daemon pid(s)
+# kill the pid whose --db / cwd is THIS repo; verify it's gone before proceeding.
+```
+
 ## Procedure A — designated migrator (per repo)
+
+```
+Progress:
+- [ ] 0. Stop stale bd daemon
+- [ ] 1. Physical snapshot + jsonl export (rollback safety)
+- [ ] 2. Check the split-remote trap (canonical = DoltHub)
+- [ ] 3. BD_ALLOW_REMOTE_MIGRATE=1 bd migrate
+- [ ] 4. Local verify: guard gone, count sane, scratch write works
+- [ ] 5. bd dolt push to the CANONICAL remote
+- [ ] 6. Fresh-clone Verification (authoritative)
+```
 
 Run from the repo root. `<repo>` = repo name.
 
@@ -66,7 +101,7 @@ TS=$(date +%Y%m%d-%H%M%S)
 cp -rp .beads/embeddeddolt /tmp/beads-<repo>-pre-$TS
 
 # 2. Logical export as a second safety net (captures issues + memories).
-bd export --all --include-memories -o /tmp/beads-<repo>-pre-$TS.jsonl
+bd export --all -o /tmp/beads-<repo>-pre-$TS.jsonl
 
 # 3. Migrate (the env var is the deliberate "I am the sole migrator" opt-in).
 BD_ALLOW_REMOTE_MIGRATE=1 bd migrate
@@ -91,13 +126,13 @@ origin"** and push to the **wrong** remote (git `refs/dolt/data`), leaving the
 canonical DoltHub remote on the old schema. Symptoms: your push "succeeds" but a
 peer's fresh clone still shows the guard.
 
-Guard against it:
+Guard against it — the two sources must agree (DoltHub):
 
 ```bash
-# What does each source think the remote is?
-grep -i 'sync.remote' .beads/config.yaml
-bd dolt remote list
-python3 -c "import json;d=json.load(open('.beads/embeddeddolt/*/.dolt/repo_state.json'.replace('*',__import__('os').listdir('.beads/embeddeddolt')[0])));[print(k,'->',v['url']) for k,v in d['remotes'].items()]"
+grep -i 'sync.remote' .beads/config.yaml               # config's view
+bd dolt remote list                                    # bd's view
+( cd .beads/embeddeddolt/beads &&                       # dolt's own origin
+  nix run nixpkgs#dolt -- remote -v )                  # ("beads" = metadata.json dolt_database)
 ```
 
 If they disagree, add an explicitly-named DoltHub remote and push to it by name:
@@ -125,31 +160,69 @@ BD_ALLOW_REMOTE_MIGRATE=1 bd -C "$t" migrate     # migrate on the remote's own l
 bd -C "$t" dolt push                             # clean fast-forward
 ```
 
-Then re-adopt the repo's local via Procedure B (it descends from the remote now).
+(If `bd -C "$t" bootstrap` is itself flaky, use the standalone-dolt clone from
+Procedure B's graft fallback to build `$t` instead.) Then re-adopt the repo's
+local via Procedure B (it descends from the remote now).
 
 ## Procedure B — adopt a migrated remote (peer machine, per repo)
 
 `bd bootstrap` re-clones from the remote and **replaces the local DB** — any
 local-only, unpushed issues are LOST. Preserve them first.
 
+```
+Progress:
+- [ ] 0. Stop stale bd daemon
+- [ ] 1. Export current local (safety + local-only diff source)
+- [ ] 2. Move embeddeddolt aside; bd bootstrap (or graft fallback)
+- [ ] 3. Verify: no guard, count sane
+- [ ] 4. Re-import ONLY the local-only ids (never a blind full import)
+- [ ] 5. Scratch write, then bd dolt push
+```
+
 ```bash
 cd ~/projects/<repo>
 
 # 1. Save current local, then find issues that exist ONLY locally.
-bd export --all --include-memories -o /tmp/<repo>-local-$(date +%s).jsonl
+bd export --all -o /tmp/<repo>-local-$(date +%s).jsonl
 
 # 2. bootstrap won't re-clone while a DB exists → move it aside to force a clone.
+#    Use a UNIQUE timestamped target; a fixed name collides on retry and nests dirs.
 mv .beads/embeddeddolt /tmp/<repo>-old-$(date +%s)
 bd bootstrap --yes                                # clones the migrated remote
 bd status                                         # expect: no guard
 
 # 3. Re-import any local-only ids the remote didn't have (diff old export vs now).
-bd export --all --include-memories -o /tmp/<repo>-now.jsonl
+bd export --all -o /tmp/<repo>-now.jsonl
 # (compare ids; extract the missing lines to a .jsonl; then:)
 bd import /tmp/<repo>-missing.jsonl               # upsert; preserves ids
 ```
 
-Diffing ids (local-only + local-newer-than-remote):
+**Do NOT blind-import the whole pre-adopt export.** Import is an upsert keyed by
+id, so replaying your old v49 copies would revert issues the remote legitimately
+updated. Re-import only the ids that are local-only (or local-newer) — diff
+first (below).
+
+### Fallback: bd's embedded clone failed → graft a standalone dolt clone
+
+If `bd bootstrap` errors mid-clone (**corrupt journal**, **"can no longer find
+.dolt dir"**, **"table file not found"**), bd's embedded clone is the problem,
+not the remote. Standalone `dolt` is reliable. Clone with it and graft into bd's
+expected path:
+
+```bash
+rm -rf /tmp/<repo>-v /home/$USER/projects/<repo>/.beads/embeddeddolt   # drop the partial
+nix run nixpkgs#dolt -- clone jmohrbacher/<repo> /tmp/<repo>-v          # reliable clone
+mkdir -p .beads/embeddeddolt
+cp -a /tmp/<repo>-v .beads/embeddeddolt/beads        # "beads" = metadata.json dolt_database
+bd status                                            # bd now reads the grafted DB; expect no guard
+```
+
+If a `bd bootstrap` attempt died partway, **`rm -rf .beads/embeddeddolt` (the
+partial) before retrying or grafting** — do not re-run the move-aside on top of a
+half-written dir, or you'll nest `embeddeddolt/embeddeddolt` and tangle the
+backups.
+
+### Diffing ids (local-only + local-newer-than-remote)
 
 ```bash
 python3 - <<'PY'
@@ -169,10 +242,15 @@ print("local-newer:", [i for i in old if i in new and old[i]>new[i]])
 PY
 ```
 
-**Caveat for repos with no `config.yaml sync.remote`** (remote lives only inside
-the dolt dir): moving `embeddeddolt` aside strips the remote and `bd bootstrap`
-fails with "No active beads workspace". For those, migrate a pristine clone
-(the "no common ancestor" recipe) instead of move-aside bootstrap.
+**Caveat — `sync.remote` presence can differ per machine.** Some repos keep the
+remote only inside the dolt dir (no `config.yaml sync.remote`); moving
+`embeddeddolt` aside then strips the remote and `bd bootstrap` fails with "No
+active beads workspace". But whether a given repo has `config.yaml sync.remote`
+can differ **per clone** — don't assume from a peer's report; `grep -i
+sync.remote .beads/config.yaml` locally. If it's absent, either write a
+`config.yaml` with the DoltHub `sync.remote` first (as in the graft fallback /
+"no common ancestor" recipe) or bootstrap a pristine clone instead of
+move-aside.
 
 ## Verification (the authoritative check — always do this)
 
@@ -185,6 +263,15 @@ echo 'sync.remote: "https://doltremoteapi.dolthub.com/jmohrbacher/<repo>"' > "$t
 bd -C "$t" bootstrap --yes
 bd -C "$t" status                      # expect: NO "refusing" guard, sane count
 S=$(bd -C "$t" q "verify (delete)"); bd -C "$t" delete "$S" --force   # write proves unforked
+```
+
+For a schema-level check that doesn't depend on bd, read the migration table
+straight from a standalone clone (`max(version)` should be the new `vMM`):
+
+```bash
+nix run nixpkgs#dolt -- clone jmohrbacher/<repo> /tmp/<repo>-probe
+( cd /tmp/<repo>-probe && nix run nixpkgs#dolt -- sql -q \
+  "select max(version) v, count(*) n from schema_migrations" )
 ```
 
 If the fresh clone still shows the guard → the remote did NOT get the migration
@@ -212,6 +299,9 @@ git push git@github.com:<org>/<repo>.git --delete refs/dolt/data \
   instead. Force forks the schema for every machine.
 - **Always take the physical snapshot** (`cp -rp .beads/embeddeddolt`) before
   migrating — it's an instant, complete rollback.
+- **Stop a stale bd daemon** before replacing a DB in place.
+- **Never blind-import** a pre-adopt export over a freshly-adopted DB — re-import
+  only local-only/local-newer ids.
 - **Always verify via a fresh clone** of the canonical remote before declaring
   a repo done.
 - Standalone `dolt` is more reliable than bd's embedded clone if the latter is

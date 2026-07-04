@@ -18,6 +18,7 @@ let
     "ask-question"
     "beads"
     "formatting-slack-messages"
+    "migrating-beads-schema"
     "opencode-launch"
     "preparing-for-compaction"
     "reviewing-github-prs"

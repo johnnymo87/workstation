@@ -79,7 +79,6 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Troubleshooting NixOS Host](.opencode/skills/troubleshooting-nixos-host/SKILL.md) | SSH issues, host keys, NixOS problems (devbox + cloudbox) |
 | [Automated Updates](.opencode/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
 | [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
-| [Migrating Beads Schema](.opencode/skills/migrating-beads-schema/SKILL.md) | Resolve a bd cross-clone schema-migration block (#4259): single-migrator discipline, split-remote trap, adopt-vs-migrate, fresh-clone verification |
 | [Growing Neovim Config](.opencode/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
 | [Clipboard (gclpr & OSC 52)](.opencode/skills/clipboard/SKILL.md) | Copy/paste over mosh/SSH via gclpr TCP bridge |
 | [Screenshot to Remote OpenCode](.opencode/skills/screenshot-to-remote-opencode/SKILL.md) | Sharing screenshots with remote OpenCode (devbox/cloudbox over SSH) |
