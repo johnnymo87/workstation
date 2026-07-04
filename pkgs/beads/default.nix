@@ -10,16 +10,16 @@
 # `buildGo126Module` (backed by go_1_26) alongside. Use that explicitly.
 buildGo126Module rec {
   pname = "beads";
-  version = "1.0.5";
+  version = "1.1.0";
 
   src = fetchFromGitHub {
     owner = "gastownhall";
     repo = "beads";
     rev = "v${version}";
-    hash = "sha256-zX4rrZfFG7panBty1iE7bL2ZVazmvktFY5kYK8Xax1c=";
+    hash = "sha256-+dFV//0N8ZDw9BHOJOoWZ+BvLmJKlnGtONHIYPRhfBE=";
   };
 
-  vendorHash = "sha256-7x8ZOWWM5S2Bvqv1SDZZw3w+fvZJldkzddcXZ0DehZU=";
+  vendorHash = "sha256-WWEwGpCwMPD7jaz02zN745RQQqYTQttehbcT3J9hayM=";
 
   # Beads 1.0+ uses github.com/dolthub/go-icu-regex (CGo bindings to ICU4C)
   # for MySQL-compatible regex, so we need ICU headers + libs at build time.
