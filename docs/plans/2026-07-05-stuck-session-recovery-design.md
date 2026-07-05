@@ -87,7 +87,7 @@ Done in workstation commits `sweeper: only finalize rows that predate every live
 3. **Verification** (review I5 + N1): evidence that our run started/ran =
    - any assistant message with `time.created` > anchor AND `time.completed` set AND no error (**ran clean**), OR
    - an **in-flight** assistant message with `time.created` > anchor (**the serving turn is running right now** — the design's success criterion is "an assistant run started"; review N1: without this branch, the watchdog would alert on and eventually ABORT the very turn serving our message once it runs long).
-   ⇒ `verified_at = now`. Done. Documented residuals: a serving turn later killed externally (canary restart) after we verified is not re-detected; an errored/aborted LATER row is non-evidence and falls through to stuck classification (which is at-least-once-safe). Our own abort's casualty rows all predate the anchor of the post-abort redelivery, so the watchdog can never verify against its own abort.
+   ⇒ `verified_at = now`. Done. Documented residuals: a serving turn later killed externally (canary restart) after we verified is not re-detected; **a serving turn that STARTS and then wedges indefinitely (e.g. question-block on a headless build primary, where question stays allowed) is verified-on-start and never re-detected — same exposure as pre-watchdog, shrunk by workstream 3's hygiene** (the skip-while-serving alternative was considered and rejected: it would catch wedged serving turns only by making legit long serving turns abortable, against C2's collateral-averse posture); an errored/aborted LATER row is non-evidence and falls through to stuck classification (which is at-least-once-safe). Our own abort's casualty rows all predate the anchor of the post-abort redelivery, so the watchdog can never verify against its own abort.
 4. **Stuck classification** (no qualifying assistant row — any in-flight turn here necessarily has `time.created` < anchor, i.e. it is BLOCKING, not serving):
    - **No in-flight turn** (no assistant row with `time.completed == null`) ⇒ session idle yet never ran our prompt (dropped in-memory queue entry): requeue without abort (bounded by MAX_REQUEUES as above). No abort — nothing to kill.
    - **Blocking in-flight turn exists**: compute `lastActivity` = max part timestamp on that message (fallback: its `time.created` if no part timestamps present).
@@ -143,7 +143,7 @@ Hygiene removes the known biggest indefinite-block; the watchdog is the generic 
 ## 5. Resolved design decisions (was: open questions; review verdicts folded)
 
 1. Abort gate: part-activity silence ≥60min + alert-first at 15min (C2). Turn age rejected.
-2. Verification: later assistant row with `completed` + no error (I5).
+2. Verification: two evidence branches — later assistant row completed clean, OR in-flight assistant row created after the anchor (serving turn started) — see §3.2 step 3 (I5 + N1).
 3. Transcript load: acceptable; dedupe per-session per-cycle; verified-row short-circuit + C3 backfill keep steady state near zero.
 4. Channels: naturally excluded (never handed_off); accumulation side-bug → bead.
 5. Migration: schema.ts ALTER pattern + PRAGMA table_info freshness check + verified_at backfill.
@@ -162,7 +162,7 @@ Hygiene removes the known biggest indefinite-block; the watchdog is the generic 
 
 **Files:** Modify `packages/daemon/src/storage/swarm-schema.ts`, `packages/daemon/src/storage/swarm-repo.ts`; Test `packages/daemon/test/swarm-repo.test.ts`.
 
-1. Failing tests: (a) fresh DB: `verified_at`/`requeue_count`/`aborted_at` columns exist; (b) **upgrade path: create the OLD schema, insert a handed_off row, run the new init — row gets `verified_at` backfilled = its `handed_off_at`**; (c) repo methods `markVerified(msgId, now)`, `requeueForRecovery(msgId, now, delayMs)` (state→queued, next_retry_at, requeue_count+1), `markAborted(msgId, now)`, `listUnverifiedHandedOff(now, verifyAfterMs)` (returns eligible rows; excludes verified, excludes to_session NULL, excludes fresher-than-window).
+1. Failing tests: (a) fresh DB: `verified_at`/`requeue_count`/`aborted_at` columns exist; (b) **upgrade path: create the OLD schema, insert a handed_off row (plus a second fixture row with NULL `handed_off_at`), run the new init — rows get `verified_at` backfilled = `COALESCE(handed_off_at, updated_at)`, pinning both COALESCE branches**; (c) repo methods `markVerified(msgId, now)`, `requeueForRecovery(msgId, now, delayMs)` (state→queued, next_retry_at, requeue_count+1), `markAborted(msgId, now)`, `listUnverifiedHandedOff(now, verifyAfterMs)` (returns eligible rows; excludes verified, excludes to_session NULL, excludes fresher-than-window).
 2. Run: `npm run --workspace @pigeon/daemon test -- swarm-repo` — expect FAIL.
 3. Implement (PRAGMA table_info guard for the backfill-only-when-freshly-added).
 4. Green + typecheck; commit `feat(daemon): swarm delivery verification columns + backfill`.
@@ -175,7 +175,7 @@ Failing tests (write ALL first, then implement `processOnce`):
 1. happy: user row (`msg_id="<id>"` attr) + later completed clean assistant → `verified_at` set.
 2. `reply_to="<id>"` in another row does NOT count as our user row (I2).
 3. redelivered duplicate: latest msg_id match anchors verification (I2).
-4. later assistant row with error / no completed-and-errored → NOT verification (I5); classified per stuck rules.
+4. later assistant row COMPLETED WITH ERROR → not verification (I5); falls through to stuck rules.
 5. **serving in-flight turn (created > anchor) → `verified_at` set, no alert, no abort (N1).**
 6. **blocking in-flight turn (created < anchor) → stuck rules apply (N1).**
 7. user row missing → requeue, no abort; 4th time (MAX_REQUEUES=3 exhausted) → terminal + alert.
