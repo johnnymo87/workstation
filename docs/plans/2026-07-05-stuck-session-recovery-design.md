@@ -46,7 +46,9 @@ Done in workstation commits `sweeper: only finalize rows that predate every live
 
 ---
 
-## 3. Workstream 2 — pigeon delivery watchdog (pigeon repo)
+## 3. Workstream 2 — pigeon delivery watchdog (pigeon repo) — SHIPPED 2026-07-05
+
+Implemented as pigeon commits `a9f6c31`/`189c969` (schema+backfill), `7800f3b`/`f71148a` (watchdog module, 25 tests), `a6bd36c`/`2883949`/`0bd1484` (wiring+hardening). Deployed on devbox and LIVE-VERIFIED (Task 4): backfill covered all 1990 pre-deploy handed_off rows; N2 cross-serve assumption confirmed (id-only read 200, never-hosting-serve abort 200 benign no-op — softer than the assumed 4xx); happy-path smoke verified in 5m13s; full stuck drill under compressed knobs ran the entire ladder live — blocking-turn detection → labeled warn alert (Telegram) → TOCTOU-checked broadcast abort + redeliver → probe served and VERIFIED, 3m43s handoff-to-recovery. Deploy-time-stuck sweep (N6): no stuck rows found. Cloudbox/macbook/chromebook rollout pending (follow-up with Task 7).
 
 ### 3.1 Current pipeline facts (verified in code)
 
