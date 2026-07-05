@@ -108,7 +108,9 @@ Abort is per-SESSION-ID: `POST /session/{id}/abort` on a serve not running that 
 
 ---
 
-## 4. Workstream 3 — question-tool hygiene (workstation)
+## 4. Workstream 3 — question-tool hygiene (workstation) — SHIPPED 2026-07-05
+
+Workstation commits `247825d` (deny + build/plan re-allow + launch-time tools deny) and `e42b16e` (bonus, operator-requested: dropped the crude 600s provider `timeout` that was killing long streaming turns — chunkTimeout 10min + the watchdog are the layered replacement; note the runtime opencode.json needed a one-time manual `del(.provider[].options.timeout)` because the activation deep-merge never deletes keys removed from base). Behaviorally verified per M8 on a FRESH throwaway serve (running serves cache config at boot): explore subagent → zero question tool parts, replied TOOL-ABSENT; build primary → question invoked and blocked (then aborted); opencode-launch headless spawn → TOOL-ABSENT even against an old-config serve (body-borne tools map). Config live for all newly-started opencode processes; pool serves pick it up at next restart (nightly reset).
 
 ### 4.1 Root cause (verified in v1.17.7 source; line refs to be re-checked against a clean checkout at implementation time — the /tmp worktree has partially scrambled identifiers)
 
@@ -228,3 +230,20 @@ Traps (review I6): construct the watchdog AFTER `notifier` (index.ts:330) — NO
 ### Task 7 (follow-up, non-blocking): cloudbox sweeper parity
 
 Port the phantom-busy sweeper unit (with the dead-owner gate) into the cloudbox home config; its serve units are system-level (hosts/cloudbox/configuration.nix) so the etimes probe needs the system unit names. Separate session/bead.
+
+---
+
+## 7. Landed state + follow-ups ledger (2026-07-05, execution complete)
+
+All three workstreams SHIPPED. Pigeon: `a9f6c31 189c969 7800f3b f71148a a6bd36c 2883949 0bd1484` (30 new tests; 588 passing). Workstation: `247825d e42b16e` + doc commits. Every task passed spec review + code-quality review; live verification evidence in §3 header.
+
+**Follow-ups to file as beads once bd migration unblocks** (bd write-blocked on devbox, v49→v53 pending designated-migrator decision):
+
+1. **Watchdog rollout to cloudbox/macbook/chromebook** — pigeon deploy is per-machine (git pull + npm install + daemon restart per cross-device-deployment skill); only devbox runs the watchdog today. Cloudbox first (same pool topology).
+2. **Cloudbox sweeper parity** (Task 7 above, review I7).
+3. **Channel-row accumulation** (review M5): `to_session IS NULL` rows never reach handed_off; `cleanupOlderThan` only deletes handed_off/failed → they accumulate forever.
+4. **Global `"*": "allow"` permission review** (§4.2 note): question was one instance; audit what else upstream denies-by-default that our wildcard resurrects.
+5. **Pigeon pre-existing typecheck breakage**: `test/routing/lease-cas-concurrency.bun-worker.ts` + `.test.ts` — 4 errors (`bun:sqlite` types etc., since commit `8265cdf`); root `npm run typecheck` exits 2. Fix or exclude from tsconfig.
+6. **Arbiter poll-loop error boundary**: same unguarded `void this.processOnce()` setInterval pattern the watchdog had (fixed there in `f71148a`); port the catch to arbiter (and other pollers).
+7. **Watchdog nice-to-haves from final review**: recovery test asserting `verified_at` stays null for pre-fix partial DBs; boundary test for `handed_off_at == cutoff`; typed HttpError instead of regex-coupled status extraction.
+8. **Serve config staleness**: base.json changes don't reach running serves until restart; nightly reset covers it, but a `systemctl --user restart opencode-serve@N` note belongs in the rebuilding skill (running sessions survive? they don't — hence nightly).
