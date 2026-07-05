@@ -1007,11 +1007,22 @@ ${serveIdCase}
   # row, so every TUI that (re)loads the session renders the "working"
   # animation forever — observed burning ~1 CPU core per TUI in a GC storm
   # for hours. This timer finalizes provably-orphaned in-flight messages:
-  # role=assistant, no time.completed, no error, AND the row untouched for
-  # >30min (a streaming turn bumps time_updated on every part append; the
-  # 30min gate leaves headroom for long silent tool calls — and even a
-  # false positive is self-healing, since the owning serve's own completion
-  # write lands last). Writes the canonical MessageAbortedError shape so
+  # role=assistant, no time.completed, no error, row untouched for >30min
+  # (a streaming turn bumps time_updated on every part append; the 30min
+  # gate leaves headroom for long silent tool calls), AND — since the
+  # 2026-07-05 loot incident — created BEFORE every currently-running pool
+  # serve booted. That last gate scopes the sweep to the dead-owner class it
+  # was designed for: a row younger than all live serves may belong to a
+  # fiber that is alive-but-blocked in a serve's memory (e.g. a headless
+  # child stuck on the `question` tool). DB-finalizing those rows does NOT
+  # free the session (the serve's in-memory runner still holds the turn, so
+  # prompt_async appends but never runs) and actively lies to observers
+  # until the serve's own completion write lands over ours. The
+  # live-but-stuck class needs an abort with a demand signal — that's the
+  # pigeon delivery watchdog's job, not ours. Caveat: rows executed by
+  # STANDALONE `opencode` TUI processes (not pool serves) predate no serve
+  # boot; the 30-min silence gate is the only protection there, same as the
+  # original design. Writes the canonical MessageAbortedError shape so
   # clients treat it exactly like a user abort. Safe against live serves:
   # WAL mode, single short transaction, busy_timeout.
   systemd.user.services.opencode-phantom-busy-sweeper = {
@@ -1020,19 +1031,34 @@ ${serveIdCase}
       Type = "oneshot";
       ExecStart = "${pkgs.writeShellScript "opencode-phantom-busy-sweeper" ''
         set -u
-        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.sqlite ]}
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.sqlite pkgs.systemd pkgs.procps pkgs.gawk ]}
         DB="$HOME/.local/share/opencode/opencode.db"
         [ -f "$DB" ] || exit 0
+        # Oldest running pool-serve boot time (epoch seconds). Rows created
+        # after this may still be executing in-memory on a live serve.
+        NOW=$(date +%s)
+        MAX_ETIMES=0
+        for u in $(systemctl --user list-units 'opencode-serve@*.service' --no-legend --plain 2>/dev/null | awk '{print $1}'); do
+          pid=$(systemctl --user show "$u" -p MainPID --value 2>/dev/null)
+          [ -n "$pid" ] && [ "$pid" != 0 ] || continue
+          et=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+          [ -n "$et" ] && [ "$et" -gt "$MAX_ETIMES" ] && MAX_ETIMES=$et
+        done
+        # No live pool serve found -> no live-owner risk from the pool; keep
+        # the original staleness-only behavior (CUTOFF = now).
+        CUTOFF=$(( NOW - MAX_ETIMES ))
+        [ "$MAX_ETIMES" -eq 0 ] && CUTOFF=$NOW
         sqlite3 "$DB" "
           PRAGMA busy_timeout=10000;
           UPDATE message SET data = json_set(data,
               '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
-              '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: serve died mid-turn)\"}}'))
+              '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: in-flight row predates all live serves, silent >30min)\"}}'))
           WHERE json_extract(data, '\$.role') = 'assistant'
             AND json_extract(data, '\$.time.completed') IS NULL
             AND json_extract(data, '\$.error') IS NULL
-            AND time_updated < (strftime('%s','now') - 1800) * 1000;
-          SELECT 'finalized ' || changes() || ' orphaned message(s)';
+            AND time_updated < (strftime('%s','now') - 1800) * 1000
+            AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
+          SELECT 'finalized ' || changes() || ' orphaned message(s) (cutoff=' || $CUTOFF || ')';
         "
       ''}";
     };
