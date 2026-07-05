@@ -7,6 +7,11 @@ let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
   devboxModel = "anthropic/claude-opus-4-8";
+  # Compaction model for devbox/crostini: direct Anthropic Sonnet 5 (NOT Vertex).
+  # Runs via the Claude Max subscription (teamclaude on devbox / anthropic-auth
+  # OAuth on crostini), so there is no per-token cost. Cheaper/faster than Opus
+  # for one-shot summarization while staying off the Vertex path.
+  sonnetModel = "anthropic/claude-sonnet-5";
   # Cloudbox default: Opus over Vertex (no Claude Max subscription here, unlike
   # devbox). Carries its own high thinking effort from opencode.base.json's
   # google-vertex-anthropic model options, so no variant override is needed.
@@ -154,15 +159,16 @@ let
   opencodeOverlay =
     (lib.optionalAttrs (isDevbox || isCrostini) {
       model = devboxModel;
-      # Route the built-in `compaction` agent to Opus on devbox/crostini too.
+      # Route the built-in `compaction` agent to Sonnet 5 on devbox/crostini.
       # Without this, compaction inherits opencode.base.json's top-level default
       # (openai/gpt-5.5), which is billed per-token AND hits OpenAI usage caps —
       # leaving sessions stuck retrying "usage limit reached" forever (the
-      # cloudbox/darwin branch already routes compaction to cheap Gemini Flash).
-      # On devbox/crostini Opus runs via the Claude Max subscription (teamclaude
-      # on devbox / anthropic-auth OAuth on crostini), so there is no per-token
-      # cost; Vertex Gemini Flash isn't available here anyway.
-      agent.compaction.model = devboxModel;
+      # cloudbox/darwin branch routes compaction to cheap Gemini Flash instead).
+      # On devbox/crostini Sonnet 5 runs via the Claude Max subscription
+      # (teamclaude on devbox / anthropic-auth OAuth on crostini), so there is no
+      # per-token cost; Vertex Gemini Flash isn't available here anyway. Sonnet
+      # (vs. the interactive Opus default) is plenty for one-shot summarization.
+      agent.compaction.model = sonnetModel;
       # vision-qa (deployed below on devbox/crostini only) uses the direct
       # Google Generative AI API here (google/gemini-3.5-flash,
       # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY auth — no Vertex).

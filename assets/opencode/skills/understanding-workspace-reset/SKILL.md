@@ -61,12 +61,15 @@ The full prompt is baked into `reset-workspace`. Two phases.
    `GET /session/<sid>/message` to judge mid-task vs wrapped-up. Learn what each
    session *is* (you'll coordinate it later) without absorbing transcripts.
 3. Send a short, opinionated, **project-grouped, numbered** Telegram message
-   calling out finished (PR landed / question resolved) vs mid-flight work.
-4. Ask via the question tool; accept free-form (`1,3,5`, `all`, `none`,
-   `the mono ones`).
-5. For each chosen sid: `oc-auto-attach --tmux-session main <sid>`, run
-   **sequentially** — mono worktrees collapse to one `mono` nvim window and
-   racing window/socket creation is flaky.
+   that briefly describes each session, calling out finished (PR landed /
+   question resolved) vs mid-flight work.
+4. Do **not** use the question tool / pose a question — the user replies with
+   in-depth instructions that don't fit a Q&A. Send the description, then wait
+   for their free-form reply (`1,3,5`, `all`, `none`, or grouped by project,
+   plus detailed direction).
+5. For each sid they want reopened: `oc-auto-attach --tmux-session main <sid>`, run
+   **sequentially** — multiple worktrees of the same repo collapse to one shared
+   nvim window and racing window/socket creation is flaky.
 
 **Phase 2 — swarm coordinator:** after reopening, the agent stays on as swarm
 coordinator for the reopened sessions, directed by the user's ongoing replies.

@@ -20,9 +20,12 @@ in `~` with a baked-in prompt instructing it to:
 1. Read the manifest.
 2. Enrich each sid via `GET http://127.0.0.1:4096/session/<sid>` (title,
    directory, last update, optionally recent messages).
-3. Send a conversational Telegram message recommending which sessions
-   to reopen and why, with numbered options.
-4. Wait for your Telegram reply (free-form: "1,3", "all", "none", etc).
+3. Send a conversational Telegram message giving a short description of
+   each session (project, goal, finished vs mid-flight), numbered so you
+   can refer to them. It does NOT pose a question — you typically reply
+   with in-depth instructions that don't fit a simple Q&A.
+4. Wait for your Telegram reply (free-form: "1,3", "all", "none", plus
+   whatever detailed direction you want to give each session).
 5. For each chosen sid, exec `oc-auto-attach --tmux-session main <sid>`
    to create the tab. The `--tmux-session main` is mandatory: the
    recommendation session is headless (not attached to tmux), so a bare
