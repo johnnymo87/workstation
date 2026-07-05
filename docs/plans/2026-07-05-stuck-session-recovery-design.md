@@ -63,7 +63,7 @@ Done in workstation commits `sweeper: only finalize rows that predate every live
 - `requeue_count INTEGER NOT NULL DEFAULT 0` — watchdog-initiated redeliveries (distinct from delivery `attempts`).
 - `aborted_at INTEGER` — set when the watchdog has fired its one abort for this msg (review I1: aborts tracked separately from benign requeues).
 
-**Migration (review C3/M6):** follow the storage/schema.ts:102-121 try/catch-swallow ALTER pattern, but use `PRAGMA table_info(swarm_messages)` to detect whether `verified_at` is freshly added, and if so **backfill `verified_at = handed_off_at` for all existing handed_off rows** — the watchdog governs only post-deploy messages; without backfill the first cycle would mass-fetch and mass-redeliver up to 7 days of stale prompts.
+**Migration (review C3/M6/N6):** follow the storage/schema.ts:102-121 try/catch-swallow ALTER pattern, but use `PRAGMA table_info(swarm_messages)` to detect whether `verified_at` is freshly added, and if so **backfill `verified_at = COALESCE(handed_off_at, updated_at)` for all existing handed_off rows** — the watchdog governs only post-deploy messages; without backfill the first cycle would mass-fetch and mass-redeliver up to 7 days of stale prompts. Explicit consequence: a message genuinely stuck AT deploy time gets backfill-verified and will NOT be auto-recovered — Task 4 includes a one-time manual sweep for such rows.
 
 **Client resolution (review C1a/C1d):** a `watchdogClientFor(sessionId)` helper:
 1. If routing configured: prefer `resolveProspectiveRoute` target (read-only, router.ts:109) for locality; else ANY healthy serve from `serve_instance`.
@@ -80,16 +80,19 @@ Done in workstation commits `sweeper: only finalize rows that predate every live
 
 **Cycle**, for each row `state='handed_off' AND verified_at IS NULL AND to_session IS NOT NULL AND handed_off_at < now - VERIFY_AFTER_MS`, deduped to one transcript fetch AND at most one intervention per session per cycle (review M2):
 
-1. **Fetch transcript** via `watchdogClientFor`. Error handling (review I6): HTTP 404 → session deleted → `markFailed` + alert (don't loop); 5xx/network → skip row this cycle, NO counter bump; abort failures below likewise don't consume the abort.
+1. **Fetch transcript** via `watchdogClientFor`. Error handling (review I6): HTTP 404 → **second opinion required** (review N2: id-only cross-serve reads are production-supported but unproven for never-hosted serves — confirm the 404 via one other healthy serve / the prospective-route serve before declaring the session deleted) → then `markFailed` + alert; 5xx/network → skip row this cycle, NO counter bump; abort failures below likewise don't consume the abort. Retention note (review N4): perpetually-skipped rows (chronic 5xx / no healthy serve) are eventually deleted UNVERIFIED by the 7-day `cleanupOlderThan` with only the age alarm as a trace — accepted and logged, not tracked further.
 2. **Find our user row**: match the exact attribute string `msg_id="<id>"` (excludes `reply_to="<id>"` renders), take the LATEST occurrence (redelivery writes a second row with the same msg_id) (review I2).
    - **Not found** ⇒ the 2xx lied / write lost: if `requeue_count < MAX_REQUEUES`: requeue (state→queued, `next_retry_at = now + 5s`, `requeue_count++`); else terminal: `markFailed` + alert("delivery write repeatedly lost").
-   - **Found** ⇒ continue.
-3. **Verification**: any later assistant message (`time.created` > our user row's) with **`time.completed` set and no error** (review I5: errored/instantly-aborted rows — including our own abort's casualties — are non-evidence) ⇒ `verified_at = now`. Done.
-4. **Stuck classification** (no qualifying assistant row):
+   - **Found** ⇒ continue. Everything below anchors on this row's `time.created`.
+3. **Verification** (review I5 + N1): evidence that our run started/ran =
+   - any assistant message with `time.created` > anchor AND `time.completed` set AND no error (**ran clean**), OR
+   - an **in-flight** assistant message with `time.created` > anchor (**the serving turn is running right now** — the design's success criterion is "an assistant run started"; review N1: without this branch, the watchdog would alert on and eventually ABORT the very turn serving our message once it runs long).
+   ⇒ `verified_at = now`. Done. Documented residuals: a serving turn later killed externally (canary restart) after we verified is not re-detected; an errored/aborted LATER row is non-evidence and falls through to stuck classification (which is at-least-once-safe). Our own abort's casualty rows all predate the anchor of the post-abort redelivery, so the watchdog can never verify against its own abort.
+4. **Stuck classification** (no qualifying assistant row — any in-flight turn here necessarily has `time.created` < anchor, i.e. it is BLOCKING, not serving):
    - **No in-flight turn** (no assistant row with `time.completed == null`) ⇒ session idle yet never ran our prompt (dropped in-memory queue entry): requeue without abort (bounded by MAX_REQUEUES as above). No abort — nothing to kill.
-   - **In-flight turn exists**: compute `lastActivity` = max part timestamp on that message (fallback: its `time.created` if no part timestamps present).
-     - `now - handed_off_at > STUCK_ALERT_MS` and not yet alerted (in-memory dedupe per msg_id; duplicate alert after daemon restart is acceptable) ⇒ `sendPlainAlert(warn)` with session, msg_id, blocking-turn age + silence.
-     - `now - lastActivity > STUCK_ABORT_SILENCE_MS` and `aborted_at IS NULL` ⇒ **re-fetch the transcript immediately before acting** (review M2 TOCTOU: a fresh turn may have started); if still stuck: broadcast `abortSession(to_session)` to all healthy serves (review M1; single-client fallback on router-less hosts), set `aborted_at`, requeue with `next_retry_at = now + 5s`.
+   - **Blocking in-flight turn exists**: compute `lastActivity` = max part timestamp on that message (fallback: its `time.created` if no part timestamps present).
+     - `now - handed_off_at > STUCK_ALERT_MS` and not yet alerted (in-memory dedupe per msg_id, entries pruned on verified/terminal — review N5; duplicate alert after daemon restart is acceptable) ⇒ `sendPlainAlert(warn)`, labeled **"queued behind ACTIVE turn"** vs **"queued behind SILENT turn"** by `lastActivity` freshness (review N3) with session, msg_id, blocking-turn age + silence.
+     - `now - lastActivity > STUCK_ABORT_SILENCE_MS` and `aborted_at IS NULL` ⇒ **re-fetch the transcript immediately before acting** (review M2 TOCTOU: a fresh turn may have started); if still stuck: broadcast `abortSession(to_session)` to all healthy serves (review M1; single-client fallback on router-less hosts). **Broadcast semantics (review N2): per-serve best-effort; set `aborted_at` when ≥1 serve returns 2xx; 4xx from non-owners is a benign no-op; only the all-serves-hard-fail case leaves `aborted_at` unset (skip + alert).** Then requeue with `next_retry_at = now + 5s`.
      - Else ⇒ wait; row re-checked next cycle.
 5. **Terminal**: a stuck candidate that already has `aborted_at` set and (post-redelivery, since `markHandedOff` restarted the window) is stuck AGAIN ⇒ `markFailed` + `sendPlainAlert(error)` + `delivery.failed`-style swarm message to the sender (reuse/extract `notifySenderOfFailure`).
 
@@ -172,19 +175,22 @@ Failing tests (write ALL first, then implement `processOnce`):
 1. happy: user row (`msg_id="<id>"` attr) + later completed clean assistant → `verified_at` set.
 2. `reply_to="<id>"` in another row does NOT count as our user row (I2).
 3. redelivered duplicate: latest msg_id match anchors verification (I2).
-4. later assistant row with error / no completed → NOT verification (I5); classified per stuck rules.
-5. user row missing → requeue, no abort; 4th time (MAX_REQUEUES=3 exhausted) → terminal + alert.
-6. idle-never-ran → requeue, no abort; bounded likewise.
-7. in-flight turn, part activity fresh → untouched.
-8. in-flight, handed_off age > STUCK_ALERT_MS → sendPlainAlert(warn) exactly once (in-memory dedupe).
-9. in-flight, part silence > STUCK_ABORT_SILENCE_MS, no aborted_at → TOCTOU refetch happens; still stuck → abort broadcast to ALL healthy serves + `aborted_at` set + requeued.
-10. TOCTOU: refetch shows fresh activity → no abort.
-11. aborted_at set + stuck again post-redelivery → markFailed + sendPlainAlert(error) + sender delivery.failed message.
-12. getSessionMessages 404 → markFailed + alert; 5xx → row skipped, no counter bump (I6).
-13. abortSession throws → aborted_at NOT set, no requeue count burn (I6).
-14. two stuck rows to one session, one cycle → one transcript fetch, ONE intervention (M2).
-15. no healthy serve → skipped; unverified >1h → age alarm once (M7).
-16. re-entrancy: overlapping `processOnce` coalesces.
+4. later assistant row with error / no completed-and-errored → NOT verification (I5); classified per stuck rules.
+5. **serving in-flight turn (created > anchor) → `verified_at` set, no alert, no abort (N1).**
+6. **blocking in-flight turn (created < anchor) → stuck rules apply (N1).**
+7. user row missing → requeue, no abort; 4th time (MAX_REQUEUES=3 exhausted) → terminal + alert.
+8. idle-never-ran → requeue, no abort; bounded likewise.
+9. blocking in-flight, part activity fresh → untouched (beyond the labeled warn once past STUCK_ALERT_MS — "queued behind ACTIVE turn", N3).
+10. blocking in-flight, handed_off age > STUCK_ALERT_MS → sendPlainAlert(warn) exactly once (in-memory dedupe; entry pruned on verified/terminal, N5).
+11. blocking in-flight, part silence > STUCK_ABORT_SILENCE_MS, no aborted_at → TOCTOU refetch happens; still stuck → abort broadcast to ALL healthy serves + `aborted_at` set + requeued.
+12. TOCTOU: refetch shows fresh activity → no abort.
+13. aborted_at set + stuck again post-redelivery → markFailed + sendPlainAlert(error) + sender delivery.failed message.
+14. getSessionMessages 404 → second-opinion fetch from another healthy serve (N2); confirmed → markFailed + alert; contradicted (other serve 200) → proceed with that transcript; 5xx → row skipped, no counter bump (I6).
+15. **broadcast partial failure (N2): one serve 2xx + one serve 4xx → aborted_at SET, no repeat abort next cycle; ALL serves hard-fail → aborted_at unset + skip + alert.**
+16. abortSession all-fail → no requeue count burn (I6/N2).
+17. two stuck rows to one session, one cycle → one transcript fetch, ONE intervention (M2).
+18. no healthy serve → skipped; unverified >1h → age alarm once (M7); alarm dedupe entry pruned on verified/terminal (N5).
+19. re-entrancy: overlapping `processOnce` coalesces.
 
 Implement per §3.2; `notifySenderOfFailure` extracted from arbiter into a shared helper. Green + typecheck; commit `feat(daemon): swarm delivery watchdog (verify, alert, abort+redeliver)`.
 
@@ -197,7 +203,7 @@ Traps (review I6): construct the watchdog AFTER `notifier` (index.ts:330) — NO
 ### Task 4: deploy pigeon + live verification (devbox first)
 
 1. Deploy per repo cross-device-deployment skill (git pull + npm install + restart daemon).
-2. Happy-path smoke: swarm-send to a throwaway session; confirm `verified_at` within ~6min; confirm backfill left historical rows verified.
+2. Happy-path smoke: swarm-send to a throwaway session; confirm `verified_at` within ~6min; confirm backfill left historical rows verified; **one-time manual sweep for rows genuinely stuck at deploy time (backfill-verified but unserved — N6)**; **verify id-only cross-serve `GET /session/{id}/message` + `POST /session/{id}/abort` against a serve that never hosted the session (N2 assumption)**.
 3. Stuck drill: sandbox session with an artificial 90-min-silent in-flight turn (bash `sleep` tool call), swarm-send to it; watch alert at 15min (journal + Telegram), abort+redeliver at 60min silence, verification after. Time-compressible via env knobs (set STUCK_* low for the drill).
 4. Watch the age alarm doesn't fire for normal traffic. Update design doc status; commit.
 
@@ -206,7 +212,7 @@ Traps (review I6): construct the watchdog AFTER `notifier` (index.ts:330) — NO
 **Files:** Modify `assets/opencode/opencode.base.json`; `pkgs/opencode-launch/default.nix` (+ its test.sh).
 
 1. Base json: `permission.question = "deny"` + `agent.build/plan.permission.question = "allow"` (§4.2 exact shape).
-2. opencode-launch: fold `"question": false` into the `tools` map of the initial prompt_async body (same plumbing as `--mcp`); extend `pkgs/opencode-launch/test.sh` source-grep guards.
+2. opencode-launch: fold `"question": false` into the `tools` map of the initial prompt_async body (same plumbing as `--mcp`). Note (review N7): the `tools` map is currently attached only when non-empty (default.nix:309-317 `if ($tools|length) > 0`) — adding an always-present key makes it unconditional; update `pkgs/opencode-launch/test.sh` source-grep guards to the new shape explicitly.
 3. `home-manager switch` on devbox; verify merged `~/.config/opencode/opencode.json` (additive merge is safe here — only adding keys).
 4. Behavioral verification (review M8: deny STRIPS the tool from the request — verify by absence, not self-report): run a task subagent (explore) prompted to use the question tool; inspect its transcript for zero question parts AND check the session's request tool list if inspectable; also confirm an attended `build` TUI session still HAS question available.
 5. Commit `opencode: deny question below attended primaries; launch-time deny for headless spawns`.
