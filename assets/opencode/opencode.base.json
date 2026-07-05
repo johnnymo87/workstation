@@ -3,6 +3,7 @@
   "model": "openai/gpt-5.5",
   "permission": {
     "*": "allow",
+    "question": "deny",
     "external_directory": {
       "/tmp/*": "allow"
     }
@@ -13,10 +14,16 @@
   },
   "agent": {
     "build": {
-      "variant": "high"
+      "variant": "high",
+      "permission": {
+        "question": "allow"
+      }
     },
     "plan": {
-      "variant": "high"
+      "variant": "high",
+      "permission": {
+        "question": "allow"
+      }
     }
   },
   "plugin": [

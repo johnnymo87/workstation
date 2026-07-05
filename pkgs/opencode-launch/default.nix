@@ -284,7 +284,13 @@ pkgs.writeShellApplication {
         -d "{\"session_id\":\"$session_id\"}" 2>/dev/null || true)"
       serve_url="$(parse_serve_url "$place_body" "$OPENCODE_URL")"
 
-      mcp_tools_json='{}'
+      # Base tools map always denies `question`: a headless launch has no
+      # attended user to answer it, so any subagent (or the primary itself)
+      # calling question would otherwise hang forever, as happened in a
+      # 4-hour stuck-session incident. This is folded in unconditionally
+      # (not just when --mcp is used) and merged with any MCP tool entries
+      # below, so the resulting tools map is NEVER empty.
+      mcp_tools_json='{"question": false}'
       if [ "''${#mcp_servers[@]}" -gt 0 ]; then
         for srv in $(printf '%s\n' "''${mcp_servers[@]}" | sort -u); do
           connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
@@ -298,23 +304,23 @@ pkgs.writeShellApplication {
             exit 1
           fi
         done
-        mcp_tools_json=$(build_mcp_tools_json "''${mcp_servers[@]}")
+        mcp_tools_json=$(build_mcp_tools_json "''${mcp_servers[@]}" | jq -c '. + {"question": false}')
       fi
 
+      # The tools map is always non-empty (it always carries "question":
+      # false at minimum), so it's always attached -- no length check needed.
       if [ -n "$model_spec" ]; then
         prompt_payload=$(jq -n \
           --arg p "$prompt" \
           --arg provider "$model_provider" \
           --arg model "$model_id" \
           --argjson tools "$mcp_tools_json" \
-          '{parts: [{type: "text", text: $p}], model: {providerID: $provider, modelID: $model}}
-           + (if ($tools | length) > 0 then {tools: $tools} else {} end)')
+          '{parts: [{type: "text", text: $p}], model: {providerID: $provider, modelID: $model}, tools: $tools}')
       else
         prompt_payload=$(jq -n \
           --arg p "$prompt" \
           --argjson tools "$mcp_tools_json" \
-          '{parts: [{type: "text", text: $p}]}
-           + (if ($tools | length) > 0 then {tools: $tools} else {} end)')
+          '{parts: [{type: "text", text: $p}], tools: $tools}')
       fi
 
       # Send prompt to the owning serve (where the agent loop will run)

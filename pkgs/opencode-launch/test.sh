@@ -212,6 +212,33 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source queries /config/providers catalog\n        not found in: %s\n' "$default_nix"; exit 1
   fi
+  # Launch-time question deny: a headless spawn has no attended user to
+  # answer `question`, so the tools map handed to prompt_async must ALWAYS
+  # carry "question": false -- unconditionally, not only when --mcp is used
+  # -- and it must be merged into (not overwritten by) any --mcp tool
+  # entries. Regression here reopens the 4-hour stuck-session incident.
+  if grep -q "mcp_tools_json='{\"question\": false}'" "$default_nix"; then
+    printf 'PASS  source seeds tools map with question:false unconditionally\n'
+  else
+    printf 'FAIL  source seeds tools map with question:false unconditionally\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q 'build_mcp_tools_json .*| jq -c .\+ {"question": false}' "$default_nix"; then
+    printf 'PASS  source merges question:false into --mcp tool entries\n'
+  else
+    printf 'FAIL  source merges question:false into --mcp tool entries\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # The tools map is now always non-empty, so it must always be attached to
+  # prompt_payload (no more conditional length check that could drop it).
+  if grep -q 'if (\$tools | length) > 0' "$default_nix"; then
+    printf 'FAIL  source still conditionally attaches tools (could drop question:false)\n        in: %s\n' "$default_nix"; exit 1
+  else
+    printf 'PASS  source always attaches tools to prompt_payload\n'
+  fi
+  if grep -q 'tools: \$tools' "$default_nix"; then
+    printf 'PASS  source attaches tools: $tools to prompt_payload\n'
+  else
+    printf 'FAIL  source attaches tools: $tools to prompt_payload\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
 else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
 fi
