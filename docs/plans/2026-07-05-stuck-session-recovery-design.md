@@ -237,13 +237,13 @@ Port the phantom-busy sweeper unit (with the dead-owner gate) into the cloudbox 
 
 All three workstreams SHIPPED. Pigeon: `a9f6c31 189c969 7800f3b f71148a a6bd36c 2883949 0bd1484` (30 new tests; 588 passing). Workstation: `247825d e42b16e` + doc commits. Every task passed spec review + code-quality review; live verification evidence in §3 header.
 
-**Follow-ups to file as beads once bd migration unblocks** (bd write-blocked on devbox, v49→v53 pending designated-migrator decision):
+**Follow-ups — FILED as beads 2026-07-05 (bd migration unblocked):**
 
-1. **Watchdog rollout to cloudbox/macbook/chromebook** — pigeon deploy is per-machine (git pull + npm install + daemon restart per cross-device-deployment skill); only devbox runs the watchdog today. Cloudbox first (same pool topology).
-2. **Cloudbox sweeper parity** (Task 7 above, review I7).
-3. **Channel-row accumulation** (review M5): `to_session IS NULL` rows never reach handed_off; `cleanupOlderThan` only deletes handed_off/failed → they accumulate forever.
-4. **Global `"*": "allow"` permission review** (§4.2 note): question was one instance; audit what else upstream denies-by-default that our wildcard resurrects.
-5. **Pigeon pre-existing typecheck breakage**: `test/routing/lease-cas-concurrency.bun-worker.ts` + `.test.ts` — 4 errors (`bun:sqlite` types etc., since commit `8265cdf`); root `npm run typecheck` exits 2. Fix or exclude from tsconfig.
-6. **Arbiter poll-loop error boundary**: same unguarded `void this.processOnce()` setInterval pattern the watchdog had (fixed there in `f71148a`); port the catch to arbiter (and other pollers).
-7. **Watchdog nice-to-haves from final review**: recovery test asserting `verified_at` stays null for pre-fix partial DBs; boundary test for `handed_off_at == cutoff`; typed HttpError instead of regex-coupled status extraction.
-8. **Serve config staleness**: base.json changes don't reach running serves until restart; nightly reset covers it, but a `systemctl --user restart opencode-serve@N` note belongs in the rebuilding skill (running sessions survive? they don't — hence nightly).
+1. **workstation-t2b8** — Watchdog rollout to cloudbox/macbook/chromebook (per-machine pigeon deploy; devbox-only today; cloudbox first).
+2. **workstation-s5gl** — Cloudbox sweeper parity (Task 7 above, review I7).
+3. **pigeon-web** — Channel-row accumulation (review M5): `to_session IS NULL` rows never reach handed_off; `cleanupOlderThan` never deletes them.
+4. **workstation-s635** — Global `"*": "allow"` permission audit (§4.2 note): question was one instance; what else does the wildcard resurrect?
+5. **pigeon-m68** — Pre-existing typecheck breakage in `test/routing/lease-cas-concurrency.*` (4 errors since `8265cdf`; root typecheck exits 2).
+6. **pigeon-0ky** — Arbiter/outbox poll-loop error boundary (port the watchdog's `f71148a` catch to sibling pollers).
+7. **pigeon-ewr** — Watchdog robustness nice-to-haves (verified_at-stays-null recovery assertion; cutoff boundary test; typed HttpError; NULL handed_off_at note).
+8. **workstation-am5v** — Serve config staleness + safe-restart + deep-merge-never-deletes notes for the rebuilding skill.
