@@ -995,8 +995,12 @@ in
   #
   # Path shape: api.anthropic.com base is .../v1 and @ai-sdk/anthropic appends
   # /messages, so the override is .../v1 (no trailing /messages). The
-  # `anthropic.options` object also carries timeout/chunkTimeout from
+  # `anthropic.options` object also carries chunkTimeout from
   # opencode.base.json, so the empty-object prune below never deletes it.
+  # (The overall per-request `timeout` was removed 2026-07-05: it killed
+  # legitimately long streaming turns; silent-SSE hangs are caught by
+  # chunkTimeout, and the pigeon delivery watchdog recovers wedged
+  # messaged sessions — the layered replacement for the May crude bound.)
   home.activation.injectTeamclaudeBaseUrl = lib.mkIf isDevbox
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
