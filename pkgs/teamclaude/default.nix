@@ -3,20 +3,22 @@
 # (127.0.0.1:3456) that rotates across personal Claude Max accounts and injects
 # the active account's OAuth token.
 #
-# This builds the johnnymo87/teamclaude fork (branch opus-aware), which adds
-# per-model scoped weekly-limit awareness (Opus) with per-request model-aware
-# failover on the base-URL relay. See
-# docs/plans/2026-06-21-teamclaude-opus-aware-fork-*.
+# This builds upstream KarpelesLab/teamclaude (tagged releases). We previously
+# ran the johnnymo87/teamclaude "opus-aware" fork to add per-model scoped
+# weekly-limit awareness + model-aware failover; upstream has since implemented
+# the same capability independently (PR #64 "track Fable weekly quota and route
+# by model", #69 "rich status output"), so the fork was retired in favor of
+# upstream on 2026-07-06.
 #
 # Zero runtime dependencies (Node 18+ builtins only; verified: package.json has
 # no `dependencies`, and src/ has no bare imports). So packaging is just: fetch
-# the fork source, vendor it into the store, and wrap `src/index.js` with a
-# pinned node. No node_modules, no bundler.
+# the source, vendor it into the store, and wrap `src/index.js` with a pinned
+# node. No node_modules, no bundler.
 #
-# To bump: push a new commit to the fork, then update `rev` to its SHA and
-# refresh `src.hash` via
+# To bump: pick a newer tag from https://github.com/KarpelesLab/teamclaude/tags,
+# set `rev` to its commit SHA, bump `version`, and refresh `src.hash` via
 #   nix store prefetch-file --json --unpack \
-#     https://github.com/johnnymo87/teamclaude/archive/<rev>.tar.gz | jq -r .hash
+#     https://github.com/KarpelesLab/teamclaude/archive/<rev>.tar.gz | jq -r .hash
 {
   lib,
   stdenvNoCC,
@@ -27,13 +29,13 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "0-unstable-2026-06-22"; # fork; bump per pinned commit
+  version = "1.1.5"; # upstream tag; bump per pinned release
 
   src = fetchFromGitHub {
-    owner = "johnnymo87";
+    owner = "KarpelesLab";
     repo = "teamclaude";
-    rev = "e990b7c4f1a36d72b75a6c49e695833633604eb8";
-    hash = "sha256-MVFGnKG6uJdILyyotaMsxSLVzw8PkTv2WW/D/b7LmcQ=";
+    rev = "ea6f6a97662569ec6a80fe3b1dd8ad043e828b5c"; # tag v1.1.5
+    hash = "sha256-QunIxhJ2Dn++YWM2Esozm7fbuJVQZilbtx3Ft6OzD60=";
   };
 
   nativeBuildInputs = [ makeWrapper ];

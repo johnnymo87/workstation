@@ -1077,8 +1077,8 @@ ${serveIdCase}
   #   teamclaude accounts     # verify
   #   teamclaude probe 90     # enable the proactive usage probe (reads
   #                           # /api/oauth/usage every 90s; no quota spend). This
-  #                           # is what populates scoped weekly limits (Opus/Sonnet)
-  #                           # so the opus-aware failover routes proactively.
+   #                           # is what populates scoped weekly limits (Opus/Sonnet/Fable)
+  #                           # so the model-aware failover routes proactively.
   # NOTE: `probe` persists quotaProbeSeconds into the writable runtime config
   # (~/.config/teamclaude.json), so it survives restarts but is LOST on a full
   # reseed — re-run it as part of any from-scratch seed (alongside `login`).

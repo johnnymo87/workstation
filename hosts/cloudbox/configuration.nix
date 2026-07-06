@@ -43,8 +43,8 @@ let
   # flake's localPkgs, so callPackage it directly here for the systemd service.
   claude-failover-proxy = pkgs.callPackage ../../pkgs/claude-failover-proxy { };
 
-  # teamclaude: the personal Claude Max rotator (johnnymo87/teamclaude fork,
-  # opus-aware). Same rationale as above — NixOS configs don't receive the
+  # teamclaude: the personal Claude Max rotator (upstream KarpelesLab/teamclaude,
+  # tagged release). Same rationale as above — NixOS configs don't receive the
   # flake's localPkgs, so callPackage pkgs/teamclaude directly for the service.
   teamclaude = pkgs.callPackage ../../pkgs/teamclaude { };
 
@@ -785,8 +785,8 @@ ${serveIdCase}
 
   # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
   # router forwards to when work Claude-on-Vertex spend is over budget
-  # (8fe.15 PREREQ). Runs the johnnymo87/teamclaude fork (opus-aware, zero-dep
-  # Node) from the nix package (pkgs/teamclaude), not a ~/projects checkout.
+  # (8fe.15 PREREQ). Runs upstream KarpelesLab/teamclaude (tagged release,
+  # zero-dep Node) from the nix package (pkgs/teamclaude), not a ~/projects checkout.
   #
   # CONFIG IS RUNTIME STATE, NOT NIX-MANAGED. TeamClaude reads + REWRITES
   # /home/dev/.config/teamclaude.json (OAuth access/refresh tokens auto-refresh
@@ -798,7 +798,7 @@ ${serveIdCase}
   # exits 1 ("No accounts configured") and Restart=always would crash-loop, so
   # accounts must exist before this unit is (re)started.
   #
-  # PROACTIVE PROBE (opus-aware scoped limits): the per-model scoped weekly-limit
+  # PROACTIVE PROBE (scoped weekly limits): the per-model scoped weekly-limit
   # awareness only populates PROACTIVELY when the background quota probe is on
   # (the reactive 429/SSE backstop is always armed). It is runtime opt-in and
   # also NOT nix-managed (lives as quotaProbeSeconds in the same writable config).
@@ -806,13 +806,15 @@ ${serveIdCase}
   #   TEAMCLAUDE_CONFIG=/home/dev/.config/teamclaude.json \
   #     teamclaude probe 90   # reads /api/oauth/usage every 90s; spends NO quota
   #
-  # BIND + AUTH: index.js calls server.listen(port) with no host, so it binds
-  # all interfaces (not 127.0.0.1 — the fork does not yet take a bind host).
-  # Two backstops keep :3456 private: (1) cloudbox runs NO NixOS
-  # firewall and relies on GCP's default-deny ingress (3456 is not opened), and
-  # (2) TeamClaude's own auth gate (server.js) requires x-api-key === the config
-  # proxy.apiKey for any NON-localhost client. The router connects via
-  # 127.0.0.1 (localhost-exempt) but sends the key anyway.
+  # BIND + AUTH: upstream 1.1.5 binds 127.0.0.1 by DEFAULT (server.listen host is
+  # TEAMCLAUDE_HOST || config.proxy.host || '127.0.0.1'), so :3456 is
+  # localhost-only unless explicitly widened. The router connects via 127.0.0.1
+  # anyway, so no widening is needed (this is a safer default than the old fork,
+  # which bound all interfaces). Two further backstops keep it private even if a
+  # future config widens the bind: (1) cloudbox runs NO NixOS firewall and relies
+  # on GCP's default-deny ingress (3456 is not opened), and (2) TeamClaude's own
+  # auth gate (server.js) requires x-api-key === the config proxy.apiKey for any
+  # NON-localhost client. The router sends the key anyway.
   #
   # Auto-starts on boot (wantedBy multi-user.target) per the deploy decision.
   systemd.services.teamclaude = {
