@@ -248,18 +248,21 @@ Resume Workflow:
 Session End Workflow:
 - [ ] Update in_progress issues with notes on current state
 - [ ] Ensure any discovered work is captured as new issues
-- [ ] Sync with git to persist changes
+- [ ] bd dolt push to replicate the bead DB to the Dolt remote (if configured)
 ```
 
-**Sync pattern:**
+**Sync pattern (git-free):**
 ```bash
+bd dolt push   # replicate the bead DB to the Dolt remote (e.g. DoltHub)
 git pull --rebase
-bd sync
-git push
-git status   # Verify "up to date with origin/main"
+git push       # push CODE only; beads lives in Dolt, NOT git
+git status     # Verify "up to date with origin/main"
 ```
 
-**Why this matters**: The 30-second debounce means recent changes may not be exported yet. Running `bd sync` ensures everything is committed before you leave.
+**Why this matters**: Beads is git-free here (`.beads/` gitignored,
+`no-git-ops: true`). Writes auto-commit to the local Dolt DB, but they are not
+replicated until you run `bd dolt push`. `bd sync` no longer exists (removed
+upstream in v0.56.0) — never stage `.beads/*.jsonl` into git.
 
 ---
 

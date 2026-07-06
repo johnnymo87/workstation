@@ -26,7 +26,8 @@ Complete command reference for bd (beads) CLI tool v0.42+. All commands support 
   - [bd delete](#bd-delete) - Soft delete (tombstone)
   - [bd defer / bd undefer](#bd-defer) - Defer work for later
 - [Sync Commands](#sync-commands)
-  - [bd sync](#bd-sync) - Full sync cycle
+  - [bd dolt push / bd dolt pull](#bd-dolt-pushpull) - Dolt-native cross-machine sync
+  - [bd sync (removed)](#bd-sync-removed) - Deprecated no-op; see bd dolt push/pull
   - [bd export / bd import](#bd-export) - Manual JSONL operations
 - [Daemon Commands](#daemon-commands)
   - [bd daemon](#bd-daemon) - Background daemon management
@@ -64,8 +65,7 @@ Complete command reference for bd (beads) CLI tool v0.42+. All commands support 
 | `bd relate <id1> <id2>` | Bidirectional relates-to link | |
 | `bd blocked` | Find blocked issues | `--json` |
 | `bd reopen <id>` | Reopen closed issue | |
-| `bd sync` | Full sync cycle | `--dry-run`, `--merge`, `--status` |
-| `bd daemon` | Manage background daemon | `--start`, `--stop`, `--status`, `--health` |
+| `bd dolt push` / `bd dolt pull` | Cross-machine Dolt sync (to a remote, e.g. DoltHub) | |
 | `bd status` | Database overview + stats | `--json` |
 
 ### Setup & Maintenance
@@ -333,28 +333,48 @@ Deferred issues won't appear in `bd ready` but remain visible in `bd list`.
 
 ## Sync Commands
 
-### bd sync
+Beads issue data lives in **Dolt**, not git. The local Dolt DB is the source of
+truth for every read/write. Cross-machine sync is Dolt-native — it does **not**
+go through git branches or the JSONL export.
 
-Full sync cycle: export → commit → pull → import → push.
+### bd dolt push/pull
+
+Push/pull the Dolt issue history to/from a configured Dolt remote (we use
+DoltHub). Dolt stores issues under `refs/dolt/data`, entirely separate from
+your source branches.
 
 ```bash
-bd sync                       # Full sync cycle
-bd sync --status              # Show diff between sync branch and main
-bd sync --dry-run             # Preview what would happen
-bd sync --merge               # Merge sync branch to main (protected branch workflow)
-bd sync --flush-only          # Export + commit without git pull/push
-bd sync --import-only         # Import from JSONL without git operations
+bd dolt remote add origin <url>   # one-time; e.g. https://doltremoteapi.dolthub.com/<owner>/<repo>
+bd dolt push                      # publish local issue history to the remote
+bd dolt pull                      # pull remote issue history
+bd bootstrap                      # fresh clone / new machine: clone the Dolt history from the remote
 ```
 
-**Timing:** bd uses 30-second debounce for batch operations before auto-export.
+Writes auto-commit to the local Dolt DB (`dolt.auto-commit=on`), so there is no
+manual "flush" step — just `bd dolt push` when you want to replicate.
 
 **Recommended workflow:**
 ```bash
-# At session end
-git pull --rebase
-bd sync
-git push
+# At session end (git-free: beads is NOT committed to git)
+bd dolt push        # replicate the bead DB to the remote
+git push            # push your CODE (beads rides Dolt, not git)
 ```
+
+### bd sync (removed)
+
+`bd sync` was **removed upstream in v0.56.0** and is gone from the 1.0/1.1
+binary — it now errors with `unknown command` (older builds treated it as a
+deprecated no-op). Everything it used to do is replaced:
+
+| Old `bd sync …` | Replacement |
+|-----------------|-------------|
+| `bd sync` (export→commit→pull→import→push) | `bd dolt push` / `bd dolt pull` |
+| `bd sync --flush-only` | implicit — writes auto-commit under `dolt.auto-commit=on` |
+| `bd sync --import-only` | `bd import <file.jsonl>` (JSONL is a local export, not a sync channel) |
+| `bd sync --merge` / `--status` / `--dry-run` | n/a (git-branch sync model no longer exists) |
+
+Do not add `bd sync` to any workflow. Do not stage `.beads/*.jsonl` into git —
+in this environment `.beads/` is gitignored and `no-git-ops: true` (stealth).
 
 ---
 
@@ -525,10 +545,10 @@ bd dep tree bd-epic
 ### End of Session
 
 ```bash
+bd dolt push   # replicate the bead DB to the Dolt remote (git-free; not git)
 git pull --rebase
-bd sync
-git push
-git status   # Verify "up to date with origin/main"
+git push       # push CODE only; beads is NOT tracked in git
+git status     # Verify "up to date with origin/main"
 ```
 
 ---
@@ -650,7 +670,7 @@ bd ready
 bd list
 bd status
 bd blocked
-bd sync
+bd dolt push
 bd version
 bd quickstart
 bd doctor
