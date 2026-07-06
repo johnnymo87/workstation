@@ -4,7 +4,7 @@
 
 let
 
-  # Patched opencode targeting opencode v1.17.7. Patch set (release/v1.17 branch
+  # Patched opencode targeting opencode v1.17.13. Patch set (main branch
   # of opencode-patched, see patches/apply.sh there):
   #   gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim.
   # DROPPED for the 1.17 line (see workstation
@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-PBTremqKnlayiArNcUUOH8lRShAskcMuc4czVcDwsN0=";
+      hash = "sha256-J3/RP19TLdbEKfcCpWq45xkb4mD2lWr+UlEc4rmDdGw=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-PjVU6UYcPkP/5Gz+CbdD7dSYDSnQ/LwbWmY+mhXquSI=";
+      hash = "sha256-cxADsRq/cHJxsBFRLxW1wgO3nGIDPlTVKt02xJDJgP4=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-pCCy3ejhz9ym3gTjHLhCIUrCwYqaUvEDI6h8gBohTKw=";
+      hash = "sha256-7XQvWpTPNy6rdY/QleREdWt62Qkqbak0KlWO27EbPLs=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-sXg+uOtl1VGfRZd4uahdigldlrFZnRcY+dYzGbWRlQM=";
+      hash = "sha256-D3DVekmwk2hdA5bqsN6zoTUntJ37djuK27EVrgymHnE=";
       isZip = true;
     };
   };
@@ -67,6 +67,28 @@ let
     # migration won't re-fire). Full evidence + the atomic-cutover procedure:
     #   docs/plans/2026-06-11-opencode-1.17-cutover-runbook.md
     #
+    # ROLL-FORWARD (2026-07-06): now pins v1.17.13-patched (base upstream bumped
+    # 1.17.7 -> 1.17.13, patchedRevision reset to "", hold moved to 1.17.13).
+    # DROPPED integration-list-batch — UPSTREAMED: v1.17.13 Integration.list does
+    # the bulk Map.groupBy(credentials.all(), integrationID) shape natively (the
+    # "layer 1" half of the workstation-g3iy wedge fix; sunset target from bead
+    # workstation-hbc3). The other 19 patches carry forward; 7 were rebased for
+    # v1.17.13 context drift (retry-cap, sqlite-foreign-key-wrap, serve-lease,
+    # bootstrap-disposed-filter, project-copy-debounce, event-log-gate,
+    # available-cache — none upstreamed). available-cache ("layer 2") is still
+    # needed: upstream >= v1.17.13 still recomputes the ~5k-model availability
+    # projection per /api/model call. WARNING — the switch is NOT the same trivial
+    # in-line bump as a patched.N: v1.17.13 ships 3 NEW upstream migrations over
+    # 1.17.7 (20260622142730_simplify_session_context_epoch,
+    # 20260622170816_reset_v2_session_state, 20260622202450_simplify_session_input)
+    # that DELETE the V2 projection tables (session_message/event/event_sequence/
+    # session_context_epoch/session_input/workspace) on first boot. Canonical
+    # history (message/part tables) is UNTOUCHED, so this is a re-derivable
+    # projection reset, but TEST-MIGRATE a DB copy and confirm old sessions still
+    # render before the fleet switch (Phase 2 of the cutover runbook). Serves pick
+    # up the new binary only on restart (nightly reset / manual switch).
+    #
+    # --- historical (1.17.7 hold line, patched.N revisions) ---
     # This pins v1.17.7-patched.11 (same upstream 1.17.7, build-release.yml
     # -f version=1.17.7 -f revision=11, staying on the 1.17.7 hold line). patched.11
     # adds ONE patch over patched.10, taking the set to 18:
@@ -213,8 +235,8 @@ let
     # that swaps the opencode binary should stop ALL opencode processes at once (serve
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
-    upstreamVersion = "1.17.7";
-    patchedRevision = "13";  # ".N" suffix — drop to "" on next upstream version bump
+    upstreamVersion = "1.17.13";
+    patchedRevision = "";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
@@ -224,7 +246,7 @@ let
     # the current upstream line (the old 1.15 V2 DB-corruption hold is history; see the
     # cutover runbook). Set to "" to resume tracking the newest release. Greppable
     # marker only — it does not feed the derivation.
-    opencodePatchedHold = "1.17.7";
+    opencodePatchedHold = "1.17.13";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
