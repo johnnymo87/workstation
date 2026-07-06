@@ -116,8 +116,25 @@ Host cloudbox-tunnel
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
     RemoteForward 2850 127.0.0.1:2850
-    # reverse SSH: lets a cloudbox-side agent ssh back into the Mac
-    # (cloudbox 127.0.0.1:2222 -> Mac :22) for remote-driven cutovers / darwin-rebuild
+
+# On-demand reverse SSH: opens cloudbox 127.0.0.1:2222 -> Mac :22 ONLY while a
+# human runs \`ssh cloudbox-cutover\` from the Mac. This is the intentional
+# channel for remote-driven cutovers / darwin-rebuild.
+#
+# SECURITY (2026-07): the RemoteForward 2222 used to live in the always-on
+# \`cloudbox-tunnel\` block (driven by the cloudbox-dev-tunnel LaunchAgent),
+# which meant a compromised public-IP cloudbox could \`ssh mac '<cmd>'\` at any
+# time, unattended. It now lives here in a manual-only host so the reverse shell
+# exists only during an operator-initiated window. Bringing it up still gives a
+# full shell as your macOS user, so keep the window short; unattended root is separately
+# disabled (see hosts/Y0FMQX93RR-2/configuration.nix enableUnattendedRemoteRoot)
+# and durable revocation of the cloudbox key is a JumpCloud-console action.
+Host cloudbox-cutover
+    HostName $CLOUDBOX_IP
+    User dev
+    ForwardAgent yes
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
     RemoteForward 2222 127.0.0.1:22
 $CLOUDBOX_MARKER_END
 EOF

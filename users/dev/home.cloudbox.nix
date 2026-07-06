@@ -14,10 +14,16 @@ lib.mkIf isCloudbox {
   home.stateVersion = "25.11";
 
   # SSH alias for driving the macOS box from a cloudbox-side agent. Reaches the
-  # Mac via the reverse tunnel (cloudbox 127.0.0.1:2222 -> Mac :22) maintained by
-  # the Mac's cloudbox-dev-tunnel LaunchAgent (see scripts/update-ssh-config.sh).
-  # Auth: ~/.ssh/id_mac (trusted in the Mac's authorized_keys). For hands-off
-  # remote cutovers / darwin-rebuild.
+  # Mac via the reverse tunnel (cloudbox 127.0.0.1:2222 -> Mac :22).
+  #
+  # SECURITY (2026-07): this reverse tunnel is NO LONGER always-on. It only
+  # exists while a human on the Mac runs `ssh cloudbox-cutover` (see the
+  # cloudbox-cutover host in scripts/update-ssh-config.sh). Outside that window
+  # `ssh mac` from cloudbox will fail (connection refused on :2222) — expected.
+  # Additionally, unattended passwordless root via darwin-rebuild is disabled on
+  # the Mac (enableUnattendedRemoteRoot in hosts/Y0FMQX93RR-2/configuration.nix).
+  # Auth: ~/.ssh/id_mac (trusted in the Mac's JumpCloud-managed authorized_keys).
+  # For operator-initiated remote cutovers / darwin-rebuild.
   programs.ssh.matchBlocks.mac = {
     hostname = "127.0.0.1";
     port = 2222;

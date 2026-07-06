@@ -1,6 +1,13 @@
 # Darwin (macOS) system configuration
 { config, pkgs, lib, mac, ... }:
 
+let
+  # SECURITY TOGGLE: unattended passwordless root via `sudo darwin-rebuild`.
+  # Keep false. Flip to true (+ `darwin-rebuild switch`) only for a deliberate
+  # hands-off remote workstation upgrade, then flip back. See the
+  # environment.etc."sudoers.d/darwin-rebuild" block below for the full rationale.
+  enableUnattendedRemoteRoot = false;
+in
 {
   # Platform
   nixpkgs.hostPlatform = "aarch64-darwin";
@@ -50,13 +57,28 @@
   # State version (nix-darwin uses integers 1-6)
   system.stateVersion = 6;
 
-  # Passwordless sudo for darwin-rebuild so a remote driver agent (e.g. an
-  # opencode session on cloudbox reaching in over the reverse SSH tunnel) can
-  # run system rebuilds / opencode cutovers hands-off. Scoped to the
-  # darwin-rebuild wrapper. NOTE: darwin-rebuild activates arbitrary system
-  # config, so this is effectively standing passwordless root for ${mac.username};
-  # accepted deliberately for unattended remote rebuilds.
-  environment.etc."sudoers.d/darwin-rebuild".text = ''
-    ${mac.username} ALL=(root) NOPASSWD: /run/current-system/sw/bin/darwin-rebuild
-  '';
+  # Passwordless sudo for darwin-rebuild.
+  #
+  # SECURITY (2026-07): DISABLED by default. This grants unattended root: a
+  # remote driver (e.g. an opencode session on the public-IP cloudbox reaching
+  # in over the reverse SSH tunnel) could run `sudo darwin-rebuild switch
+  # --flake <anything>`, and darwin-rebuild activates arbitrary system config =
+  # arbitrary code execution as root. That turned a compromised cloudbox into a
+  # root foothold on this corporate laptop. See docs and the cloudbox->mac
+  # reverse-tunnel notes in scripts/update-ssh-config.sh.
+  #
+  # Interactive `sudo darwin-rebuild ...` still works for the physically-present
+  # user (normal sudo password / Touch ID) via the base (ALL) ALL grant, so
+  # local upgrades are unaffected. Only the *unattended/remote* NOPASSWD path is
+  # removed.
+  #
+  # RE-ENABLE for a hands-off remote workstation upgrade by flipping this flag to
+  # true and running `darwin-rebuild switch`. Flip it back to false when done.
+  # Pair it with an on-demand `ssh cloudbox-cutover` window (the reverse tunnel
+  # is no longer always-on; see scripts/update-ssh-config.sh).
+  environment.etc."sudoers.d/darwin-rebuild" = lib.mkIf enableUnattendedRemoteRoot {
+    text = ''
+      ${mac.username} ALL=(root) NOPASSWD: /run/current-system/sw/bin/darwin-rebuild
+    '';
+  };
 }
