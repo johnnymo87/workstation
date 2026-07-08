@@ -234,4 +234,91 @@ else
   fail=1
 fi
 
+# ---- Phase 3.5 additions: --no-fetch, best-effort fetch, --prune-merged ------
+# These use a FRESH bare+clone so they don't inherit the mutated state above
+# (origin/HEAD was deleted by Test 6).
+fresh_bare="$tmpdir/origin2.git"
+git init --bare "$fresh_bare"
+fresh_clone="$tmpdir/repo2"
+git clone "$fresh_bare" "$fresh_clone"
+cd "$fresh_clone"
+git config user.name "Test User"
+git config user.email "test@example.com"
+touch README.md
+git add README.md
+git commit -m "initial commit"
+git push origin main
+git remote set-head origin -a
+
+# Test 7: --no-fetch skips the network fetch but still creates the worktree
+cd "$fresh_clone"
+set +e
+output_stderr="$(mktemp)"
+output_stdout="$(mktemp)"
+"$work_script" --no-fetch nf1 >"$output_stdout" 2>"$output_stderr"
+rc=$?
+set -e
+stderr_content="$(cat "$output_stderr")"
+stdout_content="$(cat "$output_stdout")"
+rm -f "$output_stderr" "$output_stdout"
+check "--no-fetch exit code is 0" "0" "$rc"
+check "--no-fetch created the worktree" "1" "$([ -d "$fresh_clone/.worktrees/nf1" ] && echo 1 || echo 0)"
+if [[ "$stderr_content" == *"Skipping fetch"* ]] && [[ "$stderr_content" != *"Fetching latest"* ]]; then
+  echo "PASS: --no-fetch skipped the fetch (no 'Fetching latest')"
+else
+  echo "FAIL: --no-fetch did not skip fetch. Got: [$stderr_content]"
+  fail=1
+fi
+
+# Test 8: default fetch is BEST-EFFORT -- a broken remote must NOT fail the
+# command (M2: degrade, never fail; worktree still built off local origin/main).
+cd "$fresh_clone"
+git remote set-url origin /nonexistent/path/to/nowhere.git
+set +e
+output_stderr="$(mktemp)"
+output_stdout="$(mktemp)"
+"$work_script" besteffort1 >"$output_stdout" 2>"$output_stderr"
+rc=$?
+set -e
+stderr_content="$(cat "$output_stderr")"
+stdout_content="$(cat "$output_stdout")"
+rm -f "$output_stderr" "$output_stdout"
+check "best-effort fetch: exit code still 0 despite broken remote" "0" "$rc"
+check "best-effort fetch: worktree still created off local origin/main" "1" "$([ -d "$fresh_clone/.worktrees/besteffort1" ] && echo 1 || echo 0)"
+if [[ "$stderr_content" == *"WARNING"* ]] && [[ "$stderr_content" == *"fetch"* ]]; then
+  echo "PASS: best-effort fetch warned but proceeded"
+else
+  echo "FAIL: best-effort fetch missing warning. Got: [$stderr_content]"
+  fail=1
+fi
+# restore a working remote for the prune tests
+git remote set-url origin "$fresh_bare"
+
+# Test 9: --prune-merged removes merged+clean launch worktrees, keeps unmerged
+# and dirty ones (the safety contract).
+cd "$fresh_clone"
+# A: fresh worktree, no commits -> tip == origin/main -> merged+clean -> REMOVE
+"$work_script" --no-fetch prune-merged-a >/dev/null 2>&1
+# B: worktree with an unpushed commit -> unmerged -> KEEP
+"$work_script" --no-fetch prune-unmerged-b >/dev/null 2>&1
+( cd "$fresh_clone/.worktrees/prune-unmerged-b" && echo x > extra.txt && git add extra.txt && git commit -m "wip" >/dev/null 2>&1 )
+# C: fresh worktree with an uncommitted change -> dirty -> KEEP
+"$work_script" --no-fetch prune-dirty-c >/dev/null 2>&1
+echo "dirty" > "$fresh_clone/.worktrees/prune-dirty-c/uncommitted.txt"
+
+set +e
+output_stderr="$(mktemp)"
+"$work_script" --prune-merged >"$output_stderr" 2>&1
+rc=$?
+set -e
+prune_out="$(cat "$output_stderr")"
+rm -f "$output_stderr"
+check "--prune-merged exit code is 0" "0" "$rc"
+check "--prune-merged REMOVED merged+clean worktree A" "0" "$([ -d "$fresh_clone/.worktrees/prune-merged-a" ] && echo 1 || echo 0)"
+check "--prune-merged KEPT unmerged worktree B" "1" "$([ -d "$fresh_clone/.worktrees/prune-unmerged-b" ] && echo 1 || echo 0)"
+check "--prune-merged KEPT dirty worktree C" "1" "$([ -d "$fresh_clone/.worktrees/prune-dirty-c" ] && echo 1 || echo 0)"
+# The removed branch should also be gone
+check "--prune-merged deleted branch for A" "0" "$(git -C "$fresh_clone" rev-parse --verify refs/heads/prune-merged-a >/dev/null 2>&1 && echo 1 || echo 0)"
+check "--prune-merged kept branch for B" "1" "$(git -C "$fresh_clone" rev-parse --verify refs/heads/prune-unmerged-b >/dev/null 2>&1 && echo 1 || echo 0)"
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }

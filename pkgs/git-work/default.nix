@@ -27,6 +27,7 @@ pkgs.writeShellApplication {
     show_help() {
       cat <<EOF
 Usage: work [options] <slug> [branch]
+       work --prune-merged [options]
 
 Create a new git worktree under .worktrees/<slug> tracking the repository's trunk branch.
 
@@ -40,12 +41,26 @@ Options:
   -t, --trunk <branch>
               Explicitly specify the trunk branch rather than auto-detecting it
               from origin/HEAD.
+  --no-fetch  Skip the network 'git fetch origin <trunk>' before creating the
+              worktree; branch off the LOCAL origin/<trunk> as-is. Use when the
+              caller must not block on the network (e.g. opencode-launch).
+  --prune-merged
+              Sweep .worktrees/*: remove every worktree whose branch is fully
+              merged into origin/<trunk> AND whose working tree is clean, then
+              delete its branch. Never touches dirty or unmerged worktrees, the
+              primary root, or the current worktree. Ignores <slug>.
   -h, --help  Show this help message.
+
+Notes:
+  The fetch is BEST-EFFORT and bounded by a timeout: a slow or failed fetch logs
+  a warning and proceeds off the local origin/<trunk> rather than failing.
 
 Examples:
   work feature-login
   work hotfix-123 hotfix/bug-123
   eval "\$(work --cd feature-xyz)"
+  work --no-fetch quick-slice
+  work --prune-merged
 EOF
     }
 
@@ -75,9 +90,136 @@ EOF
       printf '%s\n' "$slug" | sed -E 's/[^A-Za-z0-9._/-]/-/g'
     }
 
+    # Bounded, best-effort fetch of origin/<trunk>. Never fails the caller: a
+    # slow/failed fetch logs a warning and returns 0, leaving the local
+    # origin/<trunk> in place (already far fresher than a rotted primary root).
+    # The launcher's "degrade, never fail" invariant depends on this.
+    FETCH_TIMEOUT="''${WORK_FETCH_TIMEOUT:-15}"
+    best_effort_fetch() {
+      local root="$1" trunk="$2"
+      log "Fetching latest origin/$trunk (best-effort, ''${FETCH_TIMEOUT}s timeout)..."
+      if timeout "$FETCH_TIMEOUT" git -C "$root" fetch origin "$trunk" >&2; then
+        return 0
+      fi
+      log "WARNING: fetch of origin/$trunk failed or timed out; proceeding with the local origin/$trunk (may be slightly stale)."
+      return 0
+    }
+
+    # Helper: resolve the trunk branch (origin/HEAD short name, minus the
+    # 'origin/' prefix), honoring an explicit override. Prints empty on failure.
+    resolve_trunk() {
+      local root="$1" override="$2"
+      if [ -n "$override" ]; then
+        printf '%s\n' "$override"
+        return 0
+      fi
+      local trunk_ref
+      trunk_ref="$(git -C "$root" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+      if [ -n "$trunk_ref" ]; then
+        printf '%s\n' "''${trunk_ref#origin/}"
+      fi
+      return 0
+    }
+
+    # --prune-merged: remove every worktree under <root>/.worktrees/ whose branch
+    # is fully merged into origin/<trunk> and whose working tree is clean, then
+    # delete that branch. This is the pruning OWNER named in the Phase 3.5 design
+    # (M1c): it reclaims the worktrees opencode-launch --worktree leaves behind on
+    # the happy path. Safety by construction -- it NEVER removes:
+    #   - the primary root or the current worktree
+    #   - a worktree with uncommitted/untracked changes (status --porcelain)
+    #   - a branch with commits not yet in origin/<trunk> (not an ancestor)
+    # so an active session's worktree (which has unmerged work) is protected, and
+    # we don't need a live-session probe here.
+    prune_merged() {
+      local no_fetch="$1" trunk_override="$2"
+      local root
+      root="$(resolve_primary_root "$PWD")"
+
+      local trunk
+      trunk="$(resolve_trunk "$root" "$trunk_override")"
+      if [ -z "$trunk" ]; then
+        die "Could not determine the trunk branch from origin/HEAD (pass --trunk <branch>)."
+      fi
+
+      # Clean stale metadata, then refresh origin/<trunk> so the merged check is
+      # accurate (best-effort; --no-fetch skips it).
+      git -C "$root" worktree prune >&2
+      if [ "$no_fetch" -eq 0 ]; then
+        best_effort_fetch "$root" "$trunk"
+      fi
+
+      local self
+      self="$(realpath "$PWD")"
+      local wt_root="$root/.worktrees"
+
+      local removed=0 kept=0
+      local wt_path="" wt_branch=""
+      # Parse `git worktree list --porcelain`: records separated by blank lines,
+      # "worktree <path>" then optionally "branch refs/heads/<name>".
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          "worktree "*)
+            wt_path="''${line#worktree }"
+            wt_branch=""
+            ;;
+          "branch "*)
+            wt_branch="''${line#branch refs/heads/}"
+            ;;
+          "")
+            prune_one "$root" "$trunk" "$self" "$wt_root" "$wt_path" "$wt_branch" \
+              && removed=$((removed + 1)) || kept=$((kept + 1))
+            wt_path=""; wt_branch=""
+            ;;
+        esac
+      done < <(git -C "$root" worktree list --porcelain; printf '\n')
+
+      log "prune-merged: removed $removed, kept $kept."
+    }
+
+    # prune_one: evaluate a single worktree record and remove it if it is a
+    # merged+clean worktree under .worktrees/. Returns 0 if removed, 1 otherwise.
+    prune_one() {
+      local root="$1" trunk="$2" self="$3" wt_root="$4" wt_path="$5" wt_branch="$6"
+      [ -n "$wt_path" ] || return 1
+      local real_wt
+      real_wt="$(realpath "$wt_path" 2>/dev/null || printf '%s' "$wt_path")"
+      # Only ever touch worktrees under <root>/.worktrees/.
+      case "$real_wt/" in
+        "$wt_root"/*) : ;;
+        *) return 1 ;;
+      esac
+      # Never remove the current worktree or a detached one.
+      [ "$real_wt" != "$self" ] || { log "prune-merged: keep $wt_path (current worktree)"; return 1; }
+      [ -n "$wt_branch" ] || { log "prune-merged: keep $wt_path (detached HEAD)"; return 1; }
+      # Never remove a dirty worktree.
+      if [ -n "$(git -C "$real_wt" status --porcelain 2>/dev/null)" ]; then
+        log "prune-merged: keep $wt_path (uncommitted changes)"
+        return 1
+      fi
+      # Only remove if the branch tip is fully contained in origin/<trunk>.
+      local tip
+      tip="$(git -C "$root" rev-parse --verify "refs/heads/$wt_branch" 2>/dev/null || true)"
+      if [ -z "$tip" ]; then
+        log "prune-merged: keep $wt_path (branch '$wt_branch' missing)"
+        return 1
+      fi
+      if git -C "$root" merge-base --is-ancestor "$tip" "origin/$trunk" 2>/dev/null; then
+        git -C "$root" worktree remove "$real_wt" >&2 2>/dev/null \
+          || git -C "$root" worktree remove --force "$real_wt" >&2
+        git -C "$root" branch -D "$wt_branch" >&2 2>/dev/null || true
+        log "prune-merged: removed $wt_path (branch '$wt_branch' merged into origin/$trunk)"
+        return 0
+      fi
+      log "prune-merged: keep $wt_path (branch '$wt_branch' not merged into origin/$trunk)"
+      return 1
+    }
+
     main() {
       local CD_MODE=0
       local TRUNK_OVERRIDE=""
+      local NO_FETCH=0
+      local PRUNE_MERGED=0
 
       while [ $# -gt 0 ]; do
         case "$1" in
@@ -87,6 +229,14 @@ EOF
             ;;
           --cd)
             CD_MODE=1
+            shift
+            ;;
+          --no-fetch)
+            NO_FETCH=1
+            shift
+            ;;
+          --prune-merged)
+            PRUNE_MERGED=1
             shift
             ;;
           -t|--trunk)
@@ -104,6 +254,15 @@ EOF
             ;;
         esac
       done
+
+      # --prune-merged is a sweep mode: it takes no slug and exits when done.
+      if [ "$PRUNE_MERGED" -eq 1 ]; then
+        if [ $# -gt 0 ]; then
+          die "--prune-merged takes no positional arguments (got '$1')"
+        fi
+        prune_merged "$NO_FETCH" "$TRUNK_OVERRIDE"
+        exit 0
+      fi
 
       if [ $# -lt 1 ]; then
         show_help
@@ -131,17 +290,7 @@ EOF
 
       # Determine trunk branch
       local trunk
-      if [ -n "$TRUNK_OVERRIDE" ]; then
-        trunk="$TRUNK_OVERRIDE"
-      else
-        local trunk_ref
-        trunk_ref="$(git -C "$root" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
-        if [ -n "$trunk_ref" ]; then
-          trunk="''${trunk_ref#origin/}"
-        else
-          trunk=""
-        fi
-      fi
+      trunk="$(resolve_trunk "$root" "$TRUNK_OVERRIDE")"
 
       if [ -z "$trunk" ]; then
         echo "Error: Could not determine the trunk branch from origin/HEAD." >&2
@@ -167,10 +316,13 @@ EOF
       fi
 
       # Steps:
-      # 1. git fetch origin <trunk>
+      # 1. git fetch origin <trunk>   (bounded, best-effort; skipped by --no-fetch)
       # 2. git worktree add <root>/.worktrees/<slug> -b <branch> origin/<trunk>
-      log "Fetching latest origin/$trunk..."
-      git -C "$root" fetch origin "$trunk" >&2
+      if [ "$NO_FETCH" -eq 1 ]; then
+        log "Skipping fetch (--no-fetch); branching off the local origin/$trunk."
+      else
+        best_effort_fetch "$root" "$trunk"
+      fi
 
       log "Adding worktree for branch '$branch' at $new_wt_path tracking origin/$trunk..."
       git -C "$root" worktree add "$new_wt_path" -b "$branch" "origin/$trunk" >&2
