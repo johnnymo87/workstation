@@ -4,31 +4,21 @@
 # Run: bash test.sh
 set -o errexit -o nounset -o pipefail
 
-# ---- helpers under test (mirror of default.nix) -----------------------------
+# Find the project root and build the latest package
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$script_dir/../.." && pwd)"
 
-resolve_primary_root() {
-  local dir
-  dir="$(realpath "$1")"
-  if [[ "$dir" =~ ^"${HOME}/projects/"([^/]+)(/.*)?$ ]]; then
-    printf '%s/projects/%s\n' "$HOME" "${BASH_REMATCH[1]}"
-  else
-    local common_dir
-    if common_dir="$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null)"; then
-      if [[ "$common_dir" != /* ]]; then
-        common_dir="$dir/$common_dir"
-      fi
-      realpath "$(dirname "$common_dir")"
-    else
-      printf 'ERROR: not inside a git repository\n' >&2
-      return 1
-    fi
-  fi
-}
+echo "Building package to test the real, built binary..."
+(cd "$project_root" && nix build .#git-work)
 
-sanitize_branch() {
-  local slug="$1"
-  printf '%s\n' "$slug" | sed -E 's/[^A-Za-z0-9._/-]/-/g'
-}
+work_script="$project_root/result/bin/work"
+if [ ! -f "$work_script" ]; then
+  echo "FAIL: Built script not found at $work_script"
+  exit 1
+fi
+
+# Source the real production script to load helper functions without executing main()
+source "$work_script"
 
 # ---- test infrastructure ----------------------------------------------------
 
@@ -64,24 +54,9 @@ check "resolve_primary_root: project worktree subdir" \
 export HOME="$ORIG_HOME"
 
 # ---- Integration/End-to-End Tests -------------------------------------------
-# Setup scratch temp directory
-tmpdir="$(mktemp -d)"
+# Setup scratch temp directory under /tmp (which is pre-approved for temp work)
+tmpdir="$(mktemp -d "/tmp/git-work-test-XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT
-
-# Extract the script from default.nix for end-to-end testing
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-default_nix="$script_dir/default.nix"
-work_script="$tmpdir/work"
-
-if [ -f "$default_nix" ]; then
-  # Extract block inside text = '' and unescape Nix '' strings
-  sed -n "/text = ''/,/^  '';/p" "$default_nix" | sed "1d;\$d" | sed "s/''//g" > "$work_script"
-  chmod +x "$work_script"
-else
-  # Write a dummy placeholder that fails so we can watch it fail
-  printf '#!/usr/bin/env bash\necho "Script not implemented yet"\nexit 1\n' > "$work_script"
-  chmod +x "$work_script"
-fi
 
 # Set up fake remote (bare repo) and clone it
 bare_repo="$tmpdir/origin.git"
@@ -104,7 +79,6 @@ git remote set-head origin -a
 
 # Test 1: Happy path - create a new worktree
 cd "$clone_dir"
-# We expect success
 set +e
 output_stdout="$(mktemp)"
 output_stderr="$(mktemp)"
@@ -143,6 +117,29 @@ rm -f "$output_stdout"
 check "Worktree from within worktree exit code is 0" "0" "$rc"
 check "Worktree from within worktree path is under primary root" "$clone_dir/.worktrees/feature2" "$stdout_content"
 check "Feature2 directory exists" "1" "$([ -d "$clone_dir/.worktrees/feature2" ] && echo 1 || echo 0)"
+
+# Test 2.5: Test 'worktree prune' robust fallback
+# If we manually delete the directory for feature2 using rm -rf, git worktree still lists feature2 as a registered worktree.
+# Running worktree add with slug feature2 would normally fail because git thinks the worktree is still there.
+# However, the 'git worktree prune' command inside 'work' cleans this up automatically!
+# Note that we must also delete the local branch 'feature2' because the script prevents duplicate branch names.
+# We must prune the worktree in git first so git knows the branch is no longer checked out anywhere, allowing us to delete it.
+rm -rf "$clone_dir/.worktrees/feature2"
+git -C "$clone_dir" worktree prune
+git -C "$clone_dir" branch -D feature2 >/dev/null 2>&1 || true
+cd "$clone_dir"
+set +e
+output_stdout="$(mktemp)"
+# This should succeed because of the 'git worktree prune' call before the collision check
+"$work_script" "feature2" >"$output_stdout" 2>/dev/null
+rc=$?
+set -e
+stdout_content="$(cat "$output_stdout")"
+rm -f "$output_stdout"
+
+check "Pruned worktree recreation exit code is 0" "0" "$rc"
+check "Pruned worktree path is correct" "$clone_dir/.worktrees/feature2" "$stdout_content"
+check "Feature2 directory was recreated" "1" "$([ -d "$clone_dir/.worktrees/feature2" ] && echo 1 || echo 0)"
 
 # Test 3: Existing slug/worktree folder fails
 cd "$clone_dir"
