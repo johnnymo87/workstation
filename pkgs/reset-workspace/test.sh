@@ -175,6 +175,24 @@ if [ -f "$default_nix" ]; then
   else
     echo "FAIL: manifest write must precede the pool restart (manifest at ${manifest_line:-?}, restart at ${restart_line:-?})"; fail=1
   fi
+  # Phase 3.5 (workstation-v03j.5): reset-workspace is the pruning owner (M1c)
+  # for opencode-launch --worktree leftovers. It must sweep merged worktrees in
+  # the mono root via `work --prune-merged`, guarded by command -v work, and it
+  # must NOT abort the reset on failure (best-effort).
+  want_grep "source prunes merged launch worktrees"     'work --prune-merged'
+  want_grep "prune targets the mono primary root"        '/projects/mono'
+  want_grep "prune is guarded by command -v work"        'command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]'
+  want_grep "prune failure is non-fatal to the reset"    'work --prune-merged failed (non-fatal)'
+  # The prune must run before the recommendation session is launched (so a slow
+  # prune can't be skipped by an early recommendation-launch exit) and after the
+  # pool is confirmed healthy.
+  prune_line=$(grep -n 'work --prune-merged' "$default_nix" | head -1 | cut -d: -f1)
+  rec_line=$(grep -n '# ---- Step 6: Launch recommendation session ----' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$prune_line" ] && [ -n "$rec_line" ] && [ "$prune_line" -lt "$rec_line" ]; then
+    echo "ok: worktree prune runs before the recommendation launch"
+  else
+    echo "FAIL: prune must precede recommendation launch (prune at ${prune_line:-?}, rec at ${rec_line:-?})"; fail=1
+  fi
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi

@@ -519,6 +519,26 @@ EOF
       die "opencode serve pool did not become fully healthy within 30s (still down: ''${pending[*]})"
     fi
 
+    # ---- Step 5.5: prune merged launch worktrees ----
+    # opencode-launch --worktree (Phase 3.5) lands writable sessions in a fresh
+    # `work` worktree and leaves the worktree+branch behind on the happy path.
+    # reset-workspace is the named pruning OWNER for that lifecycle (design M1c):
+    # `work --prune-merged` reclaims only worktrees whose branch is fully merged
+    # into origin/<trunk> AND whose tree is clean, so an in-flight session's
+    # worktree (unmerged or dirty) is never removed -- no live-session probe
+    # needed. v1 scope: the mono primary root, where the read-only-main guard
+    # lives and churn matters. Best-effort: a failure here never fails the reset.
+    # (`work` is found on the inherited PATH, same as opencode-launch below.)
+    MONO_ROOT="''${HOME}/projects/mono"
+    if command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]; then
+      log "pruning merged launch worktrees under $MONO_ROOT/.worktrees ..."
+      if ! ( cd "$MONO_ROOT" && work --prune-merged ) 2>&1 | while IFS= read -r line; do log "  $line"; done; then
+        log "WARNING: work --prune-merged failed (non-fatal); continuing reset"
+      fi
+    else
+      log "skipping worktree prune (work not on PATH or $MONO_ROOT is not a git repo)"
+    fi
+
     # ---- Step 6: Launch recommendation session ----
     # The manifest was already written (Step 2.5, before the kill/restart
     # gauntlet). The recommendation session reads it, enriches each sid via
