@@ -70,7 +70,7 @@ pkgs.writeShellApplication {
 
       usage() {
         local exit_code="''${1:-1}"
-        echo "Usage: opencode-launch [--model provider/model] [--mcp server] [directory] <prompt>"
+        echo "Usage: opencode-launch [--model provider/model] [--mcp server] [--worktree slug] [directory] <prompt>"
         echo ""
         echo "Launch a headless opencode session."
         echo ""
@@ -78,6 +78,10 @@ pkgs.writeShellApplication {
         echo "  -h, --help                     Show this help message"
         echo "  --model <provider/model>       Specify the model to run"
         echo "  --mcp <server>                 Enable an MCP server's tools (repeatable)"
+        echo "  --worktree <slug>              Land the session in a fresh 'work' worktree"
+        echo "                                 under <directory> (a git repo) instead of at"
+        echo "                                 its root. Use for WRITABLE sessions so the"
+        echo "                                 read-only-main guard is bypassed by design."
         echo "  --tmux-session <name>          Auto-attach in this tmux session (default: main)"
         echo ""
         echo "Favorite Models:"
@@ -101,6 +105,7 @@ pkgs.writeShellApplication {
       }
 
       model_spec=""
+      worktree_slug=""
       mcp_servers=()
       # Default the auto-attach target to the user's primary `main` tmux
       # session so headless launches (no $TMUX) land deterministically there
@@ -140,6 +145,22 @@ pkgs.writeShellApplication {
               exit 1
             fi
             mcp_servers+=("$mcp_server")
+            shift
+            ;;
+          --worktree)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+              echo "Error: --worktree requires a slug" >&2
+              exit 1
+            fi
+            worktree_slug="$2"
+            shift 2
+            ;;
+          --worktree=*)
+            worktree_slug="''${1#--worktree=}"
+            if [ -z "$worktree_slug" ]; then
+              echo "Error: --worktree requires a slug" >&2
+              exit 1
+            fi
             shift
             ;;
           --tmux-session)
@@ -252,6 +273,65 @@ pkgs.writeShellApplication {
         esac
       fi
 
+      # --worktree: land this (writable) session in a fresh worktree instead of
+      # the passed directory, so its git toplevel != the enrolled mono root and
+      # the read-only-main guard is bypassed BY CONSTRUCTION (Phase 3.5). Done
+      # HERE -- after the health + model checks, JUST BEFORE session create
+      # (design M1a) -- so (a) a launch destined to fail on a bad model / down
+      # serve never manufactures a worktree, and (b) the window between
+      # worktree-create and launch-success (guarded by the cleanup trap below)
+      # is as small as possible. Everything downstream keys off $directory, so
+      # reassigning it is all that's needed -- the session, pool placement, MCP
+      # connects, and the auto-attached TUI all follow.
+      # Design: docs/plans/2026-07-08-worktree-guard-phase35-launch-integration-design.md
+      launch_ok=0
+      created_wt_path=""
+      created_wt_repo=""
+      # cleanup_worktree (armed on EXIT, design M1b): if we created a worktree
+      # but the launch did not reach success (launch_ok=1), remove the worktree
+      # and its branch so a failed launch never orphans one. No-op when
+      # --worktree was not used (created_wt_path stays empty) or on success.
+      cleanup_worktree() {
+        [ "$launch_ok" -eq 1 ] && return 0
+        [ -n "$created_wt_path" ] || return 0
+        [ -d "$created_wt_path" ] || return 0
+        echo "Cleaning up worktree after failed launch: $created_wt_path" >&2
+        local br
+        br="$(git -C "$created_wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+        git -C "$created_wt_repo" worktree remove --force "$created_wt_path" >/dev/null 2>&1 || true
+        if [ -n "$br" ] && [ "$br" != "HEAD" ]; then
+          git -C "$created_wt_repo" branch -D "$br" >/dev/null 2>&1 || true
+        fi
+      }
+      trap cleanup_worktree EXIT
+
+      if [ -n "$worktree_slug" ]; then
+        if ! command -v work >/dev/null 2>&1; then
+          echo "Error: --worktree requires the 'work' helper on PATH (pkgs/git-work)" >&2
+          exit 1
+        fi
+        worktree_repo="$directory"
+        # `work` derives the repo root from $PWD and prints the new worktree path
+        # on stdout (its logs go to stderr); its fetch is bounded + best-effort so
+        # this never blocks/dies on the network. On ANY work failure (not a repo,
+        # slug taken, origin/HEAD unset) we abort the launch loudly rather than
+        # silently launching writable work at the root -- that silent fallback is
+        # the exact bug Phase 3.5 closes.
+        if ! wt_path="$( cd "$worktree_repo" && work "$worktree_slug" )"; then
+          echo "Error: failed to create worktree '$worktree_slug' in $worktree_repo" >&2
+          exit 1
+        fi
+        wt_path="$(printf '%s' "$wt_path" | tail -n1)"
+        if [ -z "$wt_path" ] || [ ! -d "$wt_path" ]; then
+          echo "Error: worktree creation did not yield a directory (slug '$worktree_slug')" >&2
+          exit 1
+        fi
+        created_wt_path="$wt_path"
+        created_wt_repo="$worktree_repo"
+        directory="$wt_path"
+        echo "Worktree: $directory" >&2
+      fi
+
       # Create session
       session_response=$(curl -sf -X POST "$OPENCODE_URL/session" \
         -H "x-opencode-directory: $directory") || {
@@ -331,6 +411,12 @@ pkgs.writeShellApplication {
         echo "Error: failed to send prompt to session $session_id" >&2
         exit 1
       }
+
+      # Launch succeeded: session created, placed, and the prompt delivered.
+      # Disarm the worktree cleanup trap so a successful --worktree launch keeps
+      # its worktree (the auto-attach below is best-effort and must not trigger
+      # cleanup if it no-ops).
+      launch_ok=1
 
       # Auto-attach to nvim+tmux if we're on a host with a graphical workflow.
       # Fully detached so the launch returns immediately and Ctrl+C on the

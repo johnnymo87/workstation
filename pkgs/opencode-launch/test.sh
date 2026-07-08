@@ -239,6 +239,57 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source attaches tools: $tools to prompt_payload\n        not found in: %s\n' "$default_nix"; exit 1
   fi
+  # ---- Phase 3.5: --worktree launch integration (workstation-v03j.5) ----------
+  #
+  # --worktree <slug> lands a writable session in a fresh `work`-created worktree
+  # instead of the passed directory, so the read-only-main guard is bypassed by
+  # construction. The must-fixes from the adversarial review are encoded as
+  # source guards here so a regression trips before deploy:
+  #   M1a: worktree created AFTER health+model checks, JUST BEFORE session create.
+  #   M1b: an EXIT trap removes the worktree+branch if the launch fails.
+  #   loud-fail: work failure aborts the launch (no silent root fallback).
+  if grep -q -- '--worktree)' "$default_nix"; then
+    printf 'PASS  source parses --worktree flag\n'
+  else
+    printf 'FAIL  source parses --worktree flag\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # M1a: the work call must reassign $directory before the session is created.
+  if grep -q 'work "\$worktree_slug"' "$default_nix"; then
+    printf 'PASS  source runs work "$worktree_slug"\n'
+  else
+    printf 'FAIL  source runs work "$worktree_slug"\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # M1a ordering: the work call must appear BEFORE the POST /session create.
+  work_line="$(grep -n 'work "\$worktree_slug"' "$default_nix" | head -1 | cut -d: -f1)"
+  create_line="$(grep -n 'POST "\$OPENCODE_URL/session"' "$default_nix" | head -1 | cut -d: -f1)"
+  if [ -n "$work_line" ] && [ -n "$create_line" ] && [ "$work_line" -lt "$create_line" ]; then
+    printf 'PASS  worktree is created before the session (M1a: shrink failure window)\n'
+  else
+    printf 'FAIL  worktree must be created before session create (work@%s create@%s)\n' "$work_line" "$create_line"; exit 1
+  fi
+  # M1b: a cleanup trap on EXIT removes the worktree if the launch fails.
+  if grep -q 'trap cleanup_worktree EXIT' "$default_nix"; then
+    printf 'PASS  source arms cleanup_worktree on EXIT (M1b)\n'
+  else
+    printf 'FAIL  source arms cleanup_worktree on EXIT (M1b)\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q 'worktree remove --force' "$default_nix"; then
+    printf 'PASS  cleanup removes the worktree (M1b)\n'
+  else
+    printf 'FAIL  cleanup removes the worktree (M1b)\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # The trap must be disarmed only after the launch actually succeeds.
+  if grep -q 'launch_ok=1' "$default_nix"; then
+    printf 'PASS  source disarms cleanup only on success (launch_ok=1)\n'
+  else
+    printf 'FAIL  source disarms cleanup only on success (launch_ok=1)\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # loud-fail: a work failure must abort, never silently launch at the root.
+  if grep -q 'failed to create worktree' "$default_nix"; then
+    printf 'PASS  source fails loudly on work failure (no silent root fallback)\n'
+  else
+    printf 'FAIL  source fails loudly on work failure\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
 else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
 fi
