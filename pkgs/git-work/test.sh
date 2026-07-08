@@ -321,4 +321,22 @@ check "--prune-merged KEPT dirty worktree C" "1" "$([ -d "$fresh_clone/.worktree
 check "--prune-merged deleted branch for A" "0" "$(git -C "$fresh_clone" rev-parse --verify refs/heads/prune-merged-a >/dev/null 2>&1 && echo 1 || echo 0)"
 check "--prune-merged kept branch for B" "1" "$(git -C "$fresh_clone" rev-parse --verify refs/heads/prune-unmerged-b >/dev/null 2>&1 && echo 1 || echo 0)"
 
+# Test 10: slug path-traversal guard (the worktree dir name must stay under
+# .worktrees/). A '..' slug must be rejected loudly and create nothing.
+cd "$fresh_clone"
+set +e
+output_stderr="$(mktemp)"
+"$work_script" --no-fetch "../escape" 2>"$output_stderr" >/dev/null
+rc=$?
+set -e
+stderr_content="$(cat "$output_stderr")"
+rm -f "$output_stderr"
+if [ "$rc" -ne 0 ] && [[ "$stderr_content" == *"must not contain '..'"* ]]; then
+  echo "PASS: slug with '..' is rejected loudly"
+else
+  echo "FAIL: slug '..' not rejected (rc=$rc). Got: [$stderr_content]"
+  fail=1
+fi
+check "traversal slug created nothing outside .worktrees" "0" "$([ -e "$fresh_clone/escape" ] && echo 1 || echo 0)"
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }

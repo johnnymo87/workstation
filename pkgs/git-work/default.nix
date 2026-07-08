@@ -67,7 +67,10 @@ EOF
     # Helper: resolve the primary repository root from a given directory
     resolve_primary_root() {
       local dir
-      dir="$(realpath "$1")"
+      # -m (canonicalize-missing) so the ~/projects/<P> regex fast-path works
+      # for a not-yet-existing path too, instead of realpath erroring and
+      # silently falling through to the CWD-dependent git fallback.
+      dir="$(realpath -m "$1")"
       # Collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>
       if [[ "$dir" =~ ^"''${HOME}/projects/"([^/]+)(/.*)?$ ]]; then
         printf '%s/projects/%s\n' "''${HOME}" "''${BASH_REMATCH[1]}"
@@ -108,7 +111,7 @@ EOF
     # Helper: resolve the trunk branch (origin/HEAD short name, minus the
     # 'origin/' prefix), honoring an explicit override. Prints empty on failure.
     resolve_trunk() {
-      local root="$1" override="$2"
+      local root="$1" override="''${2:-}"
       if [ -n "$override" ]; then
         printf '%s\n' "$override"
         return 0
@@ -132,7 +135,7 @@ EOF
     # so an active session's worktree (which has unmerged work) is protected, and
     # we don't need a live-session probe here.
     prune_merged() {
-      local no_fetch="$1" trunk_override="$2"
+      local no_fetch="''${1:-0}" trunk_override="''${2:-}"
       local root
       root="$(resolve_primary_root "$PWD")"
 
@@ -154,9 +157,11 @@ EOF
       local wt_root="$root/.worktrees"
 
       local removed=0 kept=0
-      local wt_path="" wt_branch=""
+      local wt_path="" wt_branch="" line=""
       # Parse `git worktree list --porcelain`: records separated by blank lines,
-      # "worktree <path>" then optionally "branch refs/heads/<name>".
+      # "worktree <path>" then optionally "branch refs/heads/<name>". A record is
+      # only evaluated when we have a non-empty wt_path, so the stream's trailing
+      # blank line(s) don't inflate the kept count.
       while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
           "worktree "*)
@@ -167,8 +172,13 @@ EOF
             wt_branch="''${line#branch refs/heads/}"
             ;;
           "")
-            prune_one "$root" "$trunk" "$self" "$wt_root" "$wt_path" "$wt_branch" \
-              && removed=$((removed + 1)) || kept=$((kept + 1))
+            if [ -n "$wt_path" ]; then
+              if prune_one "$root" "$trunk" "$self" "$wt_root" "$wt_path" "$wt_branch"; then
+                removed=$((removed + 1))
+              else
+                kept=$((kept + 1))
+              fi
+            fi
             wt_path=""; wt_branch=""
             ;;
         esac
@@ -275,6 +285,15 @@ EOF
       if [ $# -gt 2 ]; then
         die "Too many arguments (expected at most <slug> [branch])"
       fi
+
+      # Guard the slug against path traversal: it becomes a directory name under
+      # .worktrees/, so an absolute path or a '..' segment could escape the repo
+      # (the branch name is separately sanitized, but the worktree PATH is not).
+      case "$slug" in
+        "" ) die "Slug must not be empty." ;;
+        /* | -* ) die "Invalid slug '$slug': must not start with '/' or '-'." ;;
+        *..* ) die "Invalid slug '$slug': must not contain '..'." ;;
+      esac
 
       # Determine branch name
       local branch

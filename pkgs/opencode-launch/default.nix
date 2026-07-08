@@ -6,7 +6,12 @@ pkgs.writeShellApplication {
   # process from the launcher). Without it, callers with a restricted PATH
   # (systemd units, the pigeon worker) hit "setsid: command not found" and
   # the auto-attach trigger silently no-ops.
-  runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux ];
+  # git + coreutils back the --worktree path: the cleanup_worktree trap shells
+  # out to `git`, and the worktree block uses `tail`. They're usually on the
+  # ambient PATH, but pinning them keeps --worktree working under a restricted
+  # PATH too. (The `work` helper itself is our own package, discovered on PATH
+  # with a loud `command -v` guard.)
+  runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.git pkgs.coreutils ];
   text = ''
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
 
@@ -292,7 +297,7 @@ pkgs.writeShellApplication {
       # and its branch so a failed launch never orphans one. No-op when
       # --worktree was not used (created_wt_path stays empty) or on success.
       cleanup_worktree() {
-        [ "$launch_ok" -eq 1 ] && return 0
+        if [ "$launch_ok" -eq 1 ]; then return 0; fi
         [ -n "$created_wt_path" ] || return 0
         [ -d "$created_wt_path" ] || return 0
         echo "Cleaning up worktree after failed launch: $created_wt_path" >&2
