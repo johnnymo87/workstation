@@ -1,6 +1,7 @@
 # Design: Phase 3.5 — land writable sessions in a fresh worktree at launch
 
-Status: **PROPOSAL — awaiting operator sign-off. NOT implemented.**
+Status: **IMPLEMENTED (2026-07-08).** See "Build outcome" at the end. The
+proposal/review sections below are preserved as the design record.
 Date: 2026-07-08
 Bead: workstation-v03j.5
 Parent design: `2026-07-08-worktree-guard-readonly-main-design.md`
@@ -176,3 +177,59 @@ near-zero, which tilts the trade toward **default-worktree-for-controlled-caller
 automated-caller default — is what makes writable sessions land in a worktree *by
 construction* (the parent design's goal). Re-decide default-vs-opt-in after M1
 lands rather than asserting opt-in now.
+
+---
+
+## Build outcome (2026-07-08) — IMPLEMENTED
+
+Built on branch `phase35-impl` off `origin/main` and landed. All four must-fixes
+addressed; opt-in `--worktree` shipped **with** the lifecycle and an automated
+caller (not as a bare flag).
+
+- **M1a (window)** — `opencode-launch` runs `work` *after* the health + model
+  checks, *just before* `POST /session`. A launch destined to fail on a bad
+  model / down serve never manufactures a worktree.
+- **M1b (leak on failure)** — an `EXIT` trap (`cleanup_worktree`) removes the
+  worktree + branch if the launch exits before `launch_ok=1`. Verified
+  end-to-end against a mock serve: `POST /session` 500 → worktree registration
+  back to 1 (root only) + branch deleted.
+- **M1c (pruning owner)** — `work --prune-merged` removes only
+  merged-into-`origin/<trunk>` **and** clean worktrees (never dirty / unmerged /
+  current / root), and `reset-workspace` sweeps it (Step 5.5, mono root, v1
+  scope) before the recommendation launch. In-flight sessions are protected by
+  the merged+clean predicate, so no live-session probe is needed.
+- **M2 (fetch)** — `work`'s fetch is now bounded (`timeout`, default 15s) and
+  best-effort: a slow/failed fetch warns and proceeds off the local
+  `origin/<trunk>`. `--no-fetch` added for zero-network callers. The launcher
+  never blocks or dies on the network.
+- **M3 (ship with a caller)** — the `swarm-shaped-work` skill now launches
+  **workers** with `--worktree <slug>` (coordinator stays read-only at root),
+  and the `opencode-launch` skill documents the flag. That's the programmatic
+  caller updated once, per the review.
+- **M4 (graduation metric)** — the metric is **adoption rate**: fraction of
+  *task/worker* `opencode-launch` invocations that pass `--worktree`. When that
+  trends ~100% for task launches (and the raw flag is only used ad-hoc), flip to
+  default-worktree-for-controlled-callers + a `--readonly` escape (the
+  "Reconsider" path above). This supersedes the wrong warn-hit-rate metric.
+
+### Accepted limitations (v1)
+
+- **Reopen of a merged/pruned session's cwd.** If a session recorded in a
+  worktree that later merges+prunes is reopened, its opencode server-side
+  `directory` points at a removed path. The tmux/nvim side already survives —
+  `oc-auto-attach` builds the window at the *collapsed project root*
+  (`-c "$project_key"`), never at the worktree path — so only the opencode
+  session's own cwd is stale, and only for the unusual act of reopening an
+  already-finished session (active sessions are unmerged ⇒ never pruned). Left
+  as a documented limitation rather than adding speculative reopen-rewrite logic
+  to load-bearing reset/attach code. Revisit if it bites in practice.
+- **Prune scope is mono-only in v1.** `reset-workspace` sweeps `~/projects/mono`.
+  Worktrees created by `--worktree` launches in *other* repos are reclaimed only
+  by a manual `work --prune-merged` there, until the multi-repo project list
+  (deferred `workstation-v03j.7`) lands.
+- **PATH dependency.** Both `opencode-launch --worktree` (calls `work`) and
+  `reset-workspace`'s sweep find `work` on the inherited PATH (same mechanism as
+  the existing `oc-auto-attach` / `opencode-launch` discovery), not via nix
+  `runtimeInputs`. Fine for interactive/swarm/nightly callers whose PATH carries
+  the user profile; a restricted-PATH caller degrades to a loud error (launcher)
+  or a logged skip (reset sweep).

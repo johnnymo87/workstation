@@ -90,10 +90,20 @@ For each worker, launch from its own dir with a prompt that includes:
 - The coordinator's session id (so it knows where to escalate).
 - Optional: the other workers' session ids if it has a known direct hand-off (e.g. BE → FE for "schema is live").
 
+**Workers are writable — launch them with `--worktree <slug>`.** A swarm worker
+edits code, so it must NOT start in a repo's primary root (in mono that's the
+read-only trunk the guard protects). `--worktree <slug>` runs `work <slug>` in
+`<worker-dir>` and lands the session in a fresh `.worktrees/<slug>` off the
+local trunk, so the worker is isolated and the read-only-main guard is bypassed
+by construction. Give each worker a distinct slug (its role/ticket) to avoid
+collisions. The worktree is reclaimed automatically once its branch merges (the
+nightly `reset-workspace` runs `work --prune-merged`).
+
 ```bash
-opencode-launch <worker-dir> "$(cat <<'PROMPT'
+opencode-launch --worktree be-proj-1234 <worker-dir> "$(cat <<'PROMPT'
 You are the BE worker for PROJ-1234. Your slice: implement the GraphQL
-endpoints for X.
+endpoints for X. You are in a fresh worktree off trunk — commit here and open
+a PR from this branch when done.
 
 Coordinator: ses_<coordinator-id>
 Other workers: FE=ses_<fe-id>, protos=ses_<protos-id>
@@ -106,6 +116,10 @@ PROMPT
 ```
 
 Capture each worker's session id.
+
+> The **coordinator** (previous step) is read-only — it holds context and
+> brokers decisions, it doesn't edit — so launch it WITHOUT `--worktree`, at the
+> project root. Only writable workers get a worktree.
 
 ### 4. Tell the coordinator the worker ids
 

@@ -90,6 +90,47 @@ Key caveats:
   prompt to the same session (e.g. via a `swarm_send` from another session) is
   **not** covered and would need its own enablement.
 
+## Landing a Writable Session in a Worktree (`--worktree`)
+
+`--worktree <slug>` lands the session in a fresh git worktree instead of at the
+passed directory's root. Use it for **writable** sessions (anything that edits
+code — swarm workers, implementation launches) so the session never starts in a
+repo's primary root. In mono that root is the read-only trunk protected by the
+worktree-guard; starting writable work there trips the guard by inertia.
+
+```bash
+# writable worker: isolated in ~/projects/mono/.worktrees/cops-1234 off trunk
+opencode-launch --worktree cops-1234 ~/projects/mono "implement the X importer"
+
+# read-only session (review / coordinate / "what does this do?"): NO --worktree,
+# so it gets the clean current trunk to read.
+opencode-launch ~/projects/mono "what does the FBM importer do?"
+```
+
+What it does, in order:
+
+- After the health + model checks and **just before** the session is created, it
+  runs `work <slug>` in `<directory>` (which must be a git repo), branching a
+  fresh `.worktrees/<slug>` off the local trunk, and reassigns the session's
+  directory to that worktree. Everything downstream (pool placement, MCP connect,
+  the auto-attached TUI) follows automatically.
+- The `work` fetch is bounded + best-effort, so `--worktree` never blocks or
+  fails the launch on a slow/absent network.
+- If `work` fails (not a git repo, slug already taken, `origin/HEAD` unset) the
+  launch **aborts loudly** — it never silently falls back to launching writable
+  work at the root.
+- If any later step fails, an `EXIT` trap removes the just-created worktree +
+  branch, so a failed launch never orphans one.
+
+Lifecycle: a successful `--worktree` launch keeps its worktree. It's reclaimed
+automatically once the branch merges into trunk — the nightly `reset-workspace`
+runs `work --prune-merged`, which removes only merged-into-trunk **and** clean
+worktrees (in-flight/dirty ones are always kept). To prune on demand:
+`cd <repo> && work --prune-merged`.
+
+Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos with
+`origin/HEAD` set (mono has it); pass `work`'s trunk via the repo if needed.
+
 ## Auto-Attach to nvim+tmux
 
 If you're on a host with `oc-auto-attach` installed (devbox, macOS — anywhere with
