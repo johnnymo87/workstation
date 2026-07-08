@@ -254,6 +254,9 @@ in
   # still live in each project's AGENTS.md.
   xdg.configFile."opencode/AGENTS.md".source = "${assetsPath}/opencode/AGENTS.md";
 
+  # Config for worktree-guard plugin (warn/block edits to enrolled primary roots)
+  xdg.configFile."opencode/worktree-guard.json".text = builtins.toJSON [ { path = "/home/dev/projects/mono"; trunk = "main"; enforce = "warn"; worktreesDir = ".worktrees"; } ];
+
    # Custom agents via OpenCode-native markdown format.
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
@@ -274,9 +277,10 @@ in
      source = "${assetsPath}/opencode/agents/vision-qa.md";
    };
 
-    # Plugins (SRP: shell env injection, compaction context, subagent routing)
-     xdg.configFile."opencode/plugins/shell-env.ts".source = "${assetsPath}/opencode/plugins/shell-env.ts";
-    xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+     # Plugins (SRP: shell env injection, compaction context, subagent routing)
+      xdg.configFile."opencode/plugins/shell-env.ts".source = "${assetsPath}/opencode/plugins/shell-env.ts";
+     xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+     xdg.configFile."opencode/plugins/worktree-guard.ts".source = "${assetsPath}/opencode/plugins/worktree-guard.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
