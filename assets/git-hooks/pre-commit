@@ -1,0 +1,42 @@
+#!/bin/bash
+# Pre-commit hook to prevent commits in the primary worktree (mono root).
+# Deployed by home-manager, NOT committed into target repositories.
+
+# Fail open (exit 0) if anything unexpected happens or if we are not in a git repo.
+
+common=""
+if common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+  :
+else
+  # Fallback: resolve relative common-dir against PWD
+  if rel_common="$(git rev-parse --git-common-dir 2>/dev/null)"; then
+    if [[ "$rel_common" = /* ]]; then
+      common="$rel_common"
+    else
+      common="$(cd "$PWD/$rel_common" 2>/dev/null && pwd -P || true)"
+    fi
+  fi
+fi
+
+if [ -z "$common" ]; then
+  exit 0
+fi
+
+primary="$(cd "$(dirname "$common")" 2>/dev/null && pwd -P || true)"
+if [ -z "$primary" ]; then
+  exit 0
+fi
+
+here="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+here="$(cd "$here" 2>/dev/null && pwd -P || true)"
+if [ -z "$here" ]; then
+  exit 0
+fi
+
+if [ "$here" = "$primary" ]; then
+  echo "worktree-guard: refusing to commit in the primary root ($primary)." >&2
+  echo "Create a fresh worktree and commit there:  work <slug>" >&2
+  exit 1
+fi
+
+exit 0

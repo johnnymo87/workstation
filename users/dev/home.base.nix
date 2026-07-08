@@ -698,6 +698,27 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     ''
   );
 
+home.activation.installMonoWorktreeGuardHook = lib.mkIf (!isDarwin && !isCrostini) (
+    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      if [ ! -d "/home/dev/projects/mono/.git" ] && [ ! -f "/home/dev/projects/mono/.git" ]; then
+        echo "installMonoWorktreeGuardHook: /home/dev/projects/mono/.git is not a git repo, skipping"
+      else
+        if ! ${pkgs.git}/bin/git -C /home/dev/projects/mono rev-parse --git-dir >/dev/null 2>&1; then
+          echo "installMonoWorktreeGuardHook: /home/dev/projects/mono is not a git repo, skipping"
+        else
+          current_hooks_path="$(${pkgs.git}/bin/git -C /home/dev/projects/mono config --get core.hooksPath 2>/dev/null || true)"
+          managed_hooks_dir="$HOME/.config/git-hooks"
+          if [ -z "$current_hooks_path" ] || [ "$current_hooks_path" = "$managed_hooks_dir" ]; then
+            ${pkgs.git}/bin/git -C /home/dev/projects/mono config core.hooksPath "$managed_hooks_dir"
+            echo "installMonoWorktreeGuardHook: core.hooksPath set to $managed_hooks_dir"
+          else
+            echo "WARNING: installMonoWorktreeGuardHook: core.hooksPath is set to '$current_hooks_path', which differs from '$managed_hooks_dir'. Skipping installation to avoid clobbering."
+          fi
+        fi
+      fi
+    ''
+  );
+
   # Install/update ba CLI from private GitHub release (work machines)
   # Downloads platform-appropriate binary, caches by version in ~/.local/bin
   # macOS: reads ba_cli_repo from Keychain, GH token from gh CLI auth
@@ -868,6 +889,12 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
   # Lists every per-device SSH signing key trusted to sign as our identity.
   # Add a new line here when adding a new host or rotating a key, then re-apply.
   home.file.".config/git/allowed_signers".source = "${assetsPath}/git/allowed_signers";
+
+  # Managed git hook for primary worktree protection (enforces committing in a linked worktree only)
+  home.file.".config/git-hooks/pre-commit" = {
+    source = "${assetsPath}/git-hooks/pre-commit";
+    executable = true;
+  };
 
   # GPG - shared settings (both platforms)
   programs.gpg = {
