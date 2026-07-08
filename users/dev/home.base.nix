@@ -483,6 +483,9 @@ in
     # Google Workspace CLI
     localPkgs.gws
 
+    # Repo-agnostic git worktree helper
+    localPkgs.git-work
+
     # OpenCode usage and cost reporting
     localPkgs.oc-cost
 

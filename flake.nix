@@ -57,6 +57,7 @@
       beads = p.callPackage ./pkgs/beads { };
       claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
       gclpr = p.callPackage ./pkgs/gclpr { };
+      git-work = p.callPackage ./pkgs/git-work { };
       gws = p.callPackage ./pkgs/gws { };
       lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
       nvims = p.callPackage ./pkgs/nvims { };
