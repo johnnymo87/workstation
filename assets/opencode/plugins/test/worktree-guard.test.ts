@@ -7,9 +7,11 @@ import plugin, {
   GUARDED_TOOLS,
   parseApplyPatchPaths,
   parseGitCommitRoots,
+  hasGitCommitWithoutC,
   classify,
   normalizePath,
-  nearestExistingAncestorDir
+  nearestExistingAncestorDir,
+  WorktreeGuardBlockError
 } from "../worktree-guard"
 
 // Variables used in hoisted vi.mock factories must start with the "mock" prefix
@@ -79,6 +81,19 @@ more diff
     ])
   })
 
+  it("parseApplyPatchPaths: does not match indented envelope headers in patch body", () => {
+    const patchText = `
+*** Update File: src/main.ts
+some patch diff content
+    *** Update File: /home/dev/projects/mono/x
+*** Add File: src/utils.ts
+`
+    expect(parseApplyPatchPaths(patchText)).toEqual([
+      "src/main.ts",
+      "src/utils.ts"
+    ])
+  })
+
   it("parseApplyPatchPaths: handles invalid or empty input gracefully", () => {
     expect(parseApplyPatchPaths("")).toEqual([])
     expect(parseApplyPatchPaths(null as any)).toEqual([])
@@ -92,6 +107,23 @@ more diff
       "/home/dev/projects/mono"
     ])
     expect(parseGitCommitRoots("git commit")).toEqual([])
+  })
+
+  it("parseGitCommitRoots: handles attached -C and other global option space forms", () => {
+    expect(parseGitCommitRoots("git -C/home/dev/projects/mono commit -m 'feat'")).toEqual([
+      "/home/dev/projects/mono"
+    ])
+    expect(parseGitCommitRoots("git --git-dir /foo --work-tree /bar -C /home/dev/projects/mono commit")).toEqual([
+      "/home/dev/projects/mono"
+    ])
+    expect(parseGitCommitRoots("git --git-dir=/foo --namespace /ns commit")).toEqual([])
+  })
+
+  it("hasGitCommitWithoutC: correctly identifies commit without -C option", () => {
+    expect(hasGitCommitWithoutC("git commit -m 'feat'")).toBe(true)
+    expect(hasGitCommitWithoutC("git -C /foo commit")).toBe(false)
+    expect(hasGitCommitWithoutC("git -C/foo commit")).toBe(false)
+    expect(hasGitCommitWithoutC("git --git-dir /bar commit")).toBe(true)
   })
 
   it("nearestExistingAncestorDir: walks up correctly", () => {
@@ -154,7 +186,7 @@ describe("worktree-guard live git integration", () => {
     // 2. Block mode
     const configBlock = [{ path: rootDir, enforce: "block" as const }]
     const resBlock = await runHook({ tool: "edit" }, { filePath: targetFile }, configBlock)
-    expect(resBlock.thrown).toBeInstanceOf(Error)
+    expect(resBlock.thrown).toBeInstanceOf(WorktreeGuardBlockError)
     expect(resBlock.thrown?.message).toContain(`would write into the read-only primary root ${normalizePath(rootDir)}`)
   })
 
@@ -213,5 +245,117 @@ describe("worktree-guard live git integration", () => {
     const resNonGit = await runHook({ tool: "edit" }, { filePath: "/nonexistent-path-abc/file.txt" }, [{ path: rootDir }])
     expect(resNonGit.thrown).toBeNull()
     expect(resNonGit.logs).toEqual([])
+  })
+
+  it("fails open on internal resolver error with '[worktree-guard]' substring in warn mode", async () => {
+    const guardModule = await import("../worktree-guard")
+    const spy = vi.spyOn(guardModule._internal, "getRealGitToplevel").mockImplementation(() => {
+      throw new Error("Internal error containing [worktree-guard] path")
+    })
+
+    try {
+      const config = [{ path: rootDir, enforce: "warn" as const }]
+      const res = await runHook({ tool: "edit" }, { filePath: path.join(rootDir, "README.md") }, config)
+      expect(res.thrown).toBeNull() // failed open successfully!
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("does not spawn git toplevel for files completely outside enrolled roots", async () => {
+    const guardModule = await import("../worktree-guard")
+    const spy = vi.spyOn(guardModule._internal, "getRealGitToplevel")
+
+    try {
+      const targetFile = path.join(outsideDir, "some-file.txt")
+      const config = [{ path: rootDir, enforce: "warn" as const }]
+      const res = await runHook({ tool: "edit" }, { filePath: targetFile }, config)
+
+      expect(res.thrown).toBeNull()
+      expect(res.logs).toEqual([])
+      expect(spy).not.toHaveBeenCalled() // ZERO git spawns!
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("child worktree path passes string pre-filter but is allowed by git toplevel check", async () => {
+    const guardModule = await import("../worktree-guard")
+    const spy = vi.spyOn(guardModule._internal, "getRealGitToplevel")
+
+    try {
+      const targetFile = path.join(childDir, "README.md")
+      const config = [{ path: rootDir, enforce: "warn" as const }]
+      const res = await runHook({ tool: "edit" }, { filePath: targetFile }, config)
+
+      expect(res.thrown).toBeNull()
+      expect(res.logs).toEqual([])
+      expect(spy).toHaveBeenCalled() // passed pre-filter and called git!
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("caches git toplevel lookups per-hook-invocation to avoid redundant git spawns", async () => {
+    const guardModule = await import("../worktree-guard")
+    const spy = vi.spyOn(guardModule._internal, "getRealGitToplevel")
+
+    try {
+      const patchText = `
+*** Update File: ${path.join(rootDir, "README.md")}
+*** Add File: ${path.join(rootDir, "src", "index.ts")}
+*** Delete File: ${path.join(rootDir, "src", "main.ts")}
+`
+      // Make sure src directory exists so ancestor resolves to src
+      fs.mkdirSync(path.join(rootDir, "src"), { recursive: true })
+
+      const config = [{ path: rootDir, enforce: "warn" as const }]
+      const res = await runHook({ tool: "apply_patch" }, { patchText }, config)
+
+      expect(res.thrown).toBeNull()
+      // README.md: ancestor is rootDir. Spawn git (cached rootDir)
+      // src/index.ts: ancestor is src. Spawn git (cached src)
+      // src/main.ts: ancestor is src. CACHED! Should not spawn git.
+      // Total spawns should be exactly 2, not 3!
+      expect(spy).toHaveBeenCalledTimes(2)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it("deduplicates warnings per session and root (logs once per root per session)", async () => {
+    const config = [{ path: rootDir, enforce: "warn" as const }]
+    mockConfigContent = config
+    const hooks = await plugin({} as never)
+    const hook = hooks["tool.execute.before"]
+    if (!hook) throw new Error("hook not registered")
+
+    const consoleErrors: string[] = []
+    const originalConsoleError = console.error
+    console.error = (...msg: any[]) => {
+      consoleErrors.push(msg.join(" "))
+    }
+
+    try {
+      await hook({ tool: "edit", sessionID: "ses-1" } as never, { args: { filePath: path.join(rootDir, "README.md") } } as never)
+      await hook({ tool: "edit", sessionID: "ses-1" } as never, { args: { filePath: path.join(rootDir, "package.json") } } as never)
+
+      expect(consoleErrors.length).toBe(1) // only logged once!
+    } finally {
+      console.error = originalConsoleError
+      mockConfigContent = null
+    }
+  })
+
+  it("bash workdir: treats workdir as root candidate when git commit has no -C option", async () => {
+    const config = [{ path: rootDir, enforce: "warn" as const }]
+    const res = await runHook(
+      { tool: "bash" },
+      { command: "git commit -m 'feat'", workdir: rootDir },
+      config
+    )
+    expect(res.thrown).toBeNull()
+    expect(res.logs.length).toBe(1)
+    expect(res.logs[0]).toContain(`would write into the read-only primary root ${normalizePath(rootDir)}`)
   })
 })

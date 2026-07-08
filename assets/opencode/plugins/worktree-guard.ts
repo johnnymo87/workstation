@@ -8,6 +8,13 @@ import { execFileSync } from "node:child_process"
 // These must be sorted alphabetically.
 export const GUARDED_TOOLS = ["apply_patch", "bash", "edit", "write"] as const
 
+export class WorktreeGuardBlockError extends Error {
+  constructor(m: string) {
+    super(m)
+    this.name = "WorktreeGuardBlockError"
+  }
+}
+
 /**
  * Normalizes a path using fs.realpathSync when possible to resolve symlinks,
  * falling back to path.resolve if the path does not exist.
@@ -47,12 +54,14 @@ export function nearestExistingAncestorDir(targetPath: string): string {
 /**
  * Real git toplevel lookup using child_process.execFileSync.
  * Returns undefined on error or if not in a git repo.
+ * Includes a 1s timeout to fail open on hung NFS/processes.
  */
 export function getRealGitToplevel(dir: string): string | undefined {
   try {
     const out = execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], {
       stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
+      encoding: "utf8",
+      timeout: 1000
     })
     return out.trim()
   } catch {
@@ -60,12 +69,13 @@ export function getRealGitToplevel(dir: string): string | undefined {
   }
 }
 
+export const _internal = {
+  getRealGitToplevel
+}
+
 /**
- * Parses target paths from standard apply_patch envelope lines:
- * *** Update File: <path>
- * *** Add File: <path>
- * *** Delete File: <path>
- * *** Move to: <path>
+ * Parses target paths from standard apply_patch envelope lines.
+ * Must match only lines starting with standard envelope headers at column 0.
  */
 export function parseApplyPatchPaths(patchText: string): string[] {
   if (typeof patchText !== "string") return []
@@ -78,10 +88,9 @@ export function parseApplyPatchPaths(patchText: string): string[] {
     "*** Move to: "
   ]
   for (const line of lines) {
-    const trimmed = line.trim()
     for (const prefix of prefixes) {
-      if (trimmed.startsWith(prefix)) {
-        const filePath = trimmed.substring(prefix.length).trim()
+      if (line.startsWith(prefix)) {
+        const filePath = line.substring(prefix.length).trim()
         if (filePath) {
           paths.push(filePath)
         }
@@ -119,16 +128,17 @@ export function parseGitCommitRoots(command: string): string[] {
       if (token === "-C") {
         gitCommitPath = tokens[i + 1]
         i += 2
+      } else if (token.startsWith("-C")) {
+        gitCommitPath = token.substring(2)
+        i += 1
       } else if (token === "-c") {
         i += 2
-      } else if (token.startsWith("--git-dir=")) {
-        i++
-      } else if (token.startsWith("--work-tree=")) {
-        i++
-      } else if (token.startsWith("--namespace=")) {
-        i++
+      } else if (token === "--git-dir" || token === "--work-tree" || token === "--namespace") {
+        i += 2
+      } else if (token.startsWith("--git-dir=") || token.startsWith("--work-tree=") || token.startsWith("--namespace=")) {
+        i += 1
       } else if (token.startsWith("-")) {
-        i++
+        i += 1
       } else {
         if (token === "commit") {
           isCommit = true
@@ -137,11 +147,61 @@ export function parseGitCommitRoots(command: string): string[] {
       }
     }
     if (isCommit && gitCommitPath) {
+      // Quoted paths containing spaces may remain a known limitation;
+      // the pre-commit hook is the real commit backstop.
       const cleaned = gitCommitPath.replace(/^['"]|['"]$/g, "")
       roots.push(cleaned)
     }
   }
   return roots
+}
+
+/**
+ * Checks if command contains a git commit subcommand with NO -C option.
+ */
+export function hasGitCommitWithoutC(command: string): boolean {
+  if (typeof command !== "string") return false
+  const segments = command.split(/&&|\|\||;|\||\n/)
+  for (let segment of segments) {
+    segment = segment.trim()
+    if (!segment) continue
+    const tokens = segment.split(/\s+/)
+    let i = 0
+    if (tokens[i] === "git") {
+      i++
+    } else {
+      continue
+    }
+    let hasC = false
+    let isCommit = false
+    while (i < tokens.length) {
+      const token = tokens[i]
+      if (token === "-C") {
+        hasC = true
+        i += 2
+      } else if (token.startsWith("-C")) {
+        hasC = true
+        i += 1
+      } else if (token === "-c") {
+        i += 2
+      } else if (token === "--git-dir" || token === "--work-tree" || token === "--namespace") {
+        i += 2
+      } else if (token.startsWith("--git-dir=") || token.startsWith("--work-tree=") || token.startsWith("--namespace=")) {
+        i += 1
+      } else if (token.startsWith("-")) {
+        i += 1
+      } else {
+        if (token === "commit") {
+          isCommit = true
+        }
+        break
+      }
+    }
+    if (isCommit && !hasC) {
+      return true
+    }
+  }
+  return false
 }
 
 /**
@@ -153,8 +213,22 @@ export function classify(
   gitToplevel: (dir: string) => string | undefined
 ): { hit: boolean; root?: string; enforce?: "warn" | "block" } {
   const isAbs = path.isAbsolute(targetPath)
+
+  const isCandidate = (ancestor: string): boolean => {
+    const norm = normalizePath(ancestor)
+    for (const root of enrolledRoots.keys()) {
+      if (norm === root || norm.startsWith(root + path.sep)) {
+        return true
+      }
+    }
+    return false
+  }
+
   if (isAbs) {
     const ancestor = nearestExistingAncestorDir(targetPath)
+    if (!isCandidate(ancestor)) {
+      return { hit: false }
+    }
     const toplevel = gitToplevel(ancestor)
     if (toplevel) {
       const normToplevel = normalizePath(toplevel)
@@ -164,11 +238,18 @@ export function classify(
     }
   } else {
     // Relative path (cwd unknown)
-    // Defends the root regardless of real cwd by trying each enrolled root as a base.
-    // Rare worktree false-positives acceptable in warn.
+    // Comment regarding Phase-0 spike (bead workstation-v03j.1):
+    // In opencode's pooled serve model, process.cwd() is the directory of the server process,
+    // not the active session's cwd. Thus, resolving relative paths against process.cwd() is
+    // highly unreliable and would result in incorrect checks. We must instead use our heuristic:
+    // try to resolve the relative path against each enrolled root, apply the cheap pre-filter to
+    // each joined target, and only query git toplevel for candidate matches.
     for (const [root, meta] of enrolledRoots.entries()) {
       const fullPath = path.join(root, targetPath)
       const ancestor = nearestExistingAncestorDir(fullPath)
+      if (!isCandidate(ancestor)) {
+        continue
+      }
       const toplevel = gitToplevel(ancestor)
       if (toplevel) {
         const normToplevel = normalizePath(toplevel)
@@ -229,21 +310,41 @@ const plugin: Plugin = async () => {
         } else if (input.tool === "bash") {
           const command = output.args?.command
           if (typeof command === "string") {
-            targets.push(...parseGitCommitRoots(command))
+            const commitRoots = parseGitCommitRoots(command)
+            if (commitRoots.length > 0) {
+              targets.push(...commitRoots)
+            } else {
+              // Handle command with commit but no -C and workdir is set
+              const workdir = output.args?.workdir
+              if (typeof workdir === "string" && hasGitCommitWithoutC(command)) {
+                targets.push(workdir)
+              }
+            }
           }
         }
 
+        // Per-hook-invocation cache of directory to git toplevel mapping
+        const dirToToplevelCache = new Map<string, string | undefined>()
+        const cachedGitToplevel = (dir: string): string | undefined => {
+          if (dirToToplevelCache.has(dir)) {
+            return dirToToplevelCache.get(dir)
+          }
+          const tl = _internal.getRealGitToplevel(dir)
+          dirToToplevelCache.set(dir, tl)
+          return tl
+        }
+
         for (const target of targets) {
-          const classification = classify(target, enrolledRoots, getRealGitToplevel)
+          const classification = classify(target, enrolledRoots, cachedGitToplevel)
           if (classification.hit && classification.root) {
             const root = classification.root
             const enforce = classification.enforce
             const msg = `[worktree-guard] ${input.tool} would write into the read-only primary root ${root} (${target}). Create a fresh worktree instead: run 'work <slug>'.`
             if (enforce === "block") {
-              throw new Error(msg)
+              throw new WorktreeGuardBlockError(msg)
             } else {
-              // warn mode (logs, no throw)
-              const warnKey = `${input.sessionID || ""}:${root}:${target}`
+              // warn mode (logs once per session+root, no throw)
+              const warnKey = `${input.sessionID || ""}:${root}`
               if (!warnedSessions.has(warnKey)) {
                 if (warnedSessions.size > 1000) {
                   warnedSessions.clear()
@@ -256,10 +357,10 @@ const plugin: Plugin = async () => {
         }
       } catch (err) {
         // If it's the Block Error, we must bubble it up (throw)
-        if (err instanceof Error && err.message.includes("[worktree-guard]")) {
+        if (err instanceof WorktreeGuardBlockError) {
           throw err
         }
-        // Otherwise, ignore/allow
+        // Otherwise, fail-open (never fail-closed)
       }
     }
   }
