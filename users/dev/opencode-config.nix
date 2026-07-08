@@ -254,8 +254,13 @@ in
   # still live in each project's AGENTS.md.
   xdg.configFile."opencode/AGENTS.md".source = "${assetsPath}/opencode/AGENTS.md";
 
-  # Config for worktree-guard plugin (warn/block edits to enrolled primary roots)
-  xdg.configFile."opencode/worktree-guard.json".text = builtins.toJSON [ { path = "/home/dev/projects/mono"; trunk = "main"; enforce = "warn"; worktreesDir = ".worktrees"; } ];
+  # Config for worktree-guard plugin (warn/block edits to enrolled primary roots).
+  # Scoped to cloudbox: that's the only host where the mono read-only-main guard
+  # is currently enrolled. Other hosts don't get the config, so the plugin (if
+  # present) reads no enrolled roots and no-ops.
+  xdg.configFile."opencode/worktree-guard.json" = lib.mkIf isCloudbox {
+    text = builtins.toJSON [ { path = "/home/dev/projects/mono"; trunk = "main"; enforce = "warn"; worktreesDir = ".worktrees"; } ];
+  };
 
    # Custom agents via OpenCode-native markdown format.
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
@@ -280,7 +285,12 @@ in
      # Plugins (SRP: shell env injection, compaction context, subagent routing)
       xdg.configFile."opencode/plugins/shell-env.ts".source = "${assetsPath}/opencode/plugins/shell-env.ts";
      xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
-     xdg.configFile."opencode/plugins/worktree-guard.ts".source = "${assetsPath}/opencode/plugins/worktree-guard.ts";
+     # worktree-guard plugin: scoped to cloudbox (the only host with the mono
+     # read-only-main guard enrolled). Pairs with the cloudbox-gated
+     # worktree-guard.json above.
+     xdg.configFile."opencode/plugins/worktree-guard.ts" = lib.mkIf isCloudbox {
+       source = "${assetsPath}/opencode/plugins/worktree-guard.ts";
+     };
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.

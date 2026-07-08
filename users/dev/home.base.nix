@@ -698,7 +698,7 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
     ''
   );
 
-home.activation.installMonoWorktreeGuardHook = lib.mkIf (!isDarwin && !isCrostini) (
+home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       if [ ! -d "/home/dev/projects/mono/.git" ] && [ ! -f "/home/dev/projects/mono/.git" ]; then
         echo "installMonoWorktreeGuardHook: /home/dev/projects/mono/.git is not a git repo, skipping"
@@ -890,8 +890,10 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf (!isDarwin && !isCrostin
   # Add a new line here when adding a new host or rotating a key, then re-apply.
   home.file.".config/git/allowed_signers".source = "${assetsPath}/git/allowed_signers";
 
-  # Managed git hook for primary worktree protection (enforces committing in a linked worktree only)
-  home.file.".config/git-hooks/pre-commit" = {
+  # Managed git hook for primary worktree protection (enforces committing in a
+  # linked worktree only). Scoped to cloudbox, matching installMonoWorktreeGuardHook
+  # (which sets core.hooksPath) and the cloudbox-only worktree-guard plugin/config.
+  home.file.".config/git-hooks/pre-commit" = lib.mkIf isCloudbox {
     source = "${assetsPath}/git-hooks/pre-commit";
     executable = true;
   };
