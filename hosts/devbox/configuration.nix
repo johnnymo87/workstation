@@ -343,6 +343,13 @@ in
         # recommendation opencode session that must hit the same DB.
         "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
         "OPENCODE_DISABLE_CHANNEL_DB=1"
+        # This oneshot already runs in its own system-slice cgroup, so it does
+        # NOT need reset-workspace's `systemd-run --user --scope` survival
+        # re-exec. Skipping it also removes a failure mode: a full runtime tmpfs
+        # (/run/user/1000) makes every `systemd-run --user` fail with ENOSPC,
+        # which previously hard-exited the whole nightly run before any reset
+        # work happened (2026-07 devbox outage). See pkgs/reset-workspace.
+        "RESET_WORKSPACE_NO_DETACH=1"
       ];
     };
     script = ''

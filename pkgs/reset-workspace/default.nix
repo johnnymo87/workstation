@@ -132,28 +132,52 @@ pkgs.writeShellApplication {
     #   - Is reparented under user@1000.service (no nvim ancestor)
     #   - Has its own session leader (no controlling TTY → no PTY-collapse SIGHUP)
     #
-    # We do this unconditionally (gated only by the loop-guard env var) because
-    # the cost on the happy path is ~10ms and the failure modes it prevents
-    # are silent + subtle. Set RESET_WORKSPACE_NO_DETACH=1 to opt out (for
-    # debugging only — known-broken in production-like invocation contexts).
+    # We attempt this whenever the script might be a descendant of a process it
+    # will kill. It is gated by the loop-guard env var, and can be opted out of
+    # with RESET_WORKSPACE_NO_DETACH=1 — set that on invocations that already run
+    # in their own cgroup and don't need the survival re-exec (e.g. the nightly
+    # oneshot systemd unit, which lives in its own system-slice scope). Skipping
+    # the detach there also means a full runtime tmpfs can't take the nightly run
+    # out via systemd-run (see below).
+    #
+    # IMPORTANT — degrade, don't hard-exit. Creating the transient scope can fail
+    # even when systemd-run and the user manager are healthy, most notably when
+    # the runtime tmpfs (XDG_RUNTIME_DIR = /run/user/$UID) is FULL: systemd
+    # serializes every transient unit to $XDG_RUNTIME_DIR/systemd/transient/<name>
+    # before loading it, so ENOSPC there surfaces as the misleading
+    # "Failed to start transient scope unit: ... not found". This actually took
+    # down every `systemd-run --user` on devbox in 2026-07 when a runaway devenv
+    # postgres stderr log filled /run/user/1000.
+    #
+    # The old code did `exec systemd-run ...`, which made the in-place fallback
+    # dead code: once exec replaced the shell, a systemd-run that started but
+    # exited non-zero (ENOSPC) became the script's exit code, so the reset never
+    # ran AND never fell back. Instead we probe with a throwaway canary scope
+    # first; only if that succeeds do we commit to the real re-exec, otherwise we
+    # run in-place.
     # See: docs/plans/2026-04-26-reset-workspace-cgroup-survival-design.md
     if [ "''${RESET_WORKSPACE_DETACHED:-}" != "1" ] \
        && [ "''${RESET_WORKSPACE_NO_DETACH:-}" != "1" ]; then
-      log "detaching into fresh user systemd scope..."
-      export RESET_WORKSPACE_DETACHED=1
-      # --collect: GC the transient scope as soon as we exit.
-      # --quiet: suppress the "Running scope as unit run-rXXX.scope" banner.
-      # No --pty/--pipe: those flags are service-only and rejected in --scope mode.
-      # In --scope mode the re-exec'd process just inherits our stdin/stdout/stderr,
-      # which is what we want (the script runs synchronously, attached to whatever
-      # terminal/pipe the caller gave us; the [y/N] prompt path still works because
-      # interactive humans hit it via a terminal).
       # XDG_RUNTIME_DIR: required for --user (path to the user manager's socket).
-      # Fall back to running in-place if systemd-run is unavailable or fails.
-      if ! exec env XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/''$(id -u)}" \
-           systemd-run --user --scope --collect --quiet -- "$0" "$@"; then
-        log "WARNING: systemd-run --user --scope failed; running in-place (script may die mid-flight)"
-        # Continue past the re-exec block. The flock re-exec below will still run.
+      xdg="''${XDG_RUNTIME_DIR:-/run/user/''$(id -u)}"
+      # Canary: verify a transient scope can actually be created (user manager
+      # reachable AND runtime tmpfs has room) before committing to the re-exec.
+      if env XDG_RUNTIME_DIR="$xdg" \
+           systemd-run --user --scope --collect --quiet -- true 2>/dev/null; then
+        log "detaching into fresh user systemd scope..."
+        export RESET_WORKSPACE_DETACHED=1
+        # --collect: GC the transient scope as soon as we exit.
+        # --quiet: suppress the "Running scope as unit run-rXXX.scope" banner.
+        # No --pty/--pipe: those flags are service-only and rejected in --scope mode.
+        # In --scope mode the re-exec'd process just inherits our stdin/stdout/stderr,
+        # which is what we want (the script runs synchronously, attached to whatever
+        # terminal/pipe the caller gave us; the [y/N] prompt path still works because
+        # interactive humans hit it via a terminal).
+        exec env XDG_RUNTIME_DIR="$xdg" \
+          systemd-run --user --scope --collect --quiet -- "$0" "$@"
+      else
+        log "WARNING: systemd-run --user --scope unavailable (full runtime tmpfs at $xdg, or no user manager); running in-place (script may die mid-flight if it kills an ancestor)"
+        # Fall through to run in-place. Better a degraded reset than none.
       fi
     fi
 
