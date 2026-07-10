@@ -26,13 +26,14 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 **When to use:** Stuck after 2+ attempts, architectural decision, need a second opinion.
 **Key trait:** Cannot modify files. Gives a recommendation with effort estimate (Quick/Short/Medium/Large) and action plan. Pragmatic minimalism — biases toward simplest solution. Its prompt is written as ethos + judgment (terse, actionable) rather than a rigid rule-list.
 
-### adversarial-reviewer (subagent)
+### adversarial-reviewer-opus / adversarial-reviewer-fable (subagents)
 **Purpose:** Skeptical, adversarial review of a **design / plan / approach before it's built** — hunts flaws, wrong assumptions, missing cases, hazards, and better alternatives.
-**Model:** Opus 4.8, host-correct (same routing as oracle: direct `anthropic/` off cloudbox, Vertex on cloudbox).
+**Two model-pinned twins, same prompt:** `adversarial-reviewer-opus` runs on Opus 4.8 (the default, and the source of truth for the prompt body); `adversarial-reviewer-fable` runs on `claude-fable-5`. The fable twin's source is *generated* from the opus source at nix-build time (`mkFableVariant` in `opencode-config.nix`), rewriting only the model pin + the `(… model)` description token, so the ~130-line prompt never drifts between them. Pick the handle to pick the model; the names are deliberately distinct so there's no ambiguity at the call site.
+**Model routing:** host-correct, same as oracle — direct `anthropic/` off cloudbox, Vertex on cloudbox (both opus and fable get a cloudbox → `google-vertex-anthropic/…@default` rewrite via `patchAgent`).
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
-**When to use:** You have a design or plan and want it pressure-tested *before* writing code; you want the uncomfortable "this is solving the wrong problem" read.
+**When to use:** You have a design or plan and want it pressure-tested *before* writing code; you want the uncomfortable "this is solving the wrong problem" read. `-opus` is the default; `-fable` is opt-in — its description carries a CAUTION so the orchestrator won't auto-pick the cheaper model, so only use `-fable` when explicitly asked for the fable-5 variant.
 **Key trait:** Grounds every claim in the actual code/artifact (`file:line`, never fabricates); distinguishes verified findings from suspicions; reports verdict → confirmed-sound → flaws-by-severity → missing cases → concrete recommendations.
-**Complements:** oracle is the *advisor* ("what should we do?"); adversarial-reviewer is its skeptic ("here's how that goes wrong"). code-reviewer / spec-reviewer check a *finished implementation* against a spec; adversarial-reviewer checks the *design itself*, earlier. Its prompt is deliberately ethos-driven (care that the design is correct; judgment over checklist) per the Amanda Askell steer.
+**Complements:** oracle is the *advisor* ("what should we do?"); the adversarial reviewers are its skeptic ("here's how that goes wrong"). code-reviewer / spec-reviewer check a *finished implementation* against a spec; the adversarial reviewers check the *design itself*, earlier. Their prompt is deliberately ethos-driven (care that the design is correct; judgment over checklist) per the Amanda Askell steer.
 
 ### vision-qa (subagent — devbox/crostini only)
 **Purpose:** Visual QA analyst — analyzes screenshots and UI renders.

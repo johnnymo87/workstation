@@ -80,8 +80,43 @@ let
           ''
         else
           afterSonnet;
+      # 3. fable-5 -> Vertex Anthropic on cloudbox ONLY, mirroring the opus
+      #    rewrite above and for the same reason: cloudbox has no first-party
+      #    `anthropic/` auth (it routes Anthropic through Vertex/ADC), so an
+      #    agent left pinned to `anthropic/claude-fable-5` reaches an unusable
+      #    provider and the model loop dies with an empty response. The Vertex
+      #    fable-5 entry (`google-vertex-anthropic/claude-fable-5@default`)
+      #    carries its own high `effort` from opencode.base.json, so no variant
+      #    override is added here. No-op on agents that don't pin fable-5.
+      afterFable =
+        if isCloudbox then
+          pkgs.runCommand "${name}-fable-vertex.md" {} ''
+            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-fable-5|model: google-vertex-anthropic/claude-fable-5\@default|' ${afterOpus} > $out
+          ''
+        else
+          afterOpus;
     in
-      afterOpus;
+      afterFable;
+
+  # adversarial-reviewer-fable: a fable-5-pinned twin of adversarial-reviewer-opus.
+  # Generated from the SAME source body at build time so the ~130-line prompt
+  # has a single source of truth (no hand-maintained second copy to drift).
+  # Rewrites only the model pin (opus-4-8 -> fable-5) and the matching
+  # "(opus-4-8 model)" token in the description, so the two show up under
+  # distinct handles with self-describing descriptions in the task-tool list.
+  # The result is fed through patchAgent, whose afterFable branch applies the
+  # cloudbox Vertex rewrite.
+  # The description also gets a CAUTION appended so the orchestrator does NOT
+  # auto-select the cheaper model: the fable twin is opt-in, only when the user
+  # explicitly asks for it; otherwise adversarial-reviewer-opus is the default.
+  mkFableVariant = src:
+    pkgs.runCommand "adversarial-reviewer-fable-src.md" {} ''
+      ${pkgs.perl}/bin/perl -0pe '
+        s|model: anthropic/claude-opus-4-8|model: anthropic/claude-fable-5|;
+        s|\(opus-4-8 model\)|(fable-5 model)|;
+        s|^(description: .*)$|$1. CAUTION: use this fable-5 variant ONLY when the user explicitly asks for it; otherwise default to adversarial-reviewer-opus|m;
+      ' ${src} > $out
+    '';
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -266,7 +301,13 @@ in
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/oracle.md".source = patchAgent "oracle" "${assetsPath}/opencode/agents/oracle.md";
-   xdg.configFile."opencode/agents/adversarial-reviewer.md".source = patchAgent "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
+   # Two distinctly-named twins so the model is unambiguous at the call site:
+   #   @adversarial-reviewer-opus  -> opus-4-8 (source of truth for the prompt)
+   #   @adversarial-reviewer-fable -> claude-fable-5 (generated from the opus
+   #                                  source via mkFableVariant, no body drift)
+   xdg.configFile."opencode/agents/adversarial-reviewer-opus.md".source = patchAgent "adversarial-reviewer-opus" "${assetsPath}/opencode/agents/adversarial-reviewer-opus.md";
+   xdg.configFile."opencode/agents/adversarial-reviewer-fable.md".source =
+     patchAgent "adversarial-reviewer-fable" (mkFableVariant "${assetsPath}/opencode/agents/adversarial-reviewer-opus.md");
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
