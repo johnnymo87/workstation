@@ -350,6 +350,15 @@ in
         # which previously hard-exited the whole nightly run before any reset
         # work happened (2026-07 devbox outage). See pkgs/reset-workspace.
         "RESET_WORKSPACE_NO_DETACH=1"
+        # With NO_DETACH set (above), reset-workspace no longer re-execs via
+        # `systemd-run --user --scope`, which was the only thing that provided
+        # XDG_RUNTIME_DIR. Running in-place in this system service's clean env,
+        # `systemctl --user` (used by pool_scope() to detect the devbox USER
+        # pool target) can't reach the user manager and misdetects "system",
+        # then dies restarting a nonexistent system target. Supply the runtime
+        # dir explicitly so pool_scope() correctly returns "user". (dev = uid
+        # 1000; linger keeps /run/user/1000 up.) Regression from 6bd6575.
+        "XDG_RUNTIME_DIR=/run/user/1000"
       ];
     };
     script = ''
