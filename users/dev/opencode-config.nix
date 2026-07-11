@@ -109,12 +109,23 @@ let
   # The description also gets a CAUTION appended so the orchestrator does NOT
   # auto-select the cheaper model: the fable twin is opt-in, only when the user
   # explicitly asks for it; otherwise adversarial-reviewer-opus is the default.
+  #
+  # IMPORTANT: the appended text must NOT contain a colon-space (": "). opencode
+  # parses agent frontmatter with gray-matter/js-yaml (packages/opencode/src/
+  # config/markdown.ts), and a ": " inside an unquoted YAML scalar (the
+  # `description:` value) makes the primary `matter()` parse THROW, forcing the
+  # fragile fallbackSanitization double-parse path. That path is racy under the
+  # concurrent agent-load in loadAgent(): it nondeterministically fails, and a
+  # failed parse SKIPS the agent (config.ts:198-207), leaving a default stub
+  # (mode=all, model=null) that silently runs the caller's model (opus) instead
+  # of fable. Colon-free descriptions (like the opus twin's) parse on the first
+  # try and are rock-solid, so we keep this value colon-free (em-dash instead).
   mkFableVariant = src:
     pkgs.runCommand "adversarial-reviewer-fable-src.md" {} ''
       ${pkgs.perl}/bin/perl -0pe '
         s|model: anthropic/claude-opus-4-8|model: anthropic/claude-fable-5|;
         s|\(opus-4-8 model\)|(fable-5 model)|;
-        s|^(description: .*)$|$1. CAUTION: use this fable-5 variant ONLY when the user explicitly asks for it; otherwise default to adversarial-reviewer-opus|m;
+        s|^(description: .*)$|$1. CAUTION — use this fable-5 variant ONLY when the user explicitly asks for it; otherwise default to adversarial-reviewer-opus|m;
       ' ${src} > $out
     '';
 
