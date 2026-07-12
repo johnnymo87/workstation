@@ -1,7 +1,8 @@
 # OpenCode session switcher: semantic-state-aware fuzzy navigation
 
 **Date:** 2026-07-12
-**Status:** Draft (design) — **revised after adversarial review**
+**Status:** Design — revised after adversarial review; **all open questions
+verified against source (2026-07-12)**. Ready for implementation planning.
 **Repos touched:** `workstation` (opencode plugin bundle, nvim config), later
 `lgtm` (fallback tagging, optional)
 
@@ -122,6 +123,16 @@ those become `unknown`, never their last-claimed state. This is what keeps a
 wedged serve (the fleet's documented failure mode; see `monitoring-serve-pool`)
 from showing a frozen `working` forever.
 
+**Heartbeat / liveness parameters (decided):** plugin refreshes `heartbeat`
+every **15 s**; readers treat an entry as `unknown` if `heartbeat` age > **45 s**
+(3×) **or** its `pid` is dead. Dead-PID check is done reader-side (Lua) via
+`vim.uv.kill(pid, 0)` (libuv, portable across NixOS/macOS/crostini — avoid
+`/proc`, which is Linux-only and darwin is a target). This covers process death
+and full event-loop wedge (the canary's failure mode). **Residual limitation:** a
+*partial* wedge where the timer still fires but the agent loop is stuck keeps
+heartbeating with stale state; secondary signal is a claimed-`working` entry
+whose `updatedAt` is implausibly old. Documented, not fully solvable here.
+
 Event → state mapping (names verified in
 `~/projects/opencode/packages/opencode/src`):
 
@@ -140,6 +151,16 @@ no debounce needed. `permission.asked` fires only *after* auto-approve rules fai
 (`permission/index.ts:177-204`), so no blocked-flicker on auto-approved tools.
 Abort-while-pending publishes `idle` but never `.replied`, so `idle` must clear
 the pending sets or blocked ghosts persist.
+
+**`session.status` payload (verified `session/status.ts:8-31`):** `{ sessionID,
+status }` where `status` is a union discriminated on `type` ∈
+`busy` | `idle` | `retry`. `retry` carries `{ attempt, message, next, action? }`
+(`next` = backoff timing → retry glyph). Crucially, `SessionStatus.set(idle)`
+**deletes** the session from opencode's own in-memory map and re-publishes the
+deprecated `session.idle` too (`status.ts:80-83`). So **"absent from the status
+map" ≡ idle** in opencode's model — our overlay mirrors this: store only
+busy/retry, treat missing as idle, and layer permission/question/error sets on
+top. This dovetails with "missing overlay entry ⇒ not-working."
 
 ### 2. State model — attachment × activity (two axes)
 
@@ -161,8 +182,14 @@ The server session is never touched.
 (`session/session.ts:215,543`) emitting their own status/permission events.
 **Roll child state up into the parent row and filter children from the list** —
 so a subagent's blocking permission surfaces on its parent, but children don't
-flood the picker. `parentID` isn't on the event; look it up via DB / `GET
-/session/<id>`.
+flood the picker. **`parentID` isn't on the `session.status` event, but it IS a
+first-class DB column `parent_id`** (`session/session.ts:80,119`; also
+`Session.children()` at `:476`), so the picker's base-list query already selects
+it for free — no extra API call. **Rollup rule:** base list = roots (`parent_id
+IS NULL`); fold each root's descendants' worst state into a *secondary* glyph on
+the root (a child-blocked shows as "child needs input", NOT masqueraded as the
+root's own blocked); a root pierces scope as `blocked` if it or any descendant is
+blocked.
 
 ### 3. Location — read-time nvim-socket discovery (no registry)
 
@@ -182,6 +209,16 @@ impossible**, attachment is always truthful, and the reset "already-closed" bug
 is fixed more authoritatively than a registry (which would itself need
 reconciling). ~tens of ms across ~10 sockets. Deletes draft open questions #4/#5.
 
+**No dedup needed (verified).** `nvims` already prevents a nested nvim (an
+`nvim` run inside another nvim's `:terminal`, which inherits `$TMUX_PANE`) from
+claiming the pane socket — it defers to nvim's default server
+(`nvim_listen_plan` → `DEFAULT`, fix `workstation-8iqt`,
+`pkgs/nvims/test.sh:36-41,58-62`). So `/tmp/nvim-<pane>.sock` is **one per pane,
+top-level nvim only** — exactly the nvims that host attach buffers. Discovery
+just globs, RPCs each, and skips failures. Nightly reset `pkill -9`s nvims,
+which can leave **stale socket *files*** behind; those refuse connections and are
+naturally treated as dead.
+
 ### 4. Jump-or-attach
 
 - **attached** → if the target is in another tmux **session**, `tmux
@@ -189,12 +226,19 @@ reconciling). ~tens of ms across ~10 sockets. Deletes draft open questions #4/#5
   and `nvim --server <sock> --remote-expr` (with `</dev/null`) to focus the
   buffer/tabpage from discovery.
 - **detached** → attach fresh via the existing `oc_auto_attach` path.
-- **directory gone** (lgtm prunes `.worktrees/pr-<N>` after merge;
-  `oc_auto_attach.lua:35` hard-rejects a missing dir, and attach without a
-  matching `--dir` freezes the TUI per the `event.ts` filter) → **fallback:
-  preview-only, or attach with an explicit "directory gone" notice** (verify TUI
-  behavior under a deleted `--dir` before promising attach). This path matters:
-  it's exactly the content-mode "find that old review" flow.
+- **directory gone** (lgtm prunes `.worktrees/pr-<N>` after merge) — **resolved,
+  simpler than feared.** `attach.ts:58-67` does `process.chdir(--dir)` and, on
+  failure, **catches and passes the dir string through** ("If the directory
+  doesn't exist locally (remote attach), pass it through"). Attach does *not*
+  crash on a deleted dir, and because the passed-through string equals the
+  session's stored directory, the TUI event-filter is *satisfied* (no freeze —
+  the freeze only happens when `--dir` is absent and defaults to `/home/dev`).
+  The only real blockers are on *our* side: `oc_auto_attach.lua:35`'s
+  `isdirectory==0` reject, and `jobstart`'s `cwd = dir`. **Fix:** for
+  picker-resume, relax the guard and spawn attach with process **`cwd = $HOME`**
+  (or collapsed project root) while still passing **`--dir <original stored dir
+  string>`**. One live smoke-test recommended to confirm `validateSession` + TUI
+  end-to-end. This is the flagship content-mode "find that old review" flow.
 
 ## Search modes
 
@@ -208,8 +252,15 @@ Two modes mirroring `<leader>ff` / `<leader>fg`:
 
 Content mode reuses the `oc-search` corpus and `--types`/`--all` scope; a hit →
 sessionID → the same jump-or-attach (incl. directory-gone fallback). Never blend
-the two into one ranked list. Set `busy_timeout` on any DB read (4 serves write
-concurrently; `oc-search` proves it's viable).
+the two into one ranked list.
+
+**DB access (verified):** there is **no `sqlite3` on PATH**; `oc-search` opens the
+DB via a **Nix-store sqlite3 binary** with `file:$DB?mode=ro`
+(`~/.local/bin/oc-search:105`). The picker's DB helper must likewise depend on
+`pkgs.sqlite` and open read-only, adding `PRAGMA busy_timeout` (4 serves write
+concurrently; `mode=ro` + WAL makes concurrent reads safe — `oc-search` proves
+it). **The DB is ~13 GB**, so the recency-bounded base-list query must be
+indexed/`LIMIT`ed (`ORDER BY time_updated DESC LIMIT n`), never a scan.
 
 ## Scope & grouping
 
@@ -296,19 +347,32 @@ JSON per render.
   instantiating heavyweight instances on serves that don't own a session.
   Recorded to justify the plugin approach.
 
-## Open questions / verification items
+## Verification findings (all 5 draft-2 open questions resolved, 2026-07-12)
 
-1. **`--dir <deleted>` TUI behavior** — confirm what attach does with a pruned
-   directory before promising any attach (vs preview-only) in the directory-gone
-   fallback (§4).
-2. **Subagent rollup detail** — cheapest reliable `parentID` lookup (DB vs API)
-   and the roll-up rule (does a child `blocked` mark the parent `blocked`, or a
-   distinct "child-blocked" glyph?).
-3. **Heartbeat interval T** and dead-PID detection portability across the pool.
-4. **`session.status` payload shape** — confirm exact discriminant for
-   busy/idle/retry and where `retry` backoff timing lives, for the retry glyph.
-5. **Nested-`$TMUX_PANE` sockets** — ensure discovery dedupes/handles a parent
-   nvim and its `:terminal` child sharing a pane key (`nvims/test.sh:6`).
+All resolved against `~/projects/opencode` source and the live cloudbox system.
+
+1. **`--dir <deleted>` — RESOLVED (source), 1 smoke-test left.** `attach.ts:58-67`
+   catches `chdir` failure and passes the dir string through; no crash, no freeze
+   (string matches the session's stored dir, satisfying the event filter). Fix is
+   ours: relax `oc_auto_attach.lua:35` and spawn with `cwd=$HOME` + `--dir
+   <stored dir>`. One live end-to-end smoke-test recommended. See §4.
+2. **Subagent rollup — RESOLVED (source).** `parent_id` is a DB column
+   (`session/session.ts:80,119`); the base-list query gets it free. Roots =
+   `parent_id IS NULL`; descendants' worst state folds into a secondary glyph;
+   child-blocked pierces scope on the root. See §2.
+3. **Heartbeat/liveness — DECIDED.** 15 s heartbeat, 45 s staleness threshold,
+   `vim.uv.kill(pid,0)` for dead-PID (portable). Partial-wedge residual noted.
+   See §1.
+4. **`session.status` payload — RESOLVED (source).** Union on `type` ∈
+   busy/idle/retry; `retry` carries `attempt/message/next/action?`; `idle`
+   deletes from opencode's map ⇒ absent ≡ idle. See §1.
+5. **Nested `$TMUX_PANE` sockets — RESOLVED (source).** `nvims` already prevents
+   nested nvims from claiming a pane socket (`workstation-8iqt`), so sockets are
+   one-per-pane top-level only; no dedup needed. See §3.
+
+Remaining before "done" (not blockers to planning):
+- the single live `--dir <deleted>` attach smoke-test (finding #1);
+- exact interpretation of `retry.next` (epoch vs delay) — cosmetic, glyph only.
 
 ## Related follow-ons (separable)
 
