@@ -315,6 +315,14 @@ let
             "gemini-3.5-flash" = gemini35FlashModel;
           };
         };
+      } // lib.optionalAttrs isCloudbox {
+        # codex-lb subscription models (cloudbox — same as the devbox branch).
+        # recursiveUpdate against the base openai below restores its options +
+        # gpt-5.5, so this shallow `//` doesn't drop them; the sol/terra/luna
+        # tiers only route anywhere once codex-lb.service is active (opt-in).
+        openai = lib.recursiveUpdate (opencodeBase.provider.openai or {}) {
+          models = codexLbModels;
+        };
       };
       mcp = (opencodeBase.mcp or {}) // {
         atlassian = {
@@ -1244,7 +1252,7 @@ in
   # restart is already a best-effort no-op.) Rather than kill live pool sessions,
   # we just write the config + clear the auth entry and print the apply command;
   # running serves pick it up on their next natural restart.
-  home.activation.injectCodexLbBaseUrl = lib.mkIf isDevbox
+  home.activation.injectCodexLbBaseUrl = lib.mkIf (isDevbox || isCloudbox)
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
 
@@ -1296,7 +1304,7 @@ in
 
       echo "codex-lb: openai -> ''${openai_url:-<direct OpenAI>} (codex-lb=$clb_state)" >&2
       if [[ -n "$openai_url" ]]; then
-        echo "codex-lb: restart serves to apply -> systemctl --user restart 'opencode-serve@*.service'" >&2
+        echo "codex-lb: config written — restart your opencode serve(s) to apply (devbox: systemctl --user restart 'opencode-serve@*.service')" >&2
       fi
     '');
 

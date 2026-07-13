@@ -11,6 +11,7 @@
     ./opencode-llm-audit.nix
     ./home.crostini.nix
     ./home.darwin.nix
+    ./codex-lb.nix
     ./opencode-config.nix
     ./opencode-skills.nix
     ./tmux.devbox.nix

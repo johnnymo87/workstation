@@ -1151,60 +1151,6 @@ ${serveIdCase}
     };
   };
 
-  # codex-lb: multi-account ChatGPT/Codex rotator — the OpenAI/Codex analog of
-  # teamclaude. A local OpenAI-compatible proxy on 127.0.0.1:2455 that pools
-  # personal ChatGPT *subscription* OAuth accounts, injects the active account's
-  # token + chatgpt-account-id server-side, tracks per-account 5h/weekly quota,
-  # and fails over between accounts. opencode's first-party `openai` provider is
-  # pointed at it by `injectCodexLbBaseUrl` in opencode-config.nix (gated on this
-  # unit being active), and the sol/terra/luna subscription model catalog is
-  # injected there too.
-  #
-  # RUN VIA uvx (not a nix package): codex-lb is a FastAPI + bun-SPA app; packaging
-  # it purely in Nix is a big lift, so we run the pinned PyPI release through uv's
-  # ephemeral-tool runner (cached under ~/.cache/uv). Bump the pin deliberately.
-  #
-  # CONFIG/STATE IS RUNTIME (NOT nix-managed): codex-lb reads + REWRITES
-  # ~/.codex-lb/ (store.db with accounts + OAuth tokens that auto-refresh, plus
-  # encryption.key), so it must stay writable + persistent and is LOST on a full
-  # reprovision. Accounts are added out-of-band via the dashboard's OAuth login
-  # (needs a browser — SSH-forward 2455); this unit only RUNS an already-seeded
-  # store. It does NOT crash with zero accounts (serves /health, models just
-  # error), so unlike teamclaude it needs no ConditionPathExists seed-gate.
-  #
-  # TWO NixOS gotchas the env below fixes: (1) SSL_CERT_FILE — a bare user service
-  # has no CA bundle, so httpx/aiohttp can't verify chatgpt.com and every upstream
-  # call fails CERTIFICATE_VERIFY_FAILED; (2) PATH — the uvx-generated wrapper
-  # shells out to realpath/dirname, which need coreutils on PATH.
-  #
-  # BIND + PRIVACY: bound to 127.0.0.1 explicitly (--host), and devbox's NixOS
-  # firewall does not open 2455. opencode connects via 127.0.0.1 (auth-exempt on
-  # codex-lb), so no proxy API key is needed locally.
-  systemd.user.services.codex-lb = {
-    Unit = {
-      Description = "codex-lb (multi-account ChatGPT/Codex rotator)";
-      After = [ "network-online.target" ];
-      Wants = [ "network-online.target" ];
-      StartLimitIntervalSec = 300;
-      StartLimitBurst = 5;
-    };
-    Service = {
-      Type = "simple";
-      WorkingDirectory = config.home.homeDirectory;
-      Environment = [
-        "HOME=${config.home.homeDirectory}"
-        "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-        "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
-      ];
-      ExecStart = "${pkgs.uv}/bin/uvx --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455";
-      Restart = "always";
-      RestartSec = 10;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
-
   # Sibling slices under user@1000.service for explicit placement of
   # agent workloads and devenv stacks. Processes do NOT land here
   # automatically — they're reached via systemd-run --user --scope
