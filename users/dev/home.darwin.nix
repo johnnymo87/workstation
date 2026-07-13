@@ -217,6 +217,39 @@ lib.mkIf isDarwin {
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gclpr-server.err.log";
       };
     };
+
+    # codex-lb (ChatGPT/Codex rotator) — darwin/launchd flavor of the systemd
+    # unit in codex-lb.nix (which is NixOS-only). Opt-in per host: the wrapper
+    # exits 0 when the marker is absent, and KeepAlive.SuccessfulExit=false means
+    # launchd does NOT respawn a clean exit — so no marker => stays down; marker
+    # present => runs, and a crash (non-zero) is restarted. Bootstrap:
+    #   1. touch ~/.codex-lb/enabled
+    #   2. launchctl kickstart -k gui/$(id -u)/org.nix-community.home.codex-lb
+    #   3. open http://127.0.0.1:2455 and log in ChatGPT account(s)
+    #   4. darwin-rebuild switch  (wires opencode via injectCodexLbBaseUrlDarwin)
+    codex-lb = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh" "-c"
+          ''
+            [ -e "$HOME/.codex-lb/enabled" ] || exit 0
+            exec ${pkgs.uv}/bin/uvx --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455
+          ''
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          # bare launchd service has no CA bundle -> httpx CERTIFICATE_VERIFY_FAILED
+          SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+          # uvx-generated wrapper shells out to realpath/dirname
+          PATH = lib.concatStringsSep ":" [ "${pkgs.coreutils}/bin" "/usr/bin" "/bin" ];
+        };
+        RunAtLoad = true;
+        KeepAlive = { SuccessfulExit = false; };
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/codex-lb.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/codex-lb.err.log";
+      };
+    };
   } // (builtins.listToAttrs (lib.imap0 (i: port: {
     name = "opencode-serve-${toString i}";
     value = {
