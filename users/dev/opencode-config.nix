@@ -192,6 +192,37 @@ let
 
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
+  # codex-lb (devbox only): ChatGPT/Codex-subscription models served by the local
+  # codex-lb rotator (127.0.0.1:2455). These model IDs only exist for a ChatGPT
+  # subscription account routed through codex-lb — NOT the direct OpenAI API — so
+  # they are injected on devbox only, and only take effect while codex-lb.service
+  # is up (see injectCodexLbBaseUrl below, which flips
+  # provider.openai.options.baseURL to codex-lb and clears the openai auth entry).
+  # Subscription usage has no per-token billing, so cost is zeroed here (codex-lb's
+  # own dashboard tracks real spend). Effort defaults track each tier's role:
+  # Sol = frontier (high), Terra = balanced (medium), Luna = fast (low); override
+  # per call with a variant if needed.
+  mkCodexLbModel = { name, effort }: {
+    inherit name;
+    reasoning = true;
+    tool_call = true;
+    attachment = true;
+    release_date = "2026-06-01";
+    cost = { input = 0; output = 0; cache_read = 0; };
+    limit = { context = 272000; output = 128000; };
+    modalities = { input = [ "text" "image" ]; output = [ "text" ]; };
+    options = {
+      reasoningEffort = effort;
+      reasoningSummary = "auto";
+      include = [ "reasoning.encrypted_content" ];
+    };
+  };
+  codexLbModels = {
+    "gpt-5.6-sol" = mkCodexLbModel { name = "GPT-5.6 Sol"; effort = "high"; };
+    "gpt-5.6-terra" = mkCodexLbModel { name = "GPT-5.6 Terra"; effort = "medium"; };
+    "gpt-5.6-luna" = mkCodexLbModel { name = "GPT-5.6 Luna"; effort = "low"; };
+  };
+
   # Platform overlay:
   # - devbox + crostini default to the Anthropic subscription path, so sessions
   #   do not depend on the OpenAI API key.
@@ -220,10 +251,19 @@ let
       # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY auth — no Vertex).
       # Inject the same cost/limit catalog entry used for the Vertex flavor
       # below so cost tracking (oc-cost/aigateway) stays accurate.
-      provider.google = (opencodeBase.provider.google or {}) // {
-        models = ((opencodeBase.provider.google or {}).models or {}) // {
-          "gemini-3.5-flash" = gemini35FlashModel;
+      provider = {
+        google = (opencodeBase.provider.google or {}) // {
+          models = ((opencodeBase.provider.google or {}).models or {}) // {
+            "gemini-3.5-flash" = gemini35FlashModel;
+          };
         };
+      } // lib.optionalAttrs isDevbox {
+        # codex-lb subscription models (devbox only). Merged into the base openai
+        # provider (which carries options.chunkTimeout + gpt-5.5) by the outer
+        # recursiveUpdate, so gpt-5.5 and the sol/terra/luna tiers coexist. The
+        # baseURL/apiKey that route these through codex-lb are set dynamically by
+        # injectCodexLbBaseUrl (gated on codex-lb.service being active).
+        openai = { models = codexLbModels; };
       };
     })
     // (lib.optionalAttrs isCloudbox {
@@ -1155,6 +1195,93 @@ in
             echo "teamclaude: hash file NOT updated; next switch will retry."
           } >&2
         fi
+      fi
+    '');
+
+  # Point opencode's first-party `openai` provider at the local codex-lb rotator
+  # (devbox) when its user service is active; otherwise strip the override so the
+  # provider falls back to its default (direct OpenAI). This is the OpenAI/Codex
+  # analog of injectTeamclaudeBaseUrl above, but SIMPLER by design:
+  #
+  # codex-lb pools ChatGPT/Codex *subscription* OAuth accounts and injects the
+  # active account's token + chatgpt-account-id SERVER-SIDE, exposing an
+  # OpenAI-compatible /v1 surface that preserves the Responses API + encrypted
+  # reasoning. So unlike teamclaude (which only swaps the bearer and needs the
+  # anthropic-auth plugin to SHAPE requests + a dummy-cred dance), codex-lb needs
+  # NO client-side shaping: opencode's built-in `openai` provider talks to
+  # 127.0.0.1:2455/v1 with a throwaway bearer (localhost is auth-exempt on
+  # codex-lb). The sol/terra/luna model catalog is injected statically in the
+  # managed config above (harmless when codex-lb is down — just unselectable).
+  #
+  # AUTH STORE: the built-in openai provider prefers an `oauth` entry in
+  # auth.json over the provider `apiKey` option, and in oauth mode it sends the
+  # user's OWN ChatGPT token + account id — which fights codex-lb's server-side
+  # injection. So when routing through codex-lb we DELETE .openai from auth.json,
+  # forcing apiKey mode (the throwaway local bearer). codex-lb owns the real
+  # tokens. When codex-lb is stopped we DON'T touch the auth store, so going
+  # direct just needs a real `opencode auth login`.
+  #
+  # NO AUTO SERVE-RESTART (deliberate divergence from injectTeamclaudeBaseUrl):
+  # devbox runs a serve POOL (opencode-serve@<port>, X-SwitchMethod=keep-old),
+  # not a single opencode-serve.service, so home-manager does not cycle the
+  # serves on switch and there is no single unit to bounce. (The teamclaude block
+  # above still names opencode-serve.service, which no longer exists here, so its
+  # restart is already a best-effort no-op.) Rather than kill live pool sessions,
+  # we just write the config + clear the auth entry and print the apply command;
+  # running serves pick it up on their next natural restart.
+  home.activation.injectCodexLbBaseUrl = lib.mkIf isDevbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$UID}"
+      sc=/run/current-system/sw/bin/systemctl
+      clb_state="$($sc --user is-active codex-lb.service 2>/dev/null || true)"
+
+      openai_url=""
+      openai_key=""
+      case "$clb_state" in
+        active|activating)
+          openai_url="http://127.0.0.1:2455/v1"
+          openai_key="sk-codex-lb-local" ;;
+      esac
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq --arg u "$openai_url" --arg k "$openai_key" '
+            (if $u == "" then del(.provider.openai.options.baseURL)
+             else .provider.openai.options.baseURL = $u end)
+          | (if $k == "" then del(.provider.openai.options.apiKey)
+             else .provider.openai.options.apiKey = $k end)
+          | (if (.provider.openai.options // {}) == {}
+             then del(.provider.openai.options) else . end)
+          | (if (.provider.openai // {}) == {}
+             then del(.provider.openai) else . end)
+          | (if (.provider // {}) == {} then del(.provider) else . end)' \
+          "$runtime" > "$tmp"
+        mv "$tmp" "$runtime"
+      fi
+
+      # Force apiKey mode: drop any .openai entry from the auth store so the
+      # provider uses the throwaway local bearer instead of the user's own ChatGPT
+      # token (which would fight codex-lb's server-side injection). Enforced on
+      # every switch while codex-lb is active, so a stray `opencode auth login`
+      # can't reintroduce oauth mode.
+      if [[ -n "$openai_url" ]]; then
+        auth="$HOME/.local/share/opencode/auth.json"
+        if [[ -f "$auth" ]] && ${pkgs.jq}/bin/jq -e '.openai' "$auth" >/dev/null 2>&1; then
+          atmp="$(mktemp "''${auth}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.openai)' "$auth" > "$atmp"
+          mv "$atmp" "$auth"
+          chmod 600 "$auth"
+          echo "codex-lb: cleared .openai from auth store (forcing apiKey mode; codex-lb owns tokens)" >&2
+        fi
+      fi
+
+      echo "codex-lb: openai -> ''${openai_url:-<direct OpenAI>} (codex-lb=$clb_state)" >&2
+      if [[ -n "$openai_url" ]]; then
+        echo "codex-lb: restart serves to apply -> systemctl --user restart 'opencode-serve@*.service'" >&2
       fi
     '');
 
