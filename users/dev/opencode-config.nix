@@ -98,17 +98,17 @@ let
     in
       afterFable;
 
-  # adversarial-reviewer-fable: a fable-5-pinned twin of adversarial-reviewer-opus.
-  # Generated from the SAME source body at build time so the ~130-line prompt
-  # has a single source of truth (no hand-maintained second copy to drift).
-  # Rewrites only the model pin (opus-4-8 -> fable-5) and the matching
-  # "(opus-4-8 model)" token in the description, so the two show up under
-  # distinct handles with self-describing descriptions in the task-tool list.
-  # The result is fed through patchAgent, whose afterFable branch applies the
-  # cloudbox Vertex rewrite.
+  # adversarial-reviewer-<slug>: a model-pinned twin of adversarial-reviewer-opus.
+  # Generated from the SAME source body at build time so the ~130-line prompt has
+  # a single source of truth (no hand-maintained copies to drift). Rewrites only
+  # the model pin (opus-4-8 -> modelPin) and the matching "(opus-4-8 model)" token
+  # in the description, so each twin shows up under a distinct handle with a
+  # self-describing description in the task-tool list. The result is fed through
+  # patchAgent for any host rewrites (e.g. the afterFable Vertex rewrite on
+  # cloudbox; a no-op for pins no branch matches, like openai/gpt-5.6-sol).
   # The description also gets a CAUTION appended so the orchestrator does NOT
-  # auto-select the cheaper model: the fable twin is opt-in, only when the user
-  # explicitly asks for it; otherwise adversarial-reviewer-opus is the default.
+  # auto-select the twin: each is opt-in, only when the user explicitly asks for
+  # it; otherwise adversarial-reviewer-opus is the default.
   #
   # IMPORTANT: the appended text must NOT contain a colon-space (": "). opencode
   # parses agent frontmatter with gray-matter/js-yaml (packages/opencode/src/
@@ -118,16 +118,24 @@ let
   # concurrent agent-load in loadAgent(): it nondeterministically fails, and a
   # failed parse SKIPS the agent (config.ts:198-207), leaving a default stub
   # (mode=all, model=null) that silently runs the caller's model (opus) instead
-  # of fable. Colon-free descriptions (like the opus twin's) parse on the first
-  # try and are rock-solid, so we keep this value colon-free (em-dash instead).
-  mkFableVariant = src:
-    pkgs.runCommand "adversarial-reviewer-fable-src.md" {} ''
+  # of the pinned one. Colon-free descriptions (like the opus twin's) parse on the
+  # first try and are rock-solid, so we keep this value colon-free (em-dash).
+  mkReviewerVariant = { slug, modelPin, modelTag }: src:
+    pkgs.runCommand "adversarial-reviewer-${slug}-src.md" {} ''
       ${pkgs.perl}/bin/perl -0pe '
-        s|model: anthropic/claude-opus-4-8|model: anthropic/claude-fable-5|;
-        s|\(opus-4-8 model\)|(fable-5 model)|;
-        s|^(description: .*)$|$1. CAUTION — use this fable-5 variant ONLY when the user explicitly asks for it; otherwise default to adversarial-reviewer-opus|m;
+        s|model: anthropic/claude-opus-4-8|model: ${modelPin}|;
+        s|\(opus-4-8 model\)|(${modelTag} model)|;
+        s|^(description: .*)$|$1. CAUTION — use this ${modelTag} variant ONLY when the user explicitly asks for it; otherwise default to adversarial-reviewer-opus|m;
       ' ${src} > $out
     '';
+
+  # fable-5 twin (all hosts; cloudbox gets the Vertex rewrite via patchAgent).
+  mkFableVariant = mkReviewerVariant { slug = "fable"; modelPin = "anthropic/claude-fable-5"; modelTag = "fable-5"; };
+  # gpt-5.6-sol twin: ChatGPT/Codex-subscription frontier model served by codex-lb
+  # (127.0.0.1:2455). Deployed on all hosts (like fable); it's reachable wherever
+  # codex-lb serves gpt-5.6-sol and the openai provider is routed there. patchAgent
+  # is a pass-through for its openai/gpt-5.6-sol pin (no host rewrite needed).
+  mkSolVariant = mkReviewerVariant { slug = "sol"; modelPin = "openai/gpt-5.6-sol"; modelTag = "gpt-5.6-sol"; };
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -352,13 +360,20 @@ in
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
    xdg.configFile."opencode/agents/oracle.md".source = patchAgent "oracle" "${assetsPath}/opencode/agents/oracle.md";
-   # Two distinctly-named twins so the model is unambiguous at the call site:
+   # Distinctly-named twins so the model is unambiguous at the call site, all
+   # generated from the opus source (no prompt-body drift):
    #   @adversarial-reviewer-opus  -> opus-4-8 (source of truth for the prompt)
-   #   @adversarial-reviewer-fable -> claude-fable-5 (generated from the opus
-   #                                  source via mkFableVariant, no body drift)
+   #   @adversarial-reviewer-fable -> claude-fable-5 (mkFableVariant; cloudbox
+   #                                  gets the Vertex rewrite via patchAgent)
+   #   @adversarial-reviewer-sol   -> openai/gpt-5.6-sol (mkSolVariant; deployed
+   #                                  on all hosts — reachable wherever codex-lb
+   #                                  serves gpt-5.6-sol; patchAgent is a no-op
+   #                                  for this pin)
    xdg.configFile."opencode/agents/adversarial-reviewer-opus.md".source = patchAgent "adversarial-reviewer-opus" "${assetsPath}/opencode/agents/adversarial-reviewer-opus.md";
    xdg.configFile."opencode/agents/adversarial-reviewer-fable.md".source =
      patchAgent "adversarial-reviewer-fable" (mkFableVariant "${assetsPath}/opencode/agents/adversarial-reviewer-opus.md");
+   xdg.configFile."opencode/agents/adversarial-reviewer-sol.md".source =
+     patchAgent "adversarial-reviewer-sol" (mkSolVariant "${assetsPath}/opencode/agents/adversarial-reviewer-opus.md");
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
