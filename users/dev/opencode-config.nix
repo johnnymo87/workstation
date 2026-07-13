@@ -1347,6 +1347,53 @@ in
       fi
     '');
 
+  # Darwin flavor of injectTeamclaudeBaseUrl. Port-probe detection; dummy-cred
+  # seed identical to the systemd path; no auto serve-restart (pool) — the dummy
+  # cred's shape-only mode is decided at provider init, so a manual
+  # `opencode-serve-pool-restart` is required to take effect.
+  home.activation.injectTeamclaudeBaseUrlDarwin = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      anthropic_url=""
+      if /usr/bin/nc -z -G2 127.0.0.1 3456 2>/dev/null; then
+        anthropic_url="http://127.0.0.1:3456/v1"
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq --arg a "$anthropic_url" '
+            (if $a == "" then del(.provider.anthropic.options.baseURL)
+             else .provider.anthropic.options.baseURL = $a end)
+          | (if (.provider.anthropic.options // {}) == {}
+             then del(.provider.anthropic.options) else . end)
+          | (if (.provider.anthropic // {}) == {}
+             then del(.provider.anthropic) else . end)
+          | (if (.provider // {}) == {} then del(.provider) else . end)' \
+          "$runtime" > "$tmp"
+        mv "$tmp" "$runtime"
+      fi
+
+      if [[ -n "$anthropic_url" ]]; then
+        auth="$HOME/.local/share/opencode/auth.json"
+        mkdir -p "$(dirname "$auth")"
+        [[ -f "$auth" ]] || echo '{}' > "$auth"
+        want="$(${pkgs.jq}/bin/jq -cnS '{type:"oauth",access:"teamclaude-managed-noop",refresh:"teamclaude-managed-noop",expires:4102444800000}')"
+        have="$(${pkgs.jq}/bin/jq -cS '.anthropic // empty' "$auth" 2>/dev/null || true)"
+        if [[ "$have" != "$want" ]]; then
+          atmp="$(mktemp "''${auth}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq '.anthropic = {type:"oauth",access:"teamclaude-managed-noop",refresh:"teamclaude-managed-noop",expires:4102444800000}' \
+            "$auth" > "$atmp"
+          mv "$atmp" "$auth"; chmod 600 "$auth"
+          echo "teamclaude(darwin): seeded non-expiring dummy anthropic oauth credential (plugin shape-only)" >&2
+        fi
+      fi
+
+      echo "teamclaude(darwin): anthropic -> ''${anthropic_url:-<direct Anthropic>}" >&2
+      [[ -n "$anthropic_url" ]] && echo "teamclaude(darwin): run 'opencode-serve-pool-restart' to apply to running serves" >&2 || true
+    '');
+
   # Point opencode's first-party `openai` provider at the local codex-lb rotator
   # (devbox) when its user service is active; otherwise strip the override so the
   # provider falls back to its default (direct OpenAI). This is the OpenAI/Codex
@@ -1432,6 +1479,52 @@ in
       if [[ -n "$openai_url" ]]; then
         echo "codex-lb: config written — restart your opencode serve(s) to apply (devbox: systemctl --user restart 'opencode-serve@*.service')" >&2
       fi
+    '');
+
+  # Darwin flavor of injectCodexLbBaseUrl. No systemctl on macOS, so detect
+  # "codex-lb is up" with a loopback port probe. No auto serve-restart: the Mac
+  # runs an opencode-serve POOL, so we write config + clear the auth entry and
+  # print the apply command; run `opencode-serve-pool-restart` to pick it up.
+  home.activation.injectCodexLbBaseUrlDarwin = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      openai_url=""
+      openai_key=""
+      if /usr/bin/nc -z -G2 127.0.0.1 2455 2>/dev/null; then
+        openai_url="http://127.0.0.1:2455/v1"
+        openai_key="sk-codex-lb-local"
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq --arg u "$openai_url" --arg k "$openai_key" '
+            (if $u == "" then del(.provider.openai.options.baseURL)
+             else .provider.openai.options.baseURL = $u end)
+          | (if $k == "" then del(.provider.openai.options.apiKey)
+             else .provider.openai.options.apiKey = $k end)
+          | (if (.provider.openai.options // {}) == {}
+             then del(.provider.openai.options) else . end)
+          | (if (.provider.openai // {}) == {}
+             then del(.provider.openai) else . end)
+          | (if (.provider // {}) == {} then del(.provider) else . end)' \
+          "$runtime" > "$tmp"
+        mv "$tmp" "$runtime"
+      fi
+
+      if [[ -n "$openai_url" ]]; then
+        auth="$HOME/.local/share/opencode/auth.json"
+        if [[ -f "$auth" ]] && ${pkgs.jq}/bin/jq -e '.openai' "$auth" >/dev/null 2>&1; then
+          atmp="$(mktemp "''${auth}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.openai)' "$auth" > "$atmp"
+          mv "$atmp" "$auth"; chmod 600 "$auth"
+          echo "codex-lb(darwin): removed .openai from auth store (force apiKey mode)" >&2
+        fi
+      fi
+
+      echo "codex-lb(darwin): openai -> ''${openai_url:-<direct OpenAI>}" >&2
+      [[ -n "$openai_url" ]] && echo "codex-lb(darwin): run 'opencode-serve-pool-restart' to apply to running serves" >&2 || true
     '');
 
   # Inject Datadog MCP config (remote HTTP transport) into opencode.json
