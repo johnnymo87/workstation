@@ -46,6 +46,10 @@ lib.mkIf isDarwin {
     })
     pkgs.google-cloud-sdk
     pkgs.cloudflared
+    # teamclaude CLI (multi-account Claude Max rotator). Needed for interactive
+    # `teamclaude login` / `teamclaude accounts`; the launchd agent below runs the
+    # server. Nix-packaged (pkgs/teamclaude, platforms = unix), zero runtime deps.
+    localPkgs.teamclaude
     (pkgs.writeShellApplication {
       name = "pigeon-setup-secrets";
       text = ''
@@ -248,6 +252,34 @@ lib.mkIf isDarwin {
         KeepAlive = { SuccessfulExit = false; };
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/codex-lb.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/codex-lb.err.log";
+      };
+    };
+
+    # teamclaude (Claude Max rotator) — darwin/launchd flavor of the systemd unit
+    # in home.devbox.nix. Same opt-in wrapper pattern as codex-lb. Marker is the
+    # config file itself, created by interactive `teamclaude login`. Bootstrap:
+    #   1. teamclaude login    # PKCE OAuth, needs TTY + browser; repeat per account
+    #   2. launchctl kickstart -k gui/$(id -u)/org.nix-community.home.teamclaude
+    #   3. darwin-rebuild switch  (wires opencode via injectTeamclaudeBaseUrlDarwin)
+    teamclaude = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh" "-c"
+          ''
+            [ -e "$HOME/.config/teamclaude.json" ] || exit 0
+            exec ${localPkgs.teamclaude}/bin/teamclaude server --headless
+          ''
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          TEAMCLAUDE_CONFIG = "${config.home.homeDirectory}/.config/teamclaude.json";
+          PATH = "/usr/bin:/bin";
+        };
+        RunAtLoad = true;
+        KeepAlive = { SuccessfulExit = false; };
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/teamclaude.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/teamclaude.err.log";
       };
     };
   } // (builtins.listToAttrs (lib.imap0 (i: port: {
