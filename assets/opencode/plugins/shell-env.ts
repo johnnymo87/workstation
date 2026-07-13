@@ -57,6 +57,7 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
     ["bundle_gem_fury_io", "BUNDLE_GEM__FURY__IO"],
     ["bundle_enterprise_contribsys_com", "BUNDLE_ENTERPRISE__CONTRIBSYS__COM"],
     ["bundle_gems_graphql_pro", "BUNDLE_GEMS__GRAPHQL__PRO"],
+    ["dd_pat", "DD_PAT"],
     ["dd_api_key", "DD_API_KEY"],
     ["dd_app_key", "DD_APP_KEY"],
     ["buildbuddy_host", "BUILDBUDDY_HOST"],

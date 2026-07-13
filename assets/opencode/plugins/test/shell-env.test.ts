@@ -77,6 +77,7 @@ describe("shell-env plugin: sops secret injection", () => {
       "/run/secrets/github_api_token": "gh-token",
       "/run/secrets/jenkins_api_token": "jenkins-token",
       "/run/secrets/jenkins_user": "jenkins-user",
+      "/run/secrets/dd_pat": "dd-pat",
       "/run/secrets/dd_api_key": "dd-api",
       "/run/secrets/dd_app_key": "dd-app",
       "/run/secrets/buildbuddy_host": "bb-host",
@@ -91,6 +92,7 @@ describe("shell-env plugin: sops secret injection", () => {
 
     expect(env.JENKINS_API_TOKEN).toBe("jenkins-token")
     expect(env.JENKINS_USER).toBe("jenkins-user")
+    expect(env.DD_PAT).toBe("dd-pat")
     expect(env.DD_API_KEY).toBe("dd-api")
     expect(env.DD_APP_KEY).toBe("dd-app")
     expect(env.BUILDBUDDY_HOST).toBe("bb-host")

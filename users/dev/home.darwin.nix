@@ -397,8 +397,11 @@ lib.mkIf isDarwin {
       fi
       unset _bundle_host _bundle_token
 
-      # Datadog CLI credentials (from macOS Keychain)
+      # Datadog CLI credentials (from macOS Keychain). Prefer a Personal Access
+      # Token (DD_PAT, Bearer); the app+api key pair is a deprecated fallback.
       export DD_SITE="us3.datadoghq.com"
+      DD_PAT_VAL="$(/usr/bin/security find-generic-password -s dd-pat -w 2>/dev/null)" && export DD_PAT="$DD_PAT_VAL"
+      unset DD_PAT_VAL
       DD_API_KEY_VAL="$(/usr/bin/security find-generic-password -s dd-api-key -w 2>/dev/null)" && export DD_API_KEY="$DD_API_KEY_VAL"
       unset DD_API_KEY_VAL
       DD_APP_KEY_VAL="$(/usr/bin/security find-generic-password -s dd-app-key -w 2>/dev/null)" && export DD_APP_KEY="$DD_APP_KEY_VAL"

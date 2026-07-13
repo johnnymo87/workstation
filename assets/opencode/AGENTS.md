@@ -156,7 +156,7 @@ the work tokens — never runs. To close that gap, the same `shell-env.ts` plugi
 reads the sops-decrypted `/run/secrets/*` files directly and injects them into
 every bash invocation (see `loadSecretEnv` in `shell-env.ts`). On cloudbox that means
 `JENKINS_API_TOKEN`, `JENKINS_USER`, `GH_TOKEN`, `GITHUB_API_TOKEN`, `BUNDLE_*`,
-`DD_API_KEY`/`DD_APP_KEY`, `BUILDBUDDY_*`, `BA_CLI_REPO`, `GOOGLE_CLOUD_PROJECT`,
+`DD_PAT` (plus deprecated `DD_API_KEY`/`DD_APP_KEY`), `BUILDBUDDY_*`, `BA_CLI_REPO`, `GOOGLE_CLOUD_PROJECT`,
 the Atlassian vars, etc. are all available in opencode bash sessions.
 
 The read is host-safe: where `/run/secrets/*` does not exist

@@ -284,7 +284,14 @@ in
         group = "dev";
         mode = "0400";
       };
-      # Datadog API keys (for Datadog MCP proxy)
+      # Datadog Personal Access Token (Bearer auth for dd-cli / MCP). Preferred
+      # single credential; the app+api keys below are a deprecated fallback.
+      dd_pat = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
+      # Datadog API keys (deprecated app+api pair; kept until PAT cutover done)
       dd_api_key = {
         owner = "dev";
         group = "dev";
@@ -746,8 +753,12 @@ ${serveIdCase}
         fi
         # Datadog credentials for `dd-cli` launched from OpenCode sessions.
         # Mirrors the interactive-shell exports in users/dev/home.cloudbox.nix;
-        # systemd services don't source ~/.bashrc.
+        # systemd services don't source ~/.bashrc. Prefer a Personal Access
+        # Token (DD_PAT, Bearer); app+api keys are a deprecated fallback.
         export DD_SITE="us3.datadoghq.com"
+        if [ -r /run/secrets/dd_pat ]; then
+          export DD_PAT="$(cat /run/secrets/dd_pat)"
+        fi
         if [ -r /run/secrets/dd_api_key ]; then
           export DD_API_KEY="$(cat /run/secrets/dd_api_key)"
         fi

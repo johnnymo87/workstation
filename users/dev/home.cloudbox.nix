@@ -222,8 +222,12 @@ lib.mkIf isCloudbox {
       unset _bundle_host _bundle_var
     fi
 
-    # Datadog CLI credentials (dd-cli)
+    # Datadog CLI credentials (dd-cli). Prefer a Personal Access Token (DD_PAT,
+    # sent as a Bearer token); the app+api key pair is a deprecated fallback.
     export DD_SITE="us3.datadoghq.com"
+    if [ -r /run/secrets/dd_pat ]; then
+      export DD_PAT="$(cat /run/secrets/dd_pat)"
+    fi
     if [ -r /run/secrets/dd_api_key ]; then
       export DD_API_KEY="$(cat /run/secrets/dd_api_key)"
     fi
