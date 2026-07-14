@@ -7,6 +7,9 @@ description: Use when reading or writing Jira tickets, fetching Confluence pages
 
 Two complementary tools. **Read this whole file before choosing one** — picking the wrong tool is the most common mistake.
 
+- **Atlassian MCP** (`atlassian` MCP server): mutations, JQL/CQL search, arbitrary fields, and Confluence create/edit. This is the default for everything except rich reads.
+- **nvim** (`:FetchJiraTicket` / `:FetchConfluencePage`): the best *read* path — it renders a ticket or page (plus threaded comments and image attachments) to Markdown on disk.
+
 ## Decision Matrix
 
 | Workflow | Use |
@@ -14,18 +17,18 @@ Two complementary tools. **Read this whole file before choosing one** — pickin
 | Read a Jira ticket as context (rendered Markdown + image attachments) | **nvim** `:FetchJiraTicket` |
 | Read a Confluence page (with comments + PNG diagrams) | **nvim** `:FetchConfluencePage` |
 | Archive Atlassian content to disk for offline reference | **nvim** |
-| Create a new Jira ticket | **acli** (only option) |
-| Edit a ticket's summary / description / status / assignee | **acli** (only option) |
-| Add / update / delete a comment | **acli** (only option) |
-| JQL search ("my open tickets in epic X") | **acli** (only option) |
-| Read non-default Jira fields (custom fields, labels, story points, sprint, fix version, parent epic) | **acli** `workitem view --json \| jq` |
+| Create a new Jira ticket | **MCP** `createJiraIssue` |
+| Edit a ticket's summary / description / status / assignee | **MCP** `editJiraIssue` / `transitionJiraIssue` |
+| Add a comment | **MCP** `addCommentToJiraIssue` |
+| JQL search ("my open tickets in epic X") | **MCP** `searchJiraIssuesUsingJql` |
+| Read non-default Jira fields (custom fields, labels, story points, sprint, fix version, parent epic) | **MCP** `getJiraIssue` |
 | Confluence page **body only**, no images/comments | Either; `confluence-to-md.sh` is lightest |
 | Confluence with comments or attachments | **nvim** (only option) |
-| Create / edit Confluence pages or comments | **Neither** — gap. Use REST API directly or web UI. |
+| Create / edit Confluence pages or comments | **MCP** `createConfluencePage` / `updateConfluencePage` |
 
 **Rule of thumb:**
 - **Reading rich content (rendered Markdown + images + comments) → nvim.**
-- **Mutations, JQL, arbitrary Jira fields → acli.**
+- **Mutations, JQL/CQL, arbitrary Jira fields, Confluence authoring → Atlassian MCP.**
 
 ## Quick Start
 
@@ -46,36 +49,26 @@ nvim --headless out.md -c "FetchConfluencePage 1234567890" -c "write" -c "quit"
 echo "https://company.atlassian.net/wiki/spaces/ENG/pages/1234567890/Title" | grep -oE '[0-9]{10}'
 ```
 
-### Create a Jira ticket (acli)
+### Create a Jira ticket (MCP)
 
-```bash
-acli jira workitem create --project PROJ --type Task \
-  --summary "Add integration tests" --description-file desc.md \
-  --assignee "$ATLASSIAN_ASSIGNEE_ID"
-```
+Call the `atlassian` MCP's `createJiraIssue` tool with `cloudId`, `projectKey`
+(`PROJ`), `issueTypeName` (`Task`, `Bug`, `Story`, `Epic`, …), `summary`, and a
+Markdown `description`. Set the assignee to `$ATLASSIAN_ASSIGNEE_ID`.
 
-**Format gotcha — always use GitHub-Flavored Markdown, never Jira wiki markup.** `acli` (and the underlying Atlassian Cloud REST API v3) expects descriptions and comment bodies in Markdown — `# heading`, `**bold**`, `` `code` ``, `[text](url)`, `| col | col |` tables — and converts to ADF on the way in. Jira wiki markup (`h2.`, `*bold*`, `{{code}}`, `[text|url]`, `|| col || col ||`) renders as literal text and is the most common mistake when an LLM drafts a ticket. If you see your description rendering with literal `h2.` or `{{...}}` in the Jira UI, you used wiki markup — re-edit with Markdown.
+**Format gotcha — always use GitHub-Flavored Markdown, never Jira wiki markup.** The Atlassian MCP (and the underlying Cloud REST API v3) expects descriptions and comment bodies in Markdown — `# heading`, `**bold**`, `` `code` ``, `[text](url)`, `| col | col |` tables — and converts to ADF on the way in. Jira wiki markup (`h2.`, `*bold*`, `{{code}}`, `[text|url]`, `|| col || col ||`) renders as literal text and is the most common mistake when an LLM drafts a ticket. If you see your description rendering with literal `h2.` or `{{...}}` in the Jira UI, you used wiki markup — re-edit with Markdown.
 
-### Add a comment (acli)
+### Add a comment (MCP)
 
-```bash
-acli jira workitem comment create --key PROJ-1234 --body "Reduces manual QA burden."
-```
+Call `addCommentToJiraIssue` with the `issueIdOrKey` (`PROJ-1234`) and a Markdown `commentBody`. Comment bodies follow the same rule: **Markdown only, never wiki markup.**
 
-Comment bodies follow the same rule: **Markdown only, never wiki markup.**
+### JQL search (MCP)
 
-### JQL search (acli)
+Call `searchJiraIssuesUsingJql` with a `jql` string, e.g.
+`project=PROJ AND assignee="<accountId>" AND statusCategory!=Done`.
 
-```bash
-acli jira workitem search --jql \
-  'project=PROJ AND assignee="'"$ATLASSIAN_ASSIGNEE_ID"'" AND statusCategory!=Done' --json | jq .
-```
+### Read arbitrary Jira fields (MCP)
 
-### Read arbitrary Jira fields (acli)
-
-```bash
-acli jira workitem view PROJ-1234 --json | jq '.fields.customfield_10001'
-```
+Call `getJiraIssue` with the `issueIdOrKey`. It returns the full field set (custom fields, labels, story points, sprint, fix version, parent epic). For rendered Markdown of the description + comments + image attachments, use **nvim** instead.
 
 ## Org Config
 
@@ -93,14 +86,14 @@ acli jira workitem view PROJ-1234 --json | jq '.fields.customfield_10001'
 - Less technical detail than PRs
 - Don't put the ticket number in the title
 
-## Known Gap
+## Confluence Authoring (MCP)
 
-**Neither tool can create or edit Confluence pages or comments.** For that, hit the Confluence REST API directly or use the web UI.
+Create pages with `createConfluencePage` and edit them with `updateConfluencePage` (pass `cloudId`, `spaceId`/`pageId`, `title`, and Markdown `body`). Footer/inline comments are also available via the MCP's Confluence comment tools. For *reading* a page with its threaded comments and diagrams rendered, still prefer **nvim** `:FetchConfluencePage`.
 
 ## Reference
 
 See [REFERENCE.md](./REFERENCE.md) for:
-- Full `acli` command reference (create / view / edit / delete / comments / JQL / auth)
+- Full Atlassian MCP tool reference (Jira create / view / edit / transition / comments / JQL; Confluence create / edit / search)
 - nvim fetch internals (which API endpoints, output format, threading, attachment behavior)
 - `confluence-to-md.sh` body-only helper
 - Environment variable setup (macOS Keychain / sops)

@@ -222,7 +222,7 @@ in
         group = "dev";
         mode = "0400";
       };
-      # Atlassian API token (for acli, nvim FetchJiraTicket/FetchConfluencePage)
+      # Atlassian API token (for nvim FetchJiraTicket/FetchConfluencePage)
       atlassian_api_token = {
         owner = "dev";
         group = "dev";

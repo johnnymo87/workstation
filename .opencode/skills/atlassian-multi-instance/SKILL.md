@@ -16,7 +16,7 @@ Credentials (Keychain / sops)
 Shell startup loads ATLASSIAN_* (site/email/cloud-id/api-token)
         |
         v
-nvim, acli, etc. use ATLASSIAN_* env vars
+nvim (FetchJiraTicket/FetchConfluencePage) uses ATLASSIAN_* env vars
 
 MCP server (separate path):
   atlassian  -->  wrapper reads site from Keychain/sops  -->  --resource https://{site}/ :3334

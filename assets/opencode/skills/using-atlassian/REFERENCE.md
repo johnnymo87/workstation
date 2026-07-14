@@ -17,140 +17,97 @@ Verify: `env | grep ATLASSIAN`
 
 ### Required Tools
 
-- `acli` — Atlassian CLI
-- `nvim` — with `~/.config/nvim/lua/user/atlassian.lua` (deployed from `~/projects/workstation/assets/nvim/lua/user/atlassian.lua`)
-- `curl`, `jq`, `pandoc`, `python3`
+- The `atlassian` MCP server (see the `atlassian-multi-instance` skill for how it's wired and authenticated). Provides all Jira/Confluence mutations, search, and field reads.
+- `nvim` — with `~/.config/nvim/lua/user/atlassian.lua` (deployed from `~/projects/workstation/assets/nvim/lua/user/atlassian.lua`). The rich-read path.
+- `curl`, `jq`, `pandoc`, `python3` — used by nvim and the `confluence-to-md.sh` helper.
 
-### `acli` Login (one-time)
-
-Piping doesn't work — token must come from a file via stdin redirection:
-
-```bash
-echo "$ATLASSIAN_API_TOKEN" > /tmp/token.txt && \
-  acli jira auth login \
-    --site "$ATLASSIAN_SITE" \
-    --email "$ATLASSIAN_EMAIL" \
-    --token < /tmp/token.txt && \
-  rm /tmp/token.txt
-
-acli jira auth status   # verify
-```
+The MCP authenticates over OAuth (not the `ATLASSIAN_API_TOKEN`); nvim and `confluence-to-md.sh` use the `ATLASSIAN_*` env vars. First-time MCP OAuth setup and re-auth are covered in the `atlassian-multi-instance` skill.
 
 ---
 
-## Part 1: `acli` — Jira CRUD
+## Part 1: Atlassian MCP — Jira CRUD
 
-### Create
+All operations below are tool calls against the `atlassian` MCP server. Every
+tool takes a `cloudId` (the MCP resolves the accessible cloud id; if it asks,
+it's the `getAccessibleAtlassianResources` / `atlassianUserInfo` result). Keys
+like `PROJ-1234` and project `PROJ` are examples.
 
-```bash
-acli jira workitem create \
-  --project PROJ \
-  --type Task \
-  --summary "Add integration tests for payment processing" \
-  --description-file desc.md \
-  --assignee "$ATLASSIAN_ASSIGNEE_ID"
+### Create — `createJiraIssue`
 
-# Issue types: Task, Bug, Story, Epic, etc.
+Params: `projectKey` (`PROJ`), `issueTypeName` (`Task`, `Bug`, `Story`, `Epic`, …),
+`summary`, Markdown `description`, and `assignee_account_id`
+(`$ATLASSIAN_ASSIGNEE_ID`). Returns the new key, e.g. `PROJ-1234`
+(browse: `https://$ATLASSIAN_SITE/browse/PROJ-1234`).
+
+### Read — `getJiraIssue`
+
+Params: `issueIdOrKey` (`PROJ-1234`), optional `fields`. Returns the full field
+set including custom fields (e.g. `customfield_10001`), labels, story points,
+sprint, fix version, parent epic.
+
+Note: the description comes back as ADF (Atlassian Document Format), not
+Markdown. For rendered Markdown of a ticket's description + comments +
+attachments, use **nvim** instead.
+
+### Update — `editJiraIssue` / `transitionJiraIssue`
+
+- `editJiraIssue` — params `issueIdOrKey` plus the `fields` to change (`summary`,
+  Markdown `description`, `assignee`, etc.).
+- `transitionJiraIssue` — moves a ticket's status. First call
+  `getTransitionsForJiraIssue` to get the valid transition id for the target
+  status ("In Review"), then pass that `transitionId`.
+
+### Search (JQL) — `searchJiraIssuesUsingJql`
+
+Params: `jql`. Examples:
+
+```
+project=PROJ AND assignee="<accountId>" AND statusCategory!=Done
+project=PROJ AND "Epic Link"=PROJ-5678 AND status!="Done"
 ```
 
-### Read
+### Comments — `addCommentToJiraIssue`
 
-```bash
-# Full JSON
-acli jira workitem view PROJ-1234 --json | jq .
-
-# Specific field
-acli jira workitem view PROJ-1234 --json | jq '.fields.summary'
-
-# Custom field example
-acli jira workitem view PROJ-1234 --json | jq '.fields.customfield_10001'
-```
-
-Note: description comes back as ADF (Atlassian Document Format) JSON, not Markdown. For rendered Markdown of a ticket's description + comments + attachments, use **nvim** instead.
-
-### Update
-
-```bash
-acli jira workitem edit \
-  --key PROJ-1234 \
-  --summary "Add integration tests for payments (incl. refunds)" \
-  --description-file desc-updated.md
-
-acli jira workitem edit --key PROJ-1234 --assignee "user@example.com"
-acli jira workitem transition --key PROJ-1234 --status "In Review"
-```
-
-### Delete
-
-```bash
-acli jira workitem delete --key PROJ-1234 --yes   # --yes skips prompt
-```
-
-### Search (JQL)
-
-```bash
-# My open tickets
-acli jira workitem search --jql \
-  'project=PROJ AND assignee="'"$ATLASSIAN_ASSIGNEE_ID"'" AND statusCategory!=Done'
-
-# Open tickets in Active Epic
-acli jira workitem search --jql \
-  'project=PROJ AND "Epic Link"=PROJ-5678 AND status!="Done"' --json
-```
-
-### Comments
-
-```bash
-# List
-acli jira workitem comment list --key PROJ-1234 --json | jq .
-
-# Create
-acli jira workitem comment create --key PROJ-1234 \
-  --body "This reduces manual QA burden."
-
-# Update last comment from the same author
-acli jira workitem comment create --key PROJ-1234 \
-  --edit-last \
-  --body "Updated: added retry logic."
-
-# Update specific comment
-acli jira workitem comment update --key PROJ-1234 \
-  --id 123456 \
-  --body "Updated comment"
-
-# Delete
-acli jira workitem comment delete --key PROJ-1234 --id 123456
-```
+Params: `issueIdOrKey`, Markdown `commentBody`. (To read existing comments with
+threading + attachments rendered, use **nvim**.)
 
 ### Example: Create a Bug Ticket
 
-```bash
-cat > bug-desc.md <<'EOF'
-Users experience authentication timeouts when submitting orders during peak traffic.
+Call `createJiraIssue` with:
+- `projectKey`: `PROJ`
+- `issueTypeName`: `Bug`
+- `summary`: "Fix authentication timeout on order submission"
+- `assignee_account_id`: `$ATLASSIAN_ASSIGNEE_ID`
+- `description` (Markdown):
 
-This causes order failures and user frustration. Issue appears related to session
-token expiry not being refreshed before long-running operations.
+  > Users experience authentication timeouts when submitting orders during peak
+  > traffic. This causes order failures and user frustration. Issue appears
+  > related to session token expiry not being refreshed before long-running
+  > operations. Proposed fix: implement token refresh logic before order
+  > submission API calls.
 
-Proposed fix: implement token refresh logic before order submission API calls.
-EOF
+The response contains the new key, e.g. `PROJ-1234`
+(open: `https://$ATLASSIAN_SITE/browse/PROJ-1234`).
 
-acli jira workitem create \
-  --project PROJ \
-  --type Bug \
-  --summary "Fix authentication timeout on order submission" \
-  --description-file bug-desc.md \
-  --assignee "$ATLASSIAN_ASSIGNEE_ID"
-
-# Output shows the new key, e.g. PROJ-1234
-# Open: https://$ATLASSIAN_SITE/browse/PROJ-1234
-```
-
-### `acli` Best Practices
+### Best Practices
 
 1. Lead with impact in the description
 2. Verify epic assignment for Active Epic work → `PROJ-5678`
-3. Use `accountId` for `--assignee` (more reliable than email)
-4. `env | grep ATLASSIAN` before operations to confirm correct instance
+3. Use `accountId` for the assignee (more reliable than email); look it up with `lookupJiraAccountId` if needed
+4. Confirm you're on the right instance before mutating (see Troubleshooting → Wrong instance)
+
+---
+
+## Part 1b: Atlassian MCP — Confluence authoring
+
+The MCP closes the old gap where neither tool could write Confluence:
+
+- `createConfluencePage` — params `spaceId`, `title`, Markdown `body`, optional `parentId`.
+- `updateConfluencePage` — params `pageId`, `title`, Markdown `body` (and the current `version` if the tool requires it).
+- `createConfluenceFooterComment` / `createConfluenceInlineComment` — add comments.
+- `searchConfluenceUsingCql` — CQL search across spaces.
+
+For *reading* a page with threaded comments and diagrams rendered to Markdown, still prefer **nvim** `:FetchConfluencePage` (Part 2) or the lighter `confluence-to-md.sh` (Part 3).
 
 ---
 
@@ -326,19 +283,14 @@ cat /run/secrets/atlassian_api_token
 # If missing, update secrets/cloudbox.yaml and re-apply NixOS
 ```
 
-### `acli` not authenticated
+### Atlassian MCP not authenticated / tools missing
 
-```bash
-acli jira auth status
-
-# Re-auth:
-echo "$ATLASSIAN_API_TOKEN" > /tmp/token.txt && \
-  acli jira auth login \
-    --site "$ATLASSIAN_SITE" \
-    --email "$ATLASSIAN_EMAIL" \
-    --token < /tmp/token.txt && \
-  rm /tmp/token.txt
-```
+The `atlassian` MCP authenticates over OAuth, not the API token. If its tools
+are missing or the server shows "Failed", see the `atlassian-multi-instance`
+skill → "Troubleshooting MCP Failed Status" and "Re-authenticating OAuth". In
+short: verify the site secret exists, check `ls ~/.mcp-auth/mcp-remote-*/` for
+cached tokens, and re-run the wrapper manually to complete the OAuth consent
+(callback tunnels through port 3334 on headless hosts).
 
 ### nvim fetch fails
 

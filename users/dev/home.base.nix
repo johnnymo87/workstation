@@ -530,7 +530,6 @@ in
   ]
   # Work tools (macOS + cloudbox only)
   ++ lib.optionals (isDarwin || isCloudbox) [
-    localPkgs.acli
     # BuildBuddy CLI (Bazelisk wrapper + bb subcommands like login, view).
     # The bb-test-log helper below is the API-backed escape hatch for
     # fetching raw, untruncated per-target test logs.

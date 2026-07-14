@@ -38,7 +38,7 @@ The full id is required — slugs are not unique and `opencode -s` won't accept 
 
 Queries the global OpenCode SQLite DB at `~/.local/share/opencode/opencode.db`. Searches `part.data` JSON blobs using `instr()` substring matching.
 
-Default scope is `tool` parts only (gh/acli commands and outputs). Use `--types` or `--all` for broader search.
+Default scope is `tool` parts only (e.g. gh/kubectl commands and outputs). Use `--types` or `--all` for broader search.
 
 ## Database
 
@@ -46,7 +46,7 @@ Single global DB. Schema: `project -> session -> message -> part`. Content lives
 
 | Type | Content | Default? |
 |------|---------|----------|
-| tool | gh/acli commands, inputs, outputs | Yes |
+| tool | shell/tool commands, inputs, outputs | Yes |
 | text | Conversation text | No |
 | patch | File diffs | No |
 | reasoning | Model reasoning | No |

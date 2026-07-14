@@ -51,7 +51,6 @@
 
     # Self-packaged tools (updated via nix-update in CI)
     localPkgsFor = system: let p = pkgsFor system; in {
-      acli = p.callPackage ./pkgs/acli { };
       ask-question = p.callPackage ./pkgs/ask-question { };
       bb = p.callPackage ./pkgs/bb { };
       beads = p.callPackage ./pkgs/beads { };
@@ -85,7 +84,7 @@
   in {
     # Expose local packages for nix-update and nix build.
     # Filter out packages whose meta.platforms excludes the target system
-    # (e.g. acli is aarch64-only, so it's not in packages.x86_64-linux).
+    # (e.g. a package restricted to aarch64 won't appear in packages.x86_64-linux).
     packages = builtins.listToAttrs (map (system: {
       name = system;
       value = let

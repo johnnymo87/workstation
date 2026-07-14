@@ -366,7 +366,7 @@ lib.mkIf isDarwin {
       ATLASSIAN_CLOUD_ID_VAL="$(/usr/bin/security find-generic-password -s atlassian-cloud-id -w 2>/dev/null)" && export ATLASSIAN_CLOUD_ID="$ATLASSIAN_CLOUD_ID_VAL"
       unset ATLASSIAN_CLOUD_ID_VAL
 
-      # Atlassian API token for acli / nvim Atlassian commands (from macOS Keychain)
+      # Atlassian API token for nvim Atlassian commands (from macOS Keychain)
       ATLASSIAN_VAL="$(/usr/bin/security find-generic-password -s atlassian-api-token -w 2>/dev/null)" && export ATLASSIAN_API_TOKEN="$ATLASSIAN_VAL"
       unset ATLASSIAN_VAL
 
