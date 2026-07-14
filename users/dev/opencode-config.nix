@@ -1435,8 +1435,12 @@ in
     '');
 
   # Inject Datadog MCP config (remote HTTP transport) into opencode.json
-  # Authenticates with a Datadog Personal Access Token (dd_pat/dd-pat) placed in
-  # the DD_APPLICATION_KEY header, which Datadog authenticates on alone.
+  # Authenticates with a Datadog Personal Access Token (dd_pat/dd-pat) sent as an
+  # HTTP Bearer token ("Authorization: Bearer <pat>"). NOTE: do NOT use a
+  # "DD_APPLICATION_KEY" header — Datadog's edge drops HTTP header names
+  # containing underscores, so the PAT never reaches auth and every request 401s
+  # ("server unavailable" in opencode). Bearer (or the dashed "DD-APPLICATION-KEY")
+  # is required; Bearer matches how dd-cli authenticates the same PAT.
   # Endpoint host is mcp.<DD_SITE>; site is us3 for our org.
   # Disabled by default — enable manually or via dedicated agent when needed.
   #
@@ -1474,7 +1478,7 @@ in
             "enabled": false,
             "oauth": false,
             "headers": {
-              "DD_APPLICATION_KEY": $pat
+              "Authorization": ("Bearer " + $pat)
             }
           }' "$runtime" > "$tmp"
 
@@ -1515,7 +1519,7 @@ in
             "enabled": false,
             "oauth": false,
             "headers": {
-              "DD_APPLICATION_KEY": $pat
+              "Authorization": ("Bearer " + $pat)
             }
           }' "$runtime" > "$tmp"
 
