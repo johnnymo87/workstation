@@ -651,12 +651,12 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "Basecamp MCP credentials not found in Keychain; removed mcp.basecamp from config" >&2
-        exit 0
-      fi
-
       # Both credentials present: inject full Basecamp MCP config
       # Disabled by default; enable manually when needed
-      if [[ -f "$runtime" ]]; then
+      # NOTE: elif (not a separate `if` after `exit 0`) — an `exit` here would
+      # abort the whole concatenated home-manager activation, silently skipping
+      # every later activation (setupLaunchAgents, other injects). See git log.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
@@ -704,16 +704,14 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "Slack MCP xoxp token not found in Keychain; removed mcp.slack from config" >&2
-        exit 0
-      fi
-
       # Token present: inject Slack MCP config with xoxp auth
       # MCP is disabled by default; enable manually or use dedicated slack agent when needed.
       # Two variants: `slack` (read + write, SLACK_MCP_ADD_MESSAGE_TOOL=true) and
       # `slack-ro` (read-only; omits SLACK_MCP_ADD_MESSAGE_TOOL so the korotovsky
       # server registers read tools only). slack-ro is used by lgtm's read-only
       # gather session (`opencode-launch --mcp slack-ro`) so it structurally cannot post.
-      if [[ -f "$runtime" ]]; then
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
@@ -763,14 +761,12 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "Slack MCP xoxp token not found in sops; removed mcp.slack + mcp.slack-ro from config" >&2
-        exit 0
-      fi
-
       # Token present: inject Slack MCP config with xoxp auth.
       # Two variants: `slack` (read + write) and `slack-ro` (read-only; omits
       # SLACK_MCP_ADD_MESSAGE_TOOL so only read tools register). slack-ro is used
       # by lgtm's read-only gather session so it structurally cannot post.
-      if [[ -f "$runtime" ]]; then
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
@@ -817,10 +813,8 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "PagerDuty API token not found in Keychain; removed mcp.pagerduty from config" >&2
-        exit 0
-      fi
-
-      if [[ -f "$runtime" ]]; then
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
@@ -859,10 +853,8 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "PagerDuty API token not found in sops; removed mcp.pagerduty from config" >&2
-        exit 0
-      fi
-
-      if [[ -f "$runtime" ]]; then
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
@@ -900,10 +892,8 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "Rollbar access token not found in Keychain; removed mcp.rollbar from config" >&2
-        exit 0
-      fi
-
-      if [[ -f "$runtime" ]]; then
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
@@ -942,10 +932,8 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "Rollbar access token not found in sops; removed mcp.rollbar from config" >&2
-        exit 0
-      fi
-
-      if [[ -f "$runtime" ]]; then
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
@@ -999,8 +987,9 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "DevCycle: no client id/secret (Keychain) and no SSO auth.yml; removed mcp.devcycle from config" >&2
-        exit 0
       fi
+      # NOTE: no 'exit' after the removal above — an exit aborts the whole
+      # concatenated HM activation. Gate the inject on creds/SSO instead.
 
       env_json="{}"
       if [[ "$have_creds" -eq 1 ]]; then
@@ -1012,7 +1001,7 @@ in
            + (if $pk == "" then {} else {DEVCYCLE_PROJECT_KEY: $pk} end)')"
       fi
 
-      if [[ -f "$runtime" ]]; then
+      if [[ ( "$have_creds" -eq 1 || "$have_sso" -eq 1 ) && -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
         ${pkgs.jq}/bin/jq \
           --arg command "${devcycle-mcp}/bin/devcycle-mcp" \
@@ -1055,8 +1044,9 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "DevCycle: no client id/secret (sops) and no SSO auth.yml; removed mcp.devcycle from config" >&2
-        exit 0
       fi
+      # NOTE: no 'exit' after the removal above — an exit aborts the whole
+      # concatenated HM activation. Gate the inject on creds/SSO instead.
 
       env_json="{}"
       if [[ "$have_creds" -eq 1 ]]; then
@@ -1068,7 +1058,7 @@ in
            + (if $pk == "" then {} else {DEVCYCLE_PROJECT_KEY: $pk} end)')"
       fi
 
-      if [[ -f "$runtime" ]]; then
+      if [[ ( "$have_creds" -eq 1 || "$have_sso" -eq 1 ) && -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
         ${pkgs.jq}/bin/jq \
           --arg command "${devcycle-mcp}/bin/devcycle-mcp" \
@@ -1559,10 +1549,8 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "Datadog PAT not found in Keychain (dd-pat); removed mcp.datadog from config" >&2
-        exit 0
-      fi
-
-      if [[ -f "$runtime" ]]; then
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
@@ -1600,10 +1588,8 @@ in
           mv "$tmp" "$runtime"
         fi
         echo "Datadog PAT not found in sops (dd_pat); removed mcp.datadog from config" >&2
-        exit 0
-      fi
-
-      if [[ -f "$runtime" ]]; then
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
