@@ -36,8 +36,6 @@ echo "$ATLASSIAN_API_TOKEN" > /tmp/token.txt && \
 acli jira auth status   # verify
 ```
 
-Re-auth required after `switch-atlassian`.
-
 ---
 
 ## Part 1: `acli` — Jira CRUD
@@ -358,10 +356,8 @@ ls -l ~/.config/nvim/lua/user/atlassian.lua
 
 ### Wrong instance
 
-If results look wrong, you may be hitting the other Atlassian instance:
+If results look wrong, confirm which Atlassian site is configured:
 
 ```bash
-echo "$ATLASSIAN_SITE"          # check which instance is active
-switch-atlassian default        # or alt
-# Re-auth acli after switching; nvim picks up new env automatically
+echo "$ATLASSIAN_SITE"          # verify the configured instance
 ```

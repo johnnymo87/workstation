@@ -244,27 +244,6 @@ in
         group = "dev";
         mode = "0400";
       };
-      # Alt Atlassian instance (for switch-atlassian alt)
-      atlassian_alt_api_token = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      atlassian_alt_site = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      atlassian_alt_email = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      atlassian_alt_cloud_id = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
       # BuildBuddy host + org API key (read-only). Used by `bb` CLI and the
       # bb-test-log helper to fetch raw test logs from the BuildBuddy
       # enterprise API. See assets/opencode/skills/using-buildbuddy.

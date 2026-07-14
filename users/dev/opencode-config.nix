@@ -166,13 +166,6 @@ let
     sopsSecret = "atlassian_site";
   };
 
-  atlassian-alt-mcp = mkAtlassianMcp {
-    name = "atlassian-alt-mcp";
-    port = 3335;
-    keychainService = "atlassian-alt-site";
-    sopsSecret = "atlassian_alt_site";
-  };
-
   # --enable-write-tools surfaces the incident write tools (resolve, acknowledge,
   # reassign, add notes, etc.) in addition to the read tools. The MCP is still
   # enabled:false by default, so write tools only load when the operator
@@ -348,11 +341,6 @@ let
         atlassian = {
           type = "local";
           command = [ "${atlassian-mcp}/bin/atlassian-mcp" ];
-          enabled = false;
-        };
-        atlassian-alt = {
-          type = "local";
-          command = [ "${atlassian-alt-mcp}/bin/atlassian-alt-mcp" ];
           enabled = false;
         };
       };

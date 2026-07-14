@@ -86,17 +86,6 @@ acli jira workitem view PROJ-1234 --json | jq '.fields.customfield_10001'
 | Default Assignee | `$ATLASSIAN_ASSIGNEE_ID` |
 | Active Epic | `PROJ-5678` |
 
-## Multiple Instances
-
-Two Atlassian instances configured: `default` and `alt`. Shell startup loads `default`.
-
-```bash
-switch-atlassian alt    # swap ATLASSIAN_* env vars
-# acli requires re-auth after switching: acli jira auth login --site ... --email ... --token < ...
-# nvim re-reads env on each command, no re-auth needed
-switch-atlassian default
-```
-
 ## Ticket Writing Philosophy
 
 - Lead with **impact** (problem / opportunity / benefit)
