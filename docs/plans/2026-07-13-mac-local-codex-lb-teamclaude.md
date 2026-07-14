@@ -393,6 +393,35 @@ opencode-serve-pool-restart                          # apply to running serves (
 
 ---
 
+### Root-cause postmortem: new launchd agents + teamclaude route not applied (RESOLVED)
+
+On first apply, `sudo darwin-rebuild switch` appeared to succeed but (a) never placed
+the new codex-lb/teamclaude launchd agents and (b) never wired the teamclaude
+anthropic route — while codex-lb's openai route *did* wire. Extensive dead-ends
+(install `-D/-T` flags, root-vs-user, the Aqua guard) were all ruled out.
+
+**Actual cause (pre-existing bug, unrelated to these agents):** the MCP-secret
+activations (`injectPagerDutyMcpSecrets`, `injectDatadogMcpSecrets`,
+`injectRollbarMcpSecrets`, `injectSlackMcpSecrets`, `injectBasecampMcpSecrets`,
+plus the cloudbox `…Sops` twins) used `exit 0` as a "secret missing, skip me"
+guard. home-manager concatenates every `home.activation` block into ONE script,
+so `exit` terminates the **entire** activation, silently skipping every activation
+ordered after it — including `injectTeamclaudeBaseUrlDarwin` (line ~933) and
+home-manager's own `setupLaunchAgents` (line ~1134). On macOS the PagerDuty token
+isn't in Keychain, so `injectPagerDutyMcpSecrets` hit `exit 0` and aborted the run.
+codex-lb's route wired only because `injectCodexLbBaseUrlDarwin` runs *before*
+pagerduty in the DAG order.
+
+**Fix (commit `fix(opencode): MCP-secret activations must not exit 0`):** convert
+each guard from `if empty; remove; exit 0; fi; <inject>` to
+`if empty; remove; elif -f runtime; <inject>; fi`, so a missing secret skips only
+its own injection. Verified: darwin config evals; all 9 generated scripts pass
+`bash -n`; a full activation run now reaches `injectTeamclaudeBaseUrlDarwin` +
+`setupLaunchAgents` and wires anthropic → teamclaude.
+
+**Takeaway for future activations:** never `exit` from a `home.activation` block —
+use `if/elif/else`. An `exit` is a whole-activation landmine.
+
 ### Notes / open considerations for the implementer
 - **`pkgs.uv` on aarch64-darwin**: the Task 1/2 `nix eval … drvPath` confirms it resolves. If uv is unexpectedly unavailable, fall back to installing uv via `home.packages` and referencing `${config.home.homeDirectory}/.nix-profile/bin/uvx`.
 - **macOS `nc -G`**: `-G` is the connection timeout (seconds) on the BSD/macOS `nc`; `-z` is scan mode. Both are supported by `/usr/bin/nc` on macOS.
