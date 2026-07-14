@@ -1447,10 +1447,8 @@ in
     '');
 
   # Inject Datadog MCP config (remote HTTP transport) into opencode.json
-  # Uses Datadog's hosted MCP server with DD_API_KEY/DD_APPLICATION_KEY headers.
-  # Prefers a Personal Access Token (dd_pat/dd-pat): the PAT goes in the
-  # application-key header, which Datadog authenticates on alone. Falls back to
-  # the deprecated app+api key pair.
+  # Authenticates with a Datadog Personal Access Token (dd_pat/dd-pat) placed in
+  # the DD_APPLICATION_KEY header, which Datadog authenticates on alone.
   # Endpoint host is mcp.<DD_SITE>; site is us3 for our org.
   # Disabled by default — enable manually or via dedicated agent when needed.
   #
@@ -1465,26 +1463,14 @@ in
       runtime="$HOME/.config/opencode/opencode.json"
 
       dd_pat="$(/usr/bin/security find-generic-password -s dd-pat -w 2>/dev/null || true)"
-      dd_api_key="$(/usr/bin/security find-generic-password -s dd-api-key -w 2>/dev/null || true)"
-      dd_app_key="$(/usr/bin/security find-generic-password -s dd-app-key -w 2>/dev/null || true)"
 
-      # Prefer a Personal Access Token. Datadog authenticates on a valid PAT in
-      # the application-key header alone (the api-key header is then ignored).
-      if [[ -n "''${dd_pat}" ]]; then
-        api_key="''${dd_api_key:-$dd_pat}"
-        app_key="''${dd_pat}"
-      else
-        api_key="''${dd_api_key}"
-        app_key="''${dd_app_key}"
-      fi
-
-      if [[ -z "''${api_key}" ]] || [[ -z "''${app_key}" ]]; then
+      if [[ -z "''${dd_pat}" ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.datadog)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Datadog credentials not found in Keychain (dd-pat or dd-api-key/dd-app-key); removed mcp.datadog from config" >&2
+        echo "Datadog PAT not found in Keychain (dd-pat); removed mcp.datadog from config" >&2
         exit 0
       fi
 
@@ -1493,16 +1479,14 @@ in
 
         ${pkgs.jq}/bin/jq \
           --arg url "https://mcp.us3.datadoghq.com/api/unstable/mcp-server/mcp" \
-          --arg api_key "''${api_key}" \
-          --arg app_key "''${app_key}" \
+          --arg pat "''${dd_pat}" \
           '.mcp.datadog = {
             "type": "remote",
             "url": $url,
             "enabled": false,
             "oauth": false,
             "headers": {
-              "DD_API_KEY": $api_key,
-              "DD_APPLICATION_KEY": $app_key
+              "DD_APPLICATION_KEY": $pat
             }
           }' "$runtime" > "$tmp"
 
@@ -1517,35 +1501,17 @@ in
       runtime="$HOME/.config/opencode/opencode.json"
 
       dd_pat=""
-      dd_api_key=""
-      dd_app_key=""
       if [ -r /run/secrets/dd_pat ]; then
         dd_pat="$(cat /run/secrets/dd_pat)"
       fi
-      if [ -r /run/secrets/dd_api_key ]; then
-        dd_api_key="$(cat /run/secrets/dd_api_key)"
-      fi
-      if [ -r /run/secrets/dd_app_key ]; then
-        dd_app_key="$(cat /run/secrets/dd_app_key)"
-      fi
 
-      # Prefer a Personal Access Token. Datadog authenticates on a valid PAT in
-      # the application-key header alone (the api-key header is then ignored).
-      if [[ -n "''${dd_pat}" ]]; then
-        api_key="''${dd_api_key:-$dd_pat}"
-        app_key="''${dd_pat}"
-      else
-        api_key="''${dd_api_key}"
-        app_key="''${dd_app_key}"
-      fi
-
-      if [[ -z "''${api_key}" ]] || [[ -z "''${app_key}" ]]; then
+      if [[ -z "''${dd_pat}" ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.datadog)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Datadog credentials not found in sops (dd_pat or dd_api_key/dd_app_key); removed mcp.datadog from config" >&2
+        echo "Datadog PAT not found in sops (dd_pat); removed mcp.datadog from config" >&2
         exit 0
       fi
 
@@ -1554,16 +1520,14 @@ in
 
         ${pkgs.jq}/bin/jq \
           --arg url "https://mcp.us3.datadoghq.com/api/unstable/mcp-server/mcp" \
-          --arg api_key "''${api_key}" \
-          --arg app_key "''${app_key}" \
+          --arg pat "''${dd_pat}" \
           '.mcp.datadog = {
             "type": "remote",
             "url": $url,
             "enabled": false,
             "oauth": false,
             "headers": {
-              "DD_API_KEY": $api_key,
-              "DD_APPLICATION_KEY": $app_key
+              "DD_APPLICATION_KEY": $pat
             }
           }' "$runtime" > "$tmp"
 

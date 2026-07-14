@@ -222,17 +222,10 @@ lib.mkIf isCloudbox {
       unset _bundle_host _bundle_var
     fi
 
-    # Datadog CLI credentials (dd-cli). Prefer a Personal Access Token (DD_PAT,
-    # sent as a Bearer token); the app+api key pair is a deprecated fallback.
+    # Datadog CLI credentials (dd-cli): Personal Access Token (Bearer auth).
     export DD_SITE="us3.datadoghq.com"
     if [ -r /run/secrets/dd_pat ]; then
       export DD_PAT="$(cat /run/secrets/dd_pat)"
-    fi
-    if [ -r /run/secrets/dd_api_key ]; then
-      export DD_API_KEY="$(cat /run/secrets/dd_api_key)"
-    fi
-    if [ -r /run/secrets/dd_app_key ]; then
-      export DD_APP_KEY="$(cat /run/secrets/dd_app_key)"
     fi
 
     # BuildBuddy CLI + bb-test-log helper. BUILDBUDDY_HOST is the org-branded

@@ -78,8 +78,6 @@ describe("shell-env plugin: sops secret injection", () => {
       "/run/secrets/jenkins_api_token": "jenkins-token",
       "/run/secrets/jenkins_user": "jenkins-user",
       "/run/secrets/dd_pat": "dd-pat",
-      "/run/secrets/dd_api_key": "dd-api",
-      "/run/secrets/dd_app_key": "dd-app",
       "/run/secrets/buildbuddy_host": "bb-host",
       "/run/secrets/buildbuddy_api_key": "bb-key",
       "/run/secrets/bundle_gem_fury_io": "fury",
@@ -93,8 +91,6 @@ describe("shell-env plugin: sops secret injection", () => {
     expect(env.JENKINS_API_TOKEN).toBe("jenkins-token")
     expect(env.JENKINS_USER).toBe("jenkins-user")
     expect(env.DD_PAT).toBe("dd-pat")
-    expect(env.DD_API_KEY).toBe("dd-api")
-    expect(env.DD_APP_KEY).toBe("dd-app")
     expect(env.BUILDBUDDY_HOST).toBe("bb-host")
     expect(env.BUILDBUDDY_API_KEY).toBe("bb-key")
     expect(env.BUNDLE_GEM__FURY__IO).toBe("fury")
@@ -145,7 +141,7 @@ describe("shell-env plugin: sops secret injection", () => {
     const env = await runHook({ sessionID: "ses_abc" })
     expect(env).not.toHaveProperty("JENKINS_API_TOKEN")
     expect(env).not.toHaveProperty("GH_TOKEN")
-    expect(env).not.toHaveProperty("DD_API_KEY")
+    expect(env).not.toHaveProperty("DD_PAT")
     // The non-secret invariants still hold.
     expect(env.GIT_EDITOR).toBe(":")
     expect(env.OPENCODE_SESSION_ID).toBe("ses_abc")
