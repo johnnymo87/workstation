@@ -198,6 +198,26 @@ let
     '';
   };
 
+  # DevCycle's local MCP server, shipped as the `dvc-mcp` bin inside
+  # @devcycle/cli. We use the LOCAL server (not the hosted
+  # https://mcp.devcycle.com/mcp) because DevCycle's OAuth server does not
+  # support RFC 7591 dynamic client registration, which opencode's native
+  # remote-MCP OAuth flow AND the mcp-remote shim both hard-require — the hosted
+  # endpoint fails with "Incompatible auth server: does not support dynamic
+  # client registration". The local server instead authenticates via
+  # DEVCYCLE_CLIENT_ID / DEVCYCLE_CLIENT_SECRET (+ optional DEVCYCLE_PROJECT_KEY)
+  # injected through the `environment` block by the inject* activations below,
+  # mirroring the pagerduty-mcp / rollbar-mcp token-gated pattern. Pinned to
+  # avoid surprise upstream changes. Several tools are writes (create/update/
+  # delete feature|variable), so the entry stays enabled:false by default.
+  devcycle-mcp = pkgs.writeShellApplication {
+    name = "devcycle-mcp";
+    runtimeInputs = [ pkgs.nodejs ];
+    text = ''
+      exec npx -y --package '@devcycle/cli@6.3.2' dvc-mcp "$@"
+    '';
+  };
+
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # codex-lb (devbox only): ChatGPT/Codex-subscription models served by the local
@@ -952,6 +972,124 @@ in
             }
           }' "$runtime" > "$tmp"
 
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject the DevCycle MCP entry on macOS.
+  # Uses DevCycle's local stdio server (dvc-mcp from @devcycle/cli); the hosted
+  # remote endpoint is unusable (no dynamic client registration — see the
+  # devcycle-mcp wrapper above). Two auth modes, either of which surfaces the
+  # entry:
+  #   1. Client credentials in Keychain (devcycle-client-id/-secret[/-project-key])
+  #      -> injected into the `environment` block (durable, reproducible path).
+  #   2. Interactive SSO: `~/.config/devcycle/auth.yml` present (from a
+  #      `dvc login sso` + `dvc projects select`) -> entry emitted with NO
+  #      `environment`; dvc-mcp reads auth.yml + user.yml (project) off disk.
+  # Client creds win when both are present. If neither exists, the entry is
+  # stripped. Disabled by default; enabling loads write tools (create/update/
+  # delete feature|variable), so enable only when you intend to change flags.
+  home.activation.injectDevcycleMcpSecrets = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      dvc_client_id="$(/usr/bin/security find-generic-password -s devcycle-client-id -w 2>/dev/null || true)"
+      dvc_client_secret="$(/usr/bin/security find-generic-password -s devcycle-client-secret -w 2>/dev/null || true)"
+      dvc_project_key="$(/usr/bin/security find-generic-password -s devcycle-project-key -w 2>/dev/null || true)"
+
+      have_creds=0
+      [[ -n "''${dvc_client_id}" && -n "''${dvc_client_secret}" ]] && have_creds=1
+      have_sso=0
+      [[ -f "$HOME/.config/devcycle/auth.yml" ]] && have_sso=1
+
+      if [[ "$have_creds" -eq 0 && "$have_sso" -eq 0 ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.devcycle)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "DevCycle: no client id/secret (Keychain) and no SSO auth.yml; removed mcp.devcycle from config" >&2
+        exit 0
+      fi
+
+      env_json="{}"
+      if [[ "$have_creds" -eq 1 ]]; then
+        env_json="$(${pkgs.jq}/bin/jq -n \
+          --arg id "''${dvc_client_id}" \
+          --arg secret "''${dvc_client_secret}" \
+          --arg pk "''${dvc_project_key}" \
+          '{DEVCYCLE_CLIENT_ID: $id, DEVCYCLE_CLIENT_SECRET: $secret}
+           + (if $pk == "" then {} else {DEVCYCLE_PROJECT_KEY: $pk} end)')"
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq \
+          --arg command "${devcycle-mcp}/bin/devcycle-mcp" \
+          --argjson env "$env_json" \
+          '.mcp.devcycle = ({
+            "type": "local",
+            "command": [$command],
+            "enabled": false
+          } + (if ($env | length) > 0 then {environment: $env} else {} end))' "$runtime" > "$tmp"
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject the DevCycle MCP entry on cloudbox.
+  # Same two-mode logic as the Darwin block above, but client creds come from
+  # sops (/run/secrets/devcycle_*) instead of Keychain. SSO mode is identical:
+  # `~/.config/devcycle/auth.yml` present -> entry emitted with no `environment`.
+  home.activation.injectDevcycleMcpSecretsSops = lib.mkIf isCloudbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      dvc_client_id=""
+      dvc_client_secret=""
+      dvc_project_key=""
+      [ -r /run/secrets/devcycle_client_id ] && dvc_client_id="$(cat /run/secrets/devcycle_client_id)"
+      [ -r /run/secrets/devcycle_client_secret ] && dvc_client_secret="$(cat /run/secrets/devcycle_client_secret)"
+      [ -r /run/secrets/devcycle_project_key ] && dvc_project_key="$(cat /run/secrets/devcycle_project_key)"
+
+      have_creds=0
+      [[ -n "''${dvc_client_id}" && -n "''${dvc_client_secret}" ]] && have_creds=1
+      have_sso=0
+      [[ -f "$HOME/.config/devcycle/auth.yml" ]] && have_sso=1
+
+      if [[ "$have_creds" -eq 0 && "$have_sso" -eq 0 ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.devcycle)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "DevCycle: no client id/secret (sops) and no SSO auth.yml; removed mcp.devcycle from config" >&2
+        exit 0
+      fi
+
+      env_json="{}"
+      if [[ "$have_creds" -eq 1 ]]; then
+        env_json="$(${pkgs.jq}/bin/jq -n \
+          --arg id "''${dvc_client_id}" \
+          --arg secret "''${dvc_client_secret}" \
+          --arg pk "''${dvc_project_key}" \
+          '{DEVCYCLE_CLIENT_ID: $id, DEVCYCLE_CLIENT_SECRET: $secret}
+           + (if $pk == "" then {} else {DEVCYCLE_PROJECT_KEY: $pk} end)')"
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq \
+          --arg command "${devcycle-mcp}/bin/devcycle-mcp" \
+          --argjson env "$env_json" \
+          '.mcp.devcycle = ({
+            "type": "local",
+            "command": [$command],
+            "enabled": false
+          } + (if ($env | length) > 0 then {environment: $env} else {} end))' "$runtime" > "$tmp"
         mv "$tmp" "$runtime"
       fi
     '');

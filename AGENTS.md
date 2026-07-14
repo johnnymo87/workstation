@@ -88,6 +88,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Scrubbing Company References](.opencode/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
 | [Atlassian Multi-Instance](.opencode/skills/atlassian-multi-instance/SKILL.md) | Adding, removing, debugging Atlassian instance profiles |
 | [Setting Up Notion MCP](.opencode/skills/setting-up-notion-mcp/SKILL.md) | First-time OAuth + headless devbox SSH-L dance for Notion's hosted MCP |
+| [Setting Up DevCycle MCP](.opencode/skills/setting-up-devcycle-mcp/SKILL.md) | Local dvc-mcp + client-credentials (sops/Keychain) for DevCycle's feature-flag MCP; hosted remote is unusable (no dynamic client registration) |
 | [Resetting Workspace](.opencode/skills/resetting-workspace/SKILL.md) | Manual + nightly cloudbox reset (kill nvims, clear sessions, restart serve) |
 | [Monitoring Serve Pool](.opencode/skills/monitoring-serve-pool/SKILL.md) | Wedged-serve detection/recovery (canary timer), "alive but frozen" failure mode, serve memory-limit rationale |
 | [Auditing OpenCode LLM Calls](.opencode/skills/auditing-opencode-llm-calls/SKILL.md) | Durable LLM-call capture on cloudbox; attribute surges by agent/model/session |
