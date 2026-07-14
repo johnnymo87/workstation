@@ -75,10 +75,10 @@ This keeps org-identifying URLs out of the generated `opencode.managed.json`. Th
 **Arg ordering matters:** `mcp-remote` parses positional args as `<url> [port] [flags...]`. The callback port MUST come before `--resource`:
 ```bash
 # Correct: port as args[1]
-npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v1/mcp 3334 --resource "https://${SITE}/"
+npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v1/mcp/authv2 3334 --resource "https://${SITE}/"
 
 # Wrong: --resource as args[1], port is never parsed
-npx -y mcp-remote https://mcp.atlassian.com/v1/mcp --resource "https://${SITE}/" 3334
+npx -y mcp-remote https://mcp.atlassian.com/v1/mcp/authv2 --resource "https://${SITE}/" 3334
 ```
 
 ## OAuth Token Cache

@@ -155,7 +155,7 @@ let
           echo "${name}: could not read atlassian site" >&2
           exit 1
         fi
-        exec npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v1/mcp ${toString port} --resource "https://''${SITE}/"
+        exec npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v1/mcp/authv2 ${toString port} --resource "https://''${SITE}/"
       '';
   };
 
@@ -1447,7 +1447,10 @@ in
   # NOTE: We previously used the local datadog_mcp_cli stdio proxy, but Datadog
   # broke its hardcoded api.us3.datadoghq.com/api/unstable/mcp-server/mcp path
   # (returns 404) and hasn't shipped a fixed binary. Remote HTTP is now the
-  # recommended path per docs.datadoghq.com/bits_ai/mcp_server/setup/.
+  # recommended path per docs.datadoghq.com/mcp_server/setup/. The endpoint has
+  # since graduated from the .../api/unstable/mcp-server/mcp path to the stable
+  # mcp.<DD_SITE>/v1/mcp path; ?toolsets=all surfaces all generally-available
+  # toolsets (opencode supports tool filtering).
   home.activation.injectDatadogMcpSecrets = lib.mkIf isDarwin
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
@@ -1470,7 +1473,7 @@ in
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
-          --arg url "https://mcp.us3.datadoghq.com/api/unstable/mcp-server/mcp" \
+          --arg url "https://mcp.us3.datadoghq.com/v1/mcp?toolsets=all" \
           --arg pat "''${dd_pat}" \
           '.mcp.datadog = {
             "type": "remote",
@@ -1511,7 +1514,7 @@ in
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
-          --arg url "https://mcp.us3.datadoghq.com/api/unstable/mcp-server/mcp" \
+          --arg url "https://mcp.us3.datadoghq.com/v1/mcp?toolsets=all" \
           --arg pat "''${dd_pat}" \
           '.mcp.datadog = {
             "type": "remote",
