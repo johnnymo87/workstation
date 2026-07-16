@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { boundedFetch, stripTrailingSlashes } from "./http.js";
+import { boundedFetch, stripTrailingSlashes, isAbsoluteHttpUrl } from "./http.js";
 
 export type ResolveReason =
   | "active"              // 200, valid lease
@@ -17,15 +17,6 @@ export interface ResolvedOwner {
 
 // deps injected for testability; default to real fetch.
 export interface ResolveDeps { fetch?: typeof globalThis.fetch; }
-
-function isAbsoluteHttpUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 export async function resolveOwner(
   sid: string,

@@ -18,6 +18,15 @@ export function stripTrailingSlashes(base: string): string {
   return base.replace(/\/+$/, "");
 }
 
+export function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 // Never throws. Always clears the timer. Bounds via AbortController+timeoutMs.
 export async function boundedFetch(
   url: string,

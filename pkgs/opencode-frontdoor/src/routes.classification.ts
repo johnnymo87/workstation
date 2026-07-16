@@ -4,8 +4,8 @@
  * --- RECONCILIATION ---
  * - Snapshot routes (from http://127.0.0.1:4096/doc): 188
  * - Exclusions: 0 (The web-ui served at "/" and its static assets are not declared in `/doc`, so they are excluded from the snapshot)
- * - Patch-only routes: 2 (GET /event?session_ids= and GET /api/event?session_ids=, source: event-session-scope.patch)
- * - Total table entries: 190
+ * - Patch-only routes: 3 (GET /event?session_ids= and GET /api/event?session_ids=, source: event-session-scope.patch; plus GET /doc, OpenAPI spec added manually (FABLE-W6))
+ * - Total table entries: 191
  *
  * --- DUAL SURFACE ---
  * This API exposes a dual surface: a bare surface (e.g. /session/...) and its `/api/*` mirror.
@@ -101,6 +101,7 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/config", class: "global-ro" },
   { method: "PATCH", path: "/config", class: "global-sideeffect" },
   { method: "GET", path: "/config/providers", class: "global-ro" },
+  { method: "GET", path: "/doc", class: "global-ro", note: "OpenAPI spec; self-undeclared, added manually (FABLE-W6)" },
   { method: "GET", path: "/event", class: "session-query", note: "Can receive session_ids query param (source: event-session-scope.patch)" },
   { method: "GET", path: "/event?session_ids=", class: "session-query", note: "patch-only session-query (source: event-session-scope.patch)" },
   { method: "GET", path: "/experimental/capabilities", class: "global-ro" },

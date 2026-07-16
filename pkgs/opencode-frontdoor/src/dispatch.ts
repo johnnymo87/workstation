@@ -74,6 +74,11 @@ export function classify(method: string, pathname: string): RouteClass {
     }
   }
 
+  // If HEAD, retry classification as GET
+  if (normalizedMethod === "HEAD") {
+    return classify("GET", pathname);
+  }
+
   // 3. Fallback to unrecognized
   return 'unrecognized';
 }

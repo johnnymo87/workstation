@@ -1,5 +1,15 @@
 import { describe, test, expect, vi } from "vitest";
-import { boundedFetch, stripTrailingSlashes } from "../src/http.js";
+import { boundedFetch, stripTrailingSlashes, isAbsoluteHttpUrl } from "../src/http.js";
+
+describe("isAbsoluteHttpUrl", () => {
+  test("validates absolute http and https URLs", () => {
+    expect(isAbsoluteHttpUrl("http://example.com")).toBe(true);
+    expect(isAbsoluteHttpUrl("https://example.com/foo")).toBe(true);
+    expect(isAbsoluteHttpUrl("ftp://example.com")).toBe(false);
+    expect(isAbsoluteHttpUrl("invalid")).toBe(false);
+    expect(isAbsoluteHttpUrl("/foo/bar")).toBe(false);
+  });
+});
 
 describe("stripTrailingSlashes", () => {
   test("strips trailing slashes from a URL or base string", () => {

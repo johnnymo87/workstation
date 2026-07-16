@@ -137,6 +137,15 @@ describe('Route Dispatcher', () => {
     });
   });
 
+  test('GET /doc -> global-ro/forward-anchor', () => {
+    expect(classify('GET', '/doc')).toBe('global-ro');
+    expect(dispatch('GET', '/doc')).toEqual({
+      class: 'global-ro',
+      action: 'forward-anchor',
+      recognized: true,
+    });
+  });
+
   // unrecognized:
   test('GET /nonexistent -> unrecognized/not-found-404, recognized:false', () => {
     expect(classify('GET', '/nonexistent')).toBe('unrecognized');
@@ -186,5 +195,29 @@ describe('Route Dispatcher', () => {
       const cls = classify(entry.method, concretePath);
       expect(cls).toBe(entry.class);
     }
+  });
+
+  // HEAD fallback to GET:
+  test('HEAD requests fall back to GET classification', () => {
+    expect(classify('HEAD', '/global/health')).toBe('global-ro');
+    expect(dispatch('HEAD', '/global/health')).toEqual({
+      class: 'global-ro',
+      action: 'forward-anchor',
+      recognized: true,
+    });
+
+    expect(classify('HEAD', '/session/ses_x')).toBe('session-path');
+    expect(dispatch('HEAD', '/session/ses_x')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+    });
+
+    expect(classify('HEAD', '/nonexistent')).toBe('unrecognized');
+    expect(dispatch('HEAD', '/nonexistent')).toEqual({
+      class: 'unrecognized',
+      action: 'not-found-404',
+      recognized: false,
+    });
   });
 });

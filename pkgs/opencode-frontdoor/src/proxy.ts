@@ -8,6 +8,7 @@ import { resolveOwner } from "./resolve.js";
 import { isPromotingRequest, maybePromote, PromotionGate } from "./place.js";
 import type { Config } from "./config.js";
 import { RequestLogger } from "./log.js";
+import { isAbsoluteHttpUrl } from "./http.js";
 
 export interface ProxyDeps {
   fetch?: typeof globalThis.fetch;
@@ -31,6 +32,8 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade"
 ]);
+
+const MAX_SESSION_IDS = 32;
 
 async function proxyRequest(
   target: string,
@@ -254,10 +257,12 @@ export async function handleRequest(
       }
 
       if (ex.kind === "none") {
-        // bare /event firehose with no session_ids -> proxy to config.anchorUrl (degrade)
-        target = ctx.config.anchorUrl;
-        degraded = true;
-        await proxyRequest(target, method, url, req, res, ctx, null);
+        // Distinguishing from /global/event -> 410:
+        // /global/event is a firehose gone from the door's contract (410);
+        // bare /event is the supported endpoint missing its required scoping param (400).
+        // This also removes the last degraded=true-by-policy pollution of the counter.
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_request", message: "session_ids query parameter is required" }));
         return;
       }
 
@@ -276,7 +281,7 @@ export async function handleRequest(
             gate: ctx.gate
           }, ctx.config, ctx.deps);
 
-          if (promo.placed && promo.apiBase) {
+          if (promo.placed && promo.apiBase && isAbsoluteHttpUrl(promo.apiBase)) {
             target = promo.apiBase;
             degraded = false;
             prospective = false;
@@ -296,22 +301,34 @@ export async function handleRequest(
       }
 
       if (ex.kind === "multi") {
+        if (ex.sids.length > MAX_SESSION_IDS) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "bad_request", message: "too many session_ids" }));
+          return;
+        }
+
         sid = ex.sids.join(",");
         const promises = ex.sids.map(s => resolveOwner(s, ctx.config, ctx.deps));
         const resolvedList = await Promise.all(promises);
 
-        const firstUrl = resolvedList[0].url;
-        const allSame = resolvedList.every(r => r.url === firstUrl);
+        const realOwners = resolvedList.filter(r => !r.degraded);
+        const distinctRealUrls = new Set(realOwners.map(r => r.url));
 
-        if (!allSame) {
+        if (distinctRealUrls.size >= 2) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "bad_request", message: "Diverging owners for multi-session request" }));
           return;
         }
 
-        target = firstUrl;
-        degraded = resolvedList.some(r => r.degraded);
-        prospective = resolvedList.some(r => r.prospective);
+        if (distinctRealUrls.size === 1) {
+          target = [...distinctRealUrls][0];
+          prospective = realOwners.some(r => r.prospective);
+          degraded = false;
+        } else {
+          target = ctx.config.anchorUrl;
+          degraded = resolvedList.some(r => r.reason === "pigeon-unreachable" || r.reason === "pigeon-error");
+          prospective = false;
+        }
 
         await proxyRequest(target, method, url, req, res, ctx, ex);
         return;

@@ -127,12 +127,18 @@ describe("FrontDoor Integration", () => {
         } else if (sid === "ses_prospective") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ apiBase: `http://127.0.0.1:${portA}`, prospective: true }));
+        } else if (sid === "ses_promo_invalid") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ apiBase: `http://127.0.0.1:${portA}`, prospective: true }));
         } else if (sid === "ses_slow_stream") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ apiBase: `http://127.0.0.1:${portSlowStream}`, prospective: false }));
         } else if (sid === "ses_dead_port") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ apiBase: `http://127.0.0.1:${portDead}`, prospective: false }));
+        } else if (sid === "ses_pigeon_err") {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "internal_error" }));
         } else {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "not_routed" }));
@@ -143,11 +149,19 @@ describe("FrontDoor Integration", () => {
         pigeonPlaceCalls.push(body);
 
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-          ok: true,
-          serve_id: "serve-b",
-          api_base: `http://127.0.0.1:${portB}`
-        }));
+        if (body.session_id === "ses_promo_invalid") {
+          res.end(JSON.stringify({
+            ok: true,
+            serve_id: "serve-invalid",
+            api_base: "/relative/invalid/path"
+          }));
+        } else {
+          res.end(JSON.stringify({
+            ok: true,
+            serve_id: "serve-b",
+            api_base: `http://127.0.0.1:${portB}`
+          }));
+        }
       } else {
         res.writeHead(404);
         res.end();
@@ -333,6 +347,38 @@ describe("FrontDoor Integration", () => {
     expect(pigeonPlaceCalls).toHaveLength(0);
   });
 
+  test("6c. promotion wiring: invalid apiBase in promotion falls back to resolved.url", async () => {
+    pigeonPlaceCalls = [];
+    pigeonRouteCalls = [];
+
+    const res = await makeRequest("GET", "/api/session/ses_promo_invalid/event");
+    expect(res.status).toBe(200);
+
+    // It should fall back to resolved.url which is serve-a (portA)
+    expect(res.headers["x-from-serve"]).toBe("serve-a");
+
+    expect(pigeonRouteCalls).toHaveLength(1);
+    expect(pigeonRouteCalls[0].sid).toBe("ses_promo_invalid");
+    expect(pigeonPlaceCalls).toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_promo_invalid" });
+  });
+
+  test("6d. promotion wiring: HEAD to promoting session route does NOT trigger place", async () => {
+    pigeonPlaceCalls = [];
+    pigeonRouteCalls = [];
+
+    const res = await makeRequest("HEAD", "/api/session/ses_prospective/event");
+    // Since HEAD falls back to GET, it should route to GET /api/session/ses_prospective/event's owner
+    // which is ses_prospective -> resolved.url -> serve-a (portA). It should NOT trigger place because HEAD does not promote.
+    // Also since HEAD has no body, the response has content-length or just status, let's verify status is 200 (or whatever serve-a returns, wait serve-a response has headers and body but node's http.Server for HEAD requests handles body stripping, wait, does proxyRequest strip body for HEAD? Yes, standard node http client request with method HEAD will receive response with no body or body-less).
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("serve-a");
+
+    expect(pigeonRouteCalls).toHaveLength(1);
+    expect(pigeonRouteCalls[0].sid).toBe("ses_prospective");
+    expect(pigeonPlaceCalls).toHaveLength(0);
+  });
+
   test("7. multi-session handling: same owners", async () => {
     pigeonRouteCalls = [];
     const res = await makeRequest("GET", "/event?session_ids=ses_a,ses_a");
@@ -344,6 +390,67 @@ describe("FrontDoor Integration", () => {
     pigeonRouteCalls = [];
     const res = await makeRequest("GET", "/event?session_ids=ses_a,ses_b");
     expect(res.status).toBe(400);
+  });
+
+  test("7c. multi-session handling: too many session_ids returns 400 without pigeon calls", async () => {
+    pigeonRouteCalls = [];
+    const sids = Array.from({ length: 33 }, (_, i) => "ses_a").join(",");
+    const res = await makeRequest("GET", `/event?session_ids=${sids}`);
+    expect(res.status).toBe(400);
+    const json = JSON.parse(res.body);
+    expect(json.error).toBe("bad_request");
+    expect(json.message).toBe("too many session_ids");
+    expect(pigeonRouteCalls).toHaveLength(0);
+  });
+
+  test("7d. multi-session handling: 32 session_ids proceeds", async () => {
+    pigeonRouteCalls = [];
+    const sids = Array.from({ length: 32 }, (_, i) => "ses_a").join(",");
+    const res = await makeRequest("GET", `/event?session_ids=${sids}`);
+    expect(res.status).toBe(200);
+    expect(pigeonRouteCalls).toHaveLength(32);
+  });
+
+  test("7e. multi-session handling: parent-leased + child-404 forwards to parent's serve", async () => {
+    pigeonRouteCalls = [];
+    loggedLines = [];
+    const res = await makeRequest("GET", "/event?session_ids=ses_a,ses_unknown");
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("serve-a");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    const logEntry = loggedLines.find((entry) => entry.path === "/event" && entry.method === "GET");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(false);
+    expect(logEntry.target).toBe(`http://127.0.0.1:${portA}`);
+  });
+
+  test("7f. multi-session handling: all-unplaced forwards to anchor with degraded=false", async () => {
+    pigeonRouteCalls = [];
+    loggedLines = [];
+    const res = await makeRequest("GET", "/event?session_ids=ses_unknown1,ses_unknown2");
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("anchor");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    const logEntry = loggedLines.find((entry) => entry.path === "/event" && entry.method === "GET");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(false);
+    expect(logEntry.target).toBe(`http://127.0.0.1:${portAnchor}`);
+  });
+
+  test("7g. multi-session handling: all-unplaced with a pigeon error forwards to anchor with degraded=true", async () => {
+    pigeonRouteCalls = [];
+    loggedLines = [];
+    const res = await makeRequest("GET", "/event?session_ids=ses_unknown,ses_pigeon_err");
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("anchor");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    const logEntry = loggedLines.find((entry) => entry.path === "/event" && entry.method === "GET");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(true);
+    expect(logEntry.target).toBe(`http://127.0.0.1:${portAnchor}`);
   });
 
   test("8. forward-anchor: proxies global-ro route /config to anchorUrl", async () => {
@@ -366,19 +473,21 @@ describe("FrontDoor Integration", () => {
     expect(pigeonPlaceCalls).toHaveLength(0);
   });
 
-  test("10. none -> anchor: GET /event with no session_ids proxies to anchor and logs degraded", async () => {
+  test("10. none -> 400: GET /event with no session_ids returns 400", async () => {
     loggedLines = [];
     const res = await makeRequest("GET", "/event");
-    expect(res.status).toBe(200);
-    expect(res.headers["x-from-serve"]).toBe("anchor");
+    expect(res.status).toBe(400);
+    const json = JSON.parse(res.body);
+    expect(json.error).toBe("bad_request");
+    expect(json.message).toBe("session_ids query parameter is required");
 
     // Wait for the finish/close logger triggers to be processed
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
 
     const logEntry = loggedLines.find((entry) => entry.path === "/event" && entry.method === "GET");
     expect(logEntry).toBeDefined();
-    expect(logEntry.degraded).toBe(true);
-    expect(logEntry.target).toBe(`http://127.0.0.1:${portAnchor}`);
+    expect(logEntry.degraded).toBe(false);
+    expect(logEntry.target).toBe("");
   });
 
   test("11. malformed -> 400: request with bad session id character returns 400", async () => {
