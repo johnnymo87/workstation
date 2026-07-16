@@ -9,14 +9,12 @@
     ./home.cloudbox.nix
     ./disk-cleanup.nix
     ./opencode-llm-audit.nix
-    ./home.crostini.nix
     ./home.darwin.nix
     ./codex-lb.nix
     ./opencode-config.nix
     ./opencode-skills.nix
     ./tmux.devbox.nix
     ./tmux.cloudbox.nix
-    ./tmux.crostini.nix
     ./tmux.darwin.nix
   ];
 }

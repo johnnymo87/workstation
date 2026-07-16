@@ -41,10 +41,6 @@
     devboxSystem = "aarch64-linux";
     devboxPkgs = pkgsFor devboxSystem;
 
-    # Chromebook (Crostini) pkgs
-    chromebookSystem = "x86_64-linux";
-    chromebookPkgs = pkgsFor chromebookSystem;
-
     # Darwin (macOS) pkgs
     darwinSystem = "aarch64-darwin";
     darwinPkgs = pkgsFor darwinSystem;
@@ -80,7 +76,7 @@
       (_: p: !(p ? platforms) || builtins.elem platform p.platforms)
       allProjects;
     # All systems we target
-    systems = [ devboxSystem chromebookSystem darwinSystem ];
+    systems = [ devboxSystem darwinSystem ];
   in {
     # Expose local packages for nix-update and nix build.
     # Filter out packages whose meta.platforms excludes the target system
@@ -136,7 +132,6 @@
         isDarwin = false;
         isDevbox = true;
         isCloudbox = false;
-        isCrostini = false;
       };
     };
 
@@ -157,28 +152,6 @@
         isDarwin = false;
         isDevbox = false;
         isCloudbox = true;
-        isCrostini = false;
-      };
-    };
-
-    # Home-manager configuration for Chromebook (Crostini)
-    homeConfigurations.livia = home-manager.lib.homeManagerConfiguration {
-      pkgs = chromebookPkgs;
-      modules = [
-        sops-nix.homeManagerModules.sops
-        ./users/dev/home.nix
-      ];
-      extraSpecialArgs = {
-        inherit self;
-        localPkgs = localPkgsFor chromebookSystem;
-        devenvPkg = devenv.packages.${chromebookSystem}.devenv;
-        assetsPath = ./assets;
-        projects = projectsFor "crostini";
-        isLinux = true;
-        isDarwin = false;
-        isDevbox = false;
-        isCloudbox = false;
-        isCrostini = true;
       };
     };
 
@@ -201,7 +174,6 @@
         isDarwin = true;
             isDevbox = false;
             isCloudbox = false;
-            isCrostini = false;
           };
           home-manager.users.${mac.username} = { lib, ... }: {
             home.username = lib.mkForce mac.username;
