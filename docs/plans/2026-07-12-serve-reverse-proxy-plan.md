@@ -143,7 +143,11 @@ socket-kill + gap-injection** live test once (attach a TUI, kill its SSE socket,
 trigger a turn while disconnected, confirm the TUI shows the turn after
 reconnect). Source strongly predicts PASS; if it FAILS, STOP and redesign Phase 2
 (cursor-resume via `/api` `after`, or stream-stitching). Everything else in
-Phase 0 is resolved.
+Phase 0 is resolved. **RE-SCOPED (fable review):** this test is NOT a blocker to
+*writing* Phase 2 (`sse.ts`) — nothing real rides door-SSE until Phase 6/7, and
+the TUI (the client the premise concerns) not until Phase 8. It IS a **hard
+pre-Phase-6-deploy blocker** and an **absolute Phase-8 blocker**. Run it before
+first real SSE consumers, not before coding.
 
 ---
 
@@ -216,8 +220,15 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
   drift **close the client leg** (no silent re-dial — C2). **Consult the 3.4
   sticky map first (NEW-H):** an actively-flowing leg (sticky refreshed by
   observed SSE activity) is **not** dropped mid-turn — only re-resolve/drop when
-  the leg is quiescent — making the door strictly safer than today's TUI. Assert
-  clean close + no re-dial + no-drop-while-active. Commit `feat(frontdoor): drop SSE leg on drift`.
+  the leg is quiescent — making the door strictly safer than today's TUI.
+  **DRIFT-EVIDENCE RULE (FABLE-B2 — write this into the impl):** drift = **two
+  consecutive `active`/`prospective` resolves that name a *different real
+  owner***. A `degraded`/`not-routed`/`pigeon-error`/`pigeon-unreachable` resolve
+  is **never** drift evidence — otherwise a transient pigeon blip (which
+  `resolveOwner` maps to `url=anchor`) looks like drift and drops a healthy leg,
+  and with NEW-A's non-resetting backoff that inflates TUI reconnect delay on
+  every hiccup. Assert: pigeon-blip during a live stream → NO leg drop.
+  Assert clean close + no re-dial + no-drop-while-active. Commit `feat(frontdoor): drop SSE leg on drift`.
 
 ---
 
@@ -225,7 +236,20 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
 
 - **3.1** endpoint-class first-byte timeout (`src/timeouts.ts`): cheap GET / SSE
   handshake = **time-to-response-headers** → 503; turn POSTs = no first-byte
-  timeout. Commit.
+  timeout. **FABLE-S3/S4 — re-derive the "no-first-byte-timeout" set from the
+  route table, do NOT reuse the promoting-suffix list:** it MUST also include the
+  long-*blockers* that aren't turn-starts, notably **`POST /api/session/{id}/wait`**
+  (blocks until the agent loop goes idle → returns 204 only at turn end; today it
+  gets `cheapFirstByteMs` → guaranteed 504) and **`GET /tui/control/next`** (an
+  in-process long-poll). Audit the whole table for other blockers. **FABLE-S4 —
+  fix `/tui/*` classification (Phase 5.2 or here):** `/tui/control/next` is
+  currently `global-ro`→anchor (wrong process + 504); its sibling POSTs are
+  `global-sideeffect`→405. The `/tui/*` subsystem is per-process stateful →
+  reclassify ALL of `/tui/*` to a **deny/501** class (no silent anchor-forward),
+  per design §6 "404-loud, never silent forward." Also **Phase-1.7 seam fix
+  (FABLE-W9):** `upstreamReq.setTimeout` is a socket-*idle* timeout (slow body
+  uploads reset it); `timeouts.ts` must implement true time-to-response-headers.
+  Commit.
 - **3.2** wedge health-probe for turn POSTs: probe target `/global/health`; 503
   only on probe failure. Commit.
 - **3.3** native `/healthz` (`src/healthz.ts`): 200 iff loop live AND (pigeon OR
@@ -238,8 +262,18 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
   fails a direct `/global/health` probe** (reuse 3.2), NOT when pigeon merely
   disagrees (pigeon persistently disagrees during a lease-less turn — that's
   exactly when we must stay stuck). Sticky check runs **before** resolve/promote.
-  TDD the abort-follows-the-runaway-turn case explicitly. Commit
-  `feat(frontdoor): health-broken short-TTL stickiness`.
+  TDD the abort-follows-the-runaway-turn case explicitly. **FABLE-S2 —
+  write-vs-read degrade split (NEW, load-bearing):** Phase 1 degrades EVERY
+  session request (incl. mutating `POST …/message|abort|permission|question`
+  replies) to the anchor on `pigeon-unreachable`/`pigeon-error`, and re-resolves
+  *per request* (vs the old clients' once-per-attach) — so a pigeon blip can run
+  a turn on a serve that doesn't own the session (duplicate/wrong-process
+  execution, `abort` no-ops, events on the wrong bus). Anchor-degrade is correct
+  ONLY for **reads** (shared `opencode.db`). For **mutating session routes** with
+  `reason ∈ {pigeon-unreachable, pigeon-error}` and **no sticky hit**, return a
+  **retryable 503**, not an anchor-forward. **3.4 is therefore a HARD correctness
+  prerequisite of deployment (Phase 6), not just an optimization** — state that in
+  6.2/6.5. Commit `feat(frontdoor): health-broken short-TTL stickiness`.
 
 ---
 
@@ -248,6 +282,13 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
   create response only after place; place-fail→return+degrade+log. No serve
   choice (pigeon HRW). Concurrent-create + serve-dies-mid-choreography tests.
   Commit `feat(frontdoor): create->place`.
+- **4.2 (FABLE-W5) — `POST /session/{id}/fork` also mints a NEW, never-placed
+  session** (the new sid is in the *response*, so neither the `POST /session`
+  create-watch nor turn-start promotion covers it cleanly; it self-heals only via
+  the fragile FABLE-S1 first-turn path, and unplaced forks are exactly the sids
+  that trip the multi-sid path). Decide fork's placement: readback-and-place the
+  forked sid like create, or accept self-heal. Also re-scan for other
+  session-minting routes (`/session/{id}/children`? verify). Commit.
 
 ---
 
@@ -393,6 +434,48 @@ package (host-scope everything).
   predicted PASS from source; couldn't run headless — `sudo -n` = NO). If it
   FAILS, redesign Phase 2.
 - Over-eager promotion (NEW-2) → scoped + TTL-guarded in 1.4.
+- **Under-place under load (FABLE-S1):** the `checkSidExists` anchor-GET blocks
+  5–15 s on a busy/mid-canary-restart serve → not-routed turn-starts skip placement
+  → lease-less turn on the anchor → missed events. Preferred mitigation is the
+  pigeon `/place` validation patch (deletes the check). Until then it's a real
+  gap on exactly the busy pools placement exists for.
+- **Write-degrade-to-wrong-serve (FABLE-S2):** per-request anchor-degrade of
+  mutating routes during a pigeon outage → duplicate/wrong-process turns. Mitigated
+  only once Task 3.4 lands the write-vs-read split → 3.4 gates deploy.
+
+## Post-Phase-1 fable adversarial review (folded here)
+A fable adversarial pass over the built Phase 1 + design/plan **confirmed the
+invariants hold** (read-only-except-place, no-retry-after-send, 190/190 table
+fidelity, sid extraction vs the real surface) and found policy holes the plan had
+encoded. Disposition:
+- **FABLE-B1 (fixed in Phase-1 code):** multi-`session_ids` used a raw-URL
+  `allSame` check; child/subagent sessions are *never* placed (404→anchor), so a
+  legit `parent,child` stream 400'd — worse-than-pre-pool. Fixed to **union of
+  real owners only** (not-routed/degraded = "no opinion"; exactly one real owner
+  → forward; zero → anchor; ≥2 → 400). This also unblocks Phase-8 NEW-B.
+- **FABLE-S5 (fixed in Phase-1 code):** promotion target (`promo.apiBase`) now
+  gets the same absolute-http(s)-URL validation the resolver has.
+- **FABLE-W2/W4/W6/W7 (fixed in Phase-1 code):** bare `/event` (no `session_ids`)
+  → **400 "session_ids required"** not silent anchor (distinct from `/global/event`
+  410: that firehose is *gone* from the door; bare `/event` is the supported
+  endpoint missing its scoping param); cap multi-`session_ids` fan-out; add
+  `GET /doc`→global-ro (else the 6.5 probe-diff trips); HEAD→GET classification.
+- **FABLE-B2 → Task 2.2** (drift-evidence rule). **FABLE-S2 → Task 3.4**
+  (write-vs-read degrade split; 3.4 now a deploy prerequisite). **FABLE-S3/S4 →
+  Task 3.1** (`session/{id}/wait` + `/tui/*`). **FABLE-W5 → Task 4.2** (fork).
+- **FABLE-S1 (pigeon-side recommendation):** `place.ts:checkSidExists` does a
+  `GET {anchor}/session/{sid}` that production notes say "returns in 20ms or
+  blocks 5–15s" on a busy serve → under-place → lease-less turn → yl00-shaped
+  missed events. **Preferred fix: a small pigeon `/place` patch** (sid-regex +
+  shared-DB existence check in the daemon we own) deletes `checkSidExists`, its
+  anchor dependency, and this failure mode. Do before Phase 3. Interim (if not):
+  distinguish clean-404 (don't place) from timeout/5xx (place anyway, logged);
+  probe the *prospective owner*, not the anchor. See Risks.
+- **Note (promotion acquires a real lease):** an SSE-attach promotion runs
+  pigeon `ensureRouted`→`placeSession`, which takes a **lease** (pins the session
+  vs `reassignFromDeadServe` for the TTL) and feeds `countActiveForServe`
+  (attach storms skew bounded-load HRW). Pre-existing, but the door does it far
+  more often — state it near Task 1.4 / Phase 6 capacity notes.
 
 ## Changes from plan rev 4 (3rd review — GO for Phase 1)
 1. **NEW-F:** new **Task 1.0** materializes the enumerated route-classification
