@@ -13,22 +13,16 @@ export type SidExtraction =
 const SID_REGEX = /^ses_[A-Za-z0-9_-]+$/;
 
 /**
- * Extracts and validates session IDs from the request method and URL.
+ * Extracts and validates session IDs from the incoming URL.
  *
  * Path extraction has strict precedence over query parameter extraction.
  *
- * @param method - The HTTP request method (e.g. 'GET', 'POST').
  * @param url - The WHATWG URL object for the incoming request.
  */
-export function extractSids(method: string, url: URL): SidExtraction {
+export function extractSids(url: URL): SidExtraction {
   const pathname = url.pathname;
 
-  // 1. Explicitly bypass routes that do not contain a session ID target
-  if (pathname === '/session/status' || pathname === '/api/session/status') {
-    return { kind: 'none' };
-  }
-
-  // 2. Extract from Path (Bare, /api mirror, nested paths, or experimental)
+  // 1. Extract from Path (Bare, /api mirror, nested paths, or experimental)
   // Match bare and /api mirror: /session/{sessionID} or /api/session/{sessionID}
   // The first capture group extracts the session ID segment.
   const sessionPathMatch = pathname.match(/^\/(?:api\/)?session\/([^/]+)(?:\/|$)/);
@@ -41,8 +35,10 @@ export function extractSids(method: string, url: URL): SidExtraction {
   if (pathCandidate !== undefined) {
     if (SID_REGEX.test(pathCandidate)) {
       return { kind: 'single', sid: pathCandidate };
-    } else {
+    } else if (pathCandidate.startsWith('ses_')) {
       return { kind: 'malformed' };
+    } else {
+      return { kind: 'none' };
     }
   }
 
