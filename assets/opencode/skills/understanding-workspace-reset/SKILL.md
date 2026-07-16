@@ -58,6 +58,9 @@ The full prompt is baked into `reset-workspace`. Two phases.
 **Phase 1 — recommend and reopen:**
 1. Read `/tmp/reset-workspace-last-manifest.txt` (one sid per line). Missing or
    empty → message "Nightly reset complete, no sessions to recommend." and exit.
+   Skip any sid whose directory is `~/morning` (resolved: `/home/dev/morning`) —
+   that's a predecessor morning agent's own marker, not a user session; keep any
+   scratch files in `/tmp`, never in `~/morning`.
 2. Enrich each sid: `GET /session/<sid>` for title/dir/last-update; optionally
    `GET /session/<sid>/message` to judge mid-task vs wrapped-up. Learn what each
    session *is* (you'll coordinate it later) without absorbing transcripts.

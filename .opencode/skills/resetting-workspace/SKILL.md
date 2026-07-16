@@ -18,7 +18,8 @@ the pool is back and healthy, it launches an opencode session in a dedicated
 `~/morning` dir, which `oc-auto-attach` opens as a `morning` window in your
 `main` tmux session. The baked-in prompt instructs it to:
 
-1. Read the manifest.
+1. Read the manifest, skipping any sid whose dir is `~/morning` (a previous
+   morning agent's own marker, not a user session).
 2. Enrich each sid via `GET http://127.0.0.1:4096/session/<sid>` (title,
    directory, last update, optionally recent messages).
 3. Send a conversational Telegram message giving a short description of
