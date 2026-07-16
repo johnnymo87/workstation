@@ -10,6 +10,7 @@ import type { Config } from "./config.js";
 import { RequestLogger } from "./log.js";
 import { isAbsoluteHttpUrl } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
+import { createDriftMonitor } from "./drift.js";
 
 export interface ProxyDeps {
   fetch?: typeof globalThis.fetch;
@@ -133,15 +134,31 @@ async function proxyRequest(
       res.writeHead(upstreamRes.statusCode || 200, clientHeaders);
 
       if (isEventStreamResponse(upstreamRes.headers)) {
-        // Task 2.2 will start an owner-drift monitor here. The monitor needs access to:
-        // - res (to close/end the client stream if drift is detected)
-        // - upstreamRes (to destroy and release the socket if drift is detected)
-        // - activity state (via hooks.onActivity callback or a local tracker)
+        let monitor: ReturnType<typeof createDriftMonitor> | null = null;
+        if (extraction && (extraction.kind === "single" || extraction.kind === "multi")) {
+          monitor = createDriftMonitor({
+            extraction,
+            currentOwner: target,
+            config: ctx.config,
+            deps: ctx.deps,
+            onDrop: () => {
+              upstreamRes.destroy();
+              res.end();
+            }
+          });
+          monitor.start();
+        }
+
         pipeEventStream(upstreamRes, res, {
           onActivity: () => {
-            // Task 2.2 will update its activity state here
+            if (monitor) {
+              monitor.markActivity();
+            }
           },
           onDone: () => {
+            if (monitor) {
+              monitor.stop();
+            }
             safeResolve();
           }
         });

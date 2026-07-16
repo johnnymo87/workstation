@@ -13,6 +13,8 @@ describe('place.ts', () => {
     routeTimeoutMs: 3000,
     cheapFirstByteMs: 5000,
     stickyTtlMs: 30000,
+    driftCheckMs: 5000,
+    quiesceMs: 10000,
   };
 
   describe('isPromotingRequest', () => {

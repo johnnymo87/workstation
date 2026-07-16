@@ -24,6 +24,7 @@ describe("FrontDoor Integration", () => {
   let pigeonPlaceCalls: any[] = [];
   let pigeonRouteCalls: any[] = [];
   let loggedLines: any[] = [];
+  let driftTestApiBase: string = "";
 
   // Helper to read body from IncomingMessage
   async function readBody(req: http.IncomingMessage): Promise<string> {
@@ -40,6 +41,15 @@ describe("FrontDoor Integration", () => {
   beforeAll(async () => {
     // 1. Fake Serve A
     serverA = http.createServer(async (req, res) => {
+      if (req.url && req.url.includes("ses_drift")) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive"
+        });
+        res.write("data: connected\n\n");
+        return;
+      }
       const body = await readBody(req);
       const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
       res.writeHead(status, {
@@ -118,7 +128,10 @@ describe("FrontDoor Integration", () => {
         const sid = parsedUrl.searchParams.get("session_id");
         pigeonRouteCalls.push({ sid, url: req.url });
 
-        if (sid === "ses_a" || sid === "ses_multi1") {
+        if (sid === "ses_drift") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ apiBase: driftTestApiBase || `http://127.0.0.1:${portA}`, prospective: false }));
+        } else if (sid === "ses_a" || sid === "ses_multi1") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ apiBase: `http://127.0.0.1:${portA}`, prospective: false }));
         } else if (sid === "ses_b" || sid === "ses_multi2") {
@@ -177,7 +190,9 @@ describe("FrontDoor Integration", () => {
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
-      stickyTtlMs: 30000
+      stickyTtlMs: 30000,
+      driftCheckMs: 5000,
+      quiesceMs: 10000
     };
 
     const testDeps = {
@@ -567,5 +582,88 @@ describe("FrontDoor Integration", () => {
     const subsequentRes = await makeRequest("GET", "/session/ses_a");
     expect(subsequentRes.status).toBe(200);
     expect(subsequentRes.headers["x-from-serve"]).toBe("serve-a");
+  });
+
+  test("14. owner-drift integration: closes the SSE stream cleanly on confirmed drift", async () => {
+    // 1. Configure the FrontDoor with extremely fast drift polling
+    const fastDriftConfig: Config = {
+      port: 0, // ephemeral
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 1000,
+      stickyTtlMs: 30000,
+      driftCheckMs: 40,
+      quiesceMs: 100,
+    };
+
+    const fastDeps = {
+      logger: {
+        sink: () => {}
+      }
+    };
+
+    const fastFrontDoor = createFrontDoor(fastDriftConfig, fastDeps);
+    await new Promise<void>((resolve) => fastFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const fastPort = (fastFrontDoor.address() as AddressInfo).port;
+
+    try {
+      // Initialize pigeon routing to Serve A
+      driftTestApiBase = `http://127.0.0.1:${portA}`;
+
+      // Open a live SSE stream request to the fast frontdoor
+      let streamEnded = false;
+      let firstChunkReceived = false;
+      let resolveFirstChunk: () => void = () => {};
+      const firstChunkPromise = new Promise<void>((resolve) => {
+        resolveFirstChunk = resolve;
+      });
+
+      const clientReq = http.request({
+        hostname: "127.0.0.1",
+        port: fastPort,
+        path: "/event?session_ids=ses_drift",
+        method: "GET"
+      }, (clientRes) => {
+        expect(clientRes.statusCode).toBe(200);
+        expect(clientRes.headers["content-type"]).toContain("text/event-stream");
+
+        clientRes.on("data", (chunk) => {
+          const str = chunk.toString();
+          if (str.includes("connected")) {
+            firstChunkReceived = true;
+            resolveFirstChunk();
+          }
+        });
+
+        clientRes.on("end", () => {
+          streamEnded = true;
+        });
+      });
+
+      clientReq.on("error", (err) => {
+        // Ignored
+      });
+      clientReq.end();
+
+      // Wait until we are connected and have received the first chunk
+      await firstChunkPromise;
+      expect(firstChunkReceived).toBe(true);
+      expect(streamEnded).toBe(false);
+
+      // Now flip the pigeon routing to Serve B
+      driftTestApiBase = `http://127.0.0.1:${portB}`;
+
+      // Wait a bit for the fast drift poller to run two consecutive checks (every 40ms) and quiesceMs (100ms)
+      // Since quiesceMs is 100ms and lastActivityAt was at stream start, 250ms is perfect for quiescence and two checks
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      // Stream should have been closed cleanly (EventSource sees clean end)
+      expect(streamEnded).toBe(true);
+
+      clientReq.destroy();
+    } finally {
+      await new Promise<void>((resolve) => fastFrontDoor.close(() => resolve()));
+    }
   });
 });

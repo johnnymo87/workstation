@@ -6,6 +6,8 @@ export interface Config {
   routeTimeoutMs: number;
   cheapFirstByteMs: number;
   stickyTtlMs: number;
+  driftCheckMs: number;
+  quiesceMs: number;
 }
 
 function parsePositiveInteger(envName: string, value: string | undefined, defaultValue: number): number {
@@ -34,6 +36,8 @@ export function loadConfig(): Config {
   const routeTimeoutMs = parsePositiveInteger('FRONTDOOR_ROUTE_TIMEOUT_MS', process.env.FRONTDOOR_ROUTE_TIMEOUT_MS, 3000);
   const cheapFirstByteMs = parsePositiveInteger('FRONTDOOR_CHEAP_FIRST_BYTE_MS', process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS, 5000);
   const stickyTtlMs = parsePositiveInteger('FRONTDOOR_STICKY_TTL_MS', process.env.FRONTDOOR_STICKY_TTL_MS, 30000);
+  const driftCheckMs = parsePositiveInteger('FRONTDOOR_DRIFT_CHECK_MS', process.env.FRONTDOOR_DRIFT_CHECK_MS, 5000);
+  const quiesceMs = parsePositiveInteger('FRONTDOOR_SSE_QUIESCE_MS', process.env.FRONTDOOR_SSE_QUIESCE_MS, 10000);
 
   const pigeonUrl = process.env.PIGEON_DAEMON_URL || 'http://127.0.0.1:4731';
   const anchorUrl = process.env.OPENCODE_ANCHOR_URL || 'http://127.0.0.1:4096';
@@ -47,5 +51,7 @@ export function loadConfig(): Config {
     routeTimeoutMs,
     cheapFirstByteMs,
     stickyTtlMs,
+    driftCheckMs,
+    quiesceMs,
   };
 }
