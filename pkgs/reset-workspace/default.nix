@@ -76,9 +76,7 @@ pkgs.writeShellApplication {
 
     # pool_scope: echo "user" when the per-user pool target is active on this
     # host (devbox), else "system" (cloudbox, where the pool is a system
-    # target). Crostini has NO pool target at all (plain opencode-serve.service,
-    # home.crostini.nix) -- it lands in the "system" branch and
-    # discover_pool_urls degrades to the $OPENCODE_URL fallback there.
+    # target).
     # Single source of truth for which systemctl scope owns
     # opencode-serve-pool.target, so capture and restart can never disagree.
     # `systemctl --user` needs XDG_RUNTIME_DIR; the detach re-exec above
@@ -96,7 +94,7 @@ pkgs.writeShellApplication {
     # per pool serve, in port order, by reading the target's Wants= via the
     # given systemctl scope and parsing it with pool_health_urls_from_wants.
     # Degrades to $OPENCODE_URL when discovery yields nothing (pre-pool
-    # behavior; also crostini, which has no pool target). Reading unit
+    # behavior). Reading unit
     # properties needs no privilege on stock systemd, so try unprivileged
     # first; fall back to passwordless sudo (-n: never prompt -- this runs in
     # the capture path, which must never hang) in case a D-Bus policy

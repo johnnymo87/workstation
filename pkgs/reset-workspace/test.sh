@@ -58,7 +58,7 @@ check "K=4 pool -> four serve URLs" \
   "http://127.0.0.1:4096 http://127.0.0.1:4097 http://127.0.0.1:4098 http://127.0.0.1:4099" \
   "$(pool_health_urls_from_wants 'opencode-serve@4096.service opencode-serve@4097.service opencode-serve@4098.service opencode-serve@4099.service' "$fb" | tr '\n' ' ' | sed 's/ $//')"
 
-# K=1 (crostini): single instance.
+# K=1: single instance.
 check "K=1 pool -> one serve URL" \
   "http://127.0.0.1:4096" \
   "$(pool_health_urls_from_wants 'opencode-serve@4096.service' "$fb")"

@@ -6,7 +6,7 @@
 # at it by `injectCodexLbBaseUrl` in opencode-config.nix (gated on this unit being
 # active), and the sol/terra/luna subscription model catalog is injected there.
 #
-# HOSTS: devbox + cloudbox (both NixOS/systemd). NOT crostini, and NOT macOS
+# HOSTS: devbox + cloudbox (both NixOS/systemd). NOT macOS
 # (launchd, not systemd — would need a separate darwin flavor). Each host runs
 # its OWN codex-lb instance with its OWN account logins; ~/.codex-lb is per-host
 # runtime state, never synced.

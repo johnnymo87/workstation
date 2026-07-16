@@ -699,7 +699,7 @@ lib.mkIf isDevbox {
   # fails with "Permission denied" / "Transport endpoint is not connected"),
   # which is why this lives here and not hosts/devbox/configuration.nix. Requires
   # linger (users.users.dev.linger = true in the devbox system config) so
-  # user@1000.service is up at boot. Mirrors the crostini user service.
+  # user@1000.service is up at boot.
   #
   # mn9r M5: serve-0 binds 4096, the permanent anchor — clients create new
   # sessions on it and fall back to it, while M7 routes session-targeted traffic

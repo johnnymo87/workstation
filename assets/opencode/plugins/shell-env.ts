@@ -5,7 +5,7 @@ import * as fs from "node:fs"
 /**
  * Read a sops-decrypted secret file, returning its trimmed contents or
  * undefined if the file is absent/unreadable. Host-safe: on machines without
- * /run/secrets/* (devbox/crostini/macOS) every call returns undefined.
+ * /run/secrets/* (devbox/macOS) every call returns undefined.
  */
 function readSecret(path: string): string | undefined {
   try {
@@ -24,7 +24,7 @@ function readSecret(path: string): string | undefined {
  * non-interactive bash tool sessions. Re-reading /run/secrets/* here closes
  * that gap.
  *
- * Host-safe: every secret is optional, so on devbox/crostini/macOS (no
+ * Host-safe: every secret is optional, so on devbox/macOS (no
  * /run/secrets/*) this returns an empty object. Inlined (not imported from a
  * sibling module) so the deployed single-file plugin has no relative-import
  * dependency; `read` is injected so the mapping is unit-testable.
@@ -93,8 +93,8 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
  *    its own session ID — needed for opencode-to-opencode handoffs via
  *    `opencode-send <id> "msg"`.
  * 3. Expose the host's hostname (OPENCODE_HOSTNAME) so an agent can
- *    disambiguate which machine it is on (devbox / cloudbox / macOS /
- *    crostini) without spawning a `hostname` subprocess. See the "Host
+  *    disambiguate which machine it is on (devbox / cloudbox / macOS)
+ *    without spawning a `hostname` subprocess. See the "Host
  *    Identification" section in the repo-level AGENTS.md.
  * 4. Inject sops secrets (cloudbox) so work tokens (JENKINS_API_TOKEN,
  *    GITHUB_API_TOKEN, BUNDLE_*, DD_*, BUILDBUDDY_*, etc.) are available in
