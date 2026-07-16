@@ -18,9 +18,12 @@ describe("FrontDoor Integration", () => {
   let portAnchor: number;
   let portPigeon: number;
   let portFrontDoor: number;
+  let portSlowStream: number = 0;
+  let portDead: number = 9999;
 
   let pigeonPlaceCalls: any[] = [];
   let pigeonRouteCalls: any[] = [];
+  let loggedLines: any[] = [];
 
   // Helper to read body from IncomingMessage
   async function readBody(req: http.IncomingMessage): Promise<string> {
@@ -124,6 +127,12 @@ describe("FrontDoor Integration", () => {
         } else if (sid === "ses_prospective") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ apiBase: `http://127.0.0.1:${portA}`, prospective: true }));
+        } else if (sid === "ses_slow_stream") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ apiBase: `http://127.0.0.1:${portSlowStream}`, prospective: false }));
+        } else if (sid === "ses_dead_port") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ apiBase: `http://127.0.0.1:${portDead}`, prospective: false }));
         } else {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "not_routed" }));
@@ -157,7 +166,18 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000
     };
 
-    frontDoorServer = createFrontDoor(testConfig);
+    const testDeps = {
+      logger: {
+        sink: (line: string) => {
+          try {
+            loggedLines.push(JSON.parse(line));
+          } catch {}
+          console.log(line);
+        }
+      }
+    };
+
+    frontDoorServer = createFrontDoor(testConfig, testDeps);
     await new Promise<void>((resolve) => frontDoorServer.listen(0, "127.0.0.1", () => resolve()));
     portFrontDoor = (frontDoorServer.address() as AddressInfo).port;
   });
@@ -324,5 +344,119 @@ describe("FrontDoor Integration", () => {
     pigeonRouteCalls = [];
     const res = await makeRequest("GET", "/event?session_ids=ses_a,ses_b");
     expect(res.status).toBe(400);
+  });
+
+  test("8. forward-anchor: proxies global-ro route /config to anchorUrl", async () => {
+    const res = await makeRequest("GET", "/config");
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("anchor");
+    const json = JSON.parse(res.body);
+    expect(json.serve).toBe("anchor");
+    expect(json.path).toBe("/config");
+  });
+
+  test("9. create: POST /session proxies to anchorUrl without triggering place", async () => {
+    pigeonPlaceCalls = [];
+    const res = await makeRequest("POST", "/session", {}, "create-session-body");
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("anchor");
+    const json = JSON.parse(res.body);
+    expect(json.serve).toBe("anchor");
+    expect(json.body).toBe("create-session-body");
+    expect(pigeonPlaceCalls).toHaveLength(0);
+  });
+
+  test("10. none -> anchor: GET /event with no session_ids proxies to anchor and logs degraded", async () => {
+    loggedLines = [];
+    const res = await makeRequest("GET", "/event");
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("anchor");
+
+    // Wait for the finish/close logger triggers to be processed
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+    const logEntry = loggedLines.find((entry) => entry.path === "/event" && entry.method === "GET");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(true);
+    expect(logEntry.target).toBe(`http://127.0.0.1:${portAnchor}`);
+  });
+
+  test("11. malformed -> 400: request with bad session id character returns 400", async () => {
+    const res = await makeRequest("GET", "/session/ses_bad$char/message");
+    expect(res.status).toBe(400);
+    const json = JSON.parse(res.body);
+    expect(json.error).toBe("bad_request");
+    expect(json.message).toBe("Malformed session ID");
+  });
+
+  test("12. crash safety: client aborts mid-response", async () => {
+    const slowServer = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.write("chunk1\n");
+      const interval = setInterval(() => {
+        try {
+          res.write("chunk2\n");
+        } catch {
+          clearInterval(interval);
+        }
+      }, 10);
+      req.on("close", () => {
+        clearInterval(interval);
+      });
+      res.on("close", () => {
+        clearInterval(interval);
+      });
+    });
+
+    await new Promise<void>((resolve) => slowServer.listen(0, "127.0.0.1", () => resolve()));
+    portSlowStream = (slowServer.address() as AddressInfo).port;
+
+    const req = http.request({
+      hostname: "127.0.0.1",
+      port: portFrontDoor,
+      path: "/session/ses_slow_stream",
+      method: "GET"
+    }, (res) => {
+      res.on("data", (chunk) => {
+        req.destroy();
+      });
+    });
+
+    req.on("error", () => {
+      // Ignored
+    });
+    req.end();
+
+    await new Promise<void>((resolve) => {
+      req.on("close", resolve);
+    });
+
+    // Let the front door finish clean-up/resolution
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Verify front door is still responsive and works normally
+    const subsequentRes = await makeRequest("GET", "/session/ses_a");
+    expect(subsequentRes.status).toBe(200);
+    expect(subsequentRes.headers["x-from-serve"]).toBe("serve-a");
+
+    await new Promise<void>((resolve) => slowServer.close(() => resolve()));
+  });
+
+  test("13. crash safety: upstream connect failure returns 502", async () => {
+    const tempServer = http.createServer();
+    await new Promise<void>((resolve) => tempServer.listen(0, "127.0.0.1", () => resolve()));
+    portDead = (tempServer.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => tempServer.close(() => resolve()));
+
+    const res = await makeRequest("GET", "/session/ses_dead_port");
+    expect(res.status).toBe(502);
+
+    const json = JSON.parse(res.body);
+    expect(json.error).toBe("bad_gateway");
+
+    // Verify subsequent requests still succeed
+    const subsequentRes = await makeRequest("GET", "/session/ses_a");
+    expect(subsequentRes.status).toBe(200);
+    expect(subsequentRes.headers["x-from-serve"]).toBe("serve-a");
   });
 });

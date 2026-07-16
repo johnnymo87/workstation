@@ -66,6 +66,32 @@ async function proxyRequest(
     });
 
     let headersSent = false;
+    let resolved = false;
+
+    const onReqError = (err: any) => {
+      upstreamReq.destroy();
+      if (!headersSent && !res.headersSent) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_request" }));
+      }
+      safeResolve();
+    };
+
+    const onResError = (err: any) => {
+      upstreamReq.destroy();
+      safeResolve();
+    };
+
+    const safeResolve = () => {
+      if (resolved) return;
+      resolved = true;
+      req.off("error", onReqError);
+      res.off("error", onResError);
+      resolve();
+    };
+
+    req.on("error", onReqError);
+    res.on("error", onResError);
 
     // Handle connect / first byte timeouts
     const isTurnStartingPost = method.toUpperCase() === "POST" && extraction && isPromotingRequest(method, url.pathname, extraction);
@@ -75,12 +101,16 @@ async function proxyRequest(
           res.writeHead(504, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "gateway_timeout", message: "Upstream timed out" }));
           upstreamReq.destroy();
-          resolve();
+          safeResolve();
         }
       });
     }
 
     upstreamReq.on("response", (upstreamRes) => {
+      if (res.headersSent || headersSent) {
+        upstreamRes.resume(); // drain to release the socket back to the pool
+        return;
+      }
       headersSent = true;
 
       const clientHeaders: Record<string, string | string[]> = {};
@@ -94,13 +124,13 @@ async function proxyRequest(
 
       upstreamRes.pipe(res);
 
-      upstreamRes.on("error", () => {
+      upstreamRes.on("error", (err) => {
         res.destroy();
-        resolve();
+        safeResolve();
       });
 
       upstreamRes.on("end", () => {
-        resolve();
+        safeResolve();
       });
     });
 
@@ -111,7 +141,7 @@ async function proxyRequest(
       } else {
         res.destroy();
       }
-      resolve();
+      safeResolve();
     });
 
     req.pipe(upstreamReq);
@@ -120,7 +150,7 @@ async function proxyRequest(
       if (!res.writableEnded) {
         upstreamReq.destroy();
       }
-      resolve();
+      safeResolve();
     });
   });
 }
@@ -284,6 +314,7 @@ export async function handleRequest(
       }
     }
   } catch (err: any) {
+    console.error("[frontdoor] handleRequest error:", err);
     if (!res.headersSent) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "internal_server_error", message: err.message }));
