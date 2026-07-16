@@ -1,4 +1,5 @@
 import type { Config } from "./config.js";
+import { boundedFetch, stripTrailingSlashes } from "./http.js";
 
 export type ResolveReason =
   | "active"              // 200, valid lease
@@ -31,39 +32,28 @@ export async function resolveOwner(
   config: Config,
   deps?: ResolveDeps,
 ): Promise<ResolvedOwner> {
-  const fetchFn = deps?.fetch ?? globalThis.fetch;
   // Strip trailing slashes so a configured PIGEON_DAEMON_URL like
   // "http://127.0.0.1:4731/" doesn't produce "…//route".
-  const pigeonBase = config.pigeonUrl.replace(/\/+$/, "");
+  const pigeonBase = stripTrailingSlashes(config.pigeonUrl);
   const targetUrl = `${pigeonBase}/route?session_id=${encodeURIComponent(sid)}`;
 
-  const headers: Record<string, string> = {};
-  if (config.pigeonAuthToken) {
-    headers["Authorization"] = `Bearer ${config.pigeonAuthToken}`;
-  }
+  const result = await boundedFetch(targetUrl, {
+    method: "GET",
+    timeoutMs: config.routeTimeoutMs,
+    bearerToken: config.pigeonAuthToken,
+    fetchImpl: deps?.fetch,
+  });
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort();
-  }, config.routeTimeoutMs);
-
-  let response: Response;
-  try {
-    response = await fetchFn(targetUrl, {
-      method: "GET",
-      signal: controller.signal,
-      headers,
-    });
-  } catch (err) {
+  if (!result.ok) {
     return {
       url: config.anchorUrl,
       prospective: false,
       degraded: true,
       reason: "pigeon-unreachable",
     };
-  } finally {
-    clearTimeout(timeoutId);
   }
+
+  const response = result.response!;
 
   if (response.status === 404) {
     return {

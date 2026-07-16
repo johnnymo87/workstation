@@ -1,4 +1,5 @@
 import type { Config } from "./config.js";
+import { boundedFetch, stripTrailingSlashes } from "./http.js";
 import type { ResolvedOwner } from "./resolve.js";
 import { extractSessionIdFromPath, type SidExtraction } from "./sid.js";
 
@@ -23,31 +24,30 @@ export async function placeSession(
   config: Config,
   deps?: PlaceDeps,
 ): Promise<PlaceResult> {
-  const fetchFn = deps?.fetch ?? globalThis.fetch;
-  const pigeonBase = config.pigeonUrl.replace(/\/+$/, "");
+  const pigeonBase = stripTrailingSlashes(config.pigeonUrl);
   const targetUrl = `${pigeonBase}/place`;
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (config.pigeonAuthToken) {
-    headers["Authorization"] = `Bearer ${config.pigeonAuthToken}`;
+  const result = await boundedFetch(targetUrl, {
+    method: "POST",
+    timeoutMs: config.routeTimeoutMs,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ session_id: sid }),
+    bearerToken: config.pigeonAuthToken,
+    fetchImpl: deps?.fetch,
+  });
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      status: 0,
+    };
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort();
-  }, config.routeTimeoutMs);
-
-  try {
-    const response = await fetchFn(targetUrl, {
-      method: "POST",
-      signal: controller.signal,
-      headers,
-      body: JSON.stringify({ session_id: sid }),
-    });
-
-    if (response.status === 200) {
+  const response = result.response!;
+  if (response.status === 200) {
+    try {
       const data = await response.json() as any;
       return {
         ok: true,
@@ -55,20 +55,18 @@ export async function placeSession(
         serveId: data?.serve_id ?? data?.serveId,
         apiBase: data?.api_base ?? data?.apiBase,
       };
+    } catch (err) {
+      return {
+        ok: false,
+        status: 0,
+      };
     }
-
-    return {
-      ok: false,
-      status: response.status,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      status: 0,
-    };
-  } finally {
-    clearTimeout(timeoutId);
   }
+
+  return {
+    ok: false,
+    status: response.status,
+  };
 }
 
 const PROMOTING_SUFFIXES = new Set([
@@ -171,26 +169,20 @@ async function checkSidExists(
   config: Config,
   deps?: PlaceDeps,
 ): Promise<boolean> {
-  const fetchFn = deps?.fetch ?? globalThis.fetch;
-  const anchorBase = config.anchorUrl.replace(/\/+$/, "");
+  const anchorBase = stripTrailingSlashes(config.anchorUrl);
   const targetUrl = `${anchorBase}/session/${encodeURIComponent(sid)}`;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort();
-  }, config.routeTimeoutMs);
+  const result = await boundedFetch(targetUrl, {
+    method: "GET",
+    timeoutMs: config.routeTimeoutMs,
+    fetchImpl: deps?.fetch,
+  });
 
-  try {
-    const response = await fetchFn(targetUrl, {
-      method: "GET",
-      signal: controller.signal,
-    });
-    return response.status === 200;
-  } catch (err) {
+  if (!result.ok) {
     return false;
-  } finally {
-    clearTimeout(timeoutId);
   }
+
+  return result.response!.status === 200;
 }
 
 export async function maybePromote(
