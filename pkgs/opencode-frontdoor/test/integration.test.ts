@@ -655,11 +655,13 @@ describe("FrontDoor Integration", () => {
       driftTestApiBase = `http://127.0.0.1:${portB}`;
 
       // Wait a bit for the fast drift poller to run two consecutive checks (every 40ms) and quiesceMs (100ms)
-      // Since quiesceMs is 100ms and lastActivityAt was at stream start, 250ms is perfect for quiescence and two checks
-      await new Promise((resolve) => setTimeout(resolve, 250));
-
-      // Stream should have been closed cleanly (EventSource sees clean end)
-      expect(streamEnded).toBe(true);
+      // Since quiesceMs is 100ms and lastActivityAt was at stream start, we poll streamEnded dynamically.
+      let closed = false;
+      for (let i = 0; i < 40; i++) {
+        if (streamEnded) { closed = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(closed).toBe(true);
 
       clientReq.destroy();
     } finally {

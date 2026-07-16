@@ -28,6 +28,7 @@ export interface DriftMonitor {
   markActivity(): void;
   start(): void;
   stop(): void;
+  /** Internal seam: runs exactly one poll cycle. Exposed for deterministic tests; production uses start()/stop(). */
   runCheckOnce(): Promise<void>;
 }
 
@@ -83,7 +84,7 @@ export function createDriftMonitor(opts: {
       try {
         await runCheckOnce();
       } catch (err) {
-        // Log or swallow errors from check to prevent crash/unhandled rejection
+        console.error("[frontdoor] drift monitor check failed:", err);
       }
       if (active) {
         scheduleNext();
@@ -107,11 +108,13 @@ export function createDriftMonitor(opts: {
     try {
       if (extraction.kind === "single") {
         const r = await resolveOwner(extraction.sid, config, { fetch: deps?.fetch });
+        if (!active || dropped) return;
         effectiveResolved = r.degraded ? normalizedCurrentOwner : stripTrailingSlashes(r.url);
       } else if (extraction.kind === "multi") {
         const list = await Promise.all(
           extraction.sids.map(sid => resolveOwner(sid, config, { fetch: deps?.fetch }))
         );
+        if (!active || dropped) return;
         const real = list.filter(r => !r.degraded);
         const urls = new Set(real.map(r => stripTrailingSlashes(r.url)));
         if (urls.size === 1) {
@@ -121,6 +124,7 @@ export function createDriftMonitor(opts: {
         }
       }
     } catch (err) {
+      if (!active || dropped) return;
       effectiveResolved = normalizedCurrentOwner;
     }
 
@@ -145,6 +149,7 @@ export function createDriftMonitor(opts: {
     markActivity,
     start,
     stop,
+    /** Internal seam: runs exactly one poll cycle. Exposed for deterministic tests; production uses start()/stop(). */
     runCheckOnce,
   };
 }
