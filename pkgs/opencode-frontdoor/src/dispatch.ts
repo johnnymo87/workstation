@@ -63,7 +63,11 @@ export function classify(method: string, pathname: string): RouteClass {
     return exactClass;
   }
 
-  // 2. Pattern match next
+  // 2. Pattern match next. First match wins, in ROUTE_CLASSIFICATION_TABLE
+  // order. Today the templated routes are non-overlapping so order is
+  // immaterial; if an overlapping pattern is ever added (e.g. a broad
+  // catch-all), its placement in the table decides precedence — keep the more
+  // specific pattern earlier.
   for (const pattern of patternRoutes) {
     if (pattern.method === normalizedMethod && pattern.regex.test(normalizedPath)) {
       return pattern.class;
