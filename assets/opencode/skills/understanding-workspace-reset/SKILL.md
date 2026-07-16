@@ -1,6 +1,6 @@
 ---
 name: understanding-workspace-reset
-description: Use when acting as the morning workspace agent after a nightly reset (recommend/reopen sessions, then coordinate them as a swarm; it runs in a dedicated ~/morning dir and lands as a `morning` window in `main` (still reachable over Telegram), outside the workstation repo), or when debugging from any project why an opencode session did or didn't land in /tmp/reset-workspace-last-manifest.txt. For the full mechanism and operations, defer to the workstation repo-local `resetting-workspace` skill.
+description: Use when acting as the morning workspace agent after a nightly reset (recommend/reopen sessions, then coordinate them as a swarm; it runs in a dedicated ~/morning dir (outside the workstation repo) and lands as a `morning` window in `main`, still reachable over Telegram), or when debugging from any project why an opencode session did or didn't land in /tmp/reset-workspace-last-manifest.txt. For the full mechanism and operations, defer to the workstation repo-local `resetting-workspace` skill.
 ---
 
 # Understanding Workspace Reset (consumer view)
