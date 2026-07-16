@@ -10,15 +10,12 @@ export interface SSEHooks {
  * Handles case-insensitive lookup of the 'content-type' header name and value.
  */
 export function isEventStreamResponse(headers: http.IncomingHttpHeaders): boolean {
-  for (const [key, val] of Object.entries(headers)) {
-    if (key.toLowerCase() === "content-type") {
-      if (typeof val === "string") {
-        return val.trim().toLowerCase().startsWith("text/event-stream");
-      }
-      if (Array.isArray(val)) {
-        return val.some((v) => typeof v === "string" && v.trim().toLowerCase().startsWith("text/event-stream"));
-      }
-    }
+  const contentType = headers["content-type"] ?? headers["Content-Type"] ?? headers["CONTENT-TYPE"];
+  if (typeof contentType === "string") {
+    return contentType.trim().toLowerCase().startsWith("text/event-stream");
+  }
+  if (Array.isArray(contentType)) {
+    return contentType.some((v) => typeof v === "string" && v.trim().toLowerCase().startsWith("text/event-stream"));
   }
   return false;
 }
@@ -36,8 +33,6 @@ export function pipeEventStream(
   // - clientRes (to close/end the client stream if drift is detected)
   // - upstreamRes (to destroy and release the socket if drift is detected)
   // - activity state (via hooks.onActivity callback or a local tracker)
-  //
-  // // Task 2.2 will ...
 
   let finished = false;
 

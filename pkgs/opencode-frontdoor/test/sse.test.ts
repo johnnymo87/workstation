@@ -182,6 +182,11 @@ describe("pipeEventStream", () => {
     let upstreamResRef: http.IncomingMessage | null = null;
     let clientResRef: http.ServerResponse | null = null;
 
+    let resolveDone: () => void = () => {};
+    const streamDone = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+
     const upstreamServer = await startServer((req, res) => {
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.write("data: init\n\n");
@@ -195,7 +200,9 @@ describe("pipeEventStream", () => {
         upstreamResRef = upstreamRes;
         pipeEventStream(upstreamRes, res, {
           onActivity: () => {},
-          onDone: () => {}
+          onDone: () => {
+            resolveDone();
+          }
         });
       });
       upstreamReq.end();
@@ -213,8 +220,8 @@ describe("pipeEventStream", () => {
     });
     clientReq.end();
 
-    // Wait a brief moment to allow close/teardown event processing
-    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    // Wait deterministically for the stream to complete / client close to trigger onDone
+    await streamDone;
 
     expect(upstreamResRef).not.toBeNull();
     // Upstream response should be destroyed (releasing the socket) when the client closed the connection
