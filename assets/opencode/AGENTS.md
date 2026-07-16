@@ -35,7 +35,7 @@ repo but not deployed to any machine yet.
 | [beads](skills/beads/SKILL.md) | cross | Activate `bd` issue tracking when work spans multiple sessions or has complex dependencies. |
 | [migrating-beads-schema](skills/migrating-beads-schema/SKILL.md) | cross | Resolve a bd cross-clone schema-migration block (#4259): single-migrator discipline, DoltHub-vs-git split-remote trap, adopt-vs-migrate, embedded-clone graft fallback, 0037 stripped-UUID-default repair (Error 1105), fresh-clone verification. |
 | [reviewing-github-prs](skills/reviewing-github-prs/SKILL.md) | cross | Choosing the right response shape (threaded inline reply vs fresh review vs top-level issue comment) when posting on a PR, plus the `gh` CLI mechanics for each. |
-| [understanding-workspace-reset](skills/understanding-workspace-reset/SKILL.md) | cross | Consumer-side facts for the headless morning recommendation agent: the manifest == live `main`-tmux TUIs, why a session may be missing, and reopen via `oc-auto-attach --tmux-session main`. Companion to the repo-local `resetting-workspace`. |
+| [understanding-workspace-reset](skills/understanding-workspace-reset/SKILL.md) | cross | Consumer-side facts for the morning recommendation agent (dedicated `morning` tmux window; Telegram-reachable): the manifest == live `main`-tmux TUIs, why a session may be missing, and reopen via `oc-auto-attach --tmux-session main`. Companion to the repo-local `resetting-workspace`. |
 
 ### External Services
 

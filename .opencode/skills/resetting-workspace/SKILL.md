@@ -14,8 +14,9 @@ does NOT auto-restore them. Instead, right after capture is confirmed —
 before the SIGKILL + pool-restart gauntlet, so a failed restart can't
 discard a successful capture (workstation-3smg) — it writes the
 captured session ids to `/tmp/reset-workspace-last-manifest.txt`. Once
-the pool is back and healthy, it launches a headless opencode session
-in `~` with a baked-in prompt instructing it to:
+the pool is back and healthy, it launches an opencode session in a dedicated
+`~/morning` dir, which `oc-auto-attach` opens as a `morning` window in your
+`main` tmux session. The baked-in prompt instructs it to:
 
 1. Read the manifest.
 2. Enrich each sid via `GET http://127.0.0.1:4096/session/<sid>` (title,
@@ -27,10 +28,10 @@ in `~` with a baked-in prompt instructing it to:
 4. Wait for your Telegram reply (free-form: "1,3", "all", "none", plus
    whatever detailed direction you want to give each session).
 5. For each chosen sid, exec `oc-auto-attach --tmux-session main <sid>`
-   to create the tab. The `--tmux-session main` is mandatory: the
-   recommendation session is headless (not attached to tmux), so a bare
-   `oc-auto-attach` would drop the tab into whatever session tmux deems
-   "current" instead of the user's `main` session.
+   to create the tab. Passing `--tmux-session main` is mandatory:
+   `oc-auto-attach` already defaults to `main`, but the recommendation
+   session passes it explicitly so a reopened tab never silently depends on
+   that default and always lands in the user's `main` session.
 6. Stay on as **swarm coordinator** for the reopened sessions: the user
    directs priorities through ongoing replies; the agent relays via
    pigeon (`swarm_send` etc.) at project-manager altitude, following the
@@ -107,9 +108,9 @@ missing from PATH), you'll see a `WARNING: opencode-launch failed` or
 7. Restarts the opencode serve pool (`opencode-serve-pool.target`; user
    `systemctl --user` on devbox, passwordless sudo on cloudbox) and
    waits for every pool member to report healthy.
-8. Launches a headless opencode session in `~` with a baked-in prompt
-   that handles enrichment, Telegram messaging, and selective re-open
-   on reply.
+8. Launches an opencode session in `~/morning` (opened as a `morning`
+   window in `main`) with a baked-in prompt that handles enrichment,
+   Telegram messaging, and selective re-open on reply.
 
 Concurrent runs are blocked by `flock /tmp/reset-workspace.lock`.
 

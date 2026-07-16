@@ -1,6 +1,6 @@
 ---
 name: understanding-workspace-reset
-description: Use when acting as the morning workspace agent after a nightly reset (recommend/reopen sessions, then coordinate them as a swarm; it runs headless from ~, outside the workstation repo), or when debugging from any project why an opencode session did or didn't land in /tmp/reset-workspace-last-manifest.txt. For the full mechanism and operations, defer to the workstation repo-local `resetting-workspace` skill.
+description: Use when acting as the morning workspace agent after a nightly reset (recommend/reopen sessions, then coordinate them as a swarm; it runs in a dedicated ~/morning dir and lands as a `morning` window in `main` (still reachable over Telegram), outside the workstation repo), or when debugging from any project why an opencode session did or didn't land in /tmp/reset-workspace-last-manifest.txt. For the full mechanism and operations, defer to the workstation repo-local `resetting-workspace` skill.
 ---
 
 # Understanding Workspace Reset (consumer view)
@@ -11,8 +11,9 @@ Thin, system-wide companion to the workstation repo-local skill
 is the canonical, in-depth reference (nightly systemd unit, cgroup-survival
 self-detach, capture internals, maintenance, caveats).
 
-This skill exists only because the **morning recommendation agent runs headless
-from `~`**, where that repo-local skill is NOT auto-discovered. Keep this for the
+This skill exists only because the **morning recommendation agent runs in a
+dedicated `~/morning` dir (outside the workstation repo)**, where that
+repo-local skill is NOT auto-discovered. Keep this for the
 load-bearing facts you need from outside the repo; read the repo-local one when
 you need depth or are changing the reset machinery.
 
@@ -25,9 +26,9 @@ you need depth or are changing the reset machinery.
   every persisted session (within retention), not open ones. **The manifest is
   the only authority on what was open** — you cannot reconstruct it from the API.
 - **Reopen with `oc-auto-attach --tmux-session main <sid>`.** Always pass
-  `--tmux-session main`: the agent is headless (not attached to tmux), so a bare
-  invocation drops the tab into whatever session tmux deems "current" instead of
-  reliably in `main`.
+  `--tmux-session main`: `oc-auto-attach` already defaults to `main`, but
+  passing it explicitly keeps a reopened tab from silently depending on that
+  default, so it reliably lands in `main`.
 
 ## "Why isn't my session in the manifest?" checklist
 
