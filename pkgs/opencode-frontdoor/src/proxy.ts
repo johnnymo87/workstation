@@ -33,6 +33,8 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade"
 ]);
 
+// Cap on `?session_ids=` fan-out: each id becomes one concurrent pigeon /route
+// lookup, so an unbounded list lets one client stampede the control plane.
 const MAX_SESSION_IDS = 32;
 
 async function proxyRequest(
