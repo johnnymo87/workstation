@@ -1,5 +1,5 @@
 ---
-description: Read-only strategic technical advisor — architecture, debugging, high-stakes decisions
+description: Read-only strategic technical advisor (opus-4-8 model) — architecture, debugging, high-stakes decisions
 mode: subagent
 model: anthropic/claude-opus-4-8
 permission:

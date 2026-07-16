@@ -19,11 +19,12 @@ Their nix wiring is in `users/dev/opencode-config.nix`.
 
 Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.nix) to enable the built-in Exa AI-backed websearch/codesearch tools.
 
-### oracle (subagent)
+### oracle-opus / oracle-fable / oracle-sol (subagents)
 **Purpose:** Read-only strategic technical advisor — architecture, debugging, high-stakes decisions.
-**Model:** Opus 4.8, host-correct — `anthropic/claude-opus-4-8` on devbox/crostini/macOS, rewritten by `patchAgent` to `google-vertex-anthropic/claude-opus-4-8@default` on cloudbox (see "Host-correct model routing" below).
+**Model-pinned twins, same prompt:** `oracle-opus` runs on Opus 4.8 (the default, and the source of truth for the prompt body); `oracle-fable` runs on `claude-fable-5`; `oracle-sol` runs on `openai/gpt-5.6-sol` (the ChatGPT/Codex-subscription frontier model via codex-lb). All three are generated from the opus source at nix-build time (`mkFableVariant`/`mkSolVariant` → `mkAgentVariant` in `opencode-config.nix`), rewriting only the model pin + the `(… model)` description token, so the prompt never drifts between them. Pick the handle to pick the model.
+**Model routing:** host-correct — opus/fable route direct `anthropic/` off cloudbox and Vertex on cloudbox (`patchAgent` rewrite: `google-vertex-anthropic/…@default`); sol is deployed on all hosts with a `patchAgent` pass-through, reachable wherever codex-lb serves `gpt-5.6-sol` and the openai provider is routed there.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
-**When to use:** Stuck after 2+ attempts, architectural decision, need a second opinion.
+**When to use:** Stuck after 2+ attempts, architectural decision, need a second opinion. `-opus` is the default; `-fable` and `-sol` are opt-in — each description carries a CAUTION so the orchestrator won't auto-pick a non-default twin, so only reach for `oracle-fable` / `oracle-sol` when explicitly asked for that model.
 **Key trait:** Cannot modify files. Gives a recommendation with effort estimate (Quick/Short/Medium/Large) and action plan. Pragmatic minimalism — biases toward simplest solution. Its prompt is written as ethos + judgment (terse, actionable) rather than a rigid rule-list.
 
 ### adversarial-reviewer-opus / adversarial-reviewer-fable / adversarial-reviewer-sol (subagents)
