@@ -1,16 +1,16 @@
 # OpenCode configuration management
 # Manages opencode.json via home-manager
 # with merge-on-activate pattern (runtime keys preserved, managed keys enforced)
-{ config, lib, pkgs, localPkgs, assetsPath, isDevbox, isCloudbox, isCrostini, ... }:
+{ config, lib, pkgs, localPkgs, assetsPath, isDevbox, isCloudbox, ... }:
 
 let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
   devboxModel = "anthropic/claude-opus-4-8";
-  # Compaction model for devbox/crostini: direct Anthropic Sonnet 5 (NOT Vertex).
-  # Runs via the Claude Max subscription (teamclaude on devbox / anthropic-auth
-  # OAuth on crostini), so there is no per-token cost. Cheaper/faster than Opus
-  # for one-shot summarization while staying off the Vertex path.
+  # Compaction model for devbox: direct Anthropic Sonnet 5 (NOT Vertex).
+  # Runs via the Claude Max subscription (teamclaude on devbox), so there is no
+  # per-token cost. Cheaper/faster than Opus for one-shot summarization while
+  # staying off the Vertex path.
   sonnetModel = "anthropic/claude-sonnet-5";
   # Cloudbox default: Opus over Vertex (no Claude Max subscription here, unlike
   # devbox). Carries its own high thinking effort from opencode.base.json's
@@ -54,9 +54,9 @@ let
   #      routes Anthropic through Vertex/ADC), so an opus agent left pinned to
   #      `anthropic/claude-opus-*` reaches an unusable provider and the model
   #      loop dies with an EMPTY response — the exact silent-failure the oracle
-  #      subagent was hitting historically. devbox/crostini keep the direct
-  #      `anthropic/claude-opus-*` pin (it is the working primary there via
-  #      TeamClaude / anthropic-auth OAuth); macOS is left untouched (status
+   #      subagent was hitting historically. devbox keeps the direct
+   #      `anthropic/claude-opus-*` pin (it is the working primary there via
+   #      TeamClaude); macOS is left untouched (status
   #      quo — its primary is Gemini and opus agents are rare there). This
   #      mirrors the host-conditional primary `model =` below
   #      (`if isCloudbox then vertexOpusModel else geminiModel`). The Vertex
@@ -247,7 +247,7 @@ let
   };
 
   # Platform overlay:
-  # - devbox + crostini default to the Anthropic subscription path, so sessions
+  # - devbox defaults to the Anthropic subscription path, so sessions
   #   do not depend on the OpenAI API key.
   # - cloudbox defaults to Vertex Opus 4.8 (interactive primary model), while
   #   keeping compaction + the plan-execution subagents on cheap Gemini Flash.
@@ -257,19 +257,19 @@ let
   # provider options stay there because OpenCode defaults GPT-5.x to medium
   # reasoning unless a variant or model option overrides it.
   opencodeOverlay =
-    (lib.optionalAttrs (isDevbox || isCrostini) {
+    (lib.optionalAttrs isDevbox {
       model = devboxModel;
-      # Route the built-in `compaction` agent to Sonnet 5 on devbox/crostini.
+      # Route the built-in `compaction` agent to Sonnet 5 on devbox.
       # Without this, compaction inherits opencode.base.json's top-level default
       # (openai/gpt-5.5), which is billed per-token AND hits OpenAI usage caps —
       # leaving sessions stuck retrying "usage limit reached" forever (the
       # cloudbox/darwin branch routes compaction to cheap Gemini Flash instead).
-      # On devbox/crostini Sonnet 5 runs via the Claude Max subscription
-      # (teamclaude on devbox / anthropic-auth OAuth on crostini), so there is no
-      # per-token cost; Vertex Gemini Flash isn't available here anyway. Sonnet
-      # (vs. the interactive Opus default) is plenty for one-shot summarization.
+      # On devbox Sonnet 5 runs via the Claude Max subscription
+      # (teamclaude), so there is no per-token cost; Vertex Gemini Flash isn't
+      # available here anyway. Sonnet (vs. the interactive Opus default) is
+      # plenty for one-shot summarization.
       agent.compaction.model = sonnetModel;
-      # vision-qa (deployed below on devbox/crostini only) uses the direct
+      # vision-qa (deployed below on devbox only) uses the direct
       # Google Generative AI API here (google/gemini-3.5-flash,
       # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY auth — no Vertex).
       # Inject the same cost/limit catalog entry used for the Vertex flavor
@@ -404,12 +404,12 @@ in
    # vision-qa is API-key-only by design (no Vertex): its base pin is
    # google/gemini-3.5-flash (Google Generative AI API, authed via
    # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY from sops). Deploy it only
-   # on the hosts where that auth path exists — devbox + crostini. macOS has
+   # on the hosts where that auth path exists — devbox. macOS has
    # no Gemini API key (Vertex ADC only) and cloudbox deliberately disables
    # the direct `google` provider (disabled_providers above), so neither
    # gets the agent. Bare source, no patchAgent: the pin is already
    # host-correct where deployed and must NOT be rewritten to Vertex.
-   xdg.configFile."opencode/agents/vision-qa.md" = lib.mkIf (isDevbox || isCrostini) {
+   xdg.configFile."opencode/agents/vision-qa.md" = lib.mkIf isDevbox {
      source = "${assetsPath}/opencode/agents/vision-qa.md";
    };
 

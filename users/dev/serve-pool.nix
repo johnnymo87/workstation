@@ -1,7 +1,7 @@
 # Single source of truth for the mn9r M5 opencode serve pool.
 #
 # Imported by the serve units (NixOS system on cloudbox; systemd.user on
-# devbox/crostini; launchd on macOS) AND by the pigeon-daemon config on every
+# devbox; launchd on macOS) AND by the pigeon-daemon config on every
 # host, so the pool's ports, HTTP endpoints, and serve ids are all derived from
 # ONE per-host list and can never drift.
 #
@@ -13,7 +13,7 @@
 # silently breaks lease acquire (assignment.desired_serve_id mismatch ->
 # fail-open, no lease), so this file is the drift firewall.
 #
-# DM5-3 (per-device K): cloudbox 4, devbox 2, crostini 1, macOS 2. Base port
+# DM5-3 (per-device K): cloudbox 4, devbox 2, macOS 2. Base port
 # 4096 = serve-0, the permanent anchor: clients create new sessions on it and
 # fall back to it, while session-targeted traffic is routed to the owning serve
 # via pigeon /route (mn9r M7). A K=1 host is therefore ~= the old single serve.
@@ -35,7 +35,6 @@ rec {
   portsByHost = {
     cloudbox = [ 4096 4097 4098 4099 ]; # K=4 (40G cap -> ~9G/serve)
     devbox = [ 4096 4097 ]; # K=2 (10G cap -> ~4.5G/serve)
-    crostini = [ 4096 ]; # K=1 (Chromebook; trivial pool, still routed)
     darwin = [ 4096 4097 ]; # K=2
   };
 

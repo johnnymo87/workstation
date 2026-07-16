@@ -1,6 +1,6 @@
 # Cross-platform home-manager configuration
 # Platform-specific code lives in home.linux.nix and home.darwin.nix
-{ config, pkgs, lib, localPkgs, devenvPkg, assetsPath, isDarwin, isDevbox, isCloudbox, isCrostini, ... }:
+{ config, pkgs, lib, localPkgs, devenvPkg, assetsPath, isDarwin, isDevbox, isCloudbox, ... }:
 
 let
 
@@ -296,11 +296,10 @@ let
   # behavior) on any failure. Wired here (not flake.nix localPkgs) because it
   # needs the real `opencode` binary defined above. K (pool size) is baked from
   # serve-pool.nix so the placer's internal gate and the function gate agree
-  # per host (cloudbox 4, devbox 2, darwin 2, crostini 1).
+  # per host (cloudbox 4, devbox 2, darwin 2).
   servePool = import ./serve-pool.nix;
   servePoolK =
     if isCloudbox then servePool.forHost.cloudbox.k
-    else if isCrostini then servePool.forHost.crostini.k
     else if isDarwin then servePool.forHost.darwin.k
     else servePool.forHost.devbox.k;
   oc-pool-attach = pkgs.callPackage ../../pkgs/oc-pool-attach { inherit opencode; k = servePoolK; };
@@ -511,7 +510,7 @@ in
   ++ lib.optionals (servePoolK >= 2) [
     oc-pool-attach
   ]
-  # Linux-only tools (devbox, cloudbox, crostini). reset-workspace shells out
+  # Linux-only tools (devbox, cloudbox). reset-workspace shells out
   # to systemd-run for cgroup re-exec and sudo systemctl restart, so it can't
   # even evaluate on Darwin under the newer stricter nixpkgs platform checks.
   ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -680,7 +679,7 @@ EOF
     fi
   '');
 
-home.activation.deployGclprKey = lib.mkIf (!isDarwin && !isCrostini) (
+home.activation.deployGclprKey = lib.mkIf (!isDarwin) (
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       if [ -f /run/secrets/gclpr_private_key ]; then
         mkdir -p "$HOME/.gclpr"
@@ -828,7 +827,7 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
     # Required by the K-serve pool (mn9r) where multiple serves share one DB.
     # NOTE: this only covers interactive shells (sourced via ~/.profile); the
     # systemd/launchd serve + pigeon units each need their own copy -- see
-    # hosts/{devbox,cloudbox}/configuration.nix and home.{devbox,crostini,darwin}.nix.
+    # hosts/{devbox,cloudbox}/configuration.nix and home.{devbox,darwin}.nix.
     # Path matches Global.Path.data = xdgData/opencode (xdg-basedir falls back
     # to ~/.local/share on every platform incl. macOS absent $XDG_DATA_HOME).
     OPENCODE_DB = "${config.home.homeDirectory}/.local/share/opencode/opencode.db";
@@ -901,7 +900,7 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
   programs.gpg = {
     enable = true;
     package = pkgs.gnupg;  # Use nixpkgs GPG for consistency
-    publicKeys = lib.mkIf (!isCrostini) [
+    publicKeys = [
       {
         source = "${assetsPath}/gpg-signing-key.asc";
         trust = 5;  # ultimate (our own key)
@@ -920,7 +919,7 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
   '';
 
   # gclpr clipboard bridge public key
-  home.file.".gclpr/key.pub" = lib.mkIf (!isDarwin && !isCrostini) {
+  home.file.".gclpr/key.pub" = lib.mkIf (!isDarwin) {
     source = "${assetsPath}/gclpr/key.pub";
   };
 
