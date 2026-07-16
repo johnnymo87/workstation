@@ -213,7 +213,7 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
 
 ---
 
-## Phase 2 — Event streams (SSE + drop-leg-on-drift)  [0.6 PASS by source; run the root live-test first]
+## Phase 2 — Event streams (SSE + drop-leg-on-drift) — **DONE 2026-07-16** (commits `bc164fb`..`4cebab2`; `src/sse.ts` + `src/drift.ts`; 162 tests green; spec+code+final review passed. FABLE-B2 degrade→no-evidence, NEW-H active-guard, C2 clean-close all implemented & tested. Root `ss -K` live-test still owed pre-Phase-6-deploy, not a coding blocker.)
 
 - **2.1** `src/sse.ts` unbuffered pass-through, survives 10 s heartbeat. Commit.
 - **2.2** confirm-twice re-resolve timer (**read-only**, no promote — NEW-2); on
