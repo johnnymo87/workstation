@@ -10,9 +10,9 @@ describe("isEventStreamResponse", () => {
     expect(isEventStreamResponse({ "content-type": "  text/event-stream  " })).toBe(true);
   });
 
-  test("returns true case-insensitively for keys and values", () => {
-    expect(isEventStreamResponse({ "Content-Type": "TEXT/EVENT-STREAM" })).toBe(true);
-    expect(isEventStreamResponse({ "CONTENT-TYPE": "text/event-stream; charset=utf-8" })).toBe(true);
+  test("returns true case-insensitively for values", () => {
+    expect(isEventStreamResponse({ "content-type": "TEXT/EVENT-STREAM" })).toBe(true);
+    expect(isEventStreamResponse({ "content-type": "Text/Event-Stream; charset=utf-8" })).toBe(true);
   });
 
   test("handles array of headers", () => {

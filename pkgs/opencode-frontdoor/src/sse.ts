@@ -7,10 +7,10 @@ export interface SSEHooks {
 
 /**
  * Returns true if the Content-Type header starts with text/event-stream (case-insensitively).
- * Handles case-insensitive lookup of the 'content-type' header name and value.
+ * Relies on Node's lowercased header keys and performs case-insensitive value matching.
  */
 export function isEventStreamResponse(headers: http.IncomingHttpHeaders): boolean {
-  const contentType = headers["content-type"] ?? headers["Content-Type"] ?? headers["CONTENT-TYPE"];
+  const contentType = headers["content-type"] as unknown;
   if (typeof contentType === "string") {
     return contentType.trim().toLowerCase().startsWith("text/event-stream");
   }
