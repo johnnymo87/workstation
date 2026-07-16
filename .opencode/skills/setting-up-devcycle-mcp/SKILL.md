@@ -45,7 +45,7 @@ the MCP entry's `environment` block. This mirrors the `pagerduty-mcp` /
   — so the plumbing is safe to land before either is set up (the MCP just
   doesn't appear).
 
-Work-only: no inject block runs on devbox/crostini, so `mcp.devcycle` never
+Work-only: no inject block runs on devbox, so `mcp.devcycle` never
 appears there.
 
 ## Interim path: SSO login (no IT ticket)

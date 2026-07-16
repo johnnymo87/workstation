@@ -43,7 +43,7 @@ That's it.
    ```nix
    crossPlatformSkills = [
      # ...
-     "your-new-skill"     # all platforms (devbox, cloudbox, crostini, macOS)
+     "your-new-skill"     # all platforms (devbox, cloudbox, macOS)
    ];
 
    # OR, for skills that need work-only env (Atlassian, kubectl, etc.):
@@ -71,7 +71,6 @@ That's it.
 5. Apply on the host you're logged into:
    - **devbox:** `nix run home-manager -- switch --flake .#dev`
    - **cloudbox:** `nix run home-manager -- switch --flake .#cloudbox`
-   - **crostini:** `nix run home-manager -- switch --flake .#livia`
    - **macOS:** `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2`
 6. **Verify the deployment is symlinks**, not regular files (see Gotchas §1):
    ```bash
@@ -123,7 +122,7 @@ ls -la ~/.config/opencode/skills/your-skill/   # should now be symlinks
 
 ### 2. Wrong flake target
 
-`#dev` is for devbox, `#cloudbox` is for cloudbox, `#livia` is for crostini. Applying the wrong one aborts with `FATAL: flake target #X is for Y, but running on Z`. Always check `cat /etc/hostname` first. See the `rebuilding` repo-local skill in workstation for the full host→target mapping.
+`#dev` is for devbox, `#cloudbox` is for cloudbox. Applying the wrong one aborts with `FATAL: flake target #X is for Y, but running on Z`. Always check `cat /etc/hostname` first. See the `rebuilding` repo-local skill in workstation for the full host→target mapping.
 
 ### 3. Wrong placement: repo-local content deployed system-wide
 
@@ -183,7 +182,6 @@ new generation copies real content and the symlink resolves.
 | System-wide registration | `~/projects/workstation/users/dev/opencode-skills.nix` |
 | Apply system-wide changes (devbox) | `nix run home-manager -- switch --flake .#dev` |
 | Apply system-wide changes (cloudbox) | `nix run home-manager -- switch --flake .#cloudbox` |
-| Apply system-wide changes (crostini) | `nix run home-manager -- switch --flake .#livia` |
 | Apply system-wide changes (macOS) | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` |
 | Verify deployment | `ls -la ~/.config/opencode/skills/<name>/` (must be symlinks) |
 | List all deployed skills | `ls ~/.config/opencode/skills/` |

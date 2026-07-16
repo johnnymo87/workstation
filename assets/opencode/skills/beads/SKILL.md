@@ -166,7 +166,7 @@ DBs). Concrete facts learned wiring this up:
   account, is reused by every project and every host. It's stored as the
   `dolthub_jwk` sops secret and materialized to `~/.dolt/creds/<keyid>.jwk` +
   `config_global.json` by `home.activation.deployDoltCreds` (NixOS hosts read
-  `/run/secrets`; crostini symlinks the HM-sops secret; macOS reads Keychain
+  `/run/secrets`; macOS reads Keychain
   item `dolthub-jwk`). A new project needs **no** new push cred.
 - **Creating the DB needs a *different* token.** DoltHub does NOT auto-create a
   DB on push (pushing to a nonexistent DB fails with `permission denied`). The

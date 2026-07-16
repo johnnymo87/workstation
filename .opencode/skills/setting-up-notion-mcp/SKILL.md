@@ -13,7 +13,7 @@ The catch: OAuth's redirect-URI callback is `http://127.0.0.1:19876/mcp/oauth/ca
 
 ## When to Use
 
-- First-time auth for `notion` MCP on any host (devbox, cloudbox, macOS, crostini)
+- First-time auth for `notion` MCP on any host (devbox, cloudbox, macOS)
 - Re-authenticating after token revocation or scope change
 - Debugging "stuck on Waiting for authorization" or "Connection refused" during the OAuth dance
 

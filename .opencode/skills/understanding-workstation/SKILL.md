@@ -5,10 +5,9 @@ description: This skill explains the workstation monorepo structure, how NixOS (
 
 # Understanding Workstation Config
 
-This repo manages four platforms with standalone home-manager:
+This repo manages three platforms with standalone home-manager:
 - **NixOS devbox** — Hetzner ARM server (system: `aarch64-linux`)
 - **NixOS cloudbox** — GCP ARM VM (system: `aarch64-linux`)
-- **Crostini chromebook** — ChromeOS Linux container (system: `x86_64-linux`)
 - **nix-darwin macOS** — MacBook Pro (system: `aarch64-darwin`)
 
 All share the same home-manager base config. Platform differences are isolated in dedicated modules.
@@ -34,13 +33,11 @@ workstation/
 │       ├── home.base.nix      # Shared: git, bash, tmux, neovim, packages
 │       ├── home.devbox.nix    # Devbox-only: identity, sops secrets
 │       ├── home.cloudbox.nix  # Cloudbox-only: identity, sops secrets, work tools
-│       ├── home.crostini.nix  # Crostini-only: identity, sops secrets, pigeon, opencode-serve
 │       ├── home.darwin.nix    # macOS-only: launchd, ensure-projects activation, dotfiles migration
 │       ├── opencode-config.nix # OpenCode managed config
 │       ├── opencode-skills.nix # OpenCode skills deployed to ~/.config/opencode/skills/
 │       ├── tmux.devbox.nix    # Devbox tmux extras
 │       ├── tmux.cloudbox.nix  # Cloudbox tmux extras
-│       ├── tmux.crostini.nix  # Crostini tmux extras
 │       └── tmux.darwin.nix    # macOS tmux extras
 │
 ├── assets/                   # Content deployed by home-manager
@@ -78,13 +75,11 @@ imports = [
   ./home.base.nix        # Cross-platform (always applied)
   ./home.devbox.nix      # Guarded with lib.mkIf isDevbox
   ./home.cloudbox.nix    # Guarded with lib.mkIf isCloudbox
-  ./home.crostini.nix    # Guarded with lib.mkIf isCrostini
   ./home.darwin.nix      # Guarded with lib.mkIf isDarwin
   ./opencode-config.nix
   ./opencode-skills.nix
   ./tmux.devbox.nix
   ./tmux.cloudbox.nix
-  ./tmux.crostini.nix
   ./tmux.darwin.nix
 ];
 ```
@@ -93,12 +88,12 @@ All modules are imported on all platforms. Platform-specific modules use guards 
 
 ### Platform Identity
 
-| Property | Devbox | Cloudbox | Crostini | macOS |
-|----------|--------|----------|----------|-------|
-| Username | `dev` | `dev` | `livia` | `jonathan.mohrbacher` |
-| Home dir | `/home/dev` | `/home/dev` | `/home/livia` | `/Users/jonathan.mohrbacher` |
-| Projects dir | `~/projects/` | `~/projects/` | `~/projects/` | `~/Code/` |
-| System type | `aarch64-linux` | `aarch64-linux` | `x86_64-linux` | `aarch64-darwin` |
+| Property | Devbox | Cloudbox | macOS |
+|----------|--------|----------|-------|
+| Username | `dev` | `dev` | `jonathan.mohrbacher` |
+| Home dir | `/home/dev` | `/home/dev` | `/Users/jonathan.mohrbacher` |
+| Projects dir | `~/projects/` | `~/projects/` | `~/Code/` |
+| System type | `aarch64-linux` | `aarch64-linux` | `aarch64-darwin` |
 
 **CRITICAL**: Never hardcode paths like `/home/dev` or `/Users/jonathan.mohrbacher`. Always use `config.home.homeDirectory`.
 
@@ -117,7 +112,6 @@ How each platform uses it:
 |----------|-----------|-------------|---------|
 | Devbox | `~/.local/bin/ensure-projects` script + systemd service | `~/projects/` | Login (systemd) or manual script |
 | Cloudbox | `~/.local/bin/ensure-projects` script + systemd service | `~/projects/` | Login (systemd) or manual script |
-| Crostini | `home.activation.ensureProjects` in `home.crostini.nix` | `~/projects/` | `home-manager switch` |
 | macOS | `home.activation.ensureProjects` in `home.darwin.nix` | `~/Code/` | `darwin-rebuild switch` |
 
 ### assets/ vs .opencode/
@@ -198,7 +192,6 @@ Currently disabled on Darwin: `bash`, `ssh`, `neovim` (using existing dotfiles i
 |----------|-----------|---------|
 | Devbox | sops-nix (NixOS module) | `/run/secrets/<name>`, env vars in `.bashrc` |
 | Cloudbox | sops-nix (NixOS module) | `/run/secrets/<name>`, env vars in `.bashrc` |
-| Crostini | sops-nix (home-manager module) | `~/.config/sops-nix/secrets/<name>` |
 | macOS | macOS Keychain | `security find-generic-password -s <service> -w` |
 
 ## Common Tasks
@@ -222,7 +215,6 @@ Currently disabled on Darwin: `bash`, `ssh`, `neovim` (using existing dotfiles i
 | Git config (both) | `users/dev/home.base.nix` (programs.git) |
 | Devbox systemd services | `users/dev/home.devbox.nix` |
 | Cloudbox systemd services | `users/dev/home.cloudbox.nix` |
-| Crostini systemd user services | `users/dev/home.crostini.nix` |
 | macOS launchd agents | `users/dev/home.darwin.nix` |
 | macOS dotfiles migration | `users/dev/home.darwin.nix` (disabled programs) |
 | Declared projects | `projects.nix` |
@@ -237,5 +229,4 @@ Currently disabled on Darwin: `bash`, `ssh`, `neovim` (using existing dotfiles i
 | Tmux config (shared) | `users/dev/home.base.nix` (programs.tmux) |
 | Tmux config (devbox) | `users/dev/tmux.devbox.nix` |
 | Tmux config (cloudbox) | `users/dev/tmux.cloudbox.nix` |
-| Tmux config (crostini) | `users/dev/tmux.crostini.nix` |
 | Tmux config (macOS) | `users/dev/tmux.darwin.nix` |

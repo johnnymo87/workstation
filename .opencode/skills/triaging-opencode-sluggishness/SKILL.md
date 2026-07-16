@@ -1,6 +1,6 @@
 ---
 name: triaging-opencode-sluggishness
-description: Use when opencode on any host (devbox, cloudbox, macOS, crostini) feels sluggish, slow, or frozen; when attach TUIs burn CPU or a session shows the busy/working shimmer forever; when opencode.db has grown to gigabytes; after canary serve restarts leave sessions stuck mid-turn; or when porting the sweeper/canary/DB-maintenance tooling to another host.
+description: Use when opencode on any host (devbox, cloudbox, macOS) feels sluggish, slow, or frozen; when attach TUIs burn CPU or a session shows the busy/working shimmer forever; when opencode.db has grown to gigabytes; after canary serve restarts leave sessions stuck mid-turn; or when porting the sweeper/canary/DB-maintenance tooling to another host.
 ---
 
 # Triaging OpenCode Sluggishness
@@ -142,7 +142,6 @@ management* differs:
 | devbox | user units `opencode-serve@4096/4097` + `opencode-serve-pool.target` | `systemctl --user` | both deployed (`users/dev/home.devbox.nix`) |
 | cloudbox | SYSTEM units `opencode-serve@4096..4099` + system `opencode-serve-pool.target` (`hosts/cloudbox/configuration.nix`) | `sudo systemctl` | NEITHER ported yet (beads workstation-utnw/bm1i notes) |
 | macOS | single launchd serve :4096 (`org.nix-community.home.opencode-serve`, `users/dev/home.darwin.nix`) | `launchctl bootout/bootstrap gui/$(id -u)` — darwin-rebuild does NOT reload it | no canary/sweeper; no journalctl — check `log show` or the plist's log paths |
-| crostini | home-manager opencode-serve | `systemctl --user` | none |
 
 The workstation checkout with the reference implementations exists on every
 host (`~/projects/workstation`; macOS: `~/Code/workstation`).

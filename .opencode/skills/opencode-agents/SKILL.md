@@ -36,9 +36,9 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 **Key trait:** Grounds every claim in the actual code/artifact (`file:line`, never fabricates); distinguishes verified findings from suspicions; reports verdict → confirmed-sound → flaws-by-severity → missing cases → concrete recommendations.
 **Complements:** oracle is the *advisor* ("what should we do?"); the adversarial reviewers are its skeptic ("here's how that goes wrong"). code-reviewer / spec-reviewer check a *finished implementation* against a spec; the adversarial reviewers check the *design itself*, earlier. Their prompt is deliberately ethos-driven (care that the design is correct; judgment over checklist) per the Amanda Askell steer.
 
-### vision-qa (subagent — devbox/crostini only)
+### vision-qa (subagent — devbox only)
 **Purpose:** Visual QA analyst — analyzes screenshots and UI renders.
-**Model:** `google/gemini-3.5-flash` + `variant: high` — direct Google Generative AI API, authed via `GOOGLE_GENERATIVE_AI_API_KEY` / `GEMINI_API_KEY` (sops `gemini_api_key`). **API-key-only by design: no Vertex.** The agent is therefore deployed only on devbox + crostini (the API-key hosts); macOS has no Gemini API key (Vertex ADC only) and cloudbox disables the direct `google` provider, so neither gets it. It bypasses `patchAgent` (bare `source`) so nothing rewrites the pin.
+**Model:** `google/gemini-3.5-flash` + `variant: high` — direct Google Generative AI API, authed via `GOOGLE_GENERATIVE_AI_API_KEY` / `GEMINI_API_KEY` (sops `gemini_api_key`). **API-key-only by design: no Vertex.** The agent is therefore deployed only on devbox (the API-key host); macOS has no Gemini API key (Vertex ADC only) and cloudbox disables the direct `google` provider, so neither gets it. It bypasses `patchAgent` (bare `source`) so nothing rewrites the pin.
 **Tools:** read only
 **When to use:** Comparing screenshots, identifying visual regressions, analyzing canvas/WebGL output, triaging UI bugs. Also used for:
 - **Comparative analysis** — current vs reference image, systematically comparing regions and element positions
@@ -63,12 +63,12 @@ lands on a model it can actually call:
   Anthropic through Vertex/ADC), so an opus agent left pinned to
   `anthropic/claude-opus-*` reaches an unusable provider and the model loop dies
   with an **empty response** — the silent failure that hit oracle.
-  devbox/crostini keep the direct pin (their working primary via TeamClaude /
-  anthropic-auth OAuth); macOS is left as-is.
+  devbox keeps the direct pin (its working primary via TeamClaude);
+  macOS is left as-is.
 
 When adding an opus-pinned agent, pin it to `anthropic/claude-opus-4-8` in the
 source file and let `patchAgent` handle cloudbox — do **not** hardcode the
-Vertex id, or you regress devbox/crostini/macOS.
+Vertex id, or you regress devbox/macOS.
 
 ## Agents We Removed (and Why)
 

@@ -29,7 +29,7 @@ are blocked. So the swarm can keep reading beads; it just can't file new ones.
 - **One embedded Dolt DB per repo**, at `<repo>/.beads/embeddeddolt/`. All git
   worktrees of a repo share it (bd walks up to the repo's `.beads`). There is
   **not** one clone per worktree — a whole repo's worktrees = one clone.
-- **"Clones" = machines** (devbox / cloudbox / macOS / crostini), each syncing
+- **"Clones" = machines** (devbox / cloudbox / macOS), each syncing
   to the same remote. The single-migrator rule is per-remote, across machines.
 - **A bd upgrade blocks every remote-backed DB on the machine at once** — not
   just one repo. Expect to sweep all of them (`mono`, `workstation`, `pigeon`,
@@ -37,7 +37,7 @@ are blocked. So the swarm can keep reading beads; it just can't file new ones.
 - **Canonical remote is DoltHub** (`https://doltremoteapi.dolthub.com/jmohrbacher/<repo>`)
   for the shared trackers. See the `beads` skill (`~/.config/opencode/skills/beads/SKILL.md`)
   for the wiring, credentials, and the "do NOT use git-backed dolt" anti-pattern.
-- Repo path is `~/projects/<repo>` on NixOS/crostini, `~/Code/<repo>` on macOS.
+- Repo path is `~/projects/<repo>` on NixOS, `~/Code/<repo>` on macOS.
 - **A stale `bd` daemon can hold a repo's DB open** and make the move-aside /
   clone in Procedure B fail or corrupt. Stop it first — see "Stop a stale bd
   daemon" below. (This is separate from a project's own daemon, e.g. pigeon's

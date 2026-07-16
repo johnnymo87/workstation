@@ -78,7 +78,7 @@ gains the MCP tools on top.
 Key caveats:
 
 - **Host availability.** The slack MCP is configured only on **macOS and
-  cloudbox** (devbox/crostini have no slack block). `--mcp <server>` on a host
+  cloudbox** (devbox has no slack block). `--mcp <server>` on a host
   where the server isn't configured fails with
   `Error: MCP server '<server>' is not configured on this host` (exit 1).
 - **slack is read + write.** `--mcp slack` enables `slack_*`, which **includes
@@ -197,9 +197,6 @@ The `opencode serve` service must be running:
 # Linux (NixOS)
 systemctl status opencode-serve
 
-# Linux (Crostini)
-systemctl --user status opencode-serve
-
 # macOS
 launchctl list | grep opencode
 
@@ -211,7 +208,6 @@ curl -s http://localhost:4096/global/health
 
 **"opencode serve is not reachable"**: The service isn't running. Start it:
 - NixOS: `sudo systemctl start opencode-serve`
-- Crostini: `systemctl --user start opencode-serve`
 - macOS: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.nix-community.home.opencode-serve.plist`
 
 **Session created but no activity**: Check that the model provider API key is available
