@@ -1,0 +1,292 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import http from "node:http";
+import https from "node:https";
+import { identify } from "./identity.js";
+import { dispatch } from "./dispatch.js";
+import { extractSids } from "./sid.js";
+import { resolveOwner } from "./resolve.js";
+import { isPromotingRequest, maybePromote, PromotionGate } from "./place.js";
+import type { Config } from "./config.js";
+import { RequestLogger } from "./log.js";
+
+export interface ProxyDeps {
+  fetch?: typeof globalThis.fetch;
+  now?: () => number;
+}
+
+export interface ProxyContext {
+  config: Config;
+  logger: RequestLogger;
+  gate: PromotionGate;
+  deps?: ProxyDeps;
+}
+
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade"
+]);
+
+async function proxyRequest(
+  target: string,
+  method: string,
+  url: URL,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ProxyContext,
+  extraction: any
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const targetParsed = new URL(target);
+    const clientModule = targetParsed.protocol === "https:" ? https : http;
+
+    // Filter hop-by-hop headers
+    const upstreamHeaders: Record<string, string | string[]> = {};
+    for (const [key, val] of Object.entries(req.headers)) {
+      if (val !== undefined && !HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+        upstreamHeaders[key] = val;
+      }
+    }
+    // Set Host header
+    upstreamHeaders["host"] = targetParsed.host;
+
+    const path = targetParsed.pathname.replace(/\/+$/, "") + url.pathname + url.search;
+
+    const upstreamReq = clientModule.request({
+      method: method,
+      hostname: targetParsed.hostname,
+      port: targetParsed.port || (targetParsed.protocol === "https:" ? 443 : 80),
+      path,
+      headers: upstreamHeaders,
+    });
+
+    let headersSent = false;
+
+    // Handle connect / first byte timeouts
+    const isTurnStartingPost = method.toUpperCase() === "POST" && extraction && isPromotingRequest(method, url.pathname, extraction);
+    if (!isTurnStartingPost) {
+      upstreamReq.setTimeout(ctx.config.cheapFirstByteMs, () => {
+        if (!headersSent && !res.headersSent) {
+          res.writeHead(504, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "gateway_timeout", message: "Upstream timed out" }));
+          upstreamReq.destroy();
+          resolve();
+        }
+      });
+    }
+
+    upstreamReq.on("response", (upstreamRes) => {
+      headersSent = true;
+
+      const clientHeaders: Record<string, string | string[]> = {};
+      for (const [key, val] of Object.entries(upstreamRes.headers)) {
+        if (val !== undefined && !HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+          clientHeaders[key] = val;
+        }
+      }
+
+      res.writeHead(upstreamRes.statusCode || 200, clientHeaders);
+
+      upstreamRes.pipe(res);
+
+      upstreamRes.on("error", () => {
+        res.destroy();
+        resolve();
+      });
+
+      upstreamRes.on("end", () => {
+        resolve();
+      });
+    });
+
+    upstreamReq.on("error", (err) => {
+      if (!headersSent && !res.headersSent) {
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_gateway", message: err.message }));
+      } else {
+        res.destroy();
+      }
+      resolve();
+    });
+
+    req.pipe(upstreamReq);
+
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        upstreamReq.destroy();
+      }
+      resolve();
+    });
+  });
+}
+
+export async function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ProxyContext
+): Promise<void> {
+  const startTime = Date.now();
+  let logged = false;
+
+  let sid: string | null = null;
+  let target = "";
+  let prospective = false;
+  let degraded = false;
+
+  const method = req.method || "GET";
+  const url = new URL(req.url || "", "http://internal");
+
+  let decision = dispatch(method, url.pathname);
+
+  function logResponse() {
+    if (logged) return;
+    logged = true;
+    const durationMs = Date.now() - startTime;
+    ctx.logger.log({
+      class: decision.class,
+      sid,
+      target,
+      prospective,
+      degraded,
+      status: res.statusCode || 200,
+      durationMs,
+      method,
+      path: url.pathname
+    });
+  }
+
+  res.on("finish", logResponse);
+  res.on("close", logResponse);
+
+  try {
+    // 2. Identify the request (no-op seam)
+    identify(req);
+
+    // 4. Branch on decision.action
+    if (decision.action === "not-found-404") {
+      if (!decision.recognized) {
+        console.warn(`[FRONTDOOR WARN] Unrecognized pathname: ${method} ${url.pathname}`);
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not_found" }));
+      return;
+    }
+
+    if (decision.action === "deny-405") {
+      res.writeHead(405, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "method_not_allowed" }));
+      return;
+    }
+
+    if (decision.action === "gone-410") {
+      res.writeHead(410, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "gone" }));
+      return;
+    }
+
+    if (decision.action === "pty-501") {
+      res.writeHead(501, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not_implemented", message: "PTY out of scope v1" }));
+      return;
+    }
+
+    if (decision.action === "forward-anchor") {
+      target = ctx.config.anchorUrl;
+      degraded = false;
+      await proxyRequest(target, method, url, req, res, ctx, null);
+      return;
+    }
+
+    if (decision.action === "create") {
+      // TODO(Phase 4): place-after-create choreography
+      target = ctx.config.anchorUrl;
+      degraded = false;
+      await proxyRequest(target, method, url, req, res, ctx, null);
+      return;
+    }
+
+    if (decision.action === "route-session") {
+      const ex = extractSids(url);
+
+      if (ex.kind === "malformed") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_request", message: "Malformed session ID" }));
+        return;
+      }
+
+      if (ex.kind === "none") {
+        // bare /event firehose with no session_ids -> proxy to config.anchorUrl (degrade)
+        target = ctx.config.anchorUrl;
+        degraded = true;
+        await proxyRequest(target, method, url, req, res, ctx, null);
+        return;
+      }
+
+      if (ex.kind === "single") {
+        sid = ex.sid;
+        const resolved = await resolveOwner(ex.sid, ctx.config, ctx.deps);
+
+        const isPromoting = isPromotingRequest(method, url.pathname, ex);
+        if (isPromoting) {
+          const promo = await maybePromote({
+            sid: ex.sid,
+            method,
+            pathname: url.pathname,
+            extraction: ex,
+            resolved,
+            gate: ctx.gate
+          }, ctx.config, ctx.deps);
+
+          if (promo.placed && promo.apiBase) {
+            target = promo.apiBase;
+            degraded = false;
+            prospective = false;
+          } else {
+            target = resolved.url;
+            degraded = resolved.degraded;
+            prospective = resolved.prospective;
+          }
+        } else {
+          target = resolved.url;
+          degraded = resolved.degraded;
+          prospective = resolved.prospective;
+        }
+
+        await proxyRequest(target, method, url, req, res, ctx, ex);
+        return;
+      }
+
+      if (ex.kind === "multi") {
+        sid = ex.sids.join(",");
+        const promises = ex.sids.map(s => resolveOwner(s, ctx.config, ctx.deps));
+        const resolvedList = await Promise.all(promises);
+
+        const firstUrl = resolvedList[0].url;
+        const allSame = resolvedList.every(r => r.url === firstUrl);
+
+        if (!allSame) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "bad_request", message: "Diverging owners for multi-session request" }));
+          return;
+        }
+
+        target = firstUrl;
+        degraded = resolvedList.some(r => r.degraded);
+        prospective = resolvedList.some(r => r.prospective);
+
+        await proxyRequest(target, method, url, req, res, ctx, ex);
+        return;
+      }
+    }
+  } catch (err: any) {
+    if (!res.headersSent) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "internal_server_error", message: err.message }));
+    }
+  }
+}

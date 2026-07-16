@@ -1,0 +1,30 @@
+import http from "node:http";
+import { loadConfig, type Config } from "./config.js";
+import { handleRequest } from "./proxy.js";
+import { RequestLogger } from "./log.js";
+import { PromotionGate } from "./place.js";
+
+export function createFrontDoor(config: Config, deps?: any): http.Server {
+  const logger = new RequestLogger(deps?.logger);
+  const gate = new PromotionGate(config.stickyTtlMs);
+
+  return http.createServer(async (req, res) => {
+    try {
+      await handleRequest(req, res, { config, logger, gate, deps });
+    } catch (err: any) {
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal_server_error", message: err.message }));
+      }
+      console.error("[FRONTDOOR ERROR]", err);
+    }
+  });
+}
+
+export function start(config: Config = loadConfig()): http.Server {
+  const server = createFrontDoor(config);
+  server.listen(config.port, "127.0.0.1", () => {
+    console.log(`[FRONTDOOR] Listening on http://127.0.0.1:${config.port}`);
+  });
+  return server;
+}
