@@ -4,17 +4,21 @@
 > implement this plan task-by-task. Companion design:
 > `docs/plans/2026-07-12-serve-reverse-proxy-design.md` (revision 2).
 >
-> **Plan revision 3** — after a SECOND fable adversarial review that live-tested
-> the fixes. Folds in NEW-1..9 + the 2nd review's decisions. Standing human
-> decisions: (1) **port the serve canary to cloudbox** as part of this work;
-> (2) the front door is **dependency-free where cheap** (a *soft* bonus, not a
-> hard constraint) — runtime is **node stdlib**, NOT bun (bun 1.3.3's raw socket
-> hijack is verified-broken, NEW-1); (3) **repoint `OPENCODE_URL` at the front
-> door in Phase 9** (after Phase 8), host-scoped via a consumer audit.
-> **Fleet context:** crostini is decommissioned (being removed in parallel on
-> branch `crostini-removal`); devbox + macOS will later converge on this same
-> front-door model, so host-scoping must anticipate multiple front-door hosts.
-> See "Changes from plan rev 2" at the end.
+> **Plan revision 4** — **Phase 0 investigation EXECUTED** (see
+> `docs/investigations/2026-07-12-frontdoor-route-audit.md`). Findings resolved
+> several open items and *simplified* the plan: **PTY is unused by the deployed
+> TUI → Phase 5 collapses to a 501 stub, no WebSocket proxying, and NEW-1
+> (bun's broken raw hijack) is MOOT for v1**; the **event-scope contract is
+> locked** (`/event?session_ids=` passes all global/lifecycle events, so a
+> session-scoped stream keeps `server.connected` et al.); the **Phase 2 drop-leg
+> premise PASSES** by source (it's exactly the shipped tui-follow-owner
+> reconnect-resumes-live behavior), with one root live-test still pending;
+> **create→/place** confirmed with a three-state `/route` model. Runtime stays
+> **node** (now a *free* choice, not forced). Standing human decisions unchanged:
+> (1) **port the serve canary to cloudbox**; (2) **dependency-free** (soft
+> preference; node stdlib); (3) **repoint `OPENCODE_URL` in Phase 9** host-scoped.
+> **Fleet:** crostini decommissioned (removed on `main`); devbox + macOS converge
+> on this model later. See "Changes from plan rev 3" at the end.
 
 **Goal:** Put the opencode serve pool (cloudbox K=4, ports 4096–4099) behind a
 single opaque `127.0.0.1` front-door port so no client on the box ever addresses
@@ -27,8 +31,8 @@ node stdlib** — `node:http`/`net`/`fetch`/streams) binds one port and is a thi
 surface, asks the **pigeon daemon** (the unchanged **control plane**, via its
 internal `GET /route` / `POST /place`) which serve owns the session, promotes
 *newly-established* streams / turn-starting POSTs / creates to a durable
-placement (never on casual reads — NEW-2), and forwards HTTP/SSE/WebSocket bytes
-to the owner. Owner is re-resolved per request boundary (safe: the serve-lease
+placement (never on casual reads — NEW-2), and forwards HTTP + SSE bytes
+to the owner (**no WebSocket/PTY proxying in v1 — PTY is unused, Phase-0**). Owner is re-resolved per request boundary (safe: the serve-lease
 invariant keeps the owner stable for a whole turn), with per-sid short-TTL
 stickiness broken by **direct serve health**, not pigeon's opinion (NEW-5). On
 any pigeon hiccup it degrades to the anchor serve (`serve-0`, via
@@ -36,13 +40,13 @@ any pigeon hiccup it degrades to the anchor serve (`serve-0`, via
 kit: own **system** unit, `MemoryMax`, `LimitNOFILE`, `restartIfChanged=false`,
 canary on a native `/healthz` (which also reports a build marker).
 
-**Tech Stack:** node (stdlib: `http`/`net`/`fetch`/streams — proven for duplex
-socket hijack on this box; bun rejected, NEW-1), TypeScript, vitest
-(devDependency only), Nix (NixOS **system** units in
-`hosts/cloudbox/configuration.nix`; thin copy-to-store + wrapper), bash (client
-rewrites + tests). **Dependency-free is a soft preference:** prefer node stdlib,
-but a small vetted dep is acceptable rather than hand-rolling a fragile
-primitive.
+**Tech Stack:** node (stdlib: `http`/`fetch`/streams; `net` only if PTY is ever
+in scope), TypeScript, vitest (devDependency only), Nix (NixOS **system** units
+in `hosts/cloudbox/configuration.nix`; thin copy-to-store + wrapper), bash
+(client rewrites + tests). **Dependency-free is a soft preference:** prefer node
+stdlib, but a small vetted dep is acceptable rather than hand-rolling a fragile
+primitive. **Runtime is a free choice post-Phase-0** (no WS proxying needed);
+node retained as the safe default (dodges bun's WS landmine if PTY is ever added).
 
 **Non-goals (from design):** no reinvented failover; no mid-turn migration
 handling; no auth today (localhost-only, clean identity seam); no front-door
@@ -93,59 +97,47 @@ narrowly); no change to `OPENCODE_SERVE_ID`/ports/lease machinery.
 
 ---
 
-## Phase 0 — Deployed-line audit & de-risking (no product code)
+## Phase 0 — Deployed-line audit & de-risking — **EXECUTED 2026-07-12**
 
-### Task 0.1: Snapshot route table + probe matrix (live)
-`docs/investigations/2026-07-12-frontdoor-route-audit.md`;
-`pkgs/opencode-frontdoor/audit/probe.sh` (uses `curl -N`, separate connect/read,
-disambiguates `000`). Commit `docs(frontdoor): audit deployed route table`.
+Full results: `docs/investigations/2026-07-12-frontdoor-route-audit.md`. Summary
+of what each task found (all against live serves + opencode-patched v1.17.13):
 
-### Task 0.2: Classify every route (two sources: /doc + patch list)
-`src/routes.classification.ts` (data only). Classes: `session-path`,
-`session-query`, `session-event`, `global-event` (per-process firehose),
-`create`, `pty-ws`, `global-ro`, `global-sideeffect`, `unrecognized`. Derive from
-`/doc` AND the patch list (M1). Tripwire is **operational** (probe-diff at gates),
-not a hermetic snapshot. Commit `feat(frontdoor): classify routes (doc+patches)`.
+- **0.1 route snapshot** — `/doc` OpenAPI 3.1, 478 KB, dual surface
+  (`bare` + `/api/*`). Snapshot + `probe.sh` idiom captured. *Remaining product
+  artifact: commit `pkgs/opencode-frontdoor/audit/probe.sh` in Phase 1.*
+- **0.2 classification** — 40 `session-path` routes; **`session_ids` is
+  UNDECLARED in `/doc`** (patch-only → classify from patches, M1 confirmed); PTY
+  (9 routes, **unused**); `/global/{config,health}` ro, `{dispose,upgrade}`
+  side-effect, `event` firehose.
+- **0.3 event contract — LOCKED** (source `patches/event-session-scope.patch`):
+  `/event?session_ids=` filters by `event.data.sessionID`, **but all
+  global/lifecycle `server.*` events ALWAYS pass** (incl. `server.connected`).
+  **Live-only** (no SSE `id:`/Last-Event-ID cursor). ⇒ a session-scoped stream
+  keeps the lifecycle events the TUI needs. `/global/event` policy for v1:
+  pass-to-anchor-with-loud-log (revisit at Phase 8).
+- **0.4 create→place — CONFIRMED** (live): three `/route` states —
+  **never-placed → 404**, **leased → real route**, **idle → `prospective:true`**.
+  Fresh create 404s until `POST /place`. ⇒ Task 1.4 promotes **both** the
+  404-but-exists and prospective states.
+- **0.5 PTY — UNUSED** (exhaustive grep of opencode-patched: no client builds
+  `/pty/*`). ⇒ **Phase 5.1 = 501 stub; no WS proxying; NEW-1 MOOT for v1;
+  runtime is a free choice** (node retained).
+- **0.6 drop-leg premise — PASS (source), one root live-test pending.**
+  `tui-follow-owner` already does end-attempt→reconnect-to-new-owner
+  (resume-live, not re-bootstrap) — the shipped yl00 fix; `runSseAttempt` is a
+  reconnect loop that fires on a server-initiated close; full `bootstrap()` only
+  on `server.instance.disposed`. Safe because **drift is idle-only** (no missed
+  events). **`sudo -n` = NO blocked the root `ss -K` live test** — see the
+  pre-Phase-2 gate below.
+- **0.7 node duplex tunnel — moot** (PTY unused); node 22 present.
+- **0.8 packaging — node stdlib, dependency-free thin wrapper** (decided).
 
-### Task 0.3: Decide event-stream + `/global/event` contracts
-Confirm `/event?session_ids=` is session-scoped (positive + negative sid test;
-record `id:` presence). `/global/event` policy: pass-to-anchor-with-loud-log or
-deny(410) (bucketing it `global-ro`→anchor reintroduces the yl00 missed-events
-bug, patch #15). v1 event decision: `/event?session_ids=` + drop-leg-on-drift.
-Commit `docs(frontdoor): event + global-event contracts`.
-
-### Task 0.4: Confirm create→/place choreography (manual)
-`POST /session` → `.id` → `POST /place` → `GET /route` resolves. Record exact
-headers/bodies. Commit `docs(frontdoor): confirm create->place`.
-
-### Task 0.5: Inventory TUI event diet + PTY usage — **gates the runtime + Phase 5**
-From `johnnymo87/opencode-patched` @ pinned rev + a live attach: which
-non-session events the TUI needs from `/global/event`; **whether the TUI uses
-PTY at all.** PTY-in-use → Phase 5.1 builds the node raw tunnel; PTY-unused →
-Phase 5.1 is a 501 stub. Commit `docs(frontdoor): TUI event diet + PTY usage`.
-
-### Task 0.6: **Premise check — does the deployed TUI re-bootstrap on a dropped SSE leg?** (M6)
-Premise of Phase 2. Method: **`ss -K` kill the TUI's SSE socket** mid-stream (as
-root; socat can't interpose — TUI self-resolves). **Must inject a gap:** trigger
-a turn on that sid *while disconnected*, then verify those events appear after
-reconnect (tests re-bootstrap-heals-gap, not mere reconnect). **If NO → STOP,
-escalate to redesign** (cursor-resume via `/api` `after`, or stream-stitching).
-Commit `docs(frontdoor): verify TUI reconnect-heals-gap premise`.
-
-### Task 0.7: **Runtime confirmation — node server-side socket hijack** (NEW-1)
-Confirm (known result: PASS on node 22, FAIL on bun 1.3.3) a `node:http` upgrade
-+ `net.connect` duplex tunnel to a live `/pty/<id>/connect`. This validates the
-**runtime = node** decision and the Phase 5.1 mechanism. Commit
-`docs(frontdoor): confirm node duplex-tunnel runtime`.
-
-### Task 0.8: **Runtime + packaging decision** (M3, decision 2)
-Record: **runtime = node stdlib** (dependency-free; a small vetted dep is
-allowed if a stdlib hand-roll would be fragile). Nix "build" = copy sources to
-store + wrap `node …/server.js` (or tsx), no runtime `node_modules` if we stay
-stdlib-only. Task 1.1 honors this. Commit `docs(frontdoor): runtime=node + thin nix wrapper`.
-
-**Phase 0 gate:** classes assigned; event/global-event/create contracts
-recorded; **0.6 premise PASSES**; node tunnel confirmed; PTY answer known.
+**Pre-Phase-2 gate (the one Phase 0 residual):** run the **root `ss -K`
+socket-kill + gap-injection** live test once (attach a TUI, kill its SSE socket,
+trigger a turn while disconnected, confirm the TUI shows the turn after
+reconnect). Source strongly predicts PASS; if it FAILS, STOP and redesign Phase 2
+(cursor-resume via `/api` `after`, or stream-stitching). Everything else in
+Phase 0 is resolved.
 
 ---
 
@@ -171,13 +163,16 @@ writes (NEW-2). Accept `.apiBase`/`.api_base`. Commit `feat(frontdoor): resolver
 `src/place.ts`. Issue `POST /place` **only** for: (a) SSE-stream *establishment*,
 (b) turn-starting POSTs (`…/message|prompt|compact|shell|command|summarize`,
 `init`), (c) the create choreography (Phase 4). **Never** on casual GETs or the
-Task 2.2 drift-timer re-resolve — those stay read-only. Guard: **place at most
-once per sid per `stickyTtlMs`** (avoid the assigned/dormant oscillation, load-
-skew, and idle-migrate suppression that unscoped promotion causes —
-`router.ts:174-287`). The sticky check (3.4) runs *before* promotion so a
-lease-less in-flight turn is never clobbered. TDD: establishment→place-once;
-casual GET→no write; second establishment within TTL→no re-place.
-Commit `feat(frontdoor): scoped promote-to-placed`.
+Task 2.2 drift-timer re-resolve — those stay read-only. Promote for **both**
+unplaced states confirmed in Phase 0.4: a `404 "session not routed"` (never
+placed — but confirm the sid exists first, e.g. the create response or a
+`GET /session/<sid>` 200) **and** a `prospective:true` route (placed-but-idle).
+Guard: **place at most once per sid per `stickyTtlMs`** (avoid the
+assigned/dormant oscillation, load-skew, and idle-migrate suppression that
+unscoped promotion causes — `router.ts:174-287`). The sticky check (3.4) runs
+*before* promotion so a lease-less in-flight turn is never clobbered. TDD:
+establishment→place-once; casual GET→no write; second establishment within
+TTL→no re-place; 404-unknown-sid→no place. Commit `feat(frontdoor): scoped promote-to-placed`.
 
 ### Task 1.5: request dispatcher (TDD)
 `src/dispatch.ts`. (method,path)→class→action. `unrecognized`→404-loud. Commit
@@ -191,12 +186,13 @@ Commit `feat(frontdoor): scoped promote-to-placed`.
 `src/proxy.ts`, `src/server.ts` (node `http.createServer`), `src/identity.ts`
 (no-op seam), `test/integration.test.ts` (fake serves + pigeon). Assert route-to-
 owner, unknown→anchor, header/body/status passthrough, **no-retry-after-send**.
-Note in tests: SSE/WS/turn-end realities are covered by the Phase 6 through-door
-gate, not fakes. Commit `feat(frontdoor): HTTP forwarder + harness`.
+Note in tests: SSE/turn-end realities are covered by the Phase 6 through-door
+gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
+`feat(frontdoor): HTTP forwarder + harness`.
 
 ---
 
-## Phase 2 — Event streams (SSE + drop-leg-on-drift)  [gated on 0.6 PASS]
+## Phase 2 — Event streams (SSE + drop-leg-on-drift)  [0.6 PASS by source; run the root live-test first]
 
 - **2.1** `src/sse.ts` unbuffered pass-through, survives 10 s heartbeat. Commit.
 - **2.2** confirm-twice re-resolve timer (**read-only**, no promote — NEW-2); on
@@ -235,14 +231,19 @@ gate, not fakes. Commit `feat(frontdoor): HTTP forwarder + harness`.
 
 ---
 
-## Phase 5 — WebSocket/PTY + /global/* policies
+## Phase 5 — /global/* + PTY policies  (**collapsed — PTY unused, Phase-0.5**)
 
-- **5.1** PTY (Task 0.5-driven): if used → **node raw duplex tunnel** (`upgrade`
-  event → `net.connect` upstream → pipe both legs; verified working on node,
-  NEW-1) with a `ptyID→serve` pin; else → 501 + log, out-of-scope. Smoke-test at
-  the 6.5 gate. Commit `feat(frontdoor): PTY node raw tunnel`.
-- **5.2** `/global/dispose|upgrade`→deny(405)+log; `/global/event`→Task 0.3
-  decision; unrecognized→404-loud. Commit `feat(frontdoor): global + unrecognized policies`.
+- **5.1** PTY → **501 + log, out-of-scope for v1** (Phase 0.5 proved the deployed
+  TUI/clients never construct `/pty/*`). **No WebSocket proxying, no raw tunnel,
+  no bun-vs-node WS concern in v1.** Documented future: if a client ever adds
+  PTY, revisit with a node raw duplex tunnel (node verified; bun 1.3.3's hijack
+  silently fails — audit findings §0.5/§0.7). TDD the 501 branch. Commit
+  `feat(frontdoor): PTY 501 (out of scope v1)`.
+- **5.2** `/global/dispose|upgrade`→deny(405)+log; `/global/event`→pass-to-anchor
+  with loud "legacy firehose" log (Phase 0.3 decision; the deployed TUI streams
+  `/global/event` directly + self-resolves around the door until Phase 8, so this
+  path is a legacy bridge); unrecognized→404-loud. Commit
+  `feat(frontdoor): global + unrecognized policies`.
 
 ---
 
@@ -272,7 +273,8 @@ gate, not fakes. Commit `feat(frontdoor): HTTP forwarder + harness`.
 - **6.5** **deploy + through-front-door gate** (M2): `/healthz` UP + **version
   marker matches the just-built store path** (NEW-8); run `probe.sh` **through
   the door** and diff vs direct-to-serve; `curl -N "$FRONTDOOR/event?session_ids=<sid>"`
-  while triggering a turn; PTY tunnel smoke-test (if applicable). Commit results.
+  while triggering a turn (confirm the door's SSE path carries the events).
+  (No PTY smoke-test — PTY is 501, Phase-0.5.) Commit results.
 
 ---
 
@@ -330,22 +332,40 @@ TUI's `/route` self-resolve; add tripwire; **jittered reconnect** (herd). Rollba
 ---
 
 ## Rollout / sequencing
-Phase 0 (audit + **0.6/0.7 premise checks**; pin the hold) → 1–5 (scoped **1.4**,
-health-broken **3.4**, obs **1.6**, node runtime) → 6 (**system units**,
-`restartIfChanged=false`, `LimitNOFILE`, **ported canary**, version-marked
-through-door gate) → 7 (client `/place` kept until 1.4 live; **pigeon exempt**) →
-8 (attach move, own mini-plan) → 9 (**consumer audit** → repoint → internalize).
+**Phase 0 DONE** (audit executed; one root live-test residual before Phase 2) →
+1–5 (scoped **1.4**, health-broken **3.4**, obs **1.6**, node runtime, **Phase 5
+now just 501+global policies**) → 6 (**system units**, `restartIfChanged=false`,
+`LimitNOFILE`, **ported canary**, version-marked through-door gate) → 7 (client
+`/place` kept until 1.4 live; **pigeon exempt**) → 8 (attach move, own mini-plan)
+→ 9 (**consumer audit** → repoint → internalize).
 
-**Cross-cutting deps:** crostini removal (parallel branch `crostini-removal`)
-shrinks the 9.0 audit; devbox+darwin front-door convergence is a *follow-on* that
-reuses this package (host-scope everything).
+**Cross-cutting deps:** crostini removal **DONE** (merged to `main`) — shrinks the
+9.0 audit; devbox+darwin front-door convergence is a *follow-on* that reuses this
+package (host-scope everything).
 
 ## Risks
 - Total-outage SPOF → full isolation kit mandatory.
 - `/event?session_ids=` hard-deps patch #7 → hold-pin + tripwire; **no `patched.N`
   release cut during Phases 0–8, else re-run the 0.2 probe-diff** (NEW-7).
-- 0.6 premise failure → redesign Phase 2 before building.
+- **Pre-Phase-2 residual:** the root `ss -K` live re-bootstrap test (Phase 0
+  predicted PASS from source; couldn't run headless — `sudo -n` = NO). If it
+  FAILS, redesign Phase 2.
 - Over-eager promotion (NEW-2) → scoped + TTL-guarded in 1.4.
+
+## Changes from plan rev 3 (Phase 0 findings)
+1. **PTY unused (0.5):** Phase 5 collapses to a 501 stub — **no WS proxying, no
+   raw tunnel; NEW-1 (bun hijack) MOOT for v1**; runtime a free choice, node kept.
+2. **Event contract locked (0.3):** `/event?session_ids=` passes all
+   global/lifecycle events → session-scoped stream keeps `server.connected` et al;
+   live-only (no cursor). `/global/event` v1 policy = pass-to-anchor-with-log.
+3. **Drop-leg premise PASS (0.6, source):** it's the shipped tui-follow-owner
+   reconnect-resumes-live behavior; safe because drift is idle-only. One root
+   live-test residual noted as the pre-Phase-2 gate.
+4. **create→place three-state model (0.4):** Task 1.4 promotes **both** 404-exists
+   and prospective; fresh create 404s until placed.
+5. Runtime **node** retained but reframed as free (post-Phase-0), not forced.
+6. Phase 0 marked EXECUTED; findings at
+   `docs/investigations/2026-07-12-frontdoor-route-audit.md`.
 
 ## Changes from plan rev 2
 1. **NEW-1:** runtime = **node** (bun 1.3.3 raw-hijack verified-broken, silent);
