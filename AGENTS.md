@@ -1,19 +1,18 @@
 # Workstation
 
-NixOS hosts (devbox on Hetzner, cloudbox on GCP) + nix-darwin (macOS) + Crostini (Chromebook), all sharing standalone home-manager.
+NixOS hosts (devbox on Hetzner, cloudbox on GCP) + nix-darwin (macOS), all sharing standalone home-manager.
 
 ## Host Identification (READ FIRST)
 
-**Always check `$OPENCODE_HOSTNAME` (injected into every bash call by `assets/opencode/plugins/shell-env.ts`) or run `hostname` at the start of any session.** This repo configures four first-class hosts; do NOT assume "devbox" — `cloudbox` and `devbox` are both NixOS, both run on `dev@`, and look superficially identical from inside an opencode session. Skills and configs that look "devbox-shaped" usually apply to both NixOS hosts; check `hostname` before reaching for host-specific guidance.
+**Always check `$OPENCODE_HOSTNAME` (injected into every bash call by `assets/opencode/plugins/shell-env.ts`) or run `hostname` at the start of any session.** This repo configures three first-class hosts; do NOT assume "devbox" — `cloudbox` and `devbox` are both NixOS, both run on `dev@`, and look superficially identical from inside an opencode session. Skills and configs that look "devbox-shaped" usually apply to both NixOS hosts; check `hostname` before reaching for host-specific guidance.
 
 | `hostname` returns | Host kind | NixOS rebuild | Home-manager |
 |---|---|---|---|
 | `devbox` | NixOS on Hetzner | `sudo nixos-rebuild switch --flake .#devbox` | `nix run home-manager -- switch --flake .#dev` |
 | `cloudbox` | NixOS on GCP ARM | `sudo nixos-rebuild switch --flake .#cloudbox` | `nix run home-manager -- switch --flake .#cloudbox` |
 | `Y0FMQX93RR-2` (or similar) | macOS (nix-darwin) | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (covers both) | (combined) |
-| `penguin` (Chromebook Crostini) | Crostini | (no NixOS rebuild) | `nix run home-manager -- switch --flake .#livia` |
 
-Note the home-manager target name is asymmetric: devbox uses `.#dev` (legacy name kept for compatibility), cloudbox uses `.#cloudbox`, crostini uses `.#livia`. See the [Rebuilding](.opencode/skills/rebuilding/SKILL.md) skill for the canonical commands and their host-detection logic.
+Note the home-manager target name is asymmetric: devbox uses `.#dev` (legacy name kept for compatibility), cloudbox uses `.#cloudbox`. See the [Rebuilding](.opencode/skills/rebuilding/SKILL.md) skill for the canonical commands and their host-detection logic.
 
 ## Quick Start
 
@@ -38,7 +37,6 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 |----------|-------------|---------|
 | Devbox | `~/projects/` | Login (systemd service) or `~/.local/bin/ensure-projects` |
 | Cloudbox | `~/projects/` | Login (systemd service) or `~/.local/bin/ensure-projects` |
-| Crostini | `~/projects/` | `home-manager switch` (activation script) |
 | macOS | `~/Code/` | `darwin-rebuild switch` (activation script) |
 
 **Add a project:**
@@ -74,7 +72,6 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Understanding Workstation](.opencode/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
 | [Setting Up Hetzner](.opencode/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
 | [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) | GCP ARM VM provisioning with nixos-anywhere |
-| [Setting Up Crostini](.opencode/skills/setting-up-crostini/SKILL.md) | Chromebook Crostini setup with Nix + home-manager |
 | [Rebuilding](.opencode/skills/rebuilding/SKILL.md) | How to apply changes to any NixOS host (devbox, cloudbox) |
 | [Troubleshooting NixOS Host](.opencode/skills/troubleshooting-nixos-host/SKILL.md) | SSH issues, host keys, NixOS problems (devbox + cloudbox) |
 | [Automated Updates](.opencode/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
@@ -109,7 +106,6 @@ workstation/
 │   ├── home.base.nix      # Shared config (git, bash, packages)
 │   ├── home.devbox.nix    # Devbox-only (identity, sops secrets)
 │   ├── home.cloudbox.nix  # Cloudbox-only (identity, sops secrets, work tools)
-│   ├── home.crostini.nix  # Crostini-only (identity, sops secrets, pigeon, opencode-serve)
 │   ├── home.darwin.nix    # macOS-only (launchd, ensure-projects, dotfiles migration)
 │   ├── opencode-config.nix  # OpenCode managed config + agents
 │   └── opencode-skills.nix  # System-wide OpenCode skills deployed to ~/.config/opencode/skills/
@@ -150,8 +146,6 @@ See [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) for the
 ## Secrets
 
 **Devbox/Cloudbox:** Secrets at `/run/secrets/<name>` via sops-nix (NixOS module). Env vars auto-exported in bash. See [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md).
-
-**Crostini:** Secrets at `~/.config/sops-nix/secrets/<name>` via sops-nix (home-manager module). Env vars exported in `.bashrc`.
 
 **macOS:** macOS Keychain. Secrets populated via helper scripts (e.g. `pigeon-setup-secrets`).
 

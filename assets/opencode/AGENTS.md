@@ -13,8 +13,8 @@ auto-discovers them.
 OpenCode auto-discovers skills via the platform's skill mechanism (the
 `available_skills` block in the system prompt). The table below is a quick
 reference for humans reading this file directly, grouped by purpose. **Scope**
-is the deployment target: `cross` = all machines (devbox, cloudbox, macOS,
-crostini), `work-only` = macOS + cloudbox, `repo-only` = file present in the
+is the deployment target: `cross` = all machines (devbox, cloudbox, macOS),
+`work-only` = macOS + cloudbox, `repo-only` = file present in the
 repo but not deployed to any machine yet.
 
 ### Swarm Coordination
@@ -140,7 +140,7 @@ call. Use it to disambiguate which machine you're on without spawning a
 subprocess:
 
 ```bash
-echo $OPENCODE_HOSTNAME    # devbox | cloudbox | <macOS hostname> | penguin (crostini)
+echo $OPENCODE_HOSTNAME    # devbox | cloudbox | <macOS hostname>
 ```
 
 The repo-level `AGENTS.md` (in any workstation checkout) has a full host
@@ -161,7 +161,7 @@ every bash invocation (see `loadSecretEnv` in `shell-env.ts`). On cloudbox that 
 the Atlassian vars, etc. are all available in opencode bash sessions.
 
 The read is host-safe: where `/run/secrets/*` does not exist
-(devbox/crostini/macOS) each lookup returns `undefined` and nothing is injected.
+(devbox/macOS) each lookup returns `undefined` and nothing is injected.
 
 Note: `ba config syncsecrets` still must run from the Mac — even with
 `JENKINS_API_TOKEN` loaded, the Jenkins host is unreachable from cloudbox
