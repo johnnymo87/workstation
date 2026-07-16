@@ -201,6 +201,15 @@ if [ -f "$default_nix" ]; then
   # The old cwd=~ launch must be gone. This substring matches current source
   # (opencode-launch '~' "''${RECOMMENDATION_PROMPT}") and disappears after the change.
   refuse_grep "no legacy tilde launch"              "opencode-launch '~'"
+  # 2026-07-16 Task 2: prompt rationale corrected, self-skip added.
+  # The reopen instruction (with --tmux-session main) must remain.
+  want_grep "reopen still forces --tmux-session main" 'oc-auto-attach --tmux-session main <sid>'
+  # The stale "headless" self-description must be gone.
+  refuse_grep "prompt no longer calls itself headless" 'you are a headless session not attached to tmux'
+  # The self-skip directive must be present. NOTE: do NOT grep for '$HOME/morning'
+  # here -- that string already exists at default.nix's MORNING_DIR assignment
+  # (Task 1), so it would match vacuously. Grep for a phrase unique to the directive.
+  want_grep "prompt self-skips predecessor morning sessions" 'skip any manifest sid whose session directory is'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi
