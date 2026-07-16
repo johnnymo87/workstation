@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import type { ResolvedOwner } from "./resolve.js";
-import type { SidExtraction } from "./sid.js";
+import { extractSessionIdFromPath, type SidExtraction } from "./sid.js";
 
 // Callers MUST NOT invoke `maybePromote` from the Task 2.2 drift-timer re-resolve
 // or from casual reads. Those paths must stay read-only via `resolveOwner`.
@@ -94,24 +94,31 @@ export function isPromotingRequest(
   const upperMethod = method.toUpperCase();
 
   if (upperMethod === "GET") {
-    // Single-session event stream
-    // either session-path event route (/api)?/session/{id}/event OR (/api)?/event?session_ids=<one sid>
     const normalizedPath = pathname.replace(/\/$/, "");
-    if (normalizedPath.endsWith("/event") && !normalizedPath.endsWith("/global/event")) {
+    
+    // Query-based: /event or /api/event
+    if (normalizedPath === "/event" || normalizedPath === "/api/event") {
       return true;
     }
+
+    // Path-based: /session/{sid}/event or /api/session/{sid}/event
+    if (
+      normalizedPath === `/session/${extraction.sid}/event` ||
+      normalizedPath === `/api/session/${extraction.sid}/event`
+    ) {
+      return true;
+    }
+
     return false;
   }
 
   if (upperMethod === "POST") {
     // Turn-starting POST
     // Must be a session-path with the sid in the path
-    const normalizedPath = pathname.replace(/\/$/, "");
-    const sessionPathMatch = normalizedPath.match(/^\/(?:api\/)?session\/([^/]+)(?:\/|$)/);
-    const experimentalMatch = normalizedPath.match(/^\/(?:api\/)?experimental\/session\/([^/]+)\/background$/);
-    const pathCandidate = sessionPathMatch?.[1] || experimentalMatch?.[1];
+    const pathCandidate = extractSessionIdFromPath(pathname);
 
     if (pathCandidate && pathCandidate === extraction.sid) {
+      const normalizedPath = pathname.replace(/\/$/, "");
       const segments = normalizedPath.split("/").filter(Boolean);
       const lastSegment = segments[segments.length - 1];
       if (lastSegment && PROMOTING_SUFFIXES.has(lastSegment)) {
@@ -126,6 +133,7 @@ export function isPromotingRequest(
 
 export class PromotionGate {
   private attempts = new Map<string, number>();
+  private lastSweep = 0;
 
   constructor(private stickyTtlMs: number) {}
 
@@ -139,6 +147,14 @@ export class PromotionGate {
 
   record(sid: string, now: number): void {
     this.attempts.set(sid, now);
+    if (now - this.lastSweep >= this.stickyTtlMs) {
+      for (const [key, timestamp] of this.attempts.entries()) {
+        if (now - timestamp >= this.stickyTtlMs) {
+          this.attempts.delete(key);
+        }
+      }
+      this.lastSweep = now;
+    }
   }
 }
 
@@ -218,6 +234,9 @@ export async function maybePromote(
 
   // Step 5: If resolved.reason === "not-routed"
   if (resolved.reason === "not-routed") {
+    // Note: two concurrent promoting requests for the same not-yet-routed sid
+    // can both pass shouldAttempt before either calls record (async gap across checkSidExists),
+    // so both may POST /place — which is safe because pigeon's ensureRouted is idempotent.
     const exists = await checkSidExists(sid, config, deps);
     if (!exists) {
       return { placed: false, reason: "unknown-sid" };

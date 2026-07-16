@@ -37,6 +37,10 @@ describe('place.ts', () => {
 
       // Normal session GET -> false
       expect(isPromotingRequest('GET', '/session/ses_123', { kind: 'single', sid: 'ses_123' })).toBe(false);
+
+      // Tightened exact matching
+      expect(isPromotingRequest('GET', '/foo/event', { kind: 'single', sid: 'ses_123' })).toBe(false);
+      expect(isPromotingRequest('GET', '/event', { kind: 'multi', sids: ['ses_123', 'ses_456'] })).toBe(false);
     });
 
     test('Turn-starting POST requests', () => {
@@ -78,6 +82,27 @@ describe('place.ts', () => {
 
       expect(gate.shouldAttempt('ses_1', 1500)).toBe(false);
       expect(gate.shouldAttempt('ses_2', 1500)).toBe(true);
+    });
+
+    test('passive sweep prunes stale entries on record', () => {
+      const gate = new PromotionGate(1000);
+      
+      gate.record('ses_1', 1000);
+      gate.record('ses_2', 1100);
+      
+      expect((gate as any).attempts.size).toBe(2);
+
+      // Advance now to 2000 (past stickyTtlMs of 1000 relative to ses_1)
+      // Recording a new sid at 2000 triggers the sweep
+      gate.record('ses_3', 2000);
+
+      // ses_1 (1000) -> pruned (2000 - 1000 >= 1000)
+      // ses_2 (1100) -> kept (2000 - 1100 = 900 < 1000)
+      // ses_3 (2000) -> kept (2000 - 2000 = 0 < 1000)
+      expect((gate as any).attempts.size).toBe(2);
+      expect(gate.shouldAttempt('ses_1', 2000)).toBe(true);
+      expect(gate.shouldAttempt('ses_2', 2000)).toBe(false);
+      expect(gate.shouldAttempt('ses_3', 2000)).toBe(false);
     });
   });
 

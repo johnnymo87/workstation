@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import { extractSids } from '../src/sid.js';
+import { extractSids, extractSessionIdFromPath } from '../src/sid.js';
 
 describe('extractSids', () => {
   // Helpers to construct standard WHATWG URLs for testing
@@ -185,5 +185,25 @@ describe('extractSids', () => {
   test('path takes precedence over session_ids query parameter (literal path, valid query)', () => {
     const url = makeUrl('/session/garbage?session_ids=ses_b,ses_c');
     expect(extractSids(url)).toEqual({ kind: 'none' });
+  });
+});
+
+describe('extractSessionIdFromPath', () => {
+  test('extracts sid from bare path', () => {
+    expect(extractSessionIdFromPath('/session/ses_123')).toBe('ses_123');
+    expect(extractSessionIdFromPath('/session/ses_123/')).toBe('ses_123');
+  });
+
+  test('extracts sid from api path', () => {
+    expect(extractSessionIdFromPath('/api/session/ses_123')).toBe('ses_123');
+  });
+
+  test('extracts sid from experimental background path', () => {
+    expect(extractSessionIdFromPath('/experimental/session/ses_123/background')).toBe('ses_123');
+  });
+
+  test('returns undefined for non-matching paths', () => {
+    expect(extractSessionIdFromPath('/foo')).toBeUndefined();
+    expect(extractSessionIdFromPath('/global/health')).toBeUndefined();
   });
 });

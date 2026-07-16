@@ -12,6 +12,13 @@ export type SidExtraction =
 // Pigeon's /route and /place verified-solid session ID validation regex.
 const SID_REGEX = /^ses_[A-Za-z0-9_-]+$/;
 
+export function extractSessionIdFromPath(pathname: string): string | undefined {
+  const normalized = pathname.replace(/\/$/, "");
+  const sessionPathMatch = normalized.match(/^\/(?:api\/)?session\/([^/]+)(?:\/|$)/);
+  const experimentalMatch = normalized.match(/^\/(?:api\/)?experimental\/session\/([^/]+)\/background$/);
+  return sessionPathMatch?.[1] ?? experimentalMatch?.[1];
+}
+
 /**
  * Extracts and validates session IDs from the incoming URL.
  *
@@ -23,14 +30,7 @@ export function extractSids(url: URL): SidExtraction {
   const pathname = url.pathname;
 
   // 1. Extract from Path (Bare, /api mirror, nested paths, or experimental)
-  // Match bare and /api mirror: /session/{sessionID} or /api/session/{sessionID}
-  // The first capture group extracts the session ID segment.
-  const sessionPathMatch = pathname.match(/^\/(?:api\/)?session\/([^/]+)(?:\/|$)/);
-
-  // Match experimental background path: /experimental/session/{sessionID}/background
-  const experimentalMatch = pathname.match(/^\/(?:api\/)?experimental\/session\/([^/]+)\/background$/);
-
-  const pathCandidate = sessionPathMatch?.[1] || experimentalMatch?.[1];
+  const pathCandidate = extractSessionIdFromPath(pathname);
 
   if (pathCandidate !== undefined) {
     if (SID_REGEX.test(pathCandidate)) {
