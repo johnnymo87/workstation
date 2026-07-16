@@ -136,7 +136,7 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/find/symbol", class: "global-ro" },
   { method: "GET", path: "/formatter", class: "global-ro" },
   { method: "GET", path: "/global/config", class: "global-ro" },
-  { method: "PATCH", path: "/global/config", class: "global-ro" },
+  { method: "PATCH", path: "/global/config", class: "global-sideeffect" },
   { method: "POST", path: "/global/dispose", class: "global-sideeffect" },
   { method: "GET", path: "/global/event", class: "global-event" },
   { method: "GET", path: "/global/health", class: "global-ro" },
