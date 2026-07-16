@@ -17,6 +17,18 @@ project_key() {
   fi
 }
 
+# window_name: the tmux window name oc-auto-attach derives for a session dir.
+# Mirrors the same branch as project_key in default.nix: for ~/projects/<P>[/...]
+# it is <P>; otherwise it is basename(dir). Kept in lockstep with the source.
+window_name() {
+  local dir="$1"
+  if [[ "$dir" =~ ^"${HOME}/projects/"([^/]+)(/.*)?$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  else
+    printf '%s\n' "$(basename "$dir")"
+  fi
+}
+
 # resolve_nvims: prefer $OC_NVIMS_BIN (if set and executable), else
 # fall back to `command -v nvims`. Prints path on stdout, exits 0
 # on success; prints nothing and exits 1 if neither is usable.
@@ -136,6 +148,18 @@ assert_eq "$HOME/projects/pigeon"      "$(project_key "$HOME/projects/pigeon/.wo
 assert_eq "$HOME/projects/workstation" "$(project_key "$HOME/projects/workstation/.worktrees/launch-auto-attach")" "project_key: another project worktree"
 assert_eq "/tmp/foo"                   "$(project_key "/tmp/foo")"                                                 "project_key: non-project path"
 assert_eq "$HOME"                      "$(project_key "$HOME")"                                                    "project_key: bare home"
+
+# 2026-07-16: the morning reset agent launches in $HOME/morning (not a ~/projects
+# path), so project_key stays verbatim and window_name is its basename `morning`.
+# This is the derivation the non-headless-morning-agent fix relies on.
+assert_eq "$HOME/morning" "$(project_key "$HOME/morning")" "project_key: morning marker dir stays verbatim"
+assert_eq "morning"       "$(window_name "$HOME/morning")" "window_name: morning marker dir -> morning"
+# Lock the window_name mirror against the /projects branch too, so the mirror
+# itself is trustworthy (matches project_key's own cases above).
+assert_eq "pigeon"      "$(window_name "$HOME/projects/pigeon")"             "window_name: project root -> project name"
+assert_eq "pigeon"      "$(window_name "$HOME/projects/pigeon/foo/bar")"     "window_name: project subdir -> project name"
+assert_eq "workstation" "$(window_name "$HOME/projects/workstation/.worktrees/x")" "window_name: worktree -> project name"
+assert_eq "foo"         "$(window_name "/tmp/foo")"                          "window_name: non-project path -> basename"
 
 # ---- resolve_nvims tests ----------------------------------------------------
 
