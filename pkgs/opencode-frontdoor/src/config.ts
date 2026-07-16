@@ -25,6 +25,12 @@ function parsePositiveInteger(envName: string, value: string | undefined, defaul
 
 export function loadConfig(): Config {
   const port = parsePositiveInteger('FRONTDOOR_PORT', process.env.FRONTDOOR_PORT, 4700);
+  // Fail fast at the config boundary with a clear message rather than letting
+  // an out-of-range port surface later as an opaque ERR_SOCKET_BAD_PORT from
+  // server.listen().
+  if (port > 65535) {
+    throw new Error(`Invalid FRONTDOOR_PORT: "${port}". Must be a valid TCP port (1-65535).`);
+  }
   const routeTimeoutMs = parsePositiveInteger('FRONTDOOR_ROUTE_TIMEOUT_MS', process.env.FRONTDOOR_ROUTE_TIMEOUT_MS, 3000);
   const cheapFirstByteMs = parsePositiveInteger('FRONTDOOR_CHEAP_FIRST_BYTE_MS', process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS, 5000);
   const stickyTtlMs = parsePositiveInteger('FRONTDOOR_STICKY_TTL_MS', process.env.FRONTDOOR_STICKY_TTL_MS, 30000);

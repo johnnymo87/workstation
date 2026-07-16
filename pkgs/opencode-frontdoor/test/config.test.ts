@@ -19,8 +19,14 @@ describe('loadConfig', () => {
   });
 
   afterEach(() => {
-    // Restore process.env
-    process.env = originalEnv;
+    // Restore process.env in place (keep the native proxy object; just delete
+    // keys added during the test and reassign the originals).
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, originalEnv);
   });
 
   test('should load default configuration when no environment variables are set', () => {
@@ -68,6 +74,16 @@ describe('loadConfig', () => {
 
     process.env.FRONTDOOR_PORT = '3.5';
     expect(() => loadConfig()).toThrowError('Invalid FRONTDOOR_PORT: "3.5". Must be a positive integer.');
+  });
+
+  test('should throw for a FRONTDOOR_PORT above the valid TCP range', () => {
+    process.env.FRONTDOOR_PORT = '70000';
+    expect(() => loadConfig()).toThrowError('Invalid FRONTDOOR_PORT: "70000". Must be a valid TCP port (1-65535).');
+  });
+
+  test('should accept the maximum valid TCP port', () => {
+    process.env.FRONTDOOR_PORT = '65535';
+    expect(loadConfig().port).toBe(65535);
   });
 
   test('should throw a descriptive error for invalid FRONTDOOR_ROUTE_TIMEOUT_MS', () => {
