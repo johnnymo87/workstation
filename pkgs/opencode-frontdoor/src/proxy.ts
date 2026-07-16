@@ -9,6 +9,7 @@ import { isPromotingRequest, maybePromote, PromotionGate } from "./place.js";
 import type { Config } from "./config.js";
 import { RequestLogger } from "./log.js";
 import { isAbsoluteHttpUrl } from "./http.js";
+import { isEventStreamResponse, pipeEventStream } from "./sse.js";
 
 export interface ProxyDeps {
   fetch?: typeof globalThis.fetch;
@@ -131,16 +132,31 @@ async function proxyRequest(
 
       res.writeHead(upstreamRes.statusCode || 200, clientHeaders);
 
-      upstreamRes.pipe(res);
+      if (isEventStreamResponse(upstreamRes.headers)) {
+        // Task 2.2 will start an owner-drift monitor here. The monitor needs access to:
+        // - res (to close/end the client stream if drift is detected)
+        // - upstreamRes (to destroy and release the socket if drift is detected)
+        // - activity state (via hooks.onActivity callback or a local tracker)
+        pipeEventStream(upstreamRes, res, {
+          onActivity: () => {
+            // Task 2.2 will update its activity state here
+          },
+          onDone: () => {
+            safeResolve();
+          }
+        });
+      } else {
+        upstreamRes.pipe(res);
 
-      upstreamRes.on("error", (err) => {
-        res.destroy();
-        safeResolve();
-      });
+        upstreamRes.on("error", (err) => {
+          res.destroy();
+          safeResolve();
+        });
 
-      upstreamRes.on("end", () => {
-        safeResolve();
-      });
+        upstreamRes.on("end", () => {
+          safeResolve();
+        });
+      }
     });
 
     upstreamReq.on("error", (err) => {
