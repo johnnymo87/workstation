@@ -1,0 +1,190 @@
+import { describe, test, expect } from 'vitest';
+import { classify, dispatch } from '../src/dispatch.js';
+import { ROUTE_CLASSIFICATION_TABLE } from '../src/routes.classification.js';
+
+describe('Route Dispatcher', () => {
+  // session-path:
+  test('GET /session/ses_x -> session-path/route-session', () => {
+    expect(classify('GET', '/session/ses_x')).toBe('session-path');
+    expect(dispatch('GET', '/session/ses_x')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+    });
+  });
+
+  test('POST /session/ses_x/message -> session-path/route-session', () => {
+    expect(classify('POST', '/session/ses_x/message')).toBe('session-path');
+    expect(dispatch('POST', '/session/ses_x/message')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+    });
+  });
+
+  test('/api/session/ses_x/event -> session-path/route-session', () => {
+    expect(classify('GET', '/api/session/ses_x/event')).toBe('session-path');
+    expect(dispatch('GET', '/api/session/ses_x/event')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+    });
+  });
+
+  // precedence:
+  test('GET /session/status -> global-ro/forward-anchor (NOT session-path)', () => {
+    expect(classify('GET', '/session/status')).toBe('global-ro');
+    expect(dispatch('GET', '/session/status')).toEqual({
+      class: 'global-ro',
+      action: 'forward-anchor',
+      recognized: true,
+    });
+  });
+
+  test('GET /api/session/active -> global-ro/forward-anchor (NOT session-path)', () => {
+    expect(classify('GET', '/api/session/active')).toBe('global-ro');
+    expect(dispatch('GET', '/api/session/active')).toEqual({
+      class: 'global-ro',
+      action: 'forward-anchor',
+      recognized: true,
+    });
+  });
+
+  // session-query:
+  test('GET /event -> session-query/route-session', () => {
+    expect(classify('GET', '/event')).toBe('session-query');
+    expect(dispatch('GET', '/event')).toEqual({
+      class: 'session-query',
+      action: 'route-session',
+      recognized: true,
+    });
+  });
+
+  test('GET /api/event -> session-query/route-session', () => {
+    expect(classify('GET', '/api/event')).toBe('session-query');
+    expect(dispatch('GET', '/api/event')).toEqual({
+      class: 'session-query',
+      action: 'route-session',
+      recognized: true,
+    });
+  });
+
+  // create:
+  test('POST /session -> create/create', () => {
+    expect(classify('POST', '/session')).toBe('create');
+    expect(dispatch('POST', '/session')).toEqual({
+      class: 'create',
+      action: 'create',
+      recognized: true,
+    });
+  });
+
+  // pty:
+  test('GET /pty -> pty/pty-501', () => {
+    expect(classify('GET', '/pty')).toBe('pty');
+    expect(dispatch('GET', '/pty')).toEqual({
+      class: 'pty',
+      action: 'pty-501',
+      recognized: true,
+    });
+  });
+
+  test('GET /pty/pty_x/connect -> pty/pty-501', () => {
+    expect(classify('GET', '/pty/pty_x/connect')).toBe('pty');
+    expect(dispatch('GET', '/pty/pty_x/connect')).toEqual({
+      class: 'pty',
+      action: 'pty-501',
+      recognized: true,
+    });
+  });
+
+  // global-sideeffect:
+  test('POST /global/dispose -> global-sideeffect/deny-405', () => {
+    expect(classify('POST', '/global/dispose')).toBe('global-sideeffect');
+    expect(dispatch('POST', '/global/dispose')).toEqual({
+      class: 'global-sideeffect',
+      action: 'deny-405',
+      recognized: true,
+    });
+  });
+
+  test('PATCH /global/config -> global-sideeffect/deny-405', () => {
+    expect(classify('PATCH', '/global/config')).toBe('global-sideeffect');
+    expect(dispatch('PATCH', '/global/config')).toEqual({
+      class: 'global-sideeffect',
+      action: 'deny-405',
+      recognized: true,
+    });
+  });
+
+  // global-event:
+  test('GET /global/event -> global-event/gone-410', () => {
+    expect(classify('GET', '/global/event')).toBe('global-event');
+    expect(dispatch('GET', '/global/event')).toEqual({
+      class: 'global-event',
+      action: 'gone-410',
+      recognized: true,
+    });
+  });
+
+  // global-ro:
+  test('GET /global/health -> global-ro/forward-anchor', () => {
+    expect(classify('GET', '/global/health')).toBe('global-ro');
+    expect(dispatch('GET', '/global/health')).toEqual({
+      class: 'global-ro',
+      action: 'forward-anchor',
+      recognized: true,
+    });
+  });
+
+  // unrecognized:
+  test('GET /nonexistent -> unrecognized/not-found-404, recognized:false', () => {
+    expect(classify('GET', '/nonexistent')).toBe('unrecognized');
+    expect(dispatch('GET', '/nonexistent')).toEqual({
+      class: 'unrecognized',
+      action: 'not-found-404',
+      recognized: false,
+    });
+  });
+
+  test('DELETE /global/health -> unrecognized/not-found-404, recognized:false', () => {
+    expect(classify('DELETE', '/global/health')).toBe('unrecognized');
+    expect(dispatch('DELETE', '/global/health')).toEqual({
+      class: 'unrecognized',
+      action: 'not-found-404',
+      recognized: false,
+    });
+  });
+
+  // trailing-slash normalization:
+  test('trailing slash normalization', () => {
+    expect(classify('GET', '/session/ses_x/')).toBe('session-path');
+    expect(classify('GET', '/')).toBe('unrecognized'); // or matches whatever root is, let's see. Wait, root is not in table so unrecognized/not-found-404
+    expect(classify('GET', '')).toBe('unrecognized');
+  });
+
+  // a templated multi-param route:
+  test('templated multi-param route', () => {
+    expect(classify('DELETE', '/session/ses_x/message/msg_y/part/part_z')).toBe('session-path');
+  });
+
+  // module-load integrity: every entry in ROUTE_CLASSIFICATION_TABLE classifies to ITS OWN class when you feed it a concretized path
+  test('module-load integrity: table coverage', () => {
+    for (const entry of ROUTE_CLASSIFICATION_TABLE) {
+      // Concretize path: replace any {token} with a dummy value e.g. "ses_x" or "x" or "123".
+      // Let's replace any {tokenID} or {token} with 'dummy_id_123'.
+      // Also, strip query suffix just in case.
+      let concretePath = entry.path.split('?')[0];
+      // Strip trailing slash first (except root)
+      if (concretePath.endsWith('/') && concretePath !== '/') {
+        concretePath = concretePath.slice(0, -1);
+      }
+      concretePath = concretePath.replace(/\{[^}]+\}/g, 'dummy_id_123');
+      // Replace * wildcard with a dummy subpath if it exists
+      concretePath = concretePath.replace(/\*/g, 'sub/path/to/file.txt');
+
+      const cls = classify(entry.method, concretePath);
+      expect(cls).toBe(entry.class);
+    }
+  });
+});
