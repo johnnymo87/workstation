@@ -15,10 +15,6 @@ describe("isEventStreamResponse", () => {
     expect(isEventStreamResponse({ "content-type": "Text/Event-Stream; charset=utf-8" })).toBe(true);
   });
 
-  test("handles array of headers", () => {
-    expect(isEventStreamResponse({ "content-type": ["application/json", "text/event-stream"] } as any)).toBe(true);
-  });
-
   test("returns false for application/json, empty, or missing headers", () => {
     expect(isEventStreamResponse({ "content-type": "application/json" })).toBe(false);
     expect(isEventStreamResponse({ "content-type": "" })).toBe(false);

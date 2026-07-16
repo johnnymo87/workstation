@@ -10,14 +10,12 @@ export interface SSEHooks {
  * Relies on Node's lowercased header keys and performs case-insensitive value matching.
  */
 export function isEventStreamResponse(headers: http.IncomingHttpHeaders): boolean {
-  const contentType = headers["content-type"] as unknown;
-  if (typeof contentType === "string") {
-    return contentType.trim().toLowerCase().startsWith("text/event-stream");
-  }
-  if (Array.isArray(contentType)) {
-    return contentType.some((v) => typeof v === "string" && v.trim().toLowerCase().startsWith("text/event-stream"));
-  }
-  return false;
+  // Node types (and delivers) `content-type` as a single `string | undefined` on
+  // an IncomingMessage — it's a singleton header, never an array — so a direct
+  // lookup is sufficient. Case-insensitivity that matters is on the value.
+  const contentType = headers["content-type"];
+  return typeof contentType === "string"
+    && contentType.trim().toLowerCase().startsWith("text/event-stream");
 }
 
 /**
