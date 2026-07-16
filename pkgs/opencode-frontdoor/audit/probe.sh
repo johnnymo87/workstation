@@ -90,8 +90,11 @@ probe() {
   # Clean and truncate body for display
   local first_line=""
   IFS=$'\n' read -r first_line <<< "$body"
-  # Trim leading/trailing whitespace
-  first_line=$(echo "$first_line" | xargs)
+  # Trim leading/trailing whitespace (pure bash: avoids echo interpreting a
+  # leading "-n"/"-e" as a flag and avoids xargs mangling quotes/backslashes in
+  # JSON/SSE payloads -- both matter for the deterministic Phase 6.5 diff).
+  first_line="${first_line#"${first_line%%[![:space:]]*}"}"
+  first_line="${first_line%"${first_line##*[![:space:]]}"}"
   # Limit first line length to 80 chars
   if [ ${#first_line} -gt 80 ]; then
     first_line="${first_line:0:77}..."
