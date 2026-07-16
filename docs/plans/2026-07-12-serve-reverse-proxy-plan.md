@@ -4,6 +4,12 @@
 > implement this plan task-by-task. Companion design:
 > `docs/plans/2026-07-12-serve-reverse-proxy-design.md` (revision 2).
 >
+> **Plan revision 5** — after a THIRD fable review that verified the Phase 0
+> findings against live pigeon + upstream v1.17.13 source. Verdict: **GO for
+> Phase 1.** Folds in the review's must-do-firsts (NEW-A..H) and corrects two
+> Phase-0 over-reads in the findings doc (0.5 method + web-UI PTY carve-out;
+> 0.6 backoff-reset nuance). See "Changes from plan rev 4" at the end.
+>
 > **Plan revision 4** — **Phase 0 investigation EXECUTED** (see
 > `docs/investigations/2026-07-12-frontdoor-route-audit.md`). Findings resolved
 > several open items and *simplified* the plan: **PTY is unused by the deployed
@@ -143,6 +149,14 @@ Phase 0 is resolved.
 
 ## Phase 1 — Forwarder core (node)
 
+### Task 1.0: Materialize the Phase-0 artifacts (NEW-F)
+Before any routing code, commit the two Phase-0 deliverables that were left as
+prose: `pkgs/opencode-frontdoor/audit/probe.sh` (the live `curl -N` probe
+matrix) and `src/routes.classification.ts` — the **enumerated** route→class
+table (regenerate from `/doc` + the patch list; do NOT ship only counts). The
+dispatcher (1.5) and sid map (1.2) are only as good as this table. Commit
+`feat(frontdoor): route classification table + probe.sh`.
+
 ### Task 1.1: Scaffold (node, minimal deps)
 `package.json` (vitest devDep), `tsconfig.json`, `vitest.config.ts`,
 `src/config.ts` (`port`, `pigeonUrl`, `anchorUrl` from `OPENCODE_ANCHOR_URL`,
@@ -151,8 +165,11 @@ optional `pigeonAuthToken`, `routeTimeoutMs=3000`, `cheapFirstByteMs=5000`,
 
 ### Task 1.2: sid extraction (TDD)
 `src/sid.ts`. Path / query (`session_ids`, `session`) / create→null /
-malformed→null. **Multi-value `session_ids`:** single→route; same-owner→route;
-mixed-owner→400. Commit `feat(frontdoor): session-id extraction`.
+malformed→null. **Enforce `^ses_[A-Za-z0-9_-]+$`** on any extracted sid (NEW-E) —
+pigeon's `/place` does NOT validate the sid (asymmetric with `/route`), so the
+front door must gate it before ever calling `/place`. **Multi-value
+`session_ids`:** single→route; same-owner→route; mixed-owner→400. Commit
+`feat(frontdoor): session-id extraction`.
 
 ### Task 1.3: pigeon resolver with anchor degrade (TDD)
 `src/resolve.ts`. `resolveOwner(sid) → {url, prospective, degraded}` via GET
@@ -196,8 +213,11 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
 
 - **2.1** `src/sse.ts` unbuffered pass-through, survives 10 s heartbeat. Commit.
 - **2.2** confirm-twice re-resolve timer (**read-only**, no promote — NEW-2); on
-  drift **close the client leg** (no silent re-dial — C2). Assert clean close +
-  no re-dial. Commit `feat(frontdoor): drop SSE leg on drift`.
+  drift **close the client leg** (no silent re-dial — C2). **Consult the 3.4
+  sticky map first (NEW-H):** an actively-flowing leg (sticky refreshed by
+  observed SSE activity) is **not** dropped mid-turn — only re-resolve/drop when
+  the leg is quiescent — making the door strictly safer than today's TUI. Assert
+  clean close + no re-dial + no-drop-while-active. Commit `feat(frontdoor): drop SSE leg on drift`.
 
 ---
 
@@ -239,10 +259,15 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
   PTY, revisit with a node raw duplex tunnel (node verified; bun 1.3.3's hijack
   silently fails — audit findings §0.5/§0.7). TDD the 501 branch. Commit
   `feat(frontdoor): PTY 501 (out of scope v1)`.
-- **5.2** `/global/dispose|upgrade`→deny(405)+log; `/global/event`→pass-to-anchor
-  with loud "legacy firehose" log (Phase 0.3 decision; the deployed TUI streams
-  `/global/event` directly + self-resolves around the door until Phase 8, so this
-  path is a legacy bridge); unrecognized→404-loud. Commit
+- **5.2** `/global/dispose|upgrade`→deny(405)+log; **`/global/event`→fail-loud
+  `410` (NEW-C)** — pass-to-anchor is the yl00 missed-events shape (sessions on
+  serve-1..3 emit only on their own buses) and there are **zero** non-TUI
+  `/global/event` consumers (the TUI streams it directly + self-resolves around
+  the door until Phase 8), so anchor-forwarding is dead code that can only
+  mis-serve a straggler plausibly; fail loud instead. **Web-UI scope statement
+  (NEW-D):** the web UI (`packages/app`, a PTY client served at `/`) is
+  **unsupported through the front door** — `/` + static assets → 404-loud, PTY →
+  501; use direct serve ports for the web UI. unrecognized→404-loud. Commit
   `feat(frontdoor): global + unrecognized policies`.
 
 ---
@@ -303,10 +328,27 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
 
 ## Phase 8 — opencode-patched: attach → session-scoped event stream (own mini-plan)
 Cross-repo epic → its own plan in `opencode-patched`. Move attach `/global/event`
-→ `/event?session_ids=<sid>`; preserve Task-0.5 non-session events; remove the
-TUI's `/route` self-resolve; add tripwire; **jittered reconnect** (herd). Rollback
-= hold to previous patched release. Coordinate with #7/#10/#11/#14/#15.
-**Gate:** a migrated session's attach TUI survives idle migration hands-off.
+→ `/event?session_ids=<sid>`; remove the TUI's `/route` self-resolve; **jittered
+reconnect** (herd). Rollback = hold to previous patched release. Coordinate with
+#7/#10/#11/#14/#15. **First-class requirements surfaced by review #3:**
+- **NEW-A (backoff reset):** once the door's drop-leg is the *only* migration
+  follow path, the TUI's `attempt` counter (which resets **only** on self-detected
+  drift and never on a successful open) must be fixed to **reset on a successful
+  stream open** — else routine drift-drops inflate the reconnect delay toward the
+  ~30 s cap and a turn starting in that window loses early events silently.
+- **NEW-B (sibling/child-session events):** a `?session_ids=<sid>` stream drops
+  **other sids' events by design** — incl. `session.created/updated` for the
+  session list/switcher and **all events of child/subagent sessions** (distinct
+  sids). Decide explicitly: fetch-on-demand for lists; include child sids in
+  `session_ids`; or accept staleness. (Globals still pass — 0.3.)
+- **NEW-G (real tripwire):** there is **no** CI test guard today —
+  `build-release.yml` applies patches + smoke-tests but **never runs the suite**;
+  the only standing guard is `apply.sh` + the `opencodePatchedHold` pin. Add the
+  `/event?session_ids=` tripwire here as genuine new work; "event contract
+  LOCKED" means *locked on the current pin*.
+
+**Gate:** a migrated session's attach TUI survives idle migration hands-off,
+**with no reconnect-delay inflation across repeated migrations** (NEW-A).
 
 ---
 
@@ -351,6 +393,23 @@ package (host-scope everything).
   predicted PASS from source; couldn't run headless — `sudo -n` = NO). If it
   FAILS, redesign Phase 2.
 - Over-eager promotion (NEW-2) → scoped + TTL-guarded in 1.4.
+
+## Changes from plan rev 4 (3rd review — GO for Phase 1)
+1. **NEW-F:** new **Task 1.0** materializes the enumerated route-classification
+   table + `probe.sh` before any routing code (rev-3's `classification.ts`
+   deliverable had been reduced to counts).
+2. **NEW-E:** Task 1.2 enforces the `^ses_` regex before any `/place` (pigeon's
+   `/place` doesn't validate).
+3. **NEW-C:** Task 5.2 `/global/event` → **fail-loud 410** (was pass-to-anchor;
+   zero consumers, yl00-shaped risk).
+4. **NEW-D:** Task 5.2/9.0 web-UI carve-out (web UI is a PTY client, unsupported
+   through the door).
+5. **NEW-H:** Task 2.2 consults the 3.4 sticky map (don't drop an active leg);
+   pre-Phase-2 gate PASS criterion sharpened to *eventual consistency*, not replay.
+6. **NEW-A / NEW-B / NEW-G:** added to the Phase 8 mini-plan as first-class
+   requirements (backoff-reset; sibling/child-session events; the real tripwire).
+7. Findings doc corrected: 0.5 method (source = upstream v1.17.13 checkout, not
+   the patch-only overlay) + web-UI carve-out; 0.6 backoff-reset nuance.
 
 ## Changes from plan rev 3 (Phase 0 findings)
 1. **PTY unused (0.5):** Phase 5 collapses to a 501 stub — **no WS proxying, no
