@@ -3,7 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import { identify } from "./identity.js";
 import { dispatch } from "./dispatch.js";
-import { extractSids } from "./sid.js";
+import { extractSids, type SidExtraction } from "./sid.js";
 import { resolveOwner } from "./resolve.js";
 import { isPromotingRequest, maybePromote, PromotionGate } from "./place.js";
 import type { Config } from "./config.js";
@@ -39,7 +39,7 @@ async function proxyRequest(
   req: IncomingMessage,
   res: ServerResponse,
   ctx: ProxyContext,
-  extraction: any
+  extraction: SidExtraction | null
 ): Promise<void> {
   return new Promise<void>((resolve) => {
     const targetParsed = new URL(target);
@@ -112,6 +112,10 @@ async function proxyRequest(
         return;
       }
       headersSent = true;
+      // First byte received: clear the cheap first-byte idle timeout so it can't
+      // tear down a long-lived response (e.g. an idle SSE stream in Phase 2 or a
+      // slow streamed GET). The first-byte bound only guards time-to-headers.
+      upstreamReq.setTimeout(0);
 
       const clientHeaders: Record<string, string | string[]> = {};
       for (const [key, val] of Object.entries(upstreamRes.headers)) {
