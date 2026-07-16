@@ -213,4 +213,49 @@ describe('resolveOwner', () => {
     expect(requestInit.signal).toBeDefined();
     expect(requestInit.signal?.aborted).toBe(true);
   });
+
+  test('200 with a non-absolute apiBase -> degrade to anchor, reason "pigeon-error"', async () => {
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ apiBase: '/relative/path' }),
+    });
+
+    const result = await resolveOwner('sid_123', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://anchor.local',
+      prospective: false,
+      degraded: true,
+      reason: 'pigeon-error',
+    });
+  });
+
+  test('200 with a non-http (e.g. javascript:) apiBase -> degrade to anchor, reason "pigeon-error"', async () => {
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ apiBase: 'javascript:alert(1)' }),
+    });
+
+    const result = await resolveOwner('sid_123', dummyConfig, { fetch: fakeFetch });
+
+    expect(result.degraded).toBe(true);
+    expect(result.reason).toBe('pigeon-error');
+    expect(result.url).toBe('http://anchor.local');
+  });
+
+  test('trailing slash on pigeonUrl does not produce a double slash in the request URL', async () => {
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ apiBase: 'http://active-serve.local' }),
+    });
+
+    const config: Config = { ...dummyConfig, pigeonUrl: 'http://pigeon.local/' };
+    await resolveOwner('sid_123', config, { fetch: fakeFetch });
+
+    const [requestUrl] = fakeFetch.mock.calls[0] as [string, RequestInit];
+    expect(requestUrl).toBe('http://pigeon.local/route?session_id=sid_123');
+  });
 });

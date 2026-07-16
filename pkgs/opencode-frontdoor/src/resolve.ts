@@ -17,14 +17,26 @@ export interface ResolvedOwner {
 // deps injected for testability; default to real fetch.
 export interface ResolveDeps { fetch?: typeof globalThis.fetch; }
 
+function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveOwner(
   sid: string,
   config: Config,
   deps?: ResolveDeps,
 ): Promise<ResolvedOwner> {
   const fetchFn = deps?.fetch ?? globalThis.fetch;
-  const targetUrl = `${config.pigeonUrl}/route?session_id=${encodeURIComponent(sid)}`;
-  
+  // Strip trailing slashes so a configured PIGEON_DAEMON_URL like
+  // "http://127.0.0.1:4731/" doesn't produce "…//route".
+  const pigeonBase = config.pigeonUrl.replace(/\/+$/, "");
+  const targetUrl = `${pigeonBase}/route?session_id=${encodeURIComponent(sid)}`;
+
   const headers: Record<string, string> = {};
   if (config.pigeonAuthToken) {
     headers["Authorization"] = `Bearer ${config.pigeonAuthToken}`;
@@ -40,7 +52,7 @@ export async function resolveOwner(
     response = await fetchFn(targetUrl, {
       method: "GET",
       signal: controller.signal,
-      ...(config.pigeonAuthToken ? { headers } : {}),
+      headers,
     });
   } catch (err) {
     return {
@@ -74,7 +86,10 @@ export async function resolveOwner(
   try {
     const data = await response.json() as any;
     const url = data?.apiBase ?? data?.api_base;
-    if (!url || typeof url !== "string") {
+    if (!url || typeof url !== "string" || !isAbsoluteHttpUrl(url)) {
+      // A missing base, or a base that isn't an absolute http(s) URL, would
+      // crash the forwarder (Task 1.7) on proxy init. Degrade instead of
+      // returning a live owner we can't actually forward to.
       return {
         url: config.anchorUrl,
         prospective: false,
