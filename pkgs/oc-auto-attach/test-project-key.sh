@@ -19,7 +19,9 @@ project_key() {
 
 # window_name: the tmux window name oc-auto-attach derives for a session dir.
 # Mirrors the same branch as project_key in default.nix: for ~/projects/<P>[/...]
-# it is <P>; otherwise it is basename(dir). Kept in lockstep with the source.
+# it is <P>; otherwise it is basename(dir). Kept in lockstep with the source by
+# the derivation grep guard in the production-source check below (same guard
+# also covers project_key).
 window_name() {
   local dir="$1"
   if [[ "$dir" =~ ^"${HOME}/projects/"([^/]+)(/.*)?$ ]]; then
@@ -139,7 +141,7 @@ assert_exit() {
   fi
 }
 
-# ---- project_key tests ------------------------------------------------------
+# ---- project_key / window_name tests ----------------------------------------
 
 assert_eq "$HOME/projects/pigeon"      "$(project_key "$HOME/projects/pigeon")"                                    "project_key: project root"
 assert_eq "$HOME/projects/pigeon"      "$(project_key "$HOME/projects/pigeon/foo/bar")"                            "project_key: subdir"
@@ -517,6 +519,22 @@ if [ -f "$default_nix" ]; then
     exit 1
   else
     printf 'PASS  source /session probe no longer swallows the http status (curl -sf)\n'
+  fi
+  # The morning-agent fix relies on oc-auto-attach deriving window_name from the
+  # session dir basename for non-~/projects paths (so $HOME/morning -> `morning`),
+  # and NOT collapsing non-project dirs. Guard the production derivation so a
+  # source-side refactor trips here instead of silently breaking the morning window.
+  if grep -qF '/projects/"([^/]+)(/.*)?$' "$default_nix"; then
+    printf 'PASS  source derives project via ~/projects/<P> regex\n'
+  else
+    printf 'FAIL  source derives project via ~/projects/<P> regex\n        derivation regex not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  if grep -qF 'window_name="$(basename "$session_dir")"' "$default_nix"; then
+    printf 'PASS  source derives window_name as basename for non-project dirs\n'
+  else
+    printf 'FAIL  source derives window_name as basename for non-project dirs\n        basename derivation not found in: %s\n' "$default_nix"
+    exit 1
   fi
 else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
