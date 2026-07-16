@@ -574,7 +574,15 @@ EOF
     elif ! command -v opencode-launch >/dev/null 2>&1; then
       log "WARNING: opencode-launch not on PATH; cannot spawn recommendation session"
     else
-      log "launching recommendation session in ~ ..."
+      # Land the morning agent in a dedicated dir so oc-auto-attach gives it a
+      # recognizable `morning` tmux window (basename of the dir) instead of a
+      # generic `dev` window / a hijacked ~ shell pane. cwd=~ has no clean home
+      # for it; see docs/plans/2026-07-16-morning-agent-dedicated-window-design.md.
+      # mkdir is best-effort: a failure must not abort the (already best-effort)
+      # launch — opencode/tmux fall back to a default cwd.
+      MORNING_DIR="$HOME/morning"
+      mkdir -p "$MORNING_DIR" || log "WARNING: could not create $MORNING_DIR; launching anyway"
+      log "launching recommendation session in $MORNING_DIR ..."
       # The prompt is intentionally loose/judgmental. The recommendation
       # session does its own enrichment via the opencode-serve HTTP API.
       # See design doc for the rationale.
@@ -605,8 +613,7 @@ After reopening, you are deputized as swarm coordinator for those sessions. The 
 PROMPT
 )
       # opencode-launch first arg is directory, second is the prompt.
-      # ~ resolves inside opencode-launch via "''${directory/#\~/$HOME}".
-      if ! opencode-launch '~' "''$RECOMMENDATION_PROMPT" 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
+      if ! opencode-launch "$MORNING_DIR" "$RECOMMENDATION_PROMPT" 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
         log "WARNING: opencode-launch failed (non-zero exit); recommendation session not started"
       fi
     fi

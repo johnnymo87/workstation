@@ -193,6 +193,14 @@ if [ -f "$default_nix" ]; then
   else
     echo "FAIL: prune must precede recommendation launch (prune at ${prune_line:-?}, rec at ${rec_line:-?})"; fail=1
   fi
+  # 2026-07-16: morning agent lands in a dedicated $HOME/morning window
+  # (not headless/cwd=~). See docs/plans/2026-07-16-morning-agent-dedicated-window-design.md
+  want_grep "morning agent dir is defined"          'MORNING_DIR="$HOME/morning"'
+  want_grep "morning agent dir is created"          'mkdir -p "$MORNING_DIR"'
+  want_grep "launch targets the morning dir"        'opencode-launch "$MORNING_DIR" "$RECOMMENDATION_PROMPT"'
+  # The old cwd=~ launch must be gone. This substring matches current source
+  # (opencode-launch '~' "''${RECOMMENDATION_PROMPT}") and disappears after the change.
+  refuse_grep "no legacy tilde launch"              "opencode-launch '~'"
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi
