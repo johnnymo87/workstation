@@ -210,6 +210,8 @@ if [ -f "$default_nix" ]; then
   # here -- that string already exists at default.nix's MORNING_DIR assignment
   # (Task 1), so it would match vacuously. Grep for a phrase unique to the directive.
   want_grep "prompt self-skips predecessor morning sessions" 'skip any manifest sid whose session directory is'
+  # The scratch-dir guidance must be independently guarded.
+  want_grep "prompt keeps scratch out of morning dir" 'write them under /tmp, never in'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi
