@@ -215,6 +215,7 @@ describe("FrontDoor Integration", () => {
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
+      wedgeProbeIntervalMs: 5000,
     };
 
     const testDeps = {
@@ -643,6 +644,7 @@ describe("FrontDoor Integration", () => {
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
       driftCheckMs: 40,
+      wedgeProbeIntervalMs: 5000,
     };
 
     const fastDeps = {
@@ -726,6 +728,7 @@ describe("FrontDoor Integration", () => {
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
       driftCheckMs: 40,
+      wedgeProbeIntervalMs: 5000,
     };
 
     const fastDeps = {
@@ -810,6 +813,7 @@ describe("FrontDoor Integration", () => {
       cheapFirstByteMs: 100, // 100ms wall-clock limit
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
+      wedgeProbeIntervalMs: 5000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -875,6 +879,7 @@ describe("FrontDoor Integration", () => {
       cheapFirstByteMs: 100, // 100ms
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
+      wedgeProbeIntervalMs: 5000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -931,6 +936,7 @@ describe("FrontDoor Integration", () => {
       cheapFirstByteMs: 100, // 100ms
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
+      wedgeProbeIntervalMs: 5000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -991,6 +997,150 @@ describe("FrontDoor Integration", () => {
     } finally {
       await new Promise<void>((resolve) => timeoutFrontDoor.close(() => resolve()));
       await new Promise<void>((resolve) => slowServer.close(() => resolve()));
+    }
+  });
+
+  test("19. wedge health-probe integration (Task 3.2): exempt request keeps waiting if /global/health returns 200", async () => {
+    let healthServerPort: number;
+    let healthProbeCount = 0;
+
+    const healthServer = http.createServer((req, res) => {
+      if (req.url && req.url.includes("/global/health")) {
+        healthProbeCount++;
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("OK");
+      } else {
+        // Keep the exempt POST request open without writing headers
+      }
+    });
+
+    await new Promise<void>((resolve) => healthServer.listen(0, "127.0.0.1", () => resolve()));
+    healthServerPort = (healthServer.address() as AddressInfo).port;
+
+    const testConfig: Config = {
+      port: 0,
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${healthServerPort}`,
+      routeTimeoutMs: 100,
+      cheapFirstByteMs: 50, // very small
+      wedgeProbeIntervalMs: 30, // probe every 30ms
+      stickyTtlMs: 30000,
+      driftCheckMs: 10000,
+    };
+
+    const frontDoor = createFrontDoor(testConfig, {
+      logger: { sink: () => {} }
+    });
+    await new Promise<void>((resolve) => frontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const frontDoorPort = (frontDoor.address() as AddressInfo).port;
+
+    let clientReq: http.ClientRequest | undefined;
+    try {
+      let gotResponse = false;
+      let responseStatus: number | undefined;
+
+      clientReq = http.request({
+        hostname: "127.0.0.1",
+        port: frontDoorPort,
+        path: "/api/session/ses_health_ok/prompt",
+        method: "POST"
+      }, (res) => {
+        gotResponse = true;
+        responseStatus = res.statusCode;
+      });
+
+      clientReq.on("error", () => {});
+      clientReq.end();
+
+      // Wait dynamically until at least 3 health probes have been received (up to 1000ms)
+      for (let i = 0; i < 50; i++) {
+        if (healthProbeCount >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      expect(gotResponse).toBe(false);
+      expect(healthProbeCount).toBeGreaterThanOrEqual(3);
+    } finally {
+      if (clientReq) {
+        clientReq.destroy();
+      }
+      await new Promise<void>((resolve) => frontDoor.close(() => resolve()));
+      await new Promise<void>((resolve) => healthServer.close(() => resolve()));
+    }
+  });
+
+  test("20. wedge health-probe integration (Task 3.2): exempt request times out with 503 if /global/health fails twice consecutive", async () => {
+    let healthServerPort: number;
+    let healthProbeCount = 0;
+
+    const healthServer = http.createServer((req, res) => {
+      if (req.url && req.url.includes("/global/health")) {
+        healthProbeCount++;
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.end("Internal Server Error");
+      } else {
+        // Keep the exempt POST request open without writing headers
+      }
+    });
+
+    await new Promise<void>((resolve) => healthServer.listen(0, "127.0.0.1", () => resolve()));
+    healthServerPort = (healthServer.address() as AddressInfo).port;
+
+    const testConfig: Config = {
+      port: 0,
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${healthServerPort}`,
+      routeTimeoutMs: 100,
+      cheapFirstByteMs: 50,
+      wedgeProbeIntervalMs: 30, // probe every 30ms
+      stickyTtlMs: 30000,
+      driftCheckMs: 10000,
+    };
+
+    const frontDoor = createFrontDoor(testConfig, {
+      logger: { sink: () => {} }
+    });
+    await new Promise<void>((resolve) => frontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const frontDoorPort = (frontDoor.address() as AddressInfo).port;
+
+    let clientReq: http.ClientRequest | undefined;
+    try {
+      const start = Date.now();
+      const resPromise = new Promise<any>((resolve, reject) => {
+        clientReq = http.request({
+          hostname: "127.0.0.1",
+          port: frontDoorPort,
+          path: "/api/session/ses_health_fail/prompt",
+          method: "POST"
+        }, (res) => {
+          let body = "";
+          res.on("data", (chunk) => { body += chunk; });
+          res.on("end", () => resolve({ status: res.statusCode, body }));
+        });
+        clientReq.on("error", reject);
+        clientReq.end();
+      });
+
+      const res = await resPromise;
+      const duration = Date.now() - start;
+
+      // Two health probe failures should trigger 503.
+      // 1st probe at 30ms -> fails (count=1)
+      // 2nd probe at 60ms -> fails (count=2) -> triggers 503 immediately
+      // So the duration should be roughly around 60-120ms.
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toEqual({
+        error: "service_unavailable",
+        message: "Target serve failed health probe (wedged)"
+      });
+      expect(healthProbeCount).toBe(2);
+      expect(duration).toBeLessThan(300);
+    } finally {
+      if (clientReq) {
+        clientReq.destroy();
+      }
+      await new Promise<void>((resolve) => frontDoor.close(() => resolve()));
+      await new Promise<void>((resolve) => healthServer.close(() => resolve()));
     }
   });
 });

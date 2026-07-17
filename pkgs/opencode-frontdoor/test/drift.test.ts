@@ -68,6 +68,7 @@ describe('DriftMonitor', () => {
     cheapFirstByteMs: 5000,
     stickyTtlMs: 30000,
     driftCheckMs: 5000,
+    wedgeProbeIntervalMs: 5000,
   };
 
   test('same owner -> never drops', async () => {

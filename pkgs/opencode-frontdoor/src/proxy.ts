@@ -12,6 +12,7 @@ import { RequestLogger } from "./log.js";
 import { isAbsoluteHttpUrl } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
 import { createDriftMonitor } from "./drift.js";
+import { createWedgeProbe } from "./wedge.js";
 
 export interface ProxyDeps {
   fetch?: typeof globalThis.fetch;
@@ -76,6 +77,7 @@ async function proxyRequest(
     let headersSent = false;
     let resolved = false;
     let cheapTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    let wedgeProbe: ReturnType<typeof createWedgeProbe> | null = null;
 
     const onReqError = (err: any) => {
       upstreamReq.destroy();
@@ -98,6 +100,10 @@ async function proxyRequest(
         clearTimeout(cheapTimeoutId);
         cheapTimeoutId = null;
       }
+      if (wedgeProbe) {
+        wedgeProbe.stop();
+        wedgeProbe = null;
+      }
       req.off("error", onReqError);
       res.off("error", onResError);
       resolve();
@@ -118,12 +124,32 @@ async function proxyRequest(
           safeResolve();
         }
       }, ctx.config.cheapFirstByteMs);
+    } else {
+      wedgeProbe = createWedgeProbe({
+        target,
+        config: ctx.config,
+        deps: ctx.deps,
+        onWedged: () => {
+          if (!headersSent && !res.headersSent) {
+            headersSent = true;
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "service_unavailable", message: "Target serve failed health probe (wedged)" }));
+            upstreamReq.destroy();
+            safeResolve();
+          }
+        }
+      });
+      wedgeProbe.start();
     }
 
     upstreamReq.on("response", (upstreamRes) => {
       if (cheapTimeoutId) {
         clearTimeout(cheapTimeoutId);
         cheapTimeoutId = null;
+      }
+      if (wedgeProbe) {
+        wedgeProbe.stop();
+        wedgeProbe = null;
       }
       if (res.headersSent || headersSent) {
         upstreamRes.resume(); // drain to release the socket back to the pool
