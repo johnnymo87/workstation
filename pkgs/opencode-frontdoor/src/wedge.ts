@@ -44,6 +44,12 @@ export function createWedgeProbe(opts: WedgeProbeOptions): WedgeProbe {
         fetchImpl: deps?.fetch,
       });
 
+      // We only care about liveness (status), never the payload. Release the
+      // socket back to the pool immediately — an unconsumed undici body pins the
+      // connection until GC, and this probe fires every interval per in-flight
+      // turn. (status/ok stay readable after cancelling the body stream.)
+      result.response?.body?.cancel().catch(() => {});
+
       if (!active) return;
 
       const success = result.ok && result.response?.status === 200;
