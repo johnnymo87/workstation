@@ -118,8 +118,12 @@ export function createDriftMonitor(opts: {
             );
           }
         } else {
+          // size 0: all sids degraded (transient pigeon blip). This is NOT a
+          // confirmed resolution of a divergence episode, so leave
+          // loggedDivergence unchanged — only a real size===1 resolution resets
+          // it. Otherwise a blip flapping through a live divergence would
+          // re-spam the warning on every recovery.
           effectiveResolved = normalizedCurrentOwner;
-          loggedDivergence = false;
         }
       }
     } catch (err) {
