@@ -256,7 +256,29 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
 
 ---
 
-## Phase 3 — Health / failover + stickiness
+## Phase 3 — Health / failover + stickiness  **[DONE]**
+
+**Status:** Complete via SDD (implement → spec-review → code-review → fixup per task).
+Commits on `serve-reverse-proxy`: 3.1 `578720d`, 3.2 `5c53ec0`, 3.3 `7ba8db3`,
+3.4a `f1d691f`, 3.4b `8ca9d1e`. 215 tests green, typecheck clean. Notable
+decisions folded in during build:
+- **3.1**: derived the no-first-byte-timeout set from the route table (turn/stream
+  POSTs + `POST …/wait`); reclassified all `/tui/*` → 501 (so `control/next` is
+  never forwarded, mooting its timeout exemption); replaced the socket-idle
+  `setTimeout` with a true wall-clock time-to-headers timer → **503** (FABLE-W9).
+- **3.2**: wedge probe requires **2 consecutive** `/global/health` failures
+  (canary-parity blip-immunity) before 503; probe body discarded (socket hygiene).
+- **3.3**: `/healthz` returns 200 unless **both** pigeon AND anchor are
+  unreachable (reconciles plan "pigeon OR anchor" with design §7 "don't let a
+  pigeon blip restart a healthy door"); pigeon-reachable = any HTTP response,
+  anchor-reachable = 200; degraded counter + `FRONTDOOR_VERSION` marker (NEW-8).
+- **3.4**: sticky check runs before resolve/promote and is broken ONLY on a failed
+  `/global/health` probe (never on pigeon disagreement); **FABLE-S2** write/read
+  split (mutating + pigeon-down + no-sticky → retryable **503**, reads still
+  anchor-degrade); NEW-H wires the drift monitor to the sticky map to suppress the
+  SSE drop mid-turn. Shared `discardBody`/`probeServeHealth` helpers extracted.
+- **Deferred (low):** drain `boundedFetch` bodies on non-200 early returns in
+  `place.ts`/`resolve.ts` (now that `discardBody` exists).
 
 - **3.1** endpoint-class first-byte timeout (`src/timeouts.ts`): cheap GET / SSE
   handshake = **time-to-response-headers** → 503; turn POSTs = no first-byte
