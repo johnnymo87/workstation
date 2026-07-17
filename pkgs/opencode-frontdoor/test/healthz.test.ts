@@ -73,7 +73,7 @@ describe('healthz', () => {
         throw new Error('Unexpected fetch call');
       });
 
-      await handleHealthz(res, { config: dummyConfig, deps: { fetch: fetchImpl }, metrics });
+      await handleHealthz(res, { config: dummyConfig, method: res.req.method, deps: { fetch: fetchImpl }, metrics });
 
       expect(res.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
       expect(res.end).toHaveBeenCalledTimes(1);
@@ -106,7 +106,7 @@ describe('healthz', () => {
         throw new Error('Unexpected fetch call');
       });
 
-      await handleHealthz(res, { config: dummyConfig, deps: { fetch: fetchImpl }, metrics });
+      await handleHealthz(res, { config: dummyConfig, method: res.req.method, deps: { fetch: fetchImpl }, metrics });
 
       expect(res.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
       expect(res.end).toHaveBeenCalledTimes(1);
@@ -142,7 +142,7 @@ describe('healthz', () => {
         throw new Error('Unexpected fetch call');
       });
 
-      await handleHealthz(res, { config: dummyConfig, deps: { fetch: fetchImpl }, metrics });
+      await handleHealthz(res, { config: dummyConfig, method: res.req.method, deps: { fetch: fetchImpl }, metrics });
 
       expect(res.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
       const body = JSON.parse(res.end.mock.calls[0][0]);
@@ -164,7 +164,7 @@ describe('healthz', () => {
         throw new Error('Network offline');
       });
 
-      await handleHealthz(res, { config: dummyConfig, deps: { fetch: fetchImpl }, metrics });
+      await handleHealthz(res, { config: dummyConfig, method: res.req.method, deps: { fetch: fetchImpl }, metrics });
 
       expect(res.writeHead).toHaveBeenCalledWith(503, { 'Content-Type': 'application/json' });
       const body = JSON.parse(res.end.mock.calls[0][0]);
@@ -190,7 +190,7 @@ describe('healthz', () => {
         };
       });
 
-      await handleHealthz(res, { config: dummyConfig, deps: { fetch: fetchImpl }, metrics });
+      await handleHealthz(res, { config: dummyConfig, method: res.req.method, deps: { fetch: fetchImpl }, metrics });
 
       expect(res.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
       expect(res.end).toHaveBeenCalledTimes(1);

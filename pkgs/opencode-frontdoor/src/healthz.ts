@@ -1,7 +1,7 @@
 import type { ServerResponse } from "node:http";
 import type { Config } from "./config.js";
 import type { Metrics } from "./metrics.js";
-import { boundedFetch, stripTrailingSlashes } from "./http.js";
+import { boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
 
 export function isHealthzRequest(method: string, pathname: string): boolean {
   if (method !== "GET" && method !== "HEAD") {
@@ -13,7 +13,7 @@ export function isHealthzRequest(method: string, pathname: string): boolean {
 
 export async function handleHealthz(
   res: ServerResponse,
-  { config, deps, metrics }: { config: Config; deps?: any; metrics: Metrics }
+  { config, method, deps, metrics }: { config: Config; method: string; deps?: any; metrics: Metrics }
 ): Promise<void> {
   const pigeonUrlClean = `${stripTrailingSlashes(config.pigeonUrl)}/route?session_id=__frontdoor_healthz__`;
   const anchorUrlClean = `${stripTrailingSlashes(config.anchorUrl)}/global/health`;
@@ -37,12 +37,8 @@ export async function handleHealthz(
   const pigeonReachable = pigeonRes.ok;
   const anchorReachable = anchorRes.ok && anchorRes.response?.status === 200;
 
-  if (pigeonRes.response?.body) {
-    pigeonRes.response.body.cancel().catch(() => {});
-  }
-  if (anchorRes.response?.body) {
-    anchorRes.response.body.cancel().catch(() => {});
-  }
+  discardBody(pigeonRes.response);
+  discardBody(anchorRes.response);
 
   const healthy = pigeonReachable || anchorReachable;
   const statusCode = healthy ? 200 : 503;
@@ -50,7 +46,6 @@ export async function handleHealthz(
 
   res.writeHead(statusCode, { "Content-Type": "application/json" });
 
-  const method = res.req?.method || "GET";
   if (method === "HEAD") {
     res.end();
     return;

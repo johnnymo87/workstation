@@ -18,6 +18,17 @@ export function stripTrailingSlashes(base: string): string {
   return base.replace(/\/+$/, "");
 }
 
+// Release an unconsumed fetch Response body back to the connection pool. An
+// undici body left unread pins its socket until GC, so probes that only care
+// about status/headers (wedge, healthz) must discard it. Guarded against
+// mocks/polyfills whose body lacks cancel(); never throws.
+export function discardBody(response: Response | undefined): void {
+  const body = response?.body as { cancel?: () => Promise<unknown> } | null | undefined;
+  if (body && typeof body.cancel === "function") {
+    body.cancel().catch(() => {});
+  }
+}
+
 export function isAbsoluteHttpUrl(value: string): boolean {
   try {
     const parsed = new URL(value);

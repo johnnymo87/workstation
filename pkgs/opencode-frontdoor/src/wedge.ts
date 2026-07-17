@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { boundedFetch, stripTrailingSlashes } from "./http.js";
+import { boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
 
 export interface WedgeProbeOptions {
   target: string;
@@ -47,8 +47,8 @@ export function createWedgeProbe(opts: WedgeProbeOptions): WedgeProbe {
       // We only care about liveness (status), never the payload. Release the
       // socket back to the pool immediately — an unconsumed undici body pins the
       // connection until GC, and this probe fires every interval per in-flight
-      // turn. (status/ok stay readable after cancelling the body stream.)
-      result.response?.body?.cancel().catch(() => {});
+      // turn. (status/ok stay readable after discarding the body stream.)
+      discardBody(result.response);
 
       if (!active) return;
 

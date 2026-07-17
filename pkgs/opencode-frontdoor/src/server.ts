@@ -16,7 +16,7 @@ export function createFrontDoor(config: Config, deps?: any): http.Server {
       const { pathname } = new URL(req.url || "", "http://internal");
       const method = req.method || "GET";
       if (isHealthzRequest(method, pathname)) {
-        await handleHealthz(res, { config, deps, metrics });
+        await handleHealthz(res, { config, method, deps, metrics });
         return;
       }
       await handleRequest(req, res, { config, logger, gate, metrics, deps });
