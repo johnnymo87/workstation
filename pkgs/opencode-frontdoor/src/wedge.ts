@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
+import { probeServeHealth } from "./health.js";
 
 export interface WedgeProbeOptions {
   target: string;
@@ -37,24 +37,10 @@ export function createWedgeProbe(opts: WedgeProbeOptions): WedgeProbe {
       timer = undefined;
       if (!active) return;
 
-      const url = `${stripTrailingSlashes(target)}/global/health`;
-      const result = await boundedFetch(url, {
-        method: "GET",
-        timeoutMs: config.routeTimeoutMs,
-        fetchImpl: deps?.fetch,
-      });
-
-      // We only care about liveness (status), never the payload. Release the
-      // socket back to the pool immediately — an unconsumed undici body pins the
-      // connection until GC, and this probe fires every interval per in-flight
-      // turn. (status/ok stay readable after discarding the body stream.)
-      discardBody(result.response);
-
+      const ok = await probeServeHealth(target, config, deps);
       if (!active) return;
 
-      const success = result.ok && result.response?.status === 200;
-
-      if (success) {
+      if (ok) {
         failures = 0;
         scheduleNext();
       } else {
