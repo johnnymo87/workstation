@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { boundedFetch, stripTrailingSlashes, isAbsoluteHttpUrl } from "./http.js";
+import { boundedFetch, stripTrailingSlashes, isAbsoluteHttpUrl, discardBody } from "./http.js";
 
 export type ResolveReason =
   | "active"              // 200, valid lease
@@ -47,6 +47,9 @@ export async function resolveOwner(
   const response = result.response!;
 
   if (response.status === 404) {
+    // Never read the body on this branch — release the socket (this is the
+    // hottest path: one /route call per single-sid request + drift every 5s).
+    discardBody(response);
     return {
       url: config.anchorUrl,
       prospective: false,
@@ -56,6 +59,7 @@ export async function resolveOwner(
   }
 
   if (response.status !== 200) {
+    discardBody(response);
     return {
       url: config.anchorUrl,
       prospective: false,

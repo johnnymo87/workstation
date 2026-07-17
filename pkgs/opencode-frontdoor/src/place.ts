@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { boundedFetch, stripTrailingSlashes } from "./http.js";
+import { boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
 import type { ResolvedOwner } from "./resolve.js";
 import { extractSessionIdFromPath, type SidExtraction } from "./sid.js";
 
@@ -63,6 +63,8 @@ export async function placeSession(
     }
   }
 
+  // Non-200 place-fail: body never read → release the socket.
+  discardBody(response);
   return {
     ok: false,
     status: response.status,
@@ -182,7 +184,9 @@ async function checkSidExists(
     return false;
   }
 
-  return result.response!.status === 200;
+  const exists = result.response!.status === 200;
+  discardBody(result.response); // status-only check; release the socket
+  return exists;
 }
 
 export async function maybePromote(
