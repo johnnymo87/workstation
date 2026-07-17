@@ -111,6 +111,7 @@ async function proxyRequest(
     if (!isExempt) {
       cheapTimeoutId = setTimeout(() => {
         if (!headersSent && !res.headersSent) {
+          headersSent = true;
           res.writeHead(503, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "service_unavailable", message: "Upstream did not send response headers in time" }));
           upstreamReq.destroy();
@@ -181,7 +182,10 @@ async function proxyRequest(
       if (!headersSent && !res.headersSent) {
         res.writeHead(502, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "bad_gateway", message: err.message }));
-      } else {
+      } else if (!res.writableEnded) {
+        // Avoid an abrupt RST that races the already-flushed response (e.g. the
+        // 503 first-byte-timeout path calls upstreamReq.destroy(), which can
+        // surface here after res.end()). Only tear down if still writable.
         res.destroy();
       }
       safeResolve();
