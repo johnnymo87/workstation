@@ -125,6 +125,60 @@ describe('DriftMonitor', () => {
     monitor.stop();
   });
 
+  test('different owner with isMidTurn returning true -> does NOT drop', async () => {
+    let dropped = 0;
+
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ apiBase: 'http://127.0.0.1:4097' }),
+    });
+
+    const monitor = createDriftMonitor({
+      extraction: { kind: 'single', sid: 'ses_a' },
+      currentOwner: 'http://127.0.0.1:4096',
+      config: dummyConfig,
+      isMidTurn: () => true,
+      deps: { fetch: fakeFetch },
+      onDrop: () => { dropped++; },
+    });
+
+    monitor.start();
+    await monitor.runCheckOnce();
+    expect(dropped).toBe(0);
+
+    await monitor.runCheckOnce();
+    expect(dropped).toBe(0); // suppressed!
+    monitor.stop();
+  });
+
+  test('different owner with isMidTurn returning false -> drops', async () => {
+    let dropped = 0;
+
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ apiBase: 'http://127.0.0.1:4097' }),
+    });
+
+    const monitor = createDriftMonitor({
+      extraction: { kind: 'single', sid: 'ses_a' },
+      currentOwner: 'http://127.0.0.1:4096',
+      config: dummyConfig,
+      isMidTurn: () => false,
+      deps: { fetch: fakeFetch },
+      onDrop: () => { dropped++; },
+    });
+
+    monitor.start();
+    await monitor.runCheckOnce();
+    expect(dropped).toBe(0);
+
+    await monitor.runCheckOnce();
+    expect(dropped).toBe(1); // drops!
+    monitor.stop();
+  });
+
   test('BLIP: pigeon network error / 500 / 404 repeatedly -> degraded -> NEVER drops', async () => {
     let dropped = 0;
     const fakeFetch = vi.fn().mockRejectedValue(new Error('Pigeon is dead'));

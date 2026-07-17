@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeAll, afterAll } from "vitest";
+import { describe, expect, test, beforeAll, afterAll, beforeEach } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { createFrontDoor } from "../src/server.js";
@@ -26,6 +26,16 @@ describe("FrontDoor Integration", () => {
   let loggedLines: any[] = [];
   let driftTestApiBase: string = "";
 
+  let serveAHealthStatus = 200;
+  let serveBHealthStatus = 200;
+  let pigeonSessionOwners: Record<string, string | number> = {};
+
+  beforeEach(() => {
+    serveAHealthStatus = 200;
+    serveBHealthStatus = 200;
+    pigeonSessionOwners = {};
+  });
+
   // Helper to read body from IncomingMessage
   async function readBody(req: http.IncomingMessage): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -41,6 +51,11 @@ describe("FrontDoor Integration", () => {
   beforeAll(async () => {
     // 1. Fake Serve A
     serverA = http.createServer(async (req, res) => {
+      if (req.url === "/global/health") {
+        res.writeHead(serveAHealthStatus);
+        res.end();
+        return;
+      }
       if (req.url && req.url.includes("ses_drift")) {
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
@@ -93,6 +108,11 @@ describe("FrontDoor Integration", () => {
 
     // 2. Fake Serve B
     serverB = http.createServer(async (req, res) => {
+      if (req.url === "/global/health") {
+        res.writeHead(serveBHealthStatus);
+        res.end();
+        return;
+      }
       const body = await readBody(req);
       const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
       res.writeHead(status, {
@@ -148,8 +168,23 @@ describe("FrontDoor Integration", () => {
     pigeonServer = http.createServer(async (req, res) => {
       const parsedUrl = new URL(req.url || "", `http://${req.headers.host}`);
       if (parsedUrl.pathname === "/route") {
-        const sid = parsedUrl.searchParams.get("session_id");
+        const sid = parsedUrl.searchParams.get("session_id") || "";
         pigeonRouteCalls.push({ sid, url: req.url });
+
+        if (pigeonSessionOwners[sid] !== undefined) {
+          const owner = pigeonSessionOwners[sid];
+          if (owner === 500) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "internal_error" }));
+          } else if (owner === 404) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "not_routed" }));
+          } else {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ apiBase: owner, prospective: false }));
+          }
+          return;
+        }
 
         if (sid === "ses_drift" || sid === "ses_hb") {
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -1175,5 +1210,169 @@ describe("FrontDoor Integration", () => {
 
     // Verify no request log was written to loggedLines (the standard proxy logger)
     expect(loggedLines).toHaveLength(0);
+  });
+
+  test("22. abort-follows-the-runaway-turn (Task 3.4b): mutating request follows sticky target when healthy, even if pigeon disagrees", async () => {
+    // 1) Route ses_x to Serve A
+    pigeonSessionOwners["ses_x"] = `http://127.0.0.1:${portA}`;
+    serveAHealthStatus = 200;
+
+    // 2) POST a turn start to record sticky = A
+    const res1 = await makeRequest("POST", "/session/ses_x/message", {}, "msg body");
+    expect(res1.status).toBe(200);
+    expect(res1.headers["x-from-serve"]).toBe("serve-a");
+
+    // 3) Flip pigeon routing to B
+    pigeonSessionOwners["ses_x"] = `http://127.0.0.1:${portB}`;
+
+    // 4) POST abort and verify it reaches A (via stickiness) rather than B
+    const res2 = await makeRequest("POST", "/session/ses_x/abort", {}, "abort body");
+    expect(res2.status).toBe(200);
+    expect(res2.headers["x-from-serve"]).toBe("serve-a"); // Stays on A!
+  });
+
+  test("23. sticky broken on unhealthy target (Task 3.4b): if sticky target failed health probe, break sticky and fall through to pigeon", async () => {
+    // 1) Route ses_x_unhealthy to Serve A
+    pigeonSessionOwners["ses_x_unhealthy"] = `http://127.0.0.1:${portA}`;
+    serveAHealthStatus = 200;
+
+    // 2) POST to record sticky = A
+    const res1 = await makeRequest("POST", "/session/ses_x_unhealthy/message", {}, "msg body");
+    expect(res1.status).toBe(200);
+    expect(res1.headers["x-from-serve"]).toBe("serve-a");
+
+    // 3) Make Serve A's global/health fail
+    serveAHealthStatus = 500;
+
+    // 4) Flip pigeon routing to B
+    pigeonSessionOwners["ses_x_unhealthy"] = `http://127.0.0.1:${portB}`;
+
+    // 5) POST abort and verify it reaches B because sticky A is unhealthy and broke
+    const res2 = await makeRequest("POST", "/session/ses_x_unhealthy/abort", {}, "abort body");
+    expect(res2.status).toBe(200);
+    expect(res2.headers["x-from-serve"]).toBe("serve-b"); // Fell through to B!
+  });
+
+  test("24. FABLE-S2 mutating + pigeon down + no sticky -> 503", async () => {
+    // 1) Set pigeon unreachable/error for ses_y (no prior sticky)
+    pigeonSessionOwners["ses_y"] = 500; // Pigeon responds with 500
+
+    // 2) POST abort to ses_y -> should get 503 instead of degrading to anchor
+    const res = await makeRequest("POST", "/session/ses_y/abort", {}, "abort body");
+    expect(res.status).toBe(503);
+    const json = JSON.parse(res.body);
+    expect(json.error).toBe("service_unavailable");
+    expect(json.message).toContain("refusing to route a mutating request to a non-owner");
+    expect(res.headers["x-from-serve"]).toBeUndefined();
+  });
+
+  test("25. FABLE-S2 read degrades, not 503", async () => {
+    // 1) Set pigeon unreachable/error for ses_y
+    pigeonSessionOwners["ses_y"] = 500;
+
+    // 2) GET (read) ses_y -> should degrade to anchor, NOT 503
+    const res = await makeRequest("GET", "/session/ses_y");
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ exists: true }); // Degraded to anchor!
+  });
+
+  test("26. NEW-H SSE not dropped mid-turn (Task 3.4b): suppresses SSE drop during actively sticky turn", async () => {
+    // 1. Configure the FrontDoor with extremely fast drift polling and short sticky TTL
+    const fastDriftConfig: Config = {
+      port: 0, // ephemeral
+      version: 'unknown',
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 1000,
+      stickyTtlMs: 250, // very short sticky lease
+      driftCheckMs: 40,  // fast drift checks
+      wedgeProbeIntervalMs: 5000,
+    };
+
+    const fastDeps = {
+      logger: {
+        sink: () => {}
+      }
+    };
+
+    const fastFrontDoor = createFrontDoor(fastDriftConfig, fastDeps);
+    await new Promise<void>((resolve) => fastFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const fastPort = (fastFrontDoor.address() as AddressInfo).port;
+
+    try {
+      // Route ses_drift_sticky to Serve A
+      pigeonSessionOwners["ses_drift_sticky"] = `http://127.0.0.1:${portA}`;
+
+      // Open a live SSE stream request
+      let streamEnded = false;
+      let firstChunkReceived = false;
+      let resolveFirstChunk: () => void = () => {};
+      const firstChunkPromise = new Promise<void>((resolve) => {
+        resolveFirstChunk = resolve;
+      });
+
+      const clientReq = http.request({
+        hostname: "127.0.0.1",
+        port: fastPort,
+        path: "/event?session_ids=ses_drift_sticky",
+        method: "GET"
+      }, (clientRes) => {
+        expect(clientRes.statusCode).toBe(200);
+        expect(clientRes.headers["content-type"]).toContain("text/event-stream");
+
+        clientRes.on("data", (chunk) => {
+          const str = chunk.toString();
+          if (str.includes("connected")) {
+            firstChunkReceived = true;
+            resolveFirstChunk();
+          }
+        });
+
+        clientRes.on("end", () => {
+          streamEnded = true;
+        });
+      });
+
+      clientReq.on("error", () => {});
+      clientReq.end();
+
+      // Wait until we are connected
+      await firstChunkPromise;
+      expect(firstChunkReceived).toBe(true);
+      expect(streamEnded).toBe(false);
+
+      // Now send a mutating POST to record stickiness on A (TTL is 250ms)
+      const postReq = http.request({
+        hostname: "127.0.0.1",
+        port: fastPort,
+        path: "/session/ses_drift_sticky/message",
+        method: "POST"
+      }, (postRes) => {
+        postRes.resume();
+      });
+      postReq.end();
+
+      // Flip pigeon routing to Serve B
+      pigeonSessionOwners["ses_drift_sticky"] = `http://127.0.0.1:${portB}`;
+
+      // Wait 100ms. Since poller runs every 40ms, normally the SSE stream would have been dropped.
+      // But because sticky lease of 250ms is active, dropping is suppressed!
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(streamEnded).toBe(false);
+
+      // Now wait another 250ms (total ~350ms since POST). The sticky entry has expired,
+      // so subsequent drift checks should drop the SSE connection.
+      let closed = false;
+      for (let i = 0; i < 40; i++) {
+        if (streamEnded) { closed = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(closed).toBe(true);
+
+      clientReq.destroy();
+    } finally {
+      await new Promise<void>((resolve) => fastFrontDoor.close(() => resolve()));
+    }
   });
 });

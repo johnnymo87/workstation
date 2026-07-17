@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import { StickyMap } from '../src/sticky.js';
+import { StickyMap, isMutatingSessionRequest } from '../src/sticky.js';
 
 describe('StickyMap', () => {
   test('record and get returns the serve', () => {
@@ -73,5 +73,27 @@ describe('StickyMap', () => {
     expect(map.get('ses_2', 1100)).toBe('serve_b');
     expect(map.get('ses_3', 1100)).toBe('serve_c');
     expect((map as any).lastSweep).toBe(1100);
+  });
+});
+
+describe('isMutatingSessionRequest', () => {
+  test('POST/PATCH/DELETE session-path (bare + /api) -> true', () => {
+    expect(isMutatingSessionRequest('POST', '/session/ses_a', { kind: 'single', sid: 'ses_a' })).toBe(true);
+    expect(isMutatingSessionRequest('PATCH', '/api/session/ses_a', { kind: 'single', sid: 'ses_a' })).toBe(true);
+    expect(isMutatingSessionRequest('DELETE', '/session/ses_a/message', { kind: 'single', sid: 'ses_a' })).toBe(true);
+  });
+
+  test('GET session-path -> false', () => {
+    expect(isMutatingSessionRequest('GET', '/session/ses_a', { kind: 'single', sid: 'ses_a' })).toBe(false);
+  });
+
+  test('POST /event?session_ids= single (query, not path) -> false', () => {
+    expect(isMutatingSessionRequest('POST', '/event', { kind: 'single', sid: 'ses_a' })).toBe(false);
+  });
+
+  test('multi/none -> false', () => {
+    expect(isMutatingSessionRequest('POST', '/session/ses_a', { kind: 'multi', sids: ['ses_a', 'ses_b'] })).toBe(false);
+    expect(isMutatingSessionRequest('POST', '/session/ses_a', { kind: 'none' })).toBe(false);
+    expect(isMutatingSessionRequest('POST', '/session/ses_a', { kind: 'malformed' })).toBe(false);
   });
 });

@@ -1,3 +1,6 @@
+import type { SidExtraction } from "./sid.js";
+import { extractSessionIdFromPath } from "./sid.js";
+
 export interface StickyEntry {
   serve: string;
   expiry: number;
@@ -40,4 +43,18 @@ export class StickyMap {
   delete(sid: string): void {
     this.entries.delete(sid);
   }
+}
+
+export function isMutatingSessionRequest(method: string, pathname: string, extraction: SidExtraction): boolean {
+  if (extraction.kind !== "single") return false;
+  const m = method.toUpperCase();
+  if (m !== "POST" && m !== "PATCH" && m !== "DELETE") return false;
+  return extractSessionIdFromPath(pathname) === extraction.sid; // sid must be in the PATH (not a ?session_ids= GET)
+}
+
+export function sidsForStickiness(extraction: SidExtraction | null): string[] {
+  if (!extraction) return [];
+  if (extraction.kind === "single") return [extraction.sid];
+  if (extraction.kind === "multi") return extraction.sids;
+  return [];
 }

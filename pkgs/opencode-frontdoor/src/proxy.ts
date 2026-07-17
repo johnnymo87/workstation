@@ -7,6 +7,8 @@ import { extractSids, type SidExtraction } from "./sid.js";
 import { isExemptFromFirstByteTimeout } from "./timeouts.js";
 import { resolveOwner } from "./resolve.js";
 import { isPromotingRequest, maybePromote, PromotionGate } from "./place.js";
+import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky.js";
+import { probeServeHealth } from "./health.js";
 import type { Config } from "./config.js";
 import { RequestLogger } from "./log.js";
 import { isAbsoluteHttpUrl } from "./http.js";
@@ -25,6 +27,7 @@ export interface ProxyContext {
   logger: RequestLogger;
   gate: PromotionGate;
   metrics: Metrics;
+  sticky: StickyMap;
   deps?: ProxyDeps;
 }
 
@@ -175,6 +178,7 @@ async function proxyRequest(
             extraction,
             currentOwner: target,
             config: ctx.config,
+            isMidTurn: () => sidsForStickiness(extraction).some((s) => ctx.sticky.has(s, ctx.deps?.now?.() ?? Date.now())),
             deps: ctx.deps,
             onDrop: () => {
               upstreamRes.destroy();
@@ -346,32 +350,53 @@ export async function handleRequest(
 
       if (ex.kind === "single") {
         sid = ex.sid;
-        const resolved = await resolveOwner(ex.sid, ctx.config, ctx.deps);
+        const now = ctx.deps?.now?.() ?? Date.now();
+        const mutating = isMutatingSessionRequest(method, url.pathname, ex);
 
+        // 1) Sticky check BEFORE resolve/promote — mutating requests only.
+        if (mutating) {
+          const stuckServe = ctx.sticky.get(sid, now);
+          if (stuckServe) {
+            const healthy = await probeServeHealth(stuckServe, ctx.config, ctx.deps);
+            if (healthy) {
+              target = stuckServe; degraded = false; prospective = false;
+              ctx.sticky.record(sid, stuckServe, now); // refresh TTL
+              await proxyRequest(target, method, url, req, res, ctx, ex);
+              return;
+            }
+            ctx.sticky.delete(sid); // sticky target failed health probe → break, fall through
+          }
+        }
+
+        // 2) Normal resolve/promote (existing logic, unchanged).
+        const resolved = await resolveOwner(ex.sid, ctx.config, ctx.deps);
         const isPromoting = isPromotingRequest(method, url.pathname, ex);
         if (isPromoting) {
-          const promo = await maybePromote({
-            sid: ex.sid,
-            method,
-            pathname: url.pathname,
-            extraction: ex,
-            resolved,
-            gate: ctx.gate
-          }, ctx.config, ctx.deps);
-
+          const promo = await maybePromote({ sid: ex.sid, method, pathname: url.pathname, extraction: ex, resolved, gate: ctx.gate }, ctx.config, ctx.deps);
           if (promo.placed && promo.apiBase && isAbsoluteHttpUrl(promo.apiBase)) {
-            target = promo.apiBase;
-            degraded = false;
-            prospective = false;
+            target = promo.apiBase; degraded = false; prospective = false;
           } else {
-            target = resolved.url;
-            degraded = resolved.degraded;
-            prospective = resolved.prospective;
+            target = resolved.url; degraded = resolved.degraded; prospective = resolved.prospective;
           }
         } else {
-          target = resolved.url;
-          degraded = resolved.degraded;
-          prospective = resolved.prospective;
+          target = resolved.url; degraded = resolved.degraded; prospective = resolved.prospective;
+        }
+
+        // 3) FABLE-S2 write-vs-read degrade split. A mutating request that ended up
+        //    degraded because the CONTROL PLANE is down (pigeon-unreachable / -error),
+        //    with no usable sticky, must NOT run on a non-owner (duplicate/wrong-process
+        //    turn, abort no-ops). Return a retryable 503. Reads (and not-routed) still
+        //    degrade to the anchor (shared opencode.db).
+        if (mutating && degraded && (resolved.reason === "pigeon-unreachable" || resolved.reason === "pigeon-error")) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "service_unavailable", message: "pigeon unavailable; refusing to route a mutating request to a non-owner" }));
+          return;
+        }
+
+        // 4) Record stickiness when forwarding a mutating request to a REAL owner
+        //    (never record the anchor-degrade target).
+        if (mutating && !degraded) {
+          ctx.sticky.record(sid, target, now);
         }
 
         await proxyRequest(target, method, url, req, res, ctx, ex);

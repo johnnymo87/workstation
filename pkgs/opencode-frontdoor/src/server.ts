@@ -5,11 +5,13 @@ import { RequestLogger } from "./log.js";
 import { PromotionGate } from "./place.js";
 import { createMetrics } from "./metrics.js";
 import { isHealthzRequest, handleHealthz } from "./healthz.js";
+import { StickyMap } from "./sticky.js";
 
 export function createFrontDoor(config: Config, deps?: any): http.Server {
   const logger = new RequestLogger(deps?.logger);
   const gate = new PromotionGate(config.stickyTtlMs);
   const metrics = createMetrics();
+  const sticky = new StickyMap(config.stickyTtlMs);
 
   return http.createServer(async (req, res) => {
     try {
@@ -19,7 +21,7 @@ export function createFrontDoor(config: Config, deps?: any): http.Server {
         await handleHealthz(res, { config, method, deps, metrics });
         return;
       }
-      await handleRequest(req, res, { config, logger, gate, metrics, deps });
+      await handleRequest(req, res, { config, logger, gate, metrics, sticky, deps });
     } catch (err: any) {
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });

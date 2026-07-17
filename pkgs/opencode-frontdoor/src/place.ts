@@ -213,12 +213,6 @@ export async function maybePromote(
     return { placed: false, reason: "pigeon-degraded" };
   }
 
-  // TASK 3.4 STICKY SEAM
-  // Right here, before checking the gate, Task 3.4 will add a sticky-map check.
-  // This will check if there is an active sticky session lease to prevent a lease-less
-  // in-flight turn from being clobbered. If sticky check indicates a lease exists,
-  // we would route to that sticky target.
-
   // Step 4: If !gate.shouldAttempt(...)
   if (!gate.shouldAttempt(sid, now)) {
     return { placed: false, reason: "ttl-guarded" };

@@ -35,6 +35,7 @@ export function createDriftMonitor(opts: {
   extraction: SidExtraction;
   currentOwner: string;
   config: Config;
+  isMidTurn?: () => boolean;
   deps?: {
     fetch?: typeof fetch;
   };
@@ -49,6 +50,7 @@ export function createDriftMonitor(opts: {
   let active = false;
   let dropped = false;
   let loggedDivergence = false;
+  let loggedMidTurnSuppression = false;
 
   function stop(): void {
     active = false;
@@ -135,7 +137,19 @@ export function createDriftMonitor(opts: {
     driftState = evalResult.state;
 
     if (evalResult.reconnect) {
-      triggerDrop();
+      if (opts.isMidTurn?.()) {
+        // NEW-H: a sid with a fresh forwarded-request (sticky) entry is mid-turn;
+        // dropping the SSE leg now would cut an actively-flowing turn. Suppress.
+        // driftState was already reset to INITIAL by evaluateOwnerDrift.
+        if (!loggedMidTurnSuppression) {
+          loggedMidTurnSuppression = true;
+          console.warn("[frontdoor] owner drift confirmed but sid is mid-turn (sticky); suppressing SSE drop");
+        }
+      } else {
+        triggerDrop();
+      }
+    } else {
+      loggedMidTurnSuppression = false;
     }
   }
 
