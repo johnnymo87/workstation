@@ -12,7 +12,6 @@ describe('resolveOwner', () => {
     cheapFirstByteMs: 5000,
     stickyTtlMs: 30000,
     driftCheckMs: 5000,
-    quiesceMs: 10000,
   };
 
   test('active route (200, apiBase) -> url + reason "active", degraded false', async () => {

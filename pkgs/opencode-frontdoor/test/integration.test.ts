@@ -50,6 +50,29 @@ describe("FrontDoor Integration", () => {
         res.write("data: connected\n\n");
         return;
       }
+      if (req.url && req.url.includes("ses_hb")) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive"
+        });
+        res.write("data: connected\n\n");
+        const interval = setInterval(() => {
+          if (!res.destroyed) {
+            try {
+              res.write("event: server.heartbeat\ndata: {}\n\n");
+            } catch {
+              clearInterval(interval);
+            }
+          } else {
+            clearInterval(interval);
+          }
+        }, 30);
+        res.on("close", () => {
+          clearInterval(interval);
+        });
+        return;
+      }
       const body = await readBody(req);
       const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
       res.writeHead(status, {
@@ -128,7 +151,7 @@ describe("FrontDoor Integration", () => {
         const sid = parsedUrl.searchParams.get("session_id");
         pigeonRouteCalls.push({ sid, url: req.url });
 
-        if (sid === "ses_drift") {
+        if (sid === "ses_drift" || sid === "ses_hb") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ apiBase: driftTestApiBase || `http://127.0.0.1:${portA}`, prospective: false }));
         } else if (sid === "ses_a" || sid === "ses_multi1") {
@@ -192,7 +215,6 @@ describe("FrontDoor Integration", () => {
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
-      quiesceMs: 10000
     };
 
     const testDeps = {
@@ -594,7 +616,6 @@ describe("FrontDoor Integration", () => {
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
       driftCheckMs: 40,
-      quiesceMs: 100,
     };
 
     const fastDeps = {
@@ -654,10 +675,87 @@ describe("FrontDoor Integration", () => {
       // Now flip the pigeon routing to Serve B
       driftTestApiBase = `http://127.0.0.1:${portB}`;
 
-      // Wait a bit for the fast drift poller to run two consecutive checks (every 40ms) and quiesceMs (100ms)
-      // Since quiesceMs is 100ms and lastActivityAt was at stream start, we poll streamEnded dynamically.
+      // Wait a bit for the fast drift poller to run two consecutive checks (every 40ms).
+      // We poll streamEnded dynamically.
       let closed = false;
       for (let i = 0; i < 40; i++) {
+        if (streamEnded) { closed = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(closed).toBe(true);
+
+      clientReq.destroy();
+    } finally {
+      await new Promise<void>((resolve) => fastFrontDoor.close(() => resolve()));
+    }
+  });
+
+  test("15. owner-drift integration FABLE2-B1: drops the SSE stream cleanly on confirmed drift despite continuous heartbeat activity", async () => {
+    const fastDriftConfig: Config = {
+      port: 0,
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 1000,
+      stickyTtlMs: 30000,
+      driftCheckMs: 40,
+    };
+
+    const fastDeps = {
+      logger: {
+        sink: () => {}
+      }
+    };
+
+    const fastFrontDoor = createFrontDoor(fastDriftConfig, fastDeps);
+    await new Promise<void>((resolve) => fastFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const fastPort = (fastFrontDoor.address() as AddressInfo).port;
+
+    try {
+      driftTestApiBase = `http://127.0.0.1:${portA}`;
+
+      let streamEnded = false;
+      let firstChunkReceived = false;
+      let resolveFirstChunk: () => void = () => {};
+      const firstChunkPromise = new Promise<void>((resolve) => {
+        resolveFirstChunk = resolve;
+      });
+
+      const clientReq = http.request({
+        hostname: "127.0.0.1",
+        port: fastPort,
+        path: "/event?session_ids=ses_hb",
+        method: "GET"
+      }, (clientRes) => {
+        expect(clientRes.statusCode).toBe(200);
+        expect(clientRes.headers["content-type"]).toContain("text/event-stream");
+
+        clientRes.on("data", (chunk) => {
+          const str = chunk.toString();
+          if (str.includes("connected")) {
+            firstChunkReceived = true;
+            resolveFirstChunk();
+          }
+        });
+
+        clientRes.on("end", () => {
+          streamEnded = true;
+        });
+      });
+
+      clientReq.on("error", (err) => {
+        // Ignored
+      });
+      clientReq.end();
+
+      await firstChunkPromise;
+      expect(firstChunkReceived).toBe(true);
+      expect(streamEnded).toBe(false);
+
+      driftTestApiBase = `http://127.0.0.1:${portB}`;
+
+      let closed = false;
+      for (let i = 0; i < 20; i++) {
         if (streamEnded) { closed = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }

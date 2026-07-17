@@ -150,11 +150,6 @@ async function proxyRequest(
         }
 
         pipeEventStream(upstreamRes, res, {
-          onActivity: () => {
-            if (monitor) {
-              monitor.markActivity();
-            }
-          },
           onDone: () => {
             if (monitor) {
               monitor.stop();

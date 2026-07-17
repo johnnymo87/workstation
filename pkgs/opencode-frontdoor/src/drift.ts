@@ -25,7 +25,6 @@ export function evaluateOwnerDrift(
 }
 
 export interface DriftMonitor {
-  markActivity(): void;
   start(): void;
   stop(): void;
   /** Internal seam: runs exactly one poll cycle. Exposed for deterministic tests; production uses start()/stop(). */
@@ -38,28 +37,18 @@ export function createDriftMonitor(opts: {
   config: Config;
   deps?: {
     fetch?: typeof fetch;
-    now?: () => number;
   };
   onDrop: () => void;
 }): DriftMonitor {
   const { extraction, currentOwner, config, deps, onDrop } = opts;
 
-  const nowFn = deps?.now ?? Date.now;
   const normalizedCurrentOwner = stripTrailingSlashes(currentOwner);
 
   let driftState = INITIAL_OWNER_DRIFT_STATE;
-  let lastActivityAt = nowFn();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active = false;
   let dropped = false;
-
-  function isActive(): boolean {
-    return nowFn() - lastActivityAt < config.quiesceMs;
-  }
-
-  function markActivity(): void {
-    lastActivityAt = nowFn();
-  }
+  let loggedDivergence = false;
 
   function stop(): void {
     active = false;
@@ -96,7 +85,6 @@ export function createDriftMonitor(opts: {
   function start(): void {
     if (active) return;
     active = true;
-    lastActivityAt = nowFn();
     scheduleNext();
   }
 
@@ -119,8 +107,19 @@ export function createDriftMonitor(opts: {
         const urls = new Set(real.map(r => stripTrailingSlashes(r.url)));
         if (urls.size === 1) {
           effectiveResolved = [...urls][0];
+          loggedDivergence = false;
+        } else if (urls.size >= 2) {
+          effectiveResolved = normalizedCurrentOwner;
+          if (!loggedDivergence) {
+            loggedDivergence = true;
+            console.warn(
+              "[frontdoor] multi-session stream has diverging owners; leg cannot follow all sessions:",
+              [...urls].join(", ")
+            );
+          }
         } else {
           effectiveResolved = normalizedCurrentOwner;
+          loggedDivergence = false;
         }
       }
     } catch (err) {
@@ -132,21 +131,11 @@ export function createDriftMonitor(opts: {
     driftState = evalResult.state;
 
     if (evalResult.reconnect) {
-      if (isActive()) {
-        // active-guard: never drop an actively-flowing leg mid-turn.
-        // re-arm the confirmation by setting state to { candidate: effectiveResolved, count: 1 } and keep polling
-        // (so the next confirmed + quiescent poll drops). Never drop while active.
-        driftState = { candidate: effectiveResolved, count: 1 };
-        // This activity-based "active" signal is the current realization of the Phase-3.4 sticky map (NEW-H):
-        // 3.4 will later formalize it; for now observed SSE activity IS the sticky-refresh.
-      } else {
-        triggerDrop();
-      }
+      triggerDrop();
     }
   }
 
   return {
-    markActivity,
     start,
     stop,
     /** Internal seam: runs exactly one poll cycle. Exposed for deterministic tests; production uses start()/stop(). */

@@ -68,7 +68,6 @@ describe('DriftMonitor', () => {
     cheapFirstByteMs: 5000,
     stickyTtlMs: 30000,
     driftCheckMs: 5000,
-    quiesceMs: 10000,
   };
 
   test('same owner -> never drops', async () => {
@@ -94,10 +93,8 @@ describe('DriftMonitor', () => {
     monitor.stop();
   });
 
-  test('different owner two consecutive checks, quiescent -> drops exactly once', async () => {
+  test('different owner two consecutive checks -> drops exactly once', async () => {
     let dropped = 0;
-    let currentTime = 100000;
-    const fakeNow = () => currentTime;
 
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -109,7 +106,7 @@ describe('DriftMonitor', () => {
       extraction: { kind: 'single', sid: 'ses_a' },
       currentOwner: 'http://127.0.0.1:4096',
       config: dummyConfig,
-      deps: { fetch: fakeFetch, now: fakeNow },
+      deps: { fetch: fakeFetch },
       onDrop: () => { dropped++; },
     });
 
@@ -117,12 +114,10 @@ describe('DriftMonitor', () => {
     await monitor.runCheckOnce();
     expect(dropped).toBe(0);
 
-    currentTime += 15000; // past quiesceMs
     await monitor.runCheckOnce();
     expect(dropped).toBe(1);
 
     // Call check once more to ensure it doesn't trigger onDrop again
-    currentTime += 15000;
     await monitor.runCheckOnce();
     expect(dropped).toBe(1);
     monitor.stop();
@@ -130,23 +125,19 @@ describe('DriftMonitor', () => {
 
   test('BLIP: pigeon network error / 500 / 404 repeatedly -> degraded -> NEVER drops', async () => {
     let dropped = 0;
-    let currentTime = 100000;
-    const fakeNow = () => currentTime;
     const fakeFetch = vi.fn().mockRejectedValue(new Error('Pigeon is dead'));
 
     const monitor = createDriftMonitor({
       extraction: { kind: 'single', sid: 'ses_a' },
       currentOwner: 'http://127.0.0.1:4096',
       config: dummyConfig,
-      deps: { fetch: fakeFetch, now: fakeNow },
+      deps: { fetch: fakeFetch },
       onDrop: () => { dropped++; },
     });
 
     monitor.start();
     await monitor.runCheckOnce();
-    currentTime += 15000;
     await monitor.runCheckOnce();
-    currentTime += 15000;
     await monitor.runCheckOnce();
     expect(dropped).toBe(0);
     monitor.stop();
@@ -155,8 +146,6 @@ describe('DriftMonitor', () => {
   test('drift-observed, then a blip, then drift again -> the blip breaks consecutive -> no drop', async () => {
     let dropped = 0;
     let failFetch = false;
-    let currentTime = 100000;
-    const fakeNow = () => currentTime;
     const fakeFetch = vi.fn().mockImplementation(() => {
       if (failFetch) {
         return Promise.reject(new Error('Pigeon blip'));
@@ -172,7 +161,7 @@ describe('DriftMonitor', () => {
       extraction: { kind: 'single', sid: 'ses_a' },
       currentOwner: 'http://127.0.0.1:4096',
       config: dummyConfig,
-      deps: { fetch: fakeFetch, now: fakeNow },
+      deps: { fetch: fakeFetch },
       onDrop: () => { dropped++; },
     });
 
@@ -183,75 +172,22 @@ describe('DriftMonitor', () => {
 
     // 2. Next check is a blip -> resets count to 0
     failFetch = true;
-    currentTime += 15000;
     await monitor.runCheckOnce();
     expect(dropped).toBe(0);
 
     // 3. Next check resolves to B again -> candidate B, count 1 (needs one more check to confirm)
     failFetch = false;
-    currentTime += 15000;
     await monitor.runCheckOnce();
     expect(dropped).toBe(0);
 
     // 4. Next check resolves to B again -> count 2 -> drops!
-    currentTime += 15000;
     await monitor.runCheckOnce();
-    expect(dropped).toBe(1);
-    monitor.stop();
-  });
-
-  test('active-guard: two consecutive different-owner checks but markActivity called -> NO drop, then drops when quiescent', async () => {
-    let dropped = 0;
-    let currentTime = 100000;
-    const fakeNow = () => currentTime;
-
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ apiBase: 'http://127.0.0.1:4097' }),
-    });
-
-    const monitor = createDriftMonitor({
-      extraction: { kind: 'single', sid: 'ses_a' },
-      currentOwner: 'http://127.0.0.1:4096',
-      config: dummyConfig,
-      deps: { fetch: fakeFetch, now: fakeNow },
-      onDrop: () => { dropped++; },
-    });
-
-    monitor.start(); // lastActivityAt = 100000
-    
-    // First different owner check
-    await monitor.runCheckOnce();
-    expect(dropped).toBe(0);
-
-    // Call markActivity to keep it active
-    currentTime += 8000; // 108000
-    monitor.markActivity(); // lastActivityAt = 108000
-
-    // Second different owner check at 109000 (1000ms after activity)
-    currentTime += 1000; // 109000
-    await monitor.runCheckOnce(); // different again, but isActive is true (1000ms < 10000ms)
-    expect(dropped).toBe(0); // active guard prevents drop, state is re-armed to count 1
-
-    // Let's do another check after some time, but still active
-    currentTime += 5000; // 114000
-    monitor.markActivity(); // lastActivityAt = 114000
-    currentTime += 2000; // 116000
-    await monitor.runCheckOnce(); // different again, but still active (2000ms < 10000ms)
-    expect(dropped).toBe(0);
-
-    // Now let's let it run past quiesceMs (10000ms)
-    currentTime += 12000; // 128000 (14000ms since last activity)
-    await monitor.runCheckOnce(); // third check (consecutive), quiescent -> drops!
     expect(dropped).toBe(1);
     monitor.stop();
   });
 
   test('multi-sid: parent moved + child 404 -> union yields parent new url -> drifts', async () => {
     let dropped = 0;
-    let currentTime = 100000;
-    const fakeNow = () => currentTime;
     const fakeFetch = vi.fn().mockImplementation((urlStr) => {
       if (urlStr.includes('session_id=ses_parent')) {
         return Promise.resolve({
@@ -272,7 +208,7 @@ describe('DriftMonitor', () => {
       extraction: { kind: 'multi', sids: ['ses_parent', 'ses_child'] },
       currentOwner: 'http://127.0.0.1:4096',
       config: dummyConfig,
-      deps: { fetch: fakeFetch, now: fakeNow },
+      deps: { fetch: fakeFetch },
       onDrop: () => { dropped++; },
     });
 
@@ -280,7 +216,6 @@ describe('DriftMonitor', () => {
     await monitor.runCheckOnce();
     expect(dropped).toBe(0);
 
-    currentTime += 15000;
     await monitor.runCheckOnce();
     expect(dropped).toBe(1);
     monitor.stop();
@@ -288,8 +223,6 @@ describe('DriftMonitor', () => {
 
   test('multi-sid: parent+child both stable -> no drift', async () => {
     let dropped = 0;
-    let currentTime = 100000;
-    const fakeNow = () => currentTime;
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -300,58 +233,121 @@ describe('DriftMonitor', () => {
       extraction: { kind: 'multi', sids: ['ses_parent', 'ses_child'] },
       currentOwner: 'http://127.0.0.1:4096',
       config: dummyConfig,
-      deps: { fetch: fakeFetch, now: fakeNow },
+      deps: { fetch: fakeFetch },
       onDrop: () => { dropped++; },
     });
 
     monitor.start();
     await monitor.runCheckOnce();
-    currentTime += 15000;
     await monitor.runCheckOnce();
     expect(dropped).toBe(0);
     monitor.stop();
   });
 
-  test('multi-sid: diverging two real owners -> effectiveResolved is currentOwner -> no drop', async () => {
+  test('multi-sid: diverging two real owners (child-moves-parent-stays) -> divergence: union size 2 -> console.warn fired once and NO drop', async () => {
     let dropped = 0;
-    let currentTime = 100000;
-    const fakeNow = () => currentTime;
     const fakeFetch = vi.fn().mockImplementation((urlStr) => {
       if (urlStr.includes('session_id=ses_parent')) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ apiBase: 'http://127.0.0.1:4097' }),
+          json: async () => ({ apiBase: 'http://127.0.0.1:4096' }), // parent stays on currentOwner
         });
       } else {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ apiBase: 'http://127.0.0.1:4098' }),
+          json: async () => ({ apiBase: 'http://127.0.0.1:4097' }), // child moves to new lease
         });
       }
     });
+
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const monitor = createDriftMonitor({
       extraction: { kind: 'multi', sids: ['ses_parent', 'ses_child'] },
       currentOwner: 'http://127.0.0.1:4096',
       config: dummyConfig,
-      deps: { fetch: fakeFetch, now: fakeNow },
+      deps: { fetch: fakeFetch },
       onDrop: () => { dropped++; },
     });
 
     monitor.start();
     await monitor.runCheckOnce();
-    currentTime += 15000;
+    expect(dropped).toBe(0);
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    expect(consoleSpy.mock.calls[0][0]).toContain("multi-session stream has diverging owners; leg cannot follow all sessions");
+
+    // run check again, shouldn't log again (loggedDivergence logic)
     await monitor.runCheckOnce();
     expect(dropped).toBe(0);
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+
+    consoleSpy.mockRestore();
+    monitor.stop();
+  });
+
+  test('FABLE2-S1 divergence logs once then resets when returning to size <= 1', async () => {
+    let dropped = 0;
+    let parentUrl = 'http://127.0.0.1:4096';
+    let childUrl = 'http://127.0.0.1:4097';
+
+    const fakeFetch = vi.fn().mockImplementation((urlStr) => {
+      if (urlStr.includes('session_id=ses_parent')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ apiBase: parentUrl }),
+        });
+      } else {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ apiBase: childUrl }),
+        });
+      }
+    });
+
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const monitor = createDriftMonitor({
+      extraction: { kind: 'multi', sids: ['ses_parent', 'ses_child'] },
+      currentOwner: 'http://127.0.0.1:4096',
+      config: dummyConfig,
+      deps: { fetch: fakeFetch },
+      onDrop: () => { dropped++; },
+    });
+
+    monitor.start();
+
+    // Episode 1: Divergence
+    await monitor.runCheckOnce();
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+
+    // Run again during Episode 1: no new log
+    await monitor.runCheckOnce();
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+
+    // Return to stability (size <= 1)
+    childUrl = 'http://127.0.0.1:4096';
+    await monitor.runCheckOnce();
+    expect(consoleSpy).toHaveBeenCalledTimes(1); // Still 1
+
+    // Episode 2: Divergence again -> resets and logs once more
+    childUrl = 'http://127.0.0.1:4098';
+    await monitor.runCheckOnce();
+    expect(consoleSpy).toHaveBeenCalledTimes(2); // Logged again!
+
+    // Run again during Episode 2: no new log
+    await monitor.runCheckOnce();
+    expect(consoleSpy).toHaveBeenCalledTimes(2);
+
+    consoleSpy.mockRestore();
     monitor.stop();
   });
 
   test('stop() before/after -> no further checks, no onDrop', async () => {
     let dropped = 0;
-    let currentTime = 100000;
-    const fakeNow = () => currentTime;
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -362,14 +358,13 @@ describe('DriftMonitor', () => {
       extraction: { kind: 'single', sid: 'ses_a' },
       currentOwner: 'http://127.0.0.1:4096',
       config: dummyConfig,
-      deps: { fetch: fakeFetch, now: fakeNow },
+      deps: { fetch: fakeFetch },
       onDrop: () => { dropped++; },
     });
 
     monitor.start();
     await monitor.runCheckOnce();
     monitor.stop();
-    currentTime += 15000;
     await monitor.runCheckOnce();
     expect(dropped).toBe(0);
   });

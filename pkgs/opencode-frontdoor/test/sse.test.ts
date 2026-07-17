@@ -58,7 +58,6 @@ describe("pipeEventStream", () => {
       // Connect to upstream
       const upstreamReq = http.request(`http://127.0.0.1:${upstreamPort}`, (upstreamRes) => {
         pipeEventStream(upstreamRes, res, {
-          onActivity: () => {},
           onDone: () => {}
         });
       });
@@ -105,7 +104,6 @@ describe("pipeEventStream", () => {
     const clientServer = await startServer((req, res) => {
       const upstreamReq = http.request(`http://127.0.0.1:${upstreamPort}`, (upstreamRes) => {
         pipeEventStream(upstreamRes, res, {
-          onActivity: () => {},
           onDone: () => {}
         });
       });
@@ -133,47 +131,6 @@ describe("pipeEventStream", () => {
     await stopServer(clientServer);
   });
 
-  test("activity seam fires on every chunk including heartbeats/comments", async () => {
-    const upstreamServer = await startServer((req, res) => {
-      res.writeHead(200, { "Content-Type": "text/event-stream" });
-      res.write(": keep-alive\n\n");
-      res.write("data: hello\n\n");
-      res.end();
-    });
-
-    const upstreamPort = (upstreamServer.address() as AddressInfo).port;
-    let activityCount = 0;
-
-    const clientServer = await startServer((req, res) => {
-      const upstreamReq = http.request(`http://127.0.0.1:${upstreamPort}`, (upstreamRes) => {
-        pipeEventStream(upstreamRes, res, {
-          onActivity: () => {
-            activityCount++;
-          },
-          onDone: () => {}
-        });
-      });
-      upstreamReq.end();
-    });
-
-    const clientPort = (clientServer.address() as AddressInfo).port;
-
-    await new Promise<void>((resolve, reject) => {
-      const clientReq = http.request(`http://127.0.0.1:${clientPort}`, (clientRes) => {
-        clientRes.on("data", () => {});
-        clientRes.on("end", resolve);
-        clientRes.on("error", reject);
-      });
-      clientReq.end();
-    });
-
-    // Should fire on ": keep-alive\n\n" chunk and "data: hello\n\n" chunk
-    expect(activityCount).toBeGreaterThanOrEqual(2);
-
-    await stopServer(upstreamServer);
-    await stopServer(clientServer);
-  });
-
   test("teardown: upstream error destroys client response, client close destroys upstream response", async () => {
     let upstreamResRef: http.IncomingMessage | null = null;
     let clientResRef: http.ServerResponse | null = null;
@@ -195,7 +152,6 @@ describe("pipeEventStream", () => {
       const upstreamReq = http.request(`http://127.0.0.1:${upstreamPort}`, (upstreamRes) => {
         upstreamResRef = upstreamRes;
         pipeEventStream(upstreamRes, res, {
-          onActivity: () => {},
           onDone: () => {
             resolveDone();
           }
@@ -225,5 +181,30 @@ describe("pipeEventStream", () => {
 
     await stopServer(upstreamServer);
     await stopServer(clientServer);
+  });
+
+  test("P2-W1 teardown: already-ended clientRes immediately destroys upstreamRes and fires onDone", async () => {
+    let onDoneFired = false;
+    let upstreamDestroyed = false;
+
+    const fakeUpstreamRes = {
+      destroy: () => {
+        upstreamDestroyed = true;
+      },
+    } as unknown as http.IncomingMessage;
+
+    const fakeClientRes = {
+      writableEnded: true,
+      destroyed: false,
+    } as unknown as http.ServerResponse;
+
+    pipeEventStream(fakeUpstreamRes, fakeClientRes, {
+      onDone: () => {
+        onDoneFired = true;
+      },
+    });
+
+    expect(upstreamDestroyed).toBe(true);
+    expect(onDoneFired).toBe(true);
   });
 });

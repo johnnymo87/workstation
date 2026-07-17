@@ -14,7 +14,6 @@ describe('place.ts', () => {
     cheapFirstByteMs: 5000,
     stickyTtlMs: 30000,
     driftCheckMs: 5000,
-    quiesceMs: 10000,
   };
 
   describe('isPromotingRequest', () => {

@@ -17,7 +17,6 @@ describe('loadConfig', () => {
     delete process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS;
     delete process.env.FRONTDOOR_STICKY_TTL_MS;
     delete process.env.FRONTDOOR_DRIFT_CHECK_MS;
-    delete process.env.FRONTDOOR_SSE_QUIESCE_MS;
   });
 
   afterEach(() => {
@@ -43,7 +42,6 @@ describe('loadConfig', () => {
       cheapFirstByteMs: 5000,
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
-      quiesceMs: 10000,
     });
   });
 
@@ -56,7 +54,6 @@ describe('loadConfig', () => {
     process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS = '2500';
     process.env.FRONTDOOR_STICKY_TTL_MS = '10000';
     process.env.FRONTDOOR_DRIFT_CHECK_MS = '2000';
-    process.env.FRONTDOOR_SSE_QUIESCE_MS = '4000';
 
     const config = loadConfig();
 
@@ -69,7 +66,6 @@ describe('loadConfig', () => {
       cheapFirstByteMs: 2500,
       stickyTtlMs: 10000,
       driftCheckMs: 2000,
-      quiesceMs: 4000,
     });
   });
 
@@ -115,10 +111,5 @@ describe('loadConfig', () => {
   test('should throw a descriptive error for invalid FRONTDOOR_DRIFT_CHECK_MS', () => {
     process.env.FRONTDOOR_DRIFT_CHECK_MS = 'invalid';
     expect(() => loadConfig()).toThrowError('Invalid FRONTDOOR_DRIFT_CHECK_MS: "invalid". Must be a positive integer.');
-  });
-
-  test('should throw a descriptive error for invalid FRONTDOOR_SSE_QUIESCE_MS', () => {
-    process.env.FRONTDOOR_SSE_QUIESCE_MS = '0';
-    expect(() => loadConfig()).toThrowError('Invalid FRONTDOOR_SSE_QUIESCE_MS: "0". Must be a positive integer.');
   });
 });
