@@ -148,7 +148,13 @@ export function createDriftMonitor(opts: {
       } else {
         triggerDrop();
       }
-    } else {
+    } else if (effectiveResolved === normalizedCurrentOwner) {
+      // Reset the once-per-episode suppression log ONLY when drift has genuinely
+      // resolved (resolved owner == current). A non-reconnect poll mid-episode
+      // (candidate still building toward the confirm threshold — which also
+      // happens every cycle because evaluateOwnerDrift resets state on each
+      // confirmed reconnect) is NOT stable, so resetting there would re-spam the
+      // warning every other poll during a single suppression episode.
       loggedMidTurnSuppression = false;
     }
   }
