@@ -4,6 +4,7 @@ import https from "node:https";
 import { identify } from "./identity.js";
 import { dispatch } from "./dispatch.js";
 import { extractSids, type SidExtraction } from "./sid.js";
+import { isExemptFromFirstByteTimeout } from "./timeouts.js";
 import { resolveOwner } from "./resolve.js";
 import { isPromotingRequest, maybePromote, PromotionGate } from "./place.js";
 import type { Config } from "./config.js";
@@ -74,6 +75,7 @@ async function proxyRequest(
 
     let headersSent = false;
     let resolved = false;
+    let cheapTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
     const onReqError = (err: any) => {
       upstreamReq.destroy();
@@ -92,6 +94,10 @@ async function proxyRequest(
     const safeResolve = () => {
       if (resolved) return;
       resolved = true;
+      if (cheapTimeoutId) {
+        clearTimeout(cheapTimeoutId);
+        cheapTimeoutId = null;
+      }
       req.off("error", onReqError);
       res.off("error", onResError);
       resolve();
@@ -100,29 +106,29 @@ async function proxyRequest(
     req.on("error", onReqError);
     res.on("error", onResError);
 
-    // Handle connect / first byte timeouts
-    const isTurnStartingPost = method.toUpperCase() === "POST" && extraction && isPromotingRequest(method, url.pathname, extraction);
-    if (!isTurnStartingPost) {
-      upstreamReq.setTimeout(ctx.config.cheapFirstByteMs, () => {
+    // Handle connect / first byte timeouts (true wall-clock time-to-response-headers)
+    const isExempt = isExemptFromFirstByteTimeout(method, url.pathname, extraction);
+    if (!isExempt) {
+      cheapTimeoutId = setTimeout(() => {
         if (!headersSent && !res.headersSent) {
-          res.writeHead(504, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "gateway_timeout", message: "Upstream timed out" }));
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "service_unavailable", message: "Upstream did not send response headers in time" }));
           upstreamReq.destroy();
           safeResolve();
         }
-      });
+      }, ctx.config.cheapFirstByteMs);
     }
 
     upstreamReq.on("response", (upstreamRes) => {
+      if (cheapTimeoutId) {
+        clearTimeout(cheapTimeoutId);
+        cheapTimeoutId = null;
+      }
       if (res.headersSent || headersSent) {
         upstreamRes.resume(); // drain to release the socket back to the pool
         return;
       }
       headersSent = true;
-      // First byte received: clear the cheap first-byte idle timeout so it can't
-      // tear down a long-lived response (e.g. an idle SSE stream in Phase 2 or a
-      // slow streamed GET). The first-byte bound only guards time-to-headers.
-      upstreamReq.setTimeout(0);
 
       const clientHeaders: Record<string, string | string[]> = {};
       for (const [key, val] of Object.entries(upstreamRes.headers)) {
@@ -259,6 +265,13 @@ export async function handleRequest(
     if (decision.action === "pty-501") {
       res.writeHead(501, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not_implemented", message: "PTY out of scope v1" }));
+      return;
+    }
+
+    if (decision.action === "tui-501") {
+      console.warn(`[FRONTDOOR WARN] TUI request denied: ${method} ${url.pathname}`);
+      res.writeHead(501, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not_implemented", message: "TUI endpoints are per-process; not available through the front door" }));
       return;
     }
 

@@ -345,6 +345,33 @@ describe("FrontDoor Integration", () => {
     const resPty = await makeRequest("GET", "/pty");
     expect(resPty.status).toBe(501);
 
+    // GET /tui/control/next -> 501
+    const resTuiGet = await makeRequest("GET", "/tui/control/next");
+    expect(resTuiGet.status).toBe(501);
+    const jsonTuiGet = JSON.parse(resTuiGet.body);
+    expect(jsonTuiGet).toEqual({
+      error: "not_implemented",
+      message: "TUI endpoints are per-process; not available through the front door"
+    });
+
+    // POST /tui/append-prompt -> 501
+    const resTuiPost1 = await makeRequest("POST", "/tui/append-prompt");
+    expect(resTuiPost1.status).toBe(501);
+    const jsonTuiPost1 = JSON.parse(resTuiPost1.body);
+    expect(jsonTuiPost1).toEqual({
+      error: "not_implemented",
+      message: "TUI endpoints are per-process; not available through the front door"
+    });
+
+    // POST /tui/control/response -> 501
+    const resTuiPost2 = await makeRequest("POST", "/tui/control/response");
+    expect(resTuiPost2.status).toBe(501);
+    const jsonTuiPost2 = JSON.parse(resTuiPost2.body);
+    expect(jsonTuiPost2).toEqual({
+      error: "not_implemented",
+      message: "TUI endpoints are per-process; not available through the front door"
+    });
+
     // GET /nonexistent -> 404
     const resNone = await makeRequest("GET", "/nonexistent");
     expect(resNone.status).toBe(404);
@@ -764,6 +791,206 @@ describe("FrontDoor Integration", () => {
       clientReq.destroy();
     } finally {
       await new Promise<void>((resolve) => fastFrontDoor.close(() => resolve()));
+    }
+  });
+
+  test("16. wall-clock first-byte timeout (Part C): non-exempt request times out with 503", async () => {
+    let slowServerPort: number;
+    const slowServer = http.createServer((req, res) => {
+      // Do not send headers, just sleep/idle
+    });
+    await new Promise<void>((resolve) => slowServer.listen(0, "127.0.0.1", () => resolve()));
+    slowServerPort = (slowServer.address() as AddressInfo).port;
+
+    const timeoutConfig: Config = {
+      port: 0,
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 100, // 100ms wall-clock limit
+      stickyTtlMs: 30000,
+      driftCheckMs: 10000,
+    };
+
+    const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
+      logger: { sink: () => {} }
+    });
+    await new Promise<void>((resolve) => timeoutFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const frontDoorPort = (timeoutFrontDoor.address() as AddressInfo).port;
+
+    try {
+      const start = Date.now();
+      const res = await new Promise<any>((resolve, reject) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: frontDoorPort,
+          path: "/api/session/ses_timeout",
+          method: "GET"
+        }, (res) => {
+          let body = "";
+          res.on("data", (chunk) => { body += chunk; });
+          res.on("end", () => resolve({ status: res.statusCode, body }));
+        });
+        req.on("error", reject);
+        req.end();
+      });
+
+      const duration = Date.now() - start;
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toEqual({
+        error: "service_unavailable",
+        message: "Upstream did not send response headers in time"
+      });
+      expect(duration).toBeGreaterThanOrEqual(80);
+      expect(duration).toBeLessThan(400); // should be around 100ms, not much longer
+    } finally {
+      await new Promise<void>((resolve) => timeoutFrontDoor.close(() => resolve()));
+      await new Promise<void>((resolve) => slowServer.close(() => resolve()));
+    }
+  });
+
+  test("17. wall-clock first-byte timeout (Part C): exempt request (POST /wait) does NOT time out", async () => {
+    let slowServerPort: number;
+    let receivedWaitRequest = false;
+    let resolveWaitReceived: () => void = () => {};
+    const waitReceivedPromise = new Promise<void>((resolve) => {
+      resolveWaitReceived = resolve;
+    });
+
+    const slowServer = http.createServer((req, res) => {
+      if (req.url && req.url.includes("/wait")) {
+        receivedWaitRequest = true;
+        resolveWaitReceived();
+      }
+      // Keep connection open without writing headers
+    });
+    await new Promise<void>((resolve) => slowServer.listen(0, "127.0.0.1", () => resolve()));
+    slowServerPort = (slowServer.address() as AddressInfo).port;
+
+    const timeoutConfig: Config = {
+      port: 0,
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 100, // 100ms
+      stickyTtlMs: 30000,
+      driftCheckMs: 10000,
+    };
+
+    const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
+      logger: { sink: () => {} }
+    });
+    await new Promise<void>((resolve) => timeoutFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const frontDoorPort = (timeoutFrontDoor.address() as AddressInfo).port;
+
+    try {
+      let gotTimeout = false;
+      const clientReq = http.request({
+        hostname: "127.0.0.1",
+        port: frontDoorPort,
+        path: "/api/session/ses_timeout/wait",
+        method: "POST"
+      }, (res) => {
+        // If it responds, that means it timed out or finished
+        if (res.statusCode === 503) {
+          gotTimeout = true;
+        }
+      });
+      clientReq.on("error", () => {});
+      clientReq.end();
+
+      // Wait until slowServer receives the request
+      await waitReceivedPromise;
+      expect(receivedWaitRequest).toBe(true);
+
+      // Wait 250ms (well past the 100ms first-byte timeout threshold)
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect(gotTimeout).toBe(false);
+      clientReq.destroy();
+    } finally {
+      await new Promise<void>((resolve) => timeoutFrontDoor.close(() => resolve()));
+      await new Promise<void>((resolve) => slowServer.close(() => resolve()));
+    }
+  });
+
+  test("18. wall-clock first-byte timeout (Part C): slow upload (W9) does NOT reset wall-clock timer, still times out", async () => {
+    let slowServerPort: number;
+    const slowServer = http.createServer((req, res) => {
+      // Consume body, never send headers
+      req.on("data", () => {});
+    });
+    await new Promise<void>((resolve) => slowServer.listen(0, "127.0.0.1", () => resolve()));
+    slowServerPort = (slowServer.address() as AddressInfo).port;
+
+    const timeoutConfig: Config = {
+      port: 0,
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 100, // 100ms
+      stickyTtlMs: 30000,
+      driftCheckMs: 10000,
+    };
+
+    const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
+      logger: { sink: () => {} }
+    });
+    await new Promise<void>((resolve) => timeoutFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const frontDoorPort = (timeoutFrontDoor.address() as AddressInfo).port;
+
+    try {
+      const start = Date.now();
+      const resPromise = new Promise<any>((resolve, reject) => {
+        const clientReq = http.request({
+          hostname: "127.0.0.1",
+          port: frontDoorPort,
+          path: "/api/session/ses_timeout/permission",
+          method: "POST",
+          headers: {
+            "Transfer-Encoding": "chunked"
+          }
+        }, (res) => {
+          let body = "";
+          res.on("data", (chunk) => { body += chunk; });
+          res.on("end", () => resolve({ status: res.statusCode, body }));
+        });
+
+        clientReq.on("error", reject);
+
+        // Write first chunk immediately
+        clientReq.write("chunk1");
+
+        // Write second chunk after 50ms (keeps socket active, which would reset idle timeouts)
+        setTimeout(() => {
+          if (!clientReq.destroyed) {
+            clientReq.write("chunk2");
+          }
+        }, 50);
+
+        // Write third chunk after 100ms
+        setTimeout(() => {
+          if (!clientReq.destroyed) {
+            clientReq.write("chunk3");
+            clientReq.end();
+          }
+        }, 100);
+      });
+
+      const res = await resPromise;
+      const duration = Date.now() - start;
+
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body)).toEqual({
+        error: "service_unavailable",
+        message: "Upstream did not send response headers in time"
+      });
+      // Wall-clock limit is 100ms, so it must time out around 100ms
+      expect(duration).toBeGreaterThanOrEqual(80);
+      expect(duration).toBeLessThan(350);
+    } finally {
+      await new Promise<void>((resolve) => timeoutFrontDoor.close(() => resolve()));
+      await new Promise<void>((resolve) => slowServer.close(() => resolve()));
     }
   });
 });

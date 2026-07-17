@@ -127,6 +127,34 @@ describe('Route Dispatcher', () => {
     });
   });
 
+  // tui:
+  test('GET /tui/control/next -> tui/tui-501', () => {
+    expect(classify('GET', '/tui/control/next')).toBe('tui');
+    expect(dispatch('GET', '/tui/control/next')).toEqual({
+      class: 'tui',
+      action: 'tui-501',
+      recognized: true,
+    });
+  });
+
+  test('POST /tui/append-prompt -> tui/tui-501', () => {
+    expect(classify('POST', '/tui/append-prompt')).toBe('tui');
+    expect(dispatch('POST', '/tui/append-prompt')).toEqual({
+      class: 'tui',
+      action: 'tui-501',
+      recognized: true,
+    });
+  });
+
+  test('POST /tui/control/response -> tui/tui-501', () => {
+    expect(classify('POST', '/tui/control/response')).toBe('tui');
+    expect(dispatch('POST', '/tui/control/response')).toEqual({
+      class: 'tui',
+      action: 'tui-501',
+      recognized: true,
+    });
+  });
+
   // global-ro:
   test('GET /global/health -> global-ro/forward-anchor', () => {
     expect(classify('GET', '/global/health')).toBe('global-ro');

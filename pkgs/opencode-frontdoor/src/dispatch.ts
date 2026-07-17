@@ -4,6 +4,7 @@ export type RouteAction =
   | 'route-session'
   | 'create'
   | 'pty-501'
+  | 'tui-501'
   | 'forward-anchor'
   | 'deny-405'
   | 'gone-410'
@@ -101,6 +102,9 @@ export function dispatch(method: string, pathname: string): {
       break;
     case 'pty':
       action = 'pty-501';
+      break;
+    case 'tui':
+      action = 'tui-501';
       break;
     case 'global-ro':
       action = 'forward-anchor';

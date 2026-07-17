@@ -25,6 +25,7 @@ export type RouteClass =
   | "global-sideeffect"
   | "global-event"
   | "web-ui"
+  | "tui"
   | "unrecognized";
 
 export interface RouteEntry {
@@ -208,19 +209,19 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "POST", path: "/sync/replay", class: "global-sideeffect" },
   { method: "POST", path: "/sync/start", class: "global-sideeffect" },
   { method: "POST", path: "/sync/steal", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/append-prompt", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/clear-prompt", class: "global-sideeffect" },
-  { method: "GET", path: "/tui/control/next", class: "global-ro" },
-  { method: "POST", path: "/tui/control/response", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/execute-command", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/open-help", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/open-models", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/open-sessions", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/open-themes", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/publish", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/select-session", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/show-toast", class: "global-sideeffect" },
-  { method: "POST", path: "/tui/submit-prompt", class: "global-sideeffect" },
+  { method: "POST", path: "/tui/append-prompt", class: "tui" },
+  { method: "POST", path: "/tui/clear-prompt", class: "tui" },
+  { method: "GET", path: "/tui/control/next", class: "tui" },
+  { method: "POST", path: "/tui/control/response", class: "tui" },
+  { method: "POST", path: "/tui/execute-command", class: "tui" },
+  { method: "POST", path: "/tui/open-help", class: "tui" },
+  { method: "POST", path: "/tui/open-models", class: "tui" },
+  { method: "POST", path: "/tui/open-sessions", class: "tui" },
+  { method: "POST", path: "/tui/open-themes", class: "tui" },
+  { method: "POST", path: "/tui/publish", class: "tui" },
+  { method: "POST", path: "/tui/select-session", class: "tui" },
+  { method: "POST", path: "/tui/show-toast", class: "tui" },
+  { method: "POST", path: "/tui/submit-prompt", class: "tui" },
   { method: "GET", path: "/vcs", class: "global-ro" },
   { method: "POST", path: "/vcs/apply", class: "global-sideeffect" },
   { method: "GET", path: "/vcs/diff", class: "global-ro" },
