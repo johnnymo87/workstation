@@ -209,6 +209,7 @@ describe("FrontDoor Integration", () => {
     // 5. Start FrontDoor Server
     const testConfig: Config = {
       port: 0, // ephemeral
+      version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
@@ -638,6 +639,7 @@ describe("FrontDoor Integration", () => {
     // 1. Configure the FrontDoor with extremely fast drift polling
     const fastDriftConfig: Config = {
       port: 0, // ephemeral
+      version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
@@ -722,6 +724,7 @@ describe("FrontDoor Integration", () => {
   test("15. owner-drift integration FABLE2-B1: drops the SSE stream cleanly on confirmed drift despite continuous heartbeat activity", async () => {
     const fastDriftConfig: Config = {
       port: 0,
+      version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
@@ -807,6 +810,7 @@ describe("FrontDoor Integration", () => {
 
     const timeoutConfig: Config = {
       port: 0,
+      version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
       routeTimeoutMs: 1000,
@@ -873,6 +877,7 @@ describe("FrontDoor Integration", () => {
 
     const timeoutConfig: Config = {
       port: 0,
+      version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
       routeTimeoutMs: 1000,
@@ -930,6 +935,7 @@ describe("FrontDoor Integration", () => {
 
     const timeoutConfig: Config = {
       port: 0,
+      version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
       routeTimeoutMs: 1000,
@@ -1019,6 +1025,7 @@ describe("FrontDoor Integration", () => {
 
     const testConfig: Config = {
       port: 0,
+      version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${healthServerPort}`,
       routeTimeoutMs: 100,
@@ -1088,6 +1095,7 @@ describe("FrontDoor Integration", () => {
 
     const testConfig: Config = {
       port: 0,
+      version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${healthServerPort}`,
       routeTimeoutMs: 100,
@@ -1142,5 +1150,30 @@ describe("FrontDoor Integration", () => {
       await new Promise<void>((resolve) => frontDoor.close(() => resolve()));
       await new Promise<void>((resolve) => healthServer.close(() => resolve()));
     }
+  });
+
+  test("21. native /healthz integration (Task 3.3): reports status, version, and metrics, bypasses proxy logging", async () => {
+    pigeonRouteCalls = [];
+    loggedLines.length = 0; // clear any logged proxy requests
+
+    const res = await makeRequest("GET", "/healthz");
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("application/json");
+
+    const body = JSON.parse(res.body);
+    expect(body.status).toBe("ok");
+    expect(body.degraded).toBe(false);
+    expect(body.pigeon).toBe(true);
+    expect(body.anchor).toBe(true);
+    expect(body.degradedRequests).toBeGreaterThanOrEqual(0);
+    expect(body.version).toBe("unknown");
+
+    // Verify it probed the pigeon daemon
+    expect(pigeonRouteCalls).toContainEqual(
+      expect.objectContaining({ sid: "__frontdoor_healthz__" })
+    );
+
+    // Verify no request log was written to loggedLines (the standard proxy logger)
+    expect(loggedLines).toHaveLength(0);
   });
 });

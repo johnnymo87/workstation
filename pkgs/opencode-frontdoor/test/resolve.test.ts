@@ -5,6 +5,7 @@ import type { Config } from '../src/config.js';
 describe('resolveOwner', () => {
   const dummyConfig: Config = {
     port: 4700,
+    version: 'unknown',
     pigeonUrl: 'http://pigeon.local',
     anchorUrl: 'http://anchor.local',
     pigeonAuthToken: undefined,

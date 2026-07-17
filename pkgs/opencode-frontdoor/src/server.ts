@@ -3,14 +3,23 @@ import { loadConfig, type Config } from "./config.js";
 import { handleRequest } from "./proxy.js";
 import { RequestLogger } from "./log.js";
 import { PromotionGate } from "./place.js";
+import { createMetrics } from "./metrics.js";
+import { isHealthzRequest, handleHealthz } from "./healthz.js";
 
 export function createFrontDoor(config: Config, deps?: any): http.Server {
   const logger = new RequestLogger(deps?.logger);
   const gate = new PromotionGate(config.stickyTtlMs);
+  const metrics = createMetrics();
 
   return http.createServer(async (req, res) => {
     try {
-      await handleRequest(req, res, { config, logger, gate, deps });
+      const { pathname } = new URL(req.url || "", "http://internal");
+      const method = req.method || "GET";
+      if (isHealthzRequest(method, pathname)) {
+        await handleHealthz(res, { config, deps, metrics });
+        return;
+      }
+      await handleRequest(req, res, { config, logger, gate, metrics, deps });
     } catch (err: any) {
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });

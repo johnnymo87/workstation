@@ -13,6 +13,7 @@ import { isAbsoluteHttpUrl } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
 import { createDriftMonitor } from "./drift.js";
 import { createWedgeProbe } from "./wedge.js";
+import type { Metrics } from "./metrics.js";
 
 export interface ProxyDeps {
   fetch?: typeof globalThis.fetch;
@@ -23,6 +24,7 @@ export interface ProxyContext {
   config: Config;
   logger: RequestLogger;
   gate: PromotionGate;
+  metrics: Metrics;
   deps?: ProxyDeps;
 }
 
@@ -249,6 +251,9 @@ export async function handleRequest(
   function logResponse() {
     if (logged) return;
     logged = true;
+    if (degraded) {
+      ctx.metrics.degradedRequests++;
+    }
     const durationMs = Date.now() - startTime;
     ctx.logger.log({
       class: decision.class,

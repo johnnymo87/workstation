@@ -5,6 +5,7 @@ import type { Config } from '../src/config.js';
 describe('Wedge Health Probe', () => {
   const dummyConfig: Config = {
     port: 4700,
+    version: 'unknown',
     pigeonUrl: 'http://pigeon.local',
     anchorUrl: 'http://anchor.local',
     pigeonAuthToken: undefined,

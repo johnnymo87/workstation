@@ -10,6 +10,7 @@ describe('loadConfig', () => {
 
     // Clear relevant environment variables so we start with defaults
     delete process.env.FRONTDOOR_PORT;
+    delete process.env.FRONTDOOR_VERSION;
     delete process.env.PIGEON_DAEMON_URL;
     delete process.env.OPENCODE_ANCHOR_URL;
     delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
@@ -36,6 +37,7 @@ describe('loadConfig', () => {
 
     expect(config).toEqual({
       port: 4700,
+      version: 'unknown',
       pigeonUrl: 'http://127.0.0.1:4731',
       anchorUrl: 'http://127.0.0.1:4096',
       pigeonAuthToken: undefined,
@@ -49,6 +51,7 @@ describe('loadConfig', () => {
 
   test('should override default values with valid environment variables', () => {
     process.env.FRONTDOOR_PORT = '4800';
+    process.env.FRONTDOOR_VERSION = 'v1.2.3-test';
     process.env.PIGEON_DAEMON_URL = 'http://10.0.0.1:4731';
     process.env.OPENCODE_ANCHOR_URL = 'http://10.0.0.1:4096';
     process.env.PIGEON_DAEMON_AUTH_TOKEN = 'secret-token';
@@ -62,6 +65,7 @@ describe('loadConfig', () => {
 
     expect(config).toEqual({
       port: 4800,
+      version: 'v1.2.3-test',
       pigeonUrl: 'http://10.0.0.1:4731',
       anchorUrl: 'http://10.0.0.1:4096',
       pigeonAuthToken: 'secret-token',

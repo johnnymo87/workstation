@@ -7,6 +7,7 @@ import type { ResolvedOwner } from '../src/resolve.js';
 describe('place.ts', () => {
   const dummyConfig: Config = {
     port: 4700,
+    version: 'unknown',
     pigeonUrl: 'http://pigeon.local',
     anchorUrl: 'http://anchor.local',
     pigeonAuthToken: undefined,

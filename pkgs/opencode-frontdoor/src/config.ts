@@ -1,5 +1,10 @@
 export interface Config {
   port: number;
+  /*
+   * The version marker. Phase 6's Nix wrapper will inject the store path/hash here
+   * so the canary can diff the running binary against the just-built store path.
+   */
+  version: string;
   pigeonUrl: string;
   anchorUrl: string;
   pigeonAuthToken?: string;
@@ -42,9 +47,11 @@ export function loadConfig(): Config {
   const pigeonUrl = process.env.PIGEON_DAEMON_URL || 'http://127.0.0.1:4731';
   const anchorUrl = process.env.OPENCODE_ANCHOR_URL || 'http://127.0.0.1:4096';
   const pigeonAuthToken = process.env.PIGEON_DAEMON_AUTH_TOKEN || undefined;
+  const version = process.env.FRONTDOOR_VERSION || 'unknown';
 
   return {
     port,
+    version,
     pigeonUrl,
     anchorUrl,
     pigeonAuthToken,
