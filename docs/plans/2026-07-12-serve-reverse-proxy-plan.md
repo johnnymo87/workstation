@@ -213,22 +213,46 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
 
 ---
 
-## Phase 2 — Event streams (SSE + drop-leg-on-drift) — **DONE 2026-07-16** (commits `bc164fb`..`4cebab2`; `src/sse.ts` + `src/drift.ts`; 162 tests green; spec+code+final review passed. FABLE-B2 degrade→no-evidence, NEW-H active-guard, C2 clean-close all implemented & tested. Root `ss -K` live-test still owed pre-Phase-6-deploy, not a coding blocker.)
+## Phase 2 — Event streams (SSE + drop-leg-on-drift) — **DONE 2026-07-16** (commits `bc164fb`..`4cebab2`, remediation in follow-up commits; `src/sse.ts` + `src/drift.ts`; spec+code+final review + **2nd fable adversarial pass** passed. FABLE-B2 degrade→no-evidence and C2 clean-close implemented & tested. Root `ss -K` live-test still owed pre-Phase-6-deploy, not a coding blocker.)
 
-- **2.1** `src/sse.ts` unbuffered pass-through, survives 10 s heartbeat. Commit.
+- **2.1** `src/sse.ts` unbuffered pass-through, survives the upstream 10 s
+  `server.heartbeat`. Commit. (**FABLE2-B1 correction:** upstream `/event` emits
+  a `server.heartbeat` every 10 s with `properties:{}` — no `sessionID`, so it
+  passes the session-scope filter. An SSE-byte "activity" signal therefore can
+  NEVER distinguish a live turn from an idle heartbeat; do not build a drift
+  guard on it — see 2.2 / 3.4.)
 - **2.2** confirm-twice re-resolve timer (**read-only**, no promote — NEW-2); on
-  drift **close the client leg** (no silent re-dial — C2). **Consult the 3.4
-  sticky map first (NEW-H):** an actively-flowing leg (sticky refreshed by
-  observed SSE activity) is **not** dropped mid-turn — only re-resolve/drop when
-  the leg is quiescent — making the door strictly safer than today's TUI.
-  **DRIFT-EVIDENCE RULE (FABLE-B2 — write this into the impl):** drift = **two
-  consecutive `active`/`prospective` resolves that name a *different real
-  owner***. A `degraded`/`not-routed`/`pigeon-error`/`pigeon-unreachable` resolve
-  is **never** drift evidence — otherwise a transient pigeon blip (which
-  `resolveOwner` maps to `url=anchor`) looks like drift and drops a healthy leg,
-  and with NEW-A's non-resetting backoff that inflates TUI reconnect delay on
-  every hiccup. Assert: pigeon-blip during a live stream → NO leg drop.
-  Assert clean close + no re-dial + no-drop-while-active. Commit `feat(frontdoor): drop SSE leg on drift`.
+  confirmed drift **close the client leg** (no silent re-dial — C2). **Drop on
+  confirmed drift, deployed-TUI parity (no active-guard in Phase 2).**
+  The **lease invariant already prevents mid-turn drops**: a mid-turn session
+  holds a renewed lease, so pigeon `/route` keeps naming the same owner and drift
+  cannot confirm mid-turn; the only exception (owner serve dies → reassign)
+  leaves a dead/silent serve → quiescent leg → dropping is the *correct* outcome.
+  This matches `tui-follow-owner.patch`, which has no guard and works.
+  **NEW-H's "don't drop an active leg" moves to Task 3.4**, sourced from
+  *forwarded-request* stickiness (turn POSTs the door forwards) — the signal
+  NEW-H actually described — NOT SSE bytes (FABLE2-B1: heartbeats pollute the
+  byte signal; the old byte-guard defaulted `quiesceMs`=10 s = the heartbeat
+  period and thus suppressed the drop **permanently**, making the door strictly
+  *less* capable than the guardless TUI).
+  **DRIFT-EVIDENCE RULE (FABLE-B2 — in the impl):** drift = **two consecutive
+  `active`/`prospective` resolves that name a *different real owner***. A
+  `degraded`/`not-routed`/`pigeon-error`/`pigeon-unreachable` resolve is
+  **never** drift evidence (RESETS the chain) — otherwise a transient pigeon blip
+  (which `resolveOwner` maps to `url=anchor`) looks like drift and drops a healthy
+  leg, and with NEW-A's non-resetting backoff inflates TUI reconnect delay on
+  every hiccup. Assert: pigeon-blip during a live stream → NO drop; **a leg still
+  receiving heartbeats but with a confirmed different owner → DOES drop**
+  (FABLE2-B1 regression test).
+  **FABLE2-S1 (multi-sid divergence):** ≥2 diverging *real* owners for one
+  `session_ids` leg (parent on A, child actively leased on C) can't be served by
+  one leg; v1 logs loudly on first divergence (visible decision, not a silent
+  starve) and holds; establishment already 400s this. **FABLE2-S2
+  (degraded-anchor baseline):** a leg established while pigeon was degraded pipes
+  from the anchor and heals via the drift-drop once pigeon recovers (tested);
+  requires `OPENCODE_ANCHOR_URL` to *textually* match pigeon's registered anchor
+  endpoint (`127.0.0.1` vs `localhost` spelling drift → one spurious drop cycle)
+  — documented constraint. Commit `feat(frontdoor): drop SSE leg on drift`.
 
 ---
 
@@ -257,11 +281,17 @@ gate, not fakes. Also commit the `audit/probe.sh` from Phase 0.1 here. Commit
   (store path / hash — NEW-8, closes the `restartIfChanged=false` staleness gap).
   Never proxies. Commit.
 - **3.4** **corrected** per-sid stickiness (`src/sticky.ts`) — fixes M5/NEW-5:
-  map `{sid→lastForwardedServe, expiry}` **refreshed on every forwarded request
-  and observed SSE activity**; break stickiness **only when the sticky target
+  map `{sid→lastForwardedServe, expiry}` **refreshed on every forwarded request**
+  (a turn POST/mutating request the door forwards — NOT SSE bytes: FABLE2-B1
+  proved the 10 s `server.heartbeat` makes SSE-byte activity useless as a
+  liveness signal); break stickiness **only when the sticky target
   fails a direct `/global/health` probe** (reuse 3.2), NOT when pigeon merely
   disagrees (pigeon persistently disagrees during a lease-less turn — that's
   exactly when we must stay stuck). Sticky check runs **before** resolve/promote.
+  **NEW-H (deferred from Phase 2):** this is the correct home for "don't drop an
+  actively-flowing SSE leg mid-turn" — the drift monitor (2.2) consults this
+  sticky map: a sid with a fresh forwarded-request entry is mid-turn → suppress
+  the drift-drop. Wire the 2.2 monitor to the sticky map here.
   TDD the abort-follows-the-runaway-turn case explicitly. **FABLE-S2 —
   write-vs-read degrade split (NEW, load-bearing):** Phase 1 degrades EVERY
   session request (incl. mutating `POST …/message|abort|permission|question`
@@ -487,7 +517,11 @@ encoded. Disposition:
    zero consumers, yl00-shaped risk).
 4. **NEW-D:** Task 5.2/9.0 web-UI carve-out (web UI is a PTY client, unsupported
    through the door).
-5. **NEW-H:** Task 2.2 consults the 3.4 sticky map (don't drop an active leg);
+5. **NEW-H:** ~~Task 2.2 consults the 3.4 sticky map~~ **(revised by 2nd fable
+   pass, FABLE2-B1): moved to Task 3.4** — the SSE-byte active-guard was removed
+   from Phase 2 (heartbeats make byte-activity useless); the real active-guard is
+   sourced from forwarded-request stickiness in 3.4. Phase 2 drops on confirmed
+   drift (TUI parity), safe by the lease invariant. Original note:
    pre-Phase-2 gate PASS criterion sharpened to *eventual consistency*, not replay.
 6. **NEW-A / NEW-B / NEW-G:** added to the Phase 8 mini-plan as first-class
    requirements (backoff-reset; sibling/child-session events; the real tripwire).
