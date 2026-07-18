@@ -269,6 +269,21 @@ let
       # available here anyway. Sonnet (vs. the interactive Opus default) is
       # plenty for one-shot summarization.
       agent.compaction.model = sonnetModel;
+      # Hide the Vertex providers on devbox: they are compiled into the shared
+      # opencode.base.json for every host, but devbox has NEITHER ADC
+      # (~/.config/gcloud/application_default_credentials.json is absent) NOR the
+      # Vertex gateway baseURL (injectAigatewayBaseUrl / claude-failover-proxy are
+      # isCloudbox-only), so any turn on google-vertex-anthropic/* or
+      # google-vertex/* falls through to the stock @ai-sdk/google-vertex ADC path
+      # and dies on the first turn with "Could not load the default credentials".
+      # The picker listed the Vertex "Claude Opus 4.8" (and "Gemini 3.5 Flash")
+      # entries right next to the working first-party anthropic/google ones; a
+      # mis-pick persisted into ~/.local/state/opencode/model.json poisoned every
+      # subsequently-opened session (3 crashes 2026-06..07). Disabling removes the
+      # providers from the registry/picker entirely (recursiveUpdate treats the
+      # list as a leaf and REPLACES it — base.json has no disabled_providers, and
+      # the cloudbox branch below is a separate host, so there is no union/collision).
+      disabled_providers = [ "google-vertex" "google-vertex-anthropic" ];
       # vision-qa (deployed below on devbox only) uses the direct
       # Google Generative AI API here (google/gemini-3.5-flash,
       # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY auth — no Vertex).
