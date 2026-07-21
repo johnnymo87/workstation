@@ -332,9 +332,10 @@ decisions folded in during build:
 ## Phase 4 — create → /place → respond  **[DONE]**
 
 **Status:** Complete via SDD (implement → spec-review → code-review → fixup per
-task). Commits on `serve-reverse-proxy`: 4.1 `309c098` + hardening `01d6d3b`,
-4.2 `a4f5af5` + cleanup `cc66fd4`. 228 tests green, typecheck clean. Notable
-decisions folded in during build:
+task) **plus a fable adversarial pass** (findings folded below). Commits on
+`serve-reverse-proxy`: 4.1 `309c098` + hardening `01d6d3b`, 4.2 `a4f5af5` +
+cleanup `cc66fd4`, fable remediations `92f7d46`. 232 tests green, typecheck
+clean. Notable decisions folded in during build:
 - **4.1**: replaced the `create` stub with a **buffered** forward to the anchor →
   parse top-level `.id` → `placeSession` → relay only after place resolves.
   place-fail / missing-id → `degraded=true` (counter via the `logResponse`
@@ -352,16 +353,74 @@ decisions folded in during build:
   `createNext` with **no** `parentID`; it's a message-copy, session.ts:697), sid
   in the response `.id`. Reclassified `POST /session/{id}/fork` to its own `fork`
   action (out of the streaming `route-session` path). Extracted the shared
-  `placeAfterCreate(target, …)` core; `handleFork` resolves the **parent's owner**
-  (`resolveOwner(parent).url`, freshest parent state; degrades to anchor via
-  shared db) and runs the create core against it, **placing the CHILD sid** and
-  seeding its stickiness. Fork is create-like → **no FABLE-S2 503 on pigeon-down**
-  (degrade, don't block). Placement also fixes the "unplaced fork trips the
-  multi-sid path" concern (resolveOwner(forkSid) now yields a real owner).
-  **Minter re-scan (verified):** only `POST /session` (create) and
-  `POST /session/{id}/fork` mint new sids; `GET /session/{id}/children` is a
-  read/list; `update`/`share`/`unshare`/part-update return `Session.Info` for an
-  existing path sid (not minters).
+  `placeAfterCreate(target, …)` core; `handleFork` resolves the parent's owner
+  (`resolveOwner(parent).url`) and runs the create core against it, **placing the
+  CHILD sid** and seeding its stickiness. Fork is create-like → **no FABLE-S2 503
+  on pigeon-down** (degrade, don't block). Placement also fixes the "unplaced fork
+  trips the multi-sid path" concern (resolveOwner(forkSid) now yields a real
+  owner).
+  > **Correction (FABLE-P4/LOW-1):** the earlier "freshest parent state" rationale
+  > for forwarding fork to the parent's owner is **wrong** — upstream `Session.fork`
+  > reads the parent via `get()`/`messages()`, both **shared-db reads**
+  > (`session.ts:543,830`), and non-durable `message.part.delta`s are lost on every
+  > serve equally, so the owner has **no** freshness advantage. Any serve (incl. the
+  > anchor) forks identical state. Parent-owner forwarding is therefore neutral-to-
+  > slightly-worse (it burns the copy-loop CPU on the serve most likely mid-turn);
+  > it is retained as a reviewed, working choice. **Anchor-always is a valid future
+  > simplification** (drops a `/route`, mirrors create) — deferred, not required.
+  **Minter re-scan (verified against live `/doc` + upstream):** only `POST /session`
+  (+ `/api/session`) and `POST /session/{id}/fork` mint sids; the `/api` mirror has
+  **no** fork route; `GET /session/{id}/children` is a read/list;
+  `update`/`share`/`unshare`/part-update return `Session.Info` for an existing path
+  sid (not minters); no auto-create-on-message path exists.
+
+### Phase 4 fable adversarial pass — findings & disposition
+A fable pass verified the strongest design claim to the bottom — the create→place
+**"no registration window"** holds: pigeon's `POST /place`→`ensureRouted` does
+synchronous better-sqlite3 `assignments.upsert`+`leases.acquireCAS`
+(`router.ts:196-218`), so any later `GET /route` on any connection sees the
+assignment (strict read-after-write); a >30s-idle lease expiry still resolves via
+the persisted assignment. Areas cleared: registration window, minter completeness,
+fork-to-degraded-target (shared-db reads ⇒ no staleness; nonexistent parent → serve
+404 → relay, never placed), degrade accounting.
+**Folded into code (`92f7d46`):**
+- **HIGH-1 (mint timeout):** the buffered mint forward used the 3s control-plane
+  `routeTimeoutMs`; a large fork's per-message/part copy loop blows it → 504 +
+  half-copied orphan. Split out `mintTimeoutMs` (`FRONTDOOR_MINT_TIMEOUT_MS`,
+  default **60s**) for the data-plane forward; pigeon `/place` stays on
+  `routeTimeoutMs`.
+- **MED-1 (sid validation):** `placeAfterCreate` now requires `SID_REGEX.test(id)`
+  before `POST /place` (pigeon `/place` itself does not validate) — junk `.id` →
+  degrade path, never placed.
+- **MED-2 (2xx relay):** success gate widened to any 2xx and the **upstream status
+  is relayed** (not hardcoded 200), so a future 201/204 neither silently skips
+  placement nor gets status-rewritten.
+- **LOW-4/LOW-5:** documented the intentional no-wall-clock-bound on
+  `readIncomingBody` (localhost + Node `requestTimeout`); fixed the mislabeled
+  create test to actually guard the missing-id degrade branch.
+**Deferred to before Phase 6 deploy (tracked, NOT fixed in Phase 4):**
+- **FABLE-P4-HIGH-2 (sticky/lease divergence) — must fix before deploy.** The
+  sticky short-circuit **refreshes its own TTL on every mutating hit**
+  (`proxy.ts:547`), while pigeon's lease renews **only** via `placeSession`
+  (`router.touch` has no callers). A session mutated more often than the 30s TTL
+  keeps its sticky entry alive forever without re-confirming pigeon; if pigeon later
+  re-places that sid onto a different (also-healthy) serve, the door pins to the
+  stale owner — the exact wrong-process-turn shape FABLE-S2 exists to prevent (rare:
+  needs an eligible-set change coinciding with an expired lease). **Do NOT** apply
+  the naive "stop refreshing" fix — it regresses FABLE-S2 resilience (sticky must
+  outlive pigeon outages >30s). Correct fix: on a sticky hit older than ~½ the lease
+  TTL, fire-and-forget a `POST /place` to renew the lease + re-confirm the owner
+  (keeps outage resilience *and* convergence). Own task.
+- **LOW-2:** `stickyTtlMs ≤ leaseTtlMs` is currently coincidental (30s==30s) but
+  they're independent env knobs — document/assert the invariant in the Phase 6 unit.
+- **LOW-3:** `POST /session {parentID}` mints a *child* whose owner is unrelated to
+  the parent's; handled mechanically, no through-door consumer today — model note.
+- **Interrupted-fork orphans:** upstream `Session.fork`'s copy loop is **not**
+  transactional, so a client disconnect / >60s fork can still leave a half-copied
+  unplaced child in the shared db. The door can't fix this (upstream concern); note
+  a reaper / wrapping-transaction as a future upstream item.
+- **Tripwire:** pin "create/fork success is exactly 200" as an opencode-patched CI
+  tripwire alongside the `session_ids` one (design C1).
 
 ---
 
