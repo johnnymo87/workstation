@@ -829,6 +829,10 @@ ${serveIdCase}
           TS=$(date +%Y%m%dT%H%M%S)
           DUMP="$STATE/wedge-$TS-$PORT"
           mkdir -p "$DUMP"
+
+          # Bound persistent forensics: keep only the 10 newest wedge dumps.
+          ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+
           PID=$(systemctl show "$UNIT" -p MainPID --value)
           CG=$(systemctl show "$UNIT" -p ControlGroup --value)
           if [ -n "$PID" ] && [ "$PID" != "0" ]; then
@@ -1169,7 +1173,7 @@ ${serveIdCase}
         set -u
         # System-service PATH is minimal — be explicit.
         # We only need coreutils, systemd, util-linux, and curl for instant forensics.
-        # Deep stack dumps (such as native-stack tracers) are omitted to ensure fast recovery.
+        # Deep stack dumps (the serve canary's `eu-stack` native-stack loop and its 2s `cpu-io-split` sample) are omitted to ensure fast recovery.
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl ]}
         STATE=/var/lib/opencode-frontdoor-canary
         UNIT=opencode-frontdoor.service
@@ -1179,21 +1183,28 @@ ${serveIdCase}
         # Only police units that are supposed to be up. Intentional stops,
         # crash-loop backoff, etc. reset the counter.
         if [ "$(systemctl is-active "$UNIT")" != "active" ]; then
-          rm --force "$FAILFILE"
+          rm -f "$FAILFILE"
           exit 0
         fi
 
-        # We omit the workspace-reset lock-file check because the nightly reset
-        # does not stop or restart the front door, and the unflagged curl probe
-        # already tolerates backend bounces.
+        # We omit the `/tmp/reset-workspace.lock` check because the nightly reset
+        # does not stop/restart the front door, and the no-`-f` probe already
+        # tolerates backend bounces.
 
         # Probe the native /healthz WITHOUT -f.
         # Critical isolation logic: a 503 from /healthz means the door's event loop
         # is ALIVE but both backends are down — we must NOT restart the door on that
         # (restarting cannot fix backends). Only a TIMEOUT / refused connection
         # (frozen loop or dead process) is a wedge.
-        if curl -s --max-time 3 --connect-timeout 3 -o /dev/null "http://127.0.0.1:$PORT/healthz"; then
-          rm --force "$FAILFILE"
+        #
+        # Coupling note: The canary's --max-time (5s) MUST exceed the front door's
+        # FRONTDOOR_ROUTE_TIMEOUT_MS (default 3000ms) so a healthy-but-degraded 503
+        # (both backends slow) is still read as alive; only a true frozen loop /
+        # dead process (no response within 5s) counts as a wedge. (If
+        # FRONTDOOR_ROUTE_TIMEOUT_MS is ever raised on the door unit, this must be
+        # raised too.)
+        if curl -s --max-time 5 --connect-timeout 3 -o /dev/null "http://127.0.0.1:$PORT/healthz"; then
+          rm -f "$FAILFILE"
           exit 0
         fi
 
@@ -1209,10 +1220,14 @@ ${serveIdCase}
 
         # Wedged. Capture near-instant forensics before fast restart.
         # The front door is a single point of failure (SPOF) for all opencode access.
-        # We do NOT include deep stack checks (such as native-stack tracers) or split-measurement sleeps to minimize time-to-recovery.
+        # We do NOT include deep stack checks (the serve canary's `eu-stack` native-stack loop and its 2s `cpu-io-split` sample) to minimize time-to-recovery.
         TS=$(date +%Y%m%dT%H%M%S)
         DUMP="$STATE/wedge-$TS"
         mkdir -p "$DUMP"
+
+        # Bound persistent forensics: keep only the 10 newest wedge dumps.
+        ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+
         PID=$(systemctl show "$UNIT" -p MainPID --value)
         CG=$(systemctl show "$UNIT" -p ControlGroup --value)
         if [ -n "$PID" ] && [ "$PID" != "0" ]; then
@@ -1234,7 +1249,7 @@ ${serveIdCase}
 
         echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
         systemctl restart "$UNIT"
-        rm --force "$FAILFILE"
+        rm -f "$FAILFILE"
       ''}";
     };
   };
