@@ -19,6 +19,17 @@ function normalizePath(p: string): string {
   return path;
 }
 
+function compilePathTemplate(normalizedPath: string): RegExp {
+  // 1. Escape regex special characters
+  let escaped = normalizedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // 2. Replace escaped `{token}` with `[^/]+`
+  escaped = escaped.replace(/\\\{.*?\\\}/g, '[^/]+');
+  // 3. Replace escaped `*` with `.*`
+  escaped = escaped.replace(/\\\*/g, '.*');
+
+  return new RegExp(`^${escaped}$`);
+}
+
 // Precompute structures at module load
 const exactRoutes = new Map<string, RouteClass>();
 const patternRoutes: Array<{ method: string; regex: RegExp; class: RouteClass }> = [];
@@ -39,15 +50,7 @@ for (const entry of ROUTE_CLASSIFICATION_TABLE) {
   const isPattern = normalizedPath.includes('{') || normalizedPath.includes('*');
 
   if (isPattern) {
-    // Compile regex
-    // 1. Escape regex special characters
-    let escaped = normalizedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // 2. Replace escaped `{token}` with `[^/]+`
-    escaped = escaped.replace(/\\\{.*?\\\}/g, '[^/]+');
-    // 3. Replace escaped `*` with `.*`
-    escaped = escaped.replace(/\\\*/g, '.*');
-
-    const regex = new RegExp(`^${escaped}$`);
+    const regex = compilePathTemplate(normalizedPath);
     patternRoutes.push({
       method: upperMethod,
       regex,
@@ -65,6 +68,17 @@ for (const entry of ROUTE_CLASSIFICATION_TABLE) {
 const globalRoMethodsSorted = new Map<string, string[]>();
 for (const [path, set] of globalRoMethodsMap.entries()) {
   globalRoMethodsSorted.set(path, Array.from(set).sort());
+}
+
+const globalRoPatternRoutes: Array<{ regex: RegExp; methods: string[] }> = [];
+for (const [path, methods] of globalRoMethodsSorted.entries()) {
+  const isPattern = path.includes('{') || path.includes('*');
+  if (isPattern) {
+    globalRoPatternRoutes.push({
+      regex: compilePathTemplate(path),
+      methods,
+    });
+  }
 }
 
 export function classify(method: string, pathname: string): RouteClass {
@@ -140,9 +154,21 @@ export function dispatch(method: string, pathname: string): {
   }
 
   const normPath = normalizePath(pathname);
-  const allowedMethods = action === 'deny-global-mutation'
-    ? (globalRoMethodsSorted.get(normPath) || [])
-    : [];
+  let allowedMethods: string[] = [];
+
+  if (action === 'deny-global-mutation') {
+    const exact = globalRoMethodsSorted.get(normPath);
+    if (exact) {
+      allowedMethods = exact;
+    } else {
+      for (const pattern of globalRoPatternRoutes) {
+        if (pattern.regex.test(normPath)) {
+          allowedMethods = pattern.methods;
+          break;
+        }
+      }
+    }
+  }
 
   return {
     class: cls,

@@ -321,4 +321,14 @@ describe('Route Dispatcher', () => {
       allowedMethods: [],
     });
   });
+
+  test('regression: pattern-path twin global-sideeffect returns allowMethods correctly', () => {
+    expect(classify('DELETE', '/api/integration/attempt/att_123')).toBe('global-sideeffect');
+    expect(dispatch('DELETE', '/api/integration/attempt/att_123')).toEqual({
+      class: 'global-sideeffect',
+      action: 'deny-global-mutation',
+      recognized: true,
+      allowedMethods: ['GET'],
+    });
+  });
 });

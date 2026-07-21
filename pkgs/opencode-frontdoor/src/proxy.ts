@@ -472,7 +472,7 @@ export async function handleRequest(
           error: "web_ui_not_served",
           message: "The web UI is not served through the front door. Use a serve port directly."
         }));
-      } else if (!decision.recognized) {
+      } else {
         console.warn(`[FRONTDOOR WARN] Unrecognized pathname: ${method} ${url.pathname}`);
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not_found" }));

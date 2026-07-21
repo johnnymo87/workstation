@@ -477,6 +477,14 @@ describe("FrontDoor Integration", () => {
     expect(jsonConfigPatch.error).toBe("method_not_allowed_through_frontdoor");
     expect(jsonConfigPatch.message).toContain("Allowed through the door: GET");
 
+    // DELETE /api/integration/attempt/att_123 -> 405 (Allow: GET) (Pattern twin regression test)
+    const resIntegrationDelete = await makeRequest("DELETE", "/api/integration/attempt/att_123");
+    expect(resIntegrationDelete.status).toBe(405);
+    expect(resIntegrationDelete.headers["allow"]).toBe("GET");
+    const jsonIntegrationDelete = JSON.parse(resIntegrationDelete.body);
+    expect(jsonIntegrationDelete.error).toBe("method_not_allowed_through_frontdoor");
+    expect(jsonIntegrationDelete.message).toContain("Allowed through the door: GET");
+
     // GET /global/event -> 410
     const resEvent = await makeRequest("GET", "/global/event");
     expect(resEvent.status).toBe(410);
