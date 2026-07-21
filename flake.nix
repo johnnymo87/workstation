@@ -51,6 +51,7 @@
       bb = p.callPackage ./pkgs/bb { };
       beads = p.callPackage ./pkgs/beads { };
       claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
+      clerk = p.callPackage ./pkgs/clerk { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
       gws = p.callPackage ./pkgs/gws { };
@@ -62,6 +63,7 @@
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
       teamclaude = p.callPackage ./pkgs/teamclaude { };
+      vercel = p.callPackage ./pkgs/vercel { };
     } // nixpkgs.lib.optionalAttrs (system == devboxSystem || system == darwinSystem) {
       terraform = p.callPackage ./pkgs/terraform { };
     };

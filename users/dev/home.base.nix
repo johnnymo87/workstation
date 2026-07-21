@@ -457,6 +457,14 @@ in
     # Cloudflare Workers CLI
     pkgs.wrangler
 
+    # Cloud-provider CLIs for boldco infra provisioning (Supabase, Vercel,
+    # Clerk). All install binaries only — they authenticate at runtime from
+    # env vars the user supplies; no secrets live in this config.
+    pkgs.supabase-cli   # nixpkgs; binary `supabase`
+    localPkgs.vercel    # pkgs/vercel (buildNpmPackage, current npm release)
+    localPkgs.clerk     # pkgs/clerk (pinned release binary)
+    pkgs.cloudflared    # nixpkgs; Cloudflare Tunnel (expose Clerk-gated demo)
+
     # Remote clipboard (gclpr client talks to macOS server over SSH tunnel)
     localPkgs.gclpr
 
