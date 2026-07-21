@@ -475,7 +475,6 @@ describe("FrontDoor Integration", () => {
     expect(warnSpy).toHaveBeenCalled();
     const lastWarnArg = warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0];
     expect(lastWarnArg).toContain("PTY request denied (out of scope v1)");
-    warnSpy.mockRestore();
 
     // POST /pty -> 501
     const resPtyPost = await makeRequest("POST", "/pty");
@@ -539,6 +538,8 @@ describe("FrontDoor Integration", () => {
     // GET /nonexistent -> 404
     const resNone = await makeRequest("GET", "/nonexistent");
     expect(resNone.status).toBe(404);
+
+    warnSpy.mockRestore();
   });
 
   test("6. promotion wiring: promoting prospective session triggers place", async () => {
