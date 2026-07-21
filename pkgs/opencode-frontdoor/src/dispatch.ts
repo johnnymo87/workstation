@@ -3,6 +3,7 @@ import { ROUTE_CLASSIFICATION_TABLE, RouteClass } from './routes.classification.
 export type RouteAction =
   | 'route-session'
   | 'create'
+  | 'fork'
   | 'pty-501'
   | 'tui-501'
   | 'forward-anchor'
@@ -99,6 +100,9 @@ export function dispatch(method: string, pathname: string): {
       break;
     case 'create':
       action = 'create';
+      break;
+    case 'fork':
+      action = 'fork';
       break;
     case 'pty':
       action = 'pty-501';

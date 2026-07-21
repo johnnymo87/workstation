@@ -10,7 +10,7 @@ export type SidExtraction =
   | { kind: "malformed" };                 // a sid candidate was present but failed ^ses_...$ (or session_ids had a bad member)
 
 // Pigeon's /route and /place verified-solid session ID validation regex.
-const SID_REGEX = /^ses_[A-Za-z0-9_-]+$/;
+export const SID_REGEX = /^ses_[A-Za-z0-9_-]+$/;
 
 export function extractSessionIdFromPath(pathname: string): string | undefined {
   const normalized = pathname.replace(/\/$/, "");

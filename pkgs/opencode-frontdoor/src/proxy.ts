@@ -3,7 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import { identify } from "./identity.js";
 import { dispatch } from "./dispatch.js";
-import { extractSids, type SidExtraction } from "./sid.js";
+import { extractSids, type SidExtraction, SID_REGEX, extractSessionIdFromPath } from "./sid.js";
 import { isExemptFromFirstByteTimeout } from "./timeouts.js";
 import { resolveOwner } from "./resolve.js";
 import { isPromotingRequest, maybePromote, PromotionGate, placeSession } from "./place.js";
@@ -273,7 +273,15 @@ async function readIncomingBody(req: IncomingMessage, limitBytes = 1048576): Pro
   });
 }
 
-async function handleCreate(
+/**
+ * Minter re-scan verified conclusion:
+ * Only POST /session (create) and POST /session/{id}/fork mint new sids.
+ * GET /session/{id}/children is a read/list; update/share/unshare/part-update
+ * all return Session.Info for an existing path sid (not minters).
+ * No other minting routes to handle.
+ */
+async function placeAfterCreate(
+  target: string,
   req: IncomingMessage,
   res: ServerResponse,
   ctx: ProxyContext,
@@ -305,8 +313,8 @@ async function handleCreate(
     }
   }
 
-  const anchorBase = stripTrailingSlashes(ctx.config.anchorUrl);
-  const targetUrl = `${anchorBase}${url.pathname}${url.search}`;
+  const targetBase = stripTrailingSlashes(target);
+  const targetUrl = `${targetBase}${url.pathname}${url.search}`;
 
   const result = await boundedFetch(targetUrl, {
     method: "POST",
@@ -375,6 +383,35 @@ async function handleCreate(
   res.writeHead(200, responseHeaders);
   res.end(anchorBody);
   return { sid: createdSid, degraded: degradedState };
+}
+
+async function handleCreate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ProxyContext,
+  url: URL,
+  method: string
+): Promise<{ sid: string | null; degraded: boolean }> {
+  return placeAfterCreate(ctx.config.anchorUrl, req, res, ctx, url, method);
+}
+
+async function handleFork(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ProxyContext,
+  url: URL,
+  method: string
+): Promise<{ sid: string | null; degraded: boolean }> {
+  const parent = extractSessionIdFromPath(url.pathname);
+  if (!parent || !SID_REGEX.test(parent)) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "bad_request", message: "Malformed session ID" }));
+    return { sid: null, degraded: false };
+  }
+
+  const resolved = await resolveOwner(parent, ctx.config, ctx.deps);
+  const r = await placeAfterCreate(resolved.url, req, res, ctx, url, method);
+  return { sid: r.sid, degraded: r.degraded || resolved.degraded };
 }
 
 export async function handleRequest(
@@ -468,6 +505,13 @@ export async function handleRequest(
       const resVal = await handleCreate(req, res, ctx, url, method);
       sid = resVal.sid;
       degraded = resVal.degraded;
+      return;
+    }
+
+    if (decision.action === "fork") {
+      const r = await handleFork(req, res, ctx, url, method);
+      sid = r.sid;
+      degraded = r.degraded;
       return;
     }
 

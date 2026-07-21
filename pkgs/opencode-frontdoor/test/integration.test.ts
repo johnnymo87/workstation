@@ -96,13 +96,23 @@ describe("FrontDoor Integration", () => {
         "x-from-serve": "serve-a",
         "x-echo-header": req.headers["x-test-header"] || ""
       });
-      res.end(JSON.stringify({
-        serve: "serve-a",
-        method: req.method,
-        path: req.url,
-        headers: req.headers,
-        body
-      }));
+      if (req.headers["x-test-mint-id"]) {
+        res.end(JSON.stringify({
+          id: req.headers["x-test-mint-id"],
+          serve: "serve-a",
+          method: req.method,
+          path: req.url,
+          body
+        }));
+      } else {
+        res.end(JSON.stringify({
+          serve: "serve-a",
+          method: req.method,
+          path: req.url,
+          headers: req.headers,
+          body
+        }));
+      }
     });
     await new Promise<void>((resolve) => serverA.listen(0, "127.0.0.1", () => resolve()));
     portA = (serverA.address() as AddressInfo).port;
@@ -123,13 +133,23 @@ describe("FrontDoor Integration", () => {
         "upgrade": "websocket",
         "proxy-authenticate": "Basic"
       });
-      res.end(JSON.stringify({
-        serve: "serve-b",
-        method: req.method,
-        path: req.url,
-        headers: req.headers,
-        body
-      }));
+      if (req.headers["x-test-mint-id"]) {
+        res.end(JSON.stringify({
+          id: req.headers["x-test-mint-id"],
+          serve: "serve-b",
+          method: req.method,
+          path: req.url,
+          body
+        }));
+      } else {
+        res.end(JSON.stringify({
+          serve: "serve-b",
+          method: req.method,
+          path: req.url,
+          headers: req.headers,
+          body
+        }));
+      }
     });
     await new Promise<void>((resolve) => serverB.listen(0, "127.0.0.1", () => resolve()));
     portB = (serverB.address() as AddressInfo).port;
@@ -1588,5 +1608,95 @@ describe("FrontDoor Integration", () => {
     expect(res.status).toBe(504);
     const json = JSON.parse(res.body);
     expect(json.error).toBe("gateway_timeout");
+  });
+
+  test("fork happy path: forwards to parent owner, places child, seeds sticky", async () => {
+    pigeonPlaceCalls = [];
+    pigeonRouteCalls = [];
+    
+    // Set parent's owner to serverB
+    pigeonSessionOwners["ses_parent"] = `http://127.0.0.1:${portB}`;
+
+    const res = await makeRequest("POST", "/session/ses_parent/fork", {
+      "x-test-mint-id": "ses_forked1"
+    }, "{}");
+
+    // Client receives the body with id
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("serve-b");
+    const json = JSON.parse(res.body);
+    expect(json.id).toBe("ses_forked1");
+
+    // Assert pigeon place was called with session_id: ses_forked1 (the child)
+    expect(pigeonPlaceCalls).toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_forked1" });
+
+    // Assert stickiness recorded: subsequent mutating request should go straight to B (portB)
+    // and NOT call pigeon /route for the child
+    const resMutating = await makeRequest("POST", "/session/ses_forked1/message", {}, "{}");
+    expect(resMutating.status).toBe(200);
+    expect(resMutating.headers["x-from-serve"]).toBe("serve-b");
+    expect(pigeonRouteCalls).toHaveLength(1);
+    expect(pigeonRouteCalls[0].sid).toBe("ses_parent");
+  });
+
+  test("fork place-fail: pigeon /place fails -> client still gets the forked session (200), degraded", async () => {
+    pigeonPlaceCalls = [];
+    loggedLines = [];
+    pigeonSessionOwners["ses_parent"] = `http://127.0.0.1:${portB}`;
+
+    const res = await makeRequest("POST", "/session/ses_parent/fork", {
+      "x-test-mint-id": "ses_place_fail"
+    }, "{}");
+
+    expect(res.status).toBe(200);
+    const json = JSON.parse(res.body);
+    expect(json.id).toBe("ses_place_fail");
+
+    expect(pigeonPlaceCalls).toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_place_fail" });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    const logEntry = loggedLines.find((entry) => entry.sid === "ses_place_fail" && entry.method === "POST");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(true);
+  });
+
+  test("fork with parent not-routed/degraded: resolveOwner(parent) degrades to anchor -> fork still forwarded (to anchor), child still place-attempted, degraded flagged", async () => {
+    pigeonPlaceCalls = [];
+    loggedLines = [];
+    
+    // Parent is not-routed (degrades to anchor)
+    pigeonSessionOwners["ses_parent_unknown"] = 404;
+
+    const res = await makeRequest("POST", "/session/ses_parent_unknown/fork", {
+      "x-test-mint-id": "ses_forked_under_degraded"
+    }, "{}");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("anchor");
+    const json = JSON.parse(res.body);
+    expect(json.id).toBe("ses_forked_under_degraded");
+
+    expect(pigeonPlaceCalls).toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_forked_under_degraded" });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    const logEntry = loggedLines.find((entry) => entry.sid === "ses_forked_under_degraded" && entry.method === "POST");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(true);
+  });
+
+  test("fork non-200 from serve: relayed, place NOT called", async () => {
+    pigeonPlaceCalls = [];
+    pigeonSessionOwners["ses_parent"] = `http://127.0.0.1:${portB}`;
+
+    const res = await makeRequest("POST", "/session/ses_parent/fork", {
+      "x-test-status": "400",
+      "x-test-mint-id": "ses_forked_err"
+    }, "{}");
+
+    expect(res.status).toBe(400);
+    expect(pigeonPlaceCalls).toHaveLength(0);
   });
 });

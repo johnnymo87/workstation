@@ -20,6 +20,7 @@ export type RouteClass =
   | "session-path"
   | "session-query"
   | "create"
+  | "fork"
   | "pty"
   | "global-ro"
   | "global-sideeffect"
@@ -186,7 +187,7 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/session/{sessionID}/children", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/command", class: "session-path" },
   { method: "GET", path: "/session/{sessionID}/diff", class: "session-path" },
-  { method: "POST", path: "/session/{sessionID}/fork", class: "session-path" },
+  { method: "POST", path: "/session/{sessionID}/fork", class: "fork" },
   { method: "POST", path: "/session/{sessionID}/init", class: "session-path" },
   { method: "GET", path: "/session/{sessionID}/message", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/message", class: "session-path" },
