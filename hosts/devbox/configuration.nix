@@ -702,7 +702,7 @@ in
     uid = 1000;
     group = "dev";
     description = "Development user";
-    extraGroups = [ "wheel" ];
+    extraGroups = [ "wheel" "docker" ];
     shell = pkgs.bashInteractive;
     linger = true;  # Allow user services to run without active login
     openssh.authorizedKeys.keys = [
@@ -711,6 +711,14 @@ in
   };
 
   security.sudo.wheelNeedsPassword = false;
+
+  # Docker daemon for local dev stacks (e.g. Supabase `supabase start` for the
+  # BoldCo project). The daemon runs as a system service (docker.service),
+  # independent of the user-1000.slice TasksMax cap below. User `dev` is added
+  # to the `docker` group above so it can reach the socket without sudo — note
+  # that group membership only takes effect on NEW logins, so existing sessions
+  # need `sg docker -c ...` (or an opencode-serve restart) until then.
+  virtualisation.docker.enable = true;
 
   # --- OOM mitigation (P0-P4) ---
   # Context: 16 GB RAM + 7.6 GB zram, opencode sessions leak to 8-13 GB,
