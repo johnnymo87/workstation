@@ -561,14 +561,106 @@ no body — leak-clean).
   the cloudbox serve env too, or scope this task to the liveness canary only
   (not the inspector wedge-watcher). Update `monitoring-serve-pool` skill.
   Commit `feat(serve-pool): port canary to cloudbox`.
-- **6.4** front-door canary on `/healthz` (system unit). Commit.
-- **6.5** **deploy + through-front-door gate** (M2): `/healthz` UP + **version
-  marker matches the just-built store path** (NEW-8); run `probe.sh` **through
-  the door** and diff vs direct-to-serve; `curl -N "$FRONTDOOR/event?session_ids=<sid>"`
-  while triggering a turn (confirm the door's SSE path carries the events).
+- **6.4** front-door canary on `/healthz` (system unit). Commit. **DONE** (`f1a4048`
+  + review fixups `e049707`: probe `--max-time 5` > door's 3s `routeTimeoutMs`; no
+  `-f` so a 503 = door-alive; THRESHOLD=2; instant-only forensics; keep-latest-10
+  prune on both canaries).
+- **6.5** **deploy + through-front-door gate** (M2). **NOT YET EXECUTED — gated on
+  operator go-ahead** (first live `sudo nixos-rebuild switch` on cloudbox; decide
+  deploy-from-worktree vs merge-to-main first). Then, in order:
+  1. Run `./pkgs/opencode-frontdoor/test.sh` (mandatory pre-rebuild gate, F5).
+  2. `sudo nixos-rebuild switch --flake .#cloudbox`; then — because
+     `restartIfChanged=false` — **explicitly** `sudo systemctl restart
+     opencode-frontdoor.service` to activate the new build.
+  3. `/healthz` UP + **version marker matches the just-built store path** (NEW-8).
+  4. `probe.sh` **through the door**, diff vs direct-to-serve — **run WITHOUT
+     `--mutate`** (a `--mutate` run would drive POST /session → the full
+     mint→place→`sticky.record` path; the canary must not create sticky state —
+     see the HIGH-2 note below).
+  5. `curl -N "$FRONTDOOR/event?session_ids=<sid>"` while triggering a turn (confirm
+     the door's SSE path carries events). NOTE (fable F2): `/event` is a *promoting*
+     request — through the door it may issue an idempotent `POST /place` to pigeon.
+     That is expected and safe (it's what direct clients do); it writes **no sticky
+     entry**. Log it, don't be surprised by it.
+  6. **Deny-contract-through-door drill (fable Q7):** `curl -i -X PATCH $FRONTDOOR/config`
+     → expect `405` + `Allow: GET`; one 403 case (e.g. `POST $FRONTDOOR/global/dispose`).
+  7. **Canary self-test drill (fable Q7):** `systemctl kill -s SIGSTOP opencode-frontdoor`
+     → expect the frontdoor-canary to restart it within ~3 min + a dump in
+     `/var/lib/opencode-frontdoor-canary/`; `SIGCONT`/verify recovery.
+  8. **Degrade drill (fable Q7 — tests the `Wants`-not-`Requires` + §7 invariant):**
+     stop pigeon ~30s → confirm the door stays up and `/healthz` reports
+     `status:ok, degraded:true` (falls back to anchor); restart pigeon.
+  9. Optional: reboot once to prove auto-start ordering with a soft-dep pigeon.
   (No PTY smoke-test — PTY is 501, Phase-0.5.) Commit results.
 
 ---
+
+## Phase 6 — DONE (2026-07-21, tasks 6.0–6.4; 6.5 deploy gated on operator)
+
+Tasks 6.0–6.4 landed via task-by-task SDD (implement → spec-review → code-review →
+fixup), each pushed, then an `adversarial-reviewer-fable` pass over the whole phase.
+Commits: `c7e80b0`+`a892d04` (6.0 honest deny 405+Allow/403 + web-ui `/`),
+`67bf3aa` (6.1 node/tsx nix package), `e25fb9e`+`2eb36cb` (6.2 system unit +
+isolation kit), `95b6330`+`dc4a277` (6.3 serve liveness canary → cloudbox system
+units), `f1a4048`+`e049707` (6.4 front-door `/healthz` canary), `096752b` (6.0
+fable-F1 table-driven twin coverage). Package: **239 tests green, typecheck clean**;
+cloudbox system closure builds.
+
+### Phase-6 fable adversarial pass — findings & disposition
+Verdict: **safe to deploy as a Phase-6 canary** (nothing points at `:4700` until
+Phase 7). Confirmed sound: `allowedMethods` pattern-fallback has no false twins;
+tsx runs Node 22; no SIGTERM handler ⇒ prompt shutdown (15s is a real backstop, not
+a per-restart tax); the `/healthz` wedge signal + `--max-time 5 > 3s` coupling;
+MemoryMax-only; forensics hygiene; and the sticky map genuinely cannot populate in
+Phase 6.
+- **F1 (HIGH, folded):** the generic twin mechanism yields **six** 405 paths, not the
+  3 hand-listed. Added a table-driven test (`096752b`) that derives the expected
+  405/403 set from `ROUTE_CLASSIFICATION_TABLE` and pins the six twins.
+- **F2 (HIGH reasoning, folded):** the "6.5 gate does only reads" rationale was
+  **false** (`/event` promotes → possible `POST /place`; `probe.sh --mutate` mints).
+  Corrected the invariant to **"no sticky *writes* in Phase 6"** (`sticky.record`
+  only at `proxy.ts:379/587/623` — create/fork/mutating; none hit by the pinned
+  gate) and pinned 6.5 to run `probe.sh` **without `--mutate`** (see 6.5 above). The
+  HIGH-2 re-scope stands on the corrected invariant.
+- **F5 (MED, folded/doc):** the nix build does NOT typecheck — documented `test.sh`
+  as the MANDATORY pre-rebuild gate in `default.nix` and step 6.5.1.
+- **F3/F4/F6/F7/F8/F9 + gate drills:** deferred to the Phase-7 pre-cutover blocker
+  list below (none reachable by canary traffic).
+
+### Phase 7 pre-cutover blockers (fable — MUST resolve before pointing any client at the door)
+- **FABLE-P4-HIGH-2 (sticky/lease divergence):** `proxy.ts:587` refreshes sticky TTL
+  on every mutating hit with no background lease renewal → a sticky entry can outlive
+  pigeon's lease and pin to a stale owner. Fix: on a sticky hit older than ~½ lease
+  TTL, fire-and-forget `POST /place` to renew+re-confirm. (Cannot manifest in Phase 6
+  — no through-door mutating client traffic.)
+- **LOW-2 (invariant, now UNVERIFIED):** `stickyTtlMs`(default 30s, `config.ts:44`) must
+  be `≤` pigeon's actual serve-lease TTL. The 30s==30s equality was assumed, **never
+  measured in this branch** — measure pigeon's real lease TTL and assert/doc the
+  invariant as a Phase-7 entry gate.
+- **FABLE-S1 (under-placement):** `checkSidExists` GET to the anchor can block 5–15s
+  under load. Preferred fix: a pigeon `/place` sid-validation patch.
+- **F3 (`/mcp` misleading Allow):** `POST /mcp` → `405 Allow: GET`, but `GET /mcp`
+  reads PER-PROCESS state (FABLE-P5-F2). Resolve with the F2-row decision (deny, or
+  per-owner fan-in) — don't advertise a per-process twin. (Of the six twins, only
+  `/mcp`'s is per-process; the other five are shared reads.)
+- **F4 (front-door canary false-negative):** a door-side sickness (fd exhaustion,
+  undici pool wedge) presents as `/healthz` 503 = "backends down", which the no-`-f`
+  rule never restarts → silent-forever outage. Fix: on a 503 streak, cross-probe the
+  anchor directly; N rounds of "anchor fine directly, door says anchor unreachable"
+  ⇒ restart the door.
+- **F6 (crash policy):** no `unhandledRejection`/`uncaughtException` handlers; a sync
+  throw in a `proxyRequest` event callback crashes the process (all SSE dropped). Add
+  at least logging handlers (log + `process.exit(1)` to preserve crash+Restart) and
+  decide crash-vs-continue deliberately.
+- **F8 (canary tuning): (b)** re-derive serve-canary `THRESHOLD=7` for cloudbox (it's a
+  verbatim devbox value citing the devbox g3iy burn); **(c)** verify the cloudbox
+  **aarch64** bun binary is ET_EXEC before trusting the eu-stack cross-wedge
+  stable-address fingerprint (the claim came from x86 devbox). Re-justify front-door
+  `THRESHOLD=2` for a live-traffic SPOF.
+- **F7/F9 (runbook):** `Restart=always`+`RestartSec=5` never trips systemd's
+  start-limit → a bad env/broken build crash-loops silently (no alerting layer). And
+  unit-`Environment` changes / canary-triggered restarts activate new state with no
+  gate run. Runbook: always `/healthz` (+ version marker) after every rebuild+restart.
 
 ## Phase 7 — Client cutover + infra-plane exemption
 [**C1 gate:** Task 1.4 live before 7.3/7.4 drop client `/place`.]
