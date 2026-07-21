@@ -108,6 +108,15 @@ describe('Route Dispatcher', () => {
     });
   });
 
+  test('POST /global/upgrade -> global-sideeffect/deny-405', () => {
+    expect(classify('POST', '/global/upgrade')).toBe('global-sideeffect');
+    expect(dispatch('POST', '/global/upgrade')).toEqual({
+      class: 'global-sideeffect',
+      action: 'deny-405',
+      recognized: true,
+    });
+  });
+
   test('PATCH /global/config -> global-sideeffect/deny-405', () => {
     expect(classify('PATCH', '/global/config')).toBe('global-sideeffect');
     expect(dispatch('PATCH', '/global/config')).toEqual({
@@ -178,6 +187,24 @@ describe('Route Dispatcher', () => {
   test('GET /nonexistent -> unrecognized/not-found-404, recognized:false', () => {
     expect(classify('GET', '/nonexistent')).toBe('unrecognized');
     expect(dispatch('GET', '/nonexistent')).toEqual({
+      class: 'unrecognized',
+      action: 'not-found-404',
+      recognized: false,
+    });
+  });
+
+  test('GET / -> unrecognized/not-found-404, recognized:false', () => {
+    expect(classify('GET', '/')).toBe('unrecognized');
+    expect(dispatch('GET', '/')).toEqual({
+      class: 'unrecognized',
+      action: 'not-found-404',
+      recognized: false,
+    });
+  });
+
+  test('GET /_build/app.js -> unrecognized/not-found-404, recognized:false', () => {
+    expect(classify('GET', '/_build/app.js')).toBe('unrecognized');
+    expect(dispatch('GET', '/_build/app.js')).toEqual({
       class: 'unrecognized',
       action: 'not-found-404',
       recognized: false,

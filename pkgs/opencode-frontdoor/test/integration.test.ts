@@ -454,15 +454,20 @@ describe("FrontDoor Integration", () => {
   });
 
   test("5. dispatch policies through the server", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
     // POST /global/dispose -> 405
     const resDispose = await makeRequest("POST", "/global/dispose");
     expect(resDispose.status).toBe(405);
+    expect(warnSpy).toHaveBeenCalled();
+    let calls = warnSpy.mock.calls.map(c => c[0]);
+    expect(calls.some(c => c.includes("Global side-effecting endpoint denied"))).toBe(true);
 
     // GET /global/event -> 410
     const resEvent = await makeRequest("GET", "/global/event");
     expect(resEvent.status).toBe(410);
-
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    calls = warnSpy.mock.calls.map(c => c[0]);
+    expect(calls.some(c => c.includes("firehose is gone"))).toBe(true);
 
     // GET /pty -> 501
     const resPty = await makeRequest("GET", "/pty");
@@ -536,8 +541,28 @@ describe("FrontDoor Integration", () => {
     });
 
     // GET /nonexistent -> 404
+    const countBeforeNone = warnSpy.mock.calls.length;
     const resNone = await makeRequest("GET", "/nonexistent");
     expect(resNone.status).toBe(404);
+    expect(JSON.parse(resNone.body)).toEqual({ error: "not_found" });
+    expect(warnSpy.mock.calls.length).toBe(countBeforeNone + 1);
+    expect(warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0]).toContain("Unrecognized pathname");
+
+    // GET / -> 404 (web UI unsupported)
+    const countBeforeRoot = warnSpy.mock.calls.length;
+    const resWebUi = await makeRequest("GET", "/");
+    expect(resWebUi.status).toBe(404);
+    expect(JSON.parse(resWebUi.body)).toEqual({ error: "not_found" });
+    expect(warnSpy.mock.calls.length).toBe(countBeforeRoot + 1);
+    expect(warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0]).toContain("Unrecognized pathname");
+
+    // GET /_build/app.js -> 404
+    const countBeforeAsset = warnSpy.mock.calls.length;
+    const resAsset = await makeRequest("GET", "/_build/app.js");
+    expect(resAsset.status).toBe(404);
+    expect(JSON.parse(resAsset.body)).toEqual({ error: "not_found" });
+    expect(warnSpy.mock.calls.length).toBe(countBeforeAsset + 1);
+    expect(warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0]).toContain("Unrecognized pathname");
 
     warnSpy.mockRestore();
   });

@@ -463,8 +463,12 @@ export async function handleRequest(
 
     // 4. Branch on decision.action
     if (decision.action === "not-found-404") {
-      if (!decision.recognized) {
-        console.warn(`[FRONTDOOR WARN] Unrecognized pathname: ${method} ${url.pathname}`);
+      if (!decision.recognized || decision.class === "web-ui") {
+        if (decision.class === "web-ui") {
+          console.warn(`[FRONTDOOR WARN] Web UI endpoint is unsupported through the front door: ${method} ${url.pathname}`);
+        } else {
+          console.warn(`[FRONTDOOR WARN] Unrecognized pathname: ${method} ${url.pathname}`);
+        }
       }
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not_found" }));
@@ -472,12 +476,14 @@ export async function handleRequest(
     }
 
     if (decision.action === "deny-405") {
+      console.warn(`[FRONTDOOR WARN] Global side-effecting endpoint denied (per-process state; call a serve directly): ${method} ${url.pathname}`);
       res.writeHead(405, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "method_not_allowed" }));
       return;
     }
 
     if (decision.action === "gone-410") {
+      console.warn(`[FRONTDOOR WARN] /global/event firehose is gone from the front-door contract (410): ${method} ${url.pathname}`);
       res.writeHead(410, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "gone" }));
       return;
