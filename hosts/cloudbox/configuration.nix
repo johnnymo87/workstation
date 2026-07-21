@@ -1155,6 +1155,99 @@ ${serveIdCase}
     };
   };
 
+  # This is the front door's own §7-isolation-kit canary (independently restartable SPOF).
+  # This timer probes the frontdoor's native /healthz on localhost (3s timeout) once a
+  # minute; after 2 consecutive failures it dumps near-instant forensics
+  # (/proc status/wchan/syscall + cgroup memory.*) to /var/lib/opencode-frontdoor-canary/
+  # and restarts the service. Runs as root (system service).
+  systemd.services.opencode-frontdoor-canary = {
+    description = "opencode-frontdoor liveness canary (restart wedged front doors)";
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "opencode-frontdoor-canary";
+      ExecStart = "${pkgs.writeShellScript "opencode-frontdoor-canary" ''
+        set -u
+        # System-service PATH is minimal — be explicit.
+        # We only need coreutils, systemd, util-linux, and curl for instant forensics.
+        # Deep stack dumps (such as native-stack tracers) are omitted to ensure fast recovery.
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl ]}
+        STATE=/var/lib/opencode-frontdoor-canary
+        UNIT=opencode-frontdoor.service
+        PORT=4700
+        FAILFILE="$STATE/fails"
+
+        # Only police units that are supposed to be up. Intentional stops,
+        # crash-loop backoff, etc. reset the counter.
+        if [ "$(systemctl is-active "$UNIT")" != "active" ]; then
+          rm --force "$FAILFILE"
+          exit 0
+        fi
+
+        # We omit the workspace-reset lock-file check because the nightly reset
+        # does not stop or restart the front door, and the unflagged curl probe
+        # already tolerates backend bounces.
+
+        # Probe the native /healthz WITHOUT -f.
+        # Critical isolation logic: a 503 from /healthz means the door's event loop
+        # is ALIVE but both backends are down — we must NOT restart the door on that
+        # (restarting cannot fix backends). Only a TIMEOUT / refused connection
+        # (frozen loop or dead process) is a wedge.
+        if curl -s --max-time 3 --connect-timeout 3 -o /dev/null "http://127.0.0.1:$PORT/healthz"; then
+          rm --force "$FAILFILE"
+          exit 0
+        fi
+
+        # THRESHOLD=2
+        # Double-confirm; the front door has no post-boot burn like the serves, but
+        # a single transient localhost blip shouldn't trigger a restart. 2 consecutive is ~2 min.
+        THRESHOLD=2
+
+        FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+        echo "$FAILS" > "$FAILFILE"
+        echo "WARNING: $UNIT failed /healthz ($FAILS/$THRESHOLD consecutive)"
+        [ "$FAILS" -lt "$THRESHOLD" ] && exit 0
+
+        # Wedged. Capture near-instant forensics before fast restart.
+        # The front door is a single point of failure (SPOF) for all opencode access.
+        # We do NOT include deep stack checks (such as native-stack tracers) or split-measurement sleeps to minimize time-to-recovery.
+        TS=$(date +%Y%m%dT%H%M%S)
+        DUMP="$STATE/wedge-$TS"
+        mkdir -p "$DUMP"
+        PID=$(systemctl show "$UNIT" -p MainPID --value)
+        CG=$(systemctl show "$UNIT" -p ControlGroup --value)
+        if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+          for f in status wchan syscall; do
+            cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
+          done
+          # Per-thread kernel wait channels.
+          for t in /proc/$PID/task/*/; do
+            tid=$(basename "$t")
+            printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
+              "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
+          done
+        fi
+        if [ -n "$CG" ]; then
+          for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
+            cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
+          done
+        fi
+
+        echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
+        systemctl restart "$UNIT"
+        rm --force "$FAILFILE"
+      ''}";
+    };
+  };
+
+  systemd.timers.opencode-frontdoor-canary = {
+    description = "Minutely OpenCode frontdoor liveness canary";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
+    };
+  };
+
   # Nightly workspace reset (3 AM). Replaces the previous serve-only
   # restart with a full workspace reset (kill nvims, clear opencode
   # sessions, restart the opencode-serve-pool.target, respawn nvims). The
