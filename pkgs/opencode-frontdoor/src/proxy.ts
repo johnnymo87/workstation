@@ -463,12 +463,12 @@ export async function handleRequest(
 
     // 4. Branch on decision.action
     if (decision.action === "not-found-404") {
-      if (!decision.recognized || decision.class === "web-ui") {
-        if (decision.class === "web-ui") {
-          console.warn(`[FRONTDOOR WARN] Web UI endpoint is unsupported through the front door: ${method} ${url.pathname}`);
-        } else {
-          console.warn(`[FRONTDOOR WARN] Unrecognized pathname: ${method} ${url.pathname}`);
-        }
+      // web-ui is defensively kept loud even though the table currently maps no
+      // route to it (see NEW-D scope statement in routes.classification.ts).
+      if (decision.class === "web-ui") {
+        console.warn(`[FRONTDOOR WARN] Web UI endpoint is unsupported through the front door: ${method} ${url.pathname}`);
+      } else if (!decision.recognized) {
+        console.warn(`[FRONTDOOR WARN] Unrecognized pathname: ${method} ${url.pathname}`);
       }
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not_found" }));

@@ -16,6 +16,15 @@
  *   Source: ~/projects/opencode-patched/patches/event-session-scope.patch
  */
 
+/*
+ * NEW-D Scope Statement (see the `web-ui` member below):
+ * The web UI (`packages/app`, a PTY client served at `/`) is UNSUPPORTED through the front door;
+ * `/` + static assets are undeclared in `/doc` and intentionally fall through to `unrecognized` -> 404-loud
+ * (and PTY -> 501, per Task 5.1). Use direct serve ports to access the web UI.
+ * The `web-ui` RouteClass is retained defensively to document intent and preserve the
+ * loud-404 invariant in the dispatcher (warn on `web-ui` matching), even though no ROUTE_CLASSIFICATION_TABLE
+ * entry currently maps to it.
+ */
 export type RouteClass =
   | "session-path"
   | "session-query"
@@ -25,15 +34,6 @@ export type RouteClass =
   | "global-ro"
   | "global-sideeffect"
   | "global-event"
-  /*
-   * NEW-D Scope Statement:
-   * The web UI (`packages/app`, a PTY client served at `/`) is UNSUPPORTED through the front door;
-   * `/` + static assets are undeclared in `/doc` and intentionally fall through to `unrecognized` -> 404-loud
-   * (and PTY -> 501, per Task 5.1). Use direct serve ports to access the web UI.
-   * The `web-ui` RouteClass is retained here defensively to document intent and preserve the
-   * loud-404 invariant in the dispatcher (warn on `web-ui` matching), even though no ROUTE_CLASSIFICATION_TABLE
-   * entry currently maps to it.
-   */
   | "web-ui"
   | "tui"
   | "unrecognized";

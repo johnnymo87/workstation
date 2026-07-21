@@ -32,6 +32,9 @@ describe("FrontDoor Integration", () => {
   let pigeonSessionOwners: Record<string, string | number> = {};
 
   beforeEach(() => {
+    // Restore any spies (e.g. console.warn) that a prior test installed, so a
+    // mid-test assertion failure can't leak a mocked console into later tests.
+    vi.restoreAllMocks();
     serveAHealthStatus = 200;
     serveBHealthStatus = 200;
     pigeonSessionOwners = {};
