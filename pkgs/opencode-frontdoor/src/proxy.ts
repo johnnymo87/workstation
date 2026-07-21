@@ -246,6 +246,10 @@ function forwardableResponseHeaders(headers: Headers): Record<string, string> {
 }
 
 async function readIncomingBody(req: IncomingMessage, limitBytes = 1048576): Promise<string> {
+  // No wall-clock timer here by design — the door binds 127.0.0.1 (trusted local clients)
+  // and a trickling client is bounded by Node's default `server.requestTimeout`;
+  // the W9 slow-upload protection applies to the streaming `proxyRequest` path,
+  // not this buffered mint path.
   return new Promise<string>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalBytes = 0;
@@ -318,7 +322,7 @@ async function placeAfterCreate(
 
   const result = await boundedFetch(targetUrl, {
     method: "POST",
-    timeoutMs: ctx.config.routeTimeoutMs,
+    timeoutMs: ctx.config.mintTimeoutMs,
     headers: forwardHeaders,
     body: clientBody,
     fetchImpl: ctx.deps?.fetch,
@@ -337,7 +341,7 @@ async function placeAfterCreate(
 
   const response = result.response!;
 
-  if (response.status !== 200) {
+  if (response.status < 200 || response.status >= 300) {
     const anchorBody = await response.text();
     const responseHeaders = forwardableResponseHeaders(response.headers);
     res.writeHead(response.status, responseHeaders);
@@ -356,11 +360,11 @@ async function placeAfterCreate(
     // invalid JSON
   }
 
-  if (!parsedSid) {
+  if (!parsedSid || !SID_REGEX.test(parsedSid)) {
     console.warn("[FRONTDOOR WARN] Create response JSON missing session id");
     degradedState = true;
     const responseHeaders = forwardableResponseHeaders(response.headers);
-    res.writeHead(200, responseHeaders);
+    res.writeHead(response.status, responseHeaders);
     res.end(anchorBody);
     return { sid: null, degraded: degradedState };
   }
@@ -380,7 +384,7 @@ async function placeAfterCreate(
   }
 
   const responseHeaders = forwardableResponseHeaders(response.headers);
-  res.writeHead(200, responseHeaders);
+  res.writeHead(response.status, responseHeaders);
   res.end(anchorBody);
   return { sid: createdSid, degraded: degradedState };
 }

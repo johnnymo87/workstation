@@ -13,6 +13,7 @@ export interface Config {
   stickyTtlMs: number;
   driftCheckMs: number; // owner-drift re-resolve interval (mirrors the deployed TUI's 5s)
   wedgeProbeIntervalMs: number;
+  mintTimeoutMs: number;
 }
 
 function parsePositiveInteger(envName: string, value: string | undefined, defaultValue: number): number {
@@ -43,6 +44,7 @@ export function loadConfig(): Config {
   const stickyTtlMs = parsePositiveInteger('FRONTDOOR_STICKY_TTL_MS', process.env.FRONTDOOR_STICKY_TTL_MS, 30000);
   const driftCheckMs = parsePositiveInteger('FRONTDOOR_DRIFT_CHECK_MS', process.env.FRONTDOOR_DRIFT_CHECK_MS, 5000);
   const wedgeProbeIntervalMs = parsePositiveInteger('FRONTDOOR_WEDGE_PROBE_INTERVAL_MS', process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS, 5000);
+  const mintTimeoutMs = parsePositiveInteger('FRONTDOOR_MINT_TIMEOUT_MS', process.env.FRONTDOOR_MINT_TIMEOUT_MS, 60000);
 
   const pigeonUrl = process.env.PIGEON_DAEMON_URL || 'http://127.0.0.1:4731';
   const anchorUrl = process.env.OPENCODE_ANCHOR_URL || 'http://127.0.0.1:4096';
@@ -60,5 +62,6 @@ export function loadConfig(): Config {
     stickyTtlMs,
     driftCheckMs,
     wedgeProbeIntervalMs,
+    mintTimeoutMs,
   };
 }

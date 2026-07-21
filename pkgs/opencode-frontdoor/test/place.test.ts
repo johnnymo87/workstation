@@ -16,6 +16,7 @@ describe('place.ts', () => {
     stickyTtlMs: 30000,
     driftCheckMs: 5000,
     wedgeProbeIntervalMs: 5000,
+    mintTimeoutMs: 60000,
   };
 
   describe('isPromotingRequest', () => {

@@ -19,6 +19,7 @@ describe('loadConfig', () => {
     delete process.env.FRONTDOOR_STICKY_TTL_MS;
     delete process.env.FRONTDOOR_DRIFT_CHECK_MS;
     delete process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS;
+    delete process.env.FRONTDOOR_MINT_TIMEOUT_MS;
   });
 
   afterEach(() => {
@@ -46,6 +47,7 @@ describe('loadConfig', () => {
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
     });
   });
 
@@ -60,6 +62,7 @@ describe('loadConfig', () => {
     process.env.FRONTDOOR_STICKY_TTL_MS = '10000';
     process.env.FRONTDOOR_DRIFT_CHECK_MS = '2000';
     process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS = '1000';
+    process.env.FRONTDOOR_MINT_TIMEOUT_MS = '45000';
 
     const config = loadConfig();
 
@@ -74,6 +77,7 @@ describe('loadConfig', () => {
       stickyTtlMs: 10000,
       driftCheckMs: 2000,
       wedgeProbeIntervalMs: 1000,
+      mintTimeoutMs: 45000,
     });
   });
 
@@ -124,5 +128,13 @@ describe('loadConfig', () => {
   test('should throw a descriptive error for invalid FRONTDOOR_WEDGE_PROBE_INTERVAL_MS', () => {
     process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS = 'invalid';
     expect(() => loadConfig()).toThrowError('Invalid FRONTDOOR_WEDGE_PROBE_INTERVAL_MS: "invalid". Must be a positive integer.');
+  });
+
+  test('should throw a descriptive error for invalid FRONTDOOR_MINT_TIMEOUT_MS', () => {
+    process.env.FRONTDOOR_MINT_TIMEOUT_MS = 'invalid';
+    expect(() => loadConfig()).toThrowError('Invalid FRONTDOOR_MINT_TIMEOUT_MS: "invalid". Must be a positive integer.');
+
+    process.env.FRONTDOOR_MINT_TIMEOUT_MS = '0';
+    expect(() => loadConfig()).toThrowError('Invalid FRONTDOOR_MINT_TIMEOUT_MS: "0". Must be a positive integer.');
   });
 });

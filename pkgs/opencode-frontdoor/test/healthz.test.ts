@@ -40,6 +40,7 @@ describe('healthz', () => {
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
     };
 
     const createMockResponse = (method: string = 'GET') => {

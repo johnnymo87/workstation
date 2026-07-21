@@ -14,6 +14,7 @@ describe('resolveOwner', () => {
     stickyTtlMs: 30000,
     driftCheckMs: 5000,
     wedgeProbeIntervalMs: 5000,
+    mintTimeoutMs: 60000,
   };
 
   test('active route (200, apiBase) -> url + reason "active", degraded false', async () => {

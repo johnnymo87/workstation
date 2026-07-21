@@ -157,7 +157,7 @@ describe("FrontDoor Integration", () => {
     // 3. Fake Anchor Serve
     anchorServer = http.createServer(async (req, res) => {
       // Support custom status and mint ID from headers for Phase 4 testing
-      if (req.headers["x-test-status"] && req.headers["x-test-status"] !== "200" && !req.url?.startsWith("/session/")) {
+      if (req.headers["x-test-status"] && req.headers["x-test-status"] !== "200" && !req.url?.startsWith("/session/") && !(req.url === "/session" && parseInt(req.headers["x-test-status"] as string, 10) >= 200 && parseInt(req.headers["x-test-status"] as string, 10) < 300)) {
         const status = parseInt(req.headers["x-test-status"] as string, 10);
         res.writeHead(status, {
           "Content-Type": "application/json",
@@ -189,6 +189,14 @@ describe("FrontDoor Integration", () => {
         }
 
         const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
+        if (status === 204) {
+          res.writeHead(204, {
+            "x-from-serve": "anchor",
+            "x-test-echo-auth": req.headers["authorization"] || ""
+          });
+          res.end();
+          return;
+        }
         res.writeHead(status, {
           "Content-Type": "application/json",
           "x-from-serve": "anchor",
@@ -327,6 +335,7 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 1000,
     };
 
     const testDeps = {
@@ -638,8 +647,9 @@ describe("FrontDoor Integration", () => {
     expect(json.path).toBe("/config");
   });
 
-  test("9. create: POST /session proxies to anchorUrl without triggering place", async () => {
+  test("9. create: POST /session degrades when response missing session id", async () => {
     pigeonPlaceCalls = [];
+    loggedLines = [];
     const res = await makeRequest("POST", "/session", {}, "create-session-body");
     expect(res.status).toBe(200);
     expect(res.headers["x-from-serve"]).toBe("anchor");
@@ -647,6 +657,11 @@ describe("FrontDoor Integration", () => {
     expect(json.serve).toBe("anchor");
     expect(json.body).toBe("create-session-body");
     expect(pigeonPlaceCalls).toHaveLength(0);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    const logEntry = loggedLines.find((entry) => entry.path === "/session" && entry.method === "POST");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(true);
   });
 
   test("10. none -> 400: GET /event with no session_ids returns 400", async () => {
@@ -757,6 +772,7 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000,
       driftCheckMs: 40,
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
     };
 
     const fastDeps = {
@@ -842,6 +858,7 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000,
       driftCheckMs: 40,
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
     };
 
     const fastDeps = {
@@ -928,6 +945,7 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -995,6 +1013,7 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -1053,6 +1072,7 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -1143,6 +1163,7 @@ describe("FrontDoor Integration", () => {
       wedgeProbeIntervalMs: 30, // probe every 30ms
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
+      mintTimeoutMs: 60000,
     };
 
     const frontDoor = createFrontDoor(testConfig, {
@@ -1213,6 +1234,7 @@ describe("FrontDoor Integration", () => {
       wedgeProbeIntervalMs: 30, // probe every 30ms
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
+      mintTimeoutMs: 60000,
     };
 
     const frontDoor = createFrontDoor(testConfig, {
@@ -1363,6 +1385,7 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 250, // very short sticky lease
       driftCheckMs: 40,  // fast drift checks
       wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
     };
 
     const fastDeps = {
@@ -1565,6 +1588,46 @@ describe("FrontDoor Integration", () => {
 
     // client gets 400 relayed, pigeon /place NOT called
     expect(res.status).toBe(400);
+    expect(pigeonPlaceCalls).toHaveLength(0);
+  });
+
+  test("create->place choreography: rejects invalid session id format from anchor", async () => {
+    pigeonPlaceCalls = [];
+
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "invalid-sid-format"
+    }, "{}");
+
+    expect(res.status).toBe(200);
+    expect(pigeonPlaceCalls).toHaveLength(0);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    const logEntry = loggedLines.find((entry) => entry.path === "/session" && entry.method === "POST" && entry.degraded === true);
+    expect(logEntry).toBeDefined();
+  });
+
+  test("create->place choreography: accepts 201 response status, places and relays 201 status", async () => {
+    pigeonPlaceCalls = [];
+
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_201_test",
+      "x-test-status": "201"
+    }, "{}");
+
+    expect(res.status).toBe(201);
+    expect(pigeonPlaceCalls).toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_201_test" });
+  });
+
+  test("create->place choreography: accepts 204 response status, degrades and relays 204 status", async () => {
+    pigeonPlaceCalls = [];
+
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_204_test",
+      "x-test-status": "204"
+    }, "{}");
+
+    expect(res.status).toBe(204);
     expect(pigeonPlaceCalls).toHaveLength(0);
   });
 
