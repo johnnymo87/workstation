@@ -48,6 +48,10 @@ let
   # flake's localPkgs, so callPackage pkgs/teamclaude directly for the service.
   teamclaude = pkgs.callPackage ../../pkgs/teamclaude { };
 
+  # opencode-frontdoor: the opaque single-port reverse proxy for the serve pool.
+  # Same rationale as above — callPackage pkgs/opencode-frontdoor directly here.
+  opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
+
   # mn9r M5: serve-pool descriptor (single source of truth in
   # users/dev/serve-pool.nix). cloudbox = K=4 on ports 4096..4099, serve-0 ==
   # :4096. routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB) and
@@ -955,6 +959,67 @@ ${serveIdCase}
       ''}";
       Restart = "on-failure";
       RestartSec = 10;
+    };
+  };
+
+  # opencode-frontdoor — the opaque single-port reverse proxy and session-sticky
+  # router for the OpenCode serve pool (§7 isolation kit). It is a stateless
+  # single point of failure (SPOF) that binds only to localhost on port 4700
+  # (FRONTDOOR_PORT=4700). It features its own MemoryMax ceiling and a dedicated
+  # /healthz canary (Task 6.4). Auto-starts on boot, but is completely safe to
+  # run because nothing points at it until Phase 7.
+  systemd.services.opencode-frontdoor = {
+    description = "opencode-frontdoor (opaque single-port reverse proxy for the serve pool)";
+
+    # Auto-starts on boot. Safe to run now because nothing points at it until Phase 7.
+    wantedBy = [ "multi-user.target" ];
+
+    # DM5/M6: Order after network, pigeon-daemon, and the serve-pool target.
+    # Use wants (SOFT deps) only. Do NOT use requires: the front door must still
+    # start and gracefully DEGRADE-TO-ANCHOR when pigeon is down (that graceful
+    # degrade is a core design invariant; a hard requires would defeat it).
+    after = [ "network.target" "pigeon-daemon.service" "opencode-serve-pool.target" ];
+    wants = [ "pigeon-daemon.service" "opencode-serve-pool.target" ];
+
+    # Never let `nixos-rebuild switch` restart this unit on a config change:
+    # a restart would briefly drop long-lived SSE streams, dropping client
+    # connections mid-turn. This is safe because the front door is stateless
+    # and resolves targets dynamically. The new definition/package applies on the
+    # next reboot or an EXPLICIT `sudo systemctl restart opencode-frontdoor.service`.
+    # Later deploy procedure will rebuild, restart, then verify `/healthz`.
+    restartIfChanged = false;
+
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      Environment = [
+        "FRONTDOOR_PORT=4700"
+        "PIGEON_DAEMON_URL=http://127.0.0.1:4731"
+        "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
+      ];
+      ExecStart = "${opencode-frontdoor}/bin/opencode-frontdoor";
+      Restart = "always";
+      RestartSec = 5;
+
+      # Memory cap: stream holder (≈1.5G). Deliberately set NO MemoryHigh because,
+      # as noted in the monitoring-serve-pool skill rationale, a soft high limit
+      # can cause the kernel to throttle and freeze the loop (creating a wedge).
+      # Max-only ensures a clean OOM kill + rapid restart recovery (~10s).
+      MemoryMax = "1500M";
+
+      # Bounds shutdown: the app has no graceful-drain SIGTERM handler today, so
+      # SIGTERM terminates promptly. This bound acts as a safety backstop in case
+      # any future graceful handler hangs indefinitely on open SSE connections.
+      # The app has no graceful-drain SIGTERM handler today, so SIGTERM terminates
+      # promptly and in-flight SSE drops (clients reconnect).
+      TimeoutStopSec = 15;
+
+      # Raise file descriptor limit: the door doubles connection count (one client
+      # socket + one upstream socket per proxied request). With ~900 concurrent
+      # connections, we need at least ~1800+ fds, so raise ceiling well above
+      # the default to avoid running out of descriptors.
+      LimitNOFILE = 65536;
     };
   };
 
