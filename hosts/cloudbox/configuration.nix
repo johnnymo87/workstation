@@ -759,6 +759,134 @@ ${serveIdCase}
     wants = map (p: "opencode-serve@${toString p}.service") servePool.ports;
   };
 
+  # Ported from devbox (users/dev/home.devbox.nix) to cloudbox as SYSTEM units.
+  # This timer probes each pool member's /global/health (3s timeout) once a
+  # minute; after 7 consecutive failures it dumps cheap root-readable forensics
+  # (/proc status/wchan/syscall + cgroup memory.*) to /tmp/opencode-serve-canary/
+  # and restarts that one instance. Runs as root (system service), so no privilege elevation helper is needed.
+  # Design notes in .opencode/skills/monitoring-serve-pool/SKILL.md;
+  # full post-mortem in docs/investigations/2026-07-03-serve-4096-wedge.md.
+  systemd.services.opencode-serve-canary = {
+    description = "OpenCode serve pool liveness canary (restart wedged serves)";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.writeShellScript "opencode-serve-canary" ''
+        set -u
+        # System-service PATH is minimal — be explicit.
+        # gawk: awk is NOT in coreutils (first live wedge lost utime/stime silently).
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk ]}
+        STATE=/tmp/opencode-serve-canary
+        # Note: /tmp/opencode-serve-canary is root-owned. It's world-readable
+        # for human inspection via root umask 022; dev can read forensics but not delete them.
+        mkdir -p "$STATE"
+        # workstation-g3iy: 7 (was 2) — the post-boot catalog/credential burn
+        # runs ~5-6 min and COMPLETES, leaving a warm stable instance. A
+        # threshold-2 (~2-3 min) restart kills the instance mid-burn, the TUI
+        # reconnects, re-creates the instance, and re-triggers the burn =
+        # restart<->burn thrash loop. 7 (~7-8 min) outlasts one clean burn
+        # while still catching permanent wedges.
+        THRESHOLD=7
+
+        # Don't fight an in-flight reset-workspace (it stops/starts the pool
+        # deliberately). Shared, non-blocking probe of its lock. fd-based form:
+        # `flock <file> <cmd>` execvp()s the command, which fails on the
+        # minimal service PATH and misreads as "lock held".
+        if [ -e /tmp/reset-workspace.lock ]; then
+          exec 9< /tmp/reset-workspace.lock
+          if ! flock -n -s 9; then
+            echo "reset-workspace in progress; skipping this run"
+            exit 0
+          fi
+          exec 9<&-
+        fi
+
+        for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
+          UNIT="opencode-serve@$PORT.service"
+          FAILFILE="$STATE/$PORT.fails"
+
+          # Only police units that are supposed to be up. Intentional stops,
+          # crash-loop backoff, etc. reset the counter.
+          if [ "$(systemctl is-active "$UNIT")" != "active" ]; then
+            rm -f "$FAILFILE"
+            continue
+          fi
+
+          if curl -sf --max-time 3 --connect-timeout 3 \
+               "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1; then
+            rm -f "$FAILFILE"
+            continue
+          fi
+
+          FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+          echo "$FAILS" > "$FAILFILE"
+          echo "WARNING: $UNIT failed /global/health ($FAILS/$THRESHOLD consecutive)"
+          [ "$FAILS" -lt "$THRESHOLD" ] && continue
+
+          # Wedged. Capture cheap forensics BEFORE the kill destroys them
+          # (the 2026-07-03 wedge left no stacks/PSI behind).
+          TS=$(date +%Y%m%dT%H%M%S)
+          DUMP="$STATE/wedge-$TS-$PORT"
+          mkdir -p "$DUMP"
+          PID=$(systemctl show "$UNIT" -p MainPID --value)
+          CG=$(systemctl show "$UNIT" -p ControlGroup --value)
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            for f in status wchan syscall; do
+              cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+            # Per-thread kernel wait channels.
+            for t in /proc/$PID/task/*/; do
+              tid=$(basename "$t")
+              printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
+                "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
+            done
+          fi
+          if [ -n "$CG" ]; then
+            for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
+              cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+          fi
+          # Deep forensics (workstation-g3iy): today's wedges spin in USERSPACE
+          # at ~2G with zero memory pressure, so cheap /proc dumps can't tell
+          # GC-thrash from a synchronous bun:sqlite scan. Capture:
+          #  - utime/stime split over 2s (pure utime = JS/GC spin; stime = syscall/IO)
+          #  - /proc io before/after (read_bytes growth = sqlite paging)
+          #  - 3x native thread stacks via eu-stack (as root, no extra privilege needed).
+          #    The bun binary is non-PIE ET_EXEC so raw addresses are STABLE across
+          #    runs/wedges: identical frames across samples = tight-loop
+          #    fingerprint even without symbols.
+          # All best-effort; a truly frozen loop can't get worse from a brief
+          # ptrace stop, and the restart follows immediately anyway.
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            {
+              awk '{print "utime="$14, "stime="$15}' "/proc/$PID/stat" 2>/dev/null
+              cat "/proc/$PID/io" 2>/dev/null
+              sleep 2
+              awk '{print "utime="$14, "stime="$15}' "/proc/$PID/stat" 2>/dev/null
+              cat "/proc/$PID/io" 2>/dev/null
+              echo "clk_tck=100 interval=2s"
+            } > "$DUMP/cpu-io-split" 2>/dev/null || true
+            for i in 1 2 3; do
+              timeout 10 ${pkgs.elfutils}/bin/eu-stack -p "$PID" > "$DUMP/eu-stack.$i" 2>&1 || true
+              sleep 1
+            done
+          fi
+          echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
+          systemctl restart "$UNIT"
+          rm -f "$FAILFILE"
+        done
+      ''}";
+    };
+  };
+
+  systemd.timers.opencode-serve-canary = {
+    description = "Minutely OpenCode serve pool liveness canary";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
+    };
+  };
+
   # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
   # router forwards to when work Claude-on-Vertex spend is over budget
   # (8fe.15 PREREQ). Runs upstream KarpelesLab/teamclaude (tagged release,

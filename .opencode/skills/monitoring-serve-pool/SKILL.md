@@ -79,7 +79,16 @@ reset; healthy stops take 1–2s.
 
 - Cloudbox runs the same architecture (K=4, system units,
   `hosts/cloudbox/configuration.nix`, MemoryHigh=32G/MemoryMax=40G) and has
-  the same wedge trap — parity tracked in beads.
+  the same wedge trap. To address this, cloudbox runs the liveness canary as
+  SYSTEM units (`systemd.services.opencode-serve-canary` + `.timer` in
+  `hosts/cloudbox/configuration.nix`), running as ROOT, with forensics in
+  root-owned `/tmp/opencode-serve-canary/`.
+  - On cloudbox, inspect the canary via SYSTEM commands:
+    `systemctl list-timers opencode-serve-canary` and
+    `journalctl -u opencode-serve-canary.service` (do NOT use `--user`).
+  - Note: the inspector wedge-watcher + `BUN_INSPECT` NAMED-JS-stacks forensics
+    are NOT ported to cloudbox (deferred; forensic-only, would require adding
+    `BUN_INSPECT` to every cloudbox serve).
 - Durable fix candidates (beads): systemd watchdog patch (`sd_notify
   WATCHDOG=1` from the main loop → SIGABRT + core on freeze), and a
   dead-man's switch so the worker heartbeat degrades `health_state` when
