@@ -6,12 +6,12 @@ import { dispatch } from "./dispatch.js";
 import { extractSids, type SidExtraction } from "./sid.js";
 import { isExemptFromFirstByteTimeout } from "./timeouts.js";
 import { resolveOwner } from "./resolve.js";
-import { isPromotingRequest, maybePromote, PromotionGate } from "./place.js";
+import { isPromotingRequest, maybePromote, PromotionGate, placeSession } from "./place.js";
 import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky.js";
 import { probeServeHealth } from "./health.js";
 import type { Config } from "./config.js";
 import { RequestLogger } from "./log.js";
-import { isAbsoluteHttpUrl } from "./http.js";
+import { isAbsoluteHttpUrl, boundedFetch } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
 import { createDriftMonitor } from "./drift.js";
 import { createWedgeProbe } from "./wedge.js";
@@ -234,6 +234,21 @@ async function proxyRequest(
   });
 }
 
+async function readIncomingBody(req: IncomingMessage): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => {
+      data += chunk;
+    });
+    req.on("end", () => {
+      resolve(data);
+    });
+    req.on("error", (err) => {
+      reject(err);
+    });
+  });
+}
+
 export async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -322,10 +337,104 @@ export async function handleRequest(
     }
 
     if (decision.action === "create") {
-      // TODO(Phase 4): place-after-create choreography
       target = ctx.config.anchorUrl;
       degraded = false;
-      await proxyRequest(target, method, url, req, res, ctx, null);
+
+      let clientBody: string;
+      try {
+        clientBody = await readIncomingBody(req);
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_request", message: "Failed to read request body" }));
+        return;
+      }
+
+      const forwardHeaders: Record<string, string> = {};
+      for (const [key, val] of Object.entries(req.headers)) {
+        if (val !== undefined && !HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+          forwardHeaders[key] = Array.isArray(val) ? val.join(", ") : val;
+        }
+      }
+
+      const anchorBase = ctx.config.anchorUrl.replace(/\/+$/, "");
+      const targetUrl = `${anchorBase}${url.pathname}${url.search}`;
+
+      const result = await boundedFetch(targetUrl, {
+        method: "POST",
+        timeoutMs: ctx.config.routeTimeoutMs,
+        headers: forwardHeaders,
+        body: clientBody,
+        fetchImpl: ctx.deps?.fetch,
+      });
+
+      if (!result.ok) {
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_gateway", message: "Failed to connect to anchor" }));
+        return;
+      }
+
+      const response = result.response!;
+
+      if (response.status !== 200) {
+        const anchorBody = await response.text();
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, key) => {
+          if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+            responseHeaders[key] = value;
+          }
+        });
+        res.writeHead(response.status, responseHeaders);
+        res.end(anchorBody);
+        return;
+      }
+
+      const anchorBody = await response.text();
+      let parsedSid: string | undefined;
+      try {
+        const parsed = JSON.parse(anchorBody);
+        if (parsed && typeof parsed === "object" && typeof parsed.id === "string") {
+          parsedSid = parsed.id;
+        }
+      } catch (err) {
+        // invalid JSON
+      }
+
+      if (!parsedSid) {
+        console.warn("[FRONTDOOR WARN] Create response JSON missing session id");
+        degraded = true;
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, key) => {
+          if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+            responseHeaders[key] = value;
+          }
+        });
+        res.writeHead(200, responseHeaders);
+        res.end(anchorBody);
+        return;
+      }
+
+      sid = parsedSid;
+
+      const placeResult = await placeSession(parsedSid, ctx.config, ctx.deps);
+
+      if (placeResult.ok) {
+        const now = ctx.deps?.now?.() ?? Date.now();
+        if (placeResult.apiBase && isAbsoluteHttpUrl(placeResult.apiBase)) {
+          ctx.sticky.record(parsedSid, placeResult.apiBase, now);
+        }
+      } else {
+        degraded = true;
+        console.warn(`[FRONTDOOR WARN] placeSession failed for sid: ${parsedSid}, status: ${placeResult.status}`);
+      }
+
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+          responseHeaders[key] = value;
+        }
+      });
+      res.writeHead(200, responseHeaders);
+      res.end(anchorBody);
       return;
     }
 

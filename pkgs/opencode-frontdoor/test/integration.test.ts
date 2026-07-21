@@ -135,6 +135,28 @@ describe("FrontDoor Integration", () => {
 
     // 3. Fake Anchor Serve
     anchorServer = http.createServer(async (req, res) => {
+      // Support custom status and mint ID from headers for Phase 4 testing
+      if (req.headers["x-test-status"] && req.headers["x-test-status"] !== "200" && !req.url?.startsWith("/session/")) {
+        const status = parseInt(req.headers["x-test-status"] as string, 10);
+        res.writeHead(status, {
+          "Content-Type": "application/json",
+          "x-from-serve": "anchor"
+        });
+        res.end(JSON.stringify({ error: "bad_request_from_anchor" }));
+        return;
+      }
+
+      if (req.headers["x-test-mint-id"]) {
+        const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
+        res.writeHead(status, {
+          "Content-Type": "application/json",
+          "x-from-serve": "anchor",
+          "x-test-echo-auth": req.headers["authorization"] || ""
+        });
+        res.end(JSON.stringify({ id: req.headers["x-test-mint-id"] }));
+        return;
+      }
+
       // Simulate checking session existence in anchor
       if (req.url && req.url.startsWith("/session/")) {
         const sid = req.url.split("/")[2];
@@ -218,6 +240,18 @@ describe("FrontDoor Integration", () => {
         const bodyStr = await readBody(req);
         const body = JSON.parse(bodyStr);
         pigeonPlaceCalls.push(body);
+
+        if (body.session_id === "ses_place_fail") {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "internal_error" }));
+          return;
+        }
+
+        if (body.session_id === "ses_place_unreachable") {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end();
+          return;
+        }
 
         res.writeHead(200, { "Content-Type": "application/json" });
         if (body.session_id === "ses_promo_invalid") {
@@ -1374,5 +1408,122 @@ describe("FrontDoor Integration", () => {
     } finally {
       await new Promise<void>((resolve) => fastFrontDoor.close(() => resolve()));
     }
+  });
+
+  test("create->place choreography: happy path", async () => {
+    pigeonPlaceCalls = [];
+    pigeonRouteCalls = [];
+    
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_happy",
+      "authorization": "Bearer custom-happy-token"
+    }, "{}");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["x-from-serve"]).toBe("anchor");
+    
+    // Parse body
+    const json = JSON.parse(res.body);
+    expect(json.id).toBe("ses_happy");
+
+    // Assert pigeon place was called with session_id
+    expect(pigeonPlaceCalls).toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_happy" });
+
+    // Assert stickiness recorded: subsequent mutating request should go straight to B (portB)
+    // and NOT call pigeon /route
+    const resMutating = await makeRequest("POST", "/session/ses_happy/message", {}, "{}");
+    expect(resMutating.status).toBe(200);
+    expect(resMutating.headers["x-from-serve"]).toBe("serve-b");
+    expect(pigeonRouteCalls).toHaveLength(0);
+  });
+
+  test("create->place choreography: place-fail still returns 200 and degrades", async () => {
+    pigeonPlaceCalls = [];
+    loggedLines = [];
+
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_place_fail"
+    }, "{}");
+
+    // client STILL receives the create 200 body
+    expect(res.status).toBe(200);
+    const json = JSON.parse(res.body);
+    expect(json.id).toBe("ses_place_fail");
+
+    // pigeon /place was called
+    expect(pigeonPlaceCalls).toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_place_fail" });
+
+    // assert degraded counter incremented / warn path taken
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    const logEntry = loggedLines.find((entry) => entry.sid === "ses_place_fail" && entry.method === "POST");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(true);
+  });
+
+  test("create->place choreography: concurrent-create handling", async () => {
+    pigeonPlaceCalls = [];
+    
+    // fire N (e.g. 5) creates concurrently, each anchor mint returns a distinct id
+    const promises = Array.from({ length: 5 }, (_, i) => {
+       return makeRequest("POST", "/session", {
+         "x-test-mint-id": `ses_concurrent_${i}`
+       }, "{}");
+    });
+
+    const results = await Promise.all(promises);
+
+    // assert each gets its own id back
+    results.forEach((res, i) => {
+      expect(res.status).toBe(200);
+      const json = JSON.parse(res.body);
+      expect(json.id).toBe(`ses_concurrent_${i}`);
+    });
+
+    // assert pigeon /place called once per distinct id
+    expect(pigeonPlaceCalls).toHaveLength(5);
+    const sessionIds = pigeonPlaceCalls.map(c => c.session_id).sort();
+    expect(sessionIds).toEqual([
+      "ses_concurrent_0",
+      "ses_concurrent_1",
+      "ses_concurrent_2",
+      "ses_concurrent_3",
+      "ses_concurrent_4"
+    ]);
+  });
+
+  test("create->place choreography: serve-dies-mid-choreography (place unreachable)", async () => {
+    pigeonPlaceCalls = [];
+    loggedLines = [];
+
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_place_unreachable"
+    }, "{}");
+
+    // assert graceful degrade (create still returned, warn/degraded), no hang, no unhandled rejection.
+    expect(res.status).toBe(200);
+    const json = JSON.parse(res.body);
+    expect(json.id).toBe("ses_place_unreachable");
+
+    expect(pigeonPlaceCalls).toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_place_unreachable" });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    const logEntry = loggedLines.find((entry) => entry.sid === "ses_place_unreachable" && entry.method === "POST");
+    expect(logEntry).toBeDefined();
+    expect(logEntry.degraded).toBe(true);
+  });
+
+  test("create->place choreography: non-200 create from anchor", async () => {
+    pigeonPlaceCalls = [];
+
+    const res = await makeRequest("POST", "/session", {
+      "x-test-status": "400"
+    }, "{}");
+
+    // client gets 400 relayed, pigeon /place NOT called
+    expect(res.status).toBe(400);
+    expect(pigeonPlaceCalls).toHaveLength(0);
   });
 });
