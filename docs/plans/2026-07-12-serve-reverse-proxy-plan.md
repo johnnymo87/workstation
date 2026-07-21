@@ -329,18 +329,39 @@ decisions folded in during build:
 
 ---
 
-## Phase 4 — create → /place → respond
-- **4.1** `POST /session`→forward to anchor→parse `.id`→`POST /place`→return
-  create response only after place; place-fail→return+degrade+log. No serve
-  choice (pigeon HRW). Concurrent-create + serve-dies-mid-choreography tests.
-  Commit `feat(frontdoor): create->place`.
-- **4.2 (FABLE-W5) — `POST /session/{id}/fork` also mints a NEW, never-placed
-  session** (the new sid is in the *response*, so neither the `POST /session`
-  create-watch nor turn-start promotion covers it cleanly; it self-heals only via
-  the fragile FABLE-S1 first-turn path, and unplaced forks are exactly the sids
-  that trip the multi-sid path). Decide fork's placement: readback-and-place the
-  forked sid like create, or accept self-heal. Also re-scan for other
-  session-minting routes (`/session/{id}/children`? verify). Commit.
+## Phase 4 — create → /place → respond  **[DONE]**
+
+**Status:** Complete via SDD (implement → spec-review → code-review → fixup per
+task). Commits on `serve-reverse-proxy`: 4.1 `309c098` + hardening `01d6d3b`,
+4.2 `a4f5af5` + cleanup `cc66fd4`. 228 tests green, typecheck clean. Notable
+decisions folded in during build:
+- **4.1**: replaced the `create` stub with a **buffered** forward to the anchor →
+  parse top-level `.id` → `placeSession` → relay only after place resolves.
+  place-fail / missing-id → `degraded=true` (counter via the `logResponse`
+  finish-hook) + warn, **still returns the created session** (never fails the
+  create). Seeds stickiness on the brand-new sid (`apiBase` from `/place`) so the
+  first turn survives a pigeon blip. Code-review hardening (all 8 accepted):
+  strip `content-length`/`content-encoding` on the decoded relay (undici
+  auto-decodes `.text()`), 1 MiB request-body cap → **413**, UTF-8-safe
+  `Buffer.concat` buffering, exclude client `Host` (parity with `proxyRequest`),
+  **504** (not 502) on anchor timeout via `boundedFetch.timedOut`, reuse
+  `stripTrailingSlashes`, dedupe header filtering (`forwardableResponseHeaders`),
+  and extract the choreography into a helper.
+- **4.2 (FABLE-W5)**: **Option A — readback-and-place the forked session.** Fork
+  mints a NEW *independent root* session (verified upstream: `Session.fork` calls
+  `createNext` with **no** `parentID`; it's a message-copy, session.ts:697), sid
+  in the response `.id`. Reclassified `POST /session/{id}/fork` to its own `fork`
+  action (out of the streaming `route-session` path). Extracted the shared
+  `placeAfterCreate(target, …)` core; `handleFork` resolves the **parent's owner**
+  (`resolveOwner(parent).url`, freshest parent state; degrades to anchor via
+  shared db) and runs the create core against it, **placing the CHILD sid** and
+  seeding its stickiness. Fork is create-like → **no FABLE-S2 503 on pigeon-down**
+  (degrade, don't block). Placement also fixes the "unplaced fork trips the
+  multi-sid path" concern (resolveOwner(forkSid) now yields a real owner).
+  **Minter re-scan (verified):** only `POST /session` (create) and
+  `POST /session/{id}/fork` mint new sids; `GET /session/{id}/children` is a
+  read/list; `update`/`share`/`unshare`/part-update return `Session.Info` for an
+  existing path sid (not minters).
 
 ---
 
