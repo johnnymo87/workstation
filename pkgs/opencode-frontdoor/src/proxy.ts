@@ -11,7 +11,7 @@ import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky
 import { probeServeHealth } from "./health.js";
 import type { Config } from "./config.js";
 import { RequestLogger } from "./log.js";
-import { isAbsoluteHttpUrl, boundedFetch } from "./http.js";
+import { isAbsoluteHttpUrl, boundedFetch, stripTrailingSlashes } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
 import { createDriftMonitor } from "./drift.js";
 import { createWedgeProbe } from "./wedge.js";
@@ -234,19 +234,147 @@ async function proxyRequest(
   });
 }
 
-async function readIncomingBody(req: IncomingMessage): Promise<string> {
+function forwardableResponseHeaders(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    const k = key.toLowerCase();
+    if (!HOP_BY_HOP_HEADERS.has(k) && k !== "content-length" && k !== "content-encoding") {
+      out[key] = value;
+    }
+  });
+  return out;
+}
+
+async function readIncomingBody(req: IncomingMessage, limitBytes = 1048576): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => {
-      data += chunk;
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let overLimit = false;
+
+    req.on("data", (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > limitBytes) {
+        if (!overLimit) {
+          overLimit = true;
+          reject(new Error("payload_too_large"));
+        }
+        return;
+      }
+      chunks.push(chunk);
     });
     req.on("end", () => {
-      resolve(data);
+      if (!overLimit) {
+        resolve(Buffer.concat(chunks).toString("utf8"));
+      }
     });
     req.on("error", (err) => {
       reject(err);
     });
   });
+}
+
+async function handleCreate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ProxyContext,
+  url: URL,
+  method: string
+): Promise<{ sid: string | null; degraded: boolean }> {
+  let createdSid: string | null = null;
+  let degradedState = false;
+
+  let clientBody: string;
+  try {
+    clientBody = await readIncomingBody(req);
+  } catch (err: any) {
+    if (err?.message === "payload_too_large") {
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "payload_too_large", message: "Request body exceeds maximum size" }));
+    } else {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "bad_request", message: "Failed to read request body" }));
+    }
+    return { sid: null, degraded: false };
+  }
+
+  const forwardHeaders: Record<string, string> = {};
+  for (const [key, val] of Object.entries(req.headers)) {
+    const k = key.toLowerCase();
+    if (val !== undefined && !HOP_BY_HOP_HEADERS.has(k) && k !== "host") {
+      forwardHeaders[key] = Array.isArray(val) ? val.join(", ") : val;
+    }
+  }
+
+  const anchorBase = stripTrailingSlashes(ctx.config.anchorUrl);
+  const targetUrl = `${anchorBase}${url.pathname}${url.search}`;
+
+  const result = await boundedFetch(targetUrl, {
+    method: "POST",
+    timeoutMs: ctx.config.routeTimeoutMs,
+    headers: forwardHeaders,
+    body: clientBody,
+    fetchImpl: ctx.deps?.fetch,
+  });
+
+  if (!result.ok) {
+    if (result.timedOut) {
+      res.writeHead(504, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "gateway_timeout", message: "Anchor did not respond in time" }));
+    } else {
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "bad_gateway", message: "Failed to connect to anchor" }));
+    }
+    return { sid: null, degraded: false };
+  }
+
+  const response = result.response!;
+
+  if (response.status !== 200) {
+    const anchorBody = await response.text();
+    const responseHeaders = forwardableResponseHeaders(response.headers);
+    res.writeHead(response.status, responseHeaders);
+    res.end(anchorBody);
+    return { sid: null, degraded: false };
+  }
+
+  const anchorBody = await response.text();
+  let parsedSid: string | undefined;
+  try {
+    const parsed = JSON.parse(anchorBody);
+    if (parsed && typeof parsed === "object" && typeof parsed.id === "string") {
+      parsedSid = parsed.id;
+    }
+  } catch (err) {
+    // invalid JSON
+  }
+
+  if (!parsedSid) {
+    console.warn("[FRONTDOOR WARN] Create response JSON missing session id");
+    degradedState = true;
+    const responseHeaders = forwardableResponseHeaders(response.headers);
+    res.writeHead(200, responseHeaders);
+    res.end(anchorBody);
+    return { sid: null, degraded: degradedState };
+  }
+
+  createdSid = parsedSid;
+
+  const placeResult = await placeSession(parsedSid, ctx.config, ctx.deps);
+
+  if (placeResult.ok) {
+    const now = ctx.deps?.now?.() ?? Date.now();
+    if (placeResult.apiBase && isAbsoluteHttpUrl(placeResult.apiBase)) {
+      ctx.sticky.record(parsedSid, placeResult.apiBase, now);
+    }
+  } else {
+    degradedState = true;
+    console.warn(`[FRONTDOOR WARN] placeSession failed for sid: ${parsedSid}, status: ${placeResult.status}`);
+  }
+
+  const responseHeaders = forwardableResponseHeaders(response.headers);
+  res.writeHead(200, responseHeaders);
+  res.end(anchorBody);
+  return { sid: createdSid, degraded: degradedState };
 }
 
 export async function handleRequest(
@@ -337,104 +465,9 @@ export async function handleRequest(
     }
 
     if (decision.action === "create") {
-      target = ctx.config.anchorUrl;
-      degraded = false;
-
-      let clientBody: string;
-      try {
-        clientBody = await readIncomingBody(req);
-      } catch (err: any) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "bad_request", message: "Failed to read request body" }));
-        return;
-      }
-
-      const forwardHeaders: Record<string, string> = {};
-      for (const [key, val] of Object.entries(req.headers)) {
-        if (val !== undefined && !HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
-          forwardHeaders[key] = Array.isArray(val) ? val.join(", ") : val;
-        }
-      }
-
-      const anchorBase = ctx.config.anchorUrl.replace(/\/+$/, "");
-      const targetUrl = `${anchorBase}${url.pathname}${url.search}`;
-
-      const result = await boundedFetch(targetUrl, {
-        method: "POST",
-        timeoutMs: ctx.config.routeTimeoutMs,
-        headers: forwardHeaders,
-        body: clientBody,
-        fetchImpl: ctx.deps?.fetch,
-      });
-
-      if (!result.ok) {
-        res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "bad_gateway", message: "Failed to connect to anchor" }));
-        return;
-      }
-
-      const response = result.response!;
-
-      if (response.status !== 200) {
-        const anchorBody = await response.text();
-        const responseHeaders: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
-          if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
-            responseHeaders[key] = value;
-          }
-        });
-        res.writeHead(response.status, responseHeaders);
-        res.end(anchorBody);
-        return;
-      }
-
-      const anchorBody = await response.text();
-      let parsedSid: string | undefined;
-      try {
-        const parsed = JSON.parse(anchorBody);
-        if (parsed && typeof parsed === "object" && typeof parsed.id === "string") {
-          parsedSid = parsed.id;
-        }
-      } catch (err) {
-        // invalid JSON
-      }
-
-      if (!parsedSid) {
-        console.warn("[FRONTDOOR WARN] Create response JSON missing session id");
-        degraded = true;
-        const responseHeaders: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
-          if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
-            responseHeaders[key] = value;
-          }
-        });
-        res.writeHead(200, responseHeaders);
-        res.end(anchorBody);
-        return;
-      }
-
-      sid = parsedSid;
-
-      const placeResult = await placeSession(parsedSid, ctx.config, ctx.deps);
-
-      if (placeResult.ok) {
-        const now = ctx.deps?.now?.() ?? Date.now();
-        if (placeResult.apiBase && isAbsoluteHttpUrl(placeResult.apiBase)) {
-          ctx.sticky.record(parsedSid, placeResult.apiBase, now);
-        }
-      } else {
-        degraded = true;
-        console.warn(`[FRONTDOOR WARN] placeSession failed for sid: ${parsedSid}, status: ${placeResult.status}`);
-      }
-
-      const responseHeaders: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
-          responseHeaders[key] = value;
-        }
-      });
-      res.writeHead(200, responseHeaders);
-      res.end(anchorBody);
+      const resVal = await handleCreate(req, res, ctx, url, method);
+      sid = resVal.sid;
+      degraded = resVal.degraded;
       return;
     }
 

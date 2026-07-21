@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeAll, afterAll, beforeEach } from "vitest";
 import http from "node:http";
+import zlib from "node:zlib";
 import type { AddressInfo } from "node:net";
 import { createFrontDoor } from "../src/server.js";
 import type { Config } from "../src/config.js";
@@ -147,6 +148,26 @@ describe("FrontDoor Integration", () => {
       }
 
       if (req.headers["x-test-mint-id"]) {
+        const mintId = req.headers["x-test-mint-id"] as string;
+        if (mintId === "ses_anchor_timeout") {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: mintId }));
+          return;
+        }
+
+        if (mintId === "ses_header_strip") {
+          const bodyBuf = zlib.gzipSync(Buffer.from(JSON.stringify({ id: mintId })));
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "x-from-serve": "anchor",
+            "Content-Length": String(bodyBuf.length),
+            "Content-Encoding": "gzip"
+          });
+          res.end(bodyBuf);
+          return;
+        }
+
         const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
         res.writeHead(status, {
           "Content-Type": "application/json",
@@ -1525,5 +1546,47 @@ describe("FrontDoor Integration", () => {
     // client gets 400 relayed, pigeon /place NOT called
     expect(res.status).toBe(400);
     expect(pigeonPlaceCalls).toHaveLength(0);
+  });
+
+  test("create->place choreography: strips content-length and content-encoding headers from anchor", async () => {
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_header_strip"
+    }, "{}");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-length"]).toBeUndefined();
+    expect(res.headers["content-encoding"]).toBeUndefined();
+    
+    const json = JSON.parse(res.body);
+    expect(json.id).toBe("ses_header_strip");
+  });
+
+  test("create->place choreography: multi-byte body round-trips intact", async () => {
+    const multiByteText = "⚡ Hello 世界! ⚡";
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_multibyte"
+    }, JSON.stringify({ text: multiByteText }));
+
+    expect(res.status).toBe(200);
+    const json = JSON.parse(res.body);
+    expect(json.id).toBe("ses_multibyte");
+  });
+
+  test("create->place choreography: returns 413 if client request body exceeds 1 MiB cap", async () => {
+    const largeBody = "a".repeat(1048576 + 1); // 1 MiB + 1 byte
+    const res = await makeRequest("POST", "/session", {}, largeBody);
+    expect(res.status).toBe(413);
+    const json = JSON.parse(res.body);
+    expect(json.error).toBe("payload_too_large");
+  });
+
+  test("create->place choreography: returns 504 on anchor timeout", async () => {
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_anchor_timeout"
+    }, "{}");
+
+    expect(res.status).toBe(504);
+    const json = JSON.parse(res.body);
+    expect(json.error).toBe("gateway_timeout");
   });
 });
