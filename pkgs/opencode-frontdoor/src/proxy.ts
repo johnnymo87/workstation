@@ -286,8 +286,8 @@ async function placeAfterCreate(
   res: ServerResponse,
   ctx: ProxyContext,
   url: URL,
-  method: string
 ): Promise<{ sid: string | null; degraded: boolean }> {
+  // Both minters (create, fork) are POST; boundedFetch below hardcodes "POST".
   let createdSid: string | null = null;
   let degradedState = false;
 
@@ -390,9 +390,8 @@ async function handleCreate(
   res: ServerResponse,
   ctx: ProxyContext,
   url: URL,
-  method: string
 ): Promise<{ sid: string | null; degraded: boolean }> {
-  return placeAfterCreate(ctx.config.anchorUrl, req, res, ctx, url, method);
+  return placeAfterCreate(ctx.config.anchorUrl, req, res, ctx, url);
 }
 
 async function handleFork(
@@ -400,7 +399,6 @@ async function handleFork(
   res: ServerResponse,
   ctx: ProxyContext,
   url: URL,
-  method: string
 ): Promise<{ sid: string | null; degraded: boolean }> {
   const parent = extractSessionIdFromPath(url.pathname);
   if (!parent || !SID_REGEX.test(parent)) {
@@ -410,7 +408,7 @@ async function handleFork(
   }
 
   const resolved = await resolveOwner(parent, ctx.config, ctx.deps);
-  const r = await placeAfterCreate(resolved.url, req, res, ctx, url, method);
+  const r = await placeAfterCreate(resolved.url, req, res, ctx, url);
   return { sid: r.sid, degraded: r.degraded || resolved.degraded };
 }
 
@@ -502,14 +500,14 @@ export async function handleRequest(
     }
 
     if (decision.action === "create") {
-      const resVal = await handleCreate(req, res, ctx, url, method);
+      const resVal = await handleCreate(req, res, ctx, url);
       sid = resVal.sid;
       degraded = resVal.degraded;
       return;
     }
 
     if (decision.action === "fork") {
-      const r = await handleFork(req, res, ctx, url, method);
+      const r = await handleFork(req, res, ctx, url);
       sid = r.sid;
       degraded = r.degraded;
       return;
