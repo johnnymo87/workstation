@@ -10,6 +10,7 @@ describe('Route Dispatcher', () => {
       class: 'session-path',
       action: 'route-session',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -19,6 +20,7 @@ describe('Route Dispatcher', () => {
       class: 'session-path',
       action: 'route-session',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -28,6 +30,7 @@ describe('Route Dispatcher', () => {
       class: 'session-path',
       action: 'route-session',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -38,6 +41,7 @@ describe('Route Dispatcher', () => {
       class: 'global-ro',
       action: 'forward-anchor',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -47,6 +51,7 @@ describe('Route Dispatcher', () => {
       class: 'global-ro',
       action: 'forward-anchor',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -57,6 +62,7 @@ describe('Route Dispatcher', () => {
       class: 'session-query',
       action: 'route-session',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -66,6 +72,7 @@ describe('Route Dispatcher', () => {
       class: 'session-query',
       action: 'route-session',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -76,6 +83,7 @@ describe('Route Dispatcher', () => {
       class: 'create',
       action: 'create',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -86,6 +94,7 @@ describe('Route Dispatcher', () => {
       class: 'pty',
       action: 'pty-501',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -95,34 +104,58 @@ describe('Route Dispatcher', () => {
       class: 'pty',
       action: 'pty-501',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
   // global-sideeffect:
-  test('POST /global/dispose -> global-sideeffect/deny-405', () => {
+  test('POST /global/dispose -> global-sideeffect/deny-global-mutation', () => {
     expect(classify('POST', '/global/dispose')).toBe('global-sideeffect');
     expect(dispatch('POST', '/global/dispose')).toEqual({
       class: 'global-sideeffect',
-      action: 'deny-405',
+      action: 'deny-global-mutation',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
-  test('POST /global/upgrade -> global-sideeffect/deny-405', () => {
+  test('POST /global/upgrade -> global-sideeffect/deny-global-mutation', () => {
     expect(classify('POST', '/global/upgrade')).toBe('global-sideeffect');
     expect(dispatch('POST', '/global/upgrade')).toEqual({
       class: 'global-sideeffect',
-      action: 'deny-405',
+      action: 'deny-global-mutation',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
-  test('PATCH /global/config -> global-sideeffect/deny-405', () => {
+  test('PATCH /global/config -> global-sideeffect/deny-global-mutation', () => {
     expect(classify('PATCH', '/global/config')).toBe('global-sideeffect');
     expect(dispatch('PATCH', '/global/config')).toEqual({
       class: 'global-sideeffect',
-      action: 'deny-405',
+      action: 'deny-global-mutation',
       recognized: true,
+      allowedMethods: ['GET'],
+    });
+  });
+
+  test('POST /mcp -> global-sideeffect/deny-global-mutation', () => {
+    expect(classify('POST', '/mcp')).toBe('global-sideeffect');
+    expect(dispatch('POST', '/mcp')).toEqual({
+      class: 'global-sideeffect',
+      action: 'deny-global-mutation',
+      recognized: true,
+      allowedMethods: ['GET'],
+    });
+  });
+
+  test('PATCH /config -> global-sideeffect/deny-global-mutation', () => {
+    expect(classify('PATCH', '/config')).toBe('global-sideeffect');
+    expect(dispatch('PATCH', '/config')).toEqual({
+      class: 'global-sideeffect',
+      action: 'deny-global-mutation',
+      recognized: true,
+      allowedMethods: ['GET'],
     });
   });
 
@@ -133,6 +166,7 @@ describe('Route Dispatcher', () => {
       class: 'global-event',
       action: 'gone-410',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -143,6 +177,7 @@ describe('Route Dispatcher', () => {
       class: 'tui',
       action: 'tui-501',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -152,6 +187,7 @@ describe('Route Dispatcher', () => {
       class: 'tui',
       action: 'tui-501',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -161,6 +197,7 @@ describe('Route Dispatcher', () => {
       class: 'tui',
       action: 'tui-501',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -171,6 +208,7 @@ describe('Route Dispatcher', () => {
       class: 'global-ro',
       action: 'forward-anchor',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -180,6 +218,7 @@ describe('Route Dispatcher', () => {
       class: 'global-ro',
       action: 'forward-anchor',
       recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -190,15 +229,17 @@ describe('Route Dispatcher', () => {
       class: 'unrecognized',
       action: 'not-found-404',
       recognized: false,
+      allowedMethods: [],
     });
   });
 
-  test('GET / -> unrecognized/not-found-404, recognized:false', () => {
-    expect(classify('GET', '/')).toBe('unrecognized');
+  test('GET / -> web-ui/not-found-404, recognized:true', () => {
+    expect(classify('GET', '/')).toBe('web-ui');
     expect(dispatch('GET', '/')).toEqual({
-      class: 'unrecognized',
+      class: 'web-ui',
       action: 'not-found-404',
-      recognized: false,
+      recognized: true,
+      allowedMethods: [],
     });
   });
 
@@ -208,6 +249,7 @@ describe('Route Dispatcher', () => {
       class: 'unrecognized',
       action: 'not-found-404',
       recognized: false,
+      allowedMethods: [],
     });
   });
 
@@ -217,13 +259,14 @@ describe('Route Dispatcher', () => {
       class: 'unrecognized',
       action: 'not-found-404',
       recognized: false,
+      allowedMethods: [],
     });
   });
 
   // trailing-slash normalization:
   test('trailing slash normalization', () => {
     expect(classify('GET', '/session/ses_x/')).toBe('session-path');
-    expect(classify('GET', '/')).toBe('unrecognized'); // or matches whatever root is, let's see. Wait, root is not in table so unrecognized/not-found-404
+    expect(classify('GET', '/')).toBe('web-ui');
     expect(classify('GET', '')).toBe('unrecognized');
   });
 
@@ -259,6 +302,7 @@ describe('Route Dispatcher', () => {
       class: 'global-ro',
       action: 'forward-anchor',
       recognized: true,
+      allowedMethods: [],
     });
 
     expect(classify('HEAD', '/session/ses_x')).toBe('session-path');
@@ -266,6 +310,7 @@ describe('Route Dispatcher', () => {
       class: 'session-path',
       action: 'route-session',
       recognized: true,
+      allowedMethods: [],
     });
 
     expect(classify('HEAD', '/nonexistent')).toBe('unrecognized');
@@ -273,6 +318,7 @@ describe('Route Dispatcher', () => {
       class: 'unrecognized',
       action: 'not-found-404',
       recognized: false,
+      allowedMethods: [],
     });
   });
 });

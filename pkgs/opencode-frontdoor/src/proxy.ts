@@ -467,18 +467,39 @@ export async function handleRequest(
       // route to it (see NEW-D scope statement in routes.classification.ts).
       if (decision.class === "web-ui") {
         console.warn(`[FRONTDOOR WARN] Web UI endpoint is unsupported through the front door: ${method} ${url.pathname}`);
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: "web_ui_not_served",
+          message: "The web UI is not served through the front door. Use a serve port directly."
+        }));
       } else if (!decision.recognized) {
         console.warn(`[FRONTDOOR WARN] Unrecognized pathname: ${method} ${url.pathname}`);
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
       }
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "not_found" }));
       return;
     }
 
-    if (decision.action === "deny-405") {
-      console.warn(`[FRONTDOOR WARN] Global side-effecting endpoint denied (per-process state; call a serve directly): ${method} ${url.pathname}`);
-      res.writeHead(405, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "method_not_allowed" }));
+    if (decision.action === "deny-global-mutation") {
+      if (decision.allowedMethods.length > 0) {
+        const allowedJoined = decision.allowedMethods.join(", ");
+        console.warn(`[FRONTDOOR WARN] Global mutation not proxied through the front door (405): ${method} ${url.pathname}`);
+        res.writeHead(405, {
+          "Content-Type": "application/json",
+          "Allow": allowedJoined
+        });
+        res.end(JSON.stringify({
+          error: "method_not_allowed_through_frontdoor",
+          message: `${method} ${url.pathname} mutates per-process state and is not proxied through the front door. Allowed through the door: ${allowedJoined}. To mutate, call a serve port directly.`
+        }));
+      } else {
+        console.warn(`[FRONTDOOR WARN] Global mutation not proxied through the front door (403): ${method} ${url.pathname}`);
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: "forbidden_through_frontdoor",
+          message: `${method} ${url.pathname} is not proxied through the front door (mutates per-process/single-process state). Call a serve port directly.`
+        }));
+      }
       return;
     }
 

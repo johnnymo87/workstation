@@ -459,12 +459,23 @@ describe("FrontDoor Integration", () => {
   test("5. dispatch policies through the server", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    // POST /global/dispose -> 405
+    // POST /global/dispose -> 403
     const resDispose = await makeRequest("POST", "/global/dispose");
-    expect(resDispose.status).toBe(405);
+    expect(resDispose.status).toBe(403);
+    const jsonDispose = JSON.parse(resDispose.body);
+    expect(jsonDispose.error).toBe("forbidden_through_frontdoor");
+    expect(jsonDispose.message).toContain("not proxied");
     expect(warnSpy).toHaveBeenCalled();
     let calls = warnSpy.mock.calls.map(c => c[0]);
-    expect(calls.some(c => c.includes("Global side-effecting endpoint denied"))).toBe(true);
+    expect(calls.some(c => c.includes("Global mutation not proxied through the front door (403)"))).toBe(true);
+
+    // PATCH /config -> 405 (Allow: GET)
+    const resConfigPatch = await makeRequest("PATCH", "/config");
+    expect(resConfigPatch.status).toBe(405);
+    expect(resConfigPatch.headers["allow"]).toBe("GET");
+    const jsonConfigPatch = JSON.parse(resConfigPatch.body);
+    expect(jsonConfigPatch.error).toBe("method_not_allowed_through_frontdoor");
+    expect(jsonConfigPatch.message).toContain("Allowed through the door: GET");
 
     // GET /global/event -> 410
     const resEvent = await makeRequest("GET", "/global/event");
@@ -555,9 +566,12 @@ describe("FrontDoor Integration", () => {
     const countBeforeRoot = warnSpy.mock.calls.length;
     const resWebUi = await makeRequest("GET", "/");
     expect(resWebUi.status).toBe(404);
-    expect(JSON.parse(resWebUi.body)).toEqual({ error: "not_found" });
+    expect(JSON.parse(resWebUi.body)).toEqual({
+      error: "web_ui_not_served",
+      message: "The web UI is not served through the front door. Use a serve port directly."
+    });
     expect(warnSpy.mock.calls.length).toBe(countBeforeRoot + 1);
-    expect(warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0]).toContain("Unrecognized pathname");
+    expect(warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0]).toContain("Web UI endpoint is unsupported");
 
     // GET /_build/app.js -> 404
     const countBeforeAsset = warnSpy.mock.calls.length;

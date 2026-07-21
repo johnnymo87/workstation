@@ -7,7 +7,7 @@ export type RouteAction =
   | 'pty-501'
   | 'tui-501'
   | 'forward-anchor'
-  | 'deny-405'
+  | 'deny-global-mutation'
   | 'gone-410'
   | 'not-found-404';
 
@@ -22,11 +22,19 @@ function normalizePath(p: string): string {
 // Precompute structures at module load
 const exactRoutes = new Map<string, RouteClass>();
 const patternRoutes: Array<{ method: string; regex: RegExp; class: RouteClass }> = [];
+const globalRoMethodsMap = new Map<string, Set<string>>();
 
 for (const entry of ROUTE_CLASSIFICATION_TABLE) {
   const normalizedPath = normalizePath(entry.path);
   const upperMethod = entry.method.toUpperCase();
   const key = `${upperMethod} ${normalizedPath}`;
+
+  if (entry.class === 'global-ro') {
+    if (!globalRoMethodsMap.has(normalizedPath)) {
+      globalRoMethodsMap.set(normalizedPath, new Set<string>());
+    }
+    globalRoMethodsMap.get(normalizedPath)!.add(upperMethod);
+  }
 
   const isPattern = normalizedPath.includes('{') || normalizedPath.includes('*');
 
@@ -52,6 +60,11 @@ for (const entry of ROUTE_CLASSIFICATION_TABLE) {
     }
     exactRoutes.set(key, entry.class);
   }
+}
+
+const globalRoMethodsSorted = new Map<string, string[]>();
+for (const [path, set] of globalRoMethodsMap.entries()) {
+  globalRoMethodsSorted.set(path, Array.from(set).sort());
 }
 
 export function classify(method: string, pathname: string): RouteClass {
@@ -89,6 +102,7 @@ export function dispatch(method: string, pathname: string): {
   class: RouteClass;
   action: RouteAction;
   recognized: boolean;
+  allowedMethods: string[];
 } {
   const cls = classify(method, pathname);
   let action: RouteAction = 'not-found-404';
@@ -114,7 +128,7 @@ export function dispatch(method: string, pathname: string): {
       action = 'forward-anchor';
       break;
     case 'global-sideeffect':
-      action = 'deny-405';
+      action = 'deny-global-mutation';
       break;
     case 'global-event':
       action = 'gone-410';
@@ -125,9 +139,15 @@ export function dispatch(method: string, pathname: string): {
       break;
   }
 
+  const normPath = normalizePath(pathname);
+  const allowedMethods = action === 'deny-global-mutation'
+    ? (globalRoMethodsSorted.get(normPath) || [])
+    : [];
+
   return {
     class: cls,
     action,
     recognized: cls !== 'unrecognized',
+    allowedMethods,
   };
 }

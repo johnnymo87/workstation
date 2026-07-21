@@ -5,7 +5,8 @@
  * - Snapshot routes (from http://127.0.0.1:4096/doc): 188
  * - Exclusions: 0 (The web-ui served at "/" and its static assets are not declared in `/doc`, so they are excluded from the snapshot)
  * - Patch-only routes: 3 (GET /event?session_ids= and GET /api/event?session_ids=, source: event-session-scope.patch; plus GET /doc, OpenAPI spec added manually (FABLE-W6))
- * - Total table entries: 191
+ * - Manually added: GET /, web UI added manually, undeclared in /doc
+ * - Total table entries: 192
  *
  * --- DUAL SURFACE ---
  * This API exposes a dual surface: a bare surface (e.g. /session/...) and its `/api/*` mirror.
@@ -19,11 +20,9 @@
 /*
  * NEW-D Scope Statement (see the `web-ui` member below):
  * The web UI (`packages/app`, a PTY client served at `/`) is UNSUPPORTED through the front door;
- * `/` + static assets are undeclared in `/doc` and intentionally fall through to `unrecognized` -> 404-loud
+ * `/` explicitly classifies as `web-ui` (rather than falling through to `unrecognized`), while
+ * static assets remain `unrecognized` -> 404-loud
  * (and PTY -> 501, per Task 5.1). Use direct serve ports to access the web UI.
- * The `web-ui` RouteClass is retained defensively to document intent and preserve the
- * loud-404 invariant in the dispatcher (warn on `web-ui` matching), even though no ROUTE_CLASSIFICATION_TABLE
- * entry currently maps to it.
  */
 export type RouteClass =
   | "session-path"
@@ -46,6 +45,7 @@ export interface RouteEntry {
 }
 
 export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
+  { method: "GET", path: "/", class: "web-ui" },
   { method: "GET", path: "/agent", class: "global-ro" },
   { method: "GET", path: "/api/agent", class: "global-ro" },
   { method: "GET", path: "/api/command", class: "global-ro" },
