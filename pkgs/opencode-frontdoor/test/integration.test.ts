@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, expect, test, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import http from "node:http";
 import zlib from "node:zlib";
 import type { AddressInfo } from "node:net";
@@ -462,9 +462,52 @@ describe("FrontDoor Integration", () => {
     const resEvent = await makeRequest("GET", "/global/event");
     expect(resEvent.status).toBe(410);
 
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
     // GET /pty -> 501
     const resPty = await makeRequest("GET", "/pty");
     expect(resPty.status).toBe(501);
+    const jsonPty = JSON.parse(resPty.body);
+    expect(jsonPty).toEqual({
+      error: "not_implemented",
+      message: "PTY out of scope v1"
+    });
+    expect(warnSpy).toHaveBeenCalled();
+    const lastWarnArg = warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0];
+    expect(lastWarnArg).toContain("PTY request denied (out of scope v1)");
+    warnSpy.mockRestore();
+
+    // POST /pty -> 501
+    const resPtyPost = await makeRequest("POST", "/pty");
+    expect(resPtyPost.status).toBe(501);
+    expect(JSON.parse(resPtyPost.body)).toEqual({
+      error: "not_implemented",
+      message: "PTY out of scope v1"
+    });
+
+    // GET /pty/pty_x/connect -> 501
+    const resPtyConnect = await makeRequest("GET", "/pty/pty_x/connect");
+    expect(resPtyConnect.status).toBe(501);
+    expect(JSON.parse(resPtyConnect.body)).toEqual({
+      error: "not_implemented",
+      message: "PTY out of scope v1"
+    });
+
+    // DELETE /api/pty/pty_x -> 501
+    const resPtyDelete = await makeRequest("DELETE", "/api/pty/pty_x");
+    expect(resPtyDelete.status).toBe(501);
+    expect(JSON.parse(resPtyDelete.body)).toEqual({
+      error: "not_implemented",
+      message: "PTY out of scope v1"
+    });
+
+    // GET /pty/shells -> 501
+    const resPtyShells = await makeRequest("GET", "/pty/shells");
+    expect(resPtyShells.status).toBe(501);
+    expect(JSON.parse(resPtyShells.body)).toEqual({
+      error: "not_implemented",
+      message: "PTY out of scope v1"
+    });
 
     // GET /tui/control/next -> 501
     const resTuiGet = await makeRequest("GET", "/tui/control/next");

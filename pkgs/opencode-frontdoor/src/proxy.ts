@@ -483,7 +483,16 @@ export async function handleRequest(
       return;
     }
 
+    // PTY is out of scope for v1: Phase 0.5 exhaustively grepped opencode-patched and
+    // found NO deployed client constructs /pty/*. So there is no WebSocket proxying /
+    // raw tunnel in v1.
+    // Future path if a client ever adds PTY: revisit with a Node raw duplex tunnel
+    // (Node 22 is present and its socket-hijack path is verified). NOTE bun 1.3.3's
+    // socket hijack silently fails — hence Node was retained as the runtime.
+    // /pty/{ptyID}/connect is a WS upgrade keyed by ptyID (not a session id), with
+    // state in-process on the creating serve, so it would also need a ptyID->serve pin.
     if (decision.action === "pty-501") {
+      console.warn(`[FRONTDOOR WARN] PTY request denied (out of scope v1): ${method} ${url.pathname}`);
       res.writeHead(501, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not_implemented", message: "PTY out of scope v1" }));
       return;
