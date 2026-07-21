@@ -424,24 +424,65 @@ fork-to-degraded-target (shared-db reads ⇒ no staleness; nonexistent parent �
 
 ---
 
-## Phase 5 — /global/* + PTY policies  (**collapsed — PTY unused, Phase-0.5**)
+## Phase 5 — /global/* + PTY policies  (**collapsed — PTY unused, Phase-0.5**)  **[DONE]**
 
-- **5.1** PTY → **501 + log, out-of-scope for v1** (Phase 0.5 proved the deployed
-  TUI/clients never construct `/pty/*`). **No WebSocket proxying, no raw tunnel,
-  no bun-vs-node WS concern in v1.** Documented future: if a client ever adds
-  PTY, revisit with a node raw duplex tunnel (node verified; bun 1.3.3's hijack
-  silently fails — audit findings §0.5/§0.7). TDD the 501 branch. Commit
-  `feat(frontdoor): PTY 501 (out of scope v1)`.
-- **5.2** `/global/dispose|upgrade`→deny(405)+log; **`/global/event`→fail-loud
-  `410` (NEW-C)** — pass-to-anchor is the yl00 missed-events shape (sessions on
-  serve-1..3 emit only on their own buses) and there are **zero** non-TUI
-  `/global/event` consumers (the TUI streams it directly + self-resolves around
-  the door until Phase 8), so anchor-forwarding is dead code that can only
-  mis-serve a straggler plausibly; fail loud instead. **Web-UI scope statement
-  (NEW-D):** the web UI (`packages/app`, a PTY client served at `/`) is
-  **unsupported through the front door** — `/` + static assets → 404-loud, PTY →
-  501; use direct serve ports for the web UI. unrecognized→404-loud. Commit
-  `feat(frontdoor): global + unrecognized policies`.
+**Status:** Complete via SDD (implement → spec-review → code-review → fixup per
+task) **plus a fable adversarial pass** (findings folded below). Commits on
+`serve-reverse-proxy`: 5.1 `6fc9554` + review fixup `dfe29f7`, 5.2 `f56a3d4` +
+review fixup `31a44b3`. 235 tests green, typecheck clean. **Most of Phase 5's
+machinery was front-loaded during Phase 1** — the 191-row classification table
+(`routes.classification.ts`), the dispatch map (`dispatch.ts`: `pty`→`pty-501`,
+`tui`→`tui-501`, `global-sideeffect`→`deny-405`, `global-event`→`gone-410`,
+`web-ui`/`unrecognized`→`not-found-404`), the proxy action branches, and their
+dispatch/integration tests already existed and passed. The FABLE-S4 `/tui/*`
+reclassification (Phase 3) was also already landed (`tui` class → `tui-501`).
+Phase 5's actual delta was: **make the policies fail-loud** (add the missing
+`console.warn` shakeout signals) + document PTY/web-ui scope + widen tests.
+
+- **5.1**: added the PTY `console.warn` (`[FRONTDOOR WARN] PTY request denied
+  (out of scope v1): …`, parity with the existing `tui-501`/unrecognized warns)
+  + a code comment recording the out-of-scope rationale and future path (Node raw
+  duplex tunnel; Node 22 verified; bun 1.3.3 hijack silently fails; `/pty/{id}/
+  connect` is a WS upgrade keyed by `ptyID` needing a `ptyID→serve` pin).
+  Strengthened integration tests to assert the 501 body across `/pty/*` +
+  `/api/pty/*` shapes and that a warn fires. **No WS proxying / raw tunnel in v1.**
+  Review fixup (`dfe29f7`): keep the warn-spy over the whole dispatch-policy test
+  so later hits don't spam stderr.
+- **5.2**: added fail-loud `console.warn` to `deny-405` (denied mutating-global:
+  "…per-process state; call a serve directly…") and `gone-410` (`/global/event`
+  "…firehose is gone from the front-door contract…"); extended `not-found-404` to
+  warn for the `web-ui` class too (keeps the loud-404 invariant honest if a `/`
+  route is ever classified web-ui). **Verified the classification table against
+  the live `/doc`** — the `/global/*`, `/pty/*`, `/api/pty/*`, `/tui/*`,
+  `/instance/*` rows match the deployed line exactly (no drift). **Web-UI scope
+  (NEW-D):** `/` + static assets are undeclared in `/doc` and intentionally fall
+  through to `unrecognized`→404-loud (PTY→501); use direct serve ports — recorded
+  as a comment above the `RouteClass` union. `/global/event`→410 (NEW-C):
+  pass-to-anchor is the yl00 missed-events shape (sessions on serve-1..3 emit only
+  on their own buses) and there are **zero** non-TUI `/global/event` consumers, so
+  anchor-forwarding is dead code that can only mis-serve — fail loud instead.
+  Review fixups (`31a44b3`): flatten the web-ui/unrecognized conditional, hoist
+  the NEW-D comment above the union, and add `vi.restoreAllMocks()` to the
+  integration `beforeEach` so a mid-test failure can't leak a mocked console.
+
+  > **Scope note — broad `global-sideeffect`→405.** The implemented policy denies
+  > **all** mutating global routes (not just `/global/dispose|upgrade`): `PATCH
+  > /config`+`/global/config`, `PUT/DELETE /auth/{providerID}`, `POST /mcp/*`,
+  > `/sync/*`, `POST /log`, `POST /permission|question/{id}/reply` (the *bare*,
+  > non-session-scoped ones), most `/experimental/*` mutations, `/vcs/apply`,
+  > `POST /project/git/init`, `/instance/dispose`, etc. This is **intentional and
+  > aligned with design §6** ("fail-loud, never silent forward"): this config/auth/
+  > mcp state is loaded **per-process**, so forwarding a mutation to only the
+  > anchor would split-brain the pool. Denying 405 (client calls a serve directly
+  > for these rare ops) is the safe v1 choice. It was decided/tested/reviewed in
+  > Phase 1 (`dispatch.test.ts` asserts `PATCH /global/config`→405) and re-affirmed
+  > here. **Open watch-item for the fable pass / shakeout:** `POST /log` is
+  > plausibly higher-volume and now warns per denied hit — if observed noisy,
+  > rate-limit/suppress that one warn (deferred: v1 shakeout deliberately wants the
+  > loudness; adding warn-suppression state now is premature).
+
+### Phase 5 fable adversarial pass — findings & disposition
+_(to be filled by the fable pass)_
 
 ---
 
