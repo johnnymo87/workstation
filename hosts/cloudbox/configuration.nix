@@ -762,7 +762,7 @@ ${serveIdCase}
   # Ported from devbox (users/dev/home.devbox.nix) to cloudbox as SYSTEM units.
   # This timer probes each pool member's /global/health (3s timeout) once a
   # minute; after 7 consecutive failures it dumps cheap root-readable forensics
-  # (/proc status/wchan/syscall + cgroup memory.*) to /tmp/opencode-serve-canary/
+  # (/proc status/wchan/syscall + cgroup memory.*) to /var/lib/opencode-serve-canary/
   # and restarts that one instance. Runs as root (system service), so no privilege elevation helper is needed.
   # Design notes in .opencode/skills/monitoring-serve-pool/SKILL.md;
   # full post-mortem in docs/investigations/2026-07-03-serve-4096-wedge.md.
@@ -770,15 +770,17 @@ ${serveIdCase}
     description = "OpenCode serve pool liveness canary (restart wedged serves)";
     serviceConfig = {
       Type = "oneshot";
+      StateDirectory = "opencode-serve-canary";
       ExecStart = "${pkgs.writeShellScript "opencode-serve-canary" ''
         set -u
         # System-service PATH is minimal — be explicit.
         # gawk: awk is NOT in coreutils (first live wedge lost utime/stime silently).
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk ]}
-        STATE=/tmp/opencode-serve-canary
-        # Note: /tmp/opencode-serve-canary is root-owned. It's world-readable
-        # for human inspection via root umask 022; dev can read forensics but not delete them.
-        mkdir -p "$STATE"
+        STATE=/var/lib/opencode-serve-canary
+        # Note: /var/lib/opencode-serve-canary is root-owned via StateDirectory
+        # (eliminating any /tmp symlink/TOCTOU hazard) and persists across reboots.
+        # It's world-readable for human inspection via root umask 022; dev can
+        # read forensics but not delete them.
         # workstation-g3iy: 7 (was 2) — the post-boot catalog/credential burn
         # runs ~5-6 min and COMPLETES, leaving a warm stable instance. A
         # threshold-2 (~2-3 min) restart kills the instance mid-burn, the TUI
