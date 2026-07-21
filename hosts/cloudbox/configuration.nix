@@ -997,6 +997,9 @@ ${serveIdCase}
         "FRONTDOOR_PORT=4700"
         "PIGEON_DAEMON_URL=http://127.0.0.1:4731"
         "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
+        # Builtins-only app (no framework reads NODE_ENV) — set for convention/
+        # consistency with pigeon-daemon and to future-proof any added dependency.
+        "NODE_ENV=production"
       ];
       ExecStart = "${opencode-frontdoor}/bin/opencode-frontdoor";
       Restart = "always";
@@ -1009,11 +1012,10 @@ ${serveIdCase}
       MemoryMax = "1500M";
 
       # Bounds shutdown: the app has no graceful-drain SIGTERM handler today, so
-      # SIGTERM terminates promptly. This bound acts as a safety backstop in case
-      # any future graceful handler hangs indefinitely on open SSE connections.
-      # The app has no graceful-drain SIGTERM handler today, so SIGTERM terminates
-      # promptly and in-flight SSE drops (clients reconnect).
-      TimeoutStopSec = 15;
+      # SIGTERM terminates promptly and in-flight SSE connections drop (clients
+      # reconnect). This bound is a safety backstop against any future graceful
+      # handler hanging indefinitely on never-ending SSE streams.
+      TimeoutStopSec = "15s";
 
       # Raise file descriptor limit: the door doubles connection count (one client
       # socket + one upstream socket per proxied request). With ~900 concurrent
