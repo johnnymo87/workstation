@@ -331,4 +331,111 @@ describe('Route Dispatcher', () => {
       allowedMethods: ['GET'],
     });
   });
+
+  describe('deny-global-mutation contract derivation (fable F1)', () => {
+    /**
+     * Note that of the six twins, five advertise a genuinely shared-state GET read,
+     * but POST /mcp's GET /mcp twin reads PER-PROCESS state (annotated FABLE-P5-F2
+     * in routes.classification.ts) — so its Allow: GET is known-misleading and is
+     * tracked as a Phase-7 item (F3).
+     */
+    function normalizePath(p: string): string {
+      let path = p.split('?')[0];
+      if (path.endsWith('/') && path !== '/') {
+        path = path.slice(0, -1);
+      }
+      return path;
+    }
+
+    function compilePathTemplate(normalizedPath: string): RegExp {
+      let escaped = normalizedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      escaped = escaped.replace(/\\\{.*?\\\}/g, '[^/]+');
+      escaped = escaped.replace(/\\\*/g, '.*');
+      return new RegExp(`^${escaped}$`);
+    }
+
+    test('validates and asserts 405-twin paths contract', () => {
+      // 1. Build, from the table, the set of normalized paths that have at least one global-ro entry
+      const roMap = new Map<string, string[]>();
+      const roTemp = new Map<string, Set<string>>();
+
+      for (const entry of ROUTE_CLASSIFICATION_TABLE) {
+        if (entry.class === 'global-ro') {
+          const norm = normalizePath(entry.path);
+          if (!roTemp.has(norm)) {
+            roTemp.set(norm, new Set());
+          }
+          roTemp.get(norm)!.add(entry.method.toUpperCase());
+        }
+      }
+
+      for (const [norm, methods] of roTemp.entries()) {
+        roMap.set(norm, Array.from(methods).sort());
+      }
+
+      // Check if a path has a twin in global-ro Map
+      function getTwinMethods(normalizedPath: string): string[] | null {
+        if (roMap.has(normalizedPath)) {
+          return roMap.get(normalizedPath)!;
+        }
+        for (const [roPath, methods] of roMap.entries()) {
+          if (roPath.includes('{') || roPath.includes('*')) {
+            const regex = compilePathTemplate(roPath);
+            if (regex.test(normalizedPath)) {
+              return methods;
+            }
+          }
+        }
+        return null;
+      }
+
+      // 3. Add an explicit assertion that the set of 405-twin paths computed equals EXACTLY the documented six-path set
+      const expectedSixPaths = [
+        '/config',
+        '/global/config',
+        '/mcp',
+        '/experimental/workspace',
+        '/experimental/worktree',
+        '/api/integration/attempt/{attemptID}'
+      ];
+
+      const computedTwinPaths = new Set<string>();
+      for (const entry of ROUTE_CLASSIFICATION_TABLE) {
+        if (entry.class === 'global-sideeffect') {
+          const normPath = normalizePath(entry.path);
+          const twin = getTwinMethods(normPath);
+          if (twin) {
+            computedTwinPaths.add(normPath);
+          }
+        }
+      }
+
+      expect(Array.from(computedTwinPaths).sort()).toEqual(expectedSixPaths.sort());
+
+      // 2. For EVERY global-sideeffect row in the table, call dispatch(method, concretePath) and assert allowedMethods contract
+      for (const entry of ROUTE_CLASSIFICATION_TABLE) {
+        if (entry.class === 'global-sideeffect') {
+          const templatePath = normalizePath(entry.path);
+          
+          // Substitute a concrete id for {param} segments and wildcards
+          let concretePath = templatePath
+            .replace(/\{[^}]+\}/g, 'x')
+            .replace(/\*/g, 'dummy_subpath');
+
+          const twinMethods = getTwinMethods(concretePath);
+          const result = dispatch(entry.method, concretePath);
+
+          expect(result.class).toBe('global-sideeffect');
+          expect(result.action).toBe('deny-global-mutation');
+
+          if (twinMethods) {
+            expect(result.allowedMethods).toEqual(twinMethods);
+            expect(result.allowedMethods.length).toBeGreaterThan(0);
+          } else {
+            expect(result.allowedMethods).toEqual([]);
+          }
+        }
+      }
+    });
+  });
 });
