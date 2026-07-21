@@ -470,24 +470,77 @@ Phase 5's actual delta was: **make the policies fail-loud** (add the missing
   > /config`+`/global/config`, `PUT/DELETE /auth/{providerID}`, `POST /mcp/*`,
   > `/sync/*`, `POST /log`, `POST /permission|question/{id}/reply` (the *bare*,
   > non-session-scoped ones), most `/experimental/*` mutations, `/vcs/apply`,
-  > `POST /project/git/init`, `/instance/dispose`, etc. This is **intentional and
-  > aligned with design §6** ("fail-loud, never silent forward"): this config/auth/
-  > mcp state is loaded **per-process**, so forwarding a mutation to only the
-  > anchor would split-brain the pool. Denying 405 (client calls a serve directly
-  > for these rare ops) is the safe v1 choice. It was decided/tested/reviewed in
-  > Phase 1 (`dispatch.test.ts` asserts `PATCH /global/config`→405) and re-affirmed
-  > here. **Open watch-item for the fable pass / shakeout:** `POST /log` is
-  > plausibly higher-volume and now warns per denied hit — if observed noisy,
-  > rate-limit/suppress that one warn (deferred: v1 shakeout deliberately wants the
-  > loudness; adding warn-suppression state now is premature).
+  > `POST /project/git/init`, `/instance/dispose`, etc. Denying 405 (fail-loud,
+  > never silent-forward) is the safe v1 choice and the dispatch **code is correct
+  > for everything that reaches it today** (Phase-5 fable verdict). It was
+  > decided/tested/reviewed in Phase 1 (`dispatch.test.ts` asserts
+  > `PATCH /global/config`→405) and re-affirmed here.
+  > **CORRECTIONS (Phase-5 fable):** two justifications originally written here were
+  > wrong and are retracted: (1) the "per-process state ⇒ split-brain" reason is
+  > **false for the shared-storage writes** — `PUT/DELETE /auth/{providerID}` writes
+  > the **shared** `auth.json`, `POST /log` just writes the receiving process's log,
+  > `POST /vcs/apply` / `POST /project/git/init` mutate the **shared** on-disk
+  > worktree; for these, forward-anchor would be semantically identical to "call a
+  > serve directly," so denying them is a **safe-but-gratuitous** regression (kept
+  > denied in v1 for uniformity; the real per-process cases are mcp/config-reload/
+  > permission/question). (2) "client calls a serve directly for these **rare** ops"
+  > is **false**: the deployed TUI hits bare `POST /permission/{requestID}/reply`
+  > **interactively, mid-turn** (auto-approve fires on every permission), and a
+  > door-attached TUI has **no** per-route escape hatch — see **NEW-P5-F1** (Phase 8
+  > must migrate the TUI to the session-scoped reply routes **before** the Phase 9
+  > `OPENCODE_URL` repoint, or interactive turns wedge). `POST /log` warn-volume is
+  > a **non-issue** (fable verified ≈0 through-door callers; the TUI never calls
+  > `app.log`).
 
 ### Phase 5 fable adversarial pass — findings & disposition
-_(to be filled by the fable pass)_
+Fable verdict: **the dispatch code is safe to deploy — nothing deployed reaches a
+denied route through the door today** (attach bypasses the door until Phase 8).
+The defects are in the *justifying docs* and in *latent* traps for later phases.
+Verified-sound by fable: table completeness is **exact** vs live `/doc` (0 real
+routes fall to `unrecognized`); PTY→501 still true on 1.17.13 (TUI builds no
+`/pty/*`); `/global/event`→410 has no through-door consumer; the
+lifecycle-events-pass-the-`session_ids`-filter claim holds; dispatcher
+exact-before-pattern + HEAD→GET mechanics are correct; no GET-with-side-effect
+snuck into `global-ro`; policy warns log only `method`+`pathname` (no query/sids,
+no body — leak-clean).
+- **F1 (HIGH) — folded (docs).** "rare ops / call directly" is false for the TUI;
+  405 mechanism is right but the client must migrate. Retracted the false text
+  above; added **NEW-P5-F1** to Phase 8 (+ its gate) and a TUI-REST-surface row to
+  the Phase-9.0 audit gating 9.1.
+- **F2 (MED-HIGH) — folded (code annotations + design §6).** Inverse hazard:
+  `global-ro`→anchor rows that read **per-process** memory (`/session/status`,
+  `/permission`, `/question`, `/api/{permission,question}/request`, `/mcp`) return
+  the anchor's view only. Latent (no through-door consumer today). Annotated those
+  rows (`note: FABLE-P5-F2` in `routes.classification.ts`) and corrected design §6's
+  blanket "shared `opencode.db`" claim. Revisit (deny or per-owner fan-in) before
+  Phase 7/9 client reads.
+- **F3 (MED) — DEFERRED to Phase 6 (pre-deploy).** `deny-405` omits the RFC-9110
+  `Allow` header and its body (`method_not_allowed`) misleads shakeout debugging
+  (the real cause is "policy-forbidden through the proxy," not a wrong verb). Not
+  changed at Phase 5's tail because it's a deliberate contract choice (405 + `Allow:
+  GET` where a RO twin forwards, vs 403 + policy body, vs 501-like the PTY/TUI
+  denials) best made with the Phase-6 through-door probe/gate work; nothing hits it
+  through the door today. **Action in 6.x:** pick the contract, add `Allow` where a
+  forwarded GET twin exists, and put the real reason in the body.
+- **F4 (LOW-MED) — DEFERRED to Phase 6 (DX).** The serve *does* serve a web UI at
+  `GET /` (live: 200 `text/html`); through the door a browser gets a bare
+  `{"error":"not_found"}`. NEW-D documents the unsupported scope, but the `GET /`
+  404 body should say "web UI is not served through the front door; use a serve
+  port" (one string; optionally classify `/` as `web-ui` to use that class + a
+  distinct body). Fold with the F3 body work in 6.x.
 
 ---
 
 ## Phase 6 — Nix packaging + **system** units + canary (cloudbox)
 
+- **6.0** **deny-response polish (Phase-5 fable F3+F4), TDD.** Before the through-
+  door shakeout (6.5): (a) `deny-405` — decide the contract and make it honest: add
+  an RFC-9110 `Allow` header (`GET` where a forwarded RO twin exists) and put the
+  real reason in the body (policy-forbidden through the front door), or switch to
+  403/501 to match the PTY/TUI denial semantics — pick one and update the contract
+  tests. (b) `not-found-404` for `GET /` — return a body that says the web UI isn't
+  served through the front door (use a serve port), optionally by classifying `/` as
+  `web-ui`. Commit `feat(frontdoor): honest deny responses (405 Allow/body, web-ui /)`.
 - **6.1** dependency-free node Nix package (`pkgs/opencode-frontdoor/default.nix`:
   copy sources + wrap `node`/`tsx`; `test.sh` runs vitest outside sandbox).
   Commit.
@@ -560,9 +613,31 @@ reconnect** (herd). Rollback = hold to previous patched release. Coordinate with
   the only standing guard is `apply.sh` + the `opencodePatchedHold` pin. Add the
   `/event?session_ids=` tripwire here as genuine new work; "event contract
   LOCKED" means *locked on the current pin*.
+- **NEW-P5-F1 (TUI mutating-REST surface — HARD prereq of Phase 9 repoint):**
+  Phase-5 fable found the deployed 1.17.13 TUI drives its **entire** mutating-global
+  surface through its single attach-URL SDK client (`packages/tui/src/context/
+  sdk.tsx`), including **interactive, mid-turn** calls that the front door denies
+  405 (`global-sideeffect`): the **bare** `POST /permission/{requestID}/reply`
+  (auto-approve replies to *every* `permission.asked` via this bare route —
+  `context/sync.tsx`), bare `POST /question/{requestID}/reply|reject`,
+  `POST /instance/dispose` (auth-reload flow), `PUT /auth/{providerID}`,
+  `POST /mcp/{name}/connect|disconnect`, oauth authorize/callback,
+  `experimental.workspace.*`, `POST /experimental/control-plane/move-session`.
+  This is harmless **only** while attach bypasses the door; the moment a TUI is
+  handed the front-door URL (Phase 9 `OPENCODE_URL` repoint), **permission approval
+  breaks** (turn wedged on an unanswerable prompt — the design-§8 "user can't
+  control a running turn" failure). The 405 at the door is the correct *mechanism*
+  (the door cannot route the bare replies: no sid in path, `requestID→serve`
+  unknown to pigeon, pending state in-process), so the fix is **client-side**:
+  migrate the TUI to the **session-scoped** reply routes, which already exist and
+  are `session-path`-routed — `POST /api/session/{sid}/permission/{requestID}/reply`
+  and `POST /session/{sid}/permissions/{permissionID}` — and the TUI has the
+  `sessionID` at every call site (`context/sync.tsx`). Do this migration in this
+  Phase-8 opencode-patched epic (same repo/release as the event move).
 
 **Gate:** a migrated session's attach TUI survives idle migration hands-off,
-**with no reconnect-delay inflation across repeated migrations** (NEW-A).
+**with no reconnect-delay inflation across repeated migrations** (NEW-A), **and
+answers a mid-turn permission prompt through the front-door URL** (NEW-P5-F1).
 
 ---
 
@@ -578,6 +653,11 @@ reconnect** (herd). Rollback = hold to previous patched release. Coordinate with
   they get front doors); doorless hosts keep the raw anchor. reset-workspace's
   `pool_health_urls_from_wants` fallback (`reset-workspace/default.nix:117`) stays
   raw anchor (infra exemption). Commit the audit.
+  - **TUI REST-surface disposition (NEW-P5-F1) is a named row in this audit:**
+    confirm the Phase-8 TUI migration off the door-denied bare mutating-global
+    routes (esp. permission/question replies) actually shipped in the pinned
+    opencode-patched release **before** repointing `OPENCODE_URL` on any host —
+    otherwise repoint wedges interactive turns. Gate 9.1 on it.
 - **9.1** repoint `OPENCODE_URL`→`FRONTDOOR_URL` **per the 9.0 table** (cloudbox
   first). Keep `OPENCODE_ANCHOR_URL` for degrade/infra. Commit.
 - **9.2** internalize pigeon `/route`/`/place` — pigeon is already localhost-bound
