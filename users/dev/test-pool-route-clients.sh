@@ -74,4 +74,13 @@ want_grep "lgtm-sessions queries pigeon /route"            '/route?session_id=$s
 want_grep "lgtm-sessions attach hint uses resolved serve"  'opencode attach $serve_url --session $sid' "$hb"
 deny_grep "lgtm-sessions drops the hardwired generic hint" 'opencode attach $OPENCODE_URL --session <ID>' "$hb"
 
+# front-door cutover (Phase 7.5): the health check + session LIST are data-plane
+# reads and must route through the front door; the attach hint stays direct
+# (via /route) so OPENCODE_URL survives only as the /route fallback.
+want_grep "lgtm-sessions defines FRONTDOOR_URL"            'FRONTDOOR_URL="'                     "$hb"
+want_grep "lgtm-sessions health-checks the front door"     '"$FRONTDOOR_URL/global/health"'      "$hb"
+want_grep "lgtm-sessions lists sessions via the front door" '"$FRONTDOOR_URL/session"'           "$hb"
+deny_grep "lgtm-sessions no longer health-checks the anchor" '"$OPENCODE_URL/global/health"'     "$hb"
+deny_grep "lgtm-sessions no longer lists via the anchor"   '"$OPENCODE_URL/session"'             "$hb"
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }

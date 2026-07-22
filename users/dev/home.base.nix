@@ -1080,6 +1080,12 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
       set -euo pipefail
 
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+      # front-door cutover (Phase 7.5): the health check + session LIST are
+      # data-plane reads and route through the opaque front door. The per-session
+      # `opencode attach` HINT below stays direct-to-owner via GET /route (the
+      # interactive TUI can't ride the door until Phase 8/9), so OPENCODE_URL is
+      # kept as the /route fallback (raw anchor).
+      FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
       # mn9r M7: pigeon discovery endpoint. In a K-serve pool a live session's
       # event stream + TUI are hosted by the serve that OWNS it, so the
       # `opencode attach` hint must point at that serve, resolved per-session
@@ -1108,9 +1114,9 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
       }
 
       # Health check. Session metadata (below) comes from the shared opencode.db,
-      # so listing works against any serve; serve-0 is the canonical query node.
-      if ! "$CURL" -sf -m 5 "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
-        echo "OpenCode server not reachable at $OPENCODE_URL" >&2
+      # so listing works through the front door (which forwards to a pool serve).
+      if ! "$CURL" -sf -m 5 "$FRONTDOOR_URL/global/health" >/dev/null 2>&1; then
+        echo "OpenCode front door not reachable at $FRONTDOOR_URL" >&2
         exit 1
       fi
 
@@ -1160,7 +1166,7 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
       now_ms=$(( $(date +%s) * 1000 ))
       tsv=""
       for root in "''${project_roots[@]}"; do
-        body="$( "$CURL" -sf -m 10 -H "x-opencode-directory: $root" "$OPENCODE_URL/session" || echo "[]" )"
+        body="$( "$CURL" -sf -m 10 -H "x-opencode-directory: $root" "$FRONTDOOR_URL/session" || echo "[]" )"
         prefix="$root/.worktrees/pr-"
         rows="$(
           printf '%s' "$body" | "$JQ" -r --arg prefix "$prefix" --arg id "''${repo_id[$root]}" '
