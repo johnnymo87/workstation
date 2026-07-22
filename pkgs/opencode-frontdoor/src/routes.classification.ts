@@ -35,6 +35,7 @@ export type RouteClass =
   | "global-event"
   | "web-ui"
   | "tui"
+  | "per-process-ro"
   | "unrecognized";
 
 export interface RouteEntry {
@@ -156,7 +157,7 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "POST", path: "/instance/dispose", class: "global-sideeffect" },
   { method: "POST", path: "/log", class: "global-sideeffect" },
   { method: "GET", path: "/lsp", class: "global-ro" },
-  { method: "GET", path: "/mcp", class: "global-ro", note: "FABLE-P5-F2: reports PER-PROCESS MCP connection status; door->anchor returns only the anchor's connections. Latent; revisit before Phase 7/9." },
+  { method: "GET", path: "/mcp", class: "per-process-ro", note: "F3: reports PER-PROCESS MCP connection status. Unsupported/denied (501) through the front door." },
   { method: "POST", path: "/mcp", class: "global-sideeffect" },
   { method: "DELETE", path: "/mcp/{name}/auth", class: "global-sideeffect" },
   { method: "POST", path: "/mcp/{name}/auth", class: "global-sideeffect" },

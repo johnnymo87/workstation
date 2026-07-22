@@ -589,6 +589,22 @@ describe("FrontDoor Integration", () => {
     expect(warnSpy.mock.calls.length).toBe(countBeforeAsset + 1);
     expect(warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0]).toContain("Unrecognized pathname");
 
+    // GET /mcp -> 501 (per-process MCP status is denied)
+    const resMcpGet = await makeRequest("GET", "/mcp");
+    expect(resMcpGet.status).toBe(501);
+    expect(JSON.parse(resMcpGet.body)).toEqual({
+      error: "not_implemented",
+      message: "MCP connection status is per-process; not available through the front door"
+    });
+
+    // POST /mcp -> 403 (since GET /mcp is no longer a global-ro twin)
+    const resMcpPost = await makeRequest("POST", "/mcp");
+    expect(resMcpPost.status).toBe(403);
+    const jsonMcpPost = JSON.parse(resMcpPost.body);
+    expect(jsonMcpPost.error).toBe("forbidden_through_frontdoor");
+    expect(jsonMcpPost.message).toContain("POST /mcp is not proxied through the front door");
+    expect(resMcpPost.headers["allow"]).toBeUndefined();
+
     warnSpy.mockRestore();
   });
 

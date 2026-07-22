@@ -145,7 +145,7 @@ describe('Route Dispatcher', () => {
       class: 'global-sideeffect',
       action: 'deny-global-mutation',
       recognized: true,
-      allowedMethods: ['GET'],
+      allowedMethods: [],
     });
   });
 
@@ -196,6 +196,17 @@ describe('Route Dispatcher', () => {
     expect(dispatch('POST', '/tui/control/response')).toEqual({
       class: 'tui',
       action: 'tui-501',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  // per-process-ro:
+  test('GET /mcp -> per-process-ro/deny-per-process-501', () => {
+    expect(classify('GET', '/mcp')).toBe('per-process-ro');
+    expect(dispatch('GET', '/mcp')).toEqual({
+      class: 'per-process-ro',
+      action: 'deny-per-process-501',
       recognized: true,
       allowedMethods: [],
     });
@@ -334,10 +345,9 @@ describe('Route Dispatcher', () => {
 
   describe('deny-global-mutation contract derivation (fable F1)', () => {
     /**
-     * Note that of the six twins, five advertise a genuinely shared-state GET read,
-     * but POST /mcp's GET /mcp twin reads PER-PROCESS state (annotated FABLE-P5-F2
-     * in routes.classification.ts) — so its Allow: GET is known-misleading and is
-     * tracked as a Phase-7 item (F3).
+     * Note that the door's 405-Allow twin count was reduced from six to five (Phase 7 F3):
+     * GET /mcp was reclassified to per-process-ro (returning 501), so POST /mcp now returns 403.
+     * The remaining five twins advertise a genuinely shared-state GET read.
      */
     function normalizePath(p: string): string {
       let path = p.split('?')[0];
@@ -389,11 +399,10 @@ describe('Route Dispatcher', () => {
         return null;
       }
 
-      // 3. Add an explicit assertion that the set of 405-twin paths computed equals EXACTLY the documented six-path set
-      const expectedSixPaths = [
+      // 3. Add an explicit assertion that the set of 405-twin paths computed equals EXACTLY the documented five-path set
+      const expectedFivePaths = [
         '/config',
         '/global/config',
-        '/mcp',
         '/experimental/workspace',
         '/experimental/worktree',
         '/api/integration/attempt/{attemptID}'
@@ -410,7 +419,7 @@ describe('Route Dispatcher', () => {
         }
       }
 
-      expect(Array.from(computedTwinPaths).sort()).toEqual(expectedSixPaths.sort());
+      expect(Array.from(computedTwinPaths).sort()).toEqual(expectedFivePaths.sort());
 
       // 2. For EVERY global-sideeffect row in the table, call dispatch(method, concretePath) and assert allowedMethods contract
       for (const entry of ROUTE_CLASSIFICATION_TABLE) {

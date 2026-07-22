@@ -8,6 +8,7 @@ export type RouteAction =
   | 'tui-501'
   | 'forward-anchor'
   | 'deny-global-mutation'
+  | 'deny-per-process-501'
   | 'gone-410'
   | 'not-found-404';
 
@@ -146,6 +147,9 @@ export function dispatch(method: string, pathname: string): {
       break;
     case 'global-event':
       action = 'gone-410';
+      break;
+    case 'per-process-ro':
+      action = 'deny-per-process-501';
       break;
     case 'web-ui':
     case 'unrecognized':

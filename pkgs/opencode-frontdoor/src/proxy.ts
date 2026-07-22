@@ -532,6 +532,13 @@ export async function handleRequest(
       return;
     }
 
+    if (decision.action === "deny-per-process-501") {
+      console.warn(`[FRONTDOOR WARN] MCP connection status request denied: ${method} ${url.pathname}`);
+      res.writeHead(501, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not_implemented", message: "MCP connection status is per-process; not available through the front door" }));
+      return;
+    }
+
     if (decision.action === "forward-anchor") {
       target = ctx.config.anchorUrl;
       degraded = false;
