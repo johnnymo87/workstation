@@ -794,14 +794,30 @@ deploy checkpoint, and only with explicit user go-ahead.**
   PID + SIGSTOP-MainPID drill (`/healthz` goes dark → canary restarts → forensics capture
   the listener → restart < 5s).
 - **T1 — sticky/lease renewal + TTL invariant (HIGH-2 + LOW-2 + FABLE-S1 interim).**
-  (a) HIGH-2: on a sticky hit older than ~½ `stickyTtlMs`, fire-and-forget `POST /place`
-  to renew+re-confirm before routing (`proxy.ts`/`sticky.ts`/`place.ts`). (b) LOW-2:
-  MEASURE pigeon's real serve-lease TTL; assert/doc `stickyTtlMs ≤ lease TTL`; adjust the
-  30s default if the measurement demands it. (c) FABLE-S1 interim (in-repo): make
-  `checkSidExists` distinguish clean-404 (don't place) from timeout/5xx (place anyway,
-  logged) and probe the prospective owner, not the anchor. **DECISION NEEDED:** the
-  FABLE-S1 *preferred* fix is a cross-repo pigeon `/place` sid-validation patch
-  (`~/projects/pigeon`) — do now (coordinated) or defer behind the interim? (see below).
+  (a) HIGH-2: on a healthy sticky hit whose pigeon lease hasn't been renewed within ~½
+  `stickyTtlMs`, fire-and-forget `POST /place` to renew the lease (non-blocking; errors
+  logged) so a sticky-pinned session never outlives its lease
+  (`proxy.ts:582-593`/`sticky.ts`/`place.ts`). (b) LOW-2 **MEASURED 2026-07-22**: pigeon
+  `leaseTtlMs` = **30s** (`~/projects/pigeon` `config.ts:88`, `numOr(env.PIGEON_LEASE_TTL_MS,
+  30_000)`, NOT overridden on cloudbox) and frontdoor `stickyTtlMs` = **30s**
+  (`config.ts:44`, not overridden) → invariant `stickyTtl ≤ leaseTtl` holds at EQUALITY
+  (knife-edge); the HIGH-2 renew-at-½-TTL (15s) keeps the lease alive with margin. Doc the
+  invariant in `config.ts` (frontdoor can't read pigeon's config at runtime, so it's
+  doc+mechanism, not a cross-check). (c) FABLE-S1 interim (in-repo): fix
+  `checkSidExists` (`place.ts:169-190`) so a **timeout / network-error / 5xx** returns
+  "place anyway (logged)" instead of the current `if (!result.ok) return false` which
+  **silently skips placement** on exactly the 5-15s anchor block the finding is about
+  (fail-safe, not fail-open); only a clean **404** (serve reachable, session absent)
+  means don't-place. Probe a prospective-owner serve rather than the anchor where one is
+  available.
+  **FABLE-S1 pigeon-patch DECISION — RESOLVED (defer):** the *preferred* fix (a pigeon
+  `/place` "shared-DB existence check") does NOT hold up: pigeon's routing DB
+  (`pigeon-daemon.db`) owns only `serve_instance`/`session_assignment`/`session_lease`/
+  `routing_meta` — it has **no session-existence data** and never reads opencode's session
+  DB (a separate file, `OPENCODE_DB`). A pigeon-side check would therefore either couple
+  the control plane to opencode's session schema or do the *same* HTTP probe frontdoor
+  already does (just relocating the block). Not cheap, cross-repo, control-plane-critical
+  → **defer as a follow-up**; the in-repo interim (fail-safe) closes the acute risk now.
 - **T2 — `/mcp` misleading Allow (F3).** `GET /mcp` reads per-process state; stop
   advertising a per-process twin. Resolve the F2-row decision (deny, or per-owner
   fan-in) in `routes.classification.ts`; update the table-driven deny test.
