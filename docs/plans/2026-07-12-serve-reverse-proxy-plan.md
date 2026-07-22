@@ -599,15 +599,21 @@ no body — leak-clean).
 
   **Two live findings (deferred, non-blocking — canary carries no through-door
   traffic):**
-  - **F10 (canary forensics target the wrong PID):** the tsx wrapper runs TWO
-    processes — MainPID is the tsx *parent*, but the actual `:4700` listener is a
-    *child* node (`node --import tsx …`). Both canaries dump `/proc/$MainPID/…`, so a
-    real listener wedge captures the **parent's** stacks, not the frozen child's.
-    RECOVERY is unaffected (`systemctl restart` kills the whole cgroup). Fix (Phase 7
-    / packaging): run the door as a SINGLE process (invoke `node --import tsx main.ts`
-    rather than the `tsx` CLI so MainPID == listener), or have the canary dump every
-    PID in `cgroup.procs`. (First surfaced because SIGSTOP-ing MainPID left `/healthz`
+  - **F10 (front-door canary forensics target the wrong PID):** the tsx wrapper runs
+    TWO processes — MainPID is the tsx *parent* (`node …/tsx/bin/tsx …/main.ts`), but
+    the actual `:4700` listener is a *child* (`node --require …/tsx/dist/preflight.cjs
+    --import …/tsx/dist/loader.mjs …/main.ts`). The **front-door** canary dumps
+    `/proc/$MainPID/…` (parent), not the listener child, so a real listener wedge
+    captures the parent's (idle `epoll_wait`) stacks. RECOVERY is unaffected
+    (`systemctl restart` kills the whole cgroup). NB (delta F-D7): the *serve* canary
+    is NOT affected — its serve units `exec` the bun binary so their MainPID IS the
+    listener. (First surfaced because SIGSTOP-ing the parent MainPID left `/healthz`
     answering — the child kept serving.)
+    **Fix (Phase-7 task 0) — see the corrected recipe in the Phase-7 blocker list.**
+    ⚠️ The originally-recorded recipe `node --import tsx main.ts` is **BROKEN** under
+    this packaging (delta F-D1): `tsx` is a bare specifier with no vendored
+    `node_modules`, so it won't resolve — it would ship a green build that dies on
+    restart. The right fix is compile-to-JS (see below), which also closes F5 + F-D2.
   - Confirms fable **F2**: the initial `/event` probe DID exercise the promoting path
     but wrote no sticky entry (as predicted); the deploy created no sticky state.
 
@@ -650,13 +656,29 @@ units), `f1a4048`+`e049707` (6.4 front-door `/healthz` canary), `096752b` (6.0
 fable-F1 table-driven twin coverage). Package: **239 tests green, typecheck clean**;
 cloudbox system closure builds.
 
-### Phase-6 fable adversarial pass — findings & disposition
-Verdict: **safe to deploy as a Phase-6 canary** (nothing points at `:4700` until
-Phase 7). Confirmed sound: `allowedMethods` pattern-fallback has no false twins;
-tsx runs Node 22; no SIGTERM handler ⇒ prompt shutdown (15s is a real backstop, not
-a per-restart tax); the `/healthz` wedge signal + `--max-time 5 > 3s` coupling;
+### Phase-6 fable adversarial passes — findings & disposition
+Two passes: (1) the main pass over 6.0–6.4 + design/plan + the 6.5 gate *design*
+(F1–F9, below); (2) a **delta pass after the 6.5 live execution** covering the deploy
+itself + F10 (findings F-D1…F-D7; verdict: **6.5 canary deploy is sound as-is**, no
+gate claim falsifiable, but the F10 *fix recipe* was broken (F-D1) and a "confirmed
+sound" SIGTERM claim was wrong (F-D2) — both corrected here; F-D3/D4/D5/D6 folded into
+the Phase-7 blocker list). Combined verdict: **safe to deploy as a Phase-6 canary**
+(nothing points at `:4700` until Phase 7). Confirmed sound: `allowedMethods` pattern-fallback has no false twins;
+tsx runs Node 22; the `/healthz` wedge signal + `--max-time 5 > 3s` coupling;
 MemoryMax-only; forensics hygiene; and the sticky map genuinely cannot populate in
 Phase 6.
+- **CORRECTION (delta pass, F-D2):** the original claim here — "no SIGTERM handler ⇒
+  prompt shutdown" — is **false at the runtime level**. The *app* installs no handler,
+  but **tsx installs SIGTERM handlers in BOTH the parent CLI and the child** (verified
+  live: `SigCgt` bit 14 set on both PIDs; tsx's `preflight.cjs` binds a hidden handler
+  in the child). Healthy-path shutdown is still prompt — but because of tsx's internal
+  signal *relay*, not kernel-default disposition. Consequences: a genuinely wedged
+  *listener child* can't run its handler and recovery rides on the tsx parent's
+  ~30ms→forward→~30ms→SIGKILL fallback (a third-party bundler's minified internals are
+  load-bearing for SPOF recovery latency); and a wedged *parent* ignores SIGTERM →
+  every such restart eats the full `TimeoutStopSec=15s` SIGKILL path (never drilled).
+  The compile-to-JS / single-process F10 fix (below) restores kernel-default SIGTERM
+  and erases all of this.
 - **F1 (HIGH, folded):** the generic twin mechanism yields **six** 405 paths, not the
   3 hand-listed. Added a table-driven test (`096752b`) that derives the expected
   405/403 set from `ROUTE_CLASSIFICATION_TABLE` and pins the six twins.
@@ -701,15 +723,51 @@ Phase 6.
   **aarch64** bun binary is ET_EXEC before trusting the eu-stack cross-wedge
   stable-address fingerprint (the claim came from x86 devbox). Re-justify front-door
   `THRESHOLD=2` for a live-traffic SPOF.
-- **F10 (canary forensics wrong PID — found live in the 6.5 gate):** the tsx wrapper
-  runs a parent (MainPID) + a child (the actual `:4700` listener), so both canaries'
-  `/proc/$MainPID/…` dumps capture the parent, not a wedged listener child. Recovery
-  is fine (cgroup restart). Fix: make the door a single process (`node --import tsx
-  main.ts` so MainPID == listener) — cleanest — or dump every `cgroup.procs` PID.
-- **F7/F9 (runbook):** `Restart=always`+`RestartSec=5` never trips systemd's
-  start-limit → a bad env/broken build crash-loops silently (no alerting layer). And
-  unit-`Environment` changes / canary-triggered restarts activate new state with no
-  gate run. Runbook: always `/healthz` (+ version marker) after every rebuild+restart.
+- **F10 + F-D1 + F-D2 + F-D3 (single-process the front door — Phase-7 TASK 0):** the
+  tsx wrapper runs a parent (MainPID) + a child (the `:4700` listener), which causes
+  three coupled problems: (F10) the front-door canary dumps the parent's `/proc`, not
+  the wedged listener child's; (F-D2) tsx installs SIGTERM handlers in both processes,
+  so a wedged parent eats the full 15s SIGKILL path and recovery latency depends on
+  tsx internals; (F-D3) a wedged *parent* while the child serves is INVISIBLE —
+  `/healthz` stays 200, the canary never fires, any dump is misleading (`State:
+  S(sleeping)`). **Recommended fix — compile to JS at build** (`tsc` emit → run
+  `node dist/main.js`): a SINGLE process (MainPID == listener → fixes F10+F-D3),
+  kernel-default SIGTERM so a wedged listener dies instantly (fixes F-D2), AND a
+  build-time typecheck (fixes **F5**) — three findings closed at once, and it drops the
+  tsx runtime dep entirely. **⚠️ Do NOT use the originally-recorded `node --import tsx
+  main.ts` recipe (F-D1): `tsx` is a bare specifier, no `node_modules` is vendored, so
+  it won't resolve — green build, dead on restart.** If tsx must be retained instead of
+  compiling, mirror the child's exact argv with ABSOLUTE store paths
+  (`node --require ${tsx}/lib/tsx/dist/preflight.cjs --import file://${tsx}/lib/tsx/dist/loader.mjs …/src/main.ts`;
+  pin a comment — `lib/tsx/dist/*` is tsx-internal layout, re-verify on a tsx bump).
+  Retest surface: rebuild → explicit restart → re-run 6.5 gate steps 3–8 + `SigCgt`
+  bit-14 CLEAR + a SIGSTOP-**MainPID** drill proving `/healthz` goes dark, the canary
+  restarts, forensics now capture the listener, and restart latency < 5s.
+- **F-D4 (Phase-7 entry gate — real turn through the door):** the 6.5 SSE check used a
+  `noReply` message (relay proven, but no LLM turn), so the sticky/drift/mid-turn
+  machinery has NEVER run live. Before any client repoints: drive ONE real cheap-model
+  turn THROUGH the door (prompt POST through door → sticky recorded → watch
+  `/event?session_ids=` through the door across >2 `driftCheckMs`=5s cycles → confirm
+  no spurious drop and NEW-H mid-turn suppression). Pairs with the HIGH-2/LOW-2 work
+  (same never-run-live machinery).
+- **F-D5 (Phase-7 — codify the gate):** `probe.sh` only prints a matrix and exits 0;
+  the "only intended deltas" + deny-contract (405 twins / 403) checks were operator
+  eyeballing. Add an `--assert` mode (or `gate.sh`) pinning expected through-door
+  statuses per class — incl. the six 405 `Allow:GET` twins + the 403 set already
+  derived table-driven in vitest (`096752b`) — exiting non-zero on any delta, so the
+  gate is a reproducible regression instrument for the F10-redeploy re-gate and cutover.
+- **F8 (canary tuning): (b)** re-derive serve-canary `THRESHOLD=7` for cloudbox (it's a
+  verbatim devbox value citing the devbox g3iy burn); **(c)** verify the cloudbox
+  **aarch64** bun binary is ET_EXEC before trusting the eu-stack cross-wedge
+  stable-address fingerprint (the claim came from x86 devbox). Re-justify front-door
+  `THRESHOLD=2` for a live-traffic SPOF.
+- **F7/F9/F-D6 (runbook + drift detection):** `Restart=always`+`RestartSec=5` never
+  trips systemd's start-limit → a bad env/broken build crash-loops silently (no
+  alerting layer). And unit-`Environment` changes / canary-triggered restarts activate
+  new state with no gate run. Runbook: always `/healthz` (+ version marker) after every
+  rebuild+restart. Cheap automation (F-D6): the canary can compare `/healthz .version`
+  against the unit's `ExecStart` store path on each healthy probe and LOG (never
+  restart) on mismatch — turning silent version drift into a journal line.
 
 ## Phase 7 — Client cutover + infra-plane exemption
 [**C1 gate:** Task 1.4 live before 7.3/7.4 drop client `/place`.]
