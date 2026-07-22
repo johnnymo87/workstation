@@ -870,6 +870,24 @@ THROUGH the door: prompt POST → sticky recorded → watch `/event?session_ids=
 points at `:4700` yet, so a regression here is contained to the canary.
 
 **Milestone 2 — client cutover (home-manager + scripts; the actual repoint), tasks 7.1–7.8 below.**
+_Progress (2026-07-22, worktree `.worktrees/frontdoor-phase7-m2` off `main` 09fcbc1):
+**ALL of Milestone 2 code DONE (7.1–7.8), build-verified, awaiting DEPLOY CHECKPOINT 2.**
+Commits: 27ba648 (7.1/7.8 config: lgtm-run→door, pigeon anchor-exemption), e8dd067
+(7.4 opencode-launch), aeb3c09 (7.3 oc-auto-attach), 483b08f (7.2 oc-pool-attach +
+/healthz idiom), 2f8aa2a (7.5 lgtm-sessions), 296a93b (7.7 reset-workspace +
+serve-distribution-probe), f08cc4b (7.8 infra grep-guard); plan clarification 351b6e9.
+7.6 verified noop (opencode-llm-audit not a URL client; Telegram path rides the migrated
+oc-auto-attach/opencode-launch; repo-wide sweep found no untouched data-plane call sites).
+Pattern applied per client: create/health/providers/prompt/session-reads → `$FRONTDOOR_URL`
+(:4700); client `POST /place` DROPPED (door places at create) → read-only `GET /route`
+only where a `serve_url` is still needed (MCP-connect + interactive attach target); those
+two stay direct-to-owner (door denies them until Phase 8/9). Build-only verify GREEN:
+`nix build .#homeConfigurations.cloudbox.activationPackage` (shellcheck passed for
+opencode-launch/oc-auto-attach/oc-pool-attach) + `nix build …cloudbox…toplevel` (reset-workspace
+shellcheck + configuration.nix valid). Client test suites: 43+54+80+49+20 = **246 assertions
+green**. NOTE the deliberate reset-workspace CAPTURE_URL tradeoff (read via door; per-member
+probe kept only as a wedge-survival gate) — flagged for the end-of-phase fable pass._
+
 Gated on Milestone-1 checkpoint PASS. Each is SDD'd the same way; the deploy vehicle is
 `home-manager switch --flake .#cloudbox` (fast, no sudo) except the `configuration.nix`
 hardcodes in 7.1 (system rebuild). **► DEPLOY CHECKPOINT 2 (user go-ahead)** after 7.1–7.8
