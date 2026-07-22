@@ -114,11 +114,24 @@ pkgs.writeShellApplication {
       [ "$code" = "200" ] || selfhost
       dir="$(printf '%s' "$body" | jq -r '.directory // empty' 2>/dev/null || true)"
       [ -n "$dir" ] || selfhost
-      # A RESUME of a session that was never placed (e.g. a pre-cutover session)
-      # resolves to $OPENCODE_URL (anchor); post-cutover every session is door-created (placed),
-      # so this is the transitional edge only.
+      # Resolve the owner read-only FIRST (fable M2 #1). A session created through
+      # the door is already placed, so GET /route resolves it. But a NEVER-placed
+      # session -- e.g. one minted via the in-TUI "new session" keybind, which goes
+      # direct to a serve until the Phase 8 TUI-on-door move -- 404s on /route and
+      # nothing else will place it; attaching it to the anchor would go stale once
+      # its first prompt promotes it elsewhere. On a /route MISS -- and only then --
+      # POST /place (the session is CONFIRMED to exist: 200 above), which cannot
+      # manufacture a phantom assignment. Degrades to $OPENCODE_URL on any failure.
       route="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
-      serve_url="$(parse_serve_url "$route" "$OPENCODE_URL")"
+      serve_url="$(parse_serve_url "$route" "")"
+      if [ -z "$serve_url" ]; then
+        place_auth=()
+        [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ] && place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
+        place="$(curl -sf --connect-timeout 2 --max-time 3 -X POST "$PIGEON_DAEMON_URL/place" \
+          -H "Content-Type: application/json" "''${place_auth[@]+"''${place_auth[@]}"}" \
+          -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
+        serve_url="$(parse_serve_url "$place" "$OPENCODE_URL")"
+      fi
       exec "$REAL_OPENCODE" attach "$serve_url" --session "$sid" --dir "$dir"
     fi
 

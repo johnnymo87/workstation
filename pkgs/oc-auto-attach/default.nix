@@ -338,14 +338,38 @@ pkgs.writeShellApplication {
 
     log "session $sid dir=$session_dir"
 
-    # Step 1.5: resolve owner read-only (workstation-iwpj). The door already
-    # placed this session at create (opencode-launch cutover), so a read-only
-    # GET /route resolves the owner for the attach TUI. Any pigeon/route
-    # hiccup degrades serve_url to $OPENCODE_URL — never worse.
+    # Step 1.5: resolve the owning serve for the attach TUI (workstation-iwpj +
+    # fable M2 #1). Try a read-only GET /route FIRST: a session created THROUGH
+    # the door (opencode-launch / oc-pool-attach cutover) is already placed at
+    # create, so no client-side placement is needed. But a session minted some
+    # OTHER way that never traversed the door -- notably one created via the
+    # in-TUI "new session" keybind, which goes direct to a serve until the Phase
+    # 8 TUI-on-door move -- is NEVER placed: pigeon /route 404s and nothing else
+    # will place it (attach traffic is direct and never promotes). Left unplaced,
+    # this TUI would pin to the anchor while the session's first prompt later
+    # promotes it onto a different serve -> silently-stale TUI (the yl00 symptom).
+    # So on a /route MISS -- and only then -- POST /place. The session is CONFIRMED
+    # to exist (Step 1 FOUND), so this cannot manufacture a phantom assignment
+    # (the pigeon-eup hazard). /place is idempotent (ensureRouted). Any failure
+    # degrades serve_url to $OPENCODE_URL -- never worse. (Phase 8 deletes this
+    # fallback: an on-door TUI's event-stream open is itself a promoting request.)
     route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
       "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
-    serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
-    log "placed/owner serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
+    serve_url="$(parse_serve_url "$route_body" "")"
+    if [ -z "$serve_url" ]; then
+      place_auth=()
+      if [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ]; then
+        place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
+      fi
+      place_body="$(curl -sf --connect-timeout 2 --max-time 3 \
+        -X POST "$PIGEON_DAEMON_URL/place" \
+        -H "Content-Type: application/json" \
+        ''${place_auth[@]+"''${place_auth[@]}"} \
+        -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
+      serve_url="$(parse_serve_url "$place_body" "$OPENCODE_URL")"
+      log "never-placed sid; placed via POST /place -> serve_url=$serve_url"
+    fi
+    log "owner serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
 
     # Step 2: compute project key for editor routing.
     # Collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>.

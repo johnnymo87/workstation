@@ -149,6 +149,10 @@ if [ -f "$default_nix" ]; then
   want_grep "bare-resolution curl has a connect-timeout"   '--connect-timeout 3'
   want_grep "capture discovers the whole pool"             'mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")'
   want_grep "capture uses FRONTDOOR_URL as CAPTURE_URL"    'CAPTURE_URL="$FRONTDOOR_URL"'
+  # fable M2 #3: door-first, but keep a direct healthy-member fallback so a
+  # partial-pool wedge can't silently drop a sid from the morning manifest.
+  want_grep "capture records a direct healthy-member fallback"   'CAPTURE_FALLBACK="$u"'
+  want_grep "capture retries the read against the direct member" '"$CAPTURE_FALLBACK/session"'
   want_grep "no-healthy-pool still runs strict-attach"      'strict-attach capture will still run'
   want_grep "source sets an unhealthy-serve flag"          'SERVE_HEALTHY=0'
   # workstation-3smg: the 2026-07-03 empty-manifest bug WAS this gate. The

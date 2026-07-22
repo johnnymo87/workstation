@@ -204,6 +204,13 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source sends prompt to FRONTDOOR_URL\n        not found in: %s\n' "$default_nix"; exit 1
   fi
+  # Degrade (fable M2 #2): the prompt must retry DIRECT against $serve_url when the
+  # door rejects it (pigeon-outage 503), instead of hard-failing + orphaning the session.
+  if grep -q '"\$serve_url/session/\$session_id/prompt_async"' "$default_nix"; then
+    printf 'PASS  source retries the prompt direct to $serve_url on door failure\n'
+  else
+    printf 'FAIL  source retries the prompt direct to $serve_url on door failure\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
   if grep -q '"\$serve_url/mcp/\$srv/connect"' "$default_nix"; then
     printf 'PASS  source connects MCP on $serve_url (owning serve)\n'
   else

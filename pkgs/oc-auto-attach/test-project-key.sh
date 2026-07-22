@@ -497,16 +497,17 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source passes FRONTDOOR_URL to the poll subshell\n        "\"$FRONTDOOR_URL\"" not found in: %s\n' "$default_nix"
     exit 1
   fi
-  # Placement (workstation-iwpj): client-side pigeon POST /place is dropped
-  # since the front door handles placement at session creation. Assert the
-  # source no longer POSTs to pigeon /place. Match the actual call (not any
-  # mention of "/place") so accurate comments — e.g. parse_serve_url noting it
-  # accepts a POST /place response shape — don't trip the guard.
+  # Placement (workstation-iwpj + fable M2 #1): the door places sessions it
+  # creates, so the common path is a read-only GET /route (asserted above). But
+  # a never-placed session (minted via the in-TUI new-session keybind, direct to
+  # a serve) 404s on /route, and the source MUST fall back to POST /place to heal
+  # it (else the TUI pins to the anchor and goes stale). Assert the fallback call
+  # is present. Match the actual call so accurate comments don't trip the guard.
   if grep -q '\-X POST "\$PIGEON_DAEMON_URL/place"' "$default_nix"; then
-    printf 'FAIL  source still POSTs client-side pigeon /place\n        found -X POST "$PIGEON_DAEMON_URL/place" in: %s\n' "$default_nix"
-    exit 1
+    printf 'PASS  source falls back to POST /place for never-placed sessions\n'
   else
-    printf 'PASS  source no longer POSTs client-side pigeon /place\n'
+    printf 'FAIL  source falls back to POST /place for never-placed sessions\n        -X POST "$PIGEON_DAEMON_URL/place" not found in: %s\n' "$default_nix"
+    exit 1
   fi
   # 404 fast-fail (workstation-ovqu): the step-1 readiness probe must give up
   # fast on a DEFINITIVE 404 instead of burning the full 30s window, while

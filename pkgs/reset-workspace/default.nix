@@ -289,13 +289,21 @@ EOF
     # docs/investigations/2026-06-17-opencode-1.17.7-orphan-session-wedge.md Q3.
     SERVE_HEALTHY=0
     CAPTURE_URL="$FRONTDOOR_URL"
-    # The per-member health probe is an INFRA liveness gate (checks the pool has a healthy member); the actual cwd->sid READ goes through the front door.
-    # Tradeoff: with the door's fail-fast (no active failover), a partial-pool wedge can make the bare-resolve read 503; the strict-attach capture (reads sids from /proc, no serve) is unaffected, so this only degrades bare-TUI (no --session) resolution during a wedge.
+    # CAPTURE_FALLBACK: the first directly-healthy pool member (fable M2 #3). The
+    # bare-resolve READ goes through the front door (data-plane), but the door
+    # forwards this global read to the anchor with NO failover -- so a wedged
+    # anchor 503s even when another member is healthy, which would silently drop
+    # that TUI from the morning manifest. We keep the healthy member the gate
+    # below already finds and retry the read against it if the door read fails,
+    # preserving manifest integrity while still trying the door first. (The
+    # strict-attach capture reads sids from /proc and is unaffected either way.)
+    CAPTURE_FALLBACK=""
     mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")
     for u in "''${capture_pool_urls[@]}"; do
       if curl -sf --max-time 3 --connect-timeout 3 "$u/global/health" >/dev/null 2>&1; then
         SERVE_HEALTHY=1
-        log "capture: resolving bare-TUI sids via the front door ($FRONTDOOR_URL)"
+        [ -z "$CAPTURE_FALLBACK" ] && CAPTURE_FALLBACK="$u"
+        log "capture: bare-TUI sids via the front door ($FRONTDOOR_URL); direct fallback $u"
         break
       fi
     done
@@ -413,6 +421,19 @@ EOF
         --data-urlencode "roots=true" \
         --data-urlencode "limit=1" 2>/dev/null \
         | jq -r '.[0].id // empty' 2>/dev/null || true)
+
+      # fable M2 #3: if the door read failed (e.g. a wedged anchor 503 with no
+      # door-side failover), retry the read directly against the healthy pool
+      # member the gate found, so a partial-pool wedge can't silently drop this
+      # sid from the morning manifest.
+      if [ -z "$resolved_sid" ] && [ -n "$CAPTURE_FALLBACK" ] && [ "$CAPTURE_FALLBACK" != "$CAPTURE_URL" ]; then
+        resolved_sid=$(curl -fsS --max-time 5 --connect-timeout 3 --get "$CAPTURE_FALLBACK/session" \
+          --data-urlencode "directory=$cwd" \
+          --data-urlencode "roots=true" \
+          --data-urlencode "limit=1" 2>/dev/null \
+          | jq -r '.[0].id // empty' 2>/dev/null || true)
+        [ -n "$resolved_sid" ] && log "  (door read failed; recovered via direct member $CAPTURE_FALLBACK)"
+      fi
 
       if [ -n "$resolved_sid" ] && printf '%s' "$resolved_sid" | grep -qxE 'ses_[A-Za-z0-9]+'; then
         log "  pid=$pid (bare-resolved) sid=$resolved_sid cwd=$cwd"

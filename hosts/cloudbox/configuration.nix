@@ -537,16 +537,17 @@ in
       WorkingDirectory = "/home/dev/projects/lgtm";
       Environment = [
         "HOME=/home/dev"
-        # front-door cutover (Phase 7.1): lgtm-run is a headless DATA-PLANE
-        # client (the lgtm daemon reads sessions over HTTP via $OPENCODE_URL and
-        # shells out to opencode-launch — no interactive TUI here), so it routes
-        # through the front door. Safe to repoint OPENCODE_URL now (unlike the
-        # interactive hosts, whose OPENCODE_URL doubles as the attach-TUI target
-        # and is held at :4096 until the Phase 8/9 TUI migration). This unit is
-        # currently gated off (enableLgtm=false); repointed for correctness so a
-        # future re-enable lands on the door. FRONTDOOR_URL/OPENCODE_ANCHOR_URL
-        # exported alongside for any child that distinguishes the two.
-        "OPENCODE_URL=http://127.0.0.1:4700"
+        # front-door cutover (Phase 7.1, corrected per fable M2 #5): lgtm-run's
+        # children (opencode-launch et al.) treat $OPENCODE_URL as the raw-anchor
+        # DEGRADE FALLBACK for serve_url, so it MUST stay :4096 — setting it to
+        # the door poisons that fallback (a pigeon hiccup would degrade to :4700,
+        # where MCP-connect is denied and attach hints point at the door). The
+        # children reach the door via their own FRONTDOOR_URL default; we export
+        # FRONTDOOR_URL/OPENCODE_ANCHOR_URL here explicitly for clarity. The lgtm
+        # daemon's own session reads hit the anchor directly (a shared-db read;
+        # this unit is gated off via enableLgtm=false, and the out-of-repo daemon
+        # is repointed in the Phase 9 consumer audit).
+        "OPENCODE_URL=http://127.0.0.1:4096"
         "FRONTDOOR_URL=http://127.0.0.1:4700"
         "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
         "LGTM_PROJECTS_DIR=/home/dev/projects"

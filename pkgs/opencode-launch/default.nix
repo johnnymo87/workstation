@@ -234,7 +234,7 @@ pkgs.writeShellApplication {
       # Health check
       if ! curl -sf "$FRONTDOOR_URL/global/health" >/dev/null 2>&1; then
         echo "Error: front door is unreachable at $FRONTDOOR_URL" >&2
-        echo "Check: systemctl status opencode-serve (Linux) or launchctl list | grep opencode (macOS)" >&2
+        echo "Check: systemctl status opencode-frontdoor (the door) and opencode-serve-pool.target (the backends)" >&2
         exit 1
       fi
 
@@ -400,14 +400,26 @@ pkgs.writeShellApplication {
           '{parts: [{type: "text", text: $p}], tools: $tools}')
       fi
 
-      # Send prompt to the front door (which routes to the owning serve where the agent loop will run)
-      curl -sf -X POST "$FRONTDOOR_URL/session/$session_id/prompt_async" \
+      # Send prompt to the front door (which routes to the owning serve where the agent loop will run).
+      # Degrade (fable M2 #2): if the door rejects the prompt — notably a FABLE-S2 503 during a
+      # full pigeon outage, when this session was create-degraded onto the anchor and never got a
+      # lease — retry ONCE directly against $serve_url. serve_url was resolved via GET /route above:
+      # a real owner when pigeon is up, or the $OPENCODE_URL anchor (= where a create-degraded
+      # session actually lives) when pigeon is down. This restores the pre-pool "launch survives a
+      # pigeon blip" behavior instead of hard-failing and orphaning the session.
+      if ! curl -sf -X POST "$FRONTDOOR_URL/session/$session_id/prompt_async" \
         -H "x-opencode-directory: $directory" \
         -H "Content-Type: application/json" \
-        -d "$prompt_payload" >/dev/null || {
-        echo "Error: failed to send prompt to session $session_id" >&2
-        exit 1
-      }
+        -d "$prompt_payload" >/dev/null; then
+        echo "Note: prompt via front door failed; retrying directly against $serve_url" >&2
+        curl -sf -X POST "$serve_url/session/$session_id/prompt_async" \
+          -H "x-opencode-directory: $directory" \
+          -H "Content-Type: application/json" \
+          -d "$prompt_payload" >/dev/null || {
+          echo "Error: failed to send prompt to session $session_id" >&2
+          exit 1
+        }
+      fi
 
       # Launch succeeded: session created, placed, and the prompt delivered.
       # Disarm the worktree cleanup trap so a successful --worktree launch keeps

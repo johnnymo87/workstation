@@ -180,10 +180,14 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source honors PIGEON_DAEMON_URL\n        not found in: %s\n' "$default_nix"; exit 1
   fi
 
+  # fable M2 #1: NEW creates through the door (door places at create, no client
+  # /place), but RESUME of a never-placed session (in-TUI new-session keybind,
+  # direct to a serve) must fall back to POST /place on a /route MISS so the
+  # attach TUI doesn't pin to the anchor and go stale. Assert the fallback exists.
   if grep -q 'POST "\$PIGEON_DAEMON_URL/place"' "$default_nix"; then
-    printf 'FAIL  source still contains pigeon POST /place (should be dropped)\n        found in: %s\n' "$default_nix"; exit 1
+    printf 'PASS  RESUME falls back to POST /place for never-placed sessions\n'
   else
-    printf 'PASS  source does not contain pigeon POST /place\n'
+    printf 'FAIL  RESUME falls back to POST /place for never-placed sessions\n        POST "$PIGEON_DAEMON_URL/place" not found in: %s\n' "$default_nix"; exit 1
   fi
 
   if grep -q 'FRONTDOOR_URL=' "$default_nix"; then
