@@ -159,7 +159,11 @@ assert_route() {
 # ASSERTIONS
 # ==============================================================================
 
-# A) The five 405 Allow: GET twins (must return 405 AND Allow: GET)
+# A) The five 405 Allow: GET twins (must return 405 AND Allow: GET).
+# This list MUST stay in sync with the vitest table-driven five-twin pin in
+# test/dispatch.test.ts (derived from ROUTE_CLASSIFICATION_TABLE). The count went
+# six -> five in T2/F3: GET /mcp was reclassified per-process-ro (501), so POST /mcp
+# lost its GET twin and moved into the 403 deny set (group B) below.
 assert_route "5-twins-config" "PATCH"  "/config"                           "405" "GET"
 assert_route "5-twins-global" "PATCH"  "/global/config"                    "405" "GET"
 assert_route "5-twins-worksp" "POST"   "/experimental/workspace"           "405" "GET"
