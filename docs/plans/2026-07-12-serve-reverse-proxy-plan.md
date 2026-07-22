@@ -793,8 +793,22 @@ T2 `GET /mcp`→501 per-process-ro / `POST /mcp`→403 / twins 6→5; T3 crash b
 through-door gate (14 assertions, verified pass=exit0 / fail=exit1); T5 canary F4 anchor
 cross-probe + version-drift logging (+F8b/F8c verified: aarch64 bun is ET_EXEC, THRESHOLD=7
 re-justified). Suite: **250 vitest green**, typecheck clean; **`nix build ...cloudbox
-toplevel` green**; `bash -n` on the built canary OK. **NOT yet deployed — Checkpoint 1
-(live rebuild + re-gate + F-D4 real-turn) pending user go-ahead.**_
+toplevel` green**; `bash -n` on the built canary OK.
+
+**► DEPLOY CHECKPOINT 1 — DONE & VALIDATED LIVE (2026-07-22).** Merged M1 to `main`
+(rebased onto `f13b637` Gemini price-bump; ff `main`→`8a79bc7`, pushed), `nixos-rebuild
+switch` + explicit `systemctl restart opencode-frontdoor` on cloudbox. Live door now runs
+the compiled single-process build (`/healthz` version = `3pvcnpy3…-opencode-frontdoor-1.0.0`).
+Re-gate ALL GREEN: `audit/gate.sh` 14/14 through `:4700`; single process (MainPID ==
+sole `:4700` listener, door cgroup = 1 proc); **SIGTERM exit = 106 ms** (F-D2 fixed —
+NOTE: the planned "SigCgt bit-14 CLEAR" criterion was WRONG, bare `node` sets that bit too;
+the real criterion is prompt SIGTERM exit + single process); **F-D4 real turn** through the
+door (create→`prompt_async` gemini-3.5-flash→SSE `/event?session_ids=` streamed the full
+turn lifecycle + 2 heartbeats across >2 drift cycles, no spurious drop, assistant replied
+`pong`); **SIGSTOP wedge drill** — door went dark, canary detected + restarted (~105s,
+old 2586515→new 2730314) with forensics capturing the actual wedged listener
+(`status: Name node State: T (stopped)`) → F10/F-D3 fix proven live. **Milestone 1 is
+LIVE.** Next: Milestone 2 (client cutover 7.1–7.8)._
 - **T0 — compile-to-JS single process (F10/F-D1/F-D2/F-D3, closes F5).** Convert
   `default.nix` to build emitted JS (`tsc` emit → wrapper runs `node dist/main.js`),
   dropping the tsx runtime wrapper. Recommended mechanism: `buildNpmPackage` (hermetic
