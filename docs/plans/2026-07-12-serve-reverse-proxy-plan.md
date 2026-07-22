@@ -881,7 +881,21 @@ oc-auto-attach/opencode-launch; repo-wide sweep found no untouched data-plane ca
 Pattern applied per client: create/health/providers/prompt/session-reads → `$FRONTDOOR_URL`
 (:4700); client `POST /place` DROPPED (door places at create) → read-only `GET /route`
 only where a `serve_url` is still needed (MCP-connect + interactive attach target); those
-two stay direct-to-owner (door denies them until Phase 8/9). Build-only verify GREEN:
+two stay direct-to-owner (door denies them until Phase 8/9).
+
+**DEPLOYED + live-verified (Checkpoint 2, 2026-07-22):** home-manager + nixos-rebuild
+switched on cloudbox. Live: door `/healthz`+`/global/health`=200; **create-through-door
+→ door placed it (`/route`→serve-1:4097, not anchor)** = 7.4 core mechanism proven live;
+`audit/gate.sh` 14/14; pigeon back up post-restart. **End-of-phase fable pass: GO-WITH-FIXES**
+— happy path sound (create-choreography places race-free; `parse_serve_url` dual-shape;
+no denied routes hit; infra exemption complete); degrade-path findings fixed in bdff598:
+#1 re-add `POST /place` as a NARROW `/route`-404 fallback in oc-auto-attach + oc-pool-attach
+RESUME (heals never-placed in-TUI-created sessions → no stale TUI; Phase 8 deletes it),
+#2 opencode-launch retries prompt direct on door-503 (pigeon-outage degrade), #3 reset-workspace
+keeps a direct healthy-member fallback for the manifest read, #5 revert lgtm-run OPENCODE_URL
+to :4096 (fallback-poison), #8 health-msg. Deferred → beads mlve.7–10 (#4 MCP/owner divergence,
+#6 auto-attach door-down poll, #7 DELETE-503 doc, #9 poll load, door-down matrix).
+Build-only verify GREEN:
 `nix build .#homeConfigurations.cloudbox.activationPackage` (shellcheck passed for
 opencode-launch/oc-auto-attach/oc-pool-attach) + `nix build …cloudbox…toplevel` (reset-workspace
 shellcheck + configuration.nix valid). Client test suites: 43+54+80+49+20 = **246 assertions
