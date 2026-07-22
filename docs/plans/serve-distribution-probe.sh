@@ -2,6 +2,10 @@
 # serve-distribution-probe.sh — §7a GO/NO-GO gate for placement-at-create
 # (workstation-iwpj / lgtm-a3r).
 #
+# NOTE: This diagnostic exercises the front door via opencode-launch, but its
+# per-port and /route inspection is intentional (diagnostic/monitoring probe,
+# not a client to repoint).
+#
 # Validates that opencode-launch sessions are PLACED across the serve pool
 # (HRW via pigeon POST /place) instead of all concentrating on serve-0. Run
 # AFTER rebuilding cloudbox with the opencode-launch POST /place change.
@@ -99,6 +103,7 @@ printf '  unrouted: %s\n' "$unrouted"
 children_snapshot after
 
 echo "--- best-effort cleanup ---"
+# Diagnostic cleanup: issue DELETE directly against the resolved owner apiBase.
 for sid in "${sids[@]}"; do
   body="$(curl -s --max-time 5 "${AUTH[@]}" "$PIGEON/route?session_id=$sid" 2>/dev/null || true)"
   owner="$(printf '%s' "$body" | jq -r '.apiBase // empty' 2>/dev/null || true)"

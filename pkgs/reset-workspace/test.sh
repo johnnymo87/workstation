@@ -135,6 +135,7 @@ refuse_grep() { # refuse_grep <desc> <fixed-string> — string must NOT appear
   else echo "ok: $1"; fi
 }
 if [ -f "$default_nix" ]; then
+  want_grep "source defines FRONTDOOR_URL"                 'FRONTDOOR_URL="'
   want_grep "source defines pool_health_urls_from_wants" 'pool_health_urls_from_wants() {'
   want_grep "source reads the pool target Wants="         'show -p Wants --value opencode-serve-pool.target'
   want_grep "source polls each discovered serve URL"      'serve_health_urls'
@@ -147,7 +148,7 @@ if [ -f "$default_nix" ]; then
   want_grep "bare-resolution curl has a hard max-time"     '--max-time 5'
   want_grep "bare-resolution curl has a connect-timeout"   '--connect-timeout 3'
   want_grep "capture discovers the whole pool"             'mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")'
-  want_grep "capture picks a healthy member as CAPTURE_URL" 'CAPTURE_URL="$u"'
+  want_grep "capture uses FRONTDOOR_URL as CAPTURE_URL"    'CAPTURE_URL="$FRONTDOOR_URL"'
   want_grep "no-healthy-pool still runs strict-attach"      'strict-attach capture will still run'
   want_grep "source sets an unhealthy-serve flag"          'SERVE_HEALTHY=0'
   # workstation-3smg: the 2026-07-03 empty-manifest bug WAS this gate. The
@@ -212,6 +213,9 @@ if [ -f "$default_nix" ]; then
   want_grep "prompt self-skips predecessor morning sessions" 'skip any manifest sid whose session directory is'
   # The scratch-dir guidance must be independently guarded.
   want_grep "prompt keeps scratch out of morning dir" 'write them under /tmp, never in'
+  # 2026-07-22 Phase 7.7: Front door routing
+  want_grep "recommendation prompt reads via the front door" 'http://127.0.0.1:4700/session/'
+  refuse_grep "recommendation prompt no longer hardcodes anchor for reads" 'http://127.0.0.1:4096/session/'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi

@@ -21,6 +21,7 @@ pkgs.writeShellApplication {
     # --yes  Skip the confirmation prompt (used by the nightly systemd unit).
 
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+    FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
     YES=0
 
     # Save original args for the flock re-exec below.
@@ -287,13 +288,14 @@ EOF
     # probe is the suspenders. See
     # docs/investigations/2026-06-17-opencode-1.17.7-orphan-session-wedge.md Q3.
     SERVE_HEALTHY=0
-    CAPTURE_URL="$OPENCODE_URL"
+    CAPTURE_URL="$FRONTDOOR_URL"
+    # The per-member health probe is an INFRA liveness gate (checks the pool has a healthy member); the actual cwd->sid READ goes through the front door.
+    # Tradeoff: with the door's fail-fast (no active failover), a partial-pool wedge can make the bare-resolve read 503; the strict-attach capture (reads sids from /proc, no serve) is unaffected, so this only degrades bare-TUI (no --session) resolution during a wedge.
     mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")
     for u in "''${capture_pool_urls[@]}"; do
       if curl -sf --max-time 3 --connect-timeout 3 "$u/global/health" >/dev/null 2>&1; then
         SERVE_HEALTHY=1
-        CAPTURE_URL="$u"
-        log "capture: resolving bare-TUI sids via healthy pool serve $u"
+        log "capture: resolving bare-TUI sids via the front door ($FRONTDOOR_URL)"
         break
       fi
     done
@@ -513,6 +515,7 @@ EOF
     # serve-pool.nix, the single source of truth) using the same scope we
     # restarted under, so this can't drift from the actual pool and degrades to
     # $OPENCODE_URL (serve-0) if discovery yields nothing.
+    # INFRA exemption: must probe each pool member directly (per-serve liveness can't be verified through the opaque door).
     mapfile -t serve_health_urls < <(discover_pool_urls "$POOL_SCOPE")
 
     log "polling /global/health for ''${#serve_health_urls[@]} serve(s): ''${serve_health_urls[*]}"
@@ -591,7 +594,7 @@ Phase 1 -- recommend and reopen.
 
 Read the file at /tmp/reset-workspace-last-manifest.txt -- it contains one opencode session id per line, representing sessions that had a live TUI at reset time. If the manifest file is missing or empty, message the user "Nightly reset complete, no sessions to recommend." and exit. You are the successor to yesterday's morning agent, so skip any manifest sid whose session directory is your `$HOME/morning` marker directory -- resolve `$HOME` yourself (the session metadata reports directories as absolute paths like `/home/dev/morning`) -- that is a previous morning agent, not a user session. If you need scratch files, write them under /tmp, never in `$HOME/morning`, so that directory stays uninhabited and your own tab can never clobber a user pane.
 
-For each sid, fetch its metadata from GET http://127.0.0.1:4096/session/<sid> and look at the title, directory, and last update time. If useful, also fetch recent messages from GET http://127.0.0.1:4096/session/<sid>/message. Read enough to understand what each session IS (project, goal, finished vs mid-flight) -- you will be coordinating these sessions afterward -- but do not absorb full transcripts; keep your context light.
+For each sid, fetch its metadata from GET http://127.0.0.1:4700/session/<sid> and look at the title, directory, and last update time. If useful, also fetch recent messages from GET http://127.0.0.1:4700/session/<sid>/message. Read enough to understand what each session IS (project, goal, finished vs mid-flight) -- you will be coordinating these sessions afterward -- but do not absorb full transcripts; keep your context light.
 
 Build a short, conversational Telegram message that gives a brief description of each session in your view -- what it IS (project, goal, finished vs mid-flight). Group by project. Be opinionated about state: if something looks finished (a PR landed, a question got resolved), say so; if something looks mid-flight, say that too. Number the sessions so the user can refer to them by number.
 
@@ -606,7 +609,7 @@ After reopening, you are deputized as swarm coordinator for those sessions. The 
 - Operate at project-manager altitude. Track each session's goal, state, and blockers. Delegate detail work to the sessions themselves; do not do it yourself and do not read full transcripts. Keeping your context light is what lets you stay useful all day.
 - Communicate with sessions via pigeon: load the swarm-messaging skill before your first send, then use the swarm_send / swarm_read / swarm_list tools.
 - Follow that skill's message-economy section strictly: message a session only when it changes what that session will do next (task assignment, blocking question, needed answer). No acks, no heartbeats, no status-check pings. Batch related points into one message. A quiet worker is a healthy worker.
-- When the user asks how a session is doing, prefer pulling (GET http://127.0.0.1:4096/session/<sid>/message, or your own notes) over messaging the session.
+- When the user asks how a session is doing, prefer pulling (GET http://127.0.0.1:4700/session/<sid>/message, or your own notes) over messaging the session.
 - Relay crisply: turn the user's directions into precise task.assign messages, and surface results and blockers back to the user in short summaries.
 PROMPT
 )
