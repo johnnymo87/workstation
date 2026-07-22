@@ -181,12 +181,32 @@ async function checkSidExists(
   });
 
   if (!result.ok) {
+    if (result.timedOut) {
+      console.warn(
+        `[FRONTDOOR WARN] Session existence check timed out for sid: ${sid}. Assuming exists and proceeding with placement.`,
+      );
+    } else {
+      console.warn(
+        `[FRONTDOOR WARN] Session existence check failed with network error for sid: ${sid}. Assuming exists and proceeding with placement.`,
+      );
+    }
+    return true;
+  }
+
+  const status = result.response!.status;
+  discardBody(result.response); // status-only check; release the socket
+
+  if (status === 200) {
+    return true;
+  }
+  if (status === 404) {
     return false;
   }
 
-  const exists = result.response!.status === 200;
-  discardBody(result.response); // status-only check; release the socket
-  return exists;
+  console.warn(
+    `[FRONTDOOR WARN] Session existence check returned status ${status} for sid: ${sid}. Assuming exists and proceeding with placement.`,
+  );
+  return true;
 }
 
 export async function maybePromote(

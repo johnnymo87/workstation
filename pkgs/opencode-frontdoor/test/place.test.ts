@@ -1,4 +1,4 @@
-import { describe, test, expect, vi } from 'vitest';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { placeSession, isPromotingRequest, PromotionGate, maybePromote } from '../src/place.js';
 import type { Config } from '../src/config.js';
 import type { SidExtraction } from '../src/sid.js';
@@ -487,6 +487,243 @@ describe('place.ts', () => {
 
       expect(outcome).toEqual({ placed: false, reason: 'not-promoting' });
       expect(fakeFetch).not.toHaveBeenCalled();
+    });
+
+    describe('FABLE-S1 checkSidExists fail-safe behavior', () => {
+      let warnSpy: any;
+
+      beforeEach(() => {
+        warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      });
+
+      afterEach(() => {
+        warnSpy.mockRestore();
+      });
+
+      test('200 -> exists -> placement proceeds (existing behavior preserved)', async () => {
+        const fakeFetch = vi.fn().mockImplementation(async (url) => {
+          if (url.includes('/session/ses_123')) {
+            return { status: 200 };
+          }
+          if (url.includes('/place')) {
+            return {
+              status: 200,
+              json: async () => ({
+                ok: true,
+                serve_id: 'serve_abc',
+                api_base: 'http://serve.local',
+              }),
+            };
+          }
+          return { status: 500 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_123',
+            method: 'POST',
+            pathname: '/session/ses_123/message',
+            extraction: singleExt,
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome.placed).toBe(true);
+        expect(outcome.reason).toBe('placed');
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      test('clean 404 -> not placed, outcome reason is unknown-sid', async () => {
+        const fakeFetch = vi.fn().mockImplementation(async (url) => {
+          if (url.includes('/session/ses_123')) {
+            return { status: 404 };
+          }
+          return { status: 500 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_123',
+            method: 'POST',
+            pathname: '/session/ses_123/message',
+            extraction: singleExt,
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome.placed).toBe(false);
+        expect(outcome.reason).toBe('unknown-sid');
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      test('timeout -> placed anyway and warns', async () => {
+        const abortErr = new Error('aborted');
+        abortErr.name = 'AbortError';
+
+        const fakeFetch = vi.fn().mockImplementation(async (url) => {
+          if (url.includes('/session/ses_123')) {
+            throw abortErr;
+          }
+          if (url.includes('/place')) {
+            return {
+              status: 200,
+              json: async () => ({
+                ok: true,
+                serve_id: 'serve_abc',
+                api_base: 'http://serve.local',
+              }),
+            };
+          }
+          return { status: 500 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_123',
+            method: 'POST',
+            pathname: '/session/ses_123/message',
+            extraction: singleExt,
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome.placed).toBe(true);
+        expect(outcome.reason).toBe('placed');
+        expect(warnSpy).toHaveBeenCalled();
+        const loggedMsg = warnSpy.mock.calls[0][0];
+        expect(loggedMsg).toContain('[FRONTDOOR WARN]');
+        expect(loggedMsg).toContain('timed out');
+        expect(loggedMsg).toContain('ses_123');
+      });
+
+      test('network error -> placed anyway and warns', async () => {
+        const fakeFetch = vi.fn().mockImplementation(async (url) => {
+          if (url.includes('/session/ses_123')) {
+            throw new Error('DNS failure');
+          }
+          if (url.includes('/place')) {
+            return {
+              status: 200,
+              json: async () => ({
+                ok: true,
+                serve_id: 'serve_abc',
+                api_base: 'http://serve.local',
+              }),
+            };
+          }
+          return { status: 500 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_123',
+            method: 'POST',
+            pathname: '/session/ses_123/message',
+            extraction: singleExt,
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome.placed).toBe(true);
+        expect(outcome.reason).toBe('placed');
+        expect(warnSpy).toHaveBeenCalled();
+        const loggedMsg = warnSpy.mock.calls[0][0];
+        expect(loggedMsg).toContain('[FRONTDOOR WARN]');
+        expect(loggedMsg).toContain('network error');
+        expect(loggedMsg).toContain('ses_123');
+      });
+
+      test('5xx status -> placed anyway and warns', async () => {
+        const fakeFetch = vi.fn().mockImplementation(async (url) => {
+          if (url.includes('/session/ses_123')) {
+            return { status: 503 };
+          }
+          if (url.includes('/place')) {
+            return {
+              status: 200,
+              json: async () => ({
+                ok: true,
+                serve_id: 'serve_abc',
+                api_base: 'http://serve.local',
+              }),
+            };
+          }
+          return { status: 500 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_123',
+            method: 'POST',
+            pathname: '/session/ses_123/message',
+            extraction: singleExt,
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome.placed).toBe(true);
+        expect(outcome.reason).toBe('placed');
+        expect(warnSpy).toHaveBeenCalled();
+        const loggedMsg = warnSpy.mock.calls[0][0];
+        expect(loggedMsg).toContain('[FRONTDOOR WARN]');
+        expect(loggedMsg).toContain('503');
+        expect(loggedMsg).toContain('ses_123');
+      });
     });
   });
 });

@@ -1239,6 +1239,9 @@ describe("FrontDoor Integration", () => {
         healthProbeCount++;
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("OK");
+      } else if (req.method === "GET" && req.url && req.url.includes("/session/")) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
       } else {
         // Keep the exempt POST request open without writing headers
       }
@@ -1310,6 +1313,9 @@ describe("FrontDoor Integration", () => {
         healthProbeCount++;
         res.writeHead(500, { "Content-Type": "text/plain" });
         res.end("Internal Server Error");
+      } else if (req.method === "GET" && req.url && req.url.includes("/session/")) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
       } else {
         // Keep the exempt POST request open without writing headers
       }
