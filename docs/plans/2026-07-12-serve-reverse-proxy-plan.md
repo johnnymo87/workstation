@@ -753,9 +753,10 @@ Phase 6.
 - **F-D5 (Phase-7 — codify the gate):** `probe.sh` only prints a matrix and exits 0;
   the "only intended deltas" + deny-contract (405 twins / 403) checks were operator
   eyeballing. Add an `--assert` mode (or `gate.sh`) pinning expected through-door
-  statuses per class — incl. the six 405 `Allow:GET` twins + the 403 set already
-  derived table-driven in vitest (`096752b`) — exiting non-zero on any delta, so the
-  gate is a reproducible regression instrument for the F10-redeploy re-gate and cutover.
+   statuses per class — incl. the **five** 405 `Allow:GET` twins (six→five after T2/F3
+   moved `POST /mcp` to the 403 set) + the 403 set already derived table-driven in vitest
+   (`096752b`, updated in T2) — exiting non-zero on any delta, so the gate is a
+   reproducible regression instrument for the F10-redeploy re-gate and cutover.
 - **F8 (canary tuning): (b)** re-derive serve-canary `THRESHOLD=7` for cloudbox (it's a
   verbatim devbox value citing the devbox g3iy burn); **(c)** verify the cloudbox
   **aarch64** bun binary is ET_EXEC before trusting the eu-stack cross-wedge
@@ -784,6 +785,10 @@ code-review → fixup → `test.sh` green → commit; **no `nixos-rebuild switch
 deploy checkpoint, and only with explicit user go-ahead.**
 
 **Milestone 1 — front-door code + observability hardening (package + host config; zero client impact):**
+_Progress (2026-07-22, branch `frontdoor-phase7`): **T0 ✅ DONE** (`92d834e`), **T1 ✅ DONE**
+(`defb4ce` + `13672ac`; FABLE-S1 pigeon patch deferred), **T2 ✅ DONE** (`GET /mcp`→501
+per-process-ro, `POST /mcp`→403, twins 6→5). Suite: 247 green, typecheck clean. Not yet
+deployed (Checkpoint 1 pending). Remaining: T3, T4, T5._
 - **T0 — compile-to-JS single process (F10/F-D1/F-D2/F-D3, closes F5).** Convert
   `default.nix` to build emitted JS (`tsc` emit → wrapper runs `node dist/main.js`),
   dropping the tsx runtime wrapper. Recommended mechanism: `buildNpmPackage` (hermetic
@@ -824,7 +829,8 @@ deploy checkpoint, and only with explicit user go-ahead.**
 - **T3 — crash policy (F6).** Add `unhandledRejection`/`uncaughtException` handlers
   (log + `process.exit(1)` to preserve crash+Restart); decide crash-vs-continue per site.
 - **T4 — codify the gate (F-D5).** `probe.sh --assert` (or `gate.sh`) pinning expected
-  through-door statuses per class — incl. the six `405 Allow:GET` twins + the 403 set —
+  through-door statuses per class — incl. the **five** `405 Allow:GET` twins (post-T2) +
+  the 403 set (now incl. `POST /mcp`) + `GET /mcp`→501 —
   exit non-zero on any delta. This is the reproducible instrument for the T0-redeploy
   re-gate and the cutover gate.
 - **T5 — canary + systemd hardening (F4 + F8 + F7/F9/F-D6).** (F4) front-door canary
