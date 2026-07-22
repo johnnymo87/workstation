@@ -486,6 +486,12 @@ in
         export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
         export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
+        # front-door INFRA/CONTROL-PLANE EXEMPTION (Phase 7.8): pigeon is the
+        # session-aware router the front door DEPENDS ON. Its own opencode
+        # reads/fallbacks must hit the raw anchor (:4096), NOT the front door
+        # (:4700) — routing the control plane through the data plane it feeds
+        # is a circular dependency + a startup cycle. Do NOT repoint this to
+        # FRONTDOOR_URL. Enforced by the test-pool-route-clients grep-guard.
         export OPENCODE_URL="http://127.0.0.1:4096"
         exec ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";
@@ -531,7 +537,18 @@ in
       WorkingDirectory = "/home/dev/projects/lgtm";
       Environment = [
         "HOME=/home/dev"
-        "OPENCODE_URL=http://127.0.0.1:4096"
+        # front-door cutover (Phase 7.1): lgtm-run is a headless DATA-PLANE
+        # client (the lgtm daemon reads sessions over HTTP via $OPENCODE_URL and
+        # shells out to opencode-launch — no interactive TUI here), so it routes
+        # through the front door. Safe to repoint OPENCODE_URL now (unlike the
+        # interactive hosts, whose OPENCODE_URL doubles as the attach-TUI target
+        # and is held at :4096 until the Phase 8/9 TUI migration). This unit is
+        # currently gated off (enableLgtm=false); repointed for correctness so a
+        # future re-enable lands on the door. FRONTDOOR_URL/OPENCODE_ANCHOR_URL
+        # exported alongside for any child that distinguishes the two.
+        "OPENCODE_URL=http://127.0.0.1:4700"
+        "FRONTDOOR_URL=http://127.0.0.1:4700"
+        "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
         "LGTM_PROJECTS_DIR=/home/dev/projects"
         # NB: OPENCODE_DB / OPENCODE_DISABLE_CHANNEL_DB intentionally omitted
         # (lgtm-j6k). Those pinned the shared opencode.db for the run-era
