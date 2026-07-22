@@ -6,6 +6,7 @@ import { PromotionGate } from "./place.js";
 import { createMetrics } from "./metrics.js";
 import { isHealthzRequest, handleHealthz } from "./healthz.js";
 import { StickyMap } from "./sticky.js";
+import { installCrashHandlers } from "./crash.js";
 
 export function createFrontDoor(config: Config, deps?: any): http.Server {
   const logger = new RequestLogger(deps?.logger);
@@ -33,6 +34,7 @@ export function createFrontDoor(config: Config, deps?: any): http.Server {
 }
 
 export function start(config: Config = loadConfig()): http.Server {
+  installCrashHandlers();
   const server = createFrontDoor(config);
   server.listen(config.port, "127.0.0.1", () => {
     console.log(`[FRONTDOOR] Listening on http://127.0.0.1:${config.port}`);
