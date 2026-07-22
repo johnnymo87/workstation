@@ -4,6 +4,7 @@ import { extractSessionIdFromPath } from "./sid.js";
 export interface StickyEntry {
   serve: string;
   expiry: number;
+  leaseRenewedAt: number;
 }
 
 export class StickyMap {
@@ -12,8 +13,13 @@ export class StickyMap {
 
   constructor(private ttlMs: number) {}
 
-  record(sid: string, serve: string, now: number): void {
-    this.entries.set(sid, { serve, expiry: now + this.ttlMs });
+  record(sid: string, serve: string, now: number, leaseRenewedAt?: number): void {
+    const existing = this.entries.get(sid);
+    const finalLeaseRenewedAt = leaseRenewedAt !== undefined
+      ? leaseRenewedAt
+      : (existing ? existing.leaseRenewedAt : now);
+
+    this.entries.set(sid, { serve, expiry: now + this.ttlMs, leaseRenewedAt: finalLeaseRenewedAt });
     if (now - this.lastSweep >= this.ttlMs) {
       for (const [key, entry] of this.entries.entries()) {
         if (now >= entry.expiry) {
@@ -38,6 +44,21 @@ export class StickyMap {
 
   has(sid: string, now: number): boolean {
     return this.get(sid, now) !== undefined;
+  }
+
+  needsLeaseRenewal(sid: string, now: number): boolean {
+    const entry = this.entries.get(sid);
+    if (entry === undefined) {
+      return false;
+    }
+    return now - entry.leaseRenewedAt >= this.ttlMs / 2;
+  }
+
+  setLeaseRenewedAt(sid: string, now: number): void {
+    const entry = this.entries.get(sid);
+    if (entry !== undefined) {
+      entry.leaseRenewedAt = now;
+    }
   }
 
   delete(sid: string): void {

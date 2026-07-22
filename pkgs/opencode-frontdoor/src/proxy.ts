@@ -584,6 +584,20 @@ export async function handleRequest(
             const healthy = await probeServeHealth(stuckServe, ctx.config, ctx.deps);
             if (healthy) {
               target = stuckServe; degraded = false; prospective = false;
+
+              if (ctx.sticky.needsLeaseRenewal(sid, now)) {
+                // Advance the renewal clock SYNCHRONOUSLY before the fire-and-forget
+                // /place so interleaved sticky hits within ½ TTL can't double-renew.
+                ctx.sticky.setLeaseRenewedAt(sid, now);
+                placeSession(sid, ctx.config, ctx.deps).then((result) => {
+                  if (!result.ok) {
+                    console.warn(`[FRONTDOOR WARN] lease renewal placeSession failed for sid: ${sid}, status: ${result.status}`);
+                  }
+                }).catch((err) => {
+                  console.warn(`[FRONTDOOR WARN] lease renewal placeSession threw for sid: ${sid}`, err);
+                });
+              }
+
               ctx.sticky.record(sid, stuckServe, now); // refresh TTL
               await proxyRequest(target, method, url, req, res, ctx, ex);
               return;
@@ -595,10 +609,12 @@ export async function handleRequest(
         // 2) Normal resolve/promote (existing logic, unchanged).
         const resolved = await resolveOwner(ex.sid, ctx.config, ctx.deps);
         const isPromoting = isPromotingRequest(method, url.pathname, ex);
+        let wasPromoted = false;
         if (isPromoting) {
           const promo = await maybePromote({ sid: ex.sid, method, pathname: url.pathname, extraction: ex, resolved, gate: ctx.gate }, ctx.config, ctx.deps);
           if (promo.placed && promo.apiBase && isAbsoluteHttpUrl(promo.apiBase)) {
             target = promo.apiBase; degraded = false; prospective = false;
+            wasPromoted = true;
           } else {
             target = resolved.url; degraded = resolved.degraded; prospective = resolved.prospective;
           }
@@ -620,7 +636,10 @@ export async function handleRequest(
         // 4) Record stickiness when forwarding a mutating request to a REAL owner
         //    (never record the anchor-degrade target).
         if (mutating && !degraded) {
-          ctx.sticky.record(sid, target, now);
+          // Fresh promote/place → lease is new (renewedAt=now). Active resolve of
+          // unknown lease age → seed 0 so the NEXT sticky hit renews immediately.
+          const leaseRenewedAt = wasPromoted ? now : 0;
+          ctx.sticky.record(sid, target, now, leaseRenewedAt);
         }
 
         await proxyRequest(target, method, url, req, res, ctx, ex);

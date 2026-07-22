@@ -10,6 +10,11 @@ export interface Config {
   pigeonAuthToken?: string;
   routeTimeoutMs: number;
   cheapFirstByteMs: number;
+  /*
+   * INVARIANT (LOW-2): stickyTtlMs <= pigeon PIGEON_LEASE_TTL_MS (both default 30s).
+   * HIGH-2 renewal at 1/2 TTL keeps a sticky-pinned session's lease alive in pigeon
+   * so that the session never outlives its active lease.
+   */
   stickyTtlMs: number;
   driftCheckMs: number; // owner-drift re-resolve interval (mirrors the deployed TUI's 5s)
   wedgeProbeIntervalMs: number;

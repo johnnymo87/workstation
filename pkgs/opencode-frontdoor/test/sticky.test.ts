@@ -74,6 +74,35 @@ describe('StickyMap', () => {
     expect(map.get('ses_3', 1100)).toBe('serve_c');
     expect((map as any).lastSweep).toBe(1100);
   });
+
+  test('lease renewal tracking on record and update', () => {
+    const map = new StickyMap(1000); // ttlMs = 1000, half is 500
+    map.record('ses_1', 'serve_a', 100);
+
+    // 1) Initial record defaults leaseRenewedAt to now (100)
+    expect((map as any).entries.get('ses_1')?.leaseRenewedAt).toBe(100);
+    // At now = 100, age = 0 -> needsLeaseRenewal is false (0 < 500)
+    expect(map.needsLeaseRenewal('ses_1', 100)).toBe(false);
+    // At now = 599, age = 499 -> needsLeaseRenewal is false (499 < 500)
+    expect(map.needsLeaseRenewal('ses_1', 599)).toBe(false);
+    // At now = 600, age = 500 -> needsLeaseRenewal is true (500 >= 500)
+    expect(map.needsLeaseRenewal('ses_1', 600)).toBe(true);
+
+    // 2) Record updates expiry (refresh TTL) but preserves existing leaseRenewedAt
+    map.record('ses_1', 'serve_a', 300); // expiry becomes 300 + 1000 = 1300
+    expect((map as any).entries.get('ses_1')?.leaseRenewedAt).toBe(100); // still 100!
+    expect(map.needsLeaseRenewal('ses_1', 600)).toBe(true);
+
+    // 3) Record allows overriding leaseRenewedAt explicitly (e.g. seeding unknown age)
+    map.record('ses_2', 'serve_b', 300, 0); // explicitly set leaseRenewedAt = 0
+    expect((map as any).entries.get('ses_2')?.leaseRenewedAt).toBe(0);
+    expect(map.needsLeaseRenewal('ses_2', 500)).toBe(true); // age = 500 >= 500 -> true
+
+    // 4) setLeaseRenewedAt updates leaseRenewedAt
+    map.setLeaseRenewedAt('ses_1', 400);
+    expect((map as any).entries.get('ses_1')?.leaseRenewedAt).toBe(400);
+    expect(map.needsLeaseRenewal('ses_1', 600)).toBe(false); // age = 200 < 500 -> false
+  });
 });
 
 describe('isMutatingSessionRequest', () => {

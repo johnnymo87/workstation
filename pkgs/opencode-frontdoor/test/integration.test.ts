@@ -1856,4 +1856,116 @@ describe("FrontDoor Integration", () => {
     expect(res.status).toBe(400);
     expect(pigeonPlaceCalls).toHaveLength(0);
   });
+
+  test("sticky hit lease renewal logic (HIGH-2)", async () => {
+    let fakeTime = 1000;
+    const renewalConfig: Config = {
+      port: 0,
+      version: "unknown",
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 1000,
+      stickyTtlMs: 10000, // half stickyTtlMs is 5000
+      driftCheckMs: 5000,
+      wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
+    };
+
+    const renewalDeps = {
+      now: () => fakeTime,
+      logger: {
+        sink: () => {}
+      }
+    };
+
+    const renewalFrontDoor = createFrontDoor(renewalConfig, renewalDeps);
+    await new Promise<void>((resolve) => renewalFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const renewalPort = (renewalFrontDoor.address() as AddressInfo).port;
+
+    const makeRenewalRequest = async (method: string, path: string, headers: Record<string, string> = {}) => {
+      return new Promise<{ status: number, body: string, headers: Record<string, string> }>((resolve, reject) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: renewalPort,
+          path,
+          method,
+          headers
+        }, (res) => {
+          let body = "";
+          res.on("data", chunk => body += chunk);
+          res.on("end", () => {
+            const outHeaders: Record<string, string> = {};
+            for (const [k, v] of Object.entries(res.headers)) {
+              if (v !== undefined) {
+                outHeaders[k] = Array.isArray(v) ? v.join(",") : v;
+              }
+            }
+            resolve({ status: res.statusCode || 0, body, headers: outHeaders });
+          });
+        });
+        req.on("error", reject);
+        req.end();
+      });
+    };
+
+    try {
+      pigeonPlaceCalls = [];
+      pigeonSessionOwners["ses_renew"] = `http://127.0.0.1:${portA}`;
+
+      // 1) First mutating request to establish sticky entry.
+      // Since it's from an active resolve, the renewal clock is seeded as already due (0),
+      // so the NEXT sticky hit will renew immediately.
+      fakeTime = 1000;
+      let res = await makeRenewalRequest("POST", "/session/ses_renew/message");
+      expect(res.status).toBe(200);
+      expect(pigeonPlaceCalls).toHaveLength(0); // active resolve doesn't call place initially
+
+      // 2) Second mutating request immediately after (now = 6000, which is >= ½ TTL from 0).
+      // Since it's the first subsequent hit, and the entry's renewal clock was seeded at 0,
+      // it should trigger lease renewal!
+      fakeTime = 6000;
+      pigeonPlaceCalls = [];
+      res = await makeRenewalRequest("POST", "/session/ses_renew/message");
+      expect(res.status).toBe(200);
+      
+      // Wait slightly because renewal is non-blocking/fire-and-forget.
+      await new Promise<void>(resolve => setTimeout(resolve, 50));
+      expect(pigeonPlaceCalls).toHaveLength(1);
+      expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_renew" });
+
+      // 3) Third mutating request < ½ TTL (now = 8000, 8000 - 6000 = 2000 < 5000).
+      // Since last renewal was at 6000 and age (2000) < 5000, it should NOT trigger lease renewal.
+      fakeTime = 8000;
+      pigeonPlaceCalls = [];
+      res = await makeRenewalRequest("POST", "/session/ses_renew/message");
+      expect(res.status).toBe(200);
+      await new Promise<void>(resolve => setTimeout(resolve, 50));
+      expect(pigeonPlaceCalls).toHaveLength(0);
+
+      // 4) Fourth mutating request >= ½ TTL (now = 11001, 11001 - 6000 = 5001 >= 5000).
+      // It should trigger lease renewal!
+      fakeTime = 11001;
+      pigeonPlaceCalls = [];
+      res = await makeRenewalRequest("POST", "/session/ses_renew/message");
+      expect(res.status).toBe(200);
+      await new Promise<void>(resolve => setTimeout(resolve, 50));
+      expect(pigeonPlaceCalls).toHaveLength(1);
+      expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_renew" });
+
+      // 5) Rate-limiting: rapid hits within ½ TTL should not hammer pigeon.
+      pigeonPlaceCalls = [];
+      fakeTime = 11010;
+      await makeRenewalRequest("POST", "/session/ses_renew/message");
+      fakeTime = 11020;
+      await makeRenewalRequest("POST", "/session/ses_renew/message");
+      fakeTime = 11030;
+      await makeRenewalRequest("POST", "/session/ses_renew/message");
+      await new Promise<void>(resolve => setTimeout(resolve, 50));
+      expect(pigeonPlaceCalls).toHaveLength(0);
+
+    } finally {
+      await new Promise<void>((resolve) => renewalFrontDoor.close(() => resolve()));
+    }
+  });
 });
