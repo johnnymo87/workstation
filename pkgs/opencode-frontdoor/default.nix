@@ -1,33 +1,40 @@
 {
   lib,
-  stdenvNoCC,
+  buildNpmPackage,
   nodejs_22,
-  tsx,
   makeWrapper,
 }:
 
-stdenvNoCC.mkDerivation rec {
+buildNpmPackage rec {
   pname = "opencode-frontdoor";
   version = "1.0.0";
 
+  nodejs = nodejs_22;
+
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions [ ./src ./package.json ./tsconfig.json ];
+    fileset = lib.fileset.unions [
+      ./src
+      ./package.json
+      ./package-lock.json
+      ./tsconfig.json
+      ./tsconfig.build.json
+    ];
   };
+
+  npmDepsHash = "sha256-sd2sUEMSA6YphngTIaXMvrtSv78j1J/bArMwWipq8Iw=";
 
   nativeBuildInputs = [ makeWrapper ];
 
   installPhase = ''
     runHook preInstall
 
-    dest="$out/libexec/opencode-frontdoor"
-    mkdir -p "$dest"
-    cp -r . "$dest/"
+    mkdir -p "$out/libexec/opencode-frontdoor" "$out/bin"
+    cp -r dist "$out/libexec/opencode-frontdoor/dist"
 
-    makeWrapper ${tsx}/bin/tsx "$out/bin/opencode-frontdoor" \
-      --add-flags "$dest/src/main.ts" \
-      --set FRONTDOOR_VERSION "$out" \
-      --prefix PATH : ${lib.makeBinPath [ nodejs_22 ]}
+    makeWrapper ${lib.getExe nodejs_22} "$out/bin/opencode-frontdoor" \
+      --add-flags "$out/libexec/opencode-frontdoor/dist/main.js" \
+      --set FRONTDOOR_VERSION "$out"
 
     runHook postInstall
   '';
@@ -35,13 +42,17 @@ stdenvNoCC.mkDerivation rec {
   # The vitest suite binds loopback sockets / uses fake timers against 127.0.0.1,
   # which the hermetic sandbox forbids — tests run OUTSIDE the sandbox via `./test.sh`.
   #
-  # FABLE-P6-F5: this build does NOT typecheck or run tests — `installPhase` just
-  # vendors the sources and tsx strips types at RUNTIME without checking. So a
-  # type- or import-broken `src/` produces a GREEN nix build that only fails when
-  # the unit (re)starts — and `restartIfChanged=false` on the system unit means a
-  # broken package can sit until the next (possibly unattended canary) restart.
-  # MANDATORY GATE: run `./test.sh` (npm ci + tsc --noEmit + vitest) and confirm it
-  # passes BEFORE any `nixos-rebuild` that ships a new frontdoor build.
+  # Since we use buildNpmPackage and tsc compiles our code during the build step,
+  # the nix build now typechecks src (tsc emits + fails on type errors), closing
+  # the F5 finding. A type- or import-broken src will fail the nix build.
+  #
+  # `./test.sh` is still required for running the vitest suite and for typechecking
+  # the test files (which are not included in tsconfig.build.json).
+  #
+  # Bumping / regenerating package-lock.json:
+  #   1. Regenerate lock: (cd pkgs/opencode-frontdoor && npm install --package-lock-only)
+  #   2. Recompute npmDepsHash: nix run nixpkgs#prefetch-npm-deps -- pkgs/opencode-frontdoor/package-lock.json
+  #   3. Update npmDepsHash below.
   doCheck = false;
 
   meta = {
