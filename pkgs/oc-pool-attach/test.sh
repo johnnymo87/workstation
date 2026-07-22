@@ -181,15 +181,27 @@ if [ -f "$default_nix" ]; then
   fi
 
   if grep -q 'POST "\$PIGEON_DAEMON_URL/place"' "$default_nix"; then
-    printf 'PASS  source places via pigeon POST /place\n'
+    printf 'FAIL  source still contains pigeon POST /place (should be dropped)\n        found in: %s\n' "$default_nix"; exit 1
   else
-    printf 'FAIL  source places via pigeon POST /place\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'PASS  source does not contain pigeon POST /place\n'
+  fi
+
+  if grep -q 'FRONTDOOR_URL=' "$default_nix"; then
+    printf 'PASS  source defines FRONTDOOR_URL\n'
+  else
+    printf 'FAIL  source defines FRONTDOOR_URL\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q '"\$FRONTDOOR_URL/session' "$default_nix"; then
+    printf 'PASS  source references "$FRONTDOOR_URL/session"\n'
+  else
+    printf 'FAIL  source references "$FRONTDOOR_URL/session"\n        not found in: %s\n' "$default_nix"; exit 1
   fi
 
   if grep -q '"\$OPENCODE_URL/session' "$default_nix"; then
-    printf 'PASS  source references "$OPENCODE_URL/session\n'
+    printf 'FAIL  source still references old "$OPENCODE_URL/session"\n        found in: %s\n' "$default_nix"; exit 1
   else
-    printf 'FAIL  source references "$OPENCODE_URL/session\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'PASS  source does not reference old "$OPENCODE_URL/session"\n'
   fi
 
   if grep -q 'attach' "$default_nix" && grep -q -- '--session' "$default_nix" && grep -q -- '--dir' "$default_nix"; then
@@ -210,10 +222,28 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source gates on POOL_K\n        not found in: %s\n' "$default_nix"; exit 1
   fi
 
-  if grep -q 'pigeon_reachable' "$default_nix"; then
-    printf 'PASS  source checks pigeon_reachable\n'
+  if grep -q 'frontdoor_reachable' "$default_nix"; then
+    printf 'PASS  source defines/calls frontdoor_reachable\n'
   else
-    printf 'FAIL  source checks pigeon_reachable\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'FAIL  source defines/calls frontdoor_reachable\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q '"\$FRONTDOOR_URL/healthz"' "$default_nix"; then
+    printf 'PASS  source probes "$FRONTDOOR_URL/healthz"\n'
+  else
+    printf 'FAIL  source probes "$FRONTDOOR_URL/healthz"\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'ses_poolprobe' "$default_nix"; then
+    printf 'FAIL  source still contains ses_poolprobe hack\n        found in: %s\n' "$default_nix"; exit 1
+  else
+    printf 'PASS  source does not contain ses_poolprobe hack\n'
+  fi
+
+  if grep -q '/route?session_id=' "$default_nix"; then
+    printf 'PASS  source queries /route?session_id= for read-only discovery\n'
+  else
+    printf 'FAIL  source queries /route?session_id= for read-only discovery\n        not found in: %s\n' "$default_nix"; exit 1
   fi
 
   if grep -q 'original_args' "$default_nix"; then

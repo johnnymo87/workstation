@@ -65,6 +65,7 @@ pkgs.writeShellApplication {
     }
 
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+    FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
     PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
     POOL_K="${toString k}"
     REAL_OPENCODE="${opencode}/bin/opencode"
@@ -80,48 +81,44 @@ pkgs.writeShellApplication {
     split_classification "$(classify_oc_invocation "$@")"
     [ "$verb" = "PASSTHROUGH" ] && selfhost
 
-    pigeon_reachable() {
+    frontdoor_reachable() {
       local code
       code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 3 \
-        "$PIGEON_DAEMON_URL/route?session_id=ses_poolprobe" 2>/dev/null || true)"
+        "$FRONTDOOR_URL/healthz" 2>/dev/null || true)"
       [ -n "$code" ] && [ "$code" != "000" ]
     }
-    place_auth=()
-    [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ] && place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
 
     if [ "$verb" = "NEW" ]; then
-      pigeon_reachable || selfhost
-      curl -sf --max-time 5 "$OPENCODE_URL/global/health" >/dev/null 2>&1 || selfhost
+      frontdoor_reachable || selfhost
+      curl -sf --max-time 5 "$FRONTDOOR_URL/global/health" >/dev/null 2>&1 || selfhost
       dir_in="''${project:-$PWD}"
       dir_in="''${dir_in/#\~/$HOME}"
       [ -d "$dir_in" ] || selfhost
       dir_in="$(cd "$dir_in" && pwd)" || selfhost
-      resp="$(curl -sf -X POST "$OPENCODE_URL/session" -H "x-opencode-directory: $dir_in" 2>/dev/null || true)"
+      resp="$(curl -sf -X POST "$FRONTDOOR_URL/session" -H "x-opencode-directory: $dir_in" 2>/dev/null || true)"
       sid="$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null || true)"
       [ -n "$sid" ] || selfhost
       dir="$(printf '%s' "$resp" | jq -r '.directory // empty' 2>/dev/null || true)"
       [ -n "$dir" ] || dir="$dir_in"
-      place="$(curl -sf --connect-timeout 2 --max-time 3 -X POST "$PIGEON_DAEMON_URL/place" \
-        -H "Content-Type: application/json" "''${place_auth[@]+"''${place_auth[@]}"}" \
-        -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
-      serve_url="$(parse_serve_url "$place" "$OPENCODE_URL")"
+      # The door placed this session at create, so a read-only GET /route resolves the owner;
+      # any hiccup degrades serve_url to $OPENCODE_URL — never worse.
+      route="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
+      serve_url="$(parse_serve_url "$route" "$OPENCODE_URL")"
       exec "$REAL_OPENCODE" attach "$serve_url" --session "$sid" --dir "$dir"
     fi
 
     if [ "$verb" = "RESUME" ]; then
-      body="$(curl -s -o - -w $'\n%{http_code}' --connect-timeout 2 --max-time 3 "$OPENCODE_URL/session/$sid" 2>/dev/null || true)"
+      body="$(curl -s -o - -w $'\n%{http_code}' --connect-timeout 2 --max-time 3 "$FRONTDOOR_URL/session/$sid" 2>/dev/null || true)"
       code="''${body##*$'\n'}"
       body="''${body%$'\n'*}"
       [ "$code" = "200" ] || selfhost
       dir="$(printf '%s' "$body" | jq -r '.directory // empty' 2>/dev/null || true)"
       [ -n "$dir" ] || selfhost
-      place="$(curl -s -o - -w $'\n%{http_code}' --connect-timeout 2 --max-time 3 -X POST "$PIGEON_DAEMON_URL/place" \
-        -H "Content-Type: application/json" "''${place_auth[@]+"''${place_auth[@]}"}" \
-        -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
-      pcode="''${place##*$'\n'}"
-      pbody="''${place%$'\n'*}"
-      case "$pcode" in 2??) : ;; *) selfhost ;; esac
-      serve_url="$(parse_serve_url "$pbody" "$OPENCODE_URL")"
+      # A RESUME of a session that was never placed (e.g. a pre-cutover session)
+      # resolves to $OPENCODE_URL (anchor); post-cutover every session is door-created (placed),
+      # so this is the transitional edge only.
+      route="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
+      serve_url="$(parse_serve_url "$route" "$OPENCODE_URL")"
       exec "$REAL_OPENCODE" attach "$serve_url" --session "$sid" --dir "$dir"
     fi
 
