@@ -111,7 +111,7 @@ fi
 if command -v jq >/dev/null 2>&1; then
   catalog='{"providers":[
     {"id":"google-vertex-anthropic","models":{"claude-opus-4-8@default":{},"claude-haiku-4-5@20251001":{},"claude-opus-4-7@default":{}}},
-    {"id":"google-vertex","models":{"gemini-3.5-flash":{},"claude-haiku-4-5@20251001":{}}},
+    {"id":"google-vertex","models":{"gemini-3.6-flash":{},"claude-haiku-4-5@20251001":{}}},
     {"id":"ambi","models":{"foo@v1":{},"foo@v2":{}}}
   ]}'
   assert_eq "claude-opus-4-8@default" \
@@ -123,8 +123,8 @@ if command -v jq >/dev/null 2>&1; then
   assert_eq "claude-haiku-4-5@20251001" \
     "$(resolve_model_id "$catalog" google-vertex-anthropic claude-haiku-4-5)" \
     "resolve_model_id: bare haiku -> @date expansion"
-  assert_eq "gemini-3.5-flash" \
-    "$(resolve_model_id "$catalog" google-vertex gemini-3.5-flash)" \
+  assert_eq "gemini-3.6-flash" \
+    "$(resolve_model_id "$catalog" google-vertex gemini-3.6-flash)" \
     "resolve_model_id: suffix-less registered id -> unchanged"
   assert_eq "__NONE__" \
     "$(resolve_model_id "$catalog" google-vertex-anthropic claude-bogus-9)" \

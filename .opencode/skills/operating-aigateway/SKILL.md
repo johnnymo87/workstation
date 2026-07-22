@@ -57,7 +57,7 @@ If eval fails with `access to absolute path '/home' is forbidden in pure
 evaluation mode` (caused by any absolute-path reference in the flake), append
 `--impure`.
 
-> `gemini-3.5-flash` is the GLOBAL DEFAULT model on cloudbox, so routing it makes
+> `gemini-3.6-flash` is the GLOBAL DEFAULT model on cloudbox, so routing it makes
 > every session depend on the gateway being up — there is no auto-bypass when the
 > gateway is down. Treat routing changes as high blast-radius and verify a live
 > ledger row before declaring success.

@@ -52,6 +52,7 @@ RATES: dict[tuple[str, str], dict] = {
     ("google-vertex-anthropic", "claude-fable-5"):    {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5},
     # --- Google Gemini (Vertex) ---
     ("google-vertex", "gemini-3.5-flash"):  {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5},
+    ("google-vertex", "gemini-3.6-flash"):  {"input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 1.5},
     # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
     # pricing (whole-request selection above 200K input tokens).
     ("google-vertex", "gemini-3.1-pro-preview"): {

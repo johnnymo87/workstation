@@ -38,7 +38,7 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### vision-qa (subagent — devbox only)
 **Purpose:** Visual QA analyst — analyzes screenshots and UI renders.
-**Model:** `google/gemini-3.5-flash` + `variant: high` — direct Google Generative AI API, authed via `GOOGLE_GENERATIVE_AI_API_KEY` / `GEMINI_API_KEY` (sops `gemini_api_key`). **API-key-only by design: no Vertex.** The agent is therefore deployed only on devbox (the API-key host); macOS has no Gemini API key (Vertex ADC only) and cloudbox disables the direct `google` provider, so neither gets it. It bypasses `patchAgent` (bare `source`) so nothing rewrites the pin.
+**Model:** `google/gemini-3.6-flash` + `variant: high` — direct Google Generative AI API, authed via `GOOGLE_GENERATIVE_AI_API_KEY` / `GEMINI_API_KEY` (sops `gemini_api_key`). **API-key-only by design: no Vertex.** The agent is therefore deployed only on devbox (the API-key host); macOS has no Gemini API key (Vertex ADC only) and cloudbox disables the direct `google` provider, so neither gets it. It bypasses `patchAgent` (bare `source`) so nothing rewrites the pin.
 **Tools:** read only
 **When to use:** Comparing screenshots, identifying visual regressions, analyzing canvas/WebGL output, triaging UI bugs. Also used for:
 - **Comparative analysis** — current vs reference image, systematically comparing regions and element positions
@@ -56,7 +56,7 @@ reach the first-party `anthropic/` provider. `patchAgent` in
 `users/dev/opencode-config.nix` rewrites the pin at deploy time so each host
 lands on a model it can actually call:
 
-- **sonnet-5 → Gemini 3.5 Flash** on macOS + cloudbox (the cheap plan-execution
+- **sonnet-5 → Gemini 3.6 Flash** on macOS + cloudbox (the cheap plan-execution
   / research subagents: implementer, spec-reviewer, code-reviewer, librarian).
 - **opus-4-N → `google-vertex-anthropic/claude-opus-4-N@default`** on **cloudbox
   only**. Cloudbox has no working first-party `anthropic/` auth (it routes
