@@ -484,15 +484,29 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source queries pigeon /route?session_id=\n        "/route?session_id=" not found in: %s\n' "$default_nix"
     exit 1
   fi
-  # Placement (workstation-iwpj): after the session is confirmed to exist, the
-  # source must POST pigeon /place to get the authoritative owning serve so
-  # attachments distribute across the pool instead of all falling back to the
-  # default :4096. (GET /route alone 404s for never-placed sessions -> :4096.)
-  if grep -q '/place' "$default_nix"; then
-    printf 'PASS  source places sessions via pigeon POST /place\n'
+  # Front door polling: the step-1 readiness poll must go through the front door.
+  if grep -qF 'FRONTDOOR_URL=' "$default_nix"; then
+    printf 'PASS  source defines FRONTDOOR_URL\n'
   else
-    printf 'FAIL  source places sessions via pigeon POST /place\n        "/place" not found in: %s\n' "$default_nix"
+    printf 'FAIL  source defines FRONTDOOR_URL\n        "FRONTDOOR_URL=" not found in: %s\n' "$default_nix"
     exit 1
+  fi
+  if grep -qF '"$FRONTDOOR_URL"' "$default_nix"; then
+    printf 'PASS  source passes FRONTDOOR_URL to the poll subshell\n'
+  else
+    printf 'FAIL  source passes FRONTDOOR_URL to the poll subshell\n        "\"$FRONTDOOR_URL\"" not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  # Placement (workstation-iwpj): client-side pigeon POST /place is dropped
+  # since the front door handles placement at session creation. Assert the
+  # source no longer POSTs to pigeon /place. Match the actual call (not any
+  # mention of "/place") so accurate comments — e.g. parse_serve_url noting it
+  # accepts a POST /place response shape — don't trip the guard.
+  if grep -q '\-X POST "\$PIGEON_DAEMON_URL/place"' "$default_nix"; then
+    printf 'FAIL  source still POSTs client-side pigeon /place\n        found -X POST "$PIGEON_DAEMON_URL/place" in: %s\n' "$default_nix"
+    exit 1
+  else
+    printf 'PASS  source no longer POSTs client-side pigeon /place\n'
   fi
   # 404 fast-fail (workstation-ovqu): the step-1 readiness probe must give up
   # fast on a DEFINITIVE 404 instead of burning the full 30s window, while

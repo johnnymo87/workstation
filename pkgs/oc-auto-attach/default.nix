@@ -26,6 +26,7 @@ pkgs.writeShellApplication {
     # launcher on display issues).
 
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+    FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
 
     # Pigeon daemon discovery endpoint. In a K-serve pool, opencode-serve
     # processes do NOT share an in-memory event bus, so a session's turns are
@@ -240,20 +241,17 @@ pkgs.writeShellApplication {
     fi
     log "confining to tmux session: $target_session"
 
-    # Step 0: resolve which serve in the pool owns (runs) this session, and
-    # attach the TUI there. opencode-serve's streaming event bus is in-memory
-    # per process; with K>1 serves sharing one opencode.db, pigeon places a
-    # session on one serve via rendezvous hashing, and ONLY that serve emits
-    # the session's turn events. A TUI hardwired to a different serve renders
-    # stale (misses telegram/swarm-delivered turns) -- the exact symptom this
-    # resolves. Any failure (pigeon down, non-2xx, empty/garbage body, no
-    # apiBase) degrades to $OPENCODE_URL, i.e. the pre-pool single-serve
-    # behavior, so this is strictly safe. We use $serve_url for both the
-    # session-dir probe below and the `opencode attach` URL handed to nvim.
-    route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
-      "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
-    serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
-    log "serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
+    # Step 0: We poll readiness through the front door (which routes event
+    # stream/turn traffic but denies permission/event routes for interactive
+    # attach). Once the session is confirmed to exist, we resolve its owner
+    # read-only for the attach TUI (which must connect direct-to-owner).
+    # opencode-serve's streaming event bus is in-memory per process; with K>1
+    # serves sharing one opencode.db, pigeon places a session on one serve via
+    # rendezvous hashing, and ONLY that serve emits the session's turn events.
+    # A TUI hardwired to a different serve renders stale (misses telegram/
+    # swarm-delivered turns). Any failure (pigeon down, non-2xx, empty/garbage
+    # body, no apiBase) degrades to $OPENCODE_URL, i.e. the pre-pool
+    # single-serve behavior, so this is strictly safe.
 
     # Step 1: wait for session to be visible with a non-empty directory.
     #
@@ -268,14 +266,15 @@ pkgs.writeShellApplication {
     # BUT a stall and a genuinely-absent session look DIFFERENT on the wire,
     # and we must not treat them the same. A stall returns no HTTP response
     # (curl --max-time abort -> http_code 000); a deleted/never-existed
-    # session returns a real HTTP 404. Because every serve in the K-serve pool
-    # reads ONE shared opencode.db, a 404 from the routed owner is CONCLUSIVE
-    # -- no amount of waiting makes the session appear. So we classify each
-    # probe (classify_session_probe) and give up FAST on a definitive 404
-    # (after OC_AA_404_GRACE_SECS of grace for the launch-commit race), while
-    # still polling the full 30s through transient 000/5xx stalls. Pre-fix this
-    # loop swallowed the 404 with `curl -sf ... || true` and hung the whole 30s
-    # on phantom sids -- e.g. a manual attach of a stale id (workstation-ovqu).
+    # session returns a real HTTP 404. Because the door forwards GET /session/{sid}
+    # to a pool serve (or degrades the read to the anchor) and all serves share
+    # one opencode.db, a 404 through the door is still CONCLUSIVE -- no amount
+    # of waiting makes the session appear. So we classify each probe
+    # (classify_session_probe) and give up FAST on a definitive 404 (after
+    # OC_AA_404_GRACE_SECS of grace for the launch-commit race), while still
+    # polling the full 30s through transient 000/5xx stalls. Pre-fix this loop
+    # swallowed the 404 with `curl -sf ... || true` and hung the whole 30s on
+    # phantom sids -- e.g. a manual attach of a stale id (workstation-ovqu).
     session_dir=""
     probe_rc=0
     probe_body_file="$(mktemp)"
@@ -325,11 +324,11 @@ pkgs.writeShellApplication {
         esac
         sleep 0.2
       done
-    ' _ "$sid" "$serve_url" "$probe_body_file")" || probe_rc=$?
+    ' _ "$sid" "$FRONTDOOR_URL" "$probe_body_file")" || probe_rc=$?
     rm -f "$probe_body_file"
 
     if [ "$probe_rc" -eq 3 ]; then
-      log "session $sid not found (404 from $serve_url) -- absent from opencode.db; giving up"
+      log "session $sid not found (404 from $FRONTDOOR_URL) -- absent from opencode.db; giving up"
       exit 0
     fi
     if [ "$probe_rc" -ne 0 ] || [ -z "$session_dir" ]; then
@@ -339,27 +338,14 @@ pkgs.writeShellApplication {
 
     log "session $sid dir=$session_dir"
 
-    # Step 1.5: place the session (workstation-iwpj). The session is now
-    # CONFIRMED to exist (Step 1 FOUND), so POSTing pigeon /place cannot
-    # manufacture a phantom assignment for a stale/garbage sid (the pigeon-eup
-    # hazard that made GET /route read-only). /place is idempotent
-    # (ensureRouted = resolveRoute ?? placeSession) and load-aware (HRW +
-    # ACTIVE_TURN_CAP), and returns the authoritative owning serve. Without it,
-    # never-placed sessions 404 on GET /route and every TUI falls back to the
-    # default :4096 -- the serve-0 concentration this fixes. Any failure (pigeon
-    # down, non-2xx, empty/garbage body, no api_base) degrades to the Step-0
-    # serve_url (itself an OPENCODE_URL fallback), i.e. never worse than today.
-    place_auth=()
-    if [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ]; then
-      place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
-    fi
-    place_body="$(curl -sf --connect-timeout 2 --max-time 3 \
-      -X POST "$PIGEON_DAEMON_URL/place" \
-      -H "Content-Type: application/json" \
-      ''${place_auth[@]+"''${place_auth[@]}"} \
-      -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
-    serve_url="$(parse_serve_url "$place_body" "$serve_url")"
-    log "placed serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
+    # Step 1.5: resolve owner read-only (workstation-iwpj). The door already
+    # placed this session at create (opencode-launch cutover), so a read-only
+    # GET /route resolves the owner for the attach TUI. Any pigeon/route
+    # hiccup degrades serve_url to $OPENCODE_URL — never worse.
+    route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
+      "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
+    serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
+    log "placed/owner serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
 
     # Step 2: compute project key for editor routing.
     # Collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>.
