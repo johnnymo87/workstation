@@ -785,10 +785,16 @@ code-review → fixup → `test.sh` green → commit; **no `nixos-rebuild switch
 deploy checkpoint, and only with explicit user go-ahead.**
 
 **Milestone 1 — front-door code + observability hardening (package + host config; zero client impact):**
-_Progress (2026-07-22, branch `frontdoor-phase7`): **T0 ✅ DONE** (`92d834e`), **T1 ✅ DONE**
-(`defb4ce` + `13672ac`; FABLE-S1 pigeon patch deferred), **T2 ✅ DONE** (`GET /mcp`→501
-per-process-ro, `POST /mcp`→403, twins 6→5). Suite: 247 green, typecheck clean. Not yet
-deployed (Checkpoint 1 pending). Remaining: T3, T4, T5._
+_Progress (2026-07-22, branch `frontdoor-phase7`): **ALL of Milestone 1 DONE (T0–T5)**,
+each via SDD (implement → spec-review → code-review → triaged fixups). T0 compile-to-JS;
+T1 sticky/lease renewal + LOW-2 doc + FABLE-S1 fail-safe interim (pigeon patch deferred);
+T2 `GET /mcp`→501 per-process-ro / `POST /mcp`→403 / twins 6→5; T3 crash backstop
+(uncaughtException→exit1, unhandledRejection→log-continue); T4 `audit/gate.sh` pass/fail
+through-door gate (14 assertions, verified pass=exit0 / fail=exit1); T5 canary F4 anchor
+cross-probe + version-drift logging (+F8b/F8c verified: aarch64 bun is ET_EXEC, THRESHOLD=7
+re-justified). Suite: **250 vitest green**, typecheck clean; **`nix build ...cloudbox
+toplevel` green**; `bash -n` on the built canary OK. **NOT yet deployed — Checkpoint 1
+(live rebuild + re-gate + F-D4 real-turn) pending user go-ahead.**_
 - **T0 — compile-to-JS single process (F10/F-D1/F-D2/F-D3, closes F5).** Convert
   `default.nix` to build emitted JS (`tsc` emit → wrapper runs `node dist/main.js`),
   dropping the tsx runtime wrapper. Recommended mechanism: `buildNpmPackage` (hermetic
