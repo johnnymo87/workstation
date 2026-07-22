@@ -14,6 +14,7 @@ pkgs.writeShellApplication {
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.git pkgs.coreutils ];
   text = ''
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+      FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
 
       # Pigeon daemon discovery endpoint. In a K-serve pool, opencode-serve
       # processes don't share an in-memory event bus, MCP connections, or active
@@ -231,8 +232,8 @@ pkgs.writeShellApplication {
       fi
 
       # Health check
-      if ! curl -sf "$OPENCODE_URL/global/health" >/dev/null 2>&1; then
-        echo "Error: opencode serve is not reachable at $OPENCODE_URL" >&2
+      if ! curl -sf "$FRONTDOOR_URL/global/health" >/dev/null 2>&1; then
+        echo "Error: front door is unreachable at $FRONTDOOR_URL" >&2
         echo "Check: systemctl status opencode-serve (Linux) or launchctl list | grep opencode (macOS)" >&2
         exit 1
       fi
@@ -246,10 +247,10 @@ pkgs.writeShellApplication {
       # session the user otherwise has to notice and nudge. Resolving up front
       # turns it into either an auto-correction (unique bare -> @version) or a
       # loud pre-launch error. Catalog config is global (same across the pool),
-      # so OPENCODE_URL is fine here, before /route. Any catalog/jq/provider
+      # so FRONTDOOR_URL is fine here, before /route. Any catalog/jq/provider
       # hiccup degrades to the id as-given -- never worse than before.
       if [ -n "$model_spec" ]; then
-        providers_body="$(curl -sf --max-time 5 "$OPENCODE_URL/config/providers" 2>/dev/null || true)"
+        providers_body="$(curl -sf --max-time 5 "$FRONTDOOR_URL/config/providers" 2>/dev/null || true)"
         resolved_model="$(resolve_model_id "$providers_body" "$model_provider" "$model_id")"
         case "$resolved_model" in
           __SKIP__)
@@ -338,7 +339,7 @@ pkgs.writeShellApplication {
       fi
 
       # Create session
-      session_response=$(curl -sf -X POST "$OPENCODE_URL/session" \
+      session_response=$(curl -sf -X POST "$FRONTDOOR_URL/session" \
         -H "x-opencode-directory: $directory") || {
         echo "Error: failed to create session" >&2
         exit 1
@@ -350,24 +351,14 @@ pkgs.writeShellApplication {
         exit 1
       fi
 
-      # PLACE this session on a pool serve (HRW) and resolve its owner. This is
-      # the placement-at-create fix (workstation-iwpj): `GET /route` is read-only
-      # and 404s for a never-placed session, so the old passive lookup always
-      # fell back to the anchor and EVERY first turn ran on serve-0 (the other
-      # serves idled). `POST /place` runs pigeon's ensureRouted
-      # (resolveRoute ?? placeSession), which writes the session_assignment +
-      # lease via the rendezvous hash and returns the owning serve. We must place
-      # BEFORE the first prompt: placing after a turn starts bumps
-      # owner_generation and kills the in-flight run. We then send the
-      # MCP-connect + prompt to this owner so the agent loop, its MCP tools, and
-      # the TUI (which resolves via /route) all land on the same serve. Any
-      # failure (pigeon down, no healthy serve) degrades to $OPENCODE_URL (the
-      # serve we created on), i.e. pre-pool single-serve behavior -- never worse.
-      place_body="$(curl -sf --connect-timeout 2 --max-time 3 \
-        -X POST "$PIGEON_DAEMON_URL/place" \
-        -H "Content-Type: application/json" \
-        -d "{\"session_id\":\"$session_id\"}" 2>/dev/null || true)"
-      serve_url="$(parse_serve_url "$place_body" "$OPENCODE_URL")"
+      # DISCOVER the owning serve for this session via a read-only lookup.
+      # Rationale: the front door already ran `POST /place` inside its create-choreography,
+      # so the session is placed by the time create returns; the client only needs a read-only
+      # `GET /route` to discover the owner for the two calls the door cannot proxy (MCP connect
+      # + the manual attach hint). Any pigeon hiccup degrades `serve_url` to `$OPENCODE_URL`
+      # (the serve we created on), i.e. pre-pool single-serve behavior -- never worse.
+      route_body="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$session_id" 2>/dev/null || true)"
+      serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
 
       # Base tools map always denies `question`: a headless launch has no
       # attended user to answer it, so any subagent (or the primary itself)
@@ -378,6 +369,7 @@ pkgs.writeShellApplication {
       mcp_tools_json='{"question": false}'
       if [ "''${#mcp_servers[@]}" -gt 0 ]; then
         for srv in $(printf '%s\n' "''${mcp_servers[@]}" | sort -u); do
+          # Direct to owner: the front door denies MCP connect with 405 (it is per-serve state)
           connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
             -X POST "$serve_url/mcp/$srv/connect" \
             -H "x-opencode-directory: $directory")
@@ -408,8 +400,8 @@ pkgs.writeShellApplication {
           '{parts: [{type: "text", text: $p}], tools: $tools}')
       fi
 
-      # Send prompt to the owning serve (where the agent loop will run)
-      curl -sf -X POST "$serve_url/session/$session_id/prompt_async" \
+      # Send prompt to the front door (which routes to the owning serve where the agent loop will run)
+      curl -sf -X POST "$FRONTDOOR_URL/session/$session_id/prompt_async" \
         -H "x-opencode-directory: $directory" \
         -H "Content-Type: application/json" \
         -d "$prompt_payload" >/dev/null || {
@@ -441,6 +433,6 @@ pkgs.writeShellApplication {
       echo "Directory: $directory"
       echo ""
       echo "Attach:  opencode attach $serve_url --session $session_id"
-      echo "Kill:    curl -sf -X DELETE $serve_url/session/$session_id"
+      echo "Kill:    curl -sf -X DELETE $FRONTDOOR_URL/session/$session_id"
     '';
 }

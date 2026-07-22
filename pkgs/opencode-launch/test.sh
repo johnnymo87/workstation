@@ -164,24 +164,45 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source honors PIGEON_DAEMON_URL\n        not referenced in: %s\n' "$default_nix"; exit 1
   fi
-  # Placement-at-create: must POST /place (active placement), NOT the old passive
-  # read-only GET /route (which 404s pre-placement and concentrated load on serve-0).
+  # Placement-at-create: must NOT contain POST /place on the client (the door places at create)
   if grep -q 'POST "\$PIGEON_DAEMON_URL/place"' "$default_nix"; then
-    printf 'PASS  source places via pigeon POST /place\n'
+    printf 'FAIL  source still places via pigeon POST /place\n        found in: %s\n' "$default_nix"; exit 1
   else
-    printf 'FAIL  source places via pigeon POST /place\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'PASS  source no longer contains client-side POST /place\n'
   fi
+  # Discovery-via-route: must use GET /route?session_id= for read-only owner discovery
   if grep -q '/route?session_id=' "$default_nix"; then
-    printf 'FAIL  source still uses passive GET /route?session_id= (should POST /place)\n        in: %s\n' "$default_nix"; exit 1
+    printf 'PASS  source uses GET /route?session_id= for discovery\n'
   else
-    printf 'PASS  source no longer uses passive GET /route for placement\n'
+    printf 'FAIL  source does not contain GET /route?session_id=\n        not found in: %s\n' "$default_nix"; exit 1
   fi
-  # The prompt and MCP-connect must target the resolved owner ($serve_url),
-  # NOT the hardwired $OPENCODE_URL.
-  if grep -q '"\$serve_url/session/\$session_id/prompt_async"' "$default_nix"; then
-    printf 'PASS  source sends prompt to $serve_url (owning serve)\n'
+  # Front-door routing: create, health, and config/providers must route through FRONTDOOR_URL
+  if grep -q 'FRONTDOOR_URL=' "$default_nix"; then
+    printf 'PASS  source defines FRONTDOOR_URL\n'
   else
-    printf 'FAIL  source sends prompt to $serve_url\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'FAIL  source defines FRONTDOOR_URL\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q 'POST "\$FRONTDOOR_URL/session"' "$default_nix"; then
+    printf 'PASS  source sends create to FRONTDOOR_URL\n'
+  else
+    printf 'FAIL  source sends create to FRONTDOOR_URL\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q '"\$FRONTDOOR_URL/global/health"' "$default_nix"; then
+    printf 'PASS  source sends health check to FRONTDOOR_URL\n'
+  else
+    printf 'FAIL  source sends health check to FRONTDOOR_URL\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q '"\$FRONTDOOR_URL/config/providers"' "$default_nix"; then
+    printf 'PASS  source queries providers via FRONTDOOR_URL\n'
+  else
+    printf 'FAIL  source queries providers via FRONTDOOR_URL\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # The prompt and MCP-connect: prompt must route through FRONTDOOR_URL,
+  # MCP-connect must target the resolved owner ($serve_url).
+  if grep -q '"\$FRONTDOOR_URL/session/\$session_id/prompt_async"' "$default_nix"; then
+    printf 'PASS  source sends prompt to FRONTDOOR_URL\n'
+  else
+    printf 'FAIL  source sends prompt to FRONTDOOR_URL\n        not found in: %s\n' "$default_nix"; exit 1
   fi
   if grep -q '"\$serve_url/mcp/\$srv/connect"' "$default_nix"; then
     printf 'PASS  source connects MCP on $serve_url (owning serve)\n'
@@ -261,7 +282,7 @@ if [ -f "$default_nix" ]; then
   fi
   # M1a ordering: the work call must appear BEFORE the POST /session create.
   work_line="$(grep -n 'work "\$worktree_slug"' "$default_nix" | head -1 | cut -d: -f1)"
-  create_line="$(grep -n 'POST "\$OPENCODE_URL/session"' "$default_nix" | head -1 | cut -d: -f1)"
+  create_line="$(grep -n 'POST "\$FRONTDOOR_URL/session"' "$default_nix" | head -1 | cut -d: -f1)"
   if [ -n "$work_line" ] && [ -n "$create_line" ] && [ "$work_line" -lt "$create_line" ]; then
     printf 'PASS  worktree is created before the session (M1a: shrink failure window)\n'
   else
