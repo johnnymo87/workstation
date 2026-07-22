@@ -876,9 +876,47 @@ hardcodes in 7.1 (system rebuild). **► DEPLOY CHECKPOINT 2 (user go-ahead)** a
 land: verify each client class actually reaches the door and infra-plane clients still
 hit the raw anchor.
 
+#### Milestone 2 routing table — CLARIFIED 2026-07-22 (user: "everything through the front door, no other door than the front door")
+Directive: every data-plane call whose route the door **supports** goes through
+`FRONTDOOR_URL` (`:4700`) in M2. Three categories are forced off the door and are
+**not** a matter of preference:
+
+| Route / call | M2 disposition | Why |
+|---|---|---|
+| `GET /global/health`, `GET /config/providers`, `GET /doc` (global-ro) | **→ door** | door proxies global reads |
+| `POST /session` (create) | **→ door** | door runs create→`/place`→respond (Phase 4, live); this is what lets clients drop their own `POST /place` |
+| `GET /session`, `GET /session/{sid}` (list/poll) | **→ door** | session/global reads |
+| `POST /session/{sid}/prompt_async`, `/message` | **→ door** | session-path routed |
+| `DELETE /session/{sid}` (kill hint) | **→ door** | session-path routed |
+| client-side `POST /place` | **REMOVED** | door places now (C1/Task 1.4 live). Clients that still need `serve_url` (below) discover it with read-only `GET /route` — no client write. |
+| `POST /mcp/{name}/connect\|disconnect` (`opencode-launch --mcp`) | **direct→serve_url** (forced) | door **denies 405** (`global-sideeffect`): per-serve-process state, no sid in path. Folded in at Phase 8 (opencode-patched). |
+| interactive attach **TUI** (event firehose + `POST /permission/{id}/reply`, `/question/{id}/reply`, `/instance/dispose`, `PUT /auth/*`, oauth, `experimental.*`) | **direct→serve_url** via `/route` (forced) | NEW-P5-F1: door denies the bare mutating-global reply routes (405) and the `/global/event` firehose is gone from the door; pointing the TUI at the door **wedges mid-turn permission prompts**. Client-side fix ships in Phase 8 opencode-patched; Phase 9 then repoints `OPENCODE_URL`. |
+| pigeon-daemon's own `OPENCODE_URL`; frontdoor canary; serve canary; wedge-watcher; reset per-serve health probes | **anchor** (`OPENCODE_ANCHOR_URL`) (forced) | 7.8 infra/control-plane exemption: pigeon is the door's dependency (circular); canaries/probes must diagnose the door/pool directly. |
+
+Net for M2: `create`/`prompt`/`health`/`providers`/`session-reads`/`delete` move to
+the door; `POST /place` is deleted client-side; `--mcp` connect + the interactive TUI
+keep a read-only `GET /route`→`serve_url` hop until Phase 8/9; infra/pigeon stay on the
+anchor. `OPENCODE_URL` stays `:4096` (Phase 9 collapses it into `FRONTDOOR_URL`).
+
+**Plan-vs-reality corrections (audited 2026-07-22, worktree `frontdoor-phase7-m2`):**
+- 7.1's "hardcodes `:485,530`" are actually `configuration.nix:489` (**pigeon-daemon's
+  own `OPENCODE_URL`** — a 7.8 control-plane exemption; rename to `OPENCODE_ANCHOR_URL`,
+  keep value `:4096`, do **not** repoint) and `:534` (**lgtm-run** env, data-plane but
+  `enableLgtm=false` — repoint to `FRONTDOOR_URL` for correctness even though inactive).
+- `opencode-send` is already **removed** (`test-pool-route-clients.sh:5`); no client to touch in 7.4.
+- `opencode-llm-audit` is **not a URL client** (follows the serve log fd); no change in 7.6.
+- reset-workspace `CAPTURE_URL` read (`:409`) **and** the recommendation-prompt hardcodes
+  (`:594`,`:609`) **→ door** (user directive; overrides the earlier "keep direct" lean).
+- **devbox convergence (NEW):** this whole front-door stack is cloudbox-only today; once
+  the kinks are worked out we replicate it on devbox. Host-scope everything (`FRONTDOOR_URL`
+  only where a door exists; doorless hosts keep the raw anchor). devbox-only consumers —
+  `hosts/devbox/configuration.nix:290` (pigeon), `:427` (fp-digest→`:4096`), the
+  `~/projects/my-podcasts` out-of-repo Python, and the devbox serve-canary/wedge-watcher —
+  are handled in that devbox pass, not here.
+
 - **7.1** introduce `OPENCODE_ANCHOR_URL` (raw anchor) + `FRONTDOOR_URL` in
   `home.base.nix`; keep `OPENCODE_URL` unchanged (repointed in Phase 9); fix real
-  hardcodes `configuration.nix:485,530`. Commit.
+  hardcodes (see corrections above: `configuration.nix:489` rename-to-anchor, `:534` repoint). Commit.
 - **7.2** `oc-pool-attach` (+ a `/healthz` reachability idiom replacing
   `ses_poolprobe`; keep `--strict` selfhost bail).
 - **7.3** `oc-auto-attach` (drops `/place` — after 1.4).
