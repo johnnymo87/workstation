@@ -565,9 +565,53 @@ no body — leak-clean).
   + review fixups `e049707`: probe `--max-time 5` > door's 3s `routeTimeoutMs`; no
   `-f` so a 503 = door-alive; THRESHOLD=2; instant-only forensics; keep-latest-10
   prune on both canaries).
-- **6.5** **deploy + through-front-door gate** (M2). **NOT YET EXECUTED — gated on
-  operator go-ahead** (first live `sudo nixos-rebuild switch` on cloudbox; decide
-  deploy-from-worktree vs merge-to-main first). Then, in order:
+- **6.5** **deploy + through-front-door gate** (M2). **DONE 2026-07-22** — merged
+  `serve-reverse-proxy`→`main` (`2691e6b`, throwaway-worktree merge, clean auto-merge
+  of the one `flake.nix` overlap), deployed live on cloudbox via `sudo nixos-rebuild
+  switch --flake .#cloudbox` (closure `van969v…`; new units started:
+  `opencode-frontdoor.service`, `opencode-frontdoor-canary.timer`,
+  `opencode-serve-canary.timer`). Gate results:
+  1. ✅ `test.sh` gate: 239 tests + typecheck green on the deploy tree.
+  2. ✅ switch started the (new) unit fresh; `/healthz` version marker ==
+     `g4s6z5…-opencode-frontdoor-1.0.0` (== ExecStart store path). NEW-8 confirmed.
+  3. ✅ `/healthz` `status:ok, pigeon:true, anchor:true, degraded:false`, listening
+     127.0.0.1:4700.
+  4. ✅ `probe.sh` through-door (no `--mutate`) vs direct: only the intended policy
+     deltas — `pty` 200→**501**, `global-event` 200→**410**, `web-ui /` 200→**404
+     web_ui_not_served**, `unrecognized` 200(SPA)→**404**; `session-path`,
+     `session-query /event` (SSE `server.connected` streamed through door),
+     `global-ro` pass 200.
+  5. ✅ SSE turn delivery: with a throwaway session owned by **serve-2 (:4098,
+     prospective)**, a `noReply` message to the owner produced
+     `message.updated`/`message.part.updated`/`session.updated` **relayed through the
+     door's** `/event?session_ids=` — proving the door owner-routes SSE to a
+     non-anchor serve. (No LLM cost; throwaway session deleted.)
+  6. ✅ deny-contract through door: `PATCH /config`→405+`Allow: GET`+honest body;
+     `POST /global/dispose`→403; `POST /mcp`→405+`Allow: GET` (F3 per-process twin).
+  7. ✅ canary self-test: SIGSTOP the **listener child** → `/healthz` timed out →
+     canary logged `1/2` then `2/2 consecutive` → restarted the door + dumped
+     forensics to `/var/lib/opencode-frontdoor-canary/wedge-20260722T091823/`; door
+     recovered to a new PID, `/healthz` 200, failfile cleared.
+  8. ✅ degrade drill: `systemctl stop pigeon-daemon` → door stayed **active**,
+     `/healthz` `status:ok, degraded:true, pigeon:false, anchor:true`; restarting
+     pigeon → `degraded:false`. Confirms §7 degrade + `Wants`-not-`Requires` +
+     Total-Isolation-healthz.
+
+  **Two live findings (deferred, non-blocking — canary carries no through-door
+  traffic):**
+  - **F10 (canary forensics target the wrong PID):** the tsx wrapper runs TWO
+    processes — MainPID is the tsx *parent*, but the actual `:4700` listener is a
+    *child* node (`node --import tsx …`). Both canaries dump `/proc/$MainPID/…`, so a
+    real listener wedge captures the **parent's** stacks, not the frozen child's.
+    RECOVERY is unaffected (`systemctl restart` kills the whole cgroup). Fix (Phase 7
+    / packaging): run the door as a SINGLE process (invoke `node --import tsx main.ts`
+    rather than the `tsx` CLI so MainPID == listener), or have the canary dump every
+    PID in `cgroup.procs`. (First surfaced because SIGSTOP-ing MainPID left `/healthz`
+    answering — the child kept serving.)
+  - Confirms fable **F2**: the initial `/event` probe DID exercise the promoting path
+    but wrote no sticky entry (as predicted); the deploy created no sticky state.
+
+  **Execution order used (kept for the record):**
   1. Run `./pkgs/opencode-frontdoor/test.sh` (mandatory pre-rebuild gate, F5).
   2. `sudo nixos-rebuild switch --flake .#cloudbox`; then — because
      `restartIfChanged=false` — **explicitly** `sudo systemctl restart
@@ -595,7 +639,7 @@ no body — leak-clean).
 
 ---
 
-## Phase 6 — DONE (2026-07-21, tasks 6.0–6.4; 6.5 deploy gated on operator)
+## Phase 6 — DONE (2026-07-21 tasks 6.0–6.4; 6.5 deployed live on cloudbox 2026-07-22)
 
 Tasks 6.0–6.4 landed via task-by-task SDD (implement → spec-review → code-review →
 fixup), each pushed, then an `adversarial-reviewer-fable` pass over the whole phase.
@@ -657,6 +701,11 @@ Phase 6.
   **aarch64** bun binary is ET_EXEC before trusting the eu-stack cross-wedge
   stable-address fingerprint (the claim came from x86 devbox). Re-justify front-door
   `THRESHOLD=2` for a live-traffic SPOF.
+- **F10 (canary forensics wrong PID — found live in the 6.5 gate):** the tsx wrapper
+  runs a parent (MainPID) + a child (the actual `:4700` listener), so both canaries'
+  `/proc/$MainPID/…` dumps capture the parent, not a wedged listener child. Recovery
+  is fine (cgroup restart). Fix: make the door a single process (`node --import tsx
+  main.ts` so MainPID == listener) — cleanest — or dump every `cgroup.procs` PID.
 - **F7/F9 (runbook):** `Restart=always`+`RestartSec=5` never trips systemd's
   start-limit → a bad env/broken build crash-loops silently (no alerting layer). And
   unit-`Environment` changes / canary-triggered restarts activate new state with no
