@@ -83,4 +83,21 @@ want_grep "lgtm-sessions lists sessions via the front door" '"$FRONTDOOR_URL/ses
 deny_grep "lgtm-sessions no longer health-checks the anchor" '"$OPENCODE_URL/global/health"'     "$hb"
 deny_grep "lgtm-sessions no longer lists via the anchor"   '"$OPENCODE_URL/session"'             "$hb"
 
+# ---- Phase 7.8 infra-/control-plane exemption guards ------------------------
+# "Everything through the front door" applies to DATA-PLANE clients only. The
+# control plane (pigeon) and the door's own watchdogs must NOT be repointed at
+# the front door: pigeon is the router the door depends on (routing it through
+# the door is a circular control->data dependency + a startup cycle), and the
+# canaries must diagnose the door/pool directly. Guard the cloudbox system
+# config so a future edit that "helpfully" repoints pigeon at :4700 trips here.
+cfg="$script_dir/../../hosts/cloudbox/configuration.nix"
+if [ ! -f "$cfg" ]; then
+  echo "SKIP: infra-plane exemption guards (configuration.nix not found at $cfg)"
+else
+  want_grep "pigeon-daemon keeps the raw anchor (control-plane exemption)" 'export OPENCODE_URL="http://127.0.0.1:4096"' "$cfg"
+  deny_grep "pigeon-daemon is NOT repointed at the front door"             'export OPENCODE_URL="http://127.0.0.1:4700"' "$cfg"
+  want_grep "front door degrades to the raw anchor, not itself"           'OPENCODE_ANCHOR_URL=http://127.0.0.1:4096'   "$cfg"
+  want_grep "frontdoor canary watches the door port directly"             'PORT=4700'                                   "$cfg"
+fi
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }
