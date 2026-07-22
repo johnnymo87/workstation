@@ -1203,7 +1203,8 @@ ${serveIdCase}
         # The front door is a single point of failure (SPOF) for all opencode access.
         # We do NOT include deep stack checks to minimize time-to-recovery.
         capture_and_restart() {
-          local reason="$1"
+          # Default the reason under `set -u` so a future arg-less call can't crash recovery.
+          local reason="''${1:-unknown}"
           TS=$(date +%Y%m%dT%H%M%S)
           DUMP="$STATE/wedge-$TS"
           mkdir -p "$DUMP"
@@ -1219,6 +1220,7 @@ ${serveIdCase}
             done
             # Per-thread kernel wait channels.
             for t in /proc/$PID/task/*/; do
+              [ -d "$t" ] || continue  # skip the literal glob if the process just died
               tid=$(basename "$t")
               printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
                 "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
@@ -1231,6 +1233,8 @@ ${serveIdCase}
           fi
 
           echo "RESTARTING $UNIT (reason: $reason, pid=$PID); forensics in $DUMP"
+          # Synchronous; blocks up to the door unit's TimeoutStopSec (15s) if the
+          # wedged process is slow to die. Acceptable — we're already wedged.
           systemctl restart "$UNIT"
           rm -f "$FAILFILE" "$SICKFILE"
         }
