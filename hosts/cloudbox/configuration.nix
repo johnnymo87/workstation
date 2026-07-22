@@ -787,6 +787,10 @@ ${serveIdCase}
         # reconnects, re-creates the instance, and re-triggers the burn =
         # restart<->burn thrash loop. 7 (~7-8 min) outlasts one clean burn
         # while still catching permanent wedges.
+        # F8b (Phase 7): re-justified for cloudbox. The burn is a property of the
+        # opencode binary (catalog/credential load), not the host, so the g3iy
+        # rationale carries over from devbox; 7 (~7-8 min) keeps ample margin on
+        # cloudbox's aarch64/GCP too. Left at 7.
         THRESHOLD=7
 
         # Don't fight an in-flight reset-workspace (it stops/starts the pool
@@ -860,6 +864,9 @@ ${serveIdCase}
           #    The bun binary is non-PIE ET_EXEC so raw addresses are STABLE across
           #    runs/wedges: identical frames across samples = tight-loop
           #    fingerprint even without symbols.
+          #    F8c (Phase 7) VERIFIED on cloudbox: `readelf -h $(readlink -f $(command -v bun))`
+          #    reports `Type: EXEC` on AArch64 (not just x86 devbox) — the stable-address
+          #    assumption holds here too.
           # All best-effort; a truly frozen loop can't get worse from a brief
           # ptrace stop, and the restart follows immediately anyway.
           if [ -n "$PID" ] && [ "$PID" != "0" ]; then
