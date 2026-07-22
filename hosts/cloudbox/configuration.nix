@@ -1179,18 +1179,19 @@ ${serveIdCase}
       ExecStart = "${pkgs.writeShellScript "opencode-frontdoor-canary" ''
         set -u
         # System-service PATH is minimal — be explicit.
-        # We only need coreutils, systemd, util-linux, and curl for instant forensics.
+        # We include coreutils, systemd, util-linux, curl, gnugrep, gnused, and findutils.
         # Deep stack dumps (the serve canary's `eu-stack` native-stack loop and its 2s `cpu-io-split` sample) are omitted to ensure fast recovery.
-        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl ]}
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.findutils ]}
         STATE=/var/lib/opencode-frontdoor-canary
         UNIT=opencode-frontdoor.service
         PORT=4700
         FAILFILE="$STATE/fails"
+        SICKFILE="$STATE/sick"
 
         # Only police units that are supposed to be up. Intentional stops,
-        # crash-loop backoff, etc. reset the counter.
+        # crash-loop backoff, etc. reset the counters.
         if [ "$(systemctl is-active "$UNIT")" != "active" ]; then
-          rm -f "$FAILFILE"
+          rm -f "$FAILFILE" "$SICKFILE"
           exit 0
         fi
 
@@ -1198,11 +1199,46 @@ ${serveIdCase}
         # does not stop/restart the front door, and the no-`-f` probe already
         # tolerates backend bounces.
 
-        # Probe the native /healthz WITHOUT -f.
-        # Critical isolation logic: a 503 from /healthz means the door's event loop
-        # is ALIVE but both backends are down — we must NOT restart the door on that
-        # (restarting cannot fix backends). Only a TIMEOUT / refused connection
-        # (frozen loop or dead process) is a wedge.
+        # Refactored forensics capture and restart function.
+        # The front door is a single point of failure (SPOF) for all opencode access.
+        # We do NOT include deep stack checks to minimize time-to-recovery.
+        capture_and_restart() {
+          local reason="$1"
+          TS=$(date +%Y%m%dT%H%M%S)
+          DUMP="$STATE/wedge-$TS"
+          mkdir -p "$DUMP"
+
+          # Bound persistent forensics: keep only the 10 newest wedge dumps.
+          ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+
+          PID=$(systemctl show "$UNIT" -p MainPID --value)
+          CG=$(systemctl show "$UNIT" -p ControlGroup --value)
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            for f in status wchan syscall; do
+              cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+            # Per-thread kernel wait channels.
+            for t in /proc/$PID/task/*/; do
+              tid=$(basename "$t")
+              printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
+                "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
+            done
+          fi
+          if [ -n "$CG" ]; then
+            for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
+              cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+          fi
+
+          echo "RESTARTING $UNIT (reason: $reason, pid=$PID); forensics in $DUMP"
+          systemctl restart "$UNIT"
+          rm -f "$FAILFILE" "$SICKFILE"
+        }
+
+        BODY_FILE=$(mktemp)
+        trap 'rm -f "$BODY_FILE"' EXIT
+
+        # Probe the native /healthz WITHOUT -f, capturing both body and HTTP status.
         #
         # Coupling note: The canary's --max-time (5s) MUST exceed the front door's
         # FRONTDOOR_ROUTE_TIMEOUT_MS (default 3000ms) so a healthy-but-degraded 503
@@ -1210,53 +1246,77 @@ ${serveIdCase}
         # dead process (no response within 5s) counts as a wedge. (If
         # FRONTDOOR_ROUTE_TIMEOUT_MS is ever raised on the door unit, this must be
         # raised too.)
-        if curl -s --max-time 5 --connect-timeout 3 -o /dev/null "http://127.0.0.1:$PORT/healthz"; then
-          rm -f "$FAILFILE"
+        HTTP_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o "$BODY_FILE" -w "%{http_code}" "http://127.0.0.1:$PORT/healthz")
+        CURL_EXIT=$?
+
+        # 1. No HTTP response (curl failed: connection refused or timeout — frozen-loop or dead-process)
+        if [ "$CURL_EXIT" -ne 0 ] || [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" -eq 0 ]; then
+          rm -f "$SICKFILE"
+
+          THRESHOLD=2
+          FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+          echo "$FAILS" > "$FAILFILE"
+          echo "WARNING: $UNIT failed /healthz ($FAILS/$THRESHOLD consecutive timeouts/failures)"
+
+          if [ "$FAILS" -ge "$THRESHOLD" ]; then
+            capture_and_restart "no response"
+          fi
           exit 0
         fi
 
-        # THRESHOLD=2
-        # Double-confirm; the front door has no post-boot burn like the serves, but
-        # a single transient localhost blip shouldn't trigger a restart. 2 consecutive is ~2 min.
-        THRESHOLD=2
+        # 2. HTTP 200 -> healthy
+        if [ "$HTTP_CODE" -eq 200 ]; then
+          rm -f "$FAILFILE" "$SICKFILE"
 
-        FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
-        echo "$FAILS" > "$FAILFILE"
-        echo "WARNING: $UNIT failed /healthz ($FAILS/$THRESHOLD consecutive)"
-        [ "$FAILS" -lt "$THRESHOLD" ] && exit 0
+          # Version-drift check (F7/F9/F-D6)
+          # Parse version out of the body: {"status":"ok","degraded":...,"version":"/nix/store/..."}
+          RUNNING_VER=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$BODY_FILE" | sed -n 's/.*"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/p')
+          EXECSTART_FULL=$(systemctl show "$UNIT" -p ExecStart --value)
+          EXECSTART_PATH=$(echo "$EXECSTART_FULL" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
 
-        # Wedged. Capture near-instant forensics before fast restart.
-        # The front door is a single point of failure (SPOF) for all opencode access.
-        # We do NOT include deep stack checks (the serve canary's `eu-stack` native-stack loop and its 2s `cpu-io-split` sample) to minimize time-to-recovery.
-        TS=$(date +%Y%m%dT%H%M%S)
-        DUMP="$STATE/wedge-$TS"
-        mkdir -p "$DUMP"
-
-        # Bound persistent forensics: keep only the 10 newest wedge dumps.
-        ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
-
-        PID=$(systemctl show "$UNIT" -p MainPID --value)
-        CG=$(systemctl show "$UNIT" -p ControlGroup --value)
-        if [ -n "$PID" ] && [ "$PID" != "0" ]; then
-          for f in status wchan syscall; do
-            cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
-          done
-          # Per-thread kernel wait channels.
-          for t in /proc/$PID/task/*/; do
-            tid=$(basename "$t")
-            printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
-              "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
-          done
-        fi
-        if [ -n "$CG" ]; then
-          for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
-            cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
-          done
+          if [ -z "$RUNNING_VER" ]; then
+            echo "WARNING: could not parse version from /healthz response"
+          else
+            case "$EXECSTART_PATH" in
+              "$RUNNING_VER"*) ;;
+              *)
+                echo "WARNING: version drift: running=$RUNNING_VER execstart=$EXECSTART_PATH"
+                ;;
+            esac
+          fi
+          exit 0
         fi
 
-        echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
-        systemctl restart "$UNIT"
-        rm -f "$FAILFILE"
+        # 3. HTTP 503 -> F4 cross-probe
+        if [ "$HTTP_CODE" -eq 503 ]; then
+          # Probe the anchor directly (mirroring door's OPENCODE_ANCHOR_URL = http://127.0.0.1:4096)
+          ANCHOR_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:4096/global/health")
+
+          if [ "$ANCHOR_CODE" -eq 200 ]; then
+            # Anchor is healthy directly, but door says 503 -> door-side sickness!
+            # Reset wedge counter since the door's loop is alive
+            rm -f "$FAILFILE"
+
+            SICK_THRESHOLD=2 # 2 consecutive ≈ 2 min. A live-traffic SPOF shouldn't sit sick.
+            SICK=$(( $(cat "$SICKFILE" 2>/dev/null || echo 0) + 1 ))
+            echo "$SICK" > "$SICKFILE"
+            echo "WARNING: door reports 503 but anchor healthy directly ($SICK/$SICK_THRESHOLD consecutive): door-side sickness"
+
+            if [ "$SICK" -ge "$SICK_THRESHOLD" ]; then
+              capture_and_restart "door-side sickness (anchor healthy but door reports 503)"
+            fi
+          else
+            # Both unreachable directly -> genuine backend outage, not door's fault
+            rm -f "$FAILFILE" "$SICKFILE"
+            echo "both backends genuinely down (anchor unreachable directly too, status=$ANCHOR_CODE); door alive, not restarting"
+          fi
+          exit 0
+        fi
+
+        # 4. Any other status -> loop is alive, log unexpected status
+        echo "WARNING: unexpected /healthz HTTP status: $HTTP_CODE (loop alive, not restarting)"
+        rm -f "$FAILFILE" "$SICKFILE"
+        exit 0
       ''}";
     };
   };
