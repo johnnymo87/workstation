@@ -48,6 +48,10 @@ let
   # flake's localPkgs, so callPackage pkgs/teamclaude directly for the service.
   teamclaude = pkgs.callPackage ../../pkgs/teamclaude { };
 
+  # opencode-frontdoor: the opaque single-port reverse proxy for the serve pool.
+  # Same rationale as above — callPackage pkgs/opencode-frontdoor directly here.
+  opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
+
   # mn9r M5: serve-pool descriptor (single source of truth in
   # users/dev/serve-pool.nix). cloudbox = K=4 on ports 4096..4099, serve-0 ==
   # :4096. routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB) and
@@ -755,6 +759,140 @@ ${serveIdCase}
     wants = map (p: "opencode-serve@${toString p}.service") servePool.ports;
   };
 
+  # Ported from devbox (users/dev/home.devbox.nix) to cloudbox as SYSTEM units.
+  # This timer probes each pool member's /global/health (3s timeout) once a
+  # minute; after 7 consecutive failures it dumps cheap root-readable forensics
+  # (/proc status/wchan/syscall + cgroup memory.*) to /var/lib/opencode-serve-canary/
+  # and restarts that one instance. Runs as root (system service), so no privilege elevation helper is needed.
+  # Design notes in .opencode/skills/monitoring-serve-pool/SKILL.md;
+  # full post-mortem in docs/investigations/2026-07-03-serve-4096-wedge.md.
+  systemd.services.opencode-serve-canary = {
+    description = "OpenCode serve pool liveness canary (restart wedged serves)";
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "opencode-serve-canary";
+      ExecStart = "${pkgs.writeShellScript "opencode-serve-canary" ''
+        set -u
+        # System-service PATH is minimal — be explicit.
+        # gawk: awk is NOT in coreutils (first live wedge lost utime/stime silently).
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk ]}
+        STATE=/var/lib/opencode-serve-canary
+        # Note: /var/lib/opencode-serve-canary is root-owned via StateDirectory
+        # (eliminating any /tmp symlink/TOCTOU hazard) and persists across reboots.
+        # It's world-readable for human inspection via root umask 022; dev can
+        # read forensics but not delete them.
+        # workstation-g3iy: 7 (was 2) — the post-boot catalog/credential burn
+        # runs ~5-6 min and COMPLETES, leaving a warm stable instance. A
+        # threshold-2 (~2-3 min) restart kills the instance mid-burn, the TUI
+        # reconnects, re-creates the instance, and re-triggers the burn =
+        # restart<->burn thrash loop. 7 (~7-8 min) outlasts one clean burn
+        # while still catching permanent wedges.
+        THRESHOLD=7
+
+        # Don't fight an in-flight reset-workspace (it stops/starts the pool
+        # deliberately). Shared, non-blocking probe of its lock. fd-based form:
+        # `flock <file> <cmd>` execvp()s the command, which fails on the
+        # minimal service PATH and misreads as "lock held".
+        if [ -e /tmp/reset-workspace.lock ]; then
+          exec 9< /tmp/reset-workspace.lock
+          if ! flock -n -s 9; then
+            echo "reset-workspace in progress; skipping this run"
+            exit 0
+          fi
+          exec 9<&-
+        fi
+
+        for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
+          UNIT="opencode-serve@$PORT.service"
+          FAILFILE="$STATE/$PORT.fails"
+
+          # Only police units that are supposed to be up. Intentional stops,
+          # crash-loop backoff, etc. reset the counter.
+          if [ "$(systemctl is-active "$UNIT")" != "active" ]; then
+            rm -f "$FAILFILE"
+            continue
+          fi
+
+          if curl -sf --max-time 3 --connect-timeout 3 \
+               "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1; then
+            rm -f "$FAILFILE"
+            continue
+          fi
+
+          FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+          echo "$FAILS" > "$FAILFILE"
+          echo "WARNING: $UNIT failed /global/health ($FAILS/$THRESHOLD consecutive)"
+          [ "$FAILS" -lt "$THRESHOLD" ] && continue
+
+          # Wedged. Capture cheap forensics BEFORE the kill destroys them
+          # (the 2026-07-03 wedge left no stacks/PSI behind).
+          TS=$(date +%Y%m%dT%H%M%S)
+          DUMP="$STATE/wedge-$TS-$PORT"
+          mkdir -p "$DUMP"
+
+          # Bound persistent forensics: keep only the 10 newest wedge dumps.
+          ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+
+          PID=$(systemctl show "$UNIT" -p MainPID --value)
+          CG=$(systemctl show "$UNIT" -p ControlGroup --value)
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            for f in status wchan syscall; do
+              cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+            # Per-thread kernel wait channels.
+            for t in /proc/$PID/task/*/; do
+              tid=$(basename "$t")
+              printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
+                "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
+            done
+          fi
+          if [ -n "$CG" ]; then
+            for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
+              cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+          fi
+          # Deep forensics (workstation-g3iy): today's wedges spin in USERSPACE
+          # at ~2G with zero memory pressure, so cheap /proc dumps can't tell
+          # GC-thrash from a synchronous bun:sqlite scan. Capture:
+          #  - utime/stime split over 2s (pure utime = JS/GC spin; stime = syscall/IO)
+          #  - /proc io before/after (read_bytes growth = sqlite paging)
+          #  - 3x native thread stacks via eu-stack (as root, no extra privilege needed).
+          #    The bun binary is non-PIE ET_EXEC so raw addresses are STABLE across
+          #    runs/wedges: identical frames across samples = tight-loop
+          #    fingerprint even without symbols.
+          # All best-effort; a truly frozen loop can't get worse from a brief
+          # ptrace stop, and the restart follows immediately anyway.
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            {
+              awk '{print "utime="$14, "stime="$15}' "/proc/$PID/stat" 2>/dev/null
+              cat "/proc/$PID/io" 2>/dev/null
+              sleep 2
+              awk '{print "utime="$14, "stime="$15}' "/proc/$PID/stat" 2>/dev/null
+              cat "/proc/$PID/io" 2>/dev/null
+              echo "clk_tck=100 interval=2s"
+            } > "$DUMP/cpu-io-split" 2>/dev/null || true
+            for i in 1 2 3; do
+              timeout 10 ${pkgs.elfutils}/bin/eu-stack -p "$PID" > "$DUMP/eu-stack.$i" 2>&1 || true
+              sleep 1
+            done
+          fi
+          echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
+          systemctl restart "$UNIT"
+          rm -f "$FAILFILE"
+        done
+      ''}";
+    };
+  };
+
+  systemd.timers.opencode-serve-canary = {
+    description = "Minutely OpenCode serve pool liveness canary";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
+    };
+  };
+
   # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
   # router forwards to when work Claude-on-Vertex spend is over budget
   # (8fe.15 PREREQ). Runs upstream KarpelesLab/teamclaude (tagged release,
@@ -955,6 +1093,173 @@ ${serveIdCase}
       ''}";
       Restart = "on-failure";
       RestartSec = 10;
+    };
+  };
+
+  # opencode-frontdoor — the opaque single-port reverse proxy and session-sticky
+  # router for the OpenCode serve pool (§7 isolation kit). It is a stateless
+  # single point of failure (SPOF) that binds only to localhost on port 4700
+  # (FRONTDOOR_PORT=4700). It features its own MemoryMax ceiling and a dedicated
+  # /healthz canary (Task 6.4). Auto-starts on boot, but is completely safe to
+  # run because nothing points at it until Phase 7.
+  systemd.services.opencode-frontdoor = {
+    description = "opencode-frontdoor (opaque single-port reverse proxy for the serve pool)";
+
+    # Auto-starts on boot. Safe to run now because nothing points at it until Phase 7.
+    wantedBy = [ "multi-user.target" ];
+
+    # DM5/M6: Order after network, pigeon-daemon, and the serve-pool target.
+    # Use wants (SOFT deps) only. Do NOT use requires: the front door must still
+    # start and gracefully DEGRADE-TO-ANCHOR when pigeon is down (that graceful
+    # degrade is a core design invariant; a hard requires would defeat it).
+    after = [ "network.target" "pigeon-daemon.service" "opencode-serve-pool.target" ];
+    wants = [ "pigeon-daemon.service" "opencode-serve-pool.target" ];
+
+    # Never let `nixos-rebuild switch` restart this unit on a config change:
+    # a restart would briefly drop long-lived SSE streams, dropping client
+    # connections mid-turn. This is safe because the front door is stateless
+    # and resolves targets dynamically. The new definition/package applies on the
+    # next reboot or an EXPLICIT `sudo systemctl restart opencode-frontdoor.service`.
+    # Later deploy procedure will rebuild, restart, then verify `/healthz`.
+    restartIfChanged = false;
+
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      Environment = [
+        "FRONTDOOR_PORT=4700"
+        "PIGEON_DAEMON_URL=http://127.0.0.1:4731"
+        "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
+        # Builtins-only app (no framework reads NODE_ENV) — set for convention/
+        # consistency with pigeon-daemon and to future-proof any added dependency.
+        "NODE_ENV=production"
+      ];
+      ExecStart = "${opencode-frontdoor}/bin/opencode-frontdoor";
+      Restart = "always";
+      RestartSec = 5;
+
+      # Memory cap: stream holder (≈1.5G). Deliberately set NO MemoryHigh because,
+      # as noted in the monitoring-serve-pool skill rationale, a soft high limit
+      # can cause the kernel to throttle and freeze the loop (creating a wedge).
+      # Max-only ensures a clean OOM kill + rapid restart recovery (~10s).
+      MemoryMax = "1500M";
+
+      # Bounds shutdown: the app has no graceful-drain SIGTERM handler today, so
+      # SIGTERM terminates promptly and in-flight SSE connections drop (clients
+      # reconnect). This bound is a safety backstop against any future graceful
+      # handler hanging indefinitely on never-ending SSE streams.
+      TimeoutStopSec = "15s";
+
+      # Raise file descriptor limit: the door doubles connection count (one client
+      # socket + one upstream socket per proxied request). With ~900 concurrent
+      # connections, we need at least ~1800+ fds, so raise ceiling well above
+      # the default to avoid running out of descriptors.
+      LimitNOFILE = 65536;
+    };
+  };
+
+  # This is the front door's own §7-isolation-kit canary (independently restartable SPOF).
+  # This timer probes the frontdoor's native /healthz on localhost (3s timeout) once a
+  # minute; after 2 consecutive failures it dumps near-instant forensics
+  # (/proc status/wchan/syscall + cgroup memory.*) to /var/lib/opencode-frontdoor-canary/
+  # and restarts the service. Runs as root (system service).
+  systemd.services.opencode-frontdoor-canary = {
+    description = "opencode-frontdoor liveness canary (restart wedged front doors)";
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "opencode-frontdoor-canary";
+      ExecStart = "${pkgs.writeShellScript "opencode-frontdoor-canary" ''
+        set -u
+        # System-service PATH is minimal — be explicit.
+        # We only need coreutils, systemd, util-linux, and curl for instant forensics.
+        # Deep stack dumps (the serve canary's `eu-stack` native-stack loop and its 2s `cpu-io-split` sample) are omitted to ensure fast recovery.
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl ]}
+        STATE=/var/lib/opencode-frontdoor-canary
+        UNIT=opencode-frontdoor.service
+        PORT=4700
+        FAILFILE="$STATE/fails"
+
+        # Only police units that are supposed to be up. Intentional stops,
+        # crash-loop backoff, etc. reset the counter.
+        if [ "$(systemctl is-active "$UNIT")" != "active" ]; then
+          rm -f "$FAILFILE"
+          exit 0
+        fi
+
+        # We omit the `/tmp/reset-workspace.lock` check because the nightly reset
+        # does not stop/restart the front door, and the no-`-f` probe already
+        # tolerates backend bounces.
+
+        # Probe the native /healthz WITHOUT -f.
+        # Critical isolation logic: a 503 from /healthz means the door's event loop
+        # is ALIVE but both backends are down — we must NOT restart the door on that
+        # (restarting cannot fix backends). Only a TIMEOUT / refused connection
+        # (frozen loop or dead process) is a wedge.
+        #
+        # Coupling note: The canary's --max-time (5s) MUST exceed the front door's
+        # FRONTDOOR_ROUTE_TIMEOUT_MS (default 3000ms) so a healthy-but-degraded 503
+        # (both backends slow) is still read as alive; only a true frozen loop /
+        # dead process (no response within 5s) counts as a wedge. (If
+        # FRONTDOOR_ROUTE_TIMEOUT_MS is ever raised on the door unit, this must be
+        # raised too.)
+        if curl -s --max-time 5 --connect-timeout 3 -o /dev/null "http://127.0.0.1:$PORT/healthz"; then
+          rm -f "$FAILFILE"
+          exit 0
+        fi
+
+        # THRESHOLD=2
+        # Double-confirm; the front door has no post-boot burn like the serves, but
+        # a single transient localhost blip shouldn't trigger a restart. 2 consecutive is ~2 min.
+        THRESHOLD=2
+
+        FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+        echo "$FAILS" > "$FAILFILE"
+        echo "WARNING: $UNIT failed /healthz ($FAILS/$THRESHOLD consecutive)"
+        [ "$FAILS" -lt "$THRESHOLD" ] && exit 0
+
+        # Wedged. Capture near-instant forensics before fast restart.
+        # The front door is a single point of failure (SPOF) for all opencode access.
+        # We do NOT include deep stack checks (the serve canary's `eu-stack` native-stack loop and its 2s `cpu-io-split` sample) to minimize time-to-recovery.
+        TS=$(date +%Y%m%dT%H%M%S)
+        DUMP="$STATE/wedge-$TS"
+        mkdir -p "$DUMP"
+
+        # Bound persistent forensics: keep only the 10 newest wedge dumps.
+        ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+
+        PID=$(systemctl show "$UNIT" -p MainPID --value)
+        CG=$(systemctl show "$UNIT" -p ControlGroup --value)
+        if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+          for f in status wchan syscall; do
+            cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
+          done
+          # Per-thread kernel wait channels.
+          for t in /proc/$PID/task/*/; do
+            tid=$(basename "$t")
+            printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
+              "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
+          done
+        fi
+        if [ -n "$CG" ]; then
+          for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
+            cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
+          done
+        fi
+
+        echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
+        systemctl restart "$UNIT"
+        rm -f "$FAILFILE"
+      ''}";
+    };
+  };
+
+  systemd.timers.opencode-frontdoor-canary = {
+    description = "Minutely OpenCode frontdoor liveness canary";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
     };
   };
 

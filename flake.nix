@@ -59,6 +59,7 @@
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
+      opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
       opencode-launch = p.callPackage ./pkgs/opencode-launch { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };

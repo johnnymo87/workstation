@@ -34,7 +34,7 @@ bd memory `devbox-serve-4096-wedge-2026-07-03`).
 `users/dev/home.devbox.nix`) probes each pool member's
 `GET /global/health` with a 3s timeout:
 
-- **3 consecutive failures** (≈3 min wedged) → dump forensics, then
+- **7 consecutive failures** (≈7-8 min wedged, which outlasts the post-boot catalog/credential burn to prevent thrashing) → dump forensics, then
   `systemctl --user restart opencode-serve@<port>.service` (that one
   instance only).
 - Skips units that aren't `active` (intentional stops, crash-loop backoff)
@@ -79,7 +79,16 @@ reset; healthy stops take 1–2s.
 
 - Cloudbox runs the same architecture (K=4, system units,
   `hosts/cloudbox/configuration.nix`, MemoryHigh=32G/MemoryMax=40G) and has
-  the same wedge trap — parity tracked in beads.
+  the same wedge trap. To address this, cloudbox runs the liveness canary as
+  SYSTEM units (`systemd.services.opencode-serve-canary` + `.timer` in
+  `hosts/cloudbox/configuration.nix`), running as ROOT, with forensics in
+  root-owned `/var/lib/opencode-serve-canary/`.
+  - On cloudbox, inspect the canary via SYSTEM commands:
+    `systemctl list-timers opencode-serve-canary` and
+    `journalctl -u opencode-serve-canary.service` (do NOT use `--user`).
+  - Note: the inspector wedge-watcher + `BUN_INSPECT` NAMED-JS-stacks forensics
+    are NOT ported to cloudbox (deferred; forensic-only, would require adding
+    `BUN_INSPECT` to every cloudbox serve).
 - Durable fix candidates (beads): systemd watchdog patch (`sd_notify
   WATCHDOG=1` from the main loop → SIGABRT + core on freeze), and a
   dead-man's switch so the worker heartbeat degrades `health_state` when

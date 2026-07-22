@@ -252,6 +252,20 @@ from source the classes are:
   serve. Explicit policy required: **deny** / pin-to-anchor / fan-out.
 - **Read-only globals** (`/global/health`, config): route to any healthy serve
   (shared `opencode.db`), anchor default.
+  - **CORRECTION (Phase-5 fable F2):** the "shared `opencode.db`" premise is
+    **false for a subset** of GET globals that read **per-process in-memory
+    state**, not the shared db: `GET /session/status` (in-memory `SessionStatus`
+    Map — reports *idle* for a session mid-turn on another serve), `GET
+    /permission`, `GET /question`, `GET /api/permission/request`, `GET
+    /api/question/request` (in-memory pending requests), and `GET /mcp`
+    (per-process MCP connection status). Anchor-forwarding these through the door
+    returns **only the anchor's view** (silently wrong for a session owned by
+    another serve — the same mis-serve shape that justified `/global/event`→410,
+    but on the read path). Latent today (no deployed client hits them through the
+    door — the TUI uses the session-scoped v2 lists), so they remain
+    `global-ro`→anchor for v1, but the rows are annotated (`note:` in
+    `routes.classification.ts`) and must be revisited (deny, or a per-owner
+    fan-in) before any client is pointed at the door for these reads (Phase 7/9).
 - **Unrecognized endpoints:** **404-loud + log** during shakeout, never silent
   forward, so a future stateful endpoint can't silently mis-route.
 
