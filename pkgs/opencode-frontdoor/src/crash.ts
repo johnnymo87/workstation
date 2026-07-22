@@ -16,8 +16,10 @@
  * Note: Per-stream errors (e.g. proxying or SSE client disconnected) are already handled
  * cleanly in proxy.ts and sse.ts. This is a global process-level safety backstop.
  */
+import type { EventEmitter } from "node:events";
+
 export function installCrashHandlers(deps?: {
-  proc?: any;
+  proc?: EventEmitter;
   log?: (message?: any, ...optionalParams: any[]) => void;
   exit?: (code?: number) => never | void;
 }): void {
