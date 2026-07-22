@@ -770,7 +770,69 @@ Phase 6.
   restart) on mismatch — turning silent version drift into a journal line.
 
 ## Phase 7 — Client cutover + infra-plane exemption
-[**C1 gate:** Task 1.4 live before 7.3/7.4 drop client `/place`.]
+[**C1 gate:** Task 1.4 live before 7.3/7.4 drop client `/place`. **STATUS: satisfied**
+— scoped promote-once-per-TTL is live in merged `place.ts` (`shouldAttempt`/`record`
++ `checkSidExists`).]
+
+### Phase 7 execution order (SDD) — added 2026-07-22
+The fable pre-cutover blockers (see "Phase 7 pre-cutover blockers" above) reshape this
+phase: the front door's own correctness/observability holes must be closed, redeployed,
+and re-gated **before** any client is repointed at it. Execution splits into two
+milestones separated by a live-deploy checkpoint. Worktree: `.worktrees/frontdoor-phase7`
+(branch `frontdoor-phase7` off `main`). Every task = implement → spec-review →
+code-review → fixup → `test.sh` green → commit; **no `nixos-rebuild switch` until the
+deploy checkpoint, and only with explicit user go-ahead.**
+
+**Milestone 1 — front-door code + observability hardening (package + host config; zero client impact):**
+- **T0 — compile-to-JS single process (F10/F-D1/F-D2/F-D3, closes F5).** Convert
+  `default.nix` to build emitted JS (`tsc` emit → wrapper runs `node dist/main.js`),
+  dropping the tsx runtime wrapper. Recommended mechanism: `buildNpmPackage` (hermetic
+  `npm ci` + `npm run build`), which also makes the nix build **typecheck** (closes F5).
+  Add a `build` script (`tsc` with emit; new `tsconfig.build.json` emitting `dist/` from
+  `src/` only, no tests). ⚠️ NOT the broken `node --import tsx main.ts` recipe (F-D1).
+  Retest surface (at checkpoint): 6.5 gate steps 3–8 + `SigCgt` bit-14 CLEAR on the sole
+  PID + SIGSTOP-MainPID drill (`/healthz` goes dark → canary restarts → forensics capture
+  the listener → restart < 5s).
+- **T1 — sticky/lease renewal + TTL invariant (HIGH-2 + LOW-2 + FABLE-S1 interim).**
+  (a) HIGH-2: on a sticky hit older than ~½ `stickyTtlMs`, fire-and-forget `POST /place`
+  to renew+re-confirm before routing (`proxy.ts`/`sticky.ts`/`place.ts`). (b) LOW-2:
+  MEASURE pigeon's real serve-lease TTL; assert/doc `stickyTtlMs ≤ lease TTL`; adjust the
+  30s default if the measurement demands it. (c) FABLE-S1 interim (in-repo): make
+  `checkSidExists` distinguish clean-404 (don't place) from timeout/5xx (place anyway,
+  logged) and probe the prospective owner, not the anchor. **DECISION NEEDED:** the
+  FABLE-S1 *preferred* fix is a cross-repo pigeon `/place` sid-validation patch
+  (`~/projects/pigeon`) — do now (coordinated) or defer behind the interim? (see below).
+- **T2 — `/mcp` misleading Allow (F3).** `GET /mcp` reads per-process state; stop
+  advertising a per-process twin. Resolve the F2-row decision (deny, or per-owner
+  fan-in) in `routes.classification.ts`; update the table-driven deny test.
+- **T3 — crash policy (F6).** Add `unhandledRejection`/`uncaughtException` handlers
+  (log + `process.exit(1)` to preserve crash+Restart); decide crash-vs-continue per site.
+- **T4 — codify the gate (F-D5).** `probe.sh --assert` (or `gate.sh`) pinning expected
+  through-door statuses per class — incl. the six `405 Allow:GET` twins + the 403 set —
+  exit non-zero on any delta. This is the reproducible instrument for the T0-redeploy
+  re-gate and the cutover gate.
+- **T5 — canary + systemd hardening (F4 + F8 + F7/F9/F-D6).** (F4) front-door canary
+  cross-probes the anchor on a 503 streak and restarts the door when "anchor fine
+  directly, door says unreachable" for N rounds. (F8b) re-derive serve-canary
+  `THRESHOLD` for cloudbox; (F8c) verify the aarch64 bun binary is ET_EXEC; re-justify
+  front-door `THRESHOLD=2`. (F7/F9/F-D6) post-rebuild `/healthz`+version runbook; canary
+  logs (never restarts on) `/healthz .version` vs `ExecStart` store-path drift. All in
+  `hosts/cloudbox/configuration.nix`.
+
+**► DEPLOY CHECKPOINT 1 (requires user go-ahead):** `test.sh` green → build-only verify
+(`nix build .#nixosConfigurations.cloudbox.config.system.build.toplevel`) → PAUSE →
+`sudo nixos-rebuild switch --flake .#cloudbox` → explicit `systemctl restart` → run the
+codified gate (T4) + T0 retest surface + **F-D4 entry gate** (one real cheap-model turn
+THROUGH the door: prompt POST → sticky recorded → watch `/event?session_ids=` across >2
+`driftCheckMs`=5s cycles → no spurious drop, NEW-H mid-turn suppression holds). Nothing
+points at `:4700` yet, so a regression here is contained to the canary.
+
+**Milestone 2 — client cutover (home-manager + scripts; the actual repoint), tasks 7.1–7.8 below.**
+Gated on Milestone-1 checkpoint PASS. Each is SDD'd the same way; the deploy vehicle is
+`home-manager switch --flake .#cloudbox` (fast, no sudo) except the `configuration.nix`
+hardcodes in 7.1 (system rebuild). **► DEPLOY CHECKPOINT 2 (user go-ahead)** after 7.1–7.8
+land: verify each client class actually reaches the door and infra-plane clients still
+hit the raw anchor.
 
 - **7.1** introduce `OPENCODE_ANCHOR_URL` (raw anchor) + `FRONTDOOR_URL` in
   `home.base.nix`; keep `OPENCODE_URL` unchanged (repointed in Phase 9); fix real
