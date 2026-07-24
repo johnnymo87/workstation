@@ -162,11 +162,11 @@ pkgs.writeShellApplication {
     OWNS_SENTINEL=0
 
     # count_manifest_sids <file>: count non-empty lines in manifest file.
-    # Returns 0 if file is missing, unreadable, or empty. Pure helper.
+    # Returns 0 if file is missing, unreadable, empty, or blank-only. Pure helper.
     count_manifest_sids() {
       local file="''${1:-}"
-      if [ -s "$file" ]; then
-        grep -c . "$file" 2>/dev/null || echo 0
+      if [ -f "$file" ]; then
+        grep -c . "$file" 2>/dev/null || true
       else
         echo 0
       fi

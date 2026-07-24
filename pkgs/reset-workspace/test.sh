@@ -104,8 +104,8 @@ format_sentinel() {
 
 count_manifest_sids() {
   local file="${1:-}"
-  if [ -s "$file" ]; then
-    grep -c . "$file" 2>/dev/null || echo 0
+  if [ -f "$file" ]; then
+    grep -c . "$file" 2>/dev/null || true
   else
     echo 0
   fi
@@ -126,6 +126,16 @@ check "count_manifest_sids: 3 sids -> 3" "3" "$(count_manifest_sids "$lines_mani
 blanks_manifest="$tmp_dir/blanks.txt"
 printf 'ses_1\n\nses_2\n\n' > "$blanks_manifest"
 check "count_manifest_sids: 2 sids + blanks -> 2" "2" "$(count_manifest_sids "$blanks_manifest")"
+
+only_blanks_manifest="$tmp_dir/only_blanks.txt"
+printf '\n\n\n' > "$only_blanks_manifest"
+v="$(count_manifest_sids "$only_blanks_manifest")"
+check "count_manifest_sids: blank-lines-only file -> 0" "0" "$v"
+if [ "$v" -eq 0 ] 2>/dev/null; then
+  echo "ok: count_manifest_sids blank-lines result is integer usable"
+else
+  echo "FAIL: count_manifest_sids blank-lines result [$v] is not integer usable"; fail=1
+fi
 
 missing_manifest="$tmp_dir/missing.txt"
 check "count_manifest_sids: missing file -> 0" "0" "$(count_manifest_sids "$missing_manifest")"
