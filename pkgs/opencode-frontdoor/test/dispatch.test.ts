@@ -74,6 +74,46 @@ describe('Route Dispatcher', () => {
     });
   });
 
+  test('GET /session/ses_x/mcp -> session-path/route-session', () => {
+    expect(classify('GET', '/session/ses_x/mcp')).toBe('session-path');
+    expect(dispatch('GET', '/session/ses_x/mcp')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  test('POST /session/ses_x/mcp/slack/connect -> session-path/route-session', () => {
+    expect(classify('POST', '/session/ses_x/mcp/slack/connect')).toBe('session-path');
+    expect(dispatch('POST', '/session/ses_x/mcp/slack/connect')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  test('POST /session/ses_x/mcp/slack/disconnect -> session-path/route-session', () => {
+    expect(classify('POST', '/session/ses_x/mcp/slack/disconnect')).toBe('session-path');
+    expect(dispatch('POST', '/session/ses_x/mcp/slack/disconnect')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  test('GET /session/ses_x/mcp/slack/connect -> unrecognized/not-found-404 (wrong method on POST pattern)', () => {
+    expect(classify('GET', '/session/ses_x/mcp/slack/connect')).toBe('unrecognized');
+    expect(dispatch('GET', '/session/ses_x/mcp/slack/connect')).toEqual({
+      class: 'unrecognized',
+      action: 'not-found-404',
+      recognized: false,
+      allowedMethods: [],
+    });
+  });
+
   test('GET /session/ses_x/permissions/perm_y -> unrecognized/not-found-404 (negative guard)', () => {
     expect(classify('GET', '/session/ses_x/permissions/perm_y')).toBe('unrecognized');
     expect(dispatch('GET', '/session/ses_x/permissions/perm_y')).toEqual({
@@ -199,6 +239,26 @@ describe('Route Dispatcher', () => {
     });
   });
 
+  test('negative pin (LOW-10): POST /mcp/slack/connect -> global-sideeffect/deny-global-mutation', () => {
+    expect(classify('POST', '/mcp/slack/connect')).toBe('global-sideeffect');
+    expect(dispatch('POST', '/mcp/slack/connect')).toEqual({
+      class: 'global-sideeffect',
+      action: 'deny-global-mutation',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  test('negative pin (LOW-10): POST /mcp/slack/disconnect -> global-sideeffect/deny-global-mutation', () => {
+    expect(classify('POST', '/mcp/slack/disconnect')).toBe('global-sideeffect');
+    expect(dispatch('POST', '/mcp/slack/disconnect')).toEqual({
+      class: 'global-sideeffect',
+      action: 'deny-global-mutation',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
   test('PATCH /config -> global-sideeffect/deny-global-mutation', () => {
     expect(classify('PATCH', '/config')).toBe('global-sideeffect');
     expect(dispatch('PATCH', '/config')).toEqual({
@@ -252,7 +312,7 @@ describe('Route Dispatcher', () => {
   });
 
   // per-process-ro:
-  test('GET /mcp -> per-process-ro/deny-per-process-501', () => {
+  test('negative pin (LOW-10): GET /mcp -> per-process-ro/deny-per-process-501', () => {
     expect(classify('GET', '/mcp')).toBe('per-process-ro');
     expect(dispatch('GET', '/mcp')).toEqual({
       class: 'per-process-ro',

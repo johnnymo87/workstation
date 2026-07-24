@@ -1,6 +1,7 @@
 OpenAPI 3.1 JSON byte size: 478546 bytes
 Dual surface: bare (/session/..., /event, /global/*) + /api/* mirror.
 Note: Patch-only routes from session-door-routes.patch (GET /session/{sessionID}/permissions, GET /session/{sessionID}/questions, POST /session/{sessionID}/questions/{questionID}/reply, POST /session/{sessionID}/questions/{questionID}/reject) are intentionally excluded from this snapshot.
+Note: Patch-only routes from session-mcp-routes.patch (GET /session/{sessionID}/mcp, POST /session/{sessionID}/mcp/{name}/connect, POST /session/{sessionID}/mcp/{name}/disconnect) are intentionally excluded from this snapshot.
 
 DELETE /api/credential/{credentialID}
 DELETE /api/integration/attempt/{attemptID}

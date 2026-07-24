@@ -4,9 +4,9 @@
  * --- RECONCILIATION ---
  * - Snapshot routes (from http://127.0.0.1:4096/doc): 188
  * - Exclusions: 0 (The web-ui served at "/" and its static assets are not declared in `/doc`, so they are excluded from the snapshot)
- * - Patch-only routes: 7 (GET /event?session_ids= and GET /api/event?session_ids=, source: event-session-scope.patch; GET /doc, OpenAPI spec added manually (FABLE-W6); plus 4 session-scoped permission/question routes: GET /session/{sessionID}/permissions, GET /session/{sessionID}/questions, POST /session/{sessionID}/questions/{questionID}/reply, POST /session/{sessionID}/questions/{questionID}/reject, source: session-door-routes.patch)
+ * - Patch-only routes: 10 (GET /event?session_ids= and GET /api/event?session_ids=, source: event-session-scope.patch; GET /doc, OpenAPI spec added manually (FABLE-W6); 4 session-scoped permission/question routes, source: session-door-routes.patch; plus 3 session-scoped MCP routes: GET /session/{sessionID}/mcp, POST /session/{sessionID}/mcp/{name}/connect, POST /session/{sessionID}/mcp/{name}/disconnect, source: session-mcp-routes.patch)
  * - Manually added: GET /, web UI added manually, undeclared in /doc
- * - Total table entries: 196
+ * - Total table entries: 199
  *
  * --- DUAL SURFACE ---
  * This API exposes a dual surface: a bare surface (e.g. /session/...) and its `/api/*` mirror.
@@ -17,6 +17,8 @@
  *   Source: ~/projects/opencode-patched/patches/event-session-scope.patch
  * - Session-scoped permission/question routes are patch-only:
  *   Source: ~/projects/opencode-patched/patches/session-door-routes.patch
+ * - Session-scoped MCP routes are patch-only:
+ *   Source: ~/projects/opencode-patched/patches/session-mcp-routes.patch
  */
 
 /*
@@ -201,6 +203,9 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/session/{sessionID}/diff", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/fork", class: "fork" },
   { method: "POST", path: "/session/{sessionID}/init", class: "session-path" },
+  { method: "GET", path: "/session/{sessionID}/mcp", class: "session-path", note: "Response is process-global; sessionID is purely a routing key (source: session-mcp-routes.patch)" },
+  { method: "POST", path: "/session/{sessionID}/mcp/{name}/connect", class: "session-path" },
+  { method: "POST", path: "/session/{sessionID}/mcp/{name}/disconnect", class: "session-path" },
   { method: "GET", path: "/session/{sessionID}/message", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/message", class: "session-path" },
   { method: "DELETE", path: "/session/{sessionID}/message/{messageID}", class: "session-path" },
