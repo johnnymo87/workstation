@@ -72,6 +72,64 @@ check "ignores unrelated Wants units" \
 check "empty Wants -> fallback"   "$fb" "$(pool_health_urls_from_wants '' "$fb")"
 check "no pool units -> fallback" "$fb" "$(pool_health_urls_from_wants 'foo.service bar.service' "$fb")"
 
+# ---- new pure helpers under test ---------------------------------------------
+should_detach_destructive() {
+  local no_detach="$1" tty_nr="$2"
+  if [ "$no_detach" = "1" ]; then
+    return 1
+  fi
+  if [[ "$tty_nr" =~ ^[0-9]+$ ]] && [ "$tty_nr" -gt 0 ]; then
+    return 0
+  fi
+  return 1
+}
+
+is_timestamp_increased() {
+  local old="$1" new="$2"
+  [[ "$old" =~ ^[0-9]+$ ]] || old=0
+  [[ "$new" =~ ^[0-9]+$ ]] || new=0
+  [ "$new" -gt "$old" ]
+}
+
+format_sentinel() {
+  local status="$1" ts="$2" phase="${3:-}"
+  if [ "$status" = "ok" ]; then
+    printf 'ok %s\n' "$ts"
+  elif [ "$status" = "failed" ]; then
+    printf 'failed %s phase=%s\n' "$ts" "$phase"
+  else
+    printf 'started %s phase=%s\n' "$ts" "$phase"
+  fi
+}
+
+check "detach decision: TTY present, NO_DETACH unset -> detach" \
+  "0" "$(should_detach_destructive 0 34816 && echo 0 || echo 1)"
+check "detach decision: TTY present, NO_DETACH=1 -> suppress" \
+  "1" "$(should_detach_destructive 1 34816 && echo 0 || echo 1)"
+check "detach decision: no TTY, NO_DETACH unset -> suppress" \
+  "1" "$(should_detach_destructive 0 0 && echo 0 || echo 1)"
+check "detach decision: no TTY, NO_DETACH=1 -> suppress" \
+  "1" "$(should_detach_destructive 1 0 && echo 0 || echo 1)"
+
+check "timestamp increased: 100 -> 200 -> true" \
+  "0" "$(is_timestamp_increased 100 200 && echo 0 || echo 1)"
+check "timestamp increased: 200 -> 100 -> false" \
+  "1" "$(is_timestamp_increased 200 100 && echo 0 || echo 1)"
+check "timestamp increased: 100 -> 100 -> false" \
+  "1" "$(is_timestamp_increased 100 100 && echo 0 || echo 1)"
+check "timestamp increased: 0 -> 50 -> true" \
+  "0" "$(is_timestamp_increased 0 50 && echo 0 || echo 1)"
+
+check "sentinel format: started" \
+  "started 2026-07-24T12:00:00Z phase=kill-nvim" \
+  "$(format_sentinel started 2026-07-24T12:00:00Z kill-nvim)"
+check "sentinel format: ok" \
+  "ok 2026-07-24T12:00:00Z" \
+  "$(format_sentinel ok 2026-07-24T12:00:00Z)"
+check "sentinel format: failed" \
+  "failed 2026-07-24T12:00:00Z phase=restart-pool" \
+  "$(format_sentinel failed 2026-07-24T12:00:00Z restart-pool)"
+
 # ---- scope + discovery mirrors (stubbed systemctl) ---------------------------
 # pool_scope / discover_pool_urls mirrors (lockstep with default.nix). A shell
 # function named `systemctl` shadows the real binary for the rest of this
@@ -169,12 +227,32 @@ if [ -f "$default_nix" ]; then
   want_grep "capture computes the pool scope once" 'POOL_SCOPE="$(pool_scope)"'
   want_grep "bare-resolution uses the healthy capture url" '"$CAPTURE_URL/session"'
   want_grep "bare-resolve loop still serve-gated"          'OC_ALL_PIDS=""'
-  want_grep "restart reuses the precomputed scope"        '[ "$POOL_SCOPE" = "user" ]'
+  want_grep "restart reuses the precomputed scope"        'restart_pool_target "$POOL_SCOPE"'
   want_grep "post-restart poll reuses discover_pool_urls" 'serve_health_urls < <(discover_pool_urls "$POOL_SCOPE")'
+  # workstation-px2p & workstation-3smg: process detachment & sentinel status
+  want_grep "destructive phase detaches via setsid"      'setsid'
+  want_grep "destructive phase uses guard var"            'RESET_WORKSPACE_DESTRUCTIVE_DETACHED'
+  want_grep "destructive detach checks RESET_WORKSPACE_NO_DETACH" 'RESET_WORKSPACE_NO_DETACH'
+  refuse_grep "false session leader comment is gone"     'Has its own session leader'
+  refuse_grep "false no controlling TTY comment is gone" 'no controlling TTY → no PTY-collapse SIGHUP'
+  want_grep "references bead workstation-px2p"            'workstation-px2p'
+  want_grep "sentinel status path is defined"            '/tmp/reset-workspace-last-status.txt'
+  want_grep "uses ExecMainStartTimestampMonotonic"       'ExecMainStartTimestampMonotonic'
+  refuse_grep "PID-based restart comparison not used"     'MainPID'
+
+  # The sentinel must be written before pkill
+  sentinel_line=$(grep -n 'update_sentinel "started" "kill-nvim"' "$default_nix" | head -1 | cut -d: -f1)
+  pkill_line=$(grep -n 'pkill -9 -u dev -x nvim' "$default_nix" | grep -v '#' | head -1 | cut -d: -f1)
+  if [ -n "$sentinel_line" ] && [ -n "$pkill_line" ] && [ "$sentinel_line" -lt "$pkill_line" ]; then
+    echo "ok: sentinel is written before pkill"
+  else
+    echo "FAIL: sentinel write must precede pkill (sentinel at ${sentinel_line:-?}, pkill at ${pkill_line:-?})"; fail=1
+  fi
+
   # workstation-3smg: the manifest write must precede the pool restart, so a
   # restart/health-poll die can't discard a successful capture.
   manifest_line=$(grep -n 'MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"' "$default_nix" | head -1 | cut -d: -f1)
-  restart_line=$(grep -n 'restarting opencode-serve-pool.target' "$default_nix" | head -1 | cut -d: -f1)
+  restart_line=$(grep -n 'restart_pool_target "$POOL_SCOPE"' "$default_nix" | head -1 | cut -d: -f1)
   if [ -n "$manifest_line" ] && [ -n "$restart_line" ] && [ "$manifest_line" -lt "$restart_line" ]; then
     echo "ok: manifest is written before the pool restart"
   else
