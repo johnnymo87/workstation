@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-2BD6A3blba5aW8MWreYwm0rLIqotRvEEMCQXRB1As7M=";
+      hash = "sha256-yexR7lZkUACWxMsHP7FoPnW78IBiRYv8/Km13AVExLo=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-OZBGgR27DYs3wQRGQjZrLxJ4DQLbW51brCoQiJ8wUIo=";
+      hash = "sha256-5Jn0qWPehG7Wt/S/MKo2advPE7xEMg7pTdk7zUEFapA=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-Hv3+br1dfWECTtHPHZbEbXg0EB0G9NcNi+peS1CVcGI=";
+      hash = "sha256-8aZNML30YLHTIGFk+n01M9wJYWbwA684x/clYHhf12E=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-uchMDMF4y4sz/GLjIiqHINpLETUb6zspYbFO7mBmKqM=";
+      hash = "sha256-cpetWVJeKyW8Z6ZahOsKerpvVfMiXWOYVxZSzXI7bYE=";
       isZip = true;
     };
   };
@@ -259,7 +259,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.13";
-    patchedRevision = "2";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
@@ -837,7 +837,7 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
     # Claude Opus 4.7/4.8 at xhigh or max effort, set a large max_tokens so the
     # model has room to think and act across subagents and tool calls.
     # Starting at 64k tokens and tuning from there is a reasonable default."
-    # Pairs with the high adaptive default we set for opus 4.8 (and
+    # Pairs with the high adaptive default we set for opus 5 (and
     # claude-fable-5) in assets/opencode/opencode.base.json. This is a cap,
     # not a forced allocation: models still emit only what they want, but
     # high/xhigh runs no longer get truncated at 32k. Other models are
