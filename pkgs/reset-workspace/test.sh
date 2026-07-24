@@ -102,6 +102,34 @@ format_sentinel() {
   fi
 }
 
+count_manifest_sids() {
+  local file="${1:-}"
+  if [ -s "$file" ]; then
+    grep -c . "$file" 2>/dev/null || echo 0
+  else
+    echo 0
+  fi
+}
+
+tmp_dir="$(mktemp -d)"
+cleanup_tmp() { rm -rf "$tmp_dir"; }
+trap cleanup_tmp EXIT
+
+empty_manifest="$tmp_dir/empty.txt"
+: > "$empty_manifest"
+check "count_manifest_sids: empty file -> 0" "0" "$(count_manifest_sids "$empty_manifest")"
+
+lines_manifest="$tmp_dir/three_sids.txt"
+printf 'ses_1\nses_2\nses_3\n' > "$lines_manifest"
+check "count_manifest_sids: 3 sids -> 3" "3" "$(count_manifest_sids "$lines_manifest")"
+
+blanks_manifest="$tmp_dir/blanks.txt"
+printf 'ses_1\n\nses_2\n\n' > "$blanks_manifest"
+check "count_manifest_sids: 2 sids + blanks -> 2" "2" "$(count_manifest_sids "$blanks_manifest")"
+
+missing_manifest="$tmp_dir/missing.txt"
+check "count_manifest_sids: missing file -> 0" "0" "$(count_manifest_sids "$missing_manifest")"
+
 check "detach decision: TTY present, NO_DETACH unset -> detach" \
   "0" "$(should_detach_destructive 0 34816 && echo 0 || echo 1)"
 check "detach decision: TTY present, NO_DETACH=1 -> suppress" \
@@ -239,6 +267,12 @@ if [ -f "$default_nix" ]; then
   want_grep "sentinel status path is defined"            '/tmp/reset-workspace-last-status.txt'
   want_grep "uses ExecMainStartTimestampMonotonic"       'ExecMainStartTimestampMonotonic'
   refuse_grep "PID-based restart comparison not used"     'MainPID'
+  want_grep "source defines count_manifest_sids"        'count_manifest_sids() {'
+  want_grep "source counts sids via count_manifest_sids" 'OPENCODE_COUNT="$(count_manifest_sids "$MANIFEST_PATH")"'
+  want_grep "cleanup_trap checks OWNS_SENTINEL"          'cleanup_trap()'
+  want_grep "update_sentinel checks OWNS_SENTINEL"       'update_sentinel()'
+  want_grep "sentinel functions check OWNS_SENTINEL"     'OWNS_SENTINEL'
+  want_grep "discovery failure warning is logged"        'WARNING: could not discover pool instances; restart postcondition NOT verified'
 
   # The sentinel must be written before pkill
   sentinel_line=$(grep -n 'update_sentinel "started" "kill-nvim"' "$default_nix" | head -1 | cut -d: -f1)

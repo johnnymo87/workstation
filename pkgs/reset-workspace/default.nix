@@ -159,8 +159,21 @@ pkgs.writeShellApplication {
     SENTINEL_PATH="/tmp/reset-workspace-last-status.txt"
     CURRENT_PHASE="init"
     FINISHED=0
+    OWNS_SENTINEL=0
+
+    # count_manifest_sids <file>: count non-empty lines in manifest file.
+    # Returns 0 if file is missing, unreadable, or empty. Pure helper.
+    count_manifest_sids() {
+      local file="''${1:-}"
+      if [ -s "$file" ]; then
+        grep -c . "$file" 2>/dev/null || echo 0
+      else
+        echo 0
+      fi
+    }
 
     update_sentinel() {
+      [ "''${OWNS_SENTINEL:-0}" -eq 1 ] || return 0
       local status="$1" phase="''${2:-}"
       CURRENT_PHASE="$phase"
       local ts
@@ -172,7 +185,7 @@ pkgs.writeShellApplication {
 
     cleanup_trap() {
       local rc=$?
-      if [ "$FINISHED" -ne 1 ] && [ "$rc" -ne 0 ]; then
+      if [ "''${OWNS_SENTINEL:-0}" -eq 1 ] && [ "$FINISHED" -ne 1 ] && [ "$rc" -ne 0 ]; then
         local ts
         ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
         local line
@@ -658,13 +671,10 @@ EOF
     fi
 
     # ---- Destructive Tail Phase ----
+    OWNS_SENTINEL=1
     POOL_SCOPE="$(pool_scope)"
     MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"
-    if [ -f "$MANIFEST_PATH" ]; then
-      OPENCODE_COUNT=$(grep -c . "$MANIFEST_PATH" 2>/dev/null || echo 0)
-    else
-      OPENCODE_COUNT=0
-    fi
+    OPENCODE_COUNT="$(count_manifest_sids "$MANIFEST_PATH")"
 
     # ---- Step 3: Kill all nvims ----
     update_sentinel "started" "kill-nvim"
@@ -696,11 +706,16 @@ EOF
     log "restarting opencode-serve-pool.target..."
 
     mapfile -t pool_ports < <(discover_pool_ports "$POOL_SCOPE")
-    declare -A BEFORE_TS=()
-    for port in "''${pool_ports[@]}"; do
-      BEFORE_TS["$port"]="$(get_unit_monotonic_ts "$POOL_SCOPE" "$port")"
-      log "  port $port ExecMainStartTimestampMonotonic before restart: ''${BEFORE_TS[$port]}"
-    done
+    if [ "''${#pool_ports[@]}" -eq 0 ]; then
+      log "WARNING: could not discover pool instances; restart postcondition NOT verified"
+      update_sentinel "started" "restart-pool-unverified"
+    else
+      declare -A BEFORE_TS=()
+      for port in "''${pool_ports[@]}"; do
+        BEFORE_TS["$port"]="$(get_unit_monotonic_ts "$POOL_SCOPE" "$port")"
+        log "  port $port ExecMainStartTimestampMonotonic before restart: ''${BEFORE_TS[$port]}"
+      done
+    fi
 
     restart_pool_target "$POOL_SCOPE"
 
@@ -784,6 +799,8 @@ EOF
           fi
         done
       fi
+    else
+      log "WARNING: could not discover pool instances; restart postcondition NOT verified"
     fi
 
     # ---- Step 5.5: prune merged launch worktrees ----
