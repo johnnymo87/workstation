@@ -64,7 +64,6 @@ pkgs.writeShellApplication {
       project="''${c#*$'\t'}"
     }
 
-    OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
     FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
     PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
     POOL_K="${toString k}"
@@ -100,11 +99,13 @@ pkgs.writeShellApplication {
       [ -n "$sid" ] || selfhost
       dir="$(printf '%s' "$resp" | jq -r '.directory // empty' 2>/dev/null || true)"
       [ -n "$dir" ] || dir="$dir_in"
-      # The door placed this session at create, so a read-only GET /route resolves the owner;
-      # any hiccup degrades serve_url to $OPENCODE_URL — never worse.
-      route="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
-      serve_url="$(parse_serve_url "$route" "$OPENCODE_URL")"
-      exec "$REAL_OPENCODE" attach "$serve_url" --session "$sid" --dir "$dir"
+      # Phase 9 (bead workstation-mlve.3/.4): the interactive TUI now rides the
+      # opaque FRONT DOOR, not a resolved serve. The door owns ownership — it
+      # routes the scoped /event?session_ids= subscribe + all /session REST to the
+      # owning serve and DROPS the SSE leg on a confirmed owner migration, so the
+      # TUI follows migrations without any client-side /route self-resolve. The
+      # door already placed this session at create.
+      exec "$REAL_OPENCODE" attach "$FRONTDOOR_URL" --session "$sid" --dir "$dir"
     fi
 
     if [ "$verb" = "RESUME" ]; then
@@ -114,25 +115,25 @@ pkgs.writeShellApplication {
       [ "$code" = "200" ] || selfhost
       dir="$(printf '%s' "$body" | jq -r '.directory // empty' 2>/dev/null || true)"
       [ -n "$dir" ] || selfhost
-      # Resolve the owner read-only FIRST (fable M2 #1). A session created through
-      # the door is already placed, so GET /route resolves it. But a NEVER-placed
-      # session -- e.g. one minted via the in-TUI "new session" keybind, which goes
-      # direct to a serve until the Phase 8 TUI-on-door move -- 404s on /route and
-      # nothing else will place it; attaching it to the anchor would go stale once
-      # its first prompt promotes it elsewhere. On a /route MISS -- and only then --
-      # POST /place (the session is CONFIRMED to exist: 200 above), which cannot
-      # manufacture a phantom assignment. Degrades to $OPENCODE_URL on any failure.
+      # Phase 9: the TUI rides the front door (see the NEW path). We still PRE-PLACE
+      # a never-placed session before attaching so the door's very first
+      # /event?session_ids= resolve lands on the real owner instead of degrading to
+      # the anchor and needing an immediate drift-reconnect. A session created
+      # through the door is already placed (GET /route resolves it); a session
+      # minted via the in-TUI "new session" keybind 404s on /route, so -- and only
+      # then, the session is CONFIRMED to exist (200 above) -- POST /place. Failures
+      # are non-fatal: the door tolerates an unplaced session (degrade→anchor→
+      # drift-reconnect once its first prompt promotes it).
       route="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
       serve_url="$(parse_serve_url "$route" "")"
       if [ -z "$serve_url" ]; then
         place_auth=()
         [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ] && place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
-        place="$(curl -sf --connect-timeout 2 --max-time 3 -X POST "$PIGEON_DAEMON_URL/place" \
+        curl -sf --connect-timeout 2 --max-time 3 -X POST "$PIGEON_DAEMON_URL/place" \
           -H "Content-Type: application/json" "''${place_auth[@]+"''${place_auth[@]}"}" \
-          -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
-        serve_url="$(parse_serve_url "$place" "$OPENCODE_URL")"
+          -d "{\"session_id\":\"$sid\"}" >/dev/null 2>&1 || true
       fi
-      exec "$REAL_OPENCODE" attach "$serve_url" --session "$sid" --dir "$dir"
+      exec "$REAL_OPENCODE" attach "$FRONTDOOR_URL" --session "$sid" --dir "$dir"
     fi
 
     selfhost

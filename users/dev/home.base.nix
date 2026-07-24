@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-J3/RP19TLdbEKfcCpWq45xkb4mD2lWr+UlEc4rmDdGw=";
+      hash = "sha256-2BD6A3blba5aW8MWreYwm0rLIqotRvEEMCQXRB1As7M=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-cxADsRq/cHJxsBFRLxW1wgO3nGIDPlTVKt02xJDJgP4=";
+      hash = "sha256-OZBGgR27DYs3wQRGQjZrLxJ4DQLbW51brCoQiJ8wUIo=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-7XQvWpTPNy6rdY/QleREdWt62Qkqbak0KlWO27EbPLs=";
+      hash = "sha256-Hv3+br1dfWECTtHPHZbEbXg0EB0G9NcNi+peS1CVcGI=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-D3DVekmwk2hdA5bqsN6zoTUntJ37djuK27EVrgymHnE=";
+      hash = "sha256-uchMDMF4y4sz/GLjIiqHINpLETUb6zspYbFO7mBmKqM=";
       isZip = true;
     };
   };
@@ -87,6 +87,29 @@ let
     # projection reset, but TEST-MIGRATE a DB copy and confirm old sessions still
     # render before the fleet switch (Phase 2 of the cutover runbook). Serves pick
     # up the new binary only on restart (nightly reset / manual switch).
+    #
+    # PATCHED.2 (2026-07-24, Phase 8+9 co-land — bead workstation-mlve.3/.4): now
+    # pins v1.17.13-patched.2. Ends the "no patched.N during Phases 0-8" hold.
+    # Adds THREE patches (removing tui-follow-owner, superseded), taking the set
+    # to 21, so the interactive attach TUI rides the opaque FRONT DOOR on a
+    # SESSION-SCOPED /event?session_ids= stream instead of the /global/event
+    # firehose: session-door-routes (server ?session_ids= query field +
+    # session-scoped GET pending permissions/questions + POST questions reply/
+    # reject + permissionRespond message parity + regenerated SDK), tui-door-attach
+    # (scoped subscribe; drop pigeon /route self-resolve — the door owns ownership
+    # and drops the SSE leg on migration; D2 child-poll bounded to newest-30 <
+    # door's 32-cap + fetch-on-reconnect reconcile; D6 route-follow; NEW-A min-open
+    # backoff + jitter; W5 session-scoped reply migration), tui-door-tests (NEW-G
+    # client contract + CI step). This bundles Phase 9: oc-pool-attach /
+    # oc-auto-attach now `attach $FRONTDOOR_URL` (:4700) instead of the resolved
+    # serve, so the door handles owner migration (the removed tui-follow-owner's
+    # job). REVIEWED by adversarial-reviewer-fable on the implementation; CRITICAL/
+    # HIGH/MEDIUM findings fixed before this cut (see opencode-patched plan doc).
+    # DEPLOY ORDER: serves + attach TUIs must restart onto patched.2 together (a
+    # workspace reset does this atomically) — an OLD binary through the door 410s
+    # on /global/event, and the door's new /session routes 404 on an old serve.
+    # (patched.1 was cut then its pin REVERTED after the fable review found the
+    # deploy-window regression; patched.2 folds in the fixes + the Phase 9 co-land.)
     #
     # --- historical (1.17.7 hold line, patched.N revisions) ---
     # This pins v1.17.7-patched.11 (same upstream 1.17.7, build-release.yml
@@ -236,7 +259,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.13";
-    patchedRevision = "";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "2";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";

@@ -351,8 +351,10 @@ pkgs.writeShellApplication {
     # So on a /route MISS -- and only then -- POST /place. The session is CONFIRMED
     # to exist (Step 1 FOUND), so this cannot manufacture a phantom assignment
     # (the pigeon-eup hazard). /place is idempotent (ensureRouted). Any failure
-    # degrades serve_url to $OPENCODE_URL -- never worse. (Phase 8 deletes this
-    # fallback: an on-door TUI's event-stream open is itself a promoting request.)
+    # degrades serve_url to $OPENCODE_URL -- never worse. (Phase 9 KEEPS this
+    # pre-place -- not for the attach target, which is now the door, but so the
+    # door's first /event?session_ids= resolve lands on the real owner instead of
+    # degrading to the anchor and needing an immediate drift-reconnect.)
     route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
       "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
     serve_url="$(parse_serve_url "$route_body" "")"
@@ -507,10 +509,16 @@ pkgs.writeShellApplication {
     # Step 6: invoke the helper. We pass the payload as JSON encoded by jq,
     # then decode it inside Lua via vim.json.decode to bulletproof against
     # any quoting hazards in sid/dir/url.
+    # Phase 9 (bead workstation-mlve.3/.4): the attach TUI rides the opaque FRONT
+    # DOOR, not the resolved serve. The door owns ownership — it routes the scoped
+    # /event?session_ids= subscribe + /session REST to the owner and drops the SSE
+    # leg on a confirmed migration, so the TUI follows migrations with no client
+    # /route self-resolve. serve_url above is now used only to PRE-PLACE a
+    # never-placed session (so the door's first resolve lands on the real owner).
     payload="$(jq -nc \
       --arg sid "$sid" \
       --arg dir "$session_dir" \
-      --arg url "$serve_url" \
+      --arg url "$FRONTDOOR_URL" \
       '{sid:$sid, dir:$dir, url:$url}')"
 
     # jq -Rs '.' emits a JSON string literal, which doubles as a valid
