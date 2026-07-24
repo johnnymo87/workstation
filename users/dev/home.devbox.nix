@@ -21,6 +21,14 @@ let
   serveIdCase = lib.concatStringsSep "\n" (lib.imap0
     (i: port: "          ${toString port}) export OPENCODE_SERVE_ID=serve-${toString i} ;;")
     servePool.ports);
+  # frontdoor devbox convergence: the opaque single-port reverse proxy for the
+  # serve pool (docs/plans/2026-07-12-serve-reverse-proxy-plan.md §"devbox
+  # convergence"). Same callPackage as the cloudbox host config, but wired as a
+  # systemd.user service below (not a system service) because devbox's pool is a
+  # USER target (K=2). This makes the shared home.base.nix FRONTDOOR_URL default
+  # (http://127.0.0.1:4700) correct on devbox — before this, devbox was a
+  # doorless host whose clients pointed at a :4700 that never existed.
+  opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
   # workstation-g3iy: JS-level stack capture for wedged serves. The pool units
   # run with BUN_INSPECT listening on 127.0.0.1:1<port> (14096/14097); this
   # client connects, enables the JSC debugger, and pause/capture/resumes N
@@ -1001,6 +1009,200 @@ ${serveIdCase}
   };
   systemd.user.timers.opencode-serve-canary = {
     Unit.Description = "Minutely OpenCode serve pool liveness canary";
+    Timer = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
+    };
+    Install.WantedBy = [ "timers.target" ];
+  };
+
+  # opencode-frontdoor (devbox convergence) — the opaque single-port reverse
+  # proxy and session-sticky router for the USER serve pool. The cloudbox analog
+  # is the SYSTEM service systemd.services.opencode-frontdoor in
+  # hosts/cloudbox/configuration.nix; here it is a systemd.user service to match
+  # devbox's user-level pool so it can order After= the user
+  # opencode-serve-pool.target. Binds localhost :4700 (FRONTDOOR_PORT). Stateless
+  # SPOF; degrades-to-anchor (:4096) when pigeon (:4731) is down, so pigeon is a
+  # SOFT/runtime dependency only (and, being a SYSTEM unit on devbox, cannot be
+  # an After= of this USER unit anyway — same constraint as the serve unit's
+  # DM5-2 note). Its own liveness canary is the frontdoor-canary user timer below.
+  systemd.user.services.opencode-frontdoor = {
+    Unit = {
+      Description = "opencode-frontdoor (opaque single-port reverse proxy for the serve pool)";
+      # Order after the user serve-pool so the anchor/backends exist first. Use
+      # Wants (soft) only — the door must still start and degrade-to-anchor if
+      # the pool is slow. pigeon (:4731) is a runtime dep resolved dynamically,
+      # not an ordering dep (and is a system unit, un-orderable from user scope).
+      After = [ "opencode-serve-pool.target" ];
+      Wants = [ "opencode-serve-pool.target" ];
+      # DM5-7 analog: do NOT restart the door on a routine `home-manager switch`
+      # — a restart briefly drops long-lived SSE streams mid-turn. The door is
+      # stateless and resolves targets dynamically, so keep-old leaves a running
+      # instance untouched on switch; the new package applies on the next reboot
+      # or an EXPLICIT `systemctl --user restart opencode-frontdoor.service`.
+      X-SwitchMethod = "keep-old";
+    };
+    Service = {
+      Type = "simple";
+      Environment = [
+        "FRONTDOOR_PORT=4700"
+        "PIGEON_DAEMON_URL=http://127.0.0.1:4731"
+        "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
+        # Builtins-only app (nothing reads NODE_ENV today) — set for convention/
+        # consistency with pigeon-daemon and to future-proof any added dependency.
+        "NODE_ENV=production"
+      ];
+      ExecStart = "${opencode-frontdoor}/bin/opencode-frontdoor";
+      Restart = "always";
+      RestartSec = 5;
+      # Memory cap: stream holder (~1.5G). NO MemoryHigh (a soft high can throttle
+      # the loop into a wedge — same rationale as the serve unit's MemoryMax-only
+      # cap). Max-only ensures a clean OOM kill + rapid restart recovery.
+      MemoryMax = "1500M";
+      # No graceful-drain SIGTERM handler today; bound shutdown so a future
+      # handler can't hang on never-ending SSE streams (in-flight streams drop,
+      # clients reconnect).
+      TimeoutStopSec = "15s";
+      # The door doubles connection count (client socket + upstream socket per
+      # proxied request); raise the fd ceiling well above the default.
+      LimitNOFILE = 65536;
+    };
+    Install.WantedBy = [ "default.target" ];
+  };
+
+  # opencode-frontdoor's own liveness canary (§7 isolation kit). Probes the
+  # door's native /healthz once a minute (3s connect / 5s max); after 2
+  # consecutive no-responses it dumps cheap owner-readable forensics to
+  # /tmp/opencode-frontdoor-canary/ and restarts the door. On a 503 it
+  # cross-probes the anchor (:4096) directly: anchor-healthy-but-door-503 for 2
+  # runs = door-side sickness -> restart; both-down = genuine backend outage,
+  # door left alone. Cloudbox runs this as a SYSTEM oneshot (root, /var/lib,
+  # `systemctl`); here it is a USER oneshot mirroring opencode-serve-canary
+  # (systemctl --user, /tmp state, explicit minimal PATH). The 5s canary
+  # --max-time MUST stay above the door's FRONTDOOR_ROUTE_TIMEOUT_MS (3000ms)
+  # so a healthy-but-degraded 503 isn't misread as a wedge.
+  systemd.user.services.opencode-frontdoor-canary = {
+    Unit.Description = "opencode-frontdoor liveness canary (restart wedged front doors)";
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.writeShellScript "opencode-frontdoor-canary" ''
+        set -u
+        # User-service PATH is minimal — be explicit (mirrors opencode-serve-canary).
+        export PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.findutils ]}
+        STATE=/tmp/opencode-frontdoor-canary
+        mkdir -p "$STATE"
+        UNIT=opencode-frontdoor.service
+        PORT=4700
+        FAILFILE="$STATE/fails"
+        SICKFILE="$STATE/sick"
+
+        # Only police the door when it's supposed to be up. Intentional stops /
+        # crash-loop backoff reset the counters.
+        if [ "$(systemctl --user is-active "$UNIT")" != "active" ]; then
+          rm -f "$FAILFILE" "$SICKFILE"
+          exit 0
+        fi
+
+        # Capture cheap forensics BEFORE the restart destroys them, then bounce.
+        capture_and_restart() {
+          local reason="''${1:-unknown}"
+          TS=$(date +%Y%m%dT%H%M%S)
+          DUMP="$STATE/wedge-$TS"
+          mkdir -p "$DUMP"
+          # Bound persistent forensics: keep only the 10 newest wedge dumps.
+          ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+
+          PID=$(systemctl --user show "$UNIT" -p MainPID --value)
+          CG=$(systemctl --user show "$UNIT" -p ControlGroup --value)
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            for f in status wchan syscall; do
+              cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+            for t in /proc/$PID/task/*/; do
+              [ -d "$t" ] || continue
+              tid=$(basename "$t")
+              printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
+                "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
+            done
+          fi
+          if [ -n "$CG" ]; then
+            for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
+              cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+          fi
+
+          echo "RESTARTING $UNIT (reason: $reason, pid=$PID); forensics in $DUMP"
+          systemctl --user restart "$UNIT"
+          rm -f "$FAILFILE" "$SICKFILE"
+        }
+
+        BODY_FILE=$(mktemp)
+        trap 'rm -f "$BODY_FILE"' EXIT
+
+        # Probe /healthz WITHOUT -f, capturing body + HTTP status. --max-time 5s
+        # must exceed the door's FRONTDOOR_ROUTE_TIMEOUT_MS (3000ms).
+        HTTP_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o "$BODY_FILE" -w "%{http_code}" "http://127.0.0.1:$PORT/healthz")
+        CURL_EXIT=$?
+
+        # 1. No HTTP response (frozen loop / dead process)
+        if [ "$CURL_EXIT" -ne 0 ] || [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" -eq 0 ]; then
+          rm -f "$SICKFILE"
+          THRESHOLD=2
+          FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+          echo "$FAILS" > "$FAILFILE"
+          echo "WARNING: $UNIT failed /healthz ($FAILS/$THRESHOLD consecutive timeouts/failures)"
+          if [ "$FAILS" -ge "$THRESHOLD" ]; then
+            capture_and_restart "no response"
+          fi
+          exit 0
+        fi
+
+        # 2. HTTP 200 -> healthy (+ version-drift check)
+        if [ "$HTTP_CODE" -eq 200 ]; then
+          rm -f "$FAILFILE" "$SICKFILE"
+          RUNNING_VER=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$BODY_FILE" | sed -n 's/.*"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/p')
+          EXECSTART_FULL=$(systemctl --user show "$UNIT" -p ExecStart --value)
+          EXECSTART_PATH=$(echo "$EXECSTART_FULL" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
+          if [ -z "$RUNNING_VER" ]; then
+            echo "WARNING: could not parse version from /healthz response"
+          else
+            case "$EXECSTART_PATH" in
+              "$RUNNING_VER"*) ;;
+              *) echo "WARNING: version drift: running=$RUNNING_VER execstart=$EXECSTART_PATH" ;;
+            esac
+          fi
+          exit 0
+        fi
+
+        # 3. HTTP 503 -> cross-probe the anchor (:4096) directly
+        if [ "$HTTP_CODE" -eq 503 ]; then
+          ANCHOR_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:4096/global/health")
+          if [ "$ANCHOR_CODE" -eq 200 ]; then
+            rm -f "$FAILFILE"
+            SICK_THRESHOLD=2
+            SICK=$(( $(cat "$SICKFILE" 2>/dev/null || echo 0) + 1 ))
+            echo "$SICK" > "$SICKFILE"
+            echo "WARNING: door reports 503 but anchor healthy directly ($SICK/$SICK_THRESHOLD consecutive): door-side sickness"
+            if [ "$SICK" -ge "$SICK_THRESHOLD" ]; then
+              capture_and_restart "door-side sickness (anchor healthy but door reports 503)"
+            fi
+          else
+            rm -f "$FAILFILE" "$SICKFILE"
+            echo "both backends genuinely down (anchor unreachable directly too, status=$ANCHOR_CODE); door alive, not restarting"
+          fi
+          exit 0
+        fi
+
+        # 4. Any other status -> loop alive, log it
+        echo "WARNING: unexpected /healthz HTTP status: $HTTP_CODE (loop alive, not restarting)"
+        rm -f "$FAILFILE" "$SICKFILE"
+        exit 0
+      ''}";
+    };
+  };
+
+  systemd.user.timers.opencode-frontdoor-canary = {
+    Unit.Description = "Minutely OpenCode frontdoor liveness canary";
     Timer = {
       OnCalendar = "minutely";
       AccuracySec = "15s";
