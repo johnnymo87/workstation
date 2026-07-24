@@ -4,9 +4,9 @@
  * --- RECONCILIATION ---
  * - Snapshot routes (from http://127.0.0.1:4096/doc): 188
  * - Exclusions: 0 (The web-ui served at "/" and its static assets are not declared in `/doc`, so they are excluded from the snapshot)
- * - Patch-only routes: 3 (GET /event?session_ids= and GET /api/event?session_ids=, source: event-session-scope.patch; plus GET /doc, OpenAPI spec added manually (FABLE-W6))
+ * - Patch-only routes: 7 (GET /event?session_ids= and GET /api/event?session_ids=, source: event-session-scope.patch; GET /doc, OpenAPI spec added manually (FABLE-W6); plus 4 session-scoped permission/question routes: GET /session/{sessionID}/permissions, GET /session/{sessionID}/questions, POST /session/{sessionID}/questions/{questionID}/reply, POST /session/{sessionID}/questions/{questionID}/reject, source: session-door-routes.patch)
  * - Manually added: GET /, web UI added manually, undeclared in /doc
- * - Total table entries: 192
+ * - Total table entries: 196
  *
  * --- DUAL SURFACE ---
  * This API exposes a dual surface: a bare surface (e.g. /session/...) and its `/api/*` mirror.
@@ -15,6 +15,8 @@
  * --- PATCH SOURCE ---
  * - `session_ids` is patch-only:
  *   Source: ~/projects/opencode-patched/patches/event-session-scope.patch
+ * - Session-scoped permission/question routes are patch-only:
+ *   Source: ~/projects/opencode-patched/patches/session-door-routes.patch
  */
 
 /*
@@ -205,8 +207,12 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/session/{sessionID}/message/{messageID}", class: "session-path" },
   { method: "DELETE", path: "/session/{sessionID}/message/{messageID}/part/{partID}", class: "session-path" },
   { method: "PATCH", path: "/session/{sessionID}/message/{messageID}/part/{partID}", class: "session-path" },
+  { method: "GET", path: "/session/{sessionID}/permissions", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/permissions/{permissionID}", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/prompt_async", class: "session-path" },
+  { method: "GET", path: "/session/{sessionID}/questions", class: "session-path" },
+  { method: "POST", path: "/session/{sessionID}/questions/{questionID}/reject", class: "session-path" },
+  { method: "POST", path: "/session/{sessionID}/questions/{questionID}/reply", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/revert", class: "session-path" },
   { method: "DELETE", path: "/session/{sessionID}/share", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/share", class: "session-path" },

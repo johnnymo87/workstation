@@ -34,6 +34,56 @@ describe('Route Dispatcher', () => {
     });
   });
 
+  test('GET /session/ses_x/permissions -> session-path/route-session', () => {
+    expect(classify('GET', '/session/ses_x/permissions')).toBe('session-path');
+    expect(dispatch('GET', '/session/ses_x/permissions')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  test('GET /session/ses_x/questions -> session-path/route-session', () => {
+    expect(classify('GET', '/session/ses_x/questions')).toBe('session-path');
+    expect(dispatch('GET', '/session/ses_x/questions')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  test('POST /session/ses_x/questions/qr_y/reply -> session-path/route-session', () => {
+    expect(classify('POST', '/session/ses_x/questions/qr_y/reply')).toBe('session-path');
+    expect(dispatch('POST', '/session/ses_x/questions/qr_y/reply')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  test('POST /session/ses_x/questions/qr_y/reject -> session-path/route-session', () => {
+    expect(classify('POST', '/session/ses_x/questions/qr_y/reject')).toBe('session-path');
+    expect(dispatch('POST', '/session/ses_x/questions/qr_y/reject')).toEqual({
+      class: 'session-path',
+      action: 'route-session',
+      recognized: true,
+      allowedMethods: [],
+    });
+  });
+
+  test('GET /session/ses_x/permissions/perm_y -> unrecognized/not-found-404 (negative guard)', () => {
+    expect(classify('GET', '/session/ses_x/permissions/perm_y')).toBe('unrecognized');
+    expect(dispatch('GET', '/session/ses_x/permissions/perm_y')).toEqual({
+      class: 'unrecognized',
+      action: 'not-found-404',
+      recognized: false,
+      allowedMethods: [],
+    });
+  });
+
   // precedence:
   test('GET /session/status -> global-ro/forward-anchor (NOT session-path)', () => {
     expect(classify('GET', '/session/status')).toBe('global-ro');

@@ -191,6 +191,19 @@ assert_route "fixed-event-get" "GET"   "/event"                            "400"
 # D) global-ro forwards (backend-dependent, assert "not denied by the door")
 assert_route "forward-health"  "GET"   "/global/health"                    "NON-DENY" "ANY"
 
+# E) Session-scoped permission/question routes (patch-only)
+LIVE_SID=$(curl -s "${BASE_URL}/session" | jq -r '.[0].id // empty' 2>/dev/null || true)
+if [ -n "$LIVE_SID" ]; then
+  assert_route "session-perms" "GET"   "/session/${LIVE_SID}/permissions"  "NON-DENY" "ANY"
+  assert_route "session-quests" "GET"   "/session/${LIVE_SID}/questions"    "NON-DENY" "ANY"
+else
+  printf "[SKIP] %-15s %-6s %-38s | %s\n" "session-perms" "GET" "/session/<SID>/permissions" "No live session available on door"
+  printf "[SKIP] %-15s %-6s %-38s | %s\n" "session-quests" "GET" "/session/<SID>/questions" "No live session available on door"
+fi
+
+# Note: POST /session/{sessionID}/questions/{questionID}/reply and /reject are omitted from live gate
+# probes to prevent state mutation / dependency on live pending questions; verified deterministically in dispatch.test.ts.
+
 # ==============================================================================
 # SUMMARY
 # ==============================================================================
