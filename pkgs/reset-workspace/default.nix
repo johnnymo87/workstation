@@ -28,7 +28,7 @@ pkgs.writeShellApplication {
     ORIG_ARGS=("$@")
 
     log() {
-      printf '[reset-workspace] %s\n' "$*" >&2
+      printf '[reset-workspace] %s\n' "$*" >&2 || true
     }
 
     die() {
@@ -75,6 +75,21 @@ pkgs.writeShellApplication {
       fi
     }
 
+    # pool_ports_from_wants <wants-string>: parse systemd Wants= string and print
+    # port numbers for opencode-serve@<port>.service units in order. Pure helper.
+    pool_ports_from_wants() {
+      local wants="$1" unit port
+      for unit in $wants; do
+        case "$unit" in
+          opencode-serve@*.service)
+            port="''${unit#opencode-serve@}"
+            port="''${port%.service}"
+            [ -n "$port" ] && printf '%s\n' "$port"
+            ;;
+        esac
+      done
+    }
+
     # pool_scope: echo "user" when the per-user pool target is active on this
     # host (devbox), else "system" (cloudbox, where the pool is a system
     # target).
@@ -91,20 +106,9 @@ pkgs.writeShellApplication {
       fi
     }
 
-    # discover_pool_urls <scope>: print one http://127.0.0.1:<port> health URL
-    # per pool serve, in port order, by reading the target's Wants= via the
-    # given systemctl scope and parsing it with pool_health_urls_from_wants.
-    # Degrades to $OPENCODE_URL when discovery yields nothing (pre-pool
-    # behavior). Reading unit
-    # properties needs no privilege on stock systemd, so try unprivileged
-    # first; fall back to passwordless sudo (-n: never prompt -- this runs in
-    # the capture path, which must never hang) in case a D-Bus policy
-    # restricts the read. /run/wrappers/bin/sudo is NixOS's setuid sudo
-    # (/run/current-system/sw/bin/sudo is a non-setuid symlink sudo refuses to
-    # exec from); on non-NixOS hosts it's absent and the fallback fails
-    # silently.
-    discover_pool_urls() {
-      local scope="$1" wants
+    # get_pool_wants <scope>: read Wants= for opencode-serve-pool.target via systemctl.
+    get_pool_wants() {
+      local scope="$1" wants=""
       if [ "$scope" = "user" ]; then
         wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
       else
@@ -113,7 +117,25 @@ pkgs.writeShellApplication {
           wants="$(/run/wrappers/bin/sudo -n systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
         fi
       fi
+      printf '%s\n' "$wants"
+    }
+
+    # discover_pool_urls <scope>: print one http://127.0.0.1:<port> health URL
+    # per pool serve, in port order, by reading the target's Wants= via the
+    # given systemctl scope and parsing it with pool_health_urls_from_wants.
+    # Degrades to $OPENCODE_URL when discovery yields nothing (pre-pool behavior).
+    discover_pool_urls() {
+      local scope="$1" wants
+      wants="$(get_pool_wants "$scope")"
       pool_health_urls_from_wants "$wants" "$OPENCODE_URL"
+    }
+
+    # discover_pool_ports <scope>: print instance port numbers (e.g. 4096 4097)
+    # for opencode-serve@<port>.service units in Wants=.
+    discover_pool_ports() {
+      local scope="$1" wants
+      wants="$(get_pool_wants "$scope")"
+      pool_ports_from_wants "$wants"
     }
 
     # should_detach_destructive <no_detach_env> <tty_nr>: pure predicate deciding
@@ -142,17 +164,17 @@ pkgs.writeShellApplication {
       printf '%s\n' "''${tty_nr:-0}"
     }
 
-    # format_sentinel <status> <ts> [phase]: format sentinel line for
+    # format_sentinel <status> <ts> <pid> [phase]: format sentinel line for
     # /tmp/reset-workspace-last-status.txt.
-    # "started <ts> phase=<name>", "ok <ts>", or "failed <ts> phase=<name>".
+    # "started <ts> pid=<pid> phase=<name>", "ok <ts> pid=<pid>", or "failed <ts> pid=<pid> phase=<name>".
     format_sentinel() {
-      local status="$1" ts="$2" phase="''${3:-}"
+      local status="$1" ts="$2" pid="$3" phase="''${4:-}"
       if [ "$status" = "ok" ]; then
-        printf 'ok %s\n' "$ts"
+        printf 'ok %s pid=%s\n' "$ts" "$pid"
       elif [ "$status" = "failed" ]; then
-        printf 'failed %s phase=%s\n' "$ts" "$phase"
+        printf 'failed %s pid=%s phase=%s\n' "$ts" "$pid" "$phase"
       else
-        printf 'started %s phase=%s\n' "$ts" "$phase"
+        printf 'started %s pid=%s phase=%s\n' "$ts" "$pid" "$phase"
       fi
     }
 
@@ -172,6 +194,8 @@ pkgs.writeShellApplication {
       fi
     }
 
+    # update_sentinel <status> [phase]: write sentinel status atomically via mktemp + mv -f.
+    # Only executes if OWNS_SENTINEL=1.
     update_sentinel() {
       [ "''${OWNS_SENTINEL:-0}" -eq 1 ] || return 0
       local status="$1" phase="''${2:-}"
@@ -179,8 +203,11 @@ pkgs.writeShellApplication {
       local ts
       ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
       local line
-      line="$(format_sentinel "$status" "$ts" "$phase")"
-      printf '%s\n' "$line" > "$SENTINEL_PATH"
+      line="$(format_sentinel "$status" "$ts" "$BASHPID" "$phase")"
+      local tmp_sentinel
+      tmp_sentinel="$(mktemp "/tmp/reset-workspace-status.XXXXXX" 2>/dev/null || echo "$SENTINEL_PATH.tmp.$$")"
+      printf '%s\n' "$line" > "$tmp_sentinel" || return 0
+      mv -f "$tmp_sentinel" "$SENTINEL_PATH" || return 0
     }
 
     cleanup_trap() {
@@ -189,8 +216,11 @@ pkgs.writeShellApplication {
         local ts
         ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
         local line
-        line="$(format_sentinel "failed" "$ts" "$CURRENT_PHASE")"
-        printf '%s\n' "$line" > "$SENTINEL_PATH"
+        line="$(format_sentinel "failed" "$ts" "$BASHPID" "$CURRENT_PHASE")"
+        local tmp_sentinel
+        tmp_sentinel="$(mktemp "/tmp/reset-workspace-status.XXXXXX" 2>/dev/null || echo "$SENTINEL_PATH.tmp.$$")"
+        printf '%s\n' "$line" > "$tmp_sentinel" || return 0
+        mv -f "$tmp_sentinel" "$SENTINEL_PATH" || return 0
       fi
     }
     trap cleanup_trap EXIT HUP TERM INT
@@ -204,32 +234,8 @@ pkgs.writeShellApplication {
       [ "$new" -gt "$old" ]
     }
 
-    # discover_pool_ports <scope>: print instance port numbers (e.g. 4096 4097)
-    # for opencode-serve@<port>.service units in Wants=.
-    discover_pool_ports() {
-      local scope="$1" wants
-      if [ "$scope" = "user" ]; then
-        wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
-      else
-        wants="$(systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
-        if [ -z "$wants" ]; then
-          wants="$(/run/wrappers/bin/sudo -n systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"
-        fi
-      fi
-      local unit port
-      for unit in $wants; do
-        case "$unit" in
-          opencode-serve@*.service)
-            port="''${unit#opencode-serve@}"
-            port="''${port%.service}"
-            [ -n "$port" ] && printf '%s\n' "$port"
-            ;;
-        esac
-      done
-    }
-
     # get_unit_monotonic_ts <scope> <port>: read ExecMainStartTimestampMonotonic for
-    # opencode-serve@<port>.service.
+    # opencode-serve@<port>.service. Returns empty string if read failed.
     get_unit_monotonic_ts() {
       local scope="$1" port="$2" ts=""
       if [ "$scope" = "user" ]; then
@@ -240,7 +246,11 @@ pkgs.writeShellApplication {
           ts="$(/run/wrappers/bin/sudo -n systemctl show -p ExecMainStartTimestampMonotonic --value "opencode-serve@$port.service" 2>/dev/null || true)"
         fi
       fi
-      printf '%s\n' "''${ts:-0}"
+      if [[ "$ts" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "$ts"
+      else
+        printf '\n'
+      fi
     }
 
     # restart_pool_target <scope>: issue systemctl restart on opencode-serve-pool.target
@@ -650,6 +660,8 @@ EOF
         LOG_FILE="/tmp/reset-workspace-run.log"
         log "detaching destructive phase into new session via setsid (log at $LOG_FILE)..."
         : > "$LOG_FILE"
+        # Prevent stale sentinel reads from previous runs
+        rm -f "$SENTINEL_PATH"
         export RESET_WORKSPACE_DESTRUCTIVE_DETACHED=1
         # Concurrency lock preservation: setsid child inherits RESET_WORKSPACE_LOCKED=1
         # and the open flock file descriptor.
@@ -662,11 +674,13 @@ EOF
         if [ -f "$SENTINEL_PATH" ]; then
           status_line="$(cat "$SENTINEL_PATH" 2>/dev/null || true)"
           case "$status_line" in
-            ok*) log "reset-workspace finished successfully"; exit 0 ;;
+            ok*pid=$TAIL_PID*) log "reset-workspace finished successfully"; exit 0 ;;
+            ok*) die "destructive phase sentinel OK status belongs to stale PID (expected pid=$TAIL_PID; status: $status_line)" ;;
             *) die "destructive phase finished with status: $status_line" ;;
           esac
+        else
+          die "destructive phase PID $TAIL_PID exited without writing sentinel status"
         fi
-        exit 0
       fi
     fi
 
@@ -706,15 +720,27 @@ EOF
     log "restarting opencode-serve-pool.target..."
 
     mapfile -t pool_ports < <(discover_pool_ports "$POOL_SCOPE")
+    declare -A BEFORE_TS=()
+    before_read_ok=1
     if [ "''${#pool_ports[@]}" -eq 0 ]; then
       log "WARNING: could not discover pool instances; restart postcondition NOT verified"
       update_sentinel "started" "restart-pool-unverified"
+      before_read_ok=0
     else
-      declare -A BEFORE_TS=()
       for port in "''${pool_ports[@]}"; do
-        BEFORE_TS["$port"]="$(get_unit_monotonic_ts "$POOL_SCOPE" "$port")"
-        log "  port $port ExecMainStartTimestampMonotonic before restart: ''${BEFORE_TS[$port]}"
+        ts="$(get_unit_monotonic_ts "$POOL_SCOPE" "$port")"
+        if [ -z "$ts" ]; then
+          log "  WARNING: could not read ExecMainStartTimestampMonotonic for serve port $port before restart"
+          before_read_ok=0
+        else
+          BEFORE_TS["$port"]="$ts"
+          log "  port $port ExecMainStartTimestampMonotonic before restart: $ts"
+        fi
       done
+      if [ "$before_read_ok" -eq 0 ]; then
+        log "WARNING: some BEFORE monotonic timestamp reads failed; restart postcondition NOT fully verifiable"
+        update_sentinel "started" "restart-pool-unverified"
+      fi
     fi
 
     restart_pool_target "$POOL_SCOPE"
@@ -757,10 +783,17 @@ EOF
     # Assert restart postcondition: each pool instance's ExecMainStartTimestampMonotonic strictly increased
     if [ "''${#pool_ports[@]}" -gt 0 ]; then
       restart_verified=1
+      if [ "$before_read_ok" -eq 0 ]; then
+        restart_verified=0
+        log "WARNING: BEFORE timestamp read failed for one or more ports; restart assertion unverified"
+      fi
       for port in "''${pool_ports[@]}"; do
-        old_ts="''${BEFORE_TS[$port]:-0}"
+        old_ts="''${BEFORE_TS[$port]:-}"
         new_ts="$(get_unit_monotonic_ts "$POOL_SCOPE" "$port")"
-        if ! is_timestamp_increased "$old_ts" "$new_ts"; then
+        if [ -z "$old_ts" ] || [ -z "$new_ts" ]; then
+          log "  WARNING: serve port $port timestamp read failed (before: ''${old_ts:-FAILED}, after: ''${new_ts:-FAILED})"
+          restart_verified=0
+        elif ! is_timestamp_increased "$old_ts" "$new_ts"; then
           log "  WARNING: serve port $port ExecMainStartTimestampMonotonic did not increase (before: $old_ts, after: $new_ts)"
           restart_verified=0
         else
@@ -769,7 +802,7 @@ EOF
       done
 
       if [ "$restart_verified" -ne 1 ]; then
-        log "WARNING: pool restart assertion failed; retrying restart once..."
+        log "WARNING: pool restart assertion failed or unverified; retrying restart once..."
         restart_pool_target "$POOL_SCOPE"
         # Re-poll health after retry
         DEADLINE=$(($(date +%s) + 30))
@@ -792,9 +825,9 @@ EOF
         fi
 
         for port in "''${pool_ports[@]}"; do
-          old_ts="''${BEFORE_TS[$port]:-0}"
+          old_ts="''${BEFORE_TS[$port]:-}"
           new_ts="$(get_unit_monotonic_ts "$POOL_SCOPE" "$port")"
-          if ! is_timestamp_increased "$old_ts" "$new_ts"; then
+          if [ -n "$old_ts" ] && [ -n "$new_ts" ] && ! is_timestamp_increased "$old_ts" "$new_ts"; then
             die "opencode serve port $port failed to restart (ExecMainStartTimestampMonotonic did not increase: before $old_ts, after $new_ts)"
           fi
         done

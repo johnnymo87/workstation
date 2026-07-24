@@ -63,14 +63,36 @@ check "K=1 pool -> one serve URL" \
   "http://127.0.0.1:4096" \
   "$(pool_health_urls_from_wants 'opencode-serve@4096.service' "$fb")"
 
-# Non-pool units in Wants= are ignored.
-check "ignores unrelated Wants units" \
-  "http://127.0.0.1:4096" \
-  "$(pool_health_urls_from_wants 'foo.service opencode-serve@4096.service bar.target' "$fb")"
+pool_ports_from_wants() {
+  local wants="$1" unit port
+  for unit in $wants; do
+    case "$unit" in
+      opencode-serve@*.service)
+        port="${unit#opencode-serve@}"
+        port="${port%.service}"
+        [ -n "$port" ] && printf '%s\n' "$port"
+        ;;
+    esac
+  done
+}
 
-# Empty / failed query -> fallback (pre-pool behavior).
-check "empty Wants -> fallback"   "$fb" "$(pool_health_urls_from_wants '' "$fb")"
-check "no pool units -> fallback" "$fb" "$(pool_health_urls_from_wants 'foo.service bar.service' "$fb")"
+# K=2 pool -> two ports
+check "K=2 pool -> both serve ports" \
+  "4096 4097" \
+  "$(pool_ports_from_wants 'opencode-serve@4096.service opencode-serve@4097.service' | tr '\n' ' ' | sed 's/ $//')"
+
+# K=4 pool -> four ports
+check "K=4 pool -> four serve ports" \
+  "4096 4097 4098 4099" \
+  "$(pool_ports_from_wants 'opencode-serve@4096.service opencode-serve@4097.service opencode-serve@4098.service opencode-serve@4099.service' | tr '\n' ' ' | sed 's/ $//')"
+
+# Non-pool units in Wants= are ignored.
+check "ignores unrelated Wants units for ports" \
+  "4096" \
+  "$(pool_ports_from_wants 'foo.service opencode-serve@4096.service bar.target')"
+
+# Empty / failed query -> empty
+check "empty Wants -> empty ports" "" "$(pool_ports_from_wants '')"
 
 # ---- new pure helpers under test ---------------------------------------------
 should_detach_destructive() {
@@ -92,13 +114,13 @@ is_timestamp_increased() {
 }
 
 format_sentinel() {
-  local status="$1" ts="$2" phase="${3:-}"
+  local status="$1" ts="$2" pid="$3" phase="${4:-}"
   if [ "$status" = "ok" ]; then
-    printf 'ok %s\n' "$ts"
+    printf 'ok %s pid=%s\n' "$ts" "$pid"
   elif [ "$status" = "failed" ]; then
-    printf 'failed %s phase=%s\n' "$ts" "$phase"
+    printf 'failed %s pid=%s phase=%s\n' "$ts" "$pid" "$phase"
   else
-    printf 'started %s phase=%s\n' "$ts" "$phase"
+    printf 'started %s pid=%s phase=%s\n' "$ts" "$pid" "$phase"
   fi
 }
 
@@ -159,14 +181,14 @@ check "timestamp increased: 0 -> 50 -> true" \
   "0" "$(is_timestamp_increased 0 50 && echo 0 || echo 1)"
 
 check "sentinel format: started" \
-  "started 2026-07-24T12:00:00Z phase=kill-nvim" \
-  "$(format_sentinel started 2026-07-24T12:00:00Z kill-nvim)"
+  "started 2026-07-24T12:00:00Z pid=1234 phase=kill-nvim" \
+  "$(format_sentinel started 2026-07-24T12:00:00Z 1234 kill-nvim)"
 check "sentinel format: ok" \
-  "ok 2026-07-24T12:00:00Z" \
-  "$(format_sentinel ok 2026-07-24T12:00:00Z)"
+  "ok 2026-07-24T12:00:00Z pid=1234" \
+  "$(format_sentinel ok 2026-07-24T12:00:00Z 1234)"
 check "sentinel format: failed" \
-  "failed 2026-07-24T12:00:00Z phase=restart-pool" \
-  "$(format_sentinel failed 2026-07-24T12:00:00Z restart-pool)"
+  "failed 2026-07-24T12:00:00Z pid=1234 phase=restart-pool" \
+  "$(format_sentinel failed 2026-07-24T12:00:00Z 1234 restart-pool)"
 
 # ---- scope + discovery mirrors (stubbed systemctl) ---------------------------
 # pool_scope / discover_pool_urls mirrors (lockstep with default.nix). A shell
@@ -231,6 +253,22 @@ refuse_grep() { # refuse_grep <desc> <fixed-string> — string must NOT appear
   else echo "ok: $1"; fi
 }
 if [ -f "$default_nix" ]; then
+  want_grep_func_content() { # want_grep_func_content <desc> <func_name> <string>
+    local desc="$1" func="$2" pattern="$3"
+    local body
+    body=$(sed -n "/^    ${func}() {/,/^    }/p" "$default_nix")
+    if printf '%s' "$body" | grep -qF -- "$pattern"; then
+      echo "ok: $desc"
+    else
+      echo "FAIL: $desc"; echo "  pattern '$pattern' not found in $func body"; fail=1
+    fi
+  }
+
+  want_grep "log helper is EIO proof"                     'printf '\''[reset-workspace] %s\n'\'' "$*" >&2 || true'
+  want_grep "clears sentinel before setsid re-exec"       'rm -f "$SENTINEL_PATH"'
+  want_grep "atomic sentinel write via mktemp and mv"     'mktemp "/tmp/reset-workspace-status.XXXXXX"'
+  want_grep "source defines pool_ports_from_wants"       'pool_ports_from_wants() {'
+  want_grep "source defines get_pool_wants"               'get_pool_wants() {'
   want_grep "source defines FRONTDOOR_URL"                 'FRONTDOOR_URL="'
   want_grep "source defines pool_health_urls_from_wants" 'pool_health_urls_from_wants() {'
   want_grep "source reads the pool target Wants="         'show -p Wants --value opencode-serve-pool.target'
@@ -279,9 +317,8 @@ if [ -f "$default_nix" ]; then
   refuse_grep "PID-based restart comparison not used"     'MainPID'
   want_grep "source defines count_manifest_sids"        'count_manifest_sids() {'
   want_grep "source counts sids via count_manifest_sids" 'OPENCODE_COUNT="$(count_manifest_sids "$MANIFEST_PATH")"'
-  want_grep "cleanup_trap checks OWNS_SENTINEL"          'cleanup_trap()'
-  want_grep "update_sentinel checks OWNS_SENTINEL"       'update_sentinel()'
-  want_grep "sentinel functions check OWNS_SENTINEL"     'OWNS_SENTINEL'
+  want_grep_func_content "cleanup_trap checks OWNS_SENTINEL" "cleanup_trap" "OWNS_SENTINEL"
+  want_grep_func_content "update_sentinel checks OWNS_SENTINEL" "update_sentinel" "OWNS_SENTINEL"
   want_grep "discovery failure warning is logged"        'WARNING: could not discover pool instances; restart postcondition NOT verified'
 
   # The sentinel must be written before pkill
