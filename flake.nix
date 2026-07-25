@@ -46,7 +46,11 @@
     darwinPkgs = pkgsFor darwinSystem;
 
     # Self-packaged tools (updated via nix-update in CI)
-    localPkgsFor = system: let p = pkgsFor system; in {
+    localPkgsFor = system: let
+      p = pkgsFor system;
+      opencode-patched = p.callPackage ./pkgs/opencode-patched { };
+      opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
+    in {
       ask-question = p.callPackage ./pkgs/ask-question { };
       bb = p.callPackage ./pkgs/bb { };
       beads = p.callPackage ./pkgs/beads { };
@@ -59,7 +63,12 @@
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
-      opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
+      inherit opencode-frontdoor;
+      opencode-patched = opencode-patched;
+      opencode-frontdoor-route-gate = p.callPackage ./pkgs/opencode-frontdoor/route-gate.nix {
+        opencodeFrontdoor = opencode-frontdoor;
+        opencodePatched = opencode-patched;
+      };
       opencode-launch = p.callPackage ./pkgs/opencode-launch { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
