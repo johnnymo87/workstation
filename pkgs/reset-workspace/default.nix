@@ -30,6 +30,7 @@ pkgs.writeShellApplication {
     log() {
       printf '[reset-workspace] %s\n' "$*" >&2 || true
     }
+    trap "" PIPE
 
     die() {
       log "FATAL: $*"
@@ -138,30 +139,18 @@ pkgs.writeShellApplication {
       pool_ports_from_wants "$wants"
     }
 
-    # should_detach_destructive <no_detach_env> <tty_nr>: pure predicate deciding
-    # whether the destructive phase should re-exec under setsid into a new session.
-    # Detaches ONLY when the process currently HAS a controlling terminal (tty_nr > 0)
-    # AND RESET_WORKSPACE_NO_DETACH!=1.
+    # should_detach_destructive <no_detach_env>: pure predicate deciding whether
+    # the destructive phase should re-exec under setsid into a new session.
+    # Detaches whenever RESET_WORKSPACE_NO_DETACH!=1. The tty_nr gate was removed
+    # because pipe-stdio (e.g. opencode agent bash tools) has tty_nr=0 and needs
+    # stdio redirection protection from setsid logfile re-exec; synchronous UX is
+    # preserved by tail --pid follow. Nightly stays inline via RESET_WORKSPACE_NO_DETACH=1.
     should_detach_destructive() {
-      local no_detach="$1" tty_nr="$2"
+      local no_detach="$1"
       if [ "$no_detach" = "1" ]; then
         return 1
       fi
-      if [[ "$tty_nr" =~ ^[0-9]+$ ]] && [ "$tty_nr" -gt 0 ]; then
-        return 0
-      fi
-      return 1
-    }
-
-    # get_tty_nr: extract controlling terminal tty_nr (field 7) from /proc/self/stat.
-    # Non-zero when attached to a controlling terminal; 0 when detached (e.g. systemd).
-    get_tty_nr() {
-      local stat
-      stat="$(cat /proc/self/stat 2>/dev/null || true)"
-      local rest="''${stat##*)}"
-      local _f1 _f2 _f3 _f4 tty_nr
-      read -r _f1 _f2 _f3 _f4 tty_nr _ <<< "$rest"
-      printf '%s\n' "''${tty_nr:-0}"
+      return 0
     }
 
     # format_sentinel <status> <ts> <pid> [phase]: format sentinel line for
@@ -654,9 +643,8 @@ EOF
         log "wrote empty ''$MANIFEST_PATH (no captured sids)"
       fi
 
-      # ---- Detach destructive phase if running interactively with controlling TTY ----
-      tty_nr="$(get_tty_nr)"
-      if should_detach_destructive "''${RESET_WORKSPACE_NO_DETACH:-0}" "$tty_nr"; then
+      # ---- Detach destructive phase unless RESET_WORKSPACE_NO_DETACH=1 ----
+      if should_detach_destructive "''${RESET_WORKSPACE_NO_DETACH:-0}"; then
         LOG_FILE="/tmp/reset-workspace-run.log"
         log "detaching destructive phase into new session via setsid (log at $LOG_FILE)..."
         : > "$LOG_FILE"
@@ -668,13 +656,14 @@ EOF
         setsid "$0" ''${ORIG_ARGS[@]+"''${ORIG_ARGS[@]}"} < /dev/null >> "$LOG_FILE" 2>&1 &
         TAIL_PID=$!
         log "destructive phase detached (PID $TAIL_PID); following log..."
+        log "Note: pressing Ctrl+C stops following this log view, but reset continues in background"
         tail --pid="$TAIL_PID" -f "$LOG_FILE" 2>/dev/null || true
 
         # Check sentinel status after tail finishes (or follower dies)
         if [ -f "$SENTINEL_PATH" ]; then
           status_line="$(cat "$SENTINEL_PATH" 2>/dev/null || true)"
           case "$status_line" in
-            ok*pid=$TAIL_PID*) log "reset-workspace finished successfully"; exit 0 ;;
+            ok*" pid=$TAIL_PID") log "reset-workspace finished successfully"; exit 0 ;;
             ok*) die "destructive phase sentinel OK status belongs to stale PID (expected pid=$TAIL_PID; status: $status_line)" ;;
             *) die "destructive phase finished with status: $status_line" ;;
           esac

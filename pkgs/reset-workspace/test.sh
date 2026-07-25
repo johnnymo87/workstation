@@ -96,14 +96,11 @@ check "empty Wants -> empty ports" "" "$(pool_ports_from_wants '')"
 
 # ---- new pure helpers under test ---------------------------------------------
 should_detach_destructive() {
-  local no_detach="$1" tty_nr="$2"
+  local no_detach="$1"
   if [ "$no_detach" = "1" ]; then
     return 1
   fi
-  if [[ "$tty_nr" =~ ^[0-9]+$ ]] && [ "$tty_nr" -gt 0 ]; then
-    return 0
-  fi
-  return 1
+  return 0
 }
 
 is_timestamp_increased() {
@@ -162,14 +159,20 @@ fi
 missing_manifest="$tmp_dir/missing.txt"
 check "count_manifest_sids: missing file -> 0" "0" "$(count_manifest_sids "$missing_manifest")"
 
-check "detach decision: TTY present, NO_DETACH unset -> detach" \
-  "0" "$(should_detach_destructive 0 34816 && echo 0 || echo 1)"
-check "detach decision: TTY present, NO_DETACH=1 -> suppress" \
-  "1" "$(should_detach_destructive 1 34816 && echo 0 || echo 1)"
-check "detach decision: no TTY, NO_DETACH unset -> suppress" \
-  "1" "$(should_detach_destructive 0 0 && echo 0 || echo 1)"
-check "detach decision: no TTY, NO_DETACH=1 -> suppress" \
-  "1" "$(should_detach_destructive 1 0 && echo 0 || echo 1)"
+check "detach decision: NO_DETACH unset -> detach" \
+  "0" "$(should_detach_destructive 0 && echo 0 || echo 1)"
+check "detach decision: NO_DETACH=1 -> suppress" \
+  "1" "$(should_detach_destructive 1 && echo 0 || echo 1)"
+
+# F1(b) test: prove log() shape writing to broken pipe exits 141 without trap and 0 with trap
+code_without_trap='log() { printf "[test] %s\n" "$*" >&2 || true; }; exec 2> >(exit 0); sleep 0.1; log "hello"'
+code_with_trap='trap "" PIPE; log() { printf "[test] %s\n" "$*" >&2 || true; }; exec 2> >(exit 0); sleep 0.1; log "hello"'
+
+rc_without=$(bash -c "$code_without_trap" 2>/dev/null; echo $?)
+rc_with=$(bash -c "$code_with_trap" 2>/dev/null; echo $?)
+
+check "broken pipe log() without trap PIPE -> exits 141" "141" "$rc_without"
+check "broken pipe log() with trap PIPE -> exits 0" "0" "$rc_with"
 
 check "timestamp increased: 100 -> 200 -> true" \
   "0" "$(is_timestamp_increased 100 200 && echo 0 || echo 1)"
@@ -306,11 +309,15 @@ if [ -f "$default_nix" ]; then
   want_grep "restart reuses the precomputed scope"        'restart_pool_target "$POOL_SCOPE"'
   want_grep "post-restart poll reuses discover_pool_urls" 'serve_health_urls < <(discover_pool_urls "$POOL_SCOPE")'
   # workstation-px2p & workstation-3smg: process detachment & sentinel status
+  want_grep "source ignores SIGPIPE via trap"            'trap "" PIPE'
   want_grep "destructive phase detaches via setsid"      'setsid'
   want_grep "destructive phase uses guard var"            'RESET_WORKSPACE_DESTRUCTIVE_DETACHED'
   want_grep "destructive detach checks RESET_WORKSPACE_NO_DETACH" 'RESET_WORKSPACE_NO_DETACH'
+  refuse_grep "get_tty_nr is removed"                     'get_tty_nr() {'
   refuse_grep "false session leader comment is gone"     'Has its own session leader'
   refuse_grep "false no controlling TTY comment is gone" 'no controlling TTY → no PTY-collapse SIGHUP'
+  want_grep "sentinel ok match is pid anchored"          'ok*" pid=$TAIL_PID")'
+  want_grep "log notes Ctrl+C behavior on detach"        'stops following this log view'
   want_grep "references bead workstation-px2p"            'workstation-px2p'
   want_grep "sentinel status path is defined"            '/tmp/reset-workspace-last-status.txt'
   want_grep "uses ExecMainStartTimestampMonotonic"       'ExecMainStartTimestampMonotonic'
