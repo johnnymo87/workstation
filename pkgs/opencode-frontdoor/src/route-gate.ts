@@ -481,8 +481,27 @@ export function checkDocRoutes(
     errors.push(`Denial disposition gate (Check B) failed: ${orphanedDispositions.length} orphaned disposition(s) found: ${orphanedDispositions.join(', ')}`);
   }
 
-  // Enforce kind census and needs-mechanism keys only when routeDispositions was NOT overridden
-  if (options.routeDispositions === undefined) {
+  // Enforce the kind census + needs-mechanism key set ONLY when checking the REAL
+  // table triple. The census is an assertion about the production tables; against a
+  // synthetic table it is meaningless, and asserting a census computed from injected
+  // data would be circular.
+  //
+  // All THREE overrides must be absent, not just routeDispositions: overriding
+  // `routeClassificationTable` changes which routes are denials at all, and
+  // `classDispositions` changes how a denial resolves — either one invalidates the
+  // census just as thoroughly. Gating on only one of them made synthetic-table tests
+  // (e.g. the F1 shadowing test) emit a spurious all-zeros census mismatch, which
+  // turned their `expect(result.passed).toBe(false)` into a tautology that would
+  // still hold if the behavior under test broke.
+  //
+  // NOTE this is a condition on EXPLICITLY INJECTED test tables, not a
+  // skip-on-missing-input: the authoritative CLI path passes no overrides, so the
+  // census is always enforced there.
+  const usingRealTables =
+    options.routeDispositions === undefined &&
+    options.classDispositions === undefined &&
+    options.routeClassificationTable === undefined;
+  if (usingRealTables) {
     const expectedKindCensus = options.expectedKindCensus ?? EXPECTED_KIND_CENSUS;
     const censusDiffs: string[] = [];
     const allCensusKeys = new Set([
