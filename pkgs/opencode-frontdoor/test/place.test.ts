@@ -737,5 +737,245 @@ describe('place.ts', () => {
         expect(loggedMsg).toContain('ses_123');
       });
     });
+
+    describe('Task 3 routingSid / parent-walk promotion behavior', () => {
+      test('1. routingSid: null -> maybePromote returns unplaceable, zero fetches', async () => {
+        const fakeFetch = vi.fn();
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+          routingSid: null,
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_child',
+            method: 'POST',
+            pathname: '/session/ses_child/message',
+            extraction: { kind: 'single', sid: 'ses_child' },
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome).toEqual({ placed: false, reason: 'unplaceable' });
+        expect(fakeFetch).not.toHaveBeenCalled();
+      });
+
+      test('2. child promote: resolved.routingSid = root, rootExists: true -> placeSession called with ROOT sid, checkSidExists NOT called', async () => {
+        const fakeFetch = vi.fn().mockImplementation(async (url, init) => {
+          if (url.includes('/place')) {
+            const body = JSON.parse(init.body as string);
+            return {
+              status: 200,
+              json: async () => ({
+                ok: true,
+                serve_id: 'serve_root',
+                api_base: 'http://serve-root.local',
+                placed_sid: body.session_id,
+              }),
+            };
+          }
+          return { status: 404 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+          routingSid: 'ses_root',
+          rootExists: true,
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_child',
+            method: 'POST',
+            pathname: '/session/ses_child/message',
+            extraction: { kind: 'single', sid: 'ses_child' },
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome).toEqual({
+          placed: true,
+          reason: 'placed',
+          serveId: 'serve_root',
+          apiBase: 'http://serve-root.local',
+          status: 200,
+        });
+
+        expect(fakeFetch).toHaveBeenCalledTimes(1);
+        const [url, init] = fakeFetch.mock.calls[0] as [string, RequestInit];
+        expect(url).toContain('/place');
+        expect(JSON.parse(init.body as string)).toEqual({ session_id: 'ses_root' });
+      });
+
+      test('3. rootExists falsy + routingSid set -> checkSidExists IS called with the ROUTING sid', async () => {
+        const fakeFetch = vi.fn().mockImplementation(async (url, init) => {
+          if (url.includes('/session/ses_root')) {
+            return { status: 200 };
+          }
+          if (url.includes('/place')) {
+            return {
+              status: 200,
+              json: async () => ({
+                ok: true,
+                serve_id: 'serve_root',
+                api_base: 'http://serve-root.local',
+              }),
+            };
+          }
+          return { status: 500 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+          routingSid: 'ses_root',
+          // rootExists intentionally omitted
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_child',
+            method: 'POST',
+            pathname: '/session/ses_child/message',
+            extraction: { kind: 'single', sid: 'ses_child' },
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome.placed).toBe(true);
+        expect(fakeFetch).toHaveBeenCalledTimes(2);
+        // First fetch is checkSidExists on the root sid
+        expect(fakeFetch.mock.calls[0][0]).toBe('http://anchor.local/session/ses_root');
+        // Second fetch is placeSession on the root sid
+        expect(fakeFetch.mock.calls[1][0]).toBe('http://pigeon.local/place');
+        expect(JSON.parse(fakeFetch.mock.calls[1][1].body as string)).toEqual({ session_id: 'ses_root' });
+      });
+
+      test('4. gate keying: two different child sids sharing one root -> only ONE placeSession within TTL', async () => {
+        const fakeFetch = vi.fn().mockImplementation(async (url) => {
+          if (url.includes('/place')) {
+            return {
+              status: 200,
+              json: async () => ({
+                ok: true,
+                serve_id: 'serve_root',
+                api_base: 'http://serve-root.local',
+              }),
+            };
+          }
+          return { status: 404 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+          routingSid: 'ses_root_shared',
+          rootExists: true,
+        };
+
+        // First child promotion
+        const outcome1 = await maybePromote(
+          {
+            sid: 'ses_child_1',
+            method: 'POST',
+            pathname: '/session/ses_child_1/message',
+            extraction: { kind: 'single', sid: 'ses_child_1' },
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch, now: () => 1000 },
+        );
+        expect(outcome1.placed).toBe(true);
+
+        // Second child promotion for a DIFFERENT child sid, but sharing the same root sid
+        const outcome2 = await maybePromote(
+          {
+            sid: 'ses_child_2',
+            method: 'POST',
+            pathname: '/session/ses_child_2/message',
+            extraction: { kind: 'single', sid: 'ses_child_2' },
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch, now: () => 1500 },
+        );
+        expect(outcome2).toEqual({ placed: false, reason: 'ttl-guarded' });
+        expect(fakeFetch).toHaveBeenCalledTimes(1);
+      });
+
+      test('5. root/unchanged path: plain root session with routingSid === sid behaves as before', async () => {
+        const fakeFetch = vi.fn().mockImplementation(async (url) => {
+          if (url.includes('/place')) {
+            return {
+              status: 200,
+              json: async () => ({
+                ok: true,
+                serve_id: 'serve_root',
+                api_base: 'http://serve-root.local',
+              }),
+            };
+          }
+          return { status: 404 };
+        });
+
+        const gate = new PromotionGate(30000);
+        const resolved: ResolvedOwner = {
+          url: 'http://anchor.local',
+          prospective: false,
+          degraded: true,
+          reason: 'not-routed',
+          routingSid: 'ses_plain_root',
+          rootExists: true,
+        };
+
+        const outcome = await maybePromote(
+          {
+            sid: 'ses_plain_root',
+            method: 'POST',
+            pathname: '/session/ses_plain_root/message',
+            extraction: { kind: 'single', sid: 'ses_plain_root' },
+            resolved,
+            gate,
+          },
+          dummyConfig,
+          { fetch: fakeFetch },
+        );
+
+        expect(outcome).toEqual({
+          placed: true,
+          reason: 'placed',
+          serveId: 'serve_root',
+          apiBase: 'http://serve-root.local',
+          status: 200,
+        });
+        expect(fakeFetch).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(fakeFetch.mock.calls[0][1].body as string)).toEqual({ session_id: 'ses_plain_root' });
+      });
+    });
   });
 });

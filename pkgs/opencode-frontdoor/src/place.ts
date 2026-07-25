@@ -160,7 +160,15 @@ export class PromotionGate {
 
 export interface PromoteOutcome {
   placed: boolean;
-  reason: "placed" | "not-promoting" | "already-active" | "pigeon-degraded" | "ttl-guarded" | "unknown-sid" | "place-failed";
+  reason:
+    | "placed"
+    | "not-promoting"
+    | "already-active"
+    | "pigeon-degraded"
+    | "ttl-guarded"
+    | "unknown-sid"
+    | "place-failed"
+    | "unplaceable";
   serveId?: string;
   apiBase?: string;
   status?: number;
@@ -237,26 +245,30 @@ export async function maybePromote(
     return { placed: false, reason: "pigeon-degraded" };
   }
 
+  const placementSid = resolved.routingSid;
+  if (placementSid === null) {
+    return { placed: false, reason: "unplaceable" };
+  }
+
   // Step 4: If !gate.shouldAttempt(...)
-  if (!gate.shouldAttempt(sid, now)) {
+  if (!gate.shouldAttempt(placementSid, now)) {
     return { placed: false, reason: "ttl-guarded" };
   }
 
   // Step 5: If resolved.reason === "not-routed"
   if (resolved.reason === "not-routed") {
-    // Note: two concurrent promoting requests for the same not-yet-routed sid
-    // can both pass shouldAttempt before either calls record (async gap across checkSidExists),
-    // so both may POST /place — which is safe because pigeon's ensureRouted is idempotent.
-    const exists = await checkSidExists(sid, config, deps);
-    if (!exists) {
-      return { placed: false, reason: "unknown-sid" };
+    if (!resolved.rootExists) {
+      const exists = await checkSidExists(placementSid, config, deps);
+      if (!exists) {
+        return { placed: false, reason: "unknown-sid" };
+      }
     }
   }
 
-  // Step 6: gate.record(sid, now) then placeSession
-  gate.record(sid, now);
+  // Step 6: gate.record(placementSid, now) then placeSession
+  gate.record(placementSid, now);
 
-  const placeResult = await placeSession(sid, config, deps);
+  const placeResult = await placeSession(placementSid, config, deps);
   if (placeResult.ok) {
     return {
       placed: true,

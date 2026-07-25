@@ -5,6 +5,7 @@ export interface StickyEntry {
   serve: string;
   expiry: number;
   leaseRenewedAt: number;
+  routingSid: string | null;
 }
 
 export class StickyMap {
@@ -13,13 +14,27 @@ export class StickyMap {
 
   constructor(private ttlMs: number) {}
 
-  record(sid: string, serve: string, now: number, leaseRenewedAt?: number): void {
+  record(
+    sid: string,
+    serve: string,
+    now: number,
+    leaseRenewedAt?: number,
+    routingSid?: string | null,
+  ): void {
     const existing = this.entries.get(sid);
     const finalLeaseRenewedAt = leaseRenewedAt !== undefined
       ? leaseRenewedAt
       : (existing ? existing.leaseRenewedAt : now);
+    const finalRoutingSid = routingSid !== undefined
+      ? routingSid
+      : (existing ? existing.routingSid : null);
 
-    this.entries.set(sid, { serve, expiry: now + this.ttlMs, leaseRenewedAt: finalLeaseRenewedAt });
+    this.entries.set(sid, {
+      serve,
+      expiry: now + this.ttlMs,
+      leaseRenewedAt: finalLeaseRenewedAt,
+      routingSid: finalRoutingSid,
+    });
     if (now - this.lastSweep >= this.ttlMs) {
       for (const [key, entry] of this.entries.entries()) {
         if (now >= entry.expiry) {
@@ -28,6 +43,11 @@ export class StickyMap {
       }
       this.lastSweep = now;
     }
+  }
+
+  getRoutingSid(sid: string): string | null | undefined {
+    const entry = this.entries.get(sid);
+    return entry?.routingSid;
   }
 
   get(sid: string, now: number): string | undefined {

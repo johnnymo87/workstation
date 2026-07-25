@@ -4,6 +4,7 @@ import zlib from "node:zlib";
 import type { AddressInfo } from "node:net";
 import { createFrontDoor } from "../src/server.js";
 import type { Config } from "../src/config.js";
+import { StickyMap } from "../src/sticky.js";
 
 // SSE drift/heartbeat/turn-end realities are validated by Phase 2 + the Phase 6 through-door gate, not these fakes.
 
@@ -30,6 +31,7 @@ describe("FrontDoor Integration", () => {
   let serveAHealthStatus = 200;
   let serveBHealthStatus = 200;
   let pigeonSessionOwners: Record<string, string | number> = {};
+  let anchorParentMap: Record<string, string | null> = {};
 
   beforeEach(() => {
     // Restore any spies (e.g. console.warn) that a prior test installed, so a
@@ -38,6 +40,7 @@ describe("FrontDoor Integration", () => {
     serveAHealthStatus = 200;
     serveBHealthStatus = 200;
     pigeonSessionOwners = {};
+    anchorParentMap = {};
   });
 
   // Helper to read body from IncomingMessage
@@ -218,7 +221,11 @@ describe("FrontDoor Integration", () => {
           return;
         } else {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ exists: true }));
+          const responseObj: any = { exists: true };
+          if (anchorParentMap[sid] !== undefined) {
+            responseObj.parentID = anchorParentMap[sid];
+          }
+          res.end(JSON.stringify(responseObj));
           return;
         }
       }
@@ -1999,6 +2006,88 @@ describe("FrontDoor Integration", () => {
       fakeTime = 11030;
       await makeRenewalRequest("POST", "/session/ses_renew/message");
       await new Promise<void>(resolve => setTimeout(resolve, 50));
+      expect(pigeonPlaceCalls).toHaveLength(0);
+
+    } finally {
+      await new Promise<void>((resolve) => renewalFrontDoor.close(() => resolve()));
+    }
+  });
+
+  test("proxy lease renewal with routingSid / child session (Task 3)", async () => {
+    let fakeTime = 1000;
+    const renewalConfig: Config = {
+      port: 0,
+      version: "unknown",
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 1000,
+      stickyTtlMs: 10000,
+      driftCheckMs: 5000,
+      wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 60000,
+    };
+
+    const renewalSticky = new StickyMap(renewalConfig.stickyTtlMs);
+    const renewalDeps = {
+      now: () => fakeTime,
+      sticky: renewalSticky,
+      logger: { sink: () => {} }
+    };
+
+    const renewalFrontDoor = createFrontDoor(renewalConfig, renewalDeps);
+    await new Promise<void>((resolve) => renewalFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const renewalPort = (renewalFrontDoor.address() as AddressInfo).port;
+
+    const makeRenewalRequest = async (method: string, path: string) => {
+      return new Promise<{ status: number, body: string }>((resolve, reject) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: renewalPort,
+          path,
+          method,
+        }, (res) => {
+          let body = "";
+          res.on("data", chunk => body += chunk);
+          res.on("end", () => resolve({ status: res.statusCode || 0, body }));
+        });
+        req.on("error", reject);
+        req.end();
+      });
+    };
+
+    try {
+      pigeonPlaceCalls = [];
+      pigeonSessionOwners["ses_child_root"] = `http://127.0.0.1:${portA}`;
+      // anchor knows ses_child -> parentID: ses_child_root
+      anchorParentMap["ses_child"] = "ses_child_root";
+
+      // 1) First mutating request on child session ses_child
+      fakeTime = 1000;
+      let res = await makeRenewalRequest("POST", "/session/ses_child/message");
+      expect(res.status).toBe(200);
+
+      // 2) Second mutating request on child session when renewal is due (fakeTime = 6000 >= 5000)
+      fakeTime = 6000;
+      pigeonPlaceCalls = [];
+      res = await makeRenewalRequest("POST", "/session/ses_child/message");
+      expect(res.status).toBe(200);
+
+      await new Promise<void>(resolve => setTimeout(resolve, 50));
+      // Lease renewal must place the ROOT sid (ses_child_root), NOT the child sid (ses_child)
+      expect(pigeonPlaceCalls).toHaveLength(1);
+      expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_child_root" });
+
+      // 3) Overwriting sticky entry's routingSid to null -> next lease renewal skips placeSession
+      fakeTime = 12000;
+      pigeonPlaceCalls = [];
+      renewalSticky.record("ses_child", `http://127.0.0.1:${portA}`, 6000, 0, null);
+
+      res = await makeRenewalRequest("POST", "/session/ses_child/message");
+      expect(res.status).toBe(200);
+
+      await new Promise<void>(resolve => setTimeout(resolve, 50));
+      // Since routingSid is now null, placeSession is NOT called!
       expect(pigeonPlaceCalls).toHaveLength(0);
 
     } finally {

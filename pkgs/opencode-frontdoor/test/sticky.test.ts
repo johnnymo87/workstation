@@ -103,6 +103,33 @@ describe('StickyMap', () => {
     expect((map as any).entries.get('ses_1')?.leaseRenewedAt).toBe(400);
     expect(map.needsLeaseRenewal('ses_1', 600)).toBe(false); // age = 200 < 500 -> false
   });
+
+  test('routingSid handling in StickyMap (Change 1)', () => {
+    const map = new StickyMap(1000);
+
+    // Missing entry returns undefined for getRoutingSid
+    expect(map.getRoutingSid('ses_missing')).toBeUndefined();
+
+    // New entry with routingSid omitted defaults to null
+    map.record('ses_1', 'serve_a', 100);
+    expect(map.getRoutingSid('ses_1')).toBeNull();
+
+    // New entry with explicit routingSid string
+    map.record('ses_2', 'serve_b', 100, undefined, 'ses_root_2');
+    expect(map.getRoutingSid('ses_2')).toBe('ses_root_2');
+
+    // Record with routingSid omitted preserves previous routingSid
+    map.record('ses_2', 'serve_b', 200);
+    expect(map.getRoutingSid('ses_2')).toBe('ses_root_2');
+
+    // Overwriting with explicit null stores null
+    map.record('ses_2', 'serve_b', 300, undefined, null);
+    expect(map.getRoutingSid('ses_2')).toBeNull();
+
+    // Overwriting explicit null with a new routingSid string
+    map.record('ses_2', 'serve_b', 400, undefined, 'ses_root_new');
+    expect(map.getRoutingSid('ses_2')).toBe('ses_root_new');
+  });
 });
 
 describe('isMutatingSessionRequest', () => {

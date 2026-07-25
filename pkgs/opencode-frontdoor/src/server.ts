@@ -10,9 +10,9 @@ import { installCrashHandlers } from "./crash.js";
 
 export function createFrontDoor(config: Config, deps?: any): http.Server {
   const logger = new RequestLogger(deps?.logger);
-  const gate = new PromotionGate(config.stickyTtlMs);
-  const metrics = createMetrics();
-  const sticky = new StickyMap(config.stickyTtlMs);
+  const gate = deps?.gate ?? new PromotionGate(config.stickyTtlMs);
+  const metrics = deps?.metrics ?? createMetrics();
+  const sticky = deps?.sticky ?? new StickyMap(config.stickyTtlMs);
 
   return http.createServer(async (req, res) => {
     try {

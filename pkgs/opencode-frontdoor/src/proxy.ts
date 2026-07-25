@@ -593,16 +593,19 @@ export async function handleRequest(
               target = stuckServe; degraded = false; prospective = false;
 
               if (ctx.sticky.needsLeaseRenewal(sid, now)) {
-                // Advance the renewal clock SYNCHRONOUSLY before the fire-and-forget
-                // /place so interleaved sticky hits within ½ TTL can't double-renew.
-                ctx.sticky.setLeaseRenewedAt(sid, now);
-                placeSession(sid, ctx.config, ctx.deps).then((result) => {
-                  if (!result.ok) {
-                    console.warn(`[FRONTDOOR WARN] lease renewal placeSession failed for sid: ${sid}, status: ${result.status}`);
-                  }
-                }).catch((err) => {
-                  console.warn(`[FRONTDOOR WARN] lease renewal placeSession threw for sid: ${sid}`, err);
-                });
+                const routingSid = ctx.sticky.getRoutingSid(sid);
+                if (typeof routingSid === "string") {
+                  // Advance the renewal clock SYNCHRONOUSLY before the fire-and-forget
+                  // /place so interleaved sticky hits within ½ TTL can't double-renew.
+                  ctx.sticky.setLeaseRenewedAt(sid, now);
+                  placeSession(routingSid, ctx.config, ctx.deps).then((result) => {
+                    if (!result.ok) {
+                      console.warn(`[FRONTDOOR WARN] lease renewal placeSession failed for sid: ${routingSid}, status: ${result.status}`);
+                    }
+                  }).catch((err) => {
+                    console.warn(`[FRONTDOOR WARN] lease renewal placeSession threw for sid: ${routingSid}`, err);
+                  });
+                }
               }
 
               ctx.sticky.record(sid, stuckServe, now); // refresh TTL
@@ -646,7 +649,7 @@ export async function handleRequest(
           // Fresh promote/place → lease is new (renewedAt=now). Active resolve of
           // unknown lease age → seed 0 so the NEXT sticky hit renews immediately.
           const leaseRenewedAt = wasPromoted ? now : 0;
-          ctx.sticky.record(sid, target, now, leaseRenewedAt);
+          ctx.sticky.record(sid, target, now, leaseRenewedAt, resolved.routingSid);
         }
 
         await proxyRequest(target, method, url, req, res, ctx, ex);
