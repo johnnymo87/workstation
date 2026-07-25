@@ -7,6 +7,7 @@
     ./home.base.nix
     ./home.devbox.nix
     ./home.cloudbox.nix
+    ./gnome-keyring.nix
     ./disk-cleanup.nix
     ./opencode-llm-audit.nix
     ./home.darwin.nix
