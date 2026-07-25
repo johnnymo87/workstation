@@ -58,6 +58,13 @@ export async function handleHealthz(
     anchor: anchorReachable,
     degradedRequests: metrics.degradedRequests,
     notRoutedMutationToAnchor: metrics.notRoutedMutationToAnchor,
+    // Every counter in Metrics MUST be exposed here. /healthz is the only reader of
+    // metrics that exists; a counter incremented in proxy.ts and absent from this
+    // object is write-only, i.e. unobservable. htmlPoisonBlocked shipped that way in
+    // the m3z2 deploy and the post-deploy check "htmlPoisonBlocked present and 0"
+    // was therefore vacuous by construction. Same lesson as the drift canary: the
+    // gap is never detection, it is delivery.
+    htmlPoisonBlocked: metrics.htmlPoisonBlocked,
     version: config.version,
   };
 

@@ -1,7 +1,7 @@
 import { describe, test, expect, vi } from 'vitest';
 import { isHealthzRequest, handleHealthz } from '../src/healthz.js';
 import type { Config } from '../src/config.js';
-import type { Metrics } from '../src/metrics.js';
+import { createMetrics, type Metrics } from '../src/metrics.js';
 
 describe('healthz', () => {
   describe('isHealthzRequest', () => {
@@ -86,6 +86,7 @@ describe('healthz', () => {
         anchor: true,
         degradedRequests: 5,
         notRoutedMutationToAnchor: 0,
+        htmlPoisonBlocked: 0,
         version: 'v1.2.3-test',
       });
     });
@@ -120,6 +121,7 @@ describe('healthz', () => {
         anchor: true,
         degradedRequests: 10,
         notRoutedMutationToAnchor: 0,
+        htmlPoisonBlocked: 0,
         version: 'v1.2.3-test',
       });
     });
@@ -156,6 +158,7 @@ describe('healthz', () => {
         anchor: false,
         degradedRequests: 0,
         notRoutedMutationToAnchor: 0,
+        htmlPoisonBlocked: 0,
         version: 'v1.2.3-test',
       });
     });
@@ -179,6 +182,7 @@ describe('healthz', () => {
         anchor: false,
         degradedRequests: 2,
         notRoutedMutationToAnchor: 0,
+        htmlPoisonBlocked: 0,
         version: 'v1.2.3-test',
       });
     });
@@ -201,5 +205,35 @@ describe('healthz', () => {
       expect(res.end).toHaveBeenCalledTimes(1);
       expect(res.end.mock.calls[0][0]).toBeUndefined(); // no body written
     });
+
+  describe('metrics exposure (no write-only counters)', () => {
+    // STRUCTURAL GUARD. htmlPoisonBlocked shipped in the m3z2 deploy incremented in two
+    // places in proxy.ts and exposed NOWHERE -- /healthz is the only reader of metrics
+    // that exists, so the counter was unobservable and the post-deploy check
+    // "htmlPoisonBlocked present and 0" was vacuous by construction. This test fails if
+    // any FUTURE counter is added to Metrics without being surfaced, so the next one
+    // cannot repeat it. Enumerating createMetrics() is what makes that automatic;
+    // asserting field-by-field would not.
+    const okFetch = () =>
+      vi.fn().mockImplementation(async () => ({ ok: true, status: 200, body: { cancel: async () => {} } }));
+
+    test('every key in Metrics appears in the /healthz body', async () => {
+      const res = createMockResponse();
+      const metrics = createMetrics();
+      await handleHealthz(res, { config: dummyConfig, method: 'GET', deps: { fetch: okFetch() }, metrics });
+      const body = JSON.parse(res.end.mock.calls[0][0]);
+      for (const key of Object.keys(metrics)) {
+        expect(body, `Metrics key "${key}" is not exposed in /healthz (write-only counter)`).toHaveProperty(key);
+      }
+    });
+
+    test('a non-zero htmlPoisonBlocked actually surfaces (not hardcoded)', async () => {
+      const res = createMockResponse();
+      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 7 };
+      await handleHealthz(res, { config: dummyConfig, method: 'GET', deps: { fetch: okFetch() }, metrics });
+      const body = JSON.parse(res.end.mock.calls[0][0]);
+      expect(body.htmlPoisonBlocked).toBe(7);
+    });
+  });
   });
 });
