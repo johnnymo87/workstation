@@ -153,28 +153,13 @@ describe('Route Classification Gate (Check A)', () => {
 
   describe('CLI Runner', () => {
     test('exits 0 on clean doc file', () => {
-      const realDocPath = '/tmp/docgate.px1q/doc.json';
-      let docFile = realDocPath;
-      let tmpDir: string | undefined;
-
-      if (!fs.existsSync(realDocPath)) {
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-test-'));
-        docFile = path.join(tmpDir, 'doc.json');
-        fs.writeFileSync(
-          docFile,
-          JSON.stringify({
-            paths: {
-              '/api/health': { get: {} },
-            },
-          })
-        );
-      }
-
-      const exitCode = runRouteGateCli([docFile, '--min-routes', '1']);
+      // No fallback stub here on purpose. A fallback would let this test pass
+      // against a 1-route stub if the fixture went missing, which is the same
+      // silent-no-op failure this suite already had (and that test.sh had).
+      // A missing fixture must fail loudly.
+      const docFile = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const exitCode = runRouteGateCli([docFile, '--min-routes', '100']);
       expect(exitCode).toBe(0);
-      if (tmpDir) {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
-      }
     });
 
     test('exits 1 on unrecognized route in doc file', () => {
@@ -201,12 +186,8 @@ describe('Route Classification Gate (Check A)', () => {
 });
 
 describe('Route Denial Disposition Gate (Check B)', () => {
-  test('Positive: real table + real dispositions pass on /tmp/docgate.px1q/doc.json', () => {
-    const docPath = '/tmp/docgate.px1q/doc.json';
-    if (!fs.existsSync(docPath)) {
-      console.warn(`Skipping real /doc test: ${docPath} not found`);
-      return;
-    }
+  test('Positive: real table + real dispositions pass on the pinned /doc fixture', () => {
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
     const result = checkDocRoutes(doc);
     expect(result.passed).toBe(true);
@@ -314,11 +295,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
   });
 
   test('Mutation test: deleting exactly one real disposition names that route and fails', () => {
-    const docPath = '/tmp/docgate.px1q/doc.json';
-    if (!fs.existsSync(docPath)) {
-      console.warn(`Skipping mutation test: ${docPath} not found`);
-      return;
-    }
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
     const throwawayRouteDispositions = { ...ROUTE_DISPOSITIONS };
@@ -357,11 +334,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
   });
 
   test('F2: real dispositions produce zero orphans against real /doc', () => {
-    const docPath = '/tmp/docgate.px1q/doc.json';
-    if (!fs.existsSync(docPath)) {
-      console.warn(`Skipping real /doc test: ${docPath} not found`);
-      return;
-    }
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
     const result = checkDocRoutes(doc);
     expect(result.orphanedDispositions).toEqual([]);
@@ -507,12 +480,8 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     expect(needsMechanismKeys).toEqual(expectedKeys);
   });
 
-  test('Census assertion on /tmp/docgate.px1q/doc.json', () => {
-    const docPath = '/tmp/docgate.px1q/doc.json';
-    if (!fs.existsSync(docPath)) {
-      console.warn(`Skipping census test: ${docPath} not found`);
-      return;
-    }
+  test('Census assertion on the pinned /doc fixture', () => {
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
     const DENIAL_ACTIONS = new Set([
