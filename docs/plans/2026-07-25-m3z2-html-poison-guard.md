@@ -23,10 +23,10 @@ of the previous item was *my own wrong premises* (five of them), not bad code.
 |---|---|---|
 | P1 | An unknown API route on a live serve returns the SPA fallback | **TRUE.** All four serves (`:4096-4099`) return `200`, `Content-Type: text/html`, 2884 bytes, `<!doctype html>` for `GET /session/ses_totallyfake/nonexistentroute`. |
 | P2 | Session-path routes legitimately return JSON | **TRUE.** Probed 8 session-path routes on a live sid: all `application/json`. |
-| P3 | `text/html` is never a *legitimate* response anywhere on the surface | **TRUE, authoritatively.** The live `/doc` declares 518 responses: `application/json` ×512, `text/event-stream` ×4, `text/x-diff; charset=utf-8` ×1, `application/octet-stream` ×1. **`text/html` appears zero times.** |
+| P3 | `text/html` is never a *legitimate* response anywhere on the surface | **TRUE ONLY OF DECLARATIONS — see the P6 correction below.** The live `/doc` *declares* 518 responses: `application/json` ×512, `text/event-stream` ×4, `text/x-diff; charset=utf-8` ×1, `application/octet-stream` ×1, and `text/html` zero times. `/doc` is authoritative about what routes **declare**, and says nothing about what they **return at runtime**. |
 | P4 | OAuth callback routes return HTML (my initial worry, which would have blocked a broad guard) | **FALSE.** `POST /provider/{providerID}/oauth/callback` and `/mcp/{name}/auth/callback` both declare `application/json`. My hazard was imaginary — caught by checking instead of asserting. |
 | P5 | The live anchor's route surface equals the pinned build's | **TRUE.** Live `/doc` and the committed fixture have identical 195 path×method pairs, so the media-type census above describes the pinned build. |
-| P6 | `GET /api/fs/read/*` streams raw file bytes, so reading an `.html` file could legitimately yield `text/html` | **FALSE.** It declares `application/octet-stream`. Even raw reads are not an HTML source. |
+| P6 | `GET /api/fs/read/*` streams raw file bytes, so reading an `.html` file could legitimately yield `text/html` | ~~FALSE — it declares `application/octet-stream`.~~ **P6 WAS RIGHT AND MY REFUTATION WAS WRONG. This is premise error #6, and the only one that reached shipped code.** See §2.5. |
 
 **A near-miss worth recording:** my first probe hit ports `46091/46095` and showed
 `404 application/json` — i.e. "the SPA fallback doesn't exist, this whole item is moot."
@@ -82,6 +82,39 @@ its own bead. The guard and Part B are **complements, not substitutes**. This do
 block m3z2 — the guard is still worth its (already-required) restart — but item 4's
 stated rationale is corrected here, and "no more frozen TUIs" is explicitly NOT claimed.
 
+## 2.5 CORRECTION #2 (fable, HIGH): declared ≠ runtime — `GET /api/fs/read/*` really does return `text/html`
+
+I refuted P6 by reading a `/doc` *declaration* and asserting a *runtime* fact. Fable
+caught it; I then reproduced it independently through the deployed door:
+
+```
+GET /api/fs/read/<repo-relative>.html?location[directory]=... -> 200  Content-Type: text/html   (2884 bytes)
+GET /api/fs/read/README.md?location[directory]=...            -> 200  Content-Type: text/markdown
+```
+
+The serve derives `Content-Type` **from the file extension at runtime**, regardless of
+the `application/octet-stream` it declares. So the widened guard as first written would
+have 502'd a legitimate file read, told the user to *"restart the serve pool"* (a remedy
+that would not work), and incremented `htmlPoisonBlocked`, corrupting the very skew signal
+this item exists to produce.
+
+**Check C structurally cannot catch this class** — the route declares `octet-stream` and
+always will. That is a real limit on how much safety Check C buys for §3.1, and the
+original §3.1 wording ("widening is *safe*") overstated it.
+
+**Fix (see §3.5):** exempt raw-byte routes, and make the exemption list itself a checked
+invariant (Check D) so it cannot rot at the next pin bump.
+
+Blast radius before the fix was nonetheless zero, verified: no workstation client and no
+`opencode-patched` patch calls `fs/read` through the door (the TUI reads files via
+`/file/content`, which JSON-wraps content at runtime — probed live: `application/json`
+even for an `.html` path). Latent, not active.
+
+**The generalisable lesson:** `/doc` answers "what does this route declare?" — never "what
+will this route send?". Six of my premises have now been wrong in this work stream, and
+this is the only one that made it into shipped reasoning; it did so because a declaration
+*looked* like authoritative evidence about behavior.
+
 ## 3. Guard design
 
 ### 3.1 Scope: every forwarded response, not just `session-path`
@@ -93,10 +126,15 @@ evidence:
   the SPA. Narrow scope guarantees a later repeat of the same incident via a new
   global/`experimental` route — this project's whole pathology is "one table discovered one
   incident at a time."
-- Widening is *safe*, not reckless: P3 shows zero declared `text/html` across 518
-  responses, and the two classes that intentionally reach the SPA (`web-ui` at `/`,
-  `unrecognized`) are already 404'd at the door **before** forwarding.
+- Widening is *defensible*, but NOT unconditionally safe — see §2.5. Zero routes
+  **declare** `text/html` across 518 responses, and the two classes that intentionally
+  reach the SPA (`web-ui` at `/`, `unrecognized`) are already 404'd at the door **before**
+  forwarding.
 - P4 killed the one counter-argument I had (oauth callbacks).
+- But declarations are not behavior. Exactly one route serves runtime-typed raw bytes and
+  legitimately can return `text/html` (§2.5), so widening REQUIRES the exemption in §3.5.
+  With it, the residual risk is a *future* raw-byte route — which Check D converts into a
+  build failure rather than a silent 502.
 
 Denied classes (`pty`, `tui`, `web-ui`, `unrecognized`, `per-process-ro`, `global-event`)
 never reach an upstream, so they are out of scope by construction.
@@ -104,7 +142,27 @@ never reach an upstream, so they are out of scope by construction.
 To keep the widened premise from silently rotting, §4 adds a **gate invariant** that fails
 the build if any route ever declares a `text/html` response. That converts "HTML is never
 legitimate" from an assumption into a checked fact — the same loop-ending pattern j6de
-established.
+established. Its limit, learned the hard way in §2.5: it constrains *declared* types only.
+
+### 3.5 Exemption for raw-byte routes, and Check D
+
+`GET /api/fs/read/*` serves arbitrary file bytes with a runtime, extension-derived
+`Content-Type`, so `text/html` from it is legitimate data rather than an SPA fallback.
+`isHtmlGuardExempt()` (`src/poison.ts`) exempts it, applied in `proxyRequest` only —
+`placeAfterCreate` handles just `POST /session` and `POST /session/{id}/fork`, neither of
+which is or can be exempt.
+
+A hand-maintained exemption list would rot at the next pin bump, so **Check D** asserts
+that the set of routes declaring an `application/octet-stream` response equals
+`HTML_GUARD_EXEMPT_ROUTES`, and reports mismatches BOTH ways:
+
+- declared-but-not-exempt → the guard would 502 legitimate bytes;
+- exempt-but-not-declared → a stale exemption silently widening the hole.
+
+Why `application/octet-stream` is the right marker: it means "arbitrary bytes", which is
+exactly the signature of a route whose runtime type is data-dependent. Contrast
+`GET /vcs/diff/raw`, which declares the *specific* type `text/x-diff; charset=utf-8` and
+cannot be HTML. Today there is exactly one octet-stream route, and it is the one exemption.
 
 ### 3.2 Predicate
 
@@ -224,9 +282,39 @@ vacuous, and claiming it as verification is the exact trap from last session. So
 
 ## 8. Residuals to record on landing
 
-1. **The freeze is not fixed** (§2). Re-promote Part B as its own bead; the guard is a
-   complement. Do not let "covers the same harm" imply equivalence.
+1. **The freeze is not fixed** (§2). Re-promoted as bead `workstation-fdb1`; the guard is a
+   complement, not a substitute. Do not let "covers the same harm" imply equivalence.
 2. `application/xhtml+xml` and other HTML-ish types are not matched.
-3. Check C constrains *declared* types only; a route that undeclares its content type and
-   returns HTML at runtime would still slip past the gate (the guard would still catch it
-   at runtime — this is a gate gap, not a guard gap).
+3. **Check C constrains *declared* types only — in BOTH directions** (§2.5). A route
+   declaring something else while returning HTML at runtime is invisible to it; that is how
+   `fs/read` was missed. Check D covers the one known instance of that class by keying on
+   the `octet-stream` marker, but a route that declared, say, `application/json` and
+   returned HTML at runtime would be caught by neither check — only by the guard firing
+   (correctly or not) in production.
+4. **`GET /api/fs/read/*` is exempt, so it is unguarded**: if a stale serve SPA-fell-back
+   on *that* route, the door would forward the SPA. Accepted: it is one route, no client
+   uses it through the door today, and the alternative (502-ing legitimate reads) is worse.
+
+### Fable review round 1 (this change set) — SHIP WITH FIXES, all fixes applied
+
+Verdict was SHIP WITH FIXES on one HIGH (§2.5, the `fs/read` false positive) plus four
+lower findings. All are now fixed and each fix was mutation-verified:
+
+| # | Finding | Fix | Mutation proof |
+|---|---|---|---|
+| F1 | HIGH — `fs/read` returns runtime `text/html`; guard would 502 legitimate reads with a wrong remedy | §3.5 exemption + Check D | removing the exemption fails 9 tests incl. Check D; an over-broad `GET /api/*` exemption fails Check D naming both directions; loosening the matcher so `/api/fs/readsomething` matches fails a test |
+| F2 | MED — census enforcement tested only in the GROW direction, so the *shrink* direction (the one that will prove D4 complete) could silently break | added inflated-expectation + extra-key tests | both mutations fable predicted would survive now fail: `expected !== actual` → `expected < actual` fails 2; deleting the `removedKeys` report fails 1 |
+| F3 | MED — Check C had no non-vacuousness floor in the authoritative gate; a `$ref`-based `/doc` refactor would blind it silently | `EXPECTED_MEDIA_TYPE_CENSUS` enforced under `usingRealTables` | a doc with zero declared content now fails the floor |
+| F5 | LOW — undrained undici body in the `placeAfterCreate` poison branch pinned the connection | use the existing `discardBody` helper | — |
+| F4 | LOW — `6d52056`'s claim overstated: the F1 test's `passed=false` is *still* tautological via the pre-existing orphan noise | comment naming the remaining tautology and the load-bearing `expect(result.shadowed)` assertion | — |
+
+Fable independently confirmed as sound: the §2 freeze correction (it re-read the deployed
+patch and agreed a 502 throws identically to an HTML parse blowup, and that I am not
+over-correcting); guard placement vs `headersSent`/`writeHead`/`clientHeaders`; no
+double-respond, header leak, or double-resolve; socket hygiene under mid-drain RST and
+premature FIN (reproduced on Node 22 in isolation); SSE/drift-monitor ordering;
+`degraded: false` in the create guard; and opacity of the client-visible 502.
+
+Recorded, not fixed: the pre-existing orphaned-disposition check has the same
+synthetic-doc noise property as the census did (49 spurious orphans) — the consistent fix
+is to scope it the same way, deliberately left out of this change set.
