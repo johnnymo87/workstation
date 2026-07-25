@@ -109,12 +109,14 @@ let
     fi
 
     # Construct JSON payload safely using jq (handles store paths, quotes, and newlines).
-    PAYLOAD=$(jq -n --arg txt "$TEXT" '{"text": $txt, "severity": "warning"}')
+    # Prefix text with [hostname] so Telegram alerts identify the originating host.
+    FULL_TEXT="[$(uname -n)] $TEXT"
+    PAYLOAD=$(jq -n --arg txt "$FULL_TEXT" '{"text": $txt, "severity": "warning"}')
 
     HTTP_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 \
       -X POST http://127.0.0.1:4731/alert \
       -H 'content-type: application/json' \
-      -d "$PAYLOAD" 2>/dev/null)
+      -d "$PAYLOAD")
     CURL_EXIT=$?
 
     case "$HTTP_STATUS" in
@@ -1369,11 +1371,11 @@ ${serveIdCase}
                 DRIFT_TEXT=$(cat <<EOF
 opencode-frontdoor is running stale code.
 
-Running store path: $RUNNING_VER
-Installed store path: $EXECSTART_PATH
-
 To fix, run:
 sudo systemctl restart opencode-frontdoor
+
+Running store path: $RUNNING_VER
+Installed store path: $EXECSTART_PATH
 
 Note: Restarting opencode-frontdoor drops in-flight SSE legs so pick an appropriate moment to restart.
 EOF
