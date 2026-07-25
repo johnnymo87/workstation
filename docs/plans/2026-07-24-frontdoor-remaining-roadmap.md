@@ -71,8 +71,12 @@ The grep-guard "no non-frontdoor callers" test delivers the real invariant (tool
 ### 6. Backlog unchanged
 `mlve.7`–`mlve.10` (door-down fallbacks, DELETE-503 doc, per-client behavior matrix), `mlve.5`/`mlve.6` (P3).
 
-## Open decision for the user (reopened by a new fact)
-The `users/dev/opencode-config.nix` fix (13 MCP injection blocks hard-reset `"enabled": false` after `mergeOpencode`, wiping any opt-in on every switch) was **declined** partly on the correct point that a `home-manager switch` does not restart serves. But **the pool restarts nightly at 03:00**, so runtime MCP connects evaporate every night and there is **no durable path** to "this MCP server is on tomorrow" — the Phase 10 dialog is effectively a daily-reset toggle. May still be acceptable; decide with this fact on the table.
+## ~~Open decision for the user~~ — RESOLVED 2026-07-25
+The question was: the `users/dev/opencode-config.nix` injection blocks hard-reset `"enabled": false` on every activation (and `pull-workstation` activates every 4h), while the pool restarts nightly at 03:00 — so runtime MCP connects evaporate nightly and there is **no durable path** to "this MCP server is on tomorrow".
+
+**Resolved: intended behavior, no work.** The user's model is that the MCP dialog is an as-needed, off-by-default, ad-hoc toggle, and 03:00 is a welcome reset. No durability requirement exists. See `2026-07-24-phase10-session-scoped-mcp.md` Follow-ups (closed won't-fix, incl. why a preserved opt-in would invert the intended fail-safe for write-capable servers).
+
+**But a real gap surfaced while confirming it:** the dialog is **not per-session isolation** — the toggle is process-global across one of the 4 serves, so it reaches sibling sessions (subagents included) and later arrivals on that serve until the nightly restart. That matters because the default-off rationale is that several servers are write-capable. Documented as an accepted limitation (Phase 10 plan, Limitation 6); deliberately not fixed, since true per-session scoping means another fork patch against fable's freeze-the-surface advice.
 
 ## Architecture notes (fable)
 - **Anchor-degrade is the recurring silent-failure generator** (`sq1v`, FABLE-B1, Phase-10 HIGH-2 are all one shape: "unknown → anchor" is right for shared-DB reads, silently wrong for per-process or mutating). Item 3 is the minimal path to shrinking it; no broader redesign.
