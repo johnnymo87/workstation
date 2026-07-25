@@ -70,6 +70,65 @@ let
   serveIdCase = lib.concatStringsSep "\n" (lib.imap0
     (i: port: "          ${toString port}) export OPENCODE_SERVE_ID=serve-${toString i} ;;")
     servePool.ports);
+
+  # Shared alert helper for canaries (opencode-frontdoor-canary and serve pool canary).
+  #
+  # Context (2026-07-24 incident):
+  # On 2026-07-24, opencode-frontdoor ran stale code for ~70 minutes. The canary detected drift
+  # every minute (70 times), but journal logs went unread.
+  #
+  # This helper sends actionable plain-text notifications via Pigeon's HTTP alert endpoint
+  # (http://127.0.0.1:4731/alert). It uses a state file and signature to throttle repeat alerts
+  # during an ongoing drift episode, preventing 70-alert storms.
+  #
+  # Safety invariants:
+  # 1. State file is written ONLY after a successful HTTP 2xx POST. A transient Pigeon
+  #    outage must not swallow the alert.
+  # 2. Under no circumstances does a failure here abort the calling script (`set -u` safe,
+  #    never exits non-zero).
+  driftAlert = pkgs.writeShellScript "opencode-drift-alert" ''
+    set -u
+    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq ]}
+
+    STATE_FILE="''${1:-}"
+    SIGNATURE="''${2:-}"
+    TEXT="''${3:-}"
+
+    if [ -z "$STATE_FILE" ] || [ -z "$SIGNATURE" ] || [ -z "$TEXT" ]; then
+      echo "WARNING: opencode-drift-alert called with missing arguments"
+      exit 0
+    fi
+
+    # Deduplication check: if state file exists and signature matches, this episode
+    # was already reported. Exit 0 silently.
+    if [ -f "$STATE_FILE" ]; then
+      CURRENT_SIG=$(cat "$STATE_FILE" 2>/dev/null || true)
+      if [ "$CURRENT_SIG" = "$SIGNATURE" ]; then
+        exit 0
+      fi
+    fi
+
+    # Construct JSON payload safely using jq (handles store paths, quotes, and newlines).
+    PAYLOAD=$(jq -n --arg txt "$TEXT" '{"text": $txt, "severity": "warning"}')
+
+    HTTP_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 \
+      -X POST http://127.0.0.1:4731/alert \
+      -H 'content-type: application/json' \
+      -d "$PAYLOAD" 2>/dev/null)
+    CURL_EXIT=$?
+
+    case "$HTTP_STATUS" in
+      2*)
+        mkdir -p "$(dirname "$STATE_FILE")"
+        printf '%s\n' "$SIGNATURE" > "$STATE_FILE"
+        ;;
+      *)
+        echo "WARNING: opencode-drift-alert: failed to send alert to pigeon (curl_exit=$CURL_EXIT, http_status=$HTTP_STATUS)"
+        ;;
+    esac
+
+    exit 0
+  '';
 in
 {
   # Guard: abort activation if applying the wrong host's config.
@@ -1298,11 +1357,31 @@ ${serveIdCase}
 
           if [ -z "$RUNNING_VER" ]; then
             echo "WARNING: could not parse version from /healthz response"
+            rm -f "$STATE/drift-alerted"
           else
             case "$EXECSTART_PATH" in
-              "$RUNNING_VER"*) ;;
+              "$RUNNING_VER"*)
+                rm -f "$STATE/drift-alerted"
+                ;;
               *)
                 echo "WARNING: version drift: running=$RUNNING_VER execstart=$EXECSTART_PATH"
+                DRIFT_TEXT=$(cat <<EOF
+opencode-frontdoor is running stale code.
+
+Running store path: $RUNNING_VER
+Installed store path: $EXECSTART_PATH
+
+To fix, run:
+sudo systemctl restart opencode-frontdoor
+
+Note: Restarting opencode-frontdoor drops in-flight SSE legs so pick an appropriate moment to restart.
+EOF
+)
+                # Throttled Telegram alert via Pigeon (2026-07-24 incident recovery).
+                # Auto-restart is intentionally omitted: restarting frontdoor drops all
+                # in-flight SSE connections and routing state, turning minor drift into an
+                # outage. A human decides when to restart.
+                ${driftAlert} "$STATE/drift-alerted" "$RUNNING_VER|$EXECSTART_PATH" "$DRIFT_TEXT"
                 ;;
             esac
           fi
