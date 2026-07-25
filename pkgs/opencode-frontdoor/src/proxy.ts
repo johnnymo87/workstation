@@ -643,6 +643,14 @@ export async function handleRequest(
           return;
         }
 
+        // 3b) sq1v counter: a MUTATING request we are about to forward to the anchor
+        //     because neither the sid nor (after the parent walk) its root is routed.
+        //     It will run on a possibly-wrong process. Deliberately counted rather
+        //     than 503'd for now; tighten to a 503 once the rate is known to be ~0.
+        if (mutating && degraded && resolved.reason === "not-routed") {
+          ctx.metrics.notRoutedMutationToAnchor++;
+        }
+
         // 4) Record stickiness when forwarding a mutating request to a REAL owner
         //    (never record the anchor-degrade target).
         if (mutating && !degraded) {

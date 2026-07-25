@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { createFrontDoor } from "../src/server.js";
 import type { Config } from "../src/config.js";
 import { StickyMap } from "../src/sticky.js";
+import { createMetrics } from "../src/metrics.js";
 
 // SSE drift/heartbeat/turn-end realities are validated by Phase 2 + the Phase 6 through-door gate, not these fakes.
 
@@ -2092,6 +2093,61 @@ describe("FrontDoor Integration", () => {
 
     } finally {
       await new Promise<void>((resolve) => renewalFrontDoor.close(() => resolve()));
+    }
+  });
+
+  test("sq1v counter: a mutating, NON-promoting request on an unrouted sid increments notRoutedMutationToAnchor", async () => {
+    // This is the literal sq1v scenario: answering a subagent permission.
+    // POST /session/{sid}/permissions/{id} is mutating (isMutatingSessionRequest)
+    // but NOT promoting (the last path segment is the permission id), so it never
+    // places — it just gets forwarded to the anchor, possibly the wrong process.
+    const countingConfig: Config = {
+      port: 0,
+      version: "unknown",
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 1000,
+      stickyTtlMs: 30000,
+      driftCheckMs: 5000,
+      wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 1000,
+    };
+    const countedMetrics = createMetrics();
+    const countingFrontDoor = createFrontDoor(countingConfig, {
+      logger: { sink: () => {} },
+      metrics: countedMetrics,
+    });
+    await new Promise<void>((resolve) => countingFrontDoor.listen(0, "127.0.0.1", () => resolve()));
+    const countingPort = (countingFrontDoor.address() as AddressInfo).port;
+
+    const post = (path: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { hostname: "127.0.0.1", port: countingPort, path, method: "POST" },
+          (res) => {
+            res.on("data", () => {});
+            res.on("end", () => resolve(res.statusCode || 0));
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+
+    try {
+      // ses_orphan has no pigeon route and (per the fake anchor) no parentID,
+      // so the parent walk confirms it is a root and we degrade to the anchor.
+      expect(countedMetrics.notRoutedMutationToAnchor).toBe(0);
+
+      await post("/session/ses_orphan/permissions/perm_1");
+      expect(countedMetrics.notRoutedMutationToAnchor).toBe(1);
+
+      // A ROUTED sid taking the same shape must NOT increment it.
+      pigeonSessionOwners["ses_routed_perm"] = `http://127.0.0.1:${portA}`;
+      await post("/session/ses_routed_perm/permissions/perm_2");
+      expect(countedMetrics.notRoutedMutationToAnchor).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => countingFrontDoor.close(() => resolve()));
     }
   });
 });

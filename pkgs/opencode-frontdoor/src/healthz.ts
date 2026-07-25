@@ -57,6 +57,7 @@ export async function handleHealthz(
     pigeon: pigeonReachable,
     anchor: anchorReachable,
     degradedRequests: metrics.degradedRequests,
+    notRoutedMutationToAnchor: metrics.notRoutedMutationToAnchor,
     version: config.version,
   };
 

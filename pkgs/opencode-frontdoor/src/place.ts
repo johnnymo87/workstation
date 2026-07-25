@@ -257,6 +257,12 @@ export async function maybePromote(
 
   // Step 5: If resolved.reason === "not-routed"
   if (resolved.reason === "not-routed") {
+    // Note: two concurrent promoting requests for the same not-yet-routed sid
+    // can both pass shouldAttempt before either calls record (async gap across
+    // checkSidExists), so both may POST /place — which is safe because pigeon's
+    // ensureRouted is idempotent.
+    // rootExists means the sq1v parent walk already got a 200 for placementSid,
+    // so the existence check would be a duplicate GET of the identical URL.
     if (!resolved.rootExists) {
       const exists = await checkSidExists(placementSid, config, deps);
       if (!exists) {
