@@ -2,7 +2,12 @@ import { describe, test, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { checkDocRoutes, runRouteGateCli } from '../src/route-gate.js';
+import {
+  checkDocRoutes,
+  runRouteGateCli,
+  EXPECTED_KIND_CENSUS,
+  EXPECTED_NEEDS_MECHANISM_KEYS,
+} from '../src/route-gate.js';
 import { ROUTE_DISPOSITIONS, getRouteDisposition } from '../src/routes.dispositions.js';
 import { ROUTE_CLASSIFICATION_TABLE } from '../src/routes.classification.js';
 import { dispatch, classify } from '../src/dispatch.js';
@@ -460,103 +465,118 @@ describe('Route Denial Disposition Gate (Check B)', () => {
   });
 
   test('needs-mechanism set equals exactly the 9 expected D4 routes', () => {
-    const needsMechanismKeys = Object.entries(ROUTE_DISPOSITIONS)
-      .filter(([_, disp]) => disp.kind === 'needs-mechanism')
-      .map(([key]) => key)
-      .sort();
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+    const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+    const result = checkDocRoutes(doc);
 
-    const expectedKeys = [
-      'POST /provider/{providerID}/oauth/authorize',
-      'POST /provider/{providerID}/oauth/callback',
-      'POST /mcp/{name}/auth',
-      'DELETE /mcp/{name}/auth',
-      'POST /mcp/{name}/auth/authenticate',
-      'POST /mcp/{name}/auth/callback',
-      'PUT /auth/{providerID}',
-      'DELETE /auth/{providerID}',
-      'POST /instance/dispose',
-    ].sort();
-
-    expect(needsMechanismKeys).toEqual(expectedKeys);
+    expect(result.needsMechanismKeys).toEqual(EXPECTED_NEEDS_MECHANISM_KEYS);
   });
 
   test('Census assertion on the pinned /doc fixture', () => {
     const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+    const result = checkDocRoutes(doc);
 
-    const DENIAL_ACTIONS = new Set([
-      'deny-global-mutation',
-      'deny-per-process-501',
-      'pty-501',
-      'tui-501',
-      'gone-410',
-      'not-found-404',
-    ]);
+    expect(result.dedupedDenialCount).toBe(70);
+    expect(result.kindCensus).toEqual(EXPECTED_KIND_CENSUS);
+  });
 
-    const deduplicatedDenials = new Map<string, { method: string; path: string }>();
+  describe('Check C — Response Media-Type Poison Invariant', () => {
+    test('Check C: passes on the real committed fixture and mediaTypeCensus matches expected', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+      const result = checkDocRoutes(doc);
 
-    for (const [path, pathItem] of Object.entries(doc.paths as Record<string, Record<string, unknown>>)) {
-      if (!pathItem || typeof pathItem !== 'object') continue;
-      for (const [methodKey] of Object.entries(pathItem)) {
-        const method = methodKey.toUpperCase();
-        if (!['GET', 'PUT', 'POST', 'DELETE', 'PATCH'].includes(method)) continue;
+      expect(result.passed).toBe(true);
+      expect(result.htmlDeclaringRoutes).toEqual([]);
+      expect(result.mediaTypeCensus).toEqual({
+        'application/json': 512,
+        'text/event-stream': 4,
+        'text/x-diff; charset=utf-8': 1,
+        'application/octet-stream': 1,
+      });
+    });
 
-        const dispatched = dispatch(method, path);
-        if (DENIAL_ACTIONS.has(dispatched.action)) {
-          let barePath = path.split('?')[0];
-          if (barePath.endsWith('/') && barePath !== '/') barePath = barePath.slice(0, -1);
-          if (barePath.startsWith('/api/')) barePath = barePath.slice(4);
+    test('Check C: fails on synthetic doc declaring text/html or text/html with parameters, passes on text/htmlx', () => {
+      const htmlDoc = {
+        paths: {
+          '/test/html': {
+            get: {
+              responses: {
+                '200': {
+                  content: {
+                    'text/html': {},
+                  },
+                },
+              },
+            },
+          },
+          '/test/html-param': {
+            get: {
+              responses: {
+                '200': {
+                  content: {
+                    'text/html; charset=utf-8': {},
+                  },
+                },
+              },
+            },
+          },
+          '/test/htmlx': {
+            get: {
+              responses: {
+                '200': {
+                  content: {
+                    'text/htmlx': {},
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
 
-          const key = `${method} ${barePath}`;
-          if (!deduplicatedDenials.has(key)) {
-            deduplicatedDenials.set(key, { method, path });
-          }
-        }
-      }
-    }
+      const result = checkDocRoutes(htmlDoc, { minRoutes: 1, routeDispositions: {} });
+      expect(result.passed).toBe(false);
+      expect(result.htmlDeclaringRoutes).toHaveLength(2);
+      expect(result.htmlDeclaringRoutes).toEqual([
+        { method: 'GET', path: '/test/html', status: '200', mediaType: 'text/html' },
+        { method: 'GET', path: '/test/html-param', status: '200', mediaType: 'text/html; charset=utf-8' },
+      ]);
+      expect(result.error).toContain('Check C failed');
+      expect(result.mediaTypeCensus).toEqual({
+        'text/html': 1,
+        'text/html; charset=utf-8': 1,
+        'text/htmlx': 1,
+      });
+    });
+  });
 
-    expect(deduplicatedDenials.size).toBe(70);
+  describe('Census Enforcement on Default Path', () => {
+    test('DEFAULT path enforces census and fails on kind census mismatch', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
-    const counts = {
-      'by-design-501': 0,
-      'not-session-scopable-degrades': 0,
-      'not-session-scopable-unverified': 0,
-      'not-session-scopable-absent': 0,
-      superseded: 0,
-      'needs-mechanism': 0,
-      'accepted-gap': 0,
-    };
+      const result = checkDocRoutes(doc, {
+        expectedKindCensus: { ...EXPECTED_KIND_CENSUS, 'needs-mechanism': 0 },
+      });
 
-    for (const [key, { method, path }] of deduplicatedDenials.entries()) {
-      const routeClass = classify(method, path);
-      const disp = getRouteDisposition(method, path, routeClass);
-      expect(disp).toBeDefined();
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Kind census mismatch');
+      expect(result.error).toContain('needs-mechanism: expected 0, got 9');
+    });
 
-      if (disp!.kind === 'by-design-501') {
-        counts['by-design-501']++;
-      } else if (disp!.kind === 'superseded') {
-        counts.superseded++;
-      } else if (disp!.kind === 'needs-mechanism') {
-        counts['needs-mechanism']++;
-      } else if (disp!.kind === 'accepted-gap') {
-        counts['accepted-gap']++;
-      } else if (disp!.kind === 'not-session-scopable') {
-        if (disp!.tuiSurface === 'degrades') {
-          counts['not-session-scopable-degrades']++;
-        } else if (disp!.tuiSurface === 'unverified') {
-          counts['not-session-scopable-unverified']++;
-        } else if (disp!.tuiSurface === 'absent') {
-          counts['not-session-scopable-absent']++;
-        }
-      }
-    }
+    test('DEFAULT path enforces needs-mechanism keys and fails on key mismatch', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
-    expect(counts['by-design-501']).toBe(21);
-    expect(counts['not-session-scopable-degrades']).toBe(6);
-    expect(counts['not-session-scopable-unverified']).toBe(5);
-    expect(counts['not-session-scopable-absent']).toBe(21);
-    expect(counts.superseded).toBe(7);
-    expect(counts['needs-mechanism']).toBe(9);
-    expect(counts['accepted-gap']).toBe(1);
+      const result = checkDocRoutes(doc, {
+        expectedNeedsMechanismKeys: [],
+      });
+
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Needs-mechanism keys mismatch');
+      expect(result.error).toContain('added [');
+    });
   });
 });

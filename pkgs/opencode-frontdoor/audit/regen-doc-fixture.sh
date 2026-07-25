@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Regenerate the committed /doc fixture used by the vitest leg of the route gate.
+#
+# WHY A SCRIPT: the fixture must be a faithful PROJECTION of the pinned opencode's
+# /doc. Hand-editing it (or lifting it from a live serve, which may be a stale
+# binary) silently decouples the fixture from the pin, and the vitest leg then
+# checks a fiction while reporting green. This script boots the PINNED binary the
+# same way route-gate.nix does and projects only what the gate actually reads:
+#
+#   paths -> {method} -> responses -> {status} -> content -> {mediaType}
+#
+# Check A/B read paths x methods; Check C reads the declared response media types.
+# Nothing else in /doc is consulted, so nothing else is kept — a 486KB full dump
+# would churn the repo on every pin bump for data no check looks at.
+#
+# Usage:  ./audit/regen-doc-fixture.sh [output-path]
+#         OPENCODE_BIN=/nix/store/...-opencode-patched-X/bin/opencode ./audit/regen-doc-fixture.sh
+#
+# After running, the script prints a census and a pair-count diff against the
+# previous fixture. REVIEW THAT DIFF — an unexpected change means the pin moved
+# and the gate's expectations (kind census, Check C) may need a decision, which
+# is the whole point of the gate failing loudly at bump time.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+OUT="${1:-test/fixtures/doc.pinned-1.17.13.4.json}"
+
+# Same resolution rule as test.sh: the profile symlink IS the pin. Never hardcode
+# a store path — it rots on the next bump or GC and would validate the wrong binary.
+OPENCODE_BIN="${OPENCODE_BIN:-$(command -v opencode 2>/dev/null || true)}"
+if [ -z "$OPENCODE_BIN" ] || [ ! -x "$OPENCODE_BIN" ]; then
+  echo "ERROR: opencode binary not found (OPENCODE_BIN='${OPENCODE_BIN}')." >&2
+  exit 1
+fi
+echo "Using opencode: $(readlink -f "$OPENCODE_BIN")"
+
+TMP=$(mktemp -d)
+export HOME="$TMP/home"
+export XDG_CONFIG_HOME="$TMP/config"
+export XDG_DATA_HOME="$TMP/data"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+
+PORT=$(( 40000 + RANDOM % 20000 ))
+DOC_RAW="$TMP/doc.raw.json"
+
+"$OPENCODE_BIN" serve --port "$PORT" --hostname 127.0.0.1 < /dev/null > "$TMP/serve.log" 2>&1 &
+SERVE_PID=$!
+cleanup() {
+  if [ -n "${SERVE_PID:-}" ] && kill -0 "$SERVE_PID" 2>/dev/null; then
+    kill -9 "$SERVE_PID" 2>/dev/null || true
+    wait "$SERVE_PID" 2>/dev/null || true
+  fi
+  rm -rf "$TMP" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+SUCCESS=0
+for _ in $(seq 1 120); do
+  if curl -sf --connect-timeout 1 --max-time 3 "http://127.0.0.1:$PORT/doc" -o "$DOC_RAW" 2>/dev/null \
+     && [ -s "$DOC_RAW" ]; then
+    SUCCESS=1
+    break
+  fi
+  if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+    echo "ERROR: opencode serve exited before answering /doc." >&2
+    cat "$TMP/serve.log" >&2 || true
+    exit 1
+  fi
+  sleep 0.5
+done
+[ "$SUCCESS" -eq 1 ] || { echo "ERROR: /doc not answered in time" >&2; cat "$TMP/serve.log" >&2; exit 1; }
+
+PREV="$OUT"
+node - "$DOC_RAW" "$OUT" "$PREV" <<'NODE'
+const fs = require('node:fs');
+const [rawPath, outPath, prevPath] = process.argv.slice(2);
+const raw = JSON.parse(fs.readFileSync(rawPath, 'utf8'));
+const METHODS = new Set(['get', 'put', 'post', 'delete', 'patch']);
+
+// Guard the projection's core assumption: pathItem keys are ONLY http methods.
+// If upstream ever adds e.g. `parameters` or `$ref` at the pathItem level, the
+// projection would silently drop it — so fail loudly instead.
+const unexpected = [];
+for (const [p, item] of Object.entries(raw.paths ?? {})) {
+  for (const k of Object.keys(item ?? {})) {
+    if (!METHODS.has(k.toLowerCase())) unexpected.push(`${p} -> ${k}`);
+  }
+}
+if (unexpected.length) {
+  console.error('ERROR: non-method pathItem keys present; projection would drop them:');
+  for (const u of unexpected) console.error('  ' + u);
+  process.exit(1);
+}
+
+const out = { openapi: raw.openapi, paths: {} };
+const mediaCensus = {};
+let pairs = 0;
+for (const [p, item] of Object.entries(raw.paths ?? {})) {
+  out.paths[p] = {};
+  for (const [m, op] of Object.entries(item ?? {})) {
+    pairs++;
+    const responses = {};
+    for (const [code, r] of Object.entries((op && op.responses) || {})) {
+      const content = {};
+      for (const ct of Object.keys((r && r.content) || {})) {
+        content[ct] = {};
+        mediaCensus[ct] = (mediaCensus[ct] || 0) + 1;
+      }
+      // Keep the status key even with no content, so "declares no body" stays visible.
+      responses[code] = Object.keys(content).length ? { content } : {};
+    }
+    out.paths[p][m] = Object.keys(responses).length ? { responses } : {};
+  }
+}
+
+let prevPairs = null;
+try {
+  const prev = JSON.parse(fs.readFileSync(prevPath, 'utf8'));
+  prevPairs = new Set();
+  for (const [p, item] of Object.entries(prev.paths ?? {})) {
+    for (const m of Object.keys(item ?? {})) prevPairs.add(`${m.toUpperCase()} ${p}`);
+  }
+} catch { /* first run */ }
+
+const newPairs = new Set();
+for (const [p, item] of Object.entries(out.paths)) {
+  for (const m of Object.keys(item)) newPairs.add(`${m.toUpperCase()} ${p}`);
+}
+
+fs.writeFileSync(outPath, JSON.stringify(out, null, 1) + '\n');
+
+console.log(`\nWrote ${outPath}`);
+console.log(`path x method pairs: ${pairs}`);
+console.log('declared response media types:', mediaCensus);
+if (prevPairs) {
+  const added = [...newPairs].filter(x => !prevPairs.has(x));
+  const removed = [...prevPairs].filter(x => !newPairs.has(x));
+  console.log(`pairs added vs previous fixture: ${added.length}`, added.slice(0, 20));
+  console.log(`pairs removed vs previous fixture: ${removed.length}`, removed.slice(0, 20));
+} else {
+  console.log('(no previous fixture to diff against)');
+}
+NODE

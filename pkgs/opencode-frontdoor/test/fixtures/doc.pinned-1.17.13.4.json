@@ -1,539 +1,3736 @@
 {
  "openapi": "3.1.0",
  "paths": {
-  "/agent": {
-   "get": {}
-  },
-  "/api/agent": {
-   "get": {}
-  },
-  "/api/command": {
-   "get": {}
-  },
-  "/api/credential/{credentialID}": {
-   "delete": {},
-   "patch": {}
-  },
-  "/api/event": {
-   "get": {}
-  },
-  "/api/fs/find": {
-   "get": {}
-  },
-  "/api/fs/list": {
-   "get": {}
-  },
-  "/api/fs/read/*": {
-   "get": {}
-  },
-  "/api/health": {
-   "get": {}
-  },
-  "/api/integration": {
-   "get": {}
-  },
-  "/api/integration/attempt/{attemptID}": {
-   "delete": {},
-   "get": {}
-  },
-  "/api/integration/attempt/{attemptID}/complete": {
-   "post": {}
-  },
-  "/api/integration/{integrationID}": {
-   "get": {}
-  },
-  "/api/integration/{integrationID}/connect/key": {
-   "post": {}
-  },
-  "/api/integration/{integrationID}/connect/oauth": {
-   "post": {}
-  },
-  "/api/location": {
-   "get": {}
-  },
-  "/api/model": {
-   "get": {}
-  },
-  "/api/permission/request": {
-   "get": {}
-  },
-  "/api/permission/saved": {
-   "get": {}
-  },
-  "/api/permission/saved/{id}": {
-   "delete": {}
-  },
-  "/api/provider": {
-   "get": {}
-  },
-  "/api/provider/{providerID}": {
-   "get": {}
-  },
-  "/api/pty": {
-   "get": {},
-   "post": {}
-  },
-  "/api/pty/{ptyID}": {
-   "delete": {},
-   "get": {},
-   "put": {}
-  },
-  "/api/pty/{ptyID}/connect": {
-   "get": {}
-  },
-  "/api/pty/{ptyID}/connect-token": {
-   "post": {}
-  },
-  "/api/question/request": {
-   "get": {}
-  },
-  "/api/reference": {
-   "get": {}
-  },
-  "/api/session": {
-   "get": {},
-   "post": {}
-  },
-  "/api/session/active": {
-   "get": {}
-  },
-  "/api/session/{sessionID}": {
-   "get": {}
-  },
-  "/api/session/{sessionID}/agent": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/compact": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/context": {
-   "get": {}
-  },
-  "/api/session/{sessionID}/event": {
-   "get": {}
-  },
-  "/api/session/{sessionID}/history": {
-   "get": {}
-  },
-  "/api/session/{sessionID}/interrupt": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/message": {
-   "get": {}
-  },
-  "/api/session/{sessionID}/message/{messageID}": {
-   "get": {}
-  },
-  "/api/session/{sessionID}/model": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/permission": {
-   "get": {},
-   "post": {}
-  },
-  "/api/session/{sessionID}/permission/{requestID}": {
-   "get": {}
-  },
-  "/api/session/{sessionID}/permission/{requestID}/reply": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/prompt": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/question": {
-   "get": {}
-  },
-  "/api/session/{sessionID}/question/{requestID}/reject": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/question/{requestID}/reply": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/revert/clear": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/revert/commit": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/revert/stage": {
-   "post": {}
-  },
-  "/api/session/{sessionID}/wait": {
-   "post": {}
-  },
-  "/api/skill": {
-   "get": {}
-  },
   "/auth/{providerID}": {
-   "delete": {},
-   "put": {}
-  },
-  "/command": {
-   "get": {}
-  },
-  "/config": {
-   "get": {},
-   "patch": {}
-  },
-  "/config/providers": {
-   "get": {}
-  },
-  "/event": {
-   "get": {}
-  },
-  "/experimental/capabilities": {
-   "get": {}
-  },
-  "/experimental/console": {
-   "get": {}
-  },
-  "/experimental/console/orgs": {
-   "get": {}
-  },
-  "/experimental/console/switch": {
-   "post": {}
-  },
-  "/experimental/control-plane/move-session": {
-   "post": {}
-  },
-  "/experimental/project/{projectID}/copy": {
-   "delete": {},
-   "post": {}
-  },
-  "/experimental/project/{projectID}/copy/generate-name": {
-   "post": {}
-  },
-  "/experimental/project/{projectID}/copy/refresh": {
-   "post": {}
-  },
-  "/experimental/resource": {
-   "get": {}
-  },
-  "/experimental/session": {
-   "get": {}
-  },
-  "/experimental/session/{sessionID}/background": {
-   "post": {}
-  },
-  "/experimental/tool": {
-   "get": {}
-  },
-  "/experimental/tool/ids": {
-   "get": {}
-  },
-  "/experimental/workspace": {
-   "get": {},
-   "post": {}
-  },
-  "/experimental/workspace/adapter": {
-   "get": {}
-  },
-  "/experimental/workspace/status": {
-   "get": {}
-  },
-  "/experimental/workspace/sync-list": {
-   "post": {}
-  },
-  "/experimental/workspace/warp": {
-   "post": {}
-  },
-  "/experimental/workspace/{id}": {
-   "delete": {}
-  },
-  "/experimental/worktree": {
-   "delete": {},
-   "get": {},
-   "post": {}
-  },
-  "/experimental/worktree/reset": {
-   "post": {}
-  },
-  "/file": {
-   "get": {}
-  },
-  "/file/content": {
-   "get": {}
-  },
-  "/file/status": {
-   "get": {}
-  },
-  "/find": {
-   "get": {}
-  },
-  "/find/file": {
-   "get": {}
-  },
-  "/find/symbol": {
-   "get": {}
-  },
-  "/formatter": {
-   "get": {}
-  },
-  "/global/config": {
-   "get": {},
-   "patch": {}
-  },
-  "/global/dispose": {
-   "post": {}
-  },
-  "/global/event": {
-   "get": {}
-  },
-  "/global/health": {
-   "get": {}
-  },
-  "/global/upgrade": {
-   "post": {}
-  },
-  "/instance/dispose": {
-   "post": {}
+   "put": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
   "/log": {
-   "post": {}
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
-  "/lsp": {
-   "get": {}
+  "/experimental/control-plane/move-session": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
-  "/mcp": {
-   "get": {},
-   "post": {}
+  "/global/health": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
-  "/mcp/{name}/auth": {
-   "delete": {},
-   "post": {}
+  "/global/event": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "text/event-stream": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
-  "/mcp/{name}/auth/authenticate": {
-   "post": {}
+  "/global/config": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "patch": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
-  "/mcp/{name}/auth/callback": {
-   "post": {}
+  "/global/dispose": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
-  "/mcp/{name}/connect": {
-   "post": {}
+  "/global/upgrade": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
-  "/mcp/{name}/disconnect": {
-   "post": {}
+  "/event": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "text/event-stream": {}
+      }
+     }
+    }
+   }
+  },
+  "/config": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "patch": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/config/providers": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/capabilities": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/console": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/console/orgs": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/console/switch": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/tool": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/tool/ids": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/worktree": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/worktree/reset": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/session": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/session/{sessionID}/background": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/resource": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/find": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/find/file": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/find/symbol": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/file": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/file/content": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/file/status": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/instance/dispose": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
   "/path": {
-   "get": {}
-  },
-  "/permission": {
-   "get": {}
-  },
-  "/permission/{requestID}/reply": {
-   "post": {}
-  },
-  "/project": {
-   "get": {}
-  },
-  "/project/current": {
-   "get": {}
-  },
-  "/project/git/init": {
-   "post": {}
-  },
-  "/project/{projectID}": {
-   "patch": {}
-  },
-  "/project/{projectID}/directories": {
-   "get": {}
-  },
-  "/provider": {
-   "get": {}
-  },
-  "/provider/auth": {
-   "get": {}
-  },
-  "/provider/{providerID}/oauth/authorize": {
-   "post": {}
-  },
-  "/provider/{providerID}/oauth/callback": {
-   "post": {}
-  },
-  "/pty": {
-   "get": {},
-   "post": {}
-  },
-  "/pty/shells": {
-   "get": {}
-  },
-  "/pty/{ptyID}": {
-   "delete": {},
-   "get": {},
-   "put": {}
-  },
-  "/pty/{ptyID}/connect": {
-   "get": {}
-  },
-  "/pty/{ptyID}/connect-token": {
-   "post": {}
-  },
-  "/question": {
-   "get": {}
-  },
-  "/question/{requestID}/reject": {
-   "post": {}
-  },
-  "/question/{requestID}/reply": {
-   "post": {}
-  },
-  "/session": {
-   "get": {},
-   "post": {}
-  },
-  "/session/status": {
-   "get": {}
-  },
-  "/session/{sessionID}": {
-   "delete": {},
-   "get": {},
-   "patch": {}
-  },
-  "/session/{sessionID}/abort": {
-   "post": {}
-  },
-  "/session/{sessionID}/children": {
-   "get": {}
-  },
-  "/session/{sessionID}/command": {
-   "post": {}
-  },
-  "/session/{sessionID}/diff": {
-   "get": {}
-  },
-  "/session/{sessionID}/fork": {
-   "post": {}
-  },
-  "/session/{sessionID}/init": {
-   "post": {}
-  },
-  "/session/{sessionID}/mcp": {
-   "get": {}
-  },
-  "/session/{sessionID}/mcp/{name}/connect": {
-   "post": {}
-  },
-  "/session/{sessionID}/mcp/{name}/disconnect": {
-   "post": {}
-  },
-  "/session/{sessionID}/message": {
-   "get": {},
-   "post": {}
-  },
-  "/session/{sessionID}/message/{messageID}": {
-   "delete": {},
-   "get": {}
-  },
-  "/session/{sessionID}/message/{messageID}/part/{partID}": {
-   "delete": {},
-   "patch": {}
-  },
-  "/session/{sessionID}/permissions": {
-   "get": {}
-  },
-  "/session/{sessionID}/permissions/{permissionID}": {
-   "post": {}
-  },
-  "/session/{sessionID}/prompt_async": {
-   "post": {}
-  },
-  "/session/{sessionID}/questions": {
-   "get": {}
-  },
-  "/session/{sessionID}/questions/{questionID}/reject": {
-   "post": {}
-  },
-  "/session/{sessionID}/questions/{questionID}/reply": {
-   "post": {}
-  },
-  "/session/{sessionID}/revert": {
-   "post": {}
-  },
-  "/session/{sessionID}/share": {
-   "delete": {},
-   "post": {}
-  },
-  "/session/{sessionID}/shell": {
-   "post": {}
-  },
-  "/session/{sessionID}/summarize": {
-   "post": {}
-  },
-  "/session/{sessionID}/todo": {
-   "get": {}
-  },
-  "/session/{sessionID}/unrevert": {
-   "post": {}
-  },
-  "/skill": {
-   "get": {}
-  },
-  "/sync/history": {
-   "post": {}
-  },
-  "/sync/replay": {
-   "post": {}
-  },
-  "/sync/start": {
-   "post": {}
-  },
-  "/sync/steal": {
-   "post": {}
-  },
-  "/tui/append-prompt": {
-   "post": {}
-  },
-  "/tui/clear-prompt": {
-   "post": {}
-  },
-  "/tui/control/next": {
-   "get": {}
-  },
-  "/tui/control/response": {
-   "post": {}
-  },
-  "/tui/execute-command": {
-   "post": {}
-  },
-  "/tui/open-help": {
-   "post": {}
-  },
-  "/tui/open-models": {
-   "post": {}
-  },
-  "/tui/open-sessions": {
-   "post": {}
-  },
-  "/tui/open-themes": {
-   "post": {}
-  },
-  "/tui/publish": {
-   "post": {}
-  },
-  "/tui/select-session": {
-   "post": {}
-  },
-  "/tui/show-toast": {
-   "post": {}
-  },
-  "/tui/submit-prompt": {
-   "post": {}
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
   "/vcs": {
-   "get": {}
-  },
-  "/vcs/apply": {
-   "post": {}
-  },
-  "/vcs/diff": {
-   "get": {}
-  },
-  "/vcs/diff/raw": {
-   "get": {}
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   },
   "/vcs/status": {
-   "get": {}
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/vcs/diff": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/vcs/diff/raw": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "text/x-diff; charset=utf-8": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/vcs/apply": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/command": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/agent": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/skill": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/lsp": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/formatter": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/mcp": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/mcp/{name}/auth": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/mcp/{name}/auth/callback": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/mcp/{name}/auth/authenticate": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/mcp/{name}/connect": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/mcp/{name}/disconnect": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/project": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/project/current": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/project/git/init": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/project/{projectID}": {
+   "patch": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/project/{projectID}/directories": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/project/{projectID}/copy/generate-name": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/pty/shells": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/pty": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/pty/{ptyID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "put": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/pty/{ptyID}/connect-token": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "403": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/question": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/question/{requestID}/reply": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/question/{requestID}/reject": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/permission": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/permission/{requestID}/reply": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/provider": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/provider/auth": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/provider/{providerID}/oauth/authorize": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/provider/{providerID}/oauth/callback": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/status": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "patch": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/children": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/todo": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/diff": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/message": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/message/{messageID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "409": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/fork": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/abort": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/init": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/share": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/summarize": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/prompt_async": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/command": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/shell": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "409": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/revert": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "409": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/unrevert": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "409": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/permissions/{permissionID}": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/permissions": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/questions": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/questions/{questionID}/reply": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/questions/{questionID}/reject": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/mcp": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/mcp/{name}/connect": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/mcp/{name}/disconnect": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/session/{sessionID}/message/{messageID}/part/{partID}": {
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "patch": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/sync/start": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/sync/replay": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/sync/steal": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/sync/history": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/append-prompt": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/open-help": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/open-sessions": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/open-themes": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/open-models": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/submit-prompt": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/clear-prompt": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/execute-command": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/show-toast": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/publish": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/select-session": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/control/next": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/tui/control/response": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/workspace/adapter": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/workspace": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/workspace/sync-list": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/workspace/status": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/workspace/{id}": {
+   "delete": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/workspace/warp": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/health": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/location": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/agent": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/active": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/agent": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/model": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/prompt": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "409": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/compact": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "503": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/wait": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "503": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/revert/stage": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/revert/clear": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/revert/commit": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/context": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/history": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/event": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "text/event-stream": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/interrupt": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/message/{messageID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/message": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/model": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "503": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/provider": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "503": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/provider/{providerID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "503": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/integration": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/integration/{integrationID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/integration/{integrationID}/connect/key": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/integration/{integrationID}/connect/oauth": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/integration/attempt/{attemptID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/integration/attempt/{attemptID}/complete": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/credential/{credentialID}": {
+   "patch": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/permission/request": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/permission/saved": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/permission/saved/{id}": {
+   "delete": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/permission": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/permission/{requestID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/permission/{requestID}/reply": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/fs/read/*": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/octet-stream": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/fs/list": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/fs/find": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/command": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/skill": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/event": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "text/event-stream": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/pty": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/pty/{ptyID}": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "put": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/pty/{ptyID}/connect-token": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "403": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/pty/{ptyID}/connect": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "403": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/question/request": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/question": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/question/{requestID}/reply": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/session/{sessionID}/question/{requestID}/reject": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/api/reference": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "401": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/project/{projectID}/copy": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   },
+   "delete": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/experimental/project/{projectID}/copy/refresh": {
+   "post": {
+    "responses": {
+     "204": {},
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
+  "/pty/{ptyID}/connect": {
+   "get": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "403": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
   }
- },
- "x-fixture-provenance": "Projection of GET /doc from the PINNED opencode-patched-1.17.13.4 (/nix/store/niqliars0nacijlzc7ma2bxmh60sappn-...), captured 2026-07-25. Only paths -> method keys are retained, because route-gate.ts reads nothing else. The AUTHORITATIVE currency check is route-gate.nix, which always boots the real pinned binary; this fixture exists purely to make the unit tests hermetic."
+ }
 }

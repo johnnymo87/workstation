@@ -7,12 +7,15 @@ import {
   CLASS_DISPOSITIONS,
 } from './routes.dispositions.js';
 import { ROUTE_CLASSIFICATION_TABLE, RouteEntry } from './routes.classification.js';
+import { isHtmlResponse } from './poison.js';
 
 export interface GateCheckOptions {
   minRoutes?: number;
   routeDispositions?: Record<string, RouteDisposition>;
   classDispositions?: Record<string, RouteDisposition>;
   routeClassificationTable?: RouteEntry[];
+  expectedKindCensus?: Record<string, number>;
+  expectedNeedsMechanismKeys?: string[];
 }
 
 export interface UnrecognizedRoute {
@@ -33,6 +36,13 @@ export interface InvalidDispositionRoute {
   reason: string;
 }
 
+export interface HtmlDeclaringRoute {
+  method: string;
+  path: string;
+  status: string;
+  mediaType: string;
+}
+
 export interface GateCheckResult {
   totalChecked: number;
   unrecognized: UnrecognizedRoute[];
@@ -40,9 +50,45 @@ export interface GateCheckResult {
   denialCount: number;
   invalidDispositions: InvalidDispositionRoute[];
   orphanedDispositions: string[];
+  kindCensus: Record<string, number>;
+  dedupedDenialCount: number;
+  needsMechanismKeys: string[];
+  mediaTypeCensus: Record<string, number>;
+  htmlDeclaringRoutes: HtmlDeclaringRoute[];
   passed: boolean;
   error?: string;
 }
+
+/**
+ * Expected disposition kind census on the pinned /doc fixture.
+ * A pin bump or table edit changing these is supposed to fail the gate and force a written decision — that is the mechanism, not a nuisance.
+ */
+export const EXPECTED_KIND_CENSUS: Record<string, number> = {
+  'by-design-501': 21,
+  'not-session-scopable-absent': 21,
+  'not-session-scopable-degrades': 6,
+  'not-session-scopable-unverified': 5,
+  superseded: 7,
+  'needs-mechanism': 9,
+  'accepted-gap': 1,
+};
+
+/**
+ * Expected set of needs-mechanism disposition keys on the pinned /doc fixture.
+ * A pin bump or table edit changing these is supposed to fail the gate and force a written decision — that is the mechanism, not a nuisance.
+ * Shrinking EXPECTED_NEEDS_MECHANISM_KEYS to empty is how D4 completion becomes provable (bead workstation-mlve.11).
+ */
+export const EXPECTED_NEEDS_MECHANISM_KEYS: string[] = [
+  'DELETE /auth/{providerID}',
+  'DELETE /mcp/{name}/auth',
+  'POST /instance/dispose',
+  'POST /mcp/{name}/auth',
+  'POST /mcp/{name}/auth/authenticate',
+  'POST /mcp/{name}/auth/callback',
+  'POST /provider/{providerID}/oauth/authorize',
+  'POST /provider/{providerID}/oauth/callback',
+  'PUT /auth/{providerID}',
+];
 
 const HTTP_METHODS = new Set(['get', 'put', 'post', 'delete', 'patch']);
 
@@ -123,6 +169,16 @@ export function checkDocRoutes(
   const routeDispositions = options.routeDispositions ?? ROUTE_DISPOSITIONS;
   const classDispositions = options.classDispositions ?? CLASS_DISPOSITIONS;
 
+  const defaultKindCensus: Record<string, number> = {
+    'by-design-501': 0,
+    'not-session-scopable-absent': 0,
+    'not-session-scopable-degrades': 0,
+    'not-session-scopable-unverified': 0,
+    superseded: 0,
+    'needs-mechanism': 0,
+    'accepted-gap': 0,
+  };
+
   if (
     !docJson ||
     typeof docJson !== 'object' ||
@@ -137,6 +193,11 @@ export function checkDocRoutes(
       denialCount: 0,
       invalidDispositions: [],
       orphanedDispositions: [],
+      kindCensus: defaultKindCensus,
+      dedupedDenialCount: 0,
+      needsMechanismKeys: [],
+      mediaTypeCensus: {},
+      htmlDeclaringRoutes: [],
       passed: false,
       error: 'Invalid /doc format: "paths" object is missing or invalid',
     };
@@ -156,11 +217,14 @@ export function checkDocRoutes(
   const shadowed: ShadowedRoute[] = [];
   const invalidDispositions: InvalidDispositionRoute[] = [];
   const matchedDispositionKeys = new Set<string>();
+  const deduplicatedDenials = new Map<string, { method: string; path: string }>();
+  const mediaTypeCensus: Record<string, number> = {};
+  const htmlDeclaringRoutes: HtmlDeclaringRoute[] = [];
 
   for (const [path, pathItem] of Object.entries(pathsObj)) {
     if (!pathItem || typeof pathItem !== 'object') continue;
 
-    for (const [key] of Object.entries(pathItem)) {
+    for (const [key, methodObj] of Object.entries(pathItem)) {
       const lowerKey = key.toLowerCase();
       if (!HTTP_METHODS.has(lowerKey)) {
         continue;
@@ -171,6 +235,28 @@ export function checkDocRoutes(
       const dispatched = dispatch(method, path);
       const action = dispatched.action;
       totalChecked++;
+
+      // Check C: media-type walk
+      if (methodObj && typeof methodObj === 'object' && 'responses' in methodObj && methodObj.responses && typeof methodObj.responses === 'object') {
+        const responsesObj = methodObj.responses as Record<string, unknown>;
+        for (const [status, responseItem] of Object.entries(responsesObj)) {
+          if (!responseItem || typeof responseItem !== 'object') continue;
+          if ('content' in responseItem && responseItem.content && typeof responseItem.content === 'object') {
+            const contentObj = responseItem.content as Record<string, unknown>;
+            for (const mediaType of Object.keys(contentObj)) {
+              mediaTypeCensus[mediaType] = (mediaTypeCensus[mediaType] || 0) + 1;
+              if (isHtmlResponse(mediaType)) {
+                htmlDeclaringRoutes.push({
+                  method,
+                  path,
+                  status,
+                  mediaType,
+                });
+              }
+            }
+          }
+        }
+      }
 
       // Check A: strict template-shape matching
       const docNormKey = `${method} ${normalizeTemplatePath(path)}`;
@@ -187,9 +273,22 @@ export function checkDocRoutes(
         }
       }
 
-      // Check B: denial dispositions
+      // Check B: denial dispositions & dedup collection
       if (DENIAL_ACTIONS.has(action)) {
         denialCount++;
+
+        let barePath = path.split('?')[0];
+        if (barePath.endsWith('/') && barePath !== '/') {
+          barePath = barePath.slice(0, -1);
+        }
+        if (barePath.startsWith('/api/')) {
+          barePath = barePath.slice(4);
+        }
+        const bareKey = `${method} ${barePath}`;
+        if (!deduplicatedDenials.has(bareKey)) {
+          deduplicatedDenials.set(bareKey, { method, path });
+        }
+
         const disp = getRouteDisposition(
           method,
           path,
@@ -296,6 +395,52 @@ export function checkDocRoutes(
     }
   }
 
+  // Compute kind census, deduped denial count, and needs-mechanism keys
+  const kindCensus: Record<string, number> = {
+    'by-design-501': 0,
+    'not-session-scopable-absent': 0,
+    'not-session-scopable-degrades': 0,
+    'not-session-scopable-unverified': 0,
+    superseded: 0,
+    'needs-mechanism': 0,
+    'accepted-gap': 0,
+  };
+  const needsMechanismKeySet = new Set<string>();
+
+  for (const [bareKey, { method, path }] of deduplicatedDenials.entries()) {
+    const routeClass = classify(method, path);
+    const disp = getRouteDisposition(
+      method,
+      path,
+      routeClass,
+      routeDispositions,
+      classDispositions
+    );
+    if (disp) {
+      if (disp.kind === 'by-design-501') {
+        kindCensus['by-design-501']++;
+      } else if (disp.kind === 'superseded') {
+        kindCensus['superseded']++;
+      } else if (disp.kind === 'needs-mechanism') {
+        kindCensus['needs-mechanism']++;
+        needsMechanismKeySet.add(bareKey);
+      } else if (disp.kind === 'accepted-gap') {
+        kindCensus['accepted-gap']++;
+      } else if (disp.kind === 'not-session-scopable') {
+        if (disp.tuiSurface === 'degrades') {
+          kindCensus['not-session-scopable-degrades']++;
+        } else if (disp.tuiSurface === 'unverified') {
+          kindCensus['not-session-scopable-unverified']++;
+        } else if (disp.tuiSurface === 'absent') {
+          kindCensus['not-session-scopable-absent']++;
+        }
+      }
+    }
+  }
+
+  const dedupedDenialCount = deduplicatedDenials.size;
+  const needsMechanismKeys = Array.from(needsMechanismKeySet).sort();
+
   // Check B (Inverse): Orphaned dispositions check
   const orphanedDispositions: string[] = [];
   for (const dispKey of Object.keys(routeDispositions)) {
@@ -312,6 +457,11 @@ export function checkDocRoutes(
       denialCount,
       invalidDispositions,
       orphanedDispositions,
+      kindCensus,
+      dedupedDenialCount,
+      needsMechanismKeys,
+      mediaTypeCensus,
+      htmlDeclaringRoutes,
       passed: false,
       error: `Sanity floor failed: checked ${totalChecked} route(s), expected at least ${minRoutes}`,
     };
@@ -331,6 +481,46 @@ export function checkDocRoutes(
     errors.push(`Denial disposition gate (Check B) failed: ${orphanedDispositions.length} orphaned disposition(s) found: ${orphanedDispositions.join(', ')}`);
   }
 
+  // Enforce kind census and needs-mechanism keys only when routeDispositions was NOT overridden
+  if (options.routeDispositions === undefined) {
+    const expectedKindCensus = options.expectedKindCensus ?? EXPECTED_KIND_CENSUS;
+    const censusDiffs: string[] = [];
+    const allCensusKeys = new Set([
+      ...Object.keys(expectedKindCensus),
+      ...Object.keys(kindCensus),
+    ]);
+    for (const censusKey of allCensusKeys) {
+      const expected = expectedKindCensus[censusKey] ?? 0;
+      const actual = kindCensus[censusKey] ?? 0;
+      if (expected !== actual) {
+        censusDiffs.push(`${censusKey}: expected ${expected}, got ${actual}`);
+      }
+    }
+    if (censusDiffs.length > 0) {
+      errors.push(`Kind census mismatch: ${censusDiffs.join('; ')}`);
+    }
+
+    const expectedNeedsMechKeys = options.expectedNeedsMechanismKeys ?? EXPECTED_NEEDS_MECHANISM_KEYS;
+    const expectedSet = new Set(expectedNeedsMechKeys);
+    const actualSet = new Set(needsMechanismKeys);
+    const addedKeys = needsMechanismKeys.filter((k) => !expectedSet.has(k));
+    const removedKeys = expectedNeedsMechKeys.filter((k) => !actualSet.has(k));
+
+    if (addedKeys.length > 0 || removedKeys.length > 0) {
+      const keyDiffs: string[] = [];
+      if (addedKeys.length > 0) keyDiffs.push(`added [${addedKeys.join(', ')}]`);
+      if (removedKeys.length > 0) keyDiffs.push(`removed [${removedKeys.join(', ')}]`);
+      errors.push(`Needs-mechanism keys mismatch: ${keyDiffs.join('; ')}`);
+    }
+  }
+
+  // Check C enforcement (always runs)
+  if (htmlDeclaringRoutes.length > 0) {
+    errors.push(
+      `Check C failed: ${htmlDeclaringRoutes.length} route(s) declare text/html responses (${htmlDeclaringRoutes.map((r) => `${r.method} ${r.path} [${r.status} ${r.mediaType}]`).join(', ')}). The runtime poison guard would 502 a legitimate response, so either the guard needs an exemption or the route needs a different disposition.`
+    );
+  }
+
   if (errors.length > 0) {
     return {
       totalChecked,
@@ -339,6 +529,11 @@ export function checkDocRoutes(
       denialCount,
       invalidDispositions,
       orphanedDispositions,
+      kindCensus,
+      dedupedDenialCount,
+      needsMechanismKeys,
+      mediaTypeCensus,
+      htmlDeclaringRoutes,
       passed: false,
       error: errors.join('; '),
     };
@@ -351,6 +546,11 @@ export function checkDocRoutes(
     denialCount,
     invalidDispositions: [],
     orphanedDispositions: [],
+    kindCensus,
+    dedupedDenialCount,
+    needsMechanismKeys,
+    mediaTypeCensus,
+    htmlDeclaringRoutes: [],
     passed: true,
   };
 }
@@ -390,8 +590,14 @@ export function runRouteGateCli(args: string[]): number {
   const result = checkDocRoutes(docJson, { minRoutes });
 
   if (result.passed) {
+    const kindCensusStr = Object.entries(result.kindCensus)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ');
+    const mediaTypeStr = Object.entries(result.mediaTypeCensus)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ');
     console.log(
-      `[PASS] Route classification and disposition gate passed: checked ${result.totalChecked} route(s) across /doc (0 unrecognized, 0 shadowed, ${result.denialCount} denials properly dispositioned, 0 orphaned dispositions).`
+      `[PASS] Route classification and disposition gate passed: checked ${result.totalChecked} route(s) across /doc (0 unrecognized, 0 shadowed, ${result.denialCount} denials properly dispositioned, 0 orphaned dispositions). Kind census: ${kindCensusStr}. Media-type census: ${mediaTypeStr}.`
     );
     return 0;
   } else {
@@ -418,6 +624,12 @@ export function runRouteGateCli(args: string[]): number {
       console.error('Orphaned dispositions (Check B):');
       for (const offender of result.orphanedDispositions) {
         console.error(`  ${offender}: disposition exists but route is not present in /doc or is not denied`);
+      }
+    }
+    if (result.htmlDeclaringRoutes.length > 0) {
+      console.error('HTML declaring routes (Check C):');
+      for (const offender of result.htmlDeclaringRoutes) {
+        console.error(`  ${offender.method} ${offender.path} [${offender.status}]: declared media type "${offender.mediaType}"`);
       }
     }
     return 1;

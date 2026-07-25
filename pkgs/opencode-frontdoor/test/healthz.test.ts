@@ -54,7 +54,7 @@ describe('healthz', () => {
 
     test('both reachable -> 200, degraded: false, pigeon: true, anchor: true', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 5, notRoutedMutationToAnchor: 0 };
+      const metrics: Metrics = { degradedRequests: 5, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         if (url.startsWith('http://pigeon.local/route')) {
@@ -92,7 +92,7 @@ describe('healthz', () => {
 
     test('pigeon unreachable, anchor 200 -> 200, degraded: true, pigeon: false, anchor: true', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 10, notRoutedMutationToAnchor: 0 };
+      const metrics: Metrics = { degradedRequests: 10, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         if (url.startsWith('http://pigeon.local/route')) {
@@ -126,7 +126,7 @@ describe('healthz', () => {
 
     test('pigeon 404 (reachable), anchor times out -> 200, degraded: true, pigeon: true, anchor: false', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0 };
+      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         if (url.startsWith('http://pigeon.local/route')) {
@@ -162,7 +162,7 @@ describe('healthz', () => {
 
     test('both unreachable -> 503, degraded: false, pigeon: false, anchor: false', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 2, notRoutedMutationToAnchor: 0 };
+      const metrics: Metrics = { degradedRequests: 2, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         throw new Error('Network offline');
@@ -185,7 +185,7 @@ describe('healthz', () => {
 
     test('HEAD request with both reachable -> 200, no body written', async () => {
       const res = createMockResponse('HEAD');
-      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0 };
+      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         return {
