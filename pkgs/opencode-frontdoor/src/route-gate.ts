@@ -7,7 +7,7 @@ import {
   CLASS_DISPOSITIONS,
 } from './routes.dispositions.js';
 import { ROUTE_CLASSIFICATION_TABLE, RouteEntry } from './routes.classification.js';
-import { isHtmlResponse } from './poison.js';
+import { isHtmlResponse, HTML_GUARD_EXEMPT_ROUTES } from './poison.js';
 
 export interface GateCheckOptions {
   minRoutes?: number;
@@ -16,6 +16,8 @@ export interface GateCheckOptions {
   routeClassificationTable?: RouteEntry[];
   expectedKindCensus?: Record<string, number>;
   expectedNeedsMechanismKeys?: string[];
+  expectedMediaTypeCensus?: Record<string, number>;
+  htmlGuardExemptRoutes?: string[];
 }
 
 export interface UnrecognizedRoute {
@@ -55,6 +57,7 @@ export interface GateCheckResult {
   needsMechanismKeys: string[];
   mediaTypeCensus: Record<string, number>;
   htmlDeclaringRoutes: HtmlDeclaringRoute[];
+  octetStreamRoutes: string[];
   passed: boolean;
   error?: string;
 }
@@ -89,6 +92,17 @@ export const EXPECTED_NEEDS_MECHANISM_KEYS: string[] = [
   'POST /provider/{providerID}/oauth/callback',
   'PUT /auth/{providerID}',
 ];
+
+/**
+ * Expected media-type census on the pinned /doc fixture.
+ * A pin bump or schema restructuring changing these (e.g. moving responses to $ref) is supposed to fail the gate and force a written decision — that is the mechanism, not a nuisance.
+ */
+export const EXPECTED_MEDIA_TYPE_CENSUS: Record<string, number> = {
+  'application/json': 512,
+  'text/event-stream': 4,
+  'text/x-diff; charset=utf-8': 1,
+  'application/octet-stream': 1,
+};
 
 const HTTP_METHODS = new Set(['get', 'put', 'post', 'delete', 'patch']);
 
@@ -198,6 +212,7 @@ export function checkDocRoutes(
       needsMechanismKeys: [],
       mediaTypeCensus: {},
       htmlDeclaringRoutes: [],
+      octetStreamRoutes: [],
       passed: false,
       error: 'Invalid /doc format: "paths" object is missing or invalid',
     };
@@ -220,6 +235,7 @@ export function checkDocRoutes(
   const deduplicatedDenials = new Map<string, { method: string; path: string }>();
   const mediaTypeCensus: Record<string, number> = {};
   const htmlDeclaringRoutes: HtmlDeclaringRoute[] = [];
+  const octetStreamSet = new Set<string>();
 
   for (const [path, pathItem] of Object.entries(pathsObj)) {
     if (!pathItem || typeof pathItem !== 'object') continue;
@@ -245,6 +261,10 @@ export function checkDocRoutes(
             const contentObj = responseItem.content as Record<string, unknown>;
             for (const mediaType of Object.keys(contentObj)) {
               mediaTypeCensus[mediaType] = (mediaTypeCensus[mediaType] || 0) + 1;
+              const normMediaType = mediaType.split(';')[0].trim().toLowerCase();
+              if (normMediaType === 'application/octet-stream') {
+                octetStreamSet.add(`${method} ${path}`);
+              }
               if (isHtmlResponse(mediaType)) {
                 htmlDeclaringRoutes.push({
                   method,
@@ -440,6 +460,7 @@ export function checkDocRoutes(
 
   const dedupedDenialCount = deduplicatedDenials.size;
   const needsMechanismKeys = Array.from(needsMechanismKeySet).sort();
+  const octetStreamRoutes = Array.from(octetStreamSet).sort();
 
   // Check B (Inverse): Orphaned dispositions check
   const orphanedDispositions: string[] = [];
@@ -462,6 +483,7 @@ export function checkDocRoutes(
       needsMechanismKeys,
       mediaTypeCensus,
       htmlDeclaringRoutes,
+      octetStreamRoutes,
       passed: false,
       error: `Sanity floor failed: checked ${totalChecked} route(s), expected at least ${minRoutes}`,
     };
@@ -531,6 +553,23 @@ export function checkDocRoutes(
       if (removedKeys.length > 0) keyDiffs.push(`removed [${removedKeys.join(', ')}]`);
       errors.push(`Needs-mechanism keys mismatch: ${keyDiffs.join('; ')}`);
     }
+
+    const expectedMediaTypeCensus = options.expectedMediaTypeCensus ?? EXPECTED_MEDIA_TYPE_CENSUS;
+    const mediaTypeDiffs: string[] = [];
+    const allMediaTypeKeys = new Set([
+      ...Object.keys(expectedMediaTypeCensus),
+      ...Object.keys(mediaTypeCensus),
+    ]);
+    for (const mtKey of allMediaTypeKeys) {
+      const expected = expectedMediaTypeCensus[mtKey] ?? 0;
+      const actual = mediaTypeCensus[mtKey] ?? 0;
+      if (expected !== actual) {
+        mediaTypeDiffs.push(`${mtKey}: expected ${expected}, got ${actual}`);
+      }
+    }
+    if (mediaTypeDiffs.length > 0) {
+      errors.push(`Media-type census mismatch: ${mediaTypeDiffs.join('; ')}`);
+    }
   }
 
   // Check C enforcement (always runs)
@@ -538,6 +577,29 @@ export function checkDocRoutes(
     errors.push(
       `Check C failed: ${htmlDeclaringRoutes.length} route(s) declare text/html responses (${htmlDeclaringRoutes.map((r) => `${r.method} ${r.path} [${r.status} ${r.mediaType}]`).join(', ')}). The runtime poison guard would 502 a legitimate response, so either the guard needs an exemption or the route needs a different disposition.`
     );
+  }
+
+  // Check D: The set of routes declaring an application/octet-stream response must equal HTML_GUARD_EXEMPT_ROUTES.
+  // Rationale: application/octet-stream means "arbitrary bytes", which is exactly the marker for a route
+  // whose runtime content type is data-dependent and therefore may legitimately be text/html.
+  // Contrast GET /vcs/diff/raw, which declares the specific type text/x-diff; charset=utf-8 and cannot be HTML.
+  // Today there is exactly one octet-stream route and it is the one exemption.
+  const exemptRoutes = options.htmlGuardExemptRoutes ?? HTML_GUARD_EXEMPT_ROUTES;
+  const exemptSet = new Set(exemptRoutes);
+  const declaredOctetSet = new Set(octetStreamRoutes);
+
+  const declaredNotExempt = octetStreamRoutes.filter((r) => !exemptSet.has(r));
+  const exemptNotDeclared = exemptRoutes.filter((r) => !declaredOctetSet.has(r));
+
+  if (declaredNotExempt.length > 0 || exemptNotDeclared.length > 0) {
+    const diffs: string[] = [];
+    if (declaredNotExempt.length > 0) {
+      diffs.push(`declared application/octet-stream in /doc but not in HTML_GUARD_EXEMPT_ROUTES: [${declaredNotExempt.join(', ')}]`);
+    }
+    if (exemptNotDeclared.length > 0) {
+      diffs.push(`present in HTML_GUARD_EXEMPT_ROUTES but does not declare application/octet-stream in /doc: [${exemptNotDeclared.join(', ')}]`);
+    }
+    errors.push(`Check D failed: octet-stream exemption mismatch (${diffs.join('; ')})`);
   }
 
   if (errors.length > 0) {
@@ -553,6 +615,7 @@ export function checkDocRoutes(
       needsMechanismKeys,
       mediaTypeCensus,
       htmlDeclaringRoutes,
+      octetStreamRoutes,
       passed: false,
       error: errors.join('; '),
     };
@@ -570,6 +633,7 @@ export function checkDocRoutes(
     needsMechanismKeys,
     mediaTypeCensus,
     htmlDeclaringRoutes: [],
+    octetStreamRoutes,
     passed: true,
   };
 }
@@ -615,8 +679,9 @@ export function runRouteGateCli(args: string[]): number {
     const mediaTypeStr = Object.entries(result.mediaTypeCensus)
       .map(([k, v]) => `${k}=${v}`)
       .join(', ');
+    const checkDStr = result.octetStreamRoutes.join(', ');
     console.log(
-      `[PASS] Route classification and disposition gate passed: checked ${result.totalChecked} route(s) across /doc (0 unrecognized, 0 shadowed, ${result.denialCount} denials properly dispositioned, 0 orphaned dispositions). Kind census: ${kindCensusStr}. Media-type census: ${mediaTypeStr}.`
+      `[PASS] Route classification and disposition gate passed: checked ${result.totalChecked} route(s) across /doc (0 unrecognized, 0 shadowed, ${result.denialCount} denials properly dispositioned, 0 orphaned dispositions). Kind census: ${kindCensusStr}. Media-type census: ${mediaTypeStr}. Check D (octet-stream exemption match): ${checkDStr}.`
     );
     return 0;
   } else {

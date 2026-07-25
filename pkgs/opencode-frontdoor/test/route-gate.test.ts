@@ -7,6 +7,7 @@ import {
   runRouteGateCli,
   EXPECTED_KIND_CENSUS,
   EXPECTED_NEEDS_MECHANISM_KEYS,
+  EXPECTED_MEDIA_TYPE_CENSUS,
 } from '../src/route-gate.js';
 import { ROUTE_DISPOSITIONS, getRouteDisposition } from '../src/routes.dispositions.js';
 import { ROUTE_CLASSIFICATION_TABLE } from '../src/routes.classification.js';
@@ -26,7 +27,7 @@ describe('Route Classification Gate (Check A)', () => {
       },
     };
 
-    const result = checkDocRoutes(doc, { minRoutes: 1, routeDispositions: {} });
+    const result = checkDocRoutes(doc, { minRoutes: 1, routeDispositions: {}, htmlGuardExemptRoutes: [] });
     expect(result.passed).toBe(true);
     expect(result.totalChecked).toBe(3);
     expect(result.unrecognized).toEqual([]);
@@ -89,13 +90,17 @@ describe('Route Classification Gate (Check A)', () => {
       },
     };
 
-    const result = checkDocRoutes(doc, { minRoutes: 1, routeDispositions: {} });
+    const result = checkDocRoutes(doc, { minRoutes: 1, routeDispositions: {}, htmlGuardExemptRoutes: [] });
     expect(result.passed).toBe(true);
     expect(result.totalChecked).toBe(1);
     expect(result.unrecognized).toEqual([]);
   });
 
   test('F1: fails when GET /session/status table row is omitted, naming it as shadowed by GET /session/{sessionID}', () => {
+    // Note on remaining tautology: This test overrides routeClassificationTable without
+    // overriding routeDispositions, so the 49 real dispositions evaluated against a 1-route
+    // synthetic doc cause 49 spurious orphaned disposition errors. Thus expect(result.passed).toBe(false)
+    // is a tautology here. The load-bearing assertion is expect(result.shadowed) below.
     const doc = {
       paths: {
         '/session/status': {
@@ -145,7 +150,16 @@ describe('Route Classification Gate (Check A)', () => {
     const doc = {
       paths: {
         '/api/fs/read/*': {
-          get: { summary: 'Read FS' },
+          get: {
+            summary: 'Read FS',
+            responses: {
+              '200': {
+                content: {
+                  'application/octet-stream': {},
+                },
+              },
+            },
+          },
         },
       },
     };
@@ -566,6 +580,19 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       expect(result.error).toContain('needs-mechanism: expected 0, got 9');
     });
 
+    test('F2: fails on inflated expectedKindCensus (shrink/grow direction test)', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+
+      const result = checkDocRoutes(doc, {
+        expectedKindCensus: { ...EXPECTED_KIND_CENSUS, 'needs-mechanism': 10 },
+      });
+
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Kind census mismatch');
+      expect(result.error).toContain('needs-mechanism: expected 10, got 9');
+    });
+
     test('DEFAULT path enforces needs-mechanism keys and fails on key mismatch', () => {
       const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
@@ -577,6 +604,90 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       expect(result.passed).toBe(false);
       expect(result.error).toContain('Needs-mechanism keys mismatch');
       expect(result.error).toContain('added [');
+    });
+
+    test('F2: fails on expectedNeedsMechanismKeys containing extra key not in real table', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+
+      const result = checkDocRoutes(doc, {
+        expectedNeedsMechanismKeys: [...EXPECTED_NEEDS_MECHANISM_KEYS, 'POST /extra/nonexistent/key'],
+      });
+
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Needs-mechanism keys mismatch');
+      expect(result.error).toContain('removed [POST /extra/nonexistent/key]');
+    });
+
+    test('F3: doc with zero declared content fails media-type census floor', () => {
+      const emptyDoc = {
+        paths: {
+          '/api/health': {
+            get: { summary: 'No content declared' },
+          },
+        },
+      };
+
+      const result = checkDocRoutes(emptyDoc, { minRoutes: 1 });
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Media-type census mismatch');
+      expect(result.error).toContain('application/json: expected 512, got 0');
+    });
+  });
+
+  describe('Check D — Octet-Stream Exemption Invariant', () => {
+    test('Check D: passes on the real committed fixture', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+      const result = checkDocRoutes(doc);
+
+      expect(result.passed).toBe(true);
+      expect(result.octetStreamRoutes).toEqual(['GET /api/fs/read/*']);
+    });
+
+    test('Check D: fails when doc declares octet-stream route not in HTML_GUARD_EXEMPT_ROUTES', () => {
+      const doc = {
+        paths: {
+          '/api/fs/read/*': {
+            get: {
+              responses: { '200': { content: { 'application/octet-stream': {} } } },
+            },
+          },
+          '/api/extra/raw': {
+            get: {
+              responses: { '200': { content: { 'application/octet-stream': {} } } },
+            },
+          },
+        },
+      };
+
+      const result = checkDocRoutes(doc, {
+        minRoutes: 1,
+        htmlGuardExemptRoutes: ['GET /api/fs/read/*'],
+      });
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Check D failed');
+      expect(result.error).toContain('declared application/octet-stream in /doc but not in HTML_GUARD_EXEMPT_ROUTES: [GET /api/extra/raw]');
+    });
+
+    test('Check D: fails when HTML_GUARD_EXEMPT_ROUTES has route not declared in doc', () => {
+      const doc = {
+        paths: {
+          '/api/fs/read/*': {
+            get: {
+              responses: { '200': { content: { 'application/octet-stream': {} } } },
+            },
+          },
+        },
+      };
+
+      const result = checkDocRoutes(doc, {
+        minRoutes: 1,
+        htmlGuardExemptRoutes: ['GET /api/fs/read/*', 'GET /stale/exemption/*'],
+      });
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Check D failed');
+      expect(result.error).toContain('present in HTML_GUARD_EXEMPT_ROUTES but does not declare application/octet-stream in /doc: [GET /stale/exemption/*]');
     });
   });
 });

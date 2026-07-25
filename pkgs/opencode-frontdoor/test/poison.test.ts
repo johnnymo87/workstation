@@ -1,5 +1,22 @@
 import { describe, expect, test } from "vitest";
-import { isHtmlResponse } from "../src/poison.js";
+import { isHtmlResponse, isHtmlGuardExempt, HTML_GUARD_EXEMPT_ROUTES } from "../src/poison.js";
+
+describe("isHtmlGuardExempt", () => {
+  test("returns true for matching raw-byte routes like GET /api/fs/read/*", () => {
+    expect(isHtmlGuardExempt("GET", "/api/fs/read/file.html")).toBe(true);
+    expect(isHtmlGuardExempt("get", "/api/fs/read/deep/nested/index.html")).toBe(true);
+  });
+
+  test("returns false for non-matching methods, path prefixes without slash, or non-exempt paths", () => {
+    expect(isHtmlGuardExempt("GET", "/api/fs/readsomething")).toBe(false);
+    expect(isHtmlGuardExempt("POST", "/api/fs/read/file.html")).toBe(false);
+    expect(isHtmlGuardExempt("GET", "/session/ses_123")).toBe(false);
+  });
+
+  test("HTML_GUARD_EXEMPT_ROUTES contains GET /api/fs/read/*", () => {
+    expect(HTML_GUARD_EXEMPT_ROUTES).toEqual(["GET /api/fs/read/*"]);
+  });
+});
 
 describe("isHtmlResponse", () => {
   test("fires for exact text/html media types", () => {

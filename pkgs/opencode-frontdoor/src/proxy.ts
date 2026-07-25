@@ -11,9 +11,9 @@ import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky
 import { probeServeHealth } from "./health.js";
 import type { Config } from "./config.js";
 import { RequestLogger } from "./log.js";
-import { isAbsoluteHttpUrl, boundedFetch, stripTrailingSlashes } from "./http.js";
+import { isAbsoluteHttpUrl, boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
-import { isHtmlResponse } from "./poison.js";
+import { isHtmlResponse, isHtmlGuardExempt } from "./poison.js";
 import { createDriftMonitor } from "./drift.js";
 import { createWedgeProbe } from "./wedge.js";
 import type { Metrics } from "./metrics.js";
@@ -163,7 +163,7 @@ async function proxyRequest(
       }
       headersSent = true;
 
-      if (isHtmlResponse(upstreamRes.headers["content-type"])) {
+      if (isHtmlResponse(upstreamRes.headers["content-type"]) && !isHtmlGuardExempt(method, url.pathname)) {
         ctx.metrics.htmlPoisonBlocked++;
         console.warn(
           `[FRONTDOOR WARN] html-poison blocked: ${method} ${url.pathname} -> ${target} returned ${upstreamRes.statusCode} text/html (stale-serve SPA fallback); returned 502`
@@ -362,6 +362,7 @@ async function placeAfterCreate(
   const response = result.response!;
 
   if (isHtmlResponse(response.headers.get("content-type") ?? undefined)) {
+    // Note: placeAfterCreate handles POST /session and POST /session/{id}/fork, neither of which is or can be exempt.
     ctx.metrics.htmlPoisonBlocked++;
     console.warn(
       `[FRONTDOOR WARN] html-poison blocked: ${req.method ?? "POST"} ${url.pathname} -> ${target} returned ${response.status} text/html (stale-serve SPA fallback); returned 502`
@@ -375,6 +376,7 @@ async function placeAfterCreate(
           "Upstream returned an HTML page for an API route. The target serve is probably running an older binary that lacks this route; restart the serve pool.",
       })
     );
+    discardBody(response);
     return { sid: null, degraded: false };
   }
 

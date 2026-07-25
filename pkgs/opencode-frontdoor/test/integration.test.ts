@@ -2506,5 +2506,21 @@ describe("FrontDoor Integration", () => {
 
       expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
     });
+
+    test("NEGATIVE 12: GET /api/fs/read/* returning text/html passes through unchanged (exempt route)", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+      const htmlBody = "<html><body>file content</body></html>";
+
+      const res = await makeRequest("GET", "/api/fs/read/test.html", {
+        "x-test-content-type": "text/html",
+        "x-test-body": htmlBody,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("text/html");
+      expect(res.body).toBe(htmlBody);
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
+    });
   });
 });
