@@ -1052,40 +1052,16 @@ now just 501+global policies**) → 6 (**system units**, `restartIfChanged=false
 9.0 audit; devbox+darwin front-door convergence is a *follow-on* that reuses this
 package (host-scope everything).
 
-## Deploy runbook
+## Deploy Runbook
 
-### Explicit Restarts Required (`restartIfChanged = false`)
+### Design Constraint (`restartIfChanged = false`)
 Both `opencode-frontdoor` and `opencode-serve@` units are declared with `restartIfChanged = false` in `hosts/cloudbox/configuration.nix`. This is **deliberate**: restarting the front door drops all in-flight SSE legs and sticky routing state, while restarting the serve pool terminates live opencode sessions.
 
-The tradeoff is that `nixos-rebuild switch` and `home-manager switch` install new binaries and rewrite units but **leave old processes running**. This puts the environment into version skew ("new routes on one side, old code on the other"). Explicit restarts are required after rebuilds to bring running processes in sync.
+The tradeoff is that `nixos-rebuild switch` and `home-manager switch` install new binaries and rewrite units but **leave old processes running**. Both 2026-07-24 production incidents (stale serves freezing the TUI; stale door 404ing the MCP dialog) were caused by leaving running processes in version drift after rebuilds.
 
-### Canonical Deploy Sequence
-
-```bash
-sudo nixos-rebuild switch --flake ".#$(hostname)"   # installs new door binary, rewrites the unit
-sudo systemctl restart opencode-frontdoor           # REQUIRED: the door does NOT self-restart
-home-manager switch --flake .#cloudbox              # installs new opencode into /home/dev/.nix-profile
-sudo systemctl restart opencode-serve-pool.target   # REQUIRED: serves do NOT self-restart
-```
-
-### 2026-07-24 Incident Precedents
-- **Stale serves (`reset-workspace` skipped pool restart):** The front door routed new session-scoped paths, but old serves responded with their HTML SPA fallback. The attach TUI attempted to JSON-parse the HTML response, threw, and reconnected infinitely, resulting in a frozen TUI.
-- **Stale door (`nixos-rebuild` ran without restart):** The front door binary was updated on disk but not restarted. The MCP dialog endpoint returned 404 through the door for ~70 minutes until `systemctl restart opencode-frontdoor` was run.
-
-### Checking Version Drift
-
-**Front door drift check:**
-```bash
-journalctl -u opencode-frontdoor-canary --since today | grep -i drift
-```
-The canary compares the running door's self-reported store path (`GET /healthz`) against the unit's `ExecStart` path every 60s (`WARNING: version drift: running=... execstart=...`) and raises a throttled Telegram alert via pigeon.
-
-**Serve pool drift check:**
-```bash
-readlink /proc/$(systemctl show opencode-serve@4096 -p MainPID --value)/exe   # running process
-readlink -f /home/dev/.nix-profile/bin/opencode                               # profile target
-```
-Mismatched `/nix/store/<hash>-...` prefixes indicate stale serve processes requiring a pool restart.
+### Operational Runbook
+The canonical deploy sequence, version drift verification steps, and operator guidelines are maintained in the operator skill:
+See **[.opencode/skills/rebuilding/SKILL.md#deploy-runbook-front-door--serve-pool](../../.opencode/skills/rebuilding/SKILL.md#deploy-runbook-front-door--serve-pool)**.
 
 ## Risks
 - Total-outage SPOF → full isolation kit mandatory.

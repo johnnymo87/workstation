@@ -40,6 +40,8 @@ sudo nixos-rebuild switch --flake ".#$hostname"
 
 This rebuilds the NixOS system. May require reboot if kernel changed.
 
+> **WARNING (cloudbox):** `nixos-rebuild switch` updates `opencode-frontdoor` on disk but does **NOT** restart the running process (`restartIfChanged = false`). Run `sudo systemctl restart opencode-frontdoor` afterward or the door keeps serving OLD code. See [Deploy Runbook: Front Door & Serve Pool](#deploy-runbook-front-door--serve-pool).
+
 ### User Changes (no sudo, fast)
 
 After editing files in `users/dev/` or `assets/`:
@@ -55,13 +57,24 @@ else
 fi
 ```
 
-This is fast (~10 seconds). Note that while `home-manager switch` does not automatically restart system services, it repoints `/home/dev/.nix-profile/bin/opencode` (which serve units exec via `opencode-serve-start`). This puts active serves into version drift until `opencode-serve-pool.target` is restarted (see Deploy Runbook below).
+This is fast (~10 seconds).
+
+> **WARNING (cloudbox):** `home-manager switch` repoints `/home/dev/.nix-profile/bin/opencode` but does **NOT** restart active serve units (`restartIfChanged = false`). Run `sudo systemctl restart opencode-serve-pool.target` afterward or serves keep running OLD code in version drift. See [Deploy Runbook: Front Door & Serve Pool](#deploy-runbook-front-door--serve-pool).
 
 ## Deploy Runbook: Front Door & Serve Pool
 
 When deploying updates that affect `opencode-frontdoor` or the `opencode-serve@` pool (e.g. on `cloudbox`), explicit service restarts are **REQUIRED**.
 
-### Explicit Restarts Required (`restartIfChanged = false`)
+### Canonical Deploy Sequence
+
+```bash
+sudo nixos-rebuild switch --flake ".#$(hostname)"   # installs new door binary, rewrites unit
+sudo systemctl restart opencode-frontdoor           # REQUIRED: door does NOT self-restart
+home-manager switch --flake .#cloudbox              # installs new opencode into /home/dev/.nix-profile
+sudo systemctl restart opencode-serve-pool.target   # REQUIRED: serves do NOT self-restart
+```
+
+### Why Explicit Restarts Are Required (`restartIfChanged = false`)
 
 Both `opencode-frontdoor` and `opencode-serve@` are configured with `restartIfChanged = false` in `hosts/cloudbox/configuration.nix`.
 
@@ -74,15 +87,6 @@ Because neither service self-restarts on rebuild, `nixos-rebuild switch` and `ho
 **Past Production Incidents (2026-07-24):**
 - **Stale serves (`reset-workspace` skipped pool restart):** Front door routed new session-scoped paths, but stale serves returned HTML SPA fallbacks. The attach TUI threw when trying to JSON-parse HTML and reconnected infinitely, resulting in a frozen TUI.
 - **Stale door (`nixos-rebuild` ran without restart):** Front door binary was updated on disk but process wasn't restarted. The MCP dialog returned 404 through the door for ~70 minutes until `opencode-frontdoor` was restarted.
-
-### Canonical Deploy Sequence
-
-```bash
-sudo nixos-rebuild switch --flake ".#$(hostname)"   # installs new door binary, rewrites unit
-sudo systemctl restart opencode-frontdoor           # REQUIRED: door does NOT self-restart
-home-manager switch --flake .#cloudbox              # installs new opencode into /home/dev/.nix-profile
-sudo systemctl restart opencode-serve-pool.target   # REQUIRED: serves do NOT self-restart
-```
 
 ### Checking for Version Drift
 
@@ -114,10 +118,16 @@ git log --oneline HEAD@{1}..HEAD --name-only
 
 # If hosts/$hostname/* changed → system rebuild
 sudo nixos-rebuild switch --flake ".#$hostname"
+# WARNING (cloudbox): If front door code changed, also run:
+# sudo systemctl restart opencode-frontdoor
 
 # If users/dev/* or assets/* changed → home-manager
 # (use correct HM target for this host)
+# WARNING (cloudbox): If opencode package changed, also run:
+# sudo systemctl restart opencode-serve-pool.target
 ```
+
+> **WARNING (cloudbox):** Neither `nixos-rebuild switch` nor `home-manager switch` automatically restarts the front door or serve pool (`restartIfChanged = false`). Always run `sudo systemctl restart opencode-frontdoor` and/or `sudo systemctl restart opencode-serve-pool.target` after applying changes. See [Deploy Runbook: Front Door & Serve Pool](#deploy-runbook-front-door--serve-pool).
 
 ## Updating Flake Inputs
 
