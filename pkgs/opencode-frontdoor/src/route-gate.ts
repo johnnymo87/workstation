@@ -273,6 +273,24 @@ export function checkDocRoutes(
               });
             }
           }
+
+          if (disp.kind === 'not-session-scopable') {
+            if (!disp.tuiSurface) {
+              invalidDispositions.push({
+                method,
+                path,
+                action,
+                reason: 'Kind "not-session-scopable" requires a tuiSurface field (\'absent\' | \'degrades\' | \'unverified\')',
+              });
+            } else if (!['absent', 'degrades', 'unverified'].includes(disp.tuiSurface)) {
+              invalidDispositions.push({
+                method,
+                path,
+                action,
+                reason: `Invalid tuiSurface value "${disp.tuiSurface}" for kind "not-session-scopable" (expected 'absent' | 'degrades' | 'unverified')`,
+              });
+            }
+          }
         }
       }
     }

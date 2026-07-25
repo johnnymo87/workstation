@@ -13,11 +13,23 @@ export type DispositionKind =
   | 'needs-mechanism'       // D4: needs anchor-pin or broadcast that the door lacks
   | 'accepted-gap';         // known gap, consciously accepted
 
+export type TuiSurface = 'absent' | 'degrades' | 'unverified';
+
+/**
+ * Membership in the TUI's documented SDK surface list at
+ * `docs/plans/2026-07-24-phase9-door-route-allowlist.md:17`.
+ *
+ * - `absent`: corresponding SDK call is NOT in that documented list.
+ * - `degrades`: in the list AND Phase 9 audit at `2026-07-24-phase9-door-route-allowlist.md:35`
+ *   recorded it as denied-by-design with graceful degradation.
+ * - `unverified`: in the list, but through-door consequence was never audited.
+ */
 export interface RouteDisposition {
   kind: DispositionKind;
   rationale: string;
   supersededBy?: string;
   bead?: string;
+  tuiSurface?: TuiSurface;
 }
 
 export const CLASS_DISPOSITIONS: Record<string, RouteDisposition> = {
@@ -73,16 +85,6 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     bead: 'workstation-mlve.11',
     rationale: 'MCP authentication callback requires anchor-pinning or broadcast mechanism not yet implemented in door.',
   },
-  'POST /mcp/{name}/connect': {
-    kind: 'needs-mechanism',
-    bead: 'workstation-mlve.11',
-    rationale: 'Global MCP connection management requires anchor-pinning or broadcast mechanism not yet implemented in door.',
-  },
-  'POST /mcp/{name}/disconnect': {
-    kind: 'needs-mechanism',
-    bead: 'workstation-mlve.11',
-    rationale: 'Global MCP disconnection management requires anchor-pinning or broadcast mechanism not yet implemented in door.',
-  },
   'POST /instance/dispose': {
     kind: 'needs-mechanism',
     bead: 'workstation-mlve.11',
@@ -105,23 +107,30 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     supersededBy: 'POST /api/session/{sessionID}/question/{requestID}/reject',
     rationale: 'Question rejections are session-scoped and routed via POST /api/session/{sessionID}/question/{requestID}/reject.',
   },
-  // CORRECTED 2026-07-25. This was originally recorded as `superseded` by
-  // `POST /session/{sessionID}/init`, which is WRONG: there is no session-scoped
-  // sync route anywhere in the classification table, and `/session/{id}/init`
-  // initialises a session (AGENTS.md generation etc.) — it has nothing to do with
-  // the sync subsystem. The bogus claim passed the gate's own validation because
-  // `/session/{id}/init` does exist and is non-denying, which is a real limit of
-  // this check: it verifies a `supersededBy` target STRUCTURALLY (exists,
-  // non-denying) and cannot detect a semantically nonsensical pairing.
-  //
-  // `accepted-gap` rather than `not-session-scopable`: the sibling `/sync/*` rows
-  // are genuinely process-global, and that is very likely true here too — but
-  // `sync.start` IS in the interactive TUI's SDK surface
-  // (2026-07-24-phase9-door-route-allowlist.md:17), so the door denies something
-  // the TUI calls. The Phase 9 bootstrap audit only established that no load-path
-  // call 404s; it never audited 403s. So the consequence through the door is
-  // UNVERIFIED, and asserting the denial is architecturally correct would
-  // overclaim. Recording it as a known gap keeps it visible for D4.
+  'GET /global/event': {
+    kind: 'superseded',
+    supersededBy: 'GET /event',
+    rationale: 'Deprecated global event stream (410 Gone); clients must use session-scoped event stream GET /event?session_ids=.',
+  },
+  'GET /mcp': {
+    kind: 'superseded',
+    supersededBy: 'GET /session/{sessionID}/mcp',
+    rationale: 'Per-process MCP status stream cannot represent multi-serve pool state (F3); superseded by session-scoped status GET /session/{sessionID}/mcp.',
+  },
+  // Solved in Phase 10 via session-scoped route POST /session/{sessionID}/mcp/{name}/connect; deliberately excluded from D4.
+  'POST /mcp/{name}/connect': {
+    kind: 'superseded',
+    supersededBy: 'POST /session/{sessionID}/mcp/{name}/connect',
+    rationale: 'MCP connection management is superseded by session-scoped POST /session/{sessionID}/mcp/{name}/connect. Phase 10 solved this via session-scoped routes; deliberately excluded from D4.',
+  },
+  // Solved in Phase 10 via session-scoped route POST /session/{sessionID}/mcp/{name}/disconnect; deliberately excluded from D4.
+  'POST /mcp/{name}/disconnect': {
+    kind: 'superseded',
+    supersededBy: 'POST /session/{sessionID}/mcp/{name}/disconnect',
+    rationale: 'MCP disconnection management is superseded by session-scoped POST /session/{sessionID}/mcp/{name}/disconnect. Phase 10 solved this via session-scoped routes; deliberately excluded from D4.',
+  },
+
+  // Corrected 2026-07-25:
   'POST /sync/start': {
     kind: 'accepted-gap',
     bead: 'workstation-mlve.11',
@@ -129,144 +138,171 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
       'Process-global sync subsystem start; the door cannot session-scope it. But sync.start is in the TUI SDK surface and the Phase 9 audit only checked for 404s, not 403s, so the through-door consequence is unverified. Tracked for D4 rather than asserted benign.',
   },
 
-  // Carried-across recorded reasoning rows:
-  'GET /global/event': {
-    kind: 'not-session-scopable',
-    rationale: 'Deprecated global event stream (410 Gone); clients must use session-scoped event stream GET /event?session_ids=.',
-  },
-  'GET /mcp': {
-    kind: 'not-session-scopable',
-    rationale: 'Per-process MCP status stream cannot represent multi-serve pool state (F3); denied as 501.',
-  },
-
-  // Individual global mutation / non-session-scopable rows:
+  // Individual global mutation / non-session-scopable rows (32 total: 6 degrades, 5 unverified, 21 absent):
   'POST /log': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Process-global logging endpoint targets single process stdout/file, not a session.',
   },
   'POST /experimental/control-plane/move-session': {
     kind: 'not-session-scopable',
-    rationale: 'Internal control-plane session migration mutation operates across processes without session-scoped door route wrapper.',
+    tuiSurface: 'degrades',
+    rationale: 'Internal control-plane session migration mutation operates across processes without session-scoped door route wrapper. In TUI SDK surface list and recorded as denied-by-design with graceful degradation (2026-07-24-phase9-door-route-allowlist.md:35).',
   },
   'PATCH /global/config': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Modifies process-level global configuration; no session context.',
   },
   'POST /global/dispose': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Disposes global process runtime state; no session context.',
   },
   'POST /global/upgrade': {
     kind: 'not-session-scopable',
-    rationale: 'Triggers process-global application binary upgrade; no session context.',
+    tuiSurface: 'degrades',
+    rationale: 'Triggers process-global application binary upgrade; no session context. In TUI SDK surface list and recorded as denied-by-design with graceful degradation (2026-07-24-phase9-door-route-allowlist.md:35).',
   },
   'PATCH /config': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Mutates global server configuration settings; no session context.',
   },
   'POST /experimental/console/switch': {
     kind: 'not-session-scopable',
-    rationale: 'Switches global console organization context for process; no session context.',
+    tuiSurface: 'unverified',
+    bead: 'workstation-mlve.11',
+    rationale: 'Switches global console organization context for process; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
   },
   'POST /experimental/worktree': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Creates process-global git worktree; no session context.',
   },
   'DELETE /experimental/worktree': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Deletes process-global git worktree; no session context.',
   },
   'POST /experimental/worktree/reset': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Resets process-global git worktree state; no session context.',
   },
   'POST /vcs/apply': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Applies VCS patch to process working directory; no session context.',
   },
   'POST /mcp': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Adds server to process-global MCP configuration; no session context.',
   },
   'POST /project/git/init': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Initializes git repository in process working directory; no session context.',
   },
   'PATCH /project/{projectID}': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Modifies process project settings; no session context.',
   },
   'POST /experimental/project/{projectID}/copy/generate-name': {
     kind: 'not-session-scopable',
-    rationale: 'Generates project copy name globally; no session context.',
+    tuiSurface: 'degrades',
+    rationale: 'Generates project copy name globally; no session context. In TUI SDK surface list and recorded as denied-by-design with graceful degradation (2026-07-24-phase9-door-route-allowlist.md:35).',
   },
   'POST /sync/replay': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Replays sync engine operations process-globally; no session context.',
   },
   'POST /sync/steal': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Steals sync engine lease process-globally; no session context.',
   },
   'POST /sync/history': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Fetches sync history for process; no session context.',
   },
   'POST /experimental/workspace': {
     kind: 'not-session-scopable',
-    rationale: 'Creates experimental workspace in process directory; no session context.',
+    tuiSurface: 'unverified',
+    bead: 'workstation-mlve.11',
+    rationale: 'Creates experimental workspace in process directory; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
   },
   'POST /experimental/workspace/sync-list': {
     kind: 'not-session-scopable',
-    rationale: 'Syncs workspace list for process; no session context.',
+    tuiSurface: 'unverified',
+    bead: 'workstation-mlve.11',
+    rationale: 'Syncs workspace list for process; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
   },
   'DELETE /experimental/workspace/{id}': {
     kind: 'not-session-scopable',
-    rationale: 'Deletes experimental workspace; no session context.',
+    tuiSurface: 'unverified',
+    bead: 'workstation-mlve.11',
+    rationale: 'Deletes experimental workspace; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
   },
   'POST /experimental/workspace/warp': {
     kind: 'not-session-scopable',
-    rationale: 'Warps workspace state process-globally; no session context.',
+    tuiSurface: 'unverified',
+    bead: 'workstation-mlve.11',
+    rationale: 'Warps workspace state process-globally; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
   },
   'POST /integration/{integrationID}/connect/key': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Connects integration key globally for process; no session context.',
   },
   'POST /integration/{integrationID}/connect/oauth': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Initiates integration OAuth connection process-globally; no session context.',
   },
   'DELETE /integration/attempt/{attemptID}': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Deletes integration OAuth attempt state from process; no session context.',
   },
   'POST /integration/attempt/{attemptID}/complete': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Completes integration OAuth attempt in process; no session context.',
   },
   'PATCH /credential/{credentialID}': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Updates process credential store; no session context.',
   },
   'DELETE /credential/{credentialID}': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Removes credential from process credential store; no session context.',
   },
   'DELETE /permission/saved/{id}': {
     kind: 'not-session-scopable',
+    tuiSurface: 'absent',
     rationale: 'Deletes process-global saved permission entry; no session context.',
   },
   'POST /experimental/project/{projectID}/copy': {
     kind: 'not-session-scopable',
-    rationale: 'Initiates project copy process-globally; no session context.',
+    tuiSurface: 'degrades',
+    rationale: 'Initiates project copy process-globally; no session context. In TUI SDK surface list and recorded as denied-by-design with graceful degradation (2026-07-24-phase9-door-route-allowlist.md:35).',
   },
   'DELETE /experimental/project/{projectID}/copy': {
     kind: 'not-session-scopable',
-    rationale: 'Cancels project copy process-globally; no session context.',
+    tuiSurface: 'degrades',
+    rationale: 'Cancels project copy process-globally; no session context. In TUI SDK surface list and recorded as denied-by-design with graceful degradation (2026-07-24-phase9-door-route-allowlist.md:35).',
   },
   'POST /experimental/project/{projectID}/copy/refresh': {
     kind: 'not-session-scopable',
-    rationale: 'Refreshes project copy status process-globally; no session context.',
+    tuiSurface: 'degrades',
+    rationale: 'Refreshes project copy status process-globally; no session context. In TUI SDK surface list and recorded as denied-by-design with graceful degradation (2026-07-24-phase9-door-route-allowlist.md:35).',
   },
 };
 
