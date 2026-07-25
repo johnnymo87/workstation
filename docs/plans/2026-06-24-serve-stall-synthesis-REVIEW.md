@@ -1,6 +1,6 @@
 # Adversarial review — serve-stall synthesis
 
-**Reviewer:** Vertex Opus 4.8 (adversarial), session driven by coordinator ses_10959f45
+**Reviewer:** Vertex Opus 5 (adversarial), session driven by coordinator ses_10959f45
 **Date:** 2026-06-24
 **Target:** `docs/plans/2026-06-24-serve-stall-synthesis.md` (+ the iwpj/qjk4-M3.1/yoa2 design docs)
 **Method:** verified every load-bearing claim against applied source. Citations are

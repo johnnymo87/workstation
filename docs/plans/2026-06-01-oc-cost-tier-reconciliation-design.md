@@ -98,7 +98,7 @@ rates and an **optional** `tier`:
 RATES = {
   ("google-vertex-anthropic", "claude-opus-4-7"):
       {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25},        # FLAT (verified)
-  ("google-vertex-anthropic", "claude-opus-4-8"):
+  ("google-vertex-anthropic", "claude-opus-5"):
       {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25},        # FLAT (verified)
   ("google-vertex-anthropic", "claude-sonnet-4-6"):
       {"input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75},        # FLAT (verified)

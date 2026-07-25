@@ -1,4 +1,4 @@
-# Pre-implementation review of the teamclaude opus-aware fork PLAN (Vertex Opus 4.8)
+# Pre-implementation review of the teamclaude opus-aware fork PLAN (Vertex Opus 5)
 
 Method: every code-level claim in the plan was checked against the actual upstream
 tree at `/tmp/teamclaude-review` (git `654ace1`, npm `1.0.7`) and against the

@@ -104,7 +104,7 @@ design defect, not a fork regression. The `opencode-patched` stack does not touc
   (`:188-191`), is best-effort/error-swallowed, and does **not** cover the reviewer
   subagents — so stuck gemini steps can retry uncapped for hours.
 - **Observability gaps (separately fixed):** (a) the aigateway ledger was failing to
-  capture opus tokens/dollars (missing `claude-opus-4-8` in PriceTable → usage nulled);
+  capture opus tokens/dollars (missing `claude-opus-5` in PriceTable → usage nulled);
   (b) gemini bypasses the aigateway entirely, so per-request gemini cost wasn't ledgered;
   (c) OpenCode does not log title/auxiliary small-model calls as messages.
 
@@ -124,7 +124,7 @@ design defect, not a fork regression. The `opencode-patched` stack does not touc
 |---|---|---|---|
 | **Fix 1 (cure)** | Cap per-step retries (~5–8) + add jitter to backoff | new patch in `opencode-patched/patches/`, against retry.ts:180 / processor.ts:810 | **Deploying** (this session) |
 | Fix 2 | Move compaction + global default off gemini; consider dedicated/raised gemini quota | workstation Nix `opencode-config.nix` (`opencode.json:8,154`) | Planned |
-| Fix 3 | aigateway: add `claude-opus-4-8` pricing (fix opus NULL) + gemini support | mono `your-org/data/aigateway` | In progress (worker) |
+| Fix 3 | aigateway: add `claude-opus-5` pricing (fix opus NULL) + gemini support | mono `your-org/data/aigateway` | In progress (worker) |
 | Fix 4 | Durable LLM-audit capture (service=llm + retry/error lines → ~/.local/state) | workstation `opencode-llm-audit.nix` | **Done, live** |
 | Fix 5 | lgtm defense-in-depth: never launch unkillable session; bound subagent wall-clock; cost circuit-breaker | `~/projects/lgtm` | Planned |
 | Fix 6 | pigeon: dedup the `session.status` retry notifier (stop Telegram flood) | pigeon opencode-plugin | Planned (cosmetic) |

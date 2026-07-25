@@ -1,7 +1,7 @@
 # Opus-aware teamclaude fork — Design (R2)
 
 > **For the reviewer:** DESIGN doc (the "what and why"), not a task-by-task plan.
-> Self-contained. **R2** supersedes R1 after a Vertex Opus 4.8 review and a real-payload
+> Self-contained. **R2** supersedes R1 after a Vertex Opus 5 review and a real-payload
 > capture from devbox that together forced a data-model pivot (see §0). The next step
 > after approval is an implementation plan (separate doc, via writing-plans).
 
@@ -40,7 +40,7 @@ payload changed three things:
 ## 1. Problem & root cause
 
 ### 1.1 Symptom
-Heavy Opus agentic workloads on devbox (default model `anthropic/claude-opus-4-8`, routed
+Heavy Opus agentic workloads on devbox (default model `anthropic/claude-opus-5`, routed
 through teamclaude at `127.0.0.1:3456`) intermittently surface Anthropic's verbatim
 `The usage limit has been reached` to opencode (opencode `SessionRetry` retries it; pigeon
 surfaces a "🤖 Retry … Next attempt" notice) **while teamclaude reports both accounts
@@ -132,7 +132,7 @@ Generic over model scope (subsumes Opus + Sonnet + future), additive to upstream
   existing unified `unified5h`/`unified7d` (still useful + free from headers). Persist the
   scoped map (extend `PERSISTED_QUOTA_FIELDS`).
 - **`modelClass(modelId)`** helper (`/opus/i`→`"opus"`, `/sonnet/i`→`"sonnet"`, else
-  `null`). Robust to opencode's provider-prefixed id (`anthropic/claude-opus-4-8`) and the
+  `null`). Robust to opencode's provider-prefixed id (`anthropic/claude-opus-5`) and the
   wire value (`claude-opus-4-…`).
 - **Near-quota for a class** = `unified5h ≥ t` **OR** `unified7d ≥ t` **OR** (a matching
   active scoped limit is near: `scopedLimits[class].isActive && (severity ≠ "normal" ||

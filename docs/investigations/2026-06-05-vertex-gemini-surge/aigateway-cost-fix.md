@@ -11,10 +11,10 @@
 Two defects fixed, plus one robustness improvement, all under TDD:
 
 1. **Task 1 — opus cost capture (confirmed root cause).** `PriceTable` had no
-   `claude-opus-4-8` entry, so `compute()` threw `IllegalArgumentException`,
+   `claude-opus-5` entry, so `compute()` threw `IllegalArgumentException`,
    `ProxyController` caught it and dropped **both** tokens and dollars. 11,129
-   `claude-opus-4-8@default` ledger rows had NULL usage/cost. Fixed by adding
-   the authoritative `claude-opus-4-8` price (incl. its >200k tier).
+   `claude-opus-5@default` ledger rows had NULL usage/cost. Fixed by adding
+   the authoritative `claude-opus-5` price (incl. its >200k tier).
 2. **Task 1 — robustness.** When pricing is unknown, the gateway no longer
    discards the parsed token usage; it now persists tokens with NULL dollars.
    Required relaxing the `cost_breakdown_consistency` CHECK constraint via a new
@@ -37,19 +37,19 @@ Diffstat (mono): 7 files changed, +496/-22, plus 1 new migration.
 ```
  model                     | rows  | with_tokens | with_dollars
 ---------------------------+-------+-------------+--------------
- claude-opus-4-8@default   | 11129 |           0 |            0
+ claude-opus-5@default   | 11129 |           0 |            0
  claude-haiku-4-5@20251001 |   202 |         201 |          201
  unknown                   |   144 |           0 |            0
- claude-opus-4-8           |     1 |           0 |            0
+ claude-opus-5           |     1 |           0 |            0
 ```
 Opus rows: 0% populated. Haiku rows: ~100% populated.
 
 ### Mechanism (verified by reading `origin/main`)
 - [`PriceTable.kt`](../../../../mono/your-org/data/aigateway/server/PriceTable.kt)
   `prices` map had `claude-opus-4-7`, `-4-5`, `claude-sonnet-4-5`,
-  `claude-haiku-4-5` — but **not** `claude-opus-4-8`.
+  `claude-haiku-4-5` — but **not** `claude-opus-5`.
 - `PriceTable.compute()` strips the Vertex `@<version>` suffix
-  (`model.substringBefore('@')` → `claude-opus-4-8`); the lookup misses and
+  (`model.substringBefore('@')` → `claude-opus-5`); the lookup misses and
   throws `IllegalArgumentException("Unknown model")`.
 - `ProxyController` (`doOnComplete`) caught the exception, traced
   `aigateway.pricing.unknown_model`, and set **`finalUsage = null`** + cost
@@ -60,9 +60,9 @@ The haiku model was in the table, so its rows priced fine — confirming the
 defect was model-table coverage, not the parse path.
 
 ### Fix
-Added `claude-opus-4-8` to `PriceTable` with **authoritative** pricing sourced
+Added `claude-opus-5` to `PriceTable` with **authoritative** pricing sourced
 from opencode's own billing DB (`~/.cache/opencode/models.json`, entry
-`google-vertex-anthropic/claude-opus-4-8@default`) and `opencode.json`:
+`google-vertex-anthropic/claude-opus-5@default`) and `opencode.json`:
 
 | Tier        | input | output | cache_read | cache_write (5m) |
 |-------------|-------|--------|------------|------------------|
@@ -75,14 +75,14 @@ cache_read is 1.00 — see [§8 known gaps](#8-known-gaps--follow-ups). This mir
 the existing `claude-sonnet-4-5` convention (tiered input/output, flat cache).
 
 > **Verified, did not assume:** the prompt flagged opus-4-7 as `$5/$25`, cache
-> `6.25/10/0.50`. Authoritative data confirms opus-4-8 matches opus-4-7
-> **under 200k**, but opus-4-8 (and per models.dev, opus-4-7 too) has a >200k
+> `6.25/10/0.50`. Authoritative data confirms opus-5 matches opus-4-7
+> **under 200k**, but opus-5 (and per models.dev, opus-4-7 too) has a >200k
 > tier of `$10/$37.5`. The existing opus-4-7/4-5 entries are flat — a
 > pre-existing under-charge above 200k, flagged in [§8](#8-known-gaps--follow-ups).
 
 `PriceTable.kt` diff (new entry, abbreviated):
 ```kotlin
-"claude-opus-4-8" to
+"claude-opus-5" to
   ModelPrices(
     input200kUnder = BigDecimal("5.00"),  input200kOver = BigDecimal("10.00"),
     output200kUnder = BigDecimal("25.00"), output200kOver = BigDecimal("37.50"),
@@ -100,7 +100,7 @@ those historical rows stay NULL. The fix is forward-looking only.
 
 ## 2. Task 1 — robustness: persist tokens when pricing is unknown
 
-Even after adding opus-4-8, the next unknown model would repeat the data loss.
+Even after adding opus-5, the next unknown model would repeat the data loss.
 Changed `ProxyController` so the `unknown_model` catch keeps the parsed usage and
 only nulls the cost:
 
@@ -197,7 +197,7 @@ Executed 14 tests: 14 pass.
 ```
 
 New/changed tests:
-- `PriceTableTest`: opus-4-8 under/over 200k, opus-4-8 `@default` suffix,
+- `PriceTableTest`: opus-5 under/over 200k, opus-5 `@default` suffix,
   gemini-3.5-flash priced, gemini flat above 200k.
 - `UsageParserTest`: gemini `generateContent` object, gemini SSE (final
   usageMetadata, thoughts→output, cached subtraction), gemini JSON array,
@@ -229,13 +229,13 @@ Successfully applied 1 migration to schema "public", now at version v20260605181
 cross-rule form. Existing 11,129 all-NULL opus rows validated fine.
 
 ### 5a. Opus fix — real call through gateway (NEW populated row)
-`POST .../publishers/anthropic/models/claude-opus-4-8@default:streamRawPredict`
+`POST .../publishers/anthropic/models/claude-opus-5@default:streamRawPredict`
 with a real `gcloud auth print-access-token` → HTTP 200,
 `X-Gateway-Request-Id: a6affe6a-...`. Ledger:
 ```
 request_id           | a6affe6a-d7af-4a11-a02b-8dbe7576644a
 user_email           | user@company.com
-model                | claude-opus-4-8@default
+model                | claude-opus-5@default
 http_status          | 200
 input_tokens         | 16
 output_tokens        | 4
@@ -294,7 +294,7 @@ The additive mapping is correct; no double-count. Documented in-code at
 ```
  model                   | rows | with_tokens | with_dollars
 -------------------------+------+-------------+--------------
- claude-opus-4-8@default |   44 |          44 |           44   ← 100% populated (was 0%)
+ claude-opus-5@default |   44 |          44 |           44   ← 100% populated (was 0%)
  gemini-3.5-flash        |    1 |           1 |            1
  gemini-2.5-flash        |    1 |           1 |            0   ← robustness (unpriced)
 ```
@@ -306,7 +306,7 @@ through the fixed gateway — additional live proof under real traffic.
 ## 6. Files changed (mono PR)
 
 ```
-M your-org/data/aigateway/server/PriceTable.kt           (+ opus-4-8, gemini-3.5-flash)
+M your-org/data/aigateway/server/PriceTable.kt           (+ opus-5, gemini-3.5-flash)
 M your-org/data/aigateway/server/UsageParser.kt          (+ parseGemini dialect)
 M your-org/data/aigateway/server/ProxyController.kt       (publisher routing + keep usage on unknown price)
 M your-org/data/aigateway/server/testing/PriceTableTest.kt
@@ -418,12 +418,12 @@ The Nix activation will re-assert the managed state on the next
 1. **opus-4-7 / opus-4-5 are flat-priced above 200k.** Authoritative data shows
    both have a >200k tier (input 10 / output 37.5). Their existing PriceTable
    entries charge the flat under-200k rate above 200k — a pre-existing
-   under-charge, left out of scope (this PR only adds opus-4-8 correctly).
+   under-charge, left out of scope (this PR only adds opus-5 correctly).
    Recommend a follow-up to align them.
 2. **Cache rates aren't tiered.** `ModelPrices` has a single `cacheRead` /
-   cache-write rate, so opus-4-8 >200k cache_read uses 0.50 (authoritative:
+   cache-write rate, so opus-5 >200k cache_read uses 0.50 (authoritative:
    1.00). Affects only cache-heavy >200k opus requests. A structural fix (tiered
-   cache rates) would address opus-4-8 and the others uniformly.
+   cache rates) would address opus-5 and the others uniformly.
 3. **Gemini multimodal pricing.** The ledger prices on total token counts;
    `gemini-3.5-flash` lists `input_audio` at 1.5 (= text input here, so no
    difference today), but image/video token pricing nuances are not modeled.

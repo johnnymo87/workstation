@@ -2,7 +2,7 @@
 
 - **Date:** 2026-06-30
 - **Bead:** workstation-jiae (Phase 2; discovered-from workstation-iwpj)
-- **Status:** approved (brainstorming); **v2 — revised after opus-4.8 adversarial
+- **Status:** approved (brainstorming); **v2 — revised after opus-5 adversarial
   review.** Implementation NOT yet authorized; deploy/push gated on explicit user
   authority.
 - **Host of design:** cloudbox (K=4 pool `:4096`–`:4099`, pigeon `:4731`)

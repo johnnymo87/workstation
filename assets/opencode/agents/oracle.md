@@ -1,7 +1,7 @@
 ---
 description: Read-only strategic technical advisor — architecture, debugging, high-stakes decisions
 mode: subagent
-model: anthropic/claude-opus-4-8
+model: anthropic/claude-opus-5
 permission:
   read: allow
   glob: allow

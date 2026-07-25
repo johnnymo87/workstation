@@ -39,6 +39,15 @@
             "effort": "xhigh"
           }
         },
+        "claude-opus-5": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "xhigh"
+          }
+        },
         "claude-opus-4-8": {
           "options": {
             "thinking": {
@@ -94,6 +103,15 @@
       },
       "models": {
         "claude-opus-4-7@default": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "xhigh"
+          }
+        },
+        "claude-opus-5@default": {
           "options": {
             "thinking": {
               "type": "adaptive",

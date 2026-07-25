@@ -267,7 +267,7 @@ without bound.
 ### 3c. Why opus reconciles 1:1
 
 opus runs on `google-vertex-anthropic` (`dispatch.ts:11`,
-`google-vertex-anthropic/claude-opus-4-8@default`) — a different gateway/quota than
+`google-vertex-anthropic/claude-opus-5@default`) — a different gateway/quota than
 gemini's `google-vertex`. It is far less likely to hit the overloaded/exhausted/flap
 conditions that trip the retry loop, so its steps mostly run once → DB messages ≈
 Vertex calls. The retry *code path* is identical for opus; it simply rarely *fires*.

@@ -102,7 +102,7 @@ fi
 # ---- resolve_model_id tests -------------------------------------------------
 #
 # The launch-time model footgun: --model passes modelID verbatim to the async
-# prompt_async. An unregistered id (e.g. a bare 'claude-opus-4-8' missing the
+# prompt_async. An unregistered id (e.g. a bare 'claude-opus-5' missing the
 # '@default' suffix the vertex-anthropic provider requires) returns HTTP 200
 # and only dies later in the agent loop (Die(ProviderModelNotFoundError)) -- a
 # silently dead session. resolve_model_id catches it up front: auto-correct a
@@ -110,15 +110,15 @@ fi
 # error, and SKIP (degrade) when the catalog can't disambiguate. Needs jq.
 if command -v jq >/dev/null 2>&1; then
   catalog='{"providers":[
-    {"id":"google-vertex-anthropic","models":{"claude-opus-4-8@default":{},"claude-haiku-4-5@20251001":{},"claude-opus-4-7@default":{}}},
+    {"id":"google-vertex-anthropic","models":{"claude-opus-5@default":{},"claude-haiku-4-5@20251001":{},"claude-opus-4-7@default":{}}},
     {"id":"google-vertex","models":{"gemini-3.5-flash":{},"claude-haiku-4-5@20251001":{}}},
     {"id":"ambi","models":{"foo@v1":{},"foo@v2":{}}}
   ]}'
-  assert_eq "claude-opus-4-8@default" \
-    "$(resolve_model_id "$catalog" google-vertex-anthropic claude-opus-4-8@default)" \
+  assert_eq "claude-opus-5@default" \
+    "$(resolve_model_id "$catalog" google-vertex-anthropic claude-opus-5@default)" \
     "resolve_model_id: exact qualified match -> unchanged"
-  assert_eq "claude-opus-4-8@default" \
-    "$(resolve_model_id "$catalog" google-vertex-anthropic claude-opus-4-8)" \
+  assert_eq "claude-opus-5@default" \
+    "$(resolve_model_id "$catalog" google-vertex-anthropic claude-opus-5)" \
     "resolve_model_id: bare id -> unique @version expansion (the reported bug)"
   assert_eq "claude-haiku-4-5@20251001" \
     "$(resolve_model_id "$catalog" google-vertex-anthropic claude-haiku-4-5)" \
@@ -136,10 +136,10 @@ if command -v jq >/dev/null 2>&1; then
     "$(resolve_model_id "$catalog" no-such-provider whatever)" \
     "resolve_model_id: provider absent -> __SKIP__ (degrade)"
   assert_eq "__SKIP__" \
-    "$(resolve_model_id "" google-vertex-anthropic claude-opus-4-8)" \
+    "$(resolve_model_id "" google-vertex-anthropic claude-opus-5)" \
     "resolve_model_id: empty catalog -> __SKIP__ (degrade)"
   assert_eq "__SKIP__" \
-    "$(resolve_model_id "not json" google-vertex-anthropic claude-opus-4-8)" \
+    "$(resolve_model_id "not json" google-vertex-anthropic claude-opus-5)" \
     "resolve_model_id: non-JSON catalog -> __SKIP__ (degrade)"
 else
   printf 'SKIP  resolve_model_id tests (jq not on PATH)\n'

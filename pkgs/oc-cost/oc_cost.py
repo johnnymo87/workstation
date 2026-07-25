@@ -22,6 +22,7 @@ RATES: dict[tuple[str, str], dict] = {
     # --- Anthropic Claude: FLAT across full context (Anthropic + Vertex + Bedrock,
     #     current gen). models.dev's >200K Vertex tier is a parsing artifact. ---
     ("anthropic", "claude-opus-4-7"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    ("anthropic", "claude-opus-5"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-opus-4-8"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-opus-4-6"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-sonnet-4-6"):            {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
@@ -32,6 +33,7 @@ RATES: dict[tuple[str, str], dict] = {
     # TODO(2026-08-31): bump these to 3/15/0.30/3.75.
     ("anthropic", "claude-sonnet-5"):              {"input": 2, "output": 10, "cache_read": 0.20, "cache_write": 2.5},
     ("google-vertex-anthropic", "claude-opus-4-7"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    ("google-vertex-anthropic", "claude-opus-5"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-4-8"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-4-6"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-sonnet-4-6"): {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},

@@ -6,11 +6,11 @@
 let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
-  devboxModel = "anthropic/claude-opus-4-8";
+  devboxModel = "anthropic/claude-opus-5";
   # Cloudbox default: Opus over Vertex (no Claude Max subscription here, unlike
   # devbox). Carries its own xhigh thinking effort from opencode.base.json's
   # google-vertex-anthropic model options, so no variant override is needed.
-  vertexOpusModel = "google-vertex-anthropic/claude-opus-4-8@default";
+  vertexOpusModel = "google-vertex-anthropic/claude-opus-5@default";
   geminiModel = "google-vertex/gemini-3.5-flash";
   geminiVariant = "high";
   gemini35FlashModel = {
@@ -113,7 +113,7 @@ let
   # Platform overlay:
   # - devbox + crostini default to the Anthropic subscription path, so sessions
   #   do not depend on the OpenAI API key.
-  # - cloudbox defaults to Vertex Opus 4.8 (interactive primary model), while
+  # - cloudbox defaults to Vertex Opus 5 (interactive primary model), while
   #   keeping compaction + the plan-execution subagents on cheap Gemini Flash.
   # - macOS defaults to Vertex Gemini 3.5 Flash on high thinking.
   # - macOS + cloudbox get Atlassian MCP wiring.
@@ -140,7 +140,7 @@ let
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
       # Default model differs by host:
-      #   - cloudbox -> Vertex Opus 4.8 (interactive primary model). The plan-
+      #   - cloudbox -> Vertex Opus 5 (interactive primary model). The plan-
       #     execution subagents + compaction stay on cheap Gemini Flash below.
       #   - macOS    -> Gemini 3.5 Flash with high thinking (unchanged).
       model = if isCloudbox then vertexOpusModel else geminiModel;

@@ -213,7 +213,7 @@ pkgs.writeShellApplication {
 
       # Resolve a (possibly bare) --model id against the serve's catalog BEFORE
       # creating a session. prompt_async is ASYNC: an unregistered model id
-      # (e.g. "google-vertex-anthropic/claude-opus-4-8", missing the required
+      # (e.g. "google-vertex-anthropic/claude-opus-5", missing the required
       # "@default" suffix) returns HTTP 200 below and only dies later in the
       # agent loop (Die(ProviderModelNotFoundError)) -- after we've already
       # printed "Session launched". That is the silently-dead, no-response

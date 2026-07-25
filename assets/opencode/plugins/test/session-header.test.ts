@@ -15,7 +15,7 @@ function makeInput(providerID: string) {
   return {
     sessionID: "ses_abc123",
     agent: "build",
-    model: { providerID, modelID: "claude-opus-4-8" },
+    model: { providerID, modelID: "claude-opus-5" },
     provider: {},
     message: { id: "msg_req789" },
   } as never

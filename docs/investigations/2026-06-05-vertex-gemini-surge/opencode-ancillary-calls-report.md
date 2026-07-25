@@ -131,7 +131,7 @@ Mapping each deduplicated Vertex call to code:
 
 | Audit call | Source | Recorded? |
 |------------|--------|-----------|
-| 1× claude-opus-4-8 | The foreground conversation turn (`processor.ts:790`) | Yes — assistant message/part |
+| 1× claude-opus-5 | The foreground conversation turn (`processor.ts:790`) | Yes — assistant message/part |
 | 1× claude-haiku-4-5 | **Title generation** for the opus session: `getSmallModel("google-vertex-anthropic")` → hardcoded priority → `claude-haiku-4-5` (`provider.ts:1786`, `prompt.ts:268`) | **No** — `title` column only |
 | 2× gemini-3.5-flash | **Title generation for gemini-default sessions** (see below) | **No** — `title` column only |
 
