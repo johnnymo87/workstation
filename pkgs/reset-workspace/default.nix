@@ -223,6 +223,38 @@ pkgs.writeShellApplication {
       [ "$new" -gt "$old" ]
     }
 
+    # evaluate_restart_outcome <old_ts1> <new_ts1> [<old_ts2> <new_ts2> ...]:
+    # pure predicate evaluating pool restart outcome across all port timestamp pairs.
+    # Returns:
+    #   "verified-restarted" when all ports strictly increased
+    #   "verified-failed" when at least one port timestamp did NOT increase
+    #   "unverifiable" when any timestamp read was missing/unreadable (and no port failed)
+    evaluate_restart_outcome() {
+      local has_failed=0 has_unreadable=0 has_restarted=0
+      if [ "$#" -eq 0 ]; then
+        printf 'unverifiable\n'
+        return 0
+      fi
+      while [ "$#" -ge 2 ]; do
+        local old="$1" new="$2"
+        shift 2
+        if [ -z "$old" ] || [ -z "$new" ] || ! [[ "$old" =~ ^[0-9]+$ ]] || ! [[ "$new" =~ ^[0-9]+$ ]]; then
+          has_unreadable=1
+        elif ! is_timestamp_increased "$old" "$new"; then
+          has_failed=1
+        else
+          has_restarted=1
+        fi
+      done
+      if [ "$has_failed" -eq 1 ]; then
+        printf 'verified-failed\n'
+      elif [ "$has_unreadable" -eq 1 ] || [ "$has_restarted" -eq 0 ]; then
+        printf 'unverifiable\n'
+      else
+        printf 'verified-restarted\n'
+      fi
+    }
+
     # get_unit_monotonic_ts <scope> <port>: read ExecMainStartTimestampMonotonic for
     # opencode-serve@<port>.service. Returns empty string if read failed.
     get_unit_monotonic_ts() {
@@ -700,6 +732,28 @@ EOF
       log "  pkill returned no matches (none running, or already dead)"
     fi
 
+    # ---- Step 4: Prune merged launch worktrees ----
+    # opencode-launch --worktree (Phase 3.5) lands writable sessions in a fresh
+    # `work` worktree and leaves the worktree+branch behind on the happy path.
+    # reset-workspace is the named pruning OWNER for that lifecycle (design M1c):
+    # `work --prune-merged` reclaims only worktrees whose branch is fully merged
+    # into origin/<trunk> AND whose tree is clean, so an in-flight session's
+    # worktree (unmerged or dirty) is never removed -- no live-session probe
+    # needed. v1 scope: the mono primary root, where the read-only-main guard
+    # lives and churn matters. Best-effort: a failure here never fails the reset.
+    # Moved before Step 5 so a pool-death restart/health failure cannot skip it.
+    # (`work` is found on the inherited PATH, same as opencode-launch below.)
+    update_sentinel "started" "prune"
+    MONO_ROOT="''${HOME}/projects/mono"
+    if command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]; then
+      log "pruning merged launch worktrees under $MONO_ROOT/.worktrees ..."
+      if ! ( trap - PIPE; cd "$MONO_ROOT" && exec work --prune-merged ) 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
+        log "WARNING: work --prune-merged failed (non-fatal); continuing reset"
+      fi
+    else
+      log "skipping worktree prune (work not on PATH or $MONO_ROOT is not a git repo)"
+    fi
+
     # ---- Step 5: Restart the opencode serve pool ----
     # mn9r M5: opencode-serve is no longer a single unit — it's a K-serve pool
     # behind opencode-serve-pool.target (templated opencode-serve@<port>.service
@@ -781,27 +835,23 @@ EOF
 
     # Assert restart postcondition: each pool instance's ExecMainStartTimestampMonotonic strictly increased
     if [ "''${#pool_ports[@]}" -gt 0 ]; then
-      restart_verified=1
-      if [ "$before_read_ok" -eq 0 ]; then
-        restart_verified=0
-        log "WARNING: BEFORE timestamp read failed for one or more ports; restart assertion unverified"
-      fi
+      eval_args=()
       for port in "''${pool_ports[@]}"; do
         old_ts="''${BEFORE_TS[$port]:-}"
         new_ts="$(get_unit_monotonic_ts "$POOL_SCOPE" "$port")"
+        eval_args+=("''${old_ts}" "''${new_ts}")
         if [ -z "$old_ts" ] || [ -z "$new_ts" ]; then
           log "  WARNING: serve port $port timestamp read failed (before: ''${old_ts:-FAILED}, after: ''${new_ts:-FAILED})"
-          restart_verified=0
         elif ! is_timestamp_increased "$old_ts" "$new_ts"; then
           log "  WARNING: serve port $port ExecMainStartTimestampMonotonic did not increase (before: $old_ts, after: $new_ts)"
-          restart_verified=0
         else
           log "  serve port $port verified restarted (before: $old_ts, after: $new_ts)"
         fi
       done
 
-      if [ "$restart_verified" -ne 1 ]; then
-        log "WARNING: pool restart assertion failed or unverified; retrying restart once..."
+      outcome="$(evaluate_restart_outcome ''${eval_args[@]+"''${eval_args[@]}"})"
+      if [ "$outcome" = "verified-failed" ]; then
+        log "WARNING: pool restart assertion failed; retrying restart once..."
         restart_pool_target "$POOL_SCOPE"
         # Re-poll health after retry
         DEADLINE=$(($(date +%s) + 30))
@@ -830,30 +880,14 @@ EOF
             die "opencode serve port $port failed to restart (ExecMainStartTimestampMonotonic did not increase: before $old_ts, after $new_ts)"
           fi
         done
+      elif [ "$outcome" = "unverifiable" ]; then
+        log "WARNING: pool restart postcondition unverifiable; continuing reset without retry"
+        update_sentinel "started" "restart-pool-unverified"
+      else
+        log "pool restart verified for all ports"
       fi
     else
       log "WARNING: could not discover pool instances; restart postcondition NOT verified"
-    fi
-
-    # ---- Step 5.5: prune merged launch worktrees ----
-    # opencode-launch --worktree (Phase 3.5) lands writable sessions in a fresh
-    # `work` worktree and leaves the worktree+branch behind on the happy path.
-    # reset-workspace is the named pruning OWNER for that lifecycle (design M1c):
-    # `work --prune-merged` reclaims only worktrees whose branch is fully merged
-    # into origin/<trunk> AND whose tree is clean, so an in-flight session's
-    # worktree (unmerged or dirty) is never removed -- no live-session probe
-    # needed. v1 scope: the mono primary root, where the read-only-main guard
-    # lives and churn matters. Best-effort: a failure here never fails the reset.
-    # (`work` is found on the inherited PATH, same as opencode-launch below.)
-    update_sentinel "started" "prune"
-    MONO_ROOT="''${HOME}/projects/mono"
-    if command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]; then
-      log "pruning merged launch worktrees under $MONO_ROOT/.worktrees ..."
-      if ! ( trap - PIPE; cd "$MONO_ROOT" && exec work --prune-merged ) 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
-        log "WARNING: work --prune-merged failed (non-fatal); continuing reset"
-      fi
-    else
-      log "skipping worktree prune (work not on PATH or $MONO_ROOT is not a git repo)"
     fi
 
     # ---- Step 6: Launch recommendation session ----

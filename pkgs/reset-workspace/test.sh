@@ -110,6 +110,32 @@ is_timestamp_increased() {
   [ "$new" -gt "$old" ]
 }
 
+evaluate_restart_outcome() {
+  local has_failed=0 has_unreadable=0 has_restarted=0
+  if [ "$#" -eq 0 ]; then
+    printf 'unverifiable\n'
+    return 0
+  fi
+  while [ "$#" -ge 2 ]; do
+    local old="$1" new="$2"
+    shift 2
+    if [ -z "$old" ] || [ -z "$new" ] || ! [[ "$old" =~ ^[0-9]+$ ]] || ! [[ "$new" =~ ^[0-9]+$ ]]; then
+      has_unreadable=1
+    elif ! is_timestamp_increased "$old" "$new"; then
+      has_failed=1
+    else
+      has_restarted=1
+    fi
+  done
+  if [ "$has_failed" -eq 1 ]; then
+    printf 'verified-failed\n'
+  elif [ "$has_unreadable" -eq 1 ] || [ "$has_restarted" -eq 0 ]; then
+    printf 'unverifiable\n'
+  else
+    printf 'verified-restarted\n'
+  fi
+}
+
 format_sentinel() {
   local status="$1" ts="$2" pid="$3" phase="${4:-}"
   if [ "$status" = "ok" ]; then
@@ -250,6 +276,19 @@ check "timestamp increased: 100 -> 100 -> false" \
   "1" "$(is_timestamp_increased 100 100 && echo 0 || echo 1)"
 check "timestamp increased: 0 -> 50 -> true" \
   "0" "$(is_timestamp_increased 0 50 && echo 0 || echo 1)"
+
+check "restart eval: all ports restarted -> verified-restarted" \
+  "verified-restarted" "$(evaluate_restart_outcome 100 200 105 205)"
+check "restart eval: one port failed -> verified-failed" \
+  "verified-failed" "$(evaluate_restart_outcome 100 200 100 100)"
+check "restart eval: one port unreadable before -> unverifiable" \
+  "unverifiable" "$(evaluate_restart_outcome 100 200 "" 200)"
+check "restart eval: one port unreadable after -> unverifiable" \
+  "unverifiable" "$(evaluate_restart_outcome 100 200 100 "")"
+check "restart eval: mixed failed + unreadable -> verified-failed" \
+  "verified-failed" "$(evaluate_restart_outcome 100 100 "" 200)"
+check "restart eval: no ports -> unverifiable" \
+  "unverifiable" "$(evaluate_restart_outcome)"
 
 check "sentinel format: started" \
   "started 2026-07-24T12:00:00Z pid=1234 phase=kill-nvim" \
@@ -395,7 +434,11 @@ if [ -f "$default_nix" ]; then
   want_grep "source counts sids via count_manifest_sids" 'OPENCODE_COUNT="$(count_manifest_sids "$MANIFEST_PATH")"'
   want_grep_func_content "cleanup_trap checks OWNS_SENTINEL" "cleanup_trap" "OWNS_SENTINEL"
   want_grep_func_content "update_sentinel checks OWNS_SENTINEL" "update_sentinel" "OWNS_SENTINEL"
-  want_grep "discovery failure warning is logged"        'WARNING: could not discover pool instances; restart postcondition NOT verified'
+  want_grep "source defines evaluate_restart_outcome"     'evaluate_restart_outcome() {'
+  refuse_grep "does not retry on unverifiable"            'pool restart assertion failed or unverified'
+  want_grep "retry is only on verified-failed"            'outcome" = "verified-failed"'
+  want_grep "unverifiable logs warning and continues"     'outcome" = "unverifiable"'
+  want_grep "discovery failure warning is logged"         'WARNING: could not discover pool instances; restart postcondition NOT verified'
 
   # The sentinel must be written before pkill
   sentinel_line=$(grep -n 'update_sentinel "started" "kill-nvim"' "$default_nix" | head -1 | cut -d: -f1)
@@ -424,11 +467,16 @@ if [ -f "$default_nix" ]; then
   want_grep "prune targets the mono primary root"        '/projects/mono'
   want_grep "prune is guarded by command -v work"        'command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]'
   want_grep "prune failure is non-fatal to the reset"    'work --prune-merged failed (non-fatal)'
-  # The prune must run before the recommendation session is launched (so a slow
-  # prune can't be skipped by an early recommendation-launch exit) and after the
-  # pool is confirmed healthy.
+  # F3: The prune must run before the pool restart and recommendation launch (so a pool failure
+  # cannot skip worktree pruning).
   prune_line=$(grep -n 'work --prune-merged' "$default_nix" | head -1 | cut -d: -f1)
+  restart_line=$(grep -n 'restart_pool_target "$POOL_SCOPE"' "$default_nix" | head -1 | cut -d: -f1)
   rec_line=$(grep -n '# ---- Step 6: Launch recommendation session ----' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$prune_line" ] && [ -n "$restart_line" ] && [ "$prune_line" -lt "$restart_line" ]; then
+    echo "ok: worktree prune runs before the pool restart"
+  else
+    echo "FAIL: prune must precede pool restart (prune at ${prune_line:-?}, restart at ${restart_line:-?})"; fail=1
+  fi
   if [ -n "$prune_line" ] && [ -n "$rec_line" ] && [ "$prune_line" -lt "$rec_line" ]; then
     echo "ok: worktree prune runs before the recommendation launch"
   else
