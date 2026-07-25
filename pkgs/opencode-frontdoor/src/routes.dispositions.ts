@@ -105,10 +105,28 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     supersededBy: 'POST /api/session/{sessionID}/question/{requestID}/reject',
     rationale: 'Question rejections are session-scoped and routed via POST /api/session/{sessionID}/question/{requestID}/reject.',
   },
+  // CORRECTED 2026-07-25. This was originally recorded as `superseded` by
+  // `POST /session/{sessionID}/init`, which is WRONG: there is no session-scoped
+  // sync route anywhere in the classification table, and `/session/{id}/init`
+  // initialises a session (AGENTS.md generation etc.) — it has nothing to do with
+  // the sync subsystem. The bogus claim passed the gate's own validation because
+  // `/session/{id}/init` does exist and is non-denying, which is a real limit of
+  // this check: it verifies a `supersededBy` target STRUCTURALLY (exists,
+  // non-denying) and cannot detect a semantically nonsensical pairing.
+  //
+  // `accepted-gap` rather than `not-session-scopable`: the sibling `/sync/*` rows
+  // are genuinely process-global, and that is very likely true here too — but
+  // `sync.start` IS in the interactive TUI's SDK surface
+  // (2026-07-24-phase9-door-route-allowlist.md:17), so the door denies something
+  // the TUI calls. The Phase 9 bootstrap audit only established that no load-path
+  // call 404s; it never audited 403s. So the consequence through the door is
+  // UNVERIFIED, and asserting the denial is architecturally correct would
+  // overclaim. Recording it as a known gap keeps it visible for D4.
   'POST /sync/start': {
-    kind: 'superseded',
-    supersededBy: 'POST /session/{sessionID}/init',
-    rationale: 'Session sync and initialization is performed via session-scoped POST /session/{sessionID}/init.',
+    kind: 'accepted-gap',
+    bead: 'workstation-mlve.11',
+    rationale:
+      'Process-global sync subsystem start; the door cannot session-scope it. But sync.start is in the TUI SDK surface and the Phase 9 audit only checked for 404s, not 403s, so the through-door consequence is unverified. Tracked for D4 rather than asserted benign.',
   },
 
   // Carried-across recorded reasoning rows:
