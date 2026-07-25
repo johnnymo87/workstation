@@ -68,7 +68,15 @@ SERVE_ENV_SCRUB=(
   -u OPENCODE_WORKSPACE_ID
   -u OPENCODE_EXPERIMENTAL_WORKSPACES
   -u OPENCODE_HEARTBEAT_INTERVAL_MS
+  -u OPENCODE_DISABLE_CHANNEL_DB       # set in sessions; changes serve behavior => non-hermetic
+  -u OPENCODE_SESSION_ID               # a throwaway serve has no business inheriting a session id
 )
+# NOTE on method (this list is a DENYLIST and denylists cannot self-certify):
+# registration requires BOTH OPENCODE_ROUTING_DB and OPENCODE_SERVE_ID, so for the
+# hijack specifically this list is doubly sufficient. It is NOT provably sufficient
+# for hermeticity — a session bash call carries nine OPENCODE_* vars today and will
+# carry more later. The `assert_serve_did_not_register` check below is what actually
+# holds the line; it tests the OUTCOME rather than the list.
 
 # Random high port: a fixed port collides with a concurrent run or an unrelated
 # listener, which would fail the gate for a reason unrelated to route drift.
@@ -114,6 +122,32 @@ for _ in $(seq 1 120); do
   fi
   sleep 0.5
 done
+
+# REGRESSION TEST for the 2026-07-25 slot-hijack incident, with real detection power.
+#
+# The env scrub above is a denylist, and until this check existed, deleting it broke
+# NOTHING until the next 76-session outage — the same vacuous-green shape this package
+# exists to eliminate. So assert the OUTCOME instead of trusting the list.
+#
+# `serve heartbeat started (mode=..., interval=...ms)` is logged by the patched serve
+# IFF it registered itself in the routing DB (serve-lease.patch:1191, guarded by
+# `if (Flag.OPENCODE_ROUTING_DB && Flag.OPENCODE_SERVE_ID)`). A throwaway gate serve
+# must NEVER register. If this fires, the scrub is broken and this run may have just
+# hijacked a live pool slot — which does not self-heal, so fail loud and say what to do.
+assert_serve_did_not_register() {
+  if [ -f "$SERVE_LOG" ] && grep -q "serve heartbeat started" "$SERVE_LOG"; then
+    echo "FATAL: the throwaway gate serve REGISTERED ITSELF in the routing DB." >&2
+    echo "       The env scrub (SERVE_ENV_SCRUB) is broken or was bypassed." >&2
+    echo "       It may have hijacked a live pool slot; that does NOT self-heal." >&2
+    echo "       Check:  serve_instance.endpoint for every serve_id in \$OPENCODE_ROUTING_DB" >&2
+    echo "       See the incident comment at the top of this script." >&2
+    echo "=== Serve Log ===" >&2
+    cat "$SERVE_LOG" >&2 || true
+    echo "=================" >&2
+    exit 1
+  fi
+}
+assert_serve_did_not_register
 
 if [ "$SUCCESS" -ne 1 ]; then
   echo "ERROR: opencode serve failed to answer /doc within timeout!" >&2

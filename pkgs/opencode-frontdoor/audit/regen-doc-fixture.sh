@@ -54,6 +54,8 @@ SERVE_ENV_SCRUB=(
   -u OPENCODE_WORKSPACE_ID
   -u OPENCODE_EXPERIMENTAL_WORKSPACES
   -u OPENCODE_HEARTBEAT_INTERVAL_MS
+  -u OPENCODE_DISABLE_CHANNEL_DB       # set in sessions; changes serve behavior => non-hermetic
+  -u OPENCODE_SESSION_ID               # a throwaway serve has no business inheriting a session id
 )
 
 PORT=$(( 40000 + RANDOM % 20000 ))
@@ -93,6 +95,18 @@ for _ in $(seq 1 120); do
   fi
   sleep 0.5
 done
+# Regression test for the 2026-07-25 slot-hijack incident — see the same check in
+# ../test.sh for the full reasoning. `serve heartbeat started` is logged IFF the serve
+# registered itself in the routing DB, which a throwaway must never do. Asserting the
+# OUTCOME is what holds the line; the env denylist above cannot self-certify.
+if grep -q "serve heartbeat started" "$TMP/serve.log" 2>/dev/null; then
+  echo "FATAL: the throwaway serve REGISTERED ITSELF in the routing DB." >&2
+  echo "       The env scrub is broken; it may have hijacked a live pool slot, which" >&2
+  echo "       does NOT self-heal. Check serve_instance.endpoint for every serve_id." >&2
+  cat "$TMP/serve.log" >&2 || true
+  exit 1
+fi
+
 [ "$SUCCESS" -eq 1 ] || { echo "ERROR: /doc not answered in time" >&2; cat "$TMP/serve.log" >&2; exit 1; }
 
 PREV="$OUT"
