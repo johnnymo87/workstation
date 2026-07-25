@@ -174,6 +174,22 @@ rc_with=$(bash -c "$code_with_trap" 2>/dev/null; echo $?)
 check "broken pipe log() without trap PIPE -> exits 141" "141" "$rc_without"
 check "broken pipe log() with trap PIPE -> exits 0" "0" "$rc_with"
 
+# Behavioral test: child inherits SIGPIPE ignored unless restored via ( trap - PIPE; exec ... )
+if [ -f /proc/self/status ]; then
+  get_sigpipe_ign() {
+    local hex
+    hex="$(grep "^SigIgn:" /proc/self/status | awk '{print $2}')"
+    echo "$(( (16#$hex >> 12) & 1 ))"
+  }
+  export -f get_sigpipe_ign
+
+  plain_child_ign=$(bash -c 'trap "" PIPE; exec bash -c get_sigpipe_ign' 2>/dev/null || echo "?")
+  restored_child_ign=$(bash -c 'trap "" PIPE; ( trap - PIPE; exec bash -c get_sigpipe_ign )' 2>/dev/null || echo "?")
+
+  check "plain child inherits SIGPIPE ignored (1)" "1" "$plain_child_ign"
+  check "restored child sees SIGPIPE default (0)" "0" "$restored_child_ign"
+fi
+
 check "timestamp increased: 100 -> 200 -> true" \
   "0" "$(is_timestamp_increased 100 200 && echo 0 || echo 1)"
 check "timestamp increased: 200 -> 100 -> false" \
@@ -369,6 +385,7 @@ if [ -f "$default_nix" ]; then
   want_grep "morning agent dir is defined"          'MORNING_DIR="$HOME/morning"'
   want_grep "morning agent dir is created"          'mkdir -p "$MORNING_DIR"'
   want_grep "launch targets the morning dir"        'opencode-launch "$MORNING_DIR" "$RECOMMENDATION_PROMPT"'
+  want_grep "opencode-launch resets SIGPIPE disposition" '( trap - PIPE; exec opencode-launch'
   # The old cwd=~ launch must be gone. This substring matches current source
   # (opencode-launch '~' "''${RECOMMENDATION_PROMPT}") and disappears after the change.
   refuse_grep "no legacy tilde launch"              "opencode-launch '~'"

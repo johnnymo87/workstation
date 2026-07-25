@@ -897,7 +897,9 @@ After reopening, you are deputized as swarm coordinator for those sessions. The 
 PROMPT
 )
       # opencode-launch first arg is directory, second is the prompt.
-      if ! opencode-launch "$MORNING_DIR" "$RECOMMENDATION_PROMPT" 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
+      # Reset SIGPIPE disposition to default (trap - PIPE) so the long-lived morning agent and its children
+      # do not inherit SIG_IGN (which is preserved across exec and irreversible in POSIX child shells).
+      if ! ( trap - PIPE; exec opencode-launch "$MORNING_DIR" "$RECOMMENDATION_PROMPT" ) 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
         log "WARNING: opencode-launch failed (non-zero exit); recommendation session not started"
       fi
     fi
