@@ -1357,10 +1357,11 @@ ${serveIdCase}
 
           if [ -z "$RUNNING_VER" ]; then
             echo "WARNING: could not parse version from /healthz response"
-            rm -f "$STATE/drift-alerted"
           else
             case "$EXECSTART_PATH" in
               "$RUNNING_VER"*)
+                # Clear throttle file ONLY on confirmed resolution (paths match).
+                # Do NOT clear on unparseable /healthz (unknown state could flap and storm).
                 rm -f "$STATE/drift-alerted"
                 ;;
               *)
