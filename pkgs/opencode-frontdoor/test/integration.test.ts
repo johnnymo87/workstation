@@ -1,11 +1,18 @@
 import { describe, expect, test, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import http from "node:http";
 import zlib from "node:zlib";
+import fs from "node:fs";
+import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { createFrontDoor } from "../src/server.js";
 import type { Config } from "../src/config.js";
 import { StickyMap } from "../src/sticky.js";
-import { createMetrics } from "../src/metrics.js";
+import { createMetrics, type Metrics } from "../src/metrics.js";
+
+const spaFallbackHtml = fs.readFileSync(
+  path.join(__dirname, "fixtures/spa-fallback.pinned-1.17.13.4.html"),
+  "utf8"
+);
 
 // SSE drift/heartbeat/turn-end realities are validated by Phase 2 + the Phase 6 through-door gate, not these fakes.
 
@@ -15,6 +22,7 @@ describe("FrontDoor Integration", () => {
   let anchorServer: http.Server;
   let pigeonServer: http.Server;
   let frontDoorServer: http.Server;
+  let testMetrics: Metrics;
 
   let portA: number;
   let portB: number;
@@ -98,6 +106,30 @@ describe("FrontDoor Integration", () => {
       }
       const body = await readBody(req);
       const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
+      if (req.headers["x-test-content-type"] !== undefined) {
+        const ct = req.headers["x-test-content-type"] as string;
+        const resHeaders: Record<string, string> = {
+          "x-from-serve": "serve-a",
+          "x-echo-header": (req.headers["x-test-header"] as string) || ""
+        };
+        if (ct !== "none") {
+          resHeaders["Content-Type"] = ct;
+        }
+        if (req.headers["x-test-csp"]) {
+          resHeaders["Content-Security-Policy"] = req.headers["x-test-csp"] as string;
+        }
+        res.writeHead(status, resHeaders);
+        let respBody = "";
+        if (req.headers["x-test-spa-fallback"] === "1") {
+          respBody = spaFallbackHtml;
+        } else if (req.headers["x-test-body-b64"]) {
+          respBody = Buffer.from(req.headers["x-test-body-b64"] as string, "base64").toString("utf8");
+        } else if (req.headers["x-test-body"]) {
+          respBody = req.headers["x-test-body"] as string;
+        }
+        res.end(respBody);
+        return;
+      }
       res.writeHead(status, {
         "Content-Type": "application/json",
         "x-from-serve": "serve-a",
@@ -163,6 +195,31 @@ describe("FrontDoor Integration", () => {
 
     // 3. Fake Anchor Serve
     anchorServer = http.createServer(async (req, res) => {
+      if (req.headers["x-test-content-type"] !== undefined) {
+        const ct = req.headers["x-test-content-type"] as string;
+        const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
+        const resHeaders: Record<string, string> = {
+          "x-from-serve": "anchor"
+        };
+        if (ct !== "none") {
+          resHeaders["Content-Type"] = ct;
+        }
+        if (req.headers["x-test-csp"]) {
+          resHeaders["Content-Security-Policy"] = req.headers["x-test-csp"] as string;
+        }
+        res.writeHead(status, resHeaders);
+        let respBody = "";
+        if (req.headers["x-test-spa-fallback"] === "1") {
+          respBody = spaFallbackHtml;
+        } else if (req.headers["x-test-body-b64"]) {
+          respBody = Buffer.from(req.headers["x-test-body-b64"] as string, "base64").toString("utf8");
+        } else if (req.headers["x-test-body"]) {
+          respBody = req.headers["x-test-body"] as string;
+        }
+        res.end(respBody);
+        return;
+      }
+
       // Support custom status and mint ID from headers for Phase 4 testing
       if (req.headers["x-test-status"] && req.headers["x-test-status"] !== "200" && !req.url?.startsWith("/session/") && !(req.url === "/session" && parseInt(req.headers["x-test-status"] as string, 10) >= 200 && parseInt(req.headers["x-test-status"] as string, 10) < 300)) {
         const status = parseInt(req.headers["x-test-status"] as string, 10);
@@ -355,7 +412,9 @@ describe("FrontDoor Integration", () => {
       mintTimeoutMs: 1000,
     };
 
+    testMetrics = createMetrics();
     const testDeps = {
+      metrics: testMetrics,
       logger: {
         sink: (line: string) => {
           try {
@@ -2232,5 +2291,220 @@ describe("FrontDoor Integration", () => {
     } finally {
       await new Promise<void>((resolve) => countingFrontDoor.close(() => resolve()));
     }
+  });
+
+  describe("HTML-Poison Guard (m3z2)", () => {
+    test("POSITIVE 1: text/html on a session-path route returns 502 JSON and blocks poison", async () => {
+      pigeonRouteCalls = [];
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-content-type": "text/html",
+        "x-test-csp": "default-src 'self'",
+        "x-test-spa-fallback": "1",
+      });
+
+      expect(res.status).toBe(502);
+      expect(res.headers["content-type"]).toBe("application/json");
+      expect(res.headers["content-security-policy"]).toBeUndefined();
+
+      const json = JSON.parse(res.body);
+      expect(json.error).toBe("bad_gateway");
+      expect(json.message).toBe(
+        "Upstream returned an HTML page for an API route. The target serve is probably running an older binary that lacks this route; restart the serve pool."
+      );
+
+      // Verify network opacity: target URL/port must NOT appear in body
+      expect(res.body).not.toContain(String(portA));
+      expect(res.body).not.toContain("127.0.0.1");
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked + 1);
+    });
+
+    test("POSITIVE 2: text/html on a forward-anchor route returns 502 JSON", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+
+      const res = await makeRequest("GET", "/config", {
+        "x-test-content-type": "text/html",
+        "x-test-csp": "default-src 'self'",
+        "x-test-spa-fallback": "1",
+      });
+
+      expect(res.status).toBe(502);
+      expect(res.headers["content-type"]).toBe("application/json");
+      expect(res.headers["content-security-policy"]).toBeUndefined();
+
+      const json = JSON.parse(res.body);
+      expect(json.error).toBe("bad_gateway");
+      expect(json.message).toBe(
+        "Upstream returned an HTML page for an API route. The target serve is probably running an older binary that lacks this route; restart the serve pool."
+      );
+
+      expect(res.body).not.toContain(String(portAnchor));
+      expect(res.body).not.toContain("127.0.0.1");
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked + 1);
+    });
+
+    test("POSITIVE 3: text/html on create (POST /session) returns 502 and skips pigeon placement", async () => {
+      const placeCallsBefore = pigeonPlaceCalls.length;
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+
+      const res = await makeRequest(
+        "POST",
+        "/session",
+        {
+          "x-test-content-type": "text/html",
+          "x-test-csp": "default-src 'self'",
+          "x-test-spa-fallback": "1",
+        },
+        JSON.stringify({ title: "test session" })
+      );
+
+      expect(res.status).toBe(502);
+      expect(res.headers["content-type"]).toBe("application/json");
+      expect(res.headers["content-security-policy"]).toBeUndefined();
+
+      const json = JSON.parse(res.body);
+      expect(json.error).toBe("bad_gateway");
+      expect(json.message).toBe(
+        "Upstream returned an HTML page for an API route. The target serve is probably running an older binary that lacks this route; restart the serve pool."
+      );
+
+      expect(res.body).not.toContain(String(portAnchor));
+      expect(pigeonPlaceCalls.length).toBe(placeCallsBefore);
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked + 1);
+    });
+
+    test("POSITIVE 4: text/html; charset=utf-8 fires guard", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-content-type": "text/html; charset=utf-8",
+        "x-test-csp": "default-src 'self'",
+        "x-test-spa-fallback": "1",
+      });
+
+      expect(res.status).toBe(502);
+      expect(res.headers["content-type"]).toBe("application/json");
+      const json = JSON.parse(res.body);
+      expect(json.error).toBe("bad_gateway");
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked + 1);
+    });
+
+    test("POSITIVE 5: upstream 404 + text/html still yields 502 (status-independent)", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-status": "404",
+        "x-test-content-type": "text/html",
+        "x-test-csp": "default-src 'self'",
+        "x-test-spa-fallback": "1",
+      });
+
+      expect(res.status).toBe(502);
+      expect(res.headers["content-type"]).toBe("application/json");
+      const json = JSON.parse(res.body);
+      expect(json.error).toBe("bad_gateway");
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked + 1);
+    });
+
+    test("NEGATIVE 6: application/json on session-path route passes through unchanged", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-content-type": "application/json",
+        "x-test-body": JSON.stringify({ ok: true, data: "test" }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("application/json");
+      const json = JSON.parse(res.body);
+      expect(json.ok).toBe(true);
+      expect(json.data).toBe("test");
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
+    });
+
+    test("NEGATIVE 7: text/event-stream on session-path route is piped as SSE", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-content-type": "text/event-stream",
+        "x-test-body-b64": Buffer.from("data: connected\n\n").toString("base64"),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/event-stream");
+      expect(res.body).toContain("data: connected");
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
+    });
+
+    test("NEGATIVE 8: text/x-diff; charset=utf-8 passes through unchanged", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+      const diffBody = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-content-type": "text/x-diff; charset=utf-8",
+        "x-test-body-b64": Buffer.from(diffBody).toString("base64"),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("text/x-diff; charset=utf-8");
+      expect(res.body).toBe(diffBody);
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
+    });
+
+    test("NEGATIVE 9: application/octet-stream passes through unchanged", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+      const rawData = "raw binary or text stream data";
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-content-type": "application/octet-stream",
+        "x-test-body": rawData,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("application/octet-stream");
+      expect(res.body).toBe(rawData);
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
+    });
+
+    test("NEGATIVE 10: text/htmlx passes through unchanged (prefix-bug guard)", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+      const htmlxBody = "<custom-htmlx>content</custom-htmlx>";
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-content-type": "text/htmlx",
+        "x-test-body": htmlxBody,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("text/htmlx");
+      expect(res.body).toBe(htmlxBody);
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
+    });
+
+    test("NEGATIVE 11: no content-type header at all passes through unchanged", async () => {
+      const initialBlocked = testMetrics.htmlPoisonBlocked;
+      const rawData = "headerless payload";
+
+      const res = await makeRequest("GET", "/session/ses_a", {
+        "x-test-content-type": "none",
+        "x-test-body": rawData,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBeUndefined();
+      expect(res.body).toBe(rawData);
+
+      expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
+    });
   });
 });
