@@ -178,6 +178,62 @@ to 503 — data-driven, retires the silent-wrong-process class. The tightening i
 3. `GET /session/{child}/permissions` through the door returns the child's pending
    permission (not `[]`).
 4. Re-run the P4 query: **no new child assignments** in pigeon.
+5. **H1 guard:** a session created through the door and kept busy still holds a
+   valid pigeon lease >45s in (i.e. `/route` reports a non-zero `expiresAt` that
+   keeps advancing), proving lease renewal was not gated off.
+
+## Post-implementation review (2026-07-25)
+
+Three reviewers ran against the finished change (`4bdbc20..31972d3`). The spec
+reviewer and code reviewer both passed it with **zero** critical/important
+findings; **fable found a real regression they both missed**, which is the whole
+argument for keeping the third pass:
+
+- **H1 (fixed, was a genuine regression).** `placeAfterCreate` seeded the sticky
+  entry with 3 args (`proxy.ts:379`), so `routingSid` defaulted to `null` and T3's
+  new renewal gate turned itself off. **Every session created or forked through
+  the door stopped renewing its pigeon lease** for as long as it kept being used.
+  It hid well because an expired lease does not break routing —
+  `resolveProspectiveRoute` still honors the assignment (`router.ts:117-127`) — but
+  the lease is the only thing stopping a heartbeat-stale owner's in-flight run
+  from being re-placed out from under it (`router.ts:299-313`), and the door's
+  ½-TTL renewal is its only refresher (pigeon exposes no `/renew`). Root cause is
+  mine: I specified "default to null (safe: do not place)", which is the safe
+  default against placing the *wrong* sid but silently disables a working
+  mechanism. Fixed by passing the created sid explicitly; created/forked sessions
+  are always roots (P6).
+- **M1 (fixed).** `rootExists` conflated *immutable parentage* with *mutable
+  existence*: a permanent cache hit was reported as a live existence proof, so
+  `maybePromote` skipped `checkSidExists` and could place an already-deleted root,
+  re-creating phantom pigeon assignments. `rootOf` now reports `fetchedLive`, and
+  only a 200 obtained in *this* walk sets `rootExists` — which still elides the
+  duplicate GET in the only case LOW-2 was actually aimed at.
+- **M2 (fixed).** A 404 was cached for the full 30s, including the window where a
+  just-minted subagent session is becoming visible to another process — pinning
+  that child's permission traffic to the wrong process for exactly the scenario
+  this change exists to fix. 404 now gets `NOT_FOUND_TTL_MS` = 5s; network/timeout
+  faults keep 30s, since those describe the anchor rather than the session.
+- **L1 (fixed).** A failing walk no longer stamps a failure over a success a
+  concurrent walk already proved.
+
+Each fix is pinned by a test that was verified to fail without it.
+
+**Accepted, not fixed** (recorded so they are not rediscovered as surprises):
+- **L2** N children of one root each renew the root on their own ½-TTL clock →
+  duplicate `/place` calls. Idempotent (`router.ts:239-241`); noise only.
+- **L3** The new counter has two blind spots as evidence for the deferred 503
+  decision: `handleFork` forwarding to a degraded anchor is an uncounted mutation,
+  and walk failures during an anchor outage *inflate* it. Inflation is the
+  conservative direction (it delays tightening, never wrongly justifies it).
+  Counter epoch = deploy day; `reset-workspace` does not restart the door.
+- **L4** A walk that dies mid-chain discards the parentage learned at earlier hops.
+
+Also confirmed by fable against the source: no body/socket leak in the new code;
+the concurrent-walk stampede is benign (drift polls are serialised per leg,
+`drift.ts:72-85`); the double-renew guard is intact; child SSE legs neither flap
+nor go permanently blind (worst case ≈40s stale, self-healing); and the additive
+`/healthz` field breaks no consumer in the repo (the canary greps `version`,
+`oc-pool-attach` checks only the status code).
 
 ## Residuals (record on landing)
 
