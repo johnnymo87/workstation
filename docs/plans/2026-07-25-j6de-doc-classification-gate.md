@@ -207,6 +207,81 @@ name it so it is not a surprise.
 6. State explicitly what each check would have caught (Phase 9 = A; a future
    pin-bump denial = B) and what neither catches (existing TUI-needed denials → D4).
 
+---
+
+## OUTCOME (implemented 2026-07-25) — NOT yet deployed
+
+Commits: `52b9f83` (Check A), `866634a` (pin-duplication fix + wiring),
+`cb8854e` (Check B), `820a01a` (fabricated-supersession fix). Suite **312 green**
+(baseline 297).
+
+### Deviation from the design above
+The draft enum included **`tui-unused`**. It was **dropped**: on this box that
+claim is *unfalsifiable* (finding 8), so it would have been decoration. Replaced
+with **`not-session-scopable`**, which asserts something about the door's
+architecture that can actually be reasoned about. Final kinds:
+`by-design-501`, `not-session-scopable`, `superseded`, `needs-mechanism`,
+`accepted-gap`.
+
+Census as dispositioned (70 de-duplicated): 21 `by-design-501` (class blanket for
+`pty`/`tui`), 34 `not-session-scopable`, 11 `needs-mechanism` (all
+`workstation-mlve.11` — these ARE the D4 rows), 3 `superseded`, 1 `accepted-gap`.
+
+### Two defects found in review — both instructive
+1. **A duplicated pin (critical, would have made the gate silently wrong).** The
+   Check A implementation added `pkgs/opencode-patched/default.nix`, a second copy
+   of the pin, and fed the gate from it. Since
+   `update-opencode-patched.yml` edits **only** `home.base.nix`, the next
+   automated bump would have left the gate validating the OLD binary while the
+   pool ran the NEW one — green and wrong, at exactly the moment the gate exists
+   for. Fixed by deleting it and instantiating the gate against the in-scope
+   pinned `opencode` in `home.base.nix`.
+2. **A fabricated supersession, and it was MY fault.** I asserted in the task
+   prompt that `POST /sync/start` was superseded by a session-scoped route; the
+   subagent invented a rationale to satisfy the premise rather than pushing back.
+   There is no session-scoped sync route at all. Now `accepted-gap` +
+   `workstation-mlve.11`, because `sync.start` *is* in the TUI SDK surface and
+   the Phase 9 audit only checked 404s, never 403s — so the through-door
+   consequence is genuinely unverified.
+
+**Recorded limit of Check B (from defect 2):** it validates a `supersededBy`
+target *structurally* (exists, non-denying) and therefore **cannot** detect a
+semantically nonsensical pairing. The bogus entry passed the gate.
+
+### Also fixed during review
+- `test.sh` hardcoded a **third** copy of the pin as a literal store path, and
+  **silently skipped** the gate (warning + exit 0) when it was absent — a gate
+  that no-ops while reporting success. Now resolves via the profile and fails loud.
+- Poll bounds widened `10x0.2s` → `120x0.5s` with early-exit detection, in both
+  `test.sh` and `route-gate.nix`. A flaky gate trains people to ignore it.
+- Corrected an overclaim in the new reconciliation header: it said the gate runs
+  "during build and CI". **There is no CI job for this gate.**
+
+### Verification actually performed (each individually, not generalised)
+- Check A detection power, re-proven against the **rewritten combined** gate.
+- Check B detection power: one disposition deleted → that route named.
+- Field enforcement, per requirement: missing `bead`, empty `rationale`.
+- Both checks report in one run.
+- Wiring, structurally: the gate drv is a genuine **requisite of the
+  `home-manager-generation` drv**, so `home-manager switch` cannot succeed without
+  building it; both the pinned opencode and the door package are direct drv inputs.
+- Wiring, empirically (door leg): perturbing `routes.classification.ts` changes the
+  gate's out path.
+- **NOT verified:** the pin leg by mutation — that needs real upstream hashes.
+  Structural proof only, stated as such.
+
+### Residuals
+- Ordering: a door-source-only change is deployed *before* the home-manager
+  closure builds the gate (runbook order). `test.sh` is the pre-deploy mitigation.
+- Blast radius: a failing gate fails `home-manager switch`, retried by
+  `pull-workstation` every 4h, blocking unrelated home-manager changes. Intended
+  fail-closed behaviour, named so it is not a surprise.
+- No standalone `nix build` target for the gate (would require a second pin copy).
+  A `pin.nix` single-source refactor would restore it, but it touches the
+  load-bearing updater — deliberately deferred.
+- Check B covers `/doc` rows only; table-only entries (e.g. manual `GET /`) are
+  static and out of scope.
+
 ## Out of scope
 
 - Fixing existing denials that the TUI needs → **item 3 / `mlve.11` (D4)**.

@@ -2,9 +2,20 @@
  * Route Classification Table for opencode-frontdoor.
  *
  * --- RECONCILIATION ---
- * Note: The automated route-gate (`src/route-gate.ts`) supersedes `routes.snapshot.txt`'s
- * reconciliation role. All /doc routes are verified programmatically against classify() (Check A)
- * and denial dispositions (Check B) during build and CI.
+ * DO NOT hand-reconcile route counts here again. The route gate (`src/route-gate.ts`)
+ * supersedes `routes.snapshot.txt`'s reconciliation role: it boots the PINNED opencode,
+ * reads its `/doc`, and mechanically verifies every declared path x method against
+ * `classify()` (Check A) and every denial against `routes.dispositions.ts` (Check B).
+ * The hand-maintained totals that used to live here are gone deliberately — they were
+ * the artifact that required reconciling.
+ *
+ * Where it runs (be precise; there is NO CI job for this):
+ *   - Authoritative: the nix check derivation `route-gate.nix`, wired into the
+ *     home-manager closure at `users/dev/home.base.nix` (cloudbox only). It depends on
+ *     BOTH the pinned opencode and this package, so a pin bump or a table edit re-runs
+ *     it, and `home-manager switch` cannot succeed while it fails.
+ *   - On demand: `./test.sh` (pre-deploy developer signal for the same check).
+ * Design: docs/plans/2026-07-25-j6de-doc-classification-gate.md
  *
  * --- DUAL SURFACE ---
  * This API exposes a dual surface: a bare surface (e.g. /session/...) and its `/api/*` mirror.
