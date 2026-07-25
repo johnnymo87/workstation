@@ -910,6 +910,7 @@ ${serveIdCase}
         DRIFT_PORTS=""
         DRIFT_DETAILS=""
         DRIFT_SIG_PARTS=""
+        VERIFIED_COUNT=0
 
         for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
           UNIT="opencode-serve@$PORT.service"
@@ -943,12 +944,15 @@ ${serveIdCase}
                 RUN_EXE=$(readlink "/proc/$PID/exe" 2>/dev/null || true)
                 if [ -n "$RUN_EXE" ]; then
                   RUN_PREFIX=$(echo "$RUN_EXE" | cut -d/ -f1-4)
-                  if [ -n "$RUN_PREFIX" ] && [ "$RUN_PREFIX" != "$REF_PREFIX" ]; then
-                    echo "WARNING: $UNIT binary drift: running=$RUN_PREFIX installed=$REF_PREFIX"
-                    DRIFT_PORTS="$DRIFT_PORTS $PORT"
-                    DRIFT_DETAILS="''${DRIFT_DETAILS}  - port $PORT: $RUN_PREFIX
+                  if [ -n "$RUN_PREFIX" ]; then
+                    VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
+                    if [ "$RUN_PREFIX" != "$REF_PREFIX" ]; then
+                      echo "WARNING: $UNIT binary drift: running=$RUN_PREFIX installed=$REF_PREFIX"
+                      DRIFT_PORTS="$DRIFT_PORTS $PORT"
+                      DRIFT_DETAILS="''${DRIFT_DETAILS}  - port $PORT: $RUN_PREFIX
 "
-                    DRIFT_SIG_PARTS="''${DRIFT_SIG_PARTS}$PORT:$RUN_PREFIX;"
+                      DRIFT_SIG_PARTS="''${DRIFT_SIG_PARTS}$PORT:$RUN_PREFIX;"
+                    fi
                   fi
                 fi
               fi
@@ -1038,7 +1042,10 @@ Note: Restarting the serve pool terminates live OpenCode sessions. Pick an appro
 EOF
 )
           ${driftAlert} "$STATE/drift-alerted" "$REF_PREFIX|$DRIFT_SIG_PARTS" "$DRIFT_TEXT"
-        else
+        elif [ -n "$REF_PREFIX" ] && [ "$VERIFIED_COUNT" -gt 0 ]; then
+          # Clear throttle file ONLY on confirmed resolution (at least one serve verified and no drift found).
+          # Do NOT clear on unverifiable passes (e.g. REF_PREFIX="" mid-home-manager-switch or all serves down),
+          # as clearing on unknown state would re-arm the alert and cause duplicate notifications.
           rm -f "$STATE/drift-alerted"
         fi
       ''}";
