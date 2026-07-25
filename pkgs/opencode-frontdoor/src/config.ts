@@ -12,8 +12,18 @@ export interface Config {
   cheapFirstByteMs: number;
   /*
    * INVARIANT (LOW-2): stickyTtlMs <= pigeon PIGEON_LEASE_TTL_MS (both default 30s).
-   * HIGH-2 renewal at 1/2 TTL keeps a sticky-pinned session's lease alive in pigeon
-   * so that the session never outlives its active lease.
+   * HIGH-2 renewal at 1/2 TTL re-places a sticky-pinned session in pigeon.
+   *
+   * CORRECTION (2026-07-25, sq1v T5): this comment used to claim the renewal "keeps
+   * the lease alive so the session never outlives its active lease". That is FALSE.
+   * `POST /place` is pigeon's `ensureRouted` = `resolveRoute ?? placeSession`, which
+   * returns a still-valid lease UNCHANGED — it never extends one. The only renewer,
+   * `touch()`/`renewCAS`, has no HTTP route and no callers. So a lease lapses at its
+   * TTL and is only re-created by the NEXT renewal tick, and renewal only fires on
+   * MUTATING sticky hits — so a long turn (one POST, then minutes of SSE/GETs) holds
+   * no lease for most of its duration. That matters because the lease is what stops
+   * `reassignFromDeadServe` migrating a heartbeat-stale (CPU-blocked) owner mid-run.
+   * Tracked for the pigeon side; the door cannot fix it alone.
    */
   stickyTtlMs: number;
   driftCheckMs: number; // owner-drift re-resolve interval (mirrors the deployed TUI's 5s)

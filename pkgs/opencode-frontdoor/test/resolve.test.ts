@@ -334,6 +334,37 @@ describe('resolveOwner', () => {
     });
   });
 
+  test('M1: a SECOND resolve served from the parentage cache reports rootExists: FALSE', async () => {
+    // rootExists means "confirmed to exist by a live 200 in THIS resolution", and
+    // maybePromote skips checkSidExists when it is true. Parentage caches forever,
+    // but existence does not -- a root can be deleted. So a cache-served walk must
+    // NOT claim existence, or the door can place an already-deleted root. Without
+    // this assertion, hardcoding `rootExists: true` in resolve.ts passes the suite.
+    const responder = async (url: string) => {
+      if (url.includes('/route?session_id=child_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/child_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'root_sid' }) };
+      }
+      if (url.includes('/session/root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      if (url.includes('/route?session_id=root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ apiBase: 'http://root-serve.local' }) };
+      }
+      return { ok: false, status: 500 };
+    };
+
+    const first = await resolveOwner('child_sid', dummyConfig, { fetch: vi.fn().mockImplementation(responder) });
+    expect(first.rootExists).toBe(true);   // walked live
+
+    const second = await resolveOwner('child_sid', dummyConfig, { fetch: vi.fn().mockImplementation(responder) });
+    expect(second.rootExists).toBe(false); // parentage from cache -> NOT an existence proof
+    expect(second.routingSid).toBe('root_sid');
+    expect(second.url).toBe('http://root-serve.local');
+  });
+
   test('404 + child whose root is ALSO 404 -> anchor, degraded, reason: not-routed, routingSid: root, viaParent: true, rootExists: true', async () => {
     const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/route?session_id=child_sid')) {

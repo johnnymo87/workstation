@@ -9,6 +9,10 @@ export interface RequestLogEntry {
   method?: string;
   path?: string;
   action?: string;
+  /** sq1v: the owner was resolved via an ancestor's route (child/subagent session). */
+  viaParent?: boolean;
+  /** sq1v: the sid pigeon lease ops used (the root). Differs from `sid` for children. */
+  routingSid?: string | null;
 }
 
 export interface MetricsSnapshot {
@@ -56,6 +60,8 @@ export class RequestLogger {
       method: entry.method,
       path: entry.path,
       action: entry.action,
+      viaParent: entry.viaParent,
+      routingSid: entry.routingSid,
     });
     this.sink(logLine);
 

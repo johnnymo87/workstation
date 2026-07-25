@@ -158,6 +158,42 @@ describe('rootOf', () => {
     expect(fakeFetch).toHaveBeenCalledTimes(0);
   });
 
+  test('5d. L1: a walk that fails while a CONCURRENT walk succeeds must not stamp a failure over it', async () => {
+    // The real L1 race: two walks for the same sid both miss the entry cache, then
+    // one succeeds and caches while the other is still in flight and about to fail.
+    // Test 5c below only proves the entry-cache short-circuit; it cannot reach the
+    // guard at all, so this is the one that actually pins it.
+    let failA!: (e: Error) => void;
+    const hangingA = new Promise<any>((_res, rej) => { failA = rej; });
+
+    let call = 0;
+    const fakeFetch = vi.fn().mockImplementation(() => {
+      call++;
+      if (call === 1) return hangingA;               // walk A: in flight, will fail
+      return Promise.resolve({                        // walk B: succeeds
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'sid_race' }),
+      });
+    });
+
+    const walkA = rootOf('sid_race', dummyConfig, { fetch: fakeFetch });
+    const walkB = rootOf('sid_race', dummyConfig, { fetch: fakeFetch });
+
+    // B completes first and caches the confirmed root.
+    expect(await walkB).toEqual({ root: 'sid_race', confirmed: true, fetchedLive: true });
+
+    // Now A fails. Without the guard it would stamp a 30s failure over B's success.
+    failA(new Error('boom'));
+    await walkA;
+
+    // The proven root must survive, served from cache with no further fetching.
+    const probe = vi.fn();
+    expect(await rootOf('sid_race', dummyConfig, { fetch: probe }))
+      .toEqual({ root: 'sid_race', confirmed: true, fetchedLive: false });
+    expect(probe).toHaveBeenCalledTimes(0);
+  });
+
   test('5c. a failure must NOT overwrite a success a concurrent walk already proved', async () => {
     // Warm a confirmed root, then make the anchor fail for the same sid.
     const okFetch = vi.fn().mockResolvedValue({

@@ -209,7 +209,13 @@ describe("FrontDoor Integration", () => {
           "x-from-serve": "anchor",
           "x-test-echo-auth": req.headers["authorization"] || ""
         });
-        res.end(JSON.stringify({ id: req.headers["x-test-mint-id"] }));
+        const minted: any = { id: req.headers["x-test-mint-id"] };
+        // Lets a test mint a CHILD, which POST /session genuinely supports via a
+        // body parentID (verified live against the deployed opencode rev).
+        if (req.headers["x-test-mint-parent"]) {
+          minted.parentID = req.headers["x-test-mint-parent"];
+        }
+        res.end(JSON.stringify(minted));
         return;
       }
 
@@ -2094,6 +2100,28 @@ describe("FrontDoor Integration", () => {
     } finally {
       await new Promise<void>((resolve) => renewalFrontDoor.close(() => resolve()));
     }
+  });
+
+  test("sq1v: creating a CHILD through the door must NOT place it with pigeon", async () => {
+    // POST /session accepts a body parentID, so a child can be minted through the
+    // door. Placing it would give pigeon an arbitrary HRW assignment for the child,
+    // which permanently shadows the parent walk (/route would 200 thereafter).
+    pigeonPlaceCalls = [];
+
+    const res = await makeRequest("POST", "/session", {
+      "x-test-mint-id": "ses_minted_child",
+      "x-test-mint-parent": "ses_minted_root",
+    }, "{}");
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).id).toBe("ses_minted_child");
+    expect(pigeonPlaceCalls).toHaveLength(0); // the child was NOT placed
+
+    // A plain root minted the same way IS still placed (no regression).
+    pigeonPlaceCalls = [];
+    const rootRes = await makeRequest("POST", "/session", { "x-test-mint-id": "ses_minted_root2" }, "{}");
+    expect(rootRes.status).toBe(200);
+    expect(pigeonPlaceCalls).toEqual([{ session_id: "ses_minted_root2" }]);
   });
 
   test("sq1v H1 regression: a session created THROUGH the door still renews its pigeon lease", async () => {

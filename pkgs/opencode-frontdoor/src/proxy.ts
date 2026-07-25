@@ -351,10 +351,14 @@ async function placeAfterCreate(
 
   const anchorBody = await response.text();
   let parsedSid: string | undefined;
+  let parsedParentId: string | undefined;
   try {
     const parsed = JSON.parse(anchorBody);
     if (parsed && typeof parsed === "object" && typeof parsed.id === "string") {
       parsedSid = parsed.id;
+      if (typeof parsed.parentID === "string" && parsed.parentID.length > 0) {
+        parsedParentId = parsed.parentID;
+      }
     }
   } catch (err) {
     // invalid JSON
@@ -370,6 +374,24 @@ async function placeAfterCreate(
   }
 
   createdSid = parsedSid;
+
+  // A CHILD must never be placed with pigeon: pigeon's placement is HRW and
+  // parent-unaware, so an assignment for a child pins it to an arbitrary serve and
+  // permanently shadows the parent walk (pigeon /route would then 200). Normally
+  // children are minted in-process by the Task tool and never reach the door, but
+  // `POST /session` accepts a `parentID` in the body (verified live against the
+  // deployed rev), so a client CAN create one through the door. We already parsed
+  // the mint response — trust that field rather than an assumption about callers.
+  // Skip placement; the child resolves to its root's owner via the parent walk.
+  if (parsedParentId) {
+    console.warn(
+      `[FRONTDOOR WARN] Created session ${parsedSid} has parentID ${parsedParentId}; skipping pigeon placement (children follow their root's owner).`,
+    );
+    const responseHeaders = forwardableResponseHeaders(response.headers);
+    res.writeHead(response.status, responseHeaders);
+    res.end(anchorBody);
+    return { sid: createdSid, degraded: degradedState };
+  }
 
   const placeResult = await placeSession(parsedSid, ctx.config, ctx.deps);
 
@@ -433,6 +455,10 @@ export async function handleRequest(
   let target = "";
   let prospective = false;
   let degraded = false;
+  // sq1v observability: recorded so a child's routing is an OBSERVATION in the log
+  // rather than something that has to be inferred from pigeon state after the fact.
+  let viaParent: boolean | undefined;
+  let routingSid: string | null | undefined;
 
   const method = req.method || "GET";
   const url = new URL(req.url || "", "http://internal");
@@ -452,6 +478,8 @@ export async function handleRequest(
       target,
       prospective,
       degraded,
+      viaParent,
+      routingSid,
       status: res.statusCode || 200,
       durationMs,
       method,
@@ -606,6 +634,10 @@ export async function handleRequest(
                   placeSession(routingSid, ctx.config, ctx.deps).then((result) => {
                     if (!result.ok) {
                       console.warn(`[FRONTDOOR WARN] lease renewal placeSession failed for sid: ${routingSid}, status: ${result.status}`);
+                    } else {
+                      // Log SUCCESSES too: without this, "did renewal fire?" can only be
+                      // inferred from pigeon lease timing after the fact (sq1v T5 Claim B).
+                      console.log(`[FRONTDOOR] lease renewal placed sid: ${routingSid}${routingSid === sid ? "" : ` (root of ${sid})`}`);
                     }
                   }).catch((err) => {
                     console.warn(`[FRONTDOOR WARN] lease renewal placeSession threw for sid: ${routingSid}`, err);
@@ -623,6 +655,8 @@ export async function handleRequest(
 
         // 2) Normal resolve/promote (existing logic, unchanged).
         const resolved = await resolveOwner(ex.sid, ctx.config, ctx.deps);
+        if (resolved.viaParent) viaParent = true;
+        if (resolved.routingSid !== ex.sid) routingSid = resolved.routingSid;
         const isPromoting = isPromotingRequest(method, url.pathname, ex);
         let wasPromoted = false;
         if (isPromoting) {

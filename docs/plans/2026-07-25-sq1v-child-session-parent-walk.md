@@ -216,7 +216,21 @@ argument for keeping the third pass:
 - **L1 (fixed).** A failing walk no longer stamps a failure over a success a
   concurrent walk already proved.
 
-Each fix is pinned by a test that was verified to fail without it.
+~~Each fix is pinned by a test that was verified to fail without it.~~
+
+> **CORRECTION (third fable pass, same day). That claim was FALSE for two of the
+> four fixes, and it was mine.** I mutation-tested H1 and M2 and then generalised
+> to all four without checking. Re-running the experiment: disabling the **L1**
+> guard entirely, and hardcoding **`rootExists: true`** to undo M1's integration,
+> each left **all 294 tests passing**. Test 5c could not reach the L1 guard by
+> construction (it asserts the failing fetch is never called, so it pins the
+> entry-cache short-circuit instead), and every `rootExists` assertion in
+> `resolve.test.ts` asserted `true`, so the dangerous cached-hit case was asserted
+> nowhere. Both gaps are now closed by tests verified to fail under exactly those
+> mutations (`parent.test.ts` "5d. L1: … CONCURRENT walk", `resolve.test.ts` "M1: a
+> SECOND resolve served from the parentage cache reports rootExists: FALSE").
+> The shipped code was correct throughout; what was wrong was the claim about how
+> well it was verified.
 
 **Accepted, not fixed** (recorded so they are not rediscovered as surprises):
 - **L2** N children of one root each renew the root on their own ½-TTL clock →
@@ -261,6 +275,39 @@ guarantee than the config comment implies.
 **Not yet exercised:** a real *pending* subagent permission round-trip (the child
 queried had already finished, so `[]` was correct). Routing for that exact path is
 proven; the remaining dimension gets covered the next time a subagent raises one.
+
+### T5 evidence, re-graded by the third fable pass — and the gap it found
+
+Fable graded the four claims **A CONCLUSIVE · B SUGGESTIVE · C NOT SUPPORTED ·
+D CONCLUSIVE-but-understated**, and it was right on every count:
+
+- **A** survives, but by *triangulation* (child 404 + no assignment appeared +
+  prospective routing is gated on assignment existence, `router.ts:110-113`, which
+  structurally excludes the HRW-coincidence worry), **not** by the single log line
+  I cited. Now made a direct observation instead: `viaParent`/`routingSid` are
+  logged (they were threaded but never emitted).
+- **B** overstated exclusivity — `forSession → ensureRouted` and
+  `reassignFromDeadServe` can also create leases and were excluded only by
+  plausibility. Renewal *successes* are now logged so this is observable, not
+  inferred.
+- **C was not evidence at all.** `GET /session/{child}/permissions` is neither
+  mutating nor promoting, so **no placement code path ever executed** — "still 1 of
+  4226" was a thermometer never inserted. **Now properly tested (2026-07-25):** with
+  child `ses_0dc429ec` and its root `ses_0de5f385` both unrouted, a *promoting*
+  request for the CHILD through the door (`GET /event?session_ids={child}`) left the
+  **child still unrouted (404)** and **placed the ROOT** (serve-0). That is
+  `maybePromote` placing `routingSid`, and it is the first time the core new
+  mechanism has fired in production. Pre-fix the same request would have pinned the
+  child to an arbitrary HRW serve.
+- **D** is understated; split out as its own pigeon-side bead `workstation-2xu4`,
+  and the false invariant comment in `config.ts` is corrected in place.
+
+**Also closed in response (MEDIUM):** `POST /session` accepts a body `parentID` —
+verified live on the deployed rev, it really does mint a child — so a client could
+have created a child *through the door* and had `placeAfterCreate` place it. The
+mint response was already parsed and already carried `parentID`; the door now
+trusts that field and skips placement for a child, rather than relying on the
+assumption that no caller does this.
 
 ## Residuals (record on landing)
 
