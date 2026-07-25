@@ -1,5 +1,6 @@
-import { describe, test, expect, vi } from 'vitest';
+import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { resolveOwner } from '../src/resolve.js';
+import { clearRootCache } from '../src/parent.js';
 import type { Config } from '../src/config.js';
 
 describe('resolveOwner', () => {
@@ -17,6 +18,10 @@ describe('resolveOwner', () => {
     mintTimeoutMs: 60000,
   };
 
+  beforeEach(() => {
+    clearRootCache();
+  });
+
   test('active route (200, apiBase) -> url + reason "active", degraded false', async () => {
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -31,6 +36,7 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: false,
       reason: 'active',
+      routingSid: 'sid_123',
     });
 
     expect(fakeFetch).toHaveBeenCalledTimes(1);
@@ -55,6 +61,7 @@ describe('resolveOwner', () => {
       prospective: true,
       degraded: false,
       reason: 'prospective',
+      routingSid: 'sid_123',
     });
   });
 
@@ -72,6 +79,7 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: false,
       reason: 'active',
+      routingSid: 'sid_123',
     });
   });
 
@@ -87,12 +95,11 @@ describe('resolveOwner', () => {
 
     expect(fakeFetch).toHaveBeenCalledTimes(1);
     const [, requestInit] = fakeFetch.mock.calls[0] as [string, RequestInit];
-    const headers = requestInit?.headers as Record<string, string>;
-    expect(headers).toBeDefined();
-    expect(headers['Authorization']).toBe('Bearer my-secret-token');
+    const headers = requestInit?.headers as Record<string, string> | undefined;
+    expect(headers?.['Authorization'] || headers?.['authorization']).toBe('Bearer my-secret-token');
   });
 
-  test('404 from pigeon -> anchor + reason "not-routed", degraded true', async () => {
+  test('404 from pigeon + anchor walk fails -> anchor + reason "not-routed", degraded true, routingSid: null', async () => {
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 404,
@@ -106,10 +113,11 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: true,
       reason: 'not-routed',
+      routingSid: null,
     });
   });
 
-  test('500/503 from pigeon -> anchor + reason "pigeon-error", degraded true', async () => {
+  test('500/503 from pigeon -> anchor + reason "pigeon-error", degraded true, routingSid: sid', async () => {
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 503,
@@ -123,7 +131,9 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: true,
       reason: 'pigeon-error',
+      routingSid: 'sid_123',
     });
+    expect(fakeFetch).toHaveBeenCalledTimes(1);
   });
 
   test('200 with missing apiBase/api_base -> anchor + reason "pigeon-error", degraded true', async () => {
@@ -140,6 +150,7 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: true,
       reason: 'pigeon-error',
+      routingSid: 'sid_123',
     });
   });
 
@@ -159,6 +170,7 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: true,
       reason: 'pigeon-error',
+      routingSid: 'sid_123',
     });
   });
 
@@ -172,7 +184,9 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: true,
       reason: 'pigeon-unreachable',
+      routingSid: 'sid_123',
     });
+    expect(fakeFetch).toHaveBeenCalledTimes(1);
   });
 
   test('timeout (fetch takes too long) -> anchor + reason "pigeon-unreachable", degraded true', async () => {
@@ -210,6 +224,7 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: true,
       reason: 'pigeon-unreachable',
+      routingSid: 'sid_123',
     });
 
     expect(fakeFetch).toHaveBeenCalledTimes(1);
@@ -232,6 +247,7 @@ describe('resolveOwner', () => {
       prospective: false,
       degraded: true,
       reason: 'pigeon-error',
+      routingSid: 'sid_123',
     });
   });
 
@@ -247,6 +263,7 @@ describe('resolveOwner', () => {
     expect(result.degraded).toBe(true);
     expect(result.reason).toBe('pigeon-error');
     expect(result.url).toBe('http://anchor.local');
+    expect(result.routingSid).toBe('sid_123');
   });
 
   test('trailing slash on pigeonUrl does not produce a double slash in the request URL', async () => {
@@ -261,5 +278,274 @@ describe('resolveOwner', () => {
 
     const [requestUrl] = fakeFetch.mock.calls[0] as [string, RequestInit];
     expect(requestUrl).toBe('http://pigeon.local/route?session_id=sid_123');
+  });
+
+  test('404 + sid is a confirmed ROOT (anchor 200, no parentID) -> anchor/degraded/not-routed, routingSid: sid, rootExists: true', async () => {
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/route?session_id=root_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('root_sid', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://anchor.local',
+      prospective: false,
+      degraded: true,
+      reason: 'not-routed',
+      routingSid: 'root_sid',
+      rootExists: true,
+    });
+    expect(fakeFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('404 + sid is a CHILD whose root is ROUTED -> url = root apiBase, degraded: false, reason: active, routingSid: root, viaParent: true, rootExists: true', async () => {
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/route?session_id=child_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/child_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'root_sid' }) };
+      }
+      if (url.includes('/session/root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      if (url.includes('/route?session_id=root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ apiBase: 'http://root-serve.local' }) };
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('child_sid', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://root-serve.local',
+      prospective: false,
+      degraded: false,
+      reason: 'active',
+      routingSid: 'root_sid',
+      viaParent: true,
+      rootExists: true,
+    });
+  });
+
+  test('404 + child whose root is ALSO 404 -> anchor, degraded, reason: not-routed, routingSid: root, viaParent: true, rootExists: true', async () => {
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/route?session_id=child_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/child_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'root_sid' }) };
+      }
+      if (url.includes('/session/root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      if (url.includes('/route?session_id=root_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('child_sid', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://anchor.local',
+      prospective: false,
+      degraded: true,
+      reason: 'not-routed',
+      routingSid: 'root_sid',
+      viaParent: true,
+      rootExists: true,
+    });
+  });
+
+  test('404 + child whose root lookup hits a pigeon ERROR -> reason: pigeon-error (NOT flattened), degraded true', async () => {
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/route?session_id=child_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/child_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'root_sid' }) };
+      }
+      if (url.includes('/session/root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      if (url.includes('/route?session_id=root_sid')) {
+        return { ok: true, status: 503, json: async () => ({ error: 'pigeon error' }) };
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('child_sid', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://anchor.local',
+      prospective: false,
+      degraded: true,
+      reason: 'pigeon-error',
+      routingSid: 'root_sid',
+      viaParent: true,
+      rootExists: true,
+    });
+  });
+
+  test('404 + child whose root lookup hits pigeon UNREACHABLE -> reason: pigeon-unreachable, degraded true', async () => {
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/route?session_id=child_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/child_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'root_sid' }) };
+      }
+      if (url.includes('/session/root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      if (url.includes('/route?session_id=root_sid')) {
+        throw new Error('Network error');
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('child_sid', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://anchor.local',
+      prospective: false,
+      degraded: true,
+      reason: 'pigeon-unreachable',
+      routingSid: 'root_sid',
+      viaParent: true,
+      rootExists: true,
+    });
+  });
+
+  test('404 + anchor walk fails -> routingSid: null, reason: not-routed, degraded true', async () => {
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/route?session_id=unknown_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/unknown_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'session not found on anchor' }) };
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('unknown_sid', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://anchor.local',
+      prospective: false,
+      degraded: true,
+      reason: 'not-routed',
+      routingSid: null,
+    });
+  });
+
+  test('404 + child, root routed as PROSPECTIVE -> prospective: true propagates', async () => {
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/route?session_id=child_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/child_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'root_sid' }) };
+      }
+      if (url.includes('/session/root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      if (url.includes('/route?session_id=root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ apiBase: 'http://prospective-serve.local', prospective: true }) };
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('child_sid', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://prospective-serve.local',
+      prospective: true,
+      degraded: false,
+      reason: 'prospective',
+      routingSid: 'root_sid',
+      viaParent: true,
+      rootExists: true,
+    });
+  });
+
+  test('multi-level: grandchild -> child -> root routed; resolves to root owner with routingSid: root', async () => {
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/route?session_id=grandchild_sid')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/grandchild_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'child_sid' }) };
+      }
+      if (url.includes('/session/child_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'root_sid' }) };
+      }
+      if (url.includes('/session/root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      if (url.includes('/route?session_id=root_sid')) {
+        return { ok: true, status: 200, json: async () => ({ apiBase: 'http://root-serve.local' }) };
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('grandchild_sid', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://root-serve.local',
+      prospective: false,
+      degraded: false,
+      reason: 'active',
+      routingSid: 'root_sid',
+      viaParent: true,
+      rootExists: true,
+    });
+  });
+
+  test('assert call ORDER and counts on fake fetch for child case', async () => {
+    const calls: string[] = [];
+    const fakeFetch = vi.fn().mockImplementation(async (url: string) => {
+      calls.push(url);
+      if (url.includes('/route?session_id=child')) {
+        return { ok: true, status: 404, json: async () => ({ error: 'not routed' }) };
+      }
+      if (url.includes('/session/child')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: 'parent' }) };
+      }
+      if (url.includes('/session/parent')) {
+        return { ok: true, status: 200, json: async () => ({ parentID: null }) };
+      }
+      if (url.includes('/route?session_id=parent')) {
+        return { ok: true, status: 200, json: async () => ({ apiBase: 'http://parent-serve.local' }) };
+      }
+      return { ok: false, status: 500 };
+    });
+
+    const result = await resolveOwner('child', dummyConfig, { fetch: fakeFetch });
+
+    expect(result).toEqual({
+      url: 'http://parent-serve.local',
+      prospective: false,
+      degraded: false,
+      reason: 'active',
+      routingSid: 'parent',
+      viaParent: true,
+      rootExists: true,
+    });
+
+    expect(calls).toEqual([
+      'http://pigeon.local/route?session_id=child',
+      'http://anchor.local/session/child',
+      'http://anchor.local/session/parent',
+      'http://pigeon.local/route?session_id=parent',
+    ]);
+    expect(fakeFetch).toHaveBeenCalledTimes(4);
   });
 });

@@ -1040,6 +1040,11 @@ describe("FrontDoor Integration", () => {
   test("16. wall-clock first-byte timeout (Part C): non-exempt request times out with 503", async () => {
     let slowServerPort: number;
     const slowServer = http.createServer((req, res) => {
+      if (req.method === "GET" && req.url && req.url.startsWith("/session/")) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
       // Do not send headers, just sleep/idle
     });
     await new Promise<void>((resolve) => slowServer.listen(0, "127.0.0.1", () => resolve()));
@@ -1104,6 +1109,11 @@ describe("FrontDoor Integration", () => {
     });
 
     const slowServer = http.createServer((req, res) => {
+      if (req.method === "GET" && req.url && req.url.startsWith("/session/")) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
       if (req.url && req.url.includes("/wait")) {
         receivedWaitRequest = true;
         resolveWaitReceived();
@@ -1166,6 +1176,11 @@ describe("FrontDoor Integration", () => {
   test("18. wall-clock first-byte timeout (Part C): slow upload (W9) does NOT reset wall-clock timer, still times out", async () => {
     let slowServerPort: number;
     const slowServer = http.createServer((req, res) => {
+      if (req.method === "GET" && req.url && req.url.startsWith("/session/")) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
       // Consume body, never send headers
       req.on("data", () => {});
     });

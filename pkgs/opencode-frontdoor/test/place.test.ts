@@ -198,6 +198,7 @@ describe('place.ts', () => {
         prospective: false,
         degraded: true,
         reason: 'not-routed',
+        routingSid: 'ses_123',
       };
 
       const outcome = await maybePromote(
@@ -225,6 +226,7 @@ describe('place.ts', () => {
         prospective: false,
         degraded: false,
         reason: 'active',
+        routingSid: 'ses_123',
       };
 
       const outcome = await maybePromote(
@@ -252,6 +254,7 @@ describe('place.ts', () => {
         prospective: false,
         degraded: true,
         reason: 'pigeon-unreachable',
+        routingSid: 'ses_123',
       };
 
       const outcome = await maybePromote(
@@ -292,6 +295,7 @@ describe('place.ts', () => {
         prospective: true,
         degraded: false,
         reason: 'prospective',
+        routingSid: 'ses_123',
       };
 
       const outcome = await maybePromote(
@@ -341,6 +345,7 @@ describe('place.ts', () => {
         prospective: true,
         degraded: false,
         reason: 'prospective',
+        routingSid: 'ses_123',
       };
 
       // First promotion
@@ -397,6 +402,7 @@ describe('place.ts', () => {
         prospective: false,
         degraded: true,
         reason: 'not-routed',
+        routingSid: 'ses_123',
       };
 
       const outcome1 = await maybePromote(
@@ -470,6 +476,7 @@ describe('place.ts', () => {
         prospective: true,
         degraded: false,
         reason: 'prospective',
+        routingSid: 'ses_123',
       };
 
       const outcome = await maybePromote(
@@ -524,6 +531,7 @@ describe('place.ts', () => {
           prospective: false,
           degraded: true,
           reason: 'not-routed',
+          routingSid: 'ses_123',
         };
 
         const outcome = await maybePromote(
@@ -558,6 +566,7 @@ describe('place.ts', () => {
           prospective: false,
           degraded: true,
           reason: 'not-routed',
+          routingSid: 'ses_123',
         };
 
         const outcome = await maybePromote(
@@ -605,6 +614,7 @@ describe('place.ts', () => {
           prospective: false,
           degraded: true,
           reason: 'not-routed',
+          routingSid: 'ses_123',
         };
 
         const outcome = await maybePromote(
@@ -653,6 +663,7 @@ describe('place.ts', () => {
           prospective: false,
           degraded: true,
           reason: 'not-routed',
+          routingSid: 'ses_123',
         };
 
         const outcome = await maybePromote(
@@ -701,6 +712,7 @@ describe('place.ts', () => {
           prospective: false,
           degraded: true,
           reason: 'not-routed',
+          routingSid: 'ses_123',
         };
 
         const outcome = await maybePromote(

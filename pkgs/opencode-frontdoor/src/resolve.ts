@@ -1,5 +1,6 @@
 import type { Config } from "./config.js";
 import { boundedFetch, stripTrailingSlashes, isAbsoluteHttpUrl, discardBody } from "./http.js";
+import { rootOf } from "./parent.js";
 
 export type ResolveReason =
   | "active"              // 200, valid lease
@@ -13,12 +14,23 @@ export interface ResolvedOwner {
   prospective: boolean; // true only for the 200-prospective case
   degraded: boolean;    // true whenever we fell back to the anchor
   reason: ResolveReason;
+  /** sid that pigeon lease ops (place / lease renewal) MUST use = ROOT of the
+   *  session tree. null => parentage UNKNOWN => caller MUST NOT place. */
+  routingSid: string | null;
+  /** owner came from an ancestor's route (logging/metrics only) */
+  viaParent?: boolean;
+  /** routingSid was confirmed to exist by the parent walk (200 from the anchor),
+   *  so maybePromote can skip its own checkSidExists */
+  rootExists?: boolean;
 }
 
 // deps injected for testability; default to real fetch.
-export interface ResolveDeps { fetch?: typeof globalThis.fetch; }
+export interface ResolveDeps {
+  fetch?: typeof globalThis.fetch;
+  now?: () => number;
+}
 
-export async function resolveOwner(
+async function fetchRoute(
   sid: string,
   config: Config,
   deps?: ResolveDeps,
@@ -41,6 +53,7 @@ export async function resolveOwner(
       prospective: false,
       degraded: true,
       reason: "pigeon-unreachable",
+      routingSid: sid,
     };
   }
 
@@ -55,6 +68,7 @@ export async function resolveOwner(
       prospective: false,
       degraded: true,
       reason: "not-routed",
+      routingSid: sid,
     };
   }
 
@@ -65,11 +79,12 @@ export async function resolveOwner(
       prospective: false,
       degraded: true,
       reason: "pigeon-error",
+      routingSid: sid,
     };
   }
 
   try {
-    const data = await response.json() as any;
+    const data = (await response.json()) as any;
     const url = data?.apiBase ?? data?.api_base;
     if (!url || typeof url !== "string" || !isAbsoluteHttpUrl(url)) {
       // A missing base, or a base that isn't an absolute http(s) URL, would
@@ -80,6 +95,7 @@ export async function resolveOwner(
         prospective: false,
         degraded: true,
         reason: "pigeon-error",
+        routingSid: sid,
       };
     }
 
@@ -89,6 +105,7 @@ export async function resolveOwner(
       prospective: isProspective,
       degraded: false,
       reason: isProspective ? "prospective" : "active",
+      routingSid: sid,
     };
   } catch (err) {
     return {
@@ -96,6 +113,48 @@ export async function resolveOwner(
       prospective: false,
       degraded: true,
       reason: "pigeon-error",
+      routingSid: sid,
     };
   }
+}
+
+export async function resolveOwner(
+  sid: string,
+  config: Config,
+  deps?: ResolveDeps,
+): Promise<ResolvedOwner> {
+  const first = await fetchRoute(sid, config, deps);
+  if (first.reason !== "not-routed") return first;
+
+  // 404 path:
+  const lookup = await rootOf(sid, config, { fetch: deps?.fetch, now: deps?.now });
+  if (!lookup.confirmed) {
+    return {
+      url: config.anchorUrl,
+      prospective: false,
+      degraded: true,
+      reason: "not-routed",
+      routingSid: null,
+    };
+  }
+
+  if (lookup.root === sid) {
+    return {
+      url: config.anchorUrl,
+      prospective: false,
+      degraded: true,
+      reason: "not-routed",
+      routingSid: sid,
+      rootExists: true,
+    };
+  }
+
+  // genuine child:
+  const viaRoot = await fetchRoute(lookup.root, config, deps);
+  return {
+    ...viaRoot,
+    routingSid: lookup.root,
+    rootExists: true,
+    viaParent: true,
+  };
 }
