@@ -55,7 +55,50 @@ else
 fi
 ```
 
-This is fast (~10 seconds) and doesn't affect system services.
+This is fast (~10 seconds). Note that while `home-manager switch` does not automatically restart system services, it repoints `/home/dev/.nix-profile/bin/opencode` (which serve units exec via `opencode-serve-start`). This puts active serves into version drift until `opencode-serve-pool.target` is restarted (see Deploy Runbook below).
+
+## Deploy Runbook: Front Door & Serve Pool
+
+When deploying updates that affect `opencode-frontdoor` or the `opencode-serve@` pool (e.g. on `cloudbox`), explicit service restarts are **REQUIRED**.
+
+### Explicit Restarts Required (`restartIfChanged = false`)
+
+Both `opencode-frontdoor` and `opencode-serve@` are configured with `restartIfChanged = false` in `hosts/cloudbox/configuration.nix`.
+
+This design is **deliberate**:
+- Restarting `opencode-frontdoor` drops active SSE connections and resets sticky session routing maps.
+- Restarting `opencode-serve-pool.target` terminates running worker sessions.
+
+Because neither service self-restarts on rebuild, `nixos-rebuild switch` and `home-manager switch` update binary files and unit definitions on disk while **leaving old processes running in version drift**.
+
+**Past Production Incidents (2026-07-24):**
+- **Stale serves (`reset-workspace` skipped pool restart):** Front door routed new session-scoped paths, but stale serves returned HTML SPA fallbacks. The attach TUI threw when trying to JSON-parse HTML and reconnected infinitely, resulting in a frozen TUI.
+- **Stale door (`nixos-rebuild` ran without restart):** Front door binary was updated on disk but process wasn't restarted. The MCP dialog returned 404 through the door for ~70 minutes until `opencode-frontdoor` was restarted.
+
+### Canonical Deploy Sequence
+
+```bash
+sudo nixos-rebuild switch --flake ".#$(hostname)"   # installs new door binary, rewrites unit
+sudo systemctl restart opencode-frontdoor           # REQUIRED: door does NOT self-restart
+home-manager switch --flake .#cloudbox              # installs new opencode into /home/dev/.nix-profile
+sudo systemctl restart opencode-serve-pool.target   # REQUIRED: serves do NOT self-restart
+```
+
+### Checking for Version Drift
+
+**Front Door Drift:**
+The canary checks `/healthz` against unit `ExecStart` every 60s (`WARNING: version drift: running=... execstart=...`) and raises a throttled Telegram alert via pigeon. Check manually with:
+```bash
+journalctl -u opencode-frontdoor-canary --since today | grep -i drift
+```
+
+**Serve Pool Drift:**
+Compare the store path of the running serve process against the active nix profile:
+```bash
+readlink /proc/$(systemctl show opencode-serve@4096 -p MainPID --value)/exe   # running process
+readlink -f /home/dev/.nix-profile/bin/opencode                               # profile target
+```
+Mismatched `/nix/store/<hash>-...` prefixes indicate stale serve processes requiring a pool restart (`sudo systemctl restart opencode-serve-pool.target`).
 
 ## Pulling and Applying Updates
 
