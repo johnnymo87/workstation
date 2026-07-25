@@ -3,17 +3,27 @@ import { classify, dispatch, RouteAction } from './dispatch.js';
 import {
   RouteDisposition,
   getRouteDisposition,
+  ROUTE_DISPOSITIONS,
+  CLASS_DISPOSITIONS,
 } from './routes.dispositions.js';
+import { ROUTE_CLASSIFICATION_TABLE, RouteEntry } from './routes.classification.js';
 
 export interface GateCheckOptions {
   minRoutes?: number;
   routeDispositions?: Record<string, RouteDisposition>;
   classDispositions?: Record<string, RouteDisposition>;
+  routeClassificationTable?: RouteEntry[];
 }
 
 export interface UnrecognizedRoute {
   method: string;
   path: string;
+}
+
+export interface ShadowedRoute {
+  method: string;
+  path: string;
+  shadowedBy: string;
 }
 
 export interface InvalidDispositionRoute {
@@ -26,8 +36,10 @@ export interface InvalidDispositionRoute {
 export interface GateCheckResult {
   totalChecked: number;
   unrecognized: UnrecognizedRoute[];
+  shadowed: ShadowedRoute[];
   denialCount: number;
   invalidDispositions: InvalidDispositionRoute[];
+  orphanedDispositions: string[];
   passed: boolean;
   error?: string;
 }
@@ -50,11 +62,66 @@ const NON_DENYING_ACTIONS = new Set<RouteAction>([
   'forward-anchor',
 ]);
 
+// Allowlist for legitimately table-only dispositions (routes deliberately not declared in /doc).
+// Currently zero entries are required; all 49 disposition keys match live /doc denial routes.
+const ALLOWED_ORPHAN_DISPOSITIONS = new Set<string>([
+  // e.g. 'METHOD /path' if ever needed in the future
+]);
+
+function normalizeTemplatePath(p: string): string {
+  let path = p.split('?')[0];
+  path = path.replace(/\{[^}]*\}/g, '{}');
+  if (path.endsWith('/') && path !== '/') {
+    path = path.slice(0, -1);
+  }
+  return path;
+}
+
+function normalizeSimplePath(p: string): string {
+  let path = p.split('?')[0];
+  if (path.endsWith('/') && path !== '/') {
+    path = path.slice(0, -1);
+  }
+  return path;
+}
+
+function compilePathTemplateRegex(normalizedPath: string): RegExp {
+  let escaped = normalizedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  escaped = escaped.replace(/\\\{.*?\\\}/g, '[^/]+');
+  escaped = escaped.replace(/\\\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
+}
+
+function findShadowingTemplate(
+  method: string,
+  pathname: string,
+  table: RouteEntry[]
+): string | undefined {
+  const normMethod = method.toUpperCase();
+  const normPath = normalizeSimplePath(pathname);
+
+  for (const entry of table) {
+    const entryNormPath = normalizeSimplePath(entry.path);
+    if (entryNormPath.includes('{') || entryNormPath.includes('*')) {
+      if (entry.method.toUpperCase() === normMethod) {
+        const regex = compilePathTemplateRegex(entryNormPath);
+        if (regex.test(normPath)) {
+          return `${entry.method.toUpperCase()} ${entry.path}`;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
 export function checkDocRoutes(
   docJson: unknown,
   options: GateCheckOptions = {}
 ): GateCheckResult {
   const minRoutes = options.minRoutes ?? 100;
+  const classificationTable = options.routeClassificationTable ?? ROUTE_CLASSIFICATION_TABLE;
+  const routeDispositions = options.routeDispositions ?? ROUTE_DISPOSITIONS;
+  const classDispositions = options.classDispositions ?? CLASS_DISPOSITIONS;
 
   if (
     !docJson ||
@@ -66,18 +133,29 @@ export function checkDocRoutes(
     return {
       totalChecked: 0,
       unrecognized: [],
+      shadowed: [],
       denialCount: 0,
       invalidDispositions: [],
+      orphanedDispositions: [],
       passed: false,
       error: 'Invalid /doc format: "paths" object is missing or invalid',
     };
+  }
+
+  const exactNormalizedTableKeys = new Set<string>();
+  for (const entry of classificationTable) {
+    const method = entry.method.toUpperCase();
+    const normPath = normalizeTemplatePath(entry.path);
+    exactNormalizedTableKeys.add(`${method} ${normPath}`);
   }
 
   const pathsObj = docJson.paths as Record<string, Record<string, unknown>>;
   let totalChecked = 0;
   let denialCount = 0;
   const unrecognized: UnrecognizedRoute[] = [];
+  const shadowed: ShadowedRoute[] = [];
   const invalidDispositions: InvalidDispositionRoute[] = [];
+  const matchedDispositionKeys = new Set<string>();
 
   for (const [path, pathItem] of Object.entries(pathsObj)) {
     if (!pathItem || typeof pathItem !== 'object') continue;
@@ -94,9 +172,19 @@ export function checkDocRoutes(
       const action = dispatched.action;
       totalChecked++;
 
-      // Check A: unrecognized
-      if (routeClass === 'unrecognized') {
-        unrecognized.push({ method, path });
+      // Check A: strict template-shape matching
+      const docNormKey = `${method} ${normalizeTemplatePath(path)}`;
+      if (!exactNormalizedTableKeys.has(docNormKey)) {
+        const shadowingTemplate = findShadowingTemplate(method, path, classificationTable);
+        if (shadowingTemplate) {
+          shadowed.push({
+            method,
+            path,
+            shadowedBy: shadowingTemplate,
+          });
+        } else {
+          unrecognized.push({ method, path });
+        }
       }
 
       // Check B: denial dispositions
@@ -106,9 +194,23 @@ export function checkDocRoutes(
           method,
           path,
           routeClass,
-          options.routeDispositions,
-          options.classDispositions
+          routeDispositions,
+          classDispositions
         );
+
+        let normPath = path.split('?')[0];
+        if (normPath.endsWith('/') && normPath !== '/') {
+          normPath = normPath.slice(0, -1);
+        }
+        const exactDispKey = `${method} ${normPath}`;
+        if (routeDispositions[exactDispKey]) {
+          matchedDispositionKeys.add(exactDispKey);
+        } else if (normPath.startsWith('/api/')) {
+          const bareDispKey = `${method} ${normPath.slice(4)}`;
+          if (routeDispositions[bareDispKey]) {
+            matchedDispositionKeys.add(bareDispKey);
+          }
+        }
 
         if (!disp) {
           invalidDispositions.push({
@@ -176,12 +278,22 @@ export function checkDocRoutes(
     }
   }
 
+  // Check B (Inverse): Orphaned dispositions check
+  const orphanedDispositions: string[] = [];
+  for (const dispKey of Object.keys(routeDispositions)) {
+    if (!matchedDispositionKeys.has(dispKey) && !ALLOWED_ORPHAN_DISPOSITIONS.has(dispKey)) {
+      orphanedDispositions.push(dispKey);
+    }
+  }
+
   if (totalChecked < minRoutes) {
     return {
       totalChecked,
       unrecognized,
+      shadowed,
       denialCount,
       invalidDispositions,
+      orphanedDispositions,
       passed: false,
       error: `Sanity floor failed: checked ${totalChecked} route(s), expected at least ${minRoutes}`,
     };
@@ -191,16 +303,24 @@ export function checkDocRoutes(
   if (unrecognized.length > 0) {
     errors.push(`Route classification gate (Check A) failed: ${unrecognized.length} unrecognized route(s) found`);
   }
+  if (shadowed.length > 0) {
+    errors.push(`Route classification gate (Check A) failed: ${shadowed.length} template-shadowed route(s) found`);
+  }
   if (invalidDispositions.length > 0) {
     errors.push(`Denial disposition gate (Check B) failed: ${invalidDispositions.length} denial route(s) missing or with invalid dispositions`);
+  }
+  if (orphanedDispositions.length > 0) {
+    errors.push(`Denial disposition gate (Check B) failed: ${orphanedDispositions.length} orphaned disposition(s) found: ${orphanedDispositions.join(', ')}`);
   }
 
   if (errors.length > 0) {
     return {
       totalChecked,
       unrecognized,
+      shadowed,
       denialCount,
       invalidDispositions,
+      orphanedDispositions,
       passed: false,
       error: errors.join('; '),
     };
@@ -209,8 +329,10 @@ export function checkDocRoutes(
   return {
     totalChecked,
     unrecognized: [],
+    shadowed: [],
     denialCount,
     invalidDispositions: [],
+    orphanedDispositions: [],
     passed: true,
   };
 }
@@ -251,7 +373,7 @@ export function runRouteGateCli(args: string[]): number {
 
   if (result.passed) {
     console.log(
-      `[PASS] Route classification and disposition gate passed: checked ${result.totalChecked} route(s) across /doc (0 unrecognized, ${result.denialCount} denials properly dispositioned).`
+      `[PASS] Route classification and disposition gate passed: checked ${result.totalChecked} route(s) across /doc (0 unrecognized, 0 shadowed, ${result.denialCount} denials properly dispositioned, 0 orphaned dispositions).`
     );
     return 0;
   } else {
@@ -262,10 +384,22 @@ export function runRouteGateCli(args: string[]): number {
         console.error(`  ${offender.method} ${offender.path}`);
       }
     }
+    if (result.shadowed.length > 0) {
+      console.error('Template-shadowed routes (Check A):');
+      for (const offender of result.shadowed) {
+        console.error(`  ${offender.method} ${offender.path}: no exact table row; matched only via template ${offender.shadowedBy}`);
+      }
+    }
     if (result.invalidDispositions.length > 0) {
       console.error('Invalid or missing dispositions (Check B):');
       for (const offender of result.invalidDispositions) {
         console.error(`  ${offender.method} ${offender.path} [${offender.action}]: ${offender.reason}`);
+      }
+    }
+    if (result.orphanedDispositions.length > 0) {
+      console.error('Orphaned dispositions (Check B):');
+      for (const offender of result.orphanedDispositions) {
+        console.error(`  ${offender}: disposition exists but route is not present in /doc or is not denied`);
       }
     }
     return 1;
