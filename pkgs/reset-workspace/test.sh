@@ -164,9 +164,11 @@ check "detach decision: NO_DETACH unset -> detach" \
 check "detach decision: NO_DETACH=1 -> suppress" \
   "1" "$(should_detach_destructive 1 && echo 0 || echo 1)"
 
-# F1(b) test: prove log() shape writing to broken pipe exits 141 without trap and 0 with trap
-code_without_trap='log() { printf "[test] %s\n" "$*" >&2 || true; }; exec 2> >(exit 0); sleep 0.1; log "hello"'
-code_with_trap='trap "" PIPE; log() { printf "[test] %s\n" "$*" >&2 || true; }; exec 2> >(exit 0); sleep 0.1; log "hello"'
+# F1(b) test: prove log() shape writing to broken pipe exits 141 without trap and 0 with trap.
+# Uses $! (PID of process-substitution reader >(exit 0)) in a bounded loop to wait deterministically
+# for reader death without relying on fixed timing.
+code_without_trap='log() { printf "[test] %s\n" "$*" >&2 || true; }; exec 2> >(exit 0); pid=$!; for i in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.01; done; log "hello"'
+code_with_trap='trap "" PIPE; log() { printf "[test] %s\n" "$*" >&2 || true; }; exec 2> >(exit 0); pid=$!; for i in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.01; done; log "hello"'
 
 rc_without=$(bash -c "$code_without_trap" 2>/dev/null; echo $?)
 rc_with=$(bash -c "$code_with_trap" 2>/dev/null; echo $?)
@@ -189,6 +191,56 @@ if [ -f /proc/self/status ]; then
   check "plain child inherits SIGPIPE ignored (1)" "1" "$plain_child_ign"
   check "restored child sees SIGPIPE default (0)" "0" "$restored_child_ign"
 fi
+
+# Behavioral test for Item 1: post-tail decision when tail exits before vs after child finishes
+check_post_tail_status() { # check_post_tail_status <tail_pid> <sentinel_file> <log_file>
+  local TAIL_PID="$1" SENTINEL_PATH="$2" LOG_FILE="$3"
+  log() { :; }
+  die() { exit 1; }
+  if kill -0 "$TAIL_PID" 2>/dev/null; then
+    log "destructive phase still running in background (PID $TAIL_PID)"
+    return 0
+  fi
+
+  if [ -f "$SENTINEL_PATH" ]; then
+    status_line="$(cat "$SENTINEL_PATH" 2>/dev/null || true)"
+    case "$status_line" in
+      ok*" pid=$TAIL_PID") log "reset-workspace finished successfully"; return 0 ;;
+      ok*) die "destructive phase sentinel OK status belongs to stale PID (expected pid=$TAIL_PID; status: $status_line)" ;;
+      *) die "destructive phase finished with status: $status_line" ;;
+    esac
+  else
+    die "destructive phase PID $TAIL_PID exited without writing sentinel status"
+  fi
+}
+
+item1_dir="$(mktemp -d)"
+item1_sentinel="$item1_dir/status.txt"
+item1_logfile="$item1_dir/run.log"
+
+# Case 1: child is still alive when log-follow exits (e.g. Ctrl+C) -> success 0
+sleep 10 & alive_pid=$!
+check_post_tail_status "$alive_pid" "$item1_sentinel" "$item1_logfile" >/dev/null 2>&1
+check "post-tail check: child still running -> success 0" "0" "$?"
+kill -9 "$alive_pid" 2>/dev/null || true
+wait "$alive_pid" 2>/dev/null || true
+
+# Case 2: child dead, ok sentinel -> success 0
+sleep 0.001 & dead_pid1=$!
+wait "$dead_pid1" 2>/dev/null || true
+echo "ok 2026-07-25T00:00:00Z pid=$dead_pid1" > "$item1_sentinel"
+check_post_tail_status "$dead_pid1" "$item1_sentinel" "$item1_logfile" >/dev/null 2>&1
+check "post-tail check: dead child, ok sentinel -> success 0" "0" "$?"
+
+# Case 3: child dead, started sentinel -> failure non-zero
+sleep 0.001 & dead_pid2=$!
+wait "$dead_pid2" 2>/dev/null || true
+echo "started 2026-07-25T00:00:00Z pid=$dead_pid2 phase=kill-nvim" > "$item1_sentinel"
+rc_started=0
+( check_post_tail_status "$dead_pid2" "$item1_sentinel" "$item1_logfile" ) >/dev/null 2>&1 || rc_started=$?
+check "post-tail check: dead child, started sentinel -> non-zero failure" "1" "$([ "$rc_started" -ne 0 ] && echo 1 || echo 0)"
+
+rm -rf "$item1_dir"
 
 check "timestamp increased: 100 -> 200 -> true" \
   "0" "$(is_timestamp_increased 100 200 && echo 0 || echo 1)"
@@ -329,6 +381,7 @@ if [ -f "$default_nix" ]; then
   want_grep "destructive phase detaches via setsid"      'setsid'
   want_grep "destructive phase uses guard var"            'RESET_WORKSPACE_DESTRUCTIVE_DETACHED'
   want_grep "destructive detach checks RESET_WORKSPACE_NO_DETACH" 'RESET_WORKSPACE_NO_DETACH'
+  want_grep "post-tail checks if detached child is still running" 'kill -0 "$TAIL_PID"'
   refuse_grep "get_tty_nr is removed"                     'get_tty_nr() {'
   refuse_grep "false session leader comment is gone"     'Has its own session leader'
   refuse_grep "false no controlling TTY comment is gone" 'no controlling TTY → no PTY-collapse SIGHUP'
@@ -367,6 +420,7 @@ if [ -f "$default_nix" ]; then
   # the mono root via `work --prune-merged`, guarded by command -v work, and it
   # must NOT abort the reset on failure (best-effort).
   want_grep "source prunes merged launch worktrees"     'work --prune-merged'
+  want_grep "prune resets SIGPIPE disposition"          '( trap - PIPE; cd "$MONO_ROOT"'
   want_grep "prune targets the mono primary root"        '/projects/mono'
   want_grep "prune is guarded by command -v work"        'command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]'
   want_grep "prune failure is non-fatal to the reset"    'work --prune-merged failed (non-fatal)'

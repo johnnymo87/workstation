@@ -278,8 +278,9 @@ pkgs.writeShellApplication {
     #
     # Note (workstation-px2p): `systemd-run --user --scope` provides CGROUP
     # isolation only; it does NOT create a new session leader and does NOT sever
-    # the controlling terminal. Actual PTY detachment for the destructive phase
-    # is handled separately via `setsid` after confirmation.
+    # stdio or the controlling terminal. Process and session detachment with logfile
+    # stdio redirection for the destructive phase is handled separately via `setsid`
+    # after confirmation (unless RESET_WORKSPACE_NO_DETACH=1).
     #
     # We attempt this whenever the script might be a descendant of a process it
     # will kill. It is gated by the loop-guard env var, and can be opted out of
@@ -659,6 +660,15 @@ EOF
         log "Note: pressing Ctrl+C stops following this log view, but reset continues in background"
         tail --pid="$TAIL_PID" -f "$LOG_FILE" 2>/dev/null || true
 
+        # Check whether the destructive phase is still running in background
+        # (e.g. log follow stopped via Ctrl+C or closed pipe).
+        if kill -0 "$TAIL_PID" 2>/dev/null; then
+          log "destructive phase still running in background (PID $TAIL_PID)"
+          log "  follow log: tail -f $LOG_FILE"
+          log "  check status: cat $SENTINEL_PATH"
+          exit 0
+        fi
+
         # Check sentinel status after tail finishes (or follower dies)
         if [ -f "$SENTINEL_PATH" ]; then
           status_line="$(cat "$SENTINEL_PATH" 2>/dev/null || true)"
@@ -839,7 +849,7 @@ EOF
     MONO_ROOT="''${HOME}/projects/mono"
     if command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]; then
       log "pruning merged launch worktrees under $MONO_ROOT/.worktrees ..."
-      if ! ( cd "$MONO_ROOT" && work --prune-merged ) 2>&1 | while IFS= read -r line; do log "  $line"; done; then
+      if ! ( trap - PIPE; cd "$MONO_ROOT" && exec work --prune-merged ) 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
         log "WARNING: work --prune-merged failed (non-fatal); continuing reset"
       fi
     else
