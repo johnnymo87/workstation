@@ -22,8 +22,44 @@ Phases 9 and 10 were both *unplanned* — each was discovered by hitting a produ
 - **`.opencode/skills/rebuilding/SKILL.md` has ZERO mentions** of frontdoor / serve-pool / restartIfChanged.
 - **Prose already failed once:** `2026-07-24-phase9-door-route-allowlist.md:69` already says route changes need a rebuild + restart — written the same day the door was then left stale. Documentation alone will not fix incident #2.
 
-## Revised priority order (fable's, accepted)
-### 1. Deploy runbook + **stale-binary alerting** ← START HERE
+## CLOSING PLAN — spine completion (2026-07-25)
+
+**Purpose of this section: land the plane.** The parent plan (`2026-07-12-serve-reverse-proxy-plan.md`) is Phases 0-9. **Phases 0-8 are done; Phase 9's 9.0 audit and 9.1 repoint are done** (clients ride `FRONTDOOR_URL`; `OPENCODE_URL` is retained as raw-anchor ONLY for deliberate infra exemptions — pigeon control plane, `opencode-launch` children, reset-workspace health fallback). **9.2 is the only unfinished spine item**, and its token half is already assessed as near-theater here (see Verified findings), leaving the grep-guard.
+
+### The drift diagnosis (why this section exists)
+Work since the cutover has felt like unbounded side quests. It isn't unbounded — it is **one table being discovered one incident at a time.** `mlve.11` (the fable-verified D4 table) states verbatim that those routes *"must land before Phase 9 repoints `OPENCODE_URL`"*. **We repointed first**, so every subsequent fire drill has been a D4 row surfacing under load:
+- Phase 9's outage = the bare session-scoped rows (`permissions`, `questions`)
+- Phase 10 = the MCP `connect`/`disconnect` row
+
+**The remaining rows are live-broken RIGHT NOW, merely undiscovered** (probed through the door 2026-07-25):
+```
+POST   /instance/dispose   -> 403
+DELETE /auth/anthropic     -> 403
+POST   /auth/anthropic     -> 404   <- not even IN the classification table
+```
+That is at least two more Phase-10-shaped drills queued, waiting on whoever opens the wrong dialog. Closing them proactively is strictly cheaper than discovering them.
+
+### Definition of "complete enough" — 4 door-side items, then STOP
+1. **`sq1v`** (bead `workstation-sq1v`, P1, LIVE) — door mis-routes subagent/child sessions to the anchor. This is the door being *wrong*, not hygiene. Detail in old item 3 below.
+2. **Finish the D4 rows** (bead `workstation-mlve.11`, raised to P1) — proactively, from the existing fable-verified per-route table (ANCHOR-PIN for provider oauth authorize/callback and `/mcp/{name}/auth/*`; ANCHOR for `PUT|DELETE /auth/{providerID}`; BROADCAST for `/instance/dispose`; keep 405 for `experimental.workspace.*`). Note `POST /auth/{providerID}` is currently *unclassified* (404), so the table needs that row too.
+3. **`/doc`-diff classification gate** (bead `workstation-j6de`, P1) — the item that *ends* the loop instead of servicing it: feed every path × method the pinned serve advertises through the door's `classify()` and fail the build on any `unrecognized`. It would have caught both Phase 9's four missing routes and the `404` above. Detail in old item 4.
+4. **9.2 grep-guard** (bead `workstation-mlve.4`, P1) — "no non-frontdoor callers" test. Closes Phase 9, therefore closes the parent plan. Token stays deferred (old item 5).
+
+**Optional, cheap, high leverage:** the **HTML-poison guard** (bead `workstation-m3z2`, P2; old item 4) — rewrite any `text/html` on a `session-path` to a JSON 502, so future skew degrades to a clean error instead of a frozen TUI. Retires the harm class that generated most of this tail.
+
+Estimated: plausibly two focused sessions. After that the front door is DONE and everything else is opportunistic.
+
+### Explicitly demoted — NOT next (recorded so it isn't silently re-promoted)
+- **`workstation-m96n`** (deploy-cloudbox script + post-condition assertion) — real value, but operational hygiene, not front-door completion. It was recommended as "next" on 2026-07-25 and that recommendation is **withdrawn** on this framing. Overlaps `workstation-a0zj` fix (a); today's drift alerting was `a0zj` fix (b). Do it when deploy pain recurs, or after spine closure.
+- **Part B reconcile hardening** (old item 2) — opencode-patched fork work; the HTML-poison guard covers the same user-visible harm at the door for less, and without another patch. Opportunistic; ride a future patched cut.
+- **Denial telemetry** (old item 4) — useful, but it services the loop rather than closing it. After the `/doc` gate.
+- `mlve.7`-`mlve.10` (docs/fallback matrices), `mlve.5`/`mlve.6` (P3) — backlog.
+- **Item 1 below (runbook + drift alerting) — DONE 2026-07-25, and also off-spine.** Justified by real incidents, but it did not advance the door. Two consecutive off-spine sessions is the pattern this section exists to stop.
+
+---
+
+## Prior priority order (superseded by the CLOSING PLAN above; kept for detail + rationale)
+### 1. Deploy runbook + **stale-binary alerting** — DONE 2026-07-25 (off-spine)
 
 **Finding that reframes this item (verified 2026-07-24 — do NOT re-derive, do NOT rebuild what already works):**
 - The door canary **already has a version-drift check** (`hosts/cloudbox/configuration.nix:1293-1308`) and **it fired correctly 70 times** — once a minute, `18:59:03` → `20:08:00`, stopping exactly at the `20:08:38` door restart. It printed the precise diagnosis: `WARNING: version drift: running=/nix/store/5b0zm9wq…-opencode-frontdoor-1.0.0 execstart=/nix/store/qfy87m7l…/bin/opencode-frontdoor`. Incident #2 was debugged by hand for ~70 minutes while a correct machine-generated diagnosis reprinted every 60s into a journal nobody reads.
@@ -54,18 +90,18 @@ Phases 9 and 10 were both *unplanned* — each was discovered by hitting a produ
 - **1b Door drift → throttled Telegram alert**: keep the existing detection untouched; add an alert on the mismatch branch. **Throttling is mandatory** — the raw signal fires every 60s (70× today). One alert per drift *episode*: write the signature (`running|execstart`) to `$STATE/drift-alerted`; alert only when the computed signature differs from the stored one; clear the file when drift clears so a later episode re-alerts. Factor the alert into a shared nix `let` helper for reuse by 1c.
 - **1c Serve drift detection + alert**: add to the existing per-port loop; compare store-path prefixes as above; same throttle (`$STATE/$PORT.drift-alerted`) and same shared helper. Inherit the loop's existing guards (skip inactive units, skip while the `reset-workspace` lock is held).
 
-### 2. Part B reconcile hardening (patched.4) — the freeze-class cap
+### 2. Part B reconcile hardening (patched.4) — DEMOTED (see CLOSING PLAN)
 Per `2026-07-24-phase9-door-route-allowlist.md:42-44`: bounded `reconcilePending` — N=3 consecutive failures (any kind, no transient/permanent taxonomy) → proceed-degraded + one-shot toast + slow reconnect; NO periodic re-fetch. Plus bootstrap `Promise.all` → `allSettled` (`sync.tsx:533-551`). **Would have prevented incident #1.** Carry `sq1v`'s interim fix in the same cut: scope reconcile to owner-confirmed (routed) sids so it never silently returns `[]` for children.
 
-### 3. `sq1v` — door-side parent-walk (P1, LIVE not latent)
+### 3. `sq1v` — door-side parent-walk (P1, LIVE) — CLOSING-PLAN ITEM 1
 Subagent permissions are answerable only when the parent happens to own the anchor (~1 in 4). Fix: on the not-routed branch in `resolve.ts`, resolve child → parent → owner. Cheaper than feared: the door **already** GETs the anchor's `/session/{sid}` in `place.ts` (`checkSidExists`), and `parentID` is **immutable** → cache child→root forever (bounded LRU), so the FABLE-S1 blocking hazard is paid once per child sid. Then add a counter on "not-routed mutation forwarded to anchor" (`proxy.ts:637-641`); if ~zero after a week, tighten that branch to 503 — data-driven, retires the silent-wrong-process class.
 
-### 4. Mechanical gates (can interleave with 2-3)
+### 4. Mechanical gates — `/doc`-diff gate is CLOSING-PLAN ITEM 3; poison guard optional; telemetry demoted
 - **`/doc`-diff classification gate** (~50 lines): run the PINNED binary from the nix store (not the live pool), fetch `/doc`, feed every path × method through the door's `classify()`, **fail the build on any `unrecognized`**. Would have caught Phase 9's four missing routes pre-deploy. Turns the hand-maintained reconciliation header (`routes.classification.ts:5-9`) into a checked invariant. Running it against LIVE serves also yields a version-skew detector.
 - **Denial telemetry**: the `/doc` gate catches *unclassified* routes (Phase 9 shape) but NOT *classified-but-denied-yet-needed* (Phase 10 shape), which aren't enumerable a priori. Door already logs denials (`proxy.ts:465-478`) → daily 404-unrecognized/403/501 report.
 - **HTML-poison guard** (small, high value): a `session-path` response with `content-type: text/html` is ALWAYS a stale serve's SPA fallback. Rewrite to a JSON 502 at the door → kills incident #1's class generically for every future skew window.
 
-### 5. Phase 9.2 — grep-guard NOW, token DEFERRED
+### 5. Phase 9.2 — grep-guard is CLOSING-PLAN ITEM 4; token DEFERRED
 The grep-guard "no non-frontdoor callers" test delivers the real invariant (tooling doesn't depend on pool internals) at ~zero risk. **The token is near-theater on this box** (see verified findings) and carries a coordinated multi-process env rollout — exactly the deploy shape that caused both incidents; a missed client → 401 on `/place` → placement silently skipped → lease-less anchor turns. Defer until a second host exists or item 1's tooling can sequence it. If ever done, `GET /sessions` must be gated too or the token means nothing.
 
 ### 6. Backlog unchanged
