@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { rootOf, clearRootCache, FAILURE_TTL_MS } from '../src/parent.js';
+import { rootOf, clearRootCache, FAILURE_TTL_MS, NOT_FOUND_TTL_MS } from '../src/parent.js';
 import type { Config } from '../src/config.js';
 
 describe('rootOf', () => {
@@ -30,7 +30,7 @@ describe('rootOf', () => {
 
     const result = await rootOf('root_123', dummyConfig, { fetch: fakeFetch });
 
-    expect(result).toEqual({ root: 'root_123', confirmed: true });
+    expect(result).toEqual({ root: 'root_123', confirmed: true, fetchedLive: true });
     expect(fakeFetch).toHaveBeenCalledTimes(1);
     const [url, init] = fakeFetch.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('http://anchor.local/session/root_123');
@@ -55,7 +55,7 @@ describe('rootOf', () => {
 
     const result = await rootOf('child_sid', dummyConfig, { fetch: fakeFetch });
 
-    expect(result).toEqual({ root: 'parent_sid', confirmed: true });
+    expect(result).toEqual({ root: 'parent_sid', confirmed: true, fetchedLive: true });
     expect(fakeFetch).toHaveBeenCalledTimes(2);
   });
 
@@ -72,7 +72,7 @@ describe('rootOf', () => {
 
     const result = await rootOf('grandchild', dummyConfig, { fetch: fakeFetch });
 
-    expect(result).toEqual({ root: 'root', confirmed: true });
+    expect(result).toEqual({ root: 'root', confirmed: true, fetchedLive: true });
     expect(fakeFetch).toHaveBeenCalledTimes(3);
   });
 
@@ -94,21 +94,21 @@ describe('rootOf', () => {
 
     // Query same grandchild again
     const res1 = await rootOf('grandchild', dummyConfig, { fetch: fakeFetch });
-    expect(res1).toEqual({ root: 'root', confirmed: true });
+    expect(res1).toEqual({ root: 'root', confirmed: true, fetchedLive: false });
     expect(fakeFetch).toHaveBeenCalledTimes(0);
 
     // Query intermediate child
     const res2 = await rootOf('child', dummyConfig, { fetch: fakeFetch });
-    expect(res2).toEqual({ root: 'root', confirmed: true });
+    expect(res2).toEqual({ root: 'root', confirmed: true, fetchedLive: false });
     expect(fakeFetch).toHaveBeenCalledTimes(0);
 
     // Query root
     const res3 = await rootOf('root', dummyConfig, { fetch: fakeFetch });
-    expect(res3).toEqual({ root: 'root', confirmed: true });
+    expect(res3).toEqual({ root: 'root', confirmed: true, fetchedLive: false });
     expect(fakeFetch).toHaveBeenCalledTimes(0);
   });
 
-  test('5. 404 at hop 1 -> {confirmed:false}; second call within 30s does 0 fetches; after 30s refetches', async () => {
+  test('5. 404 at hop 1 -> {confirmed:false}; cached for the SHORT not-found TTL only, then refetches', async () => {
     let currentTime = 1000;
     const fakeNow = () => currentTime;
 
@@ -124,17 +124,56 @@ describe('rootOf', () => {
 
     fakeFetch.mockClear();
 
-    // Call at +10s (within 30s TTL)
-    currentTime += 10_000;
+    // Within the short not-found TTL -> served from cache.
+    currentTime += NOT_FOUND_TTL_MS - 100;
     const res2 = await rootOf('unknown_sid', dummyConfig, { fetch: fakeFetch, now: fakeNow });
     expect(res2).toEqual({ confirmed: false });
     expect(fakeFetch).toHaveBeenCalledTimes(0);
 
-    // Call at +31s from start (past 30s TTL)
-    currentTime += 21_000;
+    // Past the short TTL -> refetches. A 404 must NOT be pinned for the full
+    // FAILURE_TTL_MS: it is the expected transient answer while a just-minted
+    // subagent session becomes visible, and pinning it would route that child's
+    // permission traffic to the wrong process for the whole window.
+    currentTime += 200;
     const res3 = await rootOf('unknown_sid', dummyConfig, { fetch: fakeFetch, now: fakeNow });
     expect(res3).toEqual({ confirmed: false });
     expect(fakeFetch).toHaveBeenCalledTimes(1);
+    expect(NOT_FOUND_TTL_MS).toBeLessThan(FAILURE_TTL_MS);
+  });
+
+  test('5b. a NETWORK error keeps the long failure TTL (anchor fault, not a session fact)', async () => {
+    let currentTime = 1000;
+    const fakeNow = () => currentTime;
+    const fakeFetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+
+    expect(await rootOf('sid_neterr', dummyConfig, { fetch: fakeFetch, now: fakeNow }))
+      .toEqual({ confirmed: false });
+    expect(fakeFetch).toHaveBeenCalledTimes(1);
+
+    fakeFetch.mockClear();
+    // Past the short not-found TTL, still inside the long failure TTL -> cached.
+    currentTime += NOT_FOUND_TTL_MS + 1000;
+    expect(await rootOf('sid_neterr', dummyConfig, { fetch: fakeFetch, now: fakeNow }))
+      .toEqual({ confirmed: false });
+    expect(fakeFetch).toHaveBeenCalledTimes(0);
+  });
+
+  test('5c. a failure must NOT overwrite a success a concurrent walk already proved', async () => {
+    // Warm a confirmed root, then make the anchor fail for the same sid.
+    const okFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'sid_x' }),
+    });
+    expect(await rootOf('sid_x', dummyConfig, { fetch: okFetch }))
+      .toEqual({ root: 'sid_x', confirmed: true, fetchedLive: true });
+
+    // A later failing walk cannot happen for a cached sid (cache short-circuits),
+    // so drive the invariant directly: the cached success must still win.
+    const failFetch = vi.fn().mockRejectedValue(new Error('boom'));
+    expect(await rootOf('sid_x', dummyConfig, { fetch: failFetch }))
+      .toEqual({ root: 'sid_x', confirmed: true, fetchedLive: false });
+    expect(failFetch).toHaveBeenCalledTimes(0);
   });
 
   test('6. 404 at an ANCESTOR hop (child ok, parent 404) -> {confirmed:false} and NOT cached as a success', async () => {

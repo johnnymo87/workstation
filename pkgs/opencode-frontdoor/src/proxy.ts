@@ -376,7 +376,12 @@ async function placeAfterCreate(
   if (placeResult.ok) {
     const now = ctx.deps?.now?.() ?? Date.now();
     if (placeResult.apiBase && isAbsoluteHttpUrl(placeResult.apiBase)) {
-      ctx.sticky.record(parsedSid, placeResult.apiBase, now);
+      // routingSid MUST be passed explicitly: StickyMap.record defaults it to null
+      // for a NEW entry, and a null routingSid gates off lease renewal entirely
+      // (see the renewal branch below). A session minted by create or fork is
+      // always a ROOT — a fork gets no parentID (verified live against the
+      // deployed rev) — so it renews its own lease.
+      ctx.sticky.record(parsedSid, placeResult.apiBase, now, now, parsedSid);
     }
   } else {
     degradedState = true;

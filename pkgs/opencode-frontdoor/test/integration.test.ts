@@ -2096,6 +2096,61 @@ describe("FrontDoor Integration", () => {
     }
   });
 
+  test("sq1v H1 regression: a session created THROUGH the door still renews its pigeon lease", async () => {
+    // StickyMap.record defaults routingSid to null for a NEW entry, and a null
+    // routingSid gates off lease renewal. placeAfterCreate must therefore pass the
+    // created sid explicitly, or every door-created session silently stops
+    // renewing its lease for as long as it keeps being used — which is precisely
+    // what protects a heartbeat-stale owner's in-flight run from being re-placed.
+    let fakeTime = 1000;
+    const createConfig: Config = {
+      port: 0,
+      version: "unknown",
+      pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+      anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      routeTimeoutMs: 1000,
+      cheapFirstByteMs: 1000,
+      stickyTtlMs: 10000, // half is 5000
+      driftCheckMs: 5000,
+      wedgeProbeIntervalMs: 5000,
+      mintTimeoutMs: 1000,
+    };
+    const createFd = createFrontDoor(createConfig, {
+      now: () => fakeTime,
+      logger: { sink: () => {} },
+    });
+    await new Promise<void>((resolve) => createFd.listen(0, "127.0.0.1", () => resolve()));
+    const cPort = (createFd.address() as AddressInfo).port;
+
+    const call = (method: string, path: string, headers: Record<string, string> = {}) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { hostname: "127.0.0.1", port: cPort, path, method, headers },
+          (res) => {
+            res.on("data", () => {});
+            res.on("end", () => resolve(res.statusCode || 0));
+          },
+        );
+        req.on("error", reject);
+        req.end("{}");
+      });
+
+    try {
+      pigeonPlaceCalls = [];
+      expect(await call("POST", "/session", { "x-test-mint-id": "ses_created" })).toBe(200);
+      expect(pigeonPlaceCalls).toEqual([{ session_id: "ses_created" }]);
+
+      // Past half the sticky TTL, the next mutating request must renew the lease.
+      pigeonPlaceCalls = [];
+      fakeTime = 7000;
+      expect(await call("POST", "/session/ses_created/message")).toBe(200);
+      await new Promise<void>((resolve) => setTimeout(resolve, 50)); // fire-and-forget
+      expect(pigeonPlaceCalls).toEqual([{ session_id: "ses_created" }]);
+    } finally {
+      await new Promise<void>((resolve) => createFd.close(() => resolve()));
+    }
+  });
+
   test("sq1v counter: a mutating, NON-promoting request on an unrouted sid increments notRoutedMutationToAnchor", async () => {
     // This is the literal sq1v scenario: answering a subagent permission.
     // POST /session/{sid}/permissions/{id} is mutating (isMutatingSessionRequest)

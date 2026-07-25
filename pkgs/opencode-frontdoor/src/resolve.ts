@@ -145,7 +145,9 @@ export async function resolveOwner(
       degraded: true,
       reason: "not-routed",
       routingSid: sid,
-      rootExists: true,
+      // Only a live 200 in THIS walk is an existence proof; a cached hit proves
+      // parentage only, and the session may since have been deleted.
+      rootExists: lookup.fetchedLive,
     };
   }
 
@@ -154,7 +156,7 @@ export async function resolveOwner(
   return {
     ...viaRoot,
     routingSid: lookup.root,
-    rootExists: true,
+    rootExists: lookup.fetchedLive,
     viaParent: true,
   };
 }
