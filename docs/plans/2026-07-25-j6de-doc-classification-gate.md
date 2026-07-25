@@ -270,6 +270,95 @@ semantically nonsensical pairing. The bogus entry passed the gate.
 - **NOT verified:** the pin leg by mutation — that needs real upstream hashes.
   Structural proof only, stated as such.
 
+### Fable review round 2 (post-implementation) — findings and disposition
+
+Verdict: *"Sound with fixes — but one of the fixes goes to the heart of the gate's
+promise."* Fable independently re-verified the wiring (both legs), Check B's
+detection power, and the pin/profile coherence. Two real holes, both reproduced by
+me before acting:
+
+**F1 (HIGH) — template shadowing. FIXED (`6c9909d`).** Deleting the
+`GET /session/status` row left the gate **PASSING**: `classify()` falls back to
+template regex where `{sessionID}` is `[^/]+`, so `/session/status` silently
+matched `GET /session/{sessionID}` and returned `session-path` — the door would
+treat `"status"` as a session id. Check A only tested for `unrecognized`, so it
+could never trip. The forward direction is the real exposure: a future
+`GET /session/search` would be silently misrouted with a green gate — **exactly the
+Phase-9 shape this item exists to end.**
+Fix: Check A now requires an **exact normalized template match** (`{x}` → `{}`),
+reporting `shadowed` as a distinct kind that names the shadowing template. Verified
+green today with **zero exceptions** across all 195 rows before landing it. 8 `/doc`
+paths are structurally shadow-vulnerable, so this was not hypothetical.
+
+**F2 (MEDIUM) — orphaned dispositions invisible. FIXED (`6c9909d`).** A disposition
+for a nonexistent route left the gate passing; nothing checked the inverse
+direction. Worse, a route moving between denying classes under a bump would keep a
+stale disposition and still pass. Fix: every `ROUTE_DISPOSITIONS` key must match a
+live `/doc` denial. Zero allowlist entries needed.
+
+**F3/F4/F5 — `not-session-scopable` was doing too much work. FIXED.** It conflated
+"the TUI never calls this" with "the TUI calls this and nobody checked". Added a
+**required `tuiSurface: 'absent' | 'degrades' | 'unverified'`** field, deliberately
+defined as a *documentary* claim about membership in the TUI SDK surface list
+(`2026-07-24-phase9-door-route-allowlist.md:17`) — checkable against a specific
+line — rather than an unfalsifiable behavioural claim. Split: 21 `absent`,
+6 `degrades` (Phase-9-audited, now citing `:35`), 5 `unverified`.
+
+**Three more of my own wrong premises, same shape as the `/sync/start` error.**
+Partitioning for F4 surfaced that I had asserted these in task prompts and they
+were wrong:
+- `POST /mcp/{name}/connect` and `POST /mcp/{name}/disconnect` were marked
+  `needs-mechanism` (D4). **Phase 10 already solved them** via forwarded
+  session-scoped routes (`routes.classification.ts:207-208`) — and the roadmap's D4
+  list deliberately omits them. Now `superseded`.
+- `GET /mcp` is likewise `superseded` by the patch-added
+  `GET /session/{sessionID}/mcp`.
+- `GET /global/event` was `not-session-scopable` while its own rationale named its
+  successor. Now `superseded` by `GET /event`.
+
+`needs-mechanism` now contains **exactly the 9** roadmap D4 rows, asserted by test.
+So **"D4 complete" is computable**, and item 3 inherits a machine-readable 15-row
+list (9 `needs-mechanism` + 5 `unverified` + 1 `accepted-gap`) instead of prose.
+
+Final census (70 de-duplicated): 21 `by-design-501`, 32 `not-session-scopable`
+(21/6/5), 7 `superseded`, 9 `needs-mechanism`, 1 `accepted-gap`. Suite **323 green**.
+
+### Corrections to earlier claims in THIS document (fable W1-W3)
+
+- **W1.** "Check A: delete a table row → gate must name that route" was **true only
+  for the rows I happened to test, and false in general** until F1 was fixed. The
+  rows I mutated were not shadowed. The property I proved was "these rows are
+  caught"; I generalised it to "any row". This is the *same* over-generalisation
+  error as the previous item, in a new costume — the lesson did not fully take.
+- **W2.** The deviation note recorded dropping `tui-unused` but silently dropped
+  **`denied-by-design`** too, which discarded the one bit D4 most needs (TUI calls
+  it but degrades). Now restored as `tuiSurface: 'degrades'`.
+- **W3.** "B1 forces the *does the TUI need this?* question at bump time" needs two
+  exceptions to be true: new routes landing in a **blanketed class** (`pty`/`tui`)
+  are auto-covered with **zero** human decision, and shadowed routes never reached
+  Check B as denials at all (F1). With F1 fixed and those exceptions stated, the
+  claim holds.
+
+### Accepted / deferred from fable round 2
+
+- **F6 — fail-closed is currently fail-*silent*-closed.** `pull-workstation` is
+  journal-only and there is no `OnFailure=` anywhere in the repo, so a firing gate
+  could block all home-manager changes for days before anyone noticed — which is
+  precisely when a gate gets disabled in anger. Telegram plumbing already exists.
+  **Deferred to its own bead**, to be done before the gate first fires for real.
+  Fable also credited two mitigations I had undersold: `opencodePatchedHold` means
+  auto-bumps only track self-cut releases (human in the loop), and a failed switch
+  also withholds the new binary from the pool, so gate-vs-pool coherence is
+  preserved — fail-closed is *correct*, not merely tolerable.
+- **F7 minor, deferred:** `head`/`options`/`trace` in `/doc` are skipped (empty set
+  today); `--min-routes` `parseInt` NaN is unguarded; the fixed-port comment should
+  state its `sandbox = true` assumption; and the gate validates the *HM-closure*
+  build of the door while the deployed door is the *NixOS-closure* build (same
+  source at the same commit, so benign — an unstated cousin of the ordering residual).
+- **Fable's framing worth keeping:** *the gate proves the table, not the door.* A
+  correctly classified route can still break through the door (sid-resolution
+  degrade, child-routing). That is outside this item by construction.
+
 ### Residuals
 - Ordering: a door-source-only change is deployed *before* the home-manager
   closure builds the gate (runbook order). `test.sh` is the pre-deploy mitigation.
