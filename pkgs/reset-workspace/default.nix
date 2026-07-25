@@ -827,7 +827,7 @@ EOF
       done
       pending=(''${still[@]+"''${still[@]}"})
       [ "''${#pending[@]}" -eq 0 ] && break
-      read -t 0.5 -r _ < <(:) 2>/dev/null || true
+      sleep 0.5
     done
     if [ "''${#pending[@]}" -gt 0 ]; then
       die "opencode serve pool did not become fully healthy within 30s (still down: ''${pending[*]})"
@@ -865,10 +865,10 @@ EOF
               still+=("$u")
             fi
           done
-          pending=(''${still[@]+"''${still[@]}"})
-          [ "''${#pending[@]}" -eq 0 ] && break
-          read -t 0.5 -r _ < <(:) 2>/dev/null || true
-        done
+      pending=(''${still[@]+"''${still[@]}"})
+      [ "''${#pending[@]}" -eq 0 ] && break
+      sleep 0.5
+    done
         if [ "''${#pending[@]}" -gt 0 ]; then
           die "opencode serve pool did not become fully healthy after retry within 30s (still down: ''${pending[*]})"
         fi

@@ -290,6 +290,20 @@ check "restart eval: mixed failed + unreadable -> verified-failed" \
 check "restart eval: no ports -> unverifiable" \
   "unverifiable" "$(evaluate_restart_outcome)"
 
+# Health-poll pause idiom test: prove read -t 0.5 < <(:) does not pause (< 50ms) while sleep 0.1 genuinely pauses (>= 80ms)
+t0=$(date +%s%N)
+read -t 0.5 -r _ < <(:) 2>/dev/null || true
+t1=$(date +%s%N)
+dt_read_ms=$(( (t1 - t0) / 1000000 ))
+
+t2=$(date +%s%N)
+sleep 0.1
+t3=$(date +%s%N)
+dt_sleep_ms=$(( (t3 - t2) / 1000000 ))
+
+check "non-pausing read idiom returns immediately (< 50ms)" "1" "$([ "$dt_read_ms" -lt 50 ] && echo 1 || echo 0)"
+check "sleep 0.1 genuinely pauses (>= 80ms)" "1" "$([ "$dt_sleep_ms" -ge 80 ] && echo 1 || echo 0)"
+
 check "sentinel format: started" \
   "started 2026-07-24T12:00:00Z pid=1234 phase=kill-nvim" \
   "$(format_sentinel started 2026-07-24T12:00:00Z 1234 kill-nvim)"
@@ -415,6 +429,8 @@ if [ -f "$default_nix" ]; then
   want_grep "bare-resolve loop still serve-gated"          'OC_ALL_PIDS=""'
   want_grep "restart reuses the precomputed scope"        'restart_pool_target "$POOL_SCOPE"'
   want_grep "post-restart poll reuses discover_pool_urls" 'serve_health_urls < <(discover_pool_urls "$POOL_SCOPE")'
+  refuse_grep "no non-pausing read in health poll"        '< <(:)'
+  want_grep "health poll pauses via sleep"               'sleep 0.5'
   # workstation-px2p & workstation-3smg: process detachment & sentinel status
   want_grep "source ignores SIGPIPE via trap"            'trap "" PIPE'
   want_grep "destructive phase detaches via setsid"      'setsid'
