@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-yexR7lZkUACWxMsHP7FoPnW78IBiRYv8/Km13AVExLo=";
+      hash = "sha256-XPJTGOeQL/WJirAIwztunwpUlbzRdZzk1/+Ub56noko=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-5Jn0qWPehG7Wt/S/MKo2advPE7xEMg7pTdk7zUEFapA=";
+      hash = "sha256-yM3TrFL64ln/EM5gsqnJbmYJUxovhUVU2QCsdke/saU=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-8aZNML30YLHTIGFk+n01M9wJYWbwA684x/clYHhf12E=";
+      hash = "sha256-NZrjbK0I8hVK1Nzzhtqpp8wdhbxDcsQuYmIXZGObZNk=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-cpetWVJeKyW8Z6ZahOsKerpvVfMiXWOYVxZSzXI7bYE=";
+      hash = "sha256-mmiePXnDLJFVtPeWH9xmulVPIO/ZCudxyeoRzwgGlL4=";
       isZip = true;
     };
   };
@@ -87,6 +87,18 @@ let
     # projection reset, but TEST-MIGRATE a DB copy and confirm old sessions still
     # render before the fleet switch (Phase 2 of the cutover runbook). Serves pick
     # up the new binary only on restart (nightly reset / manual switch).
+    #
+    # PATCHED.4 (2026-07-25): pins v1.17.13-patched.4 (build-release.yml
+    # -f version=1.17.13 -f revision=4). Adds ONE patch over patched.3, taking
+    # the set to 24: opus5-adaptive-thinking (cherry-pick of upstream #38757 /
+    # commit 2b2aacc9, in v1.18.5). FIXES the Claude Opus 5 "thinking.type.enabled
+    # is not supported for this model" 400: v1.17.13's variant builder gates
+    # adaptive thinking on a TWO-part opus version regex (opus-(\d+)[.-](\d+)), so
+    # single-part claude-opus-5 fell through to the legacy {thinking:{type:enabled,
+    # budgetTokens}} high/max variant, which Vertex/Anthropic opus-5 rejects. The
+    # patch generalizes the regex (minor optional) so opus-5 -> adaptive. Sunset on
+    # the upstream bump to >= v1.18.5. (patched.3 was a prior patch-set cut on the
+    # same 1.17.13 base.)
     #
     # PATCHED.2 (2026-07-24, Phase 8+9 co-land — bead workstation-mlve.3/.4): now
     # pins v1.17.13-patched.2. Ends the "no patched.N during Phases 0-8" hold.
@@ -259,7 +271,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.13";
-    patchedRevision = "3";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "4";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
