@@ -1,7 +1,7 @@
 ---
-description: Adversarial design/plan reviewer (opus-4-8 model) — pressure-tests a proposed design, plan, or approach BEFORE it's built, hunting flaws, wrong assumptions, missing cases, hazards, and better alternatives
+description: Adversarial design/plan reviewer (opus-5 model) — pressure-tests a proposed design, plan, or approach BEFORE it's built, hunting flaws, wrong assumptions, missing cases, hazards, and better alternatives
 mode: subagent
-model: anthropic/claude-opus-4-8
+model: anthropic/claude-opus-5
 permission:
   read: allow
   glob: allow

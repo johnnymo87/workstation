@@ -1,4 +1,4 @@
-# Review of OPUS-AWARE-DESIGN.md (Vertex Opus 4.8 reviewer pass)
+# Review of OPUS-AWARE-DESIGN.md (Vertex Opus 5 reviewer pass)
 
 Method: every code-level claim below was checked against the actual sources in
 `src/`. Line refs in this review point at the real upstream code as it exists in
@@ -322,7 +322,7 @@ present, so a wire-shape drift is visible instead of silent.
 **Where:** §5b, §4 (`modelClass`).
 
 `/opus/i`-on-`model` is fine **if** the wire value is the bare `claude-opus-4-*`.
-Note the §1.1 example `anthropic/claude-opus-4-8` is opencode's *provider-prefixed*
+Note the §1.1 example `anthropic/claude-opus-5` is opencode's *provider-prefixed*
 id; the value actually sent to `/v1/messages` should be the provider-stripped
 `claude-opus-4-...`. `/opus/i` matches either, so the regex is robust — but
 confirm with a captured request body. The design correctly plans a try/catch

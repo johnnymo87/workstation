@@ -101,7 +101,7 @@ check "empty input -> empty output" "" "$out"
 # 100k+ `message=evaluated permission` lines echo arbitrary command text and
 # must be dropped BEFORE matching so trigger words inside a command can't create
 # false positives.
-ok_line='timestamp=T level=INFO message=stream providerID=google-vertex-anthropic modelID=claude-opus-4-8@default session.id=ses_AAA small=false agent=build mode=primary'
+ok_line='timestamp=T level=INFO message=stream providerID=google-vertex-anthropic modelID=claude-opus-5@default session.id=ses_AAA small=false agent=build mode=primary'
 err_line='timestamp=T level=ERROR message="stream error" providerID=openai modelID=gpt-5.5 session.id=ses_ERR small=false agent=oracle mode=subagent error.error="AI_APICallError: RESOURCE_EXHAUSTED"'
 perm_line='timestamp=T level=INFO message=evaluated permission pattern="grep service=llm RESOURCE_EXHAUSTED status=429" action.action=allow'
 loop_line='timestamp=T level=INFO message=loop session.id=ses_AAA step=57'

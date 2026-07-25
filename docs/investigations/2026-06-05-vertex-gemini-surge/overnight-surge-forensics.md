@@ -107,7 +107,7 @@ Source (`~/projects/lgtm/src`):
 - `gather.ts:10` → `export const GATHER_MODEL = "google-vertex/gemini-3.5-flash";`
   (the exact surge model). `gather.ts:110-117` builds
   `opencode-launch --model google-vertex/gemini-3.5-flash --mcp slack-ro ...`.
-- `dispatch.ts:11` → `REVIEW_MODEL = "google-vertex-anthropic/claude-opus-4-8@default";`
+- `dispatch.ts:11` → `REVIEW_MODEL = "google-vertex-anthropic/claude-opus-5@default";`
   (the **opus** that reconciles 1:1 with the DB).
 - `opencode-launch` (read in full) does **not** spawn an isolated instance — it
   `POST`s `/session` + `/session/:id/prompt_async` to **:4096**, i.e. all this
@@ -129,11 +129,11 @@ Sessions created in window, by `model` + `agent`:
 |------:|-------|-------|
 | 34 | gemini-3.5-flash | **implementer** |
 | 27 | gemini-3.5-flash | **code-reviewer** |
-| 26 | claude-opus-4-8 | build (orchestrator) |
+| 26 | claude-opus-5 | build (orchestrator) |
 | 21 | gemini-3.5-flash | **spec-reviewer** |
-|  9 | claude-opus-4-8 | explore |
+|  9 | claude-opus-5 | explore |
 |  8 | gemini-3.5-flash | build |
-|  6 | claude-opus-4-8 | build |
+|  6 | claude-opus-5 | build |
 
 The opus `build` top-level sessions (32 of them) are overwhelmingly titled
 **"Review PR with .lgtm-review-prompt.md"** / "LGTM PR review" (lgtm dispatch),
@@ -234,7 +234,7 @@ and the dir is wiped on restart/cleanup — which is why this window's logs are
 gone):
 
 - `service=llm` lines (logical calls + attribution). Real format on this box:
-  `INFO ... service=llm providerID=anthropic modelID=claude-opus-4-8 session.id=ses_... small=false agent=build mode=primary stream`
+  `INFO ... service=llm providerID=anthropic modelID=claude-opus-5 session.id=ses_... small=false agent=build mode=primary stream`
 - **error/retry lines** (e.g. `RESOURCE_EXHAUSTED`, `429`, retry/abort) — needed
   because `service=llm` logs *logical* calls (~2–6k), **not** the ~97k retries;
   to catch a retry storm you must also capture the provider error lines.

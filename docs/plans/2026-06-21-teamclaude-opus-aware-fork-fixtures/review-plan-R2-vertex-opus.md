@@ -1,4 +1,4 @@
-# Re-review (R2) of the teamclaude opus-aware fork PLAN (Vertex Opus 4.8)
+# Re-review (R2) of the teamclaude opus-aware fork PLAN (Vertex Opus 5)
 
 Method: this is a *re-review* of the revised plan
 (`2026-06-21-teamclaude-opus-aware-fork-plan.md`, R2). Every prior finding from

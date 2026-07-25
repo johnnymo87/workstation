@@ -36,6 +36,15 @@
         "chunkTimeout": 600000
       },
       "models": {
+        "claude-opus-5": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "high"
+          }
+        },
         "claude-opus-4-8": {
           "options": {
             "thinking": {
@@ -87,6 +96,15 @@
         "chunkTimeout": 600000
       },
       "models": {
+        "claude-opus-5@default": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "high"
+          }
+        },
         "claude-opus-4-8@default": {
           "options": {
             "thinking": {

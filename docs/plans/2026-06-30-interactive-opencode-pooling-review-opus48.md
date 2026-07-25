@@ -1,6 +1,6 @@
 # Adversarial review: interactive `opencode` pooling (Phase 2)
 
-- **Reviewer:** opus-4.8 (adversarial / red-team)
+- **Reviewer:** opus-5 (adversarial / red-team)
 - **Date:** 2026-06-30
 - **Doc under review:** `docs/plans/2026-06-30-interactive-opencode-pooling-design.md`
 - **Verdict:** **SHIP-WITH-CHANGES**

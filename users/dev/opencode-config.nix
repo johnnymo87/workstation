@@ -6,7 +6,7 @@
 let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
-  devboxModel = "anthropic/claude-opus-4-8";
+  devboxModel = "anthropic/claude-opus-5";
   # Compaction model for devbox: direct Anthropic Sonnet 5 (NOT Vertex).
   # Runs via the Claude Max subscription (teamclaude on devbox), so there is no
   # per-token cost. Cheaper/faster than Opus for one-shot summarization while
@@ -15,7 +15,7 @@ let
   # Cloudbox default: Opus over Vertex (no Claude Max subscription here, unlike
   # devbox). Carries its own high thinking effort from opencode.base.json's
   # google-vertex-anthropic model options, so no variant override is needed.
-  vertexOpusModel = "google-vertex-anthropic/claude-opus-4-8@default";
+  vertexOpusModel = "google-vertex-anthropic/claude-opus-5@default";
   geminiModel = "google-vertex/gemini-3.6-flash";
   geminiVariant = "high";
   gemini36FlashModel = {
@@ -49,7 +49,7 @@ let
   #      cloudbox). These are the cheap plan-execution / research subagents;
   #      Gemini uses Gemini-native thinking levels, so add `variant: high`.
   #
-  #   2. opus-4-N -> Vertex Anthropic (`google-vertex-anthropic/claude-opus-4-N@default`)
+  #   2. opus-N -> Vertex Anthropic (`google-vertex-anthropic/claude-opus-N@default`)
   #      on cloudbox ONLY. Cloudbox has no first-party `anthropic/` auth (it
   #      routes Anthropic through Vertex/ADC), so an opus agent left pinned to
   #      `anthropic/claude-opus-*` reaches an unusable provider and the model
@@ -60,7 +60,7 @@ let
   #      quo — its primary is Gemini and opus agents are rare there). This
   #      mirrors the host-conditional primary `model =` below
   #      (`if isCloudbox then vertexOpusModel else geminiModel`). The Vertex
-  #      opus-4-8 model already carries its own `effort` setting from
+  #      opus-5 model already carries its own `effort` setting from
   #      opencode.base.json, so no variant override is added here. (opus-4-7
   #      has no provider-level model entry anymore, and no agent is pinned
   #      to it as of 2026-07-03.)
@@ -76,7 +76,7 @@ let
       afterOpus =
         if isCloudbox then
           pkgs.runCommand "${name}-opus-vertex.md" {} ''
-            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-opus-([0-9]+-[0-9]+)|model: google-vertex-anthropic/claude-opus-''${1}\@default|' ${afterSonnet} > $out
+            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-opus-([0-9]+(?:-[0-9]+)*)|model: google-vertex-anthropic/claude-opus-''${1}\@default|' ${afterSonnet} > $out
           ''
         else
           afterSonnet;
@@ -101,10 +101,10 @@ let
   # mkAgentVariant: build a model-pinned twin of a `<base>-opus` agent from the
   # SAME source body at build time, so a shared prompt has a single source of
   # truth (no hand-maintained copies to drift). Used for both adversarial-reviewer
-  # and oracle (any agent whose opus source pins anthropic/claude-opus-4-8 and
-  # carries an "(opus-4-8 model)" token in its description). It rewrites only:
-  #   - the model pin (opus-4-8 -> modelPin)
-  #   - the "(opus-4-8 model)" description token -> "(modelTag model)"
+  # and oracle (any agent whose opus source pins anthropic/claude-opus-5 and
+  # carries an "(opus-5 model)" token in its description). It rewrites only:
+  #   - the model pin (opus-5 -> modelPin)
+  #   - the "(opus-5 model)" description token -> "(modelTag model)"
   #   - appends an opt-in CAUTION so the orchestrator does NOT auto-select the
   #     twin; `<base>-opus` stays the default.
   # The result is fed through patchAgent for any host rewrites (e.g. the afterFable
@@ -124,8 +124,8 @@ let
   mkAgentVariant = { base, slug, modelPin, modelTag }: src:
     pkgs.runCommand "${base}-${slug}-src.md" {} ''
       ${pkgs.perl}/bin/perl -0pe '
-        s|model: anthropic/claude-opus-4-8|model: ${modelPin}|;
-        s|\(opus-4-8 model\)|(${modelTag} model)|;
+        s|model: anthropic/claude-opus-5|model: ${modelPin}|;
+        s|\(opus-5 model\)|(${modelTag} model)|;
         s|^(description: .*)$|$1. CAUTION — use this ${modelTag} variant ONLY when the user explicitly asks for it; otherwise default to ${base}-opus|m;
       ' ${src} > $out
     '';
@@ -249,7 +249,7 @@ let
   # Platform overlay:
   # - devbox defaults to the Anthropic subscription path, so sessions
   #   do not depend on the OpenAI API key.
-  # - cloudbox defaults to Vertex Opus 4.8 (interactive primary model), while
+  # - cloudbox defaults to Vertex Opus 5 (interactive primary model), while
   #   keeping compaction + the plan-execution subagents on cheap Gemini Flash.
   # - macOS defaults to Vertex Gemini 3.6 Flash on high thinking.
   # - macOS + cloudbox get Atlassian MCP wiring.
@@ -276,7 +276,7 @@ let
       # isCloudbox-only), so any turn on google-vertex-anthropic/* or
       # google-vertex/* falls through to the stock @ai-sdk/google-vertex ADC path
       # and dies on the first turn with "Could not load the default credentials".
-      # The picker listed the Vertex "Claude Opus 4.8" (and "Gemini 3.6 Flash")
+      # The picker listed the Vertex "Claude Opus 5" (and "Gemini 3.6 Flash")
       # entries right next to the working first-party anthropic/google ones; a
       # mis-pick persisted into ~/.local/state/opencode/model.json poisoned every
       # subsequently-opened session (3 crashes 2026-06..07). Disabling removes the
@@ -311,7 +311,7 @@ let
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
       # Default model differs by host:
-      #   - cloudbox -> Vertex Opus 4.8 (interactive primary model). The plan-
+      #   - cloudbox -> Vertex Opus 5 (interactive primary model). The plan-
       #     execution subagents + compaction stay on cheap Gemini Flash below.
       #   - macOS    -> Gemini 3.6 Flash with high thinking (unchanged).
       model = if isCloudbox then vertexOpusModel else geminiModel;
@@ -395,7 +395,7 @@ in
    # Distinctly-named model-pinned twins so the model is unambiguous at the call
    # site, all generated from each agent's `<base>-opus.md` source (single source
    # of truth for the prompt body, no drift):
-   #   @<base>-opus   -> opus-4-8 (source of truth for the prompt)
+   #   @<base>-opus   -> opus-5 (source of truth for the prompt)
    #   @<base>-fable  -> claude-fable-5 (mkFableVariant; cloudbox gets the Vertex
    #                     rewrite via patchAgent)
    #   @<base>-sol    -> openai/gpt-5.6-sol (mkSolVariant; deployed on all hosts —

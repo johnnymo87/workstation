@@ -21,7 +21,7 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### oracle-opus / oracle-fable / oracle-sol (subagents)
 **Purpose:** Read-only strategic technical advisor — architecture, debugging, high-stakes decisions.
-**Model-pinned twins, same prompt:** `oracle-opus` runs on Opus 4.8 (the default, and the source of truth for the prompt body); `oracle-fable` runs on `claude-fable-5`; `oracle-sol` runs on `openai/gpt-5.6-sol` (the ChatGPT/Codex-subscription frontier model via codex-lb). All three are generated from the opus source at nix-build time (`mkFableVariant`/`mkSolVariant` → `mkAgentVariant` in `opencode-config.nix`), rewriting only the model pin + the `(… model)` description token, so the prompt never drifts between them. Pick the handle to pick the model.
+**Model-pinned twins, same prompt:** `oracle-opus` runs on Opus 5 (the default, and the source of truth for the prompt body); `oracle-fable` runs on `claude-fable-5`; `oracle-sol` runs on `openai/gpt-5.6-sol` (the ChatGPT/Codex-subscription frontier model via codex-lb). All three are generated from the opus source at nix-build time (`mkFableVariant`/`mkSolVariant` → `mkAgentVariant` in `opencode-config.nix`), rewriting only the model pin + the `(… model)` description token, so the prompt never drifts between them. Pick the handle to pick the model.
 **Model routing:** host-correct — opus/fable route direct `anthropic/` off cloudbox and Vertex on cloudbox (`patchAgent` rewrite: `google-vertex-anthropic/…@default`); sol is deployed on all hosts with a `patchAgent` pass-through, reachable wherever codex-lb serves `gpt-5.6-sol` and the openai provider is routed there.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
 **When to use:** Stuck after 2+ attempts, architectural decision, need a second opinion. `-opus` is the default; `-fable` and `-sol` are opt-in — each description carries a CAUTION so the orchestrator won't auto-pick a non-default twin, so only reach for `oracle-fable` / `oracle-sol` when explicitly asked for that model.
@@ -29,7 +29,7 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### adversarial-reviewer-opus / adversarial-reviewer-fable / adversarial-reviewer-sol (subagents)
 **Purpose:** Skeptical, adversarial review of a **design / plan / approach before it's built** — hunts flaws, wrong assumptions, missing cases, hazards, and better alternatives.
-**Model-pinned twins, same prompt:** `adversarial-reviewer-opus` runs on Opus 4.8 (the default, and the source of truth for the prompt body); `adversarial-reviewer-fable` runs on `claude-fable-5`; `adversarial-reviewer-sol` runs on `openai/gpt-5.6-sol` (the ChatGPT/Codex-subscription frontier model via codex-lb). Every twin's source is *generated* from the opus source at nix-build time (`mkReviewerVariant` in `opencode-config.nix`), rewriting only the model pin + the `(… model)` description token, so the ~130-line prompt never drifts between them. Pick the handle to pick the model; the names are deliberately distinct so there's no ambiguity at the call site.
+**Model-pinned twins, same prompt:** `adversarial-reviewer-opus` runs on Opus 5 (the default, and the source of truth for the prompt body); `adversarial-reviewer-fable` runs on `claude-fable-5`; `adversarial-reviewer-sol` runs on `openai/gpt-5.6-sol` (the ChatGPT/Codex-subscription frontier model via codex-lb). Every twin's source is *generated* from the opus source at nix-build time (`mkReviewerVariant` in `opencode-config.nix`), rewriting only the model pin + the `(… model)` description token, so the ~130-line prompt never drifts between them. Pick the handle to pick the model; the names are deliberately distinct so there's no ambiguity at the call site.
 **Model routing:** host-correct, same as oracle — opus/fable route direct `anthropic/` off cloudbox and Vertex on cloudbox (`patchAgent` rewrite); sol is deployed on all hosts with a `patchAgent` pass-through, reachable wherever codex-lb serves `gpt-5.6-sol` and the openai provider is routed there.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
 **When to use:** You have a design or plan and want it pressure-tested *before* writing code; you want the uncomfortable "this is solving the wrong problem" read. `-opus` is the default; `-fable` and `-sol` are opt-in — each description carries a CAUTION so the orchestrator won't auto-pick a non-default twin, so only reach for `-fable` / `-sol` when explicitly asked for that model.
@@ -66,7 +66,7 @@ lands on a model it can actually call:
   devbox keeps the direct pin (its working primary via TeamClaude);
   macOS is left as-is.
 
-When adding an opus-pinned agent, pin it to `anthropic/claude-opus-4-8` in the
+When adding an opus-pinned agent, pin it to `anthropic/claude-opus-5` in the
 source file and let `patchAgent` handle cloudbox — do **not** hardcode the
 Vertex id, or you regress devbox/macOS.
 
@@ -95,7 +95,7 @@ In Feb 2025 we inherited 6 agents from "Oh My OpenCode" (OMO) and cut them all:
 
 ## Adding a New Agent
 
-1. Create `assets/opencode/agents/<name>.md` with YAML frontmatter (description, mode, model, permission). For opus agents, pin `anthropic/claude-opus-4-8` and let `patchAgent` route it (see "Host-correct model routing").
+1. Create `assets/opencode/agents/<name>.md` with YAML frontmatter (description, mode, model, permission). For opus agents, pin `anthropic/claude-opus-5` and let `patchAgent` route it (see "Host-correct model routing").
 2. Add `xdg.configFile."opencode/agents/<name>.md".source = patchAgent "<name>" "${assetsPath}/opencode/agents/<name>.md";` to `users/dev/opencode-config.nix` (route it through `patchAgent`, not a bare `source`, so host model rewriting applies)
 3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox), `nix run home-manager -- switch --flake .#cloudbox` (cloudbox), or `darwin-rebuild switch` (macOS)
 4. Update this skill with the agent's purpose and rationale

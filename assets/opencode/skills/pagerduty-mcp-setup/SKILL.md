@@ -95,13 +95,13 @@ stays `enabled: false` (Gemini-safe):
 
 ```bash
 opencode-launch --mcp pagerduty \
-  --model google-vertex-anthropic/claude-opus-4-8 \
+  --model google-vertex-anthropic/claude-opus-5 \
   ~/projects/<dir> "triage PagerDuty incident <id>"
 ```
 
 > The `google-vertex-anthropic/` provider prefix is stable on cloudbox + macOS,
 > but the Claude version suffix **drifts as new releases land** —
-> `claude-opus-4-8` is just the current example (2026-06). Pass whatever Claude
+> `claude-opus-5` is just the current example (2026-06). Pass whatever Claude
 > model your interactive sessions use; find a live id in the opencode model
 > picker or `grep claude users/dev/opencode-config.nix`. Any `claude-*` id works;
 > the point is "not Gemini."

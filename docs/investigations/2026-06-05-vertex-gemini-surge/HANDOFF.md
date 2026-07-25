@@ -125,7 +125,7 @@ No emergency mitigation taken; lgtm-run.timer still enabled.
   `docker exec dev-postgres-1 psql -U aigateway -d aigateway -c "..."`.
 - **Only proxies google-vertex-anthropic (opus + haiku titles); gemini bypasses it.**
 - **Bug found:** 10,790 opus rows have NULL tokens+dollars because `PriceTable.kt` lacks
-  `claude-opus-4-8` (has 4-7/4-5) → compute() throws → ProxyController:182-195 nulls usage+cost.
+  `claude-opus-5` (has 4-7/4-5) → compute() throws → ProxyController:182-195 nulls usage+cost.
   Haiku works (in table). → aigateway worker dispatched (see below).
 - The haiku ledger rows are the "invisible-to-oc-cost" title calls — cross-confirms the title
   counting-artifact (mechanism #1).
@@ -136,7 +136,7 @@ No emergency mitigation taken; lgtm-run.timer still enabled.
   retry lines to ~/.local/state/opencode-llm-audit/llm.log (verified live). home-manager change
   STAGED-not-committed in workstation. Next storm will be attributable by session.id/model/agent.
 - Worker 3 aigateway (`ses_1670df706ffeIwMdzaEcSoTaGA`, opus, mono worktree off origin/main) —
-  IN PROGRESS: add claude-opus-4-8 pricing (fix opus NULL) + gemini support (parse usageMetadata,
+  IN PROGRESS: add claude-opus-5 pricing (fix opus NULL) + gemini support (parse usageMetadata,
   price, proxy google publisher path). Gateway redeploy is safe; the opencode gemini-routing flip
   is GATED (gemini is the global default — broken route breaks everything). → aigateway-cost-fix.md.
 
@@ -162,7 +162,7 @@ AND the aigateway worker. After the restart, do this:
    - `/tmp/retry-cap-deploy.log` shows the restart command output.
 2. **Resume the aigateway worker** (`ses_1670df706ffeIwMdzaEcSoTaGA`): its git worktree off
    origin/main + edits persist on disk. Re-prompt it (opencode-send / prompt) to "continue
-   where you left off — check your worktree git status first." Task: add `claude-opus-4-8` to
+   where you left off — check your worktree git status first." Task: add `claude-opus-5` to
    PriceTable (fix opus NULL) + gemini support; deliver aigateway-cost-fix.md + mono PR.
 3. **Remaining work:** Fix 2 config hardening (non-gemini compaction/default in workstation
    Nix); then the low-pri list (upstream title-cost issue, dashboard query sync to PR #3215,
@@ -184,7 +184,7 @@ State: BOTH primary fixes are LIVE & verified. Now making the cure durable + ena
 ### Verified done & live
 - CURE live: opencode-serve runs capped `opencode-patched-1.15.13.3` (RETRY_JITTER_RATIO present in
   running binary; absent in old k775). MAX_RETRIES=8 + jitter.
-- aigateway fix live: opus `claude-opus-4-8` now records tokens+dollars (264 rows/$43 last hr, was 0%);
+- aigateway fix live: opus `claude-opus-5` now records tokens+dollars (264 rows/$43 last hr, was 0%);
   gemini parse+price works; unpriced models keep tokens. mono PR #3373 (food-truck/mono, OPEN).
 - forward-capture live (~/.local/state/opencode-llm-audit/llm.log). RCA in this dir + /tmp.
 

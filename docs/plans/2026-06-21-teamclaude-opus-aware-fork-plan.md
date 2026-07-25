@@ -23,7 +23,7 @@ class-free machinery.
 **Tech Stack:** Node 18+ (ESM, zero runtime deps), `node:test` + `node:assert/strict`,
 Nix (`fetchFromGitHub`) for deployment. Two repos (see below).
 
-**Status:** R2.1, **APPROVED-FOR-IMPLEMENTATION** by a second Vertex Opus 4.8 pass
+**Status:** R2.1, **APPROVED-FOR-IMPLEMENTATION** by a second Vertex Opus 5 pass
 (`fixtures/review-plan-R2-vertex-opus.md`). R1→R2 changes are tagged **[R2]** (from
 `fixtures/review-plan-vertex-opus.md`): MAJOR-1 mid-stream classifier status-gate;
 MAJOR-2 cloudbox `localPkgs`→`callPackage`; MINOR-1 `percent===1` boundary; MINOR-2
@@ -69,7 +69,7 @@ This plan spans **two** repos:
 ```
 Built only from `limits[]` entries where `group === "weekly"` and `scope?.model` is set. Key is canonicalized via `modelClass(entry.scope.model.display_name)` so `"Opus"→"opus"`, `"Sonnet"→"sonnet"`.
 
-`modelClass(modelId)`: `/opus/i → "opus"`, `/sonnet/i → "sonnet"`, else `null`. Robust to both opencode's provider-prefixed id (`anthropic/claude-opus-4-8`) and the wire value (`claude-opus-4-…`).
+`modelClass(modelId)`: `/opus/i → "opus"`, `/sonnet/i → "sonnet"`, else `null`. Robust to both opencode's provider-prefixed id (`anthropic/claude-opus-5`) and the wire value (`claude-opus-4-…`).
 
 ---
 
@@ -142,8 +142,8 @@ import assert from 'node:assert/strict';
 import { modelClass } from '../src/account-manager.js';
 
 test('modelClass maps opus/sonnet wire + provider-prefixed ids', () => {
-  assert.equal(modelClass('claude-opus-4-8'), 'opus');
-  assert.equal(modelClass('anthropic/claude-opus-4-8'), 'opus');
+  assert.equal(modelClass('claude-opus-5'), 'opus');
+  assert.equal(modelClass('anthropic/claude-opus-5'), 'opus');
   assert.equal(modelClass('claude-sonnet-4-5'), 'sonnet');
   assert.equal(modelClass('Opus'), 'opus');        // display_name form
   assert.equal(modelClass('Sonnet'), 'sonnet');
@@ -159,7 +159,7 @@ test('modelClass maps opus/sonnet wire + provider-prefixed ids', () => {
 ```js
 /**
  * Map a model id (wire value `claude-opus-4-…`, opencode's provider-prefixed
- * `anthropic/claude-opus-4-8`, or a usage `scope.model.display_name` like
+ * `anthropic/claude-opus-5`, or a usage `scope.model.display_name` like
  * "Opus") to a coarse model class used for scoped-quota tracking. Returns null
  * for anything we don't gate on.
  */
@@ -623,7 +623,7 @@ test('an Opus request routes to the account whose opus scope is healthy', async 
   try {
     await (await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-opus-4-8', messages: [] }) })).text();
+      body: JSON.stringify({ model: 'claude-opus-5', messages: [] }) })).text();
     assert.equal(seen.at(-1), 'Bearer tok-b');     // diverted to b
 
     await (await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {

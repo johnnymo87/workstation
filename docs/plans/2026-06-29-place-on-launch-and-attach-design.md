@@ -45,7 +45,7 @@ single-serve behavior ("never worse"). This is approach A.
 - **Plain/interactive `opencode`**: self-hosts its own embedded server, does not
   load the pigeon plugin, and is not in the pool — it is neither placed nor
   dumped on `:4096`. Pooling interactive `opencode` is a separate design
-  (delegated to a separate opus-4.8 session).
+  (delegated to a separate opus-5 session).
 - **Re-placing the 20 currently-concentrated live sessions**: left to drain; the
   nightly reset re-attaches them through the new path and distributes them.
 

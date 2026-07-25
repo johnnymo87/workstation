@@ -283,7 +283,7 @@ In `tests/dispatch.test.ts`, change the `buildDispatchArgs` expectation
 ```ts
     expect(buildDispatchArgs("/tmp/worktree")).toEqual([
       "--model",
-      "google-vertex-anthropic/claude-opus-4-8@default",
+      "google-vertex-anthropic/claude-opus-5@default",
       "--tmux-session",
       "lgtm",
       "--",
