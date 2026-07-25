@@ -885,6 +885,32 @@ ${serveIdCase}
           exec 9<&-
         fi
 
+        # Compute installed/reference store path prefix ONCE per canary run from
+        # the user's profile symlink.
+        #
+        # WHY profile symlink rather than ExecStart:
+        # ExecStart points to opencode-serve-start, a wrapper shell script whose nix hash
+        # is independent of the opencode package. The wrapper's final line is:
+        # `exec /home/dev/.nix-profile/bin/opencode serve ...`
+        # So /home/dev/.nix-profile/bin/opencode is the true reference for what binary
+        # would run if the serve instance were restarted right now.
+        REF_EXE=$(readlink -f /home/dev/.nix-profile/bin/opencode 2>/dev/null || true)
+        if [ -n "$REF_EXE" ]; then
+          REF_PREFIX=$(echo "$REF_EXE" | cut -d/ -f1-4)
+        else
+          REF_PREFIX=""
+        fi
+
+        # Track drifting ports across the pool to issue ONE aggregated alert per canary pass.
+        #
+        # WHY pool-level aggregation over per-port alerting:
+        # On 2026-07-24, a home-manager switch updated the opencode package system-wide.
+        # All K serves became stale simultaneously. Per-port alerting would emit K alerts
+        # for a single logical event (4-message alert storm).
+        DRIFT_PORTS=""
+        DRIFT_DETAILS=""
+        DRIFT_SIG_PARTS=""
+
         for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
           UNIT="opencode-serve@$PORT.service"
           FAILFILE="$STATE/$PORT.fails"
@@ -899,6 +925,35 @@ ${serveIdCase}
           if curl -sf --max-time 3 --connect-timeout 3 \
                "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1; then
             rm -f "$FAILFILE"
+
+            # Stale-binary drift detection for healthy serves (2026-07-24 incident recovery).
+            #
+            # WHY store path comparison:
+            # /global/health's self-reported "version" field returns upstream semver ("1.17.13"),
+            # which remains identical across patched revision builds (patched.1/.2/.3).
+            # Comparing store path prefixes (first 4 slash-separated fields) detects patch drift.
+            #
+            # WHY unknown != drift:
+            # If REF_PREFIX is empty (profile symlink briefly missing during home-manager switch)
+            # or MainPID /proc/<pid>/exe is missing/unreadable (process died/restarting), skip
+            # the check. False-positive alerts during transient state train users to ignore alerts.
+            if [ -n "$REF_PREFIX" ]; then
+              PID=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null || true)
+              if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+                RUN_EXE=$(readlink "/proc/$PID/exe" 2>/dev/null || true)
+                if [ -n "$RUN_EXE" ]; then
+                  RUN_PREFIX=$(echo "$RUN_EXE" | cut -d/ -f1-4)
+                  if [ -n "$RUN_PREFIX" ] && [ "$RUN_PREFIX" != "$REF_PREFIX" ]; then
+                    echo "WARNING: $UNIT binary drift: running=$RUN_PREFIX installed=$REF_PREFIX"
+                    DRIFT_PORTS="$DRIFT_PORTS $PORT"
+                    DRIFT_DETAILS="''${DRIFT_DETAILS}  - port $PORT: $RUN_PREFIX
+"
+                    DRIFT_SIG_PARTS="''${DRIFT_SIG_PARTS}$PORT:$RUN_PREFIX;"
+                  fi
+                fi
+              fi
+            fi
+
             continue
           fi
 
@@ -966,6 +1021,26 @@ ${serveIdCase}
           systemctl restart "$UNIT"
           rm -f "$FAILFILE"
         done
+
+        if [ -n "$DRIFT_PORTS" ]; then
+          DRIFT_TEXT=$(cat <<EOF
+OpenCode serve pool is running stale code on port(s):$DRIFT_PORTS
+
+To fix, run:
+sudo systemctl restart opencode-serve-pool.target
+
+Running store path(s):
+$DRIFT_DETAILS
+Installed store path:
+$REF_PREFIX
+
+Note: Restarting the serve pool terminates live OpenCode sessions. Pick an appropriate moment to restart.
+EOF
+)
+          ${driftAlert} "$STATE/drift-alerted" "$REF_PREFIX|$DRIFT_SIG_PARTS" "$DRIFT_TEXT"
+        else
+          rm -f "$STATE/drift-alerted"
+        fi
       ''}";
     };
   };
