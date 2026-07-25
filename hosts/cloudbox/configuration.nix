@@ -914,11 +914,43 @@ ${serveIdCase}
         # `exec /home/dev/.nix-profile/bin/opencode serve ...`
         # So /home/dev/.nix-profile/bin/opencode is the true reference for what binary
         # would run if the serve instance were restarted right now.
+        # INCIDENT 2026-07-25 (bead workstation-bcmi): a non-empty check is NOT enough.
+        # `readlink -f` resolves PARENT directories and returns the path even when the
+        # FINAL COMPONENT DOES NOT EXIST. During a home-manager switch there is a window
+        # where ~/.nix-profile/bin/opencode is missing, so REF_EXE came back as
+        # `/nix/store/<hash>-profile/bin/opencode` — non-empty, but pointing at the
+        # PROFILE instead of through to the opencode package. `cut -f1-4` then yielded
+        # `…-profile` as REF_PREFIX, which cannot equal any serve's real prefix, so ALL
+        # FOUR serves were reported as drifted and escalated to "dangerous … pending
+        # alert". The serves were correct; the canary was wrong.
+        #
+        # Only the 2-consecutive-pass dampening stopped that becoming a false Telegram
+        # page. That is a thin margin: a switch straddling two passes would page with a
+        # bogus pool-wide "dangerous drift", and the documented consequence is worse than
+        # a missed alert — it teaches the operator to ignore the channel, after which the
+        # throttle SUPPRESSES the alert when drift turns genuinely dangerous.
+        #
+        # So classify anything that is not a *verified* opencode package path as UNKNOWN
+        # (REF_PREFIX=""), which the logic below already handles correctly: never alert,
+        # never clear throttle state. "Unknown" was previously modelled as "empty"; this
+        # failure mode is unknown-but-not-empty.
         REF_EXE=$(readlink -f /home/dev/.nix-profile/bin/opencode 2>/dev/null || true)
-        if [ -n "$REF_EXE" ]; then
-          REF_PREFIX=$(echo "$REF_EXE" | cut -d/ -f1-4)
-        else
-          REF_PREFIX=""
+        REF_PREFIX=""
+        if [ -n "$REF_EXE" ] && [ -x "$REF_EXE" ]; then
+          REF_PREFIX_CANDIDATE=$(echo "$REF_EXE" | cut -d/ -f1-4)
+          # Structural sanity: the reference MUST be an opencode package, not a profile,
+          # a wrapper, or anything else a future refactor might resolve to. This catches
+          # any wrong-shaped resolution, not just the missing-file case above.
+          case "$REF_PREFIX_CANDIDATE" in
+            /nix/store/*-opencode-patched-*)
+              REF_PREFIX="$REF_PREFIX_CANDIDATE"
+              ;;
+            *)
+              echo "NOTICE: reference binary resolved to an unexpected path; treating as unknown (no alert): $REF_EXE"
+              ;;
+          esac
+        elif [ -n "$REF_EXE" ]; then
+          echo "NOTICE: reference binary path is not executable (home-manager switch in flight?); treating as unknown (no alert): $REF_EXE"
         fi
 
         # Track drifting ports across the pool to issue ONE aggregated alert per canary pass.
@@ -1515,8 +1547,19 @@ EOF
           EXECSTART_FULL=$(systemctl show "$UNIT" -p ExecStart --value)
           EXECSTART_PATH=$(echo "$EXECSTART_FULL" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
 
+          # Both sides must be KNOWN before comparing. RUNNING_VER was already guarded;
+          # EXECSTART_PATH was NOT, and it has the same hole the serve canary had
+          # (bead workstation-bcmi): if the sed stops matching — a systemd ExecStart
+          # format change, or a transient `systemctl show` failure — EXECSTART_PATH is
+          # empty, the case falls through to *), and the canary reports "version drift"
+          # against an empty execstart. This canary alerts UNCONDITIONALLY (no
+          # dangerous-only gating), so that becomes a Telegram page on the 2nd pass
+          # telling the operator to restart a door that is perfectly healthy. A format
+          # change would make it page forever on the 24h TTL. Unknown must never alert.
           if [ -z "$RUNNING_VER" ]; then
             echo "WARNING: could not parse version from /healthz response"
+          elif [ -z "$EXECSTART_PATH" ]; then
+            echo "WARNING: could not parse ExecStart path for $UNIT; treating as unknown (no alert). Raw: $EXECSTART_FULL"
           else
             case "$EXECSTART_PATH" in
               "$RUNNING_VER"*)
