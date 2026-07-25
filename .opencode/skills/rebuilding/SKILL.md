@@ -90,6 +90,8 @@ Because neither service self-restarts on rebuild, `nixos-rebuild switch` and `ho
 
 ### Checking for Version Drift
 
+Note: Drift alerting is **cloudbox-only**; devbox runs the same serve pool with the same deliberate no-bounce and has no drift detection (deliberately deferred — no front door exists on devbox, so there is no cross-service version skew class).
+
 **Front Door Drift:**
 The canary checks `/healthz` against unit `ExecStart` every 60s (`WARNING: version drift: running=... execstart=...`) and raises a throttled Telegram alert via pigeon. Check manually with:
 ```bash

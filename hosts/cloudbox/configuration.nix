@@ -93,18 +93,31 @@ let
     STATE_FILE="''${1:-}"
     SIGNATURE="''${2:-}"
     TEXT="''${3:-}"
+    TTL_SECONDS="''${4:-0}"
 
     if [ -z "$STATE_FILE" ] || [ -z "$SIGNATURE" ] || [ -z "$TEXT" ]; then
       echo "WARNING: opencode-drift-alert called with missing arguments"
       exit 0
     fi
 
-    # Deduplication check: if state file exists and signature matches, this episode
-    # was already reported. Exit 0 silently.
+    # Deduplication check: if state file exists and signature matches, check TTL.
+    # If state file is newer than TTL_SECONDS, this episode was already reported. Exit 0 silently.
+    # If TTL_SECONDS is 0, empty, or file mtime exceeds TTL_SECONDS, re-alert.
     if [ -f "$STATE_FILE" ]; then
       CURRENT_SIG=$(cat "$STATE_FILE" 2>/dev/null || true)
       if [ "$CURRENT_SIG" = "$SIGNATURE" ]; then
-        exit 0
+        EXPIRED=0
+        if [ -n "$TTL_SECONDS" ] && [ "$TTL_SECONDS" -gt 0 ] 2>/dev/null; then
+          FILE_MTIME=$(stat -c %Y "$STATE_FILE" 2>/dev/null || echo 0)
+          NOW=$(date +%s)
+          AGE=$((NOW - FILE_MTIME))
+          if [ "$AGE" -ge "$TTL_SECONDS" ]; then
+            EXPIRED=1
+          fi
+        fi
+        if [ "$EXPIRED" -eq 0 ]; then
+          exit 0
+        fi
       fi
     fi
 
@@ -112,6 +125,13 @@ let
     # Prefix text with [hostname] so Telegram alerts identify the originating host.
     FULL_TEXT="[$(uname -n)] $TEXT"
     PAYLOAD=$(jq -n --arg txt "$FULL_TEXT" '{"text": $txt, "severity": "warning"}')
+
+    # Security / Architecture trap note for future readers (Phase 9 / roadmap item 9.2):
+    # If pigeon auth token (checkAuth) is ever enabled on /alert, unauthenticated POSTs
+    # will return 401 Unauthorized -> non-2xx -> silently swallowed here -> visible ONLY
+    # as journal WARNING. That would permanently restore the unread-journal gap.
+    # Any future grep-guard or auth-enablement for roadmap item 9.2 MUST include
+    # and update these canary callers (or grant /alert IP-exempt status on 127.0.0.1).
 
     HTTP_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 \
       -X POST http://127.0.0.1:4731/alert \
@@ -907,10 +927,14 @@ ${serveIdCase}
         # On 2026-07-24, a home-manager switch updated the opencode package system-wide.
         # All K serves became stale simultaneously. Per-port alerting would emit K alerts
         # for a single logical event (4-message alert storm).
+        DOOR_ACTIVE=$(systemctl is-active opencode-frontdoor.service 2>/dev/null || echo "inactive")
+        DOOR_START_MONOTONIC=$(systemctl show opencode-frontdoor.service -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo "0")
+
         DRIFT_PORTS=""
         DRIFT_DETAILS=""
-        DRIFT_SIG_PARTS=""
         VERIFIED_COUNT=0
+        HAS_SKEW_DRIFT=0
+        NOW=$(date +%s)
 
         for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
           UNIT="opencode-serve@$PORT.service"
@@ -929,10 +953,17 @@ ${serveIdCase}
 
             # Stale-binary drift detection for healthy serves (2026-07-24 incident recovery).
             #
-            # WHY store path comparison:
+            # Store-path comparison invariant:
             # /global/health's self-reported "version" field returns upstream semver ("1.17.13"),
             # which remains identical across patched revision builds (patched.1/.2/.3).
             # Comparing store path prefixes (first 4 slash-separated fields) detects patch drift.
+            #
+            # INVARIANT: This check works because `bin/opencode` execs `bin/.opencode-wrapped` inside
+            # the EXACT SAME store path prefix (/nix/store/<hash>-opencode-patched-...).
+            # If opencode-patched packaging ever changes to exec a wrapper or binary residing in a
+            # DIFFERENT store path (e.g. `exec ''${bun}/bin/bun ...`), readlink /proc/<pid>/exe will
+            # resolve to that external store path, causing false-positive drift detection on EVERY serve pass!
+            # Next packager: preserve the same store path for the exec target or update this comparison.
             #
             # WHY unknown != drift:
             # If REF_PREFIX is empty (profile symlink briefly missing during home-manager switch)
@@ -948,10 +979,15 @@ ${serveIdCase}
                     VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
                     if [ "$RUN_PREFIX" != "$REF_PREFIX" ]; then
                       echo "WARNING: $UNIT binary drift: running=$RUN_PREFIX installed=$REF_PREFIX"
-                      DRIFT_PORTS="$DRIFT_PORTS $PORT"
+                      DRIFT_PORTS="''${DRIFT_PORTS:+$DRIFT_PORTS }$PORT"
                       DRIFT_DETAILS="''${DRIFT_DETAILS}  - port $PORT: $RUN_PREFIX
 "
-                      DRIFT_SIG_PARTS="''${DRIFT_SIG_PARTS}$PORT:$RUN_PREFIX;"
+                      SERVE_START_MONOTONIC=$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
+                      if [ "$DOOR_ACTIVE" = "active" ] && [ -n "$DOOR_START_MONOTONIC" ] && [ "$DOOR_START_MONOTONIC" -gt 0 ] 2>/dev/null && [ -n "$SERVE_START_MONOTONIC" ] && [ "$SERVE_START_MONOTONIC" -gt 0 ] 2>/dev/null; then
+                        if [ "$SERVE_START_MONOTONIC" -lt "$DOOR_START_MONOTONIC" ]; then
+                          HAS_SKEW_DRIFT=1
+                        fi
+                      fi
                     fi
                   fi
                 fi
@@ -1027,9 +1063,38 @@ ${serveIdCase}
         done
 
         if [ -n "$DRIFT_PORTS" ]; then
-          DRIFT_TEXT=$(cat <<EOF
-OpenCode serve pool is running stale code on port(s):$DRIFT_PORTS
+          if [ -f "$STATE/drift-first-seen" ]; then
+            FIRST_SEEN=$(cat "$STATE/drift-first-seen" 2>/dev/null || echo "$NOW")
+          else
+            FIRST_SEEN="$NOW"
+            echo "$FIRST_SEEN" > "$STATE/drift-first-seen"
+          fi
+          EPISODE_AGE=$((NOW - FIRST_SEEN))
 
+          IS_DANGEROUS=0
+          DANGER_REASONS=""
+          if [ "$HAS_SKEW_DRIFT" -eq 1 ]; then
+            IS_DANGEROUS=1
+            DANGER_REASONS="''${DANGER_REASONS}  - Skew shape: drifting serve(s) started before current front door (door restarted after serve) — risk of frozen TUIs / 404s
+"
+          fi
+          if [ "$EPISODE_AGE" -ge 86400 ]; then
+            IS_DANGEROUS=1
+            AGE_HOURS=$((EPISODE_AGE / 3600))
+            DANGER_REASONS="''${DANGER_REASONS}  - Stale across reset: drift persisted ''${AGE_HOURS}h (>24h) — survived nightly 03:00 reset
+"
+          fi
+
+          if [ "$IS_DANGEROUS" -eq 1 ]; then
+            DRIFT_PENDING=$(( $(cat "$STATE/drift-pending" 2>/dev/null || echo 0) + 1 ))
+            echo "$DRIFT_PENDING" > "$STATE/drift-pending"
+
+            if [ "$DRIFT_PENDING" -ge 2 ]; then
+              DRIFT_TEXT=$(cat <<EOF
+OpenCode serve pool is running stale code on port(s): $DRIFT_PORTS
+
+DANGEROUS CONDITION DETECTED:
+$DANGER_REASONS
 To fix, run:
 sudo systemctl restart opencode-serve-pool.target
 
@@ -1041,12 +1106,23 @@ $REF_PREFIX
 Note: Restarting the serve pool terminates live OpenCode sessions. Pick an appropriate moment to restart.
 EOF
 )
-          ${driftAlert} "$STATE/drift-alerted" "$REF_PREFIX|$DRIFT_SIG_PARTS" "$DRIFT_TEXT"
+              ${driftAlert} "$STATE/drift-alerted" "$REF_PREFIX|$DOOR_START_MONOTONIC" "$DRIFT_TEXT" 86400
+            else
+              echo "WARNING: dangerous serve pool binary drift detected on port(s): $DRIFT_PORTS ($DRIFT_PENDING/2 consecutive passes) — pending alert"
+            fi
+          else
+            rm -f "$STATE/drift-pending"
+            BENIGN_REASON="door predates serves, episode <24h"
+            if [ "$DOOR_ACTIVE" != "active" ] || [ -z "$DOOR_START_MONOTONIC" ] || [ "$DOOR_START_MONOTONIC" -eq 0 ] 2>/dev/null; then
+              BENIGN_REASON="door inactive/timestamp missing, episode <24h"
+            fi
+            echo "WARNING: serve pool binary drift detected on port(s): $DRIFT_PORTS (benign: $BENIGN_REASON; nightly reset will reconcile) — no alert sent"
+          fi
         elif [ -n "$REF_PREFIX" ] && [ "$VERIFIED_COUNT" -gt 0 ]; then
-          # Clear throttle file ONLY on confirmed resolution (at least one serve verified and no drift found).
+          # Clear throttle file and state ONLY on confirmed resolution (at least one serve verified and no drift found).
           # Do NOT clear on unverifiable passes (e.g. REF_PREFIX="" mid-home-manager-switch or all serves down),
           # as clearing on unknown state would re-arm the alert and cause duplicate notifications.
-          rm -f "$STATE/drift-alerted"
+          rm -f "$STATE/drift-alerted" "$STATE/drift-pending" "$STATE/drift-first-seen"
         fi
       ''}";
     };
@@ -1352,7 +1428,7 @@ EOF
         # Only police units that are supposed to be up. Intentional stops,
         # crash-loop backoff, etc. reset the counters.
         if [ "$(systemctl is-active "$UNIT")" != "active" ]; then
-          rm -f "$FAILFILE" "$SICKFILE"
+          rm -f "$FAILFILE" "$SICKFILE" "$STATE/drift-pending"
           exit 0
         fi
 
@@ -1444,17 +1520,24 @@ EOF
           else
             case "$EXECSTART_PATH" in
               "$RUNNING_VER"*)
-                # Clear throttle file ONLY on confirmed resolution (paths match).
+                # Clear throttle file and dampening counter ONLY on confirmed resolution (paths match).
                 # Do NOT clear on unparseable /healthz (unknown state could flap and storm).
-                rm -f "$STATE/drift-alerted"
+                rm -f "$STATE/drift-alerted" "$STATE/drift-pending"
                 ;;
               *)
                 echo "WARNING: version drift: running=$RUNNING_VER execstart=$EXECSTART_PATH"
-                DRIFT_TEXT=$(cat <<EOF
+                DRIFT_PENDING=$(( $(cat "$STATE/drift-pending" 2>/dev/null || echo 0) + 1 ))
+                echo "$DRIFT_PENDING" > "$STATE/drift-pending"
+
+                if [ "$DRIFT_PENDING" -ge 2 ]; then
+                  DRIFT_TEXT=$(cat <<EOF
 opencode-frontdoor is running stale code.
 
 To fix, run:
 sudo systemctl restart opencode-frontdoor
+
+IMPORTANT: Also check the serve pool! Restarting only the front door creates dangerous version skew if serves remain on old code.
+See Deploy Runbook: .opencode/skills/rebuilding/SKILL.md
 
 Running store path: $RUNNING_VER
 Installed store path: $EXECSTART_PATH
@@ -1462,11 +1545,13 @@ Installed store path: $EXECSTART_PATH
 Note: Restarting opencode-frontdoor drops in-flight SSE legs so pick an appropriate moment to restart.
 EOF
 )
-                # Throttled Telegram alert via Pigeon (2026-07-24 incident recovery).
-                # Auto-restart is intentionally omitted: restarting frontdoor drops all
-                # in-flight SSE connections and routing state, turning minor drift into an
-                # outage. A human decides when to restart.
-                ${driftAlert} "$STATE/drift-alerted" "$RUNNING_VER|$EXECSTART_PATH" "$DRIFT_TEXT"
+                  # Throttled Telegram alert via Pigeon (2026-07-24 incident recovery).
+                  # Auto-restart is intentionally omitted: restarting frontdoor drops all
+                  # in-flight SSE connections and routing state, turning minor drift into an
+                  # outage. A human decides when to restart.
+                  # Dampened to alert only after 2 consecutive minutely passes showing drift.
+                  ${driftAlert} "$STATE/drift-alerted" "$RUNNING_VER|$EXECSTART_PATH" "$DRIFT_TEXT" 86400
+                fi
                 ;;
             esac
           fi
