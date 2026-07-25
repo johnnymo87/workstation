@@ -2,11 +2,9 @@
  * Route Classification Table for opencode-frontdoor.
  *
  * --- RECONCILIATION ---
- * - Snapshot routes (from http://127.0.0.1:4096/doc): 188
- * - Exclusions: 0 (The web-ui served at "/" and its static assets are not declared in `/doc`, so they are excluded from the snapshot)
- * - Patch-only routes: 10 (GET /event?session_ids= and GET /api/event?session_ids=, source: event-session-scope.patch; GET /doc, OpenAPI spec added manually (FABLE-W6); 4 session-scoped permission/question routes, source: session-door-routes.patch; plus 3 session-scoped MCP routes: GET /session/{sessionID}/mcp, POST /session/{sessionID}/mcp/{name}/connect, POST /session/{sessionID}/mcp/{name}/disconnect, source: session-mcp-routes.patch)
- * - Manually added: GET /, web UI added manually, undeclared in /doc
- * - Total table entries: 199
+ * Note: The automated route-gate (`src/route-gate.ts`) supersedes `routes.snapshot.txt`'s
+ * reconciliation role. All /doc routes are verified programmatically against classify() (Check A)
+ * and denial dispositions (Check B) during build and CI.
  *
  * --- DUAL SURFACE ---
  * This API exposes a dual surface: a bare surface (e.g. /session/...) and its `/api/*` mirror.
