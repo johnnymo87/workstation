@@ -40,14 +40,39 @@ export XDG_CONFIG_HOME="$TMP/config"
 export XDG_DATA_HOME="$TMP/data"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
 
+# Scrubbing HOME/XDG_* is NOT enough — see the long incident comment in ../test.sh.
+# An opencode bash tool call carries OPENCODE_SERVE_ID + OPENCODE_ROUTING_DB, so a
+# throwaway serve spawned from inside a session hijacks the live pool slot `serve-1`
+# via registerSelf's unfenced upsert and points it at this script's random port,
+# which does NOT self-heal (the real serve keeps the row heartbeating and healthy).
+# That wedged 76 sessions on 2026-07-25. Keep this list in sync with test.sh.
+SERVE_ENV_SCRUB=(
+  env
+  -u OPENCODE_SERVE_ID                 # registry slot identity — the hijack vector
+  -u OPENCODE_ROUTING_DB               # pigeon's live routing DB
+  -u OPENCODE_DB                       # the shared opencode.db (real session state)
+  -u OPENCODE_WORKSPACE_ID
+  -u OPENCODE_EXPERIMENTAL_WORKSPACES
+  -u OPENCODE_HEARTBEAT_INTERVAL_MS
+)
+
 PORT=$(( 40000 + RANDOM % 20000 ))
 DOC_RAW="$TMP/doc.raw.json"
 
-"$OPENCODE_BIN" serve --port "$PORT" --hostname 127.0.0.1 < /dev/null > "$TMP/serve.log" 2>&1 &
+"${SERVE_ENV_SCRUB[@]}" "$OPENCODE_BIN" serve --port "$PORT" --hostname 127.0.0.1 < /dev/null > "$TMP/serve.log" 2>&1 &
 SERVE_PID=$!
 cleanup() {
   if [ -n "${SERVE_PID:-}" ] && kill -0 "$SERVE_PID" 2>/dev/null; then
-    kill -9 "$SERVE_PID" 2>/dev/null || true
+    # TERM first so the Effect finalizer can run `markDead` (draining=1); `kill -9`
+    # skips it, which is what made the incident permanent instead of self-healing.
+    kill -TERM "$SERVE_PID" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$SERVE_PID" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$SERVE_PID" 2>/dev/null; then
+      kill -9 "$SERVE_PID" 2>/dev/null || true
+    fi
     wait "$SERVE_PID" 2>/dev/null || true
   fi
   rm -rf "$TMP" 2>/dev/null || true

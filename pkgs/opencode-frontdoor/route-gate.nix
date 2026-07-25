@@ -34,8 +34,17 @@ stdenv.mkDerivation {
     SERVE_LOG="$TMPDIR/serve.log"
     DOC_JSON="$TMPDIR/doc.json"
 
+    # Defense in depth (see the incident comment in test.sh): a serve that inherits
+    # OPENCODE_SERVE_ID + OPENCODE_ROUTING_DB HIJACKS the live pool slot via
+    # registerSelf's unfenced upsert, and it does not self-heal. The nix sandbox
+    # already gives this build a clean env and its own network namespace, so it
+    # cannot happen here — but the failure mode is catastrophic (76 wedged sessions
+    # on 2026-07-25) and the guard costs one line, so it is not left implicit.
     echo "Booting pinned opencode serve on loopback port $PORT..."
-    ${opencodePatched}/bin/opencode serve --port $PORT --hostname 127.0.0.1 < /dev/null > "$SERVE_LOG" 2>&1 &
+    env -u OPENCODE_SERVE_ID -u OPENCODE_ROUTING_DB -u OPENCODE_DB \
+        -u OPENCODE_WORKSPACE_ID -u OPENCODE_EXPERIMENTAL_WORKSPACES \
+        -u OPENCODE_HEARTBEAT_INTERVAL_MS \
+      ${opencodePatched}/bin/opencode serve --port $PORT --hostname 127.0.0.1 < /dev/null > "$SERVE_LOG" 2>&1 &
     SERVE_PID=$!
 
     cleanup() {

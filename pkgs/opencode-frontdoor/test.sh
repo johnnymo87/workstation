@@ -42,18 +42,56 @@ export XDG_CONFIG_HOME="$GATE_TMP/config"
 export XDG_DATA_HOME="$GATE_TMP/data"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
 
+# INCIDENT 2026-07-25 — this script wedged 76 sessions. READ BEFORE EDITING.
+#
+# Scrubbing HOME/XDG_* above is NOT enough. An opencode bash tool call carries
+# OPENCODE_SERVE_ID and OPENCODE_ROUTING_DB, so a throwaway serve spawned from
+# inside a session INHERITS them and then `registerSelf` upserts
+# `ON CONFLICT(serve_id) DO UPDATE SET ... endpoint = excluded.endpoint`
+# (opencode-patched patches/serve-lease.patch) — i.e. the throwaway CLAIMS the
+# live pool slot `serve-1` and rewrites its endpoint to this script's random port.
+#
+# Why that does not self-heal: the real serve-1 keeps refreshing heartbeat_at AND
+# resetting health_state='healthy' on that same row, so the liveness signal and the
+# address are DECOUPLED — a live process keeps a dead address marked healthy
+# forever and no TTL can ever catch it. Every session assigned to serve-1 then
+# resolves to a dead port (ECONNREFUSED) until someone repairs the row by hand.
+#
+# So: scrub every var that lets this process address shared pool/session state.
+# MODELS_PATH/MODELS_URL are deliberately NOT scrubbed — they may be required for a
+# hermetic boot, and they cannot corrupt the registry.
+SERVE_ENV_SCRUB=(
+  env
+  -u OPENCODE_SERVE_ID                 # registry slot identity — the hijack vector
+  -u OPENCODE_ROUTING_DB               # pigeon's live routing DB
+  -u OPENCODE_DB                       # the shared opencode.db (real session state)
+  -u OPENCODE_WORKSPACE_ID
+  -u OPENCODE_EXPERIMENTAL_WORKSPACES
+  -u OPENCODE_HEARTBEAT_INTERVAL_MS
+)
+
 # Random high port: a fixed port collides with a concurrent run or an unrelated
 # listener, which would fail the gate for a reason unrelated to route drift.
 PORT=$(( 40000 + RANDOM % 20000 ))
 SERVE_LOG="$GATE_TMP/serve.log"
 DOC_JSON="$GATE_TMP/doc.json"
 
-"$OPENCODE_BIN" serve --port "$PORT" --hostname 127.0.0.1 < /dev/null > "$SERVE_LOG" 2>&1 &
+"${SERVE_ENV_SCRUB[@]}" "$OPENCODE_BIN" serve --port "$PORT" --hostname 127.0.0.1 < /dev/null > "$SERVE_LOG" 2>&1 &
 SERVE_PID=$!
 
 cleanup() {
   if [ -n "${SERVE_PID:-}" ] && kill -0 "$SERVE_PID" 2>/dev/null; then
-    kill -9 "$SERVE_PID" 2>/dev/null || true
+    # TERM first, and give the Effect finalizer time to run `markDead`
+    # (draining=1). `kill -9` skips it, which is what turned the incident above
+    # from self-healing into permanent. KILL only as a backstop.
+    kill -TERM "$SERVE_PID" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$SERVE_PID" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$SERVE_PID" 2>/dev/null; then
+      kill -9 "$SERVE_PID" 2>/dev/null || true
+    fi
     wait "$SERVE_PID" 2>/dev/null || true
   fi
   rm -rf "$GATE_TMP" 2>/dev/null || true
