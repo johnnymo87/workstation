@@ -235,6 +235,33 @@ nor go permanently blind (worst case ≈40s stale, self-healing); and the additi
 `/healthz` field breaks no consumer in the repo (the canary greps `version`,
 `oc-pool-attach` checks only the status code).
 
+## T5 live verification — PASSED (2026-07-25, door `imdbm7dr…`)
+
+1. **Suite**: 294 tests / 19 files green; `nix build .#opencode-frontdoor` clean.
+2. **Core fix, proven live**: parent `ses_069f33c2` owned by **serve-1 (:4097)**,
+   not the anchor; child `ses_0671300e` has **no** pigeon route (404). A door
+   request for `GET /session/{child}/permissions` logged
+   `target=http://127.0.0.1:4097 degraded=false`. Pre-fix that went to `:4096`
+   degraded. The door can only learn `:4097` via the parent walk.
+3. **H1 guard**: a session created *through* the door and kept busy re-establishes
+   its lease after the 30s lapse (`t=40s expiresAt=0` → `t=50s` new lease). `PATCH`
+   is non-promoting so `maybePromote` cannot place it — only the sticky renewal
+   path can, which proves `routingSid` is threaded.
+4. **No pollution**: children holding their own pigeon assignment still **1 of
+   4226** (unchanged baseline). `notRoutedMutationToAnchor` = 0 since deploy.
+
+**Learned during T5 (worth knowing before the deferred 503 decision):** pigeon's
+`/place` is `ensureRouted` = `resolveRoute ?? placeSession` (`router.ts:238-240`),
+so it **never extends a still-valid lease** — `touch()`/`renewCAS` does, and nothing
+calls it over HTTP. The door's ½-TTL "renewal" therefore only re-creates a lease
+*after* it lapses, leaving a ≤15s window each cycle where a busy session holds no
+lease. Pre-existing, not introduced here, but it means the lease is a weaker
+guarantee than the config comment implies.
+
+**Not yet exercised:** a real *pending* subagent permission round-trip (the child
+queried had already finished, so `[]` was correct). Routing for that exact path is
+proven; the remaining dimension gets covered the next time a subagent raises one.
+
 ## Residuals (record on landing)
 
 - If pigeon holds an assignment for an *intermediate* ancestor but not the root, we
