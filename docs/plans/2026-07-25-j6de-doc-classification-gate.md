@@ -359,6 +359,66 @@ Final census (70 de-duplicated): 21 `by-design-501`, 32 `not-session-scopable`
   correctly classified route can still break through the door (sid-resolution
   degrade, child-routing). That is outside this item by construction.
 
+### Fable review round 3 (delta pass over `2a34e48..HEAD`) — PASSED
+
+Round 2 reviewed `2a34e48`; the fixes for its own findings landed in four later
+commits and were therefore unreviewed (and by then deployed). Round 3 closed that
+gap. Verdict: **deltas sound, no redeploy warranted.**
+
+**F1 genuinely closes the hole, in both directions.** Fable mutation-tested the
+*forward* case I could not: adding `GET /session/search` to `/doc` → fails as
+`shadowed` naming `GET /session/{sessionID}`; adding a non-shadow-shaped route →
+fails as `unrecognized`. It also probed for cry-wolf risk and found none — renaming
+a path parameter (`{sessionID}`→`{id}`), the commonest cosmetic upstream churn,
+**passes**, because `{x}`→`{}` erases names by design. Every failure it could
+construct corresponds to a change genuinely requiring a table decision.
+
+Also independently re-derived and confirmed: all 32 `tuiSurface` assignments
+(21/6/5), the four supersessions against the roadmap D4 list, `/api`-vs-bare
+disposition fallback, and that the fixture is **byte-faithful** to the live `/doc`
+(identical 195 pairs; the real `/doc` has no non-method pathItem keys, so the
+projection drops nothing the gate reads).
+
+**Why no redeploy** (fable's structural argument, verified by me): nothing in
+`2a34e48..HEAD` touches the door's request path. `routes.classification.ts` — the
+only table `dispatch.ts` imports — is unchanged in the range, and `route-gate.ts` /
+`routes.dispositions.ts` are imported by nothing reachable from
+`main.ts`/`server.ts`/`proxy.ts`. The running door is functionally identical to the
+reviewed state. (It will still need a restart at the *next* rebuild, since the
+package hash changed — which is why M1 below folds into `m3z2`, whose door restart
+is required anyway.)
+
+**M1 (the one real finding) — "D4 complete is computable" is `test.sh`-scoped, not
+closure-enforced.** The census, the 9-row `needs-mechanism` pin, and the
+`tuiSurface` counts live **only in vitest**, which the authoritative gate never
+runs: `default.nix` sets `doCheck = false` and `route-gate.nix` runs only the CLI
+check. So the nix gate enforces disposition *presence and field validity*, but not
+*kind sets* — a disposition edit flipping `needs-mechanism` → `accepted-gap` would
+pass `home-manager switch` untested and the 9-row assertion would drift silently
+until someone ran `./test.sh` by hand.
+**Correction to record:** the claim above that "D4 complete is computable" is true
+of the codebase but enforced only on a voluntarily-run leg. **Folded into `m3z2`**:
+move a kind-census assertion into the CLI gate (which already walks every denial,
+so it has the data), making the claim closure-enforced.
+
+Recorded only (all bookkeeping-rot vectors, no runtime risk):
+- **M2** — F2's "matched" means *key exists and route is denied*, not *actually
+  consulted*. A route-level disposition shadowed by a class blanket (e.g.
+  `GET /pty`) is never consulted yet not flagged orphaned. Likewise a route that
+  stays denied but migrates between denying classes keeps a now-mislabeled
+  disposition; there is no kind↔action consistency check.
+- **M3** — there is no inverse Check A. Upstream *deleting* a forwarded route leaves
+  a stale table row and a green gate. Loud at runtime (door forwards, serve 404s)
+  rather than silently misrouting, and it predates this delta — but the asymmetry
+  is conspicuous next to F2.
+- **M4** — `tuiSurface` is typed optional with runtime enforcement; a discriminated
+  union on `kind` would enforce it at compile time *and* reject a meaningless
+  `tuiSurface` on a `superseded` row (currently unchecked in both directions).
+- **M5** — structural matching cannot see semantics: a future route whose normalized
+  shape collides with an existing template (`GET /session/{query}` with non-sid
+  meaning) exact-matches and passes. Irreducible; the genus is already covered by
+  *the gate proves the table, not the door*.
+
 ### Residuals
 - Ordering: a door-source-only change is deployed *before* the home-manager
   closure builds the gate (runbook order). `test.sh` is the pre-deploy mitigation.
