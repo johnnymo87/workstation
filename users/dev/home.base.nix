@@ -339,6 +339,30 @@ let
     else servePool.forHost.devbox.k;
   oc-pool-attach = pkgs.callPackage ../../pkgs/oc-pool-attach { inherit opencode; k = servePoolK; };
 
+  # workstation-j6de: the front door's /doc route-classification gate.
+  # Design: docs/plans/2026-07-25-j6de-doc-classification-gate.md
+  #
+  # Wired HERE, for the same reason as oc-pool-attach above: it needs the real
+  # PINNED `opencode` defined above. That is the whole point of the gate — it
+  # boots the pinned binary, reads its /doc, and fails the build if any route the
+  # server declares is unclassified by the door's table.
+  #
+  # It must depend on BOTH the pinned opencode AND the door's classification
+  # source, so a change to either re-runs it (fable's required constraint). Note
+  # the asymmetry that makes this placement necessary: an opencode PIN BUMP
+  # changes only the home-manager closure, so a gate living in the NixOS closure
+  # (or in flake.nix with its own copy of the pin) would NOT fire at exactly the
+  # moment it exists for.
+  #
+  # cloudbox-only: the front door is a cloudbox service, and booting opencode in
+  # a build sandbox is verified on Linux only. Wiring it on darwin would risk
+  # failing macOS home-manager switches for a gate protecting a service that
+  # does not run there.
+  opencodeFrontdoorRouteGate = pkgs.callPackage ../../pkgs/opencode-frontdoor/route-gate.nix {
+    opencodePatched = opencode;
+    opencodeFrontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
+  };
+
   # Azure CLI with msal 1.34.0 patch and azure-devops extension (work machines)
   # NOTE: azure-cli 2.79.0 ships msal 1.33.0 which has a bug where
   # `az login --use-device-code` crashes with "Session.request() got
@@ -937,6 +961,26 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
   home.file.".config/git-hooks/pre-commit" = lib.mkIf isCloudbox {
     source = "${assetsPath}/git-hooks/pre-commit";
     executable = true;
+  };
+
+  # workstation-j6de: force the front door's /doc route-classification gate into
+  # the home-manager closure, so `home-manager switch` cannot succeed while the
+  # door's table fails to classify a route the PINNED opencode declares.
+  #
+  # `home.file` (rather than `home.packages`) deliberately: this only needs to be
+  # a closure dependency to be built, and it must not pollute PATH.
+  #
+  # It is NOT wired by wrapping the frontdoor package. The door self-reports its
+  # store path via /healthz, and the drift canary
+  # (hosts/cloudbox/configuration.nix:1293-1308) compares that against the unit's
+  # ExecStart — a wrapper would make the two differ permanently and fire a FALSE
+  # drift alert forever.
+  #
+  # Deliberate blast radius: if the gate fails, `home-manager switch` fails, and
+  # pull-workstation retries it every 4h — blocking unrelated home-manager
+  # changes until the table is fixed. That is the intended fail-closed behaviour.
+  home.file.".local/share/opencode-frontdoor/route-gate-result" = lib.mkIf isCloudbox {
+    source = "${opencodeFrontdoorRouteGate}/gate-result.txt";
   };
 
   # GPG - shared settings (both platforms)

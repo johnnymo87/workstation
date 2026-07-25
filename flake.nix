@@ -48,8 +48,6 @@
     # Self-packaged tools (updated via nix-update in CI)
     localPkgsFor = system: let
       p = pkgsFor system;
-      opencode-patched = p.callPackage ./pkgs/opencode-patched { };
-      opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
     in {
       ask-question = p.callPackage ./pkgs/ask-question { };
       bb = p.callPackage ./pkgs/bb { };
@@ -63,12 +61,17 @@
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
-      inherit opencode-frontdoor;
-      opencode-patched = opencode-patched;
-      opencode-frontdoor-route-gate = p.callPackage ./pkgs/opencode-frontdoor/route-gate.nix {
-        opencodeFrontdoor = opencode-frontdoor;
-        opencodePatched = opencode-patched;
-      };
+      opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
+      # NOTE: `opencode-frontdoor-route-gate` is deliberately NOT exposed here.
+      # It needs the PINNED opencode, and that pin lives in
+      # `users/dev/home.base.nix` (edited in place by
+      # .github/workflows/update-opencode-patched.yml, so it must not be moved).
+      # Exposing a flake output would require a second copy of the pin here, which
+      # the updater would not bump — the gate would then silently validate a STALE
+      # binary while the pool ran the new one: green and wrong, at exactly the
+      # moment the gate exists for. The gate is instantiated in home.base.nix
+      # against the real pin; `pkgs/opencode-frontdoor/test.sh` runs the same
+      # check on demand.
       opencode-launch = p.callPackage ./pkgs/opencode-launch { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };

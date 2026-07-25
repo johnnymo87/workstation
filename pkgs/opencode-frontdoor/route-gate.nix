@@ -46,16 +46,26 @@ stdenv.mkDerivation {
     }
     trap cleanup EXIT
 
+    # A fixed port is safe here: the nix Linux sandbox gives each build its own
+    # network namespace, so concurrent builds cannot collide on it.
+    #
+    # Generous bound (~60s). Cold-start is seconds, but a too-tight bound turns
+    # this gate into a flaky build failure, which trains people to ignore it —
+    # worse than not having the gate at all.
     echo "Polling http://127.0.0.1:$PORT/doc..."
     SUCCESS=0
-    for i in $(seq 1 10); do
-      if curl -s --connect-timeout 1 --max-time 2 "http://127.0.0.1:$PORT/doc" -o "$DOC_JSON" 2>/dev/null; then
-        if [ -s "$DOC_JSON" ]; then
-          SUCCESS=1
-          break
-        fi
+    for _ in $(seq 1 120); do
+      if curl -sf --connect-timeout 1 --max-time 3 "http://127.0.0.1:$PORT/doc" -o "$DOC_JSON" 2>/dev/null \
+         && [ -s "$DOC_JSON" ]; then
+        SUCCESS=1
+        break
       fi
-      sleep 0.2
+      # Fail fast (with the log) if the serve died rather than burning the bound.
+      if ! kill -0 $SERVE_PID 2>/dev/null; then
+        echo "ERROR: opencode serve exited before answering /doc."
+        break
+      fi
+      sleep 0.5
     done
 
     if [ $SUCCESS -ne 1 ]; then
