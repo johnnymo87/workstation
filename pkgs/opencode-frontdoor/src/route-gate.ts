@@ -69,11 +69,11 @@ export interface GateCheckResult {
 export const EXPECTED_KIND_CENSUS: Record<string, number> = {
   'by-design-501': 21,
   'not-session-scopable-absent': 21,
-  'not-session-scopable-degrades': 6,
-  'not-session-scopable-unverified': 5,
+  'not-session-scopable-degrades': 12,
+  'not-session-scopable-unverified': 0,
   superseded: 7,
   'needs-mechanism': 9,
-  'accepted-gap': 1,
+  'accepted-gap': 0,
 };
 
 /**

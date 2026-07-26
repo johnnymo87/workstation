@@ -130,15 +130,16 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     rationale: 'MCP disconnection management is superseded by session-scoped POST /session/{sessionID}/mcp/{name}/disconnect. Phase 10 solved this via session-scoped routes; deliberately excluded from D4.',
   },
 
-  // Corrected 2026-07-25:
+  // Corrected 2026-07-25; AUDITED and resolved 2026-07-26 (workstation-mlve.11).
   'POST /sync/start': {
-    kind: 'accepted-gap',
-    bead: 'workstation-mlve.11',
+    kind: 'not-session-scopable',
+    tuiSurface: 'degrades',
     rationale:
-      'Process-global sync subsystem start; the door cannot session-scope it. But sync.start is in the TUI SDK surface and the Phase 9 audit only checked for 404s, not 403s, so the through-door consequence is unverified. Tracked for D4 rather than asserted benign.',
+      'Process-global workspace sync engine start; the door cannot session-scope it. D4 audit: the only callers are tui/src/context/sdk.tsx:99 (SSE) and :127 (RPC), BOTH gated on Flag.OPENCODE_EXPERIMENTAL_WORKSPACES (sdk.tsx:96/:124) and BOTH written `await sdk.sync.start().catch(() => {})`, so the door 403 is swallowed. The flag is off here: enabledByExperimental falls back to the EXACT var OPENCODE_EXPERIMENTAL (core/src/flag/flag.ts:11-13), and neither it nor OPENCODE_EXPERIMENTAL_WORKSPACES is set anywhere in the workstation repo. Consequence: workspace sync loops never start; nothing else is affected. Resolved by verification, not mechanism.',
   },
 
-  // Individual global mutation / non-session-scopable rows (32 total: 6 degrades, 5 unverified, 21 absent):
+  // Individual global mutation / non-session-scopable rows (32 total: 11 degrades, 21 absent; plus POST /sync/start above = 12 degrades overall).
+  // The 5 formerly-'unverified' rows were audited 2026-07-26 under workstation-mlve.11 and are now 'degrades' with the evidence inline.
   'POST /log': {
     kind: 'not-session-scopable',
     tuiSurface: 'absent',
@@ -171,9 +172,10 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
   },
   'POST /experimental/console/switch': {
     kind: 'not-session-scopable',
-    tuiSurface: 'unverified',
-    bead: 'workstation-mlve.11',
-    rationale: 'Switches global console organization context for process; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
+    tuiSurface: 'degrades',
+    bead: 'workstation-e4tp',
+    rationale:
+      'Switches global console organization context for process; no session context. D4 audit (workstation-mlve.11): called from tui/src/component/dialog-console-org.tsx:98. Degrades SILENTLY, not gracefully — the call passes `{ throwOnError: true }` with no try/catch, and DialogSelect discards the returned promise (ui/dialog-select.tsx:34/71), so the door 403 becomes an UNHANDLED REJECTION. It does not crash today only because @opentui/core registers a process-level unhandledRejection handler and opencode sets openConsoleOnError:false (tui/src/app.tsx:196), so the error lands in an invisible console buffer and the dialog silently does nothing. Bun exits 1 on an unhandled rejection with no handler, so this is one dependency bump from a TUI crash. NOTE this is the ONLY row of the six D4-audited rows that is NOT gated by the experimental flag — it needs only a Console login with 2+ switchable orgs. Door behaviour is correct; the hazard is client-side and tracked as workstation-e4tp.',
   },
   'POST /experimental/worktree': {
     kind: 'not-session-scopable',
@@ -232,27 +234,27 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
   },
   'POST /experimental/workspace': {
     kind: 'not-session-scopable',
-    tuiSurface: 'unverified',
-    bead: 'workstation-mlve.11',
-    rationale: 'Creates experimental workspace in process directory; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
+    tuiSurface: 'degrades',
+    rationale:
+      'Creates experimental workspace in process directory; no session context. D4 audit: callers are tui/src/component/prompt/workspace.tsx:31 and dialog-session-list.tsx:110, both behind Flag.OPENCODE_EXPERIMENTAL_WORKSPACES (prompt/index.tsx:535), which is OFF here. Both call sites try/catch AND check result.error, surfacing a toast ("Creating workspace failed") carrying the door message. This is the one row of the six that yields 405 + Allow: GET rather than 403, because GET /experimental/workspace is a sibling global-ro (routes.classification.ts:146). Graceful; resolved by verification, not mechanism.',
   },
   'POST /experimental/workspace/sync-list': {
     kind: 'not-session-scopable',
-    tuiSurface: 'unverified',
-    bead: 'workstation-mlve.11',
-    rationale: 'Syncs workspace list for process; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
+    tuiSurface: 'degrades',
+    rationale:
+      'Syncs workspace list for process; no session context. D4 audit: callers are dialog-workspace-create.tsx:81 and dialog-workspace-list.tsx:91, both behind Flag.OPENCODE_EXPERIMENTAL_WORKSPACES (OFF here), both written `.catch(() => undefined)` with the return value discarded — fire-and-forget. Consequence of the door 403: adapter-discovered workspaces are silently not registered. Graceful; resolved by verification, not mechanism.',
   },
   'DELETE /experimental/workspace/{id}': {
     kind: 'not-session-scopable',
-    tuiSurface: 'unverified',
-    bead: 'workstation-mlve.11',
-    rationale: 'Deletes experimental workspace; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
+    tuiSurface: 'degrades',
+    rationale:
+      'Deletes experimental workspace; no session context. D4 audit: callers are dialog-workspace-list.tsx:67 (.catch -> result.error -> toast) and dialog-session-list.tsx:153 (no try/catch, checks result.error only — safe because the generated SDK defaults throwOnError to false, v2/gen/client/client.gen.ts:222-232). Both behind Flag.OPENCODE_EXPERIMENTAL_WORKSPACES (OFF here; the list command is hidden without it, app.tsx:609). Toast "Failed to delete workspace". Graceful; resolved by verification, not mechanism.',
   },
   'POST /experimental/workspace/warp': {
     kind: 'not-session-scopable',
-    tuiSurface: 'unverified',
-    bead: 'workstation-mlve.11',
-    rationale: 'Warps workspace state process-globally; no session context. Architectural claim is probably right but through-door consequence is unverified; tracked for D4 (workstation-mlve.11).',
+    tuiSurface: 'degrades',
+    rationale:
+      'Warps workspace state process-globally; no session context. D4 audit: caller is dialog-workspace-create.tsx:102 (warpWorkspaceSession), behind Flag.OPENCODE_EXPERIMENTAL_WORKSPACES (OFF here, prompt/index.tsx:535). try/catch -> toast "Failed to warp session", returns false. Graceful; resolved by verification, not mechanism.',
   },
   'POST /integration/{integrationID}/connect/key': {
     kind: 'not-session-scopable',
