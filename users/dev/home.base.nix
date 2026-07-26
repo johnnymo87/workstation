@@ -1161,38 +1161,24 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
       set -euo pipefail
 
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
-      # front-door cutover (Phase 7.5): the health check + session LIST are
-      # data-plane reads and route through the opaque front door. The per-session
-      # `opencode attach` HINT below stays direct-to-owner via GET /route (the
-      # interactive TUI can't ride the door until Phase 8/9), so OPENCODE_URL is
-      # kept as the /route fallback (raw anchor).
+      # front-door cutover (Phase 7.5, completed Phase 9): the health check,
+      # the session LIST, and the per-session `opencode attach` HINT all route
+      # through the opaque front door. The hint used to be resolved
+      # direct-to-owner via GET /route, justified by "the interactive TUI can't
+      # ride the door until Phase 8/9" -- both phases landed (f878865), so that
+      # justification is dead and the lookup with it. OPENCODE_URL is retained
+      # only as a raw-anchor default for this script's other pool-shaped needs.
       FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
-      # mn9r M7: pigeon discovery endpoint. In a K-serve pool a live session's
-      # event stream + TUI are hosted by the serve that OWNS it, so the
-      # `opencode attach` hint must point at that serve, resolved per-session
-      # via GET /route. Default matches opencode-launch's convention.
-      PIGEON_DAEMON_URL="''${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}"
+      # NB: no PIGEON_DAEMON_URL / parse_serve_url here any more. Phase 9 pointed
+      # the attach hint at the front door, which resolves the owner per request,
+      # so this script no longer needs pigeon discovery at all. The helper lives
+      # on (and stays tested) in pkgs/opencode-launch and pkgs/oc-pool-attach,
+      # which still need an owner URL for their degrade paths.
       PROJECTS_DIR="''${LGTM_PROJECTS_DIR:-$HOME/projects}"
 
       CURL="${pkgs.curl}/bin/curl"
       JQ="${pkgs.jq}/bin/jq"
       GIT="${pkgs.git}/bin/git"
-
-      # parse_serve_url <route-json-body> <fallback-url>: extract .apiBase from
-      # a pigeon GET /route JSON body and print it. Falls back to <fallback-url>
-      # when the body is empty, not JSON, or .apiBase is absent/null/empty.
-      # Pure (no network): the caller does the curl and hands the body in, so
-      # any pigeon hiccup degrades to the pre-pool single-serve behavior, never
-      # worse. Mirror of pkgs/opencode-launch/default.nix.
-      parse_serve_url() {
-        local body="$1" fallback="$2" api
-        api="$(printf '%s' "$body" | "$JQ" -r '.apiBase // empty' 2>/dev/null || true)"
-        if [ -n "$api" ] && [ "$api" != "null" ]; then
-          printf '%s\n' "$api"
-        else
-          printf '%s\n' "$fallback"
-        fi
-      }
 
       # Health check. Session metadata (below) comes from the shared opencode.db,
       # so listing works through the front door (which forwards to a pool serve).
@@ -1288,9 +1274,12 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
         fi
       }
 
-      # Sort by updated desc and render table. Resolve each session's OWNING
-      # serve via pigeon /route so the attach hints land on the right serve in
-      # a K-serve pool (each degrades to $OPENCODE_URL on any pigeon hiccup).
+      # Sort by updated desc and render table. Attach hints point at the front
+      # door: it resolves the owning serve per-session on every request, which
+      # is strictly better than baking one serve's URL into a hint the human
+      # may paste minutes later, after the session has migrated. This replaced
+      # a per-session pigeon GET /route call (Phase 9; see
+      # docs/plans/2026-07-26-phase9-consumer-disposition.md row B3).
       printf '%-50s  %-12s  %-12s  %s\n' "PR" "CREATED" "UPDATED" "SESSION"
       count=0
       attach_hints=()
@@ -1301,10 +1290,7 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
           "$(fmt_ago "$created")" \
           "$(fmt_ago "$updated")" \
           "$sid"
-        route_body="$( "$CURL" -sf --connect-timeout 2 --max-time 3 \
-          "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true )"
-        serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
-        attach_hints+=( "opencode attach $serve_url --session $sid" )
+        attach_hints+=( "opencode attach $FRONTDOOR_URL --session $sid" )
         count=$(( count + 1 ))
       done < <(printf '%s\n' "$tsv" | sort -t$'\t' -k1,1nr)
 

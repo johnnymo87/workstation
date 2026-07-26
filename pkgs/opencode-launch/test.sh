@@ -211,10 +211,26 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source retries the prompt direct to $serve_url on door failure\n        not found in: %s\n' "$default_nix"; exit 1
   fi
-  if grep -q '"\$serve_url/mcp/\$srv/connect"' "$default_nix"; then
-    printf 'PASS  source connects MCP on $serve_url (owning serve)\n'
+  # MCP-connect rides the front door on the SESSION-SCOPED route (Phase 9,
+  # workstation-mlve.4). This assertion previously demanded the opposite --
+  # 'source connects MCP on $serve_url (owning serve)' -- which was correct
+  # when the door had no session-scoped MCP route and denied the bare one.
+  # Phase 10 added POST /session/{sessionID}/mcp/{name}/connect (class
+  # session-path, routes.classification.ts:216) and the TUI migrated to it,
+  # at which point this test was pinning a stale direct-to-serve call as
+  # correct. Verified 2026-07-26 that error semantics are unchanged: an
+  # unknown server returns byte-identical 404 McpServerNotFoundError through
+  # the door and direct to a serve, so the 404 branch in the source still
+  # means exactly what it says.
+  if grep -q '"\$FRONTDOOR_URL/session/\$session_id/mcp/\$srv/connect"' "$default_nix"; then
+    printf 'PASS  source connects MCP through the front door (session-scoped)\n'
   else
-    printf 'FAIL  source connects MCP on $serve_url\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'FAIL  source connects MCP through the front door (session-scoped)\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q '"\$serve_url/mcp/\$srv/connect"' "$default_nix"; then
+    printf 'FAIL  source still connects MCP direct to $serve_url (bare route)\n        in: %s\n' "$default_nix"; exit 1
+  else
+    printf 'PASS  source no longer connects MCP direct to $serve_url\n'
   fi
   # Guard against regression: prompt/MCP must NOT use the hardwired serve-0 URL.
   if grep -q '"\$OPENCODE_URL/session/\$session_id/prompt_async"' "$default_nix"; then

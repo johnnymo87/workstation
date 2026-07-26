@@ -352,11 +352,13 @@ pkgs.writeShellApplication {
       fi
 
       # DISCOVER the owning serve for this session via a read-only lookup.
-      # Rationale: the front door already ran `POST /place` inside its create-choreography,
-      # so the session is placed by the time create returns; the client only needs a read-only
-      # `GET /route` to discover the owner for the two calls the door cannot proxy (MCP connect
-      # + the manual attach hint). Any pigeon hiccup degrades `serve_url` to `$OPENCODE_URL`
-      # (the serve we created on), i.e. pre-pool single-serve behavior -- never worse.
+      # Phase 9 (2026-07-26) narrowed why this is still here. MCP connect and the
+      # attach hint BOTH ride the front door now, so `serve_url` survives for
+      # exactly ONE purpose: the `prompt_async` retry below, which fires only
+      # after the door path has already failed. That is an `exempt-degrade` row
+      # in docs/plans/2026-07-26-phase9-consumer-disposition.md (C7), not a
+      # data-plane path. Any pigeon hiccup degrades it to `$OPENCODE_URL` (the
+      # serve we created on) -- pre-pool single-serve behavior, never worse.
       route_body="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$session_id" 2>/dev/null || true)"
       serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
 
@@ -369,9 +371,18 @@ pkgs.writeShellApplication {
       mcp_tools_json='{"question": false}'
       if [ "''${#mcp_servers[@]}" -gt 0 ]; then
         for srv in $(printf '%s\n' "''${mcp_servers[@]}" | sort -u); do
-          # Direct to owner: the front door denies MCP connect with 405 (it is per-serve state)
+          # Through the door, session-scoped. The old comment here claimed "the
+          # front door denies MCP connect with 405 (it is per-serve state)" and
+          # went direct to $serve_url. That was stale three ways: Phase 10 added
+          # POST /session/{sessionID}/mcp/{name}/connect (class `session-path`,
+          # routes.classification.ts:216), the TUI itself migrated to it, and the
+          # bare route's denial is 403 not 405. We hold $session_id here, so the
+          # session-scoped route is available and the door picks the owner.
+          # Error semantics are preserved exactly: verified 2026-07-26 that a
+          # missing server returns byte-identical 404 McpServerNotFoundError
+          # through the door and direct to a serve.
           connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -X POST "$serve_url/mcp/$srv/connect" \
+            -X POST "$FRONTDOOR_URL/session/$session_id/mcp/$srv/connect" \
             -H "x-opencode-directory: $directory")
           if [ "$connect_code" = "404" ]; then
             echo "Error: MCP server '$srv' is not configured on this host" >&2
@@ -444,7 +455,11 @@ pkgs.writeShellApplication {
       echo "Session launched: $session_id"
       echo "Directory: $directory"
       echo ""
-      echo "Attach:  opencode attach $serve_url --session $session_id"
+      # Attach hint rides the door, matching what oc-pool-attach/oc-auto-attach
+      # actually do. Printing $serve_url here taught the human the pool's
+      # internals and handed them a URL that breaks the moment the session
+      # migrates to another serve.
+      echo "Attach:  opencode attach $FRONTDOOR_URL --session $session_id"
       echo "Kill:    curl -sf -X DELETE $FRONTDOOR_URL/session/$session_id"
     '';
 }
