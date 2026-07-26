@@ -13,7 +13,27 @@ export type DispositionKind =
   | 'not-session-scopable'  // global mutation with no session context; denial is architecturally correct
   | 'superseded'            // a forwarded session-scoped route serves this need
   | 'needs-mechanism'       // D4: needs anchor-pin or broadcast that the door lacks
+  | 'terminal-denial'       // investigated; forwarding was REJECTED on evidence. Not a gap.
   | 'accepted-gap';         // known gap, consciously accepted
+
+/**
+ * `terminal-denial` vs `needs-mechanism` — the distinction is load-bearing.
+ *
+ * `needs-mechanism` means "we want to forward this and haven't built the way
+ * yet". It is a debt marker: it requires an open bead, and the D4 completion
+ * criterion is that the list of such rows reaches empty.
+ *
+ * `terminal-denial` means "we investigated and decided NOT to forward it". The
+ * work is finished. Leaving such rows as `needs-mechanism` decays three ways,
+ * all of which we walked into on 2026-07-26:
+ *   - the pinned list can never empty, so the completion criterion becomes
+ *     permanently unmet instead of retired;
+ *   - the kind requires a bead, so live rows end up citing a CLOSED one;
+ *   - the next reader sees "needs-mechanism" and builds the mechanism that was
+ *     already falsified, because the falsification lives only in a plan file.
+ * So a terminal-denial row must carry its evidence inline. That is the whole
+ * point of the kind: the row is the record.
+ */
 
 /**
  * WHAT actually stops this route from working through the front door.
@@ -130,6 +150,14 @@ export const CLASS_DISPOSITIONS: Record<string, RouteDisposition> = {
   },
 };
 
+/**
+ * Shared evidence for the four MCP OAuth rows. Inline on every row (via
+ * concatenation) so the reasoning travels with the disposition rather than
+ * living only in a plan file -- see the `terminal-denial` note above.
+ */
+const MCP_OAUTH_DENIAL_EVIDENCE =
+  'Denial is a DECISION, not a missing feature. Anchor-forwarding is available (forward-anchor already exists) and was rejected on two verified grounds. (1) The callback listener binds a FIXED port 19876 and mcp/oauth-callback.ts:114-120 returns SUCCESS WITHOUT BINDING when the port is already owned, so whichever process grabbed 19876 first receives every browser redirect; a process that did not bind it has an empty pendingAuths and answers 400 "potential CSRF attack" while the caller blocks the full 5-minute CALLBACK_TIMEOUT_MS. The squat is live on this box: any stray `opencode` process can take 19876 with no error at bind time, which is precisely tonight\'s incident class. (2) The door\'s cheap first-byte timeout is 5000ms (config.ts:58) and isExemptFromFirstByteTimeout only exempts paths containing a session ID (timeouts.ts:26-53). None of these paths has one, so the authenticate route would 503 on every call regardless of routing. Consistent hashing on {name} was considered and is strictly WORSE than anchoring: it deliberately spreads names across processes, so most callbacks would land on a process that does not own 19876. Do not implement it.';
+
 export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
   // D4 rows (workstation-mlve.11 / needs-mechanism):
   'PUT /auth/{providerID}': {
@@ -169,34 +197,41 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     remedy: POOL_CREDENTIAL_REMEDY,
   },
   'POST /mcp/{name}/auth': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'process-pinned-ram',
-    bead: 'workstation-mlve.11',
-    rationale: 'MCP authentication flow requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    tuiSurface: 'absent',
+    rationale:
+      'MCP OAuth state is pinned to one process by the module-level pendingOAuthTransports Map (mcp/index.ts:112), keyed by mcpName. ' + MCP_OAUTH_DENIAL_EVIDENCE,
   },
   'DELETE /mcp/{name}/auth': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'process-pinned-ram',
-    bead: 'workstation-mlve.11',
-    rationale: 'MCP authentication removal requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    tuiSurface: 'absent',
+    rationale:
+      'Removal must reach the process holding this server\'s live transport and pending-auth entry (mcp/index.ts:112). ' + MCP_OAUTH_DENIAL_EVIDENCE,
   },
   'POST /mcp/{name}/auth/authenticate': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'process-pinned-ram',
-    bead: 'workstation-mlve.11',
-    rationale: 'MCP authentication execution requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    tuiSurface: 'absent',
+    rationale:
+      'This is the route that blocks on the browser callback, so it is the clearest case: even with perfect routing it exceeds the door\'s first-byte timeout every time. ' + MCP_OAUTH_DENIAL_EVIDENCE,
   },
   'POST /mcp/{name}/auth/callback': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'process-pinned-ram',
-    bead: 'workstation-mlve.11',
-    rationale: 'MCP authentication callback requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    tuiSurface: 'absent',
+    rationale:
+      'The callback must be handled by the process that issued the authorize request and owns its transport (mcp/index.ts:112). Cross-process it fails as a bare throw (mcp/index.ts:928-929), i.e. a 500 rather than a typed 4xx. ' + MCP_OAUTH_DENIAL_EVIDENCE,
   },
   'POST /instance/dispose': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'process-pinned-ram',
-    bead: 'workstation-mlve.11',
-    rationale: 'Process instance disposal requires broadcast across all active serve processes.',
+    tuiSurface: 'degrades',
+    rationale:
+      'Denial is a DECISION. Forwarding was rejected because the route INVERTS through the door: instance-context middleware LOADS (cold-boots) the target instance before the handler runs, and instance-store.ts:117-120 forks completeLoad into the SERVER scope, so when the door gives up at its 5s first-byte timeout (config.ts:58; no session ID in the path means no exemption per timeouts.ts:26-53) the boot is NOT cancelled. Net effect on a cold member: caller gets 503, plugins/LSP/MCP stdio children are spawned, the instance is cached, and NOTHING is disposed -- the exact opposite of the request. ' +
+      'Broadcast was also rejected: dispose is already directory-keyed server-side, so fanning out to the 3 members that do not hold the instance cold-boots all of them, and mcp/index.ts:546 pendingOAuthTransports.clear() is process-global, so disposing directory /a would wipe a pending MCP OAuth flow for directory /b on every member. The 200 response carries no signal about which process held the instance (handlers/instance.ts:24-27 always returns true), so it cannot even drive targeting. ' +
+      'TUI consequence (audited 2026-07-26): dialog-provider.tsx:281/:332/:405 and dialog-console-org.tsx:106 all call `await sdk.client.instance.dispose()` WITHOUT checking the returned error, then immediately `await sync.bootstrap()`. So a door 403 is discarded silently and the dialog proceeds with stale provider state; nothing crashes and nothing is reported. Degrades, but invisibly.',
   },
 
   // Superseded rows:

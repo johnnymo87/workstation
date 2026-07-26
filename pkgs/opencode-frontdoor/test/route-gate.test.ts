@@ -629,7 +629,9 @@ describe('Route Denial Disposition Gate (Check B)', () => {
 
       expect(result.passed).toBe(false);
       expect(result.error).toContain('Kind census mismatch');
-      expect(result.error).toContain('needs-mechanism: expected 0, got 9');
+      expect(result.error).toContain(
+        `needs-mechanism: expected 0, got ${EXPECTED_KIND_CENSUS['needs-mechanism']}`
+      );
     });
 
     test('F2: fails on inflated expectedKindCensus (shrink/grow direction test)', () => {
@@ -642,7 +644,9 @@ describe('Route Denial Disposition Gate (Check B)', () => {
 
       expect(result.passed).toBe(false);
       expect(result.error).toContain('Kind census mismatch');
-      expect(result.error).toContain('needs-mechanism: expected 10, got 9');
+      expect(result.error).toContain(
+        `needs-mechanism: expected 10, got ${EXPECTED_KIND_CENSUS['needs-mechanism']}`
+      );
     });
 
     test('DEFAULT path enforces the constraint census in both directions', () => {

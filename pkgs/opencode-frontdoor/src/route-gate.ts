@@ -76,7 +76,10 @@ export const EXPECTED_KIND_CENSUS: Record<string, number> = {
   'not-session-scopable-degrades': 12,
   'not-session-scopable-unverified': 0,
   superseded: 7,
-  'needs-mechanism': 9,
+  'needs-mechanism': 4,
+  'terminal-denial-absent': 4,
+  'terminal-denial-degrades': 1,
+  'terminal-denial-unverified': 0,
   'accepted-gap': 0,
 };
 
@@ -118,11 +121,6 @@ export const EXPECTED_CONSTRAINT_CENSUS: Record<string, number> = {
  */
 export const EXPECTED_NEEDS_MECHANISM_KEYS: string[] = [
   'DELETE /auth/{providerID}',
-  'DELETE /mcp/{name}/auth',
-  'POST /instance/dispose',
-  'POST /mcp/{name}/auth',
-  'POST /mcp/{name}/auth/authenticate',
-  'POST /mcp/{name}/auth/callback',
   'POST /provider/{providerID}/oauth/authorize',
   'POST /provider/{providerID}/oauth/callback',
   'PUT /auth/{providerID}',
@@ -255,6 +253,9 @@ export function checkDocRoutes(
     'not-session-scopable-unverified': 0,
     superseded: 0,
     'needs-mechanism': 0,
+    'terminal-denial-absent': 0,
+    'terminal-denial-degrades': 0,
+    'terminal-denial-unverified': 0,
     'accepted-gap': 0,
   };
 
@@ -487,20 +488,30 @@ export function checkDocRoutes(
             }
           }
 
-          if (disp.kind === 'not-session-scopable') {
+          if (disp.kind === 'terminal-denial' && disp.bead) {
+            invalidDispositions.push({
+              method,
+              path,
+              action,
+              reason:
+                'Kind "terminal-denial" must NOT cite a bead: the decision is final, so a bead reference would either be closed (orphaning the row) or imply work that is not planned. Put the evidence in the rationale instead.',
+            });
+          }
+
+          if (disp.kind === 'not-session-scopable' || disp.kind === 'terminal-denial') {
             if (!disp.tuiSurface) {
               invalidDispositions.push({
                 method,
                 path,
                 action,
-                reason: 'Kind "not-session-scopable" requires a tuiSurface field (\'absent\' | \'degrades\' | \'unverified\')',
+                reason: `Kind "${disp.kind}" requires a tuiSurface field ('absent' | 'degrades' | 'unverified')`,
               });
             } else if (!['absent', 'degrades', 'unverified'].includes(disp.tuiSurface)) {
               invalidDispositions.push({
                 method,
                 path,
                 action,
-                reason: `Invalid tuiSurface value "${disp.tuiSurface}" for kind "not-session-scopable" (expected 'absent' | 'degrades' | 'unverified')`,
+                reason: `Invalid tuiSurface value "${disp.tuiSurface}" for kind "${disp.kind}" (expected 'absent' | 'degrades' | 'unverified')`,
               });
             }
           }
@@ -517,6 +528,9 @@ export function checkDocRoutes(
     'not-session-scopable-unverified': 0,
     superseded: 0,
     'needs-mechanism': 0,
+    'terminal-denial-absent': 0,
+    'terminal-denial-degrades': 0,
+    'terminal-denial-unverified': 0,
     'accepted-gap': 0,
   };
   const constraintCensus: Record<string, number> = {
@@ -551,6 +565,14 @@ export function checkDocRoutes(
         needsMechanismKeySet.add(bareKey);
       } else if (disp.kind === 'accepted-gap') {
         kindCensus['accepted-gap']++;
+      } else if (disp.kind === 'terminal-denial') {
+        if (disp.tuiSurface === 'degrades') {
+          kindCensus['terminal-denial-degrades']++;
+        } else if (disp.tuiSurface === 'unverified') {
+          kindCensus['terminal-denial-unverified']++;
+        } else if (disp.tuiSurface === 'absent') {
+          kindCensus['terminal-denial-absent']++;
+        }
       } else if (disp.kind === 'not-session-scopable') {
         if (disp.tuiSurface === 'degrades') {
           kindCensus['not-session-scopable-degrades']++;
