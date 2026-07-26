@@ -382,8 +382,28 @@ pkgs.writeShellApplication {
           # missing server returns byte-identical 404 McpServerNotFoundError
           # through the door and direct to a serve.
           connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            --max-time 20 \
             -X POST "$FRONTDOOR_URL/session/$session_id/mcp/$srv/connect" \
             -H "x-opencode-directory: $directory")
+          # Degrade, mirroring the prompt_async retry below. Without this, a pigeon
+          # outage HARD-KILLS every --mcp launch: create can't place -> no sticky ->
+          # the door sees a mutating request it refuses to send to a non-owner and
+          # returns FABLE-S2 503 (proxy.ts:741-745) -> the `!= 200` branch exits 1.
+          # The pre-Phase-9 code went direct to $serve_url and survived, so routing
+          # this through the door without a degrade was a REGRESSION (found by
+          # adversarial review after deploy, 2026-07-26). The prompt_async retry
+          # below cannot cover it -- we exit before ever reaching it.
+          # 503 specifically means "pigeon unavailable, refusing to guess an owner",
+          # which is exactly when $serve_url's raw-anchor fallback is the right
+          # target: a create-degraded session actually lives on the anchor.
+          if [ "$connect_code" = "503" ]; then
+            echo "Note: MCP connect via front door got 503 (pigeon down); retrying direct against $serve_url" >&2
+            connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
+              --max-time 20 \
+              # frontdoor-exempt(C8): fires ONLY on a door 503 (pigeon down); without it every --mcp launch dies at connect
+              -X POST "$serve_url/mcp/$srv/connect" \
+              -H "x-opencode-directory: $directory")
+          fi
           if [ "$connect_code" = "404" ]; then
             echo "Error: MCP server '$srv' is not configured on this host" >&2
             exit 1
@@ -418,13 +438,17 @@ pkgs.writeShellApplication {
       # a real owner when pigeon is up, or the $OPENCODE_URL anchor (= where a create-degraded
       # session actually lives) when pigeon is down. This restores the pre-pool "launch survives a
       # pigeon blip" behavior instead of hard-failing and orphaning the session.
-      if ! curl -sf -X POST "$FRONTDOOR_URL/session/$session_id/prompt_async" \
+      # --max-time is load-bearing on BOTH legs: a wedged serve otherwise parks the
+      # launcher indefinitely (reset-workspace documents a curl parked 6+ hours on
+      # this exact failure). The retry leg needs it most -- it targets a serve that
+      # just failed through the door, i.e. the one most likely to be wedged.
+      if ! curl -sf --max-time 30 -X POST "$FRONTDOOR_URL/session/$session_id/prompt_async" \
         -H "x-opencode-directory: $directory" \
         -H "Content-Type: application/json" \
         -d "$prompt_payload" >/dev/null; then
         echo "Note: prompt via front door failed; retrying directly against $serve_url" >&2
         # frontdoor-exempt(C7): post-door-failure degrade ONLY; fires after the FRONTDOOR_URL prompt above fails
-        curl -sf -X POST "$serve_url/session/$session_id/prompt_async" \
+        curl -sf --max-time 30 -X POST "$serve_url/session/$session_id/prompt_async" \
           -H "x-opencode-directory: $directory" \
           -H "Content-Type: application/json" \
           -d "$prompt_payload" >/dev/null || {

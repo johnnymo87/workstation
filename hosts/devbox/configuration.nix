@@ -266,6 +266,7 @@ in
         # its HTTP health-poller onto the serves' own heartbeats (M4 D1a), and
         # PIGEON_DAEMON_DB_PATH pins the routing DB to the same file the serves
         # open as OPENCODE_ROUTING_DB (DM5-1). Mirrors the cloudbox pigeon config.
+        # frontdoor-exempt(C9): pigeon's data-plane fan-out; it must address every serve to route and reconcile them
         "PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}"
         "PIGEON_SERVE_LIVENESS=self"
         "PIGEON_DAEMON_DB_PATH=${routingDbPath}"

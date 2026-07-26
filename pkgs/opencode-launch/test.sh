@@ -227,10 +227,34 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source connects MCP through the front door (session-scoped)\n        not found in: %s\n' "$default_nix"; exit 1
   fi
-  if grep -q '"\$serve_url/mcp/\$srv/connect"' "$default_nix"; then
-    printf 'FAIL  source still connects MCP direct to $serve_url (bare route)\n        in: %s\n' "$default_nix"; exit 1
+  # The bare direct-to-serve connect is PERMITTED, but ONLY as the 503 degrade.
+  # History: this started as a blanket deny of "$serve_url/mcp/$srv/connect",
+  # which was right when the door call had no fallback -- and it immediately
+  # caught the degrade being added, correctly. But a blanket deny would have
+  # forced the regression it was written to prevent: without a fallback, a pigeon
+  # outage makes the door 503 every MCP connect (proxy.ts:741-745) and the
+  # launcher exits 1, where the pre-Phase-9 code survived. So assert the
+  # STRUCTURE instead of banning the string: door first, bare route only under a
+  # 503 test.
+  if grep -q 'if \[ "\$connect_code" = "503" \]; then' "$default_nix"; then
+    printf 'PASS  source degrades MCP connect on 503 (pigeon-down survivability)\n'
   else
-    printf 'PASS  source no longer connects MCP direct to $serve_url\n'
+    printf 'FAIL  source degrades MCP connect on 503\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # The bare connect must appear exactly once, and inside the 503 branch. Two
+  # occurrences would mean the primary path regressed back to direct-to-serve.
+  bare_connect_count="$(grep -c '"\$serve_url/mcp/\$srv/connect"' "$default_nix" || true)"
+  if [ "$bare_connect_count" = "1" ]; then
+    printf 'PASS  bare MCP connect appears exactly once (the degrade leg)\n'
+  else
+    printf 'FAIL  bare MCP connect appears %s time(s), expected exactly 1\n        in: %s\n' "$bare_connect_count" "$default_nix"; exit 1
+  fi
+  # Both connect legs must be time-bounded: a wedged serve otherwise parks the
+  # launcher (reset-workspace documents a 6+ hour parked curl on this shape).
+  if [ "$(grep -c -- '--max-time 20' "$default_nix" || true)" -ge 2 ]; then
+    printf 'PASS  both MCP connect legs carry --max-time\n'
+  else
+    printf 'FAIL  both MCP connect legs carry --max-time\n        in: %s\n' "$default_nix"; exit 1
   fi
   # Guard against regression: prompt/MCP must NOT use the hardwired serve-0 URL.
   if grep -q '"\$OPENCODE_URL/session/\$session_id/prompt_async"' "$default_nix"; then
