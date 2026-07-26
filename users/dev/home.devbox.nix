@@ -779,6 +779,13 @@ lib.mkIf isDevbox {
 ${serveIdCase}
           *) echo "opencode-serve@: port $PORT not in serve-pool.nix"; exit 1 ;;
         esac
+        # REGISTRY PORT FENCE (bead pigeon-13p) -- see the long rationale in
+        # hosts/cloudbox/configuration.nix. Exported so children inherit this slot's
+        # DECLARED port; a throwaway `opencode serve` spawned from a session then
+        # binds a different port and the serve refuses to claim the slot (exit 20).
+        # Unset = unarmed, so the binary release and this rebuild can land in either
+        # order.
+        export OPENCODE_SERVE_EXPECTED_PORT="$PORT"
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
         export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"

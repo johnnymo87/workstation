@@ -774,6 +774,22 @@ in
 ${serveIdCase}
           *) echo "opencode-serve@: port $PORT not in serve-pool.nix"; exit 1 ;;
         esac
+        # REGISTRY PORT FENCE (bead pigeon-13p). Declares which TCP port this slot
+        # is supposed to hold. The serve compares it against the port it ACTUALLY
+        # bound and refuses to register (exit 20) if they disagree.
+        #
+        # The value is just "$PORT", but the fence is NOT vacuous: its power comes
+        # from being EXPORTED, so it is inherited by every child process. A throwaway
+        # `opencode serve` spawned from inside a session hosted by this serve carries
+        # this slot's declared port while binding its own random one -- which is
+        # exactly the 2026-07-25 hijack signature (slot repointed at :47037, and
+        # again at :44407 by a test harness). Comparing against this process's own
+        # --port instead would catch nothing, because the throwaway binds the port
+        # it asked for.
+        #
+        # Unset = fence unarmed (serve logs a warning and registers as before), so
+        # the opencode-patched release and this rebuild can land in either order.
+        export OPENCODE_SERVE_EXPECTED_PORT="$PORT"
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
         # Personal Anthropic subscription auth for the

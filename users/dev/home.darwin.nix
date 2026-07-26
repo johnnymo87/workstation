@@ -322,6 +322,13 @@ lib.mkIf isDarwin {
             export OPENCODE_ROUTING_DB="${routingDbPath}"
             export OPENCODE_SERVE_ID="serve-${toString i}"
 
+            # REGISTRY PORT FENCE (bead pigeon-13p) -- see the long rationale in
+            # hosts/cloudbox/configuration.nix. Exported so children inherit this
+            # slot's DECLARED port; a throwaway `opencode serve` spawned from a
+            # session binds a different port and is refused (exit 20). Unset =
+            # unarmed, so the binary release and this rebuild are order-independent.
+            export OPENCODE_SERVE_EXPECTED_PORT="${toString port}"
+
             exec opencode serve --port ${toString port} --hostname 127.0.0.1
           ''}"
         ];
