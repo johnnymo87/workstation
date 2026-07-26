@@ -19,10 +19,45 @@ That is the whole point. Not the disposition table, not the gate, not the CLI �
 
 ## Where we actually stand
 
-**The objective is NOT met.** `OPENCODE_URL=http://127.0.0.1:4096` — the anchor,
+> **CORRECTED 2026-07-26 by measurement.** This section previously claimed the
+> objective was NOT met and that "the TUI does not go through the front door,"
+> citing `hosts/cloudbox/configuration.nix:576,631`. **Both claims were false**,
+> and acting on them would have caused an outage. Superseded by the measured
+> audit in `docs/plans/2026-07-26-phase9-consumer-disposition.md`. The original
+> text is preserved below, struck, because *how* a status claim went unchecked
+> through three audits is the more useful lesson.
+
+~~"The objective is NOT met. `OPENCODE_URL=http://127.0.0.1:4096` — the anchor,
 not the door (`hosts/cloudbox/configuration.nix:576,631`). The TUI does not go
-through the front door. Until that changes, the door is optional infrastructure
-and the pool's internals are still public to the machine.
+through the front door."~~
+
+**What is actually true**, measured on cloudbox 2026-07-26:
+
+- **20 of 20 live `opencode attach` TUIs run against `http://127.0.0.1:4700`.**
+  Zero against any serve port. The TUI rides the door.
+- **Every process connected to a pool port is the door or a serve.** No external
+  consumer addresses a serve at runtime.
+- **Pigeon is fully token-gated**: `/route`, `/place`, `/sessions` all 401.
+
+The repoint landed in `f878865` ("Phase 9 attach-through-door (co-land)"). The
+runtime objective is **substantially met**.
+
+And the two cited lines are not violations at all — they are deliberate,
+commented, **test-enforced** exemptions. `:576` is the pigeon control plane;
+repointing it at `:4700` creates the door⇄pigeon startup cycle its own comment
+forbids and trips `users/dev/test-pool-route-clients.sh:97-98`. Following this
+file literally would have broken routing for the whole box.
+
+**The lesson worth keeping:** the false claim was inherited from a bead note and
+restated confidently without probing a single process. One `pgrep`/`/proc` read
+refuted it in seconds. This repo's own rule — *configured ≠ running* — applies to
+**status claims in prose**, not just to `systemctl`. A doc asserting system state
+must cite a measurement or it is a rumour with a filename.
+
+What genuinely remains is small and enumerated in the disposition table: three
+direct-to-serve call sites (`opencode-launch` MCP-connect + attach hint,
+`lgtm-sessions` attach hint), the test that pins one of them, and the 9.2
+grep-guard.
 
 Everything else in the epic is either done or subordinate:
 
@@ -32,7 +67,9 @@ Everything else in the epic is either done or subordinate:
 | 8 (attach → session-scoped `/event`) | **closed 2026-07-26**; live gate verified: `/global/event`→410, bare `/event`→400, `/event?session_ids=`→200 |
 | 10 (session-scoped MCP routes) | done |
 | D4 (disposition the 9 denied mutating routes) | **closed 2026-07-26**, deployed and verified on the wire |
-| **9 (repoint `OPENCODE_URL`, internalize pigeon `/route`)** | **THE REMAINING WORK — `workstation-mlve.4`** |
+| 9.1 (repoint → door) | **done** in `f878865`; verified 2026-07-26 — 20/20 TUIs on `:4700` |
+| 9.2 (pigeon token) | **done**; `/route`, `/place`, `/sessions` all 401 (was carried as "deferred") |
+| **9.0 + 9.2 grep-guard + 3 call sites** | **THE REMAINING WORK — `workstation-mlve.4`** |
 
 `workstation-mlve.4` is the sole remaining P1 in the epic. It is the spine.
 
