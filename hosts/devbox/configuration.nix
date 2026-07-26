@@ -287,6 +287,7 @@ in
         export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
         export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
+        # frontdoor-exempt(D1): no front door on devbox; :4096 is the only endpoint that exists
         export OPENCODE_URL="http://127.0.0.1:4096"
         exec ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";

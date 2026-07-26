@@ -423,6 +423,7 @@ pkgs.writeShellApplication {
         -H "Content-Type: application/json" \
         -d "$prompt_payload" >/dev/null; then
         echo "Note: prompt via front door failed; retrying directly against $serve_url" >&2
+        # frontdoor-exempt(C7): post-door-failure degrade ONLY; fires after the FRONTDOOR_URL prompt above fails
         curl -sf -X POST "$serve_url/session/$session_id/prompt_async" \
           -H "x-opencode-directory: $directory" \
           -H "Content-Type: application/json" \

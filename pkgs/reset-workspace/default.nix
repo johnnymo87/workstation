@@ -487,6 +487,7 @@ EOF
       CAPTURE_FALLBACK=""
       mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")
       for u in "''${capture_pool_urls[@]}"; do
+        # frontdoor-exempt(C5): per-serve liveness; the door deliberately hides WHICH member answered
         if curl -sf --max-time 3 --connect-timeout 3 "$u/global/health" >/dev/null 2>&1; then
           SERVE_HEALTHY=1
           [ -z "$CAPTURE_FALLBACK" ] && CAPTURE_FALLBACK="$u"
@@ -819,6 +820,7 @@ EOF
     while [ "$(date +%s)" -lt "$DEADLINE" ] && [ "''${#pending[@]}" -gt 0 ]; do
       still=()
       for u in "''${pending[@]}"; do
+        # frontdoor-exempt(C5): per-serve readiness after restart; must confirm every member, not one
         if curl -sf --max-time 3 "$u/global/health" >/dev/null 2>&1; then
           log "  serve healthy: $u"
         else
@@ -859,6 +861,7 @@ EOF
         while [ "$(date +%s)" -lt "$DEADLINE" ] && [ "''${#pending[@]}" -gt 0 ]; do
           still=()
           for u in "''${pending[@]}"; do
+            # frontdoor-exempt(C5): per-serve readiness after restart; must confirm every member, not one
             if curl -sf --max-time 3 "$u/global/health" >/dev/null 2>&1; then
               log "  serve healthy: $u"
             else

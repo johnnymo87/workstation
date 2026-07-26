@@ -573,6 +573,7 @@ in
         # (:4700) — routing the control plane through the data plane it feeds
         # is a circular dependency + a startup cycle. Do NOT repoint this to
         # FRONTDOOR_URL. Enforced by the test-pool-route-clients grep-guard.
+        # frontdoor-exempt(C1): pigeon is the router the door DEPENDS on; door->pigeon->door is a startup cycle
         export OPENCODE_URL="http://127.0.0.1:4096"
         exec ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";
@@ -628,8 +629,10 @@ in
         # daemon's own session reads hit the anchor directly (a shared-db read;
         # this unit is gated off via enableLgtm=false, and the out-of-repo daemon
         # is repointed in the Phase 9 consumer audit).
+        # frontdoor-exempt(C2): children read this as their raw-anchor degrade fallback; the door would poison it
         "OPENCODE_URL=http://127.0.0.1:4096"
         "FRONTDOOR_URL=http://127.0.0.1:4700"
+        # frontdoor-exempt(C3): the door's own upstream; it cannot proxy through itself
         "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
         "LGTM_PROJECTS_DIR=/home/dev/projects"
         # NB: OPENCODE_DB / OPENCODE_DISABLE_CHANNEL_DB intentionally omitted
@@ -1679,6 +1682,7 @@ EOF
       Environment = [
         "FRONTDOOR_PORT=4700"
         "PIGEON_DAEMON_URL=http://127.0.0.1:4731"
+        # frontdoor-exempt(C3): the door's own upstream; it cannot proxy through itself
         "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
         # Builtins-only app (no framework reads NODE_ENV) — set for convention/
         # consistency with pigeon-daemon and to future-proof any added dependency.
@@ -1877,6 +1881,7 @@ EOF
         # 3. HTTP 503 -> F4 cross-probe
         if [ "$HTTP_CODE" -eq 503 ]; then
           # Probe the anchor directly (mirroring door's OPENCODE_ANCHOR_URL = http://127.0.0.1:4096)
+          # frontdoor-exempt(C4): canary must tell 'door down' from 'pool down'; through the door they look alike
           ANCHOR_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:4096/global/health")
 
           if [ "$ANCHOR_CODE" -eq 200 ]; then

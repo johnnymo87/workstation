@@ -121,6 +121,7 @@ lib.mkIf isDarwin {
           HOME = config.home.homeDirectory;
           NODE_ENV = "production";
           CCR_MACHINE_ID = "macbook";
+          # frontdoor-exempt(D2): no front door on darwin; :4096 is the only endpoint that exists
           OPENCODE_URL = "http://127.0.0.1:4096";
           PIGEON_SERVE_ENDPOINTS = servePool.endpointsCsv;
           PIGEON_SERVE_LIVENESS = "self";

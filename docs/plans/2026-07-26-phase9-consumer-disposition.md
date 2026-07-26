@@ -72,9 +72,11 @@ same commit as this file.
 | A4 | `pkgs/reset-workspace/default.nix:478,493` | `CAPTURE_URL="$FRONTDOOR_URL"` — manifest capture | guarded by `pkgs/reset-workspace/test.sh:396,409` |
 | A5 | `users/dev/home.base.nix:1199,1250` | `lgtm-sessions` health check + session list | guarded by `users/dev/test-pool-route-clients.sh:80-84` |
 
-## B. Data plane — STILL DIRECT TO SERVE (the remaining work)
+## B. Data plane — was direct-to-serve; **all three repointed 2026-07-26** (`e270598`)
 
-These are the only real violations. All three are in `mlve.4`'s scope.
+These were the only real violations. All are now through the door; the rows are
+retained because the *reasoning* is what stops them regressing, and because the
+9.2 guard's `deny` assertions are derived from them.
 
 | # | Site | What | Disposition | Why it is fixable now |
 |---|---|---|---|---|
@@ -117,15 +119,44 @@ is a named successor decision, not an omission.
 
 ---
 
-## What "Phase 9 complete" means, given the above
+## How this table is enforced
+
+`users/dev/test-frontdoor-opacity.sh` is the 9.2 grep-guard. It scans shipped
+consumer code for serve-addressing call sites and requires each to carry an
+inline marker naming a row **of this file**:
+
+```
+# frontdoor-exempt(C5): per-serve liveness; the door deliberately hides WHICH member answered
+```
+
+The marker lives in the code, not in a list inside the guard, and the row id is
+validated against this file — so an exemption cannot outlive its call site, and
+the table cannot drift from the code. A new direct-to-serve call fails closed.
+
+Current state: **11 sites, 11 with a valid row.** The guard is perturbation-
+tested (new unmarked call → fail; bogus row id → fail; table deleted → refuse to
+run; pattern matching nothing → fail on vacuity).
+
+> A guard bug worth remembering: the first draft used `[^\n]*`, which in a POSIX
+> bracket expression means "neither a backslash nor the letter **n**" — so it
+> silently skipped `reset-workspace:490` (`curl … --con**n**ect-timeout …`) while
+> matching its identical siblings. It reported ALL PASS over an under-scan. Hence
+> the explicit non-vacuity assertion.
+
+## Phase 9 status
 
 1. ~~9.0 commit the table~~ — **this file**.
-2. B1, B2, B3 repointed; `test-pool-route-clients.sh:74-75` rewritten to pin the
-   *new* behaviour.
-3. 9.2 grep-guard: no non-exempt caller addresses a serve. This table is its
-   allowlist.
+2. ~~B1, B2, B3 repointed; the two tests that pinned the stale behaviour
+   rewritten~~ — `e270598`.
+3. ~~9.2 grep-guard~~ — `users/dev/test-frontdoor-opacity.sh`.
 4. 9.2 token: **already satisfied** — pigeon `/route`, `/place`, `/sessions` all
    401. Was carried as "deferred"; measurement says otherwise.
+
+**Remaining: deploy.** `home-manager switch --flake .#cloudbox` (picks up
+`lgtm-sessions` + `opencode-launch`) and `nixos-rebuild switch --flake .#cloudbox`
+(the exemption-marker comments only). No door code changed, so **no door restart
+is required** — and per `workstation-hrfn`, do not "fix" that by setting
+`restartIfChanged = true`.
 
 Note the sequencing rule from `mlve.4` no longer gates anything here: it said
 *"do not repoint `OPENCODE_URL` until `vkv2` lands"*, but the repoint already
