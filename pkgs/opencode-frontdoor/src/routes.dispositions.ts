@@ -173,9 +173,9 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
   'POST /experimental/console/switch': {
     kind: 'not-session-scopable',
     tuiSurface: 'degrades',
-    bead: 'workstation-e4tp',
+    bead: 'workstation-85ui',
     rationale:
-      'Switches global console organization context for process; no session context. D4 audit (workstation-mlve.11): called from tui/src/component/dialog-console-org.tsx:98. Degrades SILENTLY, not gracefully — the call passes `{ throwOnError: true }` with no try/catch, and DialogSelect discards the returned promise (ui/dialog-select.tsx:34/71), so the door 403 becomes an UNHANDLED REJECTION. It does not crash today only because @opentui/core registers a process-level unhandledRejection handler and opencode sets openConsoleOnError:false (tui/src/app.tsx:196), so the error lands in an invisible console buffer and the dialog silently does nothing. Bun exits 1 on an unhandled rejection with no handler, so this is one dependency bump from a TUI crash. NOTE this is the ONLY row of the six D4-audited rows that is NOT gated by the experimental flag — it needs only a Console login with 2+ switchable orgs. Door behaviour is correct; the hazard is client-side and tracked as workstation-e4tp.',
+      'Switches global console organization context for process; no session context. D4 audit (workstation-mlve.11): called from tui/src/component/dialog-console-org.tsx:98. Degrades SILENTLY, not gracefully — the call passes `{ throwOnError: true }` with no try/catch, and DialogSelect discards the returned promise (ui/dialog-select.tsx:34/71), so the door 403 becomes an UNHANDLED REJECTION. It does not crash today only because @opentui/core registers a process-level unhandledRejection handler and opencode sets openConsoleOnError:false (tui/src/app.tsx:196), so the error lands in an invisible console buffer and the dialog silently does nothing. Bun exits 1 on an unhandled rejection with no handler, so this is one dependency bump from a TUI crash. NOTE this is the ONLY row of the six D4-audited rows that is NOT gated by the experimental flag — it needs only a Console login with 2+ switchable orgs. Door behaviour is correct; the hazard is client-side and tracked as workstation-85ui.',
   },
   'POST /experimental/worktree': {
     kind: 'not-session-scopable',
