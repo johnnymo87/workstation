@@ -46,6 +46,10 @@ lib.mkIf isDarwin {
     })
     pkgs.google-cloud-sdk
     pkgs.cloudflared
+    # Hetzner Cloud CLI: used by scripts/update-ssh-config.sh to resolve the
+    # devbox IP, and by the setting-up-hetzner / troubleshooting-nixos-host
+    # skills for server management (resize, rescue, reboot).
+    pkgs.hcloud
     # teamclaude CLI (multi-account Claude Max rotator). Needed for interactive
     # `teamclaude login` / `teamclaude accounts`; the launchd agent below runs the
     # server. Nix-packaged (pkgs/teamclaude, platforms = unix), zero runtime deps.
