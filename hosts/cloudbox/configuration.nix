@@ -1358,6 +1358,47 @@ EOF
           exit 0
         fi
 
+        # QUOTA TIME SERIES — for the pool-sizing question.
+        #
+        # Account COUNT is not capacity. The 2026-07-08 saturation looked like
+        # "3 accounts wasn't enough", but two of the three were sitting at
+        # 99-100% usage, so it was really a drawn-down pool of ~1. Judging pool
+        # size from saturation events alone repeats that error.
+        #
+        # Recording per-account quota every pass lets us ask "would N-1 accounts
+        # have covered the load we actually saw?" from measured consumption,
+        # instead of removing an account and paying for the shortfall on the
+        # paid tiers to find out. Note the 5h and 7d windows are ROLLING and
+        # STAGGERED per account, so there is no clean weekly boundary to sample
+        # at — a continuous series is the only thing that answers it.
+        #
+        # Sampled on EVERY pass, including healthy ones: the healthy days are
+        # the baseline. ~250B/pass at 5-minutely => ~72KB/day, trimmed to ~30d.
+        SAMPLES="$STATE/quota-samples.jsonl"
+        if jq -c --arg ts "$(date -Is)" '{
+              ts: $ts,
+              healthy: ([(.accounts // [])[] | select(.disabled != true and .status == "active")] | length),
+              roster: ((.accounts // []) | length),
+              current: (.currentAccount // null),
+              accounts: [(.accounts // [])[] | {
+                n: ((.name // "?") | split("@")[0]),
+                s: .status,
+                u5h: ((.quota // {}).unified5h),
+                u7d: ((.quota // {}).unified7d),
+                u7dF: ((.quota // {}).unified7dFable)
+              }]
+            }' "$BODY" >> "$SAMPLES" 2>/dev/null; then
+          # Trim to roughly the last 30 days of 5-minutely samples. Checked only
+          # past a slack margin so we are not rewriting the file every pass.
+          if [ "$(wc -l < "$SAMPLES" 2>/dev/null || echo 0)" -gt 9500 ]; then
+            tail -n 8640 "$SAMPLES" > "$SAMPLES.tmp" 2>/dev/null \
+              && mv -f "$SAMPLES.tmp" "$SAMPLES"
+          fi
+        else
+          # Never fatal: a lost sample must not cost us the health alert.
+          echo "WARNING: quota sample append failed (non-fatal)"
+        fi
+
         if [ "$HEALTHY" -ge "$EXPECTED_HEALTHY" ]; then
           # Clear throttle + dampening ONLY on confirmed recovery.
           rm -f "$PENDING" "$STATE/degraded-alerted"
