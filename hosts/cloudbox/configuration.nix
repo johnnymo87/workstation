@@ -1319,6 +1319,16 @@ EOF
         # post-mortem has the last body the canary actually saw.
         BODY="$STATE/last-status.json"
 
+        # DECLARED pool size: how many accounts SHOULD be serving. Alerting on
+        # `healthy < roster length` is wrong, and would have paged daily forever:
+        # an account the operator deliberately leaves un-logged-in stays in the
+        # roster with status "error" and disabled=false, so the roster length
+        # never shrinks to match intent. As of 2026-07-26 the pool is 2 (johnnymo87
+        # is intentionally left off). BUMP THIS when the pool composition changes —
+        # the twice-monthly reminder below reports actual-vs-expected so a stale
+        # value surfaces on its own rather than silently under-alerting.
+        EXPECTED_HEALTHY=2
+
         # Only police a unit that is supposed to be up (mirrors the frontdoor
         # canary). An intentional stop must not page.
         if [ "$(systemctl is-active teamclaude.service)" != "active" ]; then
@@ -1345,22 +1355,28 @@ EOF
           exit 0
         fi
 
-        if [ "$HEALTHY" -ge "$TOTAL" ]; then
+        if [ "$HEALTHY" -ge "$EXPECTED_HEALTHY" ]; then
           # Clear throttle + dampening ONLY on confirmed recovery.
           rm -f "$PENDING" "$STATE/degraded-alerted"
+          # More healthy accounts than declared means EXPECTED_HEALTHY is stale.
+          # Log only — an operator ADDING capacity is not an incident.
+          if [ "$HEALTHY" -gt "$EXPECTED_HEALTHY" ]; then
+            echo "NOTE: $HEALTHY healthy accounts but EXPECTED_HEALTHY=$EXPECTED_HEALTHY; bump the canary's declared pool size"
+          fi
           exit 0
         fi
 
         PENDING_N=$(( $(cat "$PENDING" 2>/dev/null || echo 0) + 1 ))
         echo "$PENDING_N" > "$PENDING"
-        echo "WARNING: teamclaude pool degraded: $HEALTHY/$TOTAL healthy ($PENDING_N/2 consecutive)"
+        echo "WARNING: teamclaude pool degraded: $HEALTHY healthy, expected $EXPECTED_HEALTHY (roster $TOTAL) ($PENDING_N/2 consecutive)"
         [ "$PENDING_N" -ge 2 ] || exit 0
 
         ROSTER=$(jq -r '(.accounts // [])[] | "  - \(.name // "?"): \(.status // "?")"' "$BODY" 2>/dev/null || echo "  (roster unavailable)")
 
         DEGRADED_TEXT=$(cat <<EOF
-TeamClaude Max pool DEGRADED: $HEALTHY/$TOTAL accounts healthy.
+TeamClaude Max pool DEGRADED: $HEALTHY healthy, expected $EXPECTED_HEALTHY.
 
+Roster ($TOTAL accounts; some may be intentionally left off):
 $ROSTER
 
 Max is the only flat-rate tier - it absorbs 46-75% of notional spend on busy
@@ -1376,8 +1392,9 @@ To fix (interactive, on cloudbox):
 Confirm: curl -s localhost:3456/teamclaude/status | jq '[.accounts[].status]'
 EOF
 )
-        # Signature is healthy/total so a further degradation re-pages immediately.
-        ${driftAlert} "$STATE/degraded-alerted" "$HEALTHY/$TOTAL" "$DEGRADED_TEXT" 86400
+        # Signature is healthy-vs-expected so a FURTHER degradation re-pages
+        # immediately instead of being swallowed by the 24h throttle.
+        ${driftAlert} "$STATE/degraded-alerted" "$HEALTHY/$EXPECTED_HEALTHY" "$DEGRADED_TEXT" 86400
         exit 0
       ''}";
     };
@@ -1416,10 +1433,23 @@ EOF
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.jq ]}
         STATE=/var/lib/teamclaude-pool-canary
         BODY="$STATE/last-status.json"
+        # Keep in sync with EXPECTED_HEALTHY in teamclaude-pool-canary above.
+        EXPECTED_HEALTHY=2
 
         ROSTER="  (no recent status sample)"
+        DRIFT=""
         if [ -f "$BODY" ]; then
           ROSTER=$(jq -r '(.accounts // [])[] | "  - \(.name // "?"): \(.status // "?")"' "$BODY" 2>/dev/null || echo "  (roster unavailable)")
+          HEALTHY=$(jq -r '[(.accounts // [])[] | select(.disabled != true and .status == "active")] | length' "$BODY" 2>/dev/null || echo "")
+          case "$HEALTHY" in
+            ""|*[!0-9]*) : ;;
+            *) if [ "$HEALTHY" -ne "$EXPECTED_HEALTHY" ]; then
+                 DRIFT="
+NOTE: $HEALTHY accounts healthy but the canary expects $EXPECTED_HEALTHY. Either
+re-login the missing account(s), or update EXPECTED_HEALTHY in
+hosts/cloudbox/configuration.nix so the canary matches reality."
+               fi ;;
+          esac
         fi
 
         REMINDER_TEXT=$(cat <<EOF
@@ -1429,8 +1459,9 @@ Anthropic OAuth refresh tokens appear to expire ~30 days after issuance. In
 July 2026 two accounts died exactly 30 days after being added and the outage
 went unnoticed for 7 days, costing the flat-rate tier entirely.
 
-Last known roster:
+Last known roster (expected healthy: $EXPECTED_HEALTHY):
 $ROSTER
+$DRIFT
 
 Run on cloudbox (interactive):
   teamclaude login
