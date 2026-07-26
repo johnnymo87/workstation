@@ -753,6 +753,28 @@ in
         # only covers interactive shells, opencode-serve needs it set
         # explicitly. See full rationale there.
         "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"
+        # Tell auth plugins there is no local browser. opencode-gemini-auth
+        # (installed, v1.3.11) picks its OAuth flow from
+        #   !!(SSH_CONNECTION || SSH_CLIENT || SSH_TTY || OPENCODE_HEADLESS)
+        # in src/plugin/oauth-authorize.ts:64-69. A systemd unit inherits none
+        # of the SSH_* vars, so without this the serve believes it is on a
+        # desktop, takes the `method: "auto"` branch, and binds
+        # http://localhost:8085/oauth2callback (src/constants.ts:23,
+        # src/plugin/server.ts:220) for a redirect that would have to resolve in
+        # the USER'S laptop browser — not on cloudbox. It can never complete: it
+        # blocks for 5 minutes and fails. With this set, the plugin binds nothing
+        # and returns the paste-back `method: "code"` flow, which works remotely.
+        #
+        # Blast radius is exactly this one plugin: `git grep OPENCODE_HEADLESS`
+        # in opencode v1.17.13 core returns zero hits, and no other plugin in the
+        # cache reads it. Found during the D4 route audit (workstation-mlve.11);
+        # unrelated to the front door, which cannot fix it.
+        #
+        # NOT live until each serve restarts — restartIfChanged = false above
+        # means `nixos-rebuild switch` deploys this WITHOUT bouncing the pool
+        # (deliberate: a bounce would kill every live session). The nightly reset
+        # picks it up. Do not verify same-day and conclude it failed.
+        "OPENCODE_HEADLESS=1"
         # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
         # sessionVariables for full rationale). Required by the K-serve pool —
         # every serve must share one DB. A system service doesn't source

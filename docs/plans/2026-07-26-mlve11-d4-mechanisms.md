@@ -332,3 +332,111 @@ anywhere** in the workstation repo today. Recording the negative so a future add
 
 Net: the door change count drops from "six routes plus a new routing class" to **at most one**, and
 D4 completes by *honest relabelling plus a gate that counts relabellings*, not by forwarding.
+
+---
+
+# FABLE REVIEW OF THE REVISED PLAN (2026-07-26) — final direction
+
+The user asked for a fable pass before choosing a direction, since fable authored the original
+per-route table this plan overturns. Fable **accepted the re-scoping for Group A, B1 and
+C-as-broadcast**, in its own words: its original table answered "which process should receive this
+request" and assumed delivery to the right process equals a correct operation; F1-F4 falsify that
+assumption. "That is falsification, not goalpost-moving: the goal is unchanged; what changed is the
+discovery that forwarding cannot reach it."
+
+It then found five things wrong with the revised plan. Three change what gets built.
+
+## Corrections to the revised plan
+
+**R1 — opus overreached on the phantom `/credential` keys; DO NOT delete them.** Every key in
+`ROUTE_DISPOSITIONS` is bare-form *by convention*: dedup strips `/api/` (`route-gate.ts:304-306`),
+disposition lookup falls back `/api/`→bare (`routes.dispositions.ts:339-345`), and orphan matching
+does the same (`route-gate.ts:327-331`). The `/credential` keys are matched by exactly the same
+fallback as the six `/integration` keys. Deleting them would leave two real denials
+(`routes.classification.ts:66-67`) undispositioned and **fail the gate**. So F8's "two smaller
+drifts" is one drift: the `PATCH /config` omission is real, the `/credential` one is a misreading.
+Residual worth a gate-header note: one bare key silently speaks for both the bare and `/api/` forms,
+so if those ever diverge upstream, one disposition covers two behaviours.
+
+**R2 — the live 403 body recommends the exact footgun this plan exists to prevent.** Verified at
+`proxy.ts:563-573`: the wire message says *"Call a serve port directly."* For
+`PUT /auth/{providerID}` that instructs the user to create the false success we are refusing to
+ship — write one serve, leave three plus the writer's own booted instances on a stale credential
+indefinitely. The `rationale` field is gate-side data; **nothing puts it on the wire**. The
+superseded option 3 had this right ("replace the generic 403 with a specific message naming the real
+constraint") and the revised plan silently dropped that half. This is the one thing the second
+review wrongly discarded, and it is now the highest-value item in the plan.
+
+**R3 — step 2's single rationale is false for B1, recommitting F8's own sin one generation later.**
+"No directory context at all" is true only for the `/auth/{providerID}` pair
+(`groups/control.ts:36-75`, `AuthParams:8-10`). The B1 provider-OAuth routes *do* have directory
+context — the whole B1 analysis depends on it. Their real constraint is process-pinned RAM plus F3.
+Also `not-session-scopable` **requires** a `tuiSurface` value (`route-gate.ts:396-411`), and the TUI
+demonstrably calls both B1 routes, so `absent` is wrong and `degrades` requires a real
+through-door-consequence audit — the same audit that found the console/switch crash risk. "Relabel
+four rows" therefore contains an uncosted TUI failure-mode audit.
+
+**R4 — "leave it denied" as drafted is not stable; it decays.** Stranding B2+C as
+`needs-mechanism` means: the pinned list never empties, so the completion criterion becomes
+permanently unmet rather than retired; the `needs-mechanism` kind *requires* a bead
+(`route-gate.ts:385-394`), so five live rows would cite a **closed** bead; and the next agent reading
+`route-gate.ts:82` plus a `needs-mechanism` label will conclude the mechanism is still wanted and
+implement the falsified hash design, whose failure mode is documented only in this file.
+
+**R5 — the second pinned list is a tripwire, not a fix.** It closes the compensating-swap hole
+between the two big buckets, but no list can catch the wrong-at-birth classification — which is
+exactly how `/api/integration/*` got its wrong label. Structurally better: add a required,
+machine-visible `constraint` enum to `RouteDisposition` (`'no-session-context' |
+'process-pinned-ram' | 'shared-disk-plus-stale-cache' | …`) and pin the census over *constraints*,
+forcing every future author to answer the F8 question at write time for every row. And rewrite the
+gate's self-description honestly: **the gate proves the tables agree with themselves and with
+/doc's shape; it cannot prove any label is true; truth comes from audit on pin-bump.**
+
+**R6 — B2 denial is a choice, not a consequence.** F1 falsifies *hashing* and thereby confirms
+ANCHOR, which already exists as `forward-anchor`. The defensible reason to deny anyway is that the
+**19876 squat is live on this box**: `ensureRunning` returns success-without-binding if anything
+owns the port, and tonight's incident class (accidental `opencode` spawns) is exactly what binds it
+first and silently breaks every anchored MCP OAuth flow with no error at bind time. Either way,
+that paragraph must exist in the disposition — "right now it gets neither, and that silence is where
+the next incident lives."
+
+**R7 — CLI sharp edges.** `PUT ×4` is *worse* than `PUT ×1`: the file is shared and unlocked, so
+four redundant whole-document writes quadruple the lost-update window against a concurrent token
+refresh for zero benefit. Write once, dispose everywhere. And `POST /global/dispose` is a
+**pool-wide outage** (every directory, every in-flight run cancelled, every stdio MCP child
+SIGTERMed, on each serve in turn) — acceptable for rare manual rotation only if the CLI says so
+loudly and ideally checks pigeon for in-flight runs first. Expect a cold-boot 503 wave afterwards.
+
+**R8 — step 6 oversells.** Flock + writer-cache invalidation fixes the torn write and the *writer's*
+staleness; the other three members have no watcher and no read path, so the cross-process staleness
+that is the actual Group A blocker survives. Either the upstream ask includes mtime-check-on-read in
+the provider SDK path, or the CLI is the **permanent** pool-invalidation mechanism, not a stopgap.
+
+## Step 1 is safer than assumed — verified, and already applied
+
+Fable independently confirmed and sharpened this. `hosts/cloudbox/configuration.nix:709` sets
+`restartIfChanged = false` on `opencode-serve@`, so `nixos-rebuild switch` deploys the env change
+**without bouncing the pool** — the "no SSE drop" claim is true *because of that line*. Blast radius
+is exactly one plugin (`git grep OPENCODE_HEADLESS` in v1.17.13 core: zero hits; no other plugin in
+the cache reads it). Two caveats now written into the unit comment: it is **not live until each
+serve restarts** (the nightly reset absorbs it — do not verify same-day and conclude it failed), and
+all four units are currently `active`, so "one member down" is a *routing-slot* condition invisible
+to `systemctl` — verify via pigeon, not systemd.
+
+## Final plan
+
+1. **`OPENCODE_HEADLESS=1`** in the serve unit. **DONE** (committed; user deploys).
+2. **Wire the constraint to the user (R2).** Make the denial handler consult the disposition table
+   and emit the real rationale plus the CLI invocation in the 403/405 body, replacing "call a serve
+   port directly" for these rows. Highest value in the plan; the only part of "honest denial" that is
+   honest to the *user* rather than to the repo.
+3. **Add the `constraint` enum (R5)** and pin its census; rewrite the gate's self-description; add
+   the bare-key note (R1). Do **not** delete the `/credential` keys.
+4. **Introduce a terminal disposition kind (R4)** for rows where denial is the decision, not a gap,
+   so the pinned list empties truthfully and the bead can close without orphaning five rows against
+   it. Move B2 and C there, each with the F1/F2 evidence and the 19876-squat paragraph (R6) inline.
+5. **Relabel A and B1 separately (R3)**, with their two *different* real constraints, and do the
+   through-door-consequence audit that `tuiSurface: 'degrades'` requires.
+6. **CLI escape hatch** with R7's corrections: write auth once, dispose everywhere, announce the
+   outage, expect the 503 wave.
+7. **Upstream fix**, described honestly per R8.
