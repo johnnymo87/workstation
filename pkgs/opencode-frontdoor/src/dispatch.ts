@@ -1,4 +1,5 @@
 import { ROUTE_CLASSIFICATION_TABLE, RouteClass } from './routes.classification.js';
+import { normalizePath, compilePathTemplate } from './path-template.js';
 
 export type RouteAction =
   | 'route-session'
@@ -11,25 +12,6 @@ export type RouteAction =
   | 'deny-per-process-501'
   | 'gone-410'
   | 'not-found-404';
-
-function normalizePath(p: string): string {
-  let path = p.split('?')[0];
-  if (path.endsWith('/') && path !== '/') {
-    path = path.slice(0, -1);
-  }
-  return path;
-}
-
-function compilePathTemplate(normalizedPath: string): RegExp {
-  // 1. Escape regex special characters
-  let escaped = normalizedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // 2. Replace escaped `{token}` with `[^/]+`
-  escaped = escaped.replace(/\\\{.*?\\\}/g, '[^/]+');
-  // 3. Replace escaped `*` with `.*`
-  escaped = escaped.replace(/\\\*/g, '.*');
-
-  return new RegExp(`^${escaped}$`);
-}
 
 // Precompute structures at module load
 const exactRoutes = new Map<string, RouteClass>();

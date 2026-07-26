@@ -7,6 +7,7 @@ import {
   CLASS_DISPOSITIONS,
 } from './routes.dispositions.js';
 import { ROUTE_CLASSIFICATION_TABLE, RouteEntry } from './routes.classification.js';
+import { compilePathTemplate } from './path-template.js';
 import { isHtmlResponse, HTML_GUARD_EXEMPT_ROUTES } from './poison.js';
 
 export interface GateCheckOptions {
@@ -145,13 +146,6 @@ function normalizeSimplePath(p: string): string {
   return path;
 }
 
-function compilePathTemplateRegex(normalizedPath: string): RegExp {
-  let escaped = normalizedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  escaped = escaped.replace(/\\\{.*?\\\}/g, '[^/]+');
-  escaped = escaped.replace(/\\\*/g, '.*');
-  return new RegExp(`^${escaped}$`);
-}
-
 function findShadowingTemplate(
   method: string,
   pathname: string,
@@ -164,7 +158,7 @@ function findShadowingTemplate(
     const entryNormPath = normalizeSimplePath(entry.path);
     if (entryNormPath.includes('{') || entryNormPath.includes('*')) {
       if (entry.method.toUpperCase() === normMethod) {
-        const regex = compilePathTemplateRegex(entryNormPath);
+        const regex = compilePathTemplate(entryNormPath);
         if (regex.test(normPath)) {
           return `${entry.method.toUpperCase()} ${entry.path}`;
         }

@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, expect, test, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import http from "node:http";
 import zlib from "node:zlib";
 import fs from "node:fs";
@@ -2521,6 +2521,75 @@ describe("FrontDoor Integration", () => {
       expect(res.body).toBe(htmlBody);
 
       expect(testMetrics.htmlPoisonBlocked).toBe(initialBlocked);
+    });
+  });
+
+  // Denial bodies must not recommend the footgun the denial exists to prevent.
+  // See docs/plans/2026-07-26-mlve11-d4-mechanisms.md (R2): the previous generic
+  // text told every denied caller to "call a serve port directly", which for the
+  // credential-writing routes produces a 200 on one serve and three stale ones.
+  describe("D4 denial bodies carry the real constraint (mlve.11)", () => {
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    const credentialWriters: Array<[string, string]> = [
+      ["PUT", "/auth/anthropic"],
+      ["DELETE", "/auth/anthropic"],
+      ["POST", "/provider/anthropic/oauth/authorize"],
+      ["POST", "/provider/anthropic/oauth/callback"],
+    ];
+
+    test.each(credentialWriters)(
+      "%s %s never tells the caller to write a serve port directly",
+      async (method, path) => {
+        const res = await makeRequest(method, path);
+        expect(res.status).toBe(403);
+        const json = JSON.parse(res.body);
+
+        expect(json.error).toBe("forbidden_through_frontdoor");
+        // The regression this test exists for.
+        expect(json.message).not.toMatch(/call a serve port directly/i);
+        // The real constraint reaches the wire, not just the gate.
+        expect(json.reason).toBeTruthy();
+        expect(json.message).toContain(json.reason);
+        // And an actionable, pool-correct remedy does too.
+        expect(json.remedy).toContain("/global/dispose");
+        expect(json.message).toContain(json.remedy);
+      }
+    );
+
+    test("the write-once warning is present, since repeating it can lose updates", async () => {
+      const res = await makeRequest("PUT", "/auth/anthropic");
+      const json = JSON.parse(res.body);
+      expect(json.remedy).toMatch(/exactly ONE port/);
+      expect(json.remedy).toMatch(/Do NOT send the write to all four ports/);
+    });
+
+    test("rows without a custom message keep the generic serve-port hint", async () => {
+      // POST /global/dispose is genuinely process-local: pointing the caller at a
+      // serve port is correct there, so the fallback must survive.
+      const res = await makeRequest("POST", "/global/dispose");
+      expect(res.status).toBe(403);
+      const json = JSON.parse(res.body);
+      expect(json.remedy).toBe("To mutate, call a serve port directly.");
+      expect(json.message).toContain("not proxied through the front door");
+    });
+
+    test("405 rows also carry reason, remedy and the allowed list", async () => {
+      const res = await makeRequest("PATCH", "/config");
+      expect(res.status).toBe(405);
+      const json = JSON.parse(res.body);
+      expect(json.error).toBe("method_not_allowed_through_frontdoor");
+      expect(json.allowed).toEqual(["GET"]);
+      expect(json.remedy).toBeTruthy();
+      expect(json.message).toContain("Allowed through the door: GET");
     });
   });
 });

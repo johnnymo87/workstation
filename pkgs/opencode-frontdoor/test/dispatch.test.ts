@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import { classify, dispatch } from '../src/dispatch.js';
 import { ROUTE_CLASSIFICATION_TABLE } from '../src/routes.classification.js';
+import { normalizePath, compilePathTemplate } from '../src/path-template.js';
 
 describe('Route Dispatcher', () => {
   // session-path:
@@ -459,21 +460,6 @@ describe('Route Dispatcher', () => {
      * GET /mcp was reclassified to per-process-ro (returning 501), so POST /mcp now returns 403.
      * The remaining five twins advertise a genuinely shared-state GET read.
      */
-    function normalizePath(p: string): string {
-      let path = p.split('?')[0];
-      if (path.endsWith('/') && path !== '/') {
-        path = path.slice(0, -1);
-      }
-      return path;
-    }
-
-    function compilePathTemplate(normalizedPath: string): RegExp {
-      let escaped = normalizedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      escaped = escaped.replace(/\\\{.*?\\\}/g, '[^/]+');
-      escaped = escaped.replace(/\\\*/g, '.*');
-      return new RegExp(`^${escaped}$`);
-    }
-
     test('validates and asserts 405-twin paths contract', () => {
       // 1. Build, from the table, the set of normalized paths that have at least one global-ro entry
       const roMap = new Map<string, string[]>();

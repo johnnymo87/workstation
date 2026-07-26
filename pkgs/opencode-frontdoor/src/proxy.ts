@@ -3,6 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import { identify } from "./identity.js";
 import { dispatch } from "./dispatch.js";
+import { getRouteDisposition } from "./routes.dispositions.js";
 import { extractSids, type SidExtraction, SID_REGEX, extractSessionIdFromPath } from "./sid.js";
 import { isExemptFromFirstByteTimeout } from "./timeouts.js";
 import { resolveOwner } from "./resolve.js";
@@ -553,8 +554,21 @@ export async function handleRequest(
     }
 
     if (decision.action === "deny-global-mutation") {
+      // The denial body is the ONLY thing the caller sees, so it must not
+      // recommend a workaround that is wrong for this specific route. The
+      // generic "call a serve port directly" hint is safe for genuinely
+      // process-local rows, but for anything backed by pool-wide state it
+      // instructs the caller to manufacture exactly the silent inconsistency
+      // the denial exists to prevent (docs/plans/2026-07-26-mlve11-d4-mechanisms.md,
+      // R2). Rows that need better wording carry `userMessage`/`remedy` in
+      // ROUTE_DISPOSITIONS; everything else keeps the previous text.
+      const disposition = getRouteDisposition(method, url.pathname, decision.class);
+      const remedy = disposition?.remedy ?? "To mutate, call a serve port directly.";
+
       if (decision.allowedMethods.length > 0) {
         const allowedJoined = decision.allowedMethods.join(", ");
+        const why = disposition?.userMessage
+          ?? `${method} ${url.pathname} mutates per-process state and is not proxied through the front door.`;
         console.warn(`[FRONTDOOR WARN] Global mutation not proxied through the front door (405): ${method} ${url.pathname}`);
         res.writeHead(405, {
           "Content-Type": "application/json",
@@ -562,14 +576,23 @@ export async function handleRequest(
         });
         res.end(JSON.stringify({
           error: "method_not_allowed_through_frontdoor",
-          message: `${method} ${url.pathname} mutates per-process state and is not proxied through the front door. Allowed through the door: ${allowedJoined}. To mutate, call a serve port directly.`
+          // `message` intentionally repeats `remedy`: many clients surface only
+          // this field, and the remedy is the half that keeps them out of trouble.
+          message: `${method} ${url.pathname} is not proxied through the front door. ${why} Allowed through the door: ${allowedJoined}. ${remedy}`,
+          reason: why,
+          remedy,
+          allowed: decision.allowedMethods
         }));
       } else {
+        const why = disposition?.userMessage
+          ?? `${method} ${url.pathname} mutates per-process/single-process state.`;
         console.warn(`[FRONTDOOR WARN] Global mutation not proxied through the front door (403): ${method} ${url.pathname}`);
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           error: "forbidden_through_frontdoor",
-          message: `${method} ${url.pathname} is not proxied through the front door (mutates per-process/single-process state). Call a serve port directly.`
+          message: `${method} ${url.pathname} is not proxied through the front door. ${why} ${remedy}`,
+          reason: why,
+          remedy
         }));
       }
       return;

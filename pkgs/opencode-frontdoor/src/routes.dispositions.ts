@@ -6,6 +6,8 @@
  * correct, superseded by a session-scoped route, or a known gap.
  */
 
+import { normalizePath, compilePathTemplate, isTemplatePath } from './path-template.js';
+
 export type DispositionKind =
   | 'by-design-501'         // class-level blanket: pty / tui / per-process-ro
   | 'not-session-scopable'  // global mutation with no session context; denial is architecturally correct
@@ -14,6 +16,28 @@ export type DispositionKind =
   | 'accepted-gap';         // known gap, consciously accepted
 
 export type TuiSurface = 'absent' | 'degrades' | 'unverified';
+
+/**
+ * The remedy for provider-credential mutation, shared by the four routes whose
+ * success path writes `auth.json` (`PUT|DELETE /auth/{providerID}` and both
+ * `POST /provider/{providerID}/oauth/*` routes — the latter because
+ * `provider/auth.ts:203-220` calls `auth.set()` on success).
+ *
+ * This exists as a constant because the generic denial hint ("call a serve port
+ * directly") is ACTIVELY WRONG for these routes: writing one serve returns 200
+ * while the other three — and the writer's own already-booted instances — keep
+ * the old credential indefinitely. See docs/plans/2026-07-26-mlve11-d4-mechanisms.md
+ * (Group A, and F3 for why the OAuth pair inherits it).
+ *
+ * Step 6 of that plan replaces the hand-rolled procedure below with a CLI; when
+ * it lands, this constant is the single place to update.
+ */
+export const POOL_CREDENTIAL_REMEDY =
+  'Write the credential once, then force every serve to re-read it: ' +
+  '(1) send the write to exactly ONE port, e.g. `curl -X PUT http://127.0.0.1:4096/auth/<providerID> -H "Content-Type: application/json" -d @creds.json`; ' +
+  '(2) then `for p in 4096 4097 4098 4099; do curl -sS -X POST http://127.0.0.1:$p/global/dispose; done`. ' +
+  'Do NOT send the write to all four ports: auth.json is shared and has no lock, so concurrent whole-document writes can silently lose an update. ' +
+  'Be aware step (2) is disruptive — /global/dispose cancels every in-flight run on that serve, for every directory, and SIGTERMs its stdio MCP children; expect a cold-boot latency spike afterwards.';
 
 /**
  * Membership in the TUI's documented SDK surface list at
@@ -26,7 +50,25 @@ export type TuiSurface = 'absent' | 'degrades' | 'unverified';
  */
 export interface RouteDisposition {
   kind: DispositionKind;
+  /**
+   * Repo-facing. May cite file:line and may be long. NOT sent on the wire —
+   * see `userMessage` for the caller-facing half.
+   */
   rationale: string;
+  /**
+   * Wire-facing, optional. One sentence naming the REAL constraint, with no
+   * file:line citations. When present, `proxy.ts` puts it in the denial body in
+   * place of the generic "mutates per-process state" text.
+   *
+   * Set this whenever the generic denial text would mislead the caller.
+   */
+  userMessage?: string;
+  /**
+   * Wire-facing, optional. What the caller should actually DO. When absent,
+   * `proxy.ts` falls back to "call a serve port directly", which is safe for
+   * most process-global rows and wrong for anything sharing pool-wide state.
+   */
+  remedy?: string;
   supersededBy?: string;
   bead?: string;
   tuiSurface?: TuiSurface;
@@ -49,21 +91,33 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     kind: 'needs-mechanism',
     bead: 'workstation-mlve.11',
     rationale: 'Provider auth state mutation requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    userMessage:
+      'Provider credentials are shared pool-wide state that each serve caches in memory until its instance is disposed, so a write delivered to one serve would report success while the rest of the pool keeps using the previous credential.',
+    remedy: POOL_CREDENTIAL_REMEDY,
   },
   'DELETE /auth/{providerID}': {
     kind: 'needs-mechanism',
     bead: 'workstation-mlve.11',
     rationale: 'Provider auth removal requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    userMessage:
+      'Provider credentials are shared pool-wide state that each serve caches in memory until its instance is disposed, so a removal delivered to one serve would report success while the rest of the pool keeps authenticating with the deleted credential.',
+    remedy: POOL_CREDENTIAL_REMEDY,
   },
   'POST /provider/{providerID}/oauth/authorize': {
     kind: 'needs-mechanism',
     bead: 'workstation-mlve.11',
     rationale: 'Provider OAuth authorization flow requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    userMessage:
+      'This OAuth flow keeps its PKCE verifier in one serve process\'s memory, so the matching callback must reach that same process; and the flow completes by writing a provider credential, which is shared pool-wide state the other serves would not pick up.',
+    remedy: POOL_CREDENTIAL_REMEDY,
   },
   'POST /provider/{providerID}/oauth/callback': {
     kind: 'needs-mechanism',
     bead: 'workstation-mlve.11',
     rationale: 'Provider OAuth callback flow requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    userMessage:
+      'This callback can only be completed by the same serve process that issued the matching authorize request, because the PKCE verifier is held in that process\'s memory and is never written down; and its success path writes a provider credential, which is shared pool-wide state the other serves would not pick up.',
+    remedy: POOL_CREDENTIAL_REMEDY,
   },
   'POST /mcp/{name}/auth': {
     kind: 'needs-mechanism',
@@ -308,6 +362,53 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
   },
 };
 
+/**
+ * Compiled template matchers per disposition map, built lazily and cached.
+ *
+ * The gate calls `getRouteDisposition` with TEMPLATE paths straight out of
+ * `/doc` (`/auth/{providerID}`), which hit the exact-match step. The proxy calls
+ * it with CONCRETE request paths (`/auth/anthropic`), which do not — hence the
+ * template step below. Both callers must resolve to the same row or the wire
+ * message and the gate's rationale would describe different routes.
+ */
+const templateMatcherCache = new WeakMap<
+  Record<string, RouteDisposition>,
+  Array<{ method: string; regex: RegExp; disposition: RouteDisposition }>
+>();
+
+function templateMatchers(map: Record<string, RouteDisposition>) {
+  let compiled = templateMatcherCache.get(map);
+  if (!compiled) {
+    compiled = [];
+    for (const [key, disposition] of Object.entries(map)) {
+      const sep = key.indexOf(' ');
+      if (sep < 0) continue;
+      const keyMethod = key.slice(0, sep).toUpperCase();
+      const keyPath = normalizePath(key.slice(sep + 1));
+      if (!isTemplatePath(keyPath)) continue;
+      compiled.push({ method: keyMethod, regex: compilePathTemplate(keyPath), disposition });
+    }
+    templateMatcherCache.set(map, compiled);
+  }
+  return compiled;
+}
+
+function matchTemplate(
+  map: Record<string, RouteDisposition>,
+  upperMethod: string,
+  normPath: string
+): RouteDisposition | undefined {
+  // First match wins, in declaration order. The gate's Check B independently
+  // proves every denial resolves to exactly one disposition, so an ambiguous
+  // overlap here would be caught there rather than silently picking a row.
+  for (const candidate of templateMatchers(map)) {
+    if (candidate.method === upperMethod && candidate.regex.test(normPath)) {
+      return candidate.disposition;
+    }
+  }
+  return undefined;
+}
+
 export function getRouteDisposition(
   method: string,
   pathname: string,
@@ -324,10 +425,7 @@ export function getRouteDisposition(
   }
 
   const upperMethod = method.toUpperCase();
-  let normPath = pathname.split('?')[0];
-  if (normPath.endsWith('/') && normPath !== '/') {
-    normPath = normPath.slice(0, -1);
-  }
+  const normPath = normalizePath(pathname);
 
   // 2. Exact match in ROUTE_DISPOSITIONS
   const exactKey = `${upperMethod} ${normPath}`;
@@ -335,13 +433,28 @@ export function getRouteDisposition(
     return routeDispMap[exactKey];
   }
 
-  // 3. `/api/*` mirror fallback to bare route
-  if (normPath.startsWith('/api/')) {
-    const barePath = normPath.slice(4);
+  // 3. `/api/*` mirror fallback to bare route.
+  //    NOTE the house convention: disposition keys are written in BARE form and
+  //    this fallback is what makes them cover the `/api/` mirror too. One key
+  //    therefore speaks for BOTH forms — if upstream ever gives them different
+  //    behaviour, one disposition would silently cover two routes.
+  const barePath = normPath.startsWith('/api/') ? normPath.slice(4) : undefined;
+  if (barePath !== undefined) {
     const bareKey = `${upperMethod} ${barePath}`;
     if (routeDispMap[bareKey]) {
       return routeDispMap[bareKey];
     }
+  }
+
+  // 4. Template match, for concrete request paths (proxy callers).
+  const templated = matchTemplate(routeDispMap, upperMethod, normPath);
+  if (templated) {
+    return templated;
+  }
+
+  // 5. Template match against the `/api/`-stripped path, same convention as (3).
+  if (barePath !== undefined) {
+    return matchTemplate(routeDispMap, upperMethod, barePath);
   }
 
   return undefined;
