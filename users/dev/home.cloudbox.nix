@@ -6,6 +6,180 @@
 # And uses #cloudbox for the pull-workstation HM flake target.
 { config, pkgs, lib, projects, isCloudbox, ... }:
 
+let
+  # Serve-pool descriptor: the SAME single source of truth the serve units and
+  # pigeon read (users/dev/serve-pool.nix). The pool-auth CLI below must never
+  # hardcode ports -- a stale port list would write the credential to a serve
+  # that no longer exists and silently skip one that does.
+  servePool = (import ./serve-pool.nix).forHost.cloudbox;
+  anchorUrl = builtins.head servePool.endpoints;
+  allEndpoints = builtins.concatStringsSep " " servePool.endpoints;
+
+  # opencode-pool-auth: the escape hatch for provider-credential mutation,
+  # which the front door denies (see pkgs/opencode-frontdoor/src/routes.dispositions.ts
+  # and docs/plans/2026-07-26-mlve11-d4-mechanisms.md).
+  #
+  # Why a CLI and not a door feature: the door cannot make these routes correct.
+  # auth.json is shared, but every serve memoizes it into a Provider cache whose
+  # only invalidation path is instance disposal, so an anchor-forwarded write
+  # returns 200 while the rest of the pool keeps the old credential forever. The
+  # correct sequence is write-once-then-dispose-everywhere, and a CLI can block
+  # for minutes where the door's 5s first-byte timeout cannot.
+  #
+  # Two deliberate design choices, both learned the hard way:
+  #  - The credential is read from a FILE or stdin, never from argv. Anything in
+  #    argv is world-readable in `ps` for the lifetime of the process.
+  #  - The write goes to exactly ONE port. Writing all four is strictly worse:
+  #    auth.json is a whole-document read-modify-write with no lock
+  #    (auth/index.ts:73-81), so four concurrent writers quadruple the
+  #    lost-update window against a background token refresh, for zero benefit.
+  opencode-pool-auth = pkgs.writeShellApplication {
+    name = "opencode-pool-auth";
+    runtimeInputs = [ pkgs.curl pkgs.jq ];
+    text = ''
+      ANCHOR="${anchorUrl}"
+      ALL_ENDPOINTS=(${allEndpoints})
+
+      usage() {
+        cat >&2 <<USAGE
+      Usage:
+        opencode-pool-auth set <providerID> (--file <path> | --stdin) [--yes]
+        opencode-pool-auth remove <providerID> [--yes]
+
+      Mutate a provider credential across the whole opencode serve pool.
+
+      The front door denies these routes on purpose: a write delivered to one
+      serve returns 200 while the other members keep using the previous
+      credential indefinitely, because each caches auth.json in memory until its
+      instance is disposed. This command does the only correct sequence --
+      write once, then dispose every member so they all re-read from disk.
+
+      DISRUPTIVE. The dispose step cancels EVERY in-flight run on each serve,
+      for every directory, and SIGTERMs its stdio MCP children. Expect a
+      cold-boot latency spike afterwards. Use it for deliberate credential
+      rotation, not casually.
+
+      Options:
+        --file <path>  Read the credential JSON from a file.
+        --stdin        Read the credential JSON from stdin.
+                       (The credential is never passed via argv, which would be
+                       visible in ps to every user on the box.)
+        --yes          Skip the confirmation prompt.
+
+      Examples:
+        opencode-pool-auth set anthropic --file ./creds.json
+        pass show anthropic | opencode-pool-auth set anthropic --stdin
+        opencode-pool-auth remove anthropic --yes
+      USAGE
+        exit 2
+      }
+
+      [ $# -ge 2 ] || usage
+      ACTION="$1"; shift
+      PROVIDER="$1"; shift
+
+      CRED_FILE=""
+      USE_STDIN=0
+      ASSUME_YES=0
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --file) shift; [ $# -gt 0 ] || usage; CRED_FILE="$1" ;;
+          --stdin) USE_STDIN=1 ;;
+          --yes|-y) ASSUME_YES=1 ;;
+          *) echo "opencode-pool-auth: unknown argument '$1'" >&2; usage ;;
+        esac
+        shift
+      done
+
+      case "$ACTION" in
+        set|remove) ;;
+        *) echo "opencode-pool-auth: unknown action '$ACTION'" >&2; usage ;;
+      esac
+
+      PAYLOAD=""
+      if [ "$ACTION" = "set" ]; then
+        if [ "$USE_STDIN" -eq 1 ]; then
+          PAYLOAD="$(cat)"
+        elif [ -n "$CRED_FILE" ]; then
+          [ -r "$CRED_FILE" ] || { echo "opencode-pool-auth: cannot read $CRED_FILE" >&2; exit 1; }
+          PAYLOAD="$(cat -- "$CRED_FILE")"
+        else
+          echo "opencode-pool-auth: 'set' needs --file <path> or --stdin" >&2
+          usage
+        fi
+        # Fail before touching the pool rather than writing a corrupt auth.json:
+        # the writer does a whole-document RMW and a torn/invalid document is
+        # read back as "no credentials at all" (auth/index.ts:65).
+        echo "$PAYLOAD" | jq -e . >/dev/null 2>&1 || {
+          echo "opencode-pool-auth: credential payload is not valid JSON; refusing to write" >&2
+          exit 1
+        }
+      fi
+
+      echo "About to $ACTION provider credential '$PROVIDER' across ''${#ALL_ENDPOINTS[@]} serve(s)." >&2
+      echo "  1. write once  -> $ANCHOR" >&2
+      echo "  2. dispose all -> ''${ALL_ENDPOINTS[*]}" >&2
+      echo "" >&2
+      echo "Step 2 CANCELS EVERY IN-FLIGHT RUN on each serve and SIGTERMs its MCP children." >&2
+
+      if [ "$ASSUME_YES" -ne 1 ]; then
+        printf 'Continue? [y/N] ' >&2
+        read -r reply
+        case "$reply" in
+          y|Y|yes|YES) ;;
+          *) echo "opencode-pool-auth: aborted; nothing was changed." >&2; exit 1 ;;
+        esac
+      fi
+
+      # --- Step 1: write ONCE ---------------------------------------------
+      if [ "$ACTION" = "set" ]; then
+        CODE=$(printf '%s' "$PAYLOAD" | curl -sS -o /dev/null -w '%{http_code}'           -X PUT "$ANCHOR/auth/$PROVIDER"           -H 'Content-Type: application/json' --data-binary @-) || {
+            echo "opencode-pool-auth: write to $ANCHOR failed (curl error); pool unchanged." >&2
+            exit 1
+          }
+      else
+        CODE=$(curl -sS -o /dev/null -w '%{http_code}'           -X DELETE "$ANCHOR/auth/$PROVIDER") || {
+            echo "opencode-pool-auth: delete on $ANCHOR failed (curl error); pool unchanged." >&2
+            exit 1
+          }
+      fi
+
+      case "$CODE" in
+        2*) echo "write ok ($CODE) on $ANCHOR" >&2 ;;
+        *)
+          echo "opencode-pool-auth: write returned HTTP $CODE from $ANCHOR." >&2
+          echo "  NOT disposing: the pool is unchanged, and disposing now would" >&2
+          echo "  cancel running work for no reason." >&2
+          exit 1
+          ;;
+      esac
+
+      # --- Step 2: dispose EVERYWHERE --------------------------------------
+      # Sequential and best-effort: a member that fails to dispose keeps a stale
+      # credential, so report it loudly rather than exiting on the first error.
+      FAILED=()
+      for ep in "''${ALL_ENDPOINTS[@]}"; do
+        DCODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 120           -X POST "$ep/global/dispose" || echo "000")
+        case "$DCODE" in
+          2*) echo "disposed $ep ($DCODE)" >&2 ;;
+          *)  echo "DISPOSE FAILED $ep (HTTP $DCODE)" >&2; FAILED+=("$ep") ;;
+        esac
+      done
+
+      if [ ''${#FAILED[@]} -gt 0 ]; then
+        echo "" >&2
+        echo "opencode-pool-auth: the credential WAS written, but ''${#FAILED[@]} serve(s) were not disposed:" >&2
+        printf '  %s\n' "''${FAILED[@]}" >&2
+        echo "Those serves will keep using the PREVIOUS credential until they restart." >&2
+        echo "Re-run the dispose by hand, or restart them, before assuming the rotation took." >&2
+        exit 1
+      fi
+
+      echo "" >&2
+      echo "opencode-pool-auth: done. All serves re-read auth.json on next use." >&2
+    '';
+  };
+in
 lib.mkIf isCloudbox {
   # Cloudbox identity
   home.username = "dev";
@@ -66,6 +240,9 @@ lib.mkIf isCloudbox {
     # Cloud / Tunnels (kubectl, kubelogin, awscli2, azure-cli are in home.base.nix)
     cloudflared      # Cloudflare Tunnel client (Access-protected API calls)
     google-cloud-sdk # GCP VM management (gcloud, gsutil, bq)
+
+    # Serve-pool operator tooling
+    opencode-pool-auth # provider-credential rotation across the whole pool
   ];
 
   # GCP project: read from sops in initExtra below (org-identifying, not in public source)
