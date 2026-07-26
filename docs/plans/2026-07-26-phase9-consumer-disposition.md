@@ -35,14 +35,55 @@ Measured, not assumed — this table's whole purpose is to stop the assuming.
 - **Every process holding a connection to a pool port is either the door
   (pid 3910932, the `:4700` listener) or a serve itself.** No external consumer
   reaches a serve at runtime.
-- **Pigeon is fully token-gated**: `GET /route` → 401, `POST /place` → 401,
-  `GET /sessions` → 401 (unauthenticated). The roadmap's "`GET /sessions` is
-  unauthenticated, so a `/route` token does not deliver opacity" finding is
-  **superseded** — it is gated now.
+- ~~**Pigeon is fully token-gated**: `GET /route` → 401, `POST /place` → 401,
+  `GET /sessions` → 401. The roadmap's "`GET /sessions` is unauthenticated"
+  finding is **superseded** — it is gated now.~~
+  **RETRACTED 2026-07-26, same day, by adversarial review. THIS WAS FALSE AND I
+  MEASURED THE WRONG PORT.** Pigeon — the router every consumer in this repo
+  actually addresses — listens on **`:4731`**, not `:4731`'s neighbour `:8789`.
+  I probed `:8789`, which is a *different process* (pid 432262), got 401 on
+  everything, and generalised. Re-measured on `:4731` (pid 743412, node):
+
+  | endpoint | auth | result |
+  |---|---|---|
+  | `GET /sessions` | none | **200, 166 KB** — full inventory: sids, cwds, pids, labels |
+  | `GET /route?session_id=…` | none | **200** — resolves a real session to its serve `apiBase` |
+  | `POST /place` | none | **200** — *mutates routing*; the reviewer's probe wrote a phantom route for `ses_0000…0` → serve-0, still resolvable |
+
+  Consumers use `:4731` everywhere: `pkgs/opencode-launch/default.nix:25`,
+  `pkgs/oc-pool-attach/default.nix:68`, `pkgs/oc-auto-attach/default.nix:36`,
+  `pkgs/opencode-frontdoor/src/config.ts:64`.
+
+  **The roadmap's original finding stands and was correct.** So does its
+  conclusion: a `/route` token would not have delivered opacity anyway, because
+  `/sessions` hands out the same endpoints. And unauthenticated `POST /place` is
+  worse than a disclosure leak — it is a **routing-integrity** hole: any local
+  process can re-place any session.
+
+  **Why this error is worse than the one it replaced.** The spine doc's earlier
+  false claim was an unverified assertion inherited from a note. This one came
+  with a measurement attached, which makes it *harder* to dislodge — it reads as
+  settled. The root cause is banal and worth naming: I searched for the listener
+  with `ss -tlnp | grep -E '878[0-9]|pigeon'`, a pattern that could only find the
+  port I had already guessed. I had read `PIGEON_DAEMON_URL:-http://127.0.0.1:4731`
+  earlier in the same session — and deleted that very line as dead code — without
+  connecting it. **Measuring the wrong thing confidently is not better than not
+  measuring; derive the target from the code that uses it, never from a guess
+  confirmed by a matching grep.**
 
 **Therefore Phase 9.1 (the repoint) is DONE**, landed in `f878865`
-("Phase 9 attach-through-door (co-land)"), and the runtime objective is
-substantially met. What remains is latent code paths and the missing artifact.
+("Phase 9 attach-through-door (co-land)").
+
+**But the opacity objective is NOT met, via pigeon.** The door hides which serve
+owns a session; `GET :4731/sessions` then hands that inventory to any local
+process unauthenticated, and `POST :4731/place` lets it rewrite routing. Phase 9
+is therefore **not** complete: its 9.2 token half is genuinely outstanding, not
+"already satisfied". Tracked as `workstation-dx8p`.
+
+Scope of what *is* achieved: **no shipped consumer in this repo addresses an
+individual serve on a non-degrade path** (rows A/B/C below), and no external
+process was observed doing so at runtime. That is a real and enforceable
+property — it is just narrower than "network opacity".
 
 ### Correction to `docs/plans/2026-07-26-frontdoor-spine.md`
 
@@ -149,8 +190,12 @@ run; pattern matching nothing → fail on vacuity).
 2. ~~B1, B2, B3 repointed; the two tests that pinned the stale behaviour
    rewritten~~ — `e270598`.
 3. ~~9.2 grep-guard~~ — `users/dev/test-frontdoor-opacity.sh`.
-4. 9.2 token: **already satisfied** — pigeon `/route`, `/place`, `/sessions` all
-   401. Was carried as "deferred"; measurement says otherwise.
+4. **9.2 token: OUTSTANDING.** Previously recorded here as "already satisfied";
+   that was a wrong-port measurement, retracted above. `:4731/sessions` and
+   `:4731/place` are unauthenticated today. `workstation-dx8p`.
+
+**So Phase 9 is NOT complete.** Items 1-3 are done; item 4 is open and is the
+part that actually delivers the user's stated objective.
 
 **Remaining: deploy.** `home-manager switch --flake .#cloudbox` (picks up
 `lgtm-sessions` + `opencode-launch`) and `nixos-rebuild switch --flake .#cloudbox`
