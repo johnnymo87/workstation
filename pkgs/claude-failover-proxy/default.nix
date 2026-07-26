@@ -56,13 +56,13 @@
 }:
 
 let
-  version = "0.7.0";
+  version = "0.8.0";
 
   sources = {
     "aarch64-linux" = fetchurl {
       name = "claude-failover-proxy-${version}-linux-arm64";
-      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/463349511";
-      hash = "sha256-K50NEn5wl9mZzWu6pt8AB26VfpmRpML2Eu4bVs11dFk=";
+      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/490592532";
+      hash = "sha256-7Z+y8bk5F2jknCxrHf8e9zOu6VeNe3hIagdSyHCqsz4=";
       # Stream the raw asset bytes rather than the JSON metadata.
       curlOptsList = [ "-H" "Accept: application/octet-stream" ];
       # Forward $GITHUB_TOKEN from the (nix-daemon) environment into the sandbox
