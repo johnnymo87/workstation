@@ -1,207 +1,221 @@
 # The front-door spine — what we are actually trying to finish
 
-Written 2026-07-26, immediately before a compaction, specifically so that the
-next session can tell the spine apart from a side quest. If you read one file
-before picking up work in this area, read this one.
+Orientation artifact. If you read one file before touching anything front-door
+shaped, read this one. Rewritten 2026-07-26 after a day in which **two of its own
+status claims were falsified by measurement**; see §7, which is the most useful
+part of this file.
 
-## The objective, in the user's words
+## 1. The objective, in the user's words
 
-> "keeping /route for discovery basically lets the rest of the machine know
-> about the internals of the serve pool, right? I want that to be entirely
-> opaque."
+> "keeping /route for discovery basically lets the rest of the machine know about
+> the internals of the serve pool, right? I want that to be entirely opaque."
 >
 > "i want network opacity, why are we giving up on this"
 >
 > "no other door than the front door"
+>
+> (2026-07-26, on how far to take it) "you know me, i want front door only, no
+> other door. but i can make short/medium term compromises as we work out the kinks."
 
-That is the whole point. Not the disposition table, not the gate, not the CLI —
-**network opacity**: nothing on this box addresses an individual serve.
+## 2. Where we actually stand — measured, not assumed
 
-## Where we actually stand
+**Achieved and enforced:** no shipped consumer in this repo addresses an
+individual serve on a non-degrade path.
 
-> **CORRECTED 2026-07-26 by measurement.** This section previously claimed the
-> objective was NOT met and that "the TUI does not go through the front door,"
-> citing `hosts/cloudbox/configuration.nix:576,631`. **Both claims were false**,
-> and acting on them would have caused an outage. Superseded by the measured
-> audit in `docs/plans/2026-07-26-phase9-consumer-disposition.md`. The original
-> text is preserved below, struck, because *how* a status claim went unchecked
-> through three audits is the more useful lesson.
+- 20/20 live `opencode attach` TUIs run against `:4700` (`/proc/<pid>/cmdline`).
+- Every process connected to a pool port is the door or a serve.
+- Enforced mechanically by `users/dev/test-frontdoor-opacity.sh` against the
+  committed table `docs/plans/2026-07-26-phase9-consumer-disposition.md`.
 
-~~"The objective is NOT met. `OPENCODE_URL=http://127.0.0.1:4096` — the anchor,
-not the door (`hosts/cloudbox/configuration.nix:576,631`). The TUI does not go
-through the front door."~~
+**NOT achieved: the objective as worded.** Pigeon (`:4731`) answers *anyone*:
 
-**What is actually true**, measured on cloudbox 2026-07-26:
+| endpoint | auth | result |
+|---|---|---|
+| `GET /sessions` | none | **200, 166 KB** — sids, cwds, pids, endpoints |
+| `GET /route` | none | **200** — resolves a session to its serve |
+| `POST /place` | none | **200, a WRITE** — any local process can re-place any session |
 
-- **20 of 20 live `opencode attach` TUIs run against `http://127.0.0.1:4700`.**
-  Zero against any serve port. The TUI rides the door.
-- **Every process connected to a pool port is the door or a serve.** No external
-  consumer addresses a serve at runtime.
-- **Pigeon is fully token-gated**: `/route`, `/place`, `/sessions` all 401.
-
-The repoint landed in `f878865` ("Phase 9 attach-through-door (co-land)"). The
-runtime objective is **substantially met**.
-
-And the two cited lines are not violations at all — they are deliberate,
-commented, **test-enforced** exemptions. `:576` is the pigeon control plane;
-repointing it at `:4700` creates the door⇄pigeon startup cycle its own comment
-forbids and trips `users/dev/test-pool-route-clients.sh:97-98`. Following this
-file literally would have broken routing for the whole box.
-
-**The lesson worth keeping:** the false claim was inherited from a bead note and
-restated confidently without probing a single process. One `pgrep`/`/proc` read
-refuted it in seconds. This repo's own rule — *configured ≠ running* — applies to
-**status claims in prose**, not just to `systemctl`. A doc asserting system state
-must cite a measurement or it is a rumour with a filename.
-
-What genuinely remains is small and enumerated in the disposition table: three
-direct-to-serve call sites (`opencode-launch` MCP-connect + attach hint,
-`lgtm-sessions` attach hint), the test that pins one of them, and the 9.2
-grep-guard.
-
-Everything else in the epic is either done or subordinate:
+And `ss -tlnp` reveals `4096-4099` regardless. Bead: **`workstation-dx8p` (P1)**.
 
 | Phase | State |
 |---|---|
 | 7 (door exists, session routing) | done |
-| 8 (attach → session-scoped `/event`) | **closed 2026-07-26**; live gate verified: `/global/event`→410, bare `/event`→400, `/event?session_ids=`→200 |
+| 8 (attach → session-scoped `/event`) | done, live gate verified |
 | 10 (session-scoped MCP routes) | done |
-| D4 (disposition the 9 denied mutating routes) | **closed 2026-07-26**, deployed and verified on the wire |
-| 9.1 (repoint → door) | **done** in `f878865`; verified 2026-07-26 — 20/20 TUIs on `:4700` |
-| 9.2 (pigeon token) | **done**; `/route`, `/place`, `/sessions` all 401 (was carried as "deferred") |
-| **9.0 + 9.2 grep-guard + 3 call sites** | **THE REMAINING WORK — `workstation-mlve.4`** |
+| D4 (`mlve.11`, disposition the denied mutating routes) | done, on the wire |
+| 9.0 (consumer disposition table) | **done** — the table above |
+| 9.1 (repoint → door) | **done** in `f878865` |
+| 9.2 grep-guard | **done**, rebuilt after review |
+| **9.2 token** | **OPEN — `dx8p`. This is the objective.** |
 
-`workstation-mlve.4` is the sole remaining P1 in the epic. It is the spine.
+## 3. The opacity roadmap (oracle-fable, 2026-07-26)
 
-## The uncomfortable fact that keeps the spine honest
+**The central constraint: every process is uid 1000.** Door, serves, pigeon, and
+every ad-hoc session/subagent/bash call. Therefore unix-socket permissions,
+`iptables --uid-owner`, and `SO_PEERCRED` **all buy nothing** — the door is not
+distinguishable from an attacker by OS credentials. Verified live.
 
-**D4's operational value today is zero.** The nine routes it dispositioned are
-unreachable by the TUI, because the TUI talks to `:4096` directly. Every denial
-body shipped on 2026-07-26 is insurance against a state we have not entered.
+Two further facts that close off whole branches:
 
-D4 was a genuine prerequisite — repointing without it would 405 the TUI's
-dialogs — but if Phase 9 never lands, D4 bought nothing operationally. The same
-will be true of every further refinement to the disposition tables.
+- **`opencode serve` is TCP-only.** No unix-socket flag, no such patch in the
+  overlay. The "unix socket + mount namespace" branch is dead without writing one.
+- **No passwordless sudo** (`sudo -n true` fails), which makes systemd
+  `LoadCredential=` a genuinely meaningful boundary even at shared uid.
 
-**Corollary, and the reason this file exists:** freshly-completed work generates
-its own gravity. On 2026-07-26, six fast-follow beads were filed within twenty
-minutes of finishing D4. None of them is the spine. If you find yourself
-polishing the disposition table, the constraint enum, or the gate, stop and ask
-whether `mlve.4` moved.
+**The reframing that drives the recommendation:** the threat model is *not* a
+malicious attacker. It is **our own agents and scripts taking a shortcut and
+creating drift** — which is what has actually happened, repeatedly. Against drift,
+the winning mechanism is not isolation but **loud, cheap 401s**: they convert
+silent drift into an immediate, attributable error at the moment of writing.
 
-## The gate that was blocking Phase 9 is now open
+### Stage 1 — pigeon token (small; mostly already built)
 
-`NEW-P5-F1` asked: does the pinned release's TUI still drive mid-turn permission
-replies through the door-denied **bare** routes? If yes, repointing wedges turns
-on unanswerable prompts.
+- **TRAP, verified in source:** `pigeon/packages/daemon/src/auth.ts:5-9` protects
+  only `POST`/`DELETE` + `GET /route`. Enabling the token **leaves the 166 KB
+  `GET /sessions` leak wide open** while feeling closed. Extend the protected set
+  *first*.
+- Door client side already exists: `opencode-frontdoor/src/config.ts:66`, sent at
+  `resolve.ts:46`, `place.ts:37`, `healthz.ts:27`.
+- **Order matters:** set the token on the pigeon unit and the door unit in the
+  *same* rebuild, or the door 503s and degrade traffic hammers the anchor.
+- *Done test:* anonymous `curl :4731/sessions` → 401 and `POST /place` → 401;
+  attach still works; `dx8p` closes.
 
-**Verified satisfied** in `v1.17.13-patched.5` (the deployed pin) on 2026-07-26.
-Full evidence is on the `workstation-mlve.4` bead. Summary: the auto-approve path
-(`context/sync.tsx`), all five interactive permission sites, question
-reply/reject, and MCP connect/disconnect/status are all migrated to
-session-scoped SDK calls, and every migrated target is class `session-path` in
-`pkgs/opencode-frontdoor/src/routes.classification.ts`.
+### Stage 2 — serve token on cloudbox (medium)
 
-So the blocker is not the gate. The remaining scope is ordinary work.
+One patch in the overlay (which already carries ~25): require
+`Authorization: Bearer` on all routes **except `/global/health`**, keyed on
+`OPENCODE_SERVE_AUTH_TOKEN`; **unset ⇒ auth off**, so devbox/darwin (D1/D2) are
+automatically unaffected and a pin bump can't brick their pools.
 
-## Remaining scope of `mlve.4` (from the bead, still accurate)
+`/global/health` stays anonymous **by design** — it preserves C4 (canary must tell
+door-down from pool-down) and C5 (per-member readiness) unchanged, and leaks
+almost nothing. *Write this down or a future you will "fix" it and break both.*
 
-1. **9.0** — produce and **commit** the `OPENCODE_URL` consumer disposition table
-   (`repoint` / `anchor` / `exempt` / `host-scoped`). No committed artifact
-   exists; the "audit done" claim rested on a bead note predating Phases 8/10.
-   This table is the door's permanent exemption record and it governs items 2-4.
-2. Two live opacity violations, both verified 2026-07-25:
-   - `users/dev/home.base.nix:1258-1261` — `lgtm-sessions` emits
-     `opencode attach $serve_url`, justified by a now-false comment at `:1121`.
-   - `pkgs/opencode-launch/default.nix:372-375` — POSTs
-     `$serve_url/mcp/$srv/connect`. Its comment ("the front door denies MCP
-     connect with 405") is **doubly stale**: Phase 10 added the session-scoped
-     route, and the TUI itself migrated to it.
-3. `users/dev/test-pool-route-clients.sh:74` **pins the stale direct-to-serve
-   behaviour as correct.** The 9.2 grep-guard collides with it head-on; that test
-   must be rewritten, not deleted.
-4. **9.1** repoint `OPENCODE_URL`→`FRONTDOOR_URL` per the table (cloudbox first),
-   keeping `OPENCODE_ANCHOR_URL` for degrade/infra.
-5. **9.2** internalize pigeon `/route`/`/place`: require `PIGEON_DAEMON_AUTH_TOKEN`
-   (the door carries it) + the grep-guard test.
+*Done test:* anonymous `curl 127.0.0.1:4096/session` → 401 on all four ports;
+canary asserts the 401s nightly; nightly reset still completes.
 
-## What the repoint activates — sequence this deliberately
+### Stage 3 — shrink the exemption list (medium)
 
-Phase 9 turns D4's documented degradations into live behaviour. Most are
-harmless or visible. One is not:
+(a) Move the degrade **into** the door: when pigeon is down the door places on the
+anchor itself (it already holds the anchor per C3) instead of 503ing — then delete
+the client-side degrade in `opencode-launch` (C7/C8) and revoke its token.
+(b) Add an *authenticated per-member* health surface to `healthz.ts` so
+`reset-workspace`'s C5 probes ride the door.
 
-**`PUT /auth/{providerID}`** — `dialog-provider.tsx:396-405` calls `auth.set()`
-with **no error check**, then `instance.dispose()` also unchecked, then can show
-*"Saved credential for `<id>`"*. Post-repoint the user is told a write succeeded
-when it 403'd. Not a wedge — a lie, on the credential path.
+*Done test:* kill pigeon → `opencode-launch` still works **through `:4700`**;
+token holders = {door, pigeon, canary}; exemption rows ≤ 3.
 
-**`mlve.4` deliberately has NO hard blockers in beads.** Three related items are
-linked `relates_to`: `workstation-vkv2` (make `opencode-pool-auth` the
-documented, verified remedy for credential rotation), `workstation-u417` (five
-rows still ship the wrong wire hint), `workstation-85ui` (TUI
-`console.switchOrg` unhandled rejection).
+### Stage 4 — network namespace (large; ESCALATION ONLY)
 
-Two reasons they are links and not blockers, both learned by getting it wrong on
-2026-07-26:
+The only mechanism giving true *reachability* opacity. Sketch: named netns; serve/
+pigeon/door units get `NetworkNamespacePath=`; the door's `:4700` arrives as an fd
+from a systemd **socket unit** in the root ns.
 
-1. **A blocked bead disappears from `bd ready`.** Blocking `mlve.4` made the
-   spine invisible to the one command an agent runs to find work — the exact
-   opposite of what this file is for.
-2. **The constraint is wrong-grained as a bead dependency.** It does not apply to
-   `mlve.4` as a whole. Step 9.0 (the consumer audit table) is the first work and
-   has nothing to do with any of them. The real rule is narrower:
+**Build only if the canary catches token-copying drift more than once.** Costs:
+`sudo ip netns exec` for 3am debugging, C4/C5 canaries must join the ns, darwin can
+*never* match (permanent platform asymmetry), nightly-reset rework. It defends
+against an agent that deliberately copies a bearer token — that agent is not
+drifting, it is misbehaving, and a namespace maze won't fix that either.
 
-> **Do not perform the 9.1 `OPENCODE_URL` repoint until `vkv2` has landed.**
-> Everything before 9.1 — the audit table, the two violations, the test rewrite —
-> is safe to do first, and should be.
+Stages 1-3 are not throwaway if 4 ever happens; tokens remain defense-in-depth
+inside the ns.
 
-`u417` and `85ui` should land with the repoint but need not precede it.
+### Killed as traps (do not revisit without new information)
 
-Others, for completeness: provider OAuth degrades **visibly** (error toast /
-inline error); `/instance/dispose` degrades **silently** (error discarded at four
-call sites); `experimental.*` / `move-session` / `sync.start` are flag-gated off
-here or swallowed by design.
+| Idea | Why it's dead |
+|---|---|
+| `iptables`/`nftables` | Cannot distinguish uid-1000 clients; serves are already loopback-only. |
+| Port randomisation | `ss -tlnp` re-reveals in one command; breaks the index↔port↔serve-id invariant `serve-pool.nix:10-27` exists to protect. |
+| Dummy-interface binding | Any local process reaches any local address. Zero isolation. |
+| Serves under a different uid | Only thing that restores OS credentials, but shatters shared state: routing sqlite (WAL, multi-uid), `~/.local/share/opencode`, `auth.json`. Cost ≫ benefit. |
+| Pigeon token *alone* as the end state | Incomplete twice: the `auth.ts` `/sessions` gap, and open serve ports bypass pigeon entirely. It's Stage 1, not done. |
 
-## Explicitly NOT the spine
+**Refuted oracle claim (checked, don't re-worry):** it warned Stage 1 might break
+`swarm_send` because the plugin client may not send the bearer. It does —
+`pigeon/packages/opencode-plugin/src/daemon-client.ts:105-106` and
+`swarm-send-tool.ts:268` both read `PIGEON_DAEMON_AUTH_TOKEN`.
 
-These are real and filed. None should precede `mlve.4`:
+## 4. Explicitly NOT the spine
 
-- `workstation-g8k9` (F1) — `PATCH /config` + `/global/config` mislabelled
-  `process-local-side-effect`; they are `shared-disk-plus-stale-cache`.
-- `workstation-ix8w` (F2) — promote `/integration/attempt/*` to `terminal-denial`.
-- `workstation-yc2g` (F3) — "audit at pin-bump" has no enforcement hook.
-- `workstation-yf3i` (F5) — the 26 `needs-audit` rows have no owner.
-- `workstation-memk` — audit those 26, starting with `/credential/*`.
-- `workstation-r9hu` — upstream `auth.json` lock **and** cross-process re-read path.
-- `workstation-hrfn` — frontdoor deploy is a two-step act. **Do not "fix" this by
-  setting `restartIfChanged = true`**; the reasoning is on the bead.
+Real, filed, and none should precede `dx8p`:
+`workstation-g8k9`, `ix8w`, `yc2g`, `yf3i`, `memk`, `r9hu`, `hrfn`.
 
-## A separate cluster worth naming (not this spine)
+Two that grew out of the 2026-07-26 review and *are* genuine, but are still not
+the spine:
 
-`a0zj`, `hrfn`, `utnw`, `xci9`, `94g8`, `t2b8` are one theme: *the pool's
-lifecycle is under-observed and under-controlled*. `a0zj` (serves don't restart
-on a pin bump) and `hrfn` (door doesn't restart on rebuild) share a root cause —
-activation does not restart the thing whose content changed — and are probably
-one fix, not two.
+- **`workstation-vjq0` (P2)** — silent MCP tool loss: `connect` is not in
+  `PROMOTING_SUFFIXES` (`place.ts:74-83`) but `prompt_async` is, so an unrouted
+  session connects MCP on the anchor and the turn runs elsewhere. Tools silently
+  absent, no error. Carries the four MCP tests that should have existed.
+- **`workstation-u417`** — scope enlarged: **the door instructs its own bypass.**
+  `routes.dispositions.ts:95-96`, `proxy.ts:547,566` tell callers to "call a serve
+  port directly". The door manufactures the violations the guard exists to catch,
+  and the guard does not scan `.ts`.
 
-And there is a **P0 outside this spine entirely**: `workstation-y8m`, "Measure
-cost after context-usage removal (BEFORE adding more patches)", a measurement
-gate blocking the `b4p` epic. It is the only P0 open and nothing is moving toward
-it. If cost matters more than opacity right now, that is the honest reprioritization.
+**And a P0 outside this spine entirely: `workstation-y8m`** — "Measure cost after
+context-usage removal (BEFORE adding more patches)", a measurement gate blocking
+the `b4p` epic. It is the only open P0 and nothing has moved toward it while this
+spine consumed sessions. **The user chose it as the next work after Stage 1.**
 
-## Process discipline earned the hard way (2026-07-25/26)
+## 5. Deploy discipline
 
-- **Configured ≠ running.** `systemctl show -p ExecStart` reports *intent*. To
-  know what code is executing, read `/proc/<pid>/cmdline` or probe the wire. This
-  mistake was made three times in one session; only a live `curl` caught it.
-- **Consult the canary before asserting deploy state.** The frontdoor canary had
-  the correct answer logged 98 times while the opposite was being reported.
-- **Never use the live pool's ports (4096-4099) for test harnesses.** Use high
-  random ports.
-- **Never put backticks inside double-quoted bash strings** — command
-  substitution hijacked a pool slot and stranded 75 sessions.
-- **`pkill -f <pattern>` matches its own command line.** Bracket a character:
-  `pkill -f 'fak[e]\.py'`.
-- **Tests can stop testing the moment the guarded condition succeeds.** Three
-  negative census tests became vacuous passes exactly when D4 completed. Prefer
+- `home-manager switch --flake .#cloudbox` for `opencode-launch` / `lgtm-sessions`.
+- `nixos-rebuild switch --flake .#cloudbox` for units and exemption markers.
+- Door and serves are `restartIfChanged = false` **deliberately** — a restart drops
+  every SSE leg. Door changes need an explicit `systemctl restart
+  opencode-frontdoor`. Per `workstation-hrfn`, do **not** "fix" this with
+  `restartIfChanged = true`.
+- **Confirm a deploy by generation timestamp, not by the switch appearing to run.**
+  On 2026-07-26 a switch failed on shellcheck, was believed to have succeeded, and
+  the profile stayed four hours stale: `ls -lat ~/.local/state/nix/profiles/`.
+
+## 6. Process discipline earned the hard way
+
+- **Configured ≠ running.** `systemctl show -p ExecStart` reports *intent*. Read
+  `/proc/<pid>/cmdline` or probe the wire.
+- **Never use pool ports 4096-4099 for test harnesses.** Use high random ports.
+- **Never put backticks in double-quoted bash strings** — command substitution once
+  hijacked a pool slot and stranded 75 sessions.
+- **`pkill -f <pat>` matches its own command line.** Bracket a char: `'fak[e]\.py'`.
+- **Tests can stop testing the moment the guarded condition succeeds.** Prefer
   perturbation-derived assertions over hardcoded counts.
+- **A source-grep guard must be perturbation-tested**, or it is theater. Ours
+  missed 7 of 9 realistic violation shapes on first write.
+
+## 7. The two falsifications of 2026-07-26 — read this before asserting anything
+
+Both were *this file's own claims*. Both took seconds to disprove.
+
+**(a) "The TUI does not go through the front door."** Inherited from a bead note
+and restated confidently. One `pgrep` + `/proc` read refuted it: 20/20 on `:4700`.
+Worse, the two lines it cited as violations (`configuration.nix:576,631`) are
+deliberate, test-enforced exemptions — **acting on the claim would have created the
+door⇄pigeon startup cycle and broken routing for the whole box.**
+
+**(b) "Pigeon is fully token-gated."** This one shipped *with a measurement
+attached*, which made it read as settled and harder to dislodge — strictly worse
+than (a). I probed `:8789`, a different process, and generalised. Pigeon is
+`:4731`. It overturned a *correct* prior finding in the roadmap. Root cause:
+`ss -tlnp | grep '878[0-9]'` — a pattern that could only confirm a port already
+guessed — while the line `PIGEON_DAEMON_URL:-…:4731` was read and deleted as dead
+code in the same session.
+
+**The rules that follow:**
+
+1. *Configured ≠ running* applies to **prose asserting system state**, not just
+   `systemctl`. A doc claiming system state without a citation is a rumour with a
+   filename.
+2. **Derive the target from the code that uses it**, never from a guess that a
+   matching grep then "confirms".
+3. **Measuring the wrong thing confidently is worse than not measuring**, because
+   the evidence defeats future scrutiny.
+4. **Re-verify after the last edit.** A built artifact was inspected, *then*
+   modified, and shipped broken — the evidence had been invalidated by the next
+   commit.
+5. **Check your harness before believing its verdict.** A perturbation run reported
+   all 9 bypasses as MISSED; with `set -o pipefail`, `bash guard | grep -q FAIL`
+   inherits the guard's exit 1, so every result printed **inverted**.
+6. **Run `adversarial-reviewer-fable` BEFORE deploying, not after.** Running it
+   after found a live regression and a guard that was theater. The project's own
+   cadence is SDD + fable per phase; skipping it cost a production regression.
