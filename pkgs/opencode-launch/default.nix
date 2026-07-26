@@ -398,9 +398,9 @@ pkgs.writeShellApplication {
           # target: a create-degraded session actually lives on the anchor.
           if [ "$connect_code" = "503" ]; then
             echo "Note: MCP connect via front door got 503 (pigeon down); retrying direct against $serve_url" >&2
+            # frontdoor-exempt(C8): fires ONLY on a door 503 (pigeon down); without it every --mcp launch dies at connect
             connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
               --max-time 20 \
-              # frontdoor-exempt(C8): fires ONLY on a door 503 (pigeon down); without it every --mcp launch dies at connect
               -X POST "$serve_url/mcp/$srv/connect" \
               -H "x-opencode-directory: $directory")
           fi

@@ -179,6 +179,26 @@ if [ "$hits" -ne "$EXPECTED_SITES" ]; then
   bad "expected exactly $EXPECTED_SITES serve-addressing site(s), found $hits -- if this change is intentional, update EXPECTED_SITES and the disposition table together"
 fi
 
+# A marker must never land INSIDE a shell line-continuation. Inserting one
+# between `curl ... \` and its next argument line silently breaks the command:
+# the `\` swallows the comment and the following `-X POST ...` starts a new
+# command. Bash accepts it; shellcheck (which the nix build runs) rejects it with
+# SC2215; and none of the fast checks here would have caught it. That is exactly
+# how a broken opencode-launch reached a deploy attempt on 2026-07-26 -- the
+# artifact had been built and verified BEFORE the markers were added, and not
+# rebuilt after. Cheap to assert, so assert it.
+for f in "${files[@]}"; do
+  abs="$repo_root/$f"
+  while IFS=: read -r ln _; do
+    [ -z "${ln:-}" ] && continue
+    [ "$ln" -lt 2 ] && continue
+    prev="$(sed -n "$((ln - 1))p" "$abs")"
+    case "$prev" in
+      *\\) bad "$f:$ln marker sits inside a line-continuation (previous line ends with a backslash) -- this breaks the command; move it above the statement" ;;
+    esac
+  done < <(grep -nE 'frontdoor-exempt\((A|B|C|D)[0-9]+\)' "$abs" 2>/dev/null || true)
+done
+
 # Anti-vacuity: if the scan matches nothing, the guard has silently stopped
 # guarding (a pattern rename, a file move). That is the failure mode this
 # project keeps hitting, so assert the scan still sees the known exemptions.
