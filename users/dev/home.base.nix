@@ -1295,7 +1295,7 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
       done < <(printf '%s\n' "$tsv" | sort -t$'\t' -k1,1nr)
 
       echo
-      echo "$count session(s). Attach (each routed to its owning serve):"
+      echo "$count session(s). Attach (the front door routes each to its owner):"
       for hint in "''${attach_hints[@]}"; do
         echo "  $hint"
       done
