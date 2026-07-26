@@ -957,7 +957,9 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
 
   # Managed git hook for primary worktree protection (enforces committing in a
   # linked worktree only). Scoped to cloudbox, matching installMonoWorktreeGuardHook
-  # (which sets core.hooksPath) and the cloudbox-only worktree-guard plugin/config.
+  # (which sets core.hooksPath). Since the worktree-guard opencode plugin was
+  # removed 2026-07-25, this hook is the ONLY remaining enforcement of the
+  # read-only-trunk rule — it blocks commits at a primary root, not edits.
   home.file.".config/git-hooks/pre-commit" = lib.mkIf isCloudbox {
     source = "${assetsPath}/git-hooks/pre-commit";
     executable = true;

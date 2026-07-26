@@ -95,8 +95,9 @@ Key caveats:
 `--worktree <slug>` lands the session in a fresh git worktree instead of at the
 passed directory's root. Use it for **writable** sessions (anything that edits
 code — swarm workers, implementation launches) so the session never starts in a
-repo's primary root. In mono that root is the read-only trunk protected by the
-worktree-guard; starting writable work there trips the guard by inertia.
+repo's primary root. In mono that root is the read-only trunk: a git pre-commit
+hook refuses commits there, so writable work started at the root gets stuck at
+commit time with nowhere to land.
 
 ```bash
 # writable worker: isolated in ~/projects/mono/.worktrees/cops-1234 off trunk
