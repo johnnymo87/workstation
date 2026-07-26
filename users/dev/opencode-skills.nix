@@ -160,10 +160,21 @@ let
         nvim_bin="nvim"
       fi
 
-      if PATH="${config.home.homeDirectory}/.nix-profile/bin:${pkgs.curl}/bin:$PATH" $nvim_bin --headless "$skill_file" \
-           -c "FetchConfluencePage $page_id" -c "write" -c "quit" >/dev/null 2>&1; then
+      # FetchConfluencePage *inserts* at the cursor rather than replacing the
+      # buffer, so fetching into $skill_file directly would append another full
+      # copy of the page on every activation (this silently grew the k8s file to
+      # 16MB / 940 copies, making each rebuild take ~40s). Always fetch into a
+      # fresh empty temp file, then swap it in only if we got content — a failed
+      # fetch leaves the previous copy intact.
+      local tmp_file="$skill_dir/.$file_name.tmp.$$"
+      rm -f "$skill_dir/.$file_name.tmp."*
+
+      if PATH="${config.home.homeDirectory}/.nix-profile/bin:${pkgs.curl}/bin:$PATH" $nvim_bin --headless "$tmp_file" \
+           -c "FetchConfluencePage $page_id" -c "write" -c "quit" >/dev/null 2>&1 && [ -s "$tmp_file" ]; then
+        mv -f "$tmp_file" "$skill_file"
         echo "fetchConfluenceSkills: $skill_name/$file_name updated"
       else
+        rm -f "$tmp_file"
         echo "fetchConfluenceSkills: WARNING: failed to fetch $skill_name/$file_name"
       fi
     }
