@@ -1572,11 +1572,24 @@ EOF
   # claude-failover-proxy (cfp) — the budget-gated failover ROUTER that sits in
   # front of the work aigateway (under-budget -> Vertex) and TeamClaude
   # (over-budget -> personal Claude Max), session-sticky with idle migration
-  # (8fe.14 / T13a). Listens on :8789. opencode's google-vertex-anthropic
-  # baseURL is flipped to this in T13b; until then nothing points at it, so it
-  # is safe to run. Like teamclaude it binds all interfaces; :8789 stays private
-  # via GCP's default-deny ingress (no NixOS firewall on cloudbox) — it is NOT
-  # in the GCP-opened port set. Startup is network-tolerant: index.ts binds the
+  # (8fe.14 / T13a). Listens on 127.0.0.1:8789. opencode's
+  # google-vertex-anthropic baseURL is flipped to this in T13b.
+  #
+  # BIND ADDRESS (corrected 2026-07-26). This comment previously claimed cfp
+  # "binds all interfaces" but ":8789 stays private via GCP's default-deny
+  # ingress". Both halves were wrong in a way that mattered:
+  #   - teamclaude does NOT bind all interfaces; it is 127.0.0.1:3456.
+  #   - GCP default-deny blocks the public internet, but not VPC-internal peers
+  #     and not the local docker bridge (172.18.0.1/16). firewall.service is
+  #     inactive on this host, so nothing else was filtering either.
+  # cfp has no inbound auth and injects the TeamClaude key and the real
+  # Anthropic enterprise key on behalf of ANY caller, so a reachable port is a
+  # license to spend money — and the enterprise leg is live on any day Vertex
+  # is over budget (22 of 25 sampled days). It is now pinned to loopback below,
+  # and cfp itself defaults to 127.0.0.1 as of the CFP_LISTEN_HOST change, so
+  # this is belt-and-braces rather than the only guard.
+  #
+  # Startup is network-tolerant: index.ts binds the
   # port and logs the listening line before any upstream call (the TeamClaude
   # availability probe runs voided in a 60s interval), so the unit stays up even
   # if aigateway/teamclaude are momentarily down.
@@ -1595,6 +1608,12 @@ EOF
       StateDirectory = "claude-failover-proxy";
       Environment = [
         "CFP_LISTEN_PORT=8789"
+        # Loopback only. All cfp clients are local to cloudbox. Widening this
+        # re-exposes the credential-injecting legs described above, so treat
+        # inbound auth as a prerequisite for changing it. NOTE: requires a cfp
+        # build containing CFP_LISTEN_HOST; older binaries ignore it and still
+        # bind 0.0.0.0.
+        "CFP_LISTEN_HOST=127.0.0.1"
         "CFP_AIGATEWAY_URL=http://127.0.0.1:8080"
         "CFP_TEAMCLAUDE_URL=http://127.0.0.1:3456"
         "CFP_BUDGET_DOLLARS=100"
