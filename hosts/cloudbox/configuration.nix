@@ -1270,6 +1270,191 @@ EOF
     };
   };
 
+  # TeamClaude pool canary — the alarm that was missing on 2026-07-19.
+  #
+  # WHY THIS EXISTS. On 2026-07-19/20 the OAuth refresh tokens for two of the
+  # three Max accounts expired (invalid_grant, "Refresh token expired").
+  # TeamClaude logged "needs re-login" ~2,000x/day for SEVEN DAYS and nobody
+  # noticed, because the only health signal anyone consumed was cfp's /stats
+  # `maxAvailable` — which is `accounts.some(healthy)`, a BOOLEAN. The surviving
+  # standby account kept answering, so `maxAvailable` stayed true and actively
+  # MASKED a pool running at 1/3 capacity.
+  #
+  # That silence is expensive. Max is the only flat-rate tier; on healthy
+  # high-demand days it absorbs 46-75% of notional spend (measured over
+  # 2026-07-01..07-25). A dark pool roughly doubles the daily paid bill, because
+  # everything falls back to Vertex/Enterprise, which are billed at the same
+  # token rates as each other.
+  #
+  # WHAT IT DOES. Every 5 minutes it reads TeamClaude's own status endpoint and
+  # alerts (via Pigeon -> Telegram, throttled) when healthy < total, turning a
+  # 7-day blind spot into ~10 minutes. It deliberately does NOT auto-remediate:
+  # the fix is an interactive `teamclaude login`, which only a human can run.
+  #
+  # DESIGN NOTES, each learned the hard way:
+  #  - Needs no secret: /teamclaude/status is unauthenticated (verified
+  #    2026-07-26 — it returns 200 with no, empty, or junk x-api-key). It binds
+  #    127.0.0.1 only, so that is tolerable; it also means this canary carries no
+  #    credential.
+  #  - Trust ONLY the top-level accounts[].status. The per-account
+  #    probe.accounts[].error field reports "HTTP 429: Rate limited" for
+  #    AUTH-DEAD accounts — actively misleading, and it would send the operator
+  #    chasing a quota problem instead of running `teamclaude login`.
+  #  - UNKNOWN MUST NEVER ALERT (same rule the frontdoor canary learned): a curl
+  #    failure, non-200, unparseable body, or zero-account roster logs a warning
+  #    and exits 0. Otherwise a transient blip pages forever on the TTL.
+  #  - Dampened to 2 consecutive passes (~10 min) so one flaky probe can't page.
+  systemd.services.teamclaude-pool-canary = {
+    description = "TeamClaude Max pool health canary (alerts when accounts die)";
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "teamclaude-pool-canary";
+      ExecStart = "${pkgs.writeShellScript "teamclaude-pool-canary" ''
+        set -u
+        # System-service PATH is minimal — be explicit.
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.curl pkgs.jq ]}
+        STATE=/var/lib/teamclaude-pool-canary
+        PENDING="$STATE/degraded-pending"
+        # Persisted so the reminder below can quote the live roster, and so a
+        # post-mortem has the last body the canary actually saw.
+        BODY="$STATE/last-status.json"
+
+        # Only police a unit that is supposed to be up (mirrors the frontdoor
+        # canary). An intentional stop must not page.
+        if [ "$(systemctl is-active teamclaude.service)" != "active" ]; then
+          rm -f "$PENDING" "$STATE/degraded-alerted"
+          exit 0
+        fi
+
+        HTTP_CODE=$(curl -sS --max-time 10 --connect-timeout 3 -o "$BODY" -w "%{http_code}" \
+          http://127.0.0.1:3456/teamclaude/status 2>/dev/null) || HTTP_CODE=000
+
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "WARNING: teamclaude status probe returned HTTP $HTTP_CODE (unknown; not alerting)"
+          exit 0
+        fi
+
+        TOTAL=$(jq -r '(.accounts // []) | length' "$BODY" 2>/dev/null || echo "")
+        HEALTHY=$(jq -r '[(.accounts // [])[] | select(.disabled != true and .status == "active")] | length' "$BODY" 2>/dev/null || echo "")
+
+        # Both sides must be KNOWN before comparing.
+        case "$TOTAL" in ""|*[!0-9]*) echo "WARNING: could not parse account total (unknown; not alerting)"; exit 0 ;; esac
+        case "$HEALTHY" in ""|*[!0-9]*) echo "WARNING: could not parse healthy count (unknown; not alerting)"; exit 0 ;; esac
+        if [ "$TOTAL" -eq 0 ]; then
+          echo "WARNING: status reported zero accounts (unknown; not alerting)"
+          exit 0
+        fi
+
+        if [ "$HEALTHY" -ge "$TOTAL" ]; then
+          # Clear throttle + dampening ONLY on confirmed recovery.
+          rm -f "$PENDING" "$STATE/degraded-alerted"
+          exit 0
+        fi
+
+        PENDING_N=$(( $(cat "$PENDING" 2>/dev/null || echo 0) + 1 ))
+        echo "$PENDING_N" > "$PENDING"
+        echo "WARNING: teamclaude pool degraded: $HEALTHY/$TOTAL healthy ($PENDING_N/2 consecutive)"
+        [ "$PENDING_N" -ge 2 ] || exit 0
+
+        ROSTER=$(jq -r '(.accounts // [])[] | "  - \(.name // "?"): \(.status // "?")"' "$BODY" 2>/dev/null || echo "  (roster unavailable)")
+
+        DEGRADED_TEXT=$(cat <<EOF
+TeamClaude Max pool DEGRADED: $HEALTHY/$TOTAL accounts healthy.
+
+$ROSTER
+
+Max is the only flat-rate tier - it absorbs 46-75% of notional spend on busy
+days, so a dark pool roughly doubles the daily paid bill.
+
+Likely cause: expired OAuth refresh token(s) (~30d TTL). Ignore any
+"HTTP 429 / Rate limited" wording in the probe detail - that string is reported
+for auth-dead accounts too and is misleading.
+
+To fix (interactive, on cloudbox):
+  teamclaude login
+
+Confirm: curl -s localhost:3456/teamclaude/status | jq '[.accounts[].status]'
+EOF
+)
+        # Signature is healthy/total so a further degradation re-pages immediately.
+        ${driftAlert} "$STATE/degraded-alerted" "$HEALTHY/$TOTAL" "$DEGRADED_TEXT" 86400
+        exit 0
+      ''}";
+    };
+  };
+
+  systemd.timers.teamclaude-pool-canary = {
+    description = "5-minutely TeamClaude Max pool health canary";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*:0/5";
+      AccuracySec = "30s";
+    };
+  };
+
+  # Proactive re-login reminder.
+  #
+  # The canary above catches a dead account within ~10 minutes, which bounds the
+  # damage. This bounds it further by prompting BEFORE the tokens die. Anthropic
+  # OAuth refresh tokens appear to carry a ~30-day TTL from issuance: the two
+  # accounts added 2026-06-19 18:45 died 2026-07-19 23:55 and 2026-07-20 02:34,
+  # ~30 days later and 2.5h apart — a cohort expiry, not usage-related (both had
+  # stopped serving on 07-16 yet kept refreshing successfully until death).
+  #
+  # Fires the 1st and 15th (<=16 days apart, comfortably inside the ~30d TTL).
+  # It is deliberately a dumb calendar reminder: token issue dates are NOT
+  # recoverable from teamclaude.json (it stores only `expiresAt` for the
+  # short-lived ACCESS token), so any "days remaining" figure would be invented.
+  # The reminder quotes the live roster so the operator can judge at a glance.
+  systemd.services.teamclaude-relogin-reminder = {
+    description = "Periodic reminder to re-login TeamClaude accounts (~30d refresh-token TTL)";
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "teamclaude-pool-canary";
+      ExecStart = "${pkgs.writeShellScript "teamclaude-relogin-reminder" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.jq ]}
+        STATE=/var/lib/teamclaude-pool-canary
+        BODY="$STATE/last-status.json"
+
+        ROSTER="  (no recent status sample)"
+        if [ -f "$BODY" ]; then
+          ROSTER=$(jq -r '(.accounts // [])[] | "  - \(.name // "?"): \(.status // "?")"' "$BODY" 2>/dev/null || echo "  (roster unavailable)")
+        fi
+
+        REMINDER_TEXT=$(cat <<EOF
+Scheduled reminder: re-login the TeamClaude Max accounts.
+
+Anthropic OAuth refresh tokens appear to expire ~30 days after issuance. In
+July 2026 two accounts died exactly 30 days after being added and the outage
+went unnoticed for 7 days, costing the flat-rate tier entirely.
+
+Last known roster:
+$ROSTER
+
+Run on cloudbox (interactive):
+  teamclaude login
+
+Confirm: curl -s localhost:3456/teamclaude/status | jq '[.accounts[].status]'
+EOF
+)
+        # Date-stamped signature so the throttle never suppresses a scheduled fire.
+        ${driftAlert} "$STATE/relogin-reminded" "reminder-$(date +%Y-%m-%d)" "$REMINDER_TEXT" 0
+        exit 0
+      ''}";
+    };
+  };
+
+  systemd.timers.teamclaude-relogin-reminder = {
+    description = "Twice-monthly TeamClaude re-login reminder";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-01,15 09:00:00";
+      Persistent = true;
+      AccuracySec = "1h";
+    };
+  };
+
   # Aigateway: local Anthropic-on-Vertex proxy that captures per-request
   # attribution to a Postgres ledger. The path to the dev checkout is held
   # in the `aigateway_dir` sops secret; that dir holds the docker-compose.yml
