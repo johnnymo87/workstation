@@ -98,11 +98,27 @@ with **no error check**, then `instance.dispose()` also unchecked, then can show
 *"Saved credential for `<id>`"*. Post-repoint the user is told a write succeeded
 when it 403'd. Not a wedge — a lie, on the credential path.
 
-Hence exactly one hard blocker on `mlve.4`: **`workstation-vkv2`**, which makes
-`opencode-pool-auth` the documented, verified remedy. Two more are linked as
-`relates_to` — land them with the repoint, do not let them gate it:
-`workstation-u417` (five rows still ship the wrong wire hint) and
-`workstation-85ui` (TUI `console.switchOrg` unhandled rejection).
+**`mlve.4` deliberately has NO hard blockers in beads.** Three related items are
+linked `relates_to`: `workstation-vkv2` (make `opencode-pool-auth` the
+documented, verified remedy for credential rotation), `workstation-u417` (five
+rows still ship the wrong wire hint), `workstation-85ui` (TUI
+`console.switchOrg` unhandled rejection).
+
+Two reasons they are links and not blockers, both learned by getting it wrong on
+2026-07-26:
+
+1. **A blocked bead disappears from `bd ready`.** Blocking `mlve.4` made the
+   spine invisible to the one command an agent runs to find work — the exact
+   opposite of what this file is for.
+2. **The constraint is wrong-grained as a bead dependency.** It does not apply to
+   `mlve.4` as a whole. Step 9.0 (the consumer audit table) is the first work and
+   has nothing to do with any of them. The real rule is narrower:
+
+> **Do not perform the 9.1 `OPENCODE_URL` repoint until `vkv2` has landed.**
+> Everything before 9.1 — the audit table, the two violations, the test rewrite —
+> is safe to do first, and should be.
+
+`u417` and `85ui` should land with the repoint but need not precede it.
 
 Others, for completeness: provider OAuth degrades **visibly** (error toast /
 inline error); `/instance/dispose` degrades **silently** (error discarded at four
