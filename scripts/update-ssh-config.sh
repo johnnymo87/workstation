@@ -55,6 +55,7 @@ Host devbox-tunnel
     LocalForward 4003 localhost:4003
     LocalForward 4005 localhost:4005
     LocalForward 4173 localhost:4173
+    LocalForward 4400 localhost:4400
     LocalForward 1455 localhost:1455
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
