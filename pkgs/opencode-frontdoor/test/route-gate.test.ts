@@ -623,14 +623,18 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
+      // Perturb a bucket rather than asserting a literal count: 'needs-mechanism'
+      // used to be hardcoded here and reached 0 when D4 completed, which turned
+      // this negative test into a vacuous pass.
+      const actual = EXPECTED_KIND_CENSUS['terminal-denial-absent'];
       const result = checkDocRoutes(doc, {
-        expectedKindCensus: { ...EXPECTED_KIND_CENSUS, 'needs-mechanism': 0 },
+        expectedKindCensus: { ...EXPECTED_KIND_CENSUS, 'terminal-denial-absent': actual + 1 },
       });
 
       expect(result.passed).toBe(false);
       expect(result.error).toContain('Kind census mismatch');
       expect(result.error).toContain(
-        `needs-mechanism: expected 0, got ${EXPECTED_KIND_CENSUS['needs-mechanism']}`
+        `terminal-denial-absent: expected ${actual + 1}, got ${actual}`
       );
     });
 
@@ -689,13 +693,16 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
+      // D4 drove the real list to empty, so [] is no longer a mismatch. Assert
+      // the direction that still has detection power: a key the table does not
+      // actually carry must be reported as removed.
       const result = checkDocRoutes(doc, {
-        expectedNeedsMechanismKeys: [],
+        expectedNeedsMechanismKeys: ['PUT /auth/{providerID}'],
       });
 
       expect(result.passed).toBe(false);
       expect(result.error).toContain('Needs-mechanism keys mismatch');
-      expect(result.error).toContain('added [');
+      expect(result.error).toContain('removed [');
     });
 
     test('F2: fails on expectedNeedsMechanismKeys containing extra key not in real table', () => {

@@ -76,9 +76,9 @@ export const EXPECTED_KIND_CENSUS: Record<string, number> = {
   'not-session-scopable-degrades': 12,
   'not-session-scopable-unverified': 0,
   superseded: 7,
-  'needs-mechanism': 4,
-  'terminal-denial-absent': 4,
-  'terminal-denial-degrades': 1,
+  'needs-mechanism': 0,
+  'terminal-denial-absent': 5,
+  'terminal-denial-degrades': 4,
   'terminal-denial-unverified': 0,
   'accepted-gap': 0,
 };
@@ -119,12 +119,7 @@ export const EXPECTED_CONSTRAINT_CENSUS: Record<string, number> = {
  * coverage. Read it together with EXPECTED_CONSTRAINT_CENSUS, which is what
  * makes a relabelling visible. See the header comment on `checkDocRoutes`.
  */
-export const EXPECTED_NEEDS_MECHANISM_KEYS: string[] = [
-  'DELETE /auth/{providerID}',
-  'POST /provider/{providerID}/oauth/authorize',
-  'POST /provider/{providerID}/oauth/callback',
-  'PUT /auth/{providerID}',
-];
+export const EXPECTED_NEEDS_MECHANISM_KEYS: string[] = [];
 
 /**
  * Expected media-type census on the pinned /doc fixture.

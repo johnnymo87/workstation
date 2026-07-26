@@ -161,37 +161,47 @@ const MCP_OAUTH_DENIAL_EVIDENCE =
 export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
   // D4 rows (workstation-mlve.11 / needs-mechanism):
   'PUT /auth/{providerID}': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'shared-disk-plus-stale-cache',
-    bead: 'workstation-mlve.11',
-    rationale: 'Provider auth state mutation requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    tuiSurface: 'degrades',
+    rationale:
+      'Denial is a DECISION; the escape hatch is a CLI, not the door. auth.json is shared, but Provider bakes auth.all() into InstanceState (provider/provider.ts:1502-1512), copies the key into the constructed SDK (:1686) and memoizes it (:1700, :1801-1823) behind a ScopedCache with capacity POSITIVE_INFINITY, no TTL, and exactly ONE invalidation path: instance disposal (effect/instance-state.ts:26-45). So anchor-forwarding this write returns 200 while three other members -- and the writer\'s own already-booted instances -- keep the previous credential indefinitely. That is a false success, which is worse than a denial. ' +
+      'Two supporting facts. The write is unsafe on its own terms: whole-document read-modify-write with no lock and no atomic rename (auth/index.ts:73-81, fs-util.ts:100-104), while mcp/auth.ts:72-82 does take a flock for the same job -- an upstream asymmetry, and the reason the CLI must write exactly once. And these routes carry NO directory context at all (groups/control.ts:36-75 applies neither instance-context nor workspace-routing middleware; AuthParams:8-10 has no directory/workspace field), so any "dispose the same directory afterwards" scheme has no referent. ' +
+      'TUI consequence (audited 2026-07-26): dialog-provider.tsx:396-405 calls sdk.client.auth.set() WITHOUT checking the error, then instance.dispose() also unchecked, and can then show a "Saved credential for <id>" toast. Through the door both calls 403 and the user is told the credential was saved when nothing was written. This is the WORST surface of the four credential routes -- silent AND actively misleading -- and it is why the denial body now carries a real remedy instead of "call a serve port directly".',
     userMessage:
       'Provider credentials are shared pool-wide state that each serve caches in memory until its instance is disposed, so a write delivered to one serve would report success while the rest of the pool keeps using the previous credential.',
     remedy: POOL_CREDENTIAL_REMEDY,
   },
   'DELETE /auth/{providerID}': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'shared-disk-plus-stale-cache',
-    bead: 'workstation-mlve.11',
-    rationale: 'Provider auth removal requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    tuiSurface: 'absent',
+    rationale:
+      'Same constraint as PUT /auth/{providerID}: auth.remove writes shared auth.json (auth/index.ts:83-89) but evicts nothing from any already-booted instance\'s memoized Provider cache (provider/provider.ts:1502-1512, invalidated only by disposal per effect/instance-state.ts:26-45), so the pool would keep authenticating with a credential the user believes is deleted -- a false success with a security flavour. Same absent directory context as the PUT (groups/control.ts:36-75, AuthParams:8-10). No TUI caller (grepped v1.17.13 packages/tui/src for auth.remove: zero hits), hence absent. Use the CLI escape hatch, which disposes every member after the write.',
     userMessage:
       'Provider credentials are shared pool-wide state that each serve caches in memory until its instance is disposed, so a removal delivered to one serve would report success while the rest of the pool keeps authenticating with the deleted credential.',
     remedy: POOL_CREDENTIAL_REMEDY,
   },
   'POST /provider/{providerID}/oauth/authorize': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'process-pinned-ram',
-    bead: 'workstation-mlve.11',
-    rationale: 'Provider OAuth authorization flow requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    tuiSurface: 'degrades',
+    rationale:
+      'DIFFERENT constraint from the /auth pair, and the distinction matters: these routes DO have directory context, so "no session context" would be the wrong reason. What pins them is RAM -- provider/auth.ts:100-103 holds pending: Map<ProviderID, AuthOAuthResult> inside InstanceState, keyed by (process, directory), and the PKCE verifier lives in a JavaScript CLOSURE (match.callback) that is never serialized. A callback landing on any other process fails at :191-193 with 400 ProviderAuthOauthMissing. ' +
+      'Consistent hashing on (providerID, resolvedDirectory) was considered and rejected: the door would have to replicate four layers of upstream resolution (?workspace= overrides ?directory= via middleware/workspace-routing.ts:154-157, OPENCODE_WORKSPACE_ID short-circuits both, then decodeURIComponent + FSUtil.resolve normalise), and any drift produces a deterministically wrong key -- silent and 100% reproducible. ' +
+      'The deeper reason not to forward: provider/auth.ts:203-220 calls auth.set() on success, so a forwarded callback IS a Group A write and inherits the same pool-wide staleness. Denying the /auth pair while forwarding this one was never a defensible line. ' +
+      'TUI consequence (audited 2026-07-26): dialog-provider.tsx:185-195 checks result.error and shows an error toast, then clears the dialog. Degrades VISIBLY, though the toast renders JSON.stringify(error) rather than a friendly message.',
     userMessage:
       'This OAuth flow keeps its PKCE verifier in one serve process\'s memory, so the matching callback must reach that same process; and the flow completes by writing a provider credential, which is shared pool-wide state the other serves would not pick up.',
     remedy: POOL_CREDENTIAL_REMEDY,
   },
   'POST /provider/{providerID}/oauth/callback': {
-    kind: 'needs-mechanism',
+    kind: 'terminal-denial',
     constraint: 'process-pinned-ram',
-    bead: 'workstation-mlve.11',
-    rationale: 'Provider OAuth callback flow requires anchor-pinning or broadcast mechanism not yet implemented in door.',
+    tuiSurface: 'degrades',
+    rationale:
+      'The callback half of the flow; see POST /provider/{providerID}/oauth/authorize for the full reasoning. It must reach the same process that issued the authorize because the PKCE verifier is closure-held and never written down, and its success path writes provider credentials via auth.set() (provider/auth.ts:203-220). ' +
+      'TUI consequence (audited 2026-07-26): both callers surface the failure -- dialog-provider.tsx:265-282 (auto/device flow, onMount) shows an error toast, and :325-337 (manual code entry) sets an inline error. Degrades VISIBLY. Note the immediately following `await sdk.client.instance.dispose()` at :281 and :332 is itself denied, so even a forwarded success would be followed by a discarded 403 -- the two rows have to move together or not at all.',
     userMessage:
       'This callback can only be completed by the same serve process that issued the matching authorize request, because the PKCE verifier is held in that process\'s memory and is never written down; and its success path writes a provider credential, which is shared pool-wide state the other serves would not pick up.',
     remedy: POOL_CREDENTIAL_REMEDY,

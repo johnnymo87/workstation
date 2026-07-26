@@ -107,6 +107,31 @@ describe('credential-writing rows carry a pool-correct remedy', () => {
     }
   });
 
+  test('terminal-denial rows carry evidence and no bead', () => {
+    // The kind exists so the row IS the record. A bead would either be closed
+    // (orphaning the row) or imply work nobody intends.
+    const terminal = Object.entries(ROUTE_DISPOSITIONS).filter(([, d]) => d.kind === 'terminal-denial');
+    expect(terminal.length).toBeGreaterThan(0);
+    for (const [key, d] of terminal) {
+      expect(d.bead, `${key} must not cite a bead`).toBeUndefined();
+      expect(d.tuiSurface, `${key} must record its TUI surface`).toBeTruthy();
+      // Evidence, not a slogan: require a source citation in the rationale.
+      expect(d.rationale, `${key} must cite upstream evidence`).toMatch(/\.(ts|tsx):\d+/);
+    }
+  });
+
+  test('D4 completion is not claimable by relabelling alone', () => {
+    // If someone empties the needs-mechanism list by moving rows to
+    // terminal-denial, those rows must still name a real blocking mechanism —
+    // never 'needs-audit', which would be laundering an open question as a
+    // finished decision.
+    for (const [key, d] of Object.entries(ROUTE_DISPOSITIONS)) {
+      if (d.kind === 'terminal-denial') {
+        expect(d.constraint, `${key} cannot be a terminal decision while unaudited`).not.toBe('needs-audit');
+      }
+    }
+  });
+
   test('no rationale leaks file:line citations onto the wire', () => {
     // `rationale` is repo-facing and full of citations; `userMessage` is not.
     for (const [key, d] of Object.entries(ROUTE_DISPOSITIONS)) {
