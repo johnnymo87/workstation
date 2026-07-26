@@ -63,7 +63,7 @@ describe('getRouteDisposition resolution', () => {
 
   test('custom disposition maps are honoured and cached independently', () => {
     const custom: Record<string, RouteDisposition> = {
-      'POST /thing/{id}': { kind: 'accepted-gap', rationale: 'test row' },
+      'POST /thing/{id}': { kind: 'accepted-gap', constraint: 'needs-audit', rationale: 'test row' },
     };
     const first = getRouteDisposition('POST', '/thing/42', 'global-sideeffect', custom, {});
     const second = getRouteDisposition('POST', '/thing/43', 'global-sideeffect', custom, {});

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { classify, dispatch, RouteAction } from './dispatch.js';
 import {
   RouteDisposition,
+  DispositionConstraint,
   getRouteDisposition,
   ROUTE_DISPOSITIONS,
   CLASS_DISPOSITIONS,
@@ -16,6 +17,7 @@ export interface GateCheckOptions {
   classDispositions?: Record<string, RouteDisposition>;
   routeClassificationTable?: RouteEntry[];
   expectedKindCensus?: Record<string, number>;
+  expectedConstraintCensus?: Record<string, number>;
   expectedNeedsMechanismKeys?: string[];
   expectedMediaTypeCensus?: Record<string, number>;
   htmlGuardExemptRoutes?: string[];
@@ -54,6 +56,7 @@ export interface GateCheckResult {
   invalidDispositions: InvalidDispositionRoute[];
   orphanedDispositions: string[];
   kindCensus: Record<string, number>;
+  constraintCensus: Record<string, number>;
   dedupedDenialCount: number;
   needsMechanismKeys: string[];
   mediaTypeCensus: Record<string, number>;
@@ -78,9 +81,40 @@ export const EXPECTED_KIND_CENSUS: Record<string, number> = {
 };
 
 /**
+ * Expected census over the CONSTRAINT that blocks each denied route — i.e. the
+ * mechanism, as opposed to `EXPECTED_KIND_CENSUS`, which counts the decision.
+ *
+ * Why both: a row can carry a true `kind` and still describe itself for the
+ * wrong reason, and the kind census cannot see that. `/integration/attempt/*`
+ * was correctly denied as `not-session-scopable` while claiming "no session
+ * context", when the actual blocker is a per-instance RAM Map — so it was
+ * invisible to any search for process-pinned routes, and would have stayed
+ * invisible after D4 "completed". Pinning the constraint distribution forces
+ * that question to be answered per row, at write time.
+ *
+ * `needs-audit` is deliberately non-zero and deliberately pinned: it is the
+ * honest count of rows whose blocking mechanism has never been traced. Drive it
+ * down the way `not-session-scopable-unverified` was driven to 0 on 2026-07-26 —
+ * by auditing rows, not by relabelling them.
+ */
+export const EXPECTED_CONSTRAINT_CENSUS: Record<string, number> = {
+  'class-level-501': 21,
+  'superseded-by-session-route': 7,
+  'process-pinned-ram': 9,
+  'shared-disk-plus-stale-cache': 2,
+  'process-local-side-effect': 5,
+  'needs-audit': 26,
+};
+
+/**
  * Expected set of needs-mechanism disposition keys on the pinned /doc fixture.
  * A pin bump or table edit changing these is supposed to fail the gate and force a written decision — that is the mechanism, not a nuisance.
- * Shrinking EXPECTED_NEEDS_MECHANISM_KEYS to empty is how D4 completion becomes provable (bead workstation-mlve.11).
+ *
+ * NOTE what this does and does NOT prove. Emptying this list proves only that no
+ * row is LABELLED `needs-mechanism` any more, and labels are edited by hand — so
+ * on its own it is a statement about the table's self-consistency, not about
+ * coverage. Read it together with EXPECTED_CONSTRAINT_CENSUS, which is what
+ * makes a relabelling visible. See the header comment on `checkDocRoutes`.
  */
 export const EXPECTED_NEEDS_MECHANISM_KEYS: string[] = [
   'DELETE /auth/{providerID}',
@@ -168,6 +202,43 @@ function findShadowingTemplate(
   return undefined;
 }
 
+/**
+ * WHAT THIS GATE ACTUALLY PROVES — read before trusting a green run.
+ *
+ * It proves three things, all of them about internal agreement:
+ *   1. every route the pinned `/doc` advertises is recognised by the classifier
+ *      (no unrecognised, no shadowed);
+ *   2. every route the door DENIES carries a disposition, and no disposition
+ *      exists for a route that is not denied (no orphans);
+ *   3. the shape of the tables has not drifted from the pinned fixture — the
+ *      kind, constraint and media-type censuses all still match.
+ *
+ * It CANNOT prove that any individual label is TRUE. `kind`, `constraint`,
+ * `tuiSurface` and `rationale` are hand-written claims about upstream
+ * behaviour; nothing here reads upstream's source. A row can be internally
+ * consistent, pass every check, and still describe itself wrongly — that is not
+ * hypothetical, it is what happened to `/integration/attempt/*` (denied for a
+ * true reason, but citing "no session context" when the blocker is a
+ * per-instance RAM Map) and to `PATCH /config` (whose rationale omitted that it
+ * disposes the instance). Both were found by reading upstream, not by this gate.
+ *
+ * So: truth comes from AUDIT AT PIN-BUMP. The censuses exist to make an
+ * unaudited change impossible to land silently, not to certify the labels.
+ *
+ * Corollary for D4 (bead workstation-mlve.11): an empty
+ * EXPECTED_NEEDS_MECHANISM_KEYS does NOT by itself mean every route that needs
+ * a door mechanism has one. It means no row is labelled that way. The
+ * constraint census is the cross-check that makes relabelling visible, and
+ * `needs-audit` is the honest count of rows nobody has traced yet.
+ *
+ * One convention worth knowing (see also `getRouteDisposition`): disposition
+ * keys are written in BARE form, and the `/api/`->bare fallback is what makes
+ * them cover the `/api/` mirror too. A single key therefore speaks for both
+ * forms, so if upstream ever gives them different behaviour, one disposition
+ * would silently cover two routes. Note the split is per-route and set
+ * upstream: `/auth/{providerID}` exists only bare, `/integration/*` only
+ * under `/api/`.
+ */
 export function checkDocRoutes(
   docJson: unknown,
   options: GateCheckOptions = {}
@@ -202,6 +273,7 @@ export function checkDocRoutes(
       invalidDispositions: [],
       orphanedDispositions: [],
       kindCensus: defaultKindCensus,
+      constraintCensus: {},
       dedupedDenialCount: 0,
       needsMechanismKeys: [],
       mediaTypeCensus: {},
@@ -376,6 +448,34 @@ export function checkDocRoutes(
             }
           }
 
+          // Every disposition must name the mechanism that blocks it, not just
+          // the decision. Required rather than optional because an optional
+          // field is one an author can skip on exactly the rows where the
+          // question is hardest — which is where wrong labels come from.
+          const VALID_CONSTRAINTS: DispositionConstraint[] = [
+            'class-level-501',
+            'superseded-by-session-route',
+            'process-pinned-ram',
+            'shared-disk-plus-stale-cache',
+            'process-local-side-effect',
+            'needs-audit',
+          ];
+          if (!disp.constraint) {
+            invalidDispositions.push({
+              method,
+              path,
+              action,
+              reason: `Disposition requires a constraint field (one of: ${VALID_CONSTRAINTS.join(' | ')})`,
+            });
+          } else if (!VALID_CONSTRAINTS.includes(disp.constraint)) {
+            invalidDispositions.push({
+              method,
+              path,
+              action,
+              reason: `Invalid constraint value "${disp.constraint}" (expected one of: ${VALID_CONSTRAINTS.join(' | ')})`,
+            });
+          }
+
           if (disp.kind === 'needs-mechanism' || disp.kind === 'accepted-gap') {
             if (!disp.bead || typeof disp.bead !== 'string' || disp.bead.trim() === '') {
               invalidDispositions.push({
@@ -419,6 +519,14 @@ export function checkDocRoutes(
     'needs-mechanism': 0,
     'accepted-gap': 0,
   };
+  const constraintCensus: Record<string, number> = {
+    'class-level-501': 0,
+    'superseded-by-session-route': 0,
+    'process-pinned-ram': 0,
+    'shared-disk-plus-stale-cache': 0,
+    'process-local-side-effect': 0,
+    'needs-audit': 0,
+  };
   const needsMechanismKeySet = new Set<string>();
 
   for (const [bareKey, { method, path }] of deduplicatedDenials.entries()) {
@@ -431,6 +539,9 @@ export function checkDocRoutes(
       classDispositions
     );
     if (disp) {
+      if (disp.constraint && constraintCensus[disp.constraint] !== undefined) {
+        constraintCensus[disp.constraint]++;
+      }
       if (disp.kind === 'by-design-501') {
         kindCensus['by-design-501']++;
       } else if (disp.kind === 'superseded') {
@@ -473,6 +584,7 @@ export function checkDocRoutes(
       invalidDispositions,
       orphanedDispositions,
       kindCensus,
+      constraintCensus,
       dedupedDenialCount,
       needsMechanismKeys,
       mediaTypeCensus,
@@ -533,6 +645,23 @@ export function checkDocRoutes(
     }
     if (censusDiffs.length > 0) {
       errors.push(`Kind census mismatch: ${censusDiffs.join('; ')}`);
+    }
+
+    const expectedConstraintCensus = options.expectedConstraintCensus ?? EXPECTED_CONSTRAINT_CENSUS;
+    const constraintDiffs: string[] = [];
+    const allConstraintKeys = new Set([
+      ...Object.keys(expectedConstraintCensus),
+      ...Object.keys(constraintCensus),
+    ]);
+    for (const censusKey of allConstraintKeys) {
+      const expected = expectedConstraintCensus[censusKey] ?? 0;
+      const actual = constraintCensus[censusKey] ?? 0;
+      if (expected !== actual) {
+        constraintDiffs.push(`${censusKey}: expected ${expected}, got ${actual}`);
+      }
+    }
+    if (constraintDiffs.length > 0) {
+      errors.push(`Constraint census mismatch: ${constraintDiffs.join('; ')}`);
     }
 
     const expectedNeedsMechKeys = options.expectedNeedsMechanismKeys ?? EXPECTED_NEEDS_MECHANISM_KEYS;
@@ -605,6 +734,7 @@ export function checkDocRoutes(
       invalidDispositions,
       orphanedDispositions,
       kindCensus,
+      constraintCensus,
       dedupedDenialCount,
       needsMechanismKeys,
       mediaTypeCensus,
@@ -623,6 +753,7 @@ export function checkDocRoutes(
     invalidDispositions: [],
     orphanedDispositions: [],
     kindCensus,
+    constraintCensus,
     dedupedDenialCount,
     needsMechanismKeys,
     mediaTypeCensus,
@@ -667,6 +798,9 @@ export function runRouteGateCli(args: string[]): number {
   const result = checkDocRoutes(docJson, { minRoutes });
 
   if (result.passed) {
+    const constraintCensusStr = Object.entries(result.constraintCensus)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ');
     const kindCensusStr = Object.entries(result.kindCensus)
       .map(([k, v]) => `${k}=${v}`)
       .join(', ');
@@ -675,7 +809,7 @@ export function runRouteGateCli(args: string[]): number {
       .join(', ');
     const checkDStr = result.octetStreamRoutes.join(', ');
     console.log(
-      `[PASS] Route classification and disposition gate passed: checked ${result.totalChecked} route(s) across /doc (0 unrecognized, 0 shadowed, ${result.denialCount} denials properly dispositioned, 0 orphaned dispositions). Kind census: ${kindCensusStr}. Media-type census: ${mediaTypeStr}. Check D (octet-stream exemption match): ${checkDStr}.`
+      `[PASS] Route classification and disposition gate passed: checked ${result.totalChecked} route(s) across /doc (0 unrecognized, 0 shadowed, ${result.denialCount} denials properly dispositioned, 0 orphaned dispositions). Kind census: ${kindCensusStr}. Constraint census: ${constraintCensusStr}. Media-type census: ${mediaTypeStr}. Check D (octet-stream exemption match): ${checkDStr}.`
     );
     return 0;
   } else {

@@ -8,8 +8,9 @@ import {
   EXPECTED_KIND_CENSUS,
   EXPECTED_NEEDS_MECHANISM_KEYS,
   EXPECTED_MEDIA_TYPE_CENSUS,
+  EXPECTED_CONSTRAINT_CENSUS,
 } from '../src/route-gate.js';
-import { ROUTE_DISPOSITIONS, getRouteDisposition } from '../src/routes.dispositions.js';
+import { ROUTE_DISPOSITIONS, getRouteDisposition, type RouteDisposition } from '../src/routes.dispositions.js';
 import { ROUTE_CLASSIFICATION_TABLE } from '../src/routes.classification.js';
 import { dispatch, classify } from '../src/dispatch.js';
 
@@ -247,6 +248,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     const customDispositions = {
       'POST /sync/start': {
         kind: 'superseded' as const,
+        constraint: 'needs-audit' as const,
         rationale: 'Superseded route without target',
       },
     };
@@ -266,6 +268,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     const customDispositions = {
       'POST /sync/start': {
         kind: 'superseded' as const,
+        constraint: 'needs-audit' as const,
         supersededBy: 'POST /global/dispose', // pointing at another denial!
         rationale: 'Pointing at denying route',
       },
@@ -286,6 +289,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     const customDispositions = {
       'POST /instance/dispose': {
         kind: 'needs-mechanism' as const,
+        constraint: 'needs-audit' as const,
         rationale: 'Needs broadcast mechanism',
       },
     };
@@ -305,12 +309,56 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     const customDispositions = {
       'POST /global/dispose': {
         kind: 'not-session-scopable' as const,
+        constraint: 'needs-audit' as const,
         rationale: '   ',
       },
     };
     const result = checkDocRoutes(doc, { minRoutes: 1, routeDispositions: customDispositions });
     expect(result.passed).toBe(false);
     expect(result.invalidDispositions[0].reason).toContain('empty or missing rationale');
+  });
+
+  test('Negative: missing constraint fails', () => {
+    const doc = {
+      paths: {
+        '/global/dispose': {
+          post: { summary: 'Dispose process' },
+        },
+      },
+    };
+    // Deliberately cast: the point is to prove the GATE rejects this, not just
+    // the compiler. A table can reach the gate via JSON or a loosened type.
+    const customDispositions = {
+      'POST /global/dispose': {
+        kind: 'not-session-scopable' as const,
+        tuiSurface: 'absent' as const,
+        rationale: 'no constraint given',
+      },
+    } as unknown as Record<string, RouteDisposition>;
+    const result = checkDocRoutes(doc, { minRoutes: 1, routeDispositions: customDispositions });
+    expect(result.passed).toBe(false);
+    expect(result.invalidDispositions.some((d) => d.reason.includes('requires a constraint field'))).toBe(true);
+  });
+
+  test('Negative: unknown constraint value fails', () => {
+    const doc = {
+      paths: {
+        '/global/dispose': {
+          post: { summary: 'Dispose process' },
+        },
+      },
+    };
+    const customDispositions = {
+      'POST /global/dispose': {
+        kind: 'not-session-scopable' as const,
+        constraint: 'because-i-said-so',
+        tuiSurface: 'absent' as const,
+        rationale: 'invented constraint',
+      },
+    } as unknown as Record<string, RouteDisposition>;
+    const result = checkDocRoutes(doc, { minRoutes: 1, routeDispositions: customDispositions });
+    expect(result.passed).toBe(false);
+    expect(result.invalidDispositions.some((d) => d.reason.includes('Invalid constraint value'))).toBe(true);
   });
 
   test('Mutation test: deleting exactly one real disposition names that route and fails', () => {
@@ -342,6 +390,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     const customDispositions = {
       'POST /this/route/does-not-exist': {
         kind: 'not-session-scopable' as const,
+        constraint: 'needs-audit' as const,
         rationale: 'Orphaned disposition rationale',
       },
     };
@@ -374,6 +423,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     const customDispositions = {
       'POST /orphaned/disposition': {
         kind: 'not-session-scopable' as const,
+        constraint: 'needs-audit' as const,
         tuiSurface: 'absent' as const,
         rationale: 'Orphan',
       },
@@ -422,6 +472,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     const customDispositions = {
       'POST /global/dispose': {
         kind: 'not-session-scopable' as const,
+        constraint: 'needs-audit' as const,
         rationale: 'Disposes process',
       },
     };
@@ -448,6 +499,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     const customDispositions = {
       'POST /global/dispose': {
         kind: 'not-session-scopable' as const,
+        constraint: 'needs-audit' as const,
         tuiSurface: 'invalid-surface' as any,
         rationale: 'Disposes process',
       },
@@ -591,6 +643,42 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       expect(result.passed).toBe(false);
       expect(result.error).toContain('Kind census mismatch');
       expect(result.error).toContain('needs-mechanism: expected 10, got 9');
+    });
+
+    test('DEFAULT path enforces the constraint census in both directions', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+
+      const shrunk = checkDocRoutes(doc, {
+        expectedConstraintCensus: { ...EXPECTED_CONSTRAINT_CENSUS, 'needs-audit': 0 },
+      });
+      expect(shrunk.passed).toBe(false);
+      expect(shrunk.error).toContain('Constraint census mismatch');
+      expect(shrunk.error).toContain('needs-audit: expected 0, got 26');
+
+      const grown = checkDocRoutes(doc, {
+        expectedConstraintCensus: { ...EXPECTED_CONSTRAINT_CENSUS, 'process-pinned-ram': 99 },
+      });
+      expect(grown.passed).toBe(false);
+      expect(grown.error).toContain('process-pinned-ram: expected 99, got 9');
+    });
+
+    test('a compensating swap between constraints cannot pass silently', () => {
+      // The failure mode the constraint census exists for: relabelling a row
+      // from one bucket to another keeps the TOTAL identical, so any check that
+      // only counted denials would stay green.
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+
+      const swapped = checkDocRoutes(doc, {
+        expectedConstraintCensus: {
+          ...EXPECTED_CONSTRAINT_CENSUS,
+          'process-pinned-ram': EXPECTED_CONSTRAINT_CENSUS['process-pinned-ram'] + 1,
+          'needs-audit': EXPECTED_CONSTRAINT_CENSUS['needs-audit'] - 1,
+        },
+      });
+      expect(swapped.passed).toBe(false);
+      expect(swapped.error).toContain('Constraint census mismatch');
     });
 
     test('DEFAULT path enforces needs-mechanism keys and fails on key mismatch', () => {
