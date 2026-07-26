@@ -50,6 +50,7 @@ Ports are configured in `scripts/update-ssh-config.sh` and carried by the persis
 | 4003 | Local (-L) | eternal-machinery (secondary) |
 | 4005 | Local (-L) | eternal-machinery (tertiary) |
 | 4173 | Local (-L) | citadels Vite dev server |
+| 4400 | Local (-L) | boldco `/preview` UI harness (`npm run dev:preview`) |
 | 1455 | Local (-L) | OpenCode OAuth callback |
 | 9222 | Remote (-R) | Chrome DevTools Protocol - project A |
 | 9223 | Remote (-R) | Chrome DevTools Protocol - project B |
