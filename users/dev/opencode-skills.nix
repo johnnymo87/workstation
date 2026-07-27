@@ -16,6 +16,7 @@ let
   crossPlatformSkills = [
     "adding-opencode-skills"
     "ask-question"
+    "attributing-causes"
     "beads"
     "formatting-slack-messages"
     "migrating-beads-schema"
