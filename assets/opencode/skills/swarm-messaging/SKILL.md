@@ -117,10 +117,21 @@ Messages always come back in chronological (oldest-first) order regardless of pa
 - The receiver can confirm by calling `swarm_read` and seeing your message.
 - To check delivery to *another* session from the outside, inspect its inbox:
 
-  ```bash
-  curl -sf "${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}/swarm/inbox?session=$TARGET_SESSION_ID&limit=5" \
-    | jq '.messages[] | {msg_id, handed_off_at, payload: (.payload | .[0:80])}'
-  ```
+    ```bash
+    # The daemon requires a bearer on every route except GET /health. The secret is
+    # dev-readable (owner=dev), so no sudo. On a host without the token file the
+    # daemon runs unauthenticated and the header is simply unnecessary.
+    AUTH=(); [ -r /run/secrets/pigeon_daemon_auth_token ] && \
+      AUTH=(-H "Authorization: Bearer $(cat /run/secrets/pigeon_daemon_auth_token)")
+
+    curl -sf "${AUTH[@]}" \
+      "${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}/swarm/inbox?session=$TARGET_SESSION_ID&limit=5" \
+      | jq '.messages[] | {msg_id, handed_off_at, payload: (.payload | .[0:80])}'
+    ```
+
+    A bare `401` here means *your curl* lacks the bearer, not that the daemon or
+    the swarm is down — check `GET /health` (deliberately anonymous) to separate
+    the two.
 
   `limit=N` returns the **newest** N messages (so `limit=5` shows the 5 most recent); the response also carries `has_more`, and you can add `&before=<msg_id>` to page further back. A non-null `handed_off_at` (Unix ms) means the arbiter POSTed `prompt_async` and the receiving serve returned 2xx — treat it as proof-of-delivery.
 
