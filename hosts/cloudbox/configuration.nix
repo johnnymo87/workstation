@@ -1712,6 +1712,29 @@ EOF
         # back to UTC under systemd.
         "CFP_TZ=America/New_York"
         "CFP_STATE_PATH=/var/lib/claude-failover-proxy/spend.json"
+        # Per-request event log (cfp >= v0.9.0). MUST be set explicitly: cfp
+        # ships this DISABLED (empty path => off) and deliberately does NOT
+        # default it to a sibling of CFP_STATE_PATH the way stats.json and
+        # history.jsonl do, because the file records RAW session ids. Without
+        # this line the instrumentation is inert and we silently collect
+        # nothing — which is the failure mode it exists to eliminate.
+        #
+        # Why we want it: /stats and history.jsonl are daily AGGREGATES and
+        # cannot answer (a) the real session idle-gap distribution, so
+        # CFP_IDLE_MIGRATE_SECONDS above stays an unvalidated guess, (b) how
+        # much spend accrues to sessions already pinned to a tier after it
+        # crossed budget, or (c) a counterfactual cap replay. Two JSONL events
+        # per request (route + usage) joined by requestId answer all three.
+        #
+        # Volume: ~2.5 MB/day at peak observed traffic, ~75 MB at 30-day
+        # retention, in the same StateDirectory as the spend ledger.
+        "CFP_EVENTS_PATH=/var/lib/claude-failover-proxy/events.jsonl"
+        # 30 days, not the tempting 14: the clean 3-account baseline only
+        # restarts 2026-07-26, and 14 would age it out before release lag plus
+        # weeks of collection plus analysis could consume it. This is also the
+        # cfp default, set explicitly so a future default change can't quietly
+        # shorten the window.
+        "CFP_EVENTS_RETENTION_DAYS=30"
         # Enterprise failover tier (opt-in). CFP_ENTERPRISE_API_KEY is exported
         # from the sops secret in the shim below (RAW value, see note). The
         # enterprise spend ledger defaults to spend-enterprise.json beside
