@@ -64,13 +64,21 @@ describe('loadConfig', () => {
     process.env.OPENCODE_SERVER_PASSWORD = '';
     expect(loadConfig().serveAuthHeader).toBeUndefined();
 
-    // Password set, username unset => default username 'opencode'
-    process.env.OPENCODE_SERVER_PASSWORD = 'mysecretpassword';
+    // Whitespace-only password => undefined (empty-after-trim)
+    process.env.OPENCODE_SERVER_PASSWORD = '   \n\t  ';
+    expect(loadConfig().serveAuthHeader).toBeUndefined();
+
+    // Password set (with surrounding whitespace to trim), username unset => default username 'opencode'
+    process.env.OPENCODE_SERVER_PASSWORD = '  mysecretpassword  \n';
     expect(loadConfig().serveAuthHeader).toBe(`Basic ${Buffer.from('opencode:mysecretpassword').toString('base64')}`);
 
-    // Password set, username set
-    process.env.OPENCODE_SERVER_USERNAME = 'customuser';
+    // Password set, username set (with surrounding whitespace)
+    process.env.OPENCODE_SERVER_USERNAME = '  customuser  \t';
     expect(loadConfig().serveAuthHeader).toBe(`Basic ${Buffer.from('customuser:mysecretpassword').toString('base64')}`);
+
+    // Password set, username set to all-whitespace => falls back to 'opencode'
+    process.env.OPENCODE_SERVER_USERNAME = '   \n\t  ';
+    expect(loadConfig().serveAuthHeader).toBe(`Basic ${Buffer.from('opencode:mysecretpassword').toString('base64')}`);
   });
 
   test('should override default values with valid environment variables', () => {

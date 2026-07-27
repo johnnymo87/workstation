@@ -129,8 +129,8 @@ rm -rf ~/.cache/opencode/packages/<scope>/<name>@*
 sudo systemctl restart opencode-serve.service
 
 # 4. Trigger a request to repopulate cache (any request that uses the plugin)
-SID=$(curl -s -X POST http://127.0.0.1:4096/session | jq -r '.id')
-curl -s -X POST "http://127.0.0.1:4096/session/$SID/message" \
+SID=$(curl -s -X POST http://127.0.0.1:4700/session | jq -r '.id')
+curl -s -X POST "http://127.0.0.1:4700/session/$SID/message" \
   -H 'Content-Type: application/json' \
   -d '{"providerID":"anthropic","modelID":"claude-opus-4-7","parts":[{"type":"text","text":"ping"}]}'
 
