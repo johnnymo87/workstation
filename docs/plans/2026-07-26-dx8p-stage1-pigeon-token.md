@@ -246,11 +246,63 @@ unit and restarting pigeon restores anonymous service immediately** — no rever
 of the client changes needed, since every client's header is a harmless no-op
 when unauthenticated service resumes.
 
-## Deploy
+## Deploy — operator runbook
 
-`nixos-rebuild switch --flake .#cloudbox`. Pigeon restarts itself (no
-`restartIfChanged = false`). **Door and serves deliberately do NOT need
-restarting** — that is the whole point of the call-time read.
+Code for Tasks 1–5, 6(nix) and 8 has **landed**. What remains needs root, which
+an opencode session on this box does not have: `/var/lib/sops-age-key.txt` is
+root-only and `sudo` is unusable from the agent's shell (*"must be owned by uid 0
+and have the setuid bit set"*). So steps 1–2 are the operator's.
+
+> **The next `nixos-rebuild` fails until step 1 is done.**
+> `sops.secrets.pigeon_daemon_auth_token` is already declared, so sops-nix will
+> try to decrypt a key that is not in `secrets/cloudbox.yaml` yet. Loud and
+> immediately diagnosable, but do step 1 first.
+
+**Step 1 — mint the secret** (in the repo root):
+
+```bash
+TOKEN="$(openssl rand -hex 32)"
+sudo nix-shell -p sops --run \
+  "SOPS_AGE_KEY_FILE=/var/lib/sops-age-key.txt sops set secrets/cloudbox.yaml \
+   '[\"pigeon_daemon_auth_token\"]' '\"$TOKEN\"'"
+git add secrets/cloudbox.yaml && git commit -m "feat(dx8p): add pigeon_daemon_auth_token"
+```
+
+**Step 2 — deploy:**
+
+```bash
+sudo nixos-rebuild switch --flake .#cloudbox
+ls -lat ~/.local/state/nix/profiles/ | head -3   # confirm by TIMESTAMP, not by the command appearing to run
+```
+
+Pigeon restarts itself (it has no `restartIfChanged = false`). **The door and the
+four serves deliberately do NOT need restarting** — that is the entire point of
+the call-time read, and it is what keeps ~20 live SSE legs intact.
+
+**Step 3 — verify** (the guard does most of this):
+
+```bash
+bash users/dev/test-pigeon-auth-canary.sh      # must go GREEN; it is RED today by design
+journalctl -u pigeon-daemon -n 20 | grep 'auth:'   # expect "auth: enabled"
+```
+
+Then walk the Verification list below. Give particular attention to #4
+(`swarm_read`, the tool that had no header at all until today) and #6 (lgtm,
+whose timer fires every 10 minutes so a regression shows up fast).
+
+**Step 4 — Task 7, the phantom route.** Now that `POST /place` is authenticated
+the phantom cannot be recreated, so clean it up last. Preferred mechanism is the
+daemon's own authenticated `DELETE /sessions/<id>` (`app.ts:575`) rather than a
+sqlite write against pigeon's live WAL:
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $(sudo cat /run/secrets/pigeon_daemon_auth_token)" \
+  'http://127.0.0.1:4731/sessions/ses_0000000000000000000000000'
+curl -s -H "Authorization: Bearer ..." ':4731/route?session_id=ses_0000000000000000000000000'  # expect gone
+```
+
+**Rollback** is step 2 of the Rollback section: delete the one `export` line from
+pigeon's unit, rebuild, restart pigeon.
 
 **Confirm by generation timestamp, not by the command appearing to run:**
 `ls -lat ~/.local/state/nix/profiles/`.
