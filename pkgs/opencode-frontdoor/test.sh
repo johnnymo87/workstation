@@ -70,6 +70,9 @@ SERVE_ENV_SCRUB=(
   -u OPENCODE_HEARTBEAT_INTERVAL_MS
   -u OPENCODE_DISABLE_CHANNEL_DB       # set in sessions; changes serve behavior => non-hermetic
   -u OPENCODE_SESSION_ID               # a throwaway serve has no business inheriting a session id
+  -u OPENCODE_SERVER_PASSWORD          # throwaway serve must never inherit production auth
+  -u OPENCODE_SERVER_USERNAME
+  -u OPENCODE_SERVER_PASSWORD_FILE
 )
 # NOTE on method (this list is a DENYLIST and denylists cannot self-certify):
 # registration requires BOTH OPENCODE_ROUTING_DB and OPENCODE_SERVE_ID, so for the

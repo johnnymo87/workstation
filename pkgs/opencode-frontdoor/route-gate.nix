@@ -41,9 +41,11 @@ stdenv.mkDerivation {
     # cannot happen here — but the failure mode is catastrophic (76 wedged sessions
     # on 2026-07-25) and the guard costs one line, so it is not left implicit.
     echo "Booting pinned opencode serve on loopback port $PORT..."
+    # A throwaway serve must never inherit production auth credentials.
     env -u OPENCODE_SERVE_ID -u OPENCODE_ROUTING_DB -u OPENCODE_DB \
         -u OPENCODE_WORKSPACE_ID -u OPENCODE_EXPERIMENTAL_WORKSPACES \
         -u OPENCODE_HEARTBEAT_INTERVAL_MS \
+        -u OPENCODE_SERVER_PASSWORD -u OPENCODE_SERVER_USERNAME -u OPENCODE_SERVER_PASSWORD_FILE \
       ${opencodePatched}/bin/opencode serve --port $PORT --hostname 127.0.0.1 < /dev/null > "$SERVE_LOG" 2>&1 &
     SERVE_PID=$!
 

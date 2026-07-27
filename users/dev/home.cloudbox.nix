@@ -4,7 +4,7 @@
 # Closely mirrors home.devbox.nix but without:
 #   - /persist volume checks (GCP uses single persistent boot disk)
 # And uses #cloudbox for the pull-workstation HM flake target.
-{ config, pkgs, lib, projects, isCloudbox, ... }:
+{ config, pkgs, lib, localPkgs, projects, isCloudbox, ... }:
 
 let
   # Serve-pool descriptor: the SAME single source of truth the serve units and
@@ -37,6 +37,9 @@ let
     name = "opencode-pool-auth";
     runtimeInputs = [ pkgs.curl pkgs.jq ];
     text = ''
+      source "${localPkgs.opencode-serve-auth-sh}"
+      serve_auth_load
+
       ANCHOR="${anchorUrl}"
       ALL_ENDPOINTS=(${allEndpoints})
 
@@ -133,12 +136,17 @@ let
 
       # --- Step 1: write ONCE ---------------------------------------------
       if [ "$ACTION" = "set" ]; then
-        CODE=$(printf '%s' "$PAYLOAD" | curl -sS -o /dev/null -w '%{http_code}'           -X PUT "$ANCHOR/auth/$PROVIDER"           -H 'Content-Type: application/json' --data-binary @-) || {
+        CODE=$(printf '%s' "$PAYLOAD" | curl -sS -o /dev/null -w '%{http_code}' \
+          ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+          -X PUT "$ANCHOR/auth/$PROVIDER" \
+          -H 'Content-Type: application/json' --data-binary @-) || {
             echo "opencode-pool-auth: write to $ANCHOR failed (curl error); pool unchanged." >&2
             exit 1
           }
       else
-        CODE=$(curl -sS -o /dev/null -w '%{http_code}'           -X DELETE "$ANCHOR/auth/$PROVIDER") || {
+        CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+          ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+          -X DELETE "$ANCHOR/auth/$PROVIDER") || {
             echo "opencode-pool-auth: delete on $ANCHOR failed (curl error); pool unchanged." >&2
             exit 1
           }
@@ -159,7 +167,9 @@ let
       # credential, so report it loudly rather than exiting on the first error.
       FAILED=()
       for ep in "''${ALL_ENDPOINTS[@]}"; do
-        DCODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 120           -X POST "$ep/global/dispose" || echo "000")
+        DCODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 120 \
+          ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+          -X POST "$ep/global/dispose" || echo "000")
         case "$DCODE" in
           2*) echo "disposed $ep ($DCODE)" >&2 ;;
           *)  echo "DISPOSE FAILED $ep (HTTP $DCODE)" >&2; FAILED+=("$ep") ;;

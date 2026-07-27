@@ -73,6 +73,7 @@
       # against the real pin; `pkgs/opencode-frontdoor/test.sh` runs the same
       # check on demand.
       opencode-launch = p.callPackage ./pkgs/opencode-launch { };
+      opencode-serve-auth-sh = p.callPackage ./pkgs/opencode-serve-auth-sh { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
       teamclaude = p.callPackage ./pkgs/teamclaude { };
