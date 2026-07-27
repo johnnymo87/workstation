@@ -8,6 +8,13 @@ set -euo pipefail
 MUTATE=false
 BASE="http://127.0.0.1:4096"
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../../.." && pwd)"
+if [ -f "$repo_root/pkgs/opencode-serve-auth-sh/opencode-serve-auth.sh" ]; then
+  source "$repo_root/pkgs/opencode-serve-auth-sh/opencode-serve-auth.sh"
+  serve_auth_load
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mutate)
@@ -32,8 +39,8 @@ BASE="${BASE%/}"
 
 # Fetch an active session ID if available, otherwise use a placeholder
 SID=""
-if curl -sS --connect-timeout 2 "${BASE}/session" > /dev/null; then
-  SID=$(curl -sS --connect-timeout 2 "${BASE}/session" | jq -r '.[0].id // empty' 2>/dev/null || true)
+if curl ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} -sS --connect-timeout 2 "${BASE}/session" > /dev/null; then
+  SID=$(curl ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} -sS --connect-timeout 2 "${BASE}/session" | jq -r '.[0].id // empty' 2>/dev/null || true)
 fi
 
 if [ -z "$SID" ]; then
@@ -63,6 +70,9 @@ probe() {
   local real_path="${path//\{sessionID\}/$SID}"
   local url="${BASE}${real_path}"
   local curl_opts=("-s" "-S")
+  if [ "${#SERVE_AUTH_CURL_ARGS[@]}" -gt 0 ]; then
+    curl_opts+=("${SERVE_AUTH_CURL_ARGS[@]}")
+  fi
 
   if [ "$is_stream" = "true" ]; then
     curl_opts+=("-N" "--max-time" "3")

@@ -1,4 +1,4 @@
-{ pkgs }:
+{ pkgs, opencode-serve-auth-sh ? pkgs.callPackage ../opencode-serve-auth-sh { } }:
 
 pkgs.writeShellApplication {
   name = "opencode-launch";
@@ -13,6 +13,9 @@ pkgs.writeShellApplication {
   # with a loud `command -v` guard.)
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.git pkgs.coreutils ];
   text = ''
+      source "${opencode-serve-auth-sh}"
+      serve_auth_load
+
       OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
       FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
 
@@ -422,8 +425,8 @@ pkgs.writeShellApplication {
           if [ "$connect_code" = "503" ]; then
             echo "Note: MCP connect via front door got 503 (pigeon down); retrying direct against $serve_url" >&2
             # frontdoor-exempt(C8): fires ONLY on a door 503 (pigeon down); without it every --mcp launch dies at connect
-            connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
-              --max-time 20 \
+            connect_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+              ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
               -X POST "$serve_url/mcp/$srv/connect" \
               -H "x-opencode-directory: $directory")
           fi
@@ -471,7 +474,9 @@ pkgs.writeShellApplication {
         -d "$prompt_payload" >/dev/null; then
         echo "Note: prompt via front door failed; retrying directly against $serve_url" >&2
         # frontdoor-exempt(C7): post-door-failure degrade ONLY; fires after the FRONTDOOR_URL prompt above fails
-        curl -sf --max-time 30 -X POST "$serve_url/session/$session_id/prompt_async" \
+        curl -sf --max-time 30 \
+          ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+          -X POST "$serve_url/session/$session_id/prompt_async" \
           -H "x-opencode-directory: $directory" \
           -H "Content-Type: application/json" \
           -d "$prompt_payload" >/dev/null || {

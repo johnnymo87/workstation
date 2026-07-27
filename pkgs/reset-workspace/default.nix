@@ -1,4 +1,4 @@
-{ pkgs }:
+{ pkgs, opencode-serve-auth-sh ? pkgs.callPackage ../opencode-serve-auth-sh { } }:
 
 pkgs.writeShellApplication {
   name = "reset-workspace";
@@ -19,6 +19,9 @@ pkgs.writeShellApplication {
     # docs/plans/2026-04-24-reset-workspace-design.md
     #
     # --yes  Skip the confirmation prompt (used by the nightly systemd unit).
+
+    source "${opencode-serve-auth-sh}"
+    serve_auth_load
 
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
     FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
@@ -488,7 +491,9 @@ EOF
       mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")
       for u in "''${capture_pool_urls[@]}"; do
         # frontdoor-exempt(C5): per-serve liveness; the door deliberately hides WHICH member answered
-        if curl -sf --max-time 3 --connect-timeout 3 "$u/global/health" >/dev/null 2>&1; then
+        if curl -sf --max-time 3 --connect-timeout 3 \
+          ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+          "$u/global/health" >/dev/null 2>&1; then
           SERVE_HEALTHY=1
           [ -z "$CAPTURE_FALLBACK" ] && CAPTURE_FALLBACK="$u"
           log "capture: bare-TUI sids via the front door ($FRONTDOOR_URL); direct fallback $u"
@@ -615,7 +620,9 @@ EOF
         # member the gate found, so a partial-pool wedge can't silently drop this
         # sid from the morning manifest.
         if [ -z "$resolved_sid" ] && [ -n "$CAPTURE_FALLBACK" ] && [ "$CAPTURE_FALLBACK" != "$CAPTURE_URL" ]; then
-          resolved_sid=$(curl -fsS --max-time 5 --connect-timeout 3 --get "$CAPTURE_FALLBACK/session" \
+          resolved_sid=$(curl -fsS --max-time 5 --connect-timeout 3 \
+            ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+            --get "$CAPTURE_FALLBACK/session" \
             --data-urlencode "directory=$cwd" \
             --data-urlencode "roots=true" \
             --data-urlencode "limit=1" 2>/dev/null \
@@ -821,7 +828,9 @@ EOF
       still=()
       for u in "''${pending[@]}"; do
         # frontdoor-exempt(C5): per-serve readiness after restart; must confirm every member, not one
-        if curl -sf --max-time 3 "$u/global/health" >/dev/null 2>&1; then
+        if curl -sf --max-time 3 \
+          ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+          "$u/global/health" >/dev/null 2>&1; then
           log "  serve healthy: $u"
         else
           still+=("$u")
@@ -862,7 +871,9 @@ EOF
           still=()
           for u in "''${pending[@]}"; do
             # frontdoor-exempt(C5): per-serve readiness after restart; must confirm every member, not one
-            if curl -sf --max-time 3 "$u/global/health" >/dev/null 2>&1; then
+            if curl -sf --max-time 3 \
+              ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+              "$u/global/health" >/dev/null 2>&1; then
               log "  serve healthy: $u"
             else
               still+=("$u")
