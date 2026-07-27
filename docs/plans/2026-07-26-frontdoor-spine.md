@@ -257,6 +257,47 @@ disabled auth entirely while every file, unit and doc said it was configured —
 Caught only because the verification decrypted and checked the *length* rather
 than asserting the command exited 0. **Verify the artifact, not the exit code.**
 
+**(e) THE BOOTSTRAP ERROR — the only one that caused a production incident,
+2026-07-26.** dx8p Stage 1 was designed so that clients resolve the pigeon token
+*at call time*, and I concluded — in the plan, in the commit messages, in the
+runbook, and to the user — **"no pool bounce, no door restart, no dropped SSE
+legs."**
+
+That is true in steady state and **false for the deploy that introduces it.**
+Call-time resolution only helps a process *already running the call-time code*.
+That code shipped in the same rebuild. The door is `restartIfChanged = false`, so
+`nixos-rebuild` installed the new build and left the **old** process running —
+which sent no bearer, got 401ed by a freshly-armed pigeon, classified it
+`pigeon-error`, and **503ed every mutating request** (`proxy.ts:743`). Typed
+prompts failed across the live TUIs until a human restarted the door.
+
+The serves have the identical shape and are still broken as I write this: they
+started 16:21, the plugin's token support landed 22:01, opencode `import`s the
+plugin once per process with no cache-bust, so `swarm_send`/`swarm_read` and every
+`daemon-client` notification 401s until the pool restarts.
+
+**What makes this the worst entry on this list:** `adversarial-reviewer-fable`
+*told me*. Its B2 said the pool bounce "is the actual gating event" and
+prescribed staged arming — clients first, bounce, verify, then arm pigeon. I
+replaced that with the call-time mechanism and **dropped the staging along with
+it**, treating a fix for the ongoing constraint as a fix for the bootstrap. I
+then offered the user three options, mischaracterised the tradeoff, and the option
+I talked them out of — *"Both — fallback now, staged anyway"* — was the correct
+one. **A decision made on a faulty premise is mine, not theirs.**
+
+> **The rule: a mechanism that removes a deployment constraint cannot remove it
+> for the deployment that introduces the mechanism.** Any "this makes restarts
+> unnecessary" claim must be read as "…starting with the deployment *after* this
+> one." Ask: *which processes are running the old code at the moment the switch
+> flips?*
+
+**(f) Same deploy: the runbook said `nixos-rebuild` and omitted `home-manager
+switch`.** `opencode-launch` and `oc-auto-attach` are home-manager packages, so
+after the operator's rebuild they still had no token support at all. §5 of *this
+file* records the correct split, and I had personally deployed `opencode-launch`
+via home-manager earlier the same day. Knowing a fact, and applying it to your own
+instructions, are different acts.
+
 **The rules that follow:**
 
 1. *Configured ≠ running* applies to **prose asserting system state**, not just

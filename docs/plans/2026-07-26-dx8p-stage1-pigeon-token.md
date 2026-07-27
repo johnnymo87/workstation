@@ -273,9 +273,38 @@ sudo nixos-rebuild switch --flake .#cloudbox
 ls -lat ~/.local/state/nix/profiles/ | head -3   # confirm by TIMESTAMP, not by the command appearing to run
 ```
 
-Pigeon restarts itself (no `restartIfChanged = false`). **The door and the four
-serves deliberately do NOT need restarting** — that is the whole point of the
-call-time read, and it is what keeps ~20 live SSE legs intact.
+**CORRECTED 2026-07-26 after this broke in production.** The line that used to
+sit here — *"the door and the four serves deliberately do NOT need restarting"* —
+was **wrong**, and following it caused an incident. See spine §7(e).
+
+Call-time resolution only helps a process **already running the call-time code**,
+and that code ships in this same rebuild. The door and the serves are
+`restartIfChanged = false`, so they keep running the OLD build, send no bearer,
+and get 401ed by a freshly-armed pigeon. For the door that means
+`resolveOwner` → `pigeon-error` → **503 on every mutating request**, i.e. typed
+prompts failing across live TUIs.
+
+The correct sequence is therefore:
+
+```bash
+sudo nixos-rebuild switch --flake .#cloudbox     # units, secret, door + pigeon packages
+nix run home-manager -- switch --flake .#cloudbox # REQUIRED: opencode-launch and
+                                                  # oc-auto-attach are home-manager
+                                                  # packages, NOT NixOS ones
+sudo systemctl restart opencode-frontdoor.service # REQUIRED: restartIfChanged=false
+                                                  # means it is still on the old build
+ls -lat ~/.local/state/nix/profiles/ | head -3    # confirm by TIMESTAMP
+```
+
+**The serve pool also needs a restart** (`opencode-serve-pool.target`) before
+`swarm_send`/`swarm_read` and the daemon-client notifications work — opencode
+`import`s the plugin once per process with no cache-bust, so a serve started
+before the plugin commit runs pre-token code no matter what the file says.
+That bounce kills in-flight turns, so it is a deliberate choice: do it, or let
+the 03:00 nightly reset absorb it. **Until then, swarm messaging and Telegram
+question/stop notifications are silently dead.**
+
+Only the door restart is *urgent* — that one is a live 503.
 
 **Step 3 — verify:**
 
