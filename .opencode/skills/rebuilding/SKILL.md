@@ -142,6 +142,37 @@ readlink -f /home/dev/.nix-profile/bin/opencode                               # 
 ```
 Mismatched `/nix/store/<hash>-...` prefixes indicate stale serve processes requiring a pool restart (`sudo systemctl restart opencode-serve-pool.target`).
 
+## Verifying a Nix-Built Script Before You Deploy It
+
+Canaries, alert helpers, and activation scripts are shell embedded in Nix (`pkgs.writeShellScript`, `''…''` strings). Nix transforms that text before it ever runs, and **the source reads correctly while the built artifact is broken**. Reasoning about the source is not verification.
+
+**Rule: test the built artifact against real recorded input.** For a canary, that means replaying an actual incident timeline, not one synthetic call.
+
+This caught a live near-miss on 2026-07-27. A fix for the alert-escalation bug read its retry counter with `sed -n 2p`, but the script pins `PATH` to coreutils+curl+jq and **`sed` is not in coreutils**. It failed silently, the counter stayed pinned at 1, and the backoff degraded to a flat 15-minute nag with no severity escalation — **51 pages instead of 7**, for a change whose entire purpose was fixing notification. It would have shipped looking correct, with a busy alert stream as its "evidence". Replaying all 760 passes of the real incident against the built script is the only thing that exposed it.
+
+### The procedure
+
+1. **Build, don't switch.** `nix build --no-link --print-out-paths '.#nixosConfigurations.<host>.config.system.build.toplevel'`. Use `--no-link` so no `result` symlink lands in a shared worktree. This also proves the config evaluates.
+2. **Derive the artifact from the unit that uses it** — never from a store glob:
+   ```bash
+   CANARY=$(rg -o '/nix/store/[a-z0-9]+-<name>-canary' "$TOP/etc/systemd/system/<name>-canary.service" | head -1)
+   REAL=$(rg -o '/nix/store/[a-z0-9]+-<script>' "$CANARY" | head -1)
+   ```
+   `ls /nix/store/*-<script> | tail -1` sorts by **hash, not build time**. There were four `opencode-drift-alert` derivations in the store; the glob picked a stale one and the test "proved" the wrong thing. Same failure shape as measuring the wrong port: a plausible stand-in accepted in place of derivation.
+3. **Confirm the artifact contains your change** before trusting any result (`rg -c '<new symbol>' "$REAL"`). A passing test on the old artifact is worse than no test.
+4. **Patch exactly one line to make it testable, and prove it.** These scripts hardcode `export PATH=…`, so a stub binary cannot be injected via the environment. Prepend a stub dir to that one line and `diff` against the real artifact — if the diff is more than that line, the logic under test is no longer the logic that deploys.
+5. **Simulate time via state-file mtime**, not a faked clock: `touch`/`os.utime` the state file backwards and let the script compute its own ages.
+
+### Nix `''` string traps
+
+- A **bare `''` inside the script** terminates the Nix string. A shell comment reading `# the Nix '' string` is a syntax error at eval time. Write `''\''` or reword.
+- A **column-0 line** inside a `''` string drops common-indentation stripping for the *entire* script (minimum indent becomes 0). Harmless to bash, but it silently reshapes the output and breaks anchored matching like `sed 's|^export PATH=|…|'`. Build multi-line message bodies with `printf '%s\n\n%s'` instead of embedding a literal flush-left line.
+- Shell vars need `''${VAR}`; a plain `${VAR}` is Nix interpolation and will fail to evaluate or silently splice.
+
+### Deploy note
+
+Timer-driven canaries pick up a new script on their **next pass** — no service restart, unlike the `restartIfChanged = false` services above. Know which of the two you are shipping before you write the deploy instructions.
+
 ## Pulling and Applying Updates
 
 When fetching remote changes and applying them:
