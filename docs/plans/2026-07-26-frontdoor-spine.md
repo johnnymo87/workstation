@@ -131,10 +131,31 @@ inside the ns.
 | Serves under a different uid | Only thing that restores OS credentials, but shatters shared state: routing sqlite (WAL, multi-uid), `~/.local/share/opencode`, `auth.json`. Cost ≫ benefit. |
 | Pigeon token *alone* as the end state | Incomplete twice: the `auth.ts` `/sessions` gap, and open serve ports bypass pigeon entirely. It's Stage 1, not done. |
 
-**Refuted oracle claim (checked, don't re-worry):** it warned Stage 1 might break
-`swarm_send` because the plugin client may not send the bearer. It does —
-`pigeon/packages/opencode-plugin/src/daemon-client.ts:105-106` and
-`swarm-send-tool.ts:268` both read `PIGEON_DAEMON_AUTH_TOKEN`.
+**~~Refuted oracle claim (checked, don't re-worry)~~ — THIS WAS FALSIFICATION #3,
+2026-07-26.** The claim was: the oracle warned Stage 1 might break swarm
+messaging because the plugin client may not send the bearer; "it does —
+`daemon-client.ts:105-106` and `swarm-send-tool.ts:268` both read
+`PIGEON_DAEMON_AUTH_TOKEN`."
+
+Both citations are true **and the conclusion was wrong**, because they are both
+`swarm_send`. **`swarm_read` sent no `Authorization` header at all** —
+`swarm-tool.ts`, deliberately, per
+`docs/plans/2026-06-23-swarm-send-tool-design.md:67`: *"This is why `swarm_read`
+(a GET on `/swarm/inbox`, not auth-protected) gets away without the header."*
+The oracle was right about a sibling we never checked. Had this stood, Stage 1
+would have broken `swarm_read` in every session on the box.
+
+The pattern, now three-for-three today: **check one member, generalise to the
+family.** §7's rules were written against `ss -tlnp | grep '878[0-9]'` and apply
+verbatim here. Fixed in `dx8p` Task 1; the header is now sent by all three
+clients, resolved at call time.
+
+A fourth instance, same day, same shape: the `dx8p` plan quoted
+`pigeon/packages/daemon/src/routing/README.md:99` while `:94-98` — the paragraph
+it was the last line of — said *"EVERY daemon client must send the bearer … any
+other daemon callers must be updated in the SAME change, or their requests will
+401."* That warning named the exact omission the plan then shipped (it missed
+lgtm and the whole serve pool). **Read the paragraph, not the line.**
 
 ## 4. Explicitly NOT the spine
 
