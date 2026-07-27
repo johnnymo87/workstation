@@ -61,10 +61,31 @@ happened in between, so it absorbed the blame.
 
 ### What it cost to skip the check
 
-A destructive production action was authorized against resources that a
-free read-only query would have shown no longer existed. The inventory in the
-report ("four, and growing") had been carried forward from memory rather than
-re-measured; the true count was one.
+A count of stale production resources was reported, relayed, and inherited
+without anyone re-measuring it. A destructive production action was authorized
+against that count. The free read-only sweep that would have grounded it ran
+*after* the deletes had already executed — and the stand-down, once the sweep
+landed, arrived too late to stop them.
+
+The outcome was benign: the deleted resources were genuinely stale and matched
+the intended recipe, and the one that did not match was correctly left alone.
+The failure was in the process, not the result. That is exactly why it is worth
+recording — a near-miss that is honestly described gets learned from, and one
+that is inflated gets discounted.
+
+**The sharpened rule: verification must precede authorization, not merely
+accompany it.** Once a destructive action has been authorized on an inherited
+number, a later correction is racing execution, and it can lose. *A retraction
+is not a control.* Treat "I'll double-check while that runs" as equivalent to
+not checking at all.
+
+There is a second, quieter lesson in the same episode. The sweep measured the
+count correctly — and then *guessed* at why it differed from the report
+("cleaned up, or the report was stale"), publishing the guess as a
+parenthetical. The real answer was that a peer had deleted two of them fifteen
+minutes earlier, which was knowable by asking. Measuring a number and then
+inventing the story for why it moved is this same failure one level up, and it
+is easy to commit while believing you are being rigorous.
 
 ## Rules
 
@@ -75,10 +96,15 @@ re-measured; the true count was one.
    teardown kills *local* processes; it does not reach remote state. "My client
    died" and "the remote resource died" are different claims with different
    blast radii, and conflating them sends investigations to the wrong system.
-3. **Re-measure any inherited count, age or inventory before acting on it.**
-   Numbers in a report are snapshots that decay silently. Size the problem off
-   a fresh query, never a remembered one — especially before a destructive
-   action.
+3. **Re-measure any inherited count, age or inventory *before authorizing* an
+   action on it — not in parallel with it.** Numbers in a report are snapshots
+   that decay silently, and a correction issued after authorization is racing
+   execution. Size the problem off a fresh query, never a remembered one. A
+   retraction is not a control.
+   And when the fresh number disagrees with the report, *measure the
+   discrepancy too* — ask who changed it, check the events — rather than
+   attaching a plausible story to it. A guessed explanation for a real
+   measurement is still a guess.
 4. **Correlation with a memorable event is the weakest possible evidence**,
    precisely because memorable events correlate with *everything*. Timestamp
    proximity is a prompt to measure, not a finding.
