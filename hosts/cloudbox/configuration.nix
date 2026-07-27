@@ -1327,11 +1327,13 @@ EOF
         # `healthy < roster length` is wrong, and would have paged daily forever:
         # an account the operator deliberately leaves un-logged-in stays in the
         # roster with status "error" and disabled=false, so the roster length
-        # never shrinks to match intent. As of 2026-07-26 the pool is 2 (johnnymo87
-        # is intentionally left off). BUMP THIS when the pool composition changes —
-        # the twice-monthly reminder below reports actual-vs-expected so a stale
-        # value surfaces on its own rather than silently under-alerting.
-        EXPECTED_HEALTHY=2
+        # never shrinks to match intent. BUMP THIS when the pool composition
+        # changes — the twice-monthly reminder below reports actual-vs-expected so
+        # a stale value surfaces on its own rather than silently under-alerting.
+        # 2026-07-26: briefly 2 (johnnymo87 removed as a sizing experiment), then
+        # back to 3 — the experiment is answered from the quota series below
+        # instead, which does not require running the pool short.
+        EXPECTED_HEALTHY=3
 
         # Only police a unit that is supposed to be up (mirrors the frontdoor
         # canary). An intentional stop must not page.
@@ -1479,7 +1481,7 @@ EOF
         STATE=/var/lib/teamclaude-pool-canary
         BODY="$STATE/last-status.json"
         # Keep in sync with EXPECTED_HEALTHY in teamclaude-pool-canary above.
-        EXPECTED_HEALTHY=2
+        EXPECTED_HEALTHY=3
 
         ROSTER="  (no recent status sample)"
         DRIFT=""
