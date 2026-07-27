@@ -37,11 +37,31 @@ Basic:      /global/health 200  /global/config 200  /session 200  /config 200
 ?auth_token=base64(user:pass):  200        wrong password: 401
 ```
 
-`authorizationRouterMiddleware` wraps the whole router (`httpapi/server.ts:117-120,164,176`);
-per-group `.middleware()` is a second layer. Because `global.ts` has no second
-layer, the 401 on `/global/health` comes solely from the router middleware — which
-is why the Option B patch is genuinely one entry in a public-path set
-(`public-ui.ts:4-12`, checked at `authorization.ts:107`).
+> **CORRECTED 2026-07-27 (this paragraph was wrong).** It previously claimed
+> "`authorizationRouterMiddleware` wraps the whole router
+> (`httpapi/server.ts:117-120,164,176`); ... the 401 on `/global/health` comes solely
+> from the router middleware — which is why the Option B patch is genuinely one entry
+> in a public-path set." **Those line numbers correspond to nothing in v1.17.13, and
+> the mechanism is false.** The measurement above (anonymous `/global/health` → 401)
+> was real; the mechanism was *inferred* to explain it, and both candidate mechanisms
+> predict a 401, so the measurement never discriminated between them.
+>
+> What actually happens, read end-to-end in a v1.17.13 worktree:
+> - `/global/health` is an HttpApi endpoint (`groups/global.ts:66,76`) reached via
+>   `RootHttpApi`, which applies `.middleware(Authorization)` **at the API level**
+>   (`httpapi/api.ts:54-59`). `global.ts` having no per-group `.middleware()` is
+>   irrelevant — it inherits the API-level one.
+> - That middleware is `authorizationLayer` (`authorization.ts:118-132`), which
+>   **never calls `isPublicUIPath`**.
+> - `isPublicUIPath`/`PUBLIC_UI_PATHS` is consulted **only** by
+>   `authorizationRouterMiddleware` (`authorization.ts:101-116`), which
+>   `httpapi/server.ts` applies **only** to the `/doc` route (`:191`) and the UI
+>   catch-all `/*` (`:203`). `rootApiRoutes` gets `httpApiAuthLayer` (`:144`).
+>
+> Therefore **adding `/global/health` to `PUBLIC_UI_PATHS` is a no-op.** `/api/health`
+> is not an alternative either: `protocol/src/api.ts:63` applies `Authorization` to
+> the whole v2 surface, and its only bypass is the PTY-connect ticket. **When armed, a
+> serve has no anonymous health endpoint at all.**
 
 ### Where the bead's file-fallback advice does not apply
 
@@ -51,7 +71,7 @@ systemd `EnvironmentFile=`. Two traps: sops-nix writes raw values but
 `/run/secrets/<name>`; and an **empty** password fails `required()` and silently
 disables auth (`auth.ts:25`) — every file says "armed" while nothing is.
 
-## 1. Decision: keep `/global/health` anonymous (Option B)
+## 1. Decision: ~~keep `/global/health` anonymous (Option B)~~ → credential the probes and grade the status (shipped)
 
 - **A — zero patches, credentialed canaries.** Rejected: couples alerting to
   credential distribution *and* deploy ordering, for no benefit.
@@ -60,12 +80,43 @@ disables auth (`auth.ts:25`) — every file says "armed" while nothing is.
   (alarm), 401 ⇒ up and armed, refused ⇒ down. Elegant, zero patches, and makes every
   probe assert the invariant.
 
-**Ship B.** Not on the monitoring-independence argument alone (which is real but not
-unique to B) — the deciding reason is that B leaves all five probe sites
-byte-identical, whereas C requires editing a five-member family of `curl -sf` probes
-(`reset-workspace/default.nix:491,824,865`, canary `configuration.nix:1879`, door
-`healthz.ts:19`), and fumbling exactly that kind of multi-site change is this
-project's dominant failure mode. Rank: B ≥ C ≫ A.
+~~**Ship B.**~~ **SUPERSEDED 2026-07-27 — B is impossible; shipped a variant of C
+(PR #213, `8c7dfb84`).**
+
+The original argument for B was that it "leaves all five probe sites byte-identical",
+whereas C meant editing a five-member family of `curl -sf` probes. Both halves of that
+comparison turned out to be false:
+
+- **B's cost was understated.** Per the correction above, the one-line patch does
+  nothing. A *working* B must patch `authorizationLayer` — the single guard on every
+  route of both API surfaces — plus a release cut, 4 platform hash bumps, and a full
+  binary rollout. It stops being the byte-identical option, which was its entire
+  selling point.
+- **C's cost was overstated by the time we got here.** Of the five sites, three
+  (`reset-workspace` ×3) and the door (`healthz.ts`, `health.ts`) had already been
+  credentialed by the client PRs. The real remaining surface was **two** sites, both
+  in `hosts/cloudbox/configuration.nix`.
+
+**Shipped (call it F): graded liveness + credentials at those two sites.** Send the
+credential via the shared resolver, and classify the HTTP status instead of trusting
+`curl -f`: `000`/empty ⇒ dead (restart), `200` ⇒ healthy, `401` ⇒ alive + alarm, any
+other status ⇒ alive + log. This mirrors the `-w "%{http_code}"` idiom the door canary
+in the same file already uses.
+
+Why the storm risk was real and is now gone: `curl -sf` treats 401 as failure
+(verified against a live Basic-auth server), and the serve canary restarts after 7
+consecutive failures — so a missing secret would have restarted all four serves every
+~8 minutes indefinitely. Liveness now means "the event loop answered", not "the
+credential was right".
+
+Why this does not weaken wedge detection: the wedge mode presents as *no response* —
+auth runs inside the same single-threaded event loop, and the 2026-07-03 wedge failed
+to answer `/global/health` within the 3s probe at all
+(`docs/investigations/2026-07-03-serve-4096-wedge.md:43`). Also `/global/health` is a
+static constant (`handlers/global.ts:74-75`; no DB, no instance bootstrap), so the 200
+path never had much discriminating power to lose.
+
+Rank, corrected: **F ≫ A ≫ B** (B being unreachable at its advertised price).
 
 **Adopt C's best idea regardless:** the canary should alarm on an anonymous **200**
 on `/session`, making it a standing detector for the empty-password case above.
