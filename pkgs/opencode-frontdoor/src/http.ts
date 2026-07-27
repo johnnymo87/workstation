@@ -155,7 +155,7 @@ export async function boundedPigeonFetch(
   url: string,
   opts: BoundedPigeonFetchOptions,
 ): Promise<BoundedFetchResult> {
-  const token = resolveDaemonToken({ tokenFilePath: opts.tokenFilePath }) ?? opts.bearerToken;
+  const token = opts.bearerToken ?? resolveDaemonToken({ tokenFilePath: opts.tokenFilePath });
 
   const firstResult = await boundedFetch(url, {
     ...opts,
@@ -170,7 +170,7 @@ export async function boundedPigeonFetch(
   discardBody(firstResult.response);
   invalidateDaemonToken();
 
-  const newToken = resolveDaemonToken({ forceRefresh: true, tokenFilePath: opts.tokenFilePath }) ?? opts.bearerToken;
+  const newToken = opts.bearerToken ?? resolveDaemonToken({ forceRefresh: true, tokenFilePath: opts.tokenFilePath });
 
   return boundedFetch(url, {
     ...opts,

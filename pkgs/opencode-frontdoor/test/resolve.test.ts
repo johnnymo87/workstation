@@ -1,6 +1,7 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { resolveOwner } from '../src/resolve.js';
 import { clearRootCache } from '../src/parent.js';
+import { invalidateDaemonToken } from '../src/http.js';
 import type { Config } from '../src/config.js';
 
 describe('resolveOwner', () => {
@@ -20,6 +21,9 @@ describe('resolveOwner', () => {
 
   beforeEach(() => {
     clearRootCache();
+    delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+    process.env.PIGEON_DAEMON_AUTH_TOKEN_FILE = '/nonexistent';
+    invalidateDaemonToken();
   });
 
   test('active route (200, apiBase) -> url + reason "active", degraded false', async () => {
