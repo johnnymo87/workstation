@@ -1,11 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import * as fs from "node:fs"
-import plugin from "../shell-env"
+import plugin, { loadKubeconfigEnv, type KubeFS } from "../shell-env"
 
-// shell-env.ts reads sops secrets via fs.readFileSync(/run/secrets/<name>).
-// Mock that boundary so the secret-injection path is deterministic and
-// independent of the host the test runs on.
-vi.mock("node:fs", () => ({ readFileSync: vi.fn() }))
+// shell-env.ts reads sops secrets via fs.readFileSync(/run/secrets/<name>) and
+// creates per-session kubeconfig overlays.
+// Mock that boundary so tests are deterministic and independent of the host.
+vi.mock("node:fs", () => ({
+  readFileSync: vi.fn(),
+  existsSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(),
+  copyFileSync: vi.fn(),
+}))
 
 // Make fs.readFileSync resolve the given map (keyed by full /run/secrets path)
 // and throw (file absent) for anything else — mirroring a real missing file.
@@ -36,6 +42,10 @@ async function runHook(
 
 beforeEach(() => {
   vi.mocked(fs.readFileSync).mockReset()
+  vi.mocked(fs.existsSync).mockReset()
+  vi.mocked(fs.writeFileSync).mockReset()
+  vi.mocked(fs.mkdirSync).mockReset()
+  vi.mocked(fs.copyFileSync).mockReset()
 })
 
 describe("shell-env plugin: non-interactive + self-awareness", () => {
@@ -153,5 +163,156 @@ describe("shell-env plugin: sops secret injection", () => {
     expect(env.JENKINS_API_TOKEN).toBe("jenkins-token")
     expect(env).not.toHaveProperty("JENKINS_USER")
     expect(env).not.toHaveProperty("GH_TOKEN")
+  })
+})
+
+describe("shell-env plugin: per-session KUBECONFIG isolation", () => {
+  const validKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+  name: test-cluster
+`
+
+  function makeFakeFS(initialFiles: Record<string, string> = {}) {
+    const store = new Map<string, string>(Object.entries(initialFiles))
+    const createdDirs = new Set<string>()
+    const copies: Array<{ src: string; dest: string }> = []
+    const writes: Array<{ path: string; data: string }> = []
+
+    const sys: KubeFS = {
+      existsSync: (p: string) => store.has(p) || createdDirs.has(p),
+      readFileSync: (p: string) => {
+        const val = store.get(p)
+        if (val === undefined) throw new Error(`ENOENT: ${p}`)
+        return val
+      },
+      writeFileSync: (p: string, data: string) => {
+        writes.push({ path: p, data })
+        store.set(p, data)
+      },
+      mkdirSync: (p: string) => {
+        createdDirs.add(p)
+      },
+      copyFileSync: (src: string, dest: string) => {
+        copies.push({ src, dest })
+        const val = store.get(src)
+        if (val === undefined) throw new Error(`ENOENT: ${src}`)
+        store.set(dest, val)
+      },
+      getUid: () => 1000,
+      homedir: () => "/home/dev",
+    }
+
+    return { store, createdDirs, copies, writes, sys }
+  }
+
+  it("happy path: overlay absent -> created from shared, KUBECONFIG = overlay:shared", () => {
+    const { sys, copies, writes } = makeFakeFS({
+      "/home/dev/.kube/config": validKubeconfig,
+    })
+    const env = loadKubeconfigEnv("ses_abc", { XDG_RUNTIME_DIR: "/run/user/1000", HOME: "/home/dev" }, sys)
+
+    expect(env).toBe("/run/user/1000/opencode-kube/ses_abc.yaml:/home/dev/.kube/config")
+    expect(copies).toEqual([
+      {
+        src: "/home/dev/.kube/config",
+        dest: "/run/user/1000/opencode-kube/ses_abc.yaml",
+      },
+    ])
+    // README should also be created
+    expect(writes).toHaveLength(1)
+    expect(writes[0].path).toBe("/run/user/1000/opencode-kube/README")
+    expect(writes[0].data).toContain("Per-session KUBECONFIG overlays for OpenCode")
+  })
+
+  it("overlay already present and valid -> reused, no rewrite or recopy", () => {
+    const { sys, copies, writes } = makeFakeFS({
+      "/home/dev/.kube/config": validKubeconfig,
+      "/run/user/1000/opencode-kube/ses_abc.yaml": validKubeconfig,
+    })
+    const env = loadKubeconfigEnv("ses_abc", { XDG_RUNTIME_DIR: "/run/user/1000", HOME: "/home/dev" }, sys)
+
+    expect(env).toBe("/run/user/1000/opencode-kube/ses_abc.yaml:/home/dev/.kube/config")
+    expect(copies).toHaveLength(0)
+    expect(writes).toHaveLength(0)
+  })
+
+  it("overlay present but empty/corrupt -> regenerated from shared config", () => {
+    const { sys, copies } = makeFakeFS({
+      "/home/dev/.kube/config": validKubeconfig,
+      "/run/user/1000/opencode-kube/ses_abc.yaml": "corrupt or empty data",
+    })
+    const env = loadKubeconfigEnv("ses_abc", { XDG_RUNTIME_DIR: "/run/user/1000", HOME: "/home/dev" }, sys)
+
+    expect(env).toBe("/run/user/1000/opencode-kube/ses_abc.yaml:/home/dev/.kube/config")
+    expect(copies).toEqual([
+      {
+        src: "/home/dev/.kube/config",
+        dest: "/run/user/1000/opencode-kube/ses_abc.yaml",
+      },
+    ])
+  })
+
+  it("no sessionID -> no KUBECONFIG injected", () => {
+    const { sys } = makeFakeFS({
+      "/home/dev/.kube/config": validKubeconfig,
+    })
+    const env = loadKubeconfigEnv(undefined, { XDG_RUNTIME_DIR: "/run/user/1000", HOME: "/home/dev" }, sys)
+    expect(env).toBeUndefined()
+  })
+
+  it("no XDG_RUNTIME_DIR and no derivable runtime dir -> no KUBECONFIG injected", () => {
+    const { sys } = makeFakeFS({
+      "/home/dev/.kube/config": validKubeconfig,
+    })
+    sys.getUid = () => undefined
+    const env = loadKubeconfigEnv("ses_abc", { HOME: "/home/dev" }, sys)
+    expect(env).toBeUndefined()
+  })
+
+  it("falls back to /run/user/<uid> when XDG_RUNTIME_DIR is unset", () => {
+    const { sys, copies } = makeFakeFS({
+      "/home/dev/.kube/config": validKubeconfig,
+    })
+    const env = loadKubeconfigEnv("ses_abc", { HOME: "/home/dev" }, sys)
+    expect(env).toBe("/run/user/1000/opencode-kube/ses_abc.yaml:/home/dev/.kube/config")
+    expect(copies[0].dest).toBe("/run/user/1000/opencode-kube/ses_abc.yaml")
+  })
+
+  it("shared ~/.kube/config absent -> no KUBECONFIG injected", () => {
+    const { sys } = makeFakeFS({})
+    const env = loadKubeconfigEnv("ses_abc", { XDG_RUNTIME_DIR: "/run/user/1000", HOME: "/home/dev" }, sys)
+    expect(env).toBeUndefined()
+  })
+
+  it("fs throws (unwritable dir / copy fails) -> no KUBECONFIG injected, no exception escapes", () => {
+    const { sys } = makeFakeFS({
+      "/home/dev/.kube/config": validKubeconfig,
+    })
+    sys.copyFileSync = () => {
+      throw new Error("EACCES: permission denied")
+    }
+
+    expect(() => {
+      const env = loadKubeconfigEnv("ses_abc", { XDG_RUNTIME_DIR: "/run/user/1000", HOME: "/home/dev" }, sys)
+      expect(env).toBeUndefined()
+    }).not.toThrow()
+  })
+
+  it("fail-open guarantee: hook still sets other env vars (secrets, session ID, hostname) even when kube feature fails", async () => {
+    withSecrets({ "/run/secrets/jenkins_api_token": "jenkins-token" })
+    vi.mocked(fs.existsSync).mockImplementation(() => {
+      throw new Error("Disk error")
+    })
+
+    const env = await runHook({ sessionID: "ses_abc" })
+
+    expect(env.JENKINS_API_TOKEN).toBe("jenkins-token")
+    expect(env.OPENCODE_SESSION_ID).toBe("ses_abc")
+    expect(typeof env.OPENCODE_HOSTNAME).toBe("string")
+    expect(env.GIT_EDITOR).toBe(":")
+    expect(env).not.toHaveProperty("KUBECONFIG")
   })
 })
