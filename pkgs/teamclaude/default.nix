@@ -10,10 +10,15 @@
 # by model", #69 "rich status output"), so the fork was retired in favor of
 # upstream on 2026-07-06.
 #
-# Zero runtime dependencies (Node 18+ builtins only; verified: package.json has
-# no `dependencies`, and src/ has no bare imports). So packaging is just: fetch
-# the source, vendor it into the store, and wrap `src/index.js` with a pinned
-# node. No node_modules, no bundler.
+# Zero runtime dependencies (verified again at v1.1.9: package.json `dependencies`
+# is still {}, and src/ has no bare imports). So packaging is just: fetch the
+# source, vendor it into the store, and wrap `src/index.js` with a pinned node.
+# No node_modules, no bundler.
+#
+# NODE FLOOR: upstream raised `engines.node` to >=20 in v1.1.9 (#128 fixed a
+# Node-18 stream crash). The generic `nodejs` attr resolves to 22.x in our
+# pinned nixpkgs, so this is satisfied — but if that attr is ever pinned
+# downward, teamclaude breaks at runtime, not at build time.
 #
 # To bump: pick a newer tag from https://github.com/KarpelesLab/teamclaude/tags,
 # set `rev` to its commit SHA, bump `version`, and refresh `src.hash` via
@@ -29,13 +34,13 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.5"; # upstream tag; bump per pinned release
+  version = "1.1.9"; # upstream tag; bump per pinned release
 
   src = fetchFromGitHub {
     owner = "KarpelesLab";
     repo = "teamclaude";
-    rev = "ea6f6a97662569ec6a80fe3b1dd8ad043e828b5c"; # tag v1.1.5
-    hash = "sha256-QunIxhJ2Dn++YWM2Esozm7fbuJVQZilbtx3Ft6OzD60=";
+    rev = "7dfd47af62663f81c123a74463cc412675e84eb8"; # tag v1.1.9
+    hash = "sha256-2XKao3/1bD0T9ebVNl09OmpHdsd2gcX6oj4A91XfaYQ=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
