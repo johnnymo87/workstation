@@ -1,7 +1,7 @@
 import type { ServerResponse } from "node:http";
 import type { Config } from "./config.js";
 import type { Metrics } from "./metrics.js";
-import { boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
+import { boundedFetch, boundedPigeonFetch, stripTrailingSlashes, discardBody } from "./http.js";
 
 export function isHealthzRequest(method: string, pathname: string): boolean {
   if (method !== "GET" && method !== "HEAD") {
@@ -19,13 +19,15 @@ export async function handleHealthz(
   const anchorUrlClean = `${stripTrailingSlashes(config.anchorUrl)}/global/health`;
 
   const fetchImpl = deps?.fetch;
+  const tokenFilePath = deps?.tokenFilePath;
 
   const [pigeonRes, anchorRes] = await Promise.all([
-    boundedFetch(pigeonUrlClean, {
+    boundedPigeonFetch(pigeonUrlClean, {
       method: "GET",
       timeoutMs: config.routeTimeoutMs,
       bearerToken: config.pigeonAuthToken,
       fetchImpl,
+      tokenFilePath,
     }),
     boundedFetch(anchorUrlClean, {
       method: "GET",

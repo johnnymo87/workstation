@@ -126,16 +126,29 @@ let
     FULL_TEXT="[$(uname -n)] $TEXT"
     PAYLOAD=$(jq -n --arg txt "$FULL_TEXT" '{"text": $txt, "severity": "warning"}')
 
-    # Security / Architecture trap note for future readers (Phase 9 / roadmap item 9.2):
-    # If pigeon auth token (checkAuth) is ever enabled on /alert, unauthenticated POSTs
-    # will return 401 Unauthorized -> non-2xx -> silently swallowed here -> visible ONLY
-    # as journal WARNING. That would permanently restore the unread-journal gap.
-    # Any future grep-guard or auth-enablement for roadmap item 9.2 MUST include
-    # and update these canary callers (or grant /alert IP-exempt status on 127.0.0.1).
+    PIGEON_TOKEN="''${PIGEON_DAEMON_AUTH_TOKEN:-}"
+    PIGEON_TOKEN="$(printf '%s' "$PIGEON_TOKEN" | tr -d '[:space:]')"
+    if [ -z "$PIGEON_TOKEN" ]; then
+      TOKEN_FILE="''${PIGEON_DAEMON_AUTH_TOKEN_FILE:-/run/secrets/pigeon_daemon_auth_token}"
+      if [ -r "$TOKEN_FILE" ]; then
+        PIGEON_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null || true)"
+        PIGEON_TOKEN="$(printf '%s' "$PIGEON_TOKEN" | tr -d '[:space:]')"
+      fi
+    fi
+    AUTH_HEADER=()
+    if [ -n "$PIGEON_TOKEN" ]; then
+      AUTH_HEADER=(-H "Authorization: Bearer $PIGEON_TOKEN")
+    fi
+
+    # Security / Architecture note (roadmap item 9.2 / dx8p Stage 1):
+    # Call-time token resolution resolves PIGEON_DAEMON_AUTH_TOKEN / PIGEON_DAEMON_AUTH_TOKEN_FILE
+    # and sends Bearer auth if available. A 401 Unauthorized response indicates a misconfigured
+    # or missing token and is explicitly logged as an ERROR to stderr.
 
     HTTP_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 \
       -X POST http://127.0.0.1:4731/alert \
       -H 'content-type: application/json' \
+      ''${AUTH_HEADER[@]+"''${AUTH_HEADER[@]}"} \
       -d "$PAYLOAD")
     CURL_EXIT=$?
 
@@ -144,8 +157,11 @@ let
         mkdir -p "$(dirname "$STATE_FILE")"
         printf '%s\n' "$SIGNATURE" > "$STATE_FILE"
         ;;
+      401)
+        echo "ERROR: opencode-drift-alert: 401 Unauthorized from pigeon /alert (token missing or rejected)" >&2
+        ;;
       *)
-        echo "WARNING: opencode-drift-alert: failed to send alert to pigeon (curl_exit=$CURL_EXIT, http_status=$HTTP_STATUS)"
+        echo "WARNING: opencode-drift-alert: failed to send alert to pigeon (curl_exit=$CURL_EXIT, http_status=$HTTP_STATUS)" >&2
         ;;
     esac
 

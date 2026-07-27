@@ -1,5 +1,6 @@
-import { describe, test, expect, vi } from "vitest";
-import { boundedFetch, stripTrailingSlashes, isAbsoluteHttpUrl } from "../src/http.js";
+import * as fs from "node:fs";
+import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
+import { boundedFetch, boundedPigeonFetch, resolveDaemonToken, invalidateDaemonToken, stripTrailingSlashes, isAbsoluteHttpUrl } from "../src/http.js";
 
 describe("isAbsoluteHttpUrl", () => {
   test("validates absolute http and https URLs", () => {
@@ -166,5 +167,118 @@ describe("boundedFetch", () => {
     const [, init] = fakeFetch.mock.calls[0] as [string, RequestInit];
     expect(init.method).toBe("GET");
     expect(init.body).toBeUndefined();
+  });
+});
+
+describe("resolveDaemonToken and boundedPigeonFetch", () => {
+  let originalEnv: NodeJS.ProcessEnv;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+    delete process.env.PIGEON_DAEMON_AUTH_TOKEN_FILE;
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, originalEnv);
+  });
+
+  test("token from env", () => {
+    process.env.PIGEON_DAEMON_AUTH_TOKEN = " env-token-123  ";
+    invalidateDaemonToken();
+    expect(resolveDaemonToken()).toBe("env-token-123");
+  });
+
+  test("token from FILE when env unset", () => {
+    delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+    invalidateDaemonToken();
+    const testFilePath = "/tmp/fake_pigeon_token_test.txt";
+    fs.writeFileSync(testFilePath, "  file-token-456\n  ");
+    try {
+      const token = resolveDaemonToken({ tokenFilePath: testFilePath });
+      expect(token).toBe("file-token-456");
+    } finally {
+      fs.unlinkSync(testFilePath);
+    }
+  });
+
+  test("env precedence over file", () => {
+    process.env.PIGEON_DAEMON_AUTH_TOKEN = "env-token-789";
+    invalidateDaemonToken();
+    const testFilePath = "/tmp/fake_pigeon_token_test.txt";
+    fs.writeFileSync(testFilePath, "file-token-456");
+    try {
+      const token = resolveDaemonToken({ tokenFilePath: testFilePath });
+      expect(token).toBe("env-token-789");
+    } finally {
+      fs.unlinkSync(testFilePath);
+    }
+  });
+
+  test("neither -> undefined", () => {
+    delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+    invalidateDaemonToken();
+    const token = resolveDaemonToken({ tokenFilePath: "/tmp/non_existent_token_file.txt" });
+    expect(token).toBeUndefined();
+  });
+
+  test("boundedPigeonFetch: 401 invalidates cache, re-resolves token, retries ONCE, succeeds", async () => {
+    delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+    invalidateDaemonToken();
+
+    let callCount = 0;
+    const fakeFetch = vi.fn().mockImplementation((_url, options) => {
+      callCount++;
+      const auth = (options?.headers as any)?.["Authorization"];
+      if (callCount === 1) {
+        expect(auth).toBe("Bearer old-token");
+        return Promise.resolve({ status: 401, body: null } as Response);
+      }
+      expect(auth).toBe("Bearer new-token");
+      return Promise.resolve({ status: 200, json: async () => ({ ok: true }) } as Response);
+    });
+
+    process.env.PIGEON_DAEMON_AUTH_TOKEN = "old-token";
+
+    // Call fetch; after first attempt fails with 401, change env to new-token
+    const fetchPromise = boundedPigeonFetch("http://example.com/route", {
+      method: "GET",
+      timeoutMs: 1000,
+      fetchImpl: (url, opts) => {
+        if (callCount === 0) {
+          process.env.PIGEON_DAEMON_AUTH_TOKEN = "new-token";
+        }
+        return fakeFetch(url, opts);
+      },
+    });
+
+    const result = await fetchPromise;
+    expect(result.ok).toBe(true);
+    expect(result.response?.status).toBe(200);
+    expect(fakeFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("boundedPigeonFetch: persistent 401 does NOT loop and returns 401 after 1 retry", async () => {
+    delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+    invalidateDaemonToken();
+
+    const fakeFetch = vi.fn().mockResolvedValue({ status: 401, body: null } as Response);
+
+    process.env.PIGEON_DAEMON_AUTH_TOKEN = "bad-token";
+
+    const result = await boundedPigeonFetch("http://example.com/route", {
+      method: "GET",
+      timeoutMs: 1000,
+      fetchImpl: fakeFetch,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.response?.status).toBe(401);
+    expect(fakeFetch).toHaveBeenCalledTimes(2);
   });
 });

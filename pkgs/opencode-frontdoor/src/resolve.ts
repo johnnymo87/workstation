@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { boundedFetch, stripTrailingSlashes, isAbsoluteHttpUrl, discardBody } from "./http.js";
+import { boundedPigeonFetch, stripTrailingSlashes, isAbsoluteHttpUrl, discardBody } from "./http.js";
 import { rootOf } from "./parent.js";
 
 export type ResolveReason =
@@ -28,6 +28,7 @@ export interface ResolvedOwner {
 export interface ResolveDeps {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
+  tokenFilePath?: string;
 }
 
 async function fetchRoute(
@@ -40,11 +41,12 @@ async function fetchRoute(
   const pigeonBase = stripTrailingSlashes(config.pigeonUrl);
   const targetUrl = `${pigeonBase}/route?session_id=${encodeURIComponent(sid)}`;
 
-  const result = await boundedFetch(targetUrl, {
+  const result = await boundedPigeonFetch(targetUrl, {
     method: "GET",
     timeoutMs: config.routeTimeoutMs,
     bearerToken: config.pigeonAuthToken,
     fetchImpl: deps?.fetch,
+    tokenFilePath: deps?.tokenFilePath,
   });
 
   if (!result.ok) {

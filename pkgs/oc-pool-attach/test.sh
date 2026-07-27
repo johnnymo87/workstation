@@ -144,6 +144,46 @@ else
   printf 'SKIP  parse_serve_url tests (jq not on PATH)\n'
 fi
 
+# ---- resolve_pigeon_auth tests ----------------------------------------------
+resolve_pigeon_auth() {
+  local token="${PIGEON_DAEMON_AUTH_TOKEN:-}"
+  token="$(printf '%s' "$token" | tr -d '[:space:]')"
+  if [ -z "$token" ]; then
+    local token_file="${PIGEON_DAEMON_AUTH_TOKEN_FILE:-/run/secrets/pigeon_daemon_auth_token}"
+    if [ -r "$token_file" ]; then
+      token="$(cat "$token_file" 2>/dev/null || true)"
+      token="$(printf '%s' "$token" | tr -d '[:space:]')"
+    fi
+  fi
+  place_auth=()
+  if [ -n "$token" ]; then
+    place_auth=(-H "Authorization: Bearer $token")
+  fi
+}
+
+# Test 1: env var set
+PIGEON_DAEMON_AUTH_TOKEN="  env_token_pool  "
+resolve_pigeon_auth
+assert_eq "2" "${#place_auth[@]}" "resolve_pigeon_auth: env set yields auth array of length 2"
+assert_eq "Authorization: Bearer env_token_pool" "${place_auth[1]}" "resolve_pigeon_auth: env set second element Bearer token"
+
+# Test 2: env unset, token file present
+unset PIGEON_DAEMON_AUTH_TOKEN
+tf_pool="$(mktemp)"
+printf "  file_token_pool \n" > "$tf_pool"
+PIGEON_DAEMON_AUTH_TOKEN_FILE="$tf_pool"
+resolve_pigeon_auth
+rm -f "$tf_pool"
+assert_eq "2" "${#place_auth[@]}" "resolve_pigeon_auth: file fallback yields auth array of length 2"
+assert_eq "Authorization: Bearer file_token_pool" "${place_auth[1]}" "resolve_pigeon_auth: file fallback token trimmed"
+
+# Test 3: neither set
+unset PIGEON_DAEMON_AUTH_TOKEN
+PIGEON_DAEMON_AUTH_TOKEN_FILE="/nonexistent/pigeon_token_test"
+resolve_pigeon_auth
+assert_eq "0" "${#place_auth[@]}" "resolve_pigeon_auth: neither set yields empty auth array"
+unset PIGEON_DAEMON_AUTH_TOKEN_FILE
+
 # ---- production-source check (default.nix) -----------------------------------
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 default_nix="$script_dir/default.nix"
@@ -152,6 +192,18 @@ if [ -f "$default_nix" ]; then
     printf 'PASS  source defines parse_serve_url\n'
   else
     printf 'FAIL  source defines parse_serve_url\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'resolve_pigeon_auth()' "$default_nix"; then
+    printf 'PASS  source defines resolve_pigeon_auth\n'
+  else
+    printf 'FAIL  source defines resolve_pigeon_auth\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+
+  if grep -q 'place_auth.*PIGEON_DAEMON_URL/route' "$default_nix"; then
+    printf 'PASS  source passes place_auth array to GET /route\n'
+  else
+    printf 'FAIL  source passes place_auth array to GET /route\n        not found in: %s\n' "$default_nix"; exit 1
   fi
 
   if grep -q 'classify_oc_invocation()' "$default_nix"; then

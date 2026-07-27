@@ -119,6 +119,24 @@ list_session_panes() {
     -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true
 }
 
+# resolve_pigeon_auth: resolve pigeon bearer auth token at call time.
+# Mirror of default.nix function.
+resolve_pigeon_auth() {
+  local token="${PIGEON_DAEMON_AUTH_TOKEN:-}"
+  token="$(printf '%s' "$token" | tr -d '[:space:]')"
+  if [ -z "$token" ]; then
+    local token_file="${PIGEON_DAEMON_AUTH_TOKEN_FILE:-/run/secrets/pigeon_daemon_auth_token}"
+    if [ -r "$token_file" ]; then
+      token="$(cat "$token_file" 2>/dev/null || true)"
+      token="$(printf '%s' "$token" | tr -d '[:space:]')"
+    fi
+  fi
+  place_auth=()
+  if [ -n "$token" ]; then
+    place_auth=(-H "Authorization: Bearer $token")
+  fi
+}
+
 # ---- test infrastructure ----------------------------------------------------
 
 assert_eq() {
@@ -313,6 +331,30 @@ else
   printf 'SKIP  classify_session_probe tests (jq not on PATH)\n'
 fi
 
+# ---- resolve_pigeon_auth tests ----------------------------------------------
+# Test 1: env var set
+PIGEON_DAEMON_AUTH_TOKEN="  env_token_aa  "
+resolve_pigeon_auth
+assert_eq "2" "${#place_auth[@]}" "resolve_pigeon_auth: env set yields auth array of length 2"
+assert_eq "Authorization: Bearer env_token_aa" "${place_auth[1]}" "resolve_pigeon_auth: env set second element Bearer token"
+
+# Test 2: env unset, token file present
+unset PIGEON_DAEMON_AUTH_TOKEN
+tf_aa="$(mktemp)"
+printf "  file_token_aa \n" > "$tf_aa"
+PIGEON_DAEMON_AUTH_TOKEN_FILE="$tf_aa"
+resolve_pigeon_auth
+rm -f "$tf_aa"
+assert_eq "2" "${#place_auth[@]}" "resolve_pigeon_auth: file fallback yields auth array of length 2"
+assert_eq "Authorization: Bearer file_token_aa" "${place_auth[1]}" "resolve_pigeon_auth: file fallback token trimmed"
+
+# Test 3: neither set
+unset PIGEON_DAEMON_AUTH_TOKEN
+PIGEON_DAEMON_AUTH_TOKEN_FILE="/nonexistent/pigeon_token_test"
+resolve_pigeon_auth
+assert_eq "0" "${#place_auth[@]}" "resolve_pigeon_auth: neither set yields empty auth array"
+unset PIGEON_DAEMON_AUTH_TOKEN_FILE
+
 # ---- list_session_panes tests (real tmux) -----------------------------------
 #
 # Regression for the window/session name collision: when a window in the
@@ -470,6 +512,18 @@ if [ -f "$default_nix" ]; then
     printf 'PASS  source defines parse_serve_url\n'
   else
     printf 'FAIL  source defines parse_serve_url\n        not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  if grep -q 'resolve_pigeon_auth()' "$default_nix"; then
+    printf 'PASS  source defines resolve_pigeon_auth\n'
+  else
+    printf 'FAIL  source defines resolve_pigeon_auth\n        not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  if grep -q 'place_auth' "$default_nix" && grep -q '/route?session_id=' "$default_nix"; then
+    printf 'PASS  source passes place_auth array to GET /route\n'
+  else
+    printf 'FAIL  source passes place_auth array to GET /route\n        not found in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -q 'PIGEON_DAEMON_URL' "$default_nix"; then

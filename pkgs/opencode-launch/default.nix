@@ -43,6 +43,28 @@ pkgs.writeShellApplication {
         fi
       }
 
+      # resolve_pigeon_auth
+      #
+      # Resolves pigeon bearer auth token at call time from PIGEON_DAEMON_AUTH_TOKEN
+      # env var, or if unset/empty, from PIGEON_DAEMON_AUTH_TOKEN_FILE (defaulting to
+      # /run/secrets/pigeon_daemon_auth_token). Populates caller-scoped `pigeon_auth`
+      # array with `-H "Authorization: Bearer <token>"` if non-empty, else empty array.
+      resolve_pigeon_auth() {
+        local token="''${PIGEON_DAEMON_AUTH_TOKEN:-}"
+        token="$(printf '%s' "$token" | tr -d '[:space:]')"
+        if [ -z "$token" ]; then
+          local token_file="''${PIGEON_DAEMON_AUTH_TOKEN_FILE:-/run/secrets/pigeon_daemon_auth_token}"
+          if [ -r "$token_file" ]; then
+            token="$(cat "$token_file" 2>/dev/null || true)"
+            token="$(printf '%s' "$token" | tr -d '[:space:]')"
+          fi
+        fi
+        pigeon_auth=()
+        if [ -n "$token" ]; then
+          pigeon_auth=(-H "Authorization: Bearer $token")
+        fi
+      }
+
       # resolve_model_id <catalog-json> <provider> <model-id>
       #
       # Resolve a (possibly bare) model id against a GET /config/providers
@@ -359,7 +381,8 @@ pkgs.writeShellApplication {
       # in docs/plans/2026-07-26-phase9-consumer-disposition.md (C7), not a
       # data-plane path. Any pigeon hiccup degrades it to `$OPENCODE_URL` (the
       # serve we created on) -- pre-pool single-serve behavior, never worse.
-      route_body="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$session_id" 2>/dev/null || true)"
+      resolve_pigeon_auth
+      route_body="$(curl -sf --connect-timeout 2 --max-time 3 ''${pigeon_auth[@]+"''${pigeon_auth[@]}"} "$PIGEON_DAEMON_URL/route?session_id=$session_id" 2>/dev/null || true)"
       serve_url="$(parse_serve_url "$route_body" "$OPENCODE_URL")"
 
       # Base tools map always denies `question`: a headless launch has no

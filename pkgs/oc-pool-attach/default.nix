@@ -50,6 +50,22 @@ pkgs.writeShellApplication {
       fi
     }
 
+    resolve_pigeon_auth() {
+      local token="''${PIGEON_DAEMON_AUTH_TOKEN:-}"
+      token="$(printf '%s' "$token" | tr -d '[:space:]')"
+      if [ -z "$token" ]; then
+        local token_file="''${PIGEON_DAEMON_AUTH_TOKEN_FILE:-/run/secrets/pigeon_daemon_auth_token}"
+        if [ -r "$token_file" ]; then
+          token="$(cat "$token_file" 2>/dev/null || true)"
+          token="$(printf '%s' "$token" | tr -d '[:space:]')"
+        fi
+      fi
+      place_auth=()
+      if [ -n "$token" ]; then
+        place_auth=(-H "Authorization: Bearer $token")
+      fi
+    }
+
     # split_classification <classify-output>: split the TAB-delimited
     # "verb<TAB>sid<TAB>project" line from classify_oc_invocation into the
     # verb/sid/project globals. Hand-rolled instead of `read -r` because `read`
@@ -124,11 +140,10 @@ pkgs.writeShellApplication {
       # then, the session is CONFIRMED to exist (200 above) -- POST /place. Failures
       # are non-fatal: the door tolerates an unplaced session (degrade→anchor→
       # drift-reconnect once its first prompt promotes it).
-      route="$(curl -sf --connect-timeout 2 --max-time 3 "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
+      resolve_pigeon_auth
+      route="$(curl -sf --connect-timeout 2 --max-time 3 ''${place_auth[@]+"''${place_auth[@]}"} "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
       serve_url="$(parse_serve_url "$route" "")"
       if [ -z "$serve_url" ]; then
-        place_auth=()
-        [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ] && place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
         curl -sf --connect-timeout 2 --max-time 3 -X POST "$PIGEON_DAEMON_URL/place" \
           -H "Content-Type: application/json" "''${place_auth[@]+"''${place_auth[@]}"}" \
           -d "{\"session_id\":\"$sid\"}" >/dev/null 2>&1 || true

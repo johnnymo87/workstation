@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+
 export interface BoundedFetchOptions {
   method: string;
   timeoutMs: number;
@@ -5,6 +7,70 @@ export interface BoundedFetchOptions {
   body?: string;                       // JSON string body for POST /place; omit for GETs
   bearerToken?: string;                // adds Authorization: Bearer <token> when set
   fetchImpl?: typeof globalThis.fetch; // injectable for tests; default globalThis.fetch
+}
+
+export interface BoundedPigeonFetchOptions extends BoundedFetchOptions {
+  tokenFilePath?: string;
+}
+
+let cachedToken: string | undefined | null = null;
+
+/**
+ * Resolve pigeon daemon bearer token at call time using contract:
+ * 1. process.env.PIGEON_DAEMON_AUTH_TOKEN (trimmed)
+ * 2. secret file (e.g. /run/secrets/pigeon_daemon_auth_token or process.env.PIGEON_DAEMON_AUTH_TOKEN_FILE) (trimmed)
+ * 3. undefined
+ *
+ * Lazily caches resolved value until invalidateDaemonToken() is called.
+ */
+export function resolveDaemonToken(opts?: {
+  forceRefresh?: boolean;
+  tokenFilePath?: string;
+}): string | undefined {
+  if (opts?.forceRefresh) {
+    cachedToken = null;
+  }
+
+  if (cachedToken !== null) {
+    return cachedToken;
+  }
+
+  // 1. process.env.PIGEON_DAEMON_AUTH_TOKEN
+  const envToken = process.env.PIGEON_DAEMON_AUTH_TOKEN?.trim();
+  if (envToken) {
+    cachedToken = envToken;
+    return cachedToken;
+  }
+
+  // 2. Secret file
+  const filePath =
+    opts?.tokenFilePath ??
+    process.env.PIGEON_DAEMON_AUTH_TOKEN_FILE ??
+    "/run/secrets/pigeon_daemon_auth_token";
+
+  try {
+    if (fs.existsSync(filePath)) {
+      const fileContent = fs.readFileSync(filePath, "utf8").trim();
+      if (fileContent) {
+        cachedToken = fileContent;
+        return cachedToken;
+      }
+    }
+  } catch {
+    // Ignore unreadable file / permission errors
+  }
+
+  // 3. Fallback
+  cachedToken = undefined;
+  return cachedToken;
+}
+
+/**
+ * Invalidate cached daemon token (e.g. on 401 response).
+ * Next call to resolveDaemonToken will re-check env and secret file.
+ */
+export function invalidateDaemonToken(): void {
+  cachedToken = null;
 }
 
 export interface BoundedFetchResult {
@@ -82,4 +148,32 @@ export async function boundedFetch(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// boundedPigeonFetch resolves daemon token at call time and retries once on 401.
+export async function boundedPigeonFetch(
+  url: string,
+  opts: BoundedPigeonFetchOptions,
+): Promise<BoundedFetchResult> {
+  const token = resolveDaemonToken({ tokenFilePath: opts.tokenFilePath }) ?? opts.bearerToken;
+
+  const firstResult = await boundedFetch(url, {
+    ...opts,
+    bearerToken: token,
+  });
+
+  if (!firstResult.ok || firstResult.response?.status !== 401) {
+    return firstResult;
+  }
+
+  // Handle 401: discard body, invalidate token, re-resolve, and retry ONCE
+  discardBody(firstResult.response);
+  invalidateDaemonToken();
+
+  const newToken = resolveDaemonToken({ forceRefresh: true, tokenFilePath: opts.tokenFilePath }) ?? opts.bearerToken;
+
+  return boundedFetch(url, {
+    ...opts,
+    bearerToken: newToken,
+  });
 }

@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
+import { boundedFetch, boundedPigeonFetch, stripTrailingSlashes, discardBody } from "./http.js";
 import type { ResolvedOwner } from "./resolve.js";
 import { extractSessionIdFromPath, type SidExtraction } from "./sid.js";
 
@@ -10,6 +10,7 @@ import { extractSessionIdFromPath, type SidExtraction } from "./sid.js";
 export interface PlaceDeps {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
+  tokenFilePath?: string;
 }
 
 export interface PlaceResult {
@@ -27,7 +28,7 @@ export async function placeSession(
   const pigeonBase = stripTrailingSlashes(config.pigeonUrl);
   const targetUrl = `${pigeonBase}/place`;
 
-  const result = await boundedFetch(targetUrl, {
+  const result = await boundedPigeonFetch(targetUrl, {
     method: "POST",
     timeoutMs: config.routeTimeoutMs,
     headers: {
@@ -36,6 +37,7 @@ export async function placeSession(
     body: JSON.stringify({ session_id: sid }),
     bearerToken: config.pigeonAuthToken,
     fetchImpl: deps?.fetch,
+    tokenFilePath: deps?.tokenFilePath,
   });
 
   if (!result.ok) {

@@ -96,6 +96,22 @@ pkgs.writeShellApplication {
       fi
     }
 
+    resolve_pigeon_auth() {
+      local token="''${PIGEON_DAEMON_AUTH_TOKEN:-}"
+      token="$(printf '%s' "$token" | tr -d '[:space:]')"
+      if [ -z "$token" ]; then
+        local token_file="''${PIGEON_DAEMON_AUTH_TOKEN_FILE:-/run/secrets/pigeon_daemon_auth_token}"
+        if [ -r "$token_file" ]; then
+          token="$(cat "$token_file" 2>/dev/null || true)"
+          token="$(printf '%s' "$token" | tr -d '[:space:]')"
+        fi
+      fi
+      place_auth=()
+      if [ -n "$token" ]; then
+        place_auth=(-H "Authorization: Bearer $token")
+      fi
+    }
+
     # classify_session_probe <http_code> <body>
     #
     # Decide what the Step 1 readiness loop should do with ONE
@@ -355,14 +371,12 @@ pkgs.writeShellApplication {
     # pre-place -- not for the attach target, which is now the door, but so the
     # door's first /event?session_ids= resolve lands on the real owner instead of
     # degrading to the anchor and needing an immediate drift-reconnect.)
+    resolve_pigeon_auth
     route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
+      ''${place_auth[@]+"''${place_auth[@]}"} \
       "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
     serve_url="$(parse_serve_url "$route_body" "")"
     if [ -z "$serve_url" ]; then
-      place_auth=()
-      if [ -n "''${PIGEON_DAEMON_AUTH_TOKEN:-}" ]; then
-        place_auth=(-H "Authorization: Bearer $PIGEON_DAEMON_AUTH_TOKEN")
-      fi
       place_body="$(curl -sf --connect-timeout 2 --max-time 3 \
         -X POST "$PIGEON_DAEMON_URL/place" \
         -H "Content-Type: application/json" \
