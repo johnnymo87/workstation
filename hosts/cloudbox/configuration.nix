@@ -52,6 +52,13 @@ let
   # Same rationale as above — callPackage pkgs/opencode-frontdoor directly here.
   opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
 
+  # Shared shell resolver for the opencode serve HTTP Basic credential
+  # (workstation-km5f). Sourced by the serve canary and the frontdoor canary so
+  # both probe the serves with the same credential the real clients use, and so
+  # all callers obey one canonical resolution rule (env -> *_FILE ->
+  # /run/secrets/opencode_server_password, trimmed, empty == auth off).
+  opencode-serve-auth-sh = pkgs.callPackage ../../pkgs/opencode-serve-auth-sh { };
+
   # mn9r M5: serve-pool descriptor (single source of truth in
   # users/dev/serve-pool.nix). cloudbox = K=4 on ports 4096..4099, serve-0 ==
   # :4096. routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB) and
@@ -1037,6 +1044,16 @@ ${serveIdCase}
         # System-service PATH is minimal — be explicit.
         # gawk: awk is NOT in coreutils (first live wedge lost utime/stime silently).
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk ]}
+
+        # Serve HTTP Basic credentials (workstation-km5f). Runs as root, so the
+        # sops secret is readable. The resolver reads env then the secret file at
+        # CALL time, so a rotated password is picked up without restarting this
+        # unit. It deliberately uses bash builtins only -- note the PATH above has
+        # no gnused, and a sed-based trim would silently yield an empty password
+        # here (see pkgs/opencode-serve-auth-sh/test.sh case 6).
+        source "${opencode-serve-auth-sh}"
+        serve_auth_load
+
         STATE=/var/lib/opencode-serve-canary
         # Note: /var/lib/opencode-serve-canary is root-owned via StateDirectory
         # (eliminating any /tmp symlink/TOCTOU hazard) and persists across reboots.
@@ -1130,6 +1147,21 @@ ${serveIdCase}
         HAS_SKEW_DRIFT=0
         NOW=$(date +%s)
 
+        # Credential/status drift accumulators (workstation-km5f), aggregated
+        # across the pool so one bad password sends ONE alert, not one per port
+        # — same rationale as DRIFT_PORTS above (a pool-wide cause produces a
+        # pool-wide symptom; per-port alerting turns it into an alert storm).
+        # Initialised here because `set -u` is on and they are read after the loop.
+        AUTH_DRIFT_PORTS=""
+        ODD_STATUS_PORTS=""
+        # Count of serves that actually answered something this pass. Used to
+        # distinguish "no credential problem" from "we learned nothing" (whole
+        # pool stopped, all timing out) before clearing alert state — the same
+        # distinction the binary-drift block below draws with VERIFIED_COUNT,
+        # for the same reason: clearing throttle state on an uninformative pass
+        # re-arms the alert and produces duplicate notifications.
+        PROBED_COUNT=0
+
         for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
           UNIT="opencode-serve@$PORT.service"
           FAILFILE="$STATE/$PORT.fails"
@@ -1141,11 +1173,70 @@ ${serveIdCase}
             continue
           fi
 
-          if curl -sf --max-time 3 --connect-timeout 3 \
-               "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1; then
-            rm -f "$FAILFILE"
+          # Liveness is graded by STATUS, not by curl's exit code, and liveness
+          # means "the event loop answered", NOT "the credential was right".
+          #
+          # WHY (workstation-km5f): once serves require HTTP Basic, a bare
+          # `curl -sf` treats 401 as failure. With THRESHOLD consecutive failures
+          # triggering `systemctl restart`, a missing or stale password would
+          # restart all ${toString (builtins.length servePool.ports)} serves every
+          # ~$((THRESHOLD + 1)) minutes, forever, while doing nothing to fix the
+          # actual problem. A restart storm is a far worse outcome than a missed
+          # wedge, so anything that proves the HTTP server is answering counts as
+          # alive. Credentials are still sent (so 200 remains the normal case);
+          # 401 is reported loudly instead of acted on destructively.
+          #
+          # This does NOT weaken wedge detection. The wedge mode this canary
+          # exists for presents as NO response, not a fast 401: auth runs inside
+          # the same single-threaded event loop, and the 2026-07-03 wedge failed
+          # to answer /global/health within the 3s probe at all
+          # (docs/investigations/2026-07-03-serve-4096-wedge.md:43). A timeout or
+          # refused connection still reads as dead below.
+          #
+          # Mirrors the status-grading idiom the frontdoor canary in this same
+          # file already uses (search: 'unexpected status'), including its
+          # "unknown status -> loop alive, do not restart" bias.
+          HEALTH_CODE=$(curl -s --max-time 3 --connect-timeout 3 \
+                             -o /dev/null -w "%{http_code}" \
+                             ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+                             "http://127.0.0.1:$PORT/global/health" 2>/dev/null)
 
-            # Stale-binary drift detection for healthy serves (2026-07-24 incident recovery).
+          # NOTE: no `|| echo 000` here. curl writes %{http_code} (as "000") even
+          # when it fails, so an `|| echo` fallback would concatenate and yield
+          # "000000". Non-numeric/empty is handled explicitly below instead.
+          SERVE_ALIVE=1
+          case "$HEALTH_CODE" in
+            200)
+              ;;
+            401)
+              # Answering => alive. But the credential is wrong/missing, which
+              # after this change nothing else on the box would notice.
+              AUTH_DRIFT_PORTS="''${AUTH_DRIFT_PORTS:+$AUTH_DRIFT_PORTS }$PORT"
+              echo "WARNING: $UNIT returned 401 on /global/health: serve is alive but the canary's credential was rejected (not restarting)"
+              ;;
+            ""|000)
+              # No HTTP response at all: refused, timed out, or wedged.
+              SERVE_ALIVE=0
+              ;;
+            *)
+              ODD_STATUS_PORTS="''${ODD_STATUS_PORTS:+$ODD_STATUS_PORTS }$PORT:$HEALTH_CODE"
+              echo "WARNING: $UNIT returned unexpected status $HEALTH_CODE on /global/health: serve is alive (not restarting)"
+              ;;
+          esac
+
+          if [ "$SERVE_ALIVE" -eq 1 ]; then
+            rm -f "$FAILFILE"
+            PROBED_COUNT=$((PROBED_COUNT + 1))
+
+            # Stale-binary drift detection for LIVE serves (2026-07-24 incident recovery).
+            #
+            # Deliberately keyed on SERVE_ALIVE, not on HTTP 200: drift is read
+            # from /proc/<pid>/exe, never from the health payload, so a 401 (or
+            # any other answered status) carries exactly the same evidence. If
+            # this were left inside a 200-only branch, arming auth with a stale
+            # credential would silently disable stale-binary detection -- the
+            # precise regression the 2026-07-24 incident block below exists to
+            # catch.
             #
             # Store-path comparison invariant:
             # /global/health's self-reported "version" field returns upstream semver ("1.17.13"),
@@ -1255,6 +1346,43 @@ ${serveIdCase}
           systemctl restart "$UNIT"
           rm -f "$FAILFILE"
         done
+
+        # Credential drift (workstation-km5f). Deliberately alert-only: a 401 is
+        # never a reason to restart a serve (restarting cannot fix a password),
+        # and treating it as one is exactly the storm this design avoids.
+        #
+        # This alert is load-bearing. Once 401 counts as alive, NOTHING else on
+        # this box notices a wrong or missing serve password: the serves
+        # themselves never log 401s (disableLogger on both transports; the
+        # rejection is a silent Effect.succeed), so without this the failure is
+        # completely invisible until a human notices clients misbehaving.
+        if [ -n "$AUTH_DRIFT_PORTS" ]; then
+          AUTH_TEXT=$(cat <<EOF
+OpenCode serve rejected the canary's credential (HTTP 401) on port(s): $AUTH_DRIFT_PORTS
+
+The serves are ALIVE and have NOT been restarted — restarting cannot fix a
+credential mismatch. But every client using the same credential is being
+rejected too, and serves do not log 401s, so this alert is the only signal.
+
+Likely causes:
+  - /run/secrets/opencode_server_password missing, unreadable, or empty
+  - the secret was rotated but a consumer unit was not restarted
+  - OPENCODE_SERVER_PASSWORD armed on the serves but not where clients read it
+
+Check:
+  systemctl show opencode-serve@PORT.service -p Environment | tr ' ' '\n' | grep -c OPENCODE_SERVER_PASSWORD
+  curl -s -o /dev/null -w '%{http_code}\n' -u "opencode:\$(cat /run/secrets/opencode_server_password)" http://127.0.0.1:PORT/global/health
+EOF
+)
+          ${driftAlert} "$STATE/auth-drift-alerted" "$AUTH_DRIFT_PORTS" "$AUTH_TEXT" 900 14400
+        elif [ "$PROBED_COUNT" -gt 0 ]; then
+          # At least one serve answered and none rejected us: genuinely resolved.
+          rm -f "$STATE/auth-drift-alerted"
+        fi
+
+        if [ -n "$ODD_STATUS_PORTS" ]; then
+          echo "WARNING: unexpected /global/health status(es) from serve pool: $ODD_STATUS_PORTS (treated as alive; no restart)"
+        fi
 
         if [ -n "$DRIFT_PORTS" ]; then
           if [ -f "$STATE/drift-first-seen" ]; then
@@ -1916,6 +2044,13 @@ EOF
         # We include coreutils, systemd, util-linux, curl, gnugrep, gnused, findutils, and jq.
         # Deep stack dumps (the serve canary's `eu-stack` native-stack loop and its 2s `cpu-io-split` sample) are omitted to ensure fast recovery.
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.findutils pkgs.jq ]}
+
+        # Serve HTTP Basic credentials for the F4 cross-probe below
+        # (workstation-km5f). Resolved at call time so a rotated secret needs no
+        # restart of this unit.
+        source "${opencode-serve-auth-sh}"
+        serve_auth_load
+
         STATE=/var/lib/opencode-frontdoor-canary
         UNIT=opencode-frontdoor.service
         PORT=4700
@@ -2109,9 +2244,24 @@ EOF
         if [ "$HTTP_CODE" -eq 503 ]; then
           # Probe the anchor directly (mirroring door's OPENCODE_ANCHOR_URL = http://127.0.0.1:4096)
           # frontdoor-exempt(C4): canary must tell 'door down' from 'pool down'; through the door they look alike
-          ANCHOR_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:4096/global/health")
+          ANCHOR_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" \
+            ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+            "http://127.0.0.1:4096/global/health")
 
-          if [ "$ANCHOR_CODE" -eq 200 ]; then
+          # The question this probe answers is "did the anchor ANSWER?", which is
+          # what separates door-side sickness from a real backend outage. A 401
+          # answers it just as well as a 200 -- the serve is up and serving HTTP.
+          #
+          # Treating 401 as "down" here would be quietly destructive rather than
+          # loud (workstation-km5f): the else-branch below declares "both backends
+          # genuinely down" and `rm -f`s BOTH counters, so an armed pool with a
+          # stale canary credential would permanently disable door-side-sickness
+          # recovery AND reset the door's wedge counter every single minute,
+          # suppressing the detector this whole unit exists to provide.
+          if [ "$ANCHOR_CODE" -eq 200 ] || [ "$ANCHOR_CODE" -eq 401 ]; then
+            if [ "$ANCHOR_CODE" -eq 401 ]; then
+              echo "NOTICE: anchor answered 401 (alive, but this canary's serve credential was rejected); treating as reachable for the door-vs-pool verdict"
+            fi
             # Anchor is healthy directly, but door says 503 -> door-side sickness!
             # Reset wedge counter since the door's loop is alive
             rm -f "$FAILFILE"
