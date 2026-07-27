@@ -59,8 +59,26 @@ Two further facts that close off whole branches:
 
 - **`opencode serve` is TCP-only.** No unix-socket flag, no such patch in the
   overlay. The "unix socket + mount namespace" branch is dead without writing one.
-- **No passwordless sudo** (`sudo -n true` fails), which makes systemd
-  `LoadCredential=` a genuinely meaningful boundary even at shared uid.
+- ~~**No passwordless sudo** (`sudo -n true` fails), which makes systemd
+  `LoadCredential=` a genuinely meaningful boundary even at shared uid.~~
+  **FALSE — falsification #5, 2026-07-26.** Passwordless sudo **works**:
+  `/run/wrappers/bin/sudo -n true` succeeds, and `sudo -n cat
+  /var/lib/sops-age-key.txt` returns the age private key. The original
+  measurement ran the `sudo` on `$PATH`, which resolves to the non-setuid copy in
+  `system-path` and always fails with *"must be owned by uid 0 and have the
+  setuid bit set"* — a message that reads like a policy denial and is actually a
+  wrong-binary error. **On NixOS the setuid wrappers live in `/run/wrappers/bin`.**
+
+  Consequences, and they are strategic rather than cosmetic:
+  - `LoadCredential=` is **not** a boundary here. Any agent can `sudo cat` the
+    backing file.
+  - Stage 4 (netns) is weaker than costed: an agent with sudo can
+    `ip netns exec` into the namespace.
+  - Stage 1-3 are **unaffected in their own terms** — they target *drift*, and a
+    drifting agent does not escalate to sudo to take a shortcut. But nothing in
+    this roadmap should be described as defending against a *deliberate*
+    bypass, because on this box there isn't one to build without changing the
+    sudo posture first. Say "loud 401s against drift" and stop there.
 
 **The reframing that drives the recommendation:** the threat model is *not* a
 malicious attacker. It is **our own agents and scripts taking a shortcut and
@@ -221,6 +239,23 @@ than (a). I probed `:8789`, a different process, and generalised. Pigeon is
 `ss -tlnp | grep '878[0-9]'` — a pattern that could only confirm a port already
 guessed — while the line `PIGEON_DAEMON_URL:-…:4731` was read and deleted as dead
 code in the same session.
+
+**(c) "No passwordless sudo."** Detailed in §3. Same shape as (b): a real command
+was run, it really failed, and the failure was read as a system property instead
+of as a wrong-binary error. `sudo` on `$PATH` is not the setuid `sudo`;
+`/run/wrappers/bin/sudo` is. The error text — *"must be owned by uid 0 and have
+the setuid bit set"* — describes the binary, not the policy, and I read it as
+policy. It then propagated into a security argument about `LoadCredential=`.
+
+**(d) An empty secret, caught only by verification, 2026-07-26.** Minting the
+Stage 1 token ran `TOKEN="$(openssl rand -hex 32)"` — but `openssl` is not on
+this box's PATH. The substitution produced an empty string, `sops set` accepted
+it without complaint, and an **empty token was written to `secrets/cloudbox.yaml`.**
+Empty is the worst possible value: `checkAuth`'s falsy-token branch would have
+disabled auth entirely while every file, unit and doc said it was configured —
+"feels closed, isn't" a second time, in the same day, in the same project.
+Caught only because the verification decrypted and checked the *length* rather
+than asserting the command exited 0. **Verify the artifact, not the exit code.**
 
 **The rules that follow:**
 
