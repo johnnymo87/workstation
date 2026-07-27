@@ -120,5 +120,39 @@ when — the reporter sounds certain. Two separate confident attributions in a
 single incident were overturned this way, both by measurement rather than
 argument.
 
+### The unmeasured half of a message travels as far as the measured half
+
+This is the part that is easy to miss, because it does not look like a mistake
+while you are making it.
+
+A message can be *mostly* measured and still carry an unmeasured aside — a
+parenthetical, a "probably", a plausible reason offered for why two numbers
+disagree. That aside is transmitted with exactly the same authority as the
+evidence around it, and it inherits the credibility the evidence earned.
+Downstream, nobody can tell which half was which. In the episode above, the
+guessed half is the half that got acted on, and neither the writer nor the
+reader noticed — *precisely because it was parenthetical.*
+
+So the discipline does not end when you have measured the thing you set out to
+measure. Mark your unmeasured claims **as** unmeasured, in the same breath, or
+go measure them. "I don't know why these disagree" is more useful to a reader
+than a reasonable-sounding guess, because it does not spend credibility the
+guess has not earned.
+
+### Some discrepancies are only resolvable socially
+
+Not every gap closes with a command. When your measurement disagrees with
+someone else's, the explanation may live entirely in what another party did and
+has not yet said — a delete they ran fifteen minutes ago, a config they
+repointed, a service they restarted. No query you can run alone will surface
+it.
+
+That makes proactive disclosure load-bearing infrastructure rather than good
+manners: in a system with several actors, the norm of volunteering "I changed
+this" is often the *only* mechanism by which two inventories can be reconciled
+instead of quietly diverging. Say what you changed, unprompted. And when a
+number disagrees with a report, consider that the missing measurement may be a
+question addressed to a person.
+
 Being wrong about the cause is normal and cheap. Acting on a wrong cause is
 neither.
