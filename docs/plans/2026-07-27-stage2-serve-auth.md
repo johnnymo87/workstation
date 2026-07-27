@@ -134,6 +134,61 @@ silent watch; it is not acceptable to carry on the original "probably fine" prem
 
 ## 3. Client work
 
+**Status after Deploy-1 code (2026-07-27):**
+
+| Client | State |
+|---|---|
+| C3 door (`opencode-frontdoor`) | **DONE** — workstation#208, merged `22c68705` |
+| pigeon **plugin** (in-process, 3 raw-fetch sites) | **DONE** — pigeon#9, merged `130b58db` |
+| **pigeon daemon** | **NOT DONE — blocks Deploy 2** |
+| C7/C8 `opencode-launch` degrade paths | **NOT DONE** |
+| C2 `lgtm-run` children | **NOT DONE** (unverified) |
+| C6 `oc-auto-attach` | **No credential needed** — resolved below |
+
+**The pigeon daemon is the critical gap, and missing it was my error.**
+`packages/daemon` has zero `OPENCODE_SERVER_PASSWORD` support, while
+`opencode-client.ts` calls the serve at `:27` (`/session` create), `:46`, `:69`,
+`:102` (`prompt_async`), `:117`, `:127` (`abort`), `:137` (`message`), `:148`
+(`summarize`) — and its own comment notes that client is used on *every swarm
+delivery*. Only `healthCheck()` survives arming, because it uses `/global/health`.
+Arming the password with only the door and plugin deployed breaks swarm messaging,
+Telegram-initiated session creation, and every daemon control operation.
+
+The bead named this as C1/C9 from the start. I enumerated the door family
+exhaustively and the plugin family exhaustively, then generalised *"clients done"*
+without checking the daemon member — this project's signature failure, sixth
+occurrence, one level up from where I was watching for it. Re-derive the client list
+from the C-table **plus a fresh grep**, not from memory.
+
+`opencode-launch` is in the same state: `pkgs/opencode-launch/default.nix:474` posts
+`prompt_async` straight to `$serve_url` on the degrade path.
+
+**C6 resolved — needs no credential.** `oc-auto-attach`'s session probe targets
+`FRONTDOOR_URL` (`default.nix:343`), route/place target pigeon with the bearer
+(`:375-385`), and the attach TUI rides the door (`:527-536`).
+
+**The disposition table is stale.** `reset-workspace/default.nix:607-624` added a
+direct-member `/session` **data** read after C5 was written as "health-only, exempt".
+It will 401 when armed, and it fires precisely on the compound-failure night when the
+door path already failed. Re-audit the table for other post-table additions.
+
+**Password constraints (settle before generating the secret).** opencode's
+`decodeCredential` does `header.split(":")` and requires **exactly two** parts
+(`authorization.ts:59-66`) rather than splitting on the first colon per RFC 7617 — so
+a password containing `:` gives permanent 401s from correct clients while every config
+file looks right. Generate with `openssl rand -hex`. Combined with the empty-password
+trap in §0, the rule is: **non-empty, colon-free, no leading/trailing whitespace.**
+
+**Canonical resolver semantics — settle when the next three resolvers are written.**
+The server compares raw env with strict `===` and no trimming (`auth.ts:24-33`); the
+door matches that (`config.ts:70-74`); the plugin **trims** (`serve-auth.ts:24,30`).
+With a constrained password this is unreachable, which is why it did not block the two
+merges — but the daemon, launch and lgtm resolvers are still to come. Give all five
+one rule and the same conformance vectors rather than harmonising two now and three
+later.
+
+### Original per-site notes
+
 - **C3 the door — TWO copy sites, not one.** `proxy.ts:66` (`proxyRequest`,
   streaming/SSE) *and* `proxy.ts:334` (`placeAfterCreate`, session create/fork, via
   `boundedFetch`). Injecting only in the first breaks session creation through the
@@ -156,18 +211,34 @@ silent watch; it is not acceptable to carry on the original "probably fine" prem
 ## 4. Ordering
 
 Two separate deploys, because the door is `restartIfChanged=false` and the nightly
-reset restarts serves at 03:01 unattended:
+reset restarts serves at 03:01 unattended.
 
-1. **Clients only.** Door injection (both sites), plugin credential fix, pigeon /
-   launch / lgtm credentials. Restart the door explicitly and restart the pool.
-   Verify every workflow still works against **auth-off** serves — credentials sent
-   to an auth-off serve are never parsed (`authorization.ts:87,101`), so this is
-   strictly safe.
-2. **Only then** land the password and restart **one** serve; run the §2b checklist;
-   then roll to the rest.
+**An earlier version of this section was wrong and would have caused an outage.** It
+restarted the door in step 1 — *before the password existed* — and never restarted it
+again, so the door would have come up with no credential and stayed that way while
+the serves armed. The door must be restarted **after** the password lands and
+**before** any serve is armed.
 
-Landing both in one rebuild risks the old door process meeting password-armed serves
-at 3am — a box-wide outage while asleep.
+1. **Client code only, no password anywhere.** Door injection, plugin fix, and the
+   daemon / launch / lgtm credentials (see §3 — not all built yet). Restart the door
+   and the pool. Verify every workflow still works against **auth-off** serves;
+   credentials sent to an auth-off serve are never parsed
+   (`authorization.ts:87,101`), so this step is strictly safe.
+2. **Land the password** on both the door and serve units. Restart the **door first**
+   and positively verify it now holds the credential — at this point the serves are
+   still unarmed, so the door's credential is simply ignored, which makes this a free
+   checkpoint.
+3. **Only then** arm **one** serve; run the §2b checklist; then roll to the rest.
+
+Landing the password and the door restart in the wrong order risks a credential-less
+door meeting armed serves at 03:01 — a box-wide outage while asleep. Note the nightly
+reset restarts `opencode-serve-pool.target` (`reset-workspace/default.nix:284-288`)
+but **never the door**, so the reset cannot rescue this and will actively cause it if
+Deploy 2 is left half-finished overnight. Deploy 2 and its verification must complete
+the same day.
+
+Also beware `EnvironmentFile=-` (leading dash) silently tolerating a missing secret at
+first boot, which yields a permanently credential-less unit that looks configured.
 
 Done test: anonymous `/session` → 401 on all four ports; `/global/health` → 200
 anonymous on all four; attach, `opencode-launch --mcp`, swarm messaging all work;
