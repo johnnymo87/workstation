@@ -165,6 +165,23 @@ describe("Serve HTTP Basic Auth Injection", () => {
     expect(lastAnchorReqHeaders["authorization"]).toBe(serveAuthHeader);
   });
 
+  test("5b. Fork entry point (handleFork -> placeAfterCreate): injects Authorization header, overwrites client Authorization, and strips ?auth_token=", async () => {
+    const serveAuthHeader = "Basic " + Buffer.from("opencode:pass123").toString("base64");
+    await setupServers({ serveAuthHeader });
+
+    const res = await fetch(`http://127.0.0.1:${portFrontDoor}/session/ses_parent123/fork?auth_token=badtoken&variant=a`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer client-bearer-token",
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    expect(lastAnchorReqUrl).toBe("/session/ses_parent123/fork?variant=a");
+    expect(lastAnchorReqHeaders["authorization"]).toBe(serveAuthHeader);
+  });
+
   test("6. Safety property: password unset => no Authorization header added and query string untouched", async () => {
     await setupServers({ serveAuthHeader: undefined });
 
