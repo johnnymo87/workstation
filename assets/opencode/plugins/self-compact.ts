@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
+import { wrapFetchWithAuth } from "./serve-auth"
 import {
   type CallContext,
   callPromptAsyncHttp,
@@ -17,11 +18,14 @@ import {
 // exported function as a plugin factory (see packages/opencode/src/plugin/index.ts).
 // Test-only helpers must therefore live in `self-compact-impl.ts`, not here.
 const plugin: Plugin = async (ctx) => {
-  // Verified path: pigeon's `_client.getConfig().fetch` — captures the in-process
-  // Hono transport in TUI mode while bypassing unreliable generated SDK wrappers.
+  // In TUI mode, `_client.getConfig().fetch` captures the in-process Hono transport.
+  // In serve mode, Server.url is set, so getConfig().fetch is undefined and internalFetch
+  // falls back to globalThis.fetch — real loopback TCP to opencode's serve port.
+  // Outgoing HTTP calls therefore require HTTP Basic Auth credentials when armed.
   const sdkClientConfig: any = (ctx.client as any)._client?.getConfig?.()
-  const internalFetch: typeof fetch = sdkClientConfig?.fetch ?? globalThis.fetch
-  const callCtx: CallContext = { fetch: internalFetch, serverUrl: ctx.serverUrl }
+  const rawFetch: typeof fetch = sdkClientConfig?.fetch ?? globalThis.fetch
+  const authenticatedFetch = wrapFetchWithAuth(rawFetch)
+  const callCtx: CallContext = { fetch: authenticatedFetch, serverUrl: ctx.serverUrl }
   const pending = getSharedPendingResumes()
 
   const toolImpl = createSelfCompactTool({ pending })
@@ -36,7 +40,7 @@ const plugin: Plugin = async (ctx) => {
     pending,
     callSummarize: (input) => callSummarizeHttp(callCtx, input),
     findActiveModel: ({ sessionID }) =>
-      findActiveModel({ fetch: internalFetch, serverUrl: ctx.serverUrl, sessionID }),
+      findActiveModel({ fetch: callCtx.fetch, serverUrl: ctx.serverUrl, sessionID }),
   })
 
   const onCompacted = createOnCompacted({

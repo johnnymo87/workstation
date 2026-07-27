@@ -1,4 +1,6 @@
-import { describe, it, expect, vi } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+import plugin from "../self-compact"
+import { invalidateServeAuthHeader } from "../serve-auth"
 import {
   createDebugLogger,
   getSharedPendingResumes,
@@ -575,5 +577,110 @@ describe("waitForSessionIdleHttp", () => {
     )
     expect(ok).toBe(true)
     expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("self-compact plugin auth integration", () => {
+  const originalEnv = { ...process.env }
+
+  beforeEach(() => {
+    invalidateServeAuthHeader()
+    delete process.env.OPENCODE_SERVER_PASSWORD
+    delete process.env.OPENCODE_SERVER_PASSWORD_FILE
+    delete process.env.OPENCODE_SERVER_USERNAME
+  })
+
+  afterEach(() => {
+    process.env = { ...originalEnv }
+    invalidateServeAuthHeader()
+  })
+
+  it("plugin fetch attaches Authorization header when OPENCODE_SERVER_PASSWORD is set", async () => {
+    process.env.OPENCODE_SERVER_PASSWORD = "secret_pass"
+    process.env.OPENCODE_SERVER_USERNAME = "opencode"
+
+    const mockFetch = vi.fn().mockImplementation(async (req: Request) => {
+      if (req.url.endsWith("/message")) {
+        return new Response(
+          JSON.stringify([
+            { info: { role: "user", model: { providerID: "anthropic", modelID: "claude-3-5" } } },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
+      }
+      if (req.url.endsWith("/summarize")) {
+        return new Response(null, { status: 200 })
+      }
+      return new Response(null, { status: 200 })
+    })
+
+    const p = await plugin({
+      client: { _client: { getConfig: () => ({ fetch: mockFetch }) } } as any,
+      serverUrl: new URL("http://localhost:54321"),
+      directory: "/tmp/test",
+    } as any)
+
+    // Execute tool to stash pending resume
+    const pending = getSharedPendingResumes()
+    pending.clear()
+    await p.tool!.self_compact_and_resume.execute({ prompt: "resume prompt" }, { sessionID: "s_auth_1" } as any)
+
+    // Trigger onStatus idle event which calls findActiveModel and callSummarizeHttp
+    await p.event!({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "s_auth_1", status: { type: "idle" } },
+      },
+    })
+
+    expect(mockFetch).toHaveBeenCalled()
+    for (const call of mockFetch.mock.calls) {
+      const req = call[0] as Request
+      expect(req.headers.get("Authorization")).toBe(
+        `Basic ${Buffer.from("opencode:secret_pass").toString("base64")}`,
+      )
+    }
+  })
+
+  it("plugin fetch remains inert with NO Authorization header key when no password set", async () => {
+    const mockFetch = vi.fn().mockImplementation(async (req: Request) => {
+      if (req.url.endsWith("/message")) {
+        return new Response(
+          JSON.stringify([
+            { info: { role: "user", model: { providerID: "anthropic", modelID: "claude-3-5" } } },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
+      }
+      if (req.url.endsWith("/summarize")) {
+        return new Response(null, { status: 200 })
+      }
+      return new Response(null, { status: 200 })
+    })
+
+    const p = await plugin({
+      client: { _client: { getConfig: () => ({ fetch: mockFetch }) } } as any,
+      serverUrl: new URL("http://localhost:54321"),
+      directory: "/tmp/test",
+    } as any)
+
+    const pending = getSharedPendingResumes()
+    pending.clear()
+    await p.tool!.self_compact_and_resume.execute({ prompt: "resume prompt" }, { sessionID: "s_no_auth" } as any)
+
+    await p.event!({
+      event: {
+        type: "session.status",
+        properties: { sessionID: "s_no_auth", status: { type: "idle" } },
+      },
+    })
+
+    expect(mockFetch).toHaveBeenCalled()
+    for (const call of mockFetch.mock.calls) {
+      const req = call[0] as Request
+      expect(req.headers.has("Authorization")).toBe(false)
+      expect(req.headers.has("authorization")).toBe(false)
+      expect(Object.fromEntries(req.headers.entries())).not.toHaveProperty("authorization")
+    }
   })
 })
