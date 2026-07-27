@@ -30,6 +30,7 @@ repo but not deployed to any machine yet.
 | Skill | Scope | Purpose |
 |-------|-------|---------|
 | [adding-opencode-skills](skills/adding-opencode-skills/SKILL.md) | cross | Add, edit, or move an OpenCode skill; debug why a newly-added skill is not picked up. |
+| [attributing-causes](skills/attributing-causes/SKILL.md) | cross | Treat a memorable event (deploy, nightly job, restart) as a suspect, not evidence. The "could X even reach that state?" test, and re-measuring inherited counts before destructive action. |
 | [preparing-for-compaction](skills/preparing-for-compaction/SKILL.md) | cross | Persist durable context before compaction so work survives. Beads + plan files + resumption prompt. |
 | [searching-sessions](skills/searching-sessions/SKILL.md) | cross | `oc-search` patterns for grepping past session transcripts (PRs, Jira tickets, commands, payloads). |
 | [beads](skills/beads/SKILL.md) | cross | Activate `bd` issue tracking when work spans multiple sessions or has complex dependencies. |
