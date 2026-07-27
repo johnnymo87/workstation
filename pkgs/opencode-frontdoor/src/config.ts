@@ -8,6 +8,7 @@ export interface Config {
   pigeonUrl: string;
   anchorUrl: string;
   pigeonAuthToken?: string;
+  serveAuthHeader?: string;
   routeTimeoutMs: number;
   cheapFirstByteMs: number;
   /*
@@ -66,12 +67,21 @@ export function loadConfig(): Config {
   const pigeonAuthToken = process.env.PIGEON_DAEMON_AUTH_TOKEN || undefined;
   const version = process.env.FRONTDOOR_VERSION || 'unknown';
 
+  const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  let serveAuthHeader: string | undefined = undefined;
+  if (serverPassword) {
+    const serverUsername = process.env.OPENCODE_SERVER_USERNAME || 'opencode';
+    const credentials = Buffer.from(`${serverUsername}:${serverPassword}`).toString('base64');
+    serveAuthHeader = `Basic ${credentials}`;
+  }
+
   return {
     port,
     version,
     pigeonUrl,
     anchorUrl,
     pigeonAuthToken,
+    serveAuthHeader,
     routeTimeoutMs,
     cheapFirstByteMs,
     stickyTtlMs,

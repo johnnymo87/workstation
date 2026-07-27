@@ -176,7 +176,7 @@ export interface PromoteOutcome {
   status?: number;
 }
 
-async function checkSidExists(
+export async function checkSidExists(
   sid: string,
   config: Config,
   deps?: PlaceDeps,
@@ -187,6 +187,7 @@ async function checkSidExists(
   const result = await boundedFetch(targetUrl, {
     method: "GET",
     timeoutMs: config.routeTimeoutMs,
+    headers: config.serveAuthHeader ? { Authorization: config.serveAuthHeader } : undefined,
     fetchImpl: deps?.fetch,
   });
 

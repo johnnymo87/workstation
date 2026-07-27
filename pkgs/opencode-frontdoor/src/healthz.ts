@@ -29,9 +29,13 @@ export async function handleHealthz(
       fetchImpl,
       tokenFilePath,
     }),
+    // /global/health is planned to stay anonymous on serves, so it does not strictly
+    // need the credential — but send serveAuthHeader anyway: it is ignored by an
+    // anonymous route and keeps the probe working if that exemption ever changes.
     boundedFetch(anchorUrlClean, {
       method: "GET",
       timeoutMs: config.routeTimeoutMs,
+      headers: config.serveAuthHeader ? { Authorization: config.serveAuthHeader } : undefined,
       fetchImpl,
     }),
   ]);

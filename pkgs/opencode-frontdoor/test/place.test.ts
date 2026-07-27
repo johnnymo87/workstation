@@ -1,5 +1,6 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { placeSession, isPromotingRequest, PromotionGate, maybePromote } from '../src/place.js';
+import { invalidateDaemonToken } from '../src/http.js';
 import type { Config } from '../src/config.js';
 import type { SidExtraction } from '../src/sid.js';
 import type { ResolvedOwner } from '../src/resolve.js';
@@ -111,6 +112,25 @@ describe('place.ts', () => {
   });
 
   describe('placeSession', () => {
+    let originalEnv: NodeJS.ProcessEnv;
+
+    beforeEach(() => {
+      originalEnv = { ...process.env };
+      delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+      process.env.PIGEON_DAEMON_AUTH_TOKEN_FILE = '/nonexistent';
+      invalidateDaemonToken();
+    });
+
+    afterEach(() => {
+      for (const key of Object.keys(process.env)) {
+        if (!(key in originalEnv)) {
+          delete process.env[key];
+        }
+      }
+      Object.assign(process.env, originalEnv);
+      invalidateDaemonToken();
+    });
+
     test('200 response parses serve_id and api_base', async () => {
       const fakeFetch = vi.fn().mockResolvedValue({
         status: 200,

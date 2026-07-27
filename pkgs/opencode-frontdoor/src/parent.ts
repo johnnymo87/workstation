@@ -108,6 +108,7 @@ export async function rootOf(
     const result = await boundedFetch(url, {
       method: "GET",
       timeoutMs: remainingMs,
+      headers: config.serveAuthHeader ? { Authorization: config.serveAuthHeader } : undefined,
       fetchImpl: deps?.fetch,
     });
 

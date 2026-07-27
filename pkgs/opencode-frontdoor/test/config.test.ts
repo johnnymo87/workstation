@@ -14,6 +14,8 @@ describe('loadConfig', () => {
     delete process.env.PIGEON_DAEMON_URL;
     delete process.env.OPENCODE_ANCHOR_URL;
     delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+    delete process.env.OPENCODE_SERVER_PASSWORD;
+    delete process.env.OPENCODE_SERVER_USERNAME;
     delete process.env.FRONTDOOR_ROUTE_TIMEOUT_MS;
     delete process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS;
     delete process.env.FRONTDOOR_STICKY_TTL_MS;
@@ -42,6 +44,7 @@ describe('loadConfig', () => {
       pigeonUrl: 'http://127.0.0.1:4731',
       anchorUrl: 'http://127.0.0.1:4096',
       pigeonAuthToken: undefined,
+      serveAuthHeader: undefined,
       routeTimeoutMs: 3000,
       cheapFirstByteMs: 5000,
       stickyTtlMs: 30000,
@@ -49,6 +52,25 @@ describe('loadConfig', () => {
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
     });
+  });
+
+  test('should resolve serveAuthHeader correctly based on OPENCODE_SERVER_PASSWORD and OPENCODE_SERVER_USERNAME', () => {
+    // Unset password => undefined
+    delete process.env.OPENCODE_SERVER_PASSWORD;
+    delete process.env.OPENCODE_SERVER_USERNAME;
+    expect(loadConfig().serveAuthHeader).toBeUndefined();
+
+    // Empty password => undefined
+    process.env.OPENCODE_SERVER_PASSWORD = '';
+    expect(loadConfig().serveAuthHeader).toBeUndefined();
+
+    // Password set, username unset => default username 'opencode'
+    process.env.OPENCODE_SERVER_PASSWORD = 'mysecretpassword';
+    expect(loadConfig().serveAuthHeader).toBe(`Basic ${Buffer.from('opencode:mysecretpassword').toString('base64')}`);
+
+    // Password set, username set
+    process.env.OPENCODE_SERVER_USERNAME = 'customuser';
+    expect(loadConfig().serveAuthHeader).toBe(`Basic ${Buffer.from('customuser:mysecretpassword').toString('base64')}`);
   });
 
   test('should override default values with valid environment variables', () => {
@@ -72,6 +94,7 @@ describe('loadConfig', () => {
       pigeonUrl: 'http://10.0.0.1:4731',
       anchorUrl: 'http://10.0.0.1:4096',
       pigeonAuthToken: 'secret-token',
+      serveAuthHeader: undefined,
       routeTimeoutMs: 1500,
       cheapFirstByteMs: 2500,
       stickyTtlMs: 10000,

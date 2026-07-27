@@ -48,6 +48,19 @@ const HOP_BY_HOP_HEADERS = new Set([
 // lookup, so an unbounded list lets one client stampede the control plane.
 const MAX_SESSION_IDS = 32;
 
+export function buildForwardSearch(search: string, serveAuthHeader?: string): string {
+  if (!serveAuthHeader || !search) {
+    return search;
+  }
+  const params = new URLSearchParams(search);
+  if (!params.has("auth_token")) {
+    return search;
+  }
+  params.delete("auth_token");
+  const s = params.toString();
+  return s ? `?${s}` : "";
+}
+
 async function proxyRequest(
   target: string,
   method: string,
@@ -71,7 +84,17 @@ async function proxyRequest(
     // Set Host header
     upstreamHeaders["host"] = targetParsed.host;
 
-    const path = targetParsed.pathname.replace(/\/+$/, "") + url.pathname + url.search;
+    if (ctx.config.serveAuthHeader) {
+      for (const k of Object.keys(upstreamHeaders)) {
+        if (k.toLowerCase() === "authorization") {
+          delete upstreamHeaders[k];
+        }
+      }
+      upstreamHeaders["Authorization"] = ctx.config.serveAuthHeader;
+    }
+
+    const search = buildForwardSearch(url.search, ctx.config.serveAuthHeader);
+    const path = targetParsed.pathname.replace(/\/+$/, "") + url.pathname + search;
 
     const upstreamReq = clientModule.request({
       method: method,
@@ -338,8 +361,18 @@ async function placeAfterCreate(
     }
   }
 
+  if (ctx.config.serveAuthHeader) {
+    for (const k of Object.keys(forwardHeaders)) {
+      if (k.toLowerCase() === "authorization") {
+        delete forwardHeaders[k];
+      }
+    }
+    forwardHeaders["Authorization"] = ctx.config.serveAuthHeader;
+  }
+
+  const search = buildForwardSearch(url.search, ctx.config.serveAuthHeader);
   const targetBase = stripTrailingSlashes(target);
-  const targetUrl = `${targetBase}${url.pathname}${url.search}`;
+  const targetUrl = `${targetBase}${url.pathname}${search}`;
 
   const result = await boundedFetch(targetUrl, {
     method: "POST",

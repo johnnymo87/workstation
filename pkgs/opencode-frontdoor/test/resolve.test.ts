@@ -1,9 +1,12 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resolveOwner } from '../src/resolve.js';
 import { clearRootCache } from '../src/parent.js';
+import { invalidateDaemonToken } from '../src/http.js';
 import type { Config } from '../src/config.js';
 
 describe('resolveOwner', () => {
+  let originalEnv: NodeJS.ProcessEnv;
+
   const dummyConfig: Config = {
     port: 4700,
     version: 'unknown',
@@ -19,7 +22,21 @@ describe('resolveOwner', () => {
   };
 
   beforeEach(() => {
+    originalEnv = { ...process.env };
     clearRootCache();
+    delete process.env.PIGEON_DAEMON_AUTH_TOKEN;
+    process.env.PIGEON_DAEMON_AUTH_TOKEN_FILE = '/nonexistent';
+    invalidateDaemonToken();
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, originalEnv);
+    invalidateDaemonToken();
   });
 
   test('active route (200, apiBase) -> url + reason "active", degraded false', async () => {

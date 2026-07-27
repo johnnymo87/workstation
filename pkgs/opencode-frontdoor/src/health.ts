@@ -10,6 +10,7 @@ export async function probeServeHealth(
   const result = await boundedFetch(url, {
     method: "GET",
     timeoutMs: config.routeTimeoutMs,
+    headers: config.serveAuthHeader ? { Authorization: config.serveAuthHeader } : undefined,
     fetchImpl: deps?.fetch,
   });
 
