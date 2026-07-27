@@ -419,8 +419,9 @@ export async function callSummarizeHttp(
  *
  * IMPORTANT: `/session/status` has no sessionID in its path, so opencode's
  * workspace-routing scopes it by the `directory` query param (falling back to the
- * serve's process.cwd() — the wrong instance — if absent). The plugin's internalFetch
- * is the raw in-process app.fetch and does NOT inject a directory, so we MUST pass the
+ * serve's process.cwd() — the wrong instance — if absent). The plugin's fetch does NOT
+ * inject a directory the way the SDK client would (in serve mode it is plain
+ * globalThis.fetch over loopback TCP, not the in-process app.fetch), so we MUST pass the
  * compacted session's directory explicitly (the plugin supplies ctx.directory, which the
  * plugin host guarantees equals the session's directory). Without it the map comes back
  * empty and we'd treat the session as idle immediately — defeating the whole fix.
