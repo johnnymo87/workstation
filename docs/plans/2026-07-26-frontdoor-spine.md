@@ -27,15 +27,28 @@ individual serve on a non-degrade path.
 - Enforced mechanically by `users/dev/test-frontdoor-opacity.sh` against the
   committed table `docs/plans/2026-07-26-phase9-consumer-disposition.md`.
 
-**NOT achieved: the objective as worded.** Pigeon (`:4731`) answers *anyone*:
+~~**NOT achieved: the objective as worded.** Pigeon (`:4731`) answers *anyone*:~~
 
-| endpoint | auth | result |
+**SUPERSEDED 2026-07-27 — Stage 1 shipped; `dx8p` is closed.** The table below recorded the
+pre-Stage-1 state and is kept for the record. Re-measured on 2026-07-27:
+
+| endpoint | auth | result *(2026-07-27)* |
+|---|---|---|
+| `GET /route` | none | **401** |
+| `GET /sessions` | bearer | **200** |
+| `GET /sessions` | none | **401** — the `auth.ts` gap this file warned about was closed |
+
+The original pre-Stage-1 measurements, for the record:
+
+| endpoint | auth | result *(pre-Stage-1)* |
 |---|---|---|
 | `GET /sessions` | none | **200, 166 KB** — sids, cwds, pids, endpoints |
 | `GET /route` | none | **200** — resolves a session to its serve |
 | `POST /place` | none | **200, a WRITE** — any local process can re-place any session |
 
-And `ss -tlnp` reveals `4096-4099` regardless. Bead: **`workstation-dx8p` (P1)**.
+`ss -tlnp` still reveals `4096-4099` — that is **Stage 2**, not Stage 1, and is expected to
+remain true until the serve token lands. Bead: **`workstation-km5f` (P1)**. Structural
+*reachability* opacity remains escalation-only (Stage 4 / `workstation-pcf3`, P3).
 
 | Phase | State |
 |---|---|
@@ -46,7 +59,8 @@ And `ss -tlnp` reveals `4096-4099` regardless. Bead: **`workstation-dx8p` (P1)**
 | 9.0 (consumer disposition table) | **done** — the table above |
 | 9.1 (repoint → door) | **done** in `f878865` |
 | 9.2 grep-guard | **done**, rebuilt after review |
-| **9.2 token** | **OPEN — `dx8p`. This is the objective.** |
+| ~~**9.2 token**~~ | ~~**OPEN — `dx8p`. This is the objective.**~~ **DONE 2026-07-27** — `dx8p` closed. Verified on the wire: anonymous `GET :4731/route` → 401, bearer `GET /sessions` → 200. |
+| **Stage 2 — serve token** | **OPEN — `workstation-km5f` (P1). This is now the objective.** |
 
 ## 3. The opacity roadmap (oracle-fable, 2026-07-26)
 
@@ -177,7 +191,8 @@ lgtm and the whole serve pool). **Read the paragraph, not the line.**
 
 ## 4. Explicitly NOT the spine
 
-Real, filed, and none should precede `dx8p`:
+Real, filed, and none should precede the current spine step (~~`dx8p`~~ → now
+**`workstation-km5f`**, Stage 2):
 `workstation-g8k9`, `ix8w`, `yc2g`, `yf3i`, `memk`, `r9hu`, `hrfn`.
 
 Two that grew out of the 2026-07-26 review and *are* genuine, but are still not
@@ -192,10 +207,17 @@ the spine:
   port directly". The door manufactures the violations the guard exists to catch,
   and the guard does not scan `.ts`.
 
-**And a P0 outside this spine entirely: `workstation-y8m`** — "Measure cost after
-context-usage removal (BEFORE adding more patches)", a measurement gate blocking
-the `b4p` epic. It is the only open P0 and nothing has moved toward it while this
-spine consumed sessions. **The user chose it as the next work after Stage 1.**
+~~**And a P0 outside this spine entirely: `workstation-y8m`**~~ — **DONE 2026-07-27, and it
+closed the `b4p` epic with it.** Measured: cache health is at the floor (uncached **0.00%**
+sustained 8 weeks on `google-vertex-anthropic`; aigateway `input_dollars` = $0 over 30d),
+corroborated by two independent sources. The bead's causal premise was **falsified** — the
+cure was `61fa542` (moving-tail fix to the fork's own `caching.patch`, 2026-06-01 16:55,
+pinned to the hour by the uncached cliff between 16h/39.35% and 18h/0.00%), **not** the
+2026-05-18 `context-usage` removal it was named after. `b4p` and its patch-fetch children
+were closed obsolete: all four upstream PRs were killed by an automated stale-bot, never
+reviewed on merit, and the leak they targeted no longer exists. Remaining real headroom
+(cache **writes** are 41.8% of priced Opus spend; the Vertex 1h tier is built but unused)
+was re-scoped to **`workstation-h84n`** (P2).
 
 ## 5. Deploy discipline
 
