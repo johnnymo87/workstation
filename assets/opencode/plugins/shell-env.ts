@@ -1,6 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import * as os from "node:os"
 import * as fs from "node:fs"
+import * as path from "node:path"
 
 /**
  * Read a sops-decrypted secret file, returning its trimmed contents or
@@ -83,17 +84,112 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
   return env
 }
 
+export interface KubeFS {
+  existsSync: (path: string) => boolean
+  readFileSync: (path: string, encoding: "utf8") => string
+  writeFileSync: (path: string, data: string) => void
+  mkdirSync: (path: string, options?: { recursive?: boolean }) => void
+  copyFileSync: (src: string, dest: string) => void
+  getUid?: () => number | undefined
+  homedir?: () => string
+}
+
+const defaultKubeFS: KubeFS = {
+  existsSync: fs.existsSync,
+  readFileSync: (p, e) => fs.readFileSync(p, e),
+  writeFileSync: (p, d) => fs.writeFileSync(p, d, "utf8"),
+  mkdirSync: (p, o) => {
+    fs.mkdirSync(p, o)
+  },
+  copyFileSync: fs.copyFileSync,
+  getUid: () => (process.getuid ? process.getuid() : undefined),
+  homedir: os.homedir,
+}
+
+/**
+ * Compute the per-session KUBECONFIG overlay env var (KUBECONFIG=<overlay>:<shared>).
+ *
+ * Prevents opencode sessions from accidentally mutating each other's active
+ * Kubernetes context or namespace when running `kubectl config use-context` or
+ * `kubectl config set-context --current --namespace=...`.
+ *
+ * Injected dependencies allow complete unit testing without touching disk.
+ * Fail-open: returns undefined on any error or missing prerequisite.
+ */
+export function loadKubeconfigEnv(
+  sessionID: string | undefined,
+  processEnv: Record<string, string | undefined> = process.env,
+  sys: KubeFS = defaultKubeFS,
+): string | undefined {
+  try {
+    if (!sessionID) return undefined
+
+    let runtimeDir = processEnv.XDG_RUNTIME_DIR
+    if (!runtimeDir) {
+      const uid = sys.getUid ? sys.getUid() : undefined
+      if (uid !== undefined) {
+        runtimeDir = `/run/user/${uid}`
+      }
+    }
+    if (!runtimeDir) return undefined
+
+    const home = processEnv.HOME || (sys.homedir ? sys.homedir() : undefined)
+    if (!home) return undefined
+
+    const sharedConfig = path.join(home, ".kube", "config")
+    if (!sys.existsSync(sharedConfig)) return undefined
+
+    const kubeDir = path.join(runtimeDir, "opencode-kube")
+    const overlayConfig = path.join(kubeDir, `${sessionID}.yaml`)
+
+    let isValidOverlay = false
+    if (sys.existsSync(overlayConfig)) {
+      try {
+        const content = sys.readFileSync(overlayConfig, "utf8")
+        if (content.includes("apiVersion:") && content.includes("kind: Config")) {
+          isValidOverlay = true
+        }
+      } catch {
+        isValidOverlay = false
+      }
+    }
+
+    if (!isValidOverlay) {
+      sys.mkdirSync(kubeDir, { recursive: true })
+
+      const readmePath = path.join(kubeDir, "README")
+      if (!sys.existsSync(readmePath)) {
+        try {
+          const readmeText =
+            "Per-session KUBECONFIG overlays for OpenCode.\n" +
+            "Created by assets/opencode/plugins/shell-env.ts to prevent sessions from overwriting each other's active Kubernetes context or namespace.\n" +
+            "Deleting an overlay resets that session to the shared config (~/.kube/config).\n"
+          sys.writeFileSync(readmePath, readmeText)
+        } catch {
+          // best-effort ignore
+        }
+      }
+
+      sys.copyFileSync(sharedConfig, overlayConfig)
+    }
+
+    return `${overlayConfig}:${sharedConfig}`
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Injects environment variables into every bash tool invocation via the
  * `shell.env` hook (see opencode/packages/opencode/src/tool/bash.ts).
  *
- * Four purposes:
+ * Five purposes:
  * 1. Force non-interactive defaults so commands never wait on a TTY.
  * 2. Expose session metadata (OPENCODE_SESSION_ID) so an agent can discover
  *    its own session ID — needed for opencode-to-opencode handoffs via
  *    `opencode-send <id> "msg"`.
  * 3. Expose the host's hostname (OPENCODE_HOSTNAME) so an agent can
-  *    disambiguate which machine it is on (devbox / cloudbox / macOS)
+ *    disambiguate which machine it is on (devbox / cloudbox / macOS)
  *    without spawning a `hostname` subprocess. See the "Host
  *    Identification" section in the repo-level AGENTS.md.
  * 4. Inject sops secrets (cloudbox) so work tokens (JENKINS_API_TOKEN,
@@ -101,6 +197,8 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
  *    non-interactive bash sessions. ~/.bashrc's interactive guard
  *    short-circuits programs.bash.initExtra, so those exports never run here;
  *    re-reading /run/secrets/* directly closes that gap. See loadSecretEnv.
+ * 5. Inject per-session KUBECONFIG overlay (KUBECONFIG=<overlay>:<shared>) to
+ *    isolate active context and namespace changes to individual opencode sessions.
  */
 const plugin: Plugin = async () => ({
   "shell.env": async (input, output) => {
@@ -121,6 +219,15 @@ const plugin: Plugin = async () => ({
     // sessions. Sync reads of small files at bash-invocation time; host-safe
     // (no-op where /run/secrets/* is absent).
     Object.assign(output.env, loadSecretEnv(readSecret))
+
+    // Per-session KUBECONFIG isolation: inject KUBECONFIG=<overlay>:<shared>
+    // to isolate active context and namespace changes to this session.
+    try {
+      const kubeconfig = loadKubeconfigEnv(input.sessionID)
+      if (kubeconfig) output.env.KUBECONFIG = kubeconfig
+    } catch {
+      // Fail open: never let kubeconfig isolation error disrupt bash env hook
+    }
   },
 })
 
