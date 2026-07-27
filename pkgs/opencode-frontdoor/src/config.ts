@@ -67,10 +67,10 @@ export function loadConfig(): Config {
   const pigeonAuthToken = process.env.PIGEON_DAEMON_AUTH_TOKEN || undefined;
   const version = process.env.FRONTDOOR_VERSION || 'unknown';
 
-  const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  const serverPassword = process.env.OPENCODE_SERVER_PASSWORD?.trim();
   let serveAuthHeader: string | undefined = undefined;
   if (serverPassword) {
-    const serverUsername = process.env.OPENCODE_SERVER_USERNAME || 'opencode';
+    const serverUsername = process.env.OPENCODE_SERVER_USERNAME?.trim() || 'opencode';
     const credentials = Buffer.from(`${serverUsername}:${serverPassword}`).toString('base64');
     serveAuthHeader = `Basic ${credentials}`;
   }

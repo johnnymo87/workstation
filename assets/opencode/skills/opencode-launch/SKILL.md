@@ -166,15 +166,24 @@ If something goes wrong and you don't see a tab open, check
 ## Attaching to a Session
 
 ```bash
-opencode attach http://localhost:4096 --session <session-id>
+opencode attach http://127.0.0.1:4700 --session <session-id>
 ```
 
 The session ID is printed by `opencode-launch`.
 
 ## Killing a Session
 
+Through the front door (uncredentialed):
+
 ```bash
-curl -sf -X DELETE http://localhost:4096/session/<session-id>
+curl -sf -X DELETE http://127.0.0.1:4700/session/<session-id>
+```
+
+Or directly against a raw serve port (requires HTTP Basic Auth credentials):
+
+```bash
+curl -sf -u "opencode:$(cat /run/secrets/opencode_server_password)" \
+  -X DELETE http://127.0.0.1:4096/session/<session-id>
 ```
 
 Or from Telegram: `/kill <session-id>`
@@ -182,12 +191,12 @@ Or from Telegram: `/kill <session-id>`
 ## Listing Sessions
 
 ```bash
-curl -s http://localhost:4096/session | jq
+curl -s http://127.0.0.1:4700/session | jq
 ```
 
 ## Environment
 
-- `OPENCODE_URL` defaults to `http://127.0.0.1:4096`
+- `OPENCODE_URL` defaults to `http://127.0.0.1:4700` (front door)
 - Override if opencode serve runs on a different port
 
 ## Prerequisites
@@ -201,8 +210,8 @@ systemctl status opencode-serve
 # macOS
 launchctl list | grep opencode
 
-# Direct health check (all platforms)
-curl -s http://localhost:4096/global/health
+# Direct health check (all platforms; /global/health is unauthenticated)
+curl -s http://127.0.0.1:4096/global/health
 ```
 
 ## Troubleshooting

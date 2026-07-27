@@ -92,8 +92,8 @@ export type TuiSurface = 'absent' | 'degrades' | 'unverified';
  */
 export const POOL_CREDENTIAL_REMEDY =
   'Write the credential once, then force every serve to re-read it: ' +
-  '(1) send the write to exactly ONE port, e.g. `curl -X PUT http://127.0.0.1:4096/auth/<providerID> -H "Content-Type: application/json" -d @creds.json`; ' +
-  '(2) then `for p in 4096 4097 4098 4099; do curl -sS -X POST http://127.0.0.1:$p/global/dispose; done`. ' +
+  '(1) send the write to exactly ONE port with credentials, e.g. `curl -u "opencode:$(cat /run/secrets/opencode_server_password)" -X PUT http://127.0.0.1:4096/auth/<providerID> -H "Content-Type: application/json" -d @creds.json`; ' +
+  '(2) then `for p in 4096 4097 4098 4099; do curl -sS -u "opencode:$(cat /run/secrets/opencode_server_password)" -X POST http://127.0.0.1:$p/global/dispose; done`. ' +
   'Do NOT send the write to all four ports: auth.json is shared and has no lock, so concurrent whole-document writes can silently lose an update. ' +
   'Be aware step (2) is disruptive — /global/dispose cancels every in-flight run on that serve, for every directory, and SIGTERMs its stdio MCP children; expect a cold-boot latency spike afterwards.';
 
