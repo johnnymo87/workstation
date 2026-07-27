@@ -280,11 +280,22 @@ in
         group = "dev";
         mode = "0400";
       };
-      telegram_chat_id = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
+        telegram_chat_id = {
+          owner = "dev";
+          group = "dev";
+          mode = "0400";
+        };
+        # dx8p Stage 1: the pigeon bearer token. owner=dev is LOAD-BEARING, not
+        # boilerplate -- sops-nix defaults to root:0400, but pigeon, the four
+        # serves, and the front door all run as dev and read this file at CALL
+        # TIME (see docs/plans/2026-07-26-dx8p-stage1-pigeon-token.md). If this
+        # is root-only, every client silently falls back to sending no header
+        # and 401s against an armed pigeon.
+        pigeon_daemon_auth_token = {
+          owner = "dev";
+          group = "dev";
+          mode = "0400";
+        };
       # Google Gemini API key for OpenCode (direct API)
       gemini_api_key = {
         owner = "dev";
@@ -583,7 +594,21 @@ in
         export CCR_WORKER_URL="$(cat /run/secrets/ccr_worker_url)"
         export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
-        export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
+          export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
+          # dx8p Stage 1: ARMS pigeon's auth. Until this line exists, checkAuth's
+          # falsy-token branch keeps every route anonymous (back-compat). Once it
+          # exists, EVERY route except GET /health requires a bearer.
+          #
+          # This is the ONLY line in the rollout that changes live behaviour. Every
+          # client-side change (the door, opencode-launch, oc-*-attach, the drift
+          # alert, the pigeon plugin, lgtm) already landed and is a no-op until now,
+          # and each resolves the token at CALL TIME -- so no pool bounce and no
+          # door restart are needed, which is what keeps ~20 live SSE legs intact.
+          #
+          # ROLLBACK: delete this line, `nixos-rebuild switch`, restart pigeon.
+          # Anonymous service resumes immediately and every client's header
+          # becomes a harmless no-op again.
+          export PIGEON_DAEMON_AUTH_TOKEN="$(cat /run/secrets/pigeon_daemon_auth_token)"
         # front-door INFRA/CONTROL-PLANE EXEMPTION (Phase 7.8): pigeon is the
         # session-aware router the front door DEPENDS ON. Its own opencode
         # reads/fallbacks must hit the raw anchor (:4096), NOT the front door
@@ -1785,9 +1810,9 @@ EOF
       ExecStart = "${pkgs.writeShellScript "opencode-frontdoor-canary" ''
         set -u
         # System-service PATH is minimal — be explicit.
-        # We include coreutils, systemd, util-linux, curl, gnugrep, gnused, and findutils.
+        # We include coreutils, systemd, util-linux, curl, gnugrep, gnused, findutils, and jq.
         # Deep stack dumps (the serve canary's `eu-stack` native-stack loop and its 2s `cpu-io-split` sample) are omitted to ensure fast recovery.
-        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.findutils ]}
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.findutils pkgs.jq ]}
         STATE=/var/lib/opencode-frontdoor-canary
         UNIT=opencode-frontdoor.service
         PORT=4700
@@ -1877,6 +1902,43 @@ EOF
         # 2. HTTP 200 -> healthy
         if [ "$HTTP_CODE" -eq 200 ]; then
           rm -f "$FAILFILE" "$SICKFILE"
+
+          # Check pigeon auth and aggregate degrade signals (dx8p Stage 1, Task 8)
+          PIGEON_OK=$(jq -r 'if .pigeon == null then "missing" else .pigeon end' "$BODY_FILE" 2>/dev/null || echo "false")
+          DEGRADED=$(jq -r 'if .degraded == null then "missing" else .degraded end' "$BODY_FILE" 2>/dev/null || echo "true")
+          NOT_ROUTED_MUTATIONS=$(jq -r 'if .notRoutedMutationToAnchor == null then -1 else .notRoutedMutationToAnchor end' "$BODY_FILE" 2>/dev/null || echo "-1")
+
+          if [ "$PIGEON_OK" != "true" ]; then
+            echo "WARNING: /healthz reports pigeon is unreachable or unauthenticated (pigeon=$PIGEON_OK)"
+          fi
+          if [ "$DEGRADED" = "true" ]; then
+            echo "WARNING: /healthz reports DEGRADED mode active"
+          fi
+          if [ "$NOT_ROUTED_MUTATIONS" -gt 0 ]; then
+            echo "WARNING: /healthz reports $NOT_ROUTED_MUTATIONS mutating request(s) degraded to anchor (notRoutedMutationToAnchor)"
+          fi
+
+          # Pigeon anonymous endpoint auth probe (dx8p Stage 1, Task 8)
+          # If pigeon token secret exists on cloudbox (/run/secrets/pigeon_daemon_auth_token), assert anonymous requests 401
+          if [ -f "/run/secrets/pigeon_daemon_auth_token" ]; then
+            P_SESSIONS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:4731/sessions" || echo "000")
+            P_INBOX=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:4731/swarm/inbox" || echo "000")
+            P_ROUTE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:4731/route" || echo "000")
+            P_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:4731/health" || echo "000")
+
+            if [ "$P_SESSIONS" -ne 401 ]; then
+              echo "WARNING: pigeon anonymous GET /sessions returned $P_SESSIONS (expected 401)"
+            fi
+            if [ "$P_INBOX" -ne 401 ]; then
+              echo "WARNING: pigeon anonymous GET /swarm/inbox returned $P_INBOX (expected 401)"
+            fi
+            if [ "$P_ROUTE" -ne 401 ]; then
+              echo "WARNING: pigeon anonymous GET /route returned $P_ROUTE (expected 401)"
+            fi
+            if [ "$P_HEALTH" -ne 200 ]; then
+              echo "WARNING: pigeon anonymous GET /health returned $P_HEALTH (expected 200)"
+            fi
+          fi
 
           # Version-drift check (F7/F9/F-D6)
           # Parse version out of the body: {"status":"ok","degraded":...,"version":"/nix/store/..."}
