@@ -88,6 +88,42 @@ Because neither service self-restarts on rebuild, `nixos-rebuild switch` and `ho
 - **Stale serves (`reset-workspace` skipped pool restart):** Front door routed new session-scoped paths, but stale serves returned HTML SPA fallbacks. The attach TUI threw when trying to JSON-parse HTML and reconnected infinitely, resulting in a frozen TUI.
 - **Stale door (`nixos-rebuild` ran without restart):** Front door binary was updated on disk but process wasn't restarted. The MCP dialog returned 404 through the door for ~70 minutes until `opencode-frontdoor` was restarted.
 
+**Third incident, 2026-07-26 — and the reason this section was not enough.**
+Arming pigeon's auth token (`workstation-dx8p`) 503ed every mutating request
+through the door: `nixos-rebuild` installed the new door build, the old process
+kept running, sent no bearer, was 401ed by a freshly-armed pigeon, and classified
+it `pigeon-error`. Typed prompts failed across live TUIs until a human restarted
+the door. The `home-manager switch` step was omitted too, so `opencode-launch`
+and `oc-auto-attach` had no token support at all.
+
+**The canonical sequence above was already correct and already written here. It
+was not consulted** — a bespoke runbook was written in a plan file instead. If you
+are about to write deploy steps for cloudbox, use this section rather than
+composing your own.
+
+> ### The rationalization that defeats this section
+>
+> The design in question resolved the token **at call time** specifically so that
+> no restart would be needed — and that reasoning is *correct in steady state*
+> and **wrong for the deploy that ships it.** Call-time resolution only helps a
+> process already running the call-time code, and that code arrived in the same
+> rebuild.
+>
+> **A mechanism that removes a deployment constraint cannot remove it for the
+> deployment that introduces the mechanism.** Read every "this makes restarts
+> unnecessary" claim as "…starting with the deployment *after* this one."
+>
+> The question that catches it: **which processes are running the OLD code at the
+> moment the switch flips?** With `restartIfChanged = false`, the answer is
+> always "the door and every serve," no matter how clever the new code is.
+
+**Do not count on the nightly reset to clear door drift.** `reset-workspace`
+restarts `opencode-serve-pool.target` only. Verified 2026-07-27: after the 03:00
+reset, serves showed `ActiveEnterTimestamp` 03:01:13 and pigeon 03:00:10, while
+the door still read 22:53:30 — the previous evening's *manual* restart. A stale
+serve pool self-heals overnight; **a stale door does not, and will keep serving
+old code indefinitely.**
+
 ### Checking for Version Drift
 
 Note: Drift alerting is **cloudbox-only**; devbox runs the same serve pool with the same deliberate no-bounce and has no drift detection (deliberately deferred — no front door exists on devbox, so there is no cross-service version skew class).
