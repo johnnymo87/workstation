@@ -7,22 +7,24 @@ on:
 
 jobs:
   check:
+    # The single-entry matrix is deliberate and load-bearing: it is what makes
+    # this job report as "check (ubuntu-24.04-arm)", which is the exact context
+    # branch protection requires. Inlining `runs-on: ubuntu-24.04-arm` and
+    # dropping the matrix would rename the job to plain "check", the required
+    # context would never report, and every PR would block forever waiting on
+    # it. Renaming means updating branch protection in the same breath.
+    #
+    # There used to be a second `ubuntu-latest` leg. It was a leftover of the
+    # Crostini (x86_64-linux) target removed in 4d19e88: the flake exposes no
+    # x86_64-linux outputs, so `nix flake check` there built nothing and merely
+    # confirmed the flake evaluates, while presenting a green check that
+    # implied coverage it did not have. Removed once the matching required
+    # context was dropped from branch protection.
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Builds `checks.aarch64-linux` (both home configs + both NixOS
-          # toplevels). This is the leg that actually gates the repo.
           - runner: ubuntu-24.04-arm
-          # Vestigial. Both NixOS hosts and the Mac are ARM, so the flake
-          # exposes no x86_64-linux outputs and this leg builds nothing -- it
-          # only confirms the flake evaluates. It dates from the Crostini
-          # (x86_64-linux) target removed in 4d19e88. It is kept ONLY because
-          # branch protection lists "check (ubuntu-latest)" as a required
-          # status check, so deleting the leg would leave every PR waiting
-          # forever on a check that can never report. Dropping it means
-          # updating branch protection first.
-          - runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
     # The ARM leg builds real closures from a cold store every run (runners are
     # ephemeral and none of this repo's own packages are in any binary cache),
