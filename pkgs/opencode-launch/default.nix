@@ -13,6 +13,7 @@ pkgs.writeShellApplication {
   # with a loud `command -v` guard.)
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.git pkgs.coreutils ];
   text = ''
+      # shellcheck disable=SC1091  # sourced from a nix store path shellcheck cannot follow
       source "${opencode-serve-auth-sh}"
       serve_auth_load
 

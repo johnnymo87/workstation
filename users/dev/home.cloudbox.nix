@@ -37,6 +37,7 @@ let
     name = "opencode-pool-auth";
     runtimeInputs = [ pkgs.curl pkgs.jq ];
     text = ''
+      # shellcheck disable=SC1091  # sourced from a nix store path shellcheck cannot follow
       source "${localPkgs.opencode-serve-auth-sh}"
       serve_auth_load
 
