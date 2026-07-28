@@ -558,6 +558,11 @@ in
     # Mobile shell (survives sleep/wake, network changes)
     pkgs.mosh
 
+    # Audio/video transcode + inspection (ffmpeg, ffprobe). devbox already gets
+    # this via environment.systemPackages for its transcription services; this
+    # puts it on PATH for interactive use on every host.
+    pkgs.ffmpeg
+
     # Other tools
     devenvPkg
 
