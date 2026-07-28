@@ -9,6 +9,7 @@
     ./home.cloudbox.nix
     ./gnome-keyring.nix
     ./disk-cleanup.nix
+    ./em-drift-detector.nix
     ./opencode-llm-audit.nix
     ./home.darwin.nix
     ./codex-lb.nix
