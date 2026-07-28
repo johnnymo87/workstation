@@ -20,6 +20,7 @@ pkgs.writeShellApplication {
     #
     # --yes  Skip the confirmation prompt (used by the nightly systemd unit).
 
+    # shellcheck disable=SC1091  # sourced from a nix store path shellcheck cannot follow
     source "${opencode-serve-auth-sh}"
     serve_auth_load
 
