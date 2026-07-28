@@ -130,13 +130,26 @@
     # ubuntu-24.04-arm leg builds all four. This is keyed per-system so the
     # x86_64 leg never tries to realise an aarch64 attribute.
     #
-    # Not covered here: `darwinConfigurations`, which needs a macOS builder --
-    # tracked separately.
+    # Deliberately absent:
+    #
+    #   nixos-cloudbox -- that host pulls in `claude-failover-proxy`, whose
+    #     binary lives in a PRIVATE repo and is fetched through the GitHub API
+    #     with a token supplied via `netrcImpureEnvVars`. A CI runner has no
+    #     such credential, so the fetch 404s and the toplevel cannot be built
+    #     there at all. This is a credential wall, not a defect: it was proven
+    #     empirically in the first run of this gate (#218), where the other
+    #     three checks built clean and only this one failed. Note the recurring
+    #     hazard is unaffected -- `writeShellApplication` (the shellcheck-fatal
+    #     builder) appears zero times in either host configuration and only in
+    #     the home configs, which ARE built below. Cloudbox also keeps the
+    #     eval-level checking `nix flake check` already did. Restoring a real
+    #     build needs a CI credential; tracked separately.
+    #
+    #   darwinConfigurations -- needs a macOS builder. Tracked separately.
     checks.${devboxSystem} = {
       home-dev = self.homeConfigurations.dev.activationPackage;
       home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;
       nixos-devbox = self.nixosConfigurations.devbox.config.system.build.toplevel;
-      nixos-cloudbox = self.nixosConfigurations.cloudbox.config.system.build.toplevel;
     };
 
     # NixOS system configuration

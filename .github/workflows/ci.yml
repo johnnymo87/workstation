@@ -24,7 +24,11 @@ jobs:
           # updating branch protection first.
           - runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # The ARM leg builds real closures from a cold store every run (runners are
+    # ephemeral and none of this repo's own packages are in any binary cache),
+    # so it takes tens of minutes -- measured, not guessed. 60 was too close to
+    # the observed runtime to be a safety margin.
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
