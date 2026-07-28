@@ -107,6 +107,38 @@
         all;
     }) systems);
 
+    # Build-level CI gate.
+    #
+    # `nix flake check` on its own is NOT a build gate for this repo. It
+    # *evaluates* `nixosConfigurations` (drv level only) and does not even
+    # evaluate `homeConfigurations` -- it just confirms the attrset exists. So a
+    # derivation that is fine at eval time but fails at BUILD time sails through
+    # CI green and only explodes later, on the user's machine, at `switch` time.
+    #
+    # That is not hypothetical. #211 added `source "${opencode-serve-auth-sh}"`
+    # to three `writeShellApplication`s; that builder runs shellcheck with
+    # findings treated as fatal, and shellcheck always emits SC1091 for a source
+    # target it cannot resolve -- which a /nix/store path never is at lint time.
+    # All three failed to build, taking `home-manager-generation` with them,
+    # while CI reported success on both legs. It went unnoticed for a day, so
+    # nothing from #211/#212 reached the box, which in turn silently invalidated
+    # an unrelated measurement that was about to be acted on. Fixed in #215.
+    #
+    # Listing the configurations here makes `nix flake check` actually realise
+    # them, locally and in CI, by the same command. Both NixOS hosts are
+    # aarch64-linux (devbox is ARM on Hetzner, cloudbox is ARM on GCP), so the
+    # ubuntu-24.04-arm leg builds all four. This is keyed per-system so the
+    # x86_64 leg never tries to realise an aarch64 attribute.
+    #
+    # Not covered here: `darwinConfigurations`, which needs a macOS builder --
+    # tracked separately.
+    checks.${devboxSystem} = {
+      home-dev = self.homeConfigurations.dev.activationPackage;
+      home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;
+      nixos-devbox = self.nixosConfigurations.devbox.config.system.build.toplevel;
+      nixos-cloudbox = self.nixosConfigurations.cloudbox.config.system.build.toplevel;
+    };
+
     # NixOS system configuration
     nixosConfigurations.devbox = nixpkgs.lib.nixosSystem {
       system = devboxSystem;

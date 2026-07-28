@@ -11,9 +11,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          # Builds `checks.aarch64-linux` (both home configs + both NixOS
+          # toplevels). This is the leg that actually gates the repo.
           - runner: ubuntu-24.04-arm
+          # Vestigial. Both NixOS hosts and the Mac are ARM, so the flake
+          # exposes no x86_64-linux outputs and this leg builds nothing -- it
+          # only confirms the flake evaluates. It dates from the Crostini
+          # (x86_64-linux) target removed in 4d19e88. It is kept ONLY because
+          # branch protection lists "check (ubuntu-latest)" as a required
+          # status check, so deleting the leg would leave every PR waiting
+          # forever on a check that can never report. Dropping it means
+          # updating branch protection first.
+          - runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,5 +32,19 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v14
 
+      - name: Disk space before
+        run: df -h /
+
+      # --print-build-logs is not cosmetic. Without it a failing derivation
+      # prints only "For full logs, run: nix log /nix/store/...drv", and that
+      # store path dies with the runner -- leaving a red check with no way to
+      # see WHY. The failure this gate exists to catch (shellcheck rejecting a
+      # writeShellApplication) is legible only in the build log.
+      # --keep-going reports every broken configuration in one run instead of
+      # stopping at the first.
       - name: Run nix flake check
-        run: nix flake check
+        run: nix flake check --print-build-logs --keep-going
+
+      - name: Disk space after
+        if: always()
+        run: df -h /
