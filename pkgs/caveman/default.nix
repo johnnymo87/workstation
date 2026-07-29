@@ -42,9 +42,18 @@
 #     skill documents a hook returning `decision: "block"` and a statusline
 #     badge, neither of which exists in opencode. It could never do anything
 #     here except take up room in the system prompt.
+#
+# COMPACTION EXEMPTION. plugin.js is patched at build time so its system-prompt
+# injection never touches opencode's compaction/summary request, and so the
+# always-on ruleset rides through that same gated hook rather than opencode's
+# global `instructions` key (which has no per-agent scoping and would leak into
+# the summarizer). See pkgs/caveman/compaction-exemption.js for the full
+# rationale and pkgs/caveman/exemption-test.js for the property test that runs
+# on every build.
 { lib
 , stdenvNoCC
 , fetchFromGitHub
+, nodejs
 }:
 
 let
@@ -77,6 +86,8 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     hash = "sha256-VqRHx3/4SSCnEh3cUJ/he5saIfwNhS0hOzoH/wwtU2o=";
   };
 
+  nativeBuildInputs = [ nodejs ];
+
   dontConfigure = true;
   dontBuild = true;
 
@@ -90,7 +101,13 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     # package.json declares "type": "module" — a bare .js sibling would be
     # loaded as ESM and break plugin.js's require() bridge. This mirrors what
     # upstream's bin/install.js does.
-    cp src/plugins/opencode/plugin.js     $out/plugin/plugin.js
+    #
+    # plugin.js is the PATCHED copy (compaction exemption + ruleset routing);
+    # the patcher asserts every anchor and fails the build if upstream moved.
+    node ${./compaction-exemption.js} \
+      src/plugins/opencode/plugin.js \
+      src/rules/caveman-activate.md \
+      $out/plugin/plugin.js
     cp src/plugins/opencode/package.json  $out/plugin/package.json
     cp src/hooks/caveman-config.js        $out/plugin/caveman-config.cjs
 
@@ -155,6 +172,12 @@ stdenvNoCC.mkDerivation (finalAttrs: {
       echo "FAIL: cavecrew payload leaked into the output." >&2
       exit 1
     fi
+
+    # THE load-bearing check: drive the real shipped plugin's hooks and prove a
+    # compaction request comes out byte-identical while a normal one is terse.
+    # A compaction leak is invisible at runtime, so it has to fail here.
+    export TEST_SCRATCH="$TMPDIR/caveman-exemption-scratch"
+    node ${./exemption-test.js} "$out/plugin/plugin.js"
 
     echo "OK: caveman opencode payload complete (plugin siblings, ${toString (builtins.length skills)} skills, ${toString (builtins.length commands)} commands, ruleset)."
 

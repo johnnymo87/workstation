@@ -257,7 +257,27 @@ let
   # provider options stay there because OpenCode defaults GPT-5.x to medium
   # reasoning unless a variant or model option overrides it.
   opencodeOverlay =
-    (lib.optionalAttrs isDevbox {
+    # caveman (pkgs/caveman), all hosts. opencode's local-plugin auto-discovery
+    # globs `{plugin,plugins}/*.{ts,js}` — ONE level deep, files only. caveman
+    # must ship as a DIRECTORY (plugin.js needs caveman-config.cjs as a real
+    # sibling), so auto-discovery can never see it and an explicit entry is
+    # required. A relative path here resolves against the config file's
+    # directory (not $PWD) and is NOT sent to npm — verified against 1.17.13,
+    # which reports it back as
+    # file:///home/dev/.config/opencode/plugins/caveman/plugin.js. Because the
+    # directory cannot match the auto-discovery glob, there is exactly one load
+    # and no duplicate. `recursiveUpdate` REPLACES lists, hence base ++ append.
+    #
+    # NOTE: there is deliberately NO `instructions` entry for caveman's
+    # ruleset. `instructions` is global and reaches every agent INCLUDING
+    # compaction/summary, and opencode offers no per-agent scoping for it.
+    # The ruleset is instead pushed through the plugin's own
+    # experimental.chat.system.transform hook, which pkgs/caveman patches to
+    # skip compaction. See pkgs/caveman/compaction-exemption.js.
+    {
+      plugin = (opencodeBase.plugin or []) ++ [ "./plugins/caveman/plugin.js" ];
+    }
+    // (lib.optionalAttrs isDevbox {
       model = devboxModel;
       # Route the built-in `compaction` agent to Sonnet 5 on devbox.
       # Without this, compaction inherits opencode.base.json's top-level default
@@ -308,35 +328,6 @@ let
       # Cloudbox uses Vertex/ADC for Google models; hide the direct
       # Google Generative AI API provider to avoid selecting google/* by mistake.
       disabled_providers = [ "google" ];
-
-      # caveman (pkgs/caveman): terse-output plugin. Two wiring points here,
-      # plus the plugin directory symlink and the command files below.
-      #
-      # 1. `plugin`. opencode's local-plugin auto-discovery globs
-      #    `{plugin,plugins}/*.{ts,js}` — ONE level deep, files only. caveman
-      #    ships as a DIRECTORY (plugins/caveman/) because plugin.js needs its
-      #    caveman-config.cjs helper as a real sibling, so auto-discovery can
-      #    never see it and an explicit entry is required. Relative paths here
-      #    are resolved against the config file's directory (not $PWD) and are
-      #    NOT sent to npm — verified against 1.17.13, which reports the entry
-      #    back as file:///home/dev/.config/opencode/plugins/caveman/plugin.js.
-      #    Because the entry is a directory-with-package.json, the loader never
-      #    matches the auto-discovery glob, so there is exactly one load and no
-      #    duplicate. `recursiveUpdate` REPLACES lists, hence the explicit
-      #    base ++ append rather than a bare singleton.
-      #
-      # 2. `instructions`. This is the always-on ruleset that upstream's
-      #    installer would have appended, inside marker comments, to
-      #    ~/.config/opencode/AGENTS.md. We use opencode's `instructions` key
-      #    instead: it feeds the exact same system-prompt injection path, but
-      #    it leaves assets/opencode/AGENTS.md untouched (no concat
-      #    derivation), it is one line to remove, and the provenance shows up
-      #    in the prompt itself as "Instructions from: /nix/store/...caveman/
-      #    rules/caveman-activate.md" — so a future reader debugging odd
-      #    terseness can actually see where it came from.
-      plugin = (opencodeBase.plugin or []) ++ [ "./plugins/caveman/plugin.js" ];
-      instructions = (opencodeBase.instructions or [])
-        ++ [ "${localPkgs.caveman}/rules/caveman-activate.md" ];
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
       # Default model differs by host:
@@ -498,27 +489,24 @@ in
     # symlink is the other half of the contract. The only observable proof it
     # actually loaded is ~/.config/opencode/.caveman-active appearing after a
     # fresh session starts.
-    xdg.configFile."opencode/plugins/caveman" = lib.mkIf isCloudbox {
-      source = "${localPkgs.caveman}/plugin";
-    };
+    # Deployed on all three hosts (cloudbox, devbox, macOS). Nothing here is
+    # host-specific: the payload is pure prompt/skill/command text plus a
+    # plugin that only touches ~/.config/opencode, so there is no MCP, secret,
+    # or model dependency to gate on.
+    xdg.configFile."opencode/plugins/caveman".source = "${localPkgs.caveman}/plugin";
 
     # caveman slash commands. caveman-stats is deliberately absent — see the
     # exclusion notes in pkgs/caveman/default.nix.
-    xdg.configFile."opencode/commands/caveman.md" = lib.mkIf isCloudbox {
-      source = "${localPkgs.caveman}/commands/caveman.md";
-    };
-    xdg.configFile."opencode/commands/caveman-commit.md" = lib.mkIf isCloudbox {
-      source = "${localPkgs.caveman}/commands/caveman-commit.md";
-    };
-    xdg.configFile."opencode/commands/caveman-compress.md" = lib.mkIf isCloudbox {
-      source = "${localPkgs.caveman}/commands/caveman-compress.md";
-    };
-    xdg.configFile."opencode/commands/caveman-help.md" = lib.mkIf isCloudbox {
-      source = "${localPkgs.caveman}/commands/caveman-help.md";
-    };
-    xdg.configFile."opencode/commands/caveman-review.md" = lib.mkIf isCloudbox {
-      source = "${localPkgs.caveman}/commands/caveman-review.md";
-    };
+    xdg.configFile."opencode/commands/caveman.md".source =
+      "${localPkgs.caveman}/commands/caveman.md";
+    xdg.configFile."opencode/commands/caveman-commit.md".source =
+      "${localPkgs.caveman}/commands/caveman-commit.md";
+    xdg.configFile."opencode/commands/caveman-compress.md".source =
+      "${localPkgs.caveman}/commands/caveman-compress.md";
+    xdg.configFile."opencode/commands/caveman-help.md".source =
+      "${localPkgs.caveman}/commands/caveman-help.md";
+    xdg.configFile."opencode/commands/caveman-review.md".source =
+      "${localPkgs.caveman}/commands/caveman-review.md";
 
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
       config.lib.file.mkOutOfStoreSymlink (

@@ -95,16 +95,19 @@ let
       );
   };
 
-  # caveman skills (pkgs/caveman), cloudbox only. Each is a whole directory
+  # caveman skills (pkgs/caveman), all three hosts. Each is a whole directory
   # symlink rather than a bare SKILL.md because several carry companion files
   # (caveman-compress ships the Python scripts it shells out to, caveman ships
   # assets). Same split as superpowers: skills are wired here, the plugin and
   # its config live in opencode-config.nix.
   #
+  # Not gated by host: this is plain skill text with no MCP, secret, or model
+  # dependency, so cloudbox / devbox / macOS all get the same set.
+  #
   # cavecrew and caveman-stats are NOT here — see pkgs/caveman/default.nix for
   # why (broken agent schema / model pins, and a Claude-Code-only hook
   # mechanism that opencode has no equivalent for).
-  cavemanSkills = lib.optionalAttrs isCloudbox (
+  cavemanSkills =
     lib.foldl' (acc: name: acc // {
       ".config/opencode/skills/${name}".source = "${localPkgs.caveman}/skills/${name}";
     }) {} [
@@ -113,8 +116,7 @@ let
       "caveman-compress"
       "caveman-help"
       "caveman-review"
-    ]
-  );
+    ];
 
   # Confluence-fetched skill files: content too sensitive for source control.
   # Pages are maintained in Confluence and fetched during home-manager activation
