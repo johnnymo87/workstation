@@ -878,10 +878,10 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
     # Claude Opus 4.7/4.8 at xhigh or max effort, set a large max_tokens so the
     # model has room to think and act across subagents and tool calls.
     # Starting at 64k tokens and tuning from there is a reasonable default."
-    # Pairs with the high adaptive default we set for opus 5 (and
-    # claude-fable-5) in assets/opencode/opencode.base.json. This is a cap,
-    # not a forced allocation: models still emit only what they want, but
-    # high/xhigh runs no longer get truncated at 32k. Other models are
+    # Pairs with the adaptive thinking defaults we set in
+    # assets/opencode/opencode.base.json (opus 5 medium, claude-fable-5 high).
+    # This is a cap, not a forced allocation: models still emit only what they
+    # want, but long thinking runs no longer get truncated at 32k. Other models are
     # unaffected (their own model.limit.output still wins via Math.min in
     # packages/opencode/src/provider/transform.ts:1262). NOTE: this only
     # covers interactive shells (sourced via ~/.profile); the opencode-serve

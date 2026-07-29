@@ -14,13 +14,13 @@
   },
   "agent": {
     "build": {
-      "variant": "high",
+      "variant": "medium",
       "permission": {
         "question": "allow"
       }
     },
     "plan": {
-      "variant": "high",
+      "variant": "medium",
       "permission": {
         "question": "allow"
       }
@@ -42,16 +42,7 @@
               "type": "adaptive",
               "display": "summarized"
             },
-            "effort": "high"
-          }
-        },
-        "claude-opus-4-8": {
-          "options": {
-            "thinking": {
-              "type": "adaptive",
-              "display": "summarized"
-            },
-            "effort": "high"
+            "effort": "medium"
           }
         },
         "claude-fable-5": {
@@ -102,16 +93,7 @@
               "type": "adaptive",
               "display": "summarized"
             },
-            "effort": "high"
-          }
-        },
-        "claude-opus-4-8@default": {
-          "options": {
-            "thinking": {
-              "type": "adaptive",
-              "display": "summarized"
-            },
-            "effort": "high"
+            "effort": "medium"
           }
         },
         "claude-fable-5@default": {

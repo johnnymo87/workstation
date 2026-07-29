@@ -13,7 +13,7 @@ let
   # staying off the Vertex path.
   sonnetModel = "anthropic/claude-sonnet-5";
   # Cloudbox default: Opus over Vertex (no Claude Max subscription here, unlike
-  # devbox). Carries its own high thinking effort from opencode.base.json's
+  # devbox). Carries its own medium thinking effort from opencode.base.json's
   # google-vertex-anthropic model options, so no variant override is needed.
   vertexOpusModel = "google-vertex-anthropic/claude-opus-5@default";
   geminiModel = "google-vertex/gemini-3.6-flash";
@@ -62,8 +62,8 @@ let
   #      (`if isCloudbox then vertexOpusModel else geminiModel`). The Vertex
   #      opus-5 model already carries its own `effort` setting from
   #      opencode.base.json, so no variant override is added here. (opus-4-7
-  #      has no provider-level model entry anymore, and no agent is pinned
-  #      to it as of 2026-07-03.)
+  #      and opus-4-8 have no provider-level model entry anymore, and no agent
+  #      is pinned to either as of 2026-07-28.)
   patchAgent = name: src:
     let
       afterSonnet =
@@ -334,8 +334,8 @@ let
         compaction.model = geminiModel;
       } // lib.optionalAttrs isDarwin {
         # Gemini-native high thinking for the build/plan agents on macOS only.
-        # Cloudbox defaults to Opus, which uses its own high effort from
-        # opencode.base.json, so it gets no Gemini-style variant override.
+        # Cloudbox defaults to Opus, which uses opencode.base.json's shared
+        # build/plan `variant: medium`, so it gets no Gemini-style override.
         build.variant = geminiVariant;
         plan.variant = geminiVariant;
       };
