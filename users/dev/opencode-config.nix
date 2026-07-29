@@ -554,6 +554,31 @@ in
     # runtime-only nested keys are preserved (fixes shallow-merge bug).
     ${pkgs.jq}/bin/jq -S -s '.[0] * .[1]' "$base" "$managed" > "$tmp"
 
+    # Strip any `instructions` entry pointing at a caveman ruleset.
+    #
+    # This merge preserves runtime-only keys, which is normally what we want —
+    # but it means a key we USED to manage lingers forever after we stop
+    # managing it. An earlier iteration of the caveman wiring set
+    # `instructions` to the packaged caveman-activate.md; that approach was
+    # abandoned precisely because `instructions` is global and therefore also
+    # reaches the compaction/summary agent, which must stay caveman-free. Any
+    # machine that applied the earlier version still has the entry in its
+    # runtime opencode.json, and without this it would survive every future
+    # switch and silently re-introduce the exact leak the exemption exists to
+    # prevent (see pkgs/caveman/compaction-exemption.js).
+    #
+    # Deliberately narrow: only caveman rule paths are dropped, so unrelated
+    # user-added instructions are preserved. The key is removed entirely when
+    # nothing else remains, to avoid leaving an empty array behind.
+    cleaned="$(mktemp "''${runtime}.tmp.XXXXXX")"
+    ${pkgs.jq}/bin/jq '
+      if has("instructions") then
+        .instructions |= map(select(test("caveman-activate\\.md$") | not))
+        | if (.instructions | length) == 0 then del(.instructions) else . end
+      else . end
+    ' "$tmp" > "$cleaned"
+    mv "$cleaned" "$tmp"
+
     mv "$tmp" "$runtime"
     [[ "$base" == "$runtime" ]] || rm -f "$base"
   '';
