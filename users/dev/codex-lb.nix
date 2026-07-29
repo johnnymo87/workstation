@@ -61,8 +61,9 @@ lib.mkIf (isDevbox || isCloudbox) {
         "HOME=${config.home.homeDirectory}"
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
         "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
+        "LD_LIBRARY_PATH=/run/current-system/sw/share/nix-ld/lib"
       ];
-      ExecStart = "${pkgs.uv}/bin/uvx --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455";
+      ExecStart = "${pkgs.uv}/bin/uvx --python 3.13 --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455";
       Restart = "always";
       RestartSec = 10;
     };

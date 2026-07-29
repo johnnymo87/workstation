@@ -243,7 +243,7 @@ lib.mkIf isDarwin {
           "/bin/sh" "-c"
           ''
             [ -e "$HOME/.codex-lb/enabled" ] || exit 0
-            exec ${pkgs.uv}/bin/uvx --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455
+            exec ${pkgs.uv}/bin/uvx --python 3.13 --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455
           ''
         ];
         EnvironmentVariables = {
