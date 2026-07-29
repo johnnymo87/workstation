@@ -1,7 +1,7 @@
 # OpenCode system-wide skills deployment
 # Deploys skills to ~/.config/opencode/skills/ where OpenCode auto-discovers them
 # Skills are tool-agnostic workflows usable from any project
-{ config, lib, pkgs, assetsPath, isDarwin, isCloudbox, ... }:
+{ config, lib, pkgs, localPkgs, assetsPath, isDarwin, isCloudbox, ... }:
 
 let
   mkSkill = name: {
@@ -94,6 +94,27 @@ let
         else "${config.home.homeDirectory}/projects/superpowers/skills"
       );
   };
+
+  # caveman skills (pkgs/caveman), cloudbox only. Each is a whole directory
+  # symlink rather than a bare SKILL.md because several carry companion files
+  # (caveman-compress ships the Python scripts it shells out to, caveman ships
+  # assets). Same split as superpowers: skills are wired here, the plugin and
+  # its config live in opencode-config.nix.
+  #
+  # cavecrew and caveman-stats are NOT here — see pkgs/caveman/default.nix for
+  # why (broken agent schema / model pins, and a Claude-Code-only hook
+  # mechanism that opencode has no equivalent for).
+  cavemanSkills = lib.optionalAttrs isCloudbox (
+    lib.foldl' (acc: name: acc // {
+      ".config/opencode/skills/${name}".source = "${localPkgs.caveman}/skills/${name}";
+    }) {} [
+      "caveman"
+      "caveman-commit"
+      "caveman-compress"
+      "caveman-help"
+      "caveman-review"
+    ]
+  );
 
   # Confluence-fetched skill files: content too sensitive for source control.
   # Pages are maintained in Confluence and fetched during home-manager activation
@@ -188,6 +209,7 @@ in
     mkSkills crossPlatformSkills
     // beadsReferences
     // superpowersSkills
+    // cavemanSkills
     // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills
       // atlassianExtras
