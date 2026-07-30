@@ -11,7 +11,7 @@ import { isPromotingRequest, maybePromote, PromotionGate, placeSession } from ".
 import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky.js";
 import { probeServeHealth } from "./health.js";
 import type { Config } from "./config.js";
-import { RequestLogger } from "./log.js";
+import { RequestLogger, redactQuery } from "./log.js";
 import { isAbsoluteHttpUrl, boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
 import { isHtmlResponse, isHtmlGuardExempt } from "./poison.js";
@@ -556,7 +556,14 @@ export async function handleRequest(
       status: res.statusCode || 200,
       durationMs,
       method,
-      path: url.pathname
+      path: url.pathname,
+      // Without the query this log cannot tell /config from /config?directory=<x>,
+      // which is exactly the distinction that misled workstation-eon4. Redacted.
+      query: redactQuery(url.search),
+      // decision.action was declared in RequestLogEntry but never populated here, so
+      // the routing decision (forward-anchor, sticky, create...) had to be inferred
+      // from class+target after the fact.
+      action: decision.action
     });
   }
 
