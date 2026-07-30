@@ -6,6 +6,7 @@ import { dispatch } from "./dispatch.js";
 import { getRouteDisposition } from "./routes.dispositions.js";
 import { extractSids, type SidExtraction, SID_REGEX, extractSessionIdFromPath } from "./sid.js";
 import { isExemptFromFirstByteTimeout } from "./timeouts.js";
+import { GlobalRoCache, isCacheableGlobalRo, buildCacheKey, type CacheOutcome } from "./global-ro-cache.js";
 import { resolveOwner } from "./resolve.js";
 import { isPromotingRequest, maybePromote, PromotionGate, placeSession } from "./place.js";
 import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky.js";
@@ -30,6 +31,7 @@ export interface ProxyContext {
   gate: PromotionGate;
   metrics: Metrics;
   sticky: StickyMap;
+  globalRoCache?: GlobalRoCache;
   deps?: ProxyDeps;
 }
 
@@ -516,6 +518,113 @@ async function handleFork(
   return { sid: r.sid, degraded: r.degraded || resolved.degraded };
 }
 
+/**
+ * Anchor GET for an allowlisted `global-ro` route, via single-flight coalescing.
+ *
+ * Uses boundedFetch (never throws; bounds with AbortController) with the SAME
+ * budget as the inline cheap first-byte timer, and on failure emits byte-for-byte
+ * the same 503 body as that timer -- so a failure stays indistinguishable from
+ * today's behaviour to every client.
+ */
+async function proxyAnchorCoalesced(
+  target: string,
+  method: string,
+  url: URL,
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ProxyContext
+): Promise<CacheOutcome> {
+  const cache = ctx.globalRoCache!;
+  // Must be the FORWARDED search (auth_token stripped) for both the upstream call
+  // and the key: it is what determines the response, and keying on the raw search
+  // would fragment the cache on a credential the serve never sees.
+  const forwardedSearch = buildForwardSearch(url.search, ctx.config.serveAuthHeader);
+  const key = buildCacheKey(method, url.pathname, forwardedSearch, req.headers);
+
+  // Mirror proxyRequest's header handling EXACTLY. In particular the client's
+  // Authorization is only removed when the door has its own serve credential to
+  // substitute; with no serve auth configured it must still be forwarded, which
+  // test/serve_auth.test.ts pins.
+  const upstreamHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (v === undefined) continue;
+    if (HOP_BY_HOP_HEADERS.has(k.toLowerCase())) continue;
+    upstreamHeaders[k] = Array.isArray(v) ? v.join(",") : String(v);
+  }
+  if (ctx.config.serveAuthHeader) {
+    for (const k of Object.keys(upstreamHeaders)) {
+      if (k.toLowerCase() === "authorization") delete upstreamHeaders[k];
+    }
+    upstreamHeaders["Authorization"] = ctx.config.serveAuthHeader;
+  }
+
+  const upstreamUrl = `${stripTrailingSlashes(target)}${url.pathname}${forwardedSearch}`;
+
+  const { response, outcome } = await cache.resolve(key, async () => {
+    const result = await boundedFetch(upstreamUrl, {
+      method: "GET",
+      timeoutMs: ctx.config.cheapFirstByteMs,
+      headers: upstreamHeaders,
+      fetchImpl: ctx.deps?.fetch,
+    });
+    if (!result.ok || !result.response) {
+      return {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "service_unavailable", message: "Upstream did not send response headers in time" })),
+      };
+    }
+    const body = Buffer.from(await result.response.arrayBuffer());
+    const headers: Record<string, string | string[]> = {};
+    result.response.headers.forEach((val, name) => {
+      const ln = name.toLowerCase();
+      // arrayBuffer() has already decoded any content-encoding, so echoing the
+      // original encoding/length would describe the body incorrectly. Let Node
+      // recompute the length; the body is now identity-encoded.
+      if (HOP_BY_HOP_HEADERS.has(ln)) return;
+      if (ln === "content-encoding" || ln === "content-length") return;
+      headers[name] = val;
+    });
+    // Refuse RETENTION of an html-poison body here, at the point of fetch, so it
+    // cannot be stored even with a TTL enabled. It is still returned (and so
+    // shared with waiters already coalesced onto this call) and is converted to a
+    // 502 below, exactly as the streaming path does.
+    const poisoned =
+      isHtmlResponse(headers["content-type"]) && !isHtmlGuardExempt(method, url.pathname);
+    return { status: result.response.status, headers, body, cacheable: !poisoned };
+  });
+
+  // The html-poison guard must apply here too. proxyRequest enforces it on the
+  // streaming path (proxy.ts:192); skipping it here would let a stale serve's SPA
+  // fallback through for exactly the routes this coalescer handles -- and worse,
+  // with a TTL enabled an HTML body could be RETAINED and served to later
+  // callers. Checked after resolve() so a coalesced waiter is judged by the same
+  // rule as the caller that made the upstream call.
+  if (isHtmlResponse(response.headers["content-type"]) && !isHtmlGuardExempt(method, url.pathname)) {
+    ctx.metrics.htmlPoisonBlocked++;
+    console.warn(
+      `[FRONTDOOR WARN] html-poison blocked: ${method} ${url.pathname} -> ${target} returned ${response.status} text/html (stale-serve SPA fallback); returned 502`
+    );
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "bad_gateway",
+          message:
+            "Upstream returned an HTML page for an API route. The target serve is probably running an older binary that lacks this route; restart the serve pool.",
+        })
+      );
+    }
+    return outcome;
+  }
+
+  if (!res.headersSent) {
+    res.writeHead(response.status, response.headers);
+    res.end(response.body);
+  }
+  return outcome;
+}
+
 export async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -532,6 +641,9 @@ export async function handleRequest(
   // rather than something that has to be inferred from pigeon state after the fact.
   let viaParent: boolean | undefined;
   let routingSid: string | null | undefined;
+  // Without this the collapse is invisible in production: a coalesced request
+  // and an upstream one are otherwise indistinguishable in the log.
+  let cacheOutcome: CacheOutcome | undefined;
 
   const method = req.method || "GET";
   const url = new URL(req.url || "", "http://internal");
@@ -556,7 +668,8 @@ export async function handleRequest(
       status: res.statusCode || 200,
       durationMs,
       method,
-      path: url.pathname
+      path: url.pathname,
+      cacheOutcome
     });
   }
 
@@ -670,6 +783,16 @@ export async function handleRequest(
     if (decision.action === "forward-anchor") {
       target = ctx.config.anchorUrl;
       degraded = false;
+      // Every session-less read lands on this one serve by design, so a burst of TUI
+      // attaches makes the anchor the bottleneck while sibling serves idle (measured:
+      // anchor p50 904ms / 49% >1s while 4097 sat at 13ms p50 in the same minute). For
+      // a narrow allowlist of redundant GETs, collapse concurrent identical requests
+      // into one upstream call. Anything not on the allowlist takes the path below,
+      // unchanged.
+      if (ctx.globalRoCache && isCacheableGlobalRo(method, url.pathname)) {
+        cacheOutcome = await proxyAnchorCoalesced(target, method, url, req, res, ctx);
+        return;
+      }
       await proxyRequest(target, method, url, req, res, ctx, null);
       return;
     }

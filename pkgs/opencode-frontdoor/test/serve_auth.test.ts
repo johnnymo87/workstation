@@ -215,7 +215,7 @@ describe("Ancillary Outbound Serve Calls", () => {
     pigeonAuthToken: undefined,
     serveAuthHeader: "Basic " + Buffer.from("opencode:secret").toString("base64"),
     routeTimeoutMs: 3000,
-    cheapFirstByteMs: 5000,
+    cheapFirstByteMs: 5000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
     stickyTtlMs: 30000,
     driftCheckMs: 5000,
     wedgeProbeIntervalMs: 5000,

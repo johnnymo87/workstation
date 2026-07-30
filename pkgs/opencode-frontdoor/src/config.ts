@@ -11,6 +11,8 @@ export interface Config {
   serveAuthHeader?: string;
   routeTimeoutMs: number;
   cheapFirstByteMs: number;
+  globalRoCacheTtlMs: number;
+  globalRoCacheMaxBodyBytes: number;
   /*
    * INVARIANT (LOW-2): stickyTtlMs <= pigeon PIGEON_LEASE_TTL_MS (both default 30s).
    * HIGH-2 renewal at 1/2 TTL re-places a sticky-pinned session in pigeon.
@@ -30,6 +32,16 @@ export interface Config {
   driftCheckMs: number; // owner-drift re-resolve interval (mirrors the deployed TUI's 5s)
   wedgeProbeIntervalMs: number;
   mintTimeoutMs: number;
+}
+
+function parseNonNegativeInteger(envName: string, value: string | undefined, defaultValue: number): number {
+  if (value === undefined) {
+    return defaultValue;
+  }
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`Invalid ${envName}: "${value}". Must be a non-negative integer.`);
+  }
+  return parseInt(value, 10);
 }
 
 function parsePositiveInteger(envName: string, value: string | undefined, defaultValue: number): number {
@@ -56,6 +68,14 @@ export function loadConfig(): Config {
     throw new Error(`Invalid FRONTDOOR_PORT: "${port}". Must be a valid TCP port (1-65535).`);
   }
   const routeTimeoutMs = parsePositiveInteger('FRONTDOOR_ROUTE_TIMEOUT_MS', process.env.FRONTDOOR_ROUTE_TIMEOUT_MS, 3000);
+  // 0 is meaningful here (and is the default), so this cannot use
+  // parsePositiveInteger. See global-ro-cache.ts for why zero staleness is the
+  // default: the redundant global-ro requests were CONCURRENT (measured peak 17
+  // in flight per path), so single-flight coalescing captures the win without a
+  // staleness window, and these routes derive from on-disk project config where a
+  // stale read is user-visible.
+  const globalRoCacheTtlMs = parseNonNegativeInteger('FRONTDOOR_GLOBAL_RO_CACHE_TTL_MS', process.env.FRONTDOOR_GLOBAL_RO_CACHE_TTL_MS, 0);
+  const globalRoCacheMaxBodyBytes = parsePositiveInteger('FRONTDOOR_GLOBAL_RO_CACHE_MAX_BODY_BYTES', process.env.FRONTDOOR_GLOBAL_RO_CACHE_MAX_BODY_BYTES, 262144);
   const cheapFirstByteMs = parsePositiveInteger('FRONTDOOR_CHEAP_FIRST_BYTE_MS', process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS, 5000);
   const stickyTtlMs = parsePositiveInteger('FRONTDOOR_STICKY_TTL_MS', process.env.FRONTDOOR_STICKY_TTL_MS, 30000);
   const driftCheckMs = parsePositiveInteger('FRONTDOOR_DRIFT_CHECK_MS', process.env.FRONTDOOR_DRIFT_CHECK_MS, 5000);
@@ -84,6 +104,8 @@ export function loadConfig(): Config {
     serveAuthHeader,
     routeTimeoutMs,
     cheapFirstByteMs,
+    globalRoCacheTtlMs,
+    globalRoCacheMaxBodyBytes,
     stickyTtlMs,
     driftCheckMs,
     wedgeProbeIntervalMs,

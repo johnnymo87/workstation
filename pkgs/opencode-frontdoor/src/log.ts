@@ -8,6 +8,14 @@ export interface RequestLogEntry {
   durationMs: number;
   method?: string;
   path?: string;
+  /**
+   * Present only for allowlisted global-ro GETs that went through the anchor
+   * coalescer: "miss" made the upstream call, "coalesced" joined one already in
+   * flight, "fresh" was served from a TTL entry (only possible when
+   * FRONTDOOR_GLOBAL_RO_CACHE_TTL_MS > 0). Without this the collapse is
+   * invisible: a coalesced request and an upstream one look identical otherwise.
+   */
+  cacheOutcome?: "miss" | "coalesced" | "fresh";
   action?: string;
   /** sq1v: the owner was resolved via an ancestor's route (child/subagent session). */
   viaParent?: boolean;
@@ -62,6 +70,7 @@ export class RequestLogger {
       action: entry.action,
       viaParent: entry.viaParent,
       routingSid: entry.routingSid,
+      cacheOutcome: entry.cacheOutcome,
     });
     this.sink(logLine);
 

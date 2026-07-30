@@ -13,7 +13,7 @@ describe('place.ts', () => {
     anchorUrl: 'http://anchor.local',
     pigeonAuthToken: undefined,
     routeTimeoutMs: 3000,
-    cheapFirstByteMs: 5000,
+    cheapFirstByteMs: 5000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
     stickyTtlMs: 30000,
     driftCheckMs: 5000,
     wedgeProbeIntervalMs: 5000,

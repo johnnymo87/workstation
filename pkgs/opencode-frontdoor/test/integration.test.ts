@@ -405,7 +405,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 1000,
+      cheapFirstByteMs: 1000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
@@ -951,7 +951,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 1000,
+      cheapFirstByteMs: 1000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       stickyTtlMs: 30000,
       driftCheckMs: 40,
       wedgeProbeIntervalMs: 5000,
@@ -1037,7 +1037,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 1000,
+      cheapFirstByteMs: 1000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       stickyTtlMs: 30000,
       driftCheckMs: 40,
       wedgeProbeIntervalMs: 5000,
@@ -1129,7 +1129,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 100, // 100ms wall-clock limit
+      cheapFirstByteMs: 100, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144, // 100ms wall-clock limit
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
@@ -1202,7 +1202,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 100, // 100ms
+      cheapFirstByteMs: 100, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144, // 100ms
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
@@ -1266,7 +1266,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 100, // 100ms
+      cheapFirstByteMs: 100, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144, // 100ms
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
@@ -1360,7 +1360,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${healthServerPort}`,
       routeTimeoutMs: 100,
-      cheapFirstByteMs: 50, // very small
+      cheapFirstByteMs: 50, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144, // very small
       wedgeProbeIntervalMs: 30, // probe every 30ms
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
@@ -1434,7 +1434,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${healthServerPort}`,
       routeTimeoutMs: 100,
-      cheapFirstByteMs: 50,
+      cheapFirstByteMs: 50, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       wedgeProbeIntervalMs: 30, // probe every 30ms
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
@@ -1585,7 +1585,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 1000,
+      cheapFirstByteMs: 1000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       stickyTtlMs: 250, // very short sticky lease
       driftCheckMs: 40,  // fast drift checks
       wedgeProbeIntervalMs: 5000,
@@ -1975,7 +1975,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 1000,
+      cheapFirstByteMs: 1000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       stickyTtlMs: 10000, // half stickyTtlMs is 5000
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
@@ -2087,7 +2087,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 1000,
+      cheapFirstByteMs: 1000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       stickyTtlMs: 10000,
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
@@ -2196,7 +2196,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 1000,
+      cheapFirstByteMs: 1000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       stickyTtlMs: 10000, // half is 5000
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
@@ -2249,7 +2249,7 @@ describe("FrontDoor Integration", () => {
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
       routeTimeoutMs: 1000,
-      cheapFirstByteMs: 1000,
+      cheapFirstByteMs: 1000, globalRoCacheTtlMs: 0, globalRoCacheMaxBodyBytes: 262144,
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,

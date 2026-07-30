@@ -6,6 +6,7 @@ import { PromotionGate } from "./place.js";
 import { createMetrics } from "./metrics.js";
 import { isHealthzRequest, handleHealthz } from "./healthz.js";
 import { StickyMap } from "./sticky.js";
+import { GlobalRoCache } from "./global-ro-cache.js";
 import { installCrashHandlers } from "./crash.js";
 
 export function createFrontDoor(config: Config, deps?: any): http.Server {
@@ -13,6 +14,13 @@ export function createFrontDoor(config: Config, deps?: any): http.Server {
   const gate = deps?.gate ?? new PromotionGate(config.stickyTtlMs);
   const metrics = deps?.metrics ?? createMetrics();
   const sticky = deps?.sticky ?? new StickyMap(config.stickyTtlMs);
+  // Constructed here rather than as a module singleton so it cannot leak state
+  // between tests or between server instances.
+  const globalRoCache = new GlobalRoCache({
+    ttlMs: config.globalRoCacheTtlMs,
+    now: () => deps?.now?.() ?? Date.now(),
+    maxBodyBytes: config.globalRoCacheMaxBodyBytes,
+  });
 
   return http.createServer(async (req, res) => {
     try {
@@ -22,7 +30,7 @@ export function createFrontDoor(config: Config, deps?: any): http.Server {
         await handleHealthz(res, { config, method, deps, metrics });
         return;
       }
-      await handleRequest(req, res, { config, logger, gate, metrics, sticky, deps });
+      await handleRequest(req, res, { config, logger, gate, metrics, sticky, globalRoCache, deps });
     } catch (err: any) {
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
