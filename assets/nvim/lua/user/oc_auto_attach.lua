@@ -22,6 +22,16 @@
 
 local M = {}
 
+local statuses = {}
+
+--- Query attach status for a session ID.
+--- @param sid string
+--- @return string "running" | "failed" | "unknown"
+function M.status(sid)
+  if type(sid) ~= "string" or sid == "" then return "unknown" end
+  return statuses[sid] or "unknown"
+end
+
 --- Open a new tab with `opencode attach` running in a terminal buffer.
 --- @param opts table  { sid: string, dir: string, url: string }
 --- @return integer 1  (so --remote-expr has something to print)
@@ -41,19 +51,41 @@ function M.open(opts)
     return 0
   end
 
+  statuses[opts.sid] = "running"
+
   -- Schedule UI work for the next event-loop tick (so RPC can return promptly).
   vim.schedule(function()
     vim.cmd.tabnew()
-    vim.b.oc_session_id = opts.sid
-    vim.b.oc_session_dir = opts.dir
-    vim.fn.jobstart({
+    local buf = vim.api.nvim_get_current_buf()
+    vim.b[buf].oc_session_id = opts.sid
+    vim.b[buf].oc_session_dir = opts.dir
+
+    local job_id = vim.fn.jobstart({
       "opencode", "attach", opts.url,
       "--session", opts.sid,
       "--dir", opts.dir,
     }, {
       term = true,
       cwd = opts.dir,
+      on_exit = function(_, exit_code, _)
+        statuses[opts.sid] = "failed"
+        if vim.api.nvim_buf_is_valid(buf) then
+          pcall(vim.api.nvim_buf_set_name, buf, "[FAILED] " .. opts.sid)
+        end
+        vim.notify(
+          "oc_auto_attach: attach job exited for " .. opts.sid .. " (code " .. tostring(exit_code) .. ")",
+          vim.log.levels.ERROR
+        )
+      end,
     })
+
+    if job_id <= 0 then
+      statuses[opts.sid] = "failed"
+      if vim.api.nvim_buf_is_valid(buf) then
+        pcall(vim.api.nvim_buf_set_name, buf, "[FAILED] " .. opts.sid)
+      end
+      vim.notify("oc_auto_attach: failed to start attach job for " .. opts.sid, vim.log.levels.ERROR)
+    end
   end)
 
   return 1
