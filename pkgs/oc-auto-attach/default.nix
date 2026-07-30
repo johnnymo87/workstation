@@ -8,6 +8,7 @@ pkgs.writeShellApplication {
     tmux
     coreutils      # timeout
     gawk           # awk (used in the "find existing window by name" branch)
+    util-linux     # flock
   ];
   text = ''
     # oc-auto-attach <session-id>
@@ -18,12 +19,13 @@ pkgs.writeShellApplication {
     # Behavior:
     #   1. Wait for the session to be visible at GET /session/<id> with
     #      a non-empty .directory.
-    #   2. (Task 4) Compute project key + find/create tmux window.
-    #   3. (Task 5) Wait for nvim RPC + helper module to be ready.
-    #   4. (Task 5) RPC into nvim to open a new tab with `opencode attach`.
+    #   2. Compute project key + find/create tmux window.
+    #   3. Wait for nvim RPC + helper module to be ready.
+    #   4. RPC into nvim to open a new tab with `opencode attach`.
+    #   5. Wait for attach job to settle (verifying process stays alive past door timeout).
     #
-    # Any failure logs to stderr and exits 0 (we don't want to break the
-    # launcher on display issues).
+    # Non-zero exit codes signal genuine failures; SKIP (long-running tool in pane)
+    # returns exit 0 as an intentional no-op.
 
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
     FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
@@ -214,18 +216,27 @@ pkgs.writeShellApplication {
     # (systemd, the pigeon daemon, the recommendation session) not attached to
     # tmux. An empty --tmux-session= is coerced back to `main` below.
     target_session="main"
+    retry_count="''${OC_AA_RETRIES:-0}"
     while [ $# -gt 0 ]; do
       case "$1" in
         --tmux-session)
           if [ $# -lt 2 ] || [ -z "$2" ]; then
             log "--tmux-session requires a name"
-            exit 0
+            exit 1
           fi
           target_session="$2"
           shift 2
           ;;
         --tmux-session=*)
           target_session="''${1#--tmux-session=}"
+          shift
+          ;;
+        --retry)
+          retry_count=2
+          shift
+          ;;
+        --retry=*)
+          retry_count="''${1#--retry=}"
           shift
           ;;
         *)
@@ -237,15 +248,15 @@ pkgs.writeShellApplication {
     target_session="''${target_session:-main}"
 
     if [ $# -ne 1 ]; then
-      log "usage: oc-auto-attach [--tmux-session <name>] <session-id>"
-      exit 0
+      log "usage: oc-auto-attach [--tmux-session <name>] [--retry[=N]] <session-id>"
+      exit 1
     fi
     sid="$1"
 
     # Hard-validate session id before any shell interpolation.
     if ! [[ "$sid" =~ ^ses_[A-Za-z0-9]+$ ]]; then
       log "invalid session id: $sid"
-      exit 0
+      exit 1
     fi
 
     # Validate the tmux session name (tmux forbids '.' and ':'; this also
@@ -253,7 +264,7 @@ pkgs.writeShellApplication {
     # (defaults to `main`), so no empty-string guard is needed.
     if ! [[ "$target_session" =~ ^[A-Za-z0-9_-]+$ ]]; then
       log "invalid tmux session name: $target_session"
-      exit 0
+      exit 1
     fi
     log "confining to tmux session: $target_session"
 
@@ -345,11 +356,11 @@ pkgs.writeShellApplication {
 
     if [ "$probe_rc" -eq 3 ]; then
       log "session $sid not found (404 from $FRONTDOOR_URL) -- absent from opencode.db; giving up"
-      exit 0
+      exit 3
     fi
     if [ "$probe_rc" -ne 0 ] || [ -z "$session_dir" ]; then
       log "session $sid not ready after 30s; giving up"
-      exit 0
+      exit 2
     fi
 
     log "session $sid dir=$session_dir"
@@ -433,7 +444,7 @@ pkgs.writeShellApplication {
       # session, and new-session will start a tmux server if none exists.
       if ! nvims_path="$(resolve_nvims)"; then
         log "nvims not resolvable (neither OC_NVIMS_BIN nor PATH); skipping"
-        exit 0
+        exit 1
       fi
       log "resolved nvims at $nvims_path"
       if tmux has-session -t "=$target_session" 2>/dev/null; then
@@ -445,7 +456,7 @@ pkgs.writeShellApplication {
       fi
       if [ -z "$pane_id" ]; then
         log "tmux window/session create failed in $target_session; giving up"
-        exit 0
+        exit 1
       fi
       pane_cmd="nvim"
       log "created pane $pane_id in session $target_session (window $window_name)"
@@ -483,7 +494,7 @@ pkgs.writeShellApplication {
         ;;
       *)
         log "classify_pane returned unexpected token: $action; bailing"
-        exit 0
+        exit 1
         ;;
     esac
 
@@ -516,37 +527,105 @@ pkgs.writeShellApplication {
       done
     ' _ "$sock"; then
       log "nvim at $sock not ready (or helper not loaded) after 15s; giving up"
-      exit 0
+      exit 4
     fi
     log "nvim at $sock is ready"
+
+    # Machine-wide flock serialization lock held across RPC + settle wait.
+    # OC_AA_SERIALIZE=1 (default) serializes auto-attaches machine-wide via flock.
+    # Serialization is deliberate because all attach first-byte requests hit the
+    # single-threaded anchor serve event loop, so N>1 concurrency has no principled value.
+    # Set OC_AA_SERIALIZE=0 to bypass locking if explicitly desired.
+    serialize="''${OC_AA_SERIALIZE:-1}"
+    lock_file="/tmp/oc-auto-attach.lock"
+    lock_timeout="''${OC_AA_LOCK_TIMEOUT_SECS:-30}"
+
+    if [ "$serialize" -eq 1 ]; then
+      exec 200>"$lock_file"
+      if ! flock -w "$lock_timeout" 200; then
+        log "warning: could not acquire lock $lock_file within ''${lock_timeout}s; proceeding unlocked"
+      fi
+    fi
+
+    settle_secs="''${OC_AA_SETTLE_SECS:-8}"
+    wait_timeout="''${OC_AA_WAIT_TIMEOUT_SECS:-15}"
 
     # Step 6: invoke the helper. We pass the payload as JSON encoded by jq,
     # then decode it inside Lua via vim.json.decode to bulletproof against
     # any quoting hazards in sid/dir/url.
-    # Phase 9 (bead workstation-mlve.3/.4): the attach TUI rides the opaque FRONT
-    # DOOR, not the resolved serve. The door owns ownership — it routes the scoped
-    # /event?session_ids= subscribe + /session REST to the owner and drops the SSE
-    # leg on a confirmed migration, so the TUI follows migrations with no client
-    # /route self-resolve. serve_url above is now used only to PRE-PLACE a
-    # never-placed session (so the door's first resolve lands on the real owner).
     payload="$(jq -nc \
       --arg sid "$sid" \
       --arg dir "$session_dir" \
       --arg url "$FRONTDOOR_URL" \
-      '{sid:$sid, dir:$dir, url:$url}')"
+      --argjson settle "$settle_secs" \
+      '{sid:$sid, dir:$dir, url:$url, settle_ms:($settle * 1000)}') "
 
-    # jq -Rs '.' emits a JSON string literal, which doubles as a valid
-    # Vimscript double-quoted string literal — that's what luaeval reads as _A.
-    expr="luaeval(\"require('user.oc_auto_attach').open(vim.json.decode(_A))\", $(printf '%s' "$payload" | jq -Rs '.'))"
+    expr_open="luaeval(\"require('user.oc_auto_attach').open(vim.json.decode(_A))\", $(printf '%s' "$payload" | jq -Rs '.'))"
+    expr_status="luaeval(\"require('user.oc_auto_attach').status(_A)\", \"$sid\")"
 
-    # </dev/null prevents nvim from terminal-probing on a tty (see Step 5
-    # comment for the full story); without it, capability sequences leak
-    # into the calling terminal and the call can also fail spuriously.
-    if ! nvim --server "$sock" --remote-expr "$expr" </dev/null >/dev/null; then
-      log "nvim RPC call failed; giving up"
-      exit 0
-    fi
+    attempt=0
+    max_attempts=$(( 1 + retry_count ))
+    backoff=2
 
-    log "tab opened in pane $pane_id for $sid"
+    while [ "$attempt" -lt "$max_attempts" ]; do
+      attempt=$(( attempt + 1 ))
+      if [ "$attempt" -gt 1 ]; then
+        log "retry attempt $attempt/$max_attempts after ''${backoff}s backoff..."
+        sleep "$backoff"
+        backoff=$(( backoff * 2 ))
+      fi
+
+      if ! nvim --server "$sock" --remote-expr "$expr_open" </dev/null >/dev/null; then
+        log "nvim RPC call failed; attempt $attempt/$max_attempts"
+        if [ "$attempt" -ge "$max_attempts" ]; then
+          exit 5
+        fi
+        continue
+      fi
+
+      log "tab RPC sent to pane $pane_id for $sid"
+
+      # Step 7: Wait for attach job to settle.
+      # Settle window derivation:
+      # it is 5000 ms + margin because that is the deadline the failure itself races, NOT the 12 s that happened to work empirically.
+
+      log "waiting up to ''${settle_secs}s for attach to settle..."
+
+      start_time="$SECONDS"
+      settled=0
+
+      while :; do
+        elapsed=$(( SECONDS - start_time ))
+
+        if [ "$elapsed" -ge "$settle_secs" ]; then
+          settled=1
+          break
+        fi
+
+        if [ "$elapsed" -ge "$wait_timeout" ]; then
+          log "attach for $sid timed out waiting to settle after ''${wait_timeout}s"
+          break
+        fi
+
+        status="$(nvim --server "$sock" --remote-expr "$expr_status" </dev/null 2>/dev/null || true)"
+
+        if [ "$status" = "failed" ] || [ "$status" = "exited" ]; then
+          log "attach job for $sid exited prematurely ($status) during settle window"
+          break
+        fi
+
+        sleep 0.2
+      done
+
+      if [ "$settled" -eq 1 ]; then
+        log "tab opened and attach settled in pane $pane_id for $sid"
+        exit 0
+      fi
+
+      if [ "$attempt" -ge "$max_attempts" ]; then
+        log "attach failed to settle after $max_attempts attempts"
+        exit 6
+      fi
+    done
   '';
 }

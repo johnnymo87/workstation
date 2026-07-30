@@ -605,8 +605,124 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source derives window_name as basename for non-project dirs\n        basename derivation not found in: %s\n' "$default_nix"
     exit 1
   fi
+
+  # ---- backpressure / settle & flock source guards ---------------------------
+
+  if grep -q 'util-linux' "$default_nix"; then
+    printf 'PASS  source includes util-linux in runtimeInputs\n'
+  else
+    printf 'FAIL  source includes util-linux in runtimeInputs\n        util-linux not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+
+  if grep -q 'OC_AA_SERIALIZE' "$default_nix"; then
+    printf 'PASS  source defines serialization knob (OC_AA_SERIALIZE)\n'
+  else
+    printf 'FAIL  source defines serialization knob (OC_AA_SERIALIZE)\n        OC_AA_SERIALIZE not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+
+  if grep -q 'OC_AA_MAX_CONCURRENCY' "$default_nix"; then
+    printf 'FAIL  source still contains misleading OC_AA_MAX_CONCURRENCY knob\n        in: %s\n' "$default_nix"
+    exit 1
+  else
+    printf 'PASS  source removed misleading OC_AA_MAX_CONCURRENCY knob\n'
+  fi
+
+  if grep -q 'OC_AA_SETTLE_SECS' "$default_nix"; then
+    printf 'PASS  source defines settle window timeout (OC_AA_SETTLE_SECS)\n'
+  else
+    printf 'FAIL  source defines settle window timeout (OC_AA_SETTLE_SECS)\n        OC_AA_SETTLE_SECS not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+
+  if grep -qF '5000 ms + margin' "$default_nix"; then
+    printf 'PASS  source includes 5000 ms + margin derivation comment for settle window\n'
+  else
+    printf 'FAIL  source includes 5000 ms + margin derivation comment for settle window\n        derivation comment not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+
+  if grep -q 'require('"'"'user.oc_auto_attach'"'"').status' "$default_nix"; then
+    printf 'PASS  source queries user.oc_auto_attach.status via RPC\n'
+  else
+    printf 'FAIL  source queries user.oc_auto_attach.status via RPC\n        status query expression not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+
+  if grep -q 'exit 6' "$default_nix"; then
+    printf 'PASS  source exits non-zero on attach failure / settle timeout\n'
+  else
+    printf 'FAIL  source exits non-zero on attach failure / settle timeout\n        exit 6 not found in: %s\n' "$default_nix"
+    exit 1
+  fi
 else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
+fi
+
+# ---- lua helper guards & unit tests ------------------------------------------
+
+lua_source="$script_dir/../../assets/nvim/lua/user/oc_auto_attach.lua"
+if [ -f "$lua_source" ]; then
+  if grep -q 'on_exit' "$lua_source"; then
+    printf 'PASS  lua source defines on_exit handler\n'
+  else
+    printf 'FAIL  lua source defines on_exit handler\n        on_exit not found in: %s\n' "$lua_source"
+    exit 1
+  fi
+
+  if grep -q 'function M\.status' "$lua_source"; then
+    printf 'PASS  lua source exposes status query function (M.status)\n'
+  else
+    printf 'FAIL  lua source exposes status query function (M.status)\n        function M.status not found in: %s\n' "$lua_source"
+    exit 1
+  fi
+
+  if command -v nvim >/dev/null 2>&1; then
+    lua_out="$(nvim -l /dev/stdin <<< '
+      local M = loadfile("assets/nvim/lua/user/oc_auto_attach.lua")()
+      assert(type(M.status) == "function", "M.status is function")
+      assert(M.status("ses_test") == "unknown", "unknown sid -> unknown")
+      assert(M.open(nil) == 0, "invalid opts -> 0")
+      assert(M.open({sid="ses_123", dir="/nonexistent/dir", url="http://127.0.0.1:4096"}) == 0, "invalid dir -> 0")
+
+      -- Test pre-settle vs post-settle discriminator
+      local last_opts1, last_buf1
+      vim.fn.jobstart = function(cmd, opts)
+        last_opts1 = opts
+        last_buf1 = vim.api.nvim_get_current_buf()
+        return 100
+      end
+      M.open({sid="ses_test1", dir=".", url="http://127.0.0.1:4096", settle_ms=5000})
+      vim.wait(100, function() return last_opts1 ~= nil end)
+      last_opts1.on_exit(100, 0, "exit")
+      assert(M.status("ses_test1") == "failed", "pre-settle exit -> status failed")
+      assert(vim.api.nvim_buf_get_name(last_buf1):find("%[FAILED%]"), "pre-settle exit -> buffer renamed [FAILED]")
+
+      local last_opts2, last_buf2
+      vim.fn.jobstart = function(cmd, opts)
+        last_opts2 = opts
+        last_buf2 = vim.api.nvim_get_current_buf()
+        return 101
+      end
+      M.open({sid="ses_test2", dir=".", url="http://127.0.0.1:4096", settle_ms=0})
+      vim.wait(100, function() return last_opts2 ~= nil end)
+      vim.wait(10)
+      last_opts2.on_exit(101, 0, "exit")
+      assert(M.status("ses_test2") == "exited", "post-settle exit -> status exited")
+      assert(not vim.api.nvim_buf_get_name(last_buf2):find("%[FAILED%]"), "post-settle exit -> buffer NOT renamed [FAILED]")
+
+      print("LUA_TEST_OK")
+    ' 2>&1 || true)"
+    case "$lua_out" in
+      *"LUA_TEST_OK"*) printf 'PASS  lua module unit test via nvim -l (pre/post-settle discriminator)\n' ;;
+      *) printf 'FAIL  lua module unit test via nvim -l\n        out: %s\n' "$lua_out"; exit 1 ;;
+    esac
+  else
+    printf 'SKIP  lua module unit test via nvim -l (nvim not on PATH)\n'
+  fi
+else
+  printf 'SKIP  lua source check (oc_auto_attach.lua not found)\n'
 fi
 
 echo "all oc-auto-attach helper tests passed"
