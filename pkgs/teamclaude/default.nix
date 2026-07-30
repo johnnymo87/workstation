@@ -10,15 +10,27 @@
 # by model", #69 "rich status output"), so the fork was retired in favor of
 # upstream on 2026-07-06.
 #
-# Zero runtime dependencies (verified again at v1.1.9: package.json `dependencies`
-# is still {}, and src/ has no bare imports). So packaging is just: fetch the
-# source, vendor it into the store, and wrap `src/index.js` with a pinned node.
-# No node_modules, no bundler.
+# Zero runtime dependencies (verified again at v1.1.11: package.json has no
+# `dependencies` key at all, and every src/ import is either relative or a
+# `node:` builtin). So packaging is just: fetch the source, vendor it into the
+# store, and wrap `src/index.js` with a pinned node. No node_modules, no bundler.
 #
 # NODE FLOOR: upstream raised `engines.node` to >=20 in v1.1.9 (#128 fixed a
-# Node-18 stream crash). The generic `nodejs` attr resolves to 22.x in our
-# pinned nixpkgs, so this is satisfied — but if that attr is ever pinned
-# downward, teamclaude breaks at runtime, not at build time.
+# Node-18 stream crash); still >=20.0.0 at v1.1.11. The generic `nodejs` attr
+# resolves to 22.x in our pinned nixpkgs, so this is satisfied — but if that
+# attr is ever pinned downward, teamclaude breaks at runtime, not at build time.
+#
+# RATE-LIMIT SEMANTICS (checked at v1.1.11, unchanged since 1.1.9): there are
+# two distinct 429 paths in src/server.js. A *quota rejection* — upstream sends
+# `anthropic-ratelimit-unified-{5h,7d}-status: rejected` — throttles the account
+# and ROTATES. A *transient* rate-limit 429 (no such header) deliberately does
+# NOT rotate: it pauses the account and retries the same one, because moving a
+# burst to the next account just throttles that one too (upstream #84,
+# thundering herd) and discards the account's KV cache. `switchThreshold` only
+# feeds proactive utilization-based selection and has no effect on 429 handling.
+# The inline wait is capped by TEAMCLAUDE_RATE_LIMIT_ABSORB_MAX_SECONDS
+# (default 60); we leave it at the default deliberately, since a slow success
+# beats surfacing a hard 429 to clients.
 #
 # To bump: pick a newer tag from https://github.com/KarpelesLab/teamclaude/tags,
 # set `rev` to its commit SHA, bump `version`, and refresh `src.hash` via
@@ -34,13 +46,13 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.9"; # upstream tag; bump per pinned release
+  version = "1.1.11"; # upstream tag; bump per pinned release
 
   src = fetchFromGitHub {
     owner = "KarpelesLab";
     repo = "teamclaude";
-    rev = "7dfd47af62663f81c123a74463cc412675e84eb8"; # tag v1.1.9
-    hash = "sha256-2XKao3/1bD0T9ebVNl09OmpHdsd2gcX6oj4A91XfaYQ=";
+    rev = "b556533836d1f5b64dc4919a55368fae9e083751"; # tag v1.1.11
+    hash = "sha256-2WmLMu6zTNHRonOV5Iw1QtGBa7Z4TCVfGB3Rj/lKznk=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
