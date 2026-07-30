@@ -26,12 +26,10 @@ jobs:
         include:
           - runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    # The ARM leg builds real closures from a cold store every run, because
-    # runners are ephemeral. Kept generous deliberately: the devenv substituter
-    # below removes the largest single cost, but this repo's OWN packages (beads,
-    # gws, bb, clerk, teamclaude, vercel, ask-question, opencode-frontdoor) are
-    # still in no cache and are compiled every run, so this is not a fast job and
-    # a tight bound would only produce flaky timeouts.
+    # Kept generous deliberately. Two layers now cut the cost -- the devenv
+    # substituter and the Nix-store cache below -- but a cache MISS (first run on
+    # a new key with no prefix match, or after a purge) still pays the full cold
+    # build, so the bound has to cover the uncached case rather than the happy one.
     timeout-minutes: 90
     steps:
       - name: Checkout repository
@@ -54,6 +52,55 @@ jobs:
           extra-conf: |
             extra-substituters = https://devenv.cachix.org
             extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+
+      # The remaining cost after the devenv substituter was this repo's own
+
+      # uncached builds, and wrangler dominated them: measured 5.9 of 12.2 minutes
+
+      # (49%) on run 30566609050, because wrangler-4.62.0 is 404 on cache.nixos.org
+
+      # for aarch64-linux -- Hydra does not build it -- so pnpm-deps, the DTS build,
+
+      # auto-patchelf and fixup all ran from source every time.
+
+      #
+
+      # This uses the GitHub Actions cache as a Nix store cache, which needs NO
+
+      # external account and NO secret, unlike Cachix. A self-hosted runner would be
+
+      # faster still but GitHub advises against them on PUBLIC repositories, since a
+
+      # fork PR can execute arbitrary code on the runner.
+
+      #
+
+      # The store is GC'd to ~7GB before saving because the Actions cache quota is
+
+      # 10GB per repo and an ungarbage-collected store exceeds it. Old entries are
+
+      # purged so a stale cache cannot silently squat the quota and starve new saves.
+
+      - name: Restore and save the Nix store
+
+        uses: nix-community/cache-nix-action@v7.0.2
+
+        with:
+
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
+
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+          gc-max-store-size-linux: 7000000000
+
+          purge: true
+
+          purge-prefixes: nix-${{ runner.os }}-
+
+          purge-created: 604800
+
+          purge-primary-key: never
+
 
       - name: Disk space before
         run: df -h /
