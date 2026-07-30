@@ -243,7 +243,8 @@ lib.mkIf isDarwin {
           "/bin/sh" "-c"
           ''
             [ -e "$HOME/.codex-lb/enabled" ] || exit 0
-            exec ${pkgs.uv}/bin/uvx --python 3.13 --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455
+            # --python 3.13 + aiohttp<3.14: see the pin rationale in codex-lb.nix
+            exec ${pkgs.uv}/bin/uvx --python 3.13 --with 'aiohttp<3.14' --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455
           ''
         ];
         EnvironmentVariables = {

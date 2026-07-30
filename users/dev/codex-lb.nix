@@ -28,6 +28,27 @@
 # it purely in Nix is a big lift, so we run the pinned PyPI release through uv's
 # ephemeral-tool runner (cached under ~/.cache/uv). Bump the pin deliberately.
 #
+# FLOATING TRANSITIVE DEPS ARE A TIME BOMB: only codex-lb itself is pinned, so a
+# host that re-resolves (fresh box, or a wiped ~/.cache/uv) can pick up newer
+# deps than a long-running host and break in ways that look host-specific. Two
+# such pins are encoded in ExecStart below; add more here as they bite.
+#
+#   --python 3.13   uvx otherwise grabs the newest interpreter on the box. That
+#                   drifted to a 3.14 alpha on cloudbox.
+#
+#   aiohttp<3.14    codex-lb 1.20.1 hand-rolls its upstream WebSocket upgrade
+#                   against aiohttp PRIVATE internals (app/core/clients/proxy.py
+#                   _open_upstream_websocket -> WebSocketDataQueue /
+#                   WebSocketReader / WebSocketWriter). aiohttp 3.14 changed the
+#                   Cython WebSocketReader.__init__ from 2 to 4 required
+#                   positional args, so every streaming request died with
+#                   `TypeError: __init__() takes exactly 4 positional arguments
+#                   (2 given)`, surfaced to clients as a 502 `upstream_error`.
+#                   Non-streaming paths (dashboard, /api/accounts, model
+#                   refresh) kept working, which makes this look like an auth
+#                   problem rather than a dependency problem. Drop this pin once
+#                   codex-lb supports aiohttp 3.14.
+#
 # CONFIG/STATE IS RUNTIME (NOT nix-managed): codex-lb reads + REWRITES
 # ~/.codex-lb/ (store.db with accounts + OAuth tokens that auto-refresh, plus
 # encryption.key), so it must stay writable + persistent and is LOST on a full
@@ -63,7 +84,7 @@ lib.mkIf (isDevbox || isCloudbox) {
         "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
         "LD_LIBRARY_PATH=/run/current-system/sw/share/nix-ld/lib"
       ];
-      ExecStart = "${pkgs.uv}/bin/uvx --python 3.13 --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455";
+      ExecStart = "${pkgs.uv}/bin/uvx --python 3.13 --with 'aiohttp<3.14' --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455";
       Restart = "always";
       RestartSec = 10;
     };
