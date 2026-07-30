@@ -531,17 +531,24 @@ pkgs.writeShellApplication {
     fi
     log "nvim at $sock is ready"
 
-    # Machine-wide flock concurrency lock held across RPC + settle wait.
+    # Machine-wide flock serialization lock held across RPC + settle wait.
+    # OC_AA_SERIALIZE=1 (default) serializes auto-attaches machine-wide via flock.
+    # Serialization is deliberate because all attach first-byte requests hit the
+    # single-threaded anchor serve event loop, so N>1 concurrency has no principled value.
+    # Set OC_AA_SERIALIZE=0 to bypass locking if explicitly desired.
+    serialize="''${OC_AA_SERIALIZE:-1}"
     lock_file="/tmp/oc-auto-attach.lock"
     lock_timeout="''${OC_AA_LOCK_TIMEOUT_SECS:-30}"
-    max_concurrency="''${OC_AA_MAX_CONCURRENCY:-1}"
 
-    if [ "$max_concurrency" -gt 0 ]; then
+    if [ "$serialize" -eq 1 ]; then
       exec 200>"$lock_file"
       if ! flock -w "$lock_timeout" 200; then
         log "warning: could not acquire lock $lock_file within ''${lock_timeout}s; proceeding unlocked"
       fi
     fi
+
+    settle_secs="''${OC_AA_SETTLE_SECS:-8}"
+    wait_timeout="''${OC_AA_WAIT_TIMEOUT_SECS:-15}"
 
     # Step 6: invoke the helper. We pass the payload as JSON encoded by jq,
     # then decode it inside Lua via vim.json.decode to bulletproof against
@@ -550,7 +557,8 @@ pkgs.writeShellApplication {
       --arg sid "$sid" \
       --arg dir "$session_dir" \
       --arg url "$FRONTDOOR_URL" \
-      '{sid:$sid, dir:$dir, url:$url}')"
+      --argjson settle "$settle_secs" \
+      '{sid:$sid, dir:$dir, url:$url, settle_ms:($settle * 1000)}') "
 
     expr_open="luaeval(\"require('user.oc_auto_attach').open(vim.json.decode(_A))\", $(printf '%s' "$payload" | jq -Rs '.'))"
     expr_status="luaeval(\"require('user.oc_auto_attach').status(_A)\", \"$sid\")"
@@ -580,8 +588,6 @@ pkgs.writeShellApplication {
       # Step 7: Wait for attach job to settle.
       # Settle window derivation:
       # it is 5000 ms + margin because that is the deadline the failure itself races, NOT the 12 s that happened to work empirically.
-      settle_secs="''${OC_AA_SETTLE_SECS:-8}"
-      wait_timeout="''${OC_AA_WAIT_TIMEOUT_SECS:-15}"
 
       log "waiting up to ''${settle_secs}s for attach to settle..."
 
@@ -603,8 +609,8 @@ pkgs.writeShellApplication {
 
         status="$(nvim --server "$sock" --remote-expr "$expr_status" </dev/null 2>/dev/null || true)"
 
-        if [ "$status" = "failed" ]; then
-          log "attach job for $sid exited prematurely (failed) during settle window"
+        if [ "$status" = "failed" ] || [ "$status" = "exited" ]; then
+          log "attach job for $sid exited prematurely ($status) during settle window"
           break
         fi
 

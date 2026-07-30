@@ -26,14 +26,14 @@ local statuses = {}
 
 --- Query attach status for a session ID.
 --- @param sid string
---- @return string "running" | "failed" | "unknown"
+--- @return string "running" | "failed" | "exited" | "unknown"
 function M.status(sid)
   if type(sid) ~= "string" or sid == "" then return "unknown" end
   return statuses[sid] or "unknown"
 end
 
 --- Open a new tab with `opencode attach` running in a terminal buffer.
---- @param opts table  { sid: string, dir: string, url: string }
+--- @param opts table  { sid: string, dir: string, url: string, settle_ms?: number }
 --- @return integer 1  (so --remote-expr has something to print)
 function M.open(opts)
   -- Validate synchronously so --remote-expr returns a meaningful status.
@@ -51,6 +51,8 @@ function M.open(opts)
     return 0
   end
 
+  local settle_threshold_ms = tonumber(opts.settle_ms) or 8000
+
   statuses[opts.sid] = "running"
 
   -- Schedule UI work for the next event-loop tick (so RPC can return promptly).
@@ -60,6 +62,9 @@ function M.open(opts)
     vim.b[buf].oc_session_id = opts.sid
     vim.b[buf].oc_session_dir = opts.dir
 
+    local uv = vim.uv or vim.loop
+    local start_hr = uv.hrtime()
+
     local job_id = vim.fn.jobstart({
       "opencode", "attach", opts.url,
       "--session", opts.sid,
@@ -68,14 +73,23 @@ function M.open(opts)
       term = true,
       cwd = opts.dir,
       on_exit = function(_, exit_code, _)
-        statuses[opts.sid] = "failed"
-        if vim.api.nvim_buf_is_valid(buf) then
-          pcall(vim.api.nvim_buf_set_name, buf, "[FAILED] " .. opts.sid)
+        local elapsed_ms = (uv.hrtime() - start_hr) / 1e6
+        if elapsed_ms < settle_threshold_ms then
+          statuses[opts.sid] = "failed"
+          if vim.api.nvim_buf_is_valid(buf) then
+            pcall(vim.api.nvim_buf_set_name, buf, "[FAILED] " .. opts.sid)
+          end
+          vim.notify(
+            "oc_auto_attach: attach job exited prematurely for " .. opts.sid .. " (code " .. tostring(exit_code) .. ")",
+            vim.log.levels.ERROR
+          )
+        else
+          statuses[opts.sid] = "exited"
+          vim.notify(
+            "oc_auto_attach: attach job ended for " .. opts.sid,
+            vim.log.levels.INFO
+          )
         end
-        vim.notify(
-          "oc_auto_attach: attach job exited for " .. opts.sid .. " (code " .. tostring(exit_code) .. ")",
-          vim.log.levels.ERROR
-        )
       end,
     })
 

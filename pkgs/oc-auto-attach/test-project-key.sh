@@ -615,11 +615,18 @@ if [ -f "$default_nix" ]; then
     exit 1
   fi
 
-  if grep -q 'flock' "$default_nix"; then
-    printf 'PASS  source uses flock for machine-wide concurrency bounding\n'
+  if grep -q 'OC_AA_SERIALIZE' "$default_nix"; then
+    printf 'PASS  source defines serialization knob (OC_AA_SERIALIZE)\n'
   else
-    printf 'FAIL  source uses flock for machine-wide concurrency bounding\n        flock not found in: %s\n' "$default_nix"
+    printf 'FAIL  source defines serialization knob (OC_AA_SERIALIZE)\n        OC_AA_SERIALIZE not found in: %s\n' "$default_nix"
     exit 1
+  fi
+
+  if grep -q 'OC_AA_MAX_CONCURRENCY' "$default_nix"; then
+    printf 'FAIL  source still contains misleading OC_AA_MAX_CONCURRENCY knob\n        in: %s\n' "$default_nix"
+    exit 1
+  else
+    printf 'PASS  source removed misleading OC_AA_MAX_CONCURRENCY knob\n'
   fi
 
   if grep -q 'OC_AA_SETTLE_SECS' "$default_nix"; then
@@ -678,10 +685,37 @@ if [ -f "$lua_source" ]; then
       assert(M.status("ses_test") == "unknown", "unknown sid -> unknown")
       assert(M.open(nil) == 0, "invalid opts -> 0")
       assert(M.open({sid="ses_123", dir="/nonexistent/dir", url="http://127.0.0.1:4096"}) == 0, "invalid dir -> 0")
+
+      -- Test pre-settle vs post-settle discriminator
+      local last_opts1, last_buf1
+      vim.fn.jobstart = function(cmd, opts)
+        last_opts1 = opts
+        last_buf1 = vim.api.nvim_get_current_buf()
+        return 100
+      end
+      M.open({sid="ses_test1", dir=".", url="http://127.0.0.1:4096", settle_ms=5000})
+      vim.wait(100, function() return last_opts1 ~= nil end)
+      last_opts1.on_exit(100, 0, "exit")
+      assert(M.status("ses_test1") == "failed", "pre-settle exit -> status failed")
+      assert(vim.api.nvim_buf_get_name(last_buf1):find("%[FAILED%]"), "pre-settle exit -> buffer renamed [FAILED]")
+
+      local last_opts2, last_buf2
+      vim.fn.jobstart = function(cmd, opts)
+        last_opts2 = opts
+        last_buf2 = vim.api.nvim_get_current_buf()
+        return 101
+      end
+      M.open({sid="ses_test2", dir=".", url="http://127.0.0.1:4096", settle_ms=0})
+      vim.wait(100, function() return last_opts2 ~= nil end)
+      vim.wait(10)
+      last_opts2.on_exit(101, 0, "exit")
+      assert(M.status("ses_test2") == "exited", "post-settle exit -> status exited")
+      assert(not vim.api.nvim_buf_get_name(last_buf2):find("%[FAILED%]"), "post-settle exit -> buffer NOT renamed [FAILED]")
+
       print("LUA_TEST_OK")
     ' 2>&1 || true)"
     case "$lua_out" in
-      *"LUA_TEST_OK"*) printf 'PASS  lua module unit test via nvim -l\n' ;;
+      *"LUA_TEST_OK"*) printf 'PASS  lua module unit test via nvim -l (pre/post-settle discriminator)\n' ;;
       *) printf 'FAIL  lua module unit test via nvim -l\n        out: %s\n' "$lua_out"; exit 1 ;;
     esac
   else
