@@ -115,8 +115,28 @@ const defaultKubeFS: KubeFS = {
  *
  * Injected dependencies allow complete unit testing without touching disk.
  * Fail-open: returns undefined on any error or missing prerequisite.
+ *
+ * DO NOT `export` THIS (or any other function) AT MODULE SCOPE. opencode's
+ * legacy plugin loader treats EVERY function export of an auto-discovered
+ * plugin file as a plugin factory: it iterates `Object.values(mod)` and does
+ * `hooks.push(await server(input, opts))` WITHOUT validating the result. A
+ * named helper therefore gets invoked with the PluginInput object as its first
+ * argument, and whatever it returns is pushed into the hooks array.
+ *
+ * When that return value is `undefined`, the hooks array is poisoned and every
+ * later hook iteration dies on a property access:
+ *   plugin config hook failed  -> undefined is not an object (evaluating 'N.config')
+ *   GET /config/providers 500  -> undefined is not an object (evaluating 'n.provider')
+ *   prompt_async failed        -> Die(undefined is not an object (evaluating 'z[W]'))
+ * i.e. the whole serve loses its provider catalog and cannot run ANY prompt.
+ *
+ * This bit devbox on 2026-07-30: exporting this helper was harmless on hosts
+ * with a ~/.kube/config (it returned a string) but fatal on hosts without one
+ * (it returned undefined). Non-function exports are safe -- the loader skips
+ * them -- which is why the unit-test surface below is an object, and why
+ * `export interface KubeFS` is fine (types are erased at runtime).
  */
-export function loadKubeconfigEnv(
+function loadKubeconfigEnv(
   sessionID: string | undefined,
   processEnv: Record<string, string | undefined> = process.env,
   sys: KubeFS = defaultKubeFS,
@@ -232,3 +252,11 @@ const plugin: Plugin = async () => ({
 })
 
 export default plugin
+
+/**
+ * Unit-test surface. Deliberately an OBJECT, not a function export: opencode's
+ * legacy plugin loader invokes every *function* export as a plugin factory (see
+ * the warning on loadKubeconfigEnv above) but skips non-functions. Keep it that
+ * way -- never promote these back to bare `export function`.
+ */
+export const internals = { loadKubeconfigEnv }

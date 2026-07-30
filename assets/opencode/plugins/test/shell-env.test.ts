@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import * as fs from "node:fs"
-import plugin, { loadKubeconfigEnv, type KubeFS } from "../shell-env"
+import plugin, { internals, type KubeFS } from "../shell-env"
+
+// loadKubeconfigEnv is intentionally NOT a bare function export -- opencode's
+// legacy plugin loader would invoke it as a plugin factory. See shell-env.ts.
+const { loadKubeconfigEnv } = internals
 
 // shell-env.ts reads sops secrets via fs.readFileSync(/run/secrets/<name>) and
 // creates per-session kubeconfig overlays.
