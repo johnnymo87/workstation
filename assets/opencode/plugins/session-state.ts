@@ -4,6 +4,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import {
   applyEvent,
+  checkServePortFence,
   emptyState,
   evictIdleSessions,
   fetchPendingSnapshot,
@@ -39,6 +40,49 @@ const plugin: Plugin = async (ctx, opts?: any) => {
           `(cmdline[1] != "serve"). No session-state overlay will be written. cmdline=${JSON.stringify(cmdline.slice(0, 200))}`,
       )
     }
+    return {}
+  }
+
+  // Second gate: the port fence. isPoolServeProcess above only checks that
+  // argv[1] == "serve" and that OPENCODE_SERVE_ID is set -- both of which are
+  // TRUE for a throwaway `opencode serve` spawned from inside a session hosted
+  // by a pool serve, because the wrapper EXPORTS the slot's identity to every
+  // child. Such a process would write this slot's overlay filename under a
+  // different pid, giving two live writers alternating whole-file overwrites
+  // (the same-pid-only silence rule cannot fire when the pids differ).
+  //
+  // The routing layer's identical fence does not cover this: it only refuses to
+  // register for a process that CLAIMS a routing slot, and a nested serve with
+  // OPENCODE_ROUTING_DB scrubbed never claims one.
+  //
+  // Injectable for the same reason `cmdline` and `dir` are: the test runner
+  // inherits this variable from whichever pool serve hosts the session running
+  // the suite, so reading process.env directly makes every plugin-level test
+  // depend on ambient production state and go inert under a port that has
+  // nothing to do with the test.
+  const expectedPort = opts?.expectedPort ?? process.env.OPENCODE_SERVE_EXPECTED_PORT
+  const fence = checkServePortFence(ctx.serverUrl, expectedPort)
+  if (fence.verdict === "unarmed") {
+    // Every other inert/degraded path in this plugin is loud, for the same
+    // reason: a state writer that quietly stops enforcing something is the
+    // worst outcome, because nothing downstream can tell. A disarmed fence is
+    // worth exactly nothing, and the population most likely to present a
+    // scrubbed declared port or an unreadable serverUrl is the nested-serve
+    // population this fence exists to stop -- someone who scrubs
+    // OPENCODE_SERVE_EXPECTED_PORT but keeps OPENCODE_SERVE_ID re-arms the
+    // hijack while disarming the guard. Keep writing, but say so.
+    console.error(
+      `[session-state] port fence UNARMED for OPENCODE_SERVE_ID=${serveId}: ${fence.reason}. ` +
+        `A nested serve that inherited this slot's identity would not be detected.`,
+    )
+  }
+  if (fence.verdict === "mismatch") {
+    console.error(
+      `[session-state] inert: OPENCODE_SERVE_ID=${serveId} declares port ` +
+        `${expectedPort} but this process is serving on ${String(ctx.serverUrl)} (${fence.reason}). ` +
+        `This is a nested/throwaway serve that inherited the slot's identity, not the pool member for that slot. ` +
+        `Writing would corrupt ${serveId}'s overlay with a second writer. Scrub OPENCODE_SERVE_ID before spawning a throwaway serve.`,
+    )
     return {}
   }
 

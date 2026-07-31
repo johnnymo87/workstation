@@ -661,6 +661,94 @@ the guard logs when it goes inert with `OPENCODE_SERVE_ID` set.
   was assumed to be isolated and was not (the first deleted a live serve's
   overlay file).
 
+### Cycle 5 outcome: four of these are now closed with deployed evidence
+
+Resolved in `session-switcher-task5`. Recorded here because two of them were
+closed by *measurement that contradicted the assumption in the item itself*.
+
+- **RESOLVED [MED] Nested serve.** The proposed fix ("derive the expected port
+  from the serve-id") turned out to be unnecessary: `opencode-serve-start`
+  already **exports** `OPENCODE_SERVE_EXPECTED_PORT`, and its own comment
+  describes precisely this attack (the 2026-07-25 hijack, bead pigeon-13p). The
+  plugin now runs the same fence over `ctx.serverUrl`
+  (`checkServePortFence`). Confirmed empirically that the premise is real: a
+  throwaway serve spawned from inside a session *does* inherit
+  `OPENCODE_SERVE_ID`, and tripped the routing FATAL only because
+  `OPENCODE_ROUTING_DB` happened to be inherited too -- scrub that one variable
+  and the old guards pass. Port compared, host deliberately not: a host
+  comparison would take the writer inert fleet-wide if `ctx.serverUrl` ever
+  reported `localhost` or `::1`.
+- **RESOLVED [MED] GET response shape.** Verified against a deployed 1.17.13
+  server holding a real pending prompt. Both endpoints return arrays; the
+  running binary's own OpenAPI document declares `id` and `sessionID` as
+  **required** strings on `PermissionRequest` and `QuestionRequest`. The
+  assumption was correct -- but it was an assumption, and BUG FIX 1 rested
+  entirely on it.
+- **RESOLVED [MED] The `?directory=` negative control.** Ran it properly: two
+  sessions in two directories on one serve, one real pending permission.
+  Matching dir -> 1, `projB` -> 0, nonexistent -> 0, unfiltered -> 1 (positive
+  control), trailing slash tolerated. The param genuinely filters, so the feared
+  permanent phantom `blocked` from cross-directory seeding cannot occur.
+- **RESOLVED [MED] permission.\* fixtures.** Captured real `permission.asked`
+  (key in `properties.id`) and `permission.replied` (key in
+  `properties.requestID`) from a deployed server, confirming the reducer's
+  asymmetry for the half that previously rested on a one-time source read.
+  Forcing the prompt needed a *global* config `{"permission":"ask"}` under a
+  private `XDG_CONFIG_HOME` -- the project-level override that failed in cycle 3
+  was the wrong lever.
+- **RESOLVED [LOW] `isValidOverlay` skew.** Now validates `lastActivity`,
+  `updatedAt`, `activity` and `error`, **per entry**. Verified against
+  production first: all 11 live entries across the 23 current overlay files
+  pass, so it rejects skew and not real data. The first attempt applied the
+  check at file granularity, which the adversarial review caught -- see below;
+  that would have let one malformed entry hand a session to a stale file from
+  another serve.
+
+Method notes worth keeping:
+
+- The capture ran on a throwaway serve with its own `XDG_CONFIG_HOME` and
+  `XDG_DATA_HOME`, so the session-state plugin never loaded and no live overlay
+  was touched; a before/after listing of `session-state.d` confirmed it. Given
+  two prior incidents of tests touching production, isolation is now built in
+  rather than asserted.
+- Both new test suites were **mutation-checked**. The first pass of the fixture
+  tests caught only 4 of 6 seeded defects: comparing a parsed field against the
+  same fixture field passes vacuously when a rename makes both `undefined`, and
+  a hand-built reply event hardcoding `requestID` cannot detect that the real
+  payload drifted. Both were rewritten.
+- `expectedPort` is injectable because the test runner inherits a real
+  `OPENCODE_SERVE_EXPECTED_PORT` from whichever pool serve hosts the session
+  running the suite. Note that passing `expectedPort: undefined` does **not**
+  mean unarmed -- it falls back to `process.env`. Third instance of ambient
+  production state leaking into a supposedly isolated test.
+
+#### Cycle 5 adversarial review: two items deferred, one policy to write down
+
+- **[MED, deferred] Prefer a PID fence over the port fence.** The reviewer's
+  better idea: `opencode-serve-start` `exec`s opencode, so `$$` at export time
+  *is* the serve's eventual pid. Exporting `OPENCODE_SERVE_EXPECTED_PID=$$` and
+  comparing against `process.pid` closes every port/host/socket variant at once,
+  because children inherit the variable but never the pid. Deferred only because
+  it needs a wrapper change in `hosts/cloudbox/configuration.nix` plus a fleet
+  rebuild, and it would sit unarmed until that lands. The loopback+port fence
+  shipped here is the belt; this is the braces.
+- **[MED-LOW, deferred] The `openapiShapes` block in the fixture is still a
+  hand-summarized spec** rather than a raw schema fragment. Lower stakes than
+  the directory matrix was, because the raw GET body independently corroborates
+  the field names, but it is the same transcription class of evidence.
+- **[POLICY, must be written down] `OVERLAY_VERSION` skew.** The writer ships in
+  a nix bundle that auto-updates every 8 hours; the reader will ship as part of
+  `oc-session-list`. They therefore drift. The rules:
+  - Any change to the *file-level* shape requires an `OVERLAY_VERSION` bump, and
+    the **reader deploys first** (an unknown version is ignored, so a reader that
+    does not yet understand the new version blacks out; a writer emitting an old
+    version a new reader still accepts does not).
+  - *Additive entry-level* changes (a new `activity` value, a new optional
+    field) must NOT bump the version, and must be tolerated by the reader
+    per-entry. That is exactly what the entry-level validation now does: an
+    unrecognized entry is dropped, its healthy siblings survive, and the serve
+    is not blinded.
+
 **Carried forward, NOT fixed here** (ranked; all from the same review):
 
 - **[MED] Nested `opencode serve` slips both guards.** The cmdline check accepts

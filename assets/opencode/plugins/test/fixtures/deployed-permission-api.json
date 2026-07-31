@@ -1,0 +1,197 @@
+{
+  "_provenance": {
+    "capturedFrom": "isolated throwaway `opencode serve` on 127.0.0.1:4792 with its own XDG_CONFIG_HOME/XDG_DATA_HOME, so the session-state plugin was NOT loaded and no live overlay was touched",
+    "opencodeVersion": "1.17.13",
+    "capturedAt": "2026-07-31",
+    "how": "global config {\"permission\":\"ask\"} forces a real bash permission prompt. Two sessions were created in two different directories on the SAME serve; one was driven with claude-haiku-4-5 until it called the bash tool. The five directory queries were then issued back-to-back against that single pending prompt, and RAW response bodies recorded. The prompt was then replied to via POST /permission/{requestID}/reply, capturing a genuinely MATCHED permission.asked -> permission.replied pair from the SSE stream.",
+    "why": "Closes carried-forward Task 3 review gaps: the GET response shape behind fetchPendingSnapshot was never verified against a deployed server holding a real pending prompt, and the .asked/.replied key asymmetry was only ever confirmed for question.*, never permission.*.",
+    "liveOverlayTripwire": "listing of ~/.local/share/opencode/session-state.d identical before and after",
+    "note": "Raw bodies are stored, not hand-recorded counts, so the tests derive counts and id membership from real data rather than trusting a transcription. The final unfiltered repeat is a temporal control proving the prompt was still pending for the whole sequence, so the zero counts are filtering and not a mid-sequence reply."
+  },
+  "directoryFilterMatrix": {
+    "sessionUnderTestDirectory": "/tmp/dirfilter-probe2/projA",
+    "otherDirectory": "/tmp/dirfilter-probe2/projB",
+    "pendingPermissionID": "per_fb9cebc3e0012CRL8cPc721M0F",
+    "queries": [
+      {
+        "label": "unfiltered",
+        "query": "(none)",
+        "tMs": 14,
+        "body": [
+          {
+            "id": "per_fb9cebc3e0012CRL8cPc721M0F",
+            "sessionID": "ses_046314b78ffe219tJqHYlFMBqQ",
+            "permission": "bash",
+            "patterns": [
+              "echo PROBE_MARKER"
+            ],
+            "metadata": {
+              "command": "echo PROBE_MARKER"
+            },
+            "always": [
+              "echo *"
+            ],
+            "tool": {
+              "messageID": "msg_fb9ceb57a001s9zCY3Td4SttgA",
+              "callID": "toolu_vrtx_01MRzUkjYkQjzAT9cEf2NXHU"
+            }
+          }
+        ]
+      },
+      {
+        "label": "matching directory",
+        "query": "?directory=/tmp/dirfilter-probe2/projA",
+        "tMs": 0,
+        "body": [
+          {
+            "id": "per_fb9cebc3e0012CRL8cPc721M0F",
+            "sessionID": "ses_046314b78ffe219tJqHYlFMBqQ",
+            "permission": "bash",
+            "patterns": [
+              "echo PROBE_MARKER"
+            ],
+            "metadata": {
+              "command": "echo PROBE_MARKER"
+            },
+            "always": [
+              "echo *"
+            ],
+            "tool": {
+              "messageID": "msg_fb9ceb57a001s9zCY3Td4SttgA",
+              "callID": "toolu_vrtx_01MRzUkjYkQjzAT9cEf2NXHU"
+            }
+          }
+        ]
+      },
+      {
+        "label": "non-matching directory",
+        "query": "?directory=/tmp/dirfilter-probe2/projB",
+        "tMs": 0,
+        "body": []
+      },
+      {
+        "label": "nonexistent directory",
+        "query": "?directory=/nonexistent/nowhere",
+        "tMs": 11,
+        "body": []
+      },
+      {
+        "label": "matching directory, trailing slash",
+        "query": "?directory=/tmp/dirfilter-probe2/projA/",
+        "tMs": 1,
+        "body": [
+          {
+            "id": "per_fb9cebc3e0012CRL8cPc721M0F",
+            "sessionID": "ses_046314b78ffe219tJqHYlFMBqQ",
+            "permission": "bash",
+            "patterns": [
+              "echo PROBE_MARKER"
+            ],
+            "metadata": {
+              "command": "echo PROBE_MARKER"
+            },
+            "always": [
+              "echo *"
+            ],
+            "tool": {
+              "messageID": "msg_fb9ceb57a001s9zCY3Td4SttgA",
+              "callID": "toolu_vrtx_01MRzUkjYkQjzAT9cEf2NXHU"
+            }
+          }
+        ]
+      },
+      {
+        "label": "unfiltered (repeat, temporal control)",
+        "query": "(none)",
+        "tMs": 0,
+        "body": [
+          {
+            "id": "per_fb9cebc3e0012CRL8cPc721M0F",
+            "sessionID": "ses_046314b78ffe219tJqHYlFMBqQ",
+            "permission": "bash",
+            "patterns": [
+              "echo PROBE_MARKER"
+            ],
+            "metadata": {
+              "command": "echo PROBE_MARKER"
+            },
+            "always": [
+              "echo *"
+            ],
+            "tool": {
+              "messageID": "msg_fb9ceb57a001s9zCY3Td4SttgA",
+              "callID": "toolu_vrtx_01MRzUkjYkQjzAT9cEf2NXHU"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "events": {
+    "permissionAsked": {
+      "id": "evt_fb9cebc3e0026qWCyWccJAsuGf",
+      "type": "permission.asked",
+      "properties": {
+        "id": "per_fb9cebc3e0012CRL8cPc721M0F",
+        "sessionID": "ses_046314b78ffe219tJqHYlFMBqQ",
+        "permission": "bash",
+        "patterns": [
+          "echo PROBE_MARKER"
+        ],
+        "metadata": {
+          "command": "echo PROBE_MARKER"
+        },
+        "always": [
+          "echo *"
+        ],
+        "tool": {
+          "messageID": "msg_fb9ceb57a001s9zCY3Td4SttgA",
+          "callID": "toolu_vrtx_01MRzUkjYkQjzAT9cEf2NXHU"
+        }
+      }
+    },
+    "permissionReplied": {
+      "id": "evt_fb9cf04d8001Me3Mst7xjvW7If",
+      "type": "permission.replied",
+      "properties": {
+        "sessionID": "ses_046314b78ffe219tJqHYlFMBqQ",
+        "requestID": "per_fb9cebc3e0012CRL8cPc721M0F",
+        "reply": "once"
+      }
+    }
+  },
+  "openapiShapes": {
+    "PermissionRequest": {
+      "required": [
+        "always",
+        "id",
+        "metadata",
+        "patterns",
+        "permission",
+        "sessionID"
+      ],
+      "properties": {
+        "id": "string",
+        "sessionID": "string",
+        "permission": "string",
+        "patterns": "array",
+        "metadata": "object",
+        "always": "array",
+        "tool": "object"
+      }
+    },
+    "QuestionRequest": {
+      "required": [
+        "id",
+        "questions",
+        "sessionID"
+      ],
+      "properties": {
+        "id": "string",
+        "sessionID": "string",
+        "questions": "array",
+        "tool": "QuestionTool"
+      }
+    }
+  }
+}

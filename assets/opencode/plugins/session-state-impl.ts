@@ -297,6 +297,41 @@ export function serializeOverlay({
   }
 }
 
+/**
+ * Entry-level validation.
+ *
+ * lastActivity and activity are load-bearing for the merge, so they must be
+ * checked or a same-version skewed entry decides the winner: compareCandidates
+ * does `b.lastActivity - a.lastActivity`, a non-numeric value makes that NaN,
+ * every NaN comparison is false, and the sort therefore collapses to whatever
+ * order readdir returned.
+ *
+ * Deliberately applied PER ENTRY rather than per file. Rejecting a whole file
+ * for one malformed entry does not just hide that entry -- it removes the
+ * owning serve's file from the candidate set, so the owner-preference rule
+ * finds no owner file and a stale (or dead) file from a different serve wins
+ * the session instead. One skewed entry would resurrect outdated state for all
+ * of its healthy siblings.
+ *
+ * That matters because the writer ships in a nix bundle that auto-updates every
+ * 8 hours while the reader ships by a different vehicle. Any additive drift
+ * within the same OVERLAY_VERSION -- a writer emitting an activity value the
+ * reader has not learned yet -- would otherwise blind that serve completely
+ * until the reader caught up. Dropping the unknown entry degrades one session;
+ * dropping the file degrades every session on that serve.
+ */
+function isValidEntry(entry: any): boolean {
+  if (!entry || typeof entry !== "object") return false
+  const e = entry as any
+  if (!Array.isArray(e.pendingPermissions) || !Array.isArray(e.pendingQuestions)) return false
+  if (typeof e.lastActivity !== "number" || !Number.isFinite(e.lastActivity)) return false
+  if (typeof e.updatedAt !== "number" || !Number.isFinite(e.updatedAt)) return false
+  if (e.activity !== "working" && e.activity !== "idle" && e.activity !== "retry") return false
+  if (typeof e.error !== "boolean") return false
+  return true
+}
+
+/** File-level validation only. Entry shape is filtered separately, per entry. */
 function isValidOverlay(f: any): f is OverlayData {
   if (!f || typeof f !== "object") return false
   if (f.version !== OVERLAY_VERSION) return false
@@ -304,12 +339,16 @@ function isValidOverlay(f: any): f is OverlayData {
   if (typeof f.serveId !== "string") return false
   if (typeof f.heartbeat !== "number") return false
   if (!f.sessions || typeof f.sessions !== "object" || Array.isArray(f.sessions)) return false
-  for (const entry of Object.values(f.sessions)) {
-    if (!entry || typeof entry !== "object") return false
-    const e = entry as any
-    if (!Array.isArray(e.pendingPermissions) || !Array.isArray(e.pendingQuestions)) return false
-  }
   return true
+}
+
+/** Returns a copy of the overlay with only the well-formed session entries. */
+function withValidEntriesOnly(f: OverlayData): OverlayData {
+  const sessions: Record<string, any> = {}
+  for (const [sid, entry] of Object.entries(f.sessions ?? {})) {
+    if (isValidEntry(entry)) sessions[sid] = entry
+  }
+  return { ...f, sessions } as OverlayData
 }
 
 interface PreparedFile {
@@ -338,7 +377,9 @@ export function mergeOverlays(
   files: OverlayData[],
   { now, staleMs, isAlive, owners = {} }: MergeOptions,
 ): StateMap {
-  const validFiles = Array.isArray(files) ? files.filter(isValidOverlay) : []
+  const validFiles = (Array.isArray(files) ? files.filter(isValidOverlay) : []).map(
+    withValidEntriesOnly,
+  )
   const prepared: PreparedFile[] = validFiles.map((f) => ({
     file: f,
     serveId: f.serveId,
@@ -452,6 +493,101 @@ export function isPoolServeProcess(cmdline: string, serveId?: string): boolean {
   if (!cmdline) return false
   const tokens = cmdline.split("\x00")
   return tokens.length > 1 && tokens[1] === "serve"
+}
+
+export type ServePortFenceVerdict = "match" | "mismatch" | "unarmed"
+
+export interface ServePortFenceResult {
+  verdict: ServePortFenceVerdict
+  /** Why the fence reached this verdict. Carried so the caller can log a
+   *  disarmed fence: an unarmed guard is worth exactly nothing, and the
+   *  population most likely to present an unreadable serverUrl or a scrubbed
+   *  declared port is the nested-serve population this fence exists to stop. */
+  reason: string
+}
+
+const LOOPBACK_HOSTS = new Set(["localhost", "::1", "[::1]", "::ffff:127.0.0.1"])
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "")
+  if (LOOPBACK_HOSTS.has(h) || LOOPBACK_HOSTS.has(hostname.toLowerCase())) return true
+  // 127.0.0.0/8
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)
+}
+
+/**
+ * Overlay-writer half of the REGISTRY PORT FENCE (bead pigeon-13p).
+ *
+ * `opencode-serve-start` EXPORTS OPENCODE_SERVE_EXPECTED_PORT, so every child
+ * of a pool serve inherits the slot's declared port. A throwaway
+ * `opencode serve` spawned from inside a hosted session therefore carries
+ * (say) serve-2's declared 4098 while binding a port of its own -- the
+ * 2026-07-25 hijack signature.
+ *
+ * The routing layer already refuses to REGISTER on that mismatch, but only for
+ * a process that claims a routing slot. A nested serve with OPENCODE_ROUTING_DB
+ * scrubbed makes no claim, never trips that fence, and still passes this
+ * plugin's cmdline check (its argv[1] really is "serve") -- so it would write
+ * to the inherited serveId's overlay filename under a different pid. Two live
+ * writers then alternate whole-file overwrites, and the same-pid-only silence
+ * rule never fires because the pids differ.
+ *
+ * Comparing against this process's own --port would catch nothing: the
+ * throwaway binds the port it asked for. The comparison has to be against the
+ * INHERITED declaration.
+ *
+ * Unset = unarmed, matching the wrapper's own convention, so a plugin update
+ * and a wrapper update can land in either order without blacking out the writer.
+ */
+export function checkServePortFence(
+  serverUrl: string | URL | undefined,
+  expectedPort: string | undefined,
+): ServePortFenceResult {
+  const declared = expectedPort?.trim()
+  if (!declared) {
+    return { verdict: "unarmed", reason: "no declared port (OPENCODE_SERVE_EXPECTED_PORT unset)" }
+  }
+
+  let u: URL
+  try {
+    const parsed = typeof serverUrl === "string" ? new URL(serverUrl) : serverUrl
+    if (!parsed) return { verdict: "unarmed", reason: "no serverUrl" }
+    u = parsed
+  } catch {
+    // An unparseable serverUrl is a reason to stay quiet, not to go inert:
+    // going inert on a shape we do not understand would black out the writer
+    // fleet-wide on an upstream change to ctx.serverUrl. Logged by the caller.
+    return { verdict: "unarmed", reason: `unparseable serverUrl: ${String(serverUrl)}` }
+  }
+  if (!u.port) {
+    return { verdict: "unarmed", reason: `serverUrl has no port: ${String(serverUrl)}` }
+  }
+
+  // Host IS checked, but only for loopback-ness, never for an exact string.
+  //
+  // The original justification for ignoring the host entirely was wrong: a pool
+  // serve holding 127.0.0.1:4098 does NOT prevent another process binding
+  // ::1:4098 or 10.x:4098, because those are different addresses. Verified by
+  // experiment. A port-only fence therefore returns "match" for a nested serve
+  // that simply picks a different interface, which is precisely the process
+  // this fence exists to stop.
+  //
+  // Comparing the host exactly would be the brittle option -- if ctx.serverUrl
+  // ever reported "localhost" or "::1" for a real pool serve, an exact check
+  // would read as mismatch and take the writer inert fleet-wide. Loopback
+  // equivalence gets the safety without the brittleness: the wrapper pins
+  // --hostname 127.0.0.1, so a pool serve is always loopback by construction,
+  // and any non-loopback bind cannot be one.
+  if (!isLoopbackHost(u.hostname)) {
+    return {
+      verdict: "mismatch",
+      reason: `serving on non-loopback host ${u.hostname}; a pool serve always binds loopback`,
+    }
+  }
+
+  return u.port === declared
+    ? { verdict: "match", reason: `bound port ${u.port} matches declared ${declared}` }
+    : { verdict: "mismatch", reason: `bound port ${u.port} != declared ${declared}` }
 }
 
 export function getOverlayFilename(serveId: string, directory?: string): string {
