@@ -1,0 +1,123 @@
+{
+  "_provenance": {
+    "capturedFrom": "isolated throwaway `opencode serve` on 127.0.0.1:4791 with its own XDG_CONFIG_HOME/XDG_DATA_HOME (so the session-state plugin was NOT loaded and no live overlay was touched)",
+    "opencodeVersion": "1.17.13",
+    "capturedAt": "2026-07-31",
+    "how": "config {\"permission\":\"ask\"} forces a real bash permission prompt; created two sessions in two different directories on the SAME serve, drove one with claude-haiku-4-5 to call the bash tool, captured GET /permission, the permission.asked SSE event, and the permission.replied SSE event after POST /permission/{requestID}/reply",
+    "why": "Closes two carried-forward Task 3 review gaps: (a) fetchPendingSnapshot assumed GET /permission returns an array of {id, sessionID} but that was never verified against a deployed server with a real pending prompt; (b) the .asked/.replied key asymmetry was only ever confirmed for question.*, never for permission.* -- that half rested on a one-time read of the bundled source.",
+    "liveOverlayTripwire": "listing of ~/.local/share/opencode/session-state.d was identical before and after the capture"
+  },
+  "getPermissionResponse": [
+    {
+      "id": "per_fb9bd1544001vS29t82jWwiVCM",
+      "sessionID": "ses_046431a93ffeUKOotdGqn0S1YB",
+      "permission": "bash",
+      "patterns": [
+        "echo PROBE_MARKER"
+      ],
+      "metadata": {
+        "command": "echo PROBE_MARKER"
+      },
+      "always": [
+        "echo *"
+      ],
+      "tool": {
+        "messageID": "msg_fb9bd0e63001tb67MrN3N4jmJ5",
+        "callID": "toolu_vrtx_01ATsmqADrm1Qvz1KZ5Cvv5p"
+      }
+    }
+  ],
+  "events": {
+    "permissionAsked": {
+      "id": "evt_fb9bdfab7002jHMgrZqUGjBJBj",
+      "type": "permission.asked",
+      "properties": {
+        "id": "per_fb9bdfab7001O3cqPkO33tSbnW",
+        "sessionID": "ses_046431a93ffeUKOotdGqn0S1YB",
+        "permission": "bash",
+        "patterns": [
+          "ls /tmp/dirfilter-probe"
+        ],
+        "metadata": {
+          "command": "ls /tmp/dirfilter-probe"
+        },
+        "always": [
+          "ls *"
+        ],
+        "tool": {
+          "messageID": "msg_fb9bdf76b001GddG2qKwrRxmfY",
+          "callID": "toolu_vrtx_01TozptRh1GBkruf18Lc9DT9"
+        }
+      }
+    },
+    "permissionReplied": {
+      "id": "evt_fb9bd9dee001hUE1Fn1HRa1AGs",
+      "type": "permission.replied",
+      "properties": {
+        "sessionID": "ses_046431a93ffeUKOotdGqn0S1YB",
+        "requestID": "per_fb9bd1544001vS29t82jWwiVCM",
+        "reply": "once"
+      }
+    }
+  },
+  "directoryFilterMatrix": {
+    "_why": "Negative control that was never run: proves ?directory= actually EXCLUDES prompts from other directories. If the param were ignored, a serve would seed other directories' sessions into its overlay, where they never receive events, and hasPending would then block eviction forever (permanent phantom `blocked`).",
+    "sessionUnderTestDirectory": "/tmp/dirfilter-probe/projA",
+    "results": [
+      {
+        "query": "(none)",
+        "count": 1
+      },
+      {
+        "query": "?directory=/tmp/dirfilter-probe/projA",
+        "count": 1
+      },
+      {
+        "query": "?directory=/tmp/dirfilter-probe/projB",
+        "count": 0
+      },
+      {
+        "query": "?directory=/nonexistent/nowhere",
+        "count": 0
+      },
+      {
+        "query": "?directory=/tmp/dirfilter-probe/projA/ (trailing slash)",
+        "count": 1
+      }
+    ]
+  },
+  "openapiShapes": {
+    "PermissionRequest": {
+      "required": [
+        "always",
+        "id",
+        "metadata",
+        "patterns",
+        "permission",
+        "sessionID"
+      ],
+      "properties": {
+        "id": "string",
+        "sessionID": "string",
+        "permission": "string",
+        "patterns": "array",
+        "metadata": "object",
+        "always": "array",
+        "tool": "object"
+      }
+    },
+    "QuestionRequest": {
+      "required": [
+        "id",
+        "questions",
+        "sessionID"
+      ],
+      "properties": {
+        "id": "string",
+        "sessionID": "string",
+        "questions": "array",
+        "tool": "QuestionTool"
+      }
+    }
+  }
+}
