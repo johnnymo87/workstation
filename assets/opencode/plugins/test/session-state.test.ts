@@ -8,6 +8,7 @@ import {
   mergeOverlays,
   checkServePortFence,
   isPoolServeProcess,
+  OVERLAY_VERSION,
   getOverlayFilename,
   generateInstanceStamp,
   shouldGoSilent,
@@ -805,5 +806,60 @@ describe("checkServePortFence (nested-serve hijack guard)", () => {
     // serve is already holding it.
     expect(checkServePortFence("http://10.0.0.5:4098", "4098")).toBe("match")
     expect(checkServePortFence("http://localhost:4098", "4098")).toBe("match")
+  })
+})
+
+describe("mergeOverlays: skewed entries must not win arbitrarily (review, LOW)", () => {
+  // isValidOverlay gates on version, pid, serveId, heartbeat and the two
+  // pending arrays -- but NOT on lastActivity or activity. A same-version file
+  // whose lastActivity is a string (or missing) therefore passes validation and
+  // reaches compareCandidates, where `b.lastActivity - a.lastActivity` yields
+  // NaN. NaN comparisons are always false, so the sort becomes order-dependent
+  // and the winner is whichever file the directory happened to list first.
+  const mopts = (over: any = {}) => ({
+    now: 1000,
+    staleMs: 45000,
+    isAlive: () => true,
+    owners: {},
+    ...over,
+  })
+  const mfile = (serveId: string, pid: number, entryOver: any): OverlayData =>
+    ({
+      version: OVERLAY_VERSION,
+      instanceStamp: 100,
+      serveId,
+      pid,
+      heartbeat: 1000,
+      sessions: {
+        s1: {
+          activity: "idle",
+          error: false,
+          pendingPermissions: [],
+          pendingQuestions: [],
+          lastActivity: 10,
+          updatedAt: 10,
+          ...entryOver,
+        },
+      },
+    }) as any
+
+  const good = () => mfile("serve-0", 1, { lastActivity: 500, activity: "working" })
+
+  it("drops an entry whose lastActivity is not a number", () => {
+    const skewed = mfile("serve-1", 2, { lastActivity: "9999" })
+    expect(mergeOverlays([skewed, good()], mopts()).s1?.activity).toBe("working")
+  })
+
+  it("drops an entry whose activity is not a known value", () => {
+    const skewed = mfile("serve-1", 2, { lastActivity: 9999, activity: "banana" })
+    expect(mergeOverlays([skewed, good()], mopts()).s1?.activity).toBe("working")
+  })
+
+  it("is order-independent for a skewed file (the NaN symptom)", () => {
+    const skewed = mfile("serve-1", 2, { lastActivity: "9999" })
+    const a = mergeOverlays([skewed, good()], mopts())
+    const b = mergeOverlays([good(), skewed], mopts())
+    expect(a.s1?.activity).toBe(b.s1?.activity)
+    expect(a.s1?.activity).toBe("working")
   })
 })

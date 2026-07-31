@@ -308,6 +308,16 @@ function isValidOverlay(f: any): f is OverlayData {
     if (!entry || typeof entry !== "object") return false
     const e = entry as any
     if (!Array.isArray(e.pendingPermissions) || !Array.isArray(e.pendingQuestions)) return false
+    // lastActivity and activity are load-bearing for the merge, so they must be
+    // validated here or a same-version skewed file decides the winner.
+    // compareCandidates does `b.lastActivity - a.lastActivity`; a non-numeric
+    // value makes that NaN, every comparison false, and the sort therefore
+    // order-dependent -- the winner becomes whichever file readdir returned
+    // first. NaN also silently defeats the isFinite-free arithmetic downstream.
+    if (typeof e.lastActivity !== "number" || !Number.isFinite(e.lastActivity)) return false
+    if (typeof e.updatedAt !== "number" || !Number.isFinite(e.updatedAt)) return false
+    if (e.activity !== "working" && e.activity !== "idle" && e.activity !== "retry") return false
+    if (typeof e.error !== "boolean") return false
   }
   return true
 }
