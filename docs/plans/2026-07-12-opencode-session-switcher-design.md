@@ -203,18 +203,30 @@ gap/reconnect.
 Serve-lease can move a session between serves, so two files may hold the same
 sid. Ordering by `updatedAt` (wall clock) lets a **delayed `idle` from the old
 owner overwrite `blocked` from the new owner** — losing exactly the state we care
-most about. Order by **(owning-epoch, revision)** instead: each entry carries a
-monotonically increasing per-session `revision` and the writer's
-`owning_server_epoch`; the higher epoch always wins, revision breaks ties within
-an epoch, and wall-clock is *diagnostic only*. Also carry an event id for
-dedup.
+most about. The original fix — order by `(owning-epoch, revision)` where epoch is
+the writer's process start time — was itself wrong and is **superseded**; see
+finding #8. Boot order is not ownership order, and `revision` is per-writer so it
+does not compare across processes at all.
 
-**Read-time merge:** union all files; per-sessionID keep the winner by
-**(epoch, revision)** as above (never bare wall-clock);
-**discard entries whose `pid` is dead or whose `heartbeat` is older than T** —
-those become `unknown`, never their last-claimed state. This is what keeps a
-wedged serve (the fleet's documented failure mode; see `monitoring-serve-pool`)
-from showing a frozen `working` forever.
+**RESOLVED — ownership is answered by a read-time join, not by an epoch
+(2026-07-31, finding #8).** Per-sessionID winner selection is:
+
+1. **Live overlay whose `serveId` == pigeon's `session_assignment.desired_serve_id`
+   wins outright.** The router names the current owner directly; nothing in the
+   overlay needs to encode a generation.
+2. Else **freshest `lastActivity` among live overlays** (wall-clock, one machine,
+   one clock — comparable across processes in a way `revision` is not).
+3. Else `unknown: true` from the freshest dead entry.
+
+`revision` stays **intra-file only** (change detection, write suppression) and must
+never be compared across files.
+
+**Read-time merge:** union all files; per-sessionID keep the winner by the rule
+above; **entries whose `pid` is dead or whose `heartbeat` is older than T** are
+emitted as `unknown` with pending sets cleared — never their last-claimed state,
+and never dropped. This is what keeps a wedged serve (the fleet's documented
+failure mode; see `monitoring-serve-pool`) from showing a frozen `working`
+forever.
 
 **Heartbeat / liveness parameters (decided):** plugin refreshes `heartbeat`
 every **15 s**; readers treat an entry as `unknown` if `heartbeat` age > **45 s**
@@ -638,8 +650,123 @@ future "verified" claim in this doc must name the version it was verified agains
 **Landmine inherited from ccmux (`plugin.js:279-286`):** do **not** `await` the
 seed during plugin init. Those handlers are served in-process by a runtime whose
 state isn't ready until plugin init returns; awaiting deadlocks opencode boot.
-Fire-and-forget, and let the reducer accept a late snapshot (it already merges by
-`(epoch, revision)`).
+Fire-and-forget, and let the reducer accept a late snapshot — but note the seed
+does **not** participate in any cross-file ordering (that was the hand-waving
+corrected above); the late-snapshot fix is the "no event-derived entry yet" rule.
+
+### 8. Ownership resolved: pigeon's `desired_serve_id`, not an epoch (2026-07-31)
+
+Verified against the deployed fleet and the pigeon source, file:line.
+
+**A real fencing token exists, but not in opencode.** opencode exposes nothing
+usable: the plugin context is exactly `{client, project, worktree, directory,
+experimental_workspace, serverUrl, $}` (`packages/opencode/src/plugin/index.ts:149-164`),
+the event hook **strips** the durable `seq` (same file, :255), and there is no
+server-identity endpoint (`/global/health` returns only `{healthy, version}`).
+
+Routing lives in **pigeon**, in its own sqlite DB at `process.env.OPENCODE_ROUTING_DB`
+(verified live):
+
+- `session_assignment(session_id PK, directory_key, desired_serve_id,
+  owner_generation, state, last_active_at, updated_at)` —
+  `pigeon/packages/daemon/src/routing/route-schema.ts:17-25`.
+- `owner_generation` bumps **only on a genuine move** (`router.ts:197-202`);
+  pigeon's own README:37 states "monotonic so a stale-generation zombie can never
+  reacquire, even after expiry."
+- Placement is **rendezvous/HRW hash of the session id** (`rendezvous.ts:4-7`),
+  *not* of the directory — `directory_key` is stored but never used in the
+  decision. Perturbed by health filtering, a bounded-load skip (≥25 active
+  assignments, `config.ts:91`), and a 30 s sticky pin, so migration is real.
+- Live: **150 of 548** assignment rows have `owner_generation > 1` — ~27% of
+  sessions have migrated at least once. The conflict machinery earns its keep.
+
+**`owner_generation` is not load-bearing for us.** It is a fencing token for
+*writers acquiring leases*; the reader acquires nothing. The reader's question is
+"who owns this now", and `desired_serve_id` **is** that answer, written in the
+same row and the same transaction as the generation bump. Overlays cannot carry a
+generation anyway (the plugin has no access to it), so comparing generations
+reader-side would compare nothing.
+
+**The coverage gap: the causal argument was right, the join key was wrong
+(corrected 2026-07-31 by adversarial review).** The tempting argument runs: a
+session appears in two overlays *iff* it was hosted by two serves *iff* something
+moved it *iff* pigeon placed it — which is exactly what creates the row, so
+no-row ⇒ never migrated ⇒ nothing to arbitrate. Every link in that chain holds.
+**It still gives the wrong answer, because the row pigeon creates is not keyed by
+the session being arbitrated.** Placement uses `routingSid` = **the ROOT of the
+session tree** (`opencode-frontdoor/src/resolve.ts:17-19`, `place.ts:251`), so
+`session_assignment.session_id` only ever holds root ids — while overlay maps are
+keyed by the event's `sessionID`, which includes children (a subagent's
+`permission.asked` carries the *child* sid).
+
+Measured on the live pair of databases: **8,634 sessions, 4,600 of them children;
+548 assignment rows; exactly 2 children have a row.** So ~53% of all sessions
+would have fallen through to bare wall-clock ordering — the very rule BUG FIX 2
+declared broken. Not a phantom, and not an edge.
+
+**Fix: resolve to the root before joining.** The reader builds
+`owners[sid] = desired_serve_id_of(rootOf(sid))`, walking `session.parent_id` in
+opencode's own DB — which the reader already opens for the base list, so the
+linkage is free. `mergeOverlays` stays pure and simply requires `owners` to be
+keyed by *every* sid it should arbitrate.
+
+Lesson worth keeping: this is the second time in this project that a clean causal
+chain passed review while a **key mismatch** hid inside it. Check what the
+identifier *is*, not just that the causality holds.
+
+**Reading pigeon's sqlite is acceptable here** (same machine, same user, both
+repos ours) with guardrails: open `mode=ro` — **never `immutable=1`**, the DB is
+WAL and live-written, and immutable would yield silently stale/corrupt reads —
+`busy_timeout` ~100 ms, and catch *everything* (missing file, lock, `no such
+table/column`) by proceeding as if zero assignment rows. One `SELECT` of the whole
+548-row table per render, not N× `GET /route` (500 sequential HTTP calls on an
+interactive picker, and it dies when pigeon is down; the sqlite read survives a
+stopped pigeon). If the schema churns twice, escalate to a bulk `GET /assignments`
+endpoint. Insurance: a schema-contract test **in pigeon's repo** asserting
+`session_assignment` still has `session_id` / `desired_serve_id`, commented
+"externally consumed by oc-session-list".
+
+**Consequences for the build:** overlay entries carry `serveId`
+(`process.env.OPENCODE_SERVE_ID`, verified live e.g. `serve-2`) instead of a boot
+epoch; cross-file ordering uses `lastActivity`; `revision` is demoted to
+intra-file use; and the writer should **evict sessions idle > 30–60 min** from its
+overlay (absence ≡ idle, since the DB base-list already carries every session),
+which shrinks the stale-zombie surface structurally rather than by guesswork.
+
+**Absence is a positive claim (D1, adversarial review).** Rule 1 must be
+*owner-authoritative*: if a **live** owner file **for the session's directory**
+exists but does not mention the session, the merge emits **nothing** (absent ≡
+idle) rather than falling through to rule 2. Without that, a session that was
+blocked when it migrated leaves a stranded entry on the old serve — non-empty
+pending set, so idle-eviction deliberately skips it; no further events, so it
+never changes; the serve stays up, so the file stays live — and once the true
+owner's entry goes plain-idle and is pruned, rule 2 crowns the frozen `blocked`
+**permanently**, advertising a block nobody can service. Note one serve writes one
+overlay file *per directory*, so the owner file must be matched on
+`(serveId, directory)`, not `serveId` alone.
+
+**Degraded-routing window (D3, accepted + documented).** When pigeon is
+unreachable the front door forwards to the **anchor** (serve-0) and writes no row
+(`resolve.ts:52-60,77-86`, `place.ts:248` → `pigeon-degraded`). The routing DB
+stays perfectly readable, so rule 1 keeps confidently preferring the now-stale
+`desired_serve_id` over serve-0's live truth for the whole outage — the sqlite
+read surviving a stopped pigeon is exactly what makes the reader *wrong* rather
+than *degraded*. Bounded (heals on re-place) and display-only. If it bites,
+downgrade rule 1 to advisory when the door reports `degraded`.
+
+**Make degradation visible (D5).** The catch-all that turns a failed routing-DB
+read into an empty owner map silently reverts the merge to wall-clock-newest-wins
+— i.e. the pre-fix behaviour, with no operator signal. `oc-session-list` must
+surface a `joinDegraded` flag. Also: overlay JSON needs a **schema version field**;
+the reader must validate entry shape before merging, since a version-skewed writer
+can emit entries missing `pendingPermissions` and crash the picker.
+
+Residual, accepted: during the window after pigeon flips `desired_serve_id` but
+before the new owner's plugin has written an entry, rule 2 shows the old owner's
+last-known state — a wrong glyph for seconds, on a display surface. Pid-reuse can
+also make a dead pid look live; cosmetic. Statistical note: the "150/548 rows have
+`owner_generation` > 1" figure is over *placed roots*, not all sessions — fine as
+motivation, not citable as a fleet-wide session rate.
 
 ## Related follow-ons (separable)
 
