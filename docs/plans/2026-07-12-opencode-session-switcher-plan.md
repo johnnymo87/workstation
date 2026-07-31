@@ -602,6 +602,60 @@ doesn't run) — that's expected; the reader's dead-PID/stale check + GC (Task 4
 handles it, and a same-port restart overwrites it. Do not treat a lingering file
 as a bug.
 
+**Adversarial review outcome (2026-07-31).** One HIGH, fixed in `72010b9`:
+`evictIdleSessions` never consulted `activity`, so a session 46 minutes into a
+long turn was evicted and -- because absent means idle -- reported idle while
+working. Proved with a failing test first. Also fixed: `shouldGoSilent` now
+requires the superseding writer to be *live* (a recycled pid inheriting a
+crashed predecessor's high stamp could otherwise silence the real writer), and
+the guard logs when it goes inert with `OPENCODE_SERVE_ID` set.
+
+**Carried forward, NOT fixed here** (ranked; all from the same review):
+
+- **[MED] Nested `opencode serve` slips both guards.** The cmdline check accepts
+  token[1]=="serve", and the route-gate FATAL only fires for a process that
+  *claims a routing slot*. A nested serve with `OPENCODE_SERVE_ID` inherited but
+  no routing-DB claim → same filename, different pid → the same-pid-only silence
+  rule never fires → two live writers alternate whole-file overwrites. Cheap
+  strong fix: cross-check `ctx.serverUrl`'s port against the port the serve-id
+  is supposed to own; a nested serve cannot bind the real slot's port.
+- **[MED] The seed's GET response shape is unverified against deployed.**
+  `fetchPendingSnapshot` assumes `/permission` and `/question` return arrays of
+  `{sessionID, id}`. The committed fixtures are *events only*. If the field
+  names differ, `seedFromSnapshot` skips every item silently and BUG FIX 1
+  (boot blindness) quietly reverts with zero signal. Also never negatively
+  controlled: we proved a matching `?directory=` returns the prompt, never that
+  a non-matching one *excludes* it. If the param is ignored, a serve seeds other
+  directories' sessions into its overlay, where they never receive events, and
+  `hasPending` then blocks eviction → a permanent phantom `blocked`.
+  Capture a GET response with a real pending prompt as a fixture.
+- **[MED] Union-only means drift in an *existing* entry is never repaired.** The
+  60s reconcile only fills in wholly-missing sessions. Race: boot with P
+  pending → fetch lists P → P is replied while the JSON is still parsing → the
+  `replied` event no-ops (no entry yet) → the seed then creates the entry with P
+  pending → phantom `blocked` that only heals on that session's next idle, and
+  never if the session never runs again. Consider a timestamp-fenced
+  subtraction (drop pendings absent from a snapshot taken after `updatedAt`).
+- **[MED] Fixtures cover questions only.** `deployed-fixtures.test.ts` advertises
+  itself as guarding the `.asked`/`.replied` asymmetry, but contains zero
+  `permission.*` events -- that half rests on a one-time bundle read. Forcing a
+  real permission prompt needs a config whose `permission` is not `"*": "allow"`;
+  the project-level override did not merge in the attempt made here.
+- **[MED-LOW] No GC or age cap for orphaned overlay files.** Serve renumbering or
+  a retired directory leaves a file forever, and the merge emits `unknown` from
+  arbitrarily old dead files with no age bound → permanent picker noise and a
+  monotonically growing `session-state.d`. Wants a reader-side age cap or a
+  sweeper (Task 4).
+- **[LOW] `isValidOverlay` does not type-check `lastActivity`/`activity`,** so a
+  same-version skewed entry can yield NaN comparisons and an arbitrary merge
+  winner. And writer (plugin bundle) vs reader (`oc-session-list`) ship by
+  different vehicles, so an `OVERLAY_VERSION` bump blacks out all state during
+  the skew window -- the lockstep requirement should be written down.
+- **[LOW] Reader must intersect the overlay with the DB base list.** A reconcile
+  response landing after `session.deleted` can resurrect a ghost entry; this is
+  harmless *only* if the DB stays authoritative for existence. Make that an
+  explicit Task 4/6 requirement rather than an assumption.
+
 **Step 5: Commit** `feat(plugin): session-state overlay writer (cloudbox)`.
 
 ---
