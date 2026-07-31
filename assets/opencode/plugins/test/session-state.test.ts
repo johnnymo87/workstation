@@ -11,6 +11,7 @@ import {
   generateInstanceStamp,
   shouldGoSilent,
   evictIdleSessions,
+  type SessionEntry,
   fetchPendingSnapshot,
   type OverlayData,
   type StateMap,
@@ -583,7 +584,14 @@ describe("generateInstanceStamp", () => {
 describe("shouldGoSilent", () => {
   it("returns true when existing pid matches our pid AND existing stamp is strictly newer", () => {
     expect(
-      shouldGoSilent({ existingPid: 100, existingStamp: 200, ourPid: 100, ourStamp: 100 }),
+      shouldGoSilent({
+        existingPid: 100,
+        existingStamp: 200,
+        existingHeartbeat: 1_000_000,
+        ourPid: 100,
+        ourStamp: 100,
+        now: 1_000_000,
+      }),
     ).toBe(true)
   })
 
@@ -599,6 +607,29 @@ describe("shouldGoSilent", () => {
   it("returns FALSE when existing pid does NOT match our pid (foreign writer must not silence us)", () => {
     expect(
       shouldGoSilent({ existingPid: 999, existingStamp: 200, ourPid: 100, ourStamp: 100 }),
+    ).toBe(false)
+  })
+
+  it("returns FALSE when the superseding writer is STALE (pid reuse after a crash)", () => {
+    // A crashed long-lived process can leave a file whose stamp is far greater
+    // than a freshly-started instance's. If its pid gets recycled onto us, an
+    // unqualified stamp comparison would make the REAL writer silence itself
+    // forever against a dead predecessor. Only a live writer may take over.
+    expect(
+      shouldGoSilent({
+        existingPid: 100,
+        existingStamp: 9_999_999,
+        existingHeartbeat: 1_000_000 - 10 * 60 * 1000, // 10 min stale
+        ourPid: 100,
+        ourStamp: 100,
+        now: 1_000_000,
+      }),
+    ).toBe(false)
+  })
+
+  it("returns false when the existing file has no heartbeat at all", () => {
+    expect(
+      shouldGoSilent({ existingPid: 100, existingStamp: 200, ourPid: 100, ourStamp: 100, now: 1_000_000 }),
     ).toBe(false)
   })
 
@@ -676,3 +707,50 @@ describe("fetchPendingSnapshot", () => {
   })
 })
 
+
+describe("evictIdleSessions: activity is load-bearing (adversarial review, HIGH)", () => {
+  const mk = (over: Partial<SessionEntry> = {}): SessionEntry => ({
+    activity: "idle",
+    error: false,
+    pendingPermissions: [],
+    pendingQuestions: [],
+    lastActivity: 0,
+    updatedAt: 0,
+    revision: 1,
+    ...over,
+  })
+
+  it("keeps a session that is still WORKING long past the idle cap", () => {
+    // The real shape of the bug: a long autonomous turn emits
+    // session.status{busy} once and then nothing the reducer handles, so
+    // lastActivity is frozen at the start of the turn. Evicting on age alone
+    // reports the longest-running sessions as idle.
+    const s = { s1: mk({ activity: "working", lastActivity: 0 }) }
+    const after = evictIdleSessions(s, 46 * 60 * 1000)
+    expect(after.s1).toBeDefined()
+    expect(after.s1.activity).toBe("working")
+  })
+
+  it("keeps a session in RETRY long past the idle cap", () => {
+    const s = { s1: mk({ activity: "retry", lastActivity: 0 }) }
+    expect(evictIdleSessions(s, 46 * 60 * 1000).s1).toBeDefined()
+  })
+
+  it("still evicts a plain-idle session past the idle cap", () => {
+    const s = { s1: mk({ activity: "idle", lastActivity: 0 }) }
+    expect(evictIdleSessions(s, 46 * 60 * 1000).s1).toBeUndefined()
+  })
+
+  it("eventually evicts a stuck-working session at the hard cap (lost idle event)", () => {
+    const s = { s1: mk({ activity: "working", lastActivity: 0 }) }
+    expect(evictIdleSessions(s, 5 * 60 * 60 * 1000).s1).toBeDefined()
+    expect(evictIdleSessions(s, 7 * 60 * 60 * 1000).s1).toBeUndefined()
+  })
+
+  it("never evicts a blocked or errored session regardless of age", () => {
+    const blocked = { s1: mk({ activity: "idle", pendingPermissions: ["p1"], lastActivity: 0 }) }
+    const errored = { s2: mk({ activity: "idle", error: true, lastActivity: 0 }) }
+    expect(evictIdleSessions(blocked, 99 * 60 * 60 * 1000).s1).toBeDefined()
+    expect(evictIdleSessions(errored, 99 * 60 * 60 * 1000).s2).toBeDefined()
+  })
+})

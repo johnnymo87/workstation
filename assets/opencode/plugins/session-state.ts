@@ -26,6 +26,19 @@ const plugin: Plugin = async (ctx, opts?: any) => {
   const cmdline = opts?.cmdline ?? getSelfCmdline()
 
   if (!isPoolServeProcess(cmdline, serveId)) {
+    // Loud on the false-negative path only. If OPENCODE_SERVE_ID is set we are
+    // almost certainly inside a pool serve, so failing the cmdline check means
+    // the launch shape changed (a wrapper, a re-exec, an interpreter launch
+    // like `bun /path/index.js serve`) and the writer has just gone inert --
+    // fleet-wide, silently, with no overlays and therefore no signal at all.
+    // The fleet auto-updates every 8 hours, so this needs to be discoverable
+    // from the log rather than by noticing the picker is empty.
+    if (serveId) {
+      console.error(
+        `[session-state] inert: OPENCODE_SERVE_ID=${serveId} is set but this process does not look like a pool serve ` +
+          `(cmdline[1] != "serve"). No session-state overlay will be written. cmdline=${JSON.stringify(cmdline.slice(0, 200))}`,
+      )
+    }
     return {}
   }
 
@@ -61,6 +74,7 @@ const plugin: Plugin = async (ctx, opts?: any) => {
           shouldGoSilent({
             existingPid: existing?.pid,
             existingStamp: existing?.instanceStamp,
+            existingHeartbeat: existing?.heartbeat,
             ourPid: process.pid,
             ourStamp,
           })

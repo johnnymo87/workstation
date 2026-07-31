@@ -470,36 +470,73 @@ export function generateInstanceStamp(clock: () => number = Date.now): number {
   return lastStamp
 }
 
+// A superseding writer must be demonstrably ALIVE before we stand down. Without
+// this, a stale file left by a crashed process whose pid got recycled onto us
+// could silence the real writer permanently: same pid, and a stamp from a
+// long-lived predecessor that is trivially greater than a freshly-started
+// instance's. Requiring a fresh heartbeat means only a writer that is actually
+// still flushing can take the file away from us.
+export const LIVE_WRITER_MS = 60_000
+
 export function shouldGoSilent(opts: {
   existingPid?: number
   existingStamp?: number
+  existingHeartbeat?: number
   ourPid: number
   ourStamp: number
+  now?: number
+  liveWriterMs?: number
 }): boolean {
   if (opts.existingPid === undefined || opts.existingStamp === undefined) {
     return false
   }
-  return opts.existingPid === opts.ourPid && opts.existingStamp > opts.ourStamp
+  // Never stand down for a foreign pid -- that is the D4 hazard, where a stray
+  // process could permanently silence the real serve's writer.
+  if (opts.existingPid !== opts.ourPid) return false
+  if (opts.existingStamp <= opts.ourStamp) return false
+
+  const now = opts.now ?? Date.now()
+  const liveWindow = opts.liveWriterMs ?? LIVE_WRITER_MS
+  if (opts.existingHeartbeat === undefined) return false
+  return now - opts.existingHeartbeat <= liveWindow
 }
 
 export const IDLE_EVICTION_MS = 45 * 60 * 1000
+// Hard cap for entries that still claim to be working/retrying. Only reached
+// when an idle event was lost; a genuine turn does not run this long.
+export const WORKING_EVICTION_MS = 6 * 60 * 60 * 1000
 
 export function evictIdleSessions(
   prev: StateMap,
   clock: (() => number) | number = Date.now,
   maxAgeMs = IDLE_EVICTION_MS,
+  workingMaxAgeMs = WORKING_EVICTION_MS,
 ): StateMap {
   const t = typeof clock === "number" ? clock : clock()
   let changed = false
   const next: StateMap = {}
 
   for (const [sid, entry] of Object.entries(prev)) {
-    const isOld = t - entry.lastActivity > maxAgeMs
+    const age = t - entry.lastActivity
     const hasPending =
       entry.pendingPermissions.length > 0 || entry.pendingQuestions.length > 0
     const hasError = entry.error
 
-    if (isOld && !hasPending && !hasError) {
+    // `activity` MUST be consulted. lastActivity only advances on events the
+    // reducer handles, and a long autonomous turn emits `session.status{busy}`
+    // once and then nothing the reducer cares about. Evicting on age alone
+    // therefore deletes sessions that are still mid-turn, and since the reader
+    // treats absent as idle, the longest-running sessions -- exactly the ones
+    // the picker exists to surface -- would report "idle" while working.
+    const isWorking = entry.activity !== "idle"
+
+    // The flip side: if an `idle` event is ever missed, a stuck-`working` entry
+    // would otherwise live forever. A turn still "working" after this long is
+    // far more likely to be a lost idle event than a real turn, so a much
+    // longer hard cap still collects it.
+    const evictable = isWorking ? age > workingMaxAgeMs : age > maxAgeMs
+
+    if (evictable && !hasPending && !hasError) {
       changed = true
     } else {
       next[sid] = entry

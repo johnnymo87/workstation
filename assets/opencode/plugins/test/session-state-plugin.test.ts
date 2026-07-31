@@ -14,7 +14,8 @@ describe("session-state plugin integration", () => {
   })
 
   afterEach(() => {
-    process.env.OPENCODE_SERVE_ID = originalEnv
+    if (originalEnv === undefined) delete process.env.OPENCODE_SERVE_ID
+    else process.env.OPENCODE_SERVE_ID = originalEnv
     vi.restoreAllMocks()
     try {
       fs.rmSync(testDir, { recursive: true, force: true })
@@ -22,7 +23,7 @@ describe("session-state plugin integration", () => {
   })
 
   it("returns empty object when process is not a pool serve process", async () => {
-    process.env.OPENCODE_SERVE_ID = undefined
+    delete process.env.OPENCODE_SERVE_ID
 
     const ctx = {
       directory: "/path/to/project",
