@@ -454,6 +454,55 @@ export function isPoolServeProcess(cmdline: string, serveId?: string): boolean {
   return tokens.length > 1 && tokens[1] === "serve"
 }
 
+export type ServePortFence = "match" | "mismatch" | "unarmed"
+
+/**
+ * Overlay-writer half of the REGISTRY PORT FENCE (bead pigeon-13p).
+ *
+ * `opencode-serve-start` EXPORTS OPENCODE_SERVE_EXPECTED_PORT, so every child
+ * of a pool serve inherits the slot's declared port. A throwaway
+ * `opencode serve` spawned from inside a hosted session therefore carries
+ * (say) serve-2's declared 4098 while binding a port of its own -- the
+ * 2026-07-25 hijack signature.
+ *
+ * The routing layer already refuses to REGISTER on that mismatch, but only for
+ * a process that claims a routing slot. A nested serve with OPENCODE_ROUTING_DB
+ * scrubbed makes no claim, never trips that fence, and still passes this
+ * plugin's cmdline check (its argv[1] really is "serve") -- so it would write
+ * to the inherited serveId's overlay filename under a different pid. Two live
+ * writers then alternate whole-file overwrites, and the same-pid-only silence
+ * rule never fires because the pids differ.
+ *
+ * Comparing against this process's own --port would catch nothing: the
+ * throwaway binds the port it asked for. The comparison has to be against the
+ * INHERITED declaration.
+ *
+ * Unset = unarmed, matching the wrapper's own convention, so a plugin update
+ * and a wrapper update can land in either order without blacking out the writer.
+ */
+export function checkServePortFence(
+  serverUrl: string | URL | undefined,
+  expectedPort: string | undefined,
+): ServePortFence {
+  const declared = expectedPort?.trim()
+  if (!declared) return "unarmed"
+
+  let bound: string
+  try {
+    const u = typeof serverUrl === "string" ? new URL(serverUrl) : serverUrl
+    if (!u) return "unarmed"
+    bound = u.port
+  } catch {
+    // An unparseable serverUrl is a reason to stay quiet, not to go inert:
+    // going inert on a shape we do not understand would black out the writer
+    // fleet-wide on an upstream change to ctx.serverUrl.
+    return "unarmed"
+  }
+  if (!bound) return "unarmed"
+
+  return bound === declared ? "match" : "mismatch"
+}
+
 export function getOverlayFilename(serveId: string, directory?: string): string {
   const dirhash = createHash("sha256").update(directory ?? "").digest("hex").slice(0, 16)
   return `${serveId}-${dirhash}.json`

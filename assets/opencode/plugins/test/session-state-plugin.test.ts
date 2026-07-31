@@ -31,8 +31,70 @@ describe("session-state plugin integration", () => {
       client: {},
     } as any
 
-    const result = await plugin(ctx, { cmdline: "/bin/opencode\x00run\x00", dir: overlayDir, fetch: vi.fn() })
+    const result = await plugin(ctx, { cmdline: "/bin/opencode\x00run\x00", dir: overlayDir, fetch: vi.fn(), expectedPort: "1" })
     expect(result).toEqual({})
+  })
+
+  it("goes inert for a NESTED serve that inherited the slot's identity", async () => {
+    // The 2026-07-25 hijack signature: a throwaway `opencode serve` spawned
+    // from inside a session hosted by serve-2. It inherits OPENCODE_SERVE_ID
+    // and the slot's declared port (the wrapper exports both), and its argv[1]
+    // really is "serve" -- so it passes isPoolServeProcess and would write
+    // serve-2's overlay filename under a different pid. Only the port it
+    // actually bound gives it away.
+    process.env.OPENCODE_SERVE_ID = "serve-2"
+    const poolCmdline = "/bin/opencode\x00serve\x00--port\x0047037\x00"
+
+    const ctx = {
+      directory: testDir,
+      serverUrl: "http://127.0.0.1:47037", // bound its own port
+      client: {},
+    } as any
+
+    const result = await plugin(ctx, {
+      cmdline: poolCmdline,
+      dir: overlayDir,
+      fetch: vi.fn(),
+      expectedPort: "4098", // inherited from serve-2
+    })
+
+    expect(result).toEqual({})
+    // and critically: no overlay file was created for the hijacked slot
+    const files = fs.existsSync(overlayDir) ? fs.readdirSync(overlayDir) : []
+    expect(files.filter((f) => f.startsWith("serve-2"))).toEqual([])
+  })
+
+  it("still activates when the fence is UNARMED (wrapper not yet updated)", async () => {
+    // Unset = unarmed, matching opencode-serve-start's own convention, so a
+    // plugin update and a wrapper update can land in either order without
+    // blacking out the writer fleet-wide.
+    process.env.OPENCODE_SERVE_ID = "serve-0"
+    const poolCmdline = "/bin/opencode\x00serve\x00--port\x004096\x00"
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => [] })
+    const ctx = {
+      directory: testDir,
+      serverUrl: "http://127.0.0.1:1",
+      client: {},
+    } as any
+
+    // Genuinely remove the variable rather than passing `expectedPort:
+    // undefined`, which does NOT mean "unarmed" -- it means "fall back to
+    // process.env", and the suite inherits a real declared port from whichever
+    // pool serve hosts the session running these tests. That fallback is the
+    // production path, so this exercises it honestly.
+    const saved = process.env.OPENCODE_SERVE_EXPECTED_PORT
+    delete process.env.OPENCODE_SERVE_EXPECTED_PORT
+    try {
+      const result = await plugin(ctx, {
+        cmdline: poolCmdline,
+        dir: overlayDir,
+        fetch: mockFetch,
+      })
+      expect(result.event).toBeDefined()
+    } finally {
+      if (saved === undefined) delete process.env.OPENCODE_SERVE_EXPECTED_PORT
+      else process.env.OPENCODE_SERVE_EXPECTED_PORT = saved
+    }
   })
 
   it("activates when OPENCODE_SERVE_ID is set and process is pool serve, writing overlay on events", async () => {
@@ -49,7 +111,7 @@ describe("session-state plugin integration", () => {
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } },
     } as any
 
-    const result = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch })
+    const result = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch, expectedPort: "1" })
     expect(result.event).toBeDefined()
 
     // Send busy event
@@ -109,7 +171,7 @@ describe("session-state plugin integration", () => {
       client: {},
     } as any
 
-    await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: injected })
+    await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: injected, expectedPort: "1" })
     await new Promise((r) => setTimeout(r, 50))
 
     expect(injected).toHaveBeenCalled()
@@ -128,7 +190,7 @@ describe("session-state plugin integration", () => {
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } },
     } as any
 
-    const instance1 = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch })
+    const instance1 = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch, expectedPort: "1" })
 
     const files = fs.readdirSync(overlayDir).filter((f) => f.startsWith("serve-0-") && f.endsWith(".json"))
     expect(files.length).toBeGreaterThan(0)

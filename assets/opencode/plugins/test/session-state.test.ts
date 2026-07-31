@@ -6,6 +6,7 @@ import {
   seedFromSnapshot,
   serializeOverlay,
   mergeOverlays,
+  checkServePortFence,
   isPoolServeProcess,
   getOverlayFilename,
   generateInstanceStamp,
@@ -752,5 +753,57 @@ describe("evictIdleSessions: activity is load-bearing (adversarial review, HIGH)
     const errored = { s2: mk({ activity: "idle", error: true, lastActivity: 0 }) }
     expect(evictIdleSessions(blocked, 99 * 60 * 60 * 1000).s1).toBeDefined()
     expect(evictIdleSessions(errored, 99 * 60 * 60 * 1000).s2).toBeDefined()
+  })
+})
+
+describe("checkServePortFence (nested-serve hijack guard)", () => {
+  // Mirrors the REGISTRY PORT FENCE in opencode-serve-start (bead pigeon-13p).
+  // OPENCODE_SERVE_EXPECTED_PORT is EXPORTED by the pool serve wrapper, so a
+  // throwaway `opencode serve` spawned from inside a hosted session inherits
+  // this slot's declared port while binding a port of its own. That is the
+  // 2026-07-25 hijack signature. The routing layer refuses to REGISTER in that
+  // case, but only for a process that claims a routing slot -- a nested serve
+  // with OPENCODE_ROUTING_DB scrubbed makes no claim, never trips that fence,
+  // and would still write to this slot's overlay filename under a different
+  // pid, producing two live writers alternating whole-file overwrites.
+  it("reports match when the bound port equals the declared port", () => {
+    expect(checkServePortFence("http://127.0.0.1:4098", "4098")).toBe("match")
+  })
+
+  it("reports mismatch for a nested serve that bound its own port", () => {
+    expect(checkServePortFence("http://127.0.0.1:47037", "4098")).toBe("mismatch")
+  })
+
+  it("is unarmed when the declared port is absent (fence not yet deployed)", () => {
+    // Matches the wrapper's own convention: unset = unarmed, so the plugin and
+    // the wrapper can land in either order without blacking out the writer.
+    expect(checkServePortFence("http://127.0.0.1:4098", undefined)).toBe("unarmed")
+    expect(checkServePortFence("http://127.0.0.1:4098", "")).toBe("unarmed")
+  })
+
+  it("is unarmed when the server url is unusable rather than guessing", () => {
+    expect(checkServePortFence(undefined, "4098")).toBe("unarmed")
+    expect(checkServePortFence("not a url", "4098")).toBe("unarmed")
+  })
+
+  it("accepts a URL object as well as a string", () => {
+    expect(checkServePortFence(new URL("http://127.0.0.1:4098"), "4098")).toBe("match")
+    expect(checkServePortFence(new URL("http://127.0.0.1:4099"), "4098")).toBe("mismatch")
+  })
+
+  it("tolerates whitespace around the declared port", () => {
+    expect(checkServePortFence("http://127.0.0.1:4098", " 4098 ")).toBe("match")
+  })
+
+  it("compares the PORT only, deliberately ignoring the host", () => {
+    // Host is intentionally not part of the fence. The declared value is a bare
+    // port, and the failure mode of over-matching here is severe and silent:
+    // if ctx.serverUrl ever reports "localhost" or "::1" instead of 127.0.0.1,
+    // a host comparison would read as mismatch and take the writer inert across
+    // the whole fleet. The under-matching risk is negligible in exchange --
+    // a nested serve cannot bind this slot's port anyway, because the real pool
+    // serve is already holding it.
+    expect(checkServePortFence("http://10.0.0.5:4098", "4098")).toBe("match")
+    expect(checkServePortFence("http://localhost:4098", "4098")).toBe("match")
   })
 })
