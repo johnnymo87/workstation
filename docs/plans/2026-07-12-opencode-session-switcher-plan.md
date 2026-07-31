@@ -38,7 +38,8 @@ permission/index.ts,question/index.ts,session/session.ts,session/session.sql.ts}
 > our *logical conversation* identity. Plan changes: **new Task 0.5 — timeboxed
 > ccmux spike** (gates whether we extend it or only steal techniques); four bug
 > fixes folded in — **pending-interaction snapshot at plugin init** (Task 1/3),
-> **(epoch, revision) ordering instead of wall-clock** (Task 2), **TOCTOU
+> **ownership-aware ordering instead of wall-clock** (Task 2; the original
+> `(epoch, revision)` form was itself wrong — superseded by finding #8), **TOCTOU
 > re-resolve on accept** (Task 10), **invoking-client-scoped tmux focus**
 > (Task 10); plus the **`attention: seen/unseen` axis** (Tasks 7/8) and the
 > **join moves into `oc-session-list`** so nvim isn't the correctness boundary
@@ -315,76 +316,103 @@ code defect in shipped Task 1. Rationale and evidence live in the design doc.
    in-process), and the seed is demoted toward a periodic **reconcile**. Also fix
    the seed-vs-stream race (`seedFromSnapshot` may only claim sessions with no
    event-derived entry).
-2. **`revision` is never incremented** (`session-state-impl.ts` — declared line 12,
-   set to 0 by the seed, bumped nowhere). Task 2's within-epoch tie-break is
-   therefore dead on real data, and Task 2's specimen tests hand-craft revision
-   values so they would pass anyway. **Fix in code before Task 2**, with a test that
-   fails if the bump is absent.
-3. **`epoch = process start time` is not a fencing token** — see Task 3 below.
+2. ~~**`revision` is never incremented**~~ — **DONE** (commit `98c25b6`, shipped in
+   PR #226): the reducer bumps on every committed change, with a test that fails if
+   the bump is absent. Note finding #8 has since demoted `revision` to *intra-file*
+   use; it is no longer the cross-file tiebreak.
+3. ~~**`epoch = process start time` is not a fencing token**~~ — **RESOLVED
+   2026-07-31**, design doc finding #8. Epoch is deleted outright. Ownership is a
+   read-time join on pigeon's `session_assignment.desired_serve_id`; cross-file
+   freshness is `lastActivity`. Task 2 below is rewritten accordingly.
 4. **Deployed-fleet event fixture** must be captured before Task 3 wires the real
-   bus (version skew, design doc finding #7).
+   bus (version skew, design doc finding #7). **Still open — blocks Task 3.**
 
 ## Task 2: Overlay serialization + merge (stale ⇒ unknown, never dropped)
 
 **Files:** Modify `session-state-impl.ts`; extend the test.
 
-**Step 1: Failing tests** (note: ordering is **(epoch, revision)**, NOT wall clock
-— BUG FIX 2):
+**⚠ Epoch is dead. Ownership comes from an owner map.** GATE item 3 is resolved by
+design-doc finding #8 — read it before implementing. Summary of what changed:
+
+- **No `epoch` field anywhere.** Boot time does not order ownership (migrate a
+  session onto an *older-booted* serve and the stale entry wins permanently — a
+  persistent inversion, not a race).
+- **`revision` is intra-file only.** It is per-writer: serve A watching a session
+  for a week reaches revision 400, serve B owning it for ten minutes is at 3, so A
+  would win forever. That is the *same bug shape* the review already killed once —
+  a monotonic-per-writer counter treated as a global order. Never compare it
+  across files.
+- **Ownership is a read-time join.** Overlay entries carry `serveId`; the caller
+  supplies `owners: Record<sessionId, serveId>` built from pigeon's
+  `session_assignment.desired_serve_id` (Task 6 does the sqlite read; `mergeOverlays`
+  stays pure and takes the map as an argument).
+- **Cross-file freshness is `lastActivity`** — wall-clock, one machine, one clock.
+  (The reducer already sets it on committed events only; it is exactly
+  "when this writer last saw this session do something".)
+
+Winner rule, in order:
+1. A **live** overlay whose `serveId === owners[sid]` wins outright.
+2. Else the **freshest `lastActivity` among live** overlays.
+3. Else `unknown: true` from the freshest dead entry.
+
+Note rule 1 requires *live*: a `desired_serve_id` pointing at a crashed serve must
+not win with a dead entry — fall through to rule 2 so a live observer can speak.
+
+**Step 1: Failing tests**
 ```typescript
 import { mergeOverlays } from "../session-state-impl"
 const entry = (over: any = {}) => ({ activity: "working", error: false, pendingPermissions: [], pendingQuestions: [], lastActivity: 10, updatedAt: 10, revision: 1, ...over })
+const file = (serveId: string, pid: number, sessions: any, heartbeat = 1000) => ({ serveId, pid, heartbeat, sessions })
+const opts = (over: any = {}) => ({ now: 1000, staleMs: 45000, isAlive: () => true, owners: {}, ...over })
 
-it("higher epoch wins even when its wall clock is OLDER (serve-lease migration)", () => {
+it("owner wins even when its wall clock is OLDER (migration)", () => {
   // The bug this encodes: a delayed `idle` from the OLD owner must not
   // overwrite `blocked` from the NEW owner just because it arrived later.
-  const oldOwner = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "idle", pendingPermissions: [], updatedAt: 999, revision: 9 }) } }
-  const newOwner = { pid: 2, epoch: 2, heartbeat: 1000, sessions: { s1: entry({ activity: "working", pendingPermissions: ["p1"], updatedAt: 10, revision: 1 }) } }
-  const m = mergeOverlays([oldOwner, newOwner] as any, { now: 1000, staleMs: 45000, isAlive: () => true })
-  expect(m.s1.pendingPermissions).toEqual(["p1"])   // new owner wins on epoch
+  const old = file("serve-0", 1, { s1: entry({ activity: "idle", pendingPermissions: [], lastActivity: 999, revision: 9 }) })
+  const cur = file("serve-1", 2, { s1: entry({ activity: "working", pendingPermissions: ["p1"], lastActivity: 10, revision: 1 }) })
+  const m = mergeOverlays([old, cur] as any, opts({ owners: { s1: "serve-1" } }))
+  expect(m.s1.pendingPermissions).toEqual(["p1"])
 })
-it("within one epoch, higher revision wins", () => {
-  const a = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "working", revision: 1 }) } }
-  const b = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "idle", revision: 2 }) } }
-  const m = mergeOverlays([a, b] as any, { now: 1000, staleMs: 45000, isAlive: () => true })
-  expect(m.s1.activity).toBe("idle")
+it("higher revision does NOT win across files (revision is per-writer)", () => {
+  const a = file("serve-0", 1, { s1: entry({ activity: "idle", lastActivity: 10, revision: 400 }) })
+  const b = file("serve-1", 2, { s1: entry({ activity: "working", lastActivity: 999, revision: 3 }) })
+  const m = mergeOverlays([a, b] as any, opts())            // no owner known
+  expect(m.s1.activity).toBe("working")                      // freshest lastActivity wins
+})
+it("no owner entry -> freshest lastActivity among live wins", () => {
+  const a = file("serve-0", 1, { s1: entry({ activity: "idle", lastActivity: 500 }) })
+  const b = file("serve-1", 2, { s1: entry({ activity: "working", lastActivity: 900 }) })
+  expect(mergeOverlays([a, b] as any, opts()).s1.activity).toBe("working")
+})
+it("owner pointing at a DEAD serve does not win; a live observer speaks", () => {
+  const dead = file("serve-0", 999, { s1: entry({ activity: "idle", lastActivity: 999 }) })
+  const live = file("serve-1", 2,   { s1: entry({ activity: "working", pendingPermissions: ["p1"], lastActivity: 10 }) })
+  const m = mergeOverlays([dead, live] as any, opts({ owners: { s1: "serve-0" }, isAlive: (pid: number) => pid === 2 }))
+  expect(m.s1.unknown).toBeFalsy()
+  expect(m.s1.pendingPermissions).toEqual(["p1"])
 })
 it("dead pid and stale heartbeat -> entries flagged unknown, NOT dropped", () => {
-  const deadPid = { pid: 999, heartbeat: 1000, sessions: { s2: entry() } }
-  const stale   = { pid: 2,   heartbeat: 900,  sessions: { s3: entry() } }
-  const m = mergeOverlays([deadPid, stale] as any, { now: 1000, staleMs: 45, isAlive: (pid) => pid === 2 })
+  const deadPid = file("serve-0", 999, { s2: entry() })
+  const stale   = file("serve-1", 2,   { s3: entry() }, 900)
+  const m = mergeOverlays([deadPid, stale] as any, opts({ staleMs: 45, isAlive: (pid: number) => pid === 2 }))
   expect(m.s2.unknown).toBe(true)
   expect(m.s3.unknown).toBe(true)   // heartbeat age 100 > 45
 })
+it("unknown entries clear pending sets (never assert a block nobody is holding)", () => {
+  const dead = file("serve-0", 999, { s1: entry({ pendingPermissions: ["p1"], pendingQuestions: ["q1"] }) })
+  const m = mergeOverlays([dead] as any, opts({ isAlive: () => false }))
+  expect(m.s1.pendingPermissions).toEqual([])
+  expect(m.s1.pendingQuestions).toEqual([])
+})
 ```
 
-**⚠ Epoch semantics — do not implement as boot time.** The design intends an
-*ownership* generation ("the higher epoch always wins"), but a writer's
-start-time/boot id does not order ownership. Migrate a session from a
-**younger-booted** serve to an **older-booted** one and the new owner's epoch is
-*lower*, so the old owner's stale entry wins **permanently** — not a race, a
-persistent inversion. Staleness never rescues it: the old serve still hosts other
-sessions, so its file heartbeat stays fresh, and nothing prunes a migrated-away
-session (the writer prunes only on `session.deleted`). The serve canary restarts
-serves individually, so boot times genuinely diverge.
-
-Before implementing, resolve in this order:
-1. Find a real per-session **ownership generation** the plugin can read (does the
-   serve lease expose one?). Use it as `epoch`.
-2. If unreachable: have the writer **self-prune sessions with no events for X
-   minutes**, which bounds the inversion window to X, and document the residual.
-
-Either way, **do not ship boot-time epochs described as fencing tokens.**
-
-**Step 2: FAIL → Step 3: Implement.** `serializeOverlay({pid, serve, epoch,
-directory, heartbeat, sessions})` = shape passthrough (`epoch` = the ownership
-generation per above, NOT a boot id; `revision` is per-session, bumped by the
-reducer on every state change — see GATE item 2, this is currently unimplemented). `mergeOverlays(files, {now, staleMs, isAlive})`: for each file
-compute `live = isAlive(pid) && now - heartbeat <= staleMs`; union sessions
-keeping the winner by **`(epoch, revision)`** — wall clock is diagnostic only and
-must never decide; if a session's winning file is
-NOT live, emit `{ ...entry, unknown: true, pendingPermissions: [],
-pendingQuestions: [] }`. (Prune plain-idle entries with empty sets and no error
-from the union — absent≡idle.)
+**Step 2: FAIL → Step 3: Implement.** `serializeOverlay({pid, serveId, directory,
+heartbeat, sessions})` = shape passthrough (**no `epoch`**).
+`mergeOverlays(files, {now, staleMs, isAlive, owners})`: for each file compute
+`live = isAlive(pid) && now - heartbeat <= staleMs`; union sessions keeping the
+winner by the three-step rule above; if a session's winning file is NOT live, emit
+`{ ...entry, unknown: true, pendingPermissions: [], pendingQuestions: [] }`.
+(Prune plain-idle entries with empty sets and no error from the union — absent≡idle.)
 
 **Step 4: PASS → Step 5: Commit** `feat(plugin): overlay serialize + stale-aware merge`.
 
@@ -439,9 +467,23 @@ seed state from the instance's **currently-pending** permissions/questions via
 `seedFromSnapshot`. Find the in-process authority (the `Permission`/`Question`
 `InstanceState` maps — check what the plugin ctx exposes; if nothing is reachable
 in-process, fall back to a door-side read, and if neither works **stop and
-report**: this is a Phase-1 blocker, not a nice-to-have). Also stamp `epoch`
-(process start time) once at init. Smoke: trigger a permission prompt, restart
-that serve, confirm the session still reads `blocked` after restart.
+report**: this is a Phase-1 blocker, not a nice-to-have). Smoke: trigger a
+permission prompt, restart that serve, confirm the session still reads `blocked`
+after restart.
+
+**No `epoch`.** The overlay carries `serveId` (from `OPENCODE_SERVE_ID`) and
+nothing boot-derived; see finding #8. Two further writer duties from that finding:
+
+- **Idle eviction.** Drop a session from the overlay once it has had no events for
+  30–60 min with empty pending sets and no error. Absent ≡ idle (the DB base-list
+  still carries every session), so this shrinks the stale-zombie surface
+  structurally instead of by guesswork.
+- **Seed-vs-stream race (GATE item 1).** `seedFromSnapshot` is currently
+  replace-authoritative and stomps `revision` to 0, so a late snapshot can drop a
+  permission asked after the snapshot was taken, or resurrect one already replied.
+  Fix here: accept a snapshot only for sessions with **no event-derived entry yet**
+  (or make it union-only), and prefer a periodic ~60 s reconcile over a one-shot
+  boot seed. Do **not** `await` the seed during plugin init — that deadlocks boot.
 
 **Step 1b: Zombie writer defense (adversarial review, 2026-07-30).** Clearing the
 interval on `process.once("exit")` is not enough. `InstanceStore.reload` disposes
