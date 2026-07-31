@@ -636,6 +636,31 @@ requires the superseding writer to be *live* (a recycled pid inheriting a
 crashed predecessor's high stamp could otherwise silence the real writer), and
 the guard logs when it goes inert with `OPENCODE_SERVE_ID` set.
 
+**Two corrections to things this plan asserted as fact (2026-07-31, cycle 4):**
+
+- **"A bad plugin at init breaks instance creation for every directory on every
+  serve" is FALSE on 1.17.13.** Measured with a plugin that writes a marker at
+  import, writes a second marker inside its factory, and then throws: both
+  markers appear (so it really was imported and the factory really did run and
+  throw) and session creation still succeeds, with an empty log. opencode
+  swallows a throwing factory the same way it swallows a failed sibling import.
+  The blast radius of a plugin bug here is therefore much smaller than this plan
+  claimed -- but the failure is even quieter, which for a *state writer* is the
+  worse half: an absent overlay is indistinguishable from a serve with no
+  sessions. Isolated smoke-testing is still worth doing; the justification is
+  "silent wrongness", not "takes the host down".
+- **The test suite was talking to a live pool serve.** `fetchPendingSnapshot`
+  received `globalThis.fetch` while the tests passed a mock through
+  `client._client.getConfig()`, which the plugin never reads. Every `npm test`
+  fired two real requests at `ctx.serverUrl` (127.0.0.1:4096), causing a
+  production serve to create an instance for the test's temp directory. Fixed by
+  injecting fetch through `opts` (commit `3fd06b9`). Note the knock-on: on CI, or
+  any host without a pool, those requests failed into the silent catch, so
+  **BUG FIX 1's seeding path had no real coverage anywhere** -- it passed on
+  cloudbox for one reason and on CI for another. This is the second time a test
+  was assumed to be isolated and was not (the first deleted a live serve's
+  overlay file).
+
 **Carried forward, NOT fixed here** (ranked; all from the same review):
 
 - **[MED] Nested `opencode serve` slips both guards.** The cmdline check accepts
