@@ -36,6 +36,30 @@ Exit codes:
      silently retry.
   3  Still rolling -- PR not merged yet, deployment spec not yet bumped to the
      new tag, or pods mid-update. Legitimate idle-wait; re-invoke.
+  4  Rolled out AS AN ANCESTOR of a later commit, and healthy. The deployed
+     tag is not your commit's tag, but the commit it names provably CONTAINS
+     your commit, so your change IS live. This is the merge-queue batching
+     case: the queue landed your commit and one or more others in a single
+     batch, and the deploy pipeline ran only on the batch head. Terminal and
+     successful -- treat like 0, but the distinct code exists so "deployed"
+     and "deployed under someone else's tag" are never conflated.
+
+Merge-queue batching (why exit 4 exists):
+  On a repo with GitHub's merge queue enabled, the queue batches several PRs
+  into one push to the trunk. Your PR merges as commit A; another merges on
+  top as commit B minutes later; the deploy pipeline attaches to the BATCH
+  HEAD (B) only. Commit A ends up with a full set of CI check-runs and zero
+  deploy checks, permanently. Without the detection below, this script would
+  print "deploy spec not yet bumped" forever against A while the rollout had
+  in fact already succeeded.
+
+  The detection is deliberately conservative and CANNOT produce a false pass:
+  we take the tag actually deployed, resolve it to a real commit via the
+  GitHub API, and then require `compare/<yours>...<deployed>` to report
+  "ahead" or "identical" -- i.e. the deployed commit genuinely contains your
+  commit. A newer-looking tag is never assumed to contain you. Anything we
+  cannot resolve or cannot prove containment for stays "still rolling"
+  (exit 3), which is the safe direction to be wrong in.
 
 Usage in the SKILL.md loop body:
     while true; do
@@ -47,11 +71,13 @@ Usage in the SKILL.md loop body:
         1) <investigate per stdout>; ;;   # then re-invoke
         2) <surface to user>; exit ;;
         3) ;;                      # still rolling, re-invoke
+        4) break ;;                # live as an ancestor of a batch head
       esac
     done
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -95,11 +121,25 @@ RESTART_SPIKE_THRESHOLD = 3
 # suffix (e.g. "<sha>_0"). We prefix-match to tolerate that suffix.
 SHORT_SHA_LEN = 7
 
+# A deployed tag only *might* be a commit SHA. We take its leading hex run
+# (so "<sha>_0" and "<sha>-rc1" both yield "<sha>") and require at least
+# SHORT_SHA_LEN chars before asking GitHub to resolve it. Anything shorter is
+# far too ambiguous to be worth a lookup, and a non-hex tag (a semver release,
+# a channel name) is not a commit at all.
+HEX_PREFIX_RE = re.compile(r"^[0-9a-f]+")
+
+# `gh api .../compare/<base>...<head>` statuses that prove <head> contains
+# <base>. "ahead" is the merge-queue batch-head case; "identical" means the
+# same commit. "behind" and "diverged" prove the OPPOSITE and must never be
+# accepted -- that is the false-pass this whole mechanism has to avoid.
+CONTAINING_COMPARE_STATUSES = {"ahead", "identical"}
+
 # Exit codes -- documented so callers (and SKILL.md) can branch on them.
 EXIT_ALL_MET = 0
 EXIT_ACTION_NEEDED = 1
 EXIT_ERROR = 2
 EXIT_STILL_WAITING = 3
+EXIT_DEPLOYED_AS_ANCESTOR = 4
 
 
 class RolloutError(Exception):
@@ -192,6 +232,105 @@ def get_merge_state(pr, repo):
     return data.get("state"), commit.get("oid")
 
 
+# --- gh (merge-queue batch-head containment) -------------------------------
+
+def resolve_repo(repo_arg):
+    """Return "owner/repo" for the API calls below. Uses --repo when given,
+    else asks gh to infer it from the cwd. Returns None (rather than exiting)
+    when neither works: containment detection is an ENHANCEMENT, and losing it
+    must degrade to plain "still rolling", never to a hard failure."""
+    if repo_arg:
+        return repo_arg
+    try:
+        out = run_cmd(["gh", "repo", "view", "--json", "nameWithOwner"])
+        return json.loads(out).get("nameWithOwner")
+    except (subprocess.CalledProcessError, json.JSONDecodeError):
+        return None
+
+
+def tag_sha_candidate(tag):
+    """Leading hex run of a tag, if it is long enough to be a commit SHA.
+    "abc1234f_0" -> "abc1234f"; "v1.2.3" -> None; "12345" -> None (too short)."""
+    if not tag:
+        return None
+    m = HEX_PREFIX_RE.match(tag.lower())
+    if not m or len(m.group(0)) < SHORT_SHA_LEN:
+        return None
+    return m.group(0)
+
+
+def resolve_commit(repo, rev):
+    """Full SHA for a rev (short SHA) in repo, or None if GitHub cannot
+    resolve it -- unknown, ambiguous prefix, or simply not a commit. None
+    means "we learned nothing", which keeps the caller in the safe branch."""
+    try:
+        out = run_cmd(["gh", "api", f"repos/{repo}/commits/{rev}", "--jq", ".sha"])
+    except subprocess.CalledProcessError:
+        return None
+    out = out.strip()
+    return out or None
+
+
+def compare_status(repo, base, head):
+    """`gh api repos/<repo>/compare/<base>...<head> --jq .status`, or None on
+    failure. "ahead" means head is ahead of base, i.e. head CONTAINS base."""
+    try:
+        out = run_cmd([
+            "gh", "api", f"repos/{repo}/compare/{base}...{head}", "--jq", ".status",
+        ])
+    except subprocess.CalledProcessError:
+        return None
+    return out.strip() or None
+
+
+def classify_deployed_tag(repo, merge_sha, deployed_tag, cache):
+    """Decide whether a deployed tag that does NOT match our commit is
+    nonetheless a commit that CONTAINS our commit (the merge-queue batch-head
+    case). Returns a dict:
+
+      {"kind": "contained",  "sha": <full sha>, "status": <compare status>}
+      {"kind": "unrelated",  "sha": <full sha>, "status": <compare status>}
+      {"kind": "unknown",    "reason": <why we could not tell>}
+
+    Only "contained" may be treated as a successful rollout, and only because
+    containment was PROVEN by the compare endpoint -- never inferred from a
+    tag looking newer. Results are memoised per deployed tag so a polling loop
+    costs at most two API calls per distinct tag it sees."""
+    if deployed_tag in cache:
+        return cache[deployed_tag]
+
+    result = None
+    if not repo:
+        result = {"kind": "unknown",
+                  "reason": "could not determine owner/repo (pass --repo)"}
+    else:
+        candidate = tag_sha_candidate(deployed_tag)
+        if candidate is None:
+            result = {"kind": "unknown",
+                      "reason": f"deployed tag {deployed_tag!r} is not a commit SHA"}
+        else:
+            deployed_sha = resolve_commit(repo, candidate)
+            if deployed_sha is None:
+                result = {"kind": "unknown",
+                          "reason": f"{candidate} does not resolve to a commit "
+                                    f"in {repo}"}
+            else:
+                status = compare_status(repo, merge_sha, deployed_sha)
+                if status is None:
+                    result = {"kind": "unknown",
+                              "reason": f"could not compare {merge_sha[:SHORT_SHA_LEN]}"
+                                        f"...{deployed_sha[:SHORT_SHA_LEN]}"}
+                elif status in CONTAINING_COMPARE_STATUSES:
+                    result = {"kind": "contained", "sha": deployed_sha,
+                              "status": status}
+                else:
+                    result = {"kind": "unrelated", "sha": deployed_sha,
+                              "status": status}
+
+    cache[deployed_tag] = result
+    return result
+
+
 # --- kubectl (rollout) -----------------------------------------------------
 
 def get_spec_image_tag(target):
@@ -270,15 +409,24 @@ def get_pods(target, selector):
 # --- Evaluation ------------------------------------------------------------
 
 def on_target(pod, short_sha):
-    return bool(pod["tag"]) and pod["tag"].startswith(short_sha)
+    return bool(pod["tag"]) and pod["tag"].lower().startswith(short_sha)
 
 
-def evaluate_rollout(targets, short_sha, selector_tmpl):
+def evaluate_rollout(targets, short_sha, selector_tmpl,
+                     merge_sha=None, repo=None, containment_cache=None):
     """One rollout-status pass over all targets. Returns (exit_code, message)
-    where exit_code is None to mean 'still rolling, keep polling'."""
+    where exit_code is None to mean 'still rolling, keep polling'.
+
+    When a target's deployed tag is not ours, we ask whether it names a commit
+    that CONTAINS ours (merge-queue batch head) before concluding anything --
+    see classify_deployed_tag. Only proven containment counts; everything else
+    keeps the target in the 'still rolling' bucket."""
+    if containment_cache is None:
+        containment_cache = {}
     all_done = True
     wedged = []
     waiting = []
+    batched = []
 
     for t in targets:
         label, dep = t["env"], t["deployment"]
@@ -289,7 +437,34 @@ def evaluate_rollout(targets, short_sha, selector_tmpl):
         except RolloutError as e:
             return EXIT_ERROR, str(e)
 
-        spec_ok = bool(spec_tag) and spec_tag.startswith(short_sha)
+        # The SHA prefix this target's pods are judged against. Normally ours;
+        # it becomes the batch head's only after containment is proven.
+        effective_sha = short_sha
+        spec_ok = bool(spec_tag) and spec_tag.lower().startswith(short_sha)
+
+        if not spec_ok and spec_tag and merge_sha:
+            cls = classify_deployed_tag(repo, merge_sha, spec_tag,
+                                        containment_cache)
+            if cls["kind"] == "contained":
+                effective_sha = cls["sha"][:SHORT_SHA_LEN]
+                spec_ok = True
+                batched.append(
+                    f"[{label}] {dep}: deployed as {cls['sha'][:SHORT_SHA_LEN]}, "
+                    f"which contains {short_sha} (compare status "
+                    f"{cls['status']})"
+                )
+                print(f"  [{label}] {dep}: deployed tag {spec_tag} resolves to "
+                      f"{cls['sha'][:SHORT_SHA_LEN]}, which CONTAINS our commit "
+                      f"{short_sha} -- merge-queue batch head; judging pods "
+                      f"against {effective_sha}")
+            elif cls["kind"] == "unrelated":
+                print(f"  [{label}] {dep}: deployed tag {spec_tag} resolves to "
+                      f"{cls['sha'][:SHORT_SHA_LEN]}, which does NOT contain "
+                      f"our commit (compare status {cls['status']})")
+            else:
+                print(f"  [{label}] {dep}: deployed tag {spec_tag} not proven "
+                      f"to contain our commit ({cls['reason']})")
+
         print(f"  [{label}] {dep}: spec tag={spec_tag} "
               f"({'on target' if spec_ok else 'NOT on target'})")
 
@@ -298,7 +473,7 @@ def evaluate_rollout(targets, short_sha, selector_tmpl):
         # failure. An image-pull failure still sets the pod's image to the
         # requested (target) tag, so it is correctly counted as on-target.
         for p in pods:
-            is_wedged = on_target(p, short_sha) and (
+            is_wedged = on_target(p, effective_sha) and (
                 p["waiting_reason"] in WEDGED_WAITING_REASONS
                 or p["restarts"] >= RESTART_SPIKE_THRESHOLD
             )
@@ -324,7 +499,7 @@ def evaluate_rollout(targets, short_sha, selector_tmpl):
         # target tag and Running+Ready -- old-revision pods still terminating
         # keep this False, which is correct (rollout isn't done until they go).
         healthy = all(
-            on_target(p, short_sha) and p["phase"] == "Running" and p["ready"]
+            on_target(p, effective_sha) and p["phase"] == "Running" and p["ready"]
             for p in pods
         )
         if healthy:
@@ -339,6 +514,15 @@ def evaluate_rollout(targets, short_sha, selector_tmpl):
         return EXIT_ACTION_NEEDED, (
             "Wedged pod(s) -- rollout will not self-complete:\n  - "
             + "\n  - ".join(wedged)
+        )
+    if all_done and batched:
+        # Terminal success, but NOT under our own tag: report it distinctly so
+        # nobody records "deployed as <our sha>" when the registry and the
+        # cluster only ever saw the batch head's tag.
+        return EXIT_DEPLOYED_AS_ANCESTOR, (
+            "Your commit IS deployed, as an ancestor of a later commit "
+            "(merge-queue batch head). All targets healthy:\n  - "
+            + "\n  - ".join(batched)
         )
     if all_done:
         return EXIT_ALL_MET, "All targets rolled out and healthy."
@@ -371,8 +555,15 @@ def parse_args(argv=None):
     src.add_argument("--merge-sha",
                      help="Merge commit SHA directly (skip PR polling).")
     parser.add_argument("--repo",
-                        help="owner/repo for --pr (default: gh auto-detects "
-                             "from cwd).")
+                        help="owner/repo for --pr and for merge-queue "
+                             "batch-head containment checks (default: gh "
+                             "auto-detects from cwd).")
+    parser.add_argument(
+        "--no-batch-head-detect", action="store_true",
+        help="Disable merge-queue batch-head detection: never accept a "
+             "deployed tag other than our own, even when the commit it names "
+             "provably contains ours. Exit 4 then becomes unreachable.",
+    )
     parser.add_argument(
         "--target", action="append", default=[], metavar="ENV:CTX:NS:DEPLOY",
         help="Rollout target as ENV:CONTEXT:NAMESPACE:DEPLOYMENT. Repeatable "
@@ -433,7 +624,19 @@ def main(argv=None):
         print(f"error: merge SHA {merge_sha!r} shorter than {SHORT_SHA_LEN} "
               f"chars", file=sys.stderr)
         sys.exit(EXIT_ERROR)
+    merge_sha = merge_sha.lower()
     short_sha = merge_sha[:SHORT_SHA_LEN]
+
+    # owner/repo for the containment checks. Resolved once per invocation; a
+    # failure here only disables batch-head detection (the checks then report
+    # "unknown"), it is never fatal.
+    repo = None
+    if not args.no_batch_head_detect:
+        repo = resolve_repo(args.repo)
+        if repo is None:
+            print("warning: could not determine owner/repo; merge-queue "
+                  "batch-head detection disabled (pass --repo to enable)",
+                  file=sys.stderr)
 
     print(f"Target image tag prefix: {short_sha}")
     print(f"Targets ({len(targets)}):")
@@ -442,12 +645,18 @@ def main(argv=None):
               f"(ctx {t['context']}, ns {t['namespace']})")
     print(f"Budget: {args.budget_seconds}s @ {args.interval}s intervals")
 
-    # Phase 2: watch the rollout.
+    # Phase 2: watch the rollout. The containment cache lives across iterations
+    # of this invocation so a repeated deployed tag costs no extra API calls.
+    containment_cache = {}
     iteration = 0
     while True:
         iteration += 1
         print(f"\n--- rollout check {iteration} ---")
-        code, msg = evaluate_rollout(targets, short_sha, args.pod_selector)
+        code, msg = evaluate_rollout(
+            targets, short_sha, args.pod_selector,
+            merge_sha=None if args.no_batch_head_detect else merge_sha,
+            repo=repo, containment_cache=containment_cache,
+        )
         if code is not None:
             print(f"\n{msg}")
             sys.exit(code)
