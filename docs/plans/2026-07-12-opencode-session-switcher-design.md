@@ -643,6 +643,60 @@ them as fixtures. The plan's own risk section already demands fixture tests from
 captured event sequences; Task 1 shipped with hand-written fixtures only. Any
 future "verified" claim in this doc must name the version it was verified against.
 
+**CLEARED 2026-07-31 (commit `e91548f`).** Fixtures captured from deployed
+1.17.13 and committed at `assets/opencode/plugins/test/fixtures/deployed-events.json`.
+**Every Task 1 assumption survived**, verified two independent ways:
+
+*Schema, read out of the shipped bundle* (stronger than a consumer read — see the
+false alarm below):
+
+| event | schema on deployed |
+|---|---|
+| `permission.asked` | `PermissionRequest.fields` → `id` **required** |
+| `permission.replied` | `{sessionID, requestID, reply}` — no `id` |
+| `question.asked` | `QuestionRequest.fields` → `id` **required** |
+| `question.replied` | `{sessionID, requestID, answers}` |
+| `question.rejected` | `{sessionID, requestID}` |
+| `session.status` | `{sessionID, status:{type}}`, union exactly `{busy, idle, retry}` |
+
+The status union was confirmed **at the emitter** (`SessionProcessor` only ever
+calls `set({type:"busy"|"idle"|"retry"})`), not inferred from a consumer's
+branches. `permission.rejected` does **not** exist; the reducer correctly omits it.
+
+*Live capture* through the front-door event stream: a real session driven to
+busy/idle, then a real question ask/reply round trip. The captured pair is the
+whole hazard in one observation — same prompt, two field names:
+
+```
+question.asked   {"id":        "que_fb8a13dad001MOPaPSthQ456WM", ...}
+question.replied {"requestID": "que_fb8a13dad001MOPaPSthQ456WM", ...}
+```
+
+**Near-miss worth recording.** Reading the TUI's `session.deleted` branch showed
+`properties.info.id`, which looked like a fourth key-mismatch against the plan's
+`properties.sessionID`. It was a false alarm: the *schema* is
+`{sessionID, info}` and the single publish site sets both — the TUI just happens
+to read `info.id`. **A consumer's choice of field is not evidence about the
+payload's shape.** Check the schema and the publish site.
+
+**Deployed also emits a bare `session.idle` alongside `session.status{idle}`.**
+The reducer handles only the latter and no-ops on the former; now asserted.
+
+**Seeding: the door-side snapshot is unusable — positive control, 2026-07-31.**
+With a question provably pending, the *same* query against the *same* directory:
+
+| endpoint | result |
+|---|---|
+| `GET :4700/question?directory=…` (front door) | `[]` |
+| `GET :4097/question?directory=…` (owning serve) | the pending question |
+
+An empty list alone would have proved nothing (the trap this project already fell
+into once). Paired with the owning-serve control it is decisive: seed **in-process
+from this serve**, never through the door. Related: the door **refuses mutations**
+outright (`forbidden_through_frontdoor` — "mutates per-process/single-process
+state"), so replying/aborting requires the owning serve, resolved via
+`session_assignment.desired_serve_id` → `serve_instance.endpoint`.
+
 **Watch-item:** the deployed revision exposes `POST /api/session/{id}/permission`
 (v2 create). Unused today, but if anything ever creates permissions out-of-band,
 "pending ⇒ busy" breaks and *idle-clears-pending starts eating real blocks*.
