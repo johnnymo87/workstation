@@ -1,3 +1,14 @@
+import { createHash } from "node:crypto"
+import { readFileSync } from "node:fs"
+
+export function getSelfCmdline(filePath = "/proc/self/cmdline"): string {
+  try {
+    return readFileSync(filePath, "utf8")
+  } catch {
+    return ""
+  }
+}
+
 // "unknown" is produced later by Task 2 for stale overlays
 export type Activity = "working" | "blocked" | "idle" | "retry" | "error" | "unknown"
 
@@ -135,15 +146,33 @@ export interface Snapshot {
   questions?: Array<{ sessionID: string; id: string }>
 }
 
-// NOTE: seedFromSnapshot is a seed/startup primitive, not a general resync.
-// It is authoritative for sessions named in the snapshot (replacing their
-// pendingPermissions / pendingQuestions). Sessions absent from the snapshot
-// entirely are left untouched (not cleared).
+export interface SeedOptions {
+  unionOnly?: boolean
+  clock?: () => number
+}
+
+// NOTE: seedFromSnapshot is a seed/startup primitive.
+// By default (unionOnly: true), it only seeds sessions that have no event-derived entry in prev yet.
+// If a session already exists in prev, it is skipped so a late snapshot cannot drop or resurrect prompts.
 export function seedFromSnapshot(
   prev: StateMap,
   snapshot: Snapshot,
-  clock = now,
+  clockOrOptions?: SeedOptions | (() => number),
 ): StateMap {
+  let unionOnly = true
+  let clock: () => number = now
+
+  if (typeof clockOrOptions === "function") {
+    clock = clockOrOptions
+  } else if (clockOrOptions && typeof clockOrOptions === "object") {
+    if (clockOrOptions.unionOnly !== undefined) {
+      unionOnly = clockOrOptions.unionOnly
+    }
+    if (clockOrOptions.clock) {
+      clock = clockOrOptions.clock
+    }
+  }
+
   const permissionsBySession: Record<string, string[]> = {}
   const questionsBySession: Record<string, string[]> = {}
   const sessionsInSnapshot = new Set<string>()
@@ -181,9 +210,14 @@ export function seedFromSnapshot(
   const next: StateMap = { ...prev }
 
   for (const sid of sessionsInSnapshot) {
+    const cur = next[sid]
+    if (cur && unionOnly) {
+      // unionOnly: skip sessions already present in prev
+      continue
+    }
+
     const targetPermissions = permissionsBySession[sid] ?? []
     const targetQuestions = questionsBySession[sid] ?? []
-    const cur = next[sid]
 
     if (!cur) {
       next[sid] = {
@@ -218,7 +252,11 @@ export function seedFromSnapshot(
   return changed ? next : prev
 }
 
+export const OVERLAY_VERSION = 1
+
 export interface OverlayData {
+  version: number
+  instanceStamp: number
   pid: number
   serveId: string
   directory?: string
@@ -240,19 +278,38 @@ export interface MergeOptions {
 }
 
 export function serializeOverlay({
+  version = OVERLAY_VERSION,
+  instanceStamp,
   pid,
   serveId,
   directory,
   heartbeat,
   sessions,
-}: OverlayData): OverlayData {
+}: Partial<OverlayData> & Omit<OverlayData, "version">): OverlayData {
   return {
+    version,
+    instanceStamp: instanceStamp ?? 0,
     pid,
     serveId,
     directory,
     heartbeat,
     sessions,
   }
+}
+
+function isValidOverlay(f: any): f is OverlayData {
+  if (!f || typeof f !== "object") return false
+  if (f.version !== OVERLAY_VERSION) return false
+  if (typeof f.pid !== "number") return false
+  if (typeof f.serveId !== "string") return false
+  if (typeof f.heartbeat !== "number") return false
+  if (!f.sessions || typeof f.sessions !== "object" || Array.isArray(f.sessions)) return false
+  for (const entry of Object.values(f.sessions)) {
+    if (!entry || typeof entry !== "object") return false
+    const e = entry as any
+    if (!Array.isArray(e.pendingPermissions) || !Array.isArray(e.pendingQuestions)) return false
+  }
+  return true
 }
 
 interface PreparedFile {
@@ -281,7 +338,8 @@ export function mergeOverlays(
   files: OverlayData[],
   { now, staleMs, isAlive, owners = {} }: MergeOptions,
 ): StateMap {
-  const prepared: PreparedFile[] = files.map((f) => ({
+  const validFiles = Array.isArray(files) ? files.filter(isValidOverlay) : []
+  const prepared: PreparedFile[] = validFiles.map((f) => ({
     file: f,
     serveId: f.serveId,
     pid: f.pid,
@@ -387,4 +445,127 @@ export function mergeOverlays(
   }
 
   return result
+}
+
+export function isPoolServeProcess(cmdline: string, serveId?: string): boolean {
+  if (!serveId || !serveId.trim()) return false
+  if (!cmdline) return false
+  const tokens = cmdline.split("\x00")
+  return tokens.length > 1 && tokens[1] === "serve"
+}
+
+export function getOverlayFilename(serveId: string, directory?: string): string {
+  const dirhash = createHash("sha256").update(directory ?? "").digest("hex").slice(0, 16)
+  return `${serveId}-${dirhash}.json`
+}
+
+let lastStamp = 0
+export function generateInstanceStamp(clock: () => number = Date.now): number {
+  const t = clock()
+  if (t > lastStamp) {
+    lastStamp = t
+  } else {
+    lastStamp += 1
+  }
+  return lastStamp
+}
+
+// A superseding writer must be demonstrably ALIVE before we stand down. Without
+// this, a stale file left by a crashed process whose pid got recycled onto us
+// could silence the real writer permanently: same pid, and a stamp from a
+// long-lived predecessor that is trivially greater than a freshly-started
+// instance's. Requiring a fresh heartbeat means only a writer that is actually
+// still flushing can take the file away from us.
+export const LIVE_WRITER_MS = 60_000
+
+export function shouldGoSilent(opts: {
+  existingPid?: number
+  existingStamp?: number
+  existingHeartbeat?: number
+  ourPid: number
+  ourStamp: number
+  now?: number
+  liveWriterMs?: number
+}): boolean {
+  if (opts.existingPid === undefined || opts.existingStamp === undefined) {
+    return false
+  }
+  // Never stand down for a foreign pid -- that is the D4 hazard, where a stray
+  // process could permanently silence the real serve's writer.
+  if (opts.existingPid !== opts.ourPid) return false
+  if (opts.existingStamp <= opts.ourStamp) return false
+
+  const now = opts.now ?? Date.now()
+  const liveWindow = opts.liveWriterMs ?? LIVE_WRITER_MS
+  if (opts.existingHeartbeat === undefined) return false
+  return now - opts.existingHeartbeat <= liveWindow
+}
+
+export const IDLE_EVICTION_MS = 45 * 60 * 1000
+// Hard cap for entries that still claim to be working/retrying. Only reached
+// when an idle event was lost; a genuine turn does not run this long.
+export const WORKING_EVICTION_MS = 6 * 60 * 60 * 1000
+
+export function evictIdleSessions(
+  prev: StateMap,
+  clock: (() => number) | number = Date.now,
+  maxAgeMs = IDLE_EVICTION_MS,
+  workingMaxAgeMs = WORKING_EVICTION_MS,
+): StateMap {
+  const t = typeof clock === "number" ? clock : clock()
+  let changed = false
+  const next: StateMap = {}
+
+  for (const [sid, entry] of Object.entries(prev)) {
+    const age = t - entry.lastActivity
+    const hasPending =
+      entry.pendingPermissions.length > 0 || entry.pendingQuestions.length > 0
+    const hasError = entry.error
+
+    // `activity` MUST be consulted. lastActivity only advances on events the
+    // reducer handles, and a long autonomous turn emits `session.status{busy}`
+    // once and then nothing the reducer cares about. Evicting on age alone
+    // therefore deletes sessions that are still mid-turn, and since the reader
+    // treats absent as idle, the longest-running sessions -- exactly the ones
+    // the picker exists to surface -- would report "idle" while working.
+    const isWorking = entry.activity !== "idle"
+
+    // The flip side: if an `idle` event is ever missed, a stuck-`working` entry
+    // would otherwise live forever. A turn still "working" after this long is
+    // far more likely to be a lost idle event than a real turn, so a much
+    // longer hard cap still collects it.
+    const evictable = isWorking ? age > workingMaxAgeMs : age > maxAgeMs
+
+    if (evictable && !hasPending && !hasError) {
+      changed = true
+    } else {
+      next[sid] = entry
+    }
+  }
+
+  return changed ? next : prev
+}
+
+export async function fetchPendingSnapshot(
+  fetchFn: typeof fetch,
+  serverUrl: string | URL,
+  directory?: string,
+): Promise<Snapshot> {
+  try {
+    const baseUrl = (typeof serverUrl === "string" ? serverUrl : serverUrl.href).replace(/\/$/, "")
+    const dirParam = directory ? `?directory=${encodeURIComponent(directory)}` : ""
+    const [permRes, questRes] = await Promise.all([
+      fetchFn(`${baseUrl}/permission${dirParam}`),
+      fetchFn(`${baseUrl}/question${dirParam}`),
+    ])
+    if (!permRes.ok || !questRes.ok) return {}
+    const permissions = await permRes.json()
+    const questions = await questRes.json()
+    return {
+      permissions: Array.isArray(permissions) ? permissions : [],
+      questions: Array.isArray(questions) ? questions : [],
+    }
+  } catch {
+    return {}
+  }
 }

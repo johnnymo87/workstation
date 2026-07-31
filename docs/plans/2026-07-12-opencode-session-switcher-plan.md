@@ -542,19 +542,119 @@ the **deployed** fleet (1.17.x, not the 1.15.10 source tree) and commit as fixtu
 
 **Step 2: Typecheck** `npx tsc --noEmit` → clean.
 
-**Step 3: Deploy** beside the other plugin entries in `opencode-config.nix`:
-```nix
+**Step 3: Deploy — ⚠ THE SNIPPET BELOW IS WRONG. DO NOT USE IT.**
+~~```nix
 xdg.configFile."opencode/plugins/session-state.ts" = lib.mkIf isCloudbox { source = "${assetsPath}/opencode/plugins/session-state.ts"; };
 xdg.configFile."opencode/plugins/session-state-impl.ts" = lib.mkIf isCloudbox { source = "${assetsPath}/opencode/plugins/session-state-impl.ts"; };
-```
+```~~
 
-**Step 4: Manual smoke.** `nix run home-manager -- switch --flake .#cloudbox`;
+Two independent reasons, both found by smoke-testing before deploying
+(2026-07-31):
+
+1. **Per-file `xdg.configFile` entries break sibling imports.** Each entry lands
+   in its *own* `/nix/store` path, and opencode resolves a plugin through
+   `realpathSync` before importing — so `session-state.ts` would look for
+   `session-state-impl.ts` next to itself **in the store** and not find it. This
+   is documented in `opencode-config.nix` itself (the caveman comment) and the
+   failure is **silent**: opencode swallows the import error, `opencode debug
+   info` still lists the plugin, and the log stays empty.
+2. **Everything in `~/.config/opencode/plugins/` is loaded as a plugin.**
+   Observed directly: deploying the impl file there produces
+   `failed to load plugin … session-state-impl.ts error="Plugin export is not a
+   function"` on every instance bootstrap. No `*-impl.ts` is deployed to that
+   directory today, and that is not an accident.
+
+**The established precedent for a multi-file plugin is a Nix-built,
+self-contained JS bundle** — see `localPkgs.self-compact-plugin`, which inlines
+its deps and deploys a single `self-compact.js` (+ `.js.map`) for exactly these
+reasons. Task 3's deployment must do the same: add a `session-state-plugin`
+package that bundles `session-state.ts` + `session-state-impl.ts` into one
+`session-state.js`, then deploy that single file (cloudbox-gated).
+
+Deployment is therefore **its own task**, not a two-line step. The writer
+plugin itself is complete and verified in isolation (see Step 4).
+
+**Step 4a: Isolated smoke — DONE 2026-07-31, before touching the fleet.**
+A bad plugin at init breaks instance creation for *every* directory on *every*
+serve, including the one hosting the session doing the work, so the writer was
+first exercised in a throwaway `opencode serve` on a spare port with its own
+`XDG_CONFIG_HOME`. Confirmed there: the plugin loads, the pool-serve guard
+returns true against the real `/proc/self/cmdline`, the overlay lands at the
+expected filename with the right schema (`version`, `instanceStamp`, `pid`,
+`serveId`, `directory`, `heartbeat`, `sessions`), the heartbeat advances every
+15 s, and boot does not deadlock.
+
+**Bonus confirmation of D4.** The throwaway serve was *refused by the pool's own
+route-gate* — `FATAL: refusing to claim routing slot serve-test: bound port 4199
+!= expected port 4098 … most likely it inherited OPENCODE_SERVE_ID and
+OPENCODE_ROUTING_DB from a parent opencode session`. The inheritance hazard the
+D4 guard exists to stop is real enough that the routing layer already guards it
+independently. Note this guard only covers processes that *bind a routing slot*;
+a nested non-serve `opencode` inherits the env without tripping it, which is
+exactly the gap the plugin's own cmdline check closes.
+
+**Step 4b: Manual smoke on the fleet** (after the bundle package exists):
+`nix run home-manager -- switch --flake .#cloudbox`;
 drive a session to blocked/working; `cat ~/.local/share/opencode/session-state.d/*.json`.
 Expect one file per (serve×dir), advancing `heartbeat`, correct state.
 **Note:** on serve SIGKILL/nightly reset the file is NOT removed (exit handler
 doesn't run) — that's expected; the reader's dead-PID/stale check + GC (Task 4)
 handles it, and a same-port restart overwrites it. Do not treat a lingering file
 as a bug.
+
+**Adversarial review outcome (2026-07-31).** One HIGH, fixed in `72010b9`:
+`evictIdleSessions` never consulted `activity`, so a session 46 minutes into a
+long turn was evicted and -- because absent means idle -- reported idle while
+working. Proved with a failing test first. Also fixed: `shouldGoSilent` now
+requires the superseding writer to be *live* (a recycled pid inheriting a
+crashed predecessor's high stamp could otherwise silence the real writer), and
+the guard logs when it goes inert with `OPENCODE_SERVE_ID` set.
+
+**Carried forward, NOT fixed here** (ranked; all from the same review):
+
+- **[MED] Nested `opencode serve` slips both guards.** The cmdline check accepts
+  token[1]=="serve", and the route-gate FATAL only fires for a process that
+  *claims a routing slot*. A nested serve with `OPENCODE_SERVE_ID` inherited but
+  no routing-DB claim → same filename, different pid → the same-pid-only silence
+  rule never fires → two live writers alternate whole-file overwrites. Cheap
+  strong fix: cross-check `ctx.serverUrl`'s port against the port the serve-id
+  is supposed to own; a nested serve cannot bind the real slot's port.
+- **[MED] The seed's GET response shape is unverified against deployed.**
+  `fetchPendingSnapshot` assumes `/permission` and `/question` return arrays of
+  `{sessionID, id}`. The committed fixtures are *events only*. If the field
+  names differ, `seedFromSnapshot` skips every item silently and BUG FIX 1
+  (boot blindness) quietly reverts with zero signal. Also never negatively
+  controlled: we proved a matching `?directory=` returns the prompt, never that
+  a non-matching one *excludes* it. If the param is ignored, a serve seeds other
+  directories' sessions into its overlay, where they never receive events, and
+  `hasPending` then blocks eviction → a permanent phantom `blocked`.
+  Capture a GET response with a real pending prompt as a fixture.
+- **[MED] Union-only means drift in an *existing* entry is never repaired.** The
+  60s reconcile only fills in wholly-missing sessions. Race: boot with P
+  pending → fetch lists P → P is replied while the JSON is still parsing → the
+  `replied` event no-ops (no entry yet) → the seed then creates the entry with P
+  pending → phantom `blocked` that only heals on that session's next idle, and
+  never if the session never runs again. Consider a timestamp-fenced
+  subtraction (drop pendings absent from a snapshot taken after `updatedAt`).
+- **[MED] Fixtures cover questions only.** `deployed-fixtures.test.ts` advertises
+  itself as guarding the `.asked`/`.replied` asymmetry, but contains zero
+  `permission.*` events -- that half rests on a one-time bundle read. Forcing a
+  real permission prompt needs a config whose `permission` is not `"*": "allow"`;
+  the project-level override did not merge in the attempt made here.
+- **[MED-LOW] No GC or age cap for orphaned overlay files.** Serve renumbering or
+  a retired directory leaves a file forever, and the merge emits `unknown` from
+  arbitrarily old dead files with no age bound → permanent picker noise and a
+  monotonically growing `session-state.d`. Wants a reader-side age cap or a
+  sweeper (Task 4).
+- **[LOW] `isValidOverlay` does not type-check `lastActivity`/`activity`,** so a
+  same-version skewed entry can yield NaN comparisons and an arbitrary merge
+  winner. And writer (plugin bundle) vs reader (`oc-session-list`) ship by
+  different vehicles, so an `OVERLAY_VERSION` bump blacks out all state during
+  the skew window -- the lockstep requirement should be written down.
+- **[LOW] Reader must intersect the overlay with the DB base list.** A reconcile
+  response landing after `session.deleted` can resurrect a ghost entry; this is
+  harmless *only* if the DB stays authoritative for existence. Make that an
+  explicit Task 4/6 requirement rather than an assumption.
 
 **Step 5: Commit** `feat(plugin): session-state overlay writer (cloudbox)`.
 

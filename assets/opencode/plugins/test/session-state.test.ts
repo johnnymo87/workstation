@@ -6,7 +6,15 @@ import {
   seedFromSnapshot,
   serializeOverlay,
   mergeOverlays,
+  isPoolServeProcess,
+  getOverlayFilename,
+  generateInstanceStamp,
+  shouldGoSilent,
+  evictIdleSessions,
+  type SessionEntry,
+  fetchPendingSnapshot,
   type OverlayData,
+  type StateMap,
 } from "../session-state-impl"
 
 const ev = (type: string, properties: any) => ({ type, properties })
@@ -131,25 +139,50 @@ describe("seedFromSnapshot", () => {
     expect(s.s2.revision).toBe(0)
   })
 
-  it("authoritative for sessions named in snapshot, leaving unmentioned sessions untouched", () => {
+  it("seedFromSnapshot with unionOnly (default): snapshot for unseen session seeds pending prompts", () => {
+    const s = seedFromSnapshot(emptyState(), {
+      permissions: [{ sessionID: "s1", id: "p1" }],
+      questions: [{ sessionID: "s2", id: "q1" }],
+    })
+    expect(effectiveState(s.s1)).toBe("blocked")
+    expect(effectiveState(s.s2)).toBe("blocked")
+    expect(s.s1.pendingPermissions).toEqual(["p1"])
+    expect(s.s2.pendingQuestions).toEqual(["q1"])
+    expect(s.s1.revision).toBe(0)
+    expect(s.s2.revision).toBe(0)
+  })
+
+  it("seedFromSnapshot with unionOnly (default): snapshot for session already having event-derived entry is IGNORED entirely", () => {
+    // Stream state where p1 was asked then replied to (pending empty), and new prompt p2 was asked
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    s = applyEvent(s, ev("permission.replied", { sessionID: "s1", requestID: "p1" }))
+    s = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p2" }))
+    const initialRev = s.s1.revision
+
+    // Late-landing snapshot that still lists p1 (which stream replied to) and does NOT list p2 (asked after snapshot)
+    const seeded = seedFromSnapshot(s, {
+      permissions: [{ sessionID: "s1", id: "p1" }],
+    })
+
+    // Must NOT resurrect p1, must NOT drop p2, must NOT stomp revision
+    expect(seeded).toBe(s)
+    expect(seeded.s1.pendingPermissions).toEqual(["p2"])
+    expect(seeded.s1.revision).toBe(initialRev)
+  })
+
+  it("authoritative for sessions named in snapshot when unionOnly is false", () => {
     let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
     s = applyEvent(s, ev("permission.asked", { sessionID: "s2", id: "p2" }))
 
     s = seedFromSnapshot(s, {
       permissions: [{ sessionID: "s1", id: "p_new" }],
-    })
+    }, { unionOnly: false })
 
     expect(s.s1.pendingPermissions).toEqual(["p_new"])
     expect(effectiveState(s.s1)).toBe("blocked")
 
     expect(s.s2.pendingPermissions).toEqual(["p2"])
     expect(effectiveState(s.s2)).toBe("blocked")
-
-    s = seedFromSnapshot(s, {
-      questions: [{ sessionID: "s1", id: "q1" }],
-    })
-    expect(s.s1.pendingPermissions).toEqual([])
-    expect(s.s1.pendingQuestions).toEqual(["q1"])
   })
 
   it("empty snapshot or no-change snapshot returns identical prev object reference", () => {
@@ -205,8 +238,10 @@ describe("revision tracking", () => {
 })
 
 describe("serializeOverlay", () => {
-  it("passes through overlay shape without adding an epoch field", () => {
+  it("stamps version and includes instanceStamp without adding an epoch field", () => {
     const input: OverlayData = {
+      version: 1,
+      instanceStamp: 12345678,
       pid: 1234,
       serveId: "serve-1",
       directory: "/path/to/project",
@@ -224,6 +259,8 @@ describe("serializeOverlay", () => {
     }
     const serialized = serializeOverlay(input)
     expect(serialized).toEqual(input)
+    expect(serialized.version).toBe(1)
+    expect(serialized.instanceStamp).toBe(12345678)
     expect((serialized as any).epoch).toBeUndefined()
   })
 })
@@ -245,7 +282,9 @@ describe("mergeOverlays", () => {
     sessions: any,
     heartbeat = 1000,
     directory?: string,
-  ): OverlayData => ({ serveId, pid, heartbeat, directory, sessions })
+    version = 1,
+    instanceStamp = 100,
+  ): OverlayData => ({ version, instanceStamp, serveId, pid, heartbeat, directory, sessions })
   const opts = (over: any = {}) => ({
     now: 1000,
     staleMs: 45000,
@@ -443,8 +482,41 @@ describe("mergeOverlays", () => {
 
     const m = mergeOverlays(
       [deadOwnerFile, peerFile],
-      opts({ owners: { s1: "serve-0" }, isAlive: (pid) => pid === 2 }),
+      opts({ owners: { s1: "serve-0" }, isAlive: (pid: number) => pid === 2 }),
     )
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("defensive merge: ignores file with version !== OVERLAY_VERSION", () => {
+    const good = file("serve-0", 1, { s1: entry({ activity: "working" }) }, 1000, "/path", 1)
+    const badVersion = file("serve-1", 2, { s1: entry({ activity: "idle" }) }, 1000, "/path", 999)
+    const m = mergeOverlays([good, badVersion as any], opts())
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("defensive merge: ignores malformed files (null, missing pid/serveId/heartbeat, missing sessions)", () => {
+    const good = file("serve-0", 1, { s1: entry({ activity: "working" }) }, 1000)
+    const garbage1 = null
+    const garbage2 = "not an object"
+    const missingPid = { version: 1, serveId: "s", heartbeat: 1000, sessions: {} }
+    const missingServeId = { version: 1, pid: 1, heartbeat: 1000, sessions: {} }
+    const missingHeartbeat = { version: 1, pid: 1, serveId: "s", sessions: {} }
+    const missingSessions = { version: 1, pid: 1, serveId: "s", heartbeat: 1000 }
+    const nonObjSessions = { version: 1, pid: 1, serveId: "s", heartbeat: 1000, sessions: "invalid" }
+
+    const m = mergeOverlays(
+      [good, garbage1, garbage2, missingPid, missingServeId, missingHeartbeat, missingSessions, nonObjSessions] as any,
+      opts(),
+    )
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("defensive merge: ignores file whose entry lacks pendingPermissions or pendingQuestions array", () => {
+    const good = file("serve-0", 1, { s1: entry({ activity: "working" }) }, 1000)
+    const badEntry1 = file("serve-1", 2, { s1: { activity: "idle", pendingQuestions: [] } }, 1000) // missing pendingPermissions
+    const badEntry2 = file("serve-2", 3, { s1: { activity: "idle", pendingPermissions: [] } }, 1000) // missing pendingQuestions
+
+    const m = mergeOverlays([good, badEntry1 as any, badEntry2 as any], opts())
     expect(m.s1.activity).toBe("working")
   })
 
@@ -459,3 +531,226 @@ describe("mergeOverlays", () => {
   })
 })
 
+describe("isPoolServeProcess", () => {
+  it("returns true for a real pool serve cmdline with valid serveId", () => {
+    const cmdline = "/home/dev/.nix-profile/bin/opencode\x00serve\x00--port\x004096\x00--hostname\x00127.0.0.1\x00"
+    expect(isPoolServeProcess(cmdline, "serve-0")).toBe(true)
+  })
+
+  it("returns false for nested opencode run process", () => {
+    const cmdline = "/home/dev/.nix-profile/bin/opencode\x00run\x00some-args\x00"
+    expect(isPoolServeProcess(cmdline, "serve-0")).toBe(false)
+  })
+
+  it("returns false for opencode without serve argument", () => {
+    const cmdline = "/bin/opencode\x00"
+    expect(isPoolServeProcess(cmdline, "serve-0")).toBe(false)
+  })
+
+  it("returns false when serveId is missing or empty", () => {
+    const cmdline = "/home/dev/.nix-profile/bin/opencode\x00serve\x00"
+    expect(isPoolServeProcess(cmdline, undefined)).toBe(false)
+    expect(isPoolServeProcess(cmdline, "")).toBe(false)
+    expect(isPoolServeProcess(cmdline, "   ")).toBe(false)
+  })
+
+  it("returns false for empty or invalid cmdline", () => {
+    expect(isPoolServeProcess("", "serve-0")).toBe(false)
+  })
+})
+
+describe("getOverlayFilename", () => {
+  it("produces filename with serveId and sha256 dirhash", () => {
+    const name = getOverlayFilename("serve-0", "/home/dev/projects/workstation")
+    expect(name).toMatch(/^serve-0-[0-9a-f]{16}\.json$/)
+  })
+
+  it("produces distinct filenames for same-prefix directory paths", () => {
+    const name1 = getOverlayFilename("serve-0", "/a/b")
+    const name2 = getOverlayFilename("serve-0", "/a/bc")
+    expect(name1).not.toEqual(name2)
+  })
+})
+
+describe("generateInstanceStamp", () => {
+  it("strictly increases on successive calls even with identical clock timestamp", () => {
+    const staticClock = () => 100000
+    const stamp1 = generateInstanceStamp(staticClock)
+    const stamp2 = generateInstanceStamp(staticClock)
+    expect(stamp2).toBeGreaterThan(stamp1)
+  })
+})
+
+describe("shouldGoSilent", () => {
+  it("returns true when existing pid matches our pid AND existing stamp is strictly newer", () => {
+    expect(
+      shouldGoSilent({
+        existingPid: 100,
+        existingStamp: 200,
+        existingHeartbeat: 1_000_000,
+        ourPid: 100,
+        ourStamp: 100,
+        now: 1_000_000,
+      }),
+    ).toBe(true)
+  })
+
+  it("returns false when existing pid matches our pid BUT existing stamp is older or equal", () => {
+    expect(
+      shouldGoSilent({ existingPid: 100, existingStamp: 50, ourPid: 100, ourStamp: 100 }),
+    ).toBe(false)
+    expect(
+      shouldGoSilent({ existingPid: 100, existingStamp: 100, ourPid: 100, ourStamp: 100 }),
+    ).toBe(false)
+  })
+
+  it("returns FALSE when existing pid does NOT match our pid (foreign writer must not silence us)", () => {
+    expect(
+      shouldGoSilent({ existingPid: 999, existingStamp: 200, ourPid: 100, ourStamp: 100 }),
+    ).toBe(false)
+  })
+
+  it("returns FALSE when the superseding writer is STALE (pid reuse after a crash)", () => {
+    // A crashed long-lived process can leave a file whose stamp is far greater
+    // than a freshly-started instance's. If its pid gets recycled onto us, an
+    // unqualified stamp comparison would make the REAL writer silence itself
+    // forever against a dead predecessor. Only a live writer may take over.
+    expect(
+      shouldGoSilent({
+        existingPid: 100,
+        existingStamp: 9_999_999,
+        existingHeartbeat: 1_000_000 - 10 * 60 * 1000, // 10 min stale
+        ourPid: 100,
+        ourStamp: 100,
+        now: 1_000_000,
+      }),
+    ).toBe(false)
+  })
+
+  it("returns false when the existing file has no heartbeat at all", () => {
+    expect(
+      shouldGoSilent({ existingPid: 100, existingStamp: 200, ourPid: 100, ourStamp: 100, now: 1_000_000 }),
+    ).toBe(false)
+  })
+
+  it("returns false when existing file is missing or corrupt (undefined pid/stamp)", () => {
+    expect(shouldGoSilent({ existingPid: undefined, existingStamp: 200, ourPid: 100, ourStamp: 100 })).toBe(false)
+    expect(shouldGoSilent({ existingPid: 100, existingStamp: undefined, ourPid: 100, ourStamp: 100 })).toBe(false)
+  })
+})
+
+describe("evictIdleSessions", () => {
+  const entry = (over: any = {}) => ({
+    activity: "idle",
+    error: false,
+    pendingPermissions: [],
+    pendingQuestions: [],
+    lastActivity: 1000,
+    updatedAt: 1000,
+    revision: 1,
+    ...over,
+  })
+
+  it("evicts plain-idle session older than maxAgeMs", () => {
+    const prev: StateMap = {
+      oldIdle: entry({ lastActivity: 1000 }),
+    }
+    const next = evictIdleSessions(prev, 1000 + 45 * 60 * 1000 + 1)
+    expect(next.oldIdle).toBeUndefined()
+  })
+
+  it("keeps old session if it has pending permissions, pending questions, or sticky error", () => {
+    const prev: StateMap = {
+      oldWithPerm: entry({ lastActivity: 1000, pendingPermissions: ["p1"] }),
+      oldWithQuest: entry({ lastActivity: 1000, pendingQuestions: ["q1"] }),
+      oldWithError: entry({ lastActivity: 1000, error: true }),
+    }
+    const next = evictIdleSessions(prev, 1000 + 45 * 60 * 1000 + 1)
+    expect(next.oldWithPerm).toBeDefined()
+    expect(next.oldWithQuest).toBeDefined()
+    expect(next.oldWithError).toBeDefined()
+  })
+
+  it("keeps recent session (newer than maxAgeMs)", () => {
+    const prev: StateMap = {
+      recentIdle: entry({ lastActivity: 5000 }),
+    }
+    const next = evictIdleSessions(prev, 6000)
+    expect(next.recentIdle).toBeDefined()
+  })
+})
+
+describe("fetchPendingSnapshot", () => {
+  it("fetches permissions and questions and returns snapshot", async () => {
+    const mockFetch = (async (url: string) => {
+      if (url.includes("/permission")) {
+        return { ok: true, json: async () => [{ sessionID: "s1", id: "p1" }] }
+      }
+      if (url.includes("/question")) {
+        return { ok: true, json: async () => [{ sessionID: "s2", id: "q1" }] }
+      }
+      return { ok: false }
+    }) as typeof fetch
+
+    const snapshot = await fetchPendingSnapshot(mockFetch, "http://127.0.0.1:4096", "/path/to/project")
+    expect(snapshot.permissions).toEqual([{ sessionID: "s1", id: "p1" }])
+    expect(snapshot.questions).toEqual([{ sessionID: "s2", id: "q1" }])
+  })
+
+  it("handles fetch errors gracefully without throwing", async () => {
+    const failingFetch = (async () => {
+      throw new Error("network error")
+    }) as typeof fetch
+
+    const snapshot = await fetchPendingSnapshot(failingFetch, "http://127.0.0.1:4096", "/path/to/project")
+    expect(snapshot).toEqual({})
+  })
+})
+
+
+describe("evictIdleSessions: activity is load-bearing (adversarial review, HIGH)", () => {
+  const mk = (over: Partial<SessionEntry> = {}): SessionEntry => ({
+    activity: "idle",
+    error: false,
+    pendingPermissions: [],
+    pendingQuestions: [],
+    lastActivity: 0,
+    updatedAt: 0,
+    revision: 1,
+    ...over,
+  })
+
+  it("keeps a session that is still WORKING long past the idle cap", () => {
+    // The real shape of the bug: a long autonomous turn emits
+    // session.status{busy} once and then nothing the reducer handles, so
+    // lastActivity is frozen at the start of the turn. Evicting on age alone
+    // reports the longest-running sessions as idle.
+    const s = { s1: mk({ activity: "working", lastActivity: 0 }) }
+    const after = evictIdleSessions(s, 46 * 60 * 1000)
+    expect(after.s1).toBeDefined()
+    expect(after.s1.activity).toBe("working")
+  })
+
+  it("keeps a session in RETRY long past the idle cap", () => {
+    const s = { s1: mk({ activity: "retry", lastActivity: 0 }) }
+    expect(evictIdleSessions(s, 46 * 60 * 1000).s1).toBeDefined()
+  })
+
+  it("still evicts a plain-idle session past the idle cap", () => {
+    const s = { s1: mk({ activity: "idle", lastActivity: 0 }) }
+    expect(evictIdleSessions(s, 46 * 60 * 1000).s1).toBeUndefined()
+  })
+
+  it("eventually evicts a stuck-working session at the hard cap (lost idle event)", () => {
+    const s = { s1: mk({ activity: "working", lastActivity: 0 }) }
+    expect(evictIdleSessions(s, 5 * 60 * 60 * 1000).s1).toBeDefined()
+    expect(evictIdleSessions(s, 7 * 60 * 60 * 1000).s1).toBeUndefined()
+  })
+
+  it("never evicts a blocked or errored session regardless of age", () => {
+    const blocked = { s1: mk({ activity: "idle", pendingPermissions: ["p1"], lastActivity: 0 }) }
+    const errored = { s2: mk({ activity: "idle", error: true, lastActivity: 0 }) }
+    expect(evictIdleSessions(blocked, 99 * 60 * 60 * 1000).s1).toBeDefined()
+    expect(evictIdleSessions(errored, 99 * 60 * 60 * 1000).s2).toBeDefined()
+  })
+})
