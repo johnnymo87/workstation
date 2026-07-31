@@ -251,12 +251,38 @@ const plugin: Plugin = async () => ({
   },
 })
 
-export default plugin
+/**
+ * v1 plugin shape: a default-exported object carrying `id` and `server`.
+ *
+ * This shape is load-bearing, not cosmetic. opencode's loader (packages/
+ * opencode/src/plugin/index.ts, v1.17.13) branches on it in applyPlugin():
+ *
+ *   readV1Plugin(mod, spec, "server", "detect") -- returns this object because
+ *   mod.default is a record carrying "id"/"server" -- and applyPlugin then
+ *   pushes `plugin.server(...)` and RETURNS. It never reaches
+ *   getLegacyPlugins(), which is the code that iterates Object.values(mod) and
+ *   throws `TypeError: Plugin export is not a function` (index.ts:103) on the
+ *   first named export that is neither a function nor a { server } object.
+ *
+ * Under the legacy shape (`export default plugin`), that throw rejects the
+ * WHOLE FILE, silently. Both obvious ways of exposing a test surface are fatal
+ * there: `export function helper` gets invoked as a plugin factory and its
+ * return value pushed into the hooks array (this took devbox down on
+ * 2026-07-30), and `export const internals = {...}` trips the throw above (this
+ * silently disabled shell-env entirely -- no OPENCODE_HOSTNAME, no sops
+ * secrets, no KUBECONFIG isolation -- until this commit).
+ *
+ * Taking the v1 branch makes named exports unreachable, so `internals` below is
+ * safe by construction rather than by convention.
+ *
+ * `id` is mandatory: resolvePluginId() throws `Path plugin ... must export id`
+ * for file-sourced plugins without one (shared.ts:313-316).
+ */
+export default { id: "shell-env", server: plugin }
 
 /**
- * Unit-test surface. Deliberately an OBJECT, not a function export: opencode's
- * legacy plugin loader invokes every *function* export as a plugin factory (see
- * the warning on loadKubeconfigEnv above) but skips non-functions. Keep it that
- * way -- never promote these back to bare `export function`.
+ * Unit-test surface. Safe ONLY because of the v1 default export above, which
+ * stops the loader before it inspects named exports. If this file is ever
+ * reverted to `export default plugin`, this export becomes fatal again.
  */
 export const internals = { loadKubeconfigEnv }
