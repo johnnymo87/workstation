@@ -101,6 +101,17 @@ jobs:
 
           purge-primary-key: never
 
+          # Restore everywhere, save only on main.
+          #
+          # A .nix-touching PR rotates the primary key, so its run misses and would
+          # save a multi-GB entry scoped to refs/pull/N/merge. The daily bot PRs
+          # (update-bb, update-gws, update-opencode-patched, update-packages) all
+          # touch .nix files, so several such entries can be in flight at once.
+          # Against a 10GB repo limit that means GitHub silently LRU-evicts entries
+          # we still want, and a main run cannot clean them up because purge is
+          # scoped to the current ref. Saving only from main keeps one lineage.
+          save: ${{ github.ref == 'refs/heads/main' }}
+
 
       - name: Disk space before
         run: df -h /
