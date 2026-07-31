@@ -485,7 +485,8 @@ in
     # at load and opencode would swallow it (empty log, plugin still listed by
     # `opencode debug info`). Shipping the impl file into the plugins directory
     # would ALSO log `Plugin export is not a function` every bootstrap, since
-    # opencode loads every file there as a plugin. One file avoids both.
+    # opencode loads every .ts/.js there as a plugin (a .js.map is ignored --
+    # self-compact's has sat there for months). One file avoids both.
     #
     # Cloudbox-only, deliberately: this writes state for the serve pool, and the
     # pool (opencode-serve@{4096..4099}) exists only here. The plugin no-ops

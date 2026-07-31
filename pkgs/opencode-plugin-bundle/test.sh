@@ -65,13 +65,23 @@ bun --no-install -e "
 " || fail "deployed bundle did not load under bun --no-install"
 pass "bundle loads; default export is a function"
 
-echo "== invariant 5: bundle is self-contained (no relative imports) =="
-# The reason this package exists: a relative import surviving into the artifact
-# would be resolved against the /nix/store path at runtime and throw, and
-# opencode swallows that error entirely (empty log, plugin still listed).
-if grep -nE "^[[:space:]]*(import|export)[^\"']*[\"']\.\.?/" "$OUT/${ENTRY}.js"; then
-  fail "bundle contains a relative import; sibling would not resolve in the store"
+echo "== invariant 5: bundle is self-contained (no relative specifiers) =="
+# The reason this package exists: a relative specifier surviving into the
+# artifact would be resolved against the /nix/store path at runtime and throw,
+# and opencode swallows that error entirely (empty log, plugin still listed).
+# Anchored pattern = externalised static imports (how bun emits them);
+# unanchored pattern = the dynamic import()/require() forms, which would
+# otherwise fail only once that code path ran.
+if grep -nE "^[[:space:]]*(import|export)[^\"']*[\"']\.\.?/" "$OUT/${ENTRY}.js" \
+   || grep -nE "(import|require)\([[:space:]]*[\"']\.\.?/" "$OUT/${ENTRY}.js"; then
+  fail "bundle contains a relative specifier; sibling would not resolve in the store"
 fi
-pass "no relative imports in bundle"
+pass "no relative specifiers in bundle"
+
+echo "== invariant 6: sourcemap is present (it is deployed unconditionally) =="
+# opencode-config.nix references ${ENTRY}.js.map with no existence check, so a
+# missing map is a dangling symlink at activation time.
+[ -f "$OUT/${ENTRY}.js.map" ] || fail "no ${ENTRY}.js.map in $OUT"
+pass "sourcemap present"
 
 echo "ALL PASS (${PKG})"

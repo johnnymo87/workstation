@@ -51,7 +51,25 @@ const plugin: Plugin = async (ctx, opts?: any) => {
     opts?.dir ??
     process.env.OPENCODE_SESSION_STATE_DIR ??
     join(homedir(), ".local/share/opencode/session-state.d")
-  mkdirSync(dir, { recursive: true })
+
+  // The one syscall in this factory that ran unguarded. Everything below is
+  // already try/caught, so a failure here (ENOSPC, EROFS, a bad injected dir)
+  // was the single way this factory could throw. Measured on 1.17.13: opencode
+  // SWALLOWS a throwing plugin factory -- the module is imported, the factory
+  // runs and throws, and session creation still succeeds with an empty log --
+  // so this would not have taken the host down. It would instead have made the
+  // writer vanish in total silence, which for a state writer is the worse
+  // outcome: absent state reads as "no information", indistinguishable from a
+  // serve that simply has no sessions. Fail loudly and stay inert instead.
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch (err) {
+    console.error(
+      `[session-state] cannot create overlay dir ${dir}; writer inert for this instance:`,
+      err,
+    )
+    return {}
+  }
 
   const filename = getOverlayFilename(serveId!, ctx.directory)
   const file = join(dir, filename)
