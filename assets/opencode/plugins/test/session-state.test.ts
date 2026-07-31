@@ -1,0 +1,461 @@
+import { describe, it, expect } from "vitest"
+import {
+  applyEvent,
+  effectiveState,
+  emptyState,
+  seedFromSnapshot,
+  serializeOverlay,
+  mergeOverlays,
+  type OverlayData,
+} from "../session-state-impl"
+
+const ev = (type: string, properties: any) => ({ type, properties })
+
+describe("applyEvent", () => {
+  it("busy -> working; idle -> idle", () => {
+    let s = applyEvent(emptyState(), ev("session.status", { sessionID: "s1", status: { type: "busy" } }))
+    expect(effectiveState(s.s1)).toBe("working")
+    s = applyEvent(s, ev("session.status", { sessionID: "s1", status: { type: "idle" } }))
+    expect(effectiveState(s.s1)).toBe("idle")
+  })
+
+  it("permission.asked(id) -> blocked; replied(requestID) clears", () => {
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    expect(effectiveState(s.s1)).toBe("blocked")
+    s = applyEvent(s, ev("permission.replied", { sessionID: "s1", requestID: "p1" }))
+    expect(effectiveState(s.s1)).toBe("idle")
+  })
+
+  it("two permissions pend as a set; one reply keeps blocked", () => {
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    s = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p2" }))
+    s = applyEvent(s, ev("permission.replied", { sessionID: "s1", requestID: "p1" }))
+    expect(effectiveState(s.s1)).toBe("blocked")
+  })
+
+  it("question.asked(id) -> blocked; replied(requestID) clears", () => {
+    let s = applyEvent(emptyState(), ev("question.asked", { sessionID: "s1", id: "q1" }))
+    expect(effectiveState(s.s1)).toBe("blocked")
+    s = applyEvent(s, ev("question.rejected", { sessionID: "s1", requestID: "q1" }))
+    expect(effectiveState(s.s1)).toBe("idle")
+  })
+
+  it("abort-while-pending: idle clears pending sets", () => {
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    s = applyEvent(s, ev("session.status", { sessionID: "s1", status: { type: "idle" } }))
+    expect(effectiveState(s.s1)).toBe("idle")
+  })
+
+  it("retry -> retry", () => {
+    const s = applyEvent(emptyState(), ev("session.status", { sessionID: "s1", status: { type: "retry", attempt: 2, message: "429", next: 2000 } }))
+    expect(effectiveState(s.s1)).toBe("retry")
+  })
+
+  it("error is STICKY: error then idle is still error", () => {
+    let s = applyEvent(emptyState(), ev("session.error", { sessionID: "s1" }))
+    s = applyEvent(s, ev("session.status", { sessionID: "s1", status: { type: "idle" } }))
+    expect(effectiveState(s.s1)).toBe("error")
+  })
+
+  it("error cleared by next busy (new turn)", () => {
+    let s = applyEvent(emptyState(), ev("session.error", { sessionID: "s1" }))
+    s = applyEvent(s, ev("session.status", { sessionID: "s1", status: { type: "busy" } }))
+    expect(effectiveState(s.s1)).toBe("working")
+  })
+
+  it("error with no sessionID is ignored", () => {
+    expect(applyEvent(emptyState(), ev("session.error", {}))).toEqual({})
+  })
+
+  it("unrelated events create no entry and don't mutate", () => {
+    const before = emptyState()
+    expect(applyEvent(before, ev("message.part.updated", { sessionID: "s1" }))).toBe(before)
+  })
+
+  it("idle when already idle is a no-op (does not reset lastActivity)", () => {
+    let time = 1000
+    const clock = () => ++time
+    let s = applyEvent(emptyState(), ev("session.status", { sessionID: "s1", status: { type: "busy" } }), clock)
+    s = applyEvent(s, ev("session.status", { sessionID: "s1", status: { type: "idle" } }), clock)
+    const t = s.s1.lastActivity
+    const s2 = applyEvent(s, ev("session.status", { sessionID: "s1", status: { type: "idle" } }), clock)
+    expect(s2).toBe(s)
+    expect(s2.s1.lastActivity).toBe(t)
+  })
+
+  it("duplicate permission.asked or question.asked returns identical object reference (no-op)", () => {
+    let time = 1000
+    const clock = () => ++time
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }), clock)
+    const t = s.s1.lastActivity
+    const s2 = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p1" }), clock)
+    expect(s2).toBe(s)
+    expect(s2.s1.lastActivity).toBe(t)
+
+    let sq = applyEvent(emptyState(), ev("question.asked", { sessionID: "s1", id: "q1" }), clock)
+    const sq2 = applyEvent(sq, ev("question.asked", { sessionID: "s1", id: "q1" }), clock)
+    expect(sq2).toBe(sq)
+  })
+
+  it("permission.replied or question.replied/rejected for unknown requestID returns identical object reference", () => {
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    const s2 = applyEvent(s, ev("permission.replied", { sessionID: "s1", requestID: "p_unknown" }))
+    expect(s2).toBe(s)
+
+    let sq = applyEvent(emptyState(), ev("question.asked", { sessionID: "s1", id: "q1" }))
+    const sq2 = applyEvent(sq, ev("question.replied", { sessionID: "s1", requestID: "q_unknown" }))
+    expect(sq2).toBe(sq)
+  })
+
+  it("permission.asked and question.asked require an id; replied/rejected require requestID", () => {
+    const s = emptyState()
+    expect(applyEvent(s, ev("permission.asked", { sessionID: "s1" }))).toBe(s)
+    expect(applyEvent(s, ev("question.asked", { sessionID: "s1" }))).toBe(s)
+
+    const sWithPerm = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    expect(applyEvent(sWithPerm, ev("permission.replied", { sessionID: "s1" }))).toBe(sWithPerm)
+    expect(applyEvent(sWithPerm, ev("question.replied", { sessionID: "s1" }))).toBe(sWithPerm)
+    expect(applyEvent(sWithPerm, ev("question.rejected", { sessionID: "s1" }))).toBe(sWithPerm)
+  })
+})
+
+describe("seedFromSnapshot", () => {
+  it("seedFromSnapshot marks sessions with already-pending permissions as blocked", () => {
+    const s = seedFromSnapshot(emptyState(), {
+      permissions: [{ sessionID: "s1", id: "p1" }],
+      questions: [{ sessionID: "s2", id: "q1" }],
+    })
+    expect(effectiveState(s.s1)).toBe("blocked")
+    expect(effectiveState(s.s2)).toBe("blocked")
+    expect(s.s1.revision).toBe(0)
+    expect(s.s2.revision).toBe(0)
+  })
+
+  it("authoritative for sessions named in snapshot, leaving unmentioned sessions untouched", () => {
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    s = applyEvent(s, ev("permission.asked", { sessionID: "s2", id: "p2" }))
+
+    s = seedFromSnapshot(s, {
+      permissions: [{ sessionID: "s1", id: "p_new" }],
+    })
+
+    expect(s.s1.pendingPermissions).toEqual(["p_new"])
+    expect(effectiveState(s.s1)).toBe("blocked")
+
+    expect(s.s2.pendingPermissions).toEqual(["p2"])
+    expect(effectiveState(s.s2)).toBe("blocked")
+
+    s = seedFromSnapshot(s, {
+      questions: [{ sessionID: "s1", id: "q1" }],
+    })
+    expect(s.s1.pendingPermissions).toEqual([])
+    expect(s.s1.pendingQuestions).toEqual(["q1"])
+  })
+
+  it("empty snapshot or no-change snapshot returns identical prev object reference", () => {
+    const s0 = emptyState()
+    const s1 = seedFromSnapshot(s0, {})
+    expect(s1).toBe(s0)
+
+    const state = seedFromSnapshot(s0, {
+      permissions: [{ sessionID: "s1", id: "p1" }],
+    })
+    const state2 = seedFromSnapshot(state, {
+      permissions: [{ sessionID: "s1", id: "p1" }],
+    })
+    expect(state2).toBe(state)
+  })
+})
+
+describe("revision tracking", () => {
+  it("two successive committing events on one session produce a strictly increasing revision", () => {
+    let s = applyEvent(emptyState(), ev("session.status", { sessionID: "s1", status: { type: "busy" } }))
+    expect(s.s1.revision).toBe(1)
+    s = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    expect(s.s1.revision).toBe(2)
+  })
+
+  it("a no-op event does not change revision and returns identical object reference", () => {
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    const rev = s.s1.revision
+    const s2 = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    expect(s2).toBe(s)
+    expect(s2.s1.revision).toBe(rev)
+  })
+
+  it("a seeded entry starts at revision 0 and a subsequent real event increments it above 0", () => {
+    let s = seedFromSnapshot(emptyState(), {
+      permissions: [{ sessionID: "s1", id: "p1" }],
+    })
+    expect(s.s1.revision).toBe(0)
+    s = applyEvent(s, ev("permission.replied", { sessionID: "s1", requestID: "p1" }))
+    expect(s.s1.revision).toBe(1)
+  })
+
+  it("revisions are independent per session", () => {
+    let s = applyEvent(emptyState(), ev("session.status", { sessionID: "s1", status: { type: "busy" } }))
+    s = applyEvent(s, ev("session.status", { sessionID: "s2", status: { type: "busy" } }))
+    expect(s.s1.revision).toBe(1)
+    expect(s.s2.revision).toBe(1)
+
+    s = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    expect(s.s1.revision).toBe(2)
+    expect(s.s2.revision).toBe(1)
+  })
+})
+
+describe("serializeOverlay", () => {
+  it("passes through overlay shape without adding an epoch field", () => {
+    const input: OverlayData = {
+      pid: 1234,
+      serveId: "serve-1",
+      directory: "/path/to/project",
+      heartbeat: 1000,
+      sessions: {
+        s1: {
+          activity: "working",
+          error: false,
+          pendingPermissions: [],
+          pendingQuestions: [],
+          lastActivity: 500,
+          updatedAt: 500,
+        },
+      },
+    }
+    const serialized = serializeOverlay(input)
+    expect(serialized).toEqual(input)
+    expect((serialized as any).epoch).toBeUndefined()
+  })
+})
+
+describe("mergeOverlays", () => {
+  const entry = (over: any = {}) => ({
+    activity: "working",
+    error: false,
+    pendingPermissions: [],
+    pendingQuestions: [],
+    lastActivity: 10,
+    updatedAt: 10,
+    revision: 1,
+    ...over,
+  })
+  const file = (
+    serveId: string,
+    pid: number,
+    sessions: any,
+    heartbeat = 1000,
+    directory?: string,
+  ): OverlayData => ({ serveId, pid, heartbeat, directory, sessions })
+  const opts = (over: any = {}) => ({
+    now: 1000,
+    staleMs: 45000,
+    isAlive: () => true,
+    owners: {},
+    ...over,
+  })
+
+  it("owner wins even when its wall clock is OLDER (migration)", () => {
+    const old = file("serve-0", 1, {
+      s1: entry({
+        activity: "idle",
+        pendingPermissions: [],
+        lastActivity: 999,
+        revision: 9,
+      }),
+    })
+    const cur = file("serve-1", 2, {
+      s1: entry({
+        activity: "working",
+        pendingPermissions: ["p1"],
+        lastActivity: 10,
+        revision: 1,
+      }),
+    })
+    const m = mergeOverlays([old, cur], opts({ owners: { s1: "serve-1" } }))
+    expect(m.s1.pendingPermissions).toEqual(["p1"])
+  })
+
+  it("higher revision does NOT win across files (revision is per-writer)", () => {
+    const a = file("serve-0", 1, {
+      s1: entry({ activity: "idle", lastActivity: 10, revision: 400 }),
+    })
+    const b = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 999, revision: 3 }),
+    })
+    const m = mergeOverlays([a, b], opts())
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("no owner entry -> freshest lastActivity among live wins", () => {
+    const a = file("serve-0", 1, {
+      s1: entry({ activity: "idle", lastActivity: 500 }),
+    })
+    const b = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 900 }),
+    })
+    expect(mergeOverlays([a, b], opts()).s1.activity).toBe("working")
+  })
+
+  it("owner pointing at a DEAD serve does not win; a live observer speaks", () => {
+    const dead = file("serve-0", 999, {
+      s1: entry({ activity: "idle", lastActivity: 999 }),
+    })
+    const live = file("serve-1", 2, {
+      s1: entry({
+        activity: "working",
+        pendingPermissions: ["p1"],
+        lastActivity: 10,
+      }),
+    })
+    const m = mergeOverlays(
+      [dead, live],
+      opts({ owners: { s1: "serve-0" }, isAlive: (pid: number) => pid === 2 }),
+    )
+    expect(m.s1.unknown).toBeFalsy()
+    expect(m.s1.pendingPermissions).toEqual(["p1"])
+  })
+
+  it("dead pid and stale heartbeat -> entries flagged unknown, NOT dropped", () => {
+    const deadPid = file("serve-0", 999, { s2: entry() })
+    const stale = file("serve-1", 2, { s3: entry() }, 900)
+    const m = mergeOverlays(
+      [deadPid, stale],
+      opts({ staleMs: 45, isAlive: (pid: number) => pid === 2 }),
+    )
+    expect(m.s2.unknown).toBe(true)
+    expect(m.s3.unknown).toBe(true)
+  })
+
+  it("unknown entries clear pending sets (never assert a block nobody is holding)", () => {
+    const dead = file("serve-0", 999, {
+      s1: entry({
+        pendingPermissions: ["p1"],
+        pendingQuestions: ["q1"],
+      }),
+    })
+    const m = mergeOverlays([dead], opts({ isAlive: () => false }))
+    expect(m.s1.pendingPermissions).toEqual([])
+    expect(m.s1.pendingQuestions).toEqual([])
+  })
+
+  it("prunes plain idle entries from live files (absent == idle), but preserves unknown entries", () => {
+    const liveFile = file("serve-0", 1, {
+      plainIdle: entry({ activity: "idle", error: false }),
+      idleWithError: entry({ activity: "idle", error: true }),
+      idleWithPerm: entry({
+        activity: "idle",
+        pendingPermissions: ["p1"],
+      }),
+      idleWithQuest: entry({
+        activity: "idle",
+        pendingQuestions: ["q1"],
+      }),
+      workingSession: entry({ activity: "working" }),
+    })
+    const deadFile = file("serve-1", 999, {
+      deadPlainIdle: entry({ activity: "idle", error: false }),
+    })
+
+    const m = mergeOverlays(
+      [liveFile, deadFile],
+      opts({ isAlive: (pid: number) => pid === 1 }),
+    )
+
+    expect(m.plainIdle).toBeUndefined()
+    expect(m.idleWithError).toBeDefined()
+    expect(m.idleWithPerm).toBeDefined()
+    expect(m.idleWithQuest).toBeDefined()
+    expect(m.workingSession).toBeDefined()
+    expect(m.deadPlainIdle).toBeDefined()
+    expect(m.deadPlainIdle.unknown).toBe(true)
+  })
+
+  it("handles empty files array and handles missing owners map gracefully", () => {
+    expect(mergeOverlays([], opts())).toEqual({})
+
+    const f = file("serve-0", 1, { s1: entry({ activity: "working" }) })
+    const m = mergeOverlays([f], {
+      now: 1000,
+      staleMs: 45000,
+      isAlive: () => true,
+    })
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("breaks ties in equal lastActivity deterministically using serveId and pid", () => {
+    const fileA = file("serve-0", 10, {
+      s1: entry({ activity: "working", lastActivity: 500 }),
+    })
+    const fileB = file("serve-1", 20, {
+      s1: entry({ activity: "retry", lastActivity: 500 }),
+    })
+
+    const m1 = mergeOverlays([fileA, fileB], opts())
+    const m2 = mergeOverlays([fileB, fileA], opts())
+
+    expect(m1.s1.activity).toEqual(m2.s1.activity)
+  })
+
+  it("D1 regression: live owner file for directory without sid suppresses stale non-owner entry", () => {
+    const ownerFile = file("serve-0", 1, {}, 1000, "/path/to/repo")
+    const staleFile = file("serve-1", 2, {
+      s1: entry({
+        activity: "idle",
+        pendingPermissions: ["p1"],
+        lastActivity: 2000,
+      }),
+    }, 1000, "/path/to/repo")
+
+    const m = mergeOverlays([ownerFile, staleFile], opts({ owners: { s1: "serve-0" } }))
+    expect(m.s1).toBeUndefined()
+  })
+
+  it("owner file for a DIFFERENT directory does NOT suppress session", () => {
+    const ownerFileDiffDir = file("serve-0", 1, {}, 1000, "/path/other")
+    const peerFile = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 2000 }),
+    }, 1000, "/path/to/repo")
+
+    const m = mergeOverlays([ownerFileDiffDir, peerFile], opts({ owners: { s1: "serve-0" } }))
+    expect(m.s1).toBeDefined()
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("rule 1 wins normally when owner file DOES contain sid", () => {
+    const ownerFile = file("serve-0", 1, {
+      s1: entry({ activity: "idle", pendingPermissions: ["p1"], lastActivity: 1000 }),
+    }, 1000, "/path/to/repo")
+    const peerFile = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 2000 }),
+    }, 1000, "/path/to/repo")
+
+    const m = mergeOverlays([ownerFile, peerFile], opts({ owners: { s1: "serve-0" } }))
+    expect(m.s1.pendingPermissions).toEqual(["p1"])
+  })
+
+  it("crashed/dead owner falls through to rule 2", () => {
+    const deadOwnerFile = file("serve-0", 999, {
+      s1: entry({ activity: "idle", lastActivity: 500 }),
+    }, 1000, "/path/to/repo")
+    const peerFile = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 2000 }),
+    }, 1000, "/path/to/repo")
+
+    const m = mergeOverlays(
+      [deadOwnerFile, peerFile],
+      opts({ owners: { s1: "serve-0" }, isAlive: (pid) => pid === 2 }),
+    )
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("handles undefined directory matching correctly", () => {
+    const ownerFileUndefDir = file("serve-0", 1, {}, 1000, undefined)
+    const peerFileUndefDir = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 2000 }),
+    }, 1000, undefined)
+
+    const m = mergeOverlays([ownerFileUndefDir, peerFileUndefDir], opts({ owners: { s1: "serve-0" } }))
+    expect(m.s1).toBeUndefined()
+  })
+})
+

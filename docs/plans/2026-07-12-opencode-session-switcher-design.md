@@ -203,18 +203,30 @@ gap/reconnect.
 Serve-lease can move a session between serves, so two files may hold the same
 sid. Ordering by `updatedAt` (wall clock) lets a **delayed `idle` from the old
 owner overwrite `blocked` from the new owner** — losing exactly the state we care
-most about. Order by **(owning-epoch, revision)** instead: each entry carries a
-monotonically increasing per-session `revision` and the writer's
-`owning_server_epoch`; the higher epoch always wins, revision breaks ties within
-an epoch, and wall-clock is *diagnostic only*. Also carry an event id for
-dedup.
+most about. The original fix — order by `(owning-epoch, revision)` where epoch is
+the writer's process start time — was itself wrong and is **superseded**; see
+finding #8. Boot order is not ownership order, and `revision` is per-writer so it
+does not compare across processes at all.
 
-**Read-time merge:** union all files; per-sessionID keep the winner by
-**(epoch, revision)** as above (never bare wall-clock);
-**discard entries whose `pid` is dead or whose `heartbeat` is older than T** —
-those become `unknown`, never their last-claimed state. This is what keeps a
-wedged serve (the fleet's documented failure mode; see `monitoring-serve-pool`)
-from showing a frozen `working` forever.
+**RESOLVED — ownership is answered by a read-time join, not by an epoch
+(2026-07-31, finding #8).** Per-sessionID winner selection is:
+
+1. **Live overlay whose `serveId` == pigeon's `session_assignment.desired_serve_id`
+   wins outright.** The router names the current owner directly; nothing in the
+   overlay needs to encode a generation.
+2. Else **freshest `lastActivity` among live overlays** (wall-clock, one machine,
+   one clock — comparable across processes in a way `revision` is not).
+3. Else `unknown: true` from the freshest dead entry.
+
+`revision` stays **intra-file only** (change detection, write suppression) and must
+never be compared across files.
+
+**Read-time merge:** union all files; per-sessionID keep the winner by the rule
+above; **entries whose `pid` is dead or whose `heartbeat` is older than T** are
+emitted as `unknown` with pending sets cleared — never their last-claimed state,
+and never dropped. This is what keeps a wedged serve (the fleet's documented
+failure mode; see `monitoring-serve-pool`) from showing a frozen `working`
+forever.
 
 **Heartbeat / liveness parameters (decided):** plugin refreshes `heartbeat`
 every **15 s**; readers treat an entry as `unknown` if `heartbeat` age > **45 s**
@@ -494,11 +506,35 @@ JSON per render.
 
 All resolved against `~/projects/opencode` source and the live cloudbox system.
 
-1. **`--dir <deleted>` — RESOLVED (source), 1 smoke-test left.** `attach.ts:58-67`
-   catches `chdir` failure and passes the dir string through; no crash, no freeze
-   (string matches the session's stored dir, satisfying the event filter). Fix is
-   ours: relax `oc_auto_attach.lua:35` and spawn with `cwd=$HOME` + `--dir
-   <stored dir>`. One live end-to-end smoke-test recommended. See §4.
+1. **`--dir <deleted>` — SMOKE-TESTED 2026-07-30: attach OK, *turns hang*.**
+   Source reading was half right. `attach.ts:58-67` does catch the `chdir` failure
+   and pass the dir string through: **the TUI opens, no crash, and the event
+   filter is satisfied** (the stored-dir string matches, so history renders and
+   server-side changes stream). But a session whose directory is gone **cannot
+   complete a turn.**
+
+   Controlled A/B on cloudbox through the front door (`:4700`), same model
+   (Claude Opus 5), same prompt, same attach path, same timing — only the
+   directory differs:
+
+   | fixture | attach | turn |
+   |---|---|---|
+   | dir deleted (`ses_049cc1d7…`) | TUI opens, streams | `completed=false`, `parts=0`, `error=null` after **4 min** |
+   | dir exists (`ses_049c8e60…`, control) | TUI opens, streams | `completed=true`, `parts=3`, text `OK` in **<40 s** |
+
+   The failure mode is the dangerous one: **it hangs silently.** No error on the
+   assistant message, nothing rendered in the TUI, no timeout. Two consequences:
+
+   - **Task 10's attach branch for directory-gone sessions becomes preview-only /
+     read-only.** Offer "open read-only" + an explicit "directory is gone" notice;
+     do not present it as a resumable session. Re-rooting (attach at `$HOME` or a
+     replacement dir) is the only path back to a working session — a follow-on.
+   - **Our state model must not trust `working` from such a session.** A prompted
+     directory-gone session emits busy and then never idles, so it would render
+     `working` forever — an immortal phantom row. Treat "dir missing" as a
+     first-class row condition that *overrides* the activity glyph rather than
+     something the reducer can infer from events. (Cheap: the join already stats
+     the dir for display; reuse that.)
 2. **Subagent rollup — RESOLVED (source).** `parent_id` is a DB column
    (`session/session.ts:80,119`); the base-list query gets it free. Roots =
    `parent_id IS NULL`; descendants' worst state folds into a secondary glyph;
@@ -514,8 +550,223 @@ All resolved against `~/projects/opencode` source and the live cloudbox system.
    one-per-pane top-level only; no dedup needed. See §3.
 
 Remaining before "done" (not blockers to planning):
-- the single live `--dir <deleted>` attach smoke-test (finding #1);
 - exact interpretation of `retry.next` (epoch vs delay) — cosmetic, glyph only.
+
+### 6. BUG FIX 1's snapshot source — RESOLVED 2026-07-30 (was the Phase-1 blocker)
+
+The startup pending-snapshot has a source, and it is **not** the plugin SDK.
+
+- The plugin SDK exposes only `postSessionIdPermissionsPermissionId` (respond).
+  There is no list/get — verified by grepping the installed
+  `@opencode-ai/sdk/dist/gen`. ccmux hit exactly this and documented the
+  resulting hole (`docs/agent-adapters.md:116`: a pending permission is invisible
+  if ccmux starts while OpenCode is already waiting).
+- The **server HTTP API has what the SDK lacks.** From the live OpenAPI doc:
+  - `GET /api/permission/request` → `v2.permission.request.list`
+  - `GET /api/question/request` → `v2.question.request.list`
+  - plus per-session `GET /api/session/{sessionID}/permission` and `…/question`.
+
+  ~~The two `…/request` endpoints are **global**, so one call seeds every pending
+  prompt across the fleet. Verified live: both return `200` with
+  `{"location":…,"data":[]}`.~~
+
+  **CORRECTED 2026-07-30 (adversarial review). The above was wrong, and the
+  "verification" was theatre: an empty `data: []` cannot distinguish a global list
+  from a scoped one. It was cited as if it could.**
+
+  These endpoints are **directory/instance-scoped**, not global. Settled by
+  probing with the parameter rather than by observing an empty result:
+
+  ```
+  GET /api/permission/request                                    → location.directory = /home/dev  (serve default)
+  GET /api/permission/request?location[directory]=/home/dev/projects/workstation
+                                                                 → location.directory = /home/dev/projects/workstation
+  ```
+
+  The scope **moves with the parameter**. Confirmed in source: an instance-context
+  middleware resolves `store.load({ directory })` and `Permission.list()` returns
+  that instance's in-memory `pending`. `v2.permission.request.list` declares a
+  `location` query param in the live OpenAPI.
+
+  **Do not "iterate roots" to recover a fleet view.** That is the same hazard this
+  design already rejected for `/session/status` polling: `InstanceStore.load`
+  *creates* an instance on miss, so iterating roots through the door lazily
+  instantiates heavyweight instances fleet-wide. Worse, the door routes each GET to
+  **one** serve while pending state lives in per-serve memory — so even a correct
+  `location` can land on the wrong serve.
+- Not SQLite: the `permission` table is a project-level ACL (`action`/`resource`),
+  not pending prompts, and is empty; the `event` table is empty too. Pending
+  prompt state is in-memory in the serve process, exposed only over HTTP.
+
+**Consequence for Task 3 (revised): each plugin instance seeds ITSELF.** The
+correct scope was never fleet-global — it is exactly the scope the plugin's own
+overlay file already owns: its own serve, its own `ctx.directory`, queried
+in-process via `ctx.serverUrl`. This is *cheaper* than the original plan: no door
+round-trip, no opacity-guard exposure, no wrong-serve routing, no root iteration.
+
+**Also reconsider what the seed is FOR.** The startup-blindness premise is weaker
+than assumed for an *in-process* observer. The plugin loads at instance creation;
+permissions are created by turns, i.e. after init. And a serve restart *destroys*
+pending state (it is in-memory), so a post-restart "blocked" would be a lie —
+there is no dialog left to answer. ccmux's documented blind spot is an **external**
+observer starting late; our observer shares the state's lifetime.
+
+So the seed's real value is **drift repair, not startup**. Prefer a periodic
+in-process reconcile (~60 s, fire-and-forget) over a one-shot boot seed. This also
+defuses the seed-vs-stream race below.
+
+**Race hazard if the seed is kept as-is (built code, `session-state-impl.ts`).**
+`seedFromSnapshot` is replace-authoritative for named sessions. Snapshot taken at
+T1, `permission.asked p2` applied at T2, response lands at T3 ⇒ p2 is **dropped**;
+symmetrically a permission replied between T1 and T3 is **resurrected** and pins
+the row to `blocked` until the next idle. The earlier note that "the reducer
+already merges by `(epoch, revision)`" was hand-waving — the seed does not
+participate in that ordering at all, and stomps `revision` to 0. Fix: accept a
+snapshot only for sessions with **no event-derived entry yet**, or make it
+union-only. Tracked as a Task 3 prerequisite.
+
+### 7. Version skew in every "verified in source" claim (2026-07-30)
+
+**All source citations in this document were verified against `~/projects/opencode`
+at 1.15.10. The deployed fleet is 1.17.13.6 and auto-updates every 8 hours.** Two
+minors of drift, and this exact trap has already burned us once: the sq1v
+investigation re-verified against the deployed binary and found the stale-tree
+conclusion was *wrong on deployed*.
+
+This includes Task 1's load-bearing payload asymmetry (`asked→id`,
+`replied→requestID`), which is marked "do not re-spike". Treat it as
+version-stamped, not eternal.
+
+**Required before Task 3 wires the real event bus:** capture one real
+permission ask/reply and one busy/idle cycle **from the deployed fleet** and commit
+them as fixtures. The plan's own risk section already demands fixture tests from
+captured event sequences; Task 1 shipped with hand-written fixtures only. Any
+future "verified" claim in this doc must name the version it was verified against.
+
+**Watch-item:** the deployed revision exposes `POST /api/session/{id}/permission`
+(v2 create). Unused today, but if anything ever creates permissions out-of-band,
+"pending ⇒ busy" breaks and *idle-clears-pending starts eating real blocks*.
+
+**Landmine inherited from ccmux (`plugin.js:279-286`):** do **not** `await` the
+seed during plugin init. Those handlers are served in-process by a runtime whose
+state isn't ready until plugin init returns; awaiting deadlocks opencode boot.
+Fire-and-forget, and let the reducer accept a late snapshot — but note the seed
+does **not** participate in any cross-file ordering (that was the hand-waving
+corrected above); the late-snapshot fix is the "no event-derived entry yet" rule.
+
+### 8. Ownership resolved: pigeon's `desired_serve_id`, not an epoch (2026-07-31)
+
+Verified against the deployed fleet and the pigeon source, file:line.
+
+**A real fencing token exists, but not in opencode.** opencode exposes nothing
+usable: the plugin context is exactly `{client, project, worktree, directory,
+experimental_workspace, serverUrl, $}` (`packages/opencode/src/plugin/index.ts:149-164`),
+the event hook **strips** the durable `seq` (same file, :255), and there is no
+server-identity endpoint (`/global/health` returns only `{healthy, version}`).
+
+Routing lives in **pigeon**, in its own sqlite DB at `process.env.OPENCODE_ROUTING_DB`
+(verified live):
+
+- `session_assignment(session_id PK, directory_key, desired_serve_id,
+  owner_generation, state, last_active_at, updated_at)` —
+  `pigeon/packages/daemon/src/routing/route-schema.ts:17-25`.
+- `owner_generation` bumps **only on a genuine move** (`router.ts:197-202`);
+  pigeon's own README:37 states "monotonic so a stale-generation zombie can never
+  reacquire, even after expiry."
+- Placement is **rendezvous/HRW hash of the session id** (`rendezvous.ts:4-7`),
+  *not* of the directory — `directory_key` is stored but never used in the
+  decision. Perturbed by health filtering, a bounded-load skip (≥25 active
+  assignments, `config.ts:91`), and a 30 s sticky pin, so migration is real.
+- Live: **150 of 548** assignment rows have `owner_generation > 1` — ~27% of
+  sessions have migrated at least once. The conflict machinery earns its keep.
+
+**`owner_generation` is not load-bearing for us.** It is a fencing token for
+*writers acquiring leases*; the reader acquires nothing. The reader's question is
+"who owns this now", and `desired_serve_id` **is** that answer, written in the
+same row and the same transaction as the generation bump. Overlays cannot carry a
+generation anyway (the plugin has no access to it), so comparing generations
+reader-side would compare nothing.
+
+**The coverage gap: the causal argument was right, the join key was wrong
+(corrected 2026-07-31 by adversarial review).** The tempting argument runs: a
+session appears in two overlays *iff* it was hosted by two serves *iff* something
+moved it *iff* pigeon placed it — which is exactly what creates the row, so
+no-row ⇒ never migrated ⇒ nothing to arbitrate. Every link in that chain holds.
+**It still gives the wrong answer, because the row pigeon creates is not keyed by
+the session being arbitrated.** Placement uses `routingSid` = **the ROOT of the
+session tree** (`opencode-frontdoor/src/resolve.ts:17-19`, `place.ts:251`), so
+`session_assignment.session_id` only ever holds root ids — while overlay maps are
+keyed by the event's `sessionID`, which includes children (a subagent's
+`permission.asked` carries the *child* sid).
+
+Measured on the live pair of databases: **8,634 sessions, 4,600 of them children;
+548 assignment rows; exactly 2 children have a row.** So ~53% of all sessions
+would have fallen through to bare wall-clock ordering — the very rule BUG FIX 2
+declared broken. Not a phantom, and not an edge.
+
+**Fix: resolve to the root before joining.** The reader builds
+`owners[sid] = desired_serve_id_of(rootOf(sid))`, walking `session.parent_id` in
+opencode's own DB — which the reader already opens for the base list, so the
+linkage is free. `mergeOverlays` stays pure and simply requires `owners` to be
+keyed by *every* sid it should arbitrate.
+
+Lesson worth keeping: this is the second time in this project that a clean causal
+chain passed review while a **key mismatch** hid inside it. Check what the
+identifier *is*, not just that the causality holds.
+
+**Reading pigeon's sqlite is acceptable here** (same machine, same user, both
+repos ours) with guardrails: open `mode=ro` — **never `immutable=1`**, the DB is
+WAL and live-written, and immutable would yield silently stale/corrupt reads —
+`busy_timeout` ~100 ms, and catch *everything* (missing file, lock, `no such
+table/column`) by proceeding as if zero assignment rows. One `SELECT` of the whole
+548-row table per render, not N× `GET /route` (500 sequential HTTP calls on an
+interactive picker, and it dies when pigeon is down; the sqlite read survives a
+stopped pigeon). If the schema churns twice, escalate to a bulk `GET /assignments`
+endpoint. Insurance: a schema-contract test **in pigeon's repo** asserting
+`session_assignment` still has `session_id` / `desired_serve_id`, commented
+"externally consumed by oc-session-list".
+
+**Consequences for the build:** overlay entries carry `serveId`
+(`process.env.OPENCODE_SERVE_ID`, verified live e.g. `serve-2`) instead of a boot
+epoch; cross-file ordering uses `lastActivity`; `revision` is demoted to
+intra-file use; and the writer should **evict sessions idle > 30–60 min** from its
+overlay (absence ≡ idle, since the DB base-list already carries every session),
+which shrinks the stale-zombie surface structurally rather than by guesswork.
+
+**Absence is a positive claim (D1, adversarial review).** Rule 1 must be
+*owner-authoritative*: if a **live** owner file **for the session's directory**
+exists but does not mention the session, the merge emits **nothing** (absent ≡
+idle) rather than falling through to rule 2. Without that, a session that was
+blocked when it migrated leaves a stranded entry on the old serve — non-empty
+pending set, so idle-eviction deliberately skips it; no further events, so it
+never changes; the serve stays up, so the file stays live — and once the true
+owner's entry goes plain-idle and is pruned, rule 2 crowns the frozen `blocked`
+**permanently**, advertising a block nobody can service. Note one serve writes one
+overlay file *per directory*, so the owner file must be matched on
+`(serveId, directory)`, not `serveId` alone.
+
+**Degraded-routing window (D3, accepted + documented).** When pigeon is
+unreachable the front door forwards to the **anchor** (serve-0) and writes no row
+(`resolve.ts:52-60,77-86`, `place.ts:248` → `pigeon-degraded`). The routing DB
+stays perfectly readable, so rule 1 keeps confidently preferring the now-stale
+`desired_serve_id` over serve-0's live truth for the whole outage — the sqlite
+read surviving a stopped pigeon is exactly what makes the reader *wrong* rather
+than *degraded*. Bounded (heals on re-place) and display-only. If it bites,
+downgrade rule 1 to advisory when the door reports `degraded`.
+
+**Make degradation visible (D5).** The catch-all that turns a failed routing-DB
+read into an empty owner map silently reverts the merge to wall-clock-newest-wins
+— i.e. the pre-fix behaviour, with no operator signal. `oc-session-list` must
+surface a `joinDegraded` flag. Also: overlay JSON needs a **schema version field**;
+the reader must validate entry shape before merging, since a version-skewed writer
+can emit entries missing `pendingPermissions` and crash the picker.
+
+Residual, accepted: during the window after pigeon flips `desired_serve_id` but
+before the new owner's plugin has written an entry, rule 2 shows the old owner's
+last-known state — a wrong glyph for seconds, on a display surface. Pid-reuse can
+also make a dead pid look live; cosmetic. Statistical note: the "150/548 rows have
+`owner_generation` > 1" figure is over *placed roots*, not all sessions — fine as
+motivation, not citable as a fleet-wide session rate.
 
 ## Related follow-ons (separable)
 
@@ -561,6 +812,69 @@ it **folds them into a single row** — which is exactly our K=4-serves-hosting-
 -sessions topology; its own docs note input-injection then becomes ambiguous.
 **Steal, don't adopt:** picker/row model, notifications, tmux target resolution,
 previews, sidebar. (Gated by the Task 0.5 spike.)
+
+### Task 0.5 spike result (2026-07-30): **KEEP OUR PLAN** — decided, do not re-litigate
+
+Read at `/tmp/opencode/ccmux`. Rule was "≥4 YES *and* Q1+Q2 YES ⇒ extend". Q1 **NO**,
+Q2 **PARTIAL** ⇒ keep our plan. Extending ccmux means replacing its identity
+spine, not adding an adapter.
+
+| # | Question | Verdict | Evidence |
+|---|---|---|---|
+| 1 | One server → N independent rows? | **NO** | `derivePaneTrackedSessionId()` keys rows `` `${agentType}_${paneToken}` `` (`src/daemon/sessions.ts:34-38`) into `Map<string,Session>` (`:165`, written `:411`). The N→1 fold is deliberate: `aggregateOpenCodeMarkers` (`adapters/opencode/aggregate.ts:17-56`), wired `plugin-adapter.ts:187-201`; stated as design in `docs/agent-adapters.md:112`. |
+| 2 | Row with no TTY at all? | **PARTIAL** | Paneless rows exist only as a bespoke `"background"` mode fed exclusively by Claude's own roster/state files (`types/session.ts:17`, `sessions.ts:423-462`, `sources/claude-background.ts`). For marker-based agents, no pane ⇒ no row: `if (!pane) return null` (`plugin-adapter.ts:203-211`), `daemon/index.ts:750-753`. Docs: "OpenCode launched outside a tmux pane is out of scope" (`agent-adapters.md:113`). |
+| 3 | Arbitrary `focus-or-attach(session_id)` on select? | PARTIAL | Hardcoded 2-branch `activateItem()` (`tui/App.tsx:213-231`); seam exists (`AgentDef` already holds a function field, `lib/agents.ts:112`) but no hook. |
+| 4 | Attachments as a collection? | **NO** | `tmuxPane: string \| null` — singular (`types/session.ts:128`), ~15 call sites branch on `!session.tmuxPane`. Ownership is inverted: the pane *names* the session. |
+| 5 | External transcript-search provider? | PARTIAL | Agent-gated file parser, `if (agentType !== "claude" && !== "codex") return null` (`daemon/transcript-search.ts:207-209`); clean daemon `/search` boundary, but OpenCode gets nothing today. |
+| 6 | `question.*` + pending snapshot? | **YES** | Marker shape already there (`plugins/opencode/plugin.js:246-267`); only the state enum needs widening (`daemon/session-markers.ts:21`); `AttentionType` already includes `"question"` (`types/session.ts:69`). |
+
+**The finding that most validates this design:** ccmux carries a
+`Session.ambiguousWait` flag (`types/session.ts:192-204`) that **disables its own
+headline feature** — notification Approve/Deny — whenever more than one
+server-side session is waiting behind one pane, because "a keystroke lands on
+whichever dialog the pane currently renders." That is empirical, shipped proof
+that pane-identity cannot express our topology. Session-identity makes that whole
+bug class structurally impossible. Also note ccmux's plugin already writes **one
+marker file per OpenCode session id** (`plugin.js:66-68`) — the per-session data
+exists upstream; only ccmux's registry collapses it.
+
+**Techniques to steal** (referenced from Tasks 9-11):
+
+1. **Focus-or-attach with window-name dedupe** — `tui/utils/tmux.ts:258-330`
+   (`openDedupedCommandWindow`): `list-windows -a` → switch if a live named window
+   exists, else `new-window -n <name>` where the command *is* the pane process (no
+   shell wrapper — a lingering shell poisons name-dedupe, rationale at `:250-257`).
+   Directly reusable for Task 10.
+2. **Client-agnostic tmux targeting** — pick the most-recently-active client by
+   `#{client_activity}` (`lib/tmux-client.ts:46-70`), then
+   `switch-client -c <tty> -t <pane>`, with `display-popup -c <tty>` for paneless
+   rows (`daemon/notify-jump.ts:44-67`). Confirms BUG FIX 4. Also
+   `resolveLaunchPane` **re-resolves per action rather than caching** — confirms
+   BUG FIX 3 (TOCTOU).
+3. **Notification safety tokens** — dual staleness stamps `statusChangedAt` +
+   monotonic `attentionGeneration` (`types/session.ts:145-154`); a press whose
+   tokens mismatch is 409'd and re-notified instead of blind-keystroked; undelivered
+   reply text is quoted back without Enter. Best-in-class "don't answer a prompt
+   that moved" — adopt if we ever answer from the picker.
+4. **Preview capture** — `capture-pane -e -t <pane> -p -S-<n>` that *throws* on a
+   dead pane instead of returning `""` (`tui/utils/tmux.ts:16-38`); pane flash via
+   per-pane `window-style` so it never steals focus (`:110-170`). Task 11.
+5. **Row/search model** — responsive column budgeting
+   (`components/session-columns.ts:76-132`), tiered match ranking
+   `identity > cwd > prompt > pane > transcript` that reports *why* a row matched
+   (`utils/grouping.ts:34-60`), asymmetric snippet window (lead 24 / trail 136) so
+   the match isn't clipped (`transcript-search.ts:26-32`). Task 9.
+6. **Inbox-style attention** — `unread/read/null` kept orthogonal to status
+   (`daemon/attention-tracker.ts:14-31`). Independent arrival at our
+   `attention: seen/unseen` axis; copy the transition rules.
+
+**Safety note for any future "answer from the picker":** OpenCode's permission
+dialog has no absolute selector — only Left/Right move the highlight, digits/Tab
+are inert, and Escape interrupts the whole turn and strands the session in
+`working` (`lib/agents.ts:645-667`). Deny is `Right Right Enter`. A leading space
+defuses `/` but **not** `!` (OpenCode trims it and enters shell mode, where Enter
+*executes*) — inherit their `unsafeReplyPattern` `/^\s*!/`. Further reason to use
+the structured reply API, never keystrokes.
 
 **Claude Code Agent View** (`code.claude.com/docs/en/agent-view`) — the strongest
 *product* precedent and independent validation: it models semantic state

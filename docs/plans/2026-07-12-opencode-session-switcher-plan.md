@@ -38,7 +38,8 @@ permission/index.ts,question/index.ts,session/session.ts,session/session.sql.ts}
 > our *logical conversation* identity. Plan changes: **new Task 0.5 — timeboxed
 > ccmux spike** (gates whether we extend it or only steal techniques); four bug
 > fixes folded in — **pending-interaction snapshot at plugin init** (Task 1/3),
-> **(epoch, revision) ordering instead of wall-clock** (Task 2), **TOCTOU
+> **ownership-aware ordering instead of wall-clock** (Task 2; the original
+> `(epoch, revision)` form was itself wrong — superseded by finding #8), **TOCTOU
 > re-resolve on accept** (Task 10), **invoking-client-scoped tmux focus**
 > (Task 10); plus the **`attention: seen/unseen` axis** (Tasks 7/8) and the
 > **join moves into `oc-session-list`** so nvim isn't the correctness boundary
@@ -303,49 +304,123 @@ restart silently loses blocked-ness. Task 3 wires the real snapshot source.
 
 ---
 
+## GATE — corrections from the 2026-07-30 adversarial review (do before Task 2)
+
+Four items. Three are doc-level and are folded into the task text below; one is a
+code defect in shipped Task 1. Rationale and evidence live in the design doc.
+
+1. **BUG FIX 1's resolution was wrong** — `/api/permission/request` is
+   directory/instance-scoped, not global, and the "verified live" empty-list
+   evidence could not have shown otherwise. Corrected in the design doc:
+   each plugin instance seeds **itself** (own serve, own `ctx.directory`,
+   in-process), and the seed is demoted toward a periodic **reconcile**. Also fix
+   the seed-vs-stream race (`seedFromSnapshot` may only claim sessions with no
+   event-derived entry).
+2. ~~**`revision` is never incremented**~~ — **DONE** (commit `98c25b6`, shipped in
+   PR #226): the reducer bumps on every committed change, with a test that fails if
+   the bump is absent. Note finding #8 has since demoted `revision` to *intra-file*
+   use; it is no longer the cross-file tiebreak.
+3. ~~**`epoch = process start time` is not a fencing token**~~ — **RESOLVED
+   2026-07-31**, design doc finding #8. Epoch is deleted outright. Ownership is a
+   read-time join on pigeon's `session_assignment.desired_serve_id`; cross-file
+   freshness is `lastActivity`. Task 2 below is rewritten accordingly.
+4. **Deployed-fleet event fixture** must be captured before Task 3 wires the real
+   bus (version skew, design doc finding #7). **Still open — blocks Task 3.**
+
 ## Task 2: Overlay serialization + merge (stale ⇒ unknown, never dropped)
 
 **Files:** Modify `session-state-impl.ts`; extend the test.
 
-**Step 1: Failing tests** (note: ordering is **(epoch, revision)**, NOT wall clock
-— BUG FIX 2):
+**⚠ Epoch is dead. Ownership comes from an owner map.** GATE item 3 is resolved by
+design-doc finding #8 — read it before implementing. Summary of what changed:
+
+- **No `epoch` field anywhere.** Boot time does not order ownership (migrate a
+  session onto an *older-booted* serve and the stale entry wins permanently — a
+  persistent inversion, not a race).
+- **`revision` is intra-file only.** It is per-writer: serve A watching a session
+  for a week reaches revision 400, serve B owning it for ten minutes is at 3, so A
+  would win forever. That is the *same bug shape* the review already killed once —
+  a monotonic-per-writer counter treated as a global order. Never compare it
+  across files.
+- **Ownership is a read-time join.** Overlay entries carry `serveId`; the caller
+  supplies `owners: Record<sessionId, serveId>` built from pigeon's
+  `session_assignment.desired_serve_id` (Task 6 does the sqlite read; `mergeOverlays`
+  stays pure and takes the map as an argument).
+- **The join key is the ROOT session.** Pigeon places by `routingSid` = the root of
+  the session tree, so child/subagent sids have no row (measured: 4,600 children
+  live, 2 have rows). Task 6 must build `owners[sid] = owner_of(rootOf(sid))` via
+  the `parent_id` walk it already does. Getting this wrong silently routes ~53% of
+  sessions through bare wall-clock ordering.
+- **Absence is authoritative.** A live owner file *for the session's directory*
+  that omits the session means idle — emit nothing, do not fall through. One serve
+  writes one file per directory, so match `(serveId, directory)`.
+- **Cross-file freshness is `lastActivity`** — wall-clock, one machine, one clock.
+  (The reducer already sets it on committed events only; it is exactly
+  "when this writer last saw this session do something".)
+
+Winner rule, in order:
+1. A **live** overlay whose `serveId === owners[sid]` wins outright.
+2. Else the **freshest `lastActivity` among live** overlays.
+3. Else `unknown: true` from the freshest dead entry.
+
+Note rule 1 requires *live*: a `desired_serve_id` pointing at a crashed serve must
+not win with a dead entry — fall through to rule 2 so a live observer can speak.
+
+**Step 1: Failing tests**
 ```typescript
 import { mergeOverlays } from "../session-state-impl"
 const entry = (over: any = {}) => ({ activity: "working", error: false, pendingPermissions: [], pendingQuestions: [], lastActivity: 10, updatedAt: 10, revision: 1, ...over })
+const file = (serveId: string, pid: number, sessions: any, heartbeat = 1000) => ({ serveId, pid, heartbeat, sessions })
+const opts = (over: any = {}) => ({ now: 1000, staleMs: 45000, isAlive: () => true, owners: {}, ...over })
 
-it("higher epoch wins even when its wall clock is OLDER (serve-lease migration)", () => {
+it("owner wins even when its wall clock is OLDER (migration)", () => {
   // The bug this encodes: a delayed `idle` from the OLD owner must not
   // overwrite `blocked` from the NEW owner just because it arrived later.
-  const oldOwner = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "idle", pendingPermissions: [], updatedAt: 999, revision: 9 }) } }
-  const newOwner = { pid: 2, epoch: 2, heartbeat: 1000, sessions: { s1: entry({ activity: "working", pendingPermissions: ["p1"], updatedAt: 10, revision: 1 }) } }
-  const m = mergeOverlays([oldOwner, newOwner] as any, { now: 1000, staleMs: 45000, isAlive: () => true })
-  expect(m.s1.pendingPermissions).toEqual(["p1"])   // new owner wins on epoch
+  const old = file("serve-0", 1, { s1: entry({ activity: "idle", pendingPermissions: [], lastActivity: 999, revision: 9 }) })
+  const cur = file("serve-1", 2, { s1: entry({ activity: "working", pendingPermissions: ["p1"], lastActivity: 10, revision: 1 }) })
+  const m = mergeOverlays([old, cur] as any, opts({ owners: { s1: "serve-1" } }))
+  expect(m.s1.pendingPermissions).toEqual(["p1"])
 })
-it("within one epoch, higher revision wins", () => {
-  const a = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "working", revision: 1 }) } }
-  const b = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "idle", revision: 2 }) } }
-  const m = mergeOverlays([a, b] as any, { now: 1000, staleMs: 45000, isAlive: () => true })
-  expect(m.s1.activity).toBe("idle")
+it("higher revision does NOT win across files (revision is per-writer)", () => {
+  const a = file("serve-0", 1, { s1: entry({ activity: "idle", lastActivity: 10, revision: 400 }) })
+  const b = file("serve-1", 2, { s1: entry({ activity: "working", lastActivity: 999, revision: 3 }) })
+  const m = mergeOverlays([a, b] as any, opts())            // no owner known
+  expect(m.s1.activity).toBe("working")                      // freshest lastActivity wins
+})
+it("no owner entry -> freshest lastActivity among live wins", () => {
+  const a = file("serve-0", 1, { s1: entry({ activity: "idle", lastActivity: 500 }) })
+  const b = file("serve-1", 2, { s1: entry({ activity: "working", lastActivity: 900 }) })
+  expect(mergeOverlays([a, b] as any, opts()).s1.activity).toBe("working")
+})
+it("owner pointing at a DEAD serve does not win; a live observer speaks", () => {
+  const dead = file("serve-0", 999, { s1: entry({ activity: "idle", lastActivity: 999 }) })
+  const live = file("serve-1", 2,   { s1: entry({ activity: "working", pendingPermissions: ["p1"], lastActivity: 10 }) })
+  const m = mergeOverlays([dead, live] as any, opts({ owners: { s1: "serve-0" }, isAlive: (pid: number) => pid === 2 }))
+  expect(m.s1.unknown).toBeFalsy()
+  expect(m.s1.pendingPermissions).toEqual(["p1"])
 })
 it("dead pid and stale heartbeat -> entries flagged unknown, NOT dropped", () => {
-  const deadPid = { pid: 999, heartbeat: 1000, sessions: { s2: entry() } }
-  const stale   = { pid: 2,   heartbeat: 900,  sessions: { s3: entry() } }
-  const m = mergeOverlays([deadPid, stale] as any, { now: 1000, staleMs: 45, isAlive: (pid) => pid === 2 })
+  const deadPid = file("serve-0", 999, { s2: entry() })
+  const stale   = file("serve-1", 2,   { s3: entry() }, 900)
+  const m = mergeOverlays([deadPid, stale] as any, opts({ staleMs: 45, isAlive: (pid: number) => pid === 2 }))
   expect(m.s2.unknown).toBe(true)
   expect(m.s3.unknown).toBe(true)   // heartbeat age 100 > 45
 })
+it("unknown entries clear pending sets (never assert a block nobody is holding)", () => {
+  const dead = file("serve-0", 999, { s1: entry({ pendingPermissions: ["p1"], pendingQuestions: ["q1"] }) })
+  const m = mergeOverlays([dead] as any, opts({ isAlive: () => false }))
+  expect(m.s1.pendingPermissions).toEqual([])
+  expect(m.s1.pendingQuestions).toEqual([])
+})
 ```
 
-**Step 2: FAIL → Step 3: Implement.** `serializeOverlay({pid, serve, epoch,
-directory, heartbeat, sessions})` = shape passthrough (`epoch` = the writer's
-start-time/boot id; `revision` is per-session, bumped by the reducer on every
-state change). `mergeOverlays(files, {now, staleMs, isAlive})`: for each file
-compute `live = isAlive(pid) && now - heartbeat <= staleMs`; union sessions
-keeping the winner by **`(epoch, revision)`** — wall clock is diagnostic only and
-must never decide; if a session's winning file is
-NOT live, emit `{ ...entry, unknown: true, pendingPermissions: [],
-pendingQuestions: [] }`. (Prune plain-idle entries with empty sets and no error
-from the union — absent≡idle.)
+**Step 2: FAIL → Step 3: Implement.** `serializeOverlay({pid, serveId, directory,
+heartbeat, sessions})` = shape passthrough (**no `epoch`**).
+`mergeOverlays(files, {now, staleMs, isAlive, owners})`: for each file compute
+`live = isAlive(pid) && now - heartbeat <= staleMs`; union sessions keeping the
+winner by the three-step rule above; if a session's winning file is NOT live, emit
+`{ ...entry, unknown: true, pendingPermissions: [], pendingQuestions: [] }`.
+(Prune plain-idle entries with empty sets and no error from the union — absent≡idle.)
 
 **Step 4: PASS → Step 5: Commit** `feat(plugin): overlay serialize + stale-aware merge`.
 
@@ -368,7 +443,7 @@ const DIR = join(homedir(), ".local/share/opencode/session-state.d")
 const HEARTBEAT_MS = 15_000
 const plugin: Plugin = async (ctx) => {
   mkdirSync(DIR, { recursive: true })
-  const serve = process.env.OPENCODE_SERVE_ID ?? new URL(ctx.serverUrl).port ?? "0"
+  const serve = process.env.OPENCODE_SERVE_ID || new URL(ctx.serverUrl).port || "0"   // `||` not `??`: an unset port is "" , not null
   const dirhash = createHash("sha256").update(ctx.directory ?? "").digest("hex").slice(0, 16)
   const file = join(DIR, `${serve}-${dirhash}.json`)   // restart overwrites its predecessor (free GC)
   let sessions: StateMap = emptyState()
@@ -380,6 +455,9 @@ const plugin: Plugin = async (ctx) => {
   flush()
   const timer = setInterval(flush, HEARTBEAT_MS); if (typeof (timer as any).unref === "function") (timer as any).unref()
   process.once("exit", () => { try { clearInterval(timer); rmSync(file, { force: true }) } catch {} })  // best-effort only
+  // ⚠ NOT SUFFICIENT — see "Zombie writer" below. Instance reload disposes and
+  // recreates instances *inside a living process*, so `exit` never fires and the
+  // old instance keeps flushing to the same file.
   return {
     event: async ({ event }) => {
       if (event?.type === "session.deleted") { const s = (event.properties as any)?.sessionID; if (s && sessions[s]) { delete sessions[s]; flush() } return }
@@ -397,9 +475,70 @@ seed state from the instance's **currently-pending** permissions/questions via
 `seedFromSnapshot`. Find the in-process authority (the `Permission`/`Question`
 `InstanceState` maps — check what the plugin ctx exposes; if nothing is reachable
 in-process, fall back to a door-side read, and if neither works **stop and
-report**: this is a Phase-1 blocker, not a nice-to-have). Also stamp `epoch`
-(process start time) once at init. Smoke: trigger a permission prompt, restart
-that serve, confirm the session still reads `blocked` after restart.
+report**: this is a Phase-1 blocker, not a nice-to-have). Smoke: trigger a
+permission prompt, restart that serve, confirm the session still reads `blocked`
+after restart.
+
+**⚠ Writer identity hazard (D4, adversarial review).** The filename
+`${serve}-${dirhash}.json` carries **no pid**, and `OPENCODE_SERVE_ID` is
+*inherited by child processes* — a documented hijack vector (`route-gate.nix:38-43`,
+the 2026-07-25 incident). Any nested `opencode` that loads the globally-configured
+plugin in the same directory becomes a **second live writer of the same file**,
+alternating whole-file overwrites. Worse, it interacts lethally with the
+zombie-writer fix below ("if the file stamp is newer than ours, go silent"): a
+short-lived stray would **permanently silence the real serve's writer** for that
+directory, so every session there flips to `unknown` once the heartbeat ages out.
+Mitigate: verify this process is the registered pool member (own pid/port against
+the serve registry) before writing, or at minimum stamp the pid and refuse to
+stay silent when the superseding writer is dead.
+
+**Overlay needs a schema `version` field** (D5) — the reader must validate entry
+shape before merging, or a version-skewed writer's entry (e.g. missing
+`pendingPermissions`) crashes the picker.
+
+**No `epoch`.** The overlay carries `serveId` (from `OPENCODE_SERVE_ID`) and
+nothing boot-derived; see finding #8. Two further writer duties from that finding:
+
+- **Idle eviction.** Drop a session from the overlay once it has had no events for
+  30–60 min with empty pending sets and no error. Absent ≡ idle (the DB base-list
+  still carries every session), so this shrinks the stale-zombie surface
+  structurally instead of by guesswork.
+- **Seed-vs-stream race (GATE item 1).** `seedFromSnapshot` is currently
+  replace-authoritative and stomps `revision` to 0, so a late snapshot can drop a
+  permission asked after the snapshot was taken, or resurrect one already replied.
+  Fix here: accept a snapshot only for sessions with **no event-derived entry yet**
+  (or make it union-only), and prefer a periodic ~60 s reconcile over a one-shot
+  boot seed. Do **not** `await` the seed during plugin init — that deadlocks boot.
+
+**Step 1b: Zombie writer defense (adversarial review, 2026-07-30).** Clearing the
+interval on `process.once("exit")` is not enough. `InstanceStore.reload` disposes
+and recreates instances **inside a living process** (and `InstanceDisposed` likely
+never reaches the plugin — see Risks). The old plugin instance's interval then keeps
+flushing **stale state with a fresh heartbeat and a live pid** to the *same*
+`${serve}-${dirhash}.json`, alternating whole-file overwrites with the new
+instance. The reader cannot detect this: same pid, fresh heartbeat. Every reload
+leaks another writer.
+
+Fix: stamp a **per-instance init timestamp** into the file. On each `flush()`, read
+the current file first; if its stamp is **newer than our own**, we have been
+superseded — `clearInterval` and go silent (do not delete the file; the live
+instance owns it).
+
+Cheap verification: trigger one instance reload on cloudbox and confirm the file
+does not flap between two states.
+
+**Step 1c: Seed scope + race (GATE items 1 and 4).** Seed **in-process from this
+instance's own serve** (`ctx.serverUrl`, `ctx.directory`) — NOT fleet-wide through
+the door, which is impossible anyway (the endpoints are directory-scoped) and
+would lazily instantiate instances. Fire-and-forget; never `await` during init.
+Apply the snapshot only to sessions with **no event-derived entry yet**, so a
+late-landing snapshot cannot drop a newer `asked` or resurrect a replied prompt.
+Prefer a periodic (~60 s) reconcile over a one-shot boot seed — see the design
+doc, which argues the startup-blindness premise is weak for an in-process observer
+and the real value is drift repair.
+
+Before this task: capture a real permission ask/reply and a busy/idle cycle from
+the **deployed** fleet (1.17.x, not the 1.15.10 source tree) and commit as fixtures.
 
 **Step 2: Typecheck** `npx tsc --noEmit` → clean.
 
@@ -485,11 +624,28 @@ oc-search's hardcoded store-path rot).
 selects `id,title,parent_id,directory,time_updated`; **excludes archived**
 (`time_archived IS NULL`, `session/session.sql.ts:52`); ranks **per root** so a
 recently-active child keeps its (older) parent tree in the top-N:
+**⚠ `COALESCE(parent_id,id)` is WRONG here (adversarial review, 2026-07-30).** It
+lifts a child exactly **one** level, but this fleet has **multi-level** nesting —
+our own sq1v work walks parents "bounded at depth 8" and live-verified real
+grandchild chains. With the COALESCE form a blocked grandchild resolves to a
+*middle* session as its root, so it never rolls up to the true root and
+**blocked-pierces-scope silently fails for exactly the swarm topology that
+motivated this feature.**
+
+Use `WITH RECURSIVE` to walk to the true root (bound the depth), and add a
+**3-level fixture test**. At ~6k rows the cost is irrelevant.
+
+The same defect infects **Task 9's** "union in overlay-blocked roots": an overlay
+sid may be a deep child, so that individual fetch must walk up too — and must apply
+the same `time_archived IS NULL` filter as the base list, or the union will
+resurrect archived sessions.
+
 ```sql
 -- roots (and their trees) ordered by the tree's most-recent activity
+-- REPLACE the COALESCE below with a recursive walk to the true root:
 WITH tree AS (
   SELECT id,title,parent_id,directory,time_updated,
-         COALESCE(parent_id,id) AS root
+         COALESCE(parent_id,id) AS root   -- ⚠ single-level; see warning above
   FROM session WHERE time_archived IS NULL
 ),
 ranked AS (SELECT root, MAX(time_updated) AS recency FROM tree GROUP BY root
@@ -557,6 +713,10 @@ tmux session/window for attached sessions; directory-classify otherwise.
 - `effective_state`: overlay `unknown` flag → `unknown`; pending/error → blocked/
   error; else activity; missing overlay → idle.
 - attachment = `location[sid] ~= nil`.
+- **dir-missing overrides BOTH glyph and sort** (Task 0 finding). Stat the
+  directory during the join; if it's gone, the row can never make progress, so it
+  must not be allowed to sort as `working`. Otherwise a prompted dir-gone session
+  emits busy, never idles, and pins itself to the **top** of the list forever.
 - sort: `error`/`blocked` → `retry` → `working` → **`idle`+`unseen`** → `idle`/`unknown`;
   then asc idle-age (overlay `lastActivity`, fallback DB `time_updated`);
   clustered by project.
@@ -635,15 +795,37 @@ or leave the invoking terminal unchanged.
   door's first `/event?session_ids=` drift-reconnects), `$FRONTDOOR_URL`, and the
   settle logic. This also keeps the switcher outside the opacity guard's scope.
 
-**Step 2: Directory-gone in `oc_auto_attach.lua`.** This is the ONE case that
-cannot go through the binary (its probe/`--dir` path needs a real directory). Add
-`opts.allow_missing_dir` so the picker can call `M.open()` directly for it:
-skip the `isdirectory==0` reject (**now line 45**, was 35), set jobstart
-`cwd = vim.env.HOME` (**line 74**), still pass `--dir <stored dir>` (**line 71**),
-and pass `url = vim.env.FRONTDOOR_URL or "http://127.0.0.1:4700"`. Default
-(non-picker) path unchanged. Accepting no pre-placement here is fine — these are
-old/pruned-worktree sessions where sticky placement doesn't matter. If Task 0
-downgraded to preview-only, this branch shows a notice instead.
+**Step 2: Directory-gone ⇒ READ-ONLY (Option A — decided 2026-07-30 after Task 0).**
+
+Task 0 downgraded this branch. Attaching *works* (TUI opens, history renders),
+but the session **can never complete a turn** and hangs with no error — see the
+design doc's Verification finding #1 for the controlled A/B. So we open it for
+reading and refuse to imply it is resumable.
+
+Implementation (in `oc_auto_attach.lua`, driven by the picker):
+- Add `opts.allow_missing_dir`: skip the `isdirectory==0` reject (**now line 45**,
+  was 35), set jobstart `cwd = vim.env.HOME` (**line 74**), still pass
+  `--dir <stored dir>` (**line 71**), and pass
+  `url = vim.env.FRONTDOOR_URL or "http://127.0.0.1:4700"`. Default (non-picker)
+  path unchanged. No pre-placement needed — these are old/pruned-worktree sessions.
+- **Before opening, `vim.notify` a warning**: directory `<dir>` no longer exists;
+  this session is **read-only** — sending a message will hang with no error.
+- The row itself must be **visibly marked** (Task 8/9) so the state is obvious
+  *before* selecting, not only after.
+
+**Do NOT** silently let the user type into it. The whole hazard is that the hang
+is indistinguishable from normal thinking.
+
+**Future Option B (deliberately deferred, not scheduled): re-rooting.** Make a
+directory-gone session resumable again by rebinding it to a live directory
+(`$HOME`, or a user-picked replacement). Attractive because the conversation
+itself is intact — only its filesystem anchor is missing. Deferred because it
+needs its own machinery: a way to rewrite/override the session's stored directory
+server-side (or start a successor session seeded with the old transcript), a
+picker affordance to choose the new root, and a decision about whether the
+rebinding is sticky. Revisit if read-only turns out to be annoying in practice.
+Nothing in Option A blocks it — the row condition and the notice are exactly the
+hooks Option B would hang off.
 
 **Step 3: Manual smoke:** cross-window/session jump focuses correctly; resume
 detached; resume detached with pruned dir (Task 0 outcome).
@@ -702,6 +884,10 @@ facets, glyphs, file locations).
 - **Later:** statusline counts (only after staleness handling proven), live-buffer
   preview, mobile, cross-host jump, socket/HTTP overlay push, oc-auto-attach
   project→directory routing.
+- **Option B — re-rooting a directory-gone session** (user-approved as a *future*
+  option, 2026-07-30; Option A read-only ships first). Rebind a session whose
+  directory was deleted to a live directory so it becomes resumable again. See
+  Task 10 Step 2 for why it's separable and what it would need.
 
 ## Risks / watch-items
 
