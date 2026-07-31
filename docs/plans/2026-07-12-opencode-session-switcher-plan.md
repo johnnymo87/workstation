@@ -593,14 +593,40 @@ independently. Note this guard only covers processes that *bind a routing slot*;
 a nested non-serve `opencode` inherits the env without tripping it, which is
 exactly the gap the plugin's own cmdline check closes.
 
-**Step 4b: Manual smoke on the fleet** (after the bundle package exists):
-`nix run home-manager -- switch --flake .#cloudbox`;
-drive a session to blocked/working; `cat ~/.local/share/opencode/session-state.d/*.json`.
-Expect one file per (serve×dir), advancing `heartbeat`, correct state.
+**Step 4b: Manual smoke on the fleet — DONE 2026-07-31 (commit `1724e6c`).**
+The bundle package now exists: `pkgs/opencode-plugin-bundle` (shared builder),
+called by `pkgs/session-state-plugin` and, after refactor, by
+`pkgs/self-compact-plugin`. Deployed cloudbox-gated via
+`nix run home-manager -- switch --flake .#cloudbox`.
+
+Verified on the live fleet, in order:
+
+1. **The gate is real.** The cloudbox generation contains `session-state.js` +
+   `.js.map`; the devbox generation contains neither. No `*-impl` file is
+   deployed to the plugins directory on either.
+2. **No serve restart was needed.** A new *instance* picks the plugin up:
+   `GET :4700/question?directory=/tmp/opencode/probe-dir` (read-only, through
+   the front door) created an instance on serve-0 which immediately wrote
+   `serve-0-5e5bd0e61ab58c6a.json`. All four pool serves stayed `active
+   (running)`; zero plugin errors in the pool journal.
+3. **Real state transitions, both paths.** Driving a turn on that session
+   produced `revision: 3, error: true` on a failed call and then
+   `revision: 7, error: false, activity: idle` on a successful one — so the
+   error flag is set *and cleared*, not sticky. (The first failure was my own
+   bad model id, `claude-haiku-4-5@default` instead of `@20251001` — not a
+   plugin fault.)
+4. **`session.deleted` empirically confirmed.** `DELETE /session/<id>` removed
+   the entry from `sessions`. This is the payload whose key I nearly
+   misreported in cycle 3 (the TUI reads `info.id`, the schema carries
+   `sessionID`); the reducer demonstrably reads the right field on the
+   deployed version, which retires that open question.
+
 **Note:** on serve SIGKILL/nightly reset the file is NOT removed (exit handler
 doesn't run) — that's expected; the reader's dead-PID/stale check + GC (Task 4)
 handles it, and a same-port restart overwrites it. Do not treat a lingering file
-as a bug.
+as a bug. Observed live: the probe left `serve-0-*.json` behind with
+`sessions: {}` for a `/tmp` directory that no longer matters — a concrete
+instance of the orphaned-overlay item below, which Task 4's reader must handle.
 
 **Adversarial review outcome (2026-07-31).** One HIGH, fixed in `72010b9`:
 `evictIdleSessions` never consulted `activity`, so a session 46 minutes into a
