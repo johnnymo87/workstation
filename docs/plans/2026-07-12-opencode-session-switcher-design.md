@@ -687,16 +687,32 @@ same row and the same transaction as the generation bump. Overlays cannot carry 
 generation anyway (the plugin has no access to it), so comparing generations
 reader-side would compare nothing.
 
-**The coverage gap is a phantom — for conflicts.** A session only gets an
-assignment row when something calls `/place`. Many sessions therefore have no row
-at all. That looked fatal ("the authoritative path is the rare one") until the
-chain is followed: a session appears in two overlays *iff* it was hosted by two
-serves *iff* something moved it *iff* pigeon placed it — which is exactly what
-creates the row. **No-row ⇒ never migrated ⇒ at most one overlay ⇒ nothing to
-arbitrate.** The join covers ~all real conflicts. Instrument to confirm: count
-sessions appearing in ≥2 overlays with no assignment row; expect ~0. A nonzero
-count means a **non-pigeon migration path exists** — investigate that, do not
-patch the rule.
+**The coverage gap: the causal argument was right, the join key was wrong
+(corrected 2026-07-31 by adversarial review).** The tempting argument runs: a
+session appears in two overlays *iff* it was hosted by two serves *iff* something
+moved it *iff* pigeon placed it — which is exactly what creates the row, so
+no-row ⇒ never migrated ⇒ nothing to arbitrate. Every link in that chain holds.
+**It still gives the wrong answer, because the row pigeon creates is not keyed by
+the session being arbitrated.** Placement uses `routingSid` = **the ROOT of the
+session tree** (`opencode-frontdoor/src/resolve.ts:17-19`, `place.ts:251`), so
+`session_assignment.session_id` only ever holds root ids — while overlay maps are
+keyed by the event's `sessionID`, which includes children (a subagent's
+`permission.asked` carries the *child* sid).
+
+Measured on the live pair of databases: **8,634 sessions, 4,600 of them children;
+548 assignment rows; exactly 2 children have a row.** So ~53% of all sessions
+would have fallen through to bare wall-clock ordering — the very rule BUG FIX 2
+declared broken. Not a phantom, and not an edge.
+
+**Fix: resolve to the root before joining.** The reader builds
+`owners[sid] = desired_serve_id_of(rootOf(sid))`, walking `session.parent_id` in
+opencode's own DB — which the reader already opens for the base list, so the
+linkage is free. `mergeOverlays` stays pure and simply requires `owners` to be
+keyed by *every* sid it should arbitrate.
+
+Lesson worth keeping: this is the second time in this project that a clean causal
+chain passed review while a **key mismatch** hid inside it. Check what the
+identifier *is*, not just that the causality holds.
 
 **Reading pigeon's sqlite is acceptable here** (same machine, same user, both
 repos ours) with guardrails: open `mode=ro` — **never `immutable=1`**, the DB is
@@ -717,10 +733,40 @@ intra-file use; and the writer should **evict sessions idle > 30–60 min** from
 overlay (absence ≡ idle, since the DB base-list already carries every session),
 which shrinks the stale-zombie surface structurally rather than by guesswork.
 
+**Absence is a positive claim (D1, adversarial review).** Rule 1 must be
+*owner-authoritative*: if a **live** owner file **for the session's directory**
+exists but does not mention the session, the merge emits **nothing** (absent ≡
+idle) rather than falling through to rule 2. Without that, a session that was
+blocked when it migrated leaves a stranded entry on the old serve — non-empty
+pending set, so idle-eviction deliberately skips it; no further events, so it
+never changes; the serve stays up, so the file stays live — and once the true
+owner's entry goes plain-idle and is pruned, rule 2 crowns the frozen `blocked`
+**permanently**, advertising a block nobody can service. Note one serve writes one
+overlay file *per directory*, so the owner file must be matched on
+`(serveId, directory)`, not `serveId` alone.
+
+**Degraded-routing window (D3, accepted + documented).** When pigeon is
+unreachable the front door forwards to the **anchor** (serve-0) and writes no row
+(`resolve.ts:52-60,77-86`, `place.ts:248` → `pigeon-degraded`). The routing DB
+stays perfectly readable, so rule 1 keeps confidently preferring the now-stale
+`desired_serve_id` over serve-0's live truth for the whole outage — the sqlite
+read surviving a stopped pigeon is exactly what makes the reader *wrong* rather
+than *degraded*. Bounded (heals on re-place) and display-only. If it bites,
+downgrade rule 1 to advisory when the door reports `degraded`.
+
+**Make degradation visible (D5).** The catch-all that turns a failed routing-DB
+read into an empty owner map silently reverts the merge to wall-clock-newest-wins
+— i.e. the pre-fix behaviour, with no operator signal. `oc-session-list` must
+surface a `joinDegraded` flag. Also: overlay JSON needs a **schema version field**;
+the reader must validate entry shape before merging, since a version-skewed writer
+can emit entries missing `pendingPermissions` and crash the picker.
+
 Residual, accepted: during the window after pigeon flips `desired_serve_id` but
 before the new owner's plugin has written an entry, rule 2 shows the old owner's
 last-known state — a wrong glyph for seconds, on a display surface. Pid-reuse can
-also make a dead pid look live; cosmetic.
+also make a dead pid look live; cosmetic. Statistical note: the "150/548 rows have
+`owner_generation` > 1" figure is over *placed roots*, not all sessions — fine as
+motivation, not citable as a fleet-wide session rate.
 
 ## Related follow-ons (separable)
 

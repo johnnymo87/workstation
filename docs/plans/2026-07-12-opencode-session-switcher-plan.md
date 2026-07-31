@@ -346,6 +346,14 @@ design-doc finding #8 — read it before implementing. Summary of what changed:
   supplies `owners: Record<sessionId, serveId>` built from pigeon's
   `session_assignment.desired_serve_id` (Task 6 does the sqlite read; `mergeOverlays`
   stays pure and takes the map as an argument).
+- **The join key is the ROOT session.** Pigeon places by `routingSid` = the root of
+  the session tree, so child/subagent sids have no row (measured: 4,600 children
+  live, 2 have rows). Task 6 must build `owners[sid] = owner_of(rootOf(sid))` via
+  the `parent_id` walk it already does. Getting this wrong silently routes ~53% of
+  sessions through bare wall-clock ordering.
+- **Absence is authoritative.** A live owner file *for the session's directory*
+  that omits the session means idle — emit nothing, do not fall through. One serve
+  writes one file per directory, so match `(serveId, directory)`.
 - **Cross-file freshness is `lastActivity`** — wall-clock, one machine, one clock.
   (The reducer already sets it on committed events only; it is exactly
   "when this writer last saw this session do something".)
@@ -470,6 +478,23 @@ in-process, fall back to a door-side read, and if neither works **stop and
 report**: this is a Phase-1 blocker, not a nice-to-have). Smoke: trigger a
 permission prompt, restart that serve, confirm the session still reads `blocked`
 after restart.
+
+**⚠ Writer identity hazard (D4, adversarial review).** The filename
+`${serve}-${dirhash}.json` carries **no pid**, and `OPENCODE_SERVE_ID` is
+*inherited by child processes* — a documented hijack vector (`route-gate.nix:38-43`,
+the 2026-07-25 incident). Any nested `opencode` that loads the globally-configured
+plugin in the same directory becomes a **second live writer of the same file**,
+alternating whole-file overwrites. Worse, it interacts lethally with the
+zombie-writer fix below ("if the file stamp is newer than ours, go silent"): a
+short-lived stray would **permanently silence the real serve's writer** for that
+directory, so every session there flips to `unknown` once the heartbeat ages out.
+Mitigate: verify this process is the registered pool member (own pid/port against
+the serve registry) before writing, or at minimum stamp the pid and refuse to
+stay silent when the superseding writer is dead.
+
+**Overlay needs a schema `version` field** (D5) — the reader must validate entry
+shape before merging, or a version-skewed writer's entry (e.g. missing
+`pendingPermissions`) crashes the picker.
 
 **No `epoch`.** The overlay carries `serveId` (from `OPENCODE_SERVE_ID`) and
 nothing boot-derived; see finding #8. Two further writer duties from that finding:
