@@ -1,8 +1,18 @@
 # OpenCode session switcher: semantic-state-aware fuzzy navigation
 
 **Date:** 2026-07-12
-**Status:** Design — revised after adversarial review; **all open questions
-verified against source (2026-07-12)**. Ready for implementation planning.
+**Status:** Design — revised after adversarial review; open questions verified
+against source (2026-07-12); **reconciled with the front-door topology
+(2026-07-30)**. Ready for implementation planning.
+
+> **Front-door reconciliation (2026-07-30).** Between this design and its
+> implementation, the serve pool was put behind a single front door
+> (`docs/plans/2026-07-12-serve-reverse-proxy-{design,plan}.md`,
+> `2026-07-26-frontdoor-spine.md`). Net effect on this design: **small**, because
+> it was already port-agnostic. The switcher's three reads (DB, overlay file,
+> nvim sockets) touch no serve endpoint at all. One coupling changed —
+> attach/resume now goes to the **door** — and one new *constraint* applies (the
+> opacity grep-guard). Both folded in below.
 **Repos touched:** `workstation` (opencode plugin bundle, nvim config), later
 `lgtm` (fallback tagging, optional)
 
@@ -69,6 +79,34 @@ A telescope **fuzzy session switcher** that:
   attach buffer (`assets/nvim/lua/user/oc_auto_attach.lua:47`).
 - Session transcripts: global SQLite `~/.local/share/opencode/opencode.db`
   (project→session→message→part, content in `part.data`); `oc-search` greps it.
+
+### Front-door facts (added 2026-07-30)
+
+- **The door is the only address.** `FRONTDOOR_URL`, default
+  `http://127.0.0.1:4700` (`pkgs/oc-auto-attach/default.nix:31`,
+  `users/dev/home.base.nix:1176`). All 20/20 live attach TUIs run against `:4700`.
+  **Never write `:4096` in a shipped consumer.**
+- **Opacity is mechanically enforced.** `users/dev/test-frontdoor-opacity.sh`
+  scans shipped consumers — including **`pkgs/*/default.nix`**, which will cover
+  this design's `oc-session-list` — and fails *closed* on any serve-addressing
+  site (`SITE_RE` matches literal `(127.0.0.1|localhost):409[0-9]`, `${OPENCODE_URL}/`,
+  `attach …$OPENCODE_URL`, and endpoint env exports) unless an inline
+  `frontdoor-exempt(<ROW>)` marker cites a real row of
+  `docs/plans/2026-07-26-phase9-consumer-disposition.md`.
+- **Pigeon is token-gated** (Stage 1, 2026-07-27): anonymous `GET :4731/route` →
+  401. This design must not call `/route`; it doesn't need to.
+- **Serve token (Stage 2) is OPEN** (`workstation-km5f`): serves will require
+  `Authorization: Bearer` on every route except `/global/health`.
+- **Pre-placement is a real step** (`C6`): `oc-auto-attach` resolves
+  `/route`→`/place` *before* attaching to the door, so the door's first
+  `/event?session_ids=` lands on the owning serve instead of drift-reconnecting.
+  Consumers that resume a session must not skip it (see §4).
+
+**Design invariant this buys us: the switcher is HTTP-free except for attach.**
+State comes from the plugin's own file, location from nvim sockets, metadata from
+the DB — no serve calls, no `/route`, no `GET /session/<id>`. So Stage 2's serve
+token, and any future re-shaping of the pool, **cannot break it**. Keep it that
+way: if a future need for session metadata appears, take it from the DB, not HTTP.
 
 ## Non-goals / YAGNI
 
@@ -219,13 +257,31 @@ just globs, RPCs each, and skips failures. Nightly reset `pkill -9`s nvims,
 which can leave **stale socket *files*** behind; those refuse connections and are
 naturally treated as dead.
 
+**Attachment must join `oc_auto_attach.status(sid)` (added 2026-07-30).**
+`oc_auto_attach.lua` now tracks per-session attach health — `running` / `failed`
+/ `exited` / `unknown` (`:25-33`, `:56`, `:75-102`) — and renames a dead buffer
+`[FAILED] <sid>` while **leaving `b:oc_session_id` set** (`:62`). So a buffer
+alone is NOT proof of a live attach: a crashed attach would otherwise be reported
+`attached`, and the picker would "jump" you to a dead terminal. `rpc.snapshot()`
+runs inside the target nvim, so it must return
+`require("user.oc_auto_attach").status(sid)` alongside each hit; treat
+`failed`/`exited` as **detached** (optionally surfaced as an `attach-failed`
+glyph, since it's actionable: resume will fix it).
+
 ### 4. Jump-or-attach
 
 - **attached** → if the target is in another tmux **session**, `tmux
   switch-client -t <session>` (not just `select-window`); then `select-window`
   and `nvim --server <sock> --remote-expr` (with `</dev/null`) to focus the
   buffer/tabpage from discovery.
-- **detached** → attach fresh via the existing `oc_auto_attach` path.
+- **detached** → **shell out to the packaged `oc-auto-attach` binary**, do NOT
+  call the Lua `M.open()` directly. Rationale (front-door, 2026-07-30): the shell
+  wrapper owns the health probe, the `/route`→`/place` **pre-placement** (`C6`),
+  the `$FRONTDOOR_URL` attach target, and the settle logic. Calling the Lua entry
+  point directly would bypass pre-placement and invite a door drift-reconnect,
+  and would re-implement the door URL in a second place. Keeping the switcher
+  *upstream* of oc-auto-attach also keeps it out of the opacity guard's scope
+  entirely.
 - **directory gone** (lgtm prunes `.worktrees/pr-<N>` after merge) — **resolved,
   simpler than feared.** `attach.ts:58-67` does `process.chdir(--dir)` and, on
   failure, **catches and passes the dir string through** ("If the directory

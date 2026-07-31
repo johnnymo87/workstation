@@ -33,6 +33,31 @@ permission/index.ts,question/index.ts,session/session.ts,session/session.sql.ts}
   `export default` is the factory.
 - Commit after every green step. Everything **cloudbox-gated** in Phase 1.
 
+> **Front-door reconciliation (2026-07-30).** The serve pool now sits behind a
+> single door. Changes to this plan, all contained:
+> **(a)** every attach/resume targets **`$FRONTDOOR_URL`** (default
+> `http://127.0.0.1:4700`), never `:4096` — Tasks 0, 9, 10.
+> **(b)** Task 10's detached-resume **shells out to the `oc-auto-attach` binary**
+> instead of calling the Lua `M.open()`, so it inherits health-probe,
+> `/route`→`/place` **pre-placement** (`C6`) and the door URL. Calling the Lua
+> directly would skip pre-placement and cause door drift-reconnects.
+> **(c)** `users/dev/test-frontdoor-opacity.sh` scans **`pkgs/*/default.nix`** —
+> so `pkgs/oc-session-list` is governed. It is SQLite-only (no HTTP), so it
+> passes with **no exemption marker**; keep it that way (adding any health check
+> or serve URL fails the guard closed). Run the guard in Tasks 6 and 12.
+> **(d)** Discovery must join **`oc_auto_attach.status(sid)`** — a `[FAILED]`
+> attach buffer keeps `b:oc_session_id`, so buffer-presence alone would report a
+> dead attach as `attached` (Task 5/8).
+> **(e)** `oc_auto_attach.lua` line numbers shifted: the `isdirectory` guard is
+> now **`:45`** (was `:35`), jobstart `:68`, `--dir` `:71`, `cwd` `:74`.
+> **(f)** Pigeon is token-gated (anonymous `/route` → 401) and the serve token
+> (Stage 2) is open — the switcher stays **HTTP-free except attach**, so neither
+> can break it. Do not add serve calls.
+> Unchanged and re-verified: K=4 / ports 4096-4099 (`serve-pool.nix:36`),
+> `OPENCODE_SERVE_ID=serve-<i>` (`:22`), no shared bus, serve-lease migration,
+> per-(serve×dir) plugin host, global `opencode.db`, nvims sockets, and the
+> `--dir` event-filter rationale (`oc_auto_attach.lua:10-21`, intact).
+>
 > **Changes after review round 2 (2026-07-12).** Verified fixes folded in:
 > (#1) dirhash was the first 8 bytes of the path — **all `/home/dev/...` paths
 > collided**; now sha256. (#2) `permission.replied`/`question.replied` carry
@@ -57,9 +82,10 @@ Gates Task 10's directory-gone attach branch (design §4). Investigation only.
 **Step 1:** Start a session in a temp dir via `opencode-launch`, let it idle,
 `:bdelete` its attach buffer, then `rmdir` the temp dir.
 
-**Step 2:** Run the exact resume the picker will use:
+**Step 2:** Run the exact resume the picker will use — **through the door**:
 ```bash
-cd $HOME && opencode attach http://127.0.0.1:4096 --session <sid> --dir <deleted-dir>
+cd $HOME && opencode attach "${FRONTDOOR_URL:-http://127.0.0.1:4700}" \
+  --session <sid> --dir <deleted-dir>
 ```
 Expected (per `attach.ts:58-67`): no crash; TUI opens and streams (dir string
 passes through, matches stored dir, event filter satisfied).
@@ -337,11 +363,16 @@ unlink any file that is both dead-pid AND `heartbeat` older than 10 min.
 **Files:** Create `.../discovery.lua`, `.../rpc.lua`; extend `test.sh`.
 
 **Step 1: Tests** (pure parts): `discovery.pane_of(sock)` (`/tmp/nvim-%3.sock`
-→ `%3`); `discovery.dedupe(results)` (last-writer per sid).
+→ `%3`); `discovery.dedupe(results)` (last-writer per sid); **`discovery.is_live(hit)`
+— `attach_status=="running"` ⇒ attached; `"failed"`/`"exited"` ⇒ NOT attached**
+(a `[FAILED]` buffer keeps `b:oc_session_id`, so this test is the guard against
+"jump me to a dead terminal").
 
 **Step 2: FAIL → Step 3: Implement.**
-- `rpc.snapshot()` → scan this nvim's buffers for `b:oc_session_id`; return
-  **`vim.json.encode([...{sid,buffer,tabpage}])` (a string)**.
+- `rpc.snapshot()` → scan this nvim's buffers for `b:oc_session_id`; for each,
+  also read `require("user.oc_auto_attach").status(sid)`
+  (`oc_auto_attach.lua:30-33`); return
+  **`vim.json.encode([...{sid,buffer,tabpage,attach_status}])` (a string)**.
 - `discovery.locate()`:
   - **own** sockets: call `rpc.snapshot()` in-process (never `--remote-expr`
     yourself — deadlock hazard);
@@ -388,6 +419,16 @@ SELECT t.* FROM tree t JOIN ranked r ON t.root = r.root ORDER BY r.recency DESC;
 added in Task 11.
 
 **Step 4: Smoke** `oc-session-list --limit 50 | head`.
+
+**Step 4b: Front-door opacity guard must pass.** `pkgs/*/default.nix` is governed
+by `users/dev/test-frontdoor-opacity.sh`. This package is **SQLite-only — no HTTP,
+no serve URL, no health check** — so it needs **no** `frontdoor-exempt` marker.
+Run it and expect a clean pass:
+```bash
+bash users/dev/test-frontdoor-opacity.sh
+```
+If it flags this package, you added a serve-addressing site — remove it (take the
+data from the DB) rather than adding a marker.
 
 **Step 5: Commit** `feat: oc-session-list per-root recent-session query`.
 
@@ -471,15 +512,26 @@ blocked on top; detached-blocked shows out-of-scope.
 **Files:** modify `.../init.lua`, `oc_auto_attach.lua`.
 
 **Step 1: Select action:**
-- **attached**: `tmux switch-client -t %<pane>` (single unambiguous call —
-  resolves session+window+pane; pane id is from discovery), then
-  `nvim --server <sock> --remote-expr` to focus buffer/tabpage (`stdin=false`).
-- **detached**: existing `oc_auto_attach` resume path.
+- **attached** (`attach_status == "running"`): `tmux switch-client -t %<pane>`
+  (single unambiguous call — resolves session+window+pane; pane id from
+  discovery), then `nvim --server <sock> --remote-expr` to focus buffer/tabpage
+  (`stdin=false`).
+- **detached** (incl. `failed`/`exited` attach buffers): **shell out to the
+  packaged `oc-auto-attach` binary** — `vim.system({ "oc-auto-attach", sid },
+  { stdin = false })`. Do NOT call the Lua `M.open()` directly: the binary owns
+  the health probe, the `/route`→`/place` **pre-placement** (`C6` — without it the
+  door's first `/event?session_ids=` drift-reconnects), `$FRONTDOOR_URL`, and the
+  settle logic. This also keeps the switcher outside the opacity guard's scope.
 
-**Step 2: Directory-gone in `oc_auto_attach.lua`.** Add `opts.allow_missing_dir`:
-the picker-resume path skips the `isdirectory==0` reject (line 35), sets jobstart
-`cwd = vim.env.HOME`, still passes `--dir <stored dir>`. Default path unchanged.
-If Task 0 downgraded to preview-only, this branch shows a notice instead.
+**Step 2: Directory-gone in `oc_auto_attach.lua`.** This is the ONE case that
+cannot go through the binary (its probe/`--dir` path needs a real directory). Add
+`opts.allow_missing_dir` so the picker can call `M.open()` directly for it:
+skip the `isdirectory==0` reject (**now line 45**, was 35), set jobstart
+`cwd = vim.env.HOME` (**line 74**), still pass `--dir <stored dir>` (**line 71**),
+and pass `url = vim.env.FRONTDOOR_URL or "http://127.0.0.1:4700"`. Default
+(non-picker) path unchanged. Accepting no pre-placement here is fine — these are
+old/pruned-worktree sessions where sticky placement doesn't matter. If Task 0
+downgraded to preview-only, this branch shows a notice instead.
 
 **Step 3: Manual smoke:** cross-window/session jump focuses correctly; resume
 detached; resume detached with pruned dir (Task 0 outcome).
@@ -509,7 +561,16 @@ for a sid, using the existing `message_session_time_created_id_idx` /
 **Step 1:** E2E on cloudbox (multi-project, lgtm running, a blocked swarm
 worker): default hides lgtm, blocked pierces scope, grouping/jump/resume/preview
 work, and a **killed serve degrades its sessions to `unknown` within ~45 s** (not
-frozen `working`, not `idle`).
+frozen `working`, not `idle`). Also verify a **crashed attach** (`[FAILED]`
+buffer) shows as detached/attach-failed and resume repairs it.
+
+**Step 1b: Front-door regression gates.** Both must pass before landing:
+```bash
+bash users/dev/test-frontdoor-opacity.sh     # no new serve-addressing sites
+```
+Confirm on the wire that resume went through the door, not a serve:
+`pgrep -af 'opencode attach' | grep -c 4700` should account for every attach
+started by the picker, and none should show `:409[0-9]`.
 
 **Step 2:** Write `.opencode/skills/using-session-switcher/SKILL.md` (keymap,
 facets, glyphs, file locations).
