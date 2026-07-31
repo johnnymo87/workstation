@@ -25,6 +25,7 @@ const fresh = (t: number): SessionEntry => ({
   pendingQuestions: [],
   lastActivity: t,
   updatedAt: t,
+  revision: 0,
 })
 
 export function applyEvent(
@@ -44,6 +45,7 @@ export function applyEvent(
   const bump = () => {
     e.updatedAt = t
     e.lastActivity = t
+    e.revision = (cur ? (cur.revision ?? 0) : 0) + 1
     changed = true
   }
 

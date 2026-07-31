@@ -158,3 +158,40 @@ describe("seedFromSnapshot", () => {
     expect(state2).toBe(state)
   })
 })
+
+describe("revision tracking", () => {
+  it("two successive committing events on one session produce a strictly increasing revision", () => {
+    let s = applyEvent(emptyState(), ev("session.status", { sessionID: "s1", status: { type: "busy" } }))
+    expect(s.s1.revision).toBe(1)
+    s = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    expect(s.s1.revision).toBe(2)
+  })
+
+  it("a no-op event does not change revision and returns identical object reference", () => {
+    let s = applyEvent(emptyState(), ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    const rev = s.s1.revision
+    const s2 = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    expect(s2).toBe(s)
+    expect(s2.s1.revision).toBe(rev)
+  })
+
+  it("a seeded entry starts at revision 0 and a subsequent real event increments it above 0", () => {
+    let s = seedFromSnapshot(emptyState(), {
+      permissions: [{ sessionID: "s1", id: "p1" }],
+    })
+    expect(s.s1.revision).toBe(0)
+    s = applyEvent(s, ev("permission.replied", { sessionID: "s1", requestID: "p1" }))
+    expect(s.s1.revision).toBe(1)
+  })
+
+  it("revisions are independent per session", () => {
+    let s = applyEvent(emptyState(), ev("session.status", { sessionID: "s1", status: { type: "busy" } }))
+    s = applyEvent(s, ev("session.status", { sessionID: "s2", status: { type: "busy" } }))
+    expect(s.s1.revision).toBe(1)
+    expect(s.s2.revision).toBe(1)
+
+    s = applyEvent(s, ev("permission.asked", { sessionID: "s1", id: "p1" }))
+    expect(s.s1.revision).toBe(2)
+    expect(s.s2.revision).toBe(1)
+  })
+})
