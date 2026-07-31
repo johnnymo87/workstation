@@ -77,6 +77,7 @@
       opencode-serve-auth-sh = p.callPackage ./pkgs/opencode-serve-auth-sh { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
+      session-state-plugin = p.callPackage ./pkgs/session-state-plugin { };
       teamclaude = p.callPackage ./pkgs/teamclaude { };
       vercel = p.callPackage ./pkgs/vercel { };
     } // nixpkgs.lib.optionalAttrs (system == devboxSystem || system == darwinSystem) {
