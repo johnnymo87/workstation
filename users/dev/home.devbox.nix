@@ -29,6 +29,14 @@ let
   # (http://127.0.0.1:4700) correct on devbox — before this, devbox was a
   # doorless host whose clients pointed at a :4700 that never existed.
   opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
+  # Shared canary alert helper (pigeon /alert -> Telegram), same package cloudbox
+  # uses. Devbox shipped the frontdoor drift DETECTION half but never the
+  # ESCALATION half, so on 2026-07-29/30 it reproduced cloudbox's 2026-07-24
+  # incident beat for beat: the canary logged "version drift" 1363 times across
+  # ~23h while a stale front door 404'd every session-scoped question/permission
+  # request, blocking sessions on unanswerable questions. Nobody reads the
+  # journal; the fix is to make the door's staleness page a human.
+  driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
   # workstation-g3iy: JS-level stack capture for wedged serves. The pool units
   # run with BUN_INSPECT listening on 127.0.0.1:1<port> (14096/14097); this
   # client connects, enables the JSC debugger, and pause/capture/resumes N
@@ -1096,6 +1104,22 @@ ${serveIdCase}
         FAILFILE="$STATE/fails"
         SICKFILE="$STATE/sick"
 
+        # Don't fight an in-flight reset-workspace (it stops/starts the pool
+        # deliberately, which makes the door legitimately 503 on its cross-probe).
+        # Mirrors opencode-serve-canary; the door canary was missing this guard,
+        # so a reset could be misread as door-side sickness and earn a restart on
+        # top of the reset. Shared, non-blocking probe of the lock; fd-based form
+        # because `flock <file> <cmd>` execvp()s the command, which fails on the
+        # minimal service PATH and misreads as "lock held".
+        if [ -e /tmp/reset-workspace.lock ]; then
+          exec 9< /tmp/reset-workspace.lock
+          if ! flock -n -s 9; then
+            echo "reset-workspace in progress; skipping this run"
+            exit 0
+          fi
+          exec 9<&-
+        fi
+
         # Only police the door when it's supposed to be up. Intentional stops /
         # crash-loop backoff reset the counters.
         if [ "$(systemctl --user is-active "$UNIT")" != "active" ]; then
@@ -1163,12 +1187,60 @@ ${serveIdCase}
           RUNNING_VER=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$BODY_FILE" | sed -n 's/.*"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/p')
           EXECSTART_FULL=$(systemctl --user show "$UNIT" -p ExecStart --value)
           EXECSTART_PATH=$(echo "$EXECSTART_FULL" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
+
+          # Both sides must be KNOWN before comparing (cloudbox bead
+          # workstation-bcmi, ported here 2026-07-30). RUNNING_VER was already
+          # guarded; EXECSTART_PATH was NOT. If that sed stops matching -- a
+          # systemd ExecStart format change, or a transient `systemctl show`
+          # failure -- EXECSTART_PATH is empty, the case falls through to *), and
+          # the canary declares drift against an empty execstart. That was
+          # harmless while this branch only echoed to the journal; now that it
+          # PAGES, an unguarded parse failure would page forever about a
+          # perfectly healthy door. Unknown must never alert.
           if [ -z "$RUNNING_VER" ]; then
             echo "WARNING: could not parse version from /healthz response"
+          elif [ -z "$EXECSTART_PATH" ]; then
+            echo "WARNING: could not parse ExecStart path for $UNIT; treating as unknown (no alert). Raw: $EXECSTART_FULL"
           else
             case "$EXECSTART_PATH" in
-              "$RUNNING_VER"*) ;;
-              *) echo "WARNING: version drift: running=$RUNNING_VER execstart=$EXECSTART_PATH" ;;
+              "$RUNNING_VER"*)
+                # Clear throttle + dampener ONLY on confirmed resolution (paths
+                # match). Do NOT clear on an unparseable probe: unknown state can
+                # flap and would storm.
+                rm -f "$STATE/drift-alerted" "$STATE/drift-pending"
+                ;;
+              *)
+                echo "WARNING: version drift: running=$RUNNING_VER execstart=$EXECSTART_PATH"
+                DRIFT_PENDING=$(( $(cat "$STATE/drift-pending" 2>/dev/null || echo 0) + 1 ))
+                echo "$DRIFT_PENDING" > "$STATE/drift-pending"
+
+                # Dampened to 2 consecutive minutely passes so a switch that is
+                # mid-restart (ExecStart already swapped, process not yet
+                # replaced) can't page.
+                if [ "$DRIFT_PENDING" -ge 2 ]; then
+                  DRIFT_TEXT=$(cat <<EOF
+opencode-frontdoor is running stale code.
+
+To fix, run:
+systemctl --user restart opencode-frontdoor.service
+
+IMPORTANT: Also check the serve pool! Restarting only the front door creates dangerous version skew if serves remain on old code. Both the door and the serves carry X-SwitchMethod=keep-old, so a home-manager switch updates NEITHER; the pool is bounced nightly by reset-workspace but the door is not, so the door is the one that goes stale alone.
+
+Running store path: $RUNNING_VER
+Installed store path: $EXECSTART_PATH
+
+Note: Restarting opencode-frontdoor drops in-flight SSE legs so pick an appropriate moment to restart.
+EOF
+)
+                  # Auto-restart is intentionally omitted, matching cloudbox:
+                  # restarting the door drops all in-flight SSE connections and
+                  # routing state, and restarting it ALONE manufactures exactly
+                  # the door/serve skew warned about above. A human decides when.
+                  # Backoff base 15m, cap 4h (see the package header for why a
+                  # flat TTL was abandoned after the 2026-07-26 incident).
+                  ${driftAlert} "$STATE/drift-alerted" "$RUNNING_VER|$EXECSTART_PATH" "$DRIFT_TEXT" 900 14400
+                fi
+                ;;
             esac
           fi
           exit 0
