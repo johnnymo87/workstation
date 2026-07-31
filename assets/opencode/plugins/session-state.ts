@@ -2,7 +2,6 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { wrapFetchWithAuth } from "./serve-auth"
 import {
   applyEvent,
   emptyState,
@@ -30,7 +29,15 @@ const plugin: Plugin = async (ctx, opts?: any) => {
     return {}
   }
 
-  const dir = join(homedir(), ".local/share/opencode/session-state.d")
+  // Overlay directory is injectable so tests never touch the LIVE one. On
+  // cloudbox `serve-0` is a real pool serve, so a test that scans the real
+  // directory for `serve-0-*.json` can pick up (assert on, and then delete) a
+  // running serve's overlay. Tests pass an explicit temp dir; production takes
+  // the default.
+  const dir =
+    opts?.dir ??
+    process.env.OPENCODE_SESSION_STATE_DIR ??
+    join(homedir(), ".local/share/opencode/session-state.d")
   mkdirSync(dir, { recursive: true })
 
   const filename = getOverlayFilename(serveId!, ctx.directory)
@@ -96,9 +103,17 @@ const plugin: Plugin = async (ctx, opts?: any) => {
     ;(heartbeatTimer as any).unref()
   }
 
-  const sdkClientConfig: any = (ctx.client as any)._client?.getConfig?.()
-  const rawFetch: typeof fetch = sdkClientConfig?.fetch ?? globalThis.fetch
-  const fetchFn = wrapFetchWithAuth(rawFetch)
+  // Plain fetch, deliberately: the reconcile only ever talks to THIS serve over
+  // loopback, and the pool serves require no auth today (no
+  // OPENCODE_SERVER_PASSWORD in the unit, no /run/secrets/opencode_server_password,
+  // and an unauthenticated GET against a pool serve returns 200). Importing
+  // wrapFetchWithAuth from ./serve-auth would add a *deployment* dependency on a
+  // sibling plugin file that is not deployed to ~/.config/opencode/plugins at
+  // all -- and opencode swallows failed sibling imports, so it would break
+  // silently. If auth is ever turned on, the reconcile fails closed (the fetch
+  // throws/401s, the catch swallows it, and the writer keeps serving
+  // event-derived state) rather than corrupting anything.
+  const fetchFn: typeof fetch = globalThis.fetch
 
   const reconcile = async () => {
     if (isSilent) return

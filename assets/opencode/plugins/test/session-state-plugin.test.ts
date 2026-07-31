@@ -6,7 +6,7 @@ import plugin from "../session-state"
 
 describe("session-state plugin integration", () => {
   const testDir = path.join(os.tmpdir(), `session-state-test-${Date.now()}`)
-  const overlayDir = path.join(os.homedir(), ".local/share/opencode/session-state.d")
+  const overlayDir = path.join(os.tmpdir(), `session-state-overlay-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   const originalEnv = process.env.OPENCODE_SERVE_ID
 
   beforeEach(() => {
@@ -30,7 +30,7 @@ describe("session-state plugin integration", () => {
       client: {},
     } as any
 
-    const result = await plugin(ctx, { cmdline: "/bin/opencode\x00run\x00" })
+    const result = await plugin(ctx, { cmdline: "/bin/opencode\x00run\x00", dir: overlayDir })
     expect(result).toEqual({})
   })
 
@@ -48,7 +48,7 @@ describe("session-state plugin integration", () => {
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } },
     } as any
 
-    const result = await plugin(ctx, { cmdline: poolCmdline })
+    const result = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir })
     expect(result.event).toBeDefined()
 
     // Send busy event
@@ -99,7 +99,7 @@ describe("session-state plugin integration", () => {
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } },
     } as any
 
-    const instance1 = await plugin(ctx, { cmdline: poolCmdline })
+    const instance1 = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir })
 
     const files = fs.readdirSync(overlayDir).filter((f) => f.startsWith("serve-0-") && f.endsWith(".json"))
     expect(files.length).toBeGreaterThan(0)
