@@ -10,6 +10,7 @@ export interface SessionEntry {
   lastActivity: number
   updatedAt: number
   revision?: number
+  unknown?: boolean
 }
 
 export type StateMap = Record<string, SessionEntry>
@@ -123,6 +124,7 @@ export function applyEvent(
 
 export function effectiveState(e?: SessionEntry): Activity {
   if (!e) return "idle"
+  if (e.unknown) return "unknown"
   if (e.error) return "error"
   if (e.pendingPermissions.length || e.pendingQuestions.length) return "blocked"
   return e.activity
@@ -214,4 +216,153 @@ export function seedFromSnapshot(
   }
 
   return changed ? next : prev
+}
+
+export interface OverlayData {
+  pid: number
+  serveId: string
+  directory?: string
+  heartbeat: number
+  sessions: StateMap
+}
+
+export interface MergeOptions {
+  now: number
+  staleMs: number
+  isAlive: (pid: number) => boolean
+  owners?: Record<string, string>
+}
+
+export function serializeOverlay({
+  pid,
+  serveId,
+  directory,
+  heartbeat,
+  sessions,
+}: OverlayData): OverlayData {
+  return {
+    pid,
+    serveId,
+    directory,
+    heartbeat,
+    sessions,
+  }
+}
+
+interface PreparedFile {
+  file: OverlayData
+  serveId: string
+  pid: number
+  live: boolean
+}
+
+// Deterministic tie-breaker when lastActivity is equal:
+// Sorts candidates descending by lastActivity, then serveId descending, then pid descending.
+function compareCandidates(
+  c1: { file: PreparedFile; entry: SessionEntry },
+  c2: { file: PreparedFile; entry: SessionEntry },
+): number {
+  if (c1.entry.lastActivity !== c2.entry.lastActivity) {
+    return c2.entry.lastActivity - c1.entry.lastActivity
+  }
+  if (c1.file.serveId !== c2.file.serveId) {
+    return c1.file.serveId > c2.file.serveId ? -1 : 1
+  }
+  return c2.file.pid - c1.file.pid
+}
+
+export function mergeOverlays(
+  files: OverlayData[],
+  { now, staleMs, isAlive, owners = {} }: MergeOptions,
+): StateMap {
+  const prepared: PreparedFile[] = files.map((f) => ({
+    file: f,
+    serveId: f.serveId,
+    pid: f.pid,
+    live: isAlive(f.pid) && now - f.heartbeat <= staleMs,
+  }))
+
+  // Collect all session IDs across all files
+  const sessionIds = new Set<string>()
+  for (const pf of prepared) {
+    if (pf.file.sessions) {
+      for (const sid of Object.keys(pf.file.sessions)) {
+        sessionIds.add(sid)
+      }
+    }
+  }
+
+  const result: StateMap = {}
+
+  for (const sid of sessionIds) {
+    const candidates: Array<{ file: PreparedFile; entry: SessionEntry }> = []
+    for (const pf of prepared) {
+      const entry = pf.file.sessions?.[sid]
+      if (entry) {
+        candidates.push({ file: pf, entry })
+      }
+    }
+
+    if (candidates.length === 0) continue
+
+    const ownerServeId = owners[sid]
+    let winner: { file: PreparedFile; entry: SessionEntry } | undefined
+
+    // Rule 1: A live file whose serveId === owners[sid] wins outright
+    if (ownerServeId) {
+      const ownerLiveCandidates = candidates.filter(
+        (c) => c.file.live && c.file.serveId === ownerServeId,
+      )
+      if (ownerLiveCandidates.length > 0) {
+        ownerLiveCandidates.sort(compareCandidates)
+        winner = ownerLiveCandidates[0]
+      }
+    }
+
+    // Rule 2: Else the live file with the greatest lastActivity
+    if (!winner) {
+      const liveCandidates = candidates.filter((c) => c.file.live)
+      if (liveCandidates.length > 0) {
+        liveCandidates.sort(compareCandidates)
+        winner = liveCandidates[0]
+      }
+    }
+
+    // Rule 3: Else the dead file with the greatest lastActivity
+    if (!winner) {
+      const deadCandidates = candidates.filter((c) => !c.file.live)
+      if (deadCandidates.length > 0) {
+        deadCandidates.sort(compareCandidates)
+        winner = deadCandidates[0]
+      }
+    }
+
+    if (!winner) continue
+
+    let finalEntry: SessionEntry
+    if (!winner.file.live) {
+      finalEntry = {
+        ...winner.entry,
+        unknown: true,
+        pendingPermissions: [],
+        pendingQuestions: [],
+      }
+    } else {
+      finalEntry = { ...winner.entry }
+    }
+
+    // Prune plain idle entries (absent == idle) unless flagged unknown
+    const isPlainIdle =
+      finalEntry.activity === "idle" &&
+      finalEntry.pendingPermissions.length === 0 &&
+      finalEntry.pendingQuestions.length === 0 &&
+      !finalEntry.error &&
+      !finalEntry.unknown
+
+    if (!isPlainIdle) {
+      result[sid] = finalEntry
+    }
+  }
+
+  return result
 }
