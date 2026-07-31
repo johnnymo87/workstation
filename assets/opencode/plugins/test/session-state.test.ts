@@ -395,5 +395,67 @@ describe("mergeOverlays", () => {
 
     expect(m1.s1.activity).toEqual(m2.s1.activity)
   })
+
+  it("D1 regression: live owner file for directory without sid suppresses stale non-owner entry", () => {
+    const ownerFile = file("serve-0", 1, {}, 1000, "/path/to/repo")
+    const staleFile = file("serve-1", 2, {
+      s1: entry({
+        activity: "idle",
+        pendingPermissions: ["p1"],
+        lastActivity: 2000,
+      }),
+    }, 1000, "/path/to/repo")
+
+    const m = mergeOverlays([ownerFile, staleFile], opts({ owners: { s1: "serve-0" } }))
+    expect(m.s1).toBeUndefined()
+  })
+
+  it("owner file for a DIFFERENT directory does NOT suppress session", () => {
+    const ownerFileDiffDir = file("serve-0", 1, {}, 1000, "/path/other")
+    const peerFile = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 2000 }),
+    }, 1000, "/path/to/repo")
+
+    const m = mergeOverlays([ownerFileDiffDir, peerFile], opts({ owners: { s1: "serve-0" } }))
+    expect(m.s1).toBeDefined()
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("rule 1 wins normally when owner file DOES contain sid", () => {
+    const ownerFile = file("serve-0", 1, {
+      s1: entry({ activity: "idle", pendingPermissions: ["p1"], lastActivity: 1000 }),
+    }, 1000, "/path/to/repo")
+    const peerFile = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 2000 }),
+    }, 1000, "/path/to/repo")
+
+    const m = mergeOverlays([ownerFile, peerFile], opts({ owners: { s1: "serve-0" } }))
+    expect(m.s1.pendingPermissions).toEqual(["p1"])
+  })
+
+  it("crashed/dead owner falls through to rule 2", () => {
+    const deadOwnerFile = file("serve-0", 999, {
+      s1: entry({ activity: "idle", lastActivity: 500 }),
+    }, 1000, "/path/to/repo")
+    const peerFile = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 2000 }),
+    }, 1000, "/path/to/repo")
+
+    const m = mergeOverlays(
+      [deadOwnerFile, peerFile],
+      opts({ owners: { s1: "serve-0" }, isAlive: (pid) => pid === 2 }),
+    )
+    expect(m.s1.activity).toBe("working")
+  })
+
+  it("handles undefined directory matching correctly", () => {
+    const ownerFileUndefDir = file("serve-0", 1, {}, 1000, undefined)
+    const peerFileUndefDir = file("serve-1", 2, {
+      s1: entry({ activity: "working", lastActivity: 2000 }),
+    }, 1000, undefined)
+
+    const m = mergeOverlays([ownerFileUndefDir, peerFileUndefDir], opts({ owners: { s1: "serve-0" } }))
+    expect(m.s1).toBeUndefined()
+  })
 })
 

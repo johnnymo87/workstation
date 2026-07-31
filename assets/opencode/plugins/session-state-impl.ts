@@ -230,6 +230,12 @@ export interface MergeOptions {
   now: number
   staleMs: number
   isAlive: (pid: number) => boolean
+  /**
+   * owners must be keyed by EVERY session id the caller wants arbitrated, including child/subagent sessions.
+   * The routing daemon only stores rows for the ROOT of a session tree, so the caller is responsible
+   * for resolving each session to its root and mapping the root's owner onto the child.
+   * A missing entry here is not an error — it just means rule 1 cannot fire.
+   */
   owners?: Record<string, string>
 }
 
@@ -308,14 +314,30 @@ export function mergeOverlays(
     const ownerServeId = owners[sid]
     let winner: { file: PreparedFile; entry: SessionEntry } | undefined
 
-    // Rule 1: A live file whose serveId === owners[sid] wins outright
+    // Rule 1: A live file whose serveId === owners[sid] for session's directory wins outright.
+    // If live owner exists for the directory but does not mention sid, owner claims idle (emit nothing).
     if (ownerServeId) {
-      const ownerLiveCandidates = candidates.filter(
-        (c) => c.file.live && c.file.serveId === ownerServeId,
+      const sessionDirectories = new Set<string | undefined>()
+      for (const c of candidates) {
+        sessionDirectories.add(c.file.file.directory)
+      }
+      const ownerFiles = prepared.filter(
+        (pf) =>
+          pf.live &&
+          pf.serveId === ownerServeId &&
+          sessionDirectories.has(pf.file.directory),
       )
-      if (ownerLiveCandidates.length > 0) {
-        ownerLiveCandidates.sort(compareCandidates)
-        winner = ownerLiveCandidates[0]
+      if (ownerFiles.length > 0) {
+        const ownerLiveCandidates = candidates.filter(
+          (c) => c.file.live && c.file.serveId === ownerServeId,
+        )
+        if (ownerLiveCandidates.length > 0) {
+          ownerLiveCandidates.sort(compareCandidates)
+          winner = ownerLiveCandidates[0]
+        } else {
+          // Live owner is authoritative for this directory and says nothing -> session is idle
+          continue
+        }
       }
     }
 
