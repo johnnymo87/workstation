@@ -635,15 +635,37 @@ or leave the invoking terminal unchanged.
   door's first `/event?session_ids=` drift-reconnects), `$FRONTDOOR_URL`, and the
   settle logic. This also keeps the switcher outside the opacity guard's scope.
 
-**Step 2: Directory-gone in `oc_auto_attach.lua`.** This is the ONE case that
-cannot go through the binary (its probe/`--dir` path needs a real directory). Add
-`opts.allow_missing_dir` so the picker can call `M.open()` directly for it:
-skip the `isdirectory==0` reject (**now line 45**, was 35), set jobstart
-`cwd = vim.env.HOME` (**line 74**), still pass `--dir <stored dir>` (**line 71**),
-and pass `url = vim.env.FRONTDOOR_URL or "http://127.0.0.1:4700"`. Default
-(non-picker) path unchanged. Accepting no pre-placement here is fine — these are
-old/pruned-worktree sessions where sticky placement doesn't matter. If Task 0
-downgraded to preview-only, this branch shows a notice instead.
+**Step 2: Directory-gone ⇒ READ-ONLY (Option A — decided 2026-07-30 after Task 0).**
+
+Task 0 downgraded this branch. Attaching *works* (TUI opens, history renders),
+but the session **can never complete a turn** and hangs with no error — see the
+design doc's Verification finding #1 for the controlled A/B. So we open it for
+reading and refuse to imply it is resumable.
+
+Implementation (in `oc_auto_attach.lua`, driven by the picker):
+- Add `opts.allow_missing_dir`: skip the `isdirectory==0` reject (**now line 45**,
+  was 35), set jobstart `cwd = vim.env.HOME` (**line 74**), still pass
+  `--dir <stored dir>` (**line 71**), and pass
+  `url = vim.env.FRONTDOOR_URL or "http://127.0.0.1:4700"`. Default (non-picker)
+  path unchanged. No pre-placement needed — these are old/pruned-worktree sessions.
+- **Before opening, `vim.notify` a warning**: directory `<dir>` no longer exists;
+  this session is **read-only** — sending a message will hang with no error.
+- The row itself must be **visibly marked** (Task 8/9) so the state is obvious
+  *before* selecting, not only after.
+
+**Do NOT** silently let the user type into it. The whole hazard is that the hang
+is indistinguishable from normal thinking.
+
+**Future Option B (deliberately deferred, not scheduled): re-rooting.** Make a
+directory-gone session resumable again by rebinding it to a live directory
+(`$HOME`, or a user-picked replacement). Attractive because the conversation
+itself is intact — only its filesystem anchor is missing. Deferred because it
+needs its own machinery: a way to rewrite/override the session's stored directory
+server-side (or start a successor session seeded with the old transcript), a
+picker affordance to choose the new root, and a decision about whether the
+rebinding is sticky. Revisit if read-only turns out to be annoying in practice.
+Nothing in Option A blocks it — the row condition and the notice are exactly the
+hooks Option B would hang off.
 
 **Step 3: Manual smoke:** cross-window/session jump focuses correctly; resume
 detached; resume detached with pruned dir (Task 0 outcome).
@@ -702,6 +724,10 @@ facets, glyphs, file locations).
 - **Later:** statusline counts (only after staleness handling proven), live-buffer
   preview, mobile, cross-host jump, socket/HTTP overlay push, oc-auto-attach
   project→directory routing.
+- **Option B — re-rooting a directory-gone session** (user-approved as a *future*
+  option, 2026-07-30; Option A read-only ships first). Rebind a session whose
+  directory was deleted to a live directory so it becomes resumable again. See
+  Task 10 Step 2 for why it's separable and what it would need.
 
 ## Risks / watch-items
 
