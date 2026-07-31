@@ -33,6 +33,17 @@ permission/index.ts,question/index.ts,session/session.ts,session/session.sql.ts}
   `export default` is the factory.
 - Commit after every green step. Everything **cloudbox-gated** in Phase 1.
 
+> **Prior-art consult (2026-07-30).** The agent-session-switcher *category* now
+> exists (ccmux, Claude Agent View, Agent Deck, AoE, workmux, …) but none models
+> our *logical conversation* identity. Plan changes: **new Task 0.5 — timeboxed
+> ccmux spike** (gates whether we extend it or only steal techniques); four bug
+> fixes folded in — **pending-interaction snapshot at plugin init** (Task 1/3),
+> **(epoch, revision) ordering instead of wall-clock** (Task 2), **TOCTOU
+> re-resolve on accept** (Task 10), **invoking-client-scoped tmux focus**
+> (Task 10); plus the **`attention: seen/unseen` axis** (Tasks 7/8) and the
+> **join moves into `oc-session-list`** so nvim isn't the correctness boundary
+> (Tasks 6/9). Full rationale in the design doc's "Prior art" section.
+>
 > **Front-door reconciliation (2026-07-30).** The serve pool now sits behind a
 > single door. Changes to this plan, all contained:
 > **(a)** every attach/resume targets **`$FRONTDOOR_URL`** (default
@@ -94,6 +105,41 @@ passes through, matches stored dir, event filter satisfied).
 FAILS, Task 10's attach branch becomes **preview-only** — flag before proceeding.
 
 **Step 4: Commit** the design-doc note.
+
+---
+
+## Task 0.5: ccmux spike (timeboxed, gates Task 1) — 2h max
+
+**Investigation only. No code.** ccmux (`github.com/epilande/ccmux`) is the
+closest prior art and already has an OpenCode event integration plus the
+peripheral work we'd otherwise rebuild (picker/row model, notifications, tmux
+target resolution, previews, sidebar). Decide: **extend it**, or **keep our
+design and steal its techniques**.
+
+**Step 1:** Clone read-only to `/tmp/opencode/ccmux`; read `docs/architecture.md`,
+`docs/agent-adapters.md`, and its OpenCode adapter.
+
+**Step 2:** Answer these six decisive questions in writing — they are all about
+whether its identity model can invert from `pane/process → agent` to
+`logical session → 0..N attachments`:
+1. Can **one OpenCode server yield N independent logical rows** (not one
+   aggregated row)? *Known concern: its docs say several logical sessions behind
+   one server fold into that server's pane row — which is our exact topology.*
+2. Can a row exist with **no TTY/pane at all** (detached-but-blocked)?
+3. Can selection dispatch an arbitrary **`focus-or-attach(session_id)`** callback?
+4. Can **attachments be a collection** rather than the session's identity?
+5. Can transcript search be delegated to an **external provider** (our SQLite/FTS)?
+6. Can **`question.asked/replied/rejected` + a pending snapshot** be added cleanly?
+
+**Step 3: Decide and record** in the design doc's Prior-art section:
+- **≥4 yes, and (1)+(2) are yes** → extending ccmux likely beats building; STOP
+  and re-plan against it.
+- **(1) or (2) is no** (expected) → keep this plan; extract a short "techniques to
+  steal" list (tmux focus handling, notification shape, preview rendering) to
+  reference from Tasks 9-11.
+
+**Step 4: Commit** the decision note. Do not skip the write-up — an unrecorded
+spike gets re-litigated.
 
 ---
 
@@ -236,7 +282,24 @@ export function effectiveState(e?: SessionEntry): Activity {
 }
 ```
 
-**Step 4: Run — expect PASS. Step 5: Commit** `feat(plugin): pure session-state reducer`.
+**Step 4: Run — expect PASS.**
+
+**Step 4b: Add `seedFromSnapshot` (BUG FIX 1 — startup blindness).** Tests first:
+```typescript
+it("seedFromSnapshot marks sessions with already-pending permissions as blocked", () => {
+  const s = seedFromSnapshot(emptyState(), {
+    permissions: [{ sessionID: "s1", id: "p1" }],
+    questions:   [{ sessionID: "s2", id: "q1" }],
+  })
+  expect(effectiveState(s.s1)).toBe("blocked")
+  expect(effectiveState(s.s2)).toBe("blocked")
+})
+```
+Then implement (seed pending sets + `revision = 0`). Without this, a plugin that
+starts while a permission is pending reports `idle` **forever** — every serve
+restart silently loses blocked-ness. Task 3 wires the real snapshot source.
+
+**Step 5: Commit** `feat(plugin): pure session-state reducer + snapshot seed`.
 
 ---
 
@@ -244,14 +307,23 @@ export function effectiveState(e?: SessionEntry): Activity {
 
 **Files:** Modify `session-state-impl.ts`; extend the test.
 
-**Step 1: Failing tests:**
+**Step 1: Failing tests** (note: ordering is **(epoch, revision)**, NOT wall clock
+— BUG FIX 2):
 ```typescript
 import { mergeOverlays } from "../session-state-impl"
-const entry = (over: any = {}) => ({ activity: "working", error: false, pendingPermissions: [], pendingQuestions: [], lastActivity: 10, updatedAt: 10, ...over })
+const entry = (over: any = {}) => ({ activity: "working", error: false, pendingPermissions: [], pendingQuestions: [], lastActivity: 10, updatedAt: 10, revision: 1, ...over })
 
-it("newest updatedAt wins (serve-lease migration)", () => {
-  const a = { pid: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "working", updatedAt: 10 }) } }
-  const b = { pid: 2, heartbeat: 1000, sessions: { s1: entry({ activity: "idle", updatedAt: 20 }) } }
+it("higher epoch wins even when its wall clock is OLDER (serve-lease migration)", () => {
+  // The bug this encodes: a delayed `idle` from the OLD owner must not
+  // overwrite `blocked` from the NEW owner just because it arrived later.
+  const oldOwner = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "idle", pendingPermissions: [], updatedAt: 999, revision: 9 }) } }
+  const newOwner = { pid: 2, epoch: 2, heartbeat: 1000, sessions: { s1: entry({ activity: "working", pendingPermissions: ["p1"], updatedAt: 10, revision: 1 }) } }
+  const m = mergeOverlays([oldOwner, newOwner] as any, { now: 1000, staleMs: 45000, isAlive: () => true })
+  expect(m.s1.pendingPermissions).toEqual(["p1"])   // new owner wins on epoch
+})
+it("within one epoch, higher revision wins", () => {
+  const a = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "working", revision: 1 }) } }
+  const b = { pid: 1, epoch: 1, heartbeat: 1000, sessions: { s1: entry({ activity: "idle", revision: 2 }) } }
   const m = mergeOverlays([a, b] as any, { now: 1000, staleMs: 45000, isAlive: () => true })
   expect(m.s1.activity).toBe("idle")
 })
@@ -264,10 +336,13 @@ it("dead pid and stale heartbeat -> entries flagged unknown, NOT dropped", () =>
 })
 ```
 
-**Step 2: FAIL → Step 3: Implement.** `serializeOverlay({pid, serve, directory,
-heartbeat, sessions})` = shape passthrough. `mergeOverlays(files, {now, staleMs,
-isAlive})`: for each file compute `live = isAlive(pid) && now - heartbeat <=
-staleMs`; union sessions keeping max `updatedAt`; if a session's winning file is
+**Step 2: FAIL → Step 3: Implement.** `serializeOverlay({pid, serve, epoch,
+directory, heartbeat, sessions})` = shape passthrough (`epoch` = the writer's
+start-time/boot id; `revision` is per-session, bumped by the reducer on every
+state change). `mergeOverlays(files, {now, staleMs, isAlive})`: for each file
+compute `live = isAlive(pid) && now - heartbeat <= staleMs`; union sessions
+keeping the winner by **`(epoch, revision)`** — wall clock is diagnostic only and
+must never decide; if a session's winning file is
 NOT live, emit `{ ...entry, unknown: true, pendingPermissions: [],
 pendingQuestions: [] }`. (Prune plain-idle entries with empty sets and no error
 from the union — absent≡idle.)
@@ -316,6 +391,15 @@ export default plugin
 ```
 Add one vitest guarding the dirhash: two same-prefix paths → distinct filenames
 (the bug that passed every other test).
+
+**Step 1b: Wire the pending snapshot (BUG FIX 1).** Before the first `flush()`,
+seed state from the instance's **currently-pending** permissions/questions via
+`seedFromSnapshot`. Find the in-process authority (the `Permission`/`Question`
+`InstanceState` maps — check what the plugin ctx exposes; if nothing is reachable
+in-process, fall back to a door-side read, and if neither works **stop and
+report**: this is a Phase-1 blocker, not a nice-to-have). Also stamp `epoch`
+(process start time) once at init. Smoke: trigger a permission prompt, restart
+that serve, confirm the session still reads `blocked` after restart.
 
 **Step 2: Typecheck** `npx tsc --noEmit` → clean.
 
@@ -418,6 +502,16 @@ SELECT t.* FROM tree t JOIN ranked r ON t.root = r.root ORDER BY r.recency DESC;
 **Step 2: FAIL → Step 3: Implement** emitting JSON rows. `--tail <sid>` mode is
 added in Task 11.
 
+**Step 3b: `--with-state` — the join lives HERE, not in Lua.** Add a mode that
+performs the full join (base list + overlay merge + discovery) and emits ready-to
+-render rows. Rationale (consult 2026-07-30): the picker must be a *frontend*;
+nvim must not be the correctness boundary, and a second frontend (fzf/tmux, for
+recovery and use outside nvim) must be possible without reimplementing the merge.
+Tasks 4/5/8's Lua modules become **thin callers** of this (or, if the merge is
+easier to keep in Lua for Phase 1, they must be a *library* callable headlessly —
+either way, one implementation, tested once). The fzf client itself is not Phase-1
+scope; the seam is.
+
 **Step 4: Smoke** `oc-session-list --limit 50 | head`.
 
 **Step 4b: Front-door opacity guard must pass.** `pkgs/*/default.nix` is governed
@@ -440,7 +534,9 @@ data from the DB) rather than adding a marker.
 
 **Step 1: Tests:** `tags.classify(entry)` (dir matches `.worktrees/pr%-%d+` →
 `space="lgtm"`); `tags.merge(disk, updates)` (sticky last-known, updates win but
-never erase unrelated sids — the anti-clobber test); `tags.get`.
+never erase unrelated sids — the anti-clobber test); `tags.get`; **`tags.seen(sid, ts)`
++ `tags.attention(entry, seen_at)` → `seen|unseen`** (unseen iff
+`lastActivity > seen_at`; never-seen ⇒ `unseen`).
 
 **Step 2: FAIL → Step 3: Implement.** `session-tags.json`; on write, **re-read +
 merge then tmp+rename** (≥10 nvims may write concurrently — last-writer-wins on
@@ -461,8 +557,13 @@ tmux session/window for attached sessions; directory-classify otherwise.
 - `effective_state`: overlay `unknown` flag → `unknown`; pending/error → blocked/
   error; else activity; missing overlay → idle.
 - attachment = `location[sid] ~= nil`.
-- sort: `error`/`blocked` → `retry` → `working` → `idle`/`unknown`; then asc
-  idle-age (overlay `lastActivity`, fallback DB `time_updated`); clustered by project.
+- sort: `error`/`blocked` → `retry` → `working` → **`idle`+`unseen`** → `idle`/`unknown`;
+  then asc idle-age (overlay `lastActivity`, fallback DB `time_updated`);
+  clustered by project.
+- **attention axis:** assert an `idle` session whose `lastActivity > seen_at`
+  renders `unseen` and sorts above ordinary idle — this is what stops
+  completed-but-unreviewed work vanishing into the idle pile. Focusing it via the
+  picker marks it `seen`.
 - scope: keep `space==current_space` OR `space==nil` OR state∈{blocked,error}.
   **Assert a detached, blocked, untagged worker survives the default filter.**
 - **overlay-truth union:** assert a root the overlay reports blocked/working is
@@ -511,11 +612,22 @@ blocked on top; detached-blocked shows out-of-scope.
 
 **Files:** modify `.../init.lua`, `oc_auto_attach.lua`.
 
+**Step 0 (BUG FIX 3 — TOCTOU): re-resolve on accept.** A row can be correct when
+rendered and stale when selected (pane closed, buffer replaced, window renamed,
+session migrated, state flipped). Before acting, **re-run discovery for that one
+sid and re-read the overlay**; act on the fresh result, never on the target
+embedded in the row. If it's now detached, fall through to the resume branch.
+
+**Step 0b (BUG FIX 4 — client identity): capture the invoking tmux client** at
+picker-open (`tmux display -p '#{client_name}'`) and pass it to every tmux call.
+With several attached clients a bare `switch-client` can move an unrelated client
+or leave the invoking terminal unchanged.
+
 **Step 1: Select action:**
-- **attached** (`attach_status == "running"`): `tmux switch-client -t %<pane>`
-  (single unambiguous call — resolves session+window+pane; pane id from
-  discovery), then `nvim --server <sock> --remote-expr` to focus buffer/tabpage
-  (`stdin=false`).
+- **already in THIS nvim** → just focus the buffer/tabpage; no tmux round-trip.
+- **attached** (`attach_status == "running"`) elsewhere: `tmux switch-client -c
+  <invoking-client> -t %<pane>` (pane id from the *re-resolved* discovery), then
+  `nvim --server <sock> --remote-expr` to focus buffer/tabpage (`stdin=false`).
 - **detached** (incl. `failed`/`exited` attach buffers): **shell out to the
   packaged `oc-auto-attach` binary** — `vim.system({ "oc-auto-attach", sid },
   { stdin = false })`. Do NOT call the Lua `M.open()` directly: the binary owns
@@ -593,6 +705,19 @@ facets, glyphs, file locations).
 
 ## Risks / watch-items
 
+- **OpenCode event-schema drift.** workmux has already broken on OpenCode
+  lifecycle event renames. Keep OpenCode decoding behind a **versioned adapter**
+  emitting our own small internal schema (`SessionBusy|SessionIdle|SessionRetrying|
+  PermissionPending|PermissionResolved|QuestionPending|QuestionResolved|
+  SessionErrored|SessionDeleted`), retain unknown raw events for diagnostics, and
+  add fixture tests from captured event sequences. (Task 1 is already shaped this
+  way — keep it that way.)
+- **Never answer a blocked session by injecting keystrokes into a shared pane.**
+  Target the session id via the structured response API or a client explicitly
+  bound to that sid. (Future "answer from the picker" feature; noted so it isn't
+  built the wrong way.)
+- **Attach may not replay a pending interaction** — show pending from our own
+  state rather than assuming the attached TUI rediscovers it.
 - **Partial serve wedge** (timer fires, agent loop stuck): heartbeat can't catch
   it; `updatedAt`-age vs a claimed-`working` is the only secondary signal
   (documented limitation).

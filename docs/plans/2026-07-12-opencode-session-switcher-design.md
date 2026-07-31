@@ -5,6 +5,21 @@
 against source (2026-07-12); **reconciled with the front-door topology
 (2026-07-30)**. Ready for implementation planning.
 
+> **Prior-art consult (2026-07-30, ChatGPT deep research; full answer archived at
+> `/tmp/research-agent-session-switcher-answer.md`).** Checked whether this
+> already exists. **The category now does** — an agent-session-level tool class
+> shipped while we designed (ccmux, Claude Code Agent View, Agent Deck, Agent of
+> Empires, workmux, tmux-agent-sidebar, agterm). **Our identity model does not.**
+> Nearly all of them define an agent session as *one managed PTY/pane/process*;
+> we define it as *one durable logical conversation with 0..N attachments that
+> migrates between headless servers*. Nothing released combines logical sessions
+> independent of PTYs + authoritative permission/question state +
+> detached-but-actionable + jump-or-attach + global transcript search. Verdict:
+> **own the registry, steal the peripheral work.** Consequences folded in below:
+> four real bugs (§1 snapshot, §1 ordering, §4 TOCTOU, §4 client identity), a new
+> `attention` axis (§2), and the join moving out of Lua (§Architecture). See
+> "Prior art" at the end for the taxonomy and what to steal from whom.
+>
 > **Front-door reconciliation (2026-07-30).** Between this design and its
 > implementation, the serve pool was put behind a single front door
 > (`docs/plans/2026-07-12-serve-reverse-proxy-{design,plan}.md`,
@@ -135,6 +150,24 @@ No component can wedge the others: a stale/missing overlay entry ⇒ state
 `unknown`; a dead socket ⇒ session is simply `detached`; the DB is always
 authoritative for existence.
 
+**The join does NOT live in Lua (revised 2026-07-30).** The consult's strongest
+architectural note: *the picker should be a frontend; it must not own session
+identity, state reduction, or reconciliation* — otherwise Neovim becomes part of
+the correctness boundary. It recommended a socket **daemon**; we deliberately
+reject a daemon (the fleet's wedged-serve history is exactly why this design has
+none). **Synthesis:** keep the no-daemon property, but move the merge/join out of
+the Lua picker and into **`oc-session-list`** (§Task 6), which already shells
+read-only. One tested join implementation, callable by *two* thin frontends:
+
+```
+oc-session-list --with-state   ← does base-list + overlay merge + discovery join
+        ├── telescope picker (nvim-native: focuses a known buffer directly)
+        └── fzf/tmux client    (recovery + use outside nvim)
+```
+
+The fzf client is not Phase 1 scope, but the seam must exist from the start or it
+never will.
+
 ### 1. State overlay — an opencode plugin, per-instance heartbeated files
 
 Extend the existing plugin bundle (`assets/opencode/plugins/`). The `event` hook
@@ -154,8 +187,30 @@ single writer.** Each plugin instance owns **its own file**:
 - **Teardown:** on `InstanceDisposed` (`bus/index.ts:65`) / process-exit
   finalizer, tombstone/remove the file.
 
-**Read-time merge:** union all files; per-sessionID keep newest `updatedAt`
-(handles serve-lease migration where two serves briefly hold the same sid);
+**BUG FIX 1 — event-only reconstruction is broken at startup (2026-07-30).**
+A plugin instance that starts *while a permission is already pending* never sees
+the `asked` event, so that session reports `idle` **forever** — precisely when it
+is blocked on us. (ccmux documents this exact blind spot for OpenCode.) The
+correct pattern is **snapshot-then-subscribe**: on plugin init, take a
+**snapshot of currently-pending permissions/questions**, seed the state map from
+it, and only then apply events. Verify what's readable in-process (the
+`Permission`/`Question` InstanceState maps are the authority); if a snapshot is
+genuinely unavailable, that is a Phase-1 blocker to solve, not a nice-to-have —
+without it every serve restart silently loses blocked-ness. Re-snapshot after any
+gap/reconnect.
+
+**BUG FIX 2 — wall-clock newest-wins is wrong across migration (2026-07-30).**
+Serve-lease can move a session between serves, so two files may hold the same
+sid. Ordering by `updatedAt` (wall clock) lets a **delayed `idle` from the old
+owner overwrite `blocked` from the new owner** — losing exactly the state we care
+most about. Order by **(owning-epoch, revision)** instead: each entry carries a
+monotonically increasing per-session `revision` and the writer's
+`owning_server_epoch`; the higher epoch always wins, revision breaks ties within
+an epoch, and wall-clock is *diagnostic only*. Also carry an event id for
+dedup.
+
+**Read-time merge:** union all files; per-sessionID keep the winner by
+**(epoch, revision)** as above (never bare wall-clock);
 **discard entries whose `pid` is dead or whose `heartbeat` is older than T** —
 those become `unknown`, never their last-claimed state. This is what keeps a
 wedged serve (the fleet's documented failure mode; see `monitoring-serve-pool`)
@@ -205,6 +260,22 @@ top. This dovetails with "missing overlay entry ⇒ not-working."
 - **Activity** (overlay): `working` / `blocked` / `idle` / `retry` / `error` /
   `unknown`.
 - **Attachment** (socket discovery, §3): `attached` / `detached`.
+- **Attention** (added 2026-07-30): `seen` / `unseen`.
+
+**Why a third axis.** `idle` conflates four different things: finished
+successfully, waiting for my next prompt, process vanished, and *done work I
+haven't reviewed yet*. Keeping "have I looked at this since it last changed"
+separate is what stops **completed-but-unreviewed** work from disappearing into a
+pile of ordinary idle sessions — a better answer to the original "how do I know
+what I'm still working on vs. done" question than overloading attachment. Display
+model: `activity: idle · outcome: completed · attention: unseen`. Mark `seen`
+when the session is focused via the picker (or is the current buffer). This is
+cheap: one timestamp per session in the tags store, compared against
+`lastActivity`.
+
+**`blocked` is authoritative from pending-interaction records, not from
+`session.status`.** Precedence: unresolved permission/question → `blocked`; else
+error → `error`; else retry → `retry`; else busy → `working`; else `idle`.
 
 |              | working | blocked | idle |
 |--------------|---------|---------|------|
@@ -270,10 +341,26 @@ glyph, since it's actionable: resume will fix it).
 
 ### 4. Jump-or-attach
 
-- **attached** → if the target is in another tmux **session**, `tmux
-  switch-client -t <session>` (not just `select-window`); then `select-window`
-  and `nvim --server <sock> --remote-expr` (with `</dev/null`) to focus the
-  buffer/tabpage from discovery.
+**BUG FIX 3 — time-of-check/time-of-use (2026-07-30).** A row can be correct when
+rendered and stale when selected (pane closed, buffer replaced, window renamed,
+session migrated, state flipped). **On accept, re-resolve the session UUID
+against live state** (re-run discovery for that one sid + re-read the overlay);
+never act on the target embedded in the displayed row.
+
+**BUG FIX 4 — focusing the wrong tmux client (2026-07-30).** With several
+attached clients, a bare `switch-client` can move an unrelated client or leave
+the invoking terminal unchanged. **Capture the invoking client** (`tmux display
+-p '#{client_name}'` at picker-open) and target it explicitly (`switch-client -c
+<client> -t %<pane>`). The operation is *"focus attachment A for client C"*, not
+*"switch to session S"*. Distinguish the cases: buffer in the current client /
+pane attached in another client / detached pane / no attachment — they may
+warrant different behavior.
+
+- **attached** → re-resolve (fix 3), then, targeting the invoking client (fix 4):
+  if the target is in another tmux **session**, `tmux switch-client -c <client>
+  -t %<pane>`; then `nvim --server <sock> --remote-expr` (with `</dev/null`) to
+  focus the buffer/tabpage. If the session's buffer is in **this** nvim already,
+  just focus it — no tmux round-trip.
 - **detached** → **shell out to the packaged `oc-auto-attach` binary**, do NOT
   call the Lua `M.open()` directly. Rationale (front-door, 2026-07-30): the shell
   wrapper owns the health probe, the `/route`→`/place` **pre-placement** (`C6`),
@@ -454,3 +541,61 @@ Remaining before "done" (not blockers to planning):
 8. Jump: `switch-client` for cross-session; **directory-gone fallback**;
    `</dev/null`.
 9. Statusline deferred until staleness handling lands.
+
+## Prior art (consult 2026-07-30) — what exists, what to steal
+
+**Taxonomy.** The useful dividing line is *not* project-vs-session; it is
+**carrier-bound vs logical conversation**:
+
+| Category | Primary identity | Examples | Our fit |
+|---|---|---|---|
+| Project/workspace switchers | directory / worktree / tmux session | tmux-sessionizer, sesh, tmux-sessionx, Zellij session manager | wrong layer |
+| PTY-bound agent managers | agent process in a pane/tab | **ccmux**, herdr, Agent Deck, Agent of Empires, tmux-agent-sidebar, agterm | close UI, wrong identity model |
+| Logical conversation supervisors | conversation survives terminals/processes | **Claude Code Agent View**; this design | correct layer |
+
+**ccmux** (`github.com/epilande/ccmux`) — closest open-source implementation, and
+already consumes real OpenCode events (`session.status` busy/retry/idle,
+`permission.asked/replied`). **Decisive mismatch:** its session is
+pane/process-backed, and when one OpenCode server hosts several logical sessions
+it **folds them into a single row** — which is exactly our K=4-serves-hosting-many
+-sessions topology; its own docs note input-injection then becomes ambiguous.
+**Steal, don't adopt:** picker/row model, notifications, tmux target resolution,
+previews, sidebar. (Gated by the Task 0.5 spike.)
+
+**Claude Code Agent View** (`code.claude.com/docs/en/agent-view`) — the strongest
+*product* precedent and independent validation: it models semantic state
+(working / needs-input / idle / completed / failed / stopped) **separately** from
+process status (alive / exited-restartable / sleeping), promotes needs-input to
+the top, and keeps background conversations attachable later. Claude-only, no
+tmux/nvim routing, no transcript DB — but it confirms the two-axis split and the
+"blocked even when nothing is attached" requirement.
+
+**herdr** — genuinely agent-aware with a substantial socket API (enumerate/focus
+workspaces·tabs·panes, `pane.report_agent` for externally-reported authoritative
+state, custom global views that could express "current workspace + blocked
+anywhere"). **But its object is a pane**: `pane.report_agent`/`report_agent_session`
+are keyed by `pane_id`, so a logical session with **no herdr pane** is not a
+first-class agent. Adopt herdr only if we want herdr as our multiplexer; it does
+not remove the registry work.
+
+**workmux** (`github.com/raine/workmux`) — its OpenCode plugin maps permission
+*and* structured-question events to a waiting state and back; good reference for
+our reducer. Also a warning: it has already broken on **OpenCode event-name
+drift** → put OpenCode decoding behind a versioned adapter emitting our own small
+internal schema, with fixture tests from captured event sequences.
+
+**gentle-agent-state** — state-normalization substrate (agent events → states for
+tmux/Zellij surfaces); reference for the adapter idea.
+
+**Rejected as bases:** `sesh` (composable at shell level but contributes only
+list-composition; `sesh connect` doesn't understand our targets), `tmux-sessionx`
+(no general custom-row protocol), Zellij (viable plugin host, but only if we're
+migrating multiplexers anyway).
+
+**Further failure modes flagged (beyond the 4 fixed inline):** never answer a
+blocked session by injecting keystrokes into a shared pane (target the session id
+via the structured response API); attach may not replay a pending interaction, so
+show it from our own state and ideally answer without attaching; don't delete a
+logical session just because its last attachment vanished; for the 13 GB
+transcript DB use FTS5/a real index + debounce + top-K rather than repeated
+`LIKE` scans (already our documented Phase-2 upgrade path).
