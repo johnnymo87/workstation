@@ -593,14 +593,40 @@ independently. Note this guard only covers processes that *bind a routing slot*;
 a nested non-serve `opencode` inherits the env without tripping it, which is
 exactly the gap the plugin's own cmdline check closes.
 
-**Step 4b: Manual smoke on the fleet** (after the bundle package exists):
-`nix run home-manager -- switch --flake .#cloudbox`;
-drive a session to blocked/working; `cat ~/.local/share/opencode/session-state.d/*.json`.
-Expect one file per (serve×dir), advancing `heartbeat`, correct state.
+**Step 4b: Manual smoke on the fleet — DONE 2026-07-31 (commit `1724e6c`).**
+The bundle package now exists: `pkgs/opencode-plugin-bundle` (shared builder),
+called by `pkgs/session-state-plugin` and, after refactor, by
+`pkgs/self-compact-plugin`. Deployed cloudbox-gated via
+`nix run home-manager -- switch --flake .#cloudbox`.
+
+Verified on the live fleet, in order:
+
+1. **The gate is real.** The cloudbox generation contains `session-state.js` +
+   `.js.map`; the devbox generation contains neither. No `*-impl` file is
+   deployed to the plugins directory on either.
+2. **No serve restart was needed.** A new *instance* picks the plugin up:
+   `GET :4700/question?directory=/tmp/opencode/probe-dir` (read-only, through
+   the front door) created an instance on serve-0 which immediately wrote
+   `serve-0-5e5bd0e61ab58c6a.json`. All four pool serves stayed `active
+   (running)`; zero plugin errors in the pool journal.
+3. **Real state transitions, both paths.** Driving a turn on that session
+   produced `revision: 3, error: true` on a failed call and then
+   `revision: 7, error: false, activity: idle` on a successful one — so the
+   error flag is set *and cleared*, not sticky. (The first failure was my own
+   bad model id, `claude-haiku-4-5@default` instead of `@20251001` — not a
+   plugin fault.)
+4. **`session.deleted` empirically confirmed.** `DELETE /session/<id>` removed
+   the entry from `sessions`. This is the payload whose key I nearly
+   misreported in cycle 3 (the TUI reads `info.id`, the schema carries
+   `sessionID`); the reducer demonstrably reads the right field on the
+   deployed version, which retires that open question.
+
 **Note:** on serve SIGKILL/nightly reset the file is NOT removed (exit handler
 doesn't run) — that's expected; the reader's dead-PID/stale check + GC (Task 4)
 handles it, and a same-port restart overwrites it. Do not treat a lingering file
-as a bug.
+as a bug. Observed live: the probe left `serve-0-*.json` behind with
+`sessions: {}` for a `/tmp` directory that no longer matters — a concrete
+instance of the orphaned-overlay item below, which Task 4's reader must handle.
 
 **Adversarial review outcome (2026-07-31).** One HIGH, fixed in `72010b9`:
 `evictIdleSessions` never consulted `activity`, so a session 46 minutes into a
@@ -609,6 +635,31 @@ working. Proved with a failing test first. Also fixed: `shouldGoSilent` now
 requires the superseding writer to be *live* (a recycled pid inheriting a
 crashed predecessor's high stamp could otherwise silence the real writer), and
 the guard logs when it goes inert with `OPENCODE_SERVE_ID` set.
+
+**Two corrections to things this plan asserted as fact (2026-07-31, cycle 4):**
+
+- **"A bad plugin at init breaks instance creation for every directory on every
+  serve" is FALSE on 1.17.13.** Measured with a plugin that writes a marker at
+  import, writes a second marker inside its factory, and then throws: both
+  markers appear (so it really was imported and the factory really did run and
+  throw) and session creation still succeeds, with an empty log. opencode
+  swallows a throwing factory the same way it swallows a failed sibling import.
+  The blast radius of a plugin bug here is therefore much smaller than this plan
+  claimed -- but the failure is even quieter, which for a *state writer* is the
+  worse half: an absent overlay is indistinguishable from a serve with no
+  sessions. Isolated smoke-testing is still worth doing; the justification is
+  "silent wrongness", not "takes the host down".
+- **The test suite was talking to a live pool serve.** `fetchPendingSnapshot`
+  received `globalThis.fetch` while the tests passed a mock through
+  `client._client.getConfig()`, which the plugin never reads. Every `npm test`
+  fired two real requests at `ctx.serverUrl` (127.0.0.1:4096), causing a
+  production serve to create an instance for the test's temp directory. Fixed by
+  injecting fetch through `opts` (commit `3fd06b9`). Note the knock-on: on CI, or
+  any host without a pool, those requests failed into the silent catch, so
+  **BUG FIX 1's seeding path had no real coverage anywhere** -- it passed on
+  cloudbox for one reason and on CI for another. This is the second time a test
+  was assumed to be isolated and was not (the first deleted a live serve's
+  overlay file).
 
 **Carried forward, NOT fixed here** (ranked; all from the same review):
 
@@ -641,6 +692,15 @@ the guard logs when it goes inert with `OPENCODE_SERVE_ID` set.
   `permission.*` events -- that half rests on a one-time bundle read. Forcing a
   real permission prompt needs a config whose `permission` is not `"*": "allow"`;
   the project-level override did not merge in the attempt made here.
+- **[MED-LOW, sharpened by observation] A live instance for a dead directory
+  heartbeats forever.** Observed on the fleet: probe/test directories under
+  `/tmp` were deleted, but serve-0 still holds instances for them, so their
+  overlays keep rewriting with a *fresh* heartbeat and `sessions: {}`
+  indefinitely. Consequence for Task 4: **heartbeat age cannot be the staleness
+  test.** A file can be current, its writer alive, and its subject nonexistent.
+  The reader needs directory existence and/or intersection with the DB's session
+  list, not just a freshness check. This is the same "DB stays authoritative for
+  existence" requirement noted below, arrived at from the opposite direction.
 - **[MED-LOW] No GC or age cap for orphaned overlay files.** Serve renumbering or
   a retired directory leaves a file forever, and the merge emits `unknown` from
   arbitrarily old dead files with no age bound → permanent picker noise and a

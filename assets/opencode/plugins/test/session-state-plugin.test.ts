@@ -27,11 +27,11 @@ describe("session-state plugin integration", () => {
 
     const ctx = {
       directory: "/path/to/project",
-      serverUrl: "http://127.0.0.1:4096",
+      serverUrl: "http://127.0.0.1:1",
       client: {},
     } as any
 
-    const result = await plugin(ctx, { cmdline: "/bin/opencode\x00run\x00", dir: overlayDir })
+    const result = await plugin(ctx, { cmdline: "/bin/opencode\x00run\x00", dir: overlayDir, fetch: vi.fn() })
     expect(result).toEqual({})
   })
 
@@ -45,11 +45,11 @@ describe("session-state plugin integration", () => {
     })
     const ctx = {
       directory: testDir,
-      serverUrl: "http://127.0.0.1:4096",
+      serverUrl: "http://127.0.0.1:1",
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } },
     } as any
 
-    const result = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir })
+    const result = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch })
     expect(result.event).toBeDefined()
 
     // Send busy event
@@ -89,6 +89,34 @@ describe("session-state plugin integration", () => {
     } catch {}
   })
 
+  // Regression guard. The seed/reconcile used globalThis.fetch while these
+  // tests handed their mock in through `client._client.getConfig()` -- a
+  // channel the plugin never read. The mocks passed, and the suite quietly
+  // fired two real requests at whatever was on ctx.serverUrl (on cloudbox: a
+  // live pool serve, which then spun up an instance for the temp directory and
+  // left an overlay behind). Assert the injected fetch is ACTUALLY the one
+  // used, and that the global is untouched, or the isolation is decorative.
+  it("uses the injected fetch and never touches globalThis.fetch", async () => {
+    process.env.OPENCODE_SERVE_ID = "serve-0"
+    const poolCmdline = "/bin/opencode\x00serve\x00--port\x004096\x00"
+
+    const injected = vi.fn().mockResolvedValue({ ok: true, json: async () => [] })
+    const globalSpy = vi.spyOn(globalThis, "fetch")
+
+    const ctx = {
+      directory: testDir,
+      serverUrl: "http://127.0.0.1:1",
+      client: {},
+    } as any
+
+    await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: injected })
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(injected).toHaveBeenCalled()
+    expect(globalSpy).not.toHaveBeenCalled()
+    globalSpy.mockRestore()
+  })
+
   it("goes silent when an existing file has same PID and a newer instanceStamp", async () => {
     process.env.OPENCODE_SERVE_ID = "serve-0"
     const poolCmdline = "/bin/opencode\x00serve\x00--port\x004096\x00"
@@ -96,11 +124,11 @@ describe("session-state plugin integration", () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => [] })
     const ctx = {
       directory: testDir,
-      serverUrl: "http://127.0.0.1:4096",
+      serverUrl: "http://127.0.0.1:1",
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } },
     } as any
 
-    const instance1 = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir })
+    const instance1 = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch })
 
     const files = fs.readdirSync(overlayDir).filter((f) => f.startsWith("serve-0-") && f.endsWith(".json"))
     expect(files.length).toBeGreaterThan(0)

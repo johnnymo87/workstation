@@ -478,6 +478,28 @@ in
     xdg.configFile."opencode/plugins/self-compact.js.map".source =
       "${localPkgs.self-compact-plugin}/self-compact.js.map";
 
+    # session-state: the overlay writer behind the session switcher. Also a
+    # Nix-built bundle, and here bundling is not a preference — the plugin is
+    # session-state.ts + session-state-impl.ts, and two xdg.configFile entries
+    # would put them in different store paths, so the sibling import would throw
+    # at load and opencode would swallow it (empty log, plugin still listed by
+    # `opencode debug info`). Shipping the impl file into the plugins directory
+    # would ALSO log `Plugin export is not a function` every bootstrap, since
+    # opencode loads every .ts/.js there as a plugin (a .js.map is ignored --
+    # self-compact's has sat there for months). One file avoids both.
+    #
+    # Cloudbox-only, deliberately: this writes state for the serve pool, and the
+    # pool (opencode-serve@{4096..4099}) exists only here. The plugin no-ops
+    # elsewhere anyway — it stays inert unless OPENCODE_SERVE_ID is set AND
+    # /proc/self/cmdline shows a real `serve` — but there is no reason to ship a
+    # writer to hosts with nothing to write about.
+    xdg.configFile."opencode/plugins/session-state.js" = lib.mkIf isCloudbox {
+      source = "${localPkgs.session-state-plugin}/session-state.js";
+    };
+    xdg.configFile."opencode/plugins/session-state.js.map" = lib.mkIf isCloudbox {
+      source = "${localPkgs.session-state-plugin}/session-state.js.map";
+    };
+
     # caveman: symlink the whole DIRECTORY, never the individual files.
     # opencode resolves a plugin entry through realpathSync before importing
     # it, so plugin.js sees import.meta.url as its /nix/store path and looks

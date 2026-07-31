@@ -51,7 +51,25 @@ const plugin: Plugin = async (ctx, opts?: any) => {
     opts?.dir ??
     process.env.OPENCODE_SESSION_STATE_DIR ??
     join(homedir(), ".local/share/opencode/session-state.d")
-  mkdirSync(dir, { recursive: true })
+
+  // The one syscall in this factory that ran unguarded. Everything below is
+  // already try/caught, so a failure here (ENOSPC, EROFS, a bad injected dir)
+  // was the single way this factory could throw. Measured on 1.17.13: opencode
+  // SWALLOWS a throwing plugin factory -- the module is imported, the factory
+  // runs and throws, and session creation still succeeds with an empty log --
+  // so this would not have taken the host down. It would instead have made the
+  // writer vanish in total silence, which for a state writer is the worse
+  // outcome: absent state reads as "no information", indistinguishable from a
+  // serve that simply has no sessions. Fail loudly and stay inert instead.
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch (err) {
+    console.error(
+      `[session-state] cannot create overlay dir ${dir}; writer inert for this instance:`,
+      err,
+    )
+    return {}
+  }
 
   const filename = getOverlayFilename(serveId!, ctx.directory)
   const file = join(dir, filename)
@@ -127,7 +145,15 @@ const plugin: Plugin = async (ctx, opts?: any) => {
   // silently. If auth is ever turned on, the reconcile fails closed (the fetch
   // throws/401s, the catch swallows it, and the writer keeps serving
   // event-derived state) rather than corrupting anything.
-  const fetchFn: typeof fetch = globalThis.fetch
+  //
+  // INJECTABLE, and that is not a nicety. The tests used to hand a mock fetch
+  // in via `client._client.getConfig()`, which this function never read -- so
+  // every `npm test` run fired two REAL requests at whatever was listening on
+  // ctx.serverUrl. On cloudbox that is a live pool serve, which then created an
+  // instance for the test's throwaway directory and left an overlay behind. The
+  // mock was decoration; the network call was real. Same shape as the earlier
+  // bug where a test scanned and deleted the LIVE overlay directory.
+  const fetchFn: typeof fetch = opts?.fetch ?? globalThis.fetch
 
   const reconcile = async () => {
     if (isSilent) return
