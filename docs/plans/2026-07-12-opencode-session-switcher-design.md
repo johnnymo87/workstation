@@ -554,18 +554,86 @@ The startup pending-snapshot has a source, and it is **not** the plugin SDK.
   - `GET /api/question/request` → `v2.question.request.list`
   - plus per-session `GET /api/session/{sessionID}/permission` and `…/question`.
 
-  The two `…/request` endpoints are **global** (not per-session), so **one call
-  seeds every pending prompt across the fleet.** Verified live through the front
-  door: both return `200` with `{"location":…,"data":[]}`.
+  ~~The two `…/request` endpoints are **global**, so one call seeds every pending
+  prompt across the fleet. Verified live: both return `200` with
+  `{"location":…,"data":[]}`.~~
+
+  **CORRECTED 2026-07-30 (adversarial review). The above was wrong, and the
+  "verification" was theatre: an empty `data: []` cannot distinguish a global list
+  from a scoped one. It was cited as if it could.**
+
+  These endpoints are **directory/instance-scoped**, not global. Settled by
+  probing with the parameter rather than by observing an empty result:
+
+  ```
+  GET /api/permission/request                                    → location.directory = /home/dev  (serve default)
+  GET /api/permission/request?location[directory]=/home/dev/projects/workstation
+                                                                 → location.directory = /home/dev/projects/workstation
+  ```
+
+  The scope **moves with the parameter**. Confirmed in source: an instance-context
+  middleware resolves `store.load({ directory })` and `Permission.list()` returns
+  that instance's in-memory `pending`. `v2.permission.request.list` declares a
+  `location` query param in the live OpenAPI.
+
+  **Do not "iterate roots" to recover a fleet view.** That is the same hazard this
+  design already rejected for `/session/status` polling: `InstanceStore.load`
+  *creates* an instance on miss, so iterating roots through the door lazily
+  instantiates heavyweight instances fleet-wide. Worse, the door routes each GET to
+  **one** serve while pending state lives in per-serve memory — so even a correct
+  `location` can land on the wrong serve.
 - Not SQLite: the `permission` table is a project-level ACL (`action`/`resource`),
   not pending prompts, and is empty; the `event` table is empty too. Pending
   prompt state is in-memory in the serve process, exposed only over HTTP.
 
-**Consequence for Task 3:** seed via `GET /api/permission/request` +
-`GET /api/question/request` **through `$FRONTDOOR_URL`**, then subscribe. One
-open sub-question, deferred to Task 3 (not a blocker): the response echoes a
-`location.directory`, so confirm the list is fleet-global rather than scoped to
-the caller's directory — if scoped, iterate roots.
+**Consequence for Task 3 (revised): each plugin instance seeds ITSELF.** The
+correct scope was never fleet-global — it is exactly the scope the plugin's own
+overlay file already owns: its own serve, its own `ctx.directory`, queried
+in-process via `ctx.serverUrl`. This is *cheaper* than the original plan: no door
+round-trip, no opacity-guard exposure, no wrong-serve routing, no root iteration.
+
+**Also reconsider what the seed is FOR.** The startup-blindness premise is weaker
+than assumed for an *in-process* observer. The plugin loads at instance creation;
+permissions are created by turns, i.e. after init. And a serve restart *destroys*
+pending state (it is in-memory), so a post-restart "blocked" would be a lie —
+there is no dialog left to answer. ccmux's documented blind spot is an **external**
+observer starting late; our observer shares the state's lifetime.
+
+So the seed's real value is **drift repair, not startup**. Prefer a periodic
+in-process reconcile (~60 s, fire-and-forget) over a one-shot boot seed. This also
+defuses the seed-vs-stream race below.
+
+**Race hazard if the seed is kept as-is (built code, `session-state-impl.ts`).**
+`seedFromSnapshot` is replace-authoritative for named sessions. Snapshot taken at
+T1, `permission.asked p2` applied at T2, response lands at T3 ⇒ p2 is **dropped**;
+symmetrically a permission replied between T1 and T3 is **resurrected** and pins
+the row to `blocked` until the next idle. The earlier note that "the reducer
+already merges by `(epoch, revision)`" was hand-waving — the seed does not
+participate in that ordering at all, and stomps `revision` to 0. Fix: accept a
+snapshot only for sessions with **no event-derived entry yet**, or make it
+union-only. Tracked as a Task 3 prerequisite.
+
+### 7. Version skew in every "verified in source" claim (2026-07-30)
+
+**All source citations in this document were verified against `~/projects/opencode`
+at 1.15.10. The deployed fleet is 1.17.13.6 and auto-updates every 8 hours.** Two
+minors of drift, and this exact trap has already burned us once: the sq1v
+investigation re-verified against the deployed binary and found the stale-tree
+conclusion was *wrong on deployed*.
+
+This includes Task 1's load-bearing payload asymmetry (`asked→id`,
+`replied→requestID`), which is marked "do not re-spike". Treat it as
+version-stamped, not eternal.
+
+**Required before Task 3 wires the real event bus:** capture one real
+permission ask/reply and one busy/idle cycle **from the deployed fleet** and commit
+them as fixtures. The plan's own risk section already demands fixture tests from
+captured event sequences; Task 1 shipped with hand-written fixtures only. Any
+future "verified" claim in this doc must name the version it was verified against.
+
+**Watch-item:** the deployed revision exposes `POST /api/session/{id}/permission`
+(v2 create). Unused today, but if anything ever creates permissions out-of-band,
+"pending ⇒ busy" breaks and *idle-clears-pending starts eating real blocks*.
 
 **Landmine inherited from ccmux (`plugin.js:279-286`):** do **not** `await` the
 seed during plugin init. Those handlers are served in-process by a runtime whose

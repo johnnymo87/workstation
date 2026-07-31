@@ -303,6 +303,27 @@ restart silently loses blocked-ness. Task 3 wires the real snapshot source.
 
 ---
 
+## GATE — corrections from the 2026-07-30 adversarial review (do before Task 2)
+
+Four items. Three are doc-level and are folded into the task text below; one is a
+code defect in shipped Task 1. Rationale and evidence live in the design doc.
+
+1. **BUG FIX 1's resolution was wrong** — `/api/permission/request` is
+   directory/instance-scoped, not global, and the "verified live" empty-list
+   evidence could not have shown otherwise. Corrected in the design doc:
+   each plugin instance seeds **itself** (own serve, own `ctx.directory`,
+   in-process), and the seed is demoted toward a periodic **reconcile**. Also fix
+   the seed-vs-stream race (`seedFromSnapshot` may only claim sessions with no
+   event-derived entry).
+2. **`revision` is never incremented** (`session-state-impl.ts` — declared line 12,
+   set to 0 by the seed, bumped nowhere). Task 2's within-epoch tie-break is
+   therefore dead on real data, and Task 2's specimen tests hand-craft revision
+   values so they would pass anyway. **Fix in code before Task 2**, with a test that
+   fails if the bump is absent.
+3. **`epoch = process start time` is not a fencing token** — see Task 3 below.
+4. **Deployed-fleet event fixture** must be captured before Task 3 wires the real
+   bus (version skew, design doc finding #7).
+
 ## Task 2: Overlay serialization + merge (stale ⇒ unknown, never dropped)
 
 **Files:** Modify `session-state-impl.ts`; extend the test.
@@ -336,10 +357,28 @@ it("dead pid and stale heartbeat -> entries flagged unknown, NOT dropped", () =>
 })
 ```
 
+**⚠ Epoch semantics — do not implement as boot time.** The design intends an
+*ownership* generation ("the higher epoch always wins"), but a writer's
+start-time/boot id does not order ownership. Migrate a session from a
+**younger-booted** serve to an **older-booted** one and the new owner's epoch is
+*lower*, so the old owner's stale entry wins **permanently** — not a race, a
+persistent inversion. Staleness never rescues it: the old serve still hosts other
+sessions, so its file heartbeat stays fresh, and nothing prunes a migrated-away
+session (the writer prunes only on `session.deleted`). The serve canary restarts
+serves individually, so boot times genuinely diverge.
+
+Before implementing, resolve in this order:
+1. Find a real per-session **ownership generation** the plugin can read (does the
+   serve lease expose one?). Use it as `epoch`.
+2. If unreachable: have the writer **self-prune sessions with no events for X
+   minutes**, which bounds the inversion window to X, and document the residual.
+
+Either way, **do not ship boot-time epochs described as fencing tokens.**
+
 **Step 2: FAIL → Step 3: Implement.** `serializeOverlay({pid, serve, epoch,
-directory, heartbeat, sessions})` = shape passthrough (`epoch` = the writer's
-start-time/boot id; `revision` is per-session, bumped by the reducer on every
-state change). `mergeOverlays(files, {now, staleMs, isAlive})`: for each file
+directory, heartbeat, sessions})` = shape passthrough (`epoch` = the ownership
+generation per above, NOT a boot id; `revision` is per-session, bumped by the
+reducer on every state change — see GATE item 2, this is currently unimplemented). `mergeOverlays(files, {now, staleMs, isAlive})`: for each file
 compute `live = isAlive(pid) && now - heartbeat <= staleMs`; union sessions
 keeping the winner by **`(epoch, revision)`** — wall clock is diagnostic only and
 must never decide; if a session's winning file is
@@ -368,7 +407,7 @@ const DIR = join(homedir(), ".local/share/opencode/session-state.d")
 const HEARTBEAT_MS = 15_000
 const plugin: Plugin = async (ctx) => {
   mkdirSync(DIR, { recursive: true })
-  const serve = process.env.OPENCODE_SERVE_ID ?? new URL(ctx.serverUrl).port ?? "0"
+  const serve = process.env.OPENCODE_SERVE_ID || new URL(ctx.serverUrl).port || "0"   // `||` not `??`: an unset port is "" , not null
   const dirhash = createHash("sha256").update(ctx.directory ?? "").digest("hex").slice(0, 16)
   const file = join(DIR, `${serve}-${dirhash}.json`)   // restart overwrites its predecessor (free GC)
   let sessions: StateMap = emptyState()
@@ -380,6 +419,9 @@ const plugin: Plugin = async (ctx) => {
   flush()
   const timer = setInterval(flush, HEARTBEAT_MS); if (typeof (timer as any).unref === "function") (timer as any).unref()
   process.once("exit", () => { try { clearInterval(timer); rmSync(file, { force: true }) } catch {} })  // best-effort only
+  // ⚠ NOT SUFFICIENT — see "Zombie writer" below. Instance reload disposes and
+  // recreates instances *inside a living process*, so `exit` never fires and the
+  // old instance keeps flushing to the same file.
   return {
     event: async ({ event }) => {
       if (event?.type === "session.deleted") { const s = (event.properties as any)?.sessionID; if (s && sessions[s]) { delete sessions[s]; flush() } return }
@@ -400,6 +442,36 @@ in-process, fall back to a door-side read, and if neither works **stop and
 report**: this is a Phase-1 blocker, not a nice-to-have). Also stamp `epoch`
 (process start time) once at init. Smoke: trigger a permission prompt, restart
 that serve, confirm the session still reads `blocked` after restart.
+
+**Step 1b: Zombie writer defense (adversarial review, 2026-07-30).** Clearing the
+interval on `process.once("exit")` is not enough. `InstanceStore.reload` disposes
+and recreates instances **inside a living process** (and `InstanceDisposed` likely
+never reaches the plugin — see Risks). The old plugin instance's interval then keeps
+flushing **stale state with a fresh heartbeat and a live pid** to the *same*
+`${serve}-${dirhash}.json`, alternating whole-file overwrites with the new
+instance. The reader cannot detect this: same pid, fresh heartbeat. Every reload
+leaks another writer.
+
+Fix: stamp a **per-instance init timestamp** into the file. On each `flush()`, read
+the current file first; if its stamp is **newer than our own**, we have been
+superseded — `clearInterval` and go silent (do not delete the file; the live
+instance owns it).
+
+Cheap verification: trigger one instance reload on cloudbox and confirm the file
+does not flap between two states.
+
+**Step 1c: Seed scope + race (GATE items 1 and 4).** Seed **in-process from this
+instance's own serve** (`ctx.serverUrl`, `ctx.directory`) — NOT fleet-wide through
+the door, which is impossible anyway (the endpoints are directory-scoped) and
+would lazily instantiate instances. Fire-and-forget; never `await` during init.
+Apply the snapshot only to sessions with **no event-derived entry yet**, so a
+late-landing snapshot cannot drop a newer `asked` or resurrect a replied prompt.
+Prefer a periodic (~60 s) reconcile over a one-shot boot seed — see the design
+doc, which argues the startup-blindness premise is weak for an in-process observer
+and the real value is drift repair.
+
+Before this task: capture a real permission ask/reply and a busy/idle cycle from
+the **deployed** fleet (1.17.x, not the 1.15.10 source tree) and commit as fixtures.
 
 **Step 2: Typecheck** `npx tsc --noEmit` → clean.
 
@@ -485,11 +557,28 @@ oc-search's hardcoded store-path rot).
 selects `id,title,parent_id,directory,time_updated`; **excludes archived**
 (`time_archived IS NULL`, `session/session.sql.ts:52`); ranks **per root** so a
 recently-active child keeps its (older) parent tree in the top-N:
+**⚠ `COALESCE(parent_id,id)` is WRONG here (adversarial review, 2026-07-30).** It
+lifts a child exactly **one** level, but this fleet has **multi-level** nesting —
+our own sq1v work walks parents "bounded at depth 8" and live-verified real
+grandchild chains. With the COALESCE form a blocked grandchild resolves to a
+*middle* session as its root, so it never rolls up to the true root and
+**blocked-pierces-scope silently fails for exactly the swarm topology that
+motivated this feature.**
+
+Use `WITH RECURSIVE` to walk to the true root (bound the depth), and add a
+**3-level fixture test**. At ~6k rows the cost is irrelevant.
+
+The same defect infects **Task 9's** "union in overlay-blocked roots": an overlay
+sid may be a deep child, so that individual fetch must walk up too — and must apply
+the same `time_archived IS NULL` filter as the base list, or the union will
+resurrect archived sessions.
+
 ```sql
 -- roots (and their trees) ordered by the tree's most-recent activity
+-- REPLACE the COALESCE below with a recursive walk to the true root:
 WITH tree AS (
   SELECT id,title,parent_id,directory,time_updated,
-         COALESCE(parent_id,id) AS root
+         COALESCE(parent_id,id) AS root   -- ⚠ single-level; see warning above
   FROM session WHERE time_archived IS NULL
 ),
 ranked AS (SELECT root, MAX(time_updated) AS recency FROM tree GROUP BY root
@@ -557,6 +646,10 @@ tmux session/window for attached sessions; directory-classify otherwise.
 - `effective_state`: overlay `unknown` flag → `unknown`; pending/error → blocked/
   error; else activity; missing overlay → idle.
 - attachment = `location[sid] ~= nil`.
+- **dir-missing overrides BOTH glyph and sort** (Task 0 finding). Stat the
+  directory during the join; if it's gone, the row can never make progress, so it
+  must not be allowed to sort as `working`. Otherwise a prompted dir-gone session
+  emits busy, never idles, and pins itself to the **top** of the list forever.
 - sort: `error`/`blocked` → `retry` → `working` → **`idle`+`unseen`** → `idle`/`unknown`;
   then asc idle-age (overlay `lastActivity`, fallback DB `time_updated`);
   clustered by project.
