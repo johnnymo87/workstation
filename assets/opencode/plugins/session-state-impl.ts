@@ -1,3 +1,4 @@
+// "unknown" is produced later by Task 2 for stale overlays
 export type Activity = "working" | "blocked" | "idle" | "retry" | "error" | "unknown"
 
 export interface SessionEntry {
@@ -80,20 +81,28 @@ export function applyEvent(
     }
     // Asymmetry: .asked events carry key in properties.id
     case "permission.asked":
-      e.pendingPermissions = [...new Set([...e.pendingPermissions, p.id])]
+      if (!p.id) return prev
+      if (e.pendingPermissions.includes(p.id)) return prev
+      e.pendingPermissions = [...e.pendingPermissions, p.id]
       bump()
       break
     // Asymmetry: .replied / .rejected events carry key in properties.requestID
     case "permission.replied":
+      if (!p.requestID) return prev
+      if (!e.pendingPermissions.includes(p.requestID)) return prev
       e.pendingPermissions = e.pendingPermissions.filter((x) => x !== p.requestID)
       bump()
       break
     case "question.asked":
-      e.pendingQuestions = [...new Set([...e.pendingQuestions, p.id])]
+      if (!p.id) return prev
+      if (e.pendingQuestions.includes(p.id)) return prev
+      e.pendingQuestions = [...e.pendingQuestions, p.id]
       bump()
       break
     case "question.replied":
     case "question.rejected":
+      if (!p.requestID) return prev
+      if (!e.pendingQuestions.includes(p.requestID)) return prev
       e.pendingQuestions = e.pendingQuestions.filter((x) => x !== p.requestID)
       bump()
       break
@@ -122,33 +131,28 @@ export interface Snapshot {
   questions?: Array<{ sessionID: string; id: string }>
 }
 
+// NOTE: seedFromSnapshot is a seed/startup primitive, not a general resync.
+// It is authoritative for sessions named in the snapshot (replacing their
+// pendingPermissions / pendingQuestions). Sessions absent from the snapshot
+// entirely are left untouched (not cleared).
 export function seedFromSnapshot(
   prev: StateMap,
   snapshot: Snapshot,
   clock = now,
 ): StateMap {
-  const t = clock()
-  const next: StateMap = { ...prev }
-
-  const getOrCreate = (sid: string): SessionEntry => {
-    if (!next[sid]) {
-      next[sid] = {
-        ...fresh(t),
-        revision: 0,
-      }
-    } else {
-      next[sid] = { ...next[sid], revision: next[sid].revision ?? 0 }
-    }
-    return next[sid]
-  }
+  const permissionsBySession: Record<string, string[]> = {}
+  const questionsBySession: Record<string, string[]> = {}
+  const sessionsInSnapshot = new Set<string>()
 
   if (snapshot.permissions) {
     for (const item of snapshot.permissions) {
       if (!item.sessionID || !item.id) continue
-      const entry = getOrCreate(item.sessionID)
-      if (!entry.pendingPermissions.includes(item.id)) {
-        entry.pendingPermissions = [...entry.pendingPermissions, item.id]
-        entry.updatedAt = t
+      sessionsInSnapshot.add(item.sessionID)
+      if (!permissionsBySession[item.sessionID]) {
+        permissionsBySession[item.sessionID] = []
+      }
+      if (!permissionsBySession[item.sessionID].includes(item.id)) {
+        permissionsBySession[item.sessionID].push(item.id)
       }
     }
   }
@@ -156,13 +160,56 @@ export function seedFromSnapshot(
   if (snapshot.questions) {
     for (const item of snapshot.questions) {
       if (!item.sessionID || !item.id) continue
-      const entry = getOrCreate(item.sessionID)
-      if (!entry.pendingQuestions.includes(item.id)) {
-        entry.pendingQuestions = [...entry.pendingQuestions, item.id]
-        entry.updatedAt = t
+      sessionsInSnapshot.add(item.sessionID)
+      if (!questionsBySession[item.sessionID]) {
+        questionsBySession[item.sessionID] = []
+      }
+      if (!questionsBySession[item.sessionID].includes(item.id)) {
+        questionsBySession[item.sessionID].push(item.id)
       }
     }
   }
 
-  return next
+  if (sessionsInSnapshot.size === 0) return prev
+
+  const t = clock()
+  let changed = false
+  const next: StateMap = { ...prev }
+
+  for (const sid of sessionsInSnapshot) {
+    const targetPermissions = permissionsBySession[sid] ?? []
+    const targetQuestions = questionsBySession[sid] ?? []
+    const cur = next[sid]
+
+    if (!cur) {
+      next[sid] = {
+        ...fresh(t),
+        pendingPermissions: targetPermissions,
+        pendingQuestions: targetQuestions,
+        revision: 0,
+      }
+      changed = true
+    } else {
+      const samePermissions =
+        cur.pendingPermissions.length === targetPermissions.length &&
+        cur.pendingPermissions.every((val, idx) => val === targetPermissions[idx])
+      const sameQuestions =
+        cur.pendingQuestions.length === targetQuestions.length &&
+        cur.pendingQuestions.every((val, idx) => val === targetQuestions[idx])
+      const sameRevision = cur.revision === 0
+
+      if (!samePermissions || !sameQuestions || !sameRevision) {
+        next[sid] = {
+          ...cur,
+          pendingPermissions: targetPermissions,
+          pendingQuestions: targetQuestions,
+          revision: 0,
+          updatedAt: t,
+        }
+        changed = true
+      }
+    }
+  }
+
+  return changed ? next : prev
 }
