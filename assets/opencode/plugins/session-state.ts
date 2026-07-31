@@ -145,7 +145,15 @@ const plugin: Plugin = async (ctx, opts?: any) => {
   // silently. If auth is ever turned on, the reconcile fails closed (the fetch
   // throws/401s, the catch swallows it, and the writer keeps serving
   // event-derived state) rather than corrupting anything.
-  const fetchFn: typeof fetch = globalThis.fetch
+  //
+  // INJECTABLE, and that is not a nicety. The tests used to hand a mock fetch
+  // in via `client._client.getConfig()`, which this function never read -- so
+  // every `npm test` run fired two REAL requests at whatever was listening on
+  // ctx.serverUrl. On cloudbox that is a live pool serve, which then created an
+  // instance for the test's throwaway directory and left an overlay behind. The
+  // mock was decoration; the network call was real. Same shape as the earlier
+  // bug where a test scanned and deleted the LIVE overlay directory.
+  const fetchFn: typeof fetch = opts?.fetch ?? globalThis.fetch
 
   const reconcile = async () => {
     if (isSilent) return
