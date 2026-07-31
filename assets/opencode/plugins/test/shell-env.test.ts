@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import * as fs from "node:fs"
-import plugin, { internals, type KubeFS } from "../shell-env"
+import pluginModule, { internals, type KubeFS } from "../shell-env"
 
-// loadKubeconfigEnv is intentionally NOT a bare function export -- opencode's
-// legacy plugin loader would invoke it as a plugin factory. See shell-env.ts.
+// shell-env.ts uses opencode's v1 plugin shape (`export default { id, server }`),
+// which is what makes this named export safe: the loader takes the v1 branch and
+// never inspects named exports. See the comment on the default export.
 const { loadKubeconfigEnv } = internals
 
 // shell-env.ts reads sops secrets via fs.readFileSync(/run/secrets/<name>) and
@@ -29,7 +30,7 @@ function withSecrets(files: Record<string, string>) {
 
 // Resolve the shell.env hook the plugin registers.
 async function getShellEnvHook() {
-  const hooks = await plugin({} as never)
+  const hooks = await pluginModule.server({} as never, {} as never)
   const hook = hooks["shell.env"]
   if (!hook) throw new Error("plugin did not register a shell.env hook")
   return hook
