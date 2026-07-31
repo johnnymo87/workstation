@@ -692,6 +692,15 @@ the guard logs when it goes inert with `OPENCODE_SERVE_ID` set.
   `permission.*` events -- that half rests on a one-time bundle read. Forcing a
   real permission prompt needs a config whose `permission` is not `"*": "allow"`;
   the project-level override did not merge in the attempt made here.
+- **[MED-LOW, sharpened by observation] A live instance for a dead directory
+  heartbeats forever.** Observed on the fleet: probe/test directories under
+  `/tmp` were deleted, but serve-0 still holds instances for them, so their
+  overlays keep rewriting with a *fresh* heartbeat and `sessions: {}`
+  indefinitely. Consequence for Task 4: **heartbeat age cannot be the staleness
+  test.** A file can be current, its writer alive, and its subject nonexistent.
+  The reader needs directory existence and/or intersection with the DB's session
+  list, not just a freshness check. This is the same "DB stays authoritative for
+  existence" requirement noted below, arrived at from the opposite direction.
 - **[MED-LOW] No GC or age cap for orphaned overlay files.** Serve renumbering or
   a retired directory leaves a file forever, and the merge emits `unknown` from
   arbitrarily old dead files with no age bound → permanent picker noise and a
