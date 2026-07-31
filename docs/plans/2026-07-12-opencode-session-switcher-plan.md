@@ -697,9 +697,12 @@ closed by *measurement that contradicted the assumption in the item itself*.
   private `XDG_CONFIG_HOME` -- the project-level override that failed in cycle 3
   was the wrong lever.
 - **RESOLVED [LOW] `isValidOverlay` skew.** Now validates `lastActivity`,
-  `updatedAt`, `activity` and `error`. Verified against production first: all 11
-  live entries across the 23 current overlay files pass, so it rejects skew and
-  not real data.
+  `updatedAt`, `activity` and `error`, **per entry**. Verified against
+  production first: all 11 live entries across the 23 current overlay files
+  pass, so it rejects skew and not real data. The first attempt applied the
+  check at file granularity, which the adversarial review caught -- see below;
+  that would have let one malformed entry hand a session to a stale file from
+  another serve.
 
 Method notes worth keeping:
 
@@ -718,6 +721,33 @@ Method notes worth keeping:
   running the suite. Note that passing `expectedPort: undefined` does **not**
   mean unarmed -- it falls back to `process.env`. Third instance of ambient
   production state leaking into a supposedly isolated test.
+
+#### Cycle 5 adversarial review: two items deferred, one policy to write down
+
+- **[MED, deferred] Prefer a PID fence over the port fence.** The reviewer's
+  better idea: `opencode-serve-start` `exec`s opencode, so `$$` at export time
+  *is* the serve's eventual pid. Exporting `OPENCODE_SERVE_EXPECTED_PID=$$` and
+  comparing against `process.pid` closes every port/host/socket variant at once,
+  because children inherit the variable but never the pid. Deferred only because
+  it needs a wrapper change in `hosts/cloudbox/configuration.nix` plus a fleet
+  rebuild, and it would sit unarmed until that lands. The loopback+port fence
+  shipped here is the belt; this is the braces.
+- **[MED-LOW, deferred] The `openapiShapes` block in the fixture is still a
+  hand-summarized spec** rather than a raw schema fragment. Lower stakes than
+  the directory matrix was, because the raw GET body independently corroborates
+  the field names, but it is the same transcription class of evidence.
+- **[POLICY, must be written down] `OVERLAY_VERSION` skew.** The writer ships in
+  a nix bundle that auto-updates every 8 hours; the reader will ship as part of
+  `oc-session-list`. They therefore drift. The rules:
+  - Any change to the *file-level* shape requires an `OVERLAY_VERSION` bump, and
+    the **reader deploys first** (an unknown version is ignored, so a reader that
+    does not yet understand the new version blacks out; a writer emitting an old
+    version a new reader still accepts does not).
+  - *Additive entry-level* changes (a new `activity` value, a new optional
+    field) must NOT bump the version, and must be tolerated by the reader
+    per-entry. That is exactly what the entry-level validation now does: an
+    unrecognized entry is dropped, its healthy siblings survive, and the serve
+    is not blinded.
 
 **Carried forward, NOT fixed here** (ranked; all from the same review):
 
