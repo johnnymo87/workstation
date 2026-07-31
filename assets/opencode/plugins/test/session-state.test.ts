@@ -443,7 +443,7 @@ describe("mergeOverlays", () => {
 
     const m = mergeOverlays(
       [deadOwnerFile, peerFile],
-      opts({ owners: { s1: "serve-0" }, isAlive: (pid) => pid === 2 }),
+      opts({ owners: { s1: "serve-0" }, isAlive: (pid: number) => pid === 2 }),
     )
     expect(m.s1.activity).toBe("working")
   })

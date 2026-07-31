@@ -1,0 +1,126 @@
+{
+  "_provenance": {
+    "capturedFrom": "deployed cloudbox serve pool, front door /event stream",
+    "opencodeVersion": "1.17.13",
+    "nixStorePath": "opencode-patched-1.17.13.6",
+    "capturedAt": "2026-07-31",
+    "how": "created a real session via the front door, drove it to busy/idle, made it call the question tool, replied via POST /question/{requestID}/reply on the owning serve, captured the raw SSE stream",
+    "why": "Task 1's reducer depends on a payload asymmetry (.asked carries the key in properties.id, .replied/.rejected carry it in properties.requestID). All source citations in the design docs were read at 1.15.10; the fleet runs 1.17.x and auto-updates every 8h. These are real deployed payloads, not hand-written."
+  },
+  "events": [
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "ses_0476dfe9fffeApOL4NT5jlE2qf",
+        "status": {
+          "type": "busy"
+        }
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "ses_0476dfe9fffeApOL4NT5jlE2qf",
+        "status": {
+          "type": "idle"
+        }
+      }
+    },
+    {
+      "type": "session.idle",
+      "properties": {
+        "sessionID": "ses_0476dfe9fffeApOL4NT5jlE2qf"
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "ses_047632facffeMSjaGF5m3d1sFF",
+        "status": {
+          "type": "busy"
+        }
+      }
+    },
+    {
+      "type": "question.asked",
+      "properties": {
+        "id": "que_fb89edad5001hjeRVjboIOuDJ2",
+        "sessionID": "ses_047632facffeMSjaGF5m3d1sFF",
+        "questions": [
+          {
+            "question": "Which color do you prefer?",
+            "header": "Color",
+            "options": [
+              {
+                "label": "Red",
+                "description": "the red one"
+              },
+              {
+                "label": "Blue",
+                "description": "the blue one"
+              }
+            ]
+          }
+        ],
+        "tool": {
+          "messageID": "msg_fb89ecdb8001X70ko5NBg4fqNK",
+          "callID": "toolu_01TPXf5zFZRwBdL74BKHhqGu"
+        }
+      }
+    },
+    {
+      "type": "question.asked",
+      "properties": {
+        "id": "que_fb8a13dad001MOPaPSthQ456WM",
+        "sessionID": "ses_047632facffeMSjaGF5m3d1sFF",
+        "questions": [
+          {
+            "question": "Which color do you prefer?",
+            "header": "Color",
+            "options": [
+              {
+                "label": "Red",
+                "description": "the red one"
+              },
+              {
+                "label": "Blue",
+                "description": "the blue one"
+              }
+            ]
+          }
+        ],
+        "tool": {
+          "messageID": "msg_fb8a1358a001CbXC4nThZu99Vt",
+          "callID": "toolu_01U4hQsEdvZ8zfpgQLwZvLHk"
+        }
+      }
+    },
+    {
+      "type": "question.replied",
+      "properties": {
+        "sessionID": "ses_047632facffeMSjaGF5m3d1sFF",
+        "requestID": "que_fb8a13dad001MOPaPSthQ456WM",
+        "answers": [
+          [
+            "Blue"
+          ]
+        ]
+      }
+    },
+    {
+      "type": "session.status",
+      "properties": {
+        "sessionID": "ses_047632facffeMSjaGF5m3d1sFF",
+        "status": {
+          "type": "idle"
+        }
+      }
+    },
+    {
+      "type": "session.idle",
+      "properties": {
+        "sessionID": "ses_047632facffeMSjaGF5m3d1sFF"
+      }
+    }
+  ]
+}
