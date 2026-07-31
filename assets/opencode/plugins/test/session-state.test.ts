@@ -767,45 +767,68 @@ describe("checkServePortFence (nested-serve hijack guard)", () => {
   // with OPENCODE_ROUTING_DB scrubbed makes no claim, never trips that fence,
   // and would still write to this slot's overlay filename under a different
   // pid, producing two live writers alternating whole-file overwrites.
+  const verdict = (url: any, port: any) => checkServePortFence(url, port).verdict
+
   it("reports match when the bound port equals the declared port", () => {
-    expect(checkServePortFence("http://127.0.0.1:4098", "4098")).toBe("match")
+    expect(verdict("http://127.0.0.1:4098", "4098")).toBe("match")
   })
 
   it("reports mismatch for a nested serve that bound its own port", () => {
-    expect(checkServePortFence("http://127.0.0.1:47037", "4098")).toBe("mismatch")
+    expect(verdict("http://127.0.0.1:47037", "4098")).toBe("mismatch")
   })
 
   it("is unarmed when the declared port is absent (fence not yet deployed)", () => {
     // Matches the wrapper's own convention: unset = unarmed, so the plugin and
     // the wrapper can land in either order without blacking out the writer.
-    expect(checkServePortFence("http://127.0.0.1:4098", undefined)).toBe("unarmed")
-    expect(checkServePortFence("http://127.0.0.1:4098", "")).toBe("unarmed")
+    expect(verdict("http://127.0.0.1:4098", undefined)).toBe("unarmed")
+    expect(verdict("http://127.0.0.1:4098", "")).toBe("unarmed")
   })
 
   it("is unarmed when the server url is unusable rather than guessing", () => {
-    expect(checkServePortFence(undefined, "4098")).toBe("unarmed")
-    expect(checkServePortFence("not a url", "4098")).toBe("unarmed")
+    expect(verdict(undefined, "4098")).toBe("unarmed")
+    expect(verdict("not a url", "4098")).toBe("unarmed")
+  })
+
+  it("is unarmed for a portless serverUrl", () => {
+    expect(verdict("http://127.0.0.1", "4098")).toBe("unarmed")
   })
 
   it("accepts a URL object as well as a string", () => {
-    expect(checkServePortFence(new URL("http://127.0.0.1:4098"), "4098")).toBe("match")
-    expect(checkServePortFence(new URL("http://127.0.0.1:4099"), "4098")).toBe("mismatch")
+    expect(verdict(new URL("http://127.0.0.1:4098"), "4098")).toBe("match")
+    expect(verdict(new URL("http://127.0.0.1:4099"), "4098")).toBe("mismatch")
   })
 
   it("tolerates whitespace around the declared port", () => {
-    expect(checkServePortFence("http://127.0.0.1:4098", " 4098 ")).toBe("match")
+    expect(verdict("http://127.0.0.1:4098", " 4098 ")).toBe("match")
   })
 
-  it("compares the PORT only, deliberately ignoring the host", () => {
-    // Host is intentionally not part of the fence. The declared value is a bare
-    // port, and the failure mode of over-matching here is severe and silent:
-    // if ctx.serverUrl ever reports "localhost" or "::1" instead of 127.0.0.1,
-    // a host comparison would read as mismatch and take the writer inert across
-    // the whole fleet. The under-matching risk is negligible in exchange --
-    // a nested serve cannot bind this slot's port anyway, because the real pool
-    // serve is already holding it.
-    expect(checkServePortFence("http://10.0.0.5:4098", "4098")).toBe("match")
-    expect(checkServePortFence("http://localhost:4098", "4098")).toBe("match")
+  it("treats all loopback spellings as the same host", () => {
+    // A pool serve is loopback by construction (the wrapper pins
+    // --hostname 127.0.0.1), but ctx.serverUrl's exact spelling is not ours to
+    // depend on. An exact host comparison would take the real writer inert
+    // fleet-wide the day upstream reports "localhost" instead.
+    for (const host of ["127.0.0.1", "localhost", "[::1]", "127.0.0.53"]) {
+      expect(verdict(`http://${host}:4098`, "4098"), host).toBe("match")
+    }
+  })
+
+  it("rejects a NON-loopback bind even when the port matches", () => {
+    // The hole the port-only version left open. A pool serve holding
+    // 127.0.0.1:4098 does not stop another process binding ::1:4098 or
+    // 10.0.0.5:4098 -- different addresses, no conflict (verified by
+    // experiment). Port-only would call this a match and let a second writer
+    // through under the inherited serveId.
+    expect(verdict("http://10.0.0.5:4098", "4098")).toBe("mismatch")
+    expect(verdict("http://0.0.0.0:4098", "4098")).toBe("mismatch")
+  })
+
+  it("carries a reason so a disarmed fence can be logged", () => {
+    // An unarmed guard is worth nothing, and the population most likely to
+    // present an unreadable serverUrl is the nested-serve population itself.
+    expect(checkServePortFence("http://127.0.0.1:4098", undefined).reason).toMatch(/unset/)
+    expect(checkServePortFence("not a url", "4098").reason).toMatch(/unparseable/)
+    expect(checkServePortFence("http://127.0.0.1", "4098").reason).toMatch(/no port/)
+    expect(checkServePortFence("http://10.0.0.5:4098", "4098").reason).toMatch(/non-loopback/)
   })
 })
 
@@ -861,5 +884,106 @@ describe("mergeOverlays: skewed entries must not win arbitrarily (review, LOW)",
     const b = mergeOverlays([good(), skewed], mopts())
     expect(a.s1?.activity).toBe(b.s1?.activity)
     expect(a.s1?.activity).toBe("working")
+  })
+})
+
+describe("mergeOverlays: one bad entry must not discard the whole file (adversarial review, MED-HIGH)", () => {
+  // Granularity matters more than it looks. isValidOverlay is applied as
+  // files.filter(isValidOverlay), so rejecting a file for one malformed entry
+  // does not merely hide that entry -- it removes the owning serve's file from
+  // `prepared` entirely, so the owner-preference rule cannot find an owner file
+  // and a STALE or DEAD file from another serve can win the same session. One
+  // skewed entry would resurrect outdated state for its healthy siblings.
+  //
+  // This is a live risk, not a theoretical one: the writer ships via a nix
+  // bundle that auto-updates every 8 hours while the reader ships by a
+  // different vehicle, so a writer that learns a new activity value blinds an
+  // older reader for that whole serve until the reader catches up.
+  const mopts = (over: any = {}) => ({
+    now: 1000,
+    staleMs: 45000,
+    isAlive: () => true,
+    owners: {},
+    ...over,
+  })
+  const ent = (over: any = {}) => ({
+    activity: "working",
+    error: false,
+    pendingPermissions: [],
+    pendingQuestions: [],
+    lastActivity: 500,
+    updatedAt: 500,
+    ...over,
+  })
+
+  it("keeps the healthy sibling entries from a file containing one bad entry", () => {
+    const f = {
+      version: OVERLAY_VERSION,
+      instanceStamp: 100,
+      serveId: "serve-0",
+      pid: 1,
+      heartbeat: 1000,
+      sessions: {
+        good1: ent(),
+        bad: ent({ activity: "banana" }),
+        good2: ent({ activity: "retry" }),
+      },
+    } as any
+    const merged = mergeOverlays([f], mopts())
+    expect(merged.good1?.activity).toBe("working")
+    // (a plain-idle entry would be pruned by design -- absent reads as idle --
+    // so good2 uses "retry" to prove the entry actually survived the filter)
+    expect(merged.good2?.activity).toBe("retry")
+    expect(merged.bad).toBeUndefined()
+  })
+
+  it("an unknown activity value does not blind the rest of the serve", () => {
+    // Simulates additive drift within the same OVERLAY_VERSION: a newer writer
+    // emits an activity the reader has never heard of.
+    const drifted = {
+      version: OVERLAY_VERSION,
+      instanceStamp: 100,
+      serveId: "serve-0",
+      pid: 1,
+      heartbeat: 1000,
+      sessions: { s1: ent({ activity: "paused" }), s2: ent() },
+    } as any
+    const merged = mergeOverlays([drifted], mopts())
+    expect(merged.s2?.activity).toBe("working")
+  })
+
+  it("the owner's live file still wins even when it carries a bad sibling entry", () => {
+    // The dangerous consequence of file-level rejection: without the owner's
+    // file present, a stale file from another serve wins the session.
+    const owner = {
+      version: OVERLAY_VERSION,
+      instanceStamp: 100,
+      serveId: "serve-0",
+      pid: 1,
+      heartbeat: 1000,
+      sessions: { s1: ent({ activity: "working", lastActivity: 900 }), junk: ent({ lastActivity: "x" }) },
+    } as any
+    const other = {
+      version: OVERLAY_VERSION,
+      instanceStamp: 100,
+      serveId: "serve-1",
+      pid: 2,
+      heartbeat: 1000,
+      sessions: { s1: ent({ activity: "idle", lastActivity: 100 }) },
+    } as any
+    const merged = mergeOverlays([other, owner], mopts({ owners: { s1: "serve-0" } }))
+    expect(merged.s1?.activity).toBe("working")
+  })
+
+  it("still rejects a file whose FILE-level fields are wrong", () => {
+    const f = {
+      version: OVERLAY_VERSION,
+      instanceStamp: 100,
+      serveId: 12345, // not a string
+      pid: 1,
+      heartbeat: 1000,
+      sessions: { s1: ent() },
+    } as any
+    expect(mergeOverlays([f], mopts())).toEqual({})
   })
 })

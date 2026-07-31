@@ -64,6 +64,31 @@ describe("session-state plugin integration", () => {
     expect(files.filter((f) => f.startsWith("serve-2"))).toEqual([])
   })
 
+  it("goes inert for a nested serve on a NON-loopback interface at the slot's port", async () => {
+    // The hole a port-only fence left open: 127.0.0.1:4098 being held by the
+    // real serve does not stop another process binding ::1:4098 or
+    // 10.0.0.5:4098 -- different addresses, no bind conflict (verified by
+    // experiment). Such a process matches on port alone and would write
+    // serve-2's overlay under a different pid.
+    process.env.OPENCODE_SERVE_ID = "serve-2"
+    const ctx = {
+      directory: testDir,
+      serverUrl: "http://10.0.0.5:4098",
+      client: {},
+    } as any
+
+    const result = await plugin(ctx, {
+      cmdline: "/bin/opencode\x00serve\x00--port\x004098\x00",
+      dir: overlayDir,
+      fetch: vi.fn(),
+      expectedPort: "4098", // same port as the real slot
+    })
+
+    expect(result).toEqual({})
+    const files = fs.existsSync(overlayDir) ? fs.readdirSync(overlayDir) : []
+    expect(files.filter((f) => f.startsWith("serve-2"))).toEqual([])
+  })
+
   it("still activates when the fence is UNARMED (wrapper not yet updated)", async () => {
     // Unset = unarmed, matching opencode-serve-start's own convention, so a
     // plugin update and a wrapper update can land in either order without

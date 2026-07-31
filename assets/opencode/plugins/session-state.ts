@@ -62,10 +62,24 @@ const plugin: Plugin = async (ctx, opts?: any) => {
   // nothing to do with the test.
   const expectedPort = opts?.expectedPort ?? process.env.OPENCODE_SERVE_EXPECTED_PORT
   const fence = checkServePortFence(ctx.serverUrl, expectedPort)
-  if (fence === "mismatch") {
+  if (fence.verdict === "unarmed") {
+    // Every other inert/degraded path in this plugin is loud, for the same
+    // reason: a state writer that quietly stops enforcing something is the
+    // worst outcome, because nothing downstream can tell. A disarmed fence is
+    // worth exactly nothing, and the population most likely to present a
+    // scrubbed declared port or an unreadable serverUrl is the nested-serve
+    // population this fence exists to stop -- someone who scrubs
+    // OPENCODE_SERVE_EXPECTED_PORT but keeps OPENCODE_SERVE_ID re-arms the
+    // hijack while disarming the guard. Keep writing, but say so.
+    console.error(
+      `[session-state] port fence UNARMED for OPENCODE_SERVE_ID=${serveId}: ${fence.reason}. ` +
+        `A nested serve that inherited this slot's identity would not be detected.`,
+    )
+  }
+  if (fence.verdict === "mismatch") {
     console.error(
       `[session-state] inert: OPENCODE_SERVE_ID=${serveId} declares port ` +
-        `${expectedPort} but this process is serving on ${String(ctx.serverUrl)}. ` +
+        `${expectedPort} but this process is serving on ${String(ctx.serverUrl)} (${fence.reason}). ` +
         `This is a nested/throwaway serve that inherited the slot's identity, not the pool member for that slot. ` +
         `Writing would corrupt ${serveId}'s overlay with a second writer. Scrub OPENCODE_SERVE_ID before spawning a throwaway serve.`,
     )

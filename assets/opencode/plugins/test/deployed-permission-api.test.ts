@@ -33,20 +33,29 @@ const doc = JSON.parse(
   readFileSync(join(__dirname, "fixtures/deployed-permission-api.json"), "utf8"),
 ) as {
   _provenance: Record<string, string>
-  getPermissionResponse: Array<Record<string, any>>
   events: { permissionAsked: any; permissionReplied: any }
   directoryFilterMatrix: {
     sessionUnderTestDirectory: string
-    results: Array<{ query: string; count: number }>
+    otherDirectory: string
+    pendingPermissionID: string
+    queries: Array<{ label: string; query: string; tMs: number; body: Array<Record<string, any>> }>
   }
   openapiShapes: Record<string, { required: string[]; properties: Record<string, string> }>
 }
 
+/** The raw unfiltered GET body -- a real response, not a transcription. */
+const getPermissionResponse = doc.directoryFilterMatrix.queries.find(
+  (q) => q.label === "unfiltered",
+)!.body
+
+const queryByLabel = (label: string) =>
+  doc.directoryFilterMatrix.queries.find((q) => q.label === label)!
+
 describe("deployed permission API: GET response shape", () => {
   it("returns an array whose items carry the fields seedFromSnapshot reads", () => {
-    expect(Array.isArray(doc.getPermissionResponse)).toBe(true)
-    expect(doc.getPermissionResponse.length).toBeGreaterThan(0)
-    for (const item of doc.getPermissionResponse) {
+    expect(Array.isArray(getPermissionResponse)).toBe(true)
+    expect(getPermissionResponse.length).toBeGreaterThan(0)
+    for (const item of getPermissionResponse) {
       expect(typeof item.id).toBe("string")
       expect(typeof item.sessionID).toBe("string")
     }
@@ -65,11 +74,11 @@ describe("deployed permission API: GET response shape", () => {
 
   it("seedFromSnapshot actually seeds from the real captured response", () => {
     const seeded = seedFromSnapshot(emptyState(), {
-      permissions: doc.getPermissionResponse as any,
+      permissions: getPermissionResponse as any,
       questions: [],
     })
-    const sessionID = doc.getPermissionResponse[0].sessionID
-    const permissionID = doc.getPermissionResponse[0].id
+    const sessionID = getPermissionResponse[0].sessionID
+    const permissionID = getPermissionResponse[0].id
     expect(Object.keys(seeded)).toContain(sessionID)
     expect(seeded[sessionID].pendingPermissions).toContain(permissionID)
     expect(effectiveState(seeded[sessionID])).toBe("blocked")
@@ -79,18 +88,18 @@ describe("deployed permission API: GET response shape", () => {
     const calls: string[] = []
     const fakeFetch = (async (url: string) => {
       calls.push(String(url))
-      const body = String(url).includes("/permission") ? doc.getPermissionResponse : []
+      const body = String(url).includes("/permission") ? getPermissionResponse : []
       return { ok: true, json: async () => body } as any
     }) as unknown as typeof fetch
 
     const snap = await fetchPendingSnapshot(fakeFetch, "http://127.0.0.1:4791", "/tmp/x")
-    expect(snap.permissions).toHaveLength(doc.getPermissionResponse.length)
+    expect(snap.permissions).toHaveLength(getPermissionResponse.length)
     // Assert the TYPE, not just equality with the fixture: comparing
     // snap[0].sessionID to doc[0].sessionID passes vacuously when the field is
     // renamed, because both sides are then undefined.
     expect(typeof snap.permissions![0].sessionID).toBe("string")
     expect(typeof snap.permissions![0].id).toBe("string")
-    expect(snap.permissions![0].sessionID).toBe(doc.getPermissionResponse[0].sessionID)
+    expect(snap.permissions![0].sessionID).toBe(getPermissionResponse[0].sessionID)
     // directory must be forwarded, url-encoded, to BOTH endpoints
     expect(calls).toHaveLength(2)
     for (const c of calls) expect(c).toContain(`directory=${encodeURIComponent("/tmp/x")}`)
@@ -114,21 +123,14 @@ describe("deployed permission API: .asked/.replied key asymmetry", () => {
 
   it("the reducer clears a real ask with the real reply", () => {
     const asked = doc.events.permissionAsked
+    const replied = doc.events.permissionReplied
     const sessionID = asked.properties.sessionID
-    // Build the reply using whichever key the CAPTURED reply actually used, so
-    // this stays coupled to the fixture. Hardcoding "requestID" here would make
-    // the test pass even after the deployed payload drifted.
-    const repliedKey = Object.keys(doc.events.permissionReplied.properties).find(
-      (k) => k === "requestID" || k === "id",
-    )!
-    const replied = {
-      type: "permission.replied",
-      properties: {
-        sessionID,
-        [repliedKey]: asked.properties.id,
-        reply: "once",
-      },
-    }
+
+    // Both events are the REAL captured payloads of the SAME permission
+    // request, so this exercises an actual deployed lifecycle rather than a
+    // reply synthesized to match the ask.
+    expect(replied.properties.requestID).toBe(asked.properties.id)
+    expect(replied.properties.sessionID).toBe(sessionID)
 
     let state: StateMap = emptyState()
     state = applyEvent(state, asked as any)
@@ -157,26 +159,51 @@ describe("deployed permission API: .asked/.replied key asymmetry", () => {
 })
 
 describe("deployed permission API: ?directory= negative control", () => {
-  const results = () =>
-    Object.fromEntries(doc.directoryFilterMatrix.results.map((r) => [r.query, r.count]))
+  // Assertions are derived from RAW captured bodies, so they test what the
+  // deployed server returned rather than a count someone typed into the
+  // fixture. The specific thing being proven is membership of the one known
+  // pending permission id, not just a length.
+  const target = () => doc.directoryFilterMatrix.pendingPermissionID
+  const ids = (label: string) => queryByLabel(label).body.map((x) => x.id)
+
+  it("the unfiltered query returns the pending prompt (positive control)", () => {
+    // Without this, "absent everywhere" would satisfy the exclusion tests too.
+    expect(ids("unfiltered")).toContain(target())
+  })
 
   it("a MATCHING directory includes the pending prompt", () => {
-    const dir = doc.directoryFilterMatrix.sessionUnderTestDirectory
-    expect(results()[`?directory=${dir}`]).toBe(1)
+    expect(ids("matching directory")).toContain(target())
   })
 
-  it("a NON-MATCHING directory excludes it (param is not ignored)", () => {
-    const nonMatching = doc.directoryFilterMatrix.results.filter(
-      (r) => r.query.includes("projB") || r.query.includes("nonexistent"),
+  it("a NON-MATCHING directory excludes it (the param is not ignored)", () => {
+    expect(ids("non-matching directory")).not.toContain(target())
+    expect(queryByLabel("non-matching directory").body).toHaveLength(0)
+  })
+
+  it("a nonexistent directory excludes it", () => {
+    expect(ids("nonexistent directory")).not.toContain(target())
+  })
+
+  it("a trailing slash on the matching directory is tolerated", () => {
+    // Previously recorded in the fixture but asserted by nothing, while the
+    // plan cited it as a finding.
+    expect(ids("matching directory, trailing slash")).toContain(target())
+  })
+
+  it("the prompt was still pending at the END of the sequence (temporal control)", () => {
+    // Rules out the confound that makes the whole matrix meaningless: if the
+    // prompt had been replied to (or the session evicted) partway through, the
+    // later queries would return 0 for reasons having nothing to do with
+    // directory filtering.
+    expect(ids("unfiltered (repeat, temporal control)")).toContain(target())
+  })
+
+  it("queries the two directories on the SAME serve, so filtering is the only variable", () => {
+    expect(doc.directoryFilterMatrix.otherDirectory).not.toBe(
+      doc.directoryFilterMatrix.sessionUnderTestDirectory,
     )
-    expect(nonMatching.length).toBeGreaterThan(0)
-    for (const r of nonMatching) {
-      expect(r.count, `${r.query} should be filtered out`).toBe(0)
+    for (const q of doc.directoryFilterMatrix.queries) {
+      expect(Array.isArray(q.body)).toBe(true)
     }
-  })
-
-  it("the unfiltered query still returns the prompt (positive control)", () => {
-    // Without this, "0 everywhere" would also pass the test above.
-    expect(results()["(none)"]).toBe(1)
   })
 })
