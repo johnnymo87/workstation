@@ -115,6 +115,30 @@ jobs:
       - name: Run nix flake check
         run: nix flake check --print-build-logs --keep-going
 
+      # Root the checked configurations before the cache step runs.
+      #
+      # Without this the cache is real but useless, which is worse than no cache
+      # because it looks healthy. Measured on run 30600536667: "Cache hit ...
+      # Cache restored successfully", 1474 MB -- and wrangler-4.62.0.drv plus
+      # wrangler-pnpm-deps.drv built anyway, so the job stayed at ~12 min.
+      #
+      # Cause: `nix flake check` realises its checks but leaves no gcroot behind, so
+      # the garbage collection that cache-nix-action runs to fit gc-max-store-size
+      # is free to delete every one of them before the save. What got cached was the
+      # cheap residue, not the expensive closures.
+      #
+      # `nix build -o` creates an indirect gcroot, which the GC cannot remove. These
+      # are already built by the check above, so this costs seconds and only pins
+      # them. gc-max-store-size stays as a best-effort ceiling: GC will now simply
+      # fail to reach it rather than evict what we are trying to keep.
+      - name: Pin the checked configurations so the pre-save GC cannot drop them
+        run: |
+          mkdir -p /tmp/ci-gcroots
+          nix build --print-build-logs -o /tmp/ci-gcroots/home-dev '.#checks.aarch64-linux.home-dev'
+          nix build -o /tmp/ci-gcroots/home-cloudbox '.#checks.aarch64-linux.home-cloudbox'
+          nix build -o /tmp/ci-gcroots/nixos-devbox   '.#checks.aarch64-linux.nixos-devbox'
+          ls -l /tmp/ci-gcroots/
+
       - name: Disk space after
         if: always()
         run: df -h /
