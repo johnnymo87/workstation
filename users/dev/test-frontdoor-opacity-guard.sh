@@ -74,4 +74,21 @@ else
 fi
 rm -rf "$fix" "$out"
 
+# Case: a marker citing a sibling-directory row (D2, naming home.darwin.nix) from
+# home.devbox.nix must be rejected. The dirname fallback previously let any row
+# in the same directory satisfy the check.
+fix="$(new_fixture)"; out="$(mktemp)"
+sed -i 's/frontdoor-exempt(C10)/frontdoor-exempt(D2)/' "$fix/users/dev/home.devbox.nix"
+if run_guard "$fix" "$out"; then
+  bad "laundering: guard PASSED a marker citing D2 (home.darwin.nix) from home.devbox.nix (sibling directory leak)"
+else
+  if grep -q 'does not name' "$out"; then
+    pass_ "laundering: marker citing a sibling-directory row (D2) is rejected"
+  else
+    bad "laundering: guard failed, but not with the path-mismatch message (masked by another failure?)"
+    sed 's/^/      /' "$out"
+  fi
+fi
+rm -rf "$fix" "$out"
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }

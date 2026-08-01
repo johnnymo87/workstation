@@ -54,30 +54,27 @@ fi
 row_exists() { local r="$1" x; for x in "${table_rows[@]}"; do [ "$x" = "$r" ] && return 0; done; return 1; }
 row_is_exemption() { printf '%s' "$1" | grep -qE "$LEGAL_ROW_RE"; }
 
-# A row's path list is column 2 of its table line. A marker may only cite a row
-# whose path list actually names the citing file (or a glob covering it).
-#
-# WHY: row_exists() checked only that the id was in the table and
-# row_is_exemption() only that it was C*/D*. Nothing tied the row to the file, so
-# `frontdoor-exempt(C3)` -- the CLOUDBOX door's upstream -- passed on a
-# home.devbox.nix site. That is not hypothetical: it is what a peer session's
-# implementer subagent shipped on 2026-07-31 to turn this very guard green, and it
-# was caught in review, not by the guard. An armed gate that blesses the wrong fix
-# is worse than no gate, because it teaches laundering.
 row_names_file() {
-  local r="$1" f="$2" row_line
+  local r="$1" f="$2" row_line paths tok pat
   row_line="$(grep -E "^\| $r \|" "$table" | head -1)"
   [ -n "$row_line" ] || return 1
-  # Column 2 only: everything between the first and second unescaped pipe after the id.
-  local paths; paths="$(printf '%s' "$row_line" | awk -F'|' '{print $3}')"
-  # Exact path, or a directory/glob prefix that covers it (e.g. `pkgs/foo/` or `pkgs/*/`).
-  case "$paths" in
-    *"$f"*) return 0 ;;
-  esac
-  local d; d="$(dirname "$f")"
-  case "$paths" in
-    *"$d/"*) return 0 ;;
-  esac
+  paths="$(printf '%s' "$row_line" | awk -F'|' '{print $3}')"
+  # Each path token is backticked and may carry a `:12,34` line-number suffix.
+  # Match on the PATH only -- this table cites line numbers and has already
+  # drifted them twice.
+  #
+  # Glob-aware, but NOT directory-wide. An earlier version fell back to
+  # `dirname`, which let any row naming any sibling file satisfy the check: a
+  # home.devbox.nix site could cite D2 (home.darwin.nix) and pass, because both
+  # sit in users/dev/. That is the same laundering this function exists to stop,
+  # one directory over.
+  while read -r tok; do
+    [ -n "$tok" ] || continue
+    pat="${tok%%:*}"
+    [ -n "$pat" ] || continue
+    # shellcheck disable=SC2053  # unquoted RHS is deliberate: glob match
+    [[ "$f" == $pat ]] && return 0
+  done < <(printf '%s' "$paths" | grep -oE '`[^`]+`' | tr -d '`')
   return 1
 }
 
