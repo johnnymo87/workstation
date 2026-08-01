@@ -135,7 +135,7 @@ Each row states the mechanism that makes the door wrong. None may be "cleaned up
 
 | # | Site | Disposition | Mechanism |
 |---|---|---|---|
-| C1 | `hosts/cloudbox/configuration.nix:576` (pigeon-daemon `OPENCODE_URL=:4096`) | `exempt-control` | **Pigeon is the router the door depends on.** Door→pigeon→door is a startup cycle. Comment `:570-575`; enforced by `test-pool-route-clients.sh:97-98` (which also *denies* the `:4700` string). |
+| C1 | `hosts/cloudbox/configuration.nix:576`, `hosts/devbox/configuration.nix:292` (pigeon-daemon `OPENCODE_URL=:4096`) | `exempt-control` | **Pigeon is the router the door depends on.** Door→pigeon→door is a startup cycle. Comment `:570-575`; enforced by `test-pool-route-clients.sh:97-98` (which also *denies* the `:4700` string). |
 | C2 | `hosts/cloudbox/configuration.nix:631` (`lgtm-run`) | `exempt-degrade` | Children (`opencode-launch`) read `$OPENCODE_URL` as their **raw-anchor degrade fallback**. Pointing it at the door poisons the fallback: a pigeon hiccup would degrade *to the door*, where MCP-connect is denied. Unit is also `enableLgtm=false`. |
 | C3 | `hosts/cloudbox/configuration.nix:1682`, `pkgs/opencode-frontdoor/src/config.ts:65` | `exempt-infra` | The door's **own** upstream. Tautologically not through itself. |
 | C4 | `hosts/cloudbox/configuration.nix:1879` (frontdoor canary) | `exempt-infra` | Probes the anchor directly to distinguish *door down* from *pool down*. Through the door it could not tell them apart. |
@@ -155,7 +155,7 @@ Each row states the mechanism that makes the door wrong. None may be "cleaned up
 
 | # | Site | Disposition |
 |---|---|---|
-| D1 | `hosts/devbox/configuration.nix` | `host-scoped` — devbox now runs its own door and pigeon; this row covers pigeon's fan-out on devbox, and the devbox door's own two sites are C10/C11. |
+| D1 | `hosts/devbox/configuration.nix` | `host-scoped` — superseded by C1 now that devbox runs a door. Row retained for historical legibility; no site cites D1. |
 | D2 | `users/dev/home.darwin.nix:124` | `host-scoped` — no door on darwin. |
 
 The shared defaults in `home.base.nix:1163,1169` (`OPENCODE_URL:-:4096`,
