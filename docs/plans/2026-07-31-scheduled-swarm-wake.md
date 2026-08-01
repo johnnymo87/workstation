@@ -8,6 +8,25 @@ wait for a 09:15 UTC prod cron verification).
 **Implementation target repo:** `~/projects/pigeon` (not workstation). This doc
 lives in workstation only because that is where the requesting worktree is.
 
+**Tracking (beads, in the `pigeon` repo):**
+
+| Bead | Work item | Ready? |
+|---|---|---|
+| `pigeon-mx2` | **ROADMAP / spine.** Read first after any compaction. | — |
+| `pigeon-d5p` | W1 — scheduling engine: columns, time parsing, routes (§3.2-3.4) | ready |
+| `pigeon-rzt` | W2 — delivery semantics: retry budget, expiry, envelope, alerting (§3.5-3.7) | needs W1 |
+| `pigeon-346` | W3 — watchdog suppression for `wake.*` (§3.7.1) | ready, **parallel** |
+| `pigeon-c68` | W4 — plugin tools `swarm_schedule` / `swarm_scheduled` (§3.3) | needs W1 |
+| `pigeon-4yz` | W5 — skill guidance (workstation) + e2e verification (§4) | needs W2+W3+W4 |
+
+Related: `pigeon-3m5` (open P1) — duplicate injection against idle targets. See
+§3.7.1; it is this feature's nominal case.
+
+**Per-step ritual** (applies to every work item): compact → optional
+`oracle-fable` consult → SDD if the step decomposes → **`adversarial-reviewer-fable`
+before the PR** → PR → shepherd until landed. The r2/r3 revisions below exist
+because that review caught a severe bug the first pass missed. Do not skip it.
+
 ---
 
 ## 1. Problem
@@ -358,32 +377,66 @@ is worthless. Four layers, all reusing existing machinery:
    (`index.ts:369,529`), while `POST /swarm/send` accepts 202 unconditionally
    (`app.ts:152-204`). A config regression would have the daemon cheerfully banking
    wakes it will never deliver — the motivating bug, rebuilt inside the fix.
-4. **Partial watchdog reuse** — scheduled wakes become ordinary `handed_off` rows
-   and get the anchor-in-transcript verification
-   (`delivery-watchdog.ts:173-182,640-645`) and requeue for free. This is real
-   hardening at no cost. **But the abort-blocking-turn escalation must be
-   suppressed for `wake.*`** — see below. Earlier drafts of this doc called the
-   whole watchdog "hardening obtained at zero cost". That was wrong.
+4. **Watchdog is observe-and-alert only for `wake.*`** — no requeue, no abort.
+   See §3.7.1. This is a bigger walk-back than r2 made: r1 called the whole
+   watchdog "hardening at zero cost", r2 kept verify+requeue and dropped only the
+   abort. **Both were wrong.** For a wake target, the entire intervention ladder is
+   invalid.
 
-#### 3.7.1 The watchdog's abort escalation must not apply to wakes
+#### 3.7.1 The watchdog's intervention ladder is invalid for wakes
 
-If a wake is delivered while the target is mid-turn, the prompt queues, the
-watchdog sees it unverified, and if the blocking turn shows no part activity for
-> `stuckAbortSilenceMs` (1 h default, `delivery-watchdog.ts:60`) it **aborts the
-running turn** and redelivers (`:711-721,754-843`).
+**A woken session is, by definition, idle.** That is the entire premise — it has
+been asleep for 13 hours. This turns out to be exactly the condition under which
+the watchdog is already known to misbehave.
 
-"Silent for 1 h" is satisfied by a single long-running tool call — `lastActivityOf`
-only sees a part's `time.start` until the tool completes (`:221-253`). A 90-minute
-build or a long poll qualifies. And wakes make this materially worse than the
-status quo: they fire at scheduled times with zero regard for target state, at
-hours when nobody is watching, and the sessions most likely to *use* wakes are
-long-horizon autonomous sessions most likely to be inside long tool calls.
+**`pigeon-3m5` (open, P1, observed live 2026-07-25) is this feature's nominal
+case, not an edge case.** Quoting the bead: a `swarm_send` to "a session that is
+registered and reachable but **idle** for several minutes" had `handed_off_at`
+advance while `verified_at` stayed null; the watchdog requeued, then aborted and
+redelivered; the target received **two identical envelopes** while the sender was
+told "could not be delivered and was NOT received". The bead's own root-cause
+hypothesis is the decisive line:
 
-Net effect if left as-is: the reminder mechanism destroys the in-flight work it
-was supposed to check up on. **For `wake.*`, alert-and-requeue only; no abort.**
-(Or gate abort on `priority="urgent"`, which a wake should never default to.)
-The verification/requeue half is the free hardening; the abort half is a
-destructive intervention that a reminder does not justify.
+> "verification presumably requires the target to actually PROCESS the prompt,
+> which an idle/dormant session may not do promptly. If so, **verification is not
+> a valid liveness proof for idle targets and should not drive requeue/abort.**"
+
+Every scheduled wake targets an idle session. So every scheduled wake would walk
+straight into `pigeon-3m5`: duplicate wake turns, plus a false "NOT received"
+report — and for a self-wake, that false report is addressed to the sleeping
+session, so the *human* sees a failure alert (§3.6) for a wake that actually
+fired. That is worse than the silent drop we set out to fix; it is a *lying*
+drop.
+
+Two independent reasons the ladder must be off, then:
+
+1. **Requeue produces duplicates** (`pigeon-3m5`) because verification can't
+   distinguish "idle target hasn't got to it yet" from "never landed".
+2. **Abort destroys live work.** If a wake lands while the target *is* mid-turn,
+   and the blocking turn shows no part activity for > `stuckAbortSilenceMs`
+   (1 h default, `delivery-watchdog.ts:60`), the watchdog **aborts the running
+   turn** (`:711-721,754-843`). "Silent for 1 h" is satisfied by a single
+   long-running tool call — `lastActivityOf` only sees a part's `time.start` until
+   the tool completes (`:221-253`). A 90-minute build qualifies. Wakes fire at
+   scheduled times with zero regard for target state, at hours nobody is watching,
+   into precisely the long-horizon autonomous sessions most likely to be inside a
+   long tool call. The reminder destroys the work it came to check on.
+
+**Therefore, for `kind` matching `wake.*`: `handed_off` (prompt_async returned
+2xx) is terminal success.** The watchdog may still *observe* and *alert* on
+prolonged non-verification — that's useful signal — but it must not requeue and
+must not abort.
+
+Accepted consequence: we lose redelivery for the genuine "serve 2xx'd then died
+before processing" hole. That is the right trade — `pigeon-3m5` demonstrates the
+redelivery machinery currently causes more harm than that hole does, and
+duplicate wake turns are both likely and confusing. The skill's
+"wakes may arrive twice — be idempotent" guidance (§3.8) covers the residue.
+
+**This decouples the feature from `pigeon-3m5` rather than blocking on it.** If
+`3m5` is fixed first — giving verification semantics that are valid for idle
+targets — revisit and consider re-enabling requeue for wakes. Do not block on it;
+do link the two.
 
 Residual, accepted: the alert path is itself best-effort — `sendPlainAlert`
 failures are caught-and-logged (`delivery-watchdog.ts:374-381`) and a daemon with
@@ -478,9 +531,11 @@ the arbiter with `processOnce()` (`.opencode/skills/swarm-development/SKILL.md:1
    alerts on **all four** terminal paths (§3.6). Overdue-still-queued check goes in
    the **watchdog** cycle, not the arbiter (§3.7 layer 2). `/swarm/schedule` returns
    503 when the arbiter isn't started (§3.7 layer 3). **~3h**
-6. **Watchdog abort suppression for `wake.*`** (`delivery-watchdog.ts`) — §3.7.1.
-   Keep verify + requeue, skip the abort escalation. Test: a `wake.*` message
-   blocked by a silent-for-2h turn alerts and requeues but never calls abort. **~1h**
+6. **Watchdog intervention suppression for `wake.*`** (`delivery-watchdog.ts`) —
+   §3.7.1. `handed_off` is terminal success for wakes; observe and alert only, no
+   requeue, no abort. Tests: a `wake.*` message to an idle target is never
+   requeued (the `pigeon-3m5` shape — assert exactly one envelope in the
+   transcript); a `wake.*` blocked by a silent-for-2h turn never calls abort. **~1.5h**
 7. **Envelope attrs** (`envelope.ts`) — optional `scheduled_for`,
    `delivered_late_ms`, `ref`. Contract test: envelope shape for a non-scheduled
    message must be **byte-identical** to today's. **~1h**
@@ -573,7 +628,9 @@ the wrong temperament for wakes in three specific ways:
 
 - a ~324 s retry budget vs. a 6 h staleness window, colliding with the 03:00 reset
   (§3.5.1) — a wake scheduled 13 h ahead at 14:00 lands *exactly* in the reset;
-- an abort-the-blocking-turn escalation that a reminder does not justify (§3.7.1);
+- an intervention ladder (requeue, then abort-the-blocking-turn) that is already
+  known to malfunction against *idle* targets — `pigeon-3m5` — which is what every
+  woken session is by definition (§3.7.1);
 - a terminal-failure notification addressed to the sender, who for a self-wake is
   the session that just proved unreachable (§3.6).
 
@@ -597,5 +654,11 @@ Get those wrong and you have rebuilt the silent drop inside the scheduler.
   corrected (r1's claim about retention deleting queued rows was wrong in the safe
   direction, but missed that `expired`/`cancelled` match no cleanup clause); §7.8
   "unspoofable" walked back. Effort 1.5 d → ~2 d.
+- **r3 (2026-08-01)** — found open P1 bug `pigeon-3m5` (duplicate injection +
+  false `delivery.failed` against *idle* targets) while building the roadmap. A
+  woken session is idle by definition, so that bug is this feature's nominal case.
+  Broadened §3.7.1: the watchdog's whole intervention ladder is off for `wake.*`
+  (r2 had kept requeue and dropped only abort); `handed_off` is terminal success
+  for wakes. Feature is decoupled from `pigeon-3m5`, not blocked on it.
   Citation errata fixed: inbox `handed_off` filter is `swarm-repo.ts:263` (not
   `:348`); state union is `swarm-repo.ts:16` (not `:101`).
