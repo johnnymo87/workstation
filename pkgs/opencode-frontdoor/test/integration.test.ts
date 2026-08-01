@@ -404,6 +404,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
@@ -950,6 +951,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
@@ -1036,6 +1038,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
@@ -1128,6 +1131,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      poolUrls: [`http://127.0.0.1:${slowServerPort}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 100, // 100ms wall-clock limit
       stickyTtlMs: 30000,
@@ -1201,6 +1205,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      poolUrls: [`http://127.0.0.1:${slowServerPort}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 100, // 100ms
       stickyTtlMs: 30000,
@@ -1265,6 +1270,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      poolUrls: [`http://127.0.0.1:${slowServerPort}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 100, // 100ms
       stickyTtlMs: 30000,
@@ -1359,6 +1365,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${healthServerPort}`,
+      poolUrls: [`http://127.0.0.1:${healthServerPort}`],
       routeTimeoutMs: 100,
       cheapFirstByteMs: 50, // very small
       wedgeProbeIntervalMs: 30, // probe every 30ms
@@ -1433,6 +1440,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${healthServerPort}`,
+      poolUrls: [`http://127.0.0.1:${healthServerPort}`],
       routeTimeoutMs: 100,
       cheapFirstByteMs: 50,
       wedgeProbeIntervalMs: 30, // probe every 30ms
@@ -1584,6 +1592,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 250, // very short sticky lease
@@ -1974,6 +1983,7 @@ describe("FrontDoor Integration", () => {
       version: "unknown",
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 10000, // half stickyTtlMs is 5000
@@ -2086,6 +2096,7 @@ describe("FrontDoor Integration", () => {
       version: "unknown",
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 10000,
@@ -2195,6 +2206,7 @@ describe("FrontDoor Integration", () => {
       version: "unknown",
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 10000, // half is 5000
@@ -2248,6 +2260,7 @@ describe("FrontDoor Integration", () => {
       version: "unknown",
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,

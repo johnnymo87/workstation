@@ -7,6 +7,12 @@ export interface Config {
   version: string;
   pigeonUrl: string;
   anchorUrl: string;
+  /*
+   * Pool of serve member URLs for poolSafe global-ro reads (bead workstation-eon4).
+   * Unset/empty env var defaults to [anchorUrl], making the door rebuild and
+   * the environment update rollout order-independent.
+   */
+  poolUrls: string[];
   pigeonAuthToken?: string;
   serveAuthHeader?: string;
   routeTimeoutMs: number;
@@ -47,6 +53,32 @@ function parsePositiveInteger(envName: string, value: string | undefined, defaul
   return parsed;
 }
 
+function parsePoolUrls(value: string | undefined, anchorUrl: string): string[] {
+  const parts = (value ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  for (const p of parts) {
+    try {
+      new URL(p);
+    } catch {
+      throw new Error(`Invalid FRONTDOOR_POOL_URLS entry: "${p}". Must be an absolute URL.`);
+    }
+  }
+
+  // Unset/empty => anchor-only, i.e. exactly today's behaviour. This is what
+  // makes the door rebuild and the unit's env change land in either order.
+  if (parts.length === 0) return [anchorUrl];
+
+  // The anchor must always be a member: it is the universal fallback target
+  // elsewhere in the door, and a pool that excludes it would make `forward-pool`
+  // diverge from `forward-anchor` under failover.
+  if (!parts.includes(anchorUrl)) parts.push(anchorUrl);
+
+  return [...new Set(parts)];
+}
+
 export function loadConfig(): Config {
   const port = parsePositiveInteger('FRONTDOOR_PORT', process.env.FRONTDOOR_PORT, 4700);
   // Fail fast at the config boundary with a clear message rather than letting
@@ -64,6 +96,7 @@ export function loadConfig(): Config {
 
   const pigeonUrl = process.env.PIGEON_DAEMON_URL || 'http://127.0.0.1:4731';
   const anchorUrl = process.env.OPENCODE_ANCHOR_URL || 'http://127.0.0.1:4096';
+  const poolUrls = parsePoolUrls(process.env.FRONTDOOR_POOL_URLS, anchorUrl);
   const pigeonAuthToken = process.env.PIGEON_DAEMON_AUTH_TOKEN || undefined;
   const version = process.env.FRONTDOOR_VERSION || 'unknown';
 
@@ -80,6 +113,7 @@ export function loadConfig(): Config {
     version,
     pigeonUrl,
     anchorUrl,
+    poolUrls,
     pigeonAuthToken,
     serveAuthHeader,
     routeTimeoutMs,

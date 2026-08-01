@@ -34,6 +34,7 @@ describe('healthz', () => {
       version: 'v1.2.3-test',
       pigeonUrl: 'http://pigeon.local',
       anchorUrl: 'http://anchor.local/',
+      poolUrls: ['http://anchor.local/'],
       pigeonAuthToken: 'token123',
       routeTimeoutMs: 1500,
       cheapFirstByteMs: 5000,
