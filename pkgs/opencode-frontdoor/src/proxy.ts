@@ -3,11 +3,11 @@ import http from "node:http";
 import https from "node:https";
 import { identify } from "./identity.js";
 import { dispatch } from "./dispatch.js";
-import { getRouteDisposition } from "./routes.dispositions.js";
+import { getRouteDisposition, OPERATOR_RUNBOOK } from "./routes.dispositions.js";
 import { extractSids, type SidExtraction, SID_REGEX, extractSessionIdFromPath } from "./sid.js";
 import { isExemptFromFirstByteTimeout } from "./timeouts.js";
 import { resolveOwner } from "./resolve.js";
-import { isPromotingRequest, maybePromote, PromotionGate, placeSession } from "./place.js";
+import { isPromotingRequest, isStatePinningRequest, maybePromote, PromotionGate, placeSession } from "./place.js";
 import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky.js";
 import { probeServeHealth } from "./health.js";
 import type { Config } from "./config.js";
@@ -618,7 +618,7 @@ export async function handleRequest(
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           error: "web_ui_not_served",
-          message: "The web UI is not served through the front door. Use a serve port directly."
+          message: `The web UI is not served through the front door. Opening it is an interactive operator action, not a fallback for this request: see ${OPERATOR_RUNBOOK} §4.`
         }));
       } else {
         console.warn(`[FRONTDOOR WARN] Unrecognized pathname: ${method} ${url.pathname}`);
@@ -631,14 +631,15 @@ export async function handleRequest(
     if (decision.action === "deny-global-mutation") {
       // The denial body is the ONLY thing the caller sees, so it must not
       // recommend a workaround that is wrong for this specific route. The
-      // generic "call a serve port directly" hint is safe for genuinely
+      // generic hint is safe for genuinely
       // process-local rows, but for anything backed by pool-wide state it
       // instructs the caller to manufacture exactly the silent inconsistency
       // the denial exists to prevent (docs/plans/2026-07-26-mlve11-d4-mechanisms.md,
       // R2). Rows that need better wording carry `userMessage`/`remedy` in
       // ROUTE_DISPOSITIONS; everything else keeps the previous text.
       const disposition = getRouteDisposition(method, url.pathname, decision.class);
-      const remedy = disposition?.remedy ?? "To mutate, call a serve port directly.";
+      const remedy = disposition?.remedy
+        ?? `This operation mutates state that belongs to a single serve process, so the front door cannot perform it on your behalf. It is not a routing failure and there is no port to retry against: if you genuinely need it, it is an operator procedure — see ${OPERATOR_RUNBOOK}.`;
 
       if (decision.allowedMethods.length > 0) {
         const allowedJoined = decision.allowedMethods.join(", ");
@@ -820,6 +821,12 @@ export async function handleRequest(
           if (promo.placed && promo.apiBase && isAbsoluteHttpUrl(promo.apiBase)) {
             target = promo.apiBase; degraded = false; prospective = false;
             wasPromoted = true;
+            // vjq0: count state-pinning placements separately. Without this the fix is
+            // invisible — a not-routed connect that now places stops incrementing
+            // notRoutedMutationToAnchor and nothing takes its place.
+            if (isStatePinningRequest(url.pathname)) {
+              ctx.metrics.promotedOnConnect++;
+            }
           } else {
             target = resolved.url; degraded = resolved.degraded; prospective = resolved.prospective;
           }

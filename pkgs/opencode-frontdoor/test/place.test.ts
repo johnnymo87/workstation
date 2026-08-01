@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { placeSession, isPromotingRequest, PromotionGate, maybePromote } from '../src/place.js';
+import { placeSession, isPromotingRequest, isStatePinningRequest, gateKeyFor, PromotionGate, maybePromote } from '../src/place.js';
 import { invalidateDaemonToken } from '../src/http.js';
 import type { Config } from '../src/config.js';
 import type { SidExtraction } from '../src/sid.js';
@@ -62,6 +62,41 @@ describe('place.ts', () => {
       expect(isPromotingRequest('POST', '/session/ses_123/abort', singleExt)).toBe(false);
       expect(isPromotingRequest('POST', '/session/ses_123/fork', singleExt)).toBe(false);
       expect(isPromotingRequest('POST', '/api/session', singleExt)).toBe(false); // creation
+    });
+  });
+
+  describe('vjq0: connect is state-pinning and therefore promoting', () => {
+    const ex = { kind: 'single', sid: 'ses_abc' } as const;
+
+    test('the MCP connect route promotes', () => {
+      expect(isPromotingRequest('POST', '/session/ses_abc/mcp/slack/connect', ex)).toBe(true);
+      expect(isPromotingRequest('POST', '/api/session/ses_abc/mcp/slack/connect', ex)).toBe(true);
+    });
+
+    test('disconnect does NOT promote (exact last-segment match, not endsWith)', () => {
+      // This is the whole reason the matcher must stay Set.has(lastSegment). An endsWith
+      // implementation would promote disconnects too, silently.
+      expect(isPromotingRequest('POST', '/session/ses_abc/mcp/slack/disconnect', ex)).toBe(false);
+    });
+
+    test('neighbouring MCP routes do not promote', () => {
+      expect(isPromotingRequest('POST', '/session/ses_abc/mcp/slack/auth', ex)).toBe(false);
+      expect(isPromotingRequest('GET', '/session/ses_abc/mcp/slack/connect', ex)).toBe(false);
+    });
+
+    test('a connect for a DIFFERENT sid than the one extracted does not promote', () => {
+      expect(isPromotingRequest('POST', '/session/ses_other/mcp/slack/connect', ex)).toBe(false);
+    });
+
+    test('gate keys are namespaced so connect cannot burn the turn-starting budget', () => {
+      expect(gateKeyFor('/session/ses_abc/mcp/slack/connect', 'ses_abc')).toBe('pin:ses_abc');
+      expect(gateKeyFor('/session/ses_abc/prompt_async', 'ses_abc')).toBe('ses_abc');
+      expect(gateKeyFor('/session/ses_abc/mcp/slack/disconnect', 'ses_abc')).toBe('ses_abc');
+    });
+
+    test('isStatePinningRequest tolerates a trailing slash', () => {
+      expect(isStatePinningRequest('/session/ses_abc/mcp/slack/connect/')).toBe(true);
+      expect(isStatePinningRequest('/session/ses_abc/prompt')).toBe(false);
     });
   });
 
