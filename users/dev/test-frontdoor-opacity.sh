@@ -174,7 +174,7 @@ done
 
 # Pinned total. The anti-vacuity check below only catches TOTAL vacuity; partial
 # rot (10 of 11 sites silently stop matching, as the [^\n] bug did) still passed.
-EXPECTED_SITES=14
+EXPECTED_SITES=16
 if [ "$hits" -ne "$EXPECTED_SITES" ]; then
   bad "expected exactly $EXPECTED_SITES serve-addressing site(s), found $hits -- if this change is intentional, update EXPECTED_SITES and the disposition table together"
 fi
