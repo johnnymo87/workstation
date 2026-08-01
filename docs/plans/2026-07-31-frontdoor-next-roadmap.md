@@ -18,6 +18,13 @@ that critical path; see Step 4.
 `mlve.11`, `m3z2`). `workstation-mlve.4` (Phase 9) is the last, and it is **not merely
 deploy-gated** as its older notes claim — see Step 1.
 
+**Update 2026-08-01 — Step 3's blocking prerequisite is CLEARED.** `workstation-eon4`
+was not accepted-with-rationale; it was **fixed door-side and closed** (PR #237,
+`0ded471`), measured at **zero** `global-ro` 503s across a real 31-session reattach
+burst. Step 3's text below is rewritten accordingly. **Step 1 (`mlve.4`) is next and is
+unblocked.** Also closed since this file was written: `workstation-0dm8`
+("0 MCP tools") — won't-fix, not a door bug, see *Explicitly NOT next*.
+
 **Live state is good; re-measure, don't assume:** door `:4700` up, pool `:4096-4099`,
 pigeon `:4731`; 76 distinct pids on the door; the only processes whose PEER is a serve
 port are `opencode-frontdoor.service` (row C3) and the four serves connecting to
@@ -167,7 +174,7 @@ together; adversarial review mandatory; PR for (a) [+ (c)] + bookkeeping.
 
 ---
 
-## Step 3 — Ride the exit criterion (and settle `eon4` FIRST)
+## Step 3 — Ride the exit criterion (`eon4` is SETTLED — prerequisite cleared)
 
 **DONE is not "the steps landed."** Per the adopted exit criterion: the items land AND
 **one full deploy cycle rides clean** — at least one opencode pin bump plus one nightly
@@ -180,24 +187,69 @@ observation window, not a task. A deploy inside the window is the *required even
 contamination; the criterion was designed to measure perturbation survival (~27 pin
 bumps in 6 weeks is the steady state).
 
-**Blocking prerequisite — pre-register the `eon4` rule BEFORE the window opens.**
-`workstation-eon4` (2026-07-30 burst attach 503s: 196 × 503, all `class=global-ro`, all
-`target=:4096`, all `durationMs` 4999-5002 inside one 7-second window) is parked on a
-user decision. Without a rule, a fresh session reaches this step, sees eon4 open, and
-stalls forever — a wait state, not a step.
+**The blocking prerequisite is CLEARED. `workstation-eon4` is CLOSED (2026-08-01).**
+It was resolved by *fixing the door*, not by the accept-with-rationale path this document
+originally pre-registered. Do not reopen it, and do not go looking for the parked user
+decision — it was made and executed.
 
-The cycle IS the eon4 experiment: the mandatory nightly reset followed by the morning
-mass-reattach is precisely the reproduction scenario (33 sequential `oc-auto-attach`),
-and the caller-side fix (`#220`, home gen 521) is already deployed. So pre-register, in
-the shape already used for `m96n` and `km5f`:
+What shipped (PR **#237**, squash `0ded471`): the whole `global-ro` class forwarded to
+the anchor, so every session-less read concentrated on `:4096`. Now a per-route opt-in
+`poolSafe` flag routes measured-invariant reads to a new `forward-pool` action that
+round-robins the pool, with connection-level failover. `FRONTDOOR_POOL_URLS` comes from
+`serve-pool.nix`; unset ⇒ anchor-only ⇒ prior behaviour.
 
-> **Rule:** if the cycle's post-reset morning reattach produces ZERO eon4-signature
-> 503s (`class=global-ro`, `target=http://127.0.0.1:4096`, `durationMs`≈5000), the
-> door-side concentration is accepted as mitigated by `#220` and `eon4` closes
-> accepted-with-rationale. ANY recurrence re-promotes door-side work and the cycle is
-> NOT clean.
+**Measured on the first post-deploy burst (31-session reattach):**
 
-**Get the user's accept-or-fix call on that rule before opening the window.**
+| `class=global-ro` 503s | count | basis |
+|---|---|---|
+| 07-30 (pre-everything) | 333 | full local day |
+| 08-01 pre-fix | 22 | 00:53–01:56 UTC, pre-deploy |
+| 08-01 post-fix burst | **0** | the 13:25–13:52 UTC burst window only |
+
+Note the bases differ — these are **not** apples-to-apples, and this file documents a
+timezone silent-zero as a lesson two paragraphs down, so it had better label its own
+columns. Within the burst window: spread dead-even (169/169/169/169 across `:4096-4099`),
+slowest pooled read 841 ms against the 5000 ms budget, `poolFailover` 0, peak 885 req/min
+— a real burst, not a gentle ramp. The old 503s sat pinned at 4999–5002 ms; this never
+approached the wall.
+
+**That "0" is a window, not a steady state — and the same day disproved the broader
+reading.** At 14:47–14:57 UTC, ~1h after deploy, serve `:4098` went alive-but-stalling and
+the door logged **1069 × 503, all `target=:4098`**, all pinned at 4999–5003 ms: 979
+`class=session-path` (sessions leased to that member — the anchor-degrade family
+reproduced on a *non*-anchor member, not caused by this change) and **90
+`class=global-ro action=forward-pool`** — pooled reads round-robined onto the stalling
+member. `:4098` self-recovered (`NRestarts=0`); the canary ran during the window and took
+no action. Tracked as **`workstation-nv5l`** (P1).
+
+**Honest net accounting, because the trade is real:** those 90 reads would previously have
+gone to the healthy anchor and succeeded. So this fix made 90 requests fail that otherwise
+would not have, while removing the 333/22-per-burst concentration failures. A good trade —
+but a trade, not a pure win.
+
+**Still OUT OF SCOPE, do not read the closure as broader than it is:** ≥5s first-byte
+stalls by *any* member, anchor or otherwise. Failover is `failoverIfUnreachable` —
+connection-level only — so a member that accepts and then stalls eats the full budget with
+no retry. `eon4`'s scope was global-ro *concentration on the anchor*, which is fixed and
+measured. Member-stall is `workstation-nv5l`; do **not** reopen `eon4` for it, and do not
+file a third bead for the same thing.
+
+**Three lessons from that step, all of which cost real time — apply them in Steps 1, 2, 4:**
+
+- **Invariance must be MEASURED, not argued.** The flag set was first justified from
+  configuration ("all members share one templated unit and `WorkingDirectory`, so
+  responses cannot differ"). That reasons about the wrong axis — the divergence mechanism
+  is per-process caches. Curling all candidates against the live members found six that
+  diverge *today*, including `GET /config/providers`, where the anchor exposes an entire
+  provider the others lack. Set shrunk 22 → 16 before deploy.
+- **`systemctl show -p Environment` reports the LOADED UNIT, not the running process.**
+  With `restartIfChanged = false` it showed the new value while the old process still
+  served — reproduced live. Read `/proc/$(systemctl show -p MainPID --value <unit>)/environ`.
+- **A third journalctl silent-zero:** `--since` is interpreted in LOCAL time even when
+  `--utc` is passed (`--utc` only formats output), so a UTC timestamp on an EDT host
+  queries the future and returns zero lines. Relatives: bare `"today 00:00"` fails to
+  parse; an immediate post-traffic query can return empty via write lag. All three render
+  as "no traffic, no errors."
 
 ---
 
@@ -260,6 +312,25 @@ mandatory; PR in both repos.
   ~2026-08-11, pre-registered decision rule. Do not restart early; do not bundle.
 - The frontdoor global-ro cache — CLOSED on evidence (`#221`): measured ~2x not 30x,
   plus an unbounded `arrayBuffer()` stall. Do not redesign it.
+- **"Reopened sessions have 0 MCP tools" (`workstation-0dm8`) — CLOSED won't-fix, and it
+  is NOT a door bug.** Filed P1 on 2026-08-01 blaming the 31 × HTTP 501 on `GET /mcp`
+  seen during the reattach burst; four probes falsified that in ~15 minutes. The serves
+  report all 14 MCP servers `disabled` when hit **directly**, bypassing the door, and the
+  session-scoped `/session/{id}/mcp` *is* allowed through the door and returns the same
+  all-disabled list — so the door hides nothing and the 501 is inert w.r.t. tool
+  availability. All 14 ship `enabled: false` by deliberate config
+  (grep `enabled = false` in the `atlassian` block of `users/dev/opencode-config.nix`,
+  plus 13 siblings — cited as a grep anchor, not a line number, per this file's own rule).
+  **Standing user preference, stated 2026-08-01: never wants always-on MCP servers**;
+  given always-on vs always-off he chooses off and accepts starting them on demand after
+  the morning restore. So: do NOT flip `enabled = true` as a convenience fix, do NOT
+  re-file the 501, and do NOT fold any of it into `vjq0` or Step 2 residual (d) — those
+  are about MCP being *lost* by placement/migration mechanics, a different and still-open
+  failure. This one never had tools to lose.
+  *Method note worth carrying:* it was filed because a memorable event was mistaken for
+  evidence without asking whether the suspect could even produce the symptom. The
+  discriminating probe — hit the component's upstream directly, bypassing the suspect —
+  should come first; it cost minutes once it finally ran.
 - `mlve.5`-`mlve.10` backlog, `workstation-sktk` (variable-port guard blind spot) —
   after the spine closes.
 
@@ -273,3 +344,5 @@ mandatory; PR in both repos.
 | disposition table (the exemption record) | `docs/plans/2026-07-26-phase9-consumer-disposition.md` |
 | the guard | `users/dev/test-frontdoor-opacity.sh` |
 | epic / last item / MCP race / fence bug | `workstation-mlve` / `workstation-mlve.4` / `workstation-vjq0` / `workstation-4b1q` |
+| the eon4 fix (closed) | PR #237 `0ded471`; grep `poolSafe` in `pkgs/opencode-frontdoor/src/routes.classification.ts`, `forward-pool` in `src/dispatch.ts`, `poolOrder` in `src/proxy.ts`; `FRONTDOOR_POOL_URLS` wired in `hosts/cloudbox/configuration.nix` (grep it), derived from `endpointsCsv` in `users/dev/serve-pool.nix` |
+| member-stall gap (open, P1) | `workstation-nv5l`; grep `failoverIfUnreachable` in `pkgs/opencode-frontdoor/src/proxy.ts` |
