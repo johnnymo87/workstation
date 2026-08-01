@@ -3,6 +3,65 @@
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to
 > implement this plan task-by-task.
 
+---
+
+## ROADMAP / SPINE (read this first — updated 2026-07-31, after PR #234)
+
+**Where we are:** Tasks 1/2/3 (writer) and Task 6 (reader, `oc-session-list`)
+are merged. **But the feature currently displays nothing**, and the reason is
+S0 below. Do not build UI on top of an empty data source.
+
+Each step is a bead (`bd show <id>`), which is the durable spine — beads survive
+compaction, this file is the narrative. Per-step cycle: **compact → optional
+oracle-fable consult → SDD if applicable → adversarial-reviewer-fable → PR if
+applicable.** The "if applicable" is real: S0 is diagnosis, not implementation,
+and forcing SDD onto it would be theatre.
+
+| # | Bead | Step | Cycle stages that apply | Blocked by |
+|---|---|---|---|---|
+| **S0** | `workstation-gzkf` | **Diagnose the writer coverage hole** ← START HERE | compact → oracle? → **systematic-debugging (NOT SDD)** → write-up | — |
+| S1 | `workstation-kwoh` | Fix whatever S0 found | compact → oracle? → SDD *if it decomposes* → adversarial → PR | S0 |
+| S2 | `workstation-ix6n` | Deploy #232 + #234 to fleet, re-verify | compact → deploy → verify | — (may run *during* S0) |
+| S3 | `workstation-rq7k` | Emit `nodata`, not `idle`, when owner has no live file | compact → SDD → adversarial → PR | — |
+| S4 | `workstation-vyad` | Task 4: thin **async** Lua caller | compact → SDD → adversarial → PR | S1 |
+| S5 | `workstation-afp2` | Task 5: Lua socket discovery | compact → SDD → adversarial → PR | S1 |
+| S6 | `workstation-vk9y` | Task 8: join + row model | compact → SDD → adversarial → PR | S4, S5 |
+
+`bd ready` currently returns **S0, S2, S3**.
+
+### Why S0 is the spine, not a footnote
+
+`oc-session-list --with-state` returns **129 rows with zero state**. The reader
+is correct; the overlays have nothing to say. Measured 2026-07-31:
+
+- 42 overlay files, **all** live pids, **all** fresh (0 dead, 0 stale)
+- **only 2 of 42 contain any session entry** — 4 entries, all plain `idle`
+- the session doing this work was **active throughout and appears in no
+  overlay**; it is assigned to `serve-2`, which has 6 files, **none for its
+  directory**
+
+The strongest clue: **no file exists for that `(serve, directory)` pair at all**,
+so this is about file *creation*, not entry eviction.
+
+Two traps to avoid, both of which this project has already fallen into:
+
+1. **`desired_serve_id` is DESIRED, not actual.** Verify where the session is
+   really served before blaming the plugin. Do not convict the memorable
+   suspect on circumstantial evidence.
+2. **A silent failure is the expected shape here.** opencode swallows a throwing
+   plugin factory, so "the plugin is broken" and "the serve has no sessions"
+   look identical from outside. #232's loud-unarmed logging — which would
+   discriminate hypothesis H4 — **is merged but NOT deployed** (the fleet runs
+   #230). That makes S2 partly a diagnostic *enabler* for S0; but gather
+   evidence from the current state first, since deploying mutates the system
+   under investigation.
+
+S3 is deliberately **not** blocked on S0: it is the permanent tripwire that
+would have made this class of emptiness scream instead of whisper, and it is
+worth having regardless of what S0 concludes.
+
+---
+
 **Goal:** A telescope fuzzy switcher that lists opencode sessions with semantic
 state (working/blocked/idle/retry/error), grouped by project and scoped by tmux
 session, and jumps-or-attaches to the selected session.
