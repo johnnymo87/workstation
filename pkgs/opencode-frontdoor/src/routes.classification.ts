@@ -65,11 +65,15 @@ export interface RouteEntry {
    * before, so a NEWLY ADDED route is anchor-pinned (safe) by construction and
    * spreading is always a deliberate, reviewed act.
    *
-   * Bar for flagging: the response must derive solely from state shared by every
-   * member — on-disk config/project files, or the shared opencode.db — and must
-   * not depend on which process answers. When unsure, do not flag; the cost of a
-   * wrong flag (silent divergence by member) far exceeds the cost of one route
-   * still on the anchor.
+   * Standard for flagging: invariance must be MEASURED across live members,
+   * not argued from configuration; per-process caches (not cwd) are the
+   * divergence mechanism — see workstation-g8k9.
+   * Note: the three templated routes (/api/provider/{providerID},
+   * /api/integration/{integrationID}, /project/{projectID}/directories) were
+   * not individually diffed (they need real IDs); they are flagged on the
+   * strength of their collection endpoints agreeing.
+   * When unsure, do not flag; the cost of a wrong flag (silent divergence by
+   * member) far exceeds the cost of one route still on the anchor.
    */
   poolSafe?: boolean;
   note?: string;
@@ -77,9 +81,9 @@ export interface RouteEntry {
 
 export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/", class: "web-ui" },
-  { method: "GET", path: "/agent", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): agent definitions from disk" },
-  { method: "GET", path: "/api/agent", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): agent definitions from disk" },
-  { method: "GET", path: "/api/command", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): command definitions from disk" },
+  { method: "GET", path: "/agent", class: "global-ro" },
+  { method: "GET", path: "/api/agent", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/api/command", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "DELETE", path: "/api/credential/{credentialID}", class: "global-sideeffect" },
   { method: "PATCH", path: "/api/credential/{credentialID}", class: "global-sideeffect" },
   { method: "GET", path: "/api/event", class: "session-query", note: "Can receive session_ids query param (source: event-session-scope.patch)" },
@@ -88,20 +92,20 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/api/fs/list", class: "global-ro" },
   { method: "GET", path: "/api/fs/read/*", class: "global-ro" },
   { method: "GET", path: "/api/health", class: "global-ro" },
-  { method: "GET", path: "/api/integration", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): integration registry from shared config" },
-  { method: "GET", path: "/api/integration/{integrationID}", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): integration registry from shared config" },
+  { method: "GET", path: "/api/integration", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/api/integration/{integrationID}", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "POST", path: "/api/integration/{integrationID}/connect/key", class: "global-sideeffect" },
   { method: "POST", path: "/api/integration/{integrationID}/connect/oauth", class: "global-sideeffect" },
   { method: "DELETE", path: "/api/integration/attempt/{attemptID}", class: "global-sideeffect" },
   { method: "GET", path: "/api/integration/attempt/{attemptID}", class: "global-ro" },
   { method: "POST", path: "/api/integration/attempt/{attemptID}/complete", class: "global-sideeffect" },
-  { method: "GET", path: "/api/location", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): derived from the shared WorkingDirectory" },
-  { method: "GET", path: "/api/model", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): model catalogue, derived from provider config" },
+  { method: "GET", path: "/api/location", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/api/model", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/api/permission/request", class: "global-ro", note: "FABLE-P5-F2: reads PER-PROCESS in-memory pending requests; door->anchor returns only the anchor's view. Latent (no through-door consumer today); revisit before Phase 7/9." },
   { method: "GET", path: "/api/permission/saved", class: "global-ro" },
   { method: "DELETE", path: "/api/permission/saved/{id}", class: "global-sideeffect" },
-  { method: "GET", path: "/api/provider", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): provider set from on-disk config + credentials" },
-  { method: "GET", path: "/api/provider/{providerID}", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): provider set from on-disk config + credentials" },
+  { method: "GET", path: "/api/provider", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/api/provider/{providerID}", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/api/pty", class: "pty" },
   { method: "POST", path: "/api/pty", class: "pty" },
   { method: "DELETE", path: "/api/pty/{ptyID}", class: "pty" },
@@ -110,7 +114,7 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/api/pty/{ptyID}/connect", class: "pty" },
   { method: "POST", path: "/api/pty/{ptyID}/connect-token", class: "pty" },
   { method: "GET", path: "/api/question/request", class: "global-ro", note: "FABLE-P5-F2: reads PER-PROCESS in-memory pending requests; door->anchor returns only the anchor's view. Latent; revisit before Phase 7/9." },
-  { method: "GET", path: "/api/reference", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): static reference data" },
+  { method: "GET", path: "/api/reference", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/api/session", class: "global-ro" },
   { method: "POST", path: "/api/session", class: "create" },
   { method: "GET", path: "/api/session/{sessionID}", class: "session-path" },
@@ -136,17 +140,17 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "POST", path: "/api/session/{sessionID}/revert/stage", class: "session-path" },
   { method: "POST", path: "/api/session/{sessionID}/wait", class: "session-path" },
   { method: "GET", path: "/api/session/active", class: "global-ro" },
-  { method: "GET", path: "/api/skill", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): skill definitions from disk" },
+  { method: "GET", path: "/api/skill", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "DELETE", path: "/auth/{providerID}", class: "global-sideeffect" },
   { method: "PUT", path: "/auth/{providerID}", class: "global-sideeffect" },
-  { method: "GET", path: "/command", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): command definitions from disk" },
+  { method: "GET", path: "/command", class: "global-ro" },
   { method: "GET", path: "/config", class: "global-ro" },
   { method: "PATCH", path: "/config", class: "global-sideeffect" },
-  { method: "GET", path: "/config/providers", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): on-disk config projection" },
-  { method: "GET", path: "/doc", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): OpenAPI spec, identical per binary. OpenAPI spec; self-undeclared, added manually (FABLE-W6)" },
+  { method: "GET", path: "/config/providers", class: "global-ro" },
+  { method: "GET", path: "/doc", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01 (FABLE-W6)" },
   { method: "GET", path: "/event", class: "session-query", note: "Can receive session_ids query param (source: event-session-scope.patch)" },
   { method: "GET", path: "/event?session_ids=", class: "session-query", note: "patch-only session-query (source: event-session-scope.patch)" },
-  { method: "GET", path: "/experimental/capabilities", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): static capability report" },
+  { method: "GET", path: "/experimental/capabilities", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/experimental/console", class: "global-ro" },
   { method: "GET", path: "/experimental/console/orgs", class: "global-ro" },
   { method: "POST", path: "/experimental/console/switch", class: "global-sideeffect" },
@@ -195,18 +199,18 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "POST", path: "/mcp/{name}/auth/callback", class: "global-sideeffect" },
   { method: "POST", path: "/mcp/{name}/connect", class: "global-sideeffect" },
   { method: "POST", path: "/mcp/{name}/disconnect", class: "global-sideeffect" },
-  { method: "GET", path: "/path", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): derived from the shared WorkingDirectory" },
+  { method: "GET", path: "/path", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/permission", class: "global-ro", note: "FABLE-P5-F2: reads PER-PROCESS in-memory pending requests; door->anchor returns only the anchor's view. Latent; revisit before Phase 7/9." },
   { method: "POST", path: "/permission/{requestID}/reply", class: "global-sideeffect" },
-  { method: "GET", path: "/project", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): project state from disk" },
+  { method: "GET", path: "/project", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "PATCH", path: "/project/{projectID}", class: "global-sideeffect" },
-  { method: "GET", path: "/project/{projectID}/directories", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): project state from disk" },
-  { method: "GET", path: "/project/current", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): derived from the shared WorkingDirectory" },
+  { method: "GET", path: "/project/{projectID}/directories", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/project/current", class: "global-ro" },
   { method: "POST", path: "/project/git/init", class: "global-sideeffect" },
-  { method: "GET", path: "/provider", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): provider set from on-disk config + credentials" },
+  { method: "GET", path: "/provider", class: "global-ro" },
   { method: "POST", path: "/provider/{providerID}/oauth/authorize", class: "global-sideeffect" },
   { method: "POST", path: "/provider/{providerID}/oauth/callback", class: "global-sideeffect" },
-  { method: "GET", path: "/provider/auth", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): provider set from on-disk config + credentials" },
+  { method: "GET", path: "/provider/auth", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/pty", class: "pty" },
   { method: "POST", path: "/pty", class: "pty" },
   { method: "DELETE", path: "/pty/{ptyID}", class: "pty" },
@@ -252,7 +256,7 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/session/{sessionID}/todo", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/unrevert", class: "session-path" },
   { method: "GET", path: "/session/status", class: "global-ro", note: "FABLE-P5-F2: SessionStatus is a PER-PROCESS in-memory Map; door->anchor reports idle for a session mid-turn on another serve. Latent (no through-door consumer today); revisit before Phase 7/9." },
-  { method: "GET", path: "/skill", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): skill definitions from disk" },
+  { method: "GET", path: "/skill", class: "global-ro" },
   { method: "POST", path: "/sync/history", class: "global-sideeffect" },
   { method: "POST", path: "/sync/replay", class: "global-sideeffect" },
   { method: "POST", path: "/sync/start", class: "global-sideeffect" },

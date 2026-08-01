@@ -579,7 +579,6 @@ describe('Route Dispatcher', () => {
 
   describe('poolSafe flag integrity', () => {
     const EXPECTED_POOL_SAFE_ROUTES = [
-      'GET /agent',
       'GET /api/agent',
       'GET /api/command',
       'GET /api/integration',
@@ -590,17 +589,12 @@ describe('Route Dispatcher', () => {
       'GET /api/provider/{providerID}',
       'GET /api/reference',
       'GET /api/skill',
-      'GET /command',
-      'GET /config/providers',
       'GET /doc',
       'GET /experimental/capabilities',
       'GET /path',
       'GET /project',
-      'GET /project/current',
       'GET /project/{projectID}/directories',
-      'GET /provider',
       'GET /provider/auth',
-      'GET /skill',
     ].sort();
 
     // A route whose note documents PER-PROCESS state must never be flagged
