@@ -2747,6 +2747,44 @@ describe("FrontDoor Integration", () => {
       expect([502, 503]).toContain(res.status);
     });
 
+    test("does not accumulate res close listeners or unpipe leaks on failover", async () => {
+      // Close s1 and s2 so request fails over twice before hitting s3
+      await new Promise<void>((r) => s1.close(() => r()));
+      await new Promise<void>((r) => s2.close(() => r()));
+
+      let capturedReq: http.IncomingMessage | undefined;
+      let capturedRes: http.ServerResponse | undefined;
+      const onRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+        capturedReq = req;
+        capturedRes = res;
+      };
+      fdServer.on("request", onRequest);
+
+      let closeListenersOnS3 = -1;
+      let activePipeCountOnS3 = -1;
+      s3.removeAllListeners("request");
+      s3.on("request", (_req, res) => {
+        if (capturedRes) {
+          closeListenersOnS3 = capturedRes.listenerCount("close");
+        }
+        if (capturedReq) {
+          const pipes = (capturedReq as any)._readableState?.pipes;
+          activePipeCountOnS3 = Array.isArray(pipes) ? pipes.length : (pipes ? 1 : 0);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ serve: 3 }));
+      });
+
+      const res = await reqDoor("/api/provider");
+      expect(res.status).toBe(200);
+      // 1 from top-level logResponse middleware + 1 from active proxyRequest = 2 (not accumulated 4 from failed attempts)
+      expect(closeListenersOnS3).toBe(2);
+      // Failover attempts unpiped dead upstreams, so pipe count is <= 1 (not accumulating 3 dead targets)
+      expect(activePipeCountOnS3).toBeLessThanOrEqual(1);
+
+      fdServer.off("request", onRequest);
+    });
+
     test("behaves exactly as before when poolUrls is [anchorUrl]", async () => {
       const singleFdConfig: Config = {
         port: 0,

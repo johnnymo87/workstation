@@ -69,7 +69,8 @@ export function resetPoolCursor(): void {
 
 export function poolOrder(poolUrls: string[], anchorUrl: string): string[] {
   if (poolUrls.length <= 1) return [...poolUrls];
-  const start = (poolCursor++) % poolUrls.length;
+  const start = poolCursor % poolUrls.length;
+  poolCursor = (poolCursor + 1) % Number.MAX_SAFE_INTEGER;
   const rotated = [...poolUrls.slice(start), ...poolUrls.slice(0, start)];
   const primary = rotated[0];
   const rest = rotated.slice(1);
@@ -145,6 +146,13 @@ async function proxyRequest(
       safeResolve();
     };
 
+    const onClose = () => {
+      if (!res.writableEnded) {
+        upstreamReq.destroy();
+      }
+      safeResolve();
+    };
+
     const safeResolve = (outcome: ProxyOutcome = "completed") => {
       if (resolved) return;
       resolved = true;
@@ -158,6 +166,8 @@ async function proxyRequest(
       }
       req.off("error", onReqError);
       res.off("error", onResError);
+      res.off("close", onClose);
+      req.unpipe(upstreamReq);
       resolve(outcome);
     };
 
@@ -279,6 +289,7 @@ async function proxyRequest(
     upstreamReq.on("error", (err) => {
       if (!headersSent && !res.headersSent) {
         if (options?.failoverIfUnreachable) {
+          req.unpipe(upstreamReq);
           safeResolve("upstream-unreachable");
           return;
         }
@@ -295,12 +306,7 @@ async function proxyRequest(
 
     req.pipe(upstreamReq);
 
-    res.on("close", () => {
-      if (!res.writableEnded) {
-        upstreamReq.destroy();
-      }
-      safeResolve();
-    });
+    res.on("close", onClose);
   });
 }
 

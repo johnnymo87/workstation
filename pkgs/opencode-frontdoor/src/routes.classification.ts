@@ -66,7 +66,7 @@ export interface RouteEntry {
    * spreading is always a deliberate, reviewed act.
    *
    * Bar for flagging: the response must derive solely from state shared by every
-   * member — on-disk config//project files, or the shared opencode.db — and must
+   * member — on-disk config/project files, or the shared opencode.db — and must
    * not depend on which process answers. When unsure, do not flag; the cost of a
    * wrong flag (silent divergence by member) far exceeds the cost of one route
    * still on the anchor.
