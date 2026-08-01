@@ -250,25 +250,35 @@ export function queryWithState(
   const overlayFiles = loadOverlayFiles(options.overlayDir ?? "", options.onWarn);
   const mergedStateMap = mergeOverlays(overlayFiles, { now, staleMs, isAlive, owners });
 
-  // Which serves are still REPORTING? Shares mergeOverlays' liveness definition
-  // via prepareFiles rather than recomputing it (see prepareFiles' comment).
+  // Who is still REPORTING? Two granularities, because neither alone is right.
   //
-  // Deliberately serve-level, NOT per-(serveId, directory). The writer emits one
-  // file per (serve, directory) and only while an app instance is loaded for that
-  // directory, so "my owner has no file for my directory" is the ordinary resting
-  // state of any session whose instance has been evicted -- measured at 11% of
-  // real rows on a healthy fleet, and 62% under a directory-matching rule. A
-  // tripwire that fires on most rows by default is one nobody reads. A live serve
-  // with ZERO files is the real signal: its writer is broken.
+  // SERVE-LEVEL catches a dead writer but is blind to per-INSTANCE blindness:
+  // opencode binds plugins at instance creation, so instances that predate a
+  // plugin deploy never write for the life of the serve while newer instances on
+  // the SAME serve write normally (issue #234 / S0). Such a serve looks healthy.
   //
-  // Measured base rates for this predicate against the live fleet (2026-08-01):
-  //   healthy 0.0% | total outage 100.0% | serve-1 down 6.6% | serve-2 down 17.2%
-  const reportingServes = new Set(
-    prepareFiles(overlayFiles, { now, staleMs, isAlive })
-      .filter((pf) => pf.live)
-      .map((pf) => pf.serveId),
+  // DIRECTORY-LEVEL catches that, but fires on 62% of real rows on a healthy
+  // fleet, because instance eviction leaves dormant sessions with no file
+  // forever. A tripwire that fires on the majority of rows is one nobody reads.
+  //
+  // So: directory-level for RECENTLY ACTIVE rows (a row touched within FRESH_MS
+  // had an instance loaded that recently, so a missing file means "not watching",
+  // not "evicted"), serve-level for dormant ones. Measured false-alarm rate of
+  // the hybrid against the live fleet: 1m/5m/15m/60m all 0.00%, 240m 0.27%.
+  const liveFiles = prepareFiles(overlayFiles, { now, staleMs, isAlive }).filter((pf) => pf.live);
+  const reportingServes = new Set(liveFiles.map((pf) => pf.serveId));
+  const reportingPairs = new Set(
+    liveFiles.filter((pf) => pf.file.directory !== undefined)
+      .map((pf) => `${pf.serveId}\u0000${pf.file.directory}`),
+  );
+  // A live file with no `directory` (an older writer) covers ANY directory.
+  // Treating it as matching nothing would flood one serve's every recent row
+  // with false nodata, and a tripwire dies of distrust faster than of silence.
+  const wildcardServes = new Set(
+    liveFiles.filter((pf) => pf.file.directory === undefined).map((pf) => pf.serveId),
   );
   const fleetIsReporting = reportingServes.size > 0;
+  const FRESH_MS = 15 * 60 * 1000;
 
   // Seam for Task 5: nvim-socket discovery join will annotate attached location here.
 
@@ -294,9 +304,18 @@ export function queryWithState(
       // row) falls back to fleet-wide writer health rather than flooding, since
       // a missing routing db already warns three separate ways in buildOwnersMap.
       const ownerServeId = owners[row.id];
-      const hasReporter = ownerServeId
-        ? reportingServes.has(ownerServeId)
-        : fleetIsReporting;
+      let hasReporter: boolean;
+      if (!ownerServeId) {
+        hasReporter = fleetIsReporting;
+      } else if (!reportingServes.has(ownerServeId)) {
+        hasReporter = false;
+      } else if (now - row.time_updated <= FRESH_MS) {
+        hasReporter =
+          reportingPairs.has(`${ownerServeId}\u0000${row.directory}`) ||
+          wildcardServes.has(ownerServeId);
+      } else {
+        hasReporter = true;
+      }
       if (!hasReporter) nodataCount++;
       return {
         ...row,
@@ -311,14 +330,36 @@ export function queryWithState(
     }
   });
 
-  // Per-row nodata is what catches a PARTIAL outage. This aggregate is what
-  // catches a total one even when the consumer ignores the field entirely --
-  // the 2026-08-01 failure, where 886 rows of confident idle went unremarked.
-  if (baseRows.length > 0 && nodataCount === baseRows.length) {
+  // Per-row nodata catches a partial outage. These aggregates catch an outage
+  // even for a consumer that ignores the field entirely -- the 2026-08-01
+  // failure, where 886 rows of confident idle went unremarked for ~9 hours.
+  //
+  // The trigger is "no live writer", NOT "every row is nodata". An un-deploy
+  // removes the plugin, not the overlay files: the serves keep running, so orphan
+  // GC (which requires a dead pid) never collects them and their heartbeats
+  // merely age out. Sessions named in those stale files merge as `unknown`
+  // rather than nodata, so a nodataCount === baseRows.length trigger would have
+  // stayed SILENT through exactly the outage it was written for.
+  if (baseRows.length > 0 && !fleetIsReporting) {
     options.onWarn?.(
-      `all ${baseRows.length} session(s) have no live state source -- the writer ` +
-        `fleet may be down; state below is not trustworthy`,
+      `no live writer is reporting for any of the ${baseRows.length} session(s) -- ` +
+        `the writer fleet may be down; state below is not trustworthy`,
     );
+  } else if (baseRows.length > 0) {
+    // Partial outage: name the serves that own sessions but emit nothing, so the
+    // signal is attributable without flooding rows.
+    const expected = new Set<string>();
+    for (const row of baseRows) {
+      const o = owners[row.id];
+      if (o) expected.add(o);
+    }
+    const silent = [...expected].filter((s) => !reportingServes.has(s)).sort();
+    if (silent.length > 0) {
+      options.onWarn?.(
+        `${silent.join(", ")} own session(s) but are not writing any live state -- ` +
+          `their writers may be down (${nodataCount} row(s) reported nodata)`,
+      );
+    }
   }
 
   return rows;
