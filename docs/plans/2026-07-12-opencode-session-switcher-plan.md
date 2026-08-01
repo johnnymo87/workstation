@@ -910,6 +910,36 @@ Two consequences worth stating plainly:
   `owners[sid] = owner_of(rootOf(sid))` join inherits this, so orphans resolve
   to themselves and simply miss the assignment table — same as any child.
 
+**⚠ HIGH, OPEN — the deployed writer has a coverage hole, found while smoke-testing
+`--with-state` (2026-07-31).** `oc-session-list --with-state` returned 129 rows
+with **zero** carrying any state. The CLI is behaving correctly; the overlays
+genuinely have nothing to say. Measured against the live fleet:
+
+- 42 overlay files, **all** with live pids and fresh heartbeats (0 dead, 0 stale).
+- **Only 2 of 42 files contain any session entry at all** — 4 entries total, and
+  all 4 are plain `idle`, so the merge correctly prunes them to nothing
+  ("absence == idle").
+- **This session was actively working the whole time** and appears in NO
+  overlay. It is assigned to `serve-2` (`session_assignment` row, state
+  `assigned`), and `serve-2` has 6 overlay files — **none for
+  `/home/dev/projects/workstation`**, the directory it is working in.
+
+So an actively-working session on its assigned serve produced no overlay entry
+and not even a file for its directory. That is exactly the failure mode this
+plan already documented from cycle 4: opencode swallows a throwing plugin
+factory, and *"an absent overlay is indistinguishable from a serve with no
+sessions."* Candidate causes, none yet confirmed: the plugin never initialized
+for that (serve, directory) pair; it threw at init and was swallowed; or the
+instance predates the deployed bundle. **Task 3 is not as "done" as it looks —
+the switcher renders nothing useful until this is understood.** Investigate
+before building the picker on top (Tasks 4/8/9), and note that the deployed
+build is #230's — #232 is merged but NOT deployed.
+
+Incidental corroboration of the GC requirement: the live overlay dir contains
+`/tmp/opencode/probe-dir`, `/tmp/opencode/probe-dir2` and
+`/tmp/session-state-test-1785515432827` — leftover probe files from earlier
+cycles' experiments, i.e. exactly the orphan population Task 6's GC collects.
+
 **`session_assignment` verified** in pigeon's unified daemon DB
 (`/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db`, also
 `OPENCODE_ROUTING_DB`): `session_id` PK, `desired_serve_id`, 561 rows. It also
