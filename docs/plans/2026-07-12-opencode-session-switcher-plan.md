@@ -884,6 +884,47 @@ and/or the CLI must accept `--skip-sock <own>`.
    shebang. Reuse the **deps stage** (no second lockfile, no second TS build
    ecosystem); fork stage 2 with a CLI checkPhase and a `makeWrapper` bin.
 
+**Measured against the live DBs (2026-07-31). Several of Task 6's numbers were
+stale or wrong — use these.**
+
+| Claim in plan | Measured |
+|---|---|
+| `session` ~6,184 rows | **8,771** (13 GB DB; the bulk is `part`, which the base list never touches) |
+| "~15 ms" for the root walk | **130 ms** naive (correlated `MAX(depth)`); **46 ms** with an upward CTE + `ROW_NUMBER()`; ~109 ms end-to-end process |
+| "multi-level nesting … live-verified real grandchild chains" | **FALSE today. Max depth is 1.** 8,771 at depth 0, 4,668 at depth 1, **nothing at depth 2+**. No grandchild chain exists on this host. |
+| ~53% of sessions are children | **Confirmed: 4,668 / 8,771 = 53%** |
+| archived exclusion | **Zero archived sessions exist.** `time_archived IS NULL` for all 8,771 — the filter is unobservable live and MUST be fixture-tested. |
+
+Two consequences worth stating plainly:
+
+- **The `COALESCE(parent_id, id)` warning is still right, but not for the stated
+  reason.** On today's data a single-level lift and a full walk return
+  *identical* results, because nothing is deeper than one level. The recursive
+  walk is kept as (a) future-proofing for deeper swarm topologies and (b) the
+  correct handling of orphans — see next point — not because multi-level chains
+  are currently observable. Do not cite "live-verified grandchild chains" again.
+- **983 sessions are orphans** (`parent_id` set, parent row absent) — a
+  population the plan never mentions. The upward walk stops at the missing
+  parent and treats the orphan as its own root, which is the sane outcome; a
+  `COALESCE` lift would instead group them under a phantom root id. Task 6's
+  `owners[sid] = owner_of(rootOf(sid))` join inherits this, so orphans resolve
+  to themselves and simply miss the assignment table — same as any child.
+
+**`session_assignment` verified** in pigeon's unified daemon DB
+(`/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db`, also
+`OPENCODE_ROUTING_DB`): `session_id` PK, `desired_serve_id`, 561 rows. It also
+carries a **`state` column the plan never mentions** (`assigned | draining |
+dormant | migrating`); live rows include `dormant`. Treating a dormant
+assignment as ownership is harmless *given* merge Rule 1 also requires the owner
+file to be live — a dormant session's owner simply omits it, and "absence is
+authoritative" then yields idle, which is correct. Do not filter on `state`
+without re-deriving that argument.
+
+**Testing note (cycle 6):** the bun-based tests live in `test/*.spec.ts`, which
+is deliberately OUTSIDE vitest's `test/**/*.test.ts` glob — they need `bun:test`
+and `bun:sqlite` and cannot run under vitest. They run via
+`pkgs/oc-session-list/test.sh`. Renaming them to `.test.ts` breaks `npm test`.
+
 **bun:sqlite is the chosen SQLite access path.** SQLite is compiled into the bun
 binary, so there is *zero* store-path-rot surface — which is the actual intent of
 "package with a nix sqlite dependency" below (that note targets `oc-search`'s
