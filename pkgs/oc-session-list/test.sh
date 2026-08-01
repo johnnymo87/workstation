@@ -88,7 +88,29 @@ mkdir -p "$EMPTY_OVERLAY_DIR"
 JSON_STATE_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --with-state --limit 10 \
   --overlay-dir "$EMPTY_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
   || fail "oc-session-list --with-state failed on fixture DB"
-echo "$JSON_STATE_OUT" | grep -q '"activity": "idle"' || fail "--with-state output missing activity field"
-pass "--with-state mode works on fixture DB"
+
+# An empty overlay dir means NO writer was watching, so the honest answer is
+# `nodata`. This fixture is literally the shape of the 2026-08-01 outage (every
+# overlay file gone), and asserting `idle` here is what made that outage look
+# normal for ~9 hours -- the assertion was encoding the bug as the expectation.
+echo "$JSON_STATE_OUT" | grep -q '"activity": "nodata"' \
+  || fail "--with-state on an empty overlay dir must report nodata, not a confident status"
+echo "$JSON_STATE_OUT" | grep -q '"activity": "idle"' \
+  && fail "--with-state claimed idle with no live writer -- that is the S3 regression"
+
+# And the converse, so the above cannot pass by simply never emitting idle: with
+# a LIVE overlay file covering the fixture rows' owner, absence means idle.
+LIVE_OVERLAY_DIR="$TMP_DIR/live-overlays"
+mkdir -p "$LIVE_OVERLAY_DIR"
+cat > "$LIVE_OVERLAY_DIR/serve-t-fixture.json" <<JSON
+{"version":1,"instanceStamp":1,"pid":$$,"serveId":"serve-t","directory":"/fixture",
+ "heartbeat":$(($(date +%s) * 1000)),"sessions":{}}
+JSON
+JSON_LIVE_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --with-state --limit 10 \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list --with-state failed with a live overlay"
+echo "$JSON_LIVE_OUT" | grep -q '"activity": "idle"' \
+  || fail "--with-state must report idle when a live writer is present and silent"
+pass "--with-state distinguishes nodata (no writer) from idle (live writer, silent)"
 
 echo "ALL PASS (oc-session-list)"
