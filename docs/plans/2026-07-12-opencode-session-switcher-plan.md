@@ -19,9 +19,9 @@ and forcing SDD onto it would be theatre.
 
 | # | Bead | Step | Cycle stages that apply | Blocked by |
 |---|---|---|---|---|
-| **S0** | `workstation-gzkf` | **Diagnose the writer coverage hole** ← START HERE | compact → oracle? → **systematic-debugging (NOT SDD)** → write-up | — |
-| S1 | `workstation-kwoh` | Fix whatever S0 found | compact → oracle? → SDD *if it decomposes* → adversarial → PR | S0 |
-| S2 | `workstation-ix6n` | Deploy #232 + #234 to fleet, re-verify | compact → deploy → verify | — (may run *during* S0) |
+| ~~S0~~ | `workstation-gzkf` | ~~Diagnose the writer coverage hole~~ **DONE 2026-08-01** — cause: plugins bind at instance creation; pool never restarted after the 12:34 deploy | compact → systematic-debugging → write-up | — |
+| **S1** | `workstation-kwoh` | **Restart the serve pool as part of the deploy** ← START HERE. Merged with S2: the fix *is* the deploy | compact → deploy+restart → verify on fleet | — |
+| S2 | `workstation-ix6n` | Deploy #232 + #234 to fleet, re-verify | **folded into S1** | — |
 | S3 | `workstation-rq7k` | Emit `nodata`, not `idle`, when owner has no live file | compact → SDD → adversarial → PR | — |
 | S4 | `workstation-vyad` | Task 4: thin **async** Lua caller | compact → SDD → adversarial → PR | S1 |
 | S5 | `workstation-afp2` | Task 5: Lua socket discovery | compact → SDD → adversarial → PR | S1 |
@@ -969,7 +969,13 @@ Two consequences worth stating plainly:
   `owners[sid] = owner_of(rootOf(sid))` join inherits this, so orphans resolve
   to themselves and simply miss the assignment table — same as any child.
 
-**⚠ HIGH, OPEN — the deployed writer has a coverage hole, found while smoke-testing
+**✅ RESOLVED 2026-08-01 (S0, `workstation-gzkf`) — cause: plugins bind at
+INSTANCE CREATION, and the serve pool was never restarted after the writer was
+deployed. Not a writer bug; a deploy-lifecycle gap (H3).** Full evidence and the
+controlled experiment are in "S0 diagnosis" immediately below. The original
+report, left intact because its measurements are still accurate:**
+
+**⚠ HIGH, ~~OPEN~~ RESOLVED — the deployed writer has a coverage hole, found while smoke-testing
 `--with-state` (2026-07-31).** `oc-session-list --with-state` returned 129 rows
 with **zero** carrying any state. The CLI is behaving correctly; the overlays
 genuinely have nothing to say. Measured against the live fleet:
@@ -993,6 +999,113 @@ instance predates the deployed bundle. **Task 3 is not as "done" as it looks —
 the switcher renders nothing useful until this is understood.** Investigate
 before building the picker on top (Tasks 4/8/9), and note that the deployed
 build is #230's — #232 is merged but NOT deployed.
+
+### S0 diagnosis (2026-08-01): the writer was never running where it mattered
+
+**Cause. opencode binds plugins to an app *instance* at instance-creation time.
+A long-lived serve never retrofits a newly deployed plugin into instances that
+already exist.** The pool serves started **09:18**; `session-state.js` was
+deployed at **12:34** by a `home-manager switch` that did **not** restart them.
+Every directory a serve had already touched in that 3h16m window is therefore
+permanently writer-less *for the life of that process* — and those are exactly
+the long-running, actively-worked directories. Directories first touched after
+12:34 get a writer normally. Hence the near-perfect anti-correlation.
+
+**Proof (controlled experiment, no prod mutation).** Two throwaway serves on
+:4791/:4792 with `OPENCODE_SERVE_ID`/`OPENCODE_SESSION_STATE_DIR` overridden and
+`XDG_*` isolated — the override matters, because a session's own bash inherits
+`OPENCODE_SERVE_ID=serve-2`, so an un-scrubbed child serve writes the *pool's*
+overlay filenames. On :4792, starting from an **empty** plugins dir:
+
+| step | action | overlay |
+|---|---|---|
+| 1 | create instance for `dirA` (plugin absent) | 0 files |
+| 2 | **copy `session-state.js` in** (simulates the deploy), re-request `dirA` | **still 0** |
+| 3 | request `dirB` (new instance, post-deploy) | **1 file, immediately** |
+
+Same process throughout. Step 2 is the finding: an existing instance never picks
+the plugin up, no matter how many requests hit it.
+
+**Corroboration from the live fleet:**
+
+- **No overlay has an `instanceStamp` earlier than the 12:34 deploy.** Earliest
+  is 16:15, 7h *after* serve start. If instances refreshed, stamps would spread
+  back to 09:18.
+- This session (`ses_0b36d8b66`, `/home/dev/projects/workstation`) was created
+  **11:08:14** — 86 minutes *before* the plugin existed. Its instance predates
+  the writer, so it can never be recorded.
+- Same-repo control: `workstation/.worktrees/{scheduled-swarm-wake,
+  monitoring-mergequeue-fix}` (worktrees first touched after the deploy) **have**
+  overlays; `/home/dev/projects/workstation` does not. `mono` has an overlay on
+  serve-2 and serve-3 but **not** on serve-1, which is the serve currently
+  leasing it. Identical config, different instance age — activity, not config.
+- Live-leased `(serve,dir)` pairs and overlay pairs were **perfectly disjoint**
+  (6 vs 42, zero intersection).
+
+**Hypotheses refuted, not merely unselected:**
+
+- **H1 (factory threw, swallowed):** no `[session-state]` line in `opencode.log`
+  *or* the journal. `console.error` from a plugin lands in the serve's journal,
+  not `opencode.log` — checked both.
+- **H2 (never hosted on serve-2):** refuted. `session_lease` shows a live,
+  unexpired lease with a matching `instance_uuid`. `desired_serve_id` was the
+  untrustworthy field; the lease is the actual one.
+- **H4 (fence inert):** the fence does not exist in the deployed build (#232
+  unshipped), so it cannot be the cause.
+- **H5 (directory-key mismatch):** `session.directory` is exactly
+  `/home/dev/projects/workstation`; the hash matches. *But* a related
+  discrepancy surfaced and is worth remembering: `POST /api/session?directory=X`
+  returned `location.directory` = the serve's cwd, **not** `X`, while the
+  overlay was filed under `X`. Instance directory and session location are
+  distinct concepts and can disagree — a live hazard for the Task 8 join.
+
+**`n=0` on the surviving 42 is NOT a second bug.** Idle entries are evicted by
+design ("absence == idle"), and the surviving writers are precisely the
+directories with no activity. Consistent.
+
+**Verdict: deploy gap, not a writer bug.** The writer is correct and has simply
+never run anywhere that mattered — so Task 3 remains *unvalidated on the fleet*,
+not wrong. The fix is to restart the serve pool after deploying plugin changes,
+which makes **S1 and S2 the same action**; the standing requirement is that any
+deploy touching `assets/opencode/plugins/**` must restart `opencode-serve@*`,
+otherwise it silently no-ops for every existing instance.
+
+**⚠ Re-measured 12h later (2026-08-01 09:52) — a SECOND, now-dominant failure:
+the writer is not deployed at all.** The overnight reset restarted the pool at
+09:24, which should have been the natural experiment confirming the diagnosis
+above. Instead of full coverage the overlay dir is **empty — 0 files**, and
+`~/.config/opencode/plugins/session-state.js` **no longer exists**.
+
+A `home-manager switch` ran at **09:23** (generation 1953) and its closure omits
+the plugin. This is not a rollback of intent: `main` still ships the
+`xdg.configFile."opencode/plugins/session-state.js"` block, the host is
+`cloudbox`, and `isCloudbox` is plainly true (its sibling
+`subagent-routing.ts`, gated on `isDarwin || isCloudbox`, is present). The
+plugin entered `opencode-config.nix` in **#230, merged 07-31 12:39** — so a
+switch run from any worktree branched before that timestamp silently
+**un-deploys the writer fleet-wide**. Several such worktrees exist
+(`ws-iwpj-phase2`, `/tmp/wt-shellenv-fix`, `monitoring-mergequeue-fix`,
+`scheduled-swarm-wake`).
+
+**This does not invalidate the instance-binding diagnosis** — that was proven by
+controlled experiment and still explains the original 42-empty-overlay
+observation. It adds a second, independent hazard that S1 must handle, and it
+is arguably worse: home-manager is **last-writer-wins across concurrent swarm
+worktrees**, so any agent running a switch from a stale checkout reverts every
+other agent's deployed config, silently and fleet-wide. A restart alone would
+have fixed nothing this morning, because there is now no plugin to load.
+
+S1 therefore needs *both*: deploy from an up-to-date checkout **and** restart
+the pool — and the deploy needs some guard against stale-worktree clobber
+(at minimum, verifying the expected files exist in the new generation
+afterwards).
+
+**This also retires the "8-hour auto-update" comfort in `session-state.ts`.** The
+comment reasons that a fleet-wide inert writer "needs to be discoverable from the
+log rather than by noticing the picker is empty, because the fleet auto-updates
+every 8 hours." Cycle 6 already disproved the auto-update claim; S0 shows the
+consequence is worse than assumed — a deploy that lands without a restart is
+inert *and* logs nothing, because the code that would log never runs.
 
 **Task 8 input (from cycle 6 adversarial review): distinguish "no data" from
 "authoritatively idle".** The reader already holds `owners[sid]` and the overlay
