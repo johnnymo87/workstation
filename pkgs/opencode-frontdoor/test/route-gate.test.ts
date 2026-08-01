@@ -526,7 +526,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       const sMethod = parts[0].toUpperCase();
       const sPath = parts.slice(1).join(' ');
       const sDispatch = dispatch(sMethod, sPath);
-      expect(['route-session', 'create', 'fork', 'forward-anchor']).toContain(sDispatch.action);
+      expect(['route-session', 'create', 'fork', 'forward-anchor', 'forward-pool']).toContain(sDispatch.action);
     }
   });
 

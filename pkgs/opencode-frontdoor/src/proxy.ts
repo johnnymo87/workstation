@@ -61,6 +61,28 @@ export function buildForwardSearch(search: string, serveAuthHeader?: string): st
   return s ? `?${s}` : "";
 }
 
+let poolCursor = 0;
+
+export function resetPoolCursor(): void {
+  poolCursor = 0;
+}
+
+export function poolOrder(poolUrls: string[], anchorUrl: string): string[] {
+  if (poolUrls.length <= 1) return [...poolUrls];
+  const start = poolCursor % poolUrls.length;
+  poolCursor = (poolCursor + 1) % Number.MAX_SAFE_INTEGER;
+  const rotated = [...poolUrls.slice(start), ...poolUrls.slice(0, start)];
+  const primary = rotated[0];
+  const rest = rotated.slice(1);
+  const restWithoutAnchor = rest.filter((u) => u !== anchorUrl);
+  if (rest.includes(anchorUrl)) {
+    restWithoutAnchor.push(anchorUrl);
+  }
+  return [primary, ...restWithoutAnchor];
+}
+
+export type ProxyOutcome = "completed" | "upstream-unreachable";
+
 async function proxyRequest(
   target: string,
   method: string,
@@ -68,9 +90,10 @@ async function proxyRequest(
   req: IncomingMessage,
   res: ServerResponse,
   ctx: ProxyContext,
-  extraction: SidExtraction | null
-): Promise<void> {
-  return new Promise<void>((resolve) => {
+  extraction: SidExtraction | null,
+  options?: { failoverIfUnreachable?: boolean }
+): Promise<ProxyOutcome> {
+  return new Promise<ProxyOutcome>((resolve) => {
     const targetParsed = new URL(target);
     const clientModule = targetParsed.protocol === "https:" ? https : http;
 
@@ -123,7 +146,14 @@ async function proxyRequest(
       safeResolve();
     };
 
-    const safeResolve = () => {
+    const onClose = () => {
+      if (!res.writableEnded) {
+        upstreamReq.destroy();
+      }
+      safeResolve();
+    };
+
+    const safeResolve = (outcome: ProxyOutcome = "completed") => {
       if (resolved) return;
       resolved = true;
       if (cheapTimeoutId) {
@@ -136,7 +166,9 @@ async function proxyRequest(
       }
       req.off("error", onReqError);
       res.off("error", onResError);
-      resolve();
+      res.off("close", onClose);
+      req.unpipe(upstreamReq);
+      resolve(outcome);
     };
 
     req.on("error", onReqError);
@@ -256,6 +288,11 @@ async function proxyRequest(
 
     upstreamReq.on("error", (err) => {
       if (!headersSent && !res.headersSent) {
+        if (options?.failoverIfUnreachable) {
+          req.unpipe(upstreamReq);
+          safeResolve("upstream-unreachable");
+          return;
+        }
         res.writeHead(502, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "bad_gateway", message: err.message }));
       } else if (!res.writableEnded) {
@@ -264,17 +301,15 @@ async function proxyRequest(
         // surface here after res.end()). Only tear down if still writable.
         res.destroy();
       }
-      safeResolve();
+      safeResolve("completed");
     });
 
+    // Note: on pool failover, re-piping an already-ended req works because Node schedules
+    // dest.end() on nextTick when endEmitted is set. Safe only because guard tests
+    // confine poolSafe to GET/HEAD (no body to lose).
     req.pipe(upstreamReq);
 
-    res.on("close", () => {
-      if (!res.writableEnded) {
-        upstreamReq.destroy();
-      }
-      safeResolve();
-    });
+    res.on("close", onClose);
   });
 }
 
@@ -678,6 +713,25 @@ export async function handleRequest(
       target = ctx.config.anchorUrl;
       degraded = false;
       await proxyRequest(target, method, url, req, res, ctx, null);
+      return;
+    }
+
+    if (decision.action === "forward-pool") {
+      degraded = false;
+      const order = poolOrder(ctx.config.poolUrls, ctx.config.anchorUrl);
+      for (let i = 0; i < order.length; i++) {
+        target = order[i];
+        const isLast = i === order.length - 1;
+        const outcome = await proxyRequest(target, method, url, req, res, ctx, null, {
+          failoverIfUnreachable: !isLast,
+        });
+        if (outcome !== "upstream-unreachable") return;
+        ctx.metrics.poolFailover++;
+        const nextTarget = order[i + 1];
+        console.warn(
+          `[FRONTDOOR WARN] pool member ${target} unreachable for ${method} ${url.pathname}; failing over to ${nextTarget}`
+        );
+      }
       return;
     }
 

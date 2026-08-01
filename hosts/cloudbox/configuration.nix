@@ -1831,6 +1831,27 @@ EOF
         "PIGEON_DAEMON_URL=http://127.0.0.1:4731"
         # frontdoor-exempt(C3): the door's own upstream; it cannot proxy through itself
         "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
+        # eon4: pool-invariant `global-ro` reads (the `poolSafe` entries in
+        # routes.classification.ts) round-robin across the WHOLE pool instead of
+        # concentrating every session-less read on the anchor. Concentration is
+        # what made a burst of TUI attaches blow the door's cheap-first-byte
+        # budget and return 503 (333 of them on 2026-07-30, still 22 on
+        # 2026-08-01 after the caller-side retry landed).
+        #
+        # Derived from serve-pool.nix — the same single source of truth the serve
+        # units and pigeon read — so this list cannot drift from the ports that
+        # actually exist. Do NOT hand-write it.
+        #
+        # Unset => anchor-only, i.e. exactly the pre-eon4 behaviour. That is what
+        # lets this env change and the door rebuild land in either order.
+        #
+        # NB no `frontdoor-exempt` marker: the opacity guard counts LITERAL
+        # serve addresses, and this value is interpolated from serve-pool.nix, so
+        # the guard does not see a site here. Adding a marker anyway would break
+        # its 1:1 site:marker anti-laundering check. (The exemption is real in
+        # spirit — these are the door's own upstreams, C3 — it simply has no site
+        # to attach to.)
+        "FRONTDOOR_POOL_URLS=${servePool.endpointsCsv}"
         # Builtins-only app (no framework reads NODE_ENV) — set for convention/
         # consistency with pigeon-daemon and to future-proof any added dependency.
         "NODE_ENV=production"

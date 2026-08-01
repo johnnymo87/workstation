@@ -212,6 +212,7 @@ describe("Ancillary Outbound Serve Calls", () => {
     version: "unknown",
     pigeonUrl: "http://pigeon.local",
     anchorUrl: "http://anchor.local",
+    poolUrls: ["http://anchor.local"],
     pigeonAuthToken: undefined,
     serveAuthHeader: "Basic " + Buffer.from("opencode:secret").toString("base64"),
     routeTimeoutMs: 3000,

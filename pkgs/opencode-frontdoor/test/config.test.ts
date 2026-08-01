@@ -10,6 +10,7 @@ describe('loadConfig', () => {
 
     // Clear relevant environment variables so we start with defaults
     delete process.env.FRONTDOOR_PORT;
+    delete process.env.FRONTDOOR_POOL_URLS;
     delete process.env.FRONTDOOR_VERSION;
     delete process.env.PIGEON_DAEMON_URL;
     delete process.env.OPENCODE_ANCHOR_URL;
@@ -43,6 +44,7 @@ describe('loadConfig', () => {
       version: 'unknown',
       pigeonUrl: 'http://127.0.0.1:4731',
       anchorUrl: 'http://127.0.0.1:4096',
+      poolUrls: ['http://127.0.0.1:4096'],
       pigeonAuthToken: undefined,
       serveAuthHeader: undefined,
       routeTimeoutMs: 3000,
@@ -101,6 +103,7 @@ describe('loadConfig', () => {
       version: 'v1.2.3-test',
       pigeonUrl: 'http://10.0.0.1:4731',
       anchorUrl: 'http://10.0.0.1:4096',
+      poolUrls: ['http://10.0.0.1:4096'],
       pigeonAuthToken: 'secret-token',
       serveAuthHeader: undefined,
       routeTimeoutMs: 1500,
@@ -109,6 +112,55 @@ describe('loadConfig', () => {
       driftCheckMs: 2000,
       wedgeProbeIntervalMs: 1000,
       mintTimeoutMs: 45000,
+    });
+  });
+
+  describe('FRONTDOOR_POOL_URLS', () => {
+    test('defaults to [anchorUrl] when unset', () => {
+      delete process.env.FRONTDOOR_POOL_URLS;
+      process.env.OPENCODE_ANCHOR_URL = 'http://127.0.0.1:4096';
+      expect(loadConfig().poolUrls).toEqual(['http://127.0.0.1:4096']);
+    });
+
+    test('parses a comma-separated list in order', () => {
+      process.env.FRONTDOOR_POOL_URLS =
+        'http://127.0.0.1:4096,http://127.0.0.1:4097,http://127.0.0.1:4098';
+      expect(loadConfig().poolUrls).toEqual([
+        'http://127.0.0.1:4096', 'http://127.0.0.1:4097', 'http://127.0.0.1:4098',
+      ]);
+    });
+
+    test('trims whitespace and ignores empty entries', () => {
+      process.env.FRONTDOOR_POOL_URLS = ' http://127.0.0.1:4096 , ,http://127.0.0.1:4097,';
+      expect(loadConfig().poolUrls).toEqual(['http://127.0.0.1:4096', 'http://127.0.0.1:4097']);
+    });
+
+    test('falls back to [anchorUrl] when the value is empty or only separators', () => {
+      process.env.FRONTDOOR_POOL_URLS = ' , , ';
+      process.env.OPENCODE_ANCHOR_URL = 'http://127.0.0.1:4096';
+      expect(loadConfig().poolUrls).toEqual(['http://127.0.0.1:4096']);
+    });
+
+    test('always includes anchorUrl, appending it if the list omits it', () => {
+      process.env.FRONTDOOR_POOL_URLS = 'http://127.0.0.1:4097';
+      process.env.OPENCODE_ANCHOR_URL = 'http://127.0.0.1:4096';
+      expect(loadConfig().poolUrls).toContain('http://127.0.0.1:4096');
+    });
+
+    test('rejects a malformed URL loudly', () => {
+      process.env.FRONTDOOR_POOL_URLS = 'http://127.0.0.1:4096,not-a-url';
+      expect(() => loadConfig()).toThrow(/FRONTDOOR_POOL_URLS/);
+    });
+
+    test('rejects scheme-less entries like 127.0.0.1:4097', () => {
+      process.env.FRONTDOOR_POOL_URLS = '127.0.0.1:4097';
+      expect(() => loadConfig()).toThrow(/FRONTDOOR_POOL_URLS/);
+    });
+
+    test('de-duplicates repeated members, preserving first-seen order', () => {
+      process.env.FRONTDOOR_POOL_URLS =
+        'http://127.0.0.1:4096,http://127.0.0.1:4097,http://127.0.0.1:4096';
+      expect(loadConfig().poolUrls).toEqual(['http://127.0.0.1:4096', 'http://127.0.0.1:4097']);
     });
   });
 

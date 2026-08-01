@@ -12,6 +12,7 @@ describe('resolveOwner', () => {
     version: 'unknown',
     pigeonUrl: 'http://pigeon.local',
     anchorUrl: 'http://anchor.local',
+    poolUrls: ['http://anchor.local'],
     pigeonAuthToken: undefined,
     routeTimeoutMs: 3000,
     cheapFirstByteMs: 5000,

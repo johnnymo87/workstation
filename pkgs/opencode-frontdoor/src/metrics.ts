@@ -15,8 +15,12 @@ export interface Metrics {
    * See docs/plans/2026-07-25-m3z2-html-poison-guard.md.
    */
   htmlPoisonBlocked: number;
+  /**
+   * Count of connection-level failovers across pool members during forward-pool.
+   */
+  poolFailover: number;
 }
 
 export function createMetrics(): Metrics {
-  return { degradedRequests: 0, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0 };
+  return { degradedRequests: 0, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
 }
