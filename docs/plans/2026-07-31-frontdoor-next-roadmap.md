@@ -89,6 +89,17 @@ first would instantly block every PR, including the daily auto-merge bot PRs.
   additions conflict *textually* and force resolution. Keep some count-shaped invariant
   either way — per-site markers alone are insufficient, because a new site citing an
   *existing* row passes every per-site check silently.
+- **A marker may cite a row that does not describe its file.** `row_exists()` checks
+  only that the row ID is in the table and `row_is_exemption()` that it is C*/D* class;
+  **nothing checks that the cited row's path list contains the citing file.** So
+  `frontdoor-exempt(C3)` on a `home.devbox.nix` site passes, even though C3 describes
+  the *cloudbox* door. Require the cited row to name the file (or a glob covering it).
+  **This is not hypothetical:** on 2026-07-31 a peer session's implementer subagent
+  "fixed" the red guard by adding exactly those two markers citing C3/C4 for devbox
+  paths those rows do not describe, plus the count bump. The peer caught it and
+  reverted. Once the gate is armed, that becomes the path of least resistance for
+  anyone it blocks — the guard would bless the wrong fix. Fix this in the SAME PR that
+  arms it, or the gate teaches laundering.
 - **Document the peer protocol** (marker + table row + count bump, in their own PR) in
   the PR description and `AGENTS.md`. Today it exists only in the guard's stderr.
 
