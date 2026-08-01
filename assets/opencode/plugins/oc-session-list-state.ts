@@ -2,11 +2,22 @@ import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionRow } from "./oc-session-list-base.js";
-import { mergeOverlays } from "./session-state-merge.js";
+import { mergeOverlays, prepareFiles } from "./session-state-merge.js";
 import type { OverlayData } from "./session-state-impl.js";
 
 export interface SessionWithStateRow extends SessionRow {
-  activity: "working" | "idle" | "retry";
+  /**
+   * `nodata` is a TRIPWIRE, not a status. It means no live writer was in a
+   * position to report on this session, so `idle` would have been a claim the
+   * reader cannot support. Consumers MUST render it at least as loudly as
+   * `idle` -- folding it into a `default:` branch that draws a blank cell would
+   * make this quieter than the bug it exists to catch.
+   *
+   * Distinct from `unknown` on a different axis: `unknown` is stale data from a
+   * dead source (activity still carries a last-known value), `nodata` is the
+   * absence of any source. They are mutually exclusive by construction.
+   */
+  activity: "working" | "idle" | "retry" | "nodata";
   error: boolean;
   pendingPermissions: string[];
   pendingQuestions: string[];
@@ -239,9 +250,30 @@ export function queryWithState(
   const overlayFiles = loadOverlayFiles(options.overlayDir ?? "", options.onWarn);
   const mergedStateMap = mergeOverlays(overlayFiles, { now, staleMs, isAlive, owners });
 
+  // Which serves are still REPORTING? Shares mergeOverlays' liveness definition
+  // via prepareFiles rather than recomputing it (see prepareFiles' comment).
+  //
+  // Deliberately serve-level, NOT per-(serveId, directory). The writer emits one
+  // file per (serve, directory) and only while an app instance is loaded for that
+  // directory, so "my owner has no file for my directory" is the ordinary resting
+  // state of any session whose instance has been evicted -- measured at 11% of
+  // real rows on a healthy fleet, and 62% under a directory-matching rule. A
+  // tripwire that fires on most rows by default is one nobody reads. A live serve
+  // with ZERO files is the real signal: its writer is broken.
+  //
+  // Measured base rates for this predicate against the live fleet (2026-08-01):
+  //   healthy 0.0% | total outage 100.0% | serve-1 down 6.6% | serve-2 down 17.2%
+  const reportingServes = new Set(
+    prepareFiles(overlayFiles, { now, staleMs, isAlive })
+      .filter((pf) => pf.live)
+      .map((pf) => pf.serveId),
+  );
+  const fleetIsReporting = reportingServes.size > 0;
+
   // Seam for Task 5: nvim-socket discovery join will annotate attached location here.
 
-  return baseRows.map((row) => {
+  let nodataCount = 0;
+  const rows = baseRows.map((row): SessionWithStateRow => {
     const st = mergedStateMap[row.id];
     if (st) {
       return {
@@ -256,15 +288,38 @@ export function queryWithState(
         ...(st.unknown ? { unknown: st.unknown } : {}),
       };
     } else {
+      // No merged state. That is NOT automatically idle -- it is only idle if
+      // somebody was actually watching. An owned session trusts its owning
+      // serve; an unowned one (66.5% of real rows have no session_assignment
+      // row) falls back to fleet-wide writer health rather than flooding, since
+      // a missing routing db already warns three separate ways in buildOwnersMap.
+      const ownerServeId = owners[row.id];
+      const hasReporter = ownerServeId
+        ? reportingServes.has(ownerServeId)
+        : fleetIsReporting;
+      if (!hasReporter) nodataCount++;
       return {
         ...row,
-        activity: "idle",
+        activity: hasReporter ? "idle" : "nodata",
         error: false,
         pendingPermissions: [],
         pendingQuestions: [],
+        // Preserved even for nodata so anything sorting by recency stays stable.
         lastActivity: row.time_updated,
         updatedAt: row.time_updated,
       };
     }
   });
+
+  // Per-row nodata is what catches a PARTIAL outage. This aggregate is what
+  // catches a total one even when the consumer ignores the field entirely --
+  // the 2026-08-01 failure, where 886 rows of confident idle went unremarked.
+  if (baseRows.length > 0 && nodataCount === baseRows.length) {
+    options.onWarn?.(
+      `all ${baseRows.length} session(s) have no live state source -- the writer ` +
+        `fleet may be down; state below is not trustworthy`,
+    );
+  }
+
+  return rows;
 }

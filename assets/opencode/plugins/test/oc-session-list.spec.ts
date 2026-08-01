@@ -545,3 +545,167 @@ describe("ownership degradation is LOUD, never silent", () => {
     }
   });
 });
+
+/**
+ * S3: "no reporter" must not masquerade as "authoritatively idle".
+ *
+ * On 2026-08-01 the writer plugin was un-deployed fleet-wide for ~9 hours. Every
+ * overlay file vanished, and this reader printed 886 rows of confident `idle` --
+ * indistinguishable from a genuinely quiet machine. A human caught it only by
+ * noticing an empty directory.
+ *
+ * The predicate is REPORTER-LEVEL, not per-(serve, directory). The writer emits
+ * one file per (serveId, directory) and only for directories with a live app
+ * instance, so a live serve simply having no file for some directory is the
+ * normal steady state after instance eviction -- measured at 11% of real rows on
+ * a perfectly healthy fleet (and 62% under a directory-matching rule). Firing on
+ * that would make nodata the majority state and kill the tripwire by saturation.
+ * A live serve with ZERO files, by contrast, means its writer is broken.
+ *
+ * Measured base rates for this rule against the real fleet:
+ *   healthy 0.0% | total outage 100.0% | serve-1 writer down 6.6% | serve-2 down 17.2%
+ */
+describe("S3: nodata (no reporter) vs authoritative idle", () => {
+  const mkdir = (tag: string) => mkdtempSync(join(tmpdir(), `s3-${tag}-`));
+  const overlay = (
+    dir: string,
+    name: string,
+    o: { serveId: string; directory?: string; pid?: number; heartbeat?: number; sessions?: any },
+  ) => {
+    writeFileSync(
+      join(dir, `${name}.json`),
+      JSON.stringify({
+        version: OVERLAY_VERSION,
+        instanceStamp: 1,
+        pid: o.pid ?? process.pid,
+        serveId: o.serveId,
+        directory: o.directory,
+        heartbeat: o.heartbeat ?? Date.now(),
+        sessions: o.sessions ?? {},
+      }),
+    );
+  };
+  const row = (id: string, directory = "/a", time_updated = 1000) => ({
+    id, title: id, parent_id: null, directory, time_updated, root_id: id,
+  });
+
+  it("reports nodata when NO overlay file exists at all (the 2026-08-01 outage)", () => {
+    const dir = mkdir("outage");
+    try {
+      const result = queryWithState([row("s1")], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        owners: { s1: "serve-1" },
+      });
+      expect(result[0].activity).toBe("nodata");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("reports idle -- NOT nodata -- when the owner serve is live but has no file for THIS directory", () => {
+    // The 11%-of-real-rows case. The owning serve is demonstrably writing; it
+    // just has no instance loaded for /a, which means the session is not running.
+    const dir = mkdir("otherdir");
+    try {
+      overlay(dir, "serve-1-b", { serveId: "serve-1", directory: "/b", sessions: {} });
+      const result = queryWithState([row("s1", "/a")], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        owners: { s1: "serve-1" },
+      });
+      expect(result[0].activity).toBe("idle");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("isolates a partial outage to the sessions owned by the silent serve", () => {
+    const dir = mkdir("partial");
+    try {
+      // serve-2 is writing; serve-1 (owner of s1) has emitted nothing.
+      overlay(dir, "serve-2-a", { serveId: "serve-2", directory: "/a", sessions: {} });
+      const result = queryWithState([row("s1"), row("s2")], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        owners: { s1: "serve-1", s2: "serve-2" },
+      });
+      expect(result.find((r) => r.id === "s1")!.activity).toBe("nodata");
+      expect(result.find((r) => r.id === "s2")!.activity).toBe("idle");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("treats a DEAD owner file as no reporter, not as a live one", () => {
+    const dir = mkdir("dead");
+    try {
+      overlay(dir, "serve-1-a", { serveId: "serve-1", directory: "/a", pid: 999999, sessions: {} });
+      const result = queryWithState([row("s1")], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: (pid) => pid !== 999999,
+        owners: { s1: "serve-1" },
+      });
+      expect(result[0].activity).toBe("nodata");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("falls back to fleet health when ownership is unknown, rather than flooding", () => {
+    // 66.5% of real rows have no assignment row. Calling them all nodata would
+    // drown the signal, so an unowned row trusts any live writer in the fleet.
+    const dir = mkdir("noowner");
+    try {
+      overlay(dir, "serve-9-z", { serveId: "serve-9", directory: "/z", sessions: {} });
+      const writing = queryWithState([row("s1")], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true, owners: {},
+      });
+      expect(writing[0].activity).toBe("idle");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+
+    const empty = mkdir("noowner-silent");
+    try {
+      const silent = queryWithState([row("s1")], {
+        overlayDir: empty, now: Date.now(), staleMs: 45000, isAlive: () => true, owners: {},
+      });
+      expect(silent[0].activity).toBe("nodata");
+    } finally { rmSync(empty, { recursive: true, force: true }); }
+  });
+
+  it("keeps nodata and unknown mutually exclusive and preserves ordering keys", () => {
+    // unknown = stale data from a dead source (activity still carries a last-known
+    // value). nodata = no source at all. A row must never claim both.
+    const dir = mkdir("exclusive");
+    try {
+      const result = queryWithState([row("s1", "/a", 4242)], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        owners: { s1: "serve-1" },
+      });
+      expect(result[0].activity).toBe("nodata");
+      expect(result[0].unknown).toBeUndefined();
+      expect(result[0].lastActivity).toBe(4242);
+      expect(result[0].error).toBe(false);
+      expect(result[0].pendingPermissions).toEqual([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("warns once when EVERY row is nodata, so a total outage is loud even to a consumer that ignores the field", () => {
+    const dir = mkdir("aggregate");
+    try {
+      const warnings: string[] = [];
+      queryWithState([row("s1"), row("s2")], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        owners: { s1: "serve-1", s2: "serve-1" }, onWarn: (m) => warnings.push(m),
+      });
+      expect(warnings.some((w) => /no live state source/i.test(w))).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("stays silent about nodata on the healthy path (a warning that always fires is noise)", () => {
+    const dir = mkdir("healthy");
+    try {
+      const warnings: string[] = [];
+      const result = queryWithState([row("s1")], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        owners: { s1: "serve-1" }, onWarn: (m) => warnings.push(m),
+      });
+      void result;
+      overlay(dir, "serve-1-a", { serveId: "serve-1", directory: "/a", sessions: {} });
+      const warnings2: string[] = [];
+      queryWithState([row("s1")], {
+        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        owners: { s1: "serve-1" }, onWarn: (m) => warnings2.push(m),
+      });
+      expect(warnings2.some((w) => /no live state source/i.test(w))).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
