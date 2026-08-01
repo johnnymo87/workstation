@@ -1844,7 +1844,13 @@ EOF
         #
         # Unset => anchor-only, i.e. exactly the pre-eon4 behaviour. That is what
         # lets this env change and the door rebuild land in either order.
-        # frontdoor-exempt(C3): the door's own upstreams; it cannot proxy through itself
+        #
+        # NB no `frontdoor-exempt` marker: the opacity guard counts LITERAL
+        # serve addresses, and this value is interpolated from serve-pool.nix, so
+        # the guard does not see a site here. Adding a marker anyway would break
+        # its 1:1 site:marker anti-laundering check. (The exemption is real in
+        # spirit — these are the door's own upstreams, C3 — it simply has no site
+        # to attach to.)
         "FRONTDOOR_POOL_URLS=${servePool.endpointsCsv}"
         # Builtins-only app (no framework reads NODE_ENV) — set for convention/
         # consistency with pigeon-daemon and to future-proof any added dependency.
