@@ -198,19 +198,41 @@ the anchor, so every session-less read concentrated on `:4096`. Now a per-route 
 round-robins the pool, with connection-level failover. `FRONTDOOR_POOL_URLS` comes from
 `serve-pool.nix`; unset ⇒ anchor-only ⇒ prior behaviour.
 
-**Measured on the first post-deploy burst (31-session reattach, 13:25–13:52 UTC):**
+**Measured on the first post-deploy burst (31-session reattach):**
 
-| | 07-30 | 08-01 pre-fix | 08-01 post-fix |
-|---|---|---|---|
-| `class=global-ro` 503s | 333 | 22 | **0** |
+| `class=global-ro` 503s | count | basis |
+|---|---|---|
+| 07-30 (pre-everything) | 333 | full local day |
+| 08-01 pre-fix | 22 | 00:53–01:56 UTC, pre-deploy |
+| 08-01 post-fix burst | **0** | the 13:25–13:52 UTC burst window only |
 
-Spread was dead-even (169/169/169/169 across `:4096-4099`), slowest pooled read 841 ms
-against the 5000 ms budget, `poolFailover` 0, peak 885 req/min — a real burst, not a
-gentle ramp. The old 503s sat pinned at 4999–5002 ms; this never approached the wall.
+Note the bases differ — these are **not** apples-to-apples, and this file documents a
+timezone silent-zero as a lesson two paragraphs down, so it had better label its own
+columns. Within the burst window: spread dead-even (169/169/169/169 across `:4096-4099`),
+slowest pooled read 841 ms against the 5000 ms budget, `poolFailover` 0, peak 885 req/min
+— a real burst, not a gentle ramp. The old 503s sat pinned at 4999–5002 ms; this never
+approached the wall.
 
-**Still OUT OF SCOPE, do not read the closure as broader than it is:** the anchor's own
-≥5s first-byte stalls for sessions *pinned* to it. That burst produced no evidence either
-way. If anchor-degrade resurfaces it is a NEW bead, not a reopening of `eon4`.
+**That "0" is a window, not a steady state — and the same day disproved the broader
+reading.** At 14:47–14:57 UTC, ~1h after deploy, serve `:4098` went alive-but-stalling and
+the door logged **1069 × 503, all `target=:4098`**, all pinned at 4999–5003 ms: 979
+`class=session-path` (sessions leased to that member — the anchor-degrade family
+reproduced on a *non*-anchor member, not caused by this change) and **90
+`class=global-ro action=forward-pool`** — pooled reads round-robined onto the stalling
+member. `:4098` self-recovered (`NRestarts=0`); the canary ran during the window and took
+no action. Tracked as **`workstation-nv5l`** (P1).
+
+**Honest net accounting, because the trade is real:** those 90 reads would previously have
+gone to the healthy anchor and succeeded. So this fix made 90 requests fail that otherwise
+would not have, while removing the 333/22-per-burst concentration failures. A good trade —
+but a trade, not a pure win.
+
+**Still OUT OF SCOPE, do not read the closure as broader than it is:** ≥5s first-byte
+stalls by *any* member, anchor or otherwise. Failover is `failoverIfUnreachable` —
+connection-level only — so a member that accepts and then stalls eats the full budget with
+no retry. `eon4`'s scope was global-ro *concentration on the anchor*, which is fixed and
+measured. Member-stall is `workstation-nv5l`; do **not** reopen `eon4` for it, and do not
+file a third bead for the same thing.
 
 **Three lessons from that step, all of which cost real time — apply them in Steps 1, 2, 4:**
 
@@ -297,7 +319,8 @@ mandatory; PR in both repos.
   session-scoped `/session/{id}/mcp` *is* allowed through the door and returns the same
   all-disabled list — so the door hides nothing and the 501 is inert w.r.t. tool
   availability. All 14 ship `enabled: false` by deliberate config
-  (`users/dev/opencode-config.nix:381` and siblings).
+  (grep `enabled = false` in the `atlassian` block of `users/dev/opencode-config.nix`,
+  plus 13 siblings — cited as a grep anchor, not a line number, per this file's own rule).
   **Standing user preference, stated 2026-08-01: never wants always-on MCP servers**;
   given always-on vs always-off he chooses off and accepts starting them on demand after
   the morning restore. So: do NOT flip `enabled = true` as a convenience fix, do NOT
@@ -321,4 +344,5 @@ mandatory; PR in both repos.
 | disposition table (the exemption record) | `docs/plans/2026-07-26-phase9-consumer-disposition.md` |
 | the guard | `users/dev/test-frontdoor-opacity.sh` |
 | epic / last item / MCP race / fence bug | `workstation-mlve` / `workstation-mlve.4` / `workstation-vjq0` / `workstation-4b1q` |
-| the eon4 fix (closed) | PR #237 `0ded471`; `poolSafe` in `pkgs/opencode-frontdoor/src/routes.classification.ts`; `forward-pool` in `src/dispatch.ts`; `poolOrder` in `src/proxy.ts`; `FRONTDOOR_POOL_URLS` from `users/dev/serve-pool.nix` |
+| the eon4 fix (closed) | PR #237 `0ded471`; grep `poolSafe` in `pkgs/opencode-frontdoor/src/routes.classification.ts`, `forward-pool` in `src/dispatch.ts`, `poolOrder` in `src/proxy.ts`; `FRONTDOOR_POOL_URLS` wired in `hosts/cloudbox/configuration.nix` (grep it), derived from `endpointsCsv` in `users/dev/serve-pool.nix` |
+| member-stall gap (open, P1) | `workstation-nv5l`; grep `failoverIfUnreachable` in `pkgs/opencode-frontdoor/src/proxy.ts` |
