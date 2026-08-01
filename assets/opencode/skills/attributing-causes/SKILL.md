@@ -38,7 +38,58 @@ itself is usually seconds away:
 If the check costs seconds and the conclusion drives an irreversible action,
 there is no excuse for skipping it.
 
-## Worked example
+## When the cheap checks come back "plausible"
+
+Every instrument in that table is **static**. Each one asks whether a causal
+path *could* exist, and each one is decisive only when the answer is *no*.
+
+That makes them powerless in the case where the suspect genuinely touches the
+subsystem — which is also the case where you most want help. Worse than
+powerless: run all four against a suspect that does have a path, and they
+return "yes, yes, yes, yes." You have not been told "keep looking." You have
+been handed four counts of confirmation, and the story you arrived with now
+feels measured.
+
+**A "plausible" result is not a finding. It is the point at which static
+checks are exhausted.** When you reach it, stop reasoning about mechanism and
+escalate to a *dynamic* instrument.
+
+### The control run: reproduce at the suspect's parent
+
+The single highest-yield move, and the one almost nobody makes first:
+
+```bash
+git worktree add --detach "$(mktemp -d)" <suspect>^   # parent of the accused
+# ...run the failing thing there...
+```
+
+If the symptom reproduces at the parent, the suspect is acquitted outright —
+no mechanism argument required. If it does not, you have a real signal instead
+of a plausible one.
+
+This is cheap, decisive, and it terminates the "could X plausibly cause Y?"
+spiral that plausibility invites. It also frequently does double duty: the run
+that acquits the commit is often the same run that convicts the real cause, by
+showing the symptom living somewhere the suspect never reached.
+
+### Stack traces date the tree
+
+A stack trace is not merely a location. It is a **fingerprint of the source as
+it existed at the moment it ran**, and it can be diffed against a suspect
+commit for free.
+
+If your trace points at `foo.ex:3042` and the accused commit moved that
+function to `:3119`, your tree *predates the commit you are blaming* — and the
+trace you have been staring at said so the whole time.
+
+```bash
+git show <suspect>^:path/to/foo.ex | sed -n '3040,3045p'   # what was there
+git show <suspect>:path/to/foo.ex  | sed -n '3117,3122p'   # what is there now
+```
+
+Line numbers are evidence. Read them.
+
+## Worked example: when the suspect had no causal path
 
 A session reported that the 03:00 nightly workspace reset had **killed its
 production pods** and **broken its kube context**. Both were plausible: the
@@ -87,6 +138,56 @@ minutes earlier, which was knowable by asking. Measuring a number and then
 inventing the story for why it moved is this same failure one level up, and it
 is easy to commit while believing you are being rigorous.
 
+## Worked example: when every cheap check convicts the wrong commit
+
+Four Postgres `40P01 deadlock_detected` failures appeared in one app's ingest
+test suite. The obvious suspect was the commit that had just landed *in that
+same app, touching that same ingest write path*.
+
+Run the static table against it and every instrument agrees:
+
+| Check | Result |
+|---|---|
+| Does it reference the subsystem? | **Yes** — same app, same module |
+| Did it touch files in the window? | **Yes** — +171/−51 in the very file |
+| Does the timeline fit? | **Yes** — landed just before |
+| Is the state a ghost? | **No** — failures were real and reproducible |
+
+Four for four. The headline test did not merely fail to exonerate; it
+*convicted*. Two days went into reasoning about mechanism from that footing.
+
+What actually settled it was one control run at the suspect's parent, which
+reproduced the identical deadlock signature **pre**-suspect. That single run
+acquitted the commit and convicted the real cause at once: a config in which
+the test database name interpolated an unset partition variable, so *every
+worktree on the box shared one database*. Ecto's sandbox isolates within a run
+and does nothing across OS processes, so two suites running concurrently
+contended on real rows. A longstanding latent defect, nothing recent.
+
+The trace had also been saying so for two days. It pointed at
+`socket_client.ex:3042`; the suspect commit had shifted that function to
+`:3119` — a 77-line displacement matching the file's growth exactly. The tree
+that produced the trace predated the commit under suspicion, and that was
+free to check.
+
+### Two failures of sequencing, not of knowledge
+
+Both errors in that investigation are worth naming, because neither was
+ignorance:
+
+1. **The correct hypothesis was reached first, then argued away.** A
+   shared-box explanation was considered early and discarded on a parsimony
+   argument — it seemed like too much coincidence. Parsimony is a tie-breaker
+   between hypotheses you cannot test, not a reason to skip a test you can
+   run in a minute.
+2. **A serial green run was accepted as exoneration of a concurrency
+   hypothesis.** If the proposed mechanism is "two things running at once,"
+   then one thing running alone cannot falsify it. *Match the control to the
+   hypothesis*: a concurrency claim needs a concurrent control.
+
+The first error delayed the answer; the second actively pointed away from it.
+Both are sequencing failures, which is this skill's real subject.
+
 ## Rules
 
 1. **Name the causal path before accusing.** "The reset broke my context"
@@ -110,6 +211,18 @@ is easy to commit while believing you are being rigorous.
    proximity is a prompt to measure, not a finding.
 5. **State what would falsify you, then go run it.** If you cannot name a cheap
    check that would prove you wrong, you are not investigating.
+6. **Treat "plausible" as the end of static checking, not as a result.** When
+   the cheap checks cannot clear a suspect, stop arguing about mechanism and
+   run a control at its parent. A suspect that genuinely touches the subsystem
+   is exactly the one static instruments cannot resolve — and exactly the one
+   they will appear to confirm.
+7. **Match the control to the hypothesis.** A serial run cannot falsify a
+   concurrency claim; a single-tenant run cannot falsify a shared-resource
+   claim. A green control that could not have gone red proves nothing, and it
+   is worse than no control because it feels like evidence.
+8. **Read the line numbers.** A stack trace fingerprints the source that
+   produced it. If the accused commit moved the code the trace points at, the
+   trace is telling you which side of that commit your tree is on.
 
 ## When someone hands you a diagnosis
 
