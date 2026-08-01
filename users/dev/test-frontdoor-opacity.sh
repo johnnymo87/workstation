@@ -204,12 +204,71 @@ for f in "${files[@]}"; do
   fi
 done
 
-# Pinned total. The anti-vacuity check below only catches TOTAL vacuity; partial
-# rot (10 of 11 sites silently stop matching, as the [^\n] bug did) still passed.
-EXPECTED_SITES=16
-if [ "$hits" -ne "$EXPECTED_SITES" ]; then
-  bad "expected exactly $EXPECTED_SITES serve-addressing site(s), found $hits -- if this change is intentional, update EXPECTED_SITES and the disposition table together"
-fi
+# Per-file expected site counts. SORTED BY PATH, one file per line.
+#
+# WHY NOT A SINGLE SCALAR: `EXPECTED_SITES=14` merged WRONG rather than
+# conflicting. Two concurrent PRs each adding one site both write 15; git sees an
+# identical edit and merges it clean; both are green in isolation; main lands at 16
+# and goes red, blocking everyone *after the fact*. Per-file lines make
+# different-file additions merge clean AND correct, and same-file additions collide
+# textually so a human must resolve them.
+#
+# WHY KEEP A COUNT AT ALL, given per-site markers: a NEW site citing an EXISTING
+# valid row passes every per-site check silently. Only a count catches that.
+#
+# To change a number here you must also add the marker and the table row, in the
+# same PR. That is the protocol, and it is documented in AGENTS.md.
+read -r -d '' EXPECTED_MANIFEST <<'MANIFEST' || true
+hosts/cloudbox/configuration.nix 6
+hosts/devbox/configuration.nix 2
+pkgs/ask-question/default.nix 0
+pkgs/bb/default.nix 0
+pkgs/beads/default.nix 0
+pkgs/caveman/default.nix 0
+pkgs/claude-failover-proxy/default.nix 0
+pkgs/clerk/default.nix 0
+pkgs/gclpr/default.nix 0
+pkgs/git-work/default.nix 0
+pkgs/gws/default.nix 0
+pkgs/lgtm-gh/default.nix 0
+pkgs/nvims/default.nix 0
+pkgs/oc-auto-attach/default.nix 0
+pkgs/oc-cost/default.nix 0
+pkgs/oc-pool-attach/default.nix 0
+pkgs/oc-session-list/default.nix 0
+pkgs/opencode-drift-alert/default.nix 0
+pkgs/opencode-frontdoor/default.nix 0
+pkgs/opencode-launch/default.nix 2
+pkgs/opencode-plugin-bundle/default.nix 0
+pkgs/opencode-serve-auth-sh/default.nix 0
+pkgs/reset-workspace/default.nix 3
+pkgs/self-compact-plugin/default.nix 0
+pkgs/session-state-plugin/default.nix 0
+pkgs/teamclaude/default.nix 0
+pkgs/terraform/default.nix 0
+pkgs/vercel/default.nix 0
+users/dev/home.base.nix 0
+users/dev/home.cloudbox.nix 0
+users/dev/home.darwin.nix 1
+users/dev/home.devbox.nix 2
+MANIFEST
+
+while read -r mfile mcount; do
+  [ -z "${mfile:-}" ] && continue
+  actual="${sites_per_file[$mfile]:-0}"
+  if [ "$actual" -ne "$mcount" ]; then
+    bad "$mfile: manifest expects $mcount serve-addressing site(s), found $actual -- if intentional, update the manifest, add the frontdoor-exempt marker, and add/extend the disposition-table row, all in the same PR"
+  fi
+done <<< "$EXPECTED_MANIFEST"
+
+# A governed file missing from the manifest is a hole: sites there would be
+# counted by no one.
+for f in "${files[@]}"; do
+  case "$EXPECTED_MANIFEST" in
+    *"$f "*) ;;
+    *) bad "$f is governed but absent from EXPECTED_MANIFEST -- add a line for it (0 is a valid count)" ;;
+  esac
+done
 
 # A marker must never land INSIDE a shell line-continuation. Inserting one
 # between `curl ... \` and its next argument line silently breaks the command:

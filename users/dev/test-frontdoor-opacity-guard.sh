@@ -118,4 +118,29 @@ else
 fi
 rm -rf "$fix" "$out"
 
+# Case: a NEW site in a file that already has sites, citing an EXISTING valid row,
+# passes every per-site check. Only a count-shaped invariant catches it. This is why
+# the manifest cannot be dropped in favour of per-site markers alone.
+fix="$(new_fixture)"; out="$(mktemp)"
+cat >> "$fix/users/dev/home.devbox.nix" <<'PERTURB'
+  # frontdoor-exempt(C10): smuggled extra site citing a real, file-naming row
+  extraProbe = "http://127.0.0.1:4096/global/health";
+PERTURB
+if run_guard "$fix" "$out"; then
+  bad "manifest: an extra site citing an existing valid row passed -- no count-shaped invariant"
+else
+  pass_ "manifest: an extra site is caught by the per-file count"
+fi
+rm -rf "$fix" "$out"
+
+# Case: a governed file absent from the manifest must fail, not pass silently.
+fix="$(new_fixture)"; out="$(mktemp)"
+sed -i '/^users\/dev\/home\.darwin\.nix /d' "$fix/$guard"
+if run_guard "$fix" "$out"; then
+  bad "manifest: a governed file missing from the manifest passed"
+else
+  pass_ "manifest: a governed file missing from the manifest is caught"
+fi
+rm -rf "$fix" "$out"
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }
