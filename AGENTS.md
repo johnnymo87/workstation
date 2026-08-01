@@ -143,6 +143,21 @@ See [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) for the
 4. Projects auto-clone during activation (to `~/Code/`)
 5. For devenv projects: `cd ~/Code/<project> && direnv allow`
 
+## Front-Door Opacity Guard
+
+`nix flake check` runs `users/dev/test-frontdoor-opacity.sh`: no shipped consumer may address an individual serve (`127.0.0.1:4096-4099`) without an inline exemption.
+
+If it blocks your PR, the fix is **three edits in your own PR**:
+
+1. **Marker** on (or within 3 lines above) the line:
+   `frontdoor-exempt(<ROW>): <one-line reason>`
+2. **Table row** in `docs/plans/2026-07-26-phase9-consumer-disposition.md`. The row must be a C*/D* exemption class **and its path column must name your file** — you cannot borrow another host's row. If no row describes your file, add one.
+3. **Manifest count** for your file in the guard's `EXPECTED_MANIFEST`.
+
+The count is per-file *because* a single scalar merges clean-but-wrong across concurrent PRs. Same-file edits are meant to conflict; resolve them by hand.
+
+**The wrong fix**, which the guard now rejects: citing an existing row that does not describe your file. That was shipped once and reverted. If routing through the door (`:4700`) is possible at all, do that instead of adding an exemption.
+
 ## Secrets
 
 **Devbox/Cloudbox:** Secrets at `/run/secrets/<name>` via sops-nix (NixOS module). Env vars auto-exported in bash. See [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md).

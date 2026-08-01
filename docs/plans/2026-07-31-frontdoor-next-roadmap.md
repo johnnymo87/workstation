@@ -117,6 +117,30 @@ file; do not pipe into `grep -q`.
 **Cadence:** oracle optional (mechanical); SDD yes (multi-site + a CI gate);
 adversarial review mandatory; one PR.
 
+**STATUS 2026-08-01 — DONE.** 1a and 1b landed together. The table was the thing that was
+wrong: rows C10/C11 added for the devbox door's own upstream and its canary cross-probe,
+D1 retired as superseded by C1 (devbox pigeon's anchor is the same door->pigeon->door
+startup cycle as cloudbox), and the devbox `OPENCODE_URL` marker repointed D1 -> C1. Guard
+now green at 16 sites / 16 markers and ARMED in `checks.${devboxSystem}`.
+
+All four hardening items shipped, plus two the adversarial review found and one I found by
+hand-probing my own fix:
+- `SITE_RE` tightened to `409[6-9]`; `fmarks>0 && fsites==0` is now a failure.
+- Scalar `EXPECTED_SITES` replaced by a per-file `EXPECTED_MANIFEST` (only files WITH sites
+  are listed, so unrelated new packages -- including the auto-merge bot's -- don't fail).
+- Laundering closed: a marker must cite a row whose path column NAMES its file. My first
+  version had a `dirname` fallback that let any sibling file in `users/dev/` satisfy it;
+  caught by hand-probing, not by the tests.
+- **The `:-http` blanket line-skip was a laundering kit** and would have shipped armed: a
+  mutating `curl -X POST "${OPENCODE_URL:-http://127.0.0.1:4096}/session/$sid/kill"` passed
+  green, defeating the marker check, the 1:1 count and the manifest at once. Found by
+  adversarial review, reproduced directly, fixed.
+- Two of the meta cases were theatre (passed without reaching the branch they claimed to
+  prove). Both now pin their branch by message.
+
+New `users/dev/test-frontdoor-opacity-guard.sh` (10 perturbation cases) exists because a
+gate that cannot fail is the defect this step was written to remove.
+
 ---
 
 ## Step 2 — Dispose of `mlve.4`'s named residuals, then close Phase 9

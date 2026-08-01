@@ -135,7 +135,7 @@ Each row states the mechanism that makes the door wrong. None may be "cleaned up
 
 | # | Site | Disposition | Mechanism |
 |---|---|---|---|
-| C1 | `hosts/cloudbox/configuration.nix:576` (pigeon-daemon `OPENCODE_URL=:4096`) | `exempt-control` | **Pigeon is the router the door depends on.** Door→pigeon→door is a startup cycle. Comment `:570-575`; enforced by `test-pool-route-clients.sh:97-98` (which also *denies* the `:4700` string). |
+| C1 | `hosts/cloudbox/configuration.nix:576`, `hosts/devbox/configuration.nix:292` (pigeon-daemon `OPENCODE_URL=:4096`) | `exempt-control` | **Pigeon is the router the door depends on.** Door→pigeon→door is a startup cycle. Comment `:570-575`; enforced by `test-pool-route-clients.sh:97-98` (which also *denies* the `:4700` string). |
 | C2 | `hosts/cloudbox/configuration.nix:631` (`lgtm-run`) | `exempt-degrade` | Children (`opencode-launch`) read `$OPENCODE_URL` as their **raw-anchor degrade fallback**. Pointing it at the door poisons the fallback: a pigeon hiccup would degrade *to the door*, where MCP-connect is denied. Unit is also `enableLgtm=false`. |
 | C3 | `hosts/cloudbox/configuration.nix:1682`, `pkgs/opencode-frontdoor/src/config.ts:65` | `exempt-infra` | The door's **own** upstream. Tautologically not through itself. |
 | C4 | `hosts/cloudbox/configuration.nix:1879` (frontdoor canary) | `exempt-infra` | Probes the anchor directly to distinguish *door down* from *pool down*. Through the door it could not tell them apart. |
@@ -144,6 +144,8 @@ Each row states the mechanism that makes the door wrong. None may be "cleaned up
 | C7 | `pkgs/opencode-launch/default.nix` (`prompt_async` retry) | `exempt-degrade` | Fires **only** after the door path fails. Announced on stderr. **Caveat (adversarial review):** "never worse" is an overclaim. If the door's sticky is lost *and* pigeon is down, `serve_url` has degraded to the anchor, so the retry can execute the turn on a **non-owner** — mechanically fine (shared `opencode.db`) but MCP tools are absent and the turn is invisible to a door-attached TUI, inviting a duplicate turn. Load-bearing unstated invariant: launcher `$OPENCODE_URL` == door `OPENCODE_ANCHOR_URL` (two independent defaults, `opencode-launch:16` vs `config.ts:65`; coincide today, enforced nowhere). Tracked: `workstation-dx8p` sibling. |
 | C8 | `pkgs/opencode-launch/default.nix` (MCP connect 503 degrade) | `exempt-degrade` | Fires **only** on a door `503`, which means "pigeon unavailable, refusing to route a mutating request to a non-owner" (`proxy.ts:741-745`). Without it a pigeon outage **hard-kills every `--mcp` launch**: create can't place → no sticky → 503 → `exit 1`, where the pre-Phase-9 code degraded and survived. Added after adversarial review caught the regression **post-deploy**. |
 | C9 | `hosts/cloudbox/configuration.nix:529`, `hosts/devbox/configuration.nix:269` (`PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}`) | `exempt-control` | Pigeon's own data-plane fan-out: it must address **every** serve to route, health-check and reconcile them. Same control-plane rationale as C1, of which this is the other half — C1 covered only pigeon's `OPENCODE_URL`. **Was omitted from the first version of this table and invisible to the first guard**; found by adversarial review. |
+| C10 | `users/dev/home.devbox.nix` (devbox door `OPENCODE_ANCHOR_URL`) | `exempt-infra` | Devbox analogue of C3: the door's **own** upstream, tautologically not through itself. Arrived with the devbox door in #217, which is also what falsified D1's "no door on devbox". |
+| C11 | `users/dev/home.devbox.nix` (devbox frontdoor canary anchor cross-probe) | `exempt-infra` | Devbox analogue of C4: probes `:4096/global/health` directly so a door `503` can be told apart from a genuinely sick pool. Through the door the canary could not distinguish *door down* from *pool down*, which is the one thing it exists to do. |
 
 ## D. Other hosts (`host-scoped`)
 
@@ -153,7 +155,7 @@ Each row states the mechanism that makes the door wrong. None may be "cleaned up
 
 | # | Site | Disposition |
 |---|---|---|
-| D1 | `hosts/devbox/configuration.nix:290` | `host-scoped` — no door on devbox; `:4096` is the only endpoint. |
+| D1 | `hosts/devbox/configuration.nix` | `host-scoped` — superseded by C1 now that devbox runs a door. Row retained for historical legibility; no site cites D1. |
 | D2 | `users/dev/home.darwin.nix:124` | `host-scoped` — no door on darwin. |
 
 The shared defaults in `home.base.nix:1163,1169` (`OPENCODE_URL:-:4096`,

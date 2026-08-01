@@ -153,6 +153,23 @@
       home-dev = self.homeConfigurations.dev.activationPackage;
       home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;
       nixos-devbox = self.nixosConfigurations.devbox.config.system.build.toplevel;
+
+      # Phase 9.2 opacity guard. Bash-only, so it adds seconds to the ARM leg that
+      # already spends ~3 min realising the three configurations above.
+      #
+      # WHY THIS EXISTS: the guard was written in Phase 9.2 and then enforced
+      # NOWHERE -- no flake check, no CI step, no canary. It sat red on main from
+      # #217 (which added a devbox door, and with it two unmarked sites) until
+      # 2026-08-01 and nothing noticed. A guard nothing runs is documentation with
+      # a shebang.
+      frontdoor-opacity = devboxPkgs.runCommand "frontdoor-opacity-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+      } ''
+        cd ${self}
+        bash users/dev/test-frontdoor-opacity.sh
+        bash users/dev/test-frontdoor-opacity-guard.sh
+        touch $out
+      '';
     };
 
     # NixOS system configuration

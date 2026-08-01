@@ -54,6 +54,30 @@ fi
 row_exists() { local r="$1" x; for x in "${table_rows[@]}"; do [ "$x" = "$r" ] && return 0; done; return 1; }
 row_is_exemption() { printf '%s' "$1" | grep -qE "$LEGAL_ROW_RE"; }
 
+row_names_file() {
+  local r="$1" f="$2" row_line paths tok pat
+  row_line="$(grep -E "^\| $r \|" "$table" | head -1)"
+  [ -n "$row_line" ] || return 1
+  paths="$(printf '%s' "$row_line" | awk -F'|' '{print $3}')"
+  # Each path token is backticked and may carry a `:12,34` line-number suffix.
+  # Match on the PATH only -- this table cites line numbers and has already
+  # drifted them twice.
+  #
+  # Glob-aware, but NOT directory-wide. An earlier version fell back to
+  # `dirname`, which let any row naming any sibling file satisfy the check: a
+  # home.devbox.nix site could cite D2 (home.darwin.nix) and pass, because both
+  # sit in users/dev/. That is the same laundering this function exists to stop,
+  # one directory over.
+  while read -r tok; do
+    [ -n "$tok" ] || continue
+    pat="${tok%%:*}"
+    [ -n "$pat" ] || continue
+    # shellcheck disable=SC2053  # unquoted RHS is deliberate: glob match
+    [[ "$f" == $pat ]] && return 0
+  done < <(printf '%s' "$paths" | grep -oE '`[^`]+`' | tr -d '`')
+  return 1
+}
+
 # Files the guard governs: shipped consumer code. Docs, plans and test files
 # are excluded -- they describe or perturb these patterns by design.
 mapfile -t files < <(cd "$repo_root" && printf '%s\n' \
@@ -94,13 +118,18 @@ mapfile -t files < <(cd "$repo_root" && printf '%s\n' \
 #
 # Known remaining gaps (deliberate, documented rather than pretended away):
 # indirection through a renamed variable (`base=$serve_url; curl "$base/..."`),
+# defaulted expansion handed to something other than attach without a trailing / (e.g. `${VAR:-http://127.0.0.1:4096}api/...`),
+# OPENCODE_URL= matching regardless of value (e.g. export OPENCODE_URL="$FRONTDOOR_URL" pointing at the door would be flagged),
+# Nix-level indirection (servePool.endpoints / endpointsCsv carrying no matching token),
 # non-curl verbs reaching a literal host built at runtime, and any consumer in a
 # file outside FILE list below. A grep cannot close those. If opacity must be a
 # guarantee rather than a convention, the fix is structural -- serves on unix
 # sockets or a netns only the door/pigeon/infra can enter -- and this guard
 # becomes defense-in-depth. Tracked separately.
 # ---------------------------------------------------------------------------
-SITE_RE='\$\{?(serve_url|u|OPENCODE_URL|OPENCODE_ANCHOR_URL)\}?/|attach[^"]*\$\{?(serve_url|u|OPENCODE_URL|OPENCODE_ANCHOR_URL)\}?|(PIGEON_SERVE_ENDPOINTS|OPENCODE_URL|OPENCODE_ANCHOR_URL)=|(127\.0\.0\.1|localhost):409[0-9]'
+# Serve pool ports are 4096-4099. Matching 4090-4095 previously flagged non-serve
+# ports (e.g. test harnesses) and demanded a marker for things that are not serves.
+SITE_RE='\$\{?(serve_url|u|OPENCODE_URL|OPENCODE_ANCHOR_URL)\}?/|attach[^"]*\$\{?(serve_url|u|OPENCODE_URL|OPENCODE_ANCHOR_URL)\}?|(PIGEON_SERVE_ENDPOINTS|OPENCODE_URL|OPENCODE_ANCHOR_URL)=|(127\.0\.0\.1|localhost):409[6-9]'
 
 # Legal exemption rows are the EXEMPT classes only. Citing a door row (A*) or a
 # repointed-violation row (B*) as an exemption is semantic nonsense and used to
@@ -133,7 +162,20 @@ for f in "${files[@]}"; do
     # would add ~7 markers of no diagnostic value and train people to sprinkle
     # markers reflexively -- which is how an exemption system stops meaning
     # anything.
-    case "$line" in *':-http'*) continue ;; esac
+    case "$line" in
+      *':-http'*)
+        # A BARE default only puts a value in scope. A defaulted expansion that is
+        # USED -- `${VAR:-http://...:4096}/session/...` or handed to `attach` -- is a
+        # real call site. The old blanket skip took the whole line, so a mutating
+        # `curl -X POST "${OPENCODE_URL:-http://127.0.0.1:4096}/session/$sid/kill"`
+        # passed the marker check, the 1:1 count and the manifest simultaneously.
+        if printf '%s' "$line" | grep -qE '\}/|attach'; then
+          :   # used -- fall through and treat as a site
+        else
+          continue
+        fi
+        ;;
+    esac
     hits=$((hits + 1))
     sites_per_file[$f]=$(( ${sites_per_file[$f]:-0} + 1 ))
     start=$((lineno > MARKER_LOOKBACK ? lineno - MARKER_LOOKBACK : 1))
@@ -155,6 +197,10 @@ for f in "${files[@]}"; do
       bad "$f:$lineno cites frontdoor-exempt($row), which is a door/repointed row, not an exemption class (use C* or D*)"
       continue
     fi
+    if ! row_names_file "$row" "$f"; then
+      bad "$f:$lineno cites frontdoor-exempt($row), but row $row does not name $f -- cite a row that describes THIS file, or add one; do not borrow another host's row"
+      continue
+    fi
     exempted=$((exempted + 1))
   done < <(grep -nE "$SITE_RE" "$abs" 2>/dev/null || true)
 done
@@ -167,17 +213,58 @@ for f in "${files[@]}"; do
   abs="$repo_root/$f"
   fsites="${sites_per_file[$f]:-0}"
   fmarks="$(grep -cE 'frontdoor-exempt\((A|B|C|D)[0-9]+\)' "$abs" 2>/dev/null || true)"
-  if [ "$fsites" -gt 0 ] && [ "$fmarks" != "$fsites" ]; then
+  if [ "$fmarks" -gt 0 ] && [ "$fsites" -eq 0 ]; then
+    bad "$f: $fmarks frontdoor-exempt marker(s) but ZERO matching sites -- either the markers are stale, or SITE_RE has rotted and stopped seeing this file's sites"
+  elif [ "$fsites" -gt 0 ] && [ "$fmarks" != "$fsites" ]; then
     bad "$f: $fsites serve-addressing site(s) but $fmarks marker(s) -- not 1:1, so a site may be laundering a neighbour's exemption"
   fi
 done
 
-# Pinned total. The anti-vacuity check below only catches TOTAL vacuity; partial
-# rot (10 of 11 sites silently stop matching, as the [^\n] bug did) still passed.
-EXPECTED_SITES=14
-if [ "$hits" -ne "$EXPECTED_SITES" ]; then
-  bad "expected exactly $EXPECTED_SITES serve-addressing site(s), found $hits -- if this change is intentional, update EXPECTED_SITES and the disposition table together"
-fi
+# Per-file expected site counts. SORTED BY PATH, one file per line.
+# Only files with >0 serve-addressing sites are listed. Adding the first site to a
+# file requires adding a line here.
+#
+# WHY NOT A SINGLE SCALAR: `EXPECTED_SITES=14` merged WRONG rather than
+# conflicting. Two concurrent PRs each adding one site both write 15; git sees an
+# identical edit and merges it clean; both are green in isolation; main lands at 16
+# and goes red, blocking everyone *after the fact*. Two PRs adding a site to the
+# SAME file write the same bumped count (identical edit -> merges clean-but-wrong,
+# same as scalar). The real win is cross-file: per-file lines prevent cross-file
+# additions from silently merging clean-but-wrong.
+#
+# WHY KEEP A COUNT AT ALL, given per-site markers: a NEW site citing an EXISTING
+# valid row passes every per-site check silently. Only a count catches that.
+#
+# To change a number here you must also add the marker and the table row, in the
+# same PR. That is the protocol, and it is documented in AGENTS.md.
+read -r -d '' EXPECTED_MANIFEST <<'MANIFEST' || true
+hosts/cloudbox/configuration.nix 6
+hosts/devbox/configuration.nix 2
+pkgs/opencode-launch/default.nix 2
+pkgs/reset-workspace/default.nix 3
+users/dev/home.darwin.nix 1
+users/dev/home.devbox.nix 2
+MANIFEST
+
+while read -r mfile mcount; do
+  [ -z "${mfile:-}" ] && continue
+  actual="${sites_per_file[$mfile]:-0}"
+  if [ "$actual" -ne "$mcount" ]; then
+    bad "$mfile: manifest expects $mcount serve-addressing site(s), found $actual -- if intentional, update the manifest, add the frontdoor-exempt marker, and add/extend the disposition-table row, all in the same PR"
+  fi
+done <<< "$EXPECTED_MANIFEST"
+
+# A file WITH sites that no manifest line counts is a hole. A file with zero
+# sites needs no line: it hides nothing, and demanding one would fail every
+# unrelated new package (including the auto-merge bot PRs that add them),
+# training people to silence the manifest rather than read it.
+for f in "${files[@]}"; do
+  [ "${sites_per_file[$f]:-0}" -gt 0 ] || continue
+  case "$EXPECTED_MANIFEST" in
+    *"$f "*) ;;
+    *) bad "$f has ${sites_per_file[$f]} serve-addressing site(s) but no EXPECTED_MANIFEST line -- add one, plus the frontdoor-exempt marker and the disposition-table row, in the same PR" ;;
+  esac
+done
 
 # A marker must never land INSIDE a shell line-continuation. Inserting one
 # between `curl ... \` and its next argument line silently breaks the command:
