@@ -64,6 +64,7 @@ export async function handleHealthz(
     anchor: anchorReachable,
     degradedRequests: metrics.degradedRequests,
     notRoutedMutationToAnchor: metrics.notRoutedMutationToAnchor,
+    promotedOnConnect: metrics.promotedOnConnect,
     // Every counter in Metrics MUST be exposed here. /healthz is the only reader of
     // metrics that exists; a counter incremented in proxy.ts and absent from this
     // object is write-only, i.e. unobservable. htmlPoisonBlocked shipped that way in
