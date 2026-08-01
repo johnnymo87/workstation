@@ -170,9 +170,10 @@ applied in `getReadyForTarget` (`swarm-repo.ts:109-126`) and
 `listTargetsWithReady` (`:127-138`). Two lines each. That is the entire
 scheduling engine.
 
-New terminal states alongside `handed_off`/`failed` (`swarm-repo.ts:101`):
+New terminal states alongside `handed_off`/`failed` (state union `swarm-repo.ts:16`):
 `expired` and `cancelled`. Safe to add: `GET /swarm/inbox` filters to
-`handed_off` only (`swarm-repo.ts:348`), so neither leaks into anyone's inbox.
+`handed_off` only (`swarm-repo.ts:263`), so neither leaks into anyone's inbox.
+Widen the `SwarmMessageRecord["state"]` union too, or `asRecord`'s cast lies.
 
 ### 3.3 API surface
 
@@ -242,15 +243,58 @@ re-verifies a run that has since been superseded). 6 h is a guess; it is a knob,
 and the `delivered_late_ms` attr means the agent can bail on its own even inside
 the window. Do not make the agent guess — give it the number.
 
+Caveat the skill must state: **`delivered_late_ms` measures delivery, not
+processing.** A wake handed off on time but queued behind a 2 h blocking turn
+reads as `delivered_late_ms≈0` while actually being *read* 2 h late. The agent
+should compare `scheduled_for` against the actual wall clock (`date`) on receipt,
+not trust the attr alone.
+
+#### 3.5.1 For `wake.*`, `expires_at` is the ONLY terminal clock
+
+**This is the correction that matters most.** As designed above, a wake would
+still be governed by the arbiter's `MAX_ATTEMPTS = 10` with backoff
+`[1s,2s,5s,15s,60s]` clamped (`arbiter.ts:16-23`) — a **total retry budget of
+~324 seconds**. And "no healthy serve" *counts as an attempt*: `clientForSession`
+returns `undefined` → plain `throw` (`arbiter.ts:90-93`) → not a
+`PermanentDeliveryError` → `markRetry`, attempts+1 (`arbiter.ts:127-147`).
+
+Now the collision. An agent that says "wake me in 13h" at ~14:00 gets
+`deliver_at ≈ 03:00` — **exactly when the nightly unit restarts pigeon and then
+bounces all four serves** (`hosts/cloudbox/configuration.nix:2171`;
+`reset-workspace/default.nix:781-808`). Pigeon returns in ~5 s (`RestartSec=5`)
+while the serves are still restarting and health-polling. If the pool takes more
+than ~5.5 min to become routable, the wake burns its entire budget and goes
+terminal `failed` — for a session that is perfectly healthy at 03:10.
+
+§3.8's "restart storm is a non-event" covers *pigeon* being down (no attempts
+burned, nothing polls). It does **not** cover pigeon-up + serves-down, which
+burns the whole budget. A 5.4-minute retry budget against a 6-hour staleness
+window is wildly asymmetric, and 03:00 is a *likely* wake time, not an edge case.
+
+**Required change:** for `kind` matching `wake.*`:
+
+- Routing unavailability (`NoHealthyServeError` / `clientForSession` undefined /
+  directory-resolution failure) **does not increment `attempts`** — it is not a
+  delivery failure, it is the delivery not having been attempted. Reschedule via
+  `next_retry_at` and move on.
+- `MAX_ATTEMPTS` does not apply; `expires_at` is the sole terminal clock. Then the
+  design's own staleness window does exactly what §3.5 promises, and a wake that
+  lands mid-reset simply delivers at 03:06 instead of dying.
+
+Recovery from a routine nightly event must not require a human reading a Telegram
+alert.
+
 ### 3.6 Missing / dead / compacted target (Q4)
 
 **v1 does not relaunch. Say so plainly and alert instead.**
 
-- Session ids survive resets (§2.3), so "target gone" is the rare case
-  (explicitly deleted, or upstream GC), not the common one.
-- Existing failure handling already covers dead targets: 10 attempts → `failed`
-  (`arbiter.ts:129-135`), plus the watchdog's 404-confirmed-by-second-serve path
-  (`delivery-watchdog.ts:528-550`).
+- Session ids survive resets (§2.3), and there is **no upstream GC** (confirmed by
+  the human, 2026-07-31 — see §7.1), so "target gone" means "explicitly deleted"
+  and is genuinely rare.
+- Existing failure handling already covers dead targets: the watchdog's
+  404-confirmed-by-second-serve path (`delivery-watchdog.ts:528-550`). Note that
+  per §3.5.1 a `wake.*` message is **not** subject to `MAX_ATTEMPTS`; a truly dead
+  target terminates via that 404 path or via `expires_at`.
 - The existing terminal-failure notification sends a `delivery.failed` swarm
   message **back to the sender** (`swarm/notify-sender.ts:19-48`). For a self-wake
   that is a message to the session that just proved unreachable — **useless**.
@@ -258,6 +302,21 @@ the window. Do not make the agent guess — give it the number.
   `wake.`, terminal failure or expiry must additionally fire
   `notifier.sendPlainAlert` (Telegram), **with the wake payload inline** so the
   human gets the actual instruction, not just "delivery failed".
+  **This must cover all four terminal paths, not just the arbiter's:**
+  arbiter terminal (`arbiter.ts:129-135`), watchdog 404-confirmed
+  (`delivery-watchdog.ts:528-550`), watchdog stuck-after-recovery (`:664-689`),
+  watchdog max-requeues (`:742-752`). All four alert today, but generically and
+  without the payload. Wiring only the arbiter leaves half the gap open.
+
+**The woken session's working directory may be gone.** Reset Step 4 runs
+`work --prune-merged` in `~/projects/mono` (`reset-workspace/default.nix:755-764`),
+which prunes worktrees that are merged and clean — which is *precisely* the state
+of "PR merged, wake me at 09:15 to verify the prod cron". The wake then fires into
+a session whose `x-opencode-directory` no longer exists on disk. Session id stable
+≠ session *environment* stable. Untested; at minimum the skill must say "a wake
+from a launch-worktree session may find its cwd gone — the payload must not depend
+on the worktree", and the schedule tool should ideally warn at schedule time if the
+caller's directory is a prunable worktree.
 - Relaunch-if-absent (`opencode-launch` from the daemon) is deferred. It means a
   system-level node service shelling out to a workstation script, a brand-new
   session id, and a fresh context that has none of the original session's state —
@@ -281,22 +340,57 @@ honestly is better than a validator that pretends.
 ### 3.7 Failure visibility (Q7)
 
 The motivating bug is a silent drop, so a scheduler that can itself silently drop
-is worthless. Three layers, all reusing existing machinery:
+is worthless. Four layers, all reusing existing machinery:
 
-1. **Telegram alert** on `expired`, on `failed` for `wake.*` kinds, and on any
-   scheduled row whose `deliver_at` passed by > 5 min while still `queued` (that
-   last one catches "the arbiter isn't running at all"). `notifier.sendPlainAlert`
-   is already injected into daemon subsystems (`index.ts:408,436,469,533`); the
-   arbiter currently has no notifier and would need the same injection the
-   watchdog got.
-2. **Existing watchdog covers the "2xx but nothing happened" case** for free —
-   scheduled wakes become ordinary `handed_off` rows and get the anchor-in-transcript
-   verification (`delivery-watchdog.ts:173-182,640-645`), requeue, and abort-and-redeliver
-   treatment. This is a genuinely large amount of hardening obtained at zero cost,
-   and is a strong argument for pigeon over any external scheduler.
-3. **`GET /swarm/scheduled`** so an agent (or the morning agent) can list pending
-   wakes. Natural extension: the morning recommendation agent surfaces "3 wakes
-   pending today" alongside the manifest.
+1. **Telegram alert** on `expired` and on `failed` for `wake.*` kinds, with the
+   payload inline (§3.6). `notifier.sendPlainAlert` is already injected into daemon
+   subsystems (`index.ts:408,436,469,533`); the arbiter currently has no notifier
+   and would need the same injection the watchdog got.
+2. **Overdue-still-queued alert** — a scheduled row whose `deliver_at` passed by
+   > 5 min while still `queued`. This catches "the delivery loop isn't running at
+   all". **It must NOT live in the arbiter tick**, which is where §3.5's expiry
+   sweeper naturally wants to go: a dead arbiter would mean a dead sweeper and no
+   alert — self-monitoring by the possibly-dead component. Put it in the
+   `DeliveryWatchdog` cycle, which runs on a separate 60 s interval and already has
+   the notifier (`delivery-watchdog.ts:340-349`, `index.ts:533`).
+3. **`POST /swarm/schedule` must 503 when the arbiter isn't started.** The arbiter
+   and watchdog start only under `config.opencodeUrl || ingressRouter` gates
+   (`index.ts:369,529`), while `POST /swarm/send` accepts 202 unconditionally
+   (`app.ts:152-204`). A config regression would have the daemon cheerfully banking
+   wakes it will never deliver — the motivating bug, rebuilt inside the fix.
+4. **Partial watchdog reuse** — scheduled wakes become ordinary `handed_off` rows
+   and get the anchor-in-transcript verification
+   (`delivery-watchdog.ts:173-182,640-645`) and requeue for free. This is real
+   hardening at no cost. **But the abort-blocking-turn escalation must be
+   suppressed for `wake.*`** — see below. Earlier drafts of this doc called the
+   whole watchdog "hardening obtained at zero cost". That was wrong.
+
+#### 3.7.1 The watchdog's abort escalation must not apply to wakes
+
+If a wake is delivered while the target is mid-turn, the prompt queues, the
+watchdog sees it unverified, and if the blocking turn shows no part activity for
+> `stuckAbortSilenceMs` (1 h default, `delivery-watchdog.ts:60`) it **aborts the
+running turn** and redelivers (`:711-721,754-843`).
+
+"Silent for 1 h" is satisfied by a single long-running tool call — `lastActivityOf`
+only sees a part's `time.start` until the tool completes (`:221-253`). A 90-minute
+build or a long poll qualifies. And wakes make this materially worse than the
+status quo: they fire at scheduled times with zero regard for target state, at
+hours when nobody is watching, and the sessions most likely to *use* wakes are
+long-horizon autonomous sessions most likely to be inside long tool calls.
+
+Net effect if left as-is: the reminder mechanism destroys the in-flight work it
+was supposed to check up on. **For `wake.*`, alert-and-requeue only; no abort.**
+(Or gate abort on `priority="urgent"`, which a wake should never default to.)
+The verification/requeue half is the free hardening; the abort half is a
+destructive intervention that a reminder does not justify.
+
+Residual, accepted: the alert path is itself best-effort — `sendPlainAlert`
+failures are caught-and-logged (`delivery-watchdog.ts:374-381`) and a daemon with
+no notifier configured is silent (`index.ts:404-408`). Cheap partial close:
+`GET /swarm/scheduled` should also surface recent **terminal** wake outcomes
+(`expired`/`failed` since last reset), not just pending ones, so the morning agent
+can report them. The DB is the durable record — use it.
 
 ### 3.8 Duplicates / restart storms (Q6)
 
@@ -307,13 +401,22 @@ Mostly already solved:
   (`swarm-send-tool.ts:76-78,145`).
 - `markHandedOff` only after a 2xx (`arbiter.ts:111-113`), so a crash mid-delivery
   re-delivers rather than dropping. At-most-once is not achievable over
-  `prompt_async`; at-least-once with an idempotent id is the right trade.
+  `prompt_async`; at-least-once with an idempotent id is the right trade. **The
+  skill must therefore say: a wake may arrive twice; make the action idempotent.**
 - At-most-one in-flight per target (`arbiter.ts:37,70-81`) means a session with 5
   wakes firing at once gets them serialized, not 5 concurrent turns.
 - **Restart storm is a non-event**: no timers to re-arm. `Restart=on-failure`,
   `RestartSec=5` (`hosts/cloudbox/configuration.nix:539-540`); each start just
   resumes polling. Worst case a crash loop delays a wake by the loop duration —
-  which the staleness window (§3.5) then covers.
+  which the staleness window (§3.5) then covers. Note this argument covers
+  *pigeon* being down; pigeon-up-with-serves-down is a different and worse case,
+  handled by §3.5.1.
+- **State guards are missing today and must be added.** `markHandedOff` is an
+  unconditional `UPDATE ... WHERE msg_id = ?` (`swarm-repo.ts:140-148`). A cancel
+  landing between `getReadyForTarget` and the 2xx would deliver anyway *and*
+  overwrite `cancelled` → `handed_off`. Narrow window, but the fix is one clause:
+  `AND state = 'queued'`, then check `changes`. Same guard makes the
+  expiry-vs-delivery race clean. Applies to `markExpired`/`markCancelled` too.
 - One real hazard: a burst of wakes all scheduled for the same round hour. The
   per-target serialization handles same-target; cross-target it's 500 ms ticks
   against 4 serves. Fine at the expected volume (single digits/day).
@@ -365,46 +468,65 @@ the arbiter with `processOnce()` (`.opencode/skills/swarm-development/SKILL.md:1
 3. **Routes** (`app.ts`) — `POST /swarm/schedule`, `GET /swarm/scheduled`,
    `POST /swarm/scheduled/:id/cancel`. Reuse the existing validation block.
    Tests in the `swarm-routes.test.ts` style. **~2h**
-4. **Expiry sweeper + wake alerting** (`arbiter.ts`) — sweep in the tick; inject
-   `notifier` the way the watchdog has it (`index.ts:533,558`); alert on
-   expired / failed-`wake.*` / overdue-still-queued. **~2h**
-5. **Envelope attrs** (`envelope.ts`) — optional `scheduled_for`,
+4. **Wake retry semantics** (`arbiter.ts`) — §3.5.1. Classify routing/directory
+   unavailability separately from delivery failure; for `wake.*`, don't increment
+   `attempts` on it and don't apply `MAX_ATTEMPTS`. Tests: a wake whose target has
+   no healthy serve for 20 min still delivers when the serve returns; a wake past
+   `expires_at` does not. **~2h**
+5. **Expiry sweeper + wake alerting** — sweep expired rows; inject `notifier` into
+   the arbiter the way the watchdog has it (`index.ts:533,558`); wake-payload-inline
+   alerts on **all four** terminal paths (§3.6). Overdue-still-queued check goes in
+   the **watchdog** cycle, not the arbiter (§3.7 layer 2). `/swarm/schedule` returns
+   503 when the arbiter isn't started (§3.7 layer 3). **~3h**
+6. **Watchdog abort suppression for `wake.*`** (`delivery-watchdog.ts`) — §3.7.1.
+   Keep verify + requeue, skip the abort escalation. Test: a `wake.*` message
+   blocked by a silent-for-2h turn alerts and requeues but never calls abort. **~1h**
+7. **Envelope attrs** (`envelope.ts`) — optional `scheduled_for`,
    `delivered_late_ms`, `ref`. Contract test: envelope shape for a non-scheduled
    message must be **byte-identical** to today's. **~1h**
-6. **Plugin tools** (`opencode-plugin/src/`) — `swarm_schedule`,
+8. **Plugin tools** (`opencode-plugin/src/`) — `swarm_schedule`,
    `swarm_scheduled`, mirroring `swarm-send-tool.ts` (retry, `msg_id` reuse, 401
    re-auth). **~3h**
-7. **Skill update** (workstation) — `swarm-messaging` gains a "scheduling a
+9. **Skill update** (workstation) — `swarm-messaging` gains a "scheduling a
    wake" section: when to use it, the self-contained-payload rule, the beads-ref
-   convention, and the "don't end a turn on a future checkpoint without
-   scheduling" imperative. **~1h**
-8. **End-to-end verification** — schedule a wake `after=3m` to self; confirm the
-   turn fires; then a `after=8h` scheduled *before* a manual
-   `systemctl restart pigeon-daemon` and a serve-pool restart, confirming the row
-   survives and still fires. The reboot case can be argued from the SQLite
-   properties rather than actually rebooting cloudbox. **~1h**
+   convention, "check the wall clock on receipt, don't trust `delivered_late_ms`",
+   "wakes may arrive twice — be idempotent", "your worktree may be gone", a
+   restraint clause, and the "don't end a turn on a future checkpoint without
+   scheduling" imperative. **~1.5h**
+10. **End-to-end verification** — schedule a wake `after=3m` to self; confirm the
+    turn fires; then a `after=8h` scheduled *before* a manual
+    `systemctl restart pigeon-daemon` **and** a serve-pool restart, confirming the
+    row survives, does not burn attempts while the pool is down, and still fires.
+    The reboot case can be argued from the SQLite properties rather than actually
+    rebooting cloudbox. **~1.5h**
 
-**Total: ~1.5 days** for one focused session. Step 1+3 alone (~4h) is a usable
-MVP if expiry and alerting are deferred — but deferring §3.7 reintroduces the
-silent-drop failure this whole thing exists to fix, so **don't ship without step 4**.
+Also housekeeping during step 1: widen `SwarmMessageRecord["state"]`
+(`swarm-repo.ts:16`) for the new states, or `asRecord`'s cast silently lies to
+every consumer; and add `expired`/`cancelled` to `cleanupOlderThan`'s state list
+(`swarm-repo.ts:300-308`) so they can eventually be pruned.
+
+**Total: ~2 days.** Steps 1-3 alone (~5h) is a demo, not a shippable feature:
+without steps 4-6 a wake scheduled for 03:00 dies in the nightly reset (§3.5.1)
+and a wake can abort a live turn (§3.7.1). **Do not ship 1-3 alone** — that
+reintroduces the silent-drop failure this exists to fix, inside the fix.
 
 ---
 
 ## 7. Open questions and risks
 
-1. **Upstream session retention (top open question).** Nothing in workstation
-   prunes session rows, and empirically `opencode.db` only grows (13 GB, ~1500
-   sessions). But `understanding-workspace-reset/SKILL.md:26` says the session list
-   is "within retention", implying opencode core may have a retention concept.
-   If core ever GCs sessions older than N days, a long-horizon wake could target a
-   collected session. Mitigations already in the design: 30-day horizon cap,
-   terminal-failure Telegram alert carrying the payload. **Should be confirmed
-   against upstream opencode before trusting horizons beyond a few days.**
+1. ~~**Upstream session retention.**~~ **RESOLVED 2026-07-31: there is no GC.**
+   opencode retains sessions indefinitely; the "within retention" wording in
+   `understanding-workspace-reset/SKILL.md:26` does not correspond to any actual
+   collection. Combined with §2.3, a session id is a permanently valid address.
+   The 30-day horizon cap in §3.3 stays anyway, as a typo guard (a fat-fingered
+   year should 400, not lurk in the DB until 2027), not as a retention hedge.
 2. **`SWARM_RETENTION_MS` is dead code** (`swarm-schema.ts:3`, `cleanupOlderThan`
-   never called). If someone later wires up 7-day retention naively, it would
-   delete pending scheduled rows. Any future cleanup **must** exclude
-   `state='queued' AND deliver_at > now`. Worth a comment at the call site when it
-   lands.
+   never called). Note the earlier draft of this doc claimed naive retention would
+   delete pending wakes — **that was wrong**: `cleanupOlderThan` deletes only
+   `state IN ('handed_off','failed')` (`swarm-repo.ts:300-308`), so queued rows are
+   already excluded. The real gap is the opposite: new `expired`/`cancelled` rows
+   match no cleanup clause and would accumulate forever. Extend the `IN` list when
+   adding the states (folded into §6 step 1).
 3. **DB file lives inside a git working directory**
    (`~/projects/pigeon/packages/daemon/data/`). Survives reboot, but a reclone or
    an aggressive clean loses every pending wake. Pre-existing risk, now with
@@ -418,9 +540,17 @@ silent-drop failure this whole thing exists to fix, so **don't ship without step
    — pigeon re-resolves the owner per attempt and retries — but unverified.
 6. **6 h default staleness window is a guess.** Should be revisited after a few
    real wakes.
-7. **Behavioural adoption is the real risk.** The mechanism is a day and a half;
-   getting agents to actually call it at the moment they'd otherwise drop the
-   thread is the hard part, and is a prompt/skill problem, not a code problem.
+7. **Behavioural adoption is the real risk.** The mechanism is ~2 days; getting
+   agents to actually call it at the moment they'd otherwise drop the thread is the
+   hard part, and is a prompt/skill problem, not a code problem.
+8. **Cancel authorization is not "unspoofable".** The plugin fills `from` from
+   `ctx.sessionID` (`swarm-send-tool.ts:295`), but the daemon's HTTP API only checks
+   the bearer token — anything holding it can claim any `from`. Fine inside this
+   single-user, loopback-bound trust boundary; just don't describe it as a security
+   property. (Earlier draft did.)
+9. **Behaviour of a woken session whose worktree was pruned is untested** (§3.6).
+   Worth one deliberate experiment during step 10 rather than discovering it at
+   03:00 some morning.
 
 ---
 
@@ -433,9 +563,39 @@ timer to persist and no timer to re-arm, which is exactly why it survives the
 nightly reset and reboot.
 
 The premise that could have killed it — session ids changing across the nightly
-reset — was checked four ways and is false. Ids are stable.
+reset — was checked four ways and is false. Ids are stable, and (confirmed) never
+garbage-collected. A session id is a permanently valid address.
 
-The genuinely new work is not scheduling. It is **expiry semantics and failure
-visibility** (§3.5, §3.7), because the existing terminal-failure path notifies the
-sender, and for a self-wake the sender is the unreachable session. Get that wrong
-and you have rebuilt the silent drop inside a scheduler.
+The genuinely new work is not scheduling. It is **making the existing retry and
+watchdog machinery behave correctly for a message whose sender is asleep and whose
+urgency is low.** That machinery was built for live agent-to-agent chatter and has
+the wrong temperament for wakes in three specific ways:
+
+- a ~324 s retry budget vs. a 6 h staleness window, colliding with the 03:00 reset
+  (§3.5.1) — a wake scheduled 13 h ahead at 14:00 lands *exactly* in the reset;
+- an abort-the-blocking-turn escalation that a reminder does not justify (§3.7.1);
+- a terminal-failure notification addressed to the sender, who for a self-wake is
+  the session that just proved unreachable (§3.6).
+
+Get those wrong and you have rebuilt the silent drop inside the scheduler.
+
+---
+
+## 9. Revision history
+
+- **r1 (2026-07-31)** — initial design.
+- **r2 (2026-07-31)** — after adversarial review (`adversarial-reviewer-fable`) and
+  the human confirming no upstream session GC. Verdict was "approach right, home
+  right, core mechanism claim true, but not implementable as written."
+  Changes: added §3.5.1 (wake retry budget vs. reset collision — the severe one,
+  missed in r1); §3.7.1 (watchdog abort suppression; r1 wrongly called the whole
+  watchdog "hardening at zero cost"); §3.7 layers 2-3 (overdue check must live
+  outside the arbiter; `/swarm/schedule` 503s when the arbiter isn't started);
+  §3.6 wake alerting must cover all four terminal paths, not just the arbiter's;
+  §3.6 pruned-worktree hazard; §3.8 `markHandedOff` state guard; §3.5
+  `delivered_late_ms` measures delivery not processing; §7.1 resolved; §7.2
+  corrected (r1's claim about retention deleting queued rows was wrong in the safe
+  direction, but missed that `expired`/`cancelled` match no cleanup clause); §7.8
+  "unspoofable" walked back. Effort 1.5 d → ~2 d.
+  Citation errata fixed: inbox `handed_off` filter is `swarm-repo.ts:263` (not
+  `:348`); state union is `swarm-repo.ts:16` (not `:101`).
