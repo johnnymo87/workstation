@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, readdirSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { queryBaseList } from "../oc-session-list-base.js";
@@ -484,6 +484,61 @@ describe("runOrphanGc", () => {
       expect(existsSync(missingFieldsFile)).toBe(true);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ownership degradation is LOUD, never silent", () => {
+  // An empty owners map disables mergeOverlays' Rule 1 (live owner wins) and
+  // silently drops every session onto wall-clock ordering. ~53% of sessions on
+  // this fleet are children that depend on the root-keyed join, so this must
+  // never happen quietly.
+  const rows = [
+    { id: "s1", title: "t", parent_id: null, directory: "/d", time_updated: 1, root_id: "s1" },
+  ];
+
+  it("warns when the routing db is missing", () => {
+    const warnings: string[] = [];
+    const owners = buildOwnersMap("/definitely/not/here.db", rows, (m) => warnings.push(m));
+    expect(owners).toEqual({});
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("wall-clock");
+  });
+
+  it("warns when the db exists but no ownership row matches any session", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-owners-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = new Database(p);
+      db.exec(`CREATE TABLE session_assignment (session_id TEXT PRIMARY KEY, desired_serve_id TEXT NOT NULL)`);
+      db.exec(`INSERT INTO session_assignment VALUES ('someone_else', 'serve-9')`);
+      db.close();
+
+      const warnings: string[] = [];
+      const owners = buildOwnersMap(p, rows, (m) => warnings.push(m));
+      expect(owners).toEqual({});
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("no ownership rows matched");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays SILENT on the healthy path (a warning that always fires is noise)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-owners-ok-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = new Database(p);
+      db.exec(`CREATE TABLE session_assignment (session_id TEXT PRIMARY KEY, desired_serve_id TEXT NOT NULL)`);
+      db.exec(`INSERT INTO session_assignment VALUES ('s1', 'serve-2')`);
+      db.close();
+
+      const warnings: string[] = [];
+      const owners = buildOwnersMap(p, rows, (m) => warnings.push(m));
+      expect(owners).toEqual({ s1: "serve-2" });
+      expect(warnings).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

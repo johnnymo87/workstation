@@ -23,11 +23,33 @@ export interface QueryWithStateOptions {
   staleMs?: number;
   isAlive?: (pid: number) => boolean;
   owners?: Record<string, string>;
+  /** Reports degraded-ownership paths; see buildOwnersMap. Default: silent. */
+  onWarn?: (msg: string) => void;
 }
 
-export function buildOwnersMap(routingDbPath: string, baseRows: SessionRow[]): Record<string, string> {
+/**
+ * Build `owners[sid] = desired_serve_id_of(root_of(sid))` from pigeon's
+ * session_assignment table.
+ *
+ * LOUDNESS IS LOAD-BEARING. mergeOverlays defaults `owners` to {}, and with an
+ * empty map its Rule 1 (a live owner wins outright) never fires, so every
+ * session silently falls back to bare wall-clock ordering. ~53% of sessions
+ * here are children that depend on the root-keyed join, so a silent empty map
+ * is a large, invisible correctness regression -- the same "quiet wrongness"
+ * class as a writer whose overlay is simply absent. Every degraded path
+ * therefore reports through `onWarn` instead of returning {} in silence.
+ */
+export function buildOwnersMap(
+  routingDbPath: string,
+  baseRows: SessionRow[],
+  onWarn?: (msg: string) => void,
+): Record<string, string> {
   const owners: Record<string, string> = {};
   if (!routingDbPath || !existsSync(routingDbPath)) {
+    onWarn?.(
+      `routing db not found at ${routingDbPath || "<unset>"} -- ownership unavailable, ` +
+        `falling back to wall-clock ordering (set --routing-db or OPENCODE_ROUTING_DB)`,
+    );
     return owners;
   }
   try {
@@ -35,6 +57,10 @@ export function buildOwnersMap(routingDbPath: string, baseRows: SessionRow[]): R
     const tableExists = db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_assignment'`).get();
     if (!tableExists) {
       db.close();
+      onWarn?.(
+        `routing db ${routingDbPath} has no session_assignment table -- ownership ` +
+          `unavailable, falling back to wall-clock ordering`,
+      );
       return owners;
     }
     const assignments = db.query<{ session_id: string; desired_serve_id: string }, []>(
@@ -55,8 +81,17 @@ export function buildOwnersMap(routingDbPath: string, baseRows: SessionRow[]): R
         owners[row.id] = serveId;
       }
     }
-  } catch {
-    // Return empty map on error
+  } catch (err) {
+    onWarn?.(
+      `failed to read ownership from ${routingDbPath} (${String(err)}) -- ` +
+        `falling back to wall-clock ordering`,
+    );
+  }
+  if (baseRows.length > 0 && Object.keys(owners).length === 0) {
+    onWarn?.(
+      `no ownership rows matched any of the ${baseRows.length} session(s) -- ` +
+        `ordering is wall-clock only; check that session_assignment is populated`,
+    );
   }
   return owners;
 }
@@ -169,7 +204,7 @@ export function queryWithState(
 
   let owners = options.owners;
   if (!owners && options.routingDbPath) {
-    owners = buildOwnersMap(options.routingDbPath, baseRows);
+    owners = buildOwnersMap(options.routingDbPath, baseRows, options.onWarn);
   }
   owners = owners ?? {};
 

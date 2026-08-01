@@ -15,7 +15,12 @@ export interface CliOptions {
 export function parseCliArgs(args: string[]): CliOptions {
   let limit = 50;
   let dbPath = process.env.HOME ? `${process.env.HOME}/.local/share/opencode/opencode.db` : "";
-  let routingDbPath = process.env.OPENCODE_ROUTING_DB || "/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
+  // Derived from $HOME -- never hardcode an absolute user path, this package
+  // ships to devbox, cloudbox and macOS. pigeon's unified daemon DB is the same
+  // file the serves open as OPENCODE_ROUTING_DB, so prefer that when it is set.
+  let routingDbPath =
+    process.env.OPENCODE_ROUTING_DB ||
+    (process.env.HOME ? `${process.env.HOME}/projects/pigeon/packages/daemon/data/pigeon-daemon.db` : "");
   let overlayDir = process.env.HOME ? `${process.env.HOME}/.local/share/opencode/session-state.d` : "";
   let withState = false;
   let gc = false;
@@ -93,6 +98,7 @@ export function main(args: string[] = process.argv.slice(2)): void {
     if (options.withState) {
       const rowsWithState = queryWithState(baseRows, {
         routingDbPath: options.routingDbPath,
+        onWarn: (msg: string) => console.error(`oc-session-list: ${msg}`),
         overlayDir: options.overlayDir,
       });
       console.log(JSON.stringify(rowsWithState, null, 2));
