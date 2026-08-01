@@ -58,18 +58,36 @@ db.exec(`
 
 JSON_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --limit 10)" || fail "oc-session-list failed on fixture DB"
 
-# Assert JSON output includes 3-level tree items and excludes archived_1
-echo "$JSON_OUT" | grep -q "grandchild_1" || fail "grandchild_1 missing from output"
-echo "$JSON_OUT" | grep -q "child_1" || fail "child_1 missing from output"
-echo "$JSON_OUT" | grep -q "root_1" || fail "root_1 missing from output"
+# Assert JSON output includes 3-level tree items and excludes archived_1.
+#
+# These greps MUST anchor on the "id" field. A bare `grep -q "child_1"` is
+# satisfied by "grandchild_1", and a bare `grep -q "root_1"` is satisfied by any
+# row's "root_id" value -- so the built artifact could drop child_1's row
+# entirely and this file would stay green. This is the only test that exercises
+# the nix-built binary, so vacuity here is expensive.
+echo "$JSON_OUT" | grep -q '"id": "grandchild_1"' || fail "grandchild_1 missing from output"
+echo "$JSON_OUT" | grep -q '"id": "child_1"'      || fail "child_1 missing from output"
+echo "$JSON_OUT" | grep -q '"id": "root_1"'       || fail "root_1 missing from output"
 
-if echo "$JSON_OUT" | grep -q "archived_1"; then
+# And the walk must resolve the grandchild to the TRUE root, not the middle
+# session -- the defect the recursive CTE exists to prevent.
+echo "$JSON_OUT" | grep -q '"root_id": "child_1"' && fail "grandchild resolved to the MIDDLE session, not the true root"
+
+if echo "$JSON_OUT" | grep -q '"id": "archived_1"'; then
   fail "archived_1 was NOT excluded from query output"
 fi
 
 pass "fixture DB query assertions passed (3-level nesting + archived exclusion)"
 
-JSON_STATE_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --with-state --limit 10)" || fail "oc-session-list --with-state failed on fixture DB"
+# Hermetic: pass EXPLICIT empty overlay/routing paths. Without these the run
+# reads the real ~/.local/share/opencode/session-state.d and the real routing
+# DB. It is non-mutating today (no --gc), but this project has already had a
+# test destroy a live serve's overlay file, so the isolation is by construction.
+EMPTY_OVERLAY_DIR="$TMP_DIR/empty-overlays"
+mkdir -p "$EMPTY_OVERLAY_DIR"
+JSON_STATE_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --with-state --limit 10 \
+  --overlay-dir "$EMPTY_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list --with-state failed on fixture DB"
 echo "$JSON_STATE_OUT" | grep -q '"activity": "idle"' || fail "--with-state output missing activity field"
 pass "--with-state mode works on fixture DB"
 

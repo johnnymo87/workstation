@@ -57,6 +57,11 @@ export function parseCliArgs(args: string[]): CliOptions {
     }
   }
 
+  // Clamp: SQLite treats a NEGATIVE LIMIT as UNBOUNDED, so `--limit -5` would
+  // dump all 8,771 sessions off a 13 GB DB, and `--limit abc` (NaN) is equally
+  // meaningless. Fall back to the default rather than surprising the caller.
+  if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+
   return { limit, dbPath, routingDbPath, overlayDir, withState, gc, help };
 }
 
@@ -67,7 +72,7 @@ Options:
   --limit <N>          Maximum number of recent root session trees to return (default: 50)
   --db <path>          Path to opencode.db (default: $HOME/.local/share/opencode/opencode.db)
   --with-state         Merge base session list with live overlay state
-  --routing-db <path>   Path to pigeon-daemon.db (default: $OPENCODE_ROUTING_DB or /home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db)
+  --routing-db <path>   Path to pigeon-daemon.db (default: $OPENCODE_ROUTING_DB, else $HOME/projects/pigeon/packages/daemon/data/pigeon-daemon.db)
   --overlay-dir <path> Directory containing session-state overlays (default: $HOME/.local/share/opencode/session-state.d)
   --gc                 Perform orphan GC on dead overlay files older than 10 minutes
   --help, -h           Show this help message

@@ -136,7 +136,10 @@ describe("oc-session-list base query", () => {
     const rows = queryBaseList(db, { limit: 10 });
     const elapsed = Date.now() - start;
 
-    expect(elapsed).toBeLessThan(100);
+    // Assert TERMINATION, not wall time: a 100ms budget is flaky on a loaded
+    // box. The failure mode this guards is an unbounded walk, which does not
+    // finish at all.
+    expect(elapsed).toBeLessThan(5000);
     expect(rows.length).toBe(2);
   });
 
@@ -266,7 +269,7 @@ describe("buildOwnersMap", () => {
   });
 
   it("against the REAL routing DB, asserts constructed owners map is NON-EMPTY and at least one CHILD session inherits root serve", () => {
-    const realRoutingDb = "/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
+    const realRoutingDb = `${process.env.HOME}/projects/pigeon/packages/daemon/data/pigeon-daemon.db`;
     const realBaseDbPath = process.env.HOME + "/.local/share/opencode/opencode.db";
 
     if (!existsSync(realRoutingDb) || !existsSync(realBaseDbPath)) {

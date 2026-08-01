@@ -76,7 +76,19 @@ export function buildOwnersMap(
     }
 
     for (const row of baseRows) {
-      const serveId = assignmentMap.get(row.root_id) ?? assignmentMap.get(row.id);
+      // ROOT-KEYED ONLY, deliberately. Pigeon places by the root of the session
+      // tree, so this is the plan's stated rule (owners[sid] = owner_of(root)).
+      //
+      // There is NO fallback to `assignmentMap.get(row.id)`. For a root row it
+      // would be redundant (root_id === id), so it could only ever fire for a
+      // CHILD carrying its own assignment row -- of which ~2 exist out of 4,668
+      // children, i.e. anomalies, most likely stale. The downside is real: a
+      // stale child row names the wrong serve as owner, and if that serve is
+      // live with a file for the child's directory but no entry for it, merge
+      // Rule 1's "absence is authoritative" pins the session to idle and
+      // suppresses the true serve's working/blocked. Redundant upside, real
+      // downside -- so the join stays root-only.
+      const serveId = assignmentMap.get(row.root_id);
       if (serveId) {
         owners[row.id] = serveId;
       }
@@ -96,9 +108,19 @@ export function buildOwnersMap(
   return owners;
 }
 
-export function loadOverlayFiles(overlayDir: string): OverlayData[] {
+export function loadOverlayFiles(
+  overlayDir: string,
+  onWarn?: (msg: string) => void,
+): OverlayData[] {
   const files: OverlayData[] = [];
   if (!overlayDir || !existsSync(overlayDir)) {
+    // A typo'd or absent overlay dir otherwise yields confidently all-idle
+    // output -- the same "absent overlay is indistinguishable from no sessions"
+    // failure this reader exists to surface.
+    onWarn?.(
+      `overlay dir not found at ${overlayDir || "<unset>"} -- no live state available, ` +
+        `every session will report idle`,
+    );
     return files;
   }
   try {
@@ -116,8 +138,11 @@ export function loadOverlayFiles(overlayDir: string): OverlayData[] {
         // Tolerate unparseable or partial files
       }
     }
-  } catch {
-    // Ignore readdir errors
+  } catch (err) {
+    onWarn?.(`failed to read overlay dir ${overlayDir} (${String(err)}) -- reporting all idle`);
+  }
+  if (files.length === 0) {
+    onWarn?.(`no overlay files loaded from ${overlayDir} -- every session will report idle`);
   }
   return files;
 }
@@ -135,8 +160,10 @@ export function runOrphanGc(
     try {
       process.kill(pid, 0);
       return true;
-    } catch {
-      return false;
+    } catch (err: any) {
+      // EPERM means the process EXISTS but belongs to another user -- alive.
+      // Treating it as dead would make a live writer's overlay GC-eligible.
+      return err?.code === "EPERM";
     }
   });
 
@@ -197,18 +224,19 @@ export function queryWithState(
     try {
       process.kill(pid, 0);
       return true;
-    } catch {
-      return false;
+    } catch (err: any) {
+      // EPERM means the process EXISTS but belongs to another user -- alive.
+      // Treating it as dead would make a live writer's overlay GC-eligible.
+      return err?.code === "EPERM";
     }
   });
 
-  let owners = options.owners;
-  if (!owners && options.routingDbPath) {
-    owners = buildOwnersMap(options.routingDbPath, baseRows, options.onWarn);
-  }
-  owners = owners ?? {};
+  // Call buildOwnersMap even when routingDbPath is "" (HOME unset and no env):
+  // it warns on <unset>, whereas skipping it was the one degraded path that
+  // stayed silent.
+  const owners = options.owners ?? buildOwnersMap(options.routingDbPath ?? "", baseRows, options.onWarn);
 
-  const overlayFiles = options.overlayDir ? loadOverlayFiles(options.overlayDir) : [];
+  const overlayFiles = loadOverlayFiles(options.overlayDir ?? "", options.onWarn);
   const mergedStateMap = mergeOverlays(overlayFiles, { now, staleMs, isAlive, owners });
 
   // Seam for Task 5: nvim-socket discovery join will annotate attached location here.
