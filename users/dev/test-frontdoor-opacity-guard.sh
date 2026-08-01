@@ -105,17 +105,52 @@ else
 fi
 rm -rf "$fix" "$out"
 
+# Case: a smuggled direct-to-serve call with a :-http default expansion must be caught, not skipped.
+fix="$(new_fixture)"; out="$(mktemp)"
+cat >> "$fix/users/dev/home.base.nix" <<'PERTURB'
+  smuggledKill = ''curl -fsS -X POST "${OPENCODE_URL:-http://127.0.0.1:4096}/session/$sid/kill"'';
+PERTURB
+if run_guard "$fix" "$out"; then
+  bad "skip-laundering: guard PASSED a smuggled :-http direct-to-serve call"
+else
+  if grep -q 'addresses a serve with no frontdoor-exempt marker' "$out"; then
+    pass_ "skip-laundering: smuggled :-http direct-to-serve call is caught"
+  else
+    bad "skip-laundering: guard failed, but not with no-marker message"
+    sed 's/^/      /' "$out"
+  fi
+fi
+rm -rf "$fix" "$out"
+
+# Case: a bare default assignment containing :-http puts a value in scope and must NOT be flagged.
+fix="$(new_fixture)"; out="$(mktemp)"
+cat >> "$fix/users/dev/home.base.nix" <<'PERTURB'
+  FOO_URL="${FOO_URL:-http://127.0.0.1:4096}"
+PERTURB
+if run_guard "$fix" "$out"; then
+  pass_ "skip-laundering: bare :-http assignment is skipped (not falsely flagged)"
+else
+  bad "skip-laundering: bare :-http assignment was falsely flagged as a serve site"
+  sed 's/^/      /' "$out"
+fi
+rm -rf "$fix" "$out"
+
 # Case: a file whose sites all rot out of the pattern, but which keeps its markers,
 # must FAIL rather than silently pass. The per-file 1:1 check was gated on
 # `fsites -gt 0`, so total rot in one file was invisible -- the exact shape of the
 # [^\n] bug that once let 10 of 11 sites stop matching.
 fix="$(new_fixture)"; out="$(mktemp)"
-sed -i 's|127\.0\.0\.1:4096|127.0.0.1:9999|g; s|\${serve_url}/|${serve_url}_ROTTED/|g; s|\$serve_url/|$serve_url_ROTTED/|g' \
+sed -i 's|127\.0\.0\.1:4096|127.0.0.1:9999|g; s|\${serve_url}/|${serve_url}_ROTTED/|g; s|\$serve_url/|$serve_url_ROTTED/|g; s|OPENCODE_ANCHOR_URL=|OPENCODE_ANCHOR_URLX=|g' \
   "$fix/users/dev/home.devbox.nix"
 if run_guard "$fix" "$out"; then
   bad "rot: a file kept its markers while all its sites stopped matching, and the guard passed"
 else
-  pass_ "rot: markers with zero matching sites is a failure"
+  if grep -q 'ZERO matching sites' "$out"; then
+    pass_ "rot: markers with zero matching sites is a failure"
+  else
+    bad "rot: guard failed, but not with ZERO matching sites (masked by another failure?)"
+    sed 's/^/      /' "$out"
+  fi
 fi
 rm -rf "$fix" "$out"
 
@@ -146,12 +181,22 @@ rm -rf "$fix" "$out"
 
 # Case: adding a serve site to a governed file that has NO manifest line and NO sites
 # (e.g. home.base.nix) must fail, proving dropping 0-count lines did not open a hole.
+# The site carries a valid exemption marker citing a row naming home.base.nix so ONLY the manifest check can fire.
 fix="$(new_fixture)"; out="$(mktemp)"
-printf '\n  probe = "http://127.0.0.1:4096/global/health";\n' >> "$fix/users/dev/home.base.nix"
+printf '| C12 | `users/dev/home.base.nix` | `exempt-infra` | test row |\n' >> "$fix/$table"
+cat >> "$fix/users/dev/home.base.nix" <<'PERTURB'
+  # frontdoor-exempt(C12): test site in unlisted file
+  probe = "http://127.0.0.1:4096/global/health";
+PERTURB
 if run_guard "$fix" "$out"; then
   bad "manifest: adding a site to a file absent from the manifest passed -- hole opened by dropping 0-lines"
 else
-  pass_ "manifest: adding a site to an unlisted file is caught"
+  if grep -q 'no EXPECTED_MANIFEST line' "$out"; then
+    pass_ "manifest: adding a site to an unlisted file is caught by manifest check"
+  else
+    bad "manifest: guard failed, but not with no EXPECTED_MANIFEST line"
+    sed 's/^/      /' "$out"
+  fi
 fi
 rm -rf "$fix" "$out"
 
