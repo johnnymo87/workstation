@@ -118,6 +118,9 @@ mapfile -t files < <(cd "$repo_root" && printf '%s\n' \
 #
 # Known remaining gaps (deliberate, documented rather than pretended away):
 # indirection through a renamed variable (`base=$serve_url; curl "$base/..."`),
+# defaulted expansion handed to something other than attach without a trailing / (e.g. `${VAR:-http://127.0.0.1:4096}api/...`),
+# OPENCODE_URL= matching regardless of value (e.g. export OPENCODE_URL="$FRONTDOOR_URL" pointing at the door would be flagged),
+# Nix-level indirection (servePool.endpoints / endpointsCsv carrying no matching token),
 # non-curl verbs reaching a literal host built at runtime, and any consumer in a
 # file outside FILE list below. A grep cannot close those. If opacity must be a
 # guarantee rather than a convention, the fix is structural -- serves on unix
@@ -159,7 +162,20 @@ for f in "${files[@]}"; do
     # would add ~7 markers of no diagnostic value and train people to sprinkle
     # markers reflexively -- which is how an exemption system stops meaning
     # anything.
-    case "$line" in *':-http'*) continue ;; esac
+    case "$line" in
+      *':-http'*)
+        # A BARE default only puts a value in scope. A defaulted expansion that is
+        # USED -- `${VAR:-http://...:4096}/session/...` or handed to `attach` -- is a
+        # real call site. The old blanket skip took the whole line, so a mutating
+        # `curl -X POST "${OPENCODE_URL:-http://127.0.0.1:4096}/session/$sid/kill"`
+        # passed the marker check, the 1:1 count and the manifest simultaneously.
+        if printf '%s' "$line" | grep -qE '\}/|attach'; then
+          :   # used -- fall through and treat as a site
+        else
+          continue
+        fi
+        ;;
+    esac
     hits=$((hits + 1))
     sites_per_file[$f]=$(( ${sites_per_file[$f]:-0} + 1 ))
     start=$((lineno > MARKER_LOOKBACK ? lineno - MARKER_LOOKBACK : 1))
@@ -211,9 +227,10 @@ done
 # WHY NOT A SINGLE SCALAR: `EXPECTED_SITES=14` merged WRONG rather than
 # conflicting. Two concurrent PRs each adding one site both write 15; git sees an
 # identical edit and merges it clean; both are green in isolation; main lands at 16
-# and goes red, blocking everyone *after the fact*. Per-file lines make
-# different-file additions merge clean AND correct, and same-file additions collide
-# textually so a human must resolve them.
+# and goes red, blocking everyone *after the fact*. Two PRs adding a site to the
+# SAME file write the same bumped count (identical edit -> merges clean-but-wrong,
+# same as scalar). The real win is cross-file: per-file lines prevent cross-file
+# additions from silently merging clean-but-wrong.
 #
 # WHY KEEP A COUNT AT ALL, given per-site markers: a NEW site citing an EXISTING
 # valid row passes every per-site check silently. Only a count catches that.
