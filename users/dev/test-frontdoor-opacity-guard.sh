@@ -91,4 +91,31 @@ else
 fi
 rm -rf "$fix" "$out"
 
+# Case: a non-pool port (4090-4095) is not a serve and must not be flagged. The
+# pool is :4096-4099. A peer adding a :4091 harness would otherwise be blocked with
+# no legitimate row to cite -- the guard would be demanding a lie.
+fix="$(new_fixture)"; out="$(mktemp)"
+printf '\n  # harness, not a serve\n  TEST_HARNESS_URL = "http://127.0.0.1:4091/health";\n' >> "$fix/users/dev/home.base.nix"
+if run_guard "$fix" "$out"; then
+  pass_ "site-re: a non-pool port (:4091) is not treated as a serve-addressing site"
+else
+  bad "site-re: :4091 was flagged as a serve site (SITE_RE still matches 409[0-9])"
+  sed 's/^/      /' "$out"
+fi
+rm -rf "$fix" "$out"
+
+# Case: a file whose sites all rot out of the pattern, but which keeps its markers,
+# must FAIL rather than silently pass. The per-file 1:1 check was gated on
+# `fsites -gt 0`, so total rot in one file was invisible -- the exact shape of the
+# [^\n] bug that once let 10 of 11 sites stop matching.
+fix="$(new_fixture)"; out="$(mktemp)"
+sed -i 's|127\.0\.0\.1:4096|127.0.0.1:9999|g; s|\${serve_url}/|${serve_url}_ROTTED/|g; s|\$serve_url/|$serve_url_ROTTED/|g' \
+  "$fix/users/dev/home.devbox.nix"
+if run_guard "$fix" "$out"; then
+  bad "rot: a file kept its markers while all its sites stopped matching, and the guard passed"
+else
+  pass_ "rot: markers with zero matching sites is a failure"
+fi
+rm -rf "$fix" "$out"
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }

@@ -124,7 +124,9 @@ mapfile -t files < <(cd "$repo_root" && printf '%s\n' \
 # sockets or a netns only the door/pigeon/infra can enter -- and this guard
 # becomes defense-in-depth. Tracked separately.
 # ---------------------------------------------------------------------------
-SITE_RE='\$\{?(serve_url|u|OPENCODE_URL|OPENCODE_ANCHOR_URL)\}?/|attach[^"]*\$\{?(serve_url|u|OPENCODE_URL|OPENCODE_ANCHOR_URL)\}?|(PIGEON_SERVE_ENDPOINTS|OPENCODE_URL|OPENCODE_ANCHOR_URL)=|(127\.0\.0\.1|localhost):409[0-9]'
+# Serve pool ports are 4096-4099. Matching 4090-4095 previously flagged non-serve
+# ports (e.g. test harnesses) and demanded a marker for things that are not serves.
+SITE_RE='\$\{?(serve_url|u|OPENCODE_URL|OPENCODE_ANCHOR_URL)\}?/|attach[^"]*\$\{?(serve_url|u|OPENCODE_URL|OPENCODE_ANCHOR_URL)\}?|(PIGEON_SERVE_ENDPOINTS|OPENCODE_URL|OPENCODE_ANCHOR_URL)=|(127\.0\.0\.1|localhost):409[6-9]'
 
 # Legal exemption rows are the EXEMPT classes only. Citing a door row (A*) or a
 # repointed-violation row (B*) as an exemption is semantic nonsense and used to
@@ -195,7 +197,9 @@ for f in "${files[@]}"; do
   abs="$repo_root/$f"
   fsites="${sites_per_file[$f]:-0}"
   fmarks="$(grep -cE 'frontdoor-exempt\((A|B|C|D)[0-9]+\)' "$abs" 2>/dev/null || true)"
-  if [ "$fsites" -gt 0 ] && [ "$fmarks" != "$fsites" ]; then
+  if [ "$fmarks" -gt 0 ] && [ "$fsites" -eq 0 ]; then
+    bad "$f: $fmarks frontdoor-exempt marker(s) but ZERO matching sites -- either the markers are stale, or SITE_RE has rotted and stopped seeing this file's sites"
+  elif [ "$fsites" -gt 0 ] && [ "$fmarks" != "$fsites" ]; then
     bad "$f: $fsites serve-addressing site(s) but $fmarks marker(s) -- not 1:1, so a site may be laundering a neighbour's exemption"
   fi
 done
