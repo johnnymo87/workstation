@@ -253,7 +253,40 @@ close `mlve`.
 
 **This is nearly free.** `update-opencode-patched` runs every 8h and the nightly reset
 runs daily, so an organic cycle happens roughly daily with no work — it is an
-observation window, not a task. A deploy inside the window is the *required event*, not
+observation window, not a task.
+
+> **CORRECTION 2026-08-01 — the "nearly free" premise is STALE, and Step 3 is blocked on an
+> event that will not happen by itself.** Measured, not assumed: the newest
+> `opencode-patched` release is `v1.17.13-patched.6`, published **2026-07-26**; the last
+> update PR (#194) merged the same day; the workflow has run every 8h since (including
+> 18:20Z on 08-01) and opened **nothing**, because we are already on the newest release.
+> That is **6 days with zero pin bumps**, against the "~27 in 6 weeks" base rate this
+> criterion was written on. No bump arrives until someone cuts a new release.
+>
+> **This makes Steps 3 and 4 circular as written.** Step 3 waits for a pin bump; the only
+> bump on the horizon is the `patched.N` cut that **Step 4's fence fix** requires. Step 4
+> was deliberately sequenced AFTER epic closure so the fence would get its own soak — but
+> on current facts Step 4 is what *produces* Step 3's required event.
+>
+> Three resolutions, undecided, pick deliberately and record which:
+> 1. **Do Step 4 first.** Cut `patched.7` carrying ONLY the fence edit (this document
+>    already pre-registers that constraint), and let Step 3's window ride that deploy.
+> 2. **Re-read the criterion against the 08-01 deploy.** NOTE THE WEAKNESS BEFORE
+>    CHOOSING THIS: that deploy (`nixos-rebuild` + home-manager + door restart onto the
+>    Step 2 build + full pool restart) was a real perturbation, but it ended
+>    **converged** — the skew window was manually closed. A pin bump's distinctive
+>    property is that it changes the serves' binary via the mutable profile symlink
+>    WITHOUT restarting them (`a0zj`), leaving genuine skew. The 08-01 deploy never
+>    exercised that. Choosing this option is a REINTERPRETATION of the criterion and must
+>    be written down as one, not smuggled in.
+> 3. Cut a no-op `patched.7` purely to trigger a bump — churn for a checkbox. Recorded
+>    only so it is visibly rejected.
+>
+> Related evidence for the `m96n` disposition the criterion was also meant to settle: the
+> 08-01 deploy's restart sequencing was done BY HAND, which is exactly what `m96n`
+> proposes to automate. That is weak evidence *for* `m96n`, not for its demotion — and one
+> step of it (a serve-staleness comparison) was got WRONG by hand on the day. See the
+> `a0zj`/`m96n` notes. A deploy inside the window is the *required event*, not
 contamination; the criterion was designed to measure perturbation survival (~27 pin
 bumps in 6 weeks is the steady state).
 
@@ -375,6 +408,31 @@ pre-registered decision rule running to ~2026-08-11.
 mandatory; PR in both repos.
 
 ---
+
+## Scheduled, but not a numbered step (added 2026-08-01)
+
+These were in LIMBO — cited in this document's prose, on no step, and absent from
+"Explicitly NOT next". That section exists precisely to stop work drifting into that
+state, and a P1 sitting in it is the failure mode it was written to prevent. Dispositioned:
+
+- **`workstation-nv5l` (P1, OPEN) — SCHEDULED, next door change after the epic closes.**
+  A live-but-stalling pool member still poisons pooled reads: `failoverIfUnreachable` is
+  connection-level only (grep it in `pkgs/opencode-frontdoor/src/proxy.ts`), so a member
+  that accepts and then stalls eats the full 5s budget with no retry. Measured 2026-08-01:
+  1069 × 503 in a ten-minute window, of which 90 were `class=global-ro action=forward-pool`
+  — pooled reads round-robined ONTO the stalling member. **This is P1 and it is partly
+  self-inflicted:** those 90 would have gone to the healthy anchor before the `eon4` fix.
+  It is not on the epic's critical path (the epic's objective is opacity, not member
+  health), but it must not close as "mentioned somewhere".
+- **`workstation-b5yi` (P2, OPEN) — DEFERRED, with reason.** The door still leaks a pool
+  address at RUNTIME via upstream `err.message` on 502/500 (`connect ECONNREFUSED
+  127.0.0.1:<port>`). Deferred because it is a DISCLOSURE, not an INSTRUCTION — it tells a
+  caller where a serve is, it does not tell it to go there — and because no static guard
+  can ever see it, so it does not weaken the Step 1/Step 2 enforcement story. Fix it on the
+  next door change that already needs a restart; do not cut a deploy for it alone.
+- **`workstation-1puj` (P2, OPEN) — DEFERRED to `pcf3`.** Out-of-repo consumers are
+  unenumerated by construction. More grep cannot close it; structural enforcement can.
+  Tracked so a green guard is not misread as coverage it does not have.
 
 ## Explicitly NOT next (recorded so it is not silently re-promoted)
 
