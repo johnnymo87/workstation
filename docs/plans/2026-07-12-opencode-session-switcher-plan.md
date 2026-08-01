@@ -1070,6 +1070,36 @@ which makes **S1 and S2 the same action**; the standing requirement is that any
 deploy touching `assets/opencode/plugins/**` must restart `opencode-serve@*`,
 otherwise it silently no-ops for every existing instance.
 
+**⚠ Re-measured 12h later (2026-08-01 09:52) — a SECOND, now-dominant failure:
+the writer is not deployed at all.** The overnight reset restarted the pool at
+09:24, which should have been the natural experiment confirming the diagnosis
+above. Instead of full coverage the overlay dir is **empty — 0 files**, and
+`~/.config/opencode/plugins/session-state.js` **no longer exists**.
+
+A `home-manager switch` ran at **09:23** (generation 1953) and its closure omits
+the plugin. This is not a rollback of intent: `main` still ships the
+`xdg.configFile."opencode/plugins/session-state.js"` block, the host is
+`cloudbox`, and `isCloudbox` is plainly true (its sibling
+`subagent-routing.ts`, gated on `isDarwin || isCloudbox`, is present). The
+plugin entered `opencode-config.nix` in **#230, merged 07-31 12:39** — so a
+switch run from any worktree branched before that timestamp silently
+**un-deploys the writer fleet-wide**. Several such worktrees exist
+(`ws-iwpj-phase2`, `/tmp/wt-shellenv-fix`, `monitoring-mergequeue-fix`,
+`scheduled-swarm-wake`).
+
+**This does not invalidate the instance-binding diagnosis** — that was proven by
+controlled experiment and still explains the original 42-empty-overlay
+observation. It adds a second, independent hazard that S1 must handle, and it
+is arguably worse: home-manager is **last-writer-wins across concurrent swarm
+worktrees**, so any agent running a switch from a stale checkout reverts every
+other agent's deployed config, silently and fleet-wide. A restart alone would
+have fixed nothing this morning, because there is now no plugin to load.
+
+S1 therefore needs *both*: deploy from an up-to-date checkout **and** restart
+the pool — and the deploy needs some guard against stale-worktree clobber
+(at minimum, verifying the expected files exist in the new generation
+afterwards).
+
 **This also retires the "8-hour auto-update" comfort in `session-state.ts`.** The
 comment reasons that a fleet-wide inert writer "needs to be discoverable from the
 log rather than by noticing the picker is empty, because the fleet auto-updates
