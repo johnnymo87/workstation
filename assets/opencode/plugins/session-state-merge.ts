@@ -16,6 +16,13 @@ export interface MergeOptions {
    * A missing entry here is not an error — it just means rule 1 cannot fire.
    */
   owners?: Record<string, string>
+  /**
+   * Pre-computed liveness, so a caller that also needs it (queryWithState's
+   * nodata predicate) evaluates it ONCE. Two passes share a definition but not
+   * an evaluation: a process dying between them makes the reader disagree with
+   * itself about which serves were live.
+   */
+  prepared?: PreparedFile[]
 }
 
 /**
@@ -122,9 +129,9 @@ export function prepareFiles(
 
 export function mergeOverlays(
   files: OverlayData[],
-  { now, staleMs, isAlive, owners = {} }: MergeOptions,
+  { now, staleMs, isAlive, owners = {}, prepared: preparedIn }: MergeOptions,
 ): StateMap {
-  const prepared: PreparedFile[] = prepareFiles(files, { now, staleMs, isAlive })
+  const prepared: PreparedFile[] = preparedIn ?? prepareFiles(files, { now, staleMs, isAlive })
 
   // Collect all session IDs across all files
   const sessionIds = new Set<string>()

@@ -248,7 +248,10 @@ export function queryWithState(
   const owners = options.owners ?? buildOwnersMap(options.routingDbPath ?? "", baseRows, options.onWarn);
 
   const overlayFiles = loadOverlayFiles(options.overlayDir ?? "", options.onWarn);
-  const mergedStateMap = mergeOverlays(overlayFiles, { now, staleMs, isAlive, owners });
+  const preparedFiles = prepareFiles(overlayFiles, { now, staleMs, isAlive });
+  const mergedStateMap = mergeOverlays(overlayFiles, {
+    now, staleMs, isAlive, owners, prepared: preparedFiles,
+  });
 
   // Who is still REPORTING? Two granularities, because neither alone is right.
   //
@@ -265,7 +268,7 @@ export function queryWithState(
   // had an instance loaded that recently, so a missing file means "not watching",
   // not "evicted"), serve-level for dormant ones. Measured false-alarm rate of
   // the hybrid against the live fleet: 1m/5m/15m/60m all 0.00%, 240m 0.27%.
-  const liveFiles = prepareFiles(overlayFiles, { now, staleMs, isAlive }).filter((pf) => pf.live);
+  const liveFiles = preparedFiles.filter((pf) => pf.live);
   const reportingServes = new Set(liveFiles.map((pf) => pf.serveId));
   const reportingPairs = new Set(
     liveFiles.filter((pf) => pf.file.directory !== undefined)
