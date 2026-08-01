@@ -732,6 +732,23 @@ Method notes worth keeping:
   it needs a wrapper change in `hosts/cloudbox/configuration.nix` plus a fleet
   rebuild, and it would sit unarmed until that lands. The loopback+port fence
   shipped here is the belt; this is the braces.
+
+  **Update (2026-07-31, cycle 6).** Relayed to the `frontdoor` session because
+  the routing registry's fence (bead pigeon-13p) has the same port-only shape:
+  it compares `OPENCODE_SERVE_EXPECTED_PORT` against the bound port with no
+  interface check, so a nested serve on `--hostname ::1 --port <slot>` passes it.
+  Impact there is narrower than a hijack — the registered endpoint is hardcoded
+  `http://127.0.0.1:${port}`, so traffic still lands on the real serve; what you
+  get is `registerSelf` under a different `instance_uuid`, which invalidates the
+  real serve's session leases, plus self-heal churn. Filed as **workstation-4b1q**
+  (P2). Deliberately **not** exercised live: writing to the production routing
+  registry to confirm a mechanism the code already makes plain is a bad trade.
+  Frontdoor confirmed the `exec` premise on all three wrappers
+  (`hosts/cloudbox/configuration.nix:961`, `home.devbox.nix:801`,
+  `home.darwin.nix:338`), so `$$ == process.pid` is a clean equality test with no
+  host-shape caveat — but note the fence fails **closed**, so if a wrapper ever
+  stops `exec`ing, that pool silently stops registering. Assert the `exec`
+  property rather than assuming it.
 - **[MED-LOW, deferred] The `openapiShapes` block in the fixture is still a
   hand-summarized spec** rather than a raw schema fragment. Lower stakes than
   the directory matrix was, because the raw GET body independently corroborates
@@ -808,12 +825,86 @@ Method notes worth keeping:
 
 ---
 
-## Task 4: Lua overlay reader (merge, liveness, GC)
+## Cycle 6 decision (2026-07-31): the merge stays in TypeScript; Task 4 is resequenced
 
-**Files:** Create `assets/nvim/lua/user/session_switcher/overlay.lua`; Create
-`assets/nvim/lua/user/session_switcher/test.sh` (copy the `pkgs/nvims/test.sh`
-harness — headless-Lua via `nvim -l`; this is a proven in-repo pattern, not a
-maybe).
+Task 4 as written below said "port of `mergeOverlays`" into Lua. **Task 6 Step 3b
+supersedes that**, and it names Task 4 explicitly ("Tasks 4/5/8's Lua modules
+become *thin callers* of this"). Resolved before any code was written, because
+two merge implementations drifting apart is the obvious failure mode.
+
+**Decision: ONE implementation, in TypeScript, owned by `oc-session-list`.**
+Extract `mergeOverlays` + its entry-level validation out of the writer's
+`session-state-impl.ts` into a shared module under `assets/opencode/plugins/`,
+imported by the CLI entry point. Lua becomes a thin, **async** caller. Rationale:
+
+- **`mergeOverlays` is currently dead code.** Verified by grep: defined at
+  `session-state-impl.ts:376`, referenced only by 31 test sites, **never called
+  by the writer plugin**. The writer only ever writes its own
+  `serve-N-dir.json`, so merging is purely reader-side. The choice was therefore
+  never "TS vs. a Lua port" — the reader logic is *homeless*, and this picks its
+  one home. (Corollary: the per-entry validation hardening won in cycle 5 is
+  guarding code that ships to nobody until this lands.)
+- Step 3b's Lua escape hatch is conditioned on "if the merge is easier to keep in
+  Lua" — it isn't, given a hardened impl plus 31 tests already exist. Porting
+  discards them and re-opens exactly the bug classes adversarial review caught
+  (whole-file rejection, skewed-entry NaN ordering).
+- A Lua-owned merge makes every future non-nvim frontend (fzf/tmux, recovery)
+  depend on nvim. Step 3b exists precisely to prevent that.
+
+**Resequencing:** merge **and opportunistic GC** move into Task 6 (GC is
+reader-side; it belongs with the merge, else the CLI reads files Lua has not
+swept). Tests move with them. Task 4 is demoted to a small "thin Lua caller"
+step and runs **after** Task 6, before Task 8. Task 5 is unaffected
+(`rpc.snapshot()` must live in each nvim regardless).
+
+**New hazard to design against — sync-invocation deadlock.** If `--with-state`
+performs discovery via `nvim --server <sock> --remote-expr` and the *invoking*
+nvim calls the CLI **synchronously**, the CLI RPCs back into a blocked nvim and
+hangs until timeout. The Lua caller must use `vim.system` + callback (async),
+and/or the CLI must accept `--skip-sock <own>`.
+
+**Three plan claims corrected this cycle (all verified, not inherited):**
+
+1. **"The writer bundle auto-updates every 8 hours" is FALSE.** That workflow
+   (`.github/workflows/update-opencode-patched.yml`) bumps **opencode-patched**,
+   the opencode *binary*, in `home.base.nix`. **No** workflow touches
+   `session-state-plugin` — it rebuilds from repo source on `home-manager
+   switch`. So writer and reader ship on the *same vehicle, same commit, same
+   activation*. The `OVERLAY_VERSION` lockstep policy above is therefore
+   belt-and-braces for partial activations, **not** a different-vehicles skew
+   problem. Moving the merge to TS further lets `OVERLAY_VERSION` be one
+   imported constant inlined into both artifacts at build time.
+2. **`pkgs/nvims/test.sh` is NOT a headless-Lua harness** — it is a bash-mirror +
+   source-guard harness and invokes no nvim. The real `nvim -l` precedent is
+   `pkgs/oc-auto-attach/test-project-key.sh:682` (with a SKIP fallback when nvim
+   is absent). Copy that one in Task 4.
+3. **Do not reuse `pkgs/opencode-plugin-bundle` stage 2 verbatim.** Its
+   checkPhase asserts `typeof m.default === 'function'` ("Expected default export
+   to be a plugin factory function") and installs a bare `.js` with no bin and no
+   shebang. Reuse the **deps stage** (no second lockfile, no second TS build
+   ecosystem); fork stage 2 with a CLI checkPhase and a `makeWrapper` bin.
+
+**bun:sqlite is the chosen SQLite access path.** SQLite is compiled into the bun
+binary, so there is *zero* store-path-rot surface — which is the actual intent of
+"package with a nix sqlite dependency" below (that note targets `oc-search`'s
+hardcoded store paths, it does not mandate the `sqlite3` CLI). Supports
+`{readonly:true}` and `PRAGMA busy_timeout`. Bonus: Task 6 Step 1 becomes "test
+the query against a fixture DB" rather than "test the emitted SQL string", which
+is a strictly stronger test. Opacity guard is unaffected either way — still
+SQLite-only, no HTTP.
+
+---
+
+## Task 4 (DEMOTED — runs after Task 6): thin Lua caller
+
+**Superseded in part by the Cycle 6 decision above.** `overlay.merge`,
+`overlay.read`'s liveness logic, and GC now live in `oc-session-list` (Task 6).
+What remains here: invoke the CLI **asynchronously** (`vim.system` + callback —
+see the deadlock hazard above), `vim.json.decode` the result, and define the
+error surface when the CLI is missing, slow, or returns non-zero. Test with the
+`nvim -l` harness from `pkgs/oc-auto-attach/test-project-key.sh:682`.
+
+*Original text, retained for the semantics the CLI must now satisfy:*
 
 **Step 1: Write `test.sh`** asserting the pure `overlay.merge(files, opts)`
 matches Task 2's semantics: newest-wins; dead-pid/stale → `unknown` flag (not
