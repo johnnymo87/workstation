@@ -59,6 +59,13 @@ let
   # /run/secrets/opencode_server_password, trimmed, empty == auth off).
   opencode-serve-auth-sh = pkgs.callPackage ../../pkgs/opencode-serve-auth-sh { };
 
+  # Store-path reduction for the serve-canary's staleness comparison. Extracted
+  # 2026-08-01 (workstation-jj5x) so the comparison is unit-testable: the logic
+  # was correct but untested, and an untested comparison is one refactor away
+  # from the full-path form that reports STALE unconditionally.
+  # See pkgs/opencode-store-prefix-sh/test.sh.
+  opencode-store-prefix-sh = pkgs.callPackage ../../pkgs/opencode-store-prefix-sh { };
+
   # mn9r M5: serve-pool descriptor (single source of truth in
   # users/dev/serve-pool.nix). cloudbox = K=4 on ports 4096..4099, serve-0 ==
   # :4096. routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB) and
@@ -885,6 +892,10 @@ ${serveIdCase}
         source "${opencode-serve-auth-sh}"
         serve_auth_load
 
+        # Store-path reduction + reference shape gate for the staleness
+        # comparison below. Pure bash, so the minimal PATH above is irrelevant.
+        source "${opencode-store-prefix-sh}"
+
         STATE=/var/lib/opencode-serve-canary
         # Note: /var/lib/opencode-serve-canary is root-owned via StateDirectory
         # (eliminating any /tmp symlink/TOCTOU hazard) and persists across reboots.
@@ -929,10 +940,10 @@ ${serveIdCase}
         # FINAL COMPONENT DOES NOT EXIST. During a home-manager switch there is a window
         # where ~/.nix-profile/bin/opencode is missing, so REF_EXE came back as
         # `/nix/store/<hash>-profile/bin/opencode` — non-empty, but pointing at the
-        # PROFILE instead of through to the opencode package. `cut -f1-4` then yielded
-        # `…-profile` as REF_PREFIX, which cannot equal any serve's real prefix, so ALL
-        # FOUR serves were reported as drifted and escalated to "dangerous … pending
-        # alert". The serves were correct; the canary was wrong.
+        # PROFILE instead of through to the opencode package. Prefix reduction then
+        # yielded `…-profile` as REF_PREFIX, which cannot equal any serve's real prefix,
+        # so ALL FOUR serves were reported as drifted and escalated to "dangerous …
+        # pending alert". The serves were correct; the canary was wrong.
         #
         # Only the 2-consecutive-pass dampening stopped that becoming a false Telegram
         # page. That is a thin margin: a switch straddling two passes would page with a
@@ -947,18 +958,15 @@ ${serveIdCase}
         REF_EXE=$(readlink -f /home/dev/.nix-profile/bin/opencode 2>/dev/null || true)
         REF_PREFIX=""
         if [ -n "$REF_EXE" ] && [ -x "$REF_EXE" ]; then
-          REF_PREFIX_CANDIDATE=$(echo "$REF_EXE" | cut -d/ -f1-4)
+          REF_PREFIX_CANDIDATE=$(opencode_store_prefix "$REF_EXE")
           # Structural sanity: the reference MUST be an opencode package, not a profile,
           # a wrapper, or anything else a future refactor might resolve to. This catches
           # any wrong-shaped resolution, not just the missing-file case above.
-          case "$REF_PREFIX_CANDIDATE" in
-            /nix/store/*-opencode-patched-*)
-              REF_PREFIX="$REF_PREFIX_CANDIDATE"
-              ;;
-            *)
-              echo "NOTICE: reference binary resolved to an unexpected path; treating as unknown (no alert): $REF_EXE"
-              ;;
-          esac
+          if opencode_is_opencode_prefix "$REF_PREFIX_CANDIDATE"; then
+            REF_PREFIX="$REF_PREFIX_CANDIDATE"
+          else
+            echo "NOTICE: reference binary resolved to an unexpected path; treating as unknown (no alert): $REF_EXE"
+          fi
         elif [ -n "$REF_EXE" ]; then
           echo "NOTICE: reference binary path is not executable (home-manager switch in flight?); treating as unknown (no alert): $REF_EXE"
         fi
@@ -1090,7 +1098,11 @@ ${serveIdCase}
               if [ -n "$PID" ] && [ "$PID" != "0" ]; then
                 RUN_EXE=$(readlink "/proc/$PID/exe" 2>/dev/null || true)
                 if [ -n "$RUN_EXE" ]; then
-                  RUN_PREFIX=$(echo "$RUN_EXE" | cut -d/ -f1-4)
+                  # MUST be the store-path prefix, never $RUN_EXE itself: bin/opencode
+                  # execs bin/.opencode-wrapped, so the raw paths differ even when the
+                  # serve is fresh and a full-path equality check would report STALE on
+                  # every pass, forever. Locked by pkgs/opencode-store-prefix-sh/test.sh.
+                  RUN_PREFIX=$(opencode_store_prefix "$RUN_EXE")
                   if [ -n "$RUN_PREFIX" ]; then
                     VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
                     if [ "$RUN_PREFIX" != "$REF_PREFIX" ]; then

@@ -187,6 +187,22 @@
         bash assets/nvim/test-session-switcher.sh
         touch $out
       '';
+
+      # Locks the serve-canary's staleness comparison to a store-path PREFIX
+      # match. On 2026-08-01 an operator hand-wrote the full-path form
+      # (`readlink -f profile` vs `readlink /proc/<pid>/exe`), which reports
+      # STALE unconditionally because bin/opencode execs bin/.opencode-wrapped,
+      # and restarted the whole serve pool on that false signal, killing live
+      # sessions. The deployed canary was already correct -- and had no test at
+      # all, so nothing would have caught it regressing into that form.
+      # Bash-only; adds seconds. See pkgs/opencode-store-prefix-sh/test.sh.
+      store-prefix = devboxPkgs.runCommand "opencode-store-prefix-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        bash pkgs/opencode-store-prefix-sh/test.sh
+        touch $out
+      '';
     };
 
     # NixOS system configuration

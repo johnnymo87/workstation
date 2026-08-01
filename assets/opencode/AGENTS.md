@@ -170,9 +170,9 @@ Note: `ba config syncsecrets` still must run from the Mac — even with
 
 ## Backgrounding Long-Running Processes
 
-A bare `nohup ... &` can die when the parent shell is interrupted. To fully
-detach a process from the shell session (so Ctrl+C / shell exit doesn't kill
-it), use:
+A bare `nohup ... &` can die when the parent shell is interrupted. To detach a
+process from the **shell session** (so Ctrl+C / shell exit doesn't kill it),
+use:
 
 ```bash
 setsid nohup <command> < /dev/null > /tmp/log 2>&1 & disown
@@ -180,3 +180,57 @@ setsid nohup <command> < /dev/null > /tmp/log 2>&1 & disown
 
 Then verify the process is alive (`ps -p <pid>` or check for its expected
 side effect like a listening socket).
+
+### This does NOT survive `systemctl restart` of the unit you're in
+
+`setsid` and `nohup` escape the controlling terminal and the process session.
+They do **not** escape the systemd unit's **cgroup**. `systemctl restart` (and
+`stop`) kills the entire control group, so a `setsid nohup` child started from
+inside a unit dies with it.
+
+This matters constantly here, because an opencode bash tool call runs inside
+`opencode-serve@<port>.service`. Anything that restarts the serve pool — or any
+unit your session lives in — kills your "detached" job mid-flight.
+
+**Verified on cloudbox 2026-08-01** with a throwaway user unit: three children
+were started from inside the unit's cgroup, then the unit was restarted.
+
+| Launch pattern | Child's cgroup | Survived `systemctl restart`? |
+|---|---|---|
+| `setsid nohup ... & disown` | *same* `…/cgroup-escape-parent.service` | **No — killed** |
+| `systemd-run --user --scope --collect -- ...` | fresh `…/run-pNNN.scope` | Yes |
+| `systemd-run --user --unit=NAME --no-block -- ...` | own `…/NAME.service` | Yes |
+
+**Real incident that motivated this (bead workstation-4qvx):** a pool restart
+staged as `setsid nohup bash -c '...' & disown` from a session on serve `:4098`
+restarted 4096, 4097, 4098 — then died at 4098 and never reached 4099.
+
+### Correct pattern: escape the cgroup, then detach
+
+```bash
+# Fire-and-forget job that must outlive a restart of your own unit.
+# NOTE: transient units get a minimal PATH and no XDG_RUNTIME_DIR is set in
+# opencode bash calls -- pass both explicitly or the run fails with either
+# "Failed to connect to user scope bus" or exit 127 "bash: No such file".
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+systemd-run --user --unit=my-job --no-block --setenv=PATH="$PATH" \
+  bash -c '<command> >> /tmp/my-job.log 2>&1'
+```
+
+Use `--scope` instead when you need the job to inherit your stdio and run
+synchronously; use `--unit=... --no-block` for fire-and-forget with journal
+capture (`journalctl --user -u my-job`).
+
+`systemd-run` can fail even when systemd is healthy — most often when
+`XDG_RUNTIME_DIR` (`/run/user/$UID`) is **full**, which surfaces as the
+misleading "Failed to start transient scope unit: ... not found". Probe with a
+throwaway (`systemd-run --user --scope --collect --quiet -- true`) before
+committing to it, and degrade rather than hard-exit.
+`pkgs/reset-workspace/default.nix` implements exactly this (it restarts the
+serve pool it may itself be running inside); copy its shape rather than
+reinventing it.
+
+Two `pkill` footguns worth knowing, both hit while verifying the above:
+`pkill -f <pattern>` matches **your own** command line, so `pkill -f 'job scope'`
+issued from a shell whose argv contains that string kills the shell. Prefer
+`kill <pid>` on PIDs you captured, or bracket the pattern (`'[j]ob scope'`).

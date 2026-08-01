@@ -45,7 +45,11 @@ When `gws auth status` shows `token_valid: false`, re-authenticate.
   immediately after launch; if it's not up, the launch failed.
 - A bare `nohup ... &` can die when the shell is interrupted, taking the OAuth
   listener with it. Use `setsid nohup ... < /dev/null > log 2>&1 & disown` to
-  fully detach.
+  detach from the shell session. That is sufficient *here* — the OAuth listener
+  only has to outlive your shell, not a `systemctl restart`. It is NOT a general
+  detachment recipe: `setsid`/`nohup` do not escape the systemd **cgroup**, so
+  such a child still dies if the unit it started in is restarted. See
+  "Backgrounding Long-Running Processes" in the user-level `AGENTS.md`.
 - Verifying the listener is **mandatory**, not optional. If it's dead, the URL
   you give the user will 404 on callback and you'll waste their time.
 
