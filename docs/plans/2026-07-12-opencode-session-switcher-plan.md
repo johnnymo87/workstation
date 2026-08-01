@@ -935,6 +935,17 @@ the switcher renders nothing useful until this is understood.** Investigate
 before building the picker on top (Tasks 4/8/9), and note that the deployed
 build is #230's — #232 is merged but NOT deployed.
 
+**Task 8 input (from cycle 6 adversarial review): distinguish "no data" from
+"authoritatively idle".** The reader already holds `owners[sid]` and the overlay
+file list, so when `owners[sid]` exists but NO live file matches
+`(ownerServe, session.directory)`, that is *no data* — materially different from
+"the live owner is silent, therefore idle". Today both flatten to
+`activity: "idle"` (`oc-session-list-state.ts`, the `else` branch of
+`queryWithState`). Emitting `unknown` (or a distinct `nodata`) for that case
+would have made the writer-coverage hole above *scream* rather than whisper: the
+129-rows-zero-state smoke result would have shown 129 `nodata` instead of a
+confident wall of `idle`. Cheap, and it belongs in the row model.
+
 Incidental corroboration of the GC requirement: the live overlay dir contains
 `/tmp/opencode/probe-dir`, `/tmp/opencode/probe-dir2` and
 `/tmp/session-state-test-1785515432827` — leftover probe files from earlier
