@@ -23,13 +23,14 @@ bad()   { printf 'FAIL: %s\n' "$1"; fail=1; }
 new_fixture() {
   local fix; fix="$(mktemp -d)"
   ( cd "$repo_root" \
-    && cp --parents "$guard" "$table" $(printf '%s\n' \
+    && cp --parents --no-preserve=mode "$guard" "$table" $(printf '%s\n' \
          pkgs/*/default.nix \
          users/dev/home.base.nix users/dev/home.darwin.nix \
          users/dev/home.devbox.nix users/dev/home.cloudbox.nix \
          hosts/cloudbox/configuration.nix hosts/devbox/configuration.nix \
          2>/dev/null | while read -r f; do [ -f "$f" ] && echo "$f"; done) \
          "$fix/" )
+  chmod -R +w "$fix"
   printf '%s' "$fix"
 }
 
