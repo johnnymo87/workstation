@@ -1055,6 +1055,7 @@ ${serveIdCase}
       Environment = [
         "FRONTDOOR_PORT=4700"
         "PIGEON_DAEMON_URL=http://127.0.0.1:4731"
+        # frontdoor-exempt(C3): door's own upstream anchor on devbox
         "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
         # Builtins-only app (nothing reads NODE_ENV today) — set for convention/
         # consistency with pigeon-daemon and to future-proof any added dependency.
@@ -1248,6 +1249,7 @@ EOF
 
         # 3. HTTP 503 -> cross-probe the anchor (:4096) directly
         if [ "$HTTP_CODE" -eq 503 ]; then
+          # frontdoor-exempt(C4): frontdoor canary cross-probes anchor directly to distinguish door down from pool down
           ANCHOR_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:4096/global/health")
           if [ "$ANCHOR_CODE" -eq 200 ]; then
             rm -f "$FAILFILE"
