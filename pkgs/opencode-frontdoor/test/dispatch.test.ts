@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import { classify, dispatch } from '../src/dispatch.js';
+import { classify, dispatch, isPoolSafe } from '../src/dispatch.js';
 import { ROUTE_CLASSIFICATION_TABLE } from '../src/routes.classification.js';
 import { normalizePath, compilePathTemplate } from '../src/path-template.js';
 
@@ -334,13 +334,46 @@ describe('Route Dispatcher', () => {
     });
   });
 
-  test('GET /doc -> global-ro/forward-anchor', () => {
+  test('GET /doc -> global-ro/forward-pool', () => {
     expect(classify('GET', '/doc')).toBe('global-ro');
     expect(dispatch('GET', '/doc')).toEqual({
       class: 'global-ro',
-      action: 'forward-anchor',
+      action: 'forward-pool',
       recognized: true,
       allowedMethods: [],
+    });
+  });
+
+  describe('forward-pool dispatch for poolSafe global-ro routes', () => {
+    test('dispatches a flagged global-ro route to forward-pool', () => {
+      expect(dispatch('GET', '/api/provider').action).toBe('forward-pool');
+      expect(dispatch('GET', '/api/model').action).toBe('forward-pool');
+      expect(isPoolSafe('GET', '/api/provider')).toBe(true);
+      expect(isPoolSafe('GET', '/api/model')).toBe(true);
+    });
+
+    test('keeps unflagged global-ro on forward-anchor', () => {
+      expect(dispatch('GET', '/permission').action).toBe('forward-anchor');
+      expect(dispatch('GET', '/config').action).toBe('forward-anchor');
+      expect(dispatch('GET', '/session/status').action).toBe('forward-anchor');
+      expect(isPoolSafe('GET', '/permission')).toBe(false);
+      expect(isPoolSafe('GET', '/config')).toBe(false);
+      expect(isPoolSafe('GET', '/session/status')).toBe(false);
+    });
+
+    test('reports class global-ro either way', () => {
+      expect(dispatch('GET', '/api/provider').class).toBe('global-ro');
+      expect(dispatch('GET', '/permission').class).toBe('global-ro');
+    });
+
+    test('resolves flagged templated routes', () => {
+      expect(dispatch('GET', '/api/provider/anthropic').action).toBe('forward-pool');
+      expect(isPoolSafe('GET', '/api/provider/anthropic')).toBe(true);
+    });
+
+    test('treats HEAD like GET for flagged routes', () => {
+      expect(dispatch('HEAD', '/api/provider').action).toBe('forward-pool');
+      expect(isPoolSafe('HEAD', '/api/provider')).toBe(true);
     });
   });
 

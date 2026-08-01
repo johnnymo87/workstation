@@ -148,6 +148,7 @@ const NON_DENYING_ACTIONS = new Set<RouteAction>([
   'create',
   'fork',
   'forward-anchor',
+  'forward-pool',
 ]);
 
 // Allowlist for legitimately table-only dispositions (routes deliberately not declared in /doc).

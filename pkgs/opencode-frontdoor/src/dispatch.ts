@@ -8,14 +8,20 @@ export type RouteAction =
   | 'pty-501'
   | 'tui-501'
   | 'forward-anchor'
+  | 'forward-pool'
   | 'deny-global-mutation'
   | 'deny-per-process-501'
   | 'gone-410'
   | 'not-found-404';
 
 // Precompute structures at module load
-const exactRoutes = new Map<string, RouteClass>();
-const patternRoutes: Array<{ method: string; regex: RegExp; class: RouteClass }> = [];
+interface PrecomputedRoute {
+  class: RouteClass;
+  poolSafe?: boolean;
+}
+
+const exactRoutes = new Map<string, PrecomputedRoute>();
+const patternRoutes: Array<{ method: string; regex: RegExp; class: RouteClass; poolSafe?: boolean }> = [];
 const globalRoMethodsMap = new Map<string, Set<string>>();
 
 for (const entry of ROUTE_CLASSIFICATION_TABLE) {
@@ -38,13 +44,14 @@ for (const entry of ROUTE_CLASSIFICATION_TABLE) {
       method: upperMethod,
       regex,
       class: entry.class,
+      poolSafe: entry.poolSafe,
     });
   } else {
     const existing = exactRoutes.get(key);
-    if (existing && existing !== entry.class) {
-      throw new Error(`Table bug: Duplicate route key "${key}" has conflicting classes "${existing}" and "${entry.class}"`);
+    if (existing && existing.class !== entry.class) {
+      throw new Error(`Table bug: Duplicate route key "${key}" has conflicting classes "${existing.class}" and "${entry.class}"`);
     }
-    exactRoutes.set(key, entry.class);
+    exactRoutes.set(key, { class: entry.class, poolSafe: entry.poolSafe });
   }
 }
 
@@ -64,35 +71,40 @@ for (const [path, methods] of globalRoMethodsSorted.entries()) {
   }
 }
 
-export function classify(method: string, pathname: string): RouteClass {
+function findRouteEntry(method: string, pathname: string): PrecomputedRoute | null {
   const normalizedMethod = method.toUpperCase();
   const normalizedPath = normalizePath(pathname);
 
   // 1. Exact match first
   const key = `${normalizedMethod} ${normalizedPath}`;
-  const exactClass = exactRoutes.get(key);
-  if (exactClass) {
-    return exactClass;
+  const exact = exactRoutes.get(key);
+  if (exact) {
+    return exact;
   }
 
-  // 2. Pattern match next. First match wins, in ROUTE_CLASSIFICATION_TABLE
-  // order. Today the templated routes are non-overlapping so order is
-  // immaterial; if an overlapping pattern is ever added (e.g. a broad
-  // catch-all), its placement in the table decides precedence — keep the more
-  // specific pattern earlier.
+  // 2. Pattern match next. First match wins, in ROUTE_CLASSIFICATION_TABLE order.
   for (const pattern of patternRoutes) {
     if (pattern.method === normalizedMethod && pattern.regex.test(normalizedPath)) {
-      return pattern.class;
+      return pattern;
     }
   }
 
-  // If HEAD, retry classification as GET
-  if (normalizedMethod === "HEAD") {
-    return classify("GET", pathname);
+  // If HEAD, retry resolution as GET
+  if (normalizedMethod === 'HEAD') {
+    return findRouteEntry('GET', pathname);
   }
 
-  // 3. Fallback to unrecognized
-  return 'unrecognized';
+  return null;
+}
+
+export function classify(method: string, pathname: string): RouteClass {
+  const entry = findRouteEntry(method, pathname);
+  return entry ? entry.class : 'unrecognized';
+}
+
+export function isPoolSafe(method: string, pathname: string): boolean {
+  const entry = findRouteEntry(method, pathname);
+  return Boolean(entry?.poolSafe);
 }
 
 export function dispatch(method: string, pathname: string): {
@@ -101,7 +113,8 @@ export function dispatch(method: string, pathname: string): {
   recognized: boolean;
   allowedMethods: string[];
 } {
-  const cls = classify(method, pathname);
+  const entry = findRouteEntry(method, pathname);
+  const cls = entry ? entry.class : 'unrecognized';
   let action: RouteAction = 'not-found-404';
 
   switch (cls) {
@@ -122,7 +135,7 @@ export function dispatch(method: string, pathname: string): {
       action = 'tui-501';
       break;
     case 'global-ro':
-      action = 'forward-anchor';
+      action = entry?.poolSafe ? 'forward-pool' : 'forward-anchor';
       break;
     case 'global-sideeffect':
       action = 'deny-global-mutation';
