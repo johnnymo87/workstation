@@ -143,4 +143,15 @@ else
 fi
 rm -rf "$fix" "$out"
 
+# Case: adding a serve site to a governed file that has NO manifest line and NO sites
+# (e.g. home.base.nix) must fail, proving dropping 0-count lines did not open a hole.
+fix="$(new_fixture)"; out="$(mktemp)"
+printf '\n  probe = "http://127.0.0.1:4096/global/health";\n' >> "$fix/users/dev/home.base.nix"
+if run_guard "$fix" "$out"; then
+  bad "manifest: adding a site to a file absent from the manifest passed -- hole opened by dropping 0-lines"
+else
+  pass_ "manifest: adding a site to an unlisted file is caught"
+fi
+rm -rf "$fix" "$out"
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }

@@ -205,6 +205,8 @@ for f in "${files[@]}"; do
 done
 
 # Per-file expected site counts. SORTED BY PATH, one file per line.
+# Only files with >0 serve-addressing sites are listed. Adding the first site to a
+# file requires adding a line here.
 #
 # WHY NOT A SINGLE SCALAR: `EXPECTED_SITES=14` merged WRONG rather than
 # conflicting. Two concurrent PRs each adding one site both write 15; git sees an
@@ -221,34 +223,8 @@ done
 read -r -d '' EXPECTED_MANIFEST <<'MANIFEST' || true
 hosts/cloudbox/configuration.nix 6
 hosts/devbox/configuration.nix 2
-pkgs/ask-question/default.nix 0
-pkgs/bb/default.nix 0
-pkgs/beads/default.nix 0
-pkgs/caveman/default.nix 0
-pkgs/claude-failover-proxy/default.nix 0
-pkgs/clerk/default.nix 0
-pkgs/gclpr/default.nix 0
-pkgs/git-work/default.nix 0
-pkgs/gws/default.nix 0
-pkgs/lgtm-gh/default.nix 0
-pkgs/nvims/default.nix 0
-pkgs/oc-auto-attach/default.nix 0
-pkgs/oc-cost/default.nix 0
-pkgs/oc-pool-attach/default.nix 0
-pkgs/oc-session-list/default.nix 0
-pkgs/opencode-drift-alert/default.nix 0
-pkgs/opencode-frontdoor/default.nix 0
 pkgs/opencode-launch/default.nix 2
-pkgs/opencode-plugin-bundle/default.nix 0
-pkgs/opencode-serve-auth-sh/default.nix 0
 pkgs/reset-workspace/default.nix 3
-pkgs/self-compact-plugin/default.nix 0
-pkgs/session-state-plugin/default.nix 0
-pkgs/teamclaude/default.nix 0
-pkgs/terraform/default.nix 0
-pkgs/vercel/default.nix 0
-users/dev/home.base.nix 0
-users/dev/home.cloudbox.nix 0
 users/dev/home.darwin.nix 1
 users/dev/home.devbox.nix 2
 MANIFEST
@@ -261,12 +237,15 @@ while read -r mfile mcount; do
   fi
 done <<< "$EXPECTED_MANIFEST"
 
-# A governed file missing from the manifest is a hole: sites there would be
-# counted by no one.
+# A file WITH sites that no manifest line counts is a hole. A file with zero
+# sites needs no line: it hides nothing, and demanding one would fail every
+# unrelated new package (including the auto-merge bot PRs that add them),
+# training people to silence the manifest rather than read it.
 for f in "${files[@]}"; do
+  [ "${sites_per_file[$f]:-0}" -gt 0 ] || continue
   case "$EXPECTED_MANIFEST" in
     *"$f "*) ;;
-    *) bad "$f is governed but absent from EXPECTED_MANIFEST -- add a line for it (0 is a valid count)" ;;
+    *) bad "$f has ${sites_per_file[$f]} serve-addressing site(s) but no EXPECTED_MANIFEST line -- add one, plus the frontdoor-exempt marker and the disposition-table row, in the same PR" ;;
   esac
 done
 
