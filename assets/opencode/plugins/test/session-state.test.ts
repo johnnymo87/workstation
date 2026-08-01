@@ -5,7 +5,6 @@ import {
   emptyState,
   seedFromSnapshot,
   serializeOverlay,
-  mergeOverlays,
   checkServePortFence,
   isPoolServeProcess,
   OVERLAY_VERSION,
@@ -18,6 +17,7 @@ import {
   type OverlayData,
   type StateMap,
 } from "../session-state-impl"
+import { mergeOverlays } from "../session-state-merge"
 
 const ev = (type: string, properties: any) => ({ type, properties })
 
