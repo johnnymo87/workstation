@@ -66,6 +66,39 @@ describe("oc-session-list base query", () => {
 
     // The last row must be root_2
     expect(rows[3].id).toBe("root_2");
+
+    // THE ACTUAL CONTRACT: every member of the tree resolves to the TRUE root.
+    // Without this, the assertions above pass even when the walk is crippled to
+    // a single level, because with a generous limit both roots survive and the
+    // row set / ordering come out identical either way. Proven by mutation
+    // testing (depth < 8 -> depth < 1 left all 8 tests green), 2026-07-31.
+    const rootOf = Object.fromEntries(rows.map((r) => [r.id, r.root_id]));
+    expect(rootOf["root_1"]).toBe("root_1");
+    expect(rootOf["child_1"]).toBe("root_1");
+    expect(rootOf["grandchild_1"]).toBe("root_1"); // NOT "child_1"
+    expect(rootOf["root_2"]).toBe("root_2");
+  });
+
+  it("a recently-active GRANDCHILD keeps its older root's whole tree in the top-N", () => {
+    // This is the plan's stated purpose for ranking per root, and it is the
+    // discriminating case: with limit=1 a single-level lift would rank
+    // child_1's pseudo-tree (just the grandchild) and drop root_1 and child_1
+    // from the output entirely.
+    const db = createTestDb();
+    db.exec(`
+      INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated, time_archived) VALUES
+        ('root_1', 'p1', NULL, 'root-1', '/proj', 'Root', '1.0', 1000, 1000, NULL),
+        ('child_1', 'p1', 'root_1', 'child-1', '/proj', 'Child', '1.0', 1000, 2000, NULL),
+        ('grandchild_1', 'p1', 'child_1', 'gc-1', '/proj', 'Grandchild', '1.0', 1000, 3000, NULL),
+        ('root_2', 'p1', NULL, 'root-2', '/proj', 'Other Root', '1.0', 500, 500, NULL)
+    `);
+
+    const rows = queryBaseList(db, { limit: 1 });
+
+    // Exactly ONE root selected, and it must be root_1 -- brought to the top by
+    // its grandchild's recency -- with its ENTIRE tree returned.
+    expect(rows.map((r) => r.id).sort()).toEqual(["child_1", "grandchild_1", "root_1"]);
+    expect(new Set(rows.map((r) => r.root_id))).toEqual(new Set(["root_1"]));
   });
 
   it("excludes archived sessions (time_archived IS NOT NULL)", () => {
