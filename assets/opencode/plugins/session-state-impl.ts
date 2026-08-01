@@ -13,6 +13,11 @@ export function getSelfCmdline(filePath = "/proc/self/cmdline"): string {
 export type Activity = "working" | "blocked" | "idle" | "retry" | "error" | "unknown"
 
 export interface SessionEntry {
+  // Do NOT add "nodata" here to "align" this with SessionWithStateRow.activity.
+  // nodata is READER-SYNTHESIZED (it means no writer was watching) and can never
+  // be observed by a writer, so it must not enter the wire format. Adding it
+  // would also silently break evictIdleSessions below, which treats any activity
+  // !== "idle" as busy and would therefore never evict such an entry.
   activity: "working" | "idle" | "retry" // raw status axis
   error: boolean // sticky until next busy
   pendingPermissions: string[]

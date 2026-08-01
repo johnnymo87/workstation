@@ -465,6 +465,19 @@ if [ -f "$default_nix" ]; then
     echo "FAIL: sentinel write must precede pkill (sentinel at ${sentinel_line:-?}, pkill at ${pkill_line:-?})"; fail=1
   fi
 
+  # E138 guard: orphaned main.shada.tmp.<a-z> left by the SIGKILL accumulate
+  # until all 26 suffixes are taken, after which nvim can no longer persist
+  # shada. The reap must run AFTER the kill (no live nvim owns the temps) and
+  # must never touch main.shada itself.
+  want_grep "source reaps orphaned shada temps"          "-name '*.shada.tmp.*' -delete"
+  refuse_grep "shada reap does not delete main.shada"    'rm -f "$SHADA_DIR"/main.shada$'
+  reap_line=$(grep -n "shada.tmp.\*' -delete" "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$reap_line" ] && [ -n "$pkill_line" ] && [ "$pkill_line" -lt "$reap_line" ]; then
+    echo "ok: shada temp reap runs after the nvim kill"
+  else
+    echo "FAIL: shada reap must follow pkill (pkill at ${pkill_line:-?}, reap at ${reap_line:-?})"; fail=1
+  fi
+
   # workstation-3smg: the manifest write must precede the pool restart, so a
   # restart/health-poll die can't discard a successful capture.
   manifest_line=$(grep -n 'MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"' "$default_nix" | head -1 | cut -d: -f1)
