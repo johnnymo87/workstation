@@ -9,6 +9,7 @@ pkgs.writeShellApplication {
     procps         # pkill, pgrep
     util-linux     # flock
     coreutils      # timeout
+    findutils      # find (ShaDa temp reap)
     systemd        # systemd-run for cgroup re-exec
   ];
   text = ''
@@ -739,6 +740,26 @@ EOF
       log "  pkill returned matches"
     else
       log "  pkill returned no matches (none running, or already dead)"
+    fi
+
+    # ---- Step 3.5: Reap orphaned ShaDa temp files ----
+    # nvim writes its ShaDa file by creating `main.shada.tmp.<a-z>` and renaming
+    # it over `main.shada`. A SIGKILL (Step 3) landing mid-write leaves the temp
+    # behind. Those leftovers are never cleaned up by nvim, so they accumulate
+    # one reset at a time until all 26 suffixes are taken -- at which point every
+    # subsequent nvim start/exit warns `E138: All main.shada.tmp.X files exist,
+    # cannot write ShaDa file!` and shada history silently stops persisting.
+    # Safe to remove unconditionally here: Step 3 just killed every dev-owned
+    # nvim, so no live process owns any of these temps. `main.shada` itself is
+    # never touched. Best-effort; a failure never fails the reset.
+    SHADA_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/nvim/shada"
+    if [ -d "$SHADA_DIR" ]; then
+      shada_orphans=$(find "$SHADA_DIR" -maxdepth 1 -name '*.shada.tmp.*' 2>/dev/null | wc -l)
+      if [ "$shada_orphans" -gt 0 ]; then
+        log "reaping $shada_orphans orphaned ShaDa temp file(s) in $SHADA_DIR ..."
+        find "$SHADA_DIR" -maxdepth 1 -name '*.shada.tmp.*' -delete 2>/dev/null || \
+          log "  WARNING: ShaDa temp reap failed (non-fatal); continuing reset"
+      fi
     fi
 
     # ---- Step 4: Prune merged launch worktrees ----
