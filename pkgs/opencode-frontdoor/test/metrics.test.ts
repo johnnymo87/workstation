@@ -4,7 +4,7 @@ import { createMetrics } from '../src/metrics.js';
 describe('metrics', () => {
   test('creates a metrics object starting at 0', () => {
     const metrics = createMetrics();
-    expect(metrics).toEqual({ degradedRequests: 0, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0 });
+    expect(metrics).toEqual({ degradedRequests: 0, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0, poolFailover: 0 });
   });
 
   test('can increment degradedRequests', () => {
@@ -23,5 +23,11 @@ describe('metrics', () => {
     const metrics = createMetrics();
     metrics.htmlPoisonBlocked++;
     expect(metrics.htmlPoisonBlocked).toBe(1);
+  });
+
+  test('can increment poolFailover', () => {
+    const metrics = createMetrics();
+    metrics.poolFailover++;
+    expect(metrics.poolFailover).toBe(1);
   });
 });

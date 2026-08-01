@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { createFrontDoor } from "../src/server.js";
+import { resetPoolCursor } from "../src/proxy.js";
 import type { Config } from "../src/config.js";
 import { StickyMap } from "../src/sticky.js";
 import { createMetrics, type Metrics } from "../src/metrics.js";
@@ -404,6 +405,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
@@ -950,6 +952,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
@@ -1036,6 +1039,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
@@ -1128,6 +1132,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      poolUrls: [`http://127.0.0.1:${slowServerPort}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 100, // 100ms wall-clock limit
       stickyTtlMs: 30000,
@@ -1201,6 +1206,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      poolUrls: [`http://127.0.0.1:${slowServerPort}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 100, // 100ms
       stickyTtlMs: 30000,
@@ -1265,6 +1271,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${slowServerPort}`,
+      poolUrls: [`http://127.0.0.1:${slowServerPort}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 100, // 100ms
       stickyTtlMs: 30000,
@@ -1359,6 +1366,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${healthServerPort}`,
+      poolUrls: [`http://127.0.0.1:${healthServerPort}`],
       routeTimeoutMs: 100,
       cheapFirstByteMs: 50, // very small
       wedgeProbeIntervalMs: 30, // probe every 30ms
@@ -1433,6 +1441,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${healthServerPort}`,
+      poolUrls: [`http://127.0.0.1:${healthServerPort}`],
       routeTimeoutMs: 100,
       cheapFirstByteMs: 50,
       wedgeProbeIntervalMs: 30, // probe every 30ms
@@ -1584,6 +1593,7 @@ describe("FrontDoor Integration", () => {
       version: 'unknown',
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 250, // very short sticky lease
@@ -1974,6 +1984,7 @@ describe("FrontDoor Integration", () => {
       version: "unknown",
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 10000, // half stickyTtlMs is 5000
@@ -2086,6 +2097,7 @@ describe("FrontDoor Integration", () => {
       version: "unknown",
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 10000,
@@ -2195,6 +2207,7 @@ describe("FrontDoor Integration", () => {
       version: "unknown",
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 10000, // half is 5000
@@ -2248,6 +2261,7 @@ describe("FrontDoor Integration", () => {
       version: "unknown",
       pigeonUrl: `http://127.0.0.1:${portPigeon}`,
       anchorUrl: `http://127.0.0.1:${portAnchor}`,
+      poolUrls: [`http://127.0.0.1:${portAnchor}`],
       routeTimeoutMs: 1000,
       cheapFirstByteMs: 1000,
       stickyTtlMs: 30000,
@@ -2590,6 +2604,243 @@ describe("FrontDoor Integration", () => {
       expect(json.allowed).toEqual(["GET"]);
       expect(json.remedy).toBeTruthy();
       expect(json.message).toContain("Allowed through the door: GET");
+    });
+  });
+
+  describe("forward-pool round-robin and failover (Task 4)", () => {
+    let s1: http.Server;
+    let s2: http.Server;
+    let s3: http.Server;
+    let port1: number;
+    let port2: number;
+    let port3: number;
+    let counts: Record<number, number>;
+    let fdServer: http.Server;
+    let fdPort: number;
+    let fdMetrics: Metrics;
+
+    beforeEach(async () => {
+      resetPoolCursor();
+      counts = { 1: 0, 2: 0, 3: 0 };
+
+      s1 = http.createServer((req, res) => {
+        counts[1]++;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ serve: 1, path: req.url }));
+      });
+      s2 = http.createServer((req, res) => {
+        counts[2]++;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ serve: 2, path: req.url }));
+      });
+      s3 = http.createServer((req, res) => {
+        counts[3]++;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ serve: 3, path: req.url }));
+      });
+
+      await Promise.all([
+        new Promise<void>((r) => s1.listen(0, "127.0.0.1", () => r())),
+        new Promise<void>((r) => s2.listen(0, "127.0.0.1", () => r())),
+        new Promise<void>((r) => s3.listen(0, "127.0.0.1", () => r())),
+      ]);
+
+      port1 = (s1.address() as AddressInfo).port;
+      port2 = (s2.address() as AddressInfo).port;
+      port3 = (s3.address() as AddressInfo).port;
+
+      const fdConfig: Config = {
+        port: 0,
+        version: "test",
+        pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+        anchorUrl: `http://127.0.0.1:${port3}`,
+        poolUrls: [
+          `http://127.0.0.1:${port1}`,
+          `http://127.0.0.1:${port2}`,
+          `http://127.0.0.1:${port3}`,
+        ],
+        routeTimeoutMs: 1000,
+        cheapFirstByteMs: 300,
+        stickyTtlMs: 30000,
+        driftCheckMs: 5000,
+        wedgeProbeIntervalMs: 5000,
+        mintTimeoutMs: 1000,
+      };
+
+      fdMetrics = createMetrics();
+      fdServer = createFrontDoor(fdConfig, { metrics: fdMetrics });
+      await new Promise<void>((r) => fdServer.listen(0, "127.0.0.1", () => r()));
+      fdPort = (fdServer.address() as AddressInfo).port;
+    });
+
+    afterEach(async () => {
+      if (fdServer) fdServer.close();
+      if (s1 && s1.listening) s1.close();
+      if (s2 && s2.listening) s2.close();
+      if (s3 && s3.listening) s3.close();
+    });
+
+    function reqDoor(path: string): Promise<{ status: number; body: string }> {
+      return new Promise((resolve, reject) => {
+        const req = http.request(
+          `http://127.0.0.1:${fdPort}${path}`,
+          { method: "GET" },
+          (res) => {
+            let body = "";
+            res.on("data", (chunk) => (body += chunk));
+            res.on("end", () => resolve({ status: res.statusCode || 0, body }));
+          }
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    }
+
+    test("round-robins successive poolSafe reads across members", async () => {
+      for (let i = 0; i < 6; i++) {
+        const res = await reqDoor("/api/provider");
+        expect(res.status).toBe(200);
+      }
+      expect(counts[1]).toBe(2);
+      expect(counts[2]).toBe(2);
+      expect(counts[3]).toBe(2);
+    });
+
+    test("keeps unflagged global-ro pinned to the anchor", async () => {
+      for (let i = 0; i < 4; i++) {
+        const res = await reqDoor("/config");
+        expect(res.status).toBe(200);
+      }
+      expect(counts[1]).toBe(0);
+      expect(counts[2]).toBe(0);
+      expect(counts[3]).toBe(4);
+    });
+
+    test("fails over to the next member when one refuses the connection", async () => {
+      // Close s2 so port2 refuses connections
+      await new Promise<void>((r) => s2.close(() => r()));
+
+      const initialFailovers = fdMetrics.poolFailover;
+
+      // Issue 3 requests. Request 2 would normally hit s2 (port2), but must failover and return 200.
+      for (let i = 0; i < 3; i++) {
+        const res = await reqDoor("/api/provider");
+        expect(res.status).toBe(200);
+      }
+      expect(counts[2]).toBe(0);
+      expect(counts[1] + counts[3]).toBe(3);
+      expect(fdMetrics.poolFailover).toBeGreaterThan(initialFailovers);
+    });
+
+    test("tries the anchor last during failover", async () => {
+      // Close s1 and s2
+      await new Promise<void>((r) => s1.close(() => r()));
+      await new Promise<void>((r) => s2.close(() => r()));
+
+      // Request that selects s1 or s2 primary will failover to s3 (anchor) last and succeed
+      const res = await reqDoor("/api/provider");
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body).serve).toBe(3);
+    });
+
+    test("returns 502/503 when every member refuses", async () => {
+      await new Promise<void>((r) => s1.close(() => r()));
+      await new Promise<void>((r) => s2.close(() => r()));
+      await new Promise<void>((r) => s3.close(() => r()));
+
+      const res = await reqDoor("/api/provider");
+      expect([502, 503]).toContain(res.status);
+    });
+
+    test("does not accumulate res close listeners or unpipe leaks on failover", async () => {
+      // Close s1 and s2 so request fails over twice before hitting s3
+      await new Promise<void>((r) => s1.close(() => r()));
+      await new Promise<void>((r) => s2.close(() => r()));
+
+      let capturedReq: http.IncomingMessage | undefined;
+      let capturedRes: http.ServerResponse | undefined;
+      const onRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+        capturedReq = req;
+        capturedRes = res;
+      };
+      fdServer.on("request", onRequest);
+
+      let closeListenersOnS3 = -1;
+      let activePipeCountOnS3 = -1;
+      s3.removeAllListeners("request");
+      s3.on("request", (_req, res) => {
+        if (capturedRes) {
+          closeListenersOnS3 = capturedRes.listenerCount("close");
+        }
+        if (capturedReq) {
+          const pipes = (capturedReq as any)._readableState?.pipes;
+          activePipeCountOnS3 = Array.isArray(pipes) ? pipes.length : (pipes ? 1 : 0);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ serve: 3 }));
+      });
+
+      const res = await reqDoor("/api/provider");
+      expect(res.status).toBe(200);
+      // 1 from top-level logResponse middleware + 1 from active proxyRequest = 2 (not accumulated 4 from failed attempts)
+      expect(closeListenersOnS3).toBe(2);
+      // Failover attempts unpiped dead upstreams, so pipe count is <= 1 (not accumulating 3 dead targets)
+      expect(activePipeCountOnS3).toBeLessThanOrEqual(1);
+
+      fdServer.off("request", onRequest);
+    });
+
+    test("behaves exactly as before when poolUrls is [anchorUrl]", async () => {
+      const singleFdConfig: Config = {
+        port: 0,
+        version: "test",
+        pigeonUrl: `http://127.0.0.1:${portPigeon}`,
+        anchorUrl: `http://127.0.0.1:${port3}`,
+        poolUrls: [`http://127.0.0.1:${port3}`],
+        routeTimeoutMs: 1000,
+        cheapFirstByteMs: 300,
+        stickyTtlMs: 30000,
+        driftCheckMs: 5000,
+        wedgeProbeIntervalMs: 5000,
+        mintTimeoutMs: 1000,
+      };
+      const singleFd = createFrontDoor(singleFdConfig, { metrics: createMetrics() });
+      await new Promise<void>((r) => singleFd.listen(0, "127.0.0.1", () => r()));
+      const singlePort = (singleFd.address() as AddressInfo).port;
+
+      for (let i = 0; i < 3; i++) {
+        const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+          http.get(`http://127.0.0.1:${singlePort}/api/provider`, (r) => {
+            let b = "";
+            r.on("data", (c) => (b += c));
+            r.on("end", () => resolve({ status: r.statusCode || 0, body: b }));
+          }).on("error", reject);
+        });
+        expect(res.status).toBe(200);
+      }
+      expect(counts[3]).toBe(3);
+      expect(counts[1]).toBe(0);
+      expect(counts[2]).toBe(0);
+      singleFd.close();
+    });
+
+    test("does not retry on a first-byte timeout (only on connection errors)", async () => {
+      // Re-create s1 to stall (accept connection, never send response)
+      await new Promise<void>((r) => s1.close(() => r()));
+      s1 = http.createServer((_req, _res) => {
+        counts[1]++;
+        // do not write headers or end response
+      });
+      await new Promise<void>((r) => s1.listen(port1, "127.0.0.1", () => r()));
+
+      resetPoolCursor();
+      // Issue 1 request (cursor starts at 0 -> targets s1)
+      const res = await reqDoor("/api/provider");
+      expect(res.status).toBe(503);
+      expect(counts[1]).toBe(1);
+      // s2 and s3 must NOT have been called (no retry on timeout!)
+      expect(counts[2]).toBe(0);
+      expect(counts[3]).toBe(0);
     });
   });
 });

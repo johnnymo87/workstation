@@ -62,6 +62,7 @@
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
+      oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
       # NOTE: `opencode-frontdoor-route-gate` is deliberately NOT exposed here.
       # It needs the PINNED opencode, and that pin lives in

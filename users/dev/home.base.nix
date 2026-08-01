@@ -555,6 +555,9 @@ in
     # OpenCode usage and cost reporting
     localPkgs.oc-cost
 
+    # OpenCode session list CLI
+    localPkgs.oc-session-list
+
     # Mobile shell (survives sleep/wake, network changes)
     pkgs.mosh
 

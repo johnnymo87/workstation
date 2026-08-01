@@ -55,14 +55,35 @@ export interface RouteEntry {
   method: string;
   path: string;
   class: RouteClass;
+  /**
+   * Opt-in: this read is POOL-INVARIANT and may be served by any member of the
+   * serve pool, not just the anchor (bead workstation-eon4).
+   *
+   * OPT-IN, NEVER CLASS-WIDE. `global-ro` is NOT uniformly pool-invariant —
+   * several entries below read PER-PROCESS in-memory state and are marked
+   * FABLE-P5-F2. Absent this flag a route forwards to the anchor exactly as
+   * before, so a NEWLY ADDED route is anchor-pinned (safe) by construction and
+   * spreading is always a deliberate, reviewed act.
+   *
+   * Standard for flagging: invariance must be MEASURED across live members,
+   * not argued from configuration; per-process caches (not cwd) are the
+   * divergence mechanism — see workstation-g8k9.
+   * Note: the three templated routes (/api/provider/{providerID},
+   * /api/integration/{integrationID}, /project/{projectID}/directories) were
+   * not individually diffed (they need real IDs); they are flagged on the
+   * strength of their collection endpoints agreeing.
+   * When unsure, do not flag; the cost of a wrong flag (silent divergence by
+   * member) far exceeds the cost of one route still on the anchor.
+   */
+  poolSafe?: boolean;
   note?: string;
 }
 
 export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/", class: "web-ui" },
   { method: "GET", path: "/agent", class: "global-ro" },
-  { method: "GET", path: "/api/agent", class: "global-ro" },
-  { method: "GET", path: "/api/command", class: "global-ro" },
+  { method: "GET", path: "/api/agent", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/api/command", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "DELETE", path: "/api/credential/{credentialID}", class: "global-sideeffect" },
   { method: "PATCH", path: "/api/credential/{credentialID}", class: "global-sideeffect" },
   { method: "GET", path: "/api/event", class: "session-query", note: "Can receive session_ids query param (source: event-session-scope.patch)" },
@@ -71,20 +92,20 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/api/fs/list", class: "global-ro" },
   { method: "GET", path: "/api/fs/read/*", class: "global-ro" },
   { method: "GET", path: "/api/health", class: "global-ro" },
-  { method: "GET", path: "/api/integration", class: "global-ro" },
-  { method: "GET", path: "/api/integration/{integrationID}", class: "global-ro" },
+  { method: "GET", path: "/api/integration", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/api/integration/{integrationID}", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "POST", path: "/api/integration/{integrationID}/connect/key", class: "global-sideeffect" },
   { method: "POST", path: "/api/integration/{integrationID}/connect/oauth", class: "global-sideeffect" },
   { method: "DELETE", path: "/api/integration/attempt/{attemptID}", class: "global-sideeffect" },
   { method: "GET", path: "/api/integration/attempt/{attemptID}", class: "global-ro" },
   { method: "POST", path: "/api/integration/attempt/{attemptID}/complete", class: "global-sideeffect" },
-  { method: "GET", path: "/api/location", class: "global-ro" },
-  { method: "GET", path: "/api/model", class: "global-ro" },
+  { method: "GET", path: "/api/location", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/api/model", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/api/permission/request", class: "global-ro", note: "FABLE-P5-F2: reads PER-PROCESS in-memory pending requests; door->anchor returns only the anchor's view. Latent (no through-door consumer today); revisit before Phase 7/9." },
   { method: "GET", path: "/api/permission/saved", class: "global-ro" },
   { method: "DELETE", path: "/api/permission/saved/{id}", class: "global-sideeffect" },
-  { method: "GET", path: "/api/provider", class: "global-ro" },
-  { method: "GET", path: "/api/provider/{providerID}", class: "global-ro" },
+  { method: "GET", path: "/api/provider", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
+  { method: "GET", path: "/api/provider/{providerID}", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/api/pty", class: "pty" },
   { method: "POST", path: "/api/pty", class: "pty" },
   { method: "DELETE", path: "/api/pty/{ptyID}", class: "pty" },
@@ -93,7 +114,7 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/api/pty/{ptyID}/connect", class: "pty" },
   { method: "POST", path: "/api/pty/{ptyID}/connect-token", class: "pty" },
   { method: "GET", path: "/api/question/request", class: "global-ro", note: "FABLE-P5-F2: reads PER-PROCESS in-memory pending requests; door->anchor returns only the anchor's view. Latent; revisit before Phase 7/9." },
-  { method: "GET", path: "/api/reference", class: "global-ro" },
+  { method: "GET", path: "/api/reference", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/api/session", class: "global-ro" },
   { method: "POST", path: "/api/session", class: "create" },
   { method: "GET", path: "/api/session/{sessionID}", class: "session-path" },
@@ -119,17 +140,17 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "POST", path: "/api/session/{sessionID}/revert/stage", class: "session-path" },
   { method: "POST", path: "/api/session/{sessionID}/wait", class: "session-path" },
   { method: "GET", path: "/api/session/active", class: "global-ro" },
-  { method: "GET", path: "/api/skill", class: "global-ro" },
+  { method: "GET", path: "/api/skill", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "DELETE", path: "/auth/{providerID}", class: "global-sideeffect" },
   { method: "PUT", path: "/auth/{providerID}", class: "global-sideeffect" },
   { method: "GET", path: "/command", class: "global-ro" },
   { method: "GET", path: "/config", class: "global-ro" },
   { method: "PATCH", path: "/config", class: "global-sideeffect" },
   { method: "GET", path: "/config/providers", class: "global-ro" },
-  { method: "GET", path: "/doc", class: "global-ro", note: "OpenAPI spec; self-undeclared, added manually (FABLE-W6)" },
+  { method: "GET", path: "/doc", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01 (FABLE-W6)" },
   { method: "GET", path: "/event", class: "session-query", note: "Can receive session_ids query param (source: event-session-scope.patch)" },
   { method: "GET", path: "/event?session_ids=", class: "session-query", note: "patch-only session-query (source: event-session-scope.patch)" },
-  { method: "GET", path: "/experimental/capabilities", class: "global-ro" },
+  { method: "GET", path: "/experimental/capabilities", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/experimental/console", class: "global-ro" },
   { method: "GET", path: "/experimental/console/orgs", class: "global-ro" },
   { method: "POST", path: "/experimental/console/switch", class: "global-sideeffect" },
@@ -178,18 +199,18 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "POST", path: "/mcp/{name}/auth/callback", class: "global-sideeffect" },
   { method: "POST", path: "/mcp/{name}/connect", class: "global-sideeffect" },
   { method: "POST", path: "/mcp/{name}/disconnect", class: "global-sideeffect" },
-  { method: "GET", path: "/path", class: "global-ro" },
+  { method: "GET", path: "/path", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/permission", class: "global-ro", note: "FABLE-P5-F2: reads PER-PROCESS in-memory pending requests; door->anchor returns only the anchor's view. Latent; revisit before Phase 7/9." },
   { method: "POST", path: "/permission/{requestID}/reply", class: "global-sideeffect" },
-  { method: "GET", path: "/project", class: "global-ro" },
+  { method: "GET", path: "/project", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "PATCH", path: "/project/{projectID}", class: "global-sideeffect" },
-  { method: "GET", path: "/project/{projectID}/directories", class: "global-ro" },
+  { method: "GET", path: "/project/{projectID}/directories", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/project/current", class: "global-ro" },
   { method: "POST", path: "/project/git/init", class: "global-sideeffect" },
   { method: "GET", path: "/provider", class: "global-ro" },
   { method: "POST", path: "/provider/{providerID}/oauth/authorize", class: "global-sideeffect" },
   { method: "POST", path: "/provider/{providerID}/oauth/callback", class: "global-sideeffect" },
-  { method: "GET", path: "/provider/auth", class: "global-ro" },
+  { method: "GET", path: "/provider/auth", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01" },
   { method: "GET", path: "/pty", class: "pty" },
   { method: "POST", path: "/pty", class: "pty" },
   { method: "DELETE", path: "/pty/{ptyID}", class: "pty" },

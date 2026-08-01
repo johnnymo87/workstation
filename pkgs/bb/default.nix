@@ -16,24 +16,24 @@
 }:
 
 let
-  version = "5.0.418";
+  version = "5.0.420";
 
   sources = {
     "aarch64-linux" = fetchurl {
       url = "https://github.com/buildbuddy-io/bazel/releases/download/${version}/bazel-${version}-linux-arm64";
-      hash = "sha256-/26iOo55WSZrDbngEYYv86s5AdO2xbydShAXDWozTRU=";
+      hash = "sha256-45cvA2bpKEfmGy0YpH/3cPkt9G9Z1eESqeZ42uOB+BI=";
     };
     "x86_64-linux" = fetchurl {
       url = "https://github.com/buildbuddy-io/bazel/releases/download/${version}/bazel-${version}-linux-x86_64";
-      hash = "sha256-YTcy+YptIH09k5ObecbBm8GBRsvw0b1386y+CWUiyRs=";
+      hash = "sha256-nQd761qR12i/plWZ7kXcwgcjWJSJgQzxU75ak1IwkoE=";
     };
     "aarch64-darwin" = fetchurl {
       url = "https://github.com/buildbuddy-io/bazel/releases/download/${version}/bazel-${version}-darwin-arm64";
-      hash = "sha256-MUztxEsRf+YBFMEaPfMomt7LobNn63GWofBfRJ8dDr0=";
+      hash = "sha256-/uyhc/X2a16zRMfiPU6qK9uTPgvw4U7FgLda8bQKKe0=";
     };
     "x86_64-darwin" = fetchurl {
       url = "https://github.com/buildbuddy-io/bazel/releases/download/${version}/bazel-${version}-darwin-x86_64";
-      hash = "sha256-ICaQl5yUf9hdD3avaIDVK7rmgFFJDSKKusmejjhVshQ=";
+      hash = "sha256-SzxJx0GXCfJO8O9sU452XTt1xsaJQpO1IXCRzA5x54E=";
     };
   };
 

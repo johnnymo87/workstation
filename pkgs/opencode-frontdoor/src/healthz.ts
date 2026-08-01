@@ -71,6 +71,7 @@ export async function handleHealthz(
     // was therefore vacuous by construction. Same lesson as the drift canary: the
     // gap is never detection, it is delivery.
     htmlPoisonBlocked: metrics.htmlPoisonBlocked,
+    poolFailover: metrics.poolFailover,
     version: config.version,
   };
 
