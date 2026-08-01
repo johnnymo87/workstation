@@ -304,6 +304,9 @@ async function proxyRequest(
       safeResolve("completed");
     });
 
+    // Note: on pool failover, re-piping an already-ended req works because Node schedules
+    // dest.end() on nextTick when endEmitted is set. Safe only because guard tests
+    // confine poolSafe to GET/HEAD (no body to lose).
     req.pipe(upstreamReq);
 
     res.on("close", onClose);
@@ -723,6 +726,11 @@ export async function handleRequest(
           failoverIfUnreachable: !isLast,
         });
         if (outcome !== "upstream-unreachable") return;
+        ctx.metrics.poolFailover++;
+        const nextTarget = order[i + 1];
+        console.warn(
+          `[FRONTDOOR WARN] pool member ${target} unreachable for ${method} ${url.pathname}; failing over to ${nextTarget}`
+        );
       }
       return;
     }

@@ -152,6 +152,11 @@ describe('loadConfig', () => {
       expect(() => loadConfig()).toThrow(/FRONTDOOR_POOL_URLS/);
     });
 
+    test('rejects scheme-less entries like 127.0.0.1:4097', () => {
+      process.env.FRONTDOOR_POOL_URLS = '127.0.0.1:4097';
+      expect(() => loadConfig()).toThrow(/FRONTDOOR_POOL_URLS/);
+    });
+
     test('de-duplicates repeated members, preserving first-seen order', () => {
       process.env.FRONTDOOR_POOL_URLS =
         'http://127.0.0.1:4096,http://127.0.0.1:4097,http://127.0.0.1:4096';

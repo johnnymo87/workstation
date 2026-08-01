@@ -2617,6 +2617,7 @@ describe("FrontDoor Integration", () => {
     let counts: Record<number, number>;
     let fdServer: http.Server;
     let fdPort: number;
+    let fdMetrics: Metrics;
 
     beforeEach(async () => {
       resetPoolCursor();
@@ -2666,7 +2667,8 @@ describe("FrontDoor Integration", () => {
         mintTimeoutMs: 1000,
       };
 
-      fdServer = createFrontDoor(fdConfig, { metrics: createMetrics() });
+      fdMetrics = createMetrics();
+      fdServer = createFrontDoor(fdConfig, { metrics: fdMetrics });
       await new Promise<void>((r) => fdServer.listen(0, "127.0.0.1", () => r()));
       fdPort = (fdServer.address() as AddressInfo).port;
     });
@@ -2718,6 +2720,8 @@ describe("FrontDoor Integration", () => {
       // Close s2 so port2 refuses connections
       await new Promise<void>((r) => s2.close(() => r()));
 
+      const initialFailovers = fdMetrics.poolFailover;
+
       // Issue 3 requests. Request 2 would normally hit s2 (port2), but must failover and return 200.
       for (let i = 0; i < 3; i++) {
         const res = await reqDoor("/api/provider");
@@ -2725,6 +2729,7 @@ describe("FrontDoor Integration", () => {
       }
       expect(counts[2]).toBe(0);
       expect(counts[1] + counts[3]).toBe(3);
+      expect(fdMetrics.poolFailover).toBeGreaterThan(initialFailovers);
     });
 
     test("tries the anchor last during failover", async () => {

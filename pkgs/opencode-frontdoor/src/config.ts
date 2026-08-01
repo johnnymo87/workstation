@@ -60,10 +60,14 @@ function parsePoolUrls(value: string | undefined, anchorUrl: string): string[] {
     .filter((s) => s.length > 0);
 
   for (const p of parts) {
+    let u: URL;
     try {
-      new URL(p);
+      u = new URL(p);
     } catch {
       throw new Error(`Invalid FRONTDOOR_POOL_URLS entry: "${p}". Must be an absolute URL.`);
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      throw new Error(`Invalid FRONTDOOR_POOL_URLS entry: "${p}". Protocol must be http: or https:.`);
     }
   }
 

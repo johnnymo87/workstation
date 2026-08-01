@@ -436,12 +436,25 @@ The user authorised this deploy explicitly; it overrides the standing rule that 
 4. The restart drops in-flight SSE legs through the door; do it in an idle window. **No pool restart, no `patched.N` cut.**
 5. Confirm the *running* process actually has the new env — a green unit is not evidence:
    ```bash
-   systemctl show opencode-frontdoor.service -p Environment | tr ' ' '\n' | grep FRONTDOOR_POOL_URLS
+   sudo cat /proc/$(systemctl show -p MainPID --value opencode-frontdoor)/environ | tr '\0' '\n' | grep FRONTDOOR_POOL_URLS
    curl -sS 127.0.0.1:4700/healthz
    ```
 6. Smoke: issue several `GET /api/provider` through `:4700` and confirm from the door's logs that `target` varies across members. This is the first real evidence the change does anything.
 
 ## Verification — the fix is UNVERIFIED until this runs
+
+Cross-member diff loop (curl each flagged route against every pool member and compare to detect response drift):
+```bash
+for route in /api/agent /api/command /api/integration /api/location /api/model /api/provider /api/reference /api/skill /doc /experimental/capabilities /path /project /provider/auth; do
+  echo "=== Diffing $route ==="
+  tmp=$(mktemp -d)
+  for port in 4096 4097 4098 4099; do
+    curl -sS "http://127.0.0.1:$port$route" > "$tmp/$port.json"
+  done
+  diff -u "$tmp/4096.json" "$tmp/4097.json" && diff -u "$tmp/4096.json" "$tmp/4098.json" && diff -u "$tmp/4096.json" "$tmp/4099.json"
+  rm -rf "$tmp"
+done
+```
 
 The deploy proving green proves nothing about the failure mode. On the next post-reset morning, count `class=global-ro` 503s **by target**:
 
