@@ -69,4 +69,8 @@ fi
 
 pass "fixture DB query assertions passed (3-level nesting + archived exclusion)"
 
+JSON_STATE_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --with-state --limit 10)" || fail "oc-session-list --with-state failed on fixture DB"
+echo "$JSON_STATE_OUT" | grep -q '"activity": "idle"' || fail "--with-state output missing activity field"
+pass "--with-state mode works on fixture DB"
+
 echo "ALL PASS (oc-session-list)"
