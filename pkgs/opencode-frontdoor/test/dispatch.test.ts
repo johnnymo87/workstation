@@ -543,4 +543,72 @@ describe('Route Dispatcher', () => {
       }
     });
   });
+
+  describe('poolSafe flag integrity', () => {
+    const EXPECTED_POOL_SAFE_ROUTES = [
+      'GET /agent',
+      'GET /api/agent',
+      'GET /api/command',
+      'GET /api/integration',
+      'GET /api/integration/{integrationID}',
+      'GET /api/location',
+      'GET /api/model',
+      'GET /api/provider',
+      'GET /api/provider/{providerID}',
+      'GET /api/reference',
+      'GET /api/skill',
+      'GET /command',
+      'GET /config/providers',
+      'GET /doc',
+      'GET /experimental/capabilities',
+      'GET /path',
+      'GET /project',
+      'GET /project/current',
+      'GET /project/{projectID}/directories',
+      'GET /provider',
+      'GET /provider/auth',
+      'GET /skill',
+    ].sort();
+
+    // A route whose note documents PER-PROCESS state must never be flagged
+    // pool-safe. Spreading such a route converts a latent anchor-view bug into a
+    // random-member-view bug, which is strictly harder to diagnose.
+    test('never flags a route documented as per-process', () => {
+      const offenders = ROUTE_CLASSIFICATION_TABLE
+        .filter((e) => (e as any).poolSafe && /PER-PROCESS/i.test(e.note ?? ''))
+        .map((e) => `${e.method} ${e.path}`);
+      expect(offenders).toEqual([]);
+    });
+
+    test('only ever flags the global-ro class', () => {
+      const offenders = ROUTE_CLASSIFICATION_TABLE
+        .filter((e) => (e as any).poolSafe && e.class !== 'global-ro')
+        .map((e) => `${e.method} ${e.path}`);
+      expect(offenders).toEqual([]);
+    });
+
+    test('only ever flags safe, side-effect-free methods', () => {
+      const offenders = ROUTE_CLASSIFICATION_TABLE
+        .filter((e) => (e as any).poolSafe && !['GET', 'HEAD'].includes(e.method.toUpperCase()))
+        .map((e) => `${e.method} ${e.path}`);
+      expect(offenders).toEqual([]);
+    });
+
+    test('every flagged route carries a justification note', () => {
+      const offenders = ROUTE_CLASSIFICATION_TABLE
+        .filter((e) => (e as any).poolSafe && !(e.note ?? '').includes('POOL-SAFE'))
+        .map((e) => `${e.method} ${e.path}`);
+      expect(offenders).toEqual([]);
+    });
+
+    // Pins the reviewed set. Changing it must be a deliberate, reviewed edit —
+    // not a side effect of adding a route.
+    test('flags exactly the reviewed set', () => {
+      const flagged = ROUTE_CLASSIFICATION_TABLE
+        .filter((e) => (e as any).poolSafe)
+        .map((e) => `${e.method} ${e.path}`)
+        .sort();
+      expect(flagged).toEqual(EXPECTED_POOL_SAFE_ROUTES);
+    });
+  });
 });
