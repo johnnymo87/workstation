@@ -54,6 +54,33 @@ fi
 row_exists() { local r="$1" x; for x in "${table_rows[@]}"; do [ "$x" = "$r" ] && return 0; done; return 1; }
 row_is_exemption() { printf '%s' "$1" | grep -qE "$LEGAL_ROW_RE"; }
 
+# A row's path list is column 2 of its table line. A marker may only cite a row
+# whose path list actually names the citing file (or a glob covering it).
+#
+# WHY: row_exists() checked only that the id was in the table and
+# row_is_exemption() only that it was C*/D*. Nothing tied the row to the file, so
+# `frontdoor-exempt(C3)` -- the CLOUDBOX door's upstream -- passed on a
+# home.devbox.nix site. That is not hypothetical: it is what a peer session's
+# implementer subagent shipped on 2026-07-31 to turn this very guard green, and it
+# was caught in review, not by the guard. An armed gate that blesses the wrong fix
+# is worse than no gate, because it teaches laundering.
+row_names_file() {
+  local r="$1" f="$2" row_line
+  row_line="$(grep -E "^\| $r \|" "$table" | head -1)"
+  [ -n "$row_line" ] || return 1
+  # Column 2 only: everything between the first and second unescaped pipe after the id.
+  local paths; paths="$(printf '%s' "$row_line" | awk -F'|' '{print $3}')"
+  # Exact path, or a directory/glob prefix that covers it (e.g. `pkgs/foo/` or `pkgs/*/`).
+  case "$paths" in
+    *"$f"*) return 0 ;;
+  esac
+  local d; d="$(dirname "$f")"
+  case "$paths" in
+    *"$d/"*) return 0 ;;
+  esac
+  return 1
+}
+
 # Files the guard governs: shipped consumer code. Docs, plans and test files
 # are excluded -- they describe or perturb these patterns by design.
 mapfile -t files < <(cd "$repo_root" && printf '%s\n' \
@@ -153,6 +180,10 @@ for f in "${files[@]}"; do
     fi
     if ! row_is_exemption "$row"; then
       bad "$f:$lineno cites frontdoor-exempt($row), which is a door/repointed row, not an exemption class (use C* or D*)"
+      continue
+    fi
+    if ! row_names_file "$row" "$f"; then
+      bad "$f:$lineno cites frontdoor-exempt($row), but row $row does not name $f -- cite a row that describes THIS file, or add one; do not borrow another host's row"
       continue
     fi
     exempted=$((exempted + 1))

@@ -55,4 +55,23 @@ else
 fi
 rm -rf "$fix" "$out"
 
+# Case: a marker citing a row that does NOT name the citing file must be rejected.
+# This is the exact shape a peer's subagent shipped on 2026-07-31 -- C3/C4 (cloudbox
+# rows) cited from home.devbox.nix -- and the guard blessed it. Once the gate is
+# armed this becomes the path of least resistance for anyone it blocks, so it must
+# fail CLOSED.
+fix="$(new_fixture)"; out="$(mktemp)"
+sed -i 's/frontdoor-exempt(C10)/frontdoor-exempt(C3)/' "$fix/users/dev/home.devbox.nix"
+if run_guard "$fix" "$out"; then
+  bad "laundering: guard PASSED a marker citing C3, a row that does not name home.devbox.nix"
+else
+  if grep -q 'does not name' "$out"; then
+    pass_ "laundering: marker citing a row that does not name its file is rejected"
+  else
+    bad "laundering: guard failed, but not with the path-mismatch message (masked by another failure?)"
+    sed 's/^/      /' "$out"
+  fi
+fi
+rm -rf "$fix" "$out"
+
 [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }
