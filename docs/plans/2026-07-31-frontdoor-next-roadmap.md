@@ -196,6 +196,52 @@ names as the recurring generator.
 **Cadence:** oracle YES (the (c) disposition is a real design call); SDD if (a)+(c) land
 together; adversarial review mandatory; PR for (a) [+ (c)] + bookkeeping.
 
+**STATUS 2026-08-01 — DONE.** All five residuals dispositioned; (a) and (c) fixed together
+on one door restart. Implementation record: `docs/plans/2026-08-01-step2-mlve4-residuals.md`.
+
+| residual | disposition |
+|---|---|
+| (a) door instructs bypass | FIXED + ENFORCED (`u417` closed) |
+| (b) out-of-repo consumers | BEADED `workstation-1puj` |
+| (c) create→connect race | FIXED, `vjq0` SCOPE-REDUCED and left open |
+| (d) migration strips MCP | FOLDED into `vjq0` |
+| (e) structural opacity | `pcf3` stays P3, reaffirmed |
+
+**The oracle call earned its keep by REFUTING the reason I wanted to fix (c).** I argued
+the `prospective` path was a second, uncounted route to the same symptom and that 12/12
+observed agreement was luck. It is structural: `placeAfterCreate` already places AND
+records sticky at create, and a prospective connect resolves `degraded:false` so it records
+sticky and the following turn short-circuits before promotion. Measured: 94 connects in 7
+days, **0** degraded. Fixed anyway — one string, on a restart (a) already required, and the
+failure mode is silent and gets misattributed to the model — but the bead now records the
+honest reason instead of an inflated one.
+
+**Two hazards the one-line fix needed and did not have,** both from adversarial review:
+the `PromotionGate` **burn** (a connect sharing the turn-starting budget would ttl-guard a
+following `prompt_async` onto the anchor — a mutating turn on a possibly-wrong process,
+strictly worse than the tool loss being fixed), and **counter blinding** (the fix silences
+`notRoutedMutationToAnchor`, this class's only signal). Both closed; the new
+`promotedOnConnect` is scoped to `not-routed` so it cannot read nonzero-but-meaningless.
+
+**Bookkeeping:** `m96n` folded into `a0zj` (one fix, one bead) and `a0zj` reclassed P1→P2
+now that its tripwire half is deployed and live; the `ss -K` residual retired as OBSOLETE
+(a gate on a redesign decision that production has since made); `workstation-b5yi` filed
+for the runtime `err.message` address leak that no static guard can see.
+
+**Two corrections to this document's own instructions, both found by measuring:**
+- The "sweep stale comments" item is **itself stale** — both comments were already
+  corrected and now narrate the old claim as history. No action taken; verified, recorded.
+- I reported a "pre-existing failing route-classification gate" after seeing one `[FAIL]`
+  line on both pristine `main` and my branch. The measurement was right, the reading was
+  wrong: that line is **stderr from a PASSING negative test**. `./test.sh` exits 0 with
+  495/495. There is no known-failing gate; do not inherit that as debt.
+
+**THE EPIC IS NOT CLOSED HERE, deliberately.** Step 2's brief said "close Phase 9 and the
+epic", but this document's own pre-registered exit criterion (Step 3) says `mlve` closes
+only after the items land AND one full deploy cycle rides clean. Closing it now would be
+exactly the "DONE is not 'the steps landed'" failure the criterion exists to prevent.
+Phase 9's work is complete; the epic closes at Step 3.
+
 ---
 
 ## Step 3 — Ride the exit criterion (`eon4` is SETTLED — prerequisite cleared)

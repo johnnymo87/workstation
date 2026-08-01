@@ -821,10 +821,17 @@ export async function handleRequest(
           if (promo.placed && promo.apiBase && isAbsoluteHttpUrl(promo.apiBase)) {
             target = promo.apiBase; degraded = false; prospective = false;
             wasPromoted = true;
-            // vjq0: count state-pinning placements separately. Without this the fix is
-            // invisible — a not-routed connect that now places stops incrementing
-            // notRoutedMutationToAnchor and nothing takes its place.
-            if (isStatePinningRequest(url.pathname)) {
+            // vjq0: count the placements the FIX RESCUED — a state-pinning request that
+            // was NOT-ROUTED and would previously have degraded to the anchor with its MCP
+            // state stranded there.
+            //
+            // Deliberately NOT every state-pinning placement. `maybePromote` also places
+            // `prospective` connects, which measured 12/week and were already safe
+            // pre-fix (prospective resolves degraded:false, so the connect records sticky
+            // and the following turn short-circuits to the same member). Counting those
+            // would read nonzero-but-meaningless and invite the conclusion that the race
+            // fires weekly. Adversarial review caught exactly that misreading.
+            if (isStatePinningRequest(url.pathname) && resolved.reason === "not-routed") {
               ctx.metrics.promotedOnConnect++;
             }
           } else {

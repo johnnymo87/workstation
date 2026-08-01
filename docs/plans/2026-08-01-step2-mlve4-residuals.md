@@ -111,3 +111,45 @@ connect removes one entry route; it does not close the class.
 - `ss -K` residual: retire explicitly.
 - Stale comments: **already swept** — both now narrate the old claim as history. Verify,
   record, do not re-do.
+
+---
+
+## Adversarial review outcomes (2026-08-01, on the real diff)
+
+**F1 — BLOCKING, fixed.** `promotedOnConnect` as first written counted EVERY state-pinning
+placement, including `prospective` connects — which `maybePromote` also places, which
+measured 12/week, and which were already safe pre-fix. The counter built to answer "did
+the fix rescue anything?" would have read ~12/week and invited exactly the wrong
+conclusion: that the race fires weekly. It does not; it measured 0/94. Now scoped to
+`resolved.reason === "not-routed"`. A nonzero-but-meaningless counter is its own silence.
+
+**New behaviour this diff introduces, named because the plan had not named it:** prospective
+connects now issue `POST /place` (~12/week). Benign — it is what promoting requests already
+do — but it is a change, not a no-op.
+
+**F3/F4 — fixed here rather than deferred**, because a guard that ships armed and
+launderable is the exact Step 1 lesson:
+- The port patterns required a colon and matched a loop only when the variable was
+  literally `p`. So `for port in 4096 4097 4098 4099` and "send the write to port 4096"
+  both passed. Bare pool-port numerals are now banned outright. All three laundering
+  shapes were re-tested against the hardened guard and are caught.
+- The extraction only ever saw two enumerated `proxy.ts` fallbacks, so a bypass hint in any
+  of the ~10 other denial bodies would have shipped unguarded. The whole `proxy.ts` source
+  is now scanned. (A bare `127.0.0.1` in a comment describing what the door binds is
+  legitimate, so the source scan bans addressable targets and pool-port numerals, while
+  wire strings keep the stricter rule.)
+
+**F2 — BEADED, not fixed here.** `proxy.ts:proxyRequest`'s 502 branch and the catch-all 500
+return upstream `err.message`, which for a downed member is
+`connect ECONNREFUSED 127.0.0.1:<port>` — a pool address on the wire, on a common failure
+path, unreachable by any static guard. Pre-existing and a disclosure rather than an
+instruction, so not blocking. The commit-message claim "no wire-facing string may contain a
+loopback address" was an OVERCLAIM; the guard's header now states the static-only scope.
+
+**F5 — my diagnosis was wrong, in the benign direction.** I recorded a "pre-existing failing
+route-classification gate" after measuring one `[FAIL]` line on both pristine `main` and my
+branch. The measurement was right; the reading was not. That line is **stderr from a
+PASSING negative test** (`test/route-gate.test.ts`, "exits 1 on unrecognized route in doc
+file") which deliberately runs the gate against a bad fixture. `./test.sh` exits **0** with
+495/495 passing. There is no known-failing gate. Recorded here so the next reader does not
+inherit phantom debt — which is how this kind of folklore calcifies.

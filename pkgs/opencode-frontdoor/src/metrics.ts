@@ -9,8 +9,13 @@ export interface Metrics {
    */
   notRoutedMutationToAnchor: number;
   /**
-   * Sessions PLACED by a state-pinning request (`connect`) that would otherwise have been
-   * resolved without placement — i.e. how often the `vjq0` fix actually did something.
+   * NOT-ROUTED sessions placed by a state-pinning request (`connect`) — i.e. how often the
+   * `vjq0` fix RESCUED a connect that would otherwise have stranded its MCP state on the
+   * anchor while the following turn ran elsewhere.
+   *
+   * Scoped to `reason === "not-routed"` on purpose: `prospective` connects are also placed
+   * now, but they were already safe (they record sticky), so counting them would make this
+   * read ~12/week and imply the race fires that often. It does not.
    *
    * Exists because the fix would otherwise BLIND the only pre-existing signal for this
    * class: a not-routed connect that now places no longer increments

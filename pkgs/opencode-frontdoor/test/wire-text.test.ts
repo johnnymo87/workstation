@@ -14,21 +14,47 @@ import { CLASS_DISPOSITIONS, ROUTE_DISPOSITIONS, OPERATOR_RUNBOOK } from "../src
  * exists on the wire is not in any file it could scan. So this test is the wire-side
  * analogue of that guard.
  *
- * Scope is deliberately WIRE-FACING TEXT ONLY: `userMessage`, `remedy`, and the two
- * fallback strings in `proxy.ts`. Repo-facing `rationale` is exempt by design — it cites
- * file:line, describes mechanisms, and several rows legitimately narrate the old wrong
- * hint as history.
+ * Scope is deliberately WIRE-FACING TEXT ONLY: `userMessage`, `remedy`, and the literal
+ * strings in `proxy.ts`. Repo-facing `rationale` is exempt by design — it cites file:line,
+ * describes mechanisms, and several rows legitimately narrate the old wrong hint as
+ * history. (Verified: `proxy.ts` reads only `userMessage`/`remedy` from a disposition, so
+ * `rationale` cannot reach the wire.)
+ *
+ * KNOWN LIMIT, stated so it is not mistaken for a guarantee: this policies STATIC source
+ * text only. Strings minted at request time cannot be seen here — notably upstream error
+ * text (`err.message` on a 502/500), which today can carry `connect ECONNREFUSED
+ * 127.0.0.1:<port>` when a member is down. That is a disclosure rather than an
+ * instruction, it is pre-existing, and it is tracked separately. Do not read a green run
+ * as "no address can reach the wire".
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** Pool-address shapes. `409[6-9]` mirrors SITE_RE in the repo-side guard. */
+/**
+ * Pool-address shapes.
+ *
+ * NOTE the BARE-NUMERAL rule. The first version of this list required a colon
+ * (`:409[0-9]`) and matched a port-enumeration loop only when the loop variable was
+ * literally `p`. Adversarial review pointed out the obvious laundering: re-adding the
+ * historical recipe as `for port in 4096 4097 4098 4099`, or writing "send the write to
+ * port 4096", matches NEITHER — one renamed variable and the guard waves it through.
+ * Wire-facing text has no legitimate use for a bare pool-port numeral, so ban those
+ * outright and the loop shape stops mattering.
+ */
 const ADDRESS_PATTERNS: Array<{ re: RegExp; why: string }> = [
-  { re: /127\.0\.0\.1:\d+/, why: "a literal loopback address" },
+  { re: /127\.0\.0\.1/, why: "a literal loopback address" },
   { re: /localhost:\d+/i, why: "a literal localhost address" },
-  { re: /:409[0-9]\b/, why: "a serve-pool port" },
-  { re: /\bfor\s+p\s+in\b/, why: "a port-enumeration loop" },
+  { re: /\b409[0-9]\b/, why: "a serve-pool port number" },
+  { re: /\bseq\s+409[0-9]/, why: "a port-enumeration loop" },
 ];
+
+/**
+ * The subset applied to proxy.ts SOURCE (as opposed to wire strings). A bare
+ * `127.0.0.1` is legitimate in a code comment describing what the door binds; what is
+ * never legitimate in this file is an addressable target or a pool port numeral.
+ */
+const SOURCE_ADDRESS_PATTERNS = ADDRESS_PATTERNS.filter((p) => !/^\/127/.test(String(p.re)))
+  .concat([{ re: /127\.0\.0\.1:\d+/, why: "an addressable loopback target" }]);
 
 /**
  * Bypass PHRASING. Matters independently of addresses: "call a serve port directly"
@@ -111,6 +137,21 @@ describe("wire-facing text never instructs a front-door bypass", () => {
       .map(([key]) => key);
 
     expect(naked, `terminal-denial rows with no wire-facing text (they inherit the generic fallback): ${naked.join(", ")}`).toEqual([]);
+  });
+
+  test("NO literal string anywhere in proxy.ts carries an address or a bypass phrase", () => {
+    // F4: the enumerated extraction above only ever sees the two fallbacks it already
+    // knows about, so a bypass hint added to any OTHER denial body in proxy.ts (there are
+    // ~10: the two `why` fallbacks, the 501s, the 410, the html-poison 502, both 503s,
+    // and placeAfterCreate's error bodies) would ship unguarded. Scan the whole file.
+    const src = readFileSync(join(here, "..", "src", "proxy.ts"), "utf8");
+    for (const { re, why } of SOURCE_ADDRESS_PATTERNS) {
+      const m = src.match(new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g"));
+      expect(m, `proxy.ts contains ${why}: ${JSON.stringify(m?.slice(0, 3))}`).toBeNull();
+    }
+    for (const re of BYPASS_PHRASES) {
+      expect(re.test(src), `proxy.ts contains bypass phrasing (/${re.source}/)`).toBe(false);
+    }
   });
 
   test("the runbook the wire text points at actually exists", () => {
