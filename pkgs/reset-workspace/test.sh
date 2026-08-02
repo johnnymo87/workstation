@@ -470,13 +470,50 @@ if [ -f "$default_nix" ]; then
   # repair the master file, not just sweep the temps: quarantine the corrupt
   # file (never delete it), promote a parseable temp, then reap. All of it must
   # run AFTER the kill, so no live nvim owns the files.
-  want_grep "source detects unparseable shada"           'shada_parses() {'
-  want_grep "shada parse check keys on E576"             "grep -q 'E576'"
+  want_grep "source assesses the shada file"             'shada_verdict() {'
   want_grep "corrupt shada is quarantined"               'main.shada.corrupt'
-  want_grep "source reaps orphaned shada temps"          "-name 'main.shada.tmp.*' -delete"
+  want_grep "source reaps orphaned shada temps"          "-name 'main.shada.tmp.*' -o"
   refuse_grep "corrupt shada is never deleted"           'rm -f "$SHADA_MAIN"'
+
+  # workstation-wro4: five ways this repair used to fail OPEN -- declaring a bad
+  # file healthy, or installing an unvalidated one. Each line below pins one.
+  #
+  # 1. The probe asks nvim whether it would REFUSE the rename, rather than
+  #    grepping read-error codes (E575/E576/E886 are three classes and only some
+  #    cause the refusal). Bare `E136` is NOT enough: five messages share that
+  #    code, and "errors during writing it" fires on a HEALTHY file when the
+  #    disk is full -- which would quarantine good history.
+  want_grep "probe keys on the rename refusal phrase" \
+    "grep -q 'E136.*does not look like a ShaDa file'"
+  refuse_grep "probe does not key on read-error codes alone"  "grep -q 'E576'"
+  # 2. `wshada!` skips the check nvim is being asked about.
+  refuse_grep "probe never uses the checkless wshada bang"     "wshada!"
+  # 3. The probe runs on a COPY: `-i <file>` makes nvim write shada on exit, so
+  #    probing the real file mutates it and strands fresh temps.
+  want_grep "probe runs against a scratch copy"          '-i "$scratch/probe.shada"'
+  # 4. Exit status is read BEFORE grepping. In a pipeline the status is grep's,
+  #    so a hung or missing nvim yields no match and reads as healthy.
+  want_grep "probe treats a timeout as unknown"          '[ "$rc" -ge 124 ]'
+  want_grep "probe verdict is three-state"               'echo unknown'
+  # 5. Promotion installs via a same-dir temp + rename, so a reset dying
+  #    mid-write cannot leave a torn main.shada.
+  want_grep "promotion is atomic"                        'mv "$promote_tmp" "$SHADA_MAIN"'
+  refuse_grep "promotion never cps onto the live path"   'cp "$promoted" "$SHADA_MAIN"'
+  # The temps are the only recovery material, so the reap is gated on a verdict.
+  want_grep "reap is gated on the verdict"               'if [ "$shada_reap_ok" -eq 1 ]; then'
+  want_grep "promote leftovers are reaped too"           "-name 'main.shada.promote.*'"
+
+  # The gate must be CLEARED on every path that leaves recovery material behind,
+  # and set once at the top. Counting keeps a new early-return from skipping one.
+  gate_clears=$(grep -c 'shada_reap_ok=0' "$default_nix" || true)
+  if [ "$gate_clears" -eq 4 ]; then
+    echo "ok: reap gate is cleared on all 4 recovery paths"
+  else
+    echo "FAIL: expected 4 'shada_reap_ok=0' (not-regular-file, unknown verdict,"
+    echo "      quarantine failed, promotion failed); found $gate_clears"; fail=1
+  fi
   quarantine_line=$(grep -n 'quarantining ->' "$default_nix" | head -1 | cut -d: -f1)
-  reap_line=$(grep -n "main.shada.tmp.\*' -delete" "$default_nix" | head -1 | cut -d: -f1)
+  reap_line=$(grep -n "main.shada.promote.\*' \\\\) -delete" "$default_nix" | head -1 | cut -d: -f1)
   if [ -n "$quarantine_line" ] && [ -n "$reap_line" ] && [ "$quarantine_line" -lt "$reap_line" ]; then
     echo "ok: shada repair runs before the temp reap"
   else
