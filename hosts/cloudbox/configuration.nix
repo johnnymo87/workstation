@@ -903,7 +903,7 @@ ${serveIdCase}
       # exits in well under a second, so this only ever shortens the SIGKILL
       # wait. Matches devbox.
       TimeoutStopSec = 15;
-      # NO `Slice=` here, deliberately -- see workstation-vpid/step 2 notes.
+      # NO `Slice=` here, deliberately -- see workstation-le0a / step 2 notes.
       # Setting it is correct in principle (the implicit
       # `system-opencode\x2dserve` slice has no unit file and can't be
       # configured through `systemd.slices` without fighting the escaped name),

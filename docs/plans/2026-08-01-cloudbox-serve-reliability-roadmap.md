@@ -1,7 +1,7 @@
 # Cloudbox Serve Reliability Roadmap
 
 **Spine bead:** `workstation-7za8` · **Started:** 2026-08-01 · **Host:** cloudbox only
-**Status:** steps 0, 1, 2, 3 done and deployed · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-2p6x`)
+**Status:** steps 0, 1, 2, 3 done and deployed · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-le0a`)
 
 `opencode-serve@4098` had **one** confirmed throttle-band wedge on 2026-08-01
 (19:04–19:10), plus two earlier stall windows that self-recovered and are
@@ -628,7 +628,7 @@ change removed the protection it exists to add" (dangerous).
 
 **So `Slice=` is not shipped.** The slice is defined but unattached; the memory
 knobs, which *do* apply live, are deployed. Re-land `Slice=` only in a deploy
-that bounces the pool in the same step (`workstation-2p6x`).
+that bounces the pool in the same step (`workstation-le0a`).
 
 ### Deploy propagation — measured, not assumed
 
@@ -661,7 +661,7 @@ step.
     18:57**, all four report `memory.high=max`, `memory.max=15032385536`,
     `memory.swap.max=1073741824`, `TimeoutStopUSec=15s`, `NRestarts=0`, and the
     door served 645/645 requests at 200 across the change. Slice `memory.max`
-    deferred with the slice itself (`workstation-2p6x`).
+    deferred with the slice itself (`workstation-le0a`).
   - **Seven-day observation, reported as one of four outcomes** — never as a
     bare "no wedges". The durable ledger is `journalctl -k` memcg-OOM lines;
     `memory.events oom_kill` resets when a cgroup is recreated and `NRestarts`
