@@ -758,53 +758,133 @@ EOF
     # so sweeping temps alone left the warnings in place.
     #
     # Repair (in order), all after Step 3 so no live nvim owns these files:
-    #   1. If `main.shada` fails to parse, quarantine it alongside as
-    #      `main.shada.corrupt.<ts>` (kept, never deleted -- forensics).
-    #   2. Promote the newest temp that DOES parse into its place. Those temps
+    #   1. If nvim would REFUSE to rename over `main.shada`, quarantine it
+    #      alongside as `main.shada.corrupt.<ts>` (kept, never deleted).
+    #   2. Promote the newest temp nvim would accept into its place. Those temps
     #      are complete files nvim just wrote, so this preserves most history;
-    #      if none parses, leave no file and nvim starts a fresh one.
-    #   3. Reap the remaining temps.
+    #      if none is usable, leave no file and nvim starts a fresh one.
+    #   3. Reap the remaining temps -- but ONLY if we know they are expendable.
     # Best-effort throughout: any failure logs a warning and the reset continues.
     SHADA_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/nvim/shada"
     SHADA_MAIN="$SHADA_DIR/main.shada"
-    # Parses as ShaDa? nvim exits 0 even on a read error, so detect via stderr.
-    # `-i NONE` is load-bearing: it stops nvim writing ShaDa on exit. Checking
-    # with `-i <file>` instead makes the probe MUTATE the file it is inspecting
-    # and strand fresh temps -- caught in testing, where the probe's own
-    # byproduct got promoted over the real candidate.
-    shada_parses() {
-      [ -s "$1" ] || return 1
-      command -v nvim >/dev/null 2>&1 || return 0   # can't check -> assume good
-      ! timeout 30 nvim --headless -u NONE -i NONE -c "rshada $1" -c 'qa!' 2>&1 | grep -q 'E576'
+    # Verdict for one file: prints `healthy`, `corrupt`, or `unknown`.
+    #
+    # This asks nvim the question we actually care about -- "would you refuse to
+    # rename over this file?" -- instead of grepping read-error codes. The error
+    # taxonomy is a trap: nvim emits E575 (per-entry semantic), E576 (structural)
+    # and E886 (system) while reading, and only some of those classes cause the
+    # refusal. A file nvim tolerates needs no repair, so keying on the refusal
+    # itself is both exact and immune to upstream renumbering.
+    #
+    # Load-bearing details, each of which was a bug at some point:
+    #   * The probe runs against a COPY in a scratch dir. `-i <file>` makes nvim
+    #     write ShaDa on exit, so probing the real file MUTATES it and strands
+    #     fresh temps -- once observed promoting the probe's own byproduct.
+    #   * Match the refusal PHRASE, not bare `E136`. Five distinct messages share
+    #     that code and one of them ("errors during writing it") fires on a
+    #     healthy file when the disk is full -- which would quarantine good
+    #     history. `LC_ALL=C` keeps the phrase stable if NLS is ever enabled.
+    #   * Plain `wshada`. The `!` variant skips the check and would call every
+    #     corrupt file healthy.
+    #   * Output goes to a file, and the timeout's exit status is read BEFORE
+    #     grepping. Piping nvim into `grep -q` yields grep's status, so a hung or
+    #     missing nvim produces no match and reads as "healthy" -- the exact
+    #     fail-open inversion this function replaces. nvim itself exits 0 on both
+    #     verdicts, so only >=124 (timeout's own codes) means "could not run".
+    shada_verdict() {
+      local f="$1" scratch rc
+      command -v nvim >/dev/null 2>&1 || { echo unknown; return; }
+      scratch=$(mktemp -d 2>/dev/null) || { echo unknown; return; }
+      if ! cp "$f" "$scratch/probe.shada" 2>/dev/null; then
+        rm -rf "$scratch"; echo unknown; return
+      fi
+      LC_ALL=C timeout 30 nvim --headless -u NONE -i "$scratch/probe.shada" \
+        -c 'wshada' -c 'qa!' > "$scratch/out" 2>&1
+      rc=$?
+      if [ "$rc" -ge 124 ]; then rm -rf "$scratch"; echo unknown; return; fi
+      if grep -q 'E136.*does not look like a ShaDa file' "$scratch/out" 2>/dev/null; then
+        rm -rf "$scratch"; echo corrupt; return
+      fi
+      rm -rf "$scratch"; echo healthy
     }
     if [ -d "$SHADA_DIR" ]; then
-      if [ -f "$SHADA_MAIN" ] && ! shada_parses "$SHADA_MAIN"; then
-        quarantine="$SHADA_MAIN.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
-        log "ShaDa file is corrupt (nvim cannot parse it); quarantining -> $quarantine"
-        if mv "$SHADA_MAIN" "$quarantine" 2>/dev/null; then
-          # Newest-first: the freshest parseable temp has the most history.
-          promoted=""
-          while IFS= read -r cand; do
-            [ -n "$cand" ] || continue
-            if shada_parses "$cand"; then promoted="$cand"; break; fi
-          done <<EOF2
+      # The temps are the ONLY material a later run could recover history from,
+      # so the reap is gated: it happens when the master file is known good, or
+      # when repair fully succeeded, or when there was genuinely nothing to
+      # promote. Never when we could not tell. nvim caps temps at 26 (a-z), so
+      # keeping them another day costs bounded disk and buys another attempt.
+      shada_reap_ok=1
+      if [ -e "$SHADA_MAIN" ] && [ ! -f "$SHADA_MAIN" ]; then
+        log "WARNING: $SHADA_MAIN exists but is not a regular file; skipping ShaDa repair and reap"
+        shada_reap_ok=0
+      elif [ -f "$SHADA_MAIN" ]; then
+        shada_state=$(shada_verdict "$SHADA_MAIN")
+        if [ "$shada_state" = unknown ]; then
+          log "WARNING: cannot assess ShaDa file (nvim missing, probe timed out, or no scratch space)"
+          log "  leaving it and its temps untouched -- the temps are the only recovery material"
+          shada_reap_ok=0
+        elif [ "$shada_state" = corrupt ]; then
+          quarantine="$SHADA_MAIN.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
+          log "ShaDa file is corrupt (nvim would refuse to rename over it); quarantining -> $(basename "$quarantine")"
+          if mv "$SHADA_MAIN" "$quarantine" 2>/dev/null; then
+            # Newest-first: the freshest usable temp has the most history.
+            promoted=""
+            while IFS= read -r cand; do
+              [ -n "$cand" ] || continue
+              if [ "$(shada_verdict "$cand")" = healthy ]; then promoted="$cand"; break; fi
+            done <<EOF2
 $(find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
 EOF2
-          if [ -n "$promoted" ] && cp "$promoted" "$SHADA_MAIN" 2>/dev/null; then
-            chmod 600 "$SHADA_MAIN" 2>/dev/null || true
-            log "  promoted $(basename "$promoted") to main.shada (history preserved)"
+            if [ -z "$promoted" ]; then
+              log "  no usable temp to promote; nvim will start a fresh ShaDa file"
+            else
+              # Install via a same-directory temp + rename, so a reset dying
+              # mid-write cannot leave a torn main.shada -- i.e. so the repair
+              # cannot manufacture the very corruption it exists to fix. The name
+              # is deliberately outside nvim's `main.shada.tmp.*` namespace.
+              promote_tmp="$SHADA_MAIN.promote.$$"
+              if cp "$promoted" "$promote_tmp" 2>/dev/null &&
+                 chmod 600 "$promote_tmp" 2>/dev/null &&
+                 mv "$promote_tmp" "$SHADA_MAIN" 2>/dev/null; then
+                log "  promoted $(basename "$promoted") to main.shada (history preserved)"
+                # A temp that parses can still be older or shorter than what was
+                # lost: truncation on a record boundary reads as perfectly valid,
+                # and the 03:00 SIGKILL can strand a half-written temp. Neither is
+                # a reason to refuse (the alternative is zero history, and the
+                # quarantine keeps the original for manual recovery) but both are
+                # reasons to say so out loud.
+                q_age=$(stat -c %Y "$quarantine" 2>/dev/null || echo 0)
+                p_age=$(stat -c %Y "$promoted" 2>/dev/null || echo 0)
+                q_size=$(stat -c %s "$quarantine" 2>/dev/null || echo 0)
+                p_size=$(stat -c %s "$promoted" 2>/dev/null || echo 0)
+                gap=$(( q_age - p_age ))
+                if [ "$gap" -gt 86400 ]; then
+                  log "  WARNING: promoted history is $(( gap / 86400 )) day(s) older than the quarantined file"
+                fi
+                if [ "$q_size" -gt 0 ] && [ "$p_size" -lt $(( q_size * 4 / 5 )) ]; then
+                  log "  WARNING: promoted file is $p_size bytes vs $q_size quarantined -- history may be truncated"
+                fi
+              else
+                rm -f "$promote_tmp" 2>/dev/null || true
+                log "  WARNING: could not install $(basename "$promoted") as main.shada;"
+                log "  keeping every temp so a later run can retry the promotion"
+                shada_reap_ok=0
+              fi
+            fi
           else
-            log "  no parseable temp to promote; nvim will start a fresh ShaDa file"
+            log "  WARNING: could not quarantine corrupt ShaDa file (non-fatal);"
+            log "  keeping every temp so a later run can retry the repair"
+            shada_reap_ok=0
           fi
-        else
-          log "  WARNING: could not quarantine corrupt ShaDa file (non-fatal)"
         fi
       fi
-      shada_orphans=$(find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' 2>/dev/null | wc -l)
-      if [ "$shada_orphans" -gt 0 ]; then
-        log "reaping $shada_orphans orphaned ShaDa temp file(s) in $SHADA_DIR ..."
-        find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' -delete 2>/dev/null || \
-          log "  WARNING: ShaDa temp reap failed (non-fatal); continuing reset"
+      if [ "$shada_reap_ok" -eq 1 ]; then
+        shada_orphans=$(find "$SHADA_DIR" -maxdepth 1 \( -name 'main.shada.tmp.*' -o -name 'main.shada.promote.*' \) 2>/dev/null | wc -l)
+        if [ "$shada_orphans" -gt 0 ]; then
+          log "reaping $shada_orphans orphaned ShaDa temp file(s) in $SHADA_DIR ..."
+          find "$SHADA_DIR" -maxdepth 1 \( -name 'main.shada.tmp.*' -o -name 'main.shada.promote.*' \) -delete 2>/dev/null || \
+            log "  WARNING: ShaDa temp reap failed (non-fatal); continuing reset"
+        fi
       fi
     fi
 
