@@ -1,7 +1,7 @@
 # Cloudbox Serve Reliability Roadmap
 
 **Spine bead:** `workstation-7za8` · **Started:** 2026-08-01 · **Host:** cloudbox only
-**Status:** steps 0, 1, 3 done · step 2 **built and proven on scratch units, awaiting the 03:00 deploy** · then step 4
+**Status:** steps 0, 1, 2, 3 done and deployed · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-le0a`)
 
 `opencode-serve@4098` had **one** confirmed throttle-band wedge on 2026-08-01
 (19:04–19:10), plus two earlier stall windows that self-recovered and are
@@ -512,7 +512,7 @@ to land next.
 
 ---
 
-## Step 2 — Max-only memory, bounded swap, tighter stop · **BUILT 2026-08-02, NOT YET DEPLOYED**
+## Step 2 — Max-only memory, bounded swap, tighter stop · **DEPLOYED 2026-08-02** (slice backstop deferred)
 
 **Bead:** `workstation-h1y6` (filed **2026-07-03**) · **Prefers** step 1 first.
 
@@ -606,6 +606,30 @@ scaled to `MemoryMax=2G` (the memcg OOM path is value-independent).
   slice was a no-op). It would have produced a false "no OOM" pass. The script
   now sums real retained bytes.
 
+### The `Slice=` trap — found by deploying, cost ~4 minutes of unprotected pool
+
+**The first deploy silently removed every memory limit from the pool.** Worth
+reading before re-landing the slice.
+
+`nixos-rebuild switch` with `restartIfChanged=false` correctly refused to bounce
+the serves ("would NOT stop the following changed units"). But systemd had
+already re-realized those units as members of the *new* `opencode-serve.slice`
+while their processes were still in the *old* `system-opencode\x2dserve.slice`.
+It therefore stopped managing the old slice and dropped `memory` from its
+`cgroup.subtree_control`. The per-serve `memory.max`, `memory.high` and
+`memory.swap.max` files **did not change value — they ceased to exist**, and
+the parent slice's own `memory.max` read `max`. The pool ran with no memory
+bound of any kind.
+
+`systemctl show` reported the new values throughout. Only the cgroupfs read
+caught it, which is exactly why that check is written into the exit criteria —
+and it is the difference between "the change didn't apply" (annoying) and "the
+change removed the protection it exists to add" (dangerous).
+
+**So `Slice=` is not shipped.** The slice is defined but unattached; the memory
+knobs, which *do* apply live, are deployed. Re-land `Slice=` only in a deploy
+that bounces the pool in the same step (`workstation-le0a`).
+
 ### Deploy propagation — measured, not assumed
 
 Probed on a live scratch unit: editing the unit file and running
@@ -614,8 +638,9 @@ unit, and **removing** `MemoryHigh` correctly resets the live cgroup to
 `memory.high=max`. So the memory knobs need no pool bounce.
 
 **But `Slice=` cannot change on a running unit** — a process cannot be moved
-between cgroups by reload. The slice backstop therefore requires a restart, so
-this deploy **must** bounce the pool in the 03:00 window.
+between cgroups by reload, and attempting it strips the limits (above). The
+slice backstop therefore requires a deploy that restarts the pool in the same
+step.
 
 - Spine: 2 optional (**done**), 3 no, **4 mandatory (done — v1 and v2)**.
 - **Deploy in the 03:00 window**, or by an explicit `reset-workspace` run — a
@@ -632,9 +657,11 @@ this deploy **must** bounce the pool in the 03:00 window.
   believe the backstop exists.
 - **Exit criteria:**
   - Scratch positive + negative control. **Both done, above.**
-  - After deploy, on all four members *and the slice*, read from cgroupfs:
-    `memory.high` = `max`, `memory.max` = 14 G, `memory.swap.max` = 1 G,
-    `TimeoutStopUSec` = 15 s, slice `memory.max` = 32 G.
+  - After deploy, on all four members, read from cgroupfs — **done 2026-08-02
+    18:57**, all four report `memory.high=max`, `memory.max=15032385536`,
+    `memory.swap.max=1073741824`, `TimeoutStopUSec=15s`, `NRestarts=0`, and the
+    door served 645/645 requests at 200 across the change. Slice `memory.max`
+    deferred with the slice itself (`workstation-le0a`).
   - **Seven-day observation, reported as one of four outcomes** — never as a
     bare "no wedges". The durable ledger is `journalctl -k` memcg-OOM lines;
     `memory.events oom_kill` resets when a cgroup is recreated and `NRestarts`
