@@ -52,11 +52,34 @@ import * as path from "node:path"
  * opencode never sees them as plugin files.
  */
 
-/** opencode version whose loader this replica mirrors. Re-verify on bump. */
+/**
+ * opencode version whose loader this replica mirrors.
+ *
+ * This pin is COUPLED to the deployed opencode version -- by the case below for
+ * local feedback, and, load-bearingly, by users/dev/test-loader-pin.sh, which
+ * runs in `nix flake check`. CI does NOT run vitest; if the coupling lived only
+ * here it would fire after a bump had already shipped.
+ *
+ * How bumps actually reach us (do not restate this from memory -- it was got
+ * wrong once already, in the direction that flatters the guard):
+ *   - `opencodePatchedHold` pins the upstream line, so the 8-hourly
+ *     update-opencode-patched.yml auto-merge cuts `patchedRevision` bumps
+ *     (patched.N) and leaves `upstreamVersion` ALONE. Those PRs do not trip this.
+ *   - `upstreamVersion` moves only when a human lifts the hold. That is the
+ *     event this pin exists to catch.
+ *   - A fork patch touching packages/opencode/src/plugin/ would change loader
+ *     behaviour with NO version change at all. None do today (verified), but
+ *     Step 3 of the roadmap deliberately adds one -- see its exit criteria.
+ *
+ * Why it matters: a pin guarded only by a comment saying "re-verify on bump"
+ * rots silently -- the replica keeps passing while mirroring a loader that no
+ * longer exists. That is precisely how no-function-exports.test.ts failed.
+ */
 const LOADER_VERSION = "1.17.13"
 
 const PLUGIN_DIR = path.join(__dirname, "..")
 const NIX_CONFIG = path.join(PLUGIN_DIR, "../../../users/dev/opencode-config.nix")
+const HOME_BASE_NIX = path.join(PLUGIN_DIR, "../../../users/dev/home.base.nix")
 
 const isFunction = (v: unknown): boolean => typeof v === "function"
 
@@ -87,6 +110,30 @@ function deployedPluginFilenames(): string[] {
   return [...names].filter((n) => /\.(ts|js)$/.test(n))
 }
 
+describe("loader replica pin", () => {
+  it("LOADER_VERSION matches the opencode version actually deployed", () => {
+    const nix = fs.readFileSync(HOME_BASE_NIX, "utf8")
+    const m = nix.match(/^\s*upstreamVersion\s*=\s*"([^"]+)"/m)
+
+    expect(m, `could not find \`upstreamVersion = "..."\` in ${HOME_BASE_NIX}. ` + "If that attribute was renamed or moved, this coupling is silently dead -- fix it, do not delete it.").not.toBeNull()
+
+    expect(
+      m![1],
+      `This test replicates opencode's plugin loader, and the replica is pinned to ` +
+        `v${LOADER_VERSION} while home.base.nix now deploys v${m![1]}.\n\n` +
+        "The rest of this file is therefore asserting a contract that may no longer " +
+        "exist, and would keep passing while doing so.\n\n" +
+        "To resolve: diff the upstream loader against the vendored fixtures --\n" +
+        `  curl -sL https://raw.githubusercontent.com/sst/opencode/v${m![1]}/packages/opencode/src/plugin/index.ts \\\n` +
+        "    | diff - assets/opencode/plugins/test/fixtures/plugin-index.ts\n" +
+        `  curl -sL https://raw.githubusercontent.com/sst/opencode/v${m![1]}/packages/opencode/src/plugin/shared.ts \\\n` +
+        "    | diff - assets/opencode/plugins/test/fixtures/plugin-shared.ts\n\n" +
+        "If the loader semantics are unchanged, refresh the fixtures and bump " +
+        "LOADER_VERSION. If they changed, update the replica FIRST.",
+    ).toBe(LOADER_VERSION)
+  })
+})
+
 describe(`deployed opencode plugin files load under the v${LOADER_VERSION} loader`, () => {
   const deployed = deployedPluginFilenames().filter((n) => fs.existsSync(path.join(PLUGIN_DIR, n)))
 
@@ -106,7 +153,15 @@ describe(`deployed opencode plugin files load under the v${LOADER_VERSION} loade
         "string",
       )
       expect(String(v1.id).trim().length, `${name} has an empty \`id\`.`).toBeGreaterThan(0)
-      expect(isFunction(v1.server) || isFunction(v1.tui), `${name} v1 default export has neither a \`server\` nor a \`tui\` function.`).toBe(true)
+
+      // Mirror readV1Plugin(kind="server") EXACTLY. An earlier revision accepted
+      // `server || tui`, which was a hand-written rule about the loader rather
+      // than a replica of it -- the precise habit this file exists to end.
+      // Upstream, with kind="server": a tui-only default throws `must default
+      // export an object with server()`, and having BOTH throws `not both`.
+      // Either way the whole file is rejected (the QUIET shape).
+      expect(isFunction(v1.server), `${name} v1 default export has no \`server\` function. ` + "readV1Plugin(kind=\"server\") throws `must default export an object with server()`, rejecting the file.").toBe(true)
+      expect(isFunction(v1.tui), `${name} v1 default export has BOTH \`server\` and \`tui\`. ` + "Upstream throws `must default export either server() or tui(), not both`.").toBe(false)
       return
     }
 
