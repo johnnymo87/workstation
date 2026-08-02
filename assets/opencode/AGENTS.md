@@ -222,7 +222,13 @@ systemd-run --user --unit="my-job-$$" --no-block --collect \
 ```
 
 If you reuse a fixed unit name deliberately (so you can find it in the journal),
-clear the old one first: `systemctl --user reset-failed my-job 2>/dev/null`.
+clear the old one first — and note that `reset-failed` only releases a name held
+by a *failed* unit; one that is still running needs `stop`:
+
+```bash
+systemctl --user stop my-job 2>/dev/null
+systemctl --user reset-failed my-job 2>/dev/null
+```
 
 Use `--scope` instead when you need the job to inherit your stdio and run
 synchronously; use `--unit=... --no-block` for fire-and-forget with journal

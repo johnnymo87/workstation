@@ -91,9 +91,10 @@ mk_exe() { # relative path under $tmp -> absolute path
   chmod +x "$p"
   printf '%s\n' "$p"
 }
-# An executable file that is NOT shaped like an opencode package. A mktemp root
-# means the prefix reduction yields /tmp/... , which the shape gate must reject
-# -- the same rejection that keeps a mid-switch `…-profile` path out.
+# An executable file that is NOT shaped like an opencode package. The mktemp
+# root (/tmp/... locally, /build/... in the nix sandbox) means the prefix
+# reduction never yields a /nix/store path, so the shape gate must reject it --
+# the same rejection that keeps a mid-switch `…-profile` path out.
 wrong_shaped_exe="$(mk_exe "nix/store/5ndra5mzxggfh28icamhcwqdi8h6hm5j-profile/bin/opencode")"
 
 # A correctly shaped path that cannot exist, so the executability branch is
@@ -106,18 +107,37 @@ assert_eq "" "$(opencode_reference_prefix "$wrong_shaped_exe" 2>/dev/null)" \
   "executable but wrong-shaped reference is UNKNOWN, not drift (workstation-bcmi)"
 
 # Positive path: an executable, correctly shaped reference must yield its prefix.
-# This one needs a real opencode package on disk, which cannot be faked (the
-# shape gate is anchored at the literal /nix/store, and tests may not write
-# there). Reported as SKIP rather than silently dropped when unavailable, so an
-# environment where it never runs is visible instead of looking green.
-live_ref="$(readlink -f /home/dev/.nix-profile/bin/opencode 2>/dev/null || true)"
-if [ -n "$live_ref" ] && [ -x "$live_ref" ] \
-   && opencode_is_opencode_prefix "$(opencode_store_prefix "$live_ref")"; then
-  assert_eq "$(opencode_store_prefix "$live_ref")" \
-    "$(opencode_reference_prefix "$live_ref" 2>/dev/null)" \
+#
+# This needs a REAL /nix/store path -- the shape gate is anchored at the literal
+# /nix/store and a test may not write there, so no mktemp fixture can stand in.
+# `nix flake check` therefore builds a throwaway package whose name matches the
+# gate and passes it in via OPENCODE_TEST_PKG_BIN; the check then greps for this
+# assertion's PASS line, because a skipped assertion is not a passing one.
+#
+# Without that env var (a bare `bash test.sh` on a dev machine) we fall back to
+# whatever the profile resolves to, and SKIP if there is nothing usable. This is
+# the ONLY assertion that can be skipped, and it must never be skipped in CI:
+# an opencode_reference_prefix that returns "" unconditionally leaves every
+# canary pass UNKNOWN -- drift detection dead, silently, forever -- and every
+# other assertion here expects "" and would stay green through it.
+ref_fixture="${OPENCODE_TEST_PKG_BIN:-}"
+if [ -z "$ref_fixture" ]; then
+  ref_fixture="$(readlink -f /home/dev/.nix-profile/bin/opencode 2>/dev/null || true)"
+fi
+if [ -n "$ref_fixture" ] && [ -x "$ref_fixture" ] \
+   && opencode_is_opencode_prefix "$(opencode_store_prefix "$ref_fixture")"; then
+  assert_eq "$(opencode_store_prefix "$ref_fixture")" \
+    "$(opencode_reference_prefix "$ref_fixture" 2>/dev/null)" \
     "reference prefix returned for an executable opencode package path"
+elif [ -n "${OPENCODE_TEST_PKG_BIN:-}" ]; then
+  # The fixture was supplied and is unusable -- that is a broken gate, not a
+  # missing convenience. Never degrade to SKIP here.
+  printf 'FAIL  %s\n        OPENCODE_TEST_PKG_BIN unusable: %q\n' \
+    "reference prefix returned for an executable opencode package path" \
+    "$OPENCODE_TEST_PKG_BIN"
+  fail=1
 else
-  printf 'SKIP  %s (no opencode package resolvable at ~/.nix-profile/bin/opencode)\n' \
+  printf 'SKIP  %s (no opencode package resolvable; CI supplies OPENCODE_TEST_PKG_BIN)\n' \
     "reference prefix returned for an executable opencode package path"
 fi
 
@@ -198,7 +218,7 @@ done
 # renamed variable evades it. The real protection is that the verdict lives in
 # this library and is asserted above, so the call site has nothing left to get
 # wrong.
-if grep -qE '(\[\[?) *"?\$\{?(RUN|REF)_EXE\}?"? *!?= *"?\$\{?(REF|RUN)_EXE\}?"?' "$canary_src"; then
+if grep -qE '(\[\[?) *"?\$\{?(RUN|REF)_EXE\}?"? *[!=]?= *"?\$\{?(REF|RUN)_EXE\}?"?' "$canary_src"; then
   printf 'FAIL  %s\n' "cloudbox serve-canary does not compare raw exe paths"; fail=1
 else
   printf 'PASS  %s\n' "cloudbox serve-canary does not compare raw exe paths"
