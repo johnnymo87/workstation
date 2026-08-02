@@ -903,24 +903,34 @@ ${serveIdCase}
       # exits in well under a second, so this only ever shortens the SIGKILL
       # wait. Matches devbox.
       TimeoutStopSec = 15;
-      # Explicit slice so the pool has a named parent to cap (below). Without
-      # this the units land in systemd's implicit `system-opencode\x2dserve`
-      # slice, which has no unit file and cannot be configured through
-      # `systemd.slices` without fighting the escaped name.
-      Slice = "opencode-serve.slice";
+      # NO `Slice=` here, deliberately -- see workstation-vpid/step 2 notes.
+      # Setting it is correct in principle (the implicit
+      # `system-opencode\x2dserve` slice has no unit file and can't be
+      # configured through `systemd.slices` without fighting the escaped name),
+      # but it CANNOT be deployed without simultaneously restarting the pool.
+      # Measured the hard way on 2026-08-02: `nixos-rebuild switch` with
+      # restartIfChanged=false left the processes in the OLD slice while
+      # systemd re-realized them as members of the new one, which dropped
+      # `memory` from the old slice's cgroup.subtree_control. The per-serve
+      # memory.max/high/swap.max files then vanished outright and the pool ran
+      # with NO memory limits at all until this was reverted. A silent removal
+      # of the very protection the change exists to add.
+      # Re-land it only as part of a deploy that bounces the pool in the same
+      # step, and verify on cgroupfs afterwards.
     };
   };
 
-  # h1y6 step 2: aggregate backstop for the serve pool. Per-instance MemoryMax
-  # is 14G and there are four of them, so an unbounded parent would permit 56G
-  # on a 62 GiB box. This caps the whole pool at 32G (~half the box), which is
-  # comfortably above the observed concurrent pool maximum of 15.5G and only
-  # engages if two members run away at once -- a single runaway is already
-  # bounded at 14G by its own cap and cannot reach 32G alone.
+  # h1y6 step 2: aggregate backstop for the serve pool. Defined but NOT yet
+  # attached -- the serve units deliberately carry no `Slice=` (see the comment
+  # on the unit above; attaching it without restarting the pool strips the
+  # per-serve memory limits entirely). Kept here so re-landing it during a
+  # restart window is a one-line change.
   #
-  # When the slice cap is hit the kernel reclaims across the subtree and, on no
-  # progress, OOM-kills the single fattest process in it; OOMPolicy=stop on the
-  # owning unit then stops that serve and Restart=always brings it back.
+  # Per-instance MemoryMax is 14G and there are four of them, so an unbounded
+  # parent would permit 56G on a 62 GiB box. This caps the whole pool at 32G
+  # (~half the box), comfortably above the observed concurrent pool maximum of
+  # 15.5G, and only engages if two members run away at once -- a single runaway
+  # is already bounded at 14G by its own cap and cannot reach 32G alone.
   systemd.slices.opencode-serve = {
     description = "OpenCode serve pool (aggregate memory backstop)";
     sliceConfig = {
