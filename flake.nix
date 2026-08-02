@@ -171,6 +171,26 @@
         touch $out
       '';
 
+      # Serve registry PID fence wrapper invariant (bead workstation-4b1q).
+      #
+      # The fence is only sound while each serve wrapper `exec`s the serve: exec
+      # makes the serve REPLACE the wrapper shell, so its pid IS the $$ that the
+      # wrapper exported as OPENCODE_SERVE_EXPECTED_PID. Lose the exec and the
+      # serve is a child with a different pid, fails the fence, and crash-loops
+      # the whole pool on exit 21 -- at the next deploy, unattended.
+      #
+      # Checked STATICALLY at build time on purpose. A runtime probe can only
+      # notice after the bad wrapper is already deployed, which is the window this
+      # is meant to close. Step 4 of the roadmap requires the exec property be
+      # ASSERTED rather than left as a comment; this is that assertion.
+      serve-pid-fence = devboxPkgs.runCommand "serve-pid-fence-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+      } ''
+        cd ${self}
+        bash users/dev/test-serve-pid-fence.sh
+        touch $out
+      '';
+
       # Headless-Lua unit tests for assets/nvim/lua/user/session_switcher/.
       #
       # Registered here rather than bolted onto pkgs/oc-auto-attach's
