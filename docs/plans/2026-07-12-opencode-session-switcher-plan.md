@@ -22,12 +22,30 @@ and forcing SDD onto it would be theatre.
 | ~~S0~~ | `workstation-gzkf` | ~~Diagnose the writer coverage hole~~ **DONE 2026-08-01** — cause: plugins bind at instance creation; pool never restarted after the 12:34 deploy | compact → systematic-debugging → write-up | — |
 | ~~S1~~ | `workstation-kwoh` | ~~Restart the serve pool as part of the deploy~~ **DONE 2026-08-01** — gen 528 + pool restart; working session now appears in its own overlay | compact → deploy+restart → verify on fleet | — |
 | S2 | `workstation-ix6n` | Deploy #232 + #234 to fleet, re-verify | **folded into S1** | — |
-| ~~S3~~ | `workstation-rq7k` | ~~Emit `nodata`, not `idle`~~ **PR #243 2026-08-01** — predicate is a recency-keyed hybrid, not the obvious per-directory rule (see S3 write-up) | compact → oracle → TDD → adversarial → PR | — |
+| ~~S3~~ | `workstation-rq7k` | ~~Emit `nodata`, not `idle`~~ **DONE 2026-08-01** (PR #243) — predicate is a recency-keyed hybrid, not the obvious per-directory rule (see S3 write-up) | compact → oracle → TDD → adversarial → PR | — |
 | S4 | `workstation-vyad` | Task 4: thin **async** Lua caller | compact → SDD → adversarial → PR | S1 |
 | S5 | `workstation-afp2` | Task 5: Lua socket discovery | compact → SDD → adversarial → PR | S1 |
 | S6 | `workstation-vk9y` | Task 8: join + row model | compact → SDD → adversarial → PR | S4, S5 |
 
-`bd ready` currently returns **S4, S5, S6** (S0/S1 done, S2 folded, S3 in PR #243).
+`bd ready` currently returns **S4, S5** (S0/S1/S3 done, S2 folded, S6 blocked on S4+S5).
+
+### Spawned work — beads this roadmap's own cycles produced
+
+These are NOT spine steps and deliberately do not block S4-S6, but each was
+discovered while executing one, and every one of them is a hazard to the same
+data path. Tracking them here so the roadmap does not quietly leak its own
+findings into the issue tracker and forget them.
+
+| Bead | From | What | Why it is not a spine step |
+|---|---|---|---|
+| `workstation-5yox` | S0/S1 | Plugin-loader footgun: guard deployed plugins against the shape that took devbox down | Resolved in substance by the gen-528 deploy; the remaining work is the *guard*, which is loader policy, not switcher behaviour |
+| `workstation-h0mp` | S1 | Guard: detect when a `home-manager switch` deploys a **stale** config | This was S0's actual root cause — a switch from a stale worktree silently un-deployed the writer fleet-wide. Deploy-lifecycle safety, not switcher code |
+| `workstation-9i5k` | S3 | Verify the nightly reset does not cause a **morning `nodata` storm** | Raised by S3's adversarial review and explicitly **suspected, not measured**. A restarted serve with no instances yet has no files, so it reads as "not reporting". Measure the reset→reopen ordering before changing anything |
+
+The through-line: S0, S1, and `h0mp` are all the same failure — **the writer was
+not running where we assumed it was**, and nothing said so. S3 is the tripwire
+that makes that class audible; `9i5k` is the check that the tripwire does not
+cry wolf every morning and get ignored, which would put us right back here.
 
 ### Why S0 is the spine, not a footnote
 
