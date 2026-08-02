@@ -282,6 +282,23 @@ observation window, not a task.
 > 3. Cut a no-op `patched.7` purely to trigger a bump — churn for a checkbox. Recorded
 >    only so it is visibly rejected.
 >
+> **RESOLVED 2026-08-02: option 1, decided with the user and EXECUTED.** Step 4 was done
+> first and its release cut IS Step 3's required pin bump. Sequence, all landed:
+> `opencode-patched` **#33** (squash `284af48`) → release **`v1.17.13-patched.7`**
+> (build green, all four platform assets) → workstation **#252** (squash `f7a01e7`) →
+> pin-bump **#255** (`patchedRevision` 6 → 7, four hashes, auto-merge). Option 2 was
+> rejected on the weakness recorded above — the 08-01 deploy ended converged and never
+> exercised the skew window. The measurement window opens when #255 merges and the pin
+> is deployed; that deploy is the user's to run (a switch that swaps the opencode binary
+> must be done from a plain SSH shell, NOT from inside an opencode session — it kills
+> the session mid-switch; grep `plain SSH shell` in `users/dev/home.base.nix`).
+>
+> **Do NOT count the window as open until the deployed serves are on `patched.7`.**
+> Verify by mechanism, comparing the `/nix/store/<hash>` PREFIX of
+> `/proc/<MainPID>/exe` against the profile — the exe resolves to `.opencode-wrapped`,
+> not `bin/opencode`, and comparing full paths reports four healthy serves as stale
+> (done by hand on 08-01, costing a needless pool restart).
+>
 > Related evidence for the `m96n` disposition the criterion was also meant to settle: the
 > 08-01 deploy's restart sequencing was done BY HAND, which is exactly what `m96n`
 > proposes to automate. That is weak evidence *for* `m96n`, not for its demotion — and one
@@ -356,7 +373,46 @@ file a third bead for the same thing.
 
 ---
 
-## Step 4 — `4b1q`: close the serve registry fence's interface hole
+## Step 4 — DONE 2026-08-02 — `4b1q`: close the serve registry fence's interface hole
+
+> **DONE.** `opencode-patched` #33 (`284af48`) + workstation #252 (`f7a01e7`), released as
+> `v1.17.13-patched.7`. The fix is the `$$` PID fence below, exactly as pre-registered:
+> unset ⇒ UNARMED (never fatal) on both fences, malformed ⇒ fatal, exit **21** (20 is the
+> port fence), exiting before `registerSelf` AND before `setSelfIdentity`.
+>
+> The exec property is ASSERTED, not commented: `users/dev/test-serve-pid-fence.sh` runs
+> under `nix flake check` and verifies, per wrapper, a LIVE export, an `exec`'d launch,
+> their order, and — added after review — that the wrapper LIST itself is complete.
+>
+> **Three findings from adversarial review, all real, all fixed before merge:**
+> 1. BLOCKER: the regenerated patch had silently swept in `bun.lock` hunks **deleting
+>    sha512 integrity pins** (`@solidjs/start` from a mutable `pkg.pr.new` URL, plus
+>    `ghostty-web`). That both violated "the cut carries ONLY the fence edit" and would
+>    have let `bun install` accept whatever those hosts served, in a binary that runs
+>    with GH/Cloudflare/Anthropic/GCP credentials. Removed — and the release then built
+>    green WITHOUT them, proving they were churn, not a needed fix. Lesson: regenerating
+>    a patch from `git diff` after `bun install` will capture lockfile churn; restrict
+>    the diff to the paths the patch owns.
+> 2. MAJOR: the first guard PASSED when the export was merely COMMENTED OUT — reproduced
+>    live. It grepped raw text. Commenting a line out to debug is the likeliest edit
+>    here, so it was the one case the guard most needed to survive, and its own comment
+>    already said a green guard over a disarmed fence is worse than none. Now every
+>    check reads a comment-stripped view.
+> 3. MAJOR: no end-to-end test of the armed-MATCH path. Changing `process.pid` to
+>    `process.ppid` passed the unit tests AND the E2E mismatch test while bricking all
+>    four serves in production. An E2E test now spawns through the real wrapper shape
+>    (`bash -c 'export ...=$$; exec ...'`) and was proven RED under that exact mutation.
+>
+> Mechanism checks, not inspection: `$$` survives Nix eval literally into the realised
+> `opencode-serve-start`; the profile's `bin/opencode` is a wrapper but it `exec`s
+> `.opencode-wrapped`, and a live pool member's MainPID was confirmed to both have PPID 1
+> and own its port — so the whole chain execs and `$$ == process.pid` holds.
+>
+> Whole-pool crash-loop recovery is now written down BEFORE it is needed, in the
+> `monitoring-serve-pool` skill: because unset ⇒ unarmed lives in the binary, recovery is
+> a wrapper revert plus a rebuild, never a new binary.
+
+## Step 4 (original text, retained)
 
 **Bead:** `workstation-4b1q` (P2, related `workstation-necw`). Reported by a peer session
 2026-07-31; they hit the identical shape in the overlay writer (PR #232).
