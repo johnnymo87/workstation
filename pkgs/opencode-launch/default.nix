@@ -493,10 +493,20 @@ pkgs.writeShellApplication {
       launch_ok=1
 
       # Auto-attach to nvim+tmux if we're on a host with a graphical workflow.
-      # Fully detached so the launch returns immediately and Ctrl+C on the
-      # launcher can't signal the child. Missing oc-auto-attach (e.g. cloudbox
-      # headless) is silently tolerated. Log to /tmp/oc-auto-attach.log for
-      # debuggability.
+      # Detached from the launcher's SHELL SESSION so the launch returns
+      # immediately and Ctrl+C on the launcher can't signal the child.
+      #
+      # `setsid nohup` is deliberately sufficient here and no cgroup escape is
+      # needed: oc-auto-attach is short-lived (it hands the session to tmux/nvim
+      # and exits) and restarts no unit, so it never has to outlive a
+      # `systemctl restart` of a cgroup it lives in. Do NOT copy this shape for
+      # a job that restarts its own unit -- setsid/nohup do not leave the
+      # cgroup, and such a job is killed mid-flight (bead workstation-4qvx; see
+      # "Backgrounding Long-Running Processes" in assets/opencode/AGENTS.md and
+      # the systemd-run re-exec in pkgs/reset-workspace/default.nix).
+      #
+      # Missing oc-auto-attach (e.g. cloudbox headless) is silently tolerated.
+      # Log to /tmp/oc-auto-attach.log for debuggability.
       if command -v oc-auto-attach >/dev/null 2>&1; then
         oc_attach_args=()
         if [ -n "$tmux_session" ]; then

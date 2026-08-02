@@ -187,6 +187,50 @@
         bash assets/nvim/test-session-switcher.sh
         touch $out
       '';
+
+      # Locks the serve-canary's staleness comparison to a store-path PREFIX
+      # match. On 2026-08-01 an operator hand-wrote the full-path form
+      # (`readlink -f profile` vs `readlink /proc/<pid>/exe`), which reports
+      # STALE unconditionally because bin/opencode execs bin/.opencode-wrapped,
+      # and restarted the whole serve pool on that false signal, killing live
+      # sessions. The deployed canary was already correct -- and had no test at
+      # all, so nothing would have caught it regressing into that form.
+      # Bash-only; adds seconds. See pkgs/opencode-store-prefix-sh/test.sh.
+      #
+      # The positive path (an executable, correctly shaped reference resolves to
+      # its prefix) needs a REAL /nix/store path: the shape gate is anchored at
+      # the literal /nix/store, and a test may not write there. Without a fixture
+      # the assertion SKIPped -- and SKIPping is what CI actually did, which made
+      # the gate blind to the one regression that fails quiet: a
+      # opencode_reference_prefix that returns "" unconditionally leaves every
+      # pass UNKNOWN, so drift detection is dead forever and no alert ever fires.
+      # Every other assertion expects "", so they all stay green through it.
+      #
+      # So build a throwaway package whose name matches the shape gate and hand
+      # its path to the suite, then assert the assertion RAN. Grepping for the
+      # PASS line is the point: a future edit that drops the env var would
+      # otherwise silently restore the blind spot.
+      store-prefix = devboxPkgs.runCommand "opencode-store-prefix-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
+        OPENCODE_TEST_PKG_BIN = "${devboxPkgs.runCommand "opencode-patched-0.0.0-fixture" { } ''
+          mkdir -p $out/bin
+          printf '#!/bin/sh\nexit 0\n' > $out/bin/opencode
+          chmod +x $out/bin/opencode
+        ''}/bin/opencode";
+      } ''
+        cd ${self}
+        bash pkgs/opencode-store-prefix-sh/test.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        grep -q '^PASS  reference prefix returned for an executable opencode package path' \
+          "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the positive reference-resolution assertion did not run." >&2
+          echo "A skipped assertion is not a passing one -- see OPENCODE_TEST_PKG_BIN." >&2
+          exit 1
+        }
+        touch $out
+      '';
     };
 
     # NixOS system configuration
