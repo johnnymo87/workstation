@@ -230,13 +230,21 @@ masks it.
 
 | Source | Signature | How to tell |
 |---|---|---|
-| Step 3.5 promotion `cp` (`default.nix:793`) | `CREATE main.shada` + `MODIFY` + `CLOSE_WRITE` — **identical to the gun, and it fires at 03:00** | Only runs when `main.shada` was corrupt; preceded by `MOVED_FROM main.shada` → `MOVED_TO main.shada.corrupt.*` |
+| Step 3.5 promotion — **as shipped in `8ff0790`, i.e. what is running during the first watched night** | `CREATE main.shada` + `MODIFY` + `CLOSE_WRITE` — **identical to the gun, and it fires at 03:00** | Only runs when `main.shada` was corrupt; preceded by `MOVED_FROM main.shada` → `MOVED_TO main.shada.corrupt.*` |
+| Step 3.5 promotion — **after S1 (#261)** | `CREATE main.shada.promote.<pid>` + `MODIFY` + `MOVED_FROM main.shada.promote.*` → `MOVED_TO main.shada`. **No `CREATE`/`MODIFY` on `main.shada` at all** | S1 made promotion atomic (temp + rename) for durability reasons, which as a side effect retires the worst false positive above: from now on the repair is indistinguishable from a healthy save, and the discriminator is clean |
 | Step 3.5 quarantine `mv` | `MOVED_FROM main.shada` + `MOVED_TO main.shada.corrupt.*` | — |
 | Step 3.5 reap | `DELETE main.shada.tmp.*` | — |
 | First write to a fresh/absent shada | `CREATE main.shada` (single writer, benign) | No second writer overlapping |
 
 Two or more direct writers **overlapping in time** is the finding. A single one
 is a curiosity.
+
+**Quantified control, 17:56–18:31 on the arming night** (ordinary interactive
+use, no reset): **103** `CREATE`/`MODIFY` events in the shada dir, of which
+**0** were on `main.shada` itself — every one landed on a `main.shada.tmp.*`
+name. So the discriminator's false-positive rate against normal traffic is zero
+over ~35 minutes, and the signature is genuinely rare rather than merely
+undocumented. If tomorrow's readout shows even one, that is signal.
 
 **If the log is clean, S2 still proceeds.** The mechanism is strace-proven
 independently of S0; the race is probabilistic and its window is milliseconds, so
@@ -271,6 +279,44 @@ tests updated, PR merged, deployed via home-manager, verified in the built scrip
 
 Spine: no oracle (mechanical), design review still mandatory but can be brief,
 SDD optional, PR yes.
+
+**DONE — `#261`, deployed.** Two deviations from the table above, both because
+the prescription was wrong:
+
+- **Fix #1 (widen the grep) was rejected.** Which read-error classes cause the
+  *refusal* is a guess about upstream's taxonomy, and a wrong guess quarantines
+  healthy files nightly. The probe now asks nvim the question that matters —
+  write to a scratch **copy**, look for the refusal — which is exact and
+  survives upstream renumbering. Match the **phrase** `does not look like a
+  ShaDa file`, never bare `E136`: five messages share that code and one of them
+  (*"errors during writing it"*) fires on a **healthy** file when the disk is
+  full, which would quarantine good history.
+- **Fix #2 ("fail closed") was rejected as stated.** "Cannot tell" is not
+  "corrupt". Wrongly-healthy is visible and recoverable; wrongly-corrupt
+  silently moves live history aside and installs a stale temp over it, every
+  night. Verdict is three-state; `unknown` does nothing, loudly, and keeps the
+  temps.
+
+**Fifth defect, missed by the review that produced the table:** the reap was
+unconditional. On false-healthy, failed quarantine, or failed promotion it
+deleted all 26 promotion candidates — converting a transient probe failure into
+permanent history loss. Now gated on verdict + repair success.
+
+Review also caught two bugs in the *fix's own design* before any code: the bare
+`E136` false-positive above, and a first sketch that re-shipped the exact
+pipeline inversion it was replacing (`nvim | grep -q` yields **grep's** status,
+so a hung nvim reads as healthy). Exit status is now read before grepping;
+measured, nvim exits 0 on both verdicts and `timeout` gives 124.
+
+Discrimination check — the same input against the old build, which is what makes
+the new tests meaningful rather than vacuous:
+
+```
+OLD code, nvim absent, corrupt master + one good temp:
+  survivors: main.shada                      <- good temp deleted, corrupt master kept
+NEW code, same input:
+  survivors: main.shada main.shada.tmp.a     <- both preserved
+```
 
 ### S2 — Serialized graceful nvim exits · `workstation-zv0l` · P1 · gated on S0
 
@@ -323,3 +369,5 @@ master; check for an existing issue first.
 | 2026-08-02 | Review killed the racing-temps hypothesis; direct-write mechanism verified |
 | 2026-08-02 17:56 | S0 watch armed and control-verified |
 | 2026-08-02 | Revision 2: review of this doc found 4 HIGH defects pre-merge; fixed |
+| 2026-08-02 22:29 | **S1 done** — `#261` merged and deployed. Probe replaced with a write-path oracle; three-state verdict; reap gated. Review found a 5th defect (unconditional reap) and 2 bugs in the fix's own design |
+| 2026-08-02 22:4x | S1 side effect: promotion is now atomic, so Step 3.5 no longer produces the S0 smoking-gun signature — the 03:00 false positive is retired |
