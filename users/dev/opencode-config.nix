@@ -880,51 +880,70 @@ in
   #
   # Runs after every inject* for this host — hence the conditional dep list; the
   # blocks are mkIf'd per platform and naming an absent activation is a dag error.
-  home.activation.assertOpencodeConfigHasNoSecrets = lib.mkIf (isDevbox || isCloudbox)
-    (lib.hm.dag.entryAfter ([ "mergeOpencode" ]
-      ++ lib.optionals isCloudbox [
-        "injectDatadogMcpSecretsSops"
-        "injectSlackMcpSecretsSops"
-        "injectPagerDutyMcpSecretsSops"
-        "injectRollbarMcpSecretsSops"
-        "injectDevcycleMcpSecretsSops"
-      ]) ''
+  # isCloudbox ONLY, not (isDevbox || isCloudbox). Cloudbox is the only host
+  # that both declares these secrets (hosts/cloudbox/configuration.nix) and runs
+  # the inject*Sops blocks. On devbox NONE of mcpSopsSecretNames is declared, so
+  # every switch would print "checked 0 secrets" forever — and an always-on
+  # warning is worse than no warning: it trains the operator to ignore the one
+  # message that already caught a real bug (the glob that silently checked
+  # nothing). A guard that cries wolf on one host is a guard nobody reads on any
+  # host.
+  home.activation.assertOpencodeConfigHasNoSecrets = lib.mkIf isCloudbox
+    (lib.hm.dag.entryAfter [
+      "mergeOpencode"
+      "injectDatadogMcpSecretsSops"
+      "injectSlackMcpSecretsSops"
+      "injectPagerDutyMcpSecretsSops"
+      "injectRollbarMcpSecretsSops"
+      "injectDevcycleMcpSecretsSops"
+    ] ''
       set -euo pipefail
 
       runtime="$HOME/.config/opencode/opencode.json"
-      [[ -f "$runtime" ]] || exit 0
-      [ -d /run/secrets ] || exit 0
 
-      leaked=0
-      checked=0
-      for name in ${lib.concatStringsSep " " mcpSopsSecretNames}; do
-        secret="/run/secrets/$name"
-        [ -r "$secret" ] || continue
-        # Strip the trailing newline the way {file:...} does before comparing.
-        value="$(tr -d '\n' < "$secret")"
-        # Skip short values: a <16-char secret could collide with ordinary
-        # config text and produce a false positive.
-        [ "''${#value}" -ge 16 ] || continue
-        checked=$((checked + 1))
-        if ${pkgs.gnugrep}/bin/grep -qF -- "$value" "$runtime" 2>/dev/null; then
-          echo "opencode secrets guard: !! PLAINTEXT of sops secret '$name' found in $runtime" >&2
-          leaked=1
+      # NOTE: no bare `exit` anywhere in this block. home-manager concatenates
+      # every activation into ONE script with no subshell, so an `exit` here
+      # terminates the whole run — silently skipping every LATER activation
+      # (deployDoltCreds, installOpencodePlugins, reloadSystemd, ...) while
+      # still reporting success. The inject* blocks below carry the same warning
+      # in three places; an earlier version of THIS block reintroduced the bug
+      # anyway. Guard with `if`, never `|| exit`.
+      if [[ ! -f "$runtime" ]] || [ ! -d /run/secrets ]; then
+        echo "opencode secrets guard: skipped (no config or no /run/secrets on this host)." >&2
+      else
+        leaked=0
+        checked=0
+        for name in ${lib.concatStringsSep " " mcpSopsSecretNames}; do
+          secret="/run/secrets/$name"
+          [ -r "$secret" ] || continue
+          # Strip the trailing newline the way {file:...} does before comparing.
+          value="$(tr -d '\n' < "$secret")"
+          # Skip short values: a <16-char secret could collide with ordinary
+          # config text and produce a false positive.
+          [ "''${#value}" -ge 16 ] || continue
+          checked=$((checked + 1))
+          if ${pkgs.gnugrep}/bin/grep -qF -- "$value" "$runtime" 2>/dev/null; then
+            echo "opencode secrets guard: !! PLAINTEXT of sops secret '$name' found in $runtime" >&2
+            leaked=1
+          fi
+        done
+        unset value
+
+        # A guard that checks nothing must not look like a guard that passed.
+        # Only meaningful where the secrets are actually declared — see the
+        # isCloudbox gate on this activation.
+        if [ "$checked" -eq 0 ]; then
+          echo "opencode secrets guard: WARNING — checked 0 secrets; guard is not actually verifying anything." >&2
         fi
-      done
-      unset value
 
-      # A guard that checks nothing must not look like a guard that passed.
-      if [ "$checked" -eq 0 ]; then
-        echo "opencode secrets guard: WARNING — checked 0 secrets; guard is not actually verifying anything." >&2
-      fi
-
-      if [ "$leaked" = "1" ]; then
-        {
-          echo "opencode secrets guard: the config must reference secrets, not contain them."
-          echo "opencode secrets guard: use \`secretRef \"<name>\"\` in users/dev/opencode-config.nix"
-          echo "opencode secrets guard: (emits {file:/run/secrets/<name>}, which opencode expands at config load)."
-          echo "opencode secrets guard: after fixing, ROTATE the named credential — it has been on disk in cleartext."
-        } >&2
+        if [ "$leaked" = "1" ]; then
+          {
+            echo "opencode secrets guard: the config must reference secrets, not contain them."
+            echo "opencode secrets guard: use \`secretRef \"<name>\"\` in users/dev/opencode-config.nix"
+            echo "opencode secrets guard: (emits {file:/run/secrets/<name>}, which opencode expands at config load)."
+            echo "opencode secrets guard: after fixing, ROTATE the named credential — it has been on disk in cleartext."
+          } >&2
+        fi
       fi
     '');
 
