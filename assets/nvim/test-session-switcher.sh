@@ -208,4 +208,11 @@ case "$lua_out" in
   *) printf 'FAIL  session_switcher.cli unit tests\n        out: %s\n' "$lua_out"; exit 1 ;;
 esac
 
+disc_out="$(nvim --clean -l assets/nvim/test-session-switcher-discovery.lua 2>&1 || true)"
+
+case "$disc_out" in
+  *LUA_TEST_OK*) printf 'PASS  session_switcher.discovery + .rpc unit tests (nvim -l)\n' ;;
+  *) printf 'FAIL  session_switcher.discovery + .rpc unit tests\n        out: %s\n' "$disc_out"; exit 1 ;;
+esac
+
 printf 'all session_switcher lua tests passed\n'
