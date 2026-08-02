@@ -1,7 +1,7 @@
 # Cloudbox Serve Reliability Roadmap
 
 **Spine bead:** `workstation-7za8` · **Started:** 2026-08-01 · **Host:** cloudbox only
-**Status:** step 0 (this doc)
+**Status:** steps 0–1 done · next: step 2 (`workstation-h1y6`)
 
 `opencode-serve@4098` had **one** confirmed throttle-band wedge on 2026-08-01
 (19:04–19:10), plus two earlier stall windows that self-recovered and are
@@ -313,7 +313,7 @@ forensics dump. Today's regime is the best leak-observation window available.
 
 ---
 
-## Step 0 — This roadmap · **IN PROGRESS**
+## Step 0 — This roadmap · **DONE 2026-08-01**
 
 Produce the spine, wire the beads, pressure-test the whole thing with
 `adversarial-reviewer-fable`, fold the findings back in.
@@ -347,9 +347,14 @@ re-measured before being folded in. What changed as a result:
 The first draft's most confident paragraph — the sequencing argument — was its
 weakest. Note that for next time.
 
-## Step 1 — Port the phantom-busy sweeper to cloudbox
+## Step 1 — Port the phantom-busy sweeper to cloudbox · **DONE 2026-08-01**
 
 **Bead:** `workstation-s5gl` (filed **2026-07-05**) · **Precedes** step 2 (soft).
+
+> **Landed as a SYSTEM timer, not the user timer this section originally
+> mandated.** The reversal and the results are at the end of the section; the
+> analysis below is preserved because the *trap* it describes is still the whole
+> point. Read "What actually shipped" before touching this.
 
 The SQL is host-invariant. **The serve-discovery is not**, and that is the trap:
 
@@ -365,29 +370,142 @@ long-running turn that has been quiet for 30 minutes gets finalized with a fake
 `MessageAbortedError` while it is still executing. A copy-paste port is a
 correctness regression, not a no-op.
 
-**Design call (worth an `oracle-fable` consult): user timer, not system timer.**
-The DB lives at `/home/dev/.local/share/opencode/opencode.db` and is owned by
-`dev`. A root-run system unit touching it creates root-owned `-wal`/`-shm`
-files, which the serves then cannot write — turning a hygiene job into an
-outage. Run it as a **user** timer (`users/dev/home.cloudbox.nix`) that queries
-the **system** units read-only (`systemctl show opencode-serve@<port>` needs no
-privilege). That combination is the only one that is both correct and safe.
+**Design call, as first written — and WRONG. Kept for the record.** *"User
+timer, not system timer. The DB is owned by `dev`; a root-run system unit
+touching it creates root-owned `-wal`/`-shm` files the serves cannot write,
+turning a hygiene job into an outage. That combination is the only one that is
+both correct and safe."*
 
-- Spine: 2 recommended (the unit-scope split is a real decision), 3 no,
-  **4 mandatory**.
-- **Exit criteria:**
-  - `systemctl --user list-timers` shows the sweeper on cloudbox.
-  - A dry run prints a non-zero `MAX_ETIMES` — i.e. it actually found the
-    system-unit serves. **This is the acceptance test that a copy-paste port
-    fails**, and no other check catches it. The devbox script has no dry-run
-    mode, so the port must *grow* one (`--dry-run`: print `MAX_ETIMES` and
-    `SELECT count(*)` instead of `UPDATE`). "Run the discovery loop standalone
-    and see a non-zero number" is the acceptable minimum; leaving the procedure
-    undefined is not.
-  - A control: a row created *after* the oldest serve boot is **not** finalized.
-  - The 303 stale orphans are finalized, and re-querying `phantom` returns a
-    number consistent with only genuinely-live turns.
-  - `ls -l opencode.db-wal` still shows owner `dev`.
+The `oracle-fable` consult killed it in one line: **`User=dev` is available in
+the system-unit path**, so the root-owned-WAL hazard was a strawman — nobody
+proposed a root-run unit. The proof is on the host and had been sitting in the
+evidence the whole time: the serves *are* system units with `User=dev`, and
+`opencode.db-wal` is `dev:dev`. `adversarial-reviewer-fable` then tried to
+re-reverse the decision, hunted `umask`, `ProtectSystem`/`ProtectHome`/
+`PrivateTmp` defaults, supplementary groups, cgroup/OOM scope and SELinux, and
+found no hazard. Two advisors, opposite mandates, same answer.
+
+### What actually shipped
+
+`hosts/cloudbox/configuration.nix`, a **system** service + timer with
+`User=dev; Group=dev`, next to the canary that already queries these same units
+from this same file. Reasons: same bus as the discovery target, so there is no
+`--user` footgun left for a future editor — *that footgun is the exact bug this
+step exists to fix*; a pool resize in this file lands in the same diff; and a
+user unit would deploy by a different command (`home-manager switch` vs
+`nixos-rebuild switch`), opening a skew window.
+
+Five changes beyond a port:
+
+1. **`ActiveEnterTimestamp`, not `MainPID` + `ps etimes`.** `CUTOFF = min(boot
+   epoch)` is exactly devbox's `NOW - max(etimes)`, minus a pid race (a pid
+   exiting between the two calls silently skips a unit and *loosens* the gate)
+   and minus the `procps` dep. Truncation now rounds the cutoff earlier
+   (conservative) rather than later. `systemctl show --timestamp=unix` yields
+   `@1785622308` directly, so no `date -d "Sat … EDT"` parsing.
+2. **Discovery = explicit port list ∪ running glob.** The list comes from
+   `users/dev/serve-pool.nix`, so a renamed template is caught instead of
+   matching nothing; the glob additionally catches a **stray** instance still
+   running after its port was dropped from the pool (nothing stops it until
+   03:00), whose rows must keep protecting themselves. Two guards, opposite
+   drift directions.
+3. **The silent fallback is split in two.** Devbox conflates them. Discovery
+   *failure* — `list-units` exits non-zero, an expected unit is not `loaded`, or
+   **any** active unit's timestamp will not parse — now **fails closed**
+   (`exit 1`, visible in `systemctl --failed`). Only a genuinely *drained* pool
+   (every unit queried fine, none active) keeps `CUTOFF=NOW`, which in that case
+   is maximally correct. Note `systemctl show` exits **0** for a not-found unit,
+   so `LoadState` must be checked explicitly — measured, the exit code proves
+   nothing. The `2>/dev/null` redirects devbox has on both `systemctl` calls are
+   deleted; they swallow precisely this signal.
+4. **`--dry-run`** prints per-unit boot epoch, the active count, the computed
+   `CUTOFF`, and a `SELECT count(*)` against a `mode=ro` handle. It exists so the
+   acceptance test is executable.
+5. **The SQL is byte-identical to devbox's**, including
+   `json_extract(data,'$.time.created')` where the `time_created` column would
+   do. Verified they never disagree (360 314 / 360 314 rows) — and verified the
+   column buys nothing, since the only index is `(session_id, time_created, id)`
+   and this query has no session filter, so both variants full-scan. Parity with
+   a month-proven script costs literally zero here.
+
+### Results — all exit criteria met
+
+| Criterion | Result |
+|---|---|
+| Sweeper present, **system** scope | `systemctl list-timers` → next run `20:35`, `OnCalendar=*:0/5` |
+| **Discovery found the system units** — the test a copy-paste port fails | dry run: `active=4` (== `servePool.k`), all four listed with boot epochs |
+| `CUTOFF` == oldest live serve boot | `cutoff=1785622308` == `18:11:48` == `min(ActiveEnterTimestamp)` |
+| Control: a row created *after* the oldest boot is **not** finalized | 303 stale, **6 held back by gate (b)**, 297 swept — the gate does real work, it is not a no-op |
+| Backlog finalized | `finalized 297 orphaned message(s)`, `Result=success` |
+| Residual consistent with only live turns | `phantom_all` 304 → **17** (11 genuinely in-flight + the 6 protected) |
+| `opencode.db-wal` still `dev`-owned | `-rw-r--r-- 1 dev dev … opencode.db-wal` |
+| Pool not restarted | all four `active`, `NRestarts=0`, boot epochs unchanged across the switch |
+
+Fail-closed paths were exercised directly rather than assumed, by running
+mutated copies of the built script:
+
+- expected unit renamed → `LoadState=not-found … refusing to run`, `exit 1`
+- active unit with an unparseable timestamp → `refusing to run`, `exit 1`
+- drained pool (no units at all) → `active=0 cutoff=<now>`, `exit 0`, sweeps all
+  303 — the one case where `CUTOFF=NOW` is right
+
+Deploy safety was enumerated, not asserted: `nixos-rebuild build` produced
+**6 derivations, all sweeper-related**, and a file-level diff of
+`/run/current-system/etc/systemd/system` against the new one showed **two new
+units and zero changed units**. `switch` then reported exactly `the following
+new units were started: opencode-phantom-busy-sweeper.timer`.
+
+### Residuals carried forward
+
+- **The min-over-pool cutoff defers the common case by up to a day.** An
+  intraday single-member kill orphans rows *younger* than the other members'
+  boots, so they stay invisible until 03:00 bounces the whole pool via
+  `opencode-serve-pool.target` (`partOf` fan-out) and resets every boot epoch.
+  The backlog and the drained-pool case sweep immediately; a fresh intraday
+  orphan can shimmer until ~03:05. **Step 2 makes this the steady state**, since
+  it converts silent stalls into faster kills. Fixing it needs per-session owner
+  attribution — the routing DB already holds session→serve leases — and is
+  deliberately not in this step. Filed as `workstation-63wo`.
+- **Non-pool executors are unprotected**, as on devbox: a row created by a
+  standalone `opencode` process predates no serve boot, so only the 30-minute
+  silence gate guards it. Measured: cloudbox has none today (the ~20 other
+  opencode processes are all `attach` clients, which execute nothing locally).
+  Accepted, not fixed.
+- **The write transaction holds the single writer slot for ~1.3 s every 5
+  minutes** (1.8 s measured wall, ~0.5 s of it `nix run` startup), because the
+  predicate scan runs inside it. Tolerable — four serves already contend
+  continuously — but it is a real number, it grows with the table, and step 4's
+  VACUUM shrinks the scan. Recorded so step 4's priority argument has a datum.
+
+### Review record — step 1
+
+`oracle-fable` (design consult) then `adversarial-reviewer-fable` (mandatory,
+pre-code). Zero blockers on the second pass; both MAJORs fixed before writing
+any Nix:
+
+| Finding | Change |
+|---|---|
+| oracle: user-scope rationale is a strawman | scope reversed to system + `User=dev` |
+| oracle: `MainPID`+`ps etimes` has a pid race | `ActiveEnterTimestamp`, `min(boot)` |
+| oracle: glob can silently match nothing | explicit `serve-pool.nix` port list |
+| oracle: fallback conflates broken-discovery with drained-pool | split; broken → `exit 1` |
+| MAJOR — fail-closed quantifier was **"none parse"**, must be **"any active fails to parse"** | one-word fix, but it is the whole difference between fail-closed and fail-open: if the unparseable unit were the *oldest*, `CUTOFF` lands too late and the loot-incident class returns through the error path |
+| MAJOR — roadmap + bead still mandated the abandoned user timer, so this step's own exit criteria were unpassable by its own implementation | both rewritten in this commit |
+| MINOR — explicit list is weaker than the glob against a *stray* instance | discovery is the **union** of both |
+| MINOR — the min-over-pool residual is the common case, not an edge | quantified, written down, filed as `workstation-63wo` |
+| MINOR — acceptance test hardcoded tonight's boot time and `K=4` | asserts against `servePool.k` and the live `min()` |
+| MINOR — deploy safety asserted, not enumerated | `build` + unit-file diff before `switch` |
+| NIT — `--timestamp=unix` removes `date -d`; `[ -f "$DB" ] \|\| exit 0` is a permanent silent success | both applied (`exit 1`) |
+
+Two claims the reviewer raised were **checked and dismissed by measurement, not
+argument**: the 13 GB DB does not need a `time_updated` index (the predicate
+scans in 1.8 s, and no index helps since there is no session filter), and gate
+(b) is structurally immune to the stalled-but-alive class — a row a serve is
+executing was created *by* that serve, hence after its boot, hence above
+`CUTOFF`, for a stall of any length. That second one is what makes step 2 safe
+to land next.
+
+---
 
 ## Step 2 — Bound the swap, drop `MemoryHigh`, tighten `TimeoutStopSec`
 
