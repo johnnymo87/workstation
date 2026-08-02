@@ -153,6 +153,117 @@
       home-dev = self.homeConfigurations.dev.activationPackage;
       home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;
       nixos-devbox = self.nixosConfigurations.devbox.config.system.build.toplevel;
+
+      # Phase 9.2 opacity guard. Bash-only, so it adds seconds to the ARM leg that
+      # already spends ~3 min realising the three configurations above.
+      #
+      # WHY THIS EXISTS: the guard was written in Phase 9.2 and then enforced
+      # NOWHERE -- no flake check, no CI step, no canary. It sat red on main from
+      # #217 (which added a devbox door, and with it two unmarked sites) until
+      # 2026-08-01 and nothing noticed. A guard nothing runs is documentation with
+      # a shebang.
+      frontdoor-opacity = devboxPkgs.runCommand "frontdoor-opacity-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+      } ''
+        cd ${self}
+        bash users/dev/test-frontdoor-opacity.sh
+        bash users/dev/test-frontdoor-opacity-guard.sh
+        touch $out
+      '';
+
+      # Serve registry PID fence wrapper invariant (bead workstation-4b1q).
+      #
+      # The fence is only sound while each serve wrapper `exec`s the serve: exec
+      # makes the serve REPLACE the wrapper shell, so its pid IS the $$ that the
+      # wrapper exported as OPENCODE_SERVE_EXPECTED_PID. Lose the exec and the
+      # serve is a child with a different pid, fails the fence, and crash-loops
+      # the whole pool on exit 21 -- at the next deploy, unattended.
+      #
+      # Checked STATICALLY at build time on purpose. A runtime probe can only
+      # notice after the bad wrapper is already deployed, which is the window this
+      # is meant to close. Step 4 of the roadmap requires the exec property be
+      # ASSERTED rather than left as a comment; this is that assertion.
+      serve-pid-fence = devboxPkgs.runCommand "serve-pid-fence-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+      } ''
+        cd ${self}
+        bash users/dev/test-serve-pid-fence.sh
+        touch $out
+      '';
+
+      # Headless-Lua unit tests for assets/nvim/lua/user/session_switcher/.
+      #
+      # Registered here rather than bolted onto pkgs/oc-auto-attach's
+      # test-project-key.sh, which was the obvious home: that file is a real
+      # `nvim -l` harness and the right pattern to copy, but its derivation
+      # sets no doCheck/checkPhase and CI runs only `nix flake check`, so
+      # nothing executes it. Its assertions are inert. Landing S4's tests there
+      # would have repeated the frontdoor-opacity mistake documented directly
+      # above -- a guard nothing runs is documentation with a shebang.
+      nvim-lua = devboxPkgs.runCommand "nvim-lua-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.neovim ];
+      } ''
+        cd ${self}
+        bash assets/nvim/test-session-switcher.sh
+        touch $out
+      '';
+
+      # Locks the serve-canary's staleness comparison to a store-path PREFIX
+      # match. On 2026-08-01 an operator hand-wrote the full-path form
+      # (`readlink -f profile` vs `readlink /proc/<pid>/exe`), which reports
+      # STALE unconditionally because bin/opencode execs bin/.opencode-wrapped,
+      # and restarted the whole serve pool on that false signal, killing live
+      # sessions. The deployed canary was already correct -- and had no test at
+      # all, so nothing would have caught it regressing into that form.
+      # Bash-only; adds seconds. See pkgs/opencode-store-prefix-sh/test.sh.
+      #
+      # The positive path (an executable, correctly shaped reference resolves to
+      # its prefix) needs a REAL /nix/store path: the shape gate is anchored at
+      # the literal /nix/store, and a test may not write there. Without a fixture
+      # the assertion SKIPped -- and SKIPping is what CI actually did, which made
+      # the gate blind to the one regression that fails quiet: a
+      # opencode_reference_prefix that returns "" unconditionally leaves every
+      # pass UNKNOWN, so drift detection is dead forever and no alert ever fires.
+      # Every other assertion expects "", so they all stay green through it.
+      #
+      # So build a throwaway package whose name matches the shape gate and hand
+      # its path to the suite, then assert the assertion RAN. Grepping for the
+      # PASS line is the point: a future edit that drops the env var would
+      # otherwise silently restore the blind spot.
+      store-prefix = devboxPkgs.runCommand "opencode-store-prefix-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
+        OPENCODE_TEST_PKG_BIN = "${devboxPkgs.runCommand "opencode-patched-0.0.0-fixture" { } ''
+          mkdir -p $out/bin
+          printf '#!/bin/sh\nexit 0\n' > $out/bin/opencode
+          chmod +x $out/bin/opencode
+        ''}/bin/opencode";
+      } ''
+        cd ${self}
+        bash pkgs/opencode-store-prefix-sh/test.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        grep -q '^PASS  reference prefix returned for an executable opencode package path' \
+          "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the positive reference-resolution assertion did not run." >&2
+          echo "A skipped assertion is not a passing one -- see OPENCODE_TEST_PKG_BIN." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # Loader-replica pin guard. Same rationale as the opacity guard above, and
+      # the same failure it was written to avoid: the assertion also exists as a
+      # vitest case, but CI runs `nix flake check` and never runs vitest, so the
+      # vitest copy fires only on a local run -- i.e. after a bump has shipped.
+      # Enforced here so a stale pin is red in the checked path.
+      loader-pin = devboxPkgs.runCommand "loader-pin-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+      } ''
+        cd ${self}
+        bash users/dev/test-loader-pin.sh
+        touch $out
+      '';
     };
 
     # NixOS system configuration

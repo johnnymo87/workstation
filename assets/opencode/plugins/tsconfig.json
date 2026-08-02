@@ -13,5 +13,6 @@
     "types": ["node"]
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules"]
+  "//exclude": "test/fixtures holds verbatim upstream opencode sources vendored as diff references for the loader replica. They are never imported or compiled -- they import from upstream-internal paths (@/config/config, ./openai/codex) that do not resolve here -- so type-checking them is meaningless and noisy.",
+  "exclude": ["node_modules", "test/fixtures"]
 }

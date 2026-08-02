@@ -20,14 +20,40 @@ and forcing SDD onto it would be theatre.
 | # | Bead | Step | Cycle stages that apply | Blocked by |
 |---|---|---|---|---|
 | ~~S0~~ | `workstation-gzkf` | ~~Diagnose the writer coverage hole~~ **DONE 2026-08-01** — cause: plugins bind at instance creation; pool never restarted after the 12:34 deploy | compact → systematic-debugging → write-up | — |
-| **S1** | `workstation-kwoh` | **Restart the serve pool as part of the deploy** ← START HERE. Merged with S2: the fix *is* the deploy | compact → deploy+restart → verify on fleet | — |
+| ~~S1~~ | `workstation-kwoh` | ~~Restart the serve pool as part of the deploy~~ **DONE 2026-08-01** — gen 528 + pool restart; working session now appears in its own overlay | compact → deploy+restart → verify on fleet | — |
 | S2 | `workstation-ix6n` | Deploy #232 + #234 to fleet, re-verify | **folded into S1** | — |
-| S3 | `workstation-rq7k` | Emit `nodata`, not `idle`, when owner has no live file | compact → SDD → adversarial → PR | — |
-| S4 | `workstation-vyad` | Task 4: thin **async** Lua caller | compact → SDD → adversarial → PR | S1 |
-| S5 | `workstation-afp2` | Task 5: Lua socket discovery | compact → SDD → adversarial → PR | S1 |
-| S6 | `workstation-vk9y` | Task 8: join + row model | compact → SDD → adversarial → PR | S4, S5 |
+| ~~S3~~ | `workstation-rq7k` | ~~Emit `nodata`, not `idle`~~ **DONE 2026-08-01** (PR #243) — predicate is a recency-keyed hybrid, not the obvious per-directory rule (see S3 write-up) | compact → oracle → TDD → adversarial → PR | — |
+| ~~S4~~ | `workstation-vyad` | ~~Task 4: thin **async** Lua caller~~ **DONE 2026-08-02** (PR #251) — `session_switcher/cli.lua`; async justified by measurement, not by the (currently unreachable) deadlock | compact → TDD → adversarial → PR | — |
+| ~~S5~~ | `workstation-afp2` | ~~Task 5: Lua socket discovery~~ **DONE 2026-08-02** (PR #253) — liveness is `attach_status` **and** per-buffer job truth; dedupe is live-beats-dead, not last-writer | compact → TDD → adversarial → PR | — |
+| S6 | `workstation-vk9y` | Task 8: join + row model | compact → SDD → adversarial → PR | ✅ ready |
 
-`bd ready` currently returns **S0, S2, S3**.
+`bd ready` currently returns **S6** (S0/S1/S3/S4/S5 done, S2 folded).
+
+### Spawned work — beads this roadmap's own cycles produced
+
+These are NOT spine steps and deliberately do not block S4-S6, but each was
+discovered while executing one, and every one of them is a hazard to the same
+data path. Tracking them here so the roadmap does not quietly leak its own
+findings into the issue tracker and forget them.
+
+| Bead | From | What | Why it is not a spine step |
+|---|---|---|---|
+| `workstation-5yox` | S0/S1 | Plugin-loader footgun: guard deployed plugins against the shape that took devbox down | Resolved in substance by the gen-528 deploy; the remaining work is the *guard*, which is loader policy, not switcher behaviour |
+| `workstation-h0mp` | S1 | Guard: detect when a `home-manager switch` deploys a **stale** config | This was S0's actual root cause — a switch from a stale worktree silently un-deployed the writer fleet-wide. Deploy-lifecycle safety, not switcher code |
+| `workstation-9i5k` | S3 | Verify the nightly reset does not cause a **morning `nodata` storm** | Raised by S3's adversarial review and explicitly **suspected, not measured**. A restarted serve with no instances yet has no files, so it reads as "not reporting". Measure the reset→reopen ordering before changing anything |
+| `workstation-pscu` | S4 | **`pkgs/oc-auto-attach/test-project-key.sh` runs nowhere** — no `doCheck`, and CI runs only `nix flake check`, so its assertions are inert | S4 needed a harness, not a fix to that one. It routed around the problem (`checks.nvim-lua`) rather than inheriting it; oc-auto-attach's own coverage is still fake and nobody should assume it is green |
+| `workstation-095u` | S5 | Sessions in **non-tmux or nested nvims are undiscoverable** — nvims creates no socket there, so no peer can see them | A limitation of the socket convention, not of discovery. S5's job was to stop reporting corpses as live; this is about sessions it cannot see at all. Recorded as a consumer contract on S6: *absence is not proof* |
+
+Note that `pscu` is the same shape one level up: a *test* that was not running
+where we assumed it was. S0/S1/`h0mp` were an unrun writer; `pscu` is an unrun
+guard; the frontdoor-opacity check `flake.nix` already documents was a third.
+Three independent instances is a pattern, not a coincidence — when this repo
+says something is covered, check that the thing doing the covering executes.
+
+The through-line: S0, S1, and `h0mp` are all the same failure — **the writer was
+not running where we assumed it was**, and nothing said so. S3 is the tripwire
+that makes that class audible; `9i5k` is the check that the tripwire does not
+cry wolf every morning and get ignored, which would put us right back here.
 
 ### Why S0 is the spine, not a footnote
 
@@ -1504,3 +1530,49 @@ facets, glyphs, file locations).
   dependents) — do NOT rely on it; reader-side dead-PID + GC is the real cleanup.
 - **Discovery latency** if many nvims are modal-blocked: mitigated by async-spawn
   + single deadline; keep the deadline tight (~300 ms).
+
+
+---
+
+## S3 write-up (2026-08-01): the tripwire had to be tuned, not just added
+
+`queryWithState` reported `activity: "idle"` for every row with no overlay state,
+which conflated "a live writer watched and said nothing" with "nobody was
+watching". On 2026-08-01 that printed **886 confident `idle` rows for ~9 hours**
+during a total writer outage. Landed as PR #243.
+
+**The measurement that changed the design.** Both obvious predicates are wrong,
+and only the live fleet showed it:
+
+| predicate | false alarms on a HEALTHY fleet | catches #234 (per-instance blindness)? |
+|---|---|---|
+| per-`(serve, directory)` (the oracle's recommendation) | **62%** of rows | yes |
+| serve-level only (my first cut) | 0% | **no** |
+| recency-keyed hybrid (shipped) | **0.00%** at 1/5/15/60m | yes |
+
+The directory rule saturates because the writer emits a file per `(serve,
+directory)` only while an instance is loaded, so dormant sessions are fileless
+forever — a tripwire firing on 62% of rows is one nobody reads. The serve-level
+rule is quiet but blind to the failure that happened *first*: plugins bind at
+instance creation, so a serve can write for post-deploy directories while being
+permanently blind to pre-deploy ones, and those are the actively-worked ones.
+
+The hybrid keys on recency — a row touched within `FRESH_MS` had an instance
+loaded that recently, so a missing file means "not watching", not "evicted".
+
+**Two traps found by review, both real:**
+
+1. The aggregate warning originally triggered on `nodataCount === baseRows.length`
+   and **could not have fired during the outage it was written for**. An
+   un-deploy removes the plugin, not the files; serves keep running so orphan GC
+   (dead-pid-gated) never collects them, heartbeats just age out, and sessions
+   named in stale files merge as `unknown` — never nodata. Trigger is now "no
+   live writer is reporting".
+2. `pkgs/oc-session-list/test.sh` asserted `"activity": "idle"` against an empty
+   overlay dir — the exact shape of the outage. **The test encoded the bug as the
+   expectation**, and correctly broke.
+
+**Standing requirement for S4/S5/S6:** `nodata` is a tripwire, not a status.
+Consumers MUST render it at least as loudly as `idle`. Folding it into a
+`default:` branch that draws a blank cell makes it quieter than the bug it
+exists to catch, which would silently undo this work.

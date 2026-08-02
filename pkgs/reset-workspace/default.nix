@@ -9,6 +9,8 @@ pkgs.writeShellApplication {
     procps         # pkill, pgrep
     util-linux     # flock
     coreutils      # timeout
+    findutils      # find (ShaDa temp reap)
+    gnugrep        # grep (ShaDa parse check)
     systemd        # systemd-run for cgroup re-exec
   ];
   text = ''
@@ -739,6 +741,71 @@ EOF
       log "  pkill returned matches"
     else
       log "  pkill returned no matches (none running, or already dead)"
+    fi
+
+    # ---- Step 3.5: Repair a corrupt ShaDa file, then reap its temps ----
+    # nvim persists ShaDa by writing `main.shada.tmp.<a-z>` and renaming it over
+    # `main.shada` -- but only after checking that the CURRENT `main.shada`
+    # parses. Once `main.shada` is corrupt, that check fails forever:
+    #
+    #   E576: Error while reading ShaDa file: expected positive integer at <pos>
+    #   E136: Did not rename ...tmp.g because ...main.shada does not look like a
+    #         ShaDa file
+    #
+    # so every nvim start/save warns, the rename never happens, and each exit
+    # strands one more temp until all 26 suffixes are taken. Observed on cloudbox
+    # 2026-08-02: the temps were the symptom, the corrupt master file the cause,
+    # so sweeping temps alone left the warnings in place.
+    #
+    # Repair (in order), all after Step 3 so no live nvim owns these files:
+    #   1. If `main.shada` fails to parse, quarantine it alongside as
+    #      `main.shada.corrupt.<ts>` (kept, never deleted -- forensics).
+    #   2. Promote the newest temp that DOES parse into its place. Those temps
+    #      are complete files nvim just wrote, so this preserves most history;
+    #      if none parses, leave no file and nvim starts a fresh one.
+    #   3. Reap the remaining temps.
+    # Best-effort throughout: any failure logs a warning and the reset continues.
+    SHADA_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/nvim/shada"
+    SHADA_MAIN="$SHADA_DIR/main.shada"
+    # Parses as ShaDa? nvim exits 0 even on a read error, so detect via stderr.
+    # `-i NONE` is load-bearing: it stops nvim writing ShaDa on exit. Checking
+    # with `-i <file>` instead makes the probe MUTATE the file it is inspecting
+    # and strand fresh temps -- caught in testing, where the probe's own
+    # byproduct got promoted over the real candidate.
+    shada_parses() {
+      [ -s "$1" ] || return 1
+      command -v nvim >/dev/null 2>&1 || return 0   # can't check -> assume good
+      ! timeout 30 nvim --headless -u NONE -i NONE -c "rshada $1" -c 'qa!' 2>&1 | grep -q 'E576'
+    }
+    if [ -d "$SHADA_DIR" ]; then
+      if [ -f "$SHADA_MAIN" ] && ! shada_parses "$SHADA_MAIN"; then
+        quarantine="$SHADA_MAIN.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
+        log "ShaDa file is corrupt (nvim cannot parse it); quarantining -> $quarantine"
+        if mv "$SHADA_MAIN" "$quarantine" 2>/dev/null; then
+          # Newest-first: the freshest parseable temp has the most history.
+          promoted=""
+          while IFS= read -r cand; do
+            [ -n "$cand" ] || continue
+            if shada_parses "$cand"; then promoted="$cand"; break; fi
+          done <<EOF2
+$(find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+EOF2
+          if [ -n "$promoted" ] && cp "$promoted" "$SHADA_MAIN" 2>/dev/null; then
+            chmod 600 "$SHADA_MAIN" 2>/dev/null || true
+            log "  promoted $(basename "$promoted") to main.shada (history preserved)"
+          else
+            log "  no parseable temp to promote; nvim will start a fresh ShaDa file"
+          fi
+        else
+          log "  WARNING: could not quarantine corrupt ShaDa file (non-fatal)"
+        fi
+      fi
+      shada_orphans=$(find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' 2>/dev/null | wc -l)
+      if [ "$shada_orphans" -gt 0 ]; then
+        log "reaping $shada_orphans orphaned ShaDa temp file(s) in $SHADA_DIR ..."
+        find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' -delete 2>/dev/null || \
+          log "  WARNING: ShaDa temp reap failed (non-fatal); continuing reset"
+      fi
     fi
 
     # ---- Step 4: Prune merged launch worktrees ----

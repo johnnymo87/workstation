@@ -73,6 +73,18 @@ export async function placeSession(
   };
 }
 
+/**
+ * Requests that cause the door to PLACE a session rather than merely resolve it.
+ *
+ * The set used to mean exactly "turn-starting" (`abort` and `fork` are deliberately
+ * absent). It now means **turn-starting OR state-pinning**: `connect` was added for
+ * `workstation-vjq0`, because a request that pins per-process state to a serve must
+ * decide the owner instead of guessing it.
+ *
+ * Matching is EXACT LAST SEGMENT (`Set.has(lastSegment)`), not `endsWith`, so `connect`
+ * does not also catch `disconnect`. That is load-bearing and unit-tested — an `endsWith`
+ * implementation would silently promote disconnects too.
+ */
 const PROMOTING_SUFFIXES = new Set([
   "message",
   "prompt",
@@ -81,8 +93,36 @@ const PROMOTING_SUFFIXES = new Set([
   "shell",
   "command",
   "summarize",
-  "init"
+  "init",
+  "connect"
 ]);
+
+/**
+ * State-pinning (as opposed to turn-starting) promotions. These get their OWN
+ * `PromotionGate` namespace — see `gateKeyFor`.
+ */
+const STATE_PINNING_SUFFIXES = new Set(["connect"]);
+
+/**
+ * The gate is a per-sid attempt budget with TTL = stickyTtlMs. If a state-pinning
+ * promotion shared the turn-starting sid's budget, a `connect` would BURN it, and a
+ * `prompt_async` arriving inside the TTL and finding itself not-routed would be
+ * `ttl-guarded` -> fall back to the anchor -> run a MUTATING TURN ON A POSSIBLY-WRONG
+ * PROCESS. That is a worse failure than the silent tool loss `vjq0` is about, so the two
+ * kinds of promotion are budgeted separately.
+ *
+ * Found by adversarial review of the Step 2 plan, not by the tests.
+ */
+export function gateKeyFor(pathname: string, placementSid: string): string {
+  return isStatePinningRequest(pathname) ? `pin:${placementSid}` : placementSid;
+}
+
+/** True when the last path segment is a state-pinning suffix (currently only `connect`). */
+export function isStatePinningRequest(pathname: string): boolean {
+  const segments = pathname.replace(/\/$/, "").split("/").filter(Boolean);
+  const last = segments[segments.length - 1];
+  return !!last && STATE_PINNING_SUFFIXES.has(last);
+}
 
 export function isPromotingRequest(
   method: string,
@@ -254,7 +294,10 @@ export async function maybePromote(
   }
 
   // Step 4: If !gate.shouldAttempt(...)
-  if (!gate.shouldAttempt(placementSid, now)) {
+  // Namespaced so a state-pinning promotion (connect) cannot consume the turn-starting
+  // budget for the same sid — see gateKeyFor.
+  const gateKey = gateKeyFor(pathname, placementSid);
+  if (!gate.shouldAttempt(gateKey, now)) {
     return { placed: false, reason: "ttl-guarded" };
   }
 
@@ -274,8 +317,8 @@ export async function maybePromote(
     }
   }
 
-  // Step 6: gate.record(placementSid, now) then placeSession
-  gate.record(placementSid, now);
+  // Step 6: gate.record(gateKey, now) then placeSession
+  gate.record(gateKey, now);
 
   const placeResult = await placeSession(placementSid, config, deps);
   if (placeResult.ok) {

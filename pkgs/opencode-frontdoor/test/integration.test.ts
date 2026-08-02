@@ -649,10 +649,12 @@ describe("FrontDoor Integration", () => {
     const countBeforeRoot = warnSpy.mock.calls.length;
     const resWebUi = await makeRequest("GET", "/");
     expect(resWebUi.status).toBe(404);
-    expect(JSON.parse(resWebUi.body)).toEqual({
-      error: "web_ui_not_served",
-      message: "The web UI is not served through the front door. Use a serve port directly."
-    });
+    const webUiBody = JSON.parse(resWebUi.body);
+    expect(webUiBody.error).toBe("web_ui_not_served");
+    expect(webUiBody.message).toContain("not served through the front door");
+    // Step 2 residual (a): this body used to end "Use a serve port directly." — a bypass
+    // instruction shipped to every caller that hit the web UI through the door.
+    expect(webUiBody.message).not.toMatch(/serve port directly/i);
     expect(warnSpy.mock.calls.length).toBe(countBeforeRoot + 1);
     expect(warnSpy.mock.calls[warnSpy.mock.calls.length - 1][0]).toContain("Web UI endpoint is unsupported");
 
@@ -699,6 +701,57 @@ describe("FrontDoor Integration", () => {
 
     expect(pigeonPlaceCalls).toHaveLength(1);
     expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_prospective" });
+  });
+
+  test("6c. vjq0: an MCP connect on an UNROUTED session places it instead of degrading to the anchor", async () => {
+    // THE REGRESSION TEST FOR workstation-vjq0. It must FAIL on pre-fix code (remove
+    // "connect" from PROMOTING_SUFFIXES and this goes to the anchor) — verified by
+    // reverting the one-line change and re-running. Without that property this is another
+    // gate that cannot fail.
+    //
+    // Mechanism being pinned: an unrouted session's connect used to resolve not-routed and
+    // degrade to the ANCHOR, so MCP connected on the anchor process while the following
+    // prompt_async HRW-placed the session elsewhere — tools silently absent in the process
+    // that actually ran the turn.
+    pigeonPlaceCalls = [];
+    pigeonRouteCalls = [];
+
+    const res = await makeRequest("POST", "/session/ses_connect_unrouted/mcp/slack/connect");
+    expect(res.status).toBe(200);
+
+    // Assert the MECHANISM first so a failure names it: pre-fix there is no /place call at
+    // all, and a header assertion would only report "expected undefined".
+    expect(pigeonPlaceCalls, "connect did not place the session (is 'connect' still in PROMOTING_SUFFIXES?)").toHaveLength(1);
+    expect(pigeonPlaceCalls[0]).toEqual({ session_id: "ses_connect_unrouted" });
+    // ...and only then that the request actually followed the placement.
+    expect(res.headers["x-from-serve"], "connect placed the session but was forwarded elsewhere").toBe("serve-b");
+  });
+
+  test("6d. vjq0: a connect whose placement FAILED does not burn the turn-starting budget", async () => {
+    // The PromotionGate is a per-sid attempt budget with TTL = stickyTtlMs. If a connect
+    // shared the turn-starting sid's budget, it would BURN it, and a prompt_async arriving
+    // inside the TTL and finding itself not-routed would be ttl-guarded -> fall back to the
+    // anchor -> A MUTATING TURN ON A POSSIBLY-WRONG PROCESS. That is worse than the silent
+    // tool loss vjq0 is about. Found by adversarial review of the plan.
+    //
+    // NOTE the scenario had to be the PLACE-FAILED one. My first version used a SUCCEEDING
+    // connect and asserted two placements; it failed, and correctly so: a successful
+    // connect records sticky, so the following prompt short-circuits at the sticky check
+    // and never reaches the gate at all. The burn is only observable when the connect
+    // placed nothing — which is exactly when the following turn most needs its own attempt.
+    pigeonPlaceCalls = [];
+    pigeonRouteCalls = [];
+
+    // ses_place_fail: pigeon 404s the route (not-routed) and 500s the /place.
+    const connectRes = await makeRequest("POST", "/session/ses_place_fail/mcp/slack/connect");
+    expect(connectRes.status).toBe(200); // degrades to the anchor, as before the fix
+    expect(pigeonPlaceCalls).toHaveLength(1);
+
+    // The turn-start must still get its OWN placement attempt. Pre-gate-fix this is
+    // ttl-guarded and pigeonPlaceCalls stays at 1.
+    const promptRes = await makeRequest("POST", "/session/ses_place_fail/prompt_async");
+    expect(promptRes.status).toBe(200);
+    expect(pigeonPlaceCalls).toHaveLength(2);
   });
 
   test("6b. promotion wiring: casual GET does NOT trigger place", async () => {
@@ -2573,8 +2626,12 @@ describe("FrontDoor Integration", () => {
         // The real constraint reaches the wire, not just the gate.
         expect(json.reason).toBeTruthy();
         expect(json.message).toContain(json.reason);
-        // And an actionable, pool-correct remedy does too.
-        expect(json.remedy).toContain("/global/dispose");
+        // And an actionable, pool-correct remedy does too. NOTE the contract CHANGED in
+        // Step 2 residual (a): the remedy used to inline the whole recipe, including a
+        // `for p in 4096..4099` loop and the secrets path. It now names the constraint
+        // and points at the operator runbook; the ports live in the repo, not on the wire.
+        expect(json.remedy).toContain("docs/runbooks/frontdoor-per-serve-operations.md");
+        expect(json.remedy).not.toMatch(/127\.0\.0\.1:\d+/);
         expect(json.message).toContain(json.remedy);
       }
     );
@@ -2582,17 +2639,25 @@ describe("FrontDoor Integration", () => {
     test("the write-once warning is present, since repeating it can lose updates", async () => {
       const res = await makeRequest("PUT", "/auth/anthropic");
       const json = JSON.parse(res.body);
-      expect(json.remedy).toMatch(/exactly ONE port/);
-      expect(json.remedy).toMatch(/Do NOT send the write to all four ports/);
+      // Kept from mlve.11/D4: the LOSS-OF-UPDATE hazard must still reach the wire, even
+      // though the recipe moved to the runbook. Losing this in the move would have made
+      // the denial body safe-looking and less useful.
+      expect(json.remedy).toMatch(/Do NOT broadcast/i);
+      expect(json.remedy).toMatch(/silently lose an update/i);
     });
 
-    test("rows without a custom message keep the generic serve-port hint", async () => {
-      // POST /global/dispose is genuinely process-local: pointing the caller at a
-      // serve port is correct there, so the fallback must survive.
+    test("rows without a custom message get a generic remedy that does NOT name a port", async () => {
+      // CONTRACT REVERSED in Step 2 residual (a). This test previously asserted the
+      // fallback stayed "To mutate, call a serve port directly.", on the reasoning that
+      // POST /global/dispose is genuinely process-local so pointing at a serve port is
+      // correct. That reasoning was right about the ROUTE and wrong about the CHANNEL: a
+      // denial body is read by automated consumers, so the door was handing out the very
+      // bypass its opacity guard exists to catch — and no guard can see wire text.
       const res = await makeRequest("POST", "/global/dispose");
       expect(res.status).toBe(403);
       const json = JSON.parse(res.body);
-      expect(json.remedy).toBe("To mutate, call a serve port directly.");
+      expect(json.remedy).not.toMatch(/serve port directly/i);
+      expect(json.remedy).toContain("docs/runbooks/frontdoor-per-serve-operations.md");
       expect(json.message).toContain("not proxied through the front door");
     });
 

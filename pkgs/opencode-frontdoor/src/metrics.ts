@@ -9,6 +9,21 @@ export interface Metrics {
    */
   notRoutedMutationToAnchor: number;
   /**
+   * NOT-ROUTED sessions placed by a state-pinning request (`connect`) — i.e. how often the
+   * `vjq0` fix RESCUED a connect that would otherwise have stranded its MCP state on the
+   * anchor while the following turn ran elsewhere.
+   *
+   * Scoped to `reason === "not-routed"` on purpose: `prospective` connects are also placed
+   * now, but they were already safe (they record sticky), so counting them would make this
+   * read ~12/week and imply the race fires that often. It does not.
+   *
+   * Exists because the fix would otherwise BLIND the only pre-existing signal for this
+   * class: a not-routed connect that now places no longer increments
+   * `notRoutedMutationToAnchor`. Without this counter we would trade a silent bug for a
+   * silent fix and have no way to tell the difference.
+   */
+  promotedOnConnect: number;
+  /**
    * Upstream responses returning `text/html` blocked by the frontdoor html-poison
    * guard and converted into a 502 bad_gateway response. Makes skew episodes
    * countable rather than journal-only.
@@ -22,5 +37,5 @@ export interface Metrics {
 }
 
 export function createMetrics(): Metrics {
-  return { degradedRequests: 0, notRoutedMutationToAnchor: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
+  return { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
 }

@@ -76,6 +76,50 @@ export type DispositionConstraint =
 export type TuiSurface = 'absent' | 'degrades' | 'unverified';
 
 /**
+ * Where wire-facing text sends an operator instead of naming a serve address.
+ *
+ * WHY THIS EXISTS (Step 2 residual (a), bead `workstation-u417`): a denial body is an
+ * INSTRUCTION CHANNEL. It is read by automated consumers, agents and TUIs, so anything
+ * printed there becomes something they can follow. Printing serve addresses here
+ * manufactured exactly the direct-to-serve violations the opacity guard was built to
+ * catch — and the guard cannot see wire text, so nothing caught them.
+ *
+ * Rule, enforced by `test/wire-text.test.ts`: wire-facing strings name the CONSTRAINT and
+ * point HERE. Port-level recipes live in the runbook, in the repo, where they are
+ * reviewable.
+ */
+export const OPERATOR_RUNBOOK = 'docs/runbooks/frontdoor-per-serve-operations.md';
+
+/**
+ * The four MCP-OAuth routes. Here direct-to-one-serve IS the correct procedure — but it
+ * is silently breakable, so the wire text carries the SILENCE, not the recipe: the
+ * callback listener binds a fixed port and, if that port is already taken, returns
+ * success WITHOUT binding (mcp/oauth-callback.ts:114-120). The redirect then lands in the
+ * wrong process and the call blocks ~5 minutes before failing. Bead `workstation-u417`
+ * (R6): "that silence is where the next incident lives".
+ */
+export const MCP_OAUTH_USER_MESSAGE =
+  'MCP OAuth state is pinned to a single process by a module-level map keyed by MCP name, so the whole flow must complete against one serve and cannot be proxied.';
+
+export const MCP_OAUTH_REMEDY =
+  'For an ordinary MCP connect, use the session-scoped route POST /session/{sessionID}/mcp/{name}/connect, which the front door routes to the session owner. ' +
+  'The auth flow itself is an operator procedure with a known silent-failure mode (a stray process holding the callback port makes it fail late and quietly): ' +
+  `see ${OPERATOR_RUNBOOK} §2.`;
+
+/**
+ * `POST /instance/dispose` is the row where the generic "call a serve port directly" hint
+ * was not merely opaque-unfriendly but ACTIVELY HARMFUL: the caller cannot know which
+ * member holds the instance, and hitting one that does not cold-boots it and disposes
+ * nothing. Telling the caller to pick a port is precisely the trap.
+ */
+export const INSTANCE_DISPOSE_USER_MESSAGE =
+  'Disposal is per-serve and per-directory, and this route inverts through the front door: a serve that does not hold the instance loads it before the handler runs, so the request would boot an instance rather than dispose one.';
+
+export const INSTANCE_DISPOSE_REMEDY =
+  'Do not pick a serve and retry — that is the inversion this denial prevents. ' +
+  `Invalidating everywhere is an operator procedure and cancels in-flight runs: see ${OPERATOR_RUNBOOK} §3.`;
+
+/**
  * The remedy for provider-credential mutation, shared by the four routes whose
  * success path writes `auth.json` (`PUT|DELETE /auth/{providerID}` and both
  * `POST /provider/{providerID}/oauth/*` routes — the latter because
@@ -91,11 +135,10 @@ export type TuiSurface = 'absent' | 'degrades' | 'unverified';
  * it lands, this constant is the single place to update.
  */
 export const POOL_CREDENTIAL_REMEDY =
-  'Write the credential once, then force every serve to re-read it: ' +
-  '(1) send the write to exactly ONE port with credentials, e.g. `curl -u "opencode:$(cat /run/secrets/opencode_server_password)" -X PUT http://127.0.0.1:4096/auth/<providerID> -H "Content-Type: application/json" -d @creds.json`; ' +
-  '(2) then `for p in 4096 4097 4098 4099; do curl -sS -u "opencode:$(cat /run/secrets/opencode_server_password)" -X POST http://127.0.0.1:$p/global/dispose; done`. ' +
-  'Do NOT send the write to all four ports: auth.json is shared and has no lock, so concurrent whole-document writes can silently lose an update. ' +
-  'Be aware step (2) is disruptive — /global/dispose cancels every in-flight run on that serve, for every directory, and SIGTERMs its stdio MCP children; expect a cold-boot latency spike afterwards.';
+  'auth.json is shared by every serve and has no lock, and each serve caches the credential in RAM, so this write must be made once and then re-read everywhere. ' +
+  'Do NOT broadcast it: concurrent whole-document writes can silently lose an update. ' +
+  'The re-read step is disruptive — it cancels in-flight runs and SIGTERMs stdio MCP children. ' +
+  `This is an operator procedure: see ${OPERATOR_RUNBOOK} §1.`;
 
 /**
  * Membership in the TUI's documented SDK surface list at
@@ -128,8 +171,12 @@ export interface RouteDisposition {
   userMessage?: string;
   /**
    * Wire-facing, optional. What the caller should actually DO. When absent,
-   * `proxy.ts` falls back to "call a serve port directly", which is safe for
-   * most process-global rows and wrong for anything sharing pool-wide state.
+   * `proxy.ts` falls back to a generic "this is per-process; the door cannot do it for
+   * you; see the runbook" text. That fallback used to read "call a serve port directly",
+   * which was wrong for anything sharing pool-wide state AND handed every caller a
+   * bypass recipe (Step 2 residual (a), bead `workstation-u417`).
+   *
+   * Wire-facing text must never name a serve address — enforced by `test/wire-text.test.ts`.
    */
   remedy?: string;
   supersededBy?: string;
@@ -212,6 +259,8 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     tuiSurface: 'absent',
     rationale:
       'MCP OAuth state is pinned to one process by the module-level pendingOAuthTransports Map (mcp/index.ts:112), keyed by mcpName. ' + MCP_OAUTH_DENIAL_EVIDENCE,
+    userMessage: MCP_OAUTH_USER_MESSAGE,
+    remedy: MCP_OAUTH_REMEDY,
   },
   'DELETE /mcp/{name}/auth': {
     kind: 'terminal-denial',
@@ -219,6 +268,8 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     tuiSurface: 'absent',
     rationale:
       'Removal must reach the process holding this server\'s live transport and pending-auth entry (mcp/index.ts:112). ' + MCP_OAUTH_DENIAL_EVIDENCE,
+    userMessage: MCP_OAUTH_USER_MESSAGE,
+    remedy: MCP_OAUTH_REMEDY,
   },
   'POST /mcp/{name}/auth/authenticate': {
     kind: 'terminal-denial',
@@ -226,6 +277,8 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     tuiSurface: 'absent',
     rationale:
       'This is the route that blocks on the browser callback, so it is the clearest case: even with perfect routing it exceeds the door\'s first-byte timeout every time. ' + MCP_OAUTH_DENIAL_EVIDENCE,
+    userMessage: MCP_OAUTH_USER_MESSAGE,
+    remedy: MCP_OAUTH_REMEDY,
   },
   'POST /mcp/{name}/auth/callback': {
     kind: 'terminal-denial',
@@ -233,6 +286,8 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     tuiSurface: 'absent',
     rationale:
       'The callback must be handled by the process that issued the authorize request and owns its transport (mcp/index.ts:112). Cross-process it fails as a bare throw (mcp/index.ts:928-929), i.e. a 500 rather than a typed 4xx. ' + MCP_OAUTH_DENIAL_EVIDENCE,
+    userMessage: MCP_OAUTH_USER_MESSAGE,
+    remedy: MCP_OAUTH_REMEDY,
   },
   'POST /instance/dispose': {
     kind: 'terminal-denial',
@@ -242,6 +297,8 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
       'Denial is a DECISION. Forwarding was rejected because the route INVERTS through the door: instance-context middleware LOADS (cold-boots) the target instance before the handler runs, and instance-store.ts:117-120 forks completeLoad into the SERVER scope, so when the door gives up at its 5s first-byte timeout (config.ts:58; no session ID in the path means no exemption per timeouts.ts:26-53) the boot is NOT cancelled. Net effect on a cold member: caller gets 503, plugins/LSP/MCP stdio children are spawned, the instance is cached, and NOTHING is disposed -- the exact opposite of the request. ' +
       'Broadcast was also rejected: dispose is already directory-keyed server-side, so fanning out to the 3 members that do not hold the instance cold-boots all of them, and mcp/index.ts:546 pendingOAuthTransports.clear() is process-global, so disposing directory /a would wipe a pending MCP OAuth flow for directory /b on every member. The 200 response carries no signal about which process held the instance (handlers/instance.ts:24-27 always returns true), so it cannot even drive targeting. ' +
       'TUI consequence (audited 2026-07-26): dialog-provider.tsx:281/:332/:405 and dialog-console-org.tsx:106 all call `await sdk.client.instance.dispose()` WITHOUT checking the returned error, then immediately `await sync.bootstrap()`. So a door 403 is discarded silently and the dialog proceeds with stale provider state; nothing crashes and nothing is reported. Degrades, but invisibly.',
+    userMessage: INSTANCE_DISPOSE_USER_MESSAGE,
+    remedy: INSTANCE_DISPOSE_REMEDY,
   },
 
   // Superseded rows:

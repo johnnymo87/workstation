@@ -16,6 +16,13 @@ export interface MergeOptions {
    * A missing entry here is not an error — it just means rule 1 cannot fire.
    */
   owners?: Record<string, string>
+  /**
+   * Pre-computed liveness, so a caller that also needs it (queryWithState's
+   * nodata predicate) evaluates it ONCE. Two passes share a definition but not
+   * an evaluation: a process dying between them makes the reader disagree with
+   * itself about which serves were live.
+   */
+  prepared?: PreparedFile[]
 }
 
 /**
@@ -94,19 +101,37 @@ export function compareCandidates(
   return c2.file.pid - c1.file.pid
 }
 
-export function mergeOverlays(
+/**
+ * Validate and stamp liveness onto overlay files.
+ *
+ * Extracted so that `queryWithState`'s nodata predicate can ask "is this serve
+ * still reporting?" using THE SAME definition of live that decides the merge.
+ * Reimplementing `isAlive(pid) && now - heartbeat <= staleMs` at the join site
+ * would let the two drift apart on any future change (EPERM nuance,
+ * instanceStamp fencing, staleMs semantics) -- and a reader that disagrees with
+ * itself about liveness produces exactly the wrong-confidence bug this module
+ * exists to prevent.
+ */
+export function prepareFiles(
   files: OverlayData[],
-  { now, staleMs, isAlive, owners = {} }: MergeOptions,
-): StateMap {
+  { now, staleMs, isAlive }: Pick<MergeOptions, "now" | "staleMs" | "isAlive">,
+): PreparedFile[] {
   const validFiles = (Array.isArray(files) ? files.filter(isValidOverlay) : []).map(
     withValidEntriesOnly,
   )
-  const prepared: PreparedFile[] = validFiles.map((f) => ({
+  return validFiles.map((f) => ({
     file: f,
     serveId: f.serveId,
     pid: f.pid,
     live: isAlive(f.pid) && now - f.heartbeat <= staleMs,
   }))
+}
+
+export function mergeOverlays(
+  files: OverlayData[],
+  { now, staleMs, isAlive, owners = {}, prepared: preparedIn }: MergeOptions,
+): StateMap {
+  const prepared: PreparedFile[] = preparedIn ?? prepareFiles(files, { now, staleMs, isAlive })
 
   // Collect all session IDs across all files
   const sessionIds = new Set<string>()

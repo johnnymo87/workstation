@@ -465,6 +465,29 @@ if [ -f "$default_nix" ]; then
     echo "FAIL: sentinel write must precede pkill (sentinel at ${sentinel_line:-?}, pkill at ${pkill_line:-?})"; fail=1
   fi
 
+  # A corrupt main.shada makes nvim refuse the tmp->main rename forever (E136),
+  # warning on every start/save and stranding a temp each exit. The reset must
+  # repair the master file, not just sweep the temps: quarantine the corrupt
+  # file (never delete it), promote a parseable temp, then reap. All of it must
+  # run AFTER the kill, so no live nvim owns the files.
+  want_grep "source detects unparseable shada"           'shada_parses() {'
+  want_grep "shada parse check keys on E576"             "grep -q 'E576'"
+  want_grep "corrupt shada is quarantined"               'main.shada.corrupt'
+  want_grep "source reaps orphaned shada temps"          "-name 'main.shada.tmp.*' -delete"
+  refuse_grep "corrupt shada is never deleted"           'rm -f "$SHADA_MAIN"'
+  quarantine_line=$(grep -n 'quarantining ->' "$default_nix" | head -1 | cut -d: -f1)
+  reap_line=$(grep -n "main.shada.tmp.\*' -delete" "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$quarantine_line" ] && [ -n "$reap_line" ] && [ "$quarantine_line" -lt "$reap_line" ]; then
+    echo "ok: shada repair runs before the temp reap"
+  else
+    echo "FAIL: repair must precede reap (repair at ${quarantine_line:-?}, reap at ${reap_line:-?})"; fail=1
+  fi
+  if [ -n "$reap_line" ] && [ -n "$pkill_line" ] && [ "$pkill_line" -lt "$reap_line" ]; then
+    echo "ok: shada temp reap runs after the nvim kill"
+  else
+    echo "FAIL: shada reap must follow pkill (pkill at ${pkill_line:-?}, reap at ${reap_line:-?})"; fail=1
+  fi
+
   # workstation-3smg: the manifest write must precede the pool restart, so a
   # restart/health-poll die can't discard a successful capture.
   manifest_line=$(grep -n 'MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"' "$default_nix" | head -1 | cut -d: -f1)

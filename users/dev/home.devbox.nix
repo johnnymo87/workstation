@@ -802,6 +802,22 @@ ${serveIdCase}
         # Unset = unarmed, so the binary release and this rebuild can land in either
         # order.
         export OPENCODE_SERVE_EXPECTED_PORT="$PORT"
+        # REGISTRY PID FENCE (bead workstation-4b1q). The port fence above is
+        # port-ONLY: it has no interface check, so a nested
+        # `opencode serve --hostname ::1 --port $PORT` binds alongside the real
+        # serve on 127.0.0.1:$PORT, passes the port fence, and claims the slot.
+        # $$ closes that (and the socket/host variants) at once: a child inherits
+        # this VARIABLE but can never inherit this PID.
+        #
+        # LOAD-BEARING: `exec` below. It makes the serve REPLACE this shell, so
+        # the serve's own pid IS $$. Drop the `exec` and the serve becomes a
+        # child with a different pid and refuses to register (exit 21). That is
+        # not a comment you may trust -- users/dev/test-serve-pid-fence.sh
+        # asserts it at build time via `nix flake check`.
+        #
+        # Unset = fence unarmed (serve logs a warning and behaves as before), so
+        # the opencode-patched release and this rebuild can land in either order.
+        export OPENCODE_SERVE_EXPECTED_PID=$$
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
         export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
@@ -1055,6 +1071,7 @@ ${serveIdCase}
       Environment = [
         "FRONTDOOR_PORT=4700"
         "PIGEON_DAEMON_URL=http://127.0.0.1:4731"
+        # frontdoor-exempt(C10): the door's own upstream anchor -- it cannot route through itself.
         "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
         # Builtins-only app (nothing reads NODE_ENV today) — set for convention/
         # consistency with pigeon-daemon and to future-proof any added dependency.
@@ -1248,6 +1265,8 @@ EOF
 
         # 3. HTTP 503 -> cross-probe the anchor (:4096) directly
         if [ "$HTTP_CODE" -eq 503 ]; then
+          # frontdoor-exempt(C11): cross-probe the anchor directly, so a door 503 can be
+          # distinguished from a genuinely sick pool.
           ANCHOR_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:4096/global/health")
           if [ "$ANCHOR_CODE" -eq 200 ]; then
             rm -f "$FAILFILE"

@@ -2,11 +2,22 @@ import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionRow } from "./oc-session-list-base.js";
-import { mergeOverlays } from "./session-state-merge.js";
+import { mergeOverlays, prepareFiles } from "./session-state-merge.js";
 import type { OverlayData } from "./session-state-impl.js";
 
 export interface SessionWithStateRow extends SessionRow {
-  activity: "working" | "idle" | "retry";
+  /**
+   * `nodata` is a TRIPWIRE, not a status. It means no live writer was in a
+   * position to report on this session, so `idle` would have been a claim the
+   * reader cannot support. Consumers MUST render it at least as loudly as
+   * `idle` -- folding it into a `default:` branch that draws a blank cell would
+   * make this quieter than the bug it exists to catch.
+   *
+   * Distinct from `unknown` on a different axis: `unknown` is stale data from a
+   * dead source (activity still carries a last-known value), `nodata` is the
+   * absence of any source. They are mutually exclusive by construction.
+   */
+  activity: "working" | "idle" | "retry" | "nodata";
   error: boolean;
   pendingPermissions: string[];
   pendingQuestions: string[];
@@ -237,11 +248,45 @@ export function queryWithState(
   const owners = options.owners ?? buildOwnersMap(options.routingDbPath ?? "", baseRows, options.onWarn);
 
   const overlayFiles = loadOverlayFiles(options.overlayDir ?? "", options.onWarn);
-  const mergedStateMap = mergeOverlays(overlayFiles, { now, staleMs, isAlive, owners });
+  const preparedFiles = prepareFiles(overlayFiles, { now, staleMs, isAlive });
+  const mergedStateMap = mergeOverlays(overlayFiles, {
+    now, staleMs, isAlive, owners, prepared: preparedFiles,
+  });
+
+  // Who is still REPORTING? Two granularities, because neither alone is right.
+  //
+  // SERVE-LEVEL catches a dead writer but is blind to per-INSTANCE blindness:
+  // opencode binds plugins at instance creation, so instances that predate a
+  // plugin deploy never write for the life of the serve while newer instances on
+  // the SAME serve write normally (issue #234 / S0). Such a serve looks healthy.
+  //
+  // DIRECTORY-LEVEL catches that, but fires on 62% of real rows on a healthy
+  // fleet, because instance eviction leaves dormant sessions with no file
+  // forever. A tripwire that fires on the majority of rows is one nobody reads.
+  //
+  // So: directory-level for RECENTLY ACTIVE rows (a row touched within FRESH_MS
+  // had an instance loaded that recently, so a missing file means "not watching",
+  // not "evicted"), serve-level for dormant ones. Measured false-alarm rate of
+  // the hybrid against the live fleet: 1m/5m/15m/60m all 0.00%, 240m 0.27%.
+  const liveFiles = preparedFiles.filter((pf) => pf.live);
+  const reportingServes = new Set(liveFiles.map((pf) => pf.serveId));
+  const reportingPairs = new Set(
+    liveFiles.filter((pf) => pf.file.directory !== undefined)
+      .map((pf) => `${pf.serveId}\u0000${pf.file.directory}`),
+  );
+  // A live file with no `directory` (an older writer) covers ANY directory.
+  // Treating it as matching nothing would flood one serve's every recent row
+  // with false nodata, and a tripwire dies of distrust faster than of silence.
+  const wildcardServes = new Set(
+    liveFiles.filter((pf) => pf.file.directory === undefined).map((pf) => pf.serveId),
+  );
+  const fleetIsReporting = reportingServes.size > 0;
+  const FRESH_MS = 15 * 60 * 1000;
 
   // Seam for Task 5: nvim-socket discovery join will annotate attached location here.
 
-  return baseRows.map((row) => {
+  let nodataCount = 0;
+  const rows = baseRows.map((row): SessionWithStateRow => {
     const st = mergedStateMap[row.id];
     if (st) {
       return {
@@ -256,15 +301,69 @@ export function queryWithState(
         ...(st.unknown ? { unknown: st.unknown } : {}),
       };
     } else {
+      // No merged state. That is NOT automatically idle -- it is only idle if
+      // somebody was actually watching. An owned session trusts its owning
+      // serve; an unowned one (66.5% of real rows have no session_assignment
+      // row) falls back to fleet-wide writer health rather than flooding, since
+      // a missing routing db already warns three separate ways in buildOwnersMap.
+      const ownerServeId = owners[row.id];
+      let hasReporter: boolean;
+      if (!ownerServeId) {
+        hasReporter = fleetIsReporting;
+      } else if (!reportingServes.has(ownerServeId)) {
+        hasReporter = false;
+      } else if (now - row.time_updated <= FRESH_MS) {
+        hasReporter =
+          reportingPairs.has(`${ownerServeId}\u0000${row.directory}`) ||
+          wildcardServes.has(ownerServeId);
+      } else {
+        hasReporter = true;
+      }
+      if (!hasReporter) nodataCount++;
       return {
         ...row,
-        activity: "idle",
+        activity: hasReporter ? "idle" : "nodata",
         error: false,
         pendingPermissions: [],
         pendingQuestions: [],
+        // Preserved even for nodata so anything sorting by recency stays stable.
         lastActivity: row.time_updated,
         updatedAt: row.time_updated,
       };
     }
   });
+
+  // Per-row nodata catches a partial outage. These aggregates catch an outage
+  // even for a consumer that ignores the field entirely -- the 2026-08-01
+  // failure, where 886 rows of confident idle went unremarked for ~9 hours.
+  //
+  // The trigger is "no live writer", NOT "every row is nodata". An un-deploy
+  // removes the plugin, not the overlay files: the serves keep running, so orphan
+  // GC (which requires a dead pid) never collects them and their heartbeats
+  // merely age out. Sessions named in those stale files merge as `unknown`
+  // rather than nodata, so a nodataCount === baseRows.length trigger would have
+  // stayed SILENT through exactly the outage it was written for.
+  if (baseRows.length > 0 && !fleetIsReporting) {
+    options.onWarn?.(
+      `no live writer is reporting for any of the ${baseRows.length} session(s) -- ` +
+        `the writer fleet may be down; state below is not trustworthy`,
+    );
+  } else if (baseRows.length > 0) {
+    // Partial outage: name the serves that own sessions but emit nothing, so the
+    // signal is attributable without flooding rows.
+    const expected = new Set<string>();
+    for (const row of baseRows) {
+      const o = owners[row.id];
+      if (o) expected.add(o);
+    }
+    const silent = [...expected].filter((s) => !reportingServes.has(s)).sort();
+    if (silent.length > 0) {
+      options.onWarn?.(
+        `${silent.join(", ")} own session(s) but are not writing any live state -- ` +
+          `their writers may be down (${nodataCount} row(s) reported nodata)`,
+      );
+    }
+  }
+
+  return rows;
 }

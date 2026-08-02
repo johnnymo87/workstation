@@ -1067,9 +1067,18 @@ See **[.opencode/skills/rebuilding/SKILL.md#deploy-runbook-front-door--serve-poo
 - Total-outage SPOF → full isolation kit mandatory.
 - `/event?session_ids=` hard-deps patch #7 → hold-pin + tripwire; **no `patched.N`
   release cut during Phases 0–8, else re-run the 0.2 probe-diff** (NEW-7).
-- **Pre-Phase-2 residual:** the root `ss -K` live re-bootstrap test (Phase 0
+- ~~**Pre-Phase-2 residual:** the root `ss -K` live re-bootstrap test (Phase 0
   predicted PASS from source; couldn't run headless — `sudo -n` = NO). If it
-  FAILS, redesign Phase 2.
+  FAILS, redesign Phase 2.~~ **RETIRED 2026-08-01** (Step 2 of the front-door
+  spine, which owed this residual an explicit disposition rather than a lapse).
+  It was a *pre-registered gate on a redesign decision*: "if `ss -K` cannot kick
+  established sockets, Phase 2's drop-leg-on-drift approach needs redesigning."
+  Phases 2–10 then shipped and have run in production for weeks, SSE drift legs
+  included, so the decision the test was gating has been made and validated by
+  operation. Running it now could only tell us something we would not act on.
+  **It was never a coding blocker** (the Phase 2 header said so at the time), and
+  it is not evidence of an untested code path — `src/sse.ts` and `src/drift.ts`
+  carry their own tests. Retired as OBSOLETE, not as passed: nobody ever ran it.
 - Over-eager promotion (NEW-2) → scoped + TTL-guarded in 1.4.
 - **Under-place under load (FABLE-S1):** the `checkSidExists` anchor-GET blocks
   5–15 s on a busy/mid-canary-restart serve → not-routed turn-starts skip placement

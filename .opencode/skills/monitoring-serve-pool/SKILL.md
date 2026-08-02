@@ -61,6 +61,44 @@ A canary restart in the journal looks like:
 If you find one, read the dump (especially `threads` wait-channels and
 `memory.pressure`) and attach it to a bead before it's lost to `/tmp`.
 
+## Whole-pool crash-loop: the registry fences (exit 20 / exit 21)
+
+If **every** serve is restarting on a ~10s cycle (`RestartSec=10`) right after a
+deploy, suspect a registry fence before anything else. Confirm by mechanism:
+
+```bash
+systemctl status 'opencode-serve@4098' | grep -E 'Active|status=2[01]'
+journalctl -u 'opencode-serve@4098' -n 30 --no-pager | grep FATAL
+```
+
+- **exit 20** = port fence: the bound port != `OPENCODE_SERVE_EXPECTED_PORT`.
+- **exit 21** = PID fence: `process.pid` != `OPENCODE_SERVE_EXPECTED_PID`. The
+  overwhelmingly likely cause is that a wrapper stopped `exec`ing the serve, so the
+  serve became a *child* of the wrapper shell and no longer carries its `$$`.
+  `users/dev/test-serve-pid-fence.sh` (run by `nix flake check`) exists to stop that
+  reaching a host at all, so seeing this in production means something bypassed CI.
+
+**Recovery does NOT require a new binary**, which is the point of `unset ⇒ unarmed`.
+Both fences disarm when their variable is absent, so removing the export from the
+wrapper and rebuilding brings the pool back up unfenced (degraded, not down):
+
+```bash
+# in the workstation checkout, remove the offending `export OPENCODE_SERVE_EXPECTED_PID=$$`
+sudo nixos-rebuild switch --flake ".#$(hostname)"
+```
+
+Then fix the wrapper properly and re-arm. Do not "fix" a crash-loop by deleting the
+fence permanently — the fence is what prevents a throwaway serve from repointing a
+live pool slot and invalidating its session leases (the 2026-07-25 incident, 76
+sessions routed to a closed port for hours).
+
+**Relaunching a pool member by hand** must reproduce the wrapper's shape, or it will
+trip the fence it is subject to:
+
+```bash
+bash -c 'export OPENCODE_SERVE_EXPECTED_PID=$$; exec opencode serve --port 4098 --hostname 127.0.0.1'
+```
+
 ## Memory limits: why Max-only
 
 The serve units are `MemoryMax=6G` with **no MemoryHigh** (revised

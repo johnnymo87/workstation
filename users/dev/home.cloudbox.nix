@@ -689,4 +689,12 @@ lib.mkIf isCloudbox {
       WantedBy = [ "timers.target" ];
     };
   };
+
+  # NOT HERE, DELIBERATELY: the phantom-busy sweeper. Devbox defines it as a
+  # systemd USER unit (users/dev/home.devbox.nix:1312-1358), so diffing the two
+  # host files makes cloudbox look like it is missing one. It is not — cloudbox
+  # ships it as a SYSTEM service + timer with User=dev in
+  # hosts/cloudbox/configuration.nix, because its serve units are system-scoped
+  # and the sweeper must query them on the same bus. See step 1 of
+  # docs/plans/2026-08-01-cloudbox-serve-reliability-roadmap.md (workstation-s5gl).
 }
