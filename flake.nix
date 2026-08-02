@@ -251,6 +251,19 @@
         }
         touch $out
       '';
+
+      # Loader-replica pin guard. Same rationale as the opacity guard above, and
+      # the same failure it was written to avoid: the assertion also exists as a
+      # vitest case, but CI runs `nix flake check` and never runs vitest, so the
+      # vitest copy fires only on a local run -- i.e. after a bump has shipped.
+      # Enforced here so a stale pin is red in the checked path.
+      loader-pin = devboxPkgs.runCommand "loader-pin-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+      } ''
+        cd ${self}
+        bash users/dev/test-loader-pin.sh
+        touch $out
+      '';
     };
 
     # NixOS system configuration
