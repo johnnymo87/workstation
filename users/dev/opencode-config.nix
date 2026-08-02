@@ -213,6 +213,119 @@ let
     '';
   };
 
+  # ---------------------------------------------------------------------------
+  # MCP credential indirection ({file:...} references, not values)
+  # ---------------------------------------------------------------------------
+  #
+  # opencode's config loader runs ConfigVariable.substitute over the RAW TEXT of
+  # opencode.json BEFORE it parses the JSON, expanding two forms:
+  #
+  #   {env:VAR}   -> process.env[VAR]; missing expands to "" (never throws)
+  #   {file:PATH} -> file contents, .trim()ed and JSON-escaped; supports ~/,
+  #                  absolute, and config-dir-relative paths
+  #
+  # Because the pass is pre-parse and whole-file, it works in ANY string — MCP
+  # `headers` values and MCP `environment` values alike. (Remote MCP url+headers
+  # additionally get their own dedicated substitution pass.) Verified against the
+  # installed opencode 1.17.13 bundle and then proven live with a dummy secret.
+  #
+  # This is what lets a credential stay OUT of opencode.json. Previously every
+  # inject* activation below read the plaintext and inlined it, which meant a
+  # 0600 file in $HOME held live third-party tokens in cleartext — readable by
+  # anything running as `dev` (including an agent that `cat`s its own config into
+  # a transcript, which is how this was found), and copied verbatim into every
+  # opencode.json.bak.* that mergeOpencode spawns. Now the file holds only a
+  # PATH, and the secret materializes solely inside the opencode process.
+  #
+  # WHY {file:} AND NOT {env:}
+  # {env:} is the fail-soft form, but the value would have to be in opencode's
+  # environment, and it reliably is not: opencode's bash tool runs NON-interactive
+  # shells, so ~/.bashrc short-circuits and the home.nix token exports never run
+  # (this is the whole reason assets/opencode/plugins/shell-env.ts exists), and
+  # the TUI/serve processes have no better guarantee. {file:} reads from the
+  # source of truth directly and does not care how the process was started.
+  #
+  # !! THE HAZARD THAT SHAPES EVERY CALL SITE BELOW !!
+  # For the main config, substitute's `missing` mode defaults to "error". A
+  # {file:} pointing at a path that does not exist does NOT degrade to empty —
+  # it fails the ENTIRE config load:
+  #   Error: Configuration is invalid at ...: bad file reference: "{file:...}"
+  # That bricks ALL of opencode, not just the one MCP server. So a reference may
+  # only ever be written when the target is known to exist. Every inject* block
+  # below already had exactly that gate (secret present -> write entry, secret
+  # absent -> `del(.mcp.X)`); the gate is preserved verbatim and is now
+  # load-bearing rather than merely tidy. Do not "simplify" it away.
+
+  # Where the plaintext a {file:...} points at actually lives, per host.
+  #   NixOS (devbox/cloudbox): sops-nix tmpfs at /run/secrets, mode 0400 owner
+  #     dev. opencode and opencode-serve both run as dev, so it is readable, and
+  #     the plaintext never persists across a reboot.
+  #   macOS: there is no /run/secrets. Keychain remains the source of truth, but
+  #     nothing in-process can call `security` during config parse, so activation
+  #     mirrors each item into a 0600 file under ~/.config/opencode/secrets and
+  #     the reference points there. Degrades sanely: opencode.json is still
+  #     credential-free and there is one emission path for all hosts; macOS just
+  #     does not get the tmpfs property.
+  darwinSecretsDir = "$HOME/.config/opencode/secrets";
+
+  # The literal written into opencode.json in place of a credential.
+  # `~/` is expanded by substitute itself, which keeps an absolute home path out
+  # of the config file too.
+  secretRef = name:
+    if isDarwin
+    then "{file:~/.config/opencode/secrets/${name}}"
+    else "{file:/run/secrets/${name}}";
+
+  # macOS only: mirror Keychain item `service` to the 0600 file that secretRef
+  # will point at, and set shell variable `flag` to 1 on success.
+  #
+  # Removes the mirror when the item is gone, so a revoked credential cannot
+  # leave opencode pointing at a stale path — the caller's existing gate then
+  # strips the MCP entry, which is what keeps the missing-file hazard above from
+  # ever firing. The value passes through a shell variable (unavoidable: Keychain
+  # has no file interface) but is never echoed, and the subshell umask means the
+  # file is never briefly world-readable.
+  keychainMirror = { name, service, flag }: ''
+    ${flag}=0
+    if _kc_val="$(/usr/bin/security find-generic-password -s ${service} -w 2>/dev/null)" && [ -n "$_kc_val" ]; then
+      mkdir -p ${darwinSecretsDir}
+      chmod 700 ${darwinSecretsDir}
+      ( umask 077; printf '%s' "$_kc_val" > ${darwinSecretsDir}/${name} )
+      ${flag}=1
+    else
+      rm -f ${darwinSecretsDir}/${name}
+    fi
+    unset _kc_val
+  '';
+
+  # NixOS only: set shell variable `flag` to 1 when the sops secret is readable.
+  # Deliberately does NOT read the value — the whole point is that the plaintext
+  # never enters the activation script's memory, let alone the config.
+  sopsPresent = { name, flag }: ''
+    ${flag}=0
+    [ -r /run/secrets/${name} ] && ${flag}=1
+  '';
+
+  # Every sops secret an inject* block can reference from opencode.json.
+  # Used by the leak guard below to know WHAT to check for.
+  #
+  # This list must be explicit and cannot be replaced by globbing /run/secrets/*:
+  # sops-nix points /run/secrets at /run/secrets.d/<gen>, which is mode
+  # `drwxr-x--x root:keys` — `dev` may TRAVERSE it (so `cat /run/secrets/foo`
+  # works) but may NOT LIST it. A glob therefore silently expands to nothing and
+  # any loop over it becomes a no-op that reports success. (Learned the hard way:
+  # the first version of the guard globbed, "passed" on a deliberately poisoned
+  # config, and was verified only because the positive control failed to fire.)
+  mcpSopsSecretNames = [
+    "dd_pat"
+    "slack_mcp_xoxp_token"
+    "pagerduty_user_api_key"
+    "rollbar_access_token"
+    "devcycle_client_id"
+    "devcycle_client_secret"
+    "devcycle_project_key"
+  ];
+
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
   # codex-lb (devbox only): ChatGPT/Codex-subscription models served by the local
@@ -743,6 +856,78 @@ in
     ''}
   '';
 
+  # Regression guard: assert no sops plaintext ever lands in opencode.json.
+  #
+  # This is the backstop for the bug this whole {file:...} scheme exists to fix
+  # (found 2026-08-01: live Datadog/Slack/PagerDuty/Rollbar tokens sitting in
+  # cleartext in a 0600 file in $HOME, having been inlined by the very
+  # activations above, and copied into every opencode.json.bak.* alongside).
+  # The convention "emit secretRef, never the value" is easy to regress with one
+  # careless `--arg tok "$(cat /run/secrets/...)"`, and the failure is SILENT —
+  # everything keeps working, the credential is just exposed. So we check the
+  # observable end state rather than trusting the convention.
+  #
+  # Method: substring-match every /run/secrets/* value against the finished
+  # config. Comparing real values means ZERO false positives from
+  # credential-shaped-but-harmless strings, unlike a token-prefix regex.
+  # Only secrets >= 16 chars are considered, so short non-secret config values
+  # (site names, project ids, numeric ids) cannot trip it by coincidence.
+  #
+  # Warn-only, deliberately: a hard failure here would block every future
+  # home-manager switch on a machine that is already in the bad state, which is
+  # exactly when you most need switch to work in order to FIX it. The message is
+  # loud and names the offending secret (never its value).
+  #
+  # Runs after every inject* for this host — hence the conditional dep list; the
+  # blocks are mkIf'd per platform and naming an absent activation is a dag error.
+  home.activation.assertOpencodeConfigHasNoSecrets = lib.mkIf (isDevbox || isCloudbox)
+    (lib.hm.dag.entryAfter ([ "mergeOpencode" ]
+      ++ lib.optionals isCloudbox [
+        "injectDatadogMcpSecretsSops"
+        "injectSlackMcpSecretsSops"
+        "injectPagerDutyMcpSecretsSops"
+        "injectRollbarMcpSecretsSops"
+        "injectDevcycleMcpSecretsSops"
+      ]) ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+      [[ -f "$runtime" ]] || exit 0
+      [ -d /run/secrets ] || exit 0
+
+      leaked=0
+      checked=0
+      for name in ${lib.concatStringsSep " " mcpSopsSecretNames}; do
+        secret="/run/secrets/$name"
+        [ -r "$secret" ] || continue
+        # Strip the trailing newline the way {file:...} does before comparing.
+        value="$(tr -d '\n' < "$secret")"
+        # Skip short values: a <16-char secret could collide with ordinary
+        # config text and produce a false positive.
+        [ "''${#value}" -ge 16 ] || continue
+        checked=$((checked + 1))
+        if ${pkgs.gnugrep}/bin/grep -qF -- "$value" "$runtime" 2>/dev/null; then
+          echo "opencode secrets guard: !! PLAINTEXT of sops secret '$name' found in $runtime" >&2
+          leaked=1
+        fi
+      done
+      unset value
+
+      # A guard that checks nothing must not look like a guard that passed.
+      if [ "$checked" -eq 0 ]; then
+        echo "opencode secrets guard: WARNING — checked 0 secrets; guard is not actually verifying anything." >&2
+      fi
+
+      if [ "$leaked" = "1" ]; then
+        {
+          echo "opencode secrets guard: the config must reference secrets, not contain them."
+          echo "opencode secrets guard: use \`secretRef \"<name>\"\` in users/dev/opencode-config.nix"
+          echo "opencode secrets guard: (emits {file:/run/secrets/<name>}, which opencode expands at config load)."
+          echo "opencode secrets guard: after fixing, ROTATE the named credential — it has been on disk in cleartext."
+        } >&2
+      fi
+    '');
+
   # Inject Basecamp MCP secrets from macOS Keychain into opencode.json
   # Runs after mergeOpencode to ensure runtime file exists
   # Uses basic auth (username/password) instead of OAuth for simpler setup
@@ -752,13 +937,17 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      # Fetch credentials from Keychain
+      # Mirror credentials from Keychain to the 0600 files {file:...} will read.
+      # NOTE: the username is ALSO used verbatim in the USER_AGENT string below,
+      # so it is additionally kept in a shell variable. It is an identifier, not
+      # a secret; the password and account id never enter the config.
       bc_username="$(/usr/bin/security find-generic-password -a basecamp-mcp -s basecamp-mcp-username -w 2>/dev/null || true)"
-      bc_password="$(/usr/bin/security find-generic-password -a basecamp-mcp -s basecamp-mcp-password -w 2>/dev/null || true)"
-      bc_account_id="$(/usr/bin/security find-generic-password -s basecamp-account-id -w 2>/dev/null || true)"
+      ${keychainMirror { name = "basecamp_mcp_username"; service = "basecamp-mcp-username"; flag = "have_bc_user"; }}
+      ${keychainMirror { name = "basecamp_mcp_password"; service = "basecamp-mcp-password"; flag = "have_bc_pass"; }}
+      ${keychainMirror { name = "basecamp_account_id"; service = "basecamp-account-id"; flag = "have_bc_acct"; }}
 
       # If any credential is missing, delete mcp.basecamp and exit cleanly
-      if [[ -z "''${bc_username}" ]] || [[ -z "''${bc_password}" ]] || [[ -z "''${bc_account_id}" ]]; then
+      if [[ "$have_bc_user" -eq 0 || "$have_bc_pass" -eq 0 || "$have_bc_acct" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.basecamp)' "$runtime" > "$tmp"
@@ -774,10 +963,11 @@ in
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
-          --arg user "''${bc_username}" \
-          --arg pass "''${bc_password}" \
+          --arg user "${secretRef "basecamp_mcp_username"}" \
+          --arg pass "${secretRef "basecamp_mcp_password"}" \
           --arg home "$HOME" \
-          --arg account_id "''${bc_account_id}" \
+          --arg ua_user "''${bc_username}" \
+          --arg account_id "${secretRef "basecamp_account_id"}" \
           '.mcp.basecamp = {
             "type": "local",
             "command": [
@@ -789,7 +979,7 @@ in
               "BASECAMP_USERNAME": $user,
               "BASECAMP_PASSWORD": $pass,
               "BASECAMP_ACCOUNT_ID": $account_id,
-              "USER_AGENT": ("Basecamp MCP Server (" + $user + ")")
+              "USER_AGENT": ("Basecamp MCP Server (" + $ua_user + ")")
             }
           }' "$runtime" > "$tmp"
 
@@ -807,17 +997,20 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      # Fetch xoxp token from Keychain
-      xoxp_token="$(/usr/bin/security find-generic-password -s slack-mcp-xoxp-token -w 2>/dev/null || true)"
+      # Mirror the Keychain item to the 0600 file that {file:...} will read.
+      ${keychainMirror { name = "slack_mcp_xoxp_token"; service = "slack-mcp-xoxp-token"; flag = "have_xoxp"; }}
 
-      # If token is missing or empty, delete mcp.slack and exit cleanly
-      if [[ -z "''${xoxp_token}" ]]; then
+      # If token is missing, delete mcp.slack + mcp.slack-ro and exit cleanly
+      if [[ "$have_xoxp" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
-          ${pkgs.jq}/bin/jq 'del(.mcp.slack)' "$runtime" > "$tmp"
+          # Both variants, not just .mcp.slack. They share one token, so a
+          # stale slack-ro would keep a reference to a mirror we just deleted —
+          # which now fails the WHOLE config load, not just that server.
+          ${pkgs.jq}/bin/jq 'del(.mcp.slack) | del(.mcp."slack-ro")' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Slack MCP xoxp token not found in Keychain; removed mcp.slack from config" >&2
+        echo "Slack MCP xoxp token not found in Keychain; removed mcp.slack + mcp.slack-ro from config" >&2
       # Token present: inject Slack MCP config with xoxp auth
       # MCP is disabled by default; enable manually or use dedicated slack agent when needed.
       # Two variants: `slack` (read + write, SLACK_MCP_ADD_MESSAGE_TOOL=true) and
@@ -829,7 +1022,7 @@ in
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
-          --arg xoxp "''${xoxp_token}" \
+          --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
           '.mcp.slack = {
             "type": "local",
             "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
@@ -861,20 +1054,17 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      # Read xoxp token from sops-decrypted secret
-      xoxp_token=""
-      if [ -r /run/secrets/slack_mcp_xoxp_token ]; then
-        xoxp_token="$(cat /run/secrets/slack_mcp_xoxp_token)"
-      fi
+      # Presence-check the sops secret; the value is never read (see secretRef).
+      ${sopsPresent { name = "slack_mcp_xoxp_token"; flag = "have_xoxp"; }}
 
-      # If token is missing or empty, delete both slack variants and exit cleanly
-      if [[ -z "''${xoxp_token}" ]]; then
+      # If token is missing, delete both slack variants and exit cleanly
+      if [[ "$have_xoxp" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.slack) | del(.mcp."slack-ro")' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Slack MCP xoxp token not found in sops; removed mcp.slack + mcp.slack-ro from config" >&2
+        echo "Slack MCP xoxp token not found in sops; removed mcp.slack + mcp.slack-ro from config (secret absent -> reference would fail the whole config load)" >&2
       # Token present: inject Slack MCP config with xoxp auth.
       # Two variants: `slack` (read + write) and `slack-ro` (read-only; omits
       # SLACK_MCP_ADD_MESSAGE_TOOL so only read tools register). slack-ro is used
@@ -884,7 +1074,7 @@ in
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
-          --arg xoxp "''${xoxp_token}" \
+          --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
           '.mcp.slack = {
             "type": "local",
             "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
@@ -918,9 +1108,9 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      pd_api_key="$(/usr/bin/security find-generic-password -s pagerduty-user-api-key -w 2>/dev/null || true)"
+      ${keychainMirror { name = "pagerduty_user_api_key"; service = "pagerduty-user-api-key"; flag = "have_pd"; }}
 
-      if [[ -z "''${pd_api_key}" ]]; then
+      if [[ "$have_pd" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.pagerduty)' "$runtime" > "$tmp"
@@ -933,7 +1123,7 @@ in
 
         ${pkgs.jq}/bin/jq \
           --arg command "${pagerduty-mcp}/bin/pagerduty-mcp" \
-          --arg api_key "''${pd_api_key}" \
+          --arg api_key "${secretRef "pagerduty_user_api_key"}" \
           '.mcp.pagerduty = {
             "type": "local",
             "command": [$command],
@@ -955,12 +1145,9 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      pd_api_key=""
-      if [ -r /run/secrets/pagerduty_user_api_key ]; then
-        pd_api_key="$(cat /run/secrets/pagerduty_user_api_key)"
-      fi
+      ${sopsPresent { name = "pagerduty_user_api_key"; flag = "have_pd"; }}
 
-      if [[ -z "''${pd_api_key}" ]]; then
+      if [[ "$have_pd" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.pagerduty)' "$runtime" > "$tmp"
@@ -973,7 +1160,7 @@ in
 
         ${pkgs.jq}/bin/jq \
           --arg command "${pagerduty-mcp}/bin/pagerduty-mcp" \
-          --arg api_key "''${pd_api_key}" \
+          --arg api_key "${secretRef "pagerduty_user_api_key"}" \
           '.mcp.pagerduty = {
             "type": "local",
             "command": [$command],
@@ -997,9 +1184,9 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      rollbar_token="$(/usr/bin/security find-generic-password -s rollbar-access-token -w 2>/dev/null || true)"
+      ${keychainMirror { name = "rollbar_access_token"; service = "rollbar-access-token"; flag = "have_rollbar"; }}
 
-      if [[ -z "''${rollbar_token}" ]]; then
+      if [[ "$have_rollbar" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.rollbar)' "$runtime" > "$tmp"
@@ -1012,7 +1199,7 @@ in
 
         ${pkgs.jq}/bin/jq \
           --arg command "${rollbar-mcp}/bin/rollbar-mcp" \
-          --arg token "''${rollbar_token}" \
+          --arg token "${secretRef "rollbar_access_token"}" \
           '.mcp.rollbar = {
             "type": "local",
             "command": [$command],
@@ -1034,12 +1221,9 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      rollbar_token=""
-      if [ -r /run/secrets/rollbar_access_token ]; then
-        rollbar_token="$(cat /run/secrets/rollbar_access_token)"
-      fi
+      ${sopsPresent { name = "rollbar_access_token"; flag = "have_rollbar"; }}
 
-      if [[ -z "''${rollbar_token}" ]]; then
+      if [[ "$have_rollbar" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.rollbar)' "$runtime" > "$tmp"
@@ -1052,7 +1236,7 @@ in
 
         ${pkgs.jq}/bin/jq \
           --arg command "${rollbar-mcp}/bin/rollbar-mcp" \
-          --arg token "''${rollbar_token}" \
+          --arg token "${secretRef "rollbar_access_token"}" \
           '.mcp.rollbar = {
             "type": "local",
             "command": [$command],
@@ -1085,12 +1269,12 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      dvc_client_id="$(/usr/bin/security find-generic-password -s devcycle-client-id -w 2>/dev/null || true)"
-      dvc_client_secret="$(/usr/bin/security find-generic-password -s devcycle-client-secret -w 2>/dev/null || true)"
-      dvc_project_key="$(/usr/bin/security find-generic-password -s devcycle-project-key -w 2>/dev/null || true)"
+      ${keychainMirror { name = "devcycle_client_id"; service = "devcycle-client-id"; flag = "have_id"; }}
+      ${keychainMirror { name = "devcycle_client_secret"; service = "devcycle-client-secret"; flag = "have_secret"; }}
+      ${keychainMirror { name = "devcycle_project_key"; service = "devcycle-project-key"; flag = "have_pk"; }}
 
       have_creds=0
-      [[ -n "''${dvc_client_id}" && -n "''${dvc_client_secret}" ]] && have_creds=1
+      [[ "$have_id" -eq 1 && "$have_secret" -eq 1 ]] && have_creds=1
       have_sso=0
       [[ -f "$HOME/.config/devcycle/auth.yml" ]] && have_sso=1
 
@@ -1107,12 +1291,17 @@ in
 
       env_json="{}"
       if [[ "$have_creds" -eq 1 ]]; then
+        # $pk is gated on have_pk, not on emptiness: the reference string is
+        # never empty, so presence of the underlying secret is the only valid
+        # test — and emitting a reference to an absent project key would fail
+        # the entire config load.
         env_json="$(${pkgs.jq}/bin/jq -n \
-          --arg id "''${dvc_client_id}" \
-          --arg secret "''${dvc_client_secret}" \
-          --arg pk "''${dvc_project_key}" \
+          --arg id "${secretRef "devcycle_client_id"}" \
+          --arg secret "${secretRef "devcycle_client_secret"}" \
+          --arg pk "${secretRef "devcycle_project_key"}" \
+          --argjson have_pk "$have_pk" \
           '{DEVCYCLE_CLIENT_ID: $id, DEVCYCLE_CLIENT_SECRET: $secret}
-           + (if $pk == "" then {} else {DEVCYCLE_PROJECT_KEY: $pk} end)')"
+           + (if $have_pk == 1 then {DEVCYCLE_PROJECT_KEY: $pk} else {} end)')"
       fi
 
       if [[ ( "$have_creds" -eq 1 || "$have_sso" -eq 1 ) && -f "$runtime" ]]; then
@@ -1139,15 +1328,12 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      dvc_client_id=""
-      dvc_client_secret=""
-      dvc_project_key=""
-      [ -r /run/secrets/devcycle_client_id ] && dvc_client_id="$(cat /run/secrets/devcycle_client_id)"
-      [ -r /run/secrets/devcycle_client_secret ] && dvc_client_secret="$(cat /run/secrets/devcycle_client_secret)"
-      [ -r /run/secrets/devcycle_project_key ] && dvc_project_key="$(cat /run/secrets/devcycle_project_key)"
+      ${sopsPresent { name = "devcycle_client_id"; flag = "have_id"; }}
+      ${sopsPresent { name = "devcycle_client_secret"; flag = "have_secret"; }}
+      ${sopsPresent { name = "devcycle_project_key"; flag = "have_pk"; }}
 
       have_creds=0
-      [[ -n "''${dvc_client_id}" && -n "''${dvc_client_secret}" ]] && have_creds=1
+      [[ "$have_id" -eq 1 && "$have_secret" -eq 1 ]] && have_creds=1
       have_sso=0
       [[ -f "$HOME/.config/devcycle/auth.yml" ]] && have_sso=1
 
@@ -1164,12 +1350,17 @@ in
 
       env_json="{}"
       if [[ "$have_creds" -eq 1 ]]; then
+        # $pk is gated on have_pk, not on emptiness: the reference string is
+        # never empty, so presence of the underlying secret is the only valid
+        # test — and emitting a reference to an absent project key would fail
+        # the entire config load.
         env_json="$(${pkgs.jq}/bin/jq -n \
-          --arg id "''${dvc_client_id}" \
-          --arg secret "''${dvc_client_secret}" \
-          --arg pk "''${dvc_project_key}" \
+          --arg id "${secretRef "devcycle_client_id"}" \
+          --arg secret "${secretRef "devcycle_client_secret"}" \
+          --arg pk "${secretRef "devcycle_project_key"}" \
+          --argjson have_pk "$have_pk" \
           '{DEVCYCLE_CLIENT_ID: $id, DEVCYCLE_CLIENT_SECRET: $secret}
-           + (if $pk == "" then {} else {DEVCYCLE_PROJECT_KEY: $pk} end)')"
+           + (if $have_pk == 1 then {DEVCYCLE_PROJECT_KEY: $pk} else {} end)')"
       fi
 
       if [[ ( "$have_creds" -eq 1 || "$have_sso" -eq 1 ) && -f "$runtime" ]]; then
@@ -1654,9 +1845,9 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      dd_pat="$(/usr/bin/security find-generic-password -s dd-pat -w 2>/dev/null || true)"
+      ${keychainMirror { name = "dd_pat"; service = "dd-pat"; flag = "have_pat"; }}
 
-      if [[ -z "''${dd_pat}" ]]; then
+      if [[ "$have_pat" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.datadog)' "$runtime" > "$tmp"
@@ -1669,7 +1860,7 @@ in
 
         ${pkgs.jq}/bin/jq \
           --arg url "https://mcp.us3.datadoghq.com/v1/mcp?toolsets=all" \
-          --arg pat "''${dd_pat}" \
+          --arg pat "${secretRef "dd_pat"}" \
           '.mcp.datadog = {
             "type": "remote",
             "url": $url,
@@ -1690,12 +1881,9 @@ in
 
       runtime="$HOME/.config/opencode/opencode.json"
 
-      dd_pat=""
-      if [ -r /run/secrets/dd_pat ]; then
-        dd_pat="$(cat /run/secrets/dd_pat)"
-      fi
+      ${sopsPresent { name = "dd_pat"; flag = "have_pat"; }}
 
-      if [[ -z "''${dd_pat}" ]]; then
+      if [[ "$have_pat" -eq 0 ]]; then
         if [[ -f "$runtime" ]]; then
           tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
           ${pkgs.jq}/bin/jq 'del(.mcp.datadog)' "$runtime" > "$tmp"
@@ -1708,7 +1896,7 @@ in
 
         ${pkgs.jq}/bin/jq \
           --arg url "https://mcp.us3.datadoghq.com/v1/mcp?toolsets=all" \
-          --arg pat "''${dd_pat}" \
+          --arg pat "${secretRef "dd_pat"}" \
           '.mcp.datadog = {
             "type": "remote",
             "url": $url,
