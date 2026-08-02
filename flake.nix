@@ -170,6 +170,23 @@
         bash users/dev/test-frontdoor-opacity-guard.sh
         touch $out
       '';
+
+      # Headless-Lua unit tests for assets/nvim/lua/user/session_switcher/.
+      #
+      # Registered here rather than bolted onto pkgs/oc-auto-attach's
+      # test-project-key.sh, which was the obvious home: that file is a real
+      # `nvim -l` harness and the right pattern to copy, but its derivation
+      # sets no doCheck/checkPhase and CI runs only `nix flake check`, so
+      # nothing executes it. Its assertions are inert. Landing S4's tests there
+      # would have repeated the frontdoor-opacity mistake documented directly
+      # above -- a guard nothing runs is documentation with a shebang.
+      nvim-lua = devboxPkgs.runCommand "nvim-lua-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.neovim ];
+      } ''
+        cd ${self}
+        bash assets/nvim/test-session-switcher.sh
+        touch $out
+      '';
     };
 
     # NixOS system configuration
