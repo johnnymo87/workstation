@@ -334,6 +334,22 @@ lib.mkIf isDarwin {
             # session binds a different port and is refused (exit 20). Unset =
             # unarmed, so the binary release and this rebuild are order-independent.
             export OPENCODE_SERVE_EXPECTED_PORT="${toString port}"
+            # REGISTRY PID FENCE (bead workstation-4b1q). The port fence above is
+            # port-ONLY: it has no interface check, so a nested
+            # `opencode serve --hostname ::1 --port <port>` binds alongside the real
+            # serve on 127.0.0.1:<port>, passes the port fence, and claims the slot.
+            # $$ closes that (and the socket/host variants) at once: a child inherits
+            # this VARIABLE but can never inherit this PID.
+            #
+            # LOAD-BEARING: `exec` below. It makes the serve REPLACE this shell, so
+            # the serve's own pid IS $$. Drop the `exec` and the serve becomes a
+            # child with a different pid and refuses to register (exit 21). That is
+            # not a comment you may trust -- users/dev/test-serve-pid-fence.sh
+            # asserts it at build time via `nix flake check`.
+            #
+            # Unset = fence unarmed (serve logs a warning and behaves as before), so
+            # the opencode-patched release and this rebuild can land in either order.
+            export OPENCODE_SERVE_EXPECTED_PID=$$
 
             exec opencode serve --port ${toString port} --hostname 127.0.0.1
           ''}"
