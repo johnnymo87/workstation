@@ -37,6 +37,13 @@
 -- failure would blank the picker during a partial outage; discarding it would
 -- hide the outage completely. It is neither: it is data the caller must show.
 --
+-- CONTRACT NOTES FOR THE CONSUMER (S5/S8):
+--   * JSON null decodes to Lua nil, not vim.NIL (see luanil below).
+--   * There is NO cancellation. Each fetch is independent and its callback
+--     WILL fire, even if the picker that asked for it has since closed. A
+--     caller that can re-open within the timeout window owns the generation
+--     token needed to ignore a stale reply.
+--
 -- Rows are passed through VERBATIM. In particular `activity` may be "nodata",
 -- a 4th union member meaning no live writer was in a position to report. It is
 -- a tripwire, not a status. This module must not normalise, default or drop it.
@@ -74,7 +81,7 @@ end
 ---   always on the main loop.
 function M.fetch(opts, cb)
   opts = opts or {}
-  vim.validate({ cb = { cb, "function" } })
+  vim.validate("cb", cb, "function")
 
   local settled = false
   local handle
@@ -110,8 +117,17 @@ function M.fetch(opts, cb)
       return
     end
 
-    local ok, decoded = pcall(vim.json.decode, out.stdout or "")
-    if not ok or type(decoded) ~= "table" then
+    -- luanil: JSON null becomes Lua nil rather than vim.NIL. vim.NIL is
+    -- userdata and therefore TRUTHY, so `if row.activity then` would silently
+    -- take the wrong branch for a null field. Mapping to nil kills that
+    -- footgun at the source instead of documenting a landmine for S5/S8.
+    local ok, decoded = pcall(vim.json.decode, out.stdout or "", { luanil = { object = true } })
+    -- vim.islist, NOT type()=="table": a top-level JSON OBJECT is also a table,
+    -- and `{"error":"database locked"}` would otherwise pass the type check and
+    -- present as ZERO ROWS -- the silent empty picker this module exists to
+    -- prevent. `[]` is islist=true, so a legitimately empty fleet still
+    -- succeeds with 0 rows (verified on 0.11.7).
+    if not ok or not vim.islist(decoded) then
       settle(nil, {
         kind = "decode",
         stderr = out.stderr or "",

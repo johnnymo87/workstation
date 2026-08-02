@@ -17,6 +17,14 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 if ! command -v nvim >/dev/null 2>&1; then
+  # Inside a Nix build the derivation guarantees nvim, so its absence means the
+  # check is mis-wired -- fail rather than skip. A check that silently passes
+  # when its runner vanishes is the "guard nothing runs" failure this file was
+  # created to avoid.
+  if [ -n "${NIX_BUILD_TOP:-}" ]; then
+    printf 'FAIL  nvim missing inside the Nix build (check is mis-wired)\n'
+    exit 1
+  fi
   printf 'SKIP  session_switcher lua tests (nvim not on PATH)\n'
   exit 0
 fi
@@ -147,6 +155,7 @@ cat >"$lua_file" <<'LUA'
   cli.fetch({ system = fake_sync(0, ROWS) }, function() ran = true end)
   assert(ran == false, "fetch is ASYNC (callback must not run before fetch returns)")
   vim.wait(500, function() return ran end)
+  assert(ran, "sync-fake callback DOES eventually fire (not merely deferred into the void)")
 
   -- 10. The command actually invoked is oc-session-list --with-state.
   local got_cmd
@@ -170,13 +179,32 @@ cat >"$lua_file" <<'LUA'
   vim.wait(2000, function() return done2 end)
   assert(api_ok, "callback runs on main loop (vim.schedule), API calls must be legal")
 
+  -- 12. The other half of the founding distinction: a legitimately EMPTY
+  --     fleet is a SUCCESS with zero rows, not an error. Without this, an
+  --     over-eager array check could blank every healthy-but-empty fleet and
+  --     nothing would notice.
+  res, err = collect({ system = fake(0, "[]") })
+  assert(err == nil, "empty array -> success, not error")
+  assert(#res.rows == 0, "empty array -> zero rows")
+
+  -- 13. A top-level JSON OBJECT is NOT a row list. It is also a Lua table, so
+  --     a type() check would accept it and render as an empty picker.
+  res, err = collect({ system = fake(0, '{"error":"database locked"}') })
+  assert(err ~= nil and err.kind == "decode", "json object -> decode error, got " .. tostring(err and err.kind))
+  assert(res == nil, "json object -> no result (never a silent empty picker)")
+
+  -- 14. JSON null maps to Lua nil, not the TRUTHY vim.NIL userdata.
+  res, err = collect({ system = fake(0, '[{"id":"a","activity":null}]') })
+  assert(err == nil, "null field -> still success")
+  assert(res.rows[1].activity == nil, "json null -> Lua nil (vim.NIL is truthy and would misroute consumers)")
+
   print("LUA_TEST_OK")
 LUA
 
 lua_out="$(nvim --clean -l "$lua_file" 2>&1 || true)"
 
 case "$lua_out" in
-  *LUA_TEST_OK*) printf 'PASS  session_switcher.cli unit tests (11 assertions via nvim -l)\n' ;;
+  *LUA_TEST_OK*) printf 'PASS  session_switcher.cli unit tests (14 assertions via nvim -l)\n' ;;
   *) printf 'FAIL  session_switcher.cli unit tests\n        out: %s\n' "$lua_out"; exit 1 ;;
 esac
 
