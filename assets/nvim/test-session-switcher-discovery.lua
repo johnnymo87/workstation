@@ -64,6 +64,12 @@ assert(vim.tbl_count(discovery.dedupe(nil)) == 0, "nil -> empty")
 -- Junk entries must not become phantom sessions.
 assert(vim.tbl_count(discovery.dedupe({ { pane = "%1" }, hit("", "running") })) == 0, "sid-less entries dropped")
 
+-- job_dead (buffer-level truth) overrides attach_status (sid-level memory).
+assert(discovery.is_live({ attach_status = "running", job_dead = true }) == false,
+  "dead terminal job -> NOT live even when the sid says running")
+assert(discovery.is_live({ attach_status = "running", job_dead = false }) == true, "live job + running -> live")
+assert(discovery.is_live({ attach_status = "running" }) == true, "no job opinion -> fall back to status")
+
 -- ---------------------------------------------------------------- rpc.snapshot
 
 -- snapshot() is called via --remote-expr, which can only carry simple values,
@@ -98,6 +104,30 @@ vim.api.nvim_buf_delete(buf_live, { force = true })
 vim.api.nvim_buf_delete(buf_dead, { force = true })
 assert(rpc.snapshot({ status = function() return "unknown" end }) == "[]", "no sessions -> '[]'")
 
+-- RE-ATTACH RESURRECTION. statuses is keyed by SID, not buffer. Re-attaching a
+-- session whose first attach died sets statuses[sid]="running" again while the
+-- ORIGINAL corpse buffer still carries b:oc_session_id -- so a sid-only join
+-- reports the corpse as running. Only per-buffer job liveness separates them.
+local corpse = vim.api.nvim_create_buf(false, true)
+vim.b[corpse].oc_session_id = "ses_re"
+local fresh = vim.api.nvim_create_buf(false, true)
+vim.b[fresh].oc_session_id = "ses_re"
+local snap2 = vim.json.decode(rpc.snapshot({
+  status = function() return "running" end,               -- sid-level: both "running"
+  job_dead = function(b) return b == corpse end,          -- buffer-level: one is a corpse
+}))
+assert(#snap2 == 2, "both buffers reported")
+local live_count, dead_count = 0, 0
+for _, h in ipairs(snap2) do
+  if discovery.is_live(h) then live_count = live_count + 1 else dead_count = dead_count + 1 end
+end
+assert(live_count == 1 and dead_count == 1, "re-attach: exactly one of the two is live")
+local deduped = discovery.dedupe(snap2)
+assert(deduped["ses_re"].buffer == fresh, "dedupe keeps the LIVE buffer, not the corpse")
+assert(discovery.is_live(deduped["ses_re"]), "survivor is the live one")
+vim.api.nvim_buf_delete(corpse, { force = true })
+vim.api.nvim_buf_delete(fresh, { force = true })
+
 -- ---------------------------------------------------------------- locate
 
 local function collect(opts)
@@ -106,6 +136,13 @@ local function collect(opts)
   vim.wait(2000, function() return done end)
   assert(done, "locate must ALWAYS call back")
   return res
+end
+
+local function fake_kill(payload)
+  return function(_cmd, _opts, on_exit)
+    vim.schedule(function() on_exit({ code = 0, signal = 15, stdout = payload, stderr = "" }) end)
+    return { pid = 1, kill = function() end }
+  end
 end
 
 local function fake_reply(payload)
@@ -213,5 +250,71 @@ res = collect({
 })
 assert(res["ses_corpse"], "dead attach still discovered (the picker must be able to show it)")
 assert(discovery.is_live(res["ses_corpse"]) == false, "dead attach is NOT live -- no jumping to dead terminals")
+
+-- A straggler KILLED by our own deadline reports code=0 with signal=15 and
+-- possibly truncated stdout (measured). Trusting code alone would let a corpse
+-- of our own making into the picker.
+res = collect({
+  sockets = { "/tmp/nvim-5.sock" },
+  own_snapshot = function() return "[]" end,
+  system = fake_kill(vim.json.encode({ { sid = "ses_killed", attach_status = "running" } })),
+})
+assert(res["ses_killed"] == nil, "output of a SIGNALLED (killed) call is not trusted")
+
+-- A peer replying AFTER the deadline must not mutate the answer already given.
+local late_cb, calls, late_res = nil, 0, nil
+discovery.locate({
+  sockets = { "/tmp/nvim-6.sock" },
+  timeout_ms = 80,
+  own_snapshot = function() return own end,
+  system = function(_c, _o, on_exit) late_cb = on_exit; return { pid = 1, kill = function() end } end,
+}, function(r) calls = calls + 1; late_res = r end)
+vim.wait(1500, function() return calls > 0 end)
+assert(calls == 1, "deadline answered once")
+assert(late_res["ses_own"] and late_res["ses_late"] == nil, "answer contains only what arrived in time")
+late_cb({ code = 0, signal = 0, stdout = vim.json.encode({ { sid = "ses_late", attach_status = "running" } }), stderr = "" })
+vim.wait(200)
+assert(calls == 1, "late reply does not re-invoke the callback, got " .. calls)
+assert(late_res["ses_late"] == nil, "late reply does not mutate the delivered result")
+
+-- A kill-triggered reply must not edit an answer already decided. A real
+-- handle:kill() makes on_exit fire as a FAST EVENT, i.e. before the scheduled
+-- callback reaches the main loop -- so an implementation that deduped inside
+-- the scheduled closure would let a straggler it just killed inject rows.
+local killed_res, kcalls = nil, 0
+discovery.locate({
+  sockets = { "/tmp/nvim-11.sock" },
+  timeout_ms = 80,
+  own_snapshot = function() return own end,
+  system = function(_c, _o, on_exit)
+    return {
+      pid = 1,
+      kill = function()
+        on_exit({ code = 0, signal = 0, stderr = "",
+                  stdout = vim.json.encode({ { sid = "ses_ghost", attach_status = "running" } }) })
+      end,
+    }
+  end,
+}, function(r) kcalls = kcalls + 1; killed_res = r end)
+vim.wait(1500, function() return kcalls > 0 end)
+assert(kcalls == 1, "kill-triggered reply does not double-answer")
+assert(killed_res["ses_own"], "own rows survive")
+assert(killed_res["ses_ghost"] == nil, "a straggler killed at the deadline cannot inject rows")
+
+-- Equal liveness: our OWN editor wins over a peer. Jumping the user to another
+-- nvim's pane when this one already holds the session is strictly worse.
+res = collect({
+  sockets = { "/tmp/nvim-8.sock" },
+  own_snapshot = function() return vim.json.encode({ { sid = "ses_dup", attach_status = "running", buffer = 1 } }) end,
+  system = fake_reply(vim.json.encode({ { sid = "ses_dup", attach_status = "running", buffer = 2 } })),
+})
+assert(res["ses_dup"].own == true, "equally-live duplicate resolves to the OWN hit")
+-- ...but a LIVE peer still beats our own DEAD hit.
+res = collect({
+  sockets = { "/tmp/nvim-8.sock" },
+  own_snapshot = function() return vim.json.encode({ { sid = "ses_dup", attach_status = "failed", buffer = 1 } }) end,
+  system = fake_reply(vim.json.encode({ { sid = "ses_dup", attach_status = "running", buffer = 2 } })),
+})
+assert(res["ses_dup"].own ~= true and discovery.is_live(res["ses_dup"]), "live peer beats our own corpse")
 
 print("LUA_TEST_OK")

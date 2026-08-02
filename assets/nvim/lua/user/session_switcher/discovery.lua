@@ -12,6 +12,15 @@
 -- the picker jumps the user into a corpse instead of opening a fresh session.
 -- Every "is it live?" decision here goes through `is_live`, never presence.
 
+-- SCOPE LIMIT (hides live sessions, by design of the socket convention):
+-- only nvims running DIRECTLY in a tmux pane are discoverable. Outside tmux, or
+-- nested inside another nvim's :terminal, nvims execs plain `nvim` with no
+-- --listen (pkgs/nvims/default.nix:53-54), so no /tmp/nvim-*.sock exists and no
+-- peer can see those sessions at all. The picker will therefore offer a fresh
+-- attach for a session that is already open in such an editor. Acceptable
+-- today because oc-auto-attach only ever targets tmux panes, but S6 must not
+-- present "not attached" as proof that nothing is attached.
+
 local M = {}
 
 M.DEFAULT_TIMEOUT_MS = 1000
@@ -20,9 +29,11 @@ M.DEFAULT_TIMEOUT_MS = 1000
 ---
 --- `nvims` listens on /tmp/nvim-<pane>.sock where <pane> is $TMUX_PANE with the
 --- leading '%' stripped (pkgs/nvims/default.nix:12,79), so this is the inverse.
---- Outside tmux nvims uses a NON-NUMERIC key; that is not a pane, and returning
---- a fabricated "%<key>" would make the later `tmux display -t` either fail or,
---- worse, resolve to an unrelated pane. Such sockets get nil.
+--- Anything else gets nil. NOTE: outside tmux (or nested in another nvim)
+--- nvims does NOT create a non-numeric socket -- it execs plain `nvim` and
+--- makes no /tmp socket at all (pkgs/nvims/default.nix:53-54,94-98). So this
+--- nil branch is purely defensive against unrelated junk in /tmp; do not
+--- design around a "non-pane key" mechanism, it does not exist.
 --- @param sock string|nil
 --- @return string|nil  e.g. "%17"
 function M.pane_of(sock)
@@ -43,6 +54,10 @@ end
 --- @return boolean
 function M.is_live(hit)
   if type(hit) ~= "table" then return false end
+  -- Buffer-level truth overrides sid-level memory: a re-attached session marks
+  -- statuses[sid]="running" again, which would otherwise resurrect the ORIGINAL
+  -- corpse buffer as live (see rpc.lua's job_dead note).
+  if hit.job_dead == true then return false end
   return hit.attach_status == "running"
 end
 
@@ -62,8 +77,19 @@ function M.dedupe(results)
   for _, hit in ipairs(results) do
     if type(hit) == "table" and type(hit.sid) == "string" and hit.sid ~= "" then
       local prev = out[hit.sid]
-      if prev == nil or M.is_live(hit) or not M.is_live(prev) then
+      if prev == nil then
         out[hit.sid] = hit
+      else
+        local live_hit, live_prev = M.is_live(hit), M.is_live(prev)
+        if live_hit ~= live_prev then
+          -- A LIVE hit always beats a dead one, whoever reported it.
+          if live_hit then out[hit.sid] = hit end
+        elseif prev.own and not hit.own then
+          -- Equal liveness: keep home. Sending the user to another editor's
+          -- pane when this one already has the session is strictly worse.
+        else
+          out[hit.sid] = hit
+        end
       end
     end
   end
@@ -99,9 +125,13 @@ function M.locate(opts, cb)
   if socks == nil then
     socks = {}
     for _, s in ipairs((opts.all_sockets or M.sockets)()) do
-      -- Never --remote-expr our OWN socket. We would be asking an editor that
-      -- is waiting for the answer to produce it: a self-deadlock that resolves
-      -- only on timeout. Our own sessions come from the in-process snapshot.
+      -- Never --remote-expr our OWN socket. Because locate() is async this
+      -- would probably not hang (we would serve ourselves once idle), so the
+      -- cost is a pointless subprocess and duplicate hits rather than the
+      -- deadlock a SYNCHRONOUS caller would suffer -- but there is no reason
+      -- to ask over a wire for what we can read in-process. Matching is string
+      -- equality, which covers the whole real population: nvims listens on the
+      -- literal /tmp/nvim-<key>.sock that the glob returns.
       if s ~= own_sock then table.insert(socks, s) end
     end
   end
@@ -122,6 +152,7 @@ function M.locate(opts, cb)
       for _, hit in ipairs(decoded) do
         hit.sock = own_sock ~= "" and own_sock or nil
         hit.pane = M.pane_of(own_sock)
+        hit.own = true -- lets dedupe keep home when liveness ties
         table.insert(results, hit)
       end
     end
@@ -137,10 +168,16 @@ function M.locate(opts, cb)
     -- Abandon stragglers rather than letting one modal-prompt-blocked editor
     -- hold the picker hostage. Kill what is still outstanding so we do not
     -- leave orphaned `nvim --server` clients behind.
+    -- Freeze the answer BEFORE killing anything. Killing a handle makes its
+    -- on_exit fire as a fast event, which lands before the scheduled callback
+    -- runs on the main loop; computing dedupe inside that closure would let a
+    -- straggler we just killed edit the result we had already decided on, and
+    -- whether it managed to would depend on scheduler interleaving.
+    local final = M.dedupe(results)
     for _, h in ipairs(handles) do
       pcall(function() if h and h.kill then h:kill(15) end end)
     end
-    vim.schedule(function() cb(M.dedupe(results)) end)
+    vim.schedule(function() cb(final) end)
   end
 
   if pending == 0 then
@@ -154,9 +191,17 @@ function M.locate(opts, cb)
       'luaeval("require(\'user.session_switcher.rpc\').snapshot()")',
     }
     local spawned, handle = pcall(system, argv, { text = true }, function(out)
+      -- Once the deadline has fired we have already answered; a late reply
+      -- must not mutate results the picker is about to render. Without this,
+      -- whether a straggler's rows appear depends on scheduler interleaving,
+      -- because finish() kills handles and only THEN schedules the callback.
+      if settled then return end
       -- A dead or stale socket is NORMAL -- /tmp accumulates them. Skip it
       -- silently; one corpse must not blank the whole picker.
-      if out.code == 0 then
+      -- signal ~= 0 means the process was killed -- by our own deadline, most
+      -- likely -- and vim.system reports code=0 for it (measured: code=0,
+      -- signal=15, with TRUNCATED stdout). Trusting that is trusting a corpse.
+      if out.code == 0 and (out.signal or 0) == 0 then
         local ok, decoded = pcall(vim.json.decode, out.stdout or "", { luanil = { object = true } })
         if ok and vim.islist(decoded) then
           for _, hit in ipairs(decoded) do

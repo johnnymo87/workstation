@@ -23,10 +23,25 @@
 local M = {}
 
 --- Snapshot the opencode sessions visible in THIS nvim.
---- @param opts table|nil { status?: fun(sid: string): string }  -- injection seam for tests
---- @return string JSON array of { sid, buffer, tabpage, attach_status }
+--- @param opts table|nil { status?, job_dead? }  -- injection seams for tests
+--- @return string JSON array of { sid, buffer, tabpage, attach_status, job_dead }
 function M.snapshot(opts)
   opts = opts or {}
+
+  -- PER-BUFFER liveness, because attach_status alone is not enough.
+  -- oc_auto_attach keys `statuses` by SID, not by buffer. Re-attaching a
+  -- session whose previous attach died sets statuses[sid]="running" again --
+  -- and the ORIGINAL corpse buffer still carries b:oc_session_id, so a
+  -- sid-only join reports the corpse as running too. That is precisely the
+  -- dead terminal this module must never send anyone to. A terminal buffer
+  -- carries b:terminal_job_id, and jobwait(...,0) returns -1 only while the
+  -- job is alive, which is buffer-level truth rather than sid-level memory.
+  local job_dead = opts.job_dead or function(buf)
+    local ok, jid = pcall(function() return vim.b[buf].terminal_job_id end)
+    if not ok or type(jid) ~= "number" then return nil end -- not a terminal: no opinion
+    local res = vim.fn.jobwait({ jid }, 0)
+    return res[1] ~= -1
+  end
 
   local status = opts.status
   if not status then
@@ -62,6 +77,7 @@ function M.snapshot(opts)
           buffer = buf,
           tabpage = tab_of[buf],
           attach_status = status(sid),
+          job_dead = job_dead(buf),
         })
       end
     end
