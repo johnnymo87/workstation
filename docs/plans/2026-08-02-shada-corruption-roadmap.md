@@ -1,0 +1,373 @@
+# ShaDa Corruption Roadmap — kill the nightly nvim write race
+
+**Epic:** `workstation-n0yh` (P1) · **Started:** 2026-08-02 · **Status:** recovery shipped, prevention not started
+
+> **This roadmap exists because the first two fixes were wrong.** Commit
+> `b456147` shipped a theory (`E138`, all 26 temp suffixes taken) that was never
+> checked against the actual error text — the warnings came straight back.
+> Commit `8ff0790` fixed the real symptom but called the cause "unverified
+> hypothesis", and that hypothesis was then destroyed by review. The mechanism
+> below is the third answer, and the first supported by syscall traces and a
+> byte-level walk of the corrupt file.
+>
+> **Revision 2 (same day, pre-merge).** Adversarial review of *this file* found
+> four HIGH defects before it landed: the S0 smoking-gun rule was wrong in both
+> the doc and its bead (and wrong *differently* in each), the causal chain's
+> middle link was mechanically impossible per nvim's source, the arming command
+> printed here did not match the watch actually armed, and the per-step spine
+> ordered implementation before design review — the exact defect the
+> plugin-loader roadmap's own Revision 2 exists to record. All fixed below.
+> Recorded rather than quietly corrected, because "the third answer still had
+> four defects" is the most useful datum in this file.
+
+---
+
+## Facts that must survive compaction
+
+Verified against `strace` on this host's binary (NVIM v0.11.7, aarch64), against
+nvim's source, or by walking the bytes of the preserved corrupt file. Claims are
+labelled **verified** or **inference**. Do not re-derive from memory, and do not
+trust a summary — including this one — over a fresh check.
+
+### The observed failure
+
+```
+E576: Error while reading ShaDa file: expected positive integer at position 12686
+E136: Did not rename .../main.shada.tmp.g because .../main.shada does not look
+      like a ShaDa file
+```
+
+`~/.local/state/nvim/shada/main.shada` was corrupt at byte 12686 (size 16636).
+nvim validates the **existing** target before renaming a new file over it, so
+once the target is corrupt the rename is refused **forever**: every start/save
+warns, ShaDa silently stops persisting, and each exit strands one more temp
+(`shada.c:2861-2867`).
+
+### The mechanism
+
+| # | Fact | Status | How established |
+|---|---|---|---|
+| 1 | Temps are opened `O_CREAT\|O_EXCL\|O_NOFOLLOW`. Two nvims can **never** share a temp fd. | **verified** | `strace`: `openat(...tmp.a, O_WRONLY\|O_CREAT\|O_EXCL\|O_NOFOLLOW\|O_CLOEXEC, 0600)` |
+| 2 | `vim_rename` does `unlinkat(main.shada)` **before** `renameat(tmp → main.shada)`. Every healthy save opens an ENOENT window on the target. | **verified** | `strace` (order below); `fileio.c:2692` `os_remove(to)` before `os_rename` |
+| 3 | On read-open failure of `main.shada`, nvim sets `nomerge` and writes **directly** into the real path — no temp, no rename, not atomic. ENOENT is **silent**; other errnos emit `E886`. | **verified** | `shada.c:2711-2727` → `shada.c:2786` (`kFileCreate\|kFileTruncate`). Probe: fresh state dir, `main.shada` absent, **single** write → `openat(main.shada, O_WRONLY\|O_CREAT\|O_TRUNC, 0600)`, no temp created, no message |
+| 4 | All 26 temps taken ⇒ `E138` ⇒ **`return FAIL`, nothing is written at all.** A full temp dir does *not* push a writer onto the direct path. | **verified** | `shada.c:2739-2755`. Probe: 26 temps + valid `main.shada`, single write → size unchanged (27500 → 27500) |
+| 5 | `pkill -9` does not suppress shada writes — it **triggers** them. Each pane is a TUI client + an `nvim --embed` server; killing the client makes the server see channel EOF and begin a *graceful* exit, which writes shada, before pkill reaches its pid. | **inference**, strongly supported | Socket pairing on `/tmp/nvim-*.sock` (topology, verified) + the corrupt file's header showing a write at `03:00:04` by pid 822121 during the kill storm (artifact, verified). The millisecond ordering itself is not directly observed — S0 is what would observe it |
+
+The syscall order that makes fact 2 concrete:
+
+```
+openat(main.shada, O_RDONLY)                                  ← pre-merge read
+openat(main.shada.tmp.a, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW)  ← temps are safe
+unlinkat(main.shada)                                          ← ENOENT WINDOW
+renameat(main.shada.tmp.a → main.shada)
+```
+
+> **Retracted evidence, kept as a warning.** An earlier draft cited "with 26
+> temps present and `main.shada` absent, nvim prints `E138` yet still creates
+> `main.shada`" as proof of fact 3. That is impossible as a single write (fact
+> 4). The probe used `-c 'wshada' -c 'qa'` — **two** writes: the first created
+> the file directly while absent, the second hit `E138`. The conclusion was
+> right, the evidence was an artifact of a sloppy probe. Use one write per
+> probe.
+
+### The corrupt file is proof, not inference
+
+Walking the msgpack of `main.shada.corrupt.20260802T132400Z`:
+
+- **Header:** embedded timestamp `2026-08-01T07:00:04Z` = **Aug 1 03:00:04 EDT**,
+  writer **pid 822121**. Exactly the nightly reset hour.
+- **Bytes `[0, 12686)`** — writer **B**: marks/registers/jumps/history, search
+  history through **Jul 31 14:12**, ending cleanly *on a record boundary*
+  (B was SIGKILLed there).
+- **Bytes `[12686, 16636)`** — writer **A**, underneath: resumes 9 bytes into a
+  cmd-history record header (`\xec` = timestamp low byte, `!` = len 0x21,
+  matching its 33-byte payload exactly), then parses cleanly to **exactly EOF**.
+  Same section order, same inherited history, **older cutoff (Jul 30 18:01)**.
+
+Two complete streams, one inode, different recency cutoffs. Only the direct-write
+path (fact 3) can produce that; `O_EXCL` temps and atomic renames cannot.
+
+### The causal chain — and its one unresolved fork
+
+Two writers reached the direct path concurrently on Aug 1 at 03:00:04. Per fact
+4, a full temp dir cannot be what put them there, so it happened one of two ways:
+
+- **(a) At least one temp letter was free.** A healthy saver C unlinked
+  `main.shada` (fact 2); A and B both did their pre-merge read-open inside C's
+  ENOENT window; both fell to `nomerge`; both direct-opened the real path, the
+  second truncating over the first.
+- **(b) `main.shada` was already absent** entering 03:00, so every exiting
+  server direct-wrote and two of them spliced.
+
+**Which one is unresolved** — the temps that would have settled it were reaped
+during remediation. It does not change the prevention: both variants are
+disarmed by removing concurrent writers (S2), and **both are reachable with a
+completely clean temp directory**, so "the race re-arms every night" holds
+regardless of temp hygiene.
+
+The stranded temps (Apr 26 – May 4) are earlier debris of the same nightly
+storm, not a link in this chain.
+
+### Ruled out (do not revisit without new evidence)
+
+- **Shared temp fd** — `O_EXCL` (fact 1).
+- **Full temp dir causing a direct write** — `E138` returns FAIL (fact 4).
+- **Crash exposing an unsynced rename** — no reboot since May 11; `uptime` 82d.
+  The splice is not zeros, it is a second valid stream.
+- **Disk full** — 57% used, 163G free (weak: not verified for Aug 1 03:00).
+- **Weak pre-rename validation as the corruptor** — the merge-read is a full
+  parse. It is the victim (it strands temps), not the culprit.
+
+### Artifacts
+
+| Thing | Where | Durability |
+|---|---|---|
+| Corrupt file (only evidence of the splice) | `~/.local/state/nvim/shada/main.shada.corrupt.20260802T132400Z` | Kept; Step 3.5 never deletes quarantines |
+| S0 watch log | `~/.local/state/shada-watch.log` | Until manually removed |
+| S0 unfiltered control capture | `~/.local/state/shada-watch.log.control` | Until manually removed |
+| msgpack walker | pasted into epic bead `workstation-n0yh` | Durable (was `/tmp/opencode/walk.py`, ephemeral) |
+| Recovery code | `pkgs/reset-workspace/default.nix`, search `Step 3.5` | Shipped `8ff0790`, deployed |
+
+### Already shipped — recovery only, NOT prevention
+
+- `b456147` — **wrong theory**, swept temps. Warnings returned.
+- `8ff0790` — Step 3.5: quarantine an unparseable `main.shada`, promote the
+  newest parseable temp, reap the rest. Self-heals within one night. **The race
+  re-arms every night regardless.**
+
+One landmine already caught in that code: a parse probe using `-i <file>` makes
+nvim **write** that shada on exit, mutating the file it inspects and stranding
+new temps. A sandbox test caught the probe promoting its own byproduct. Hence
+`-i NONE -c 'rshada <file>'`.
+
+### Scope
+
+cloudbox is where this fired, but devbox and macOS run the same nvim config and
+the same `nvims` pool shape. S2 is cloudbox-first; the hazard is not
+cloudbox-only. S2 also only covers the *nightly* storm — ordinary daytime
+multi-pane quits carry the same (much smaller) race, which only S3 truly fixes.
+
+---
+
+## Per-step spine
+
+Every step runs this sequence. No step is done until its last box is ticked.
+
+1. **Compact** — persist context first (`preparing-for-compaction`).
+2. **Oracle consult** (`oracle-fable`) — *optional*, when the design is genuinely
+   open. Skip when the change is mechanical.
+3. **Adversarial review of the DESIGN** (`adversarial-reviewer-fable`) —
+   **mandatory, before any code is written.** Not before merge: before code.
+   Every failure in this family has been wrong-approach, not typo, and the
+   plugin-loader roadmap records this exact ordering defect as HIGH
+   (`2026-08-01-plugin-loader-hardening-roadmap.md`, Revision 2). This document
+   had it too, in its first draft.
+4. **SDD** — subagent-driven development, *if applicable* (multi-task steps).
+   Single mechanical edits go direct.
+5. **PR** — *if applicable*. Repo norm is PRs; the two fixes above went direct to
+   `main` and bypassed a required check, which Jonathan waived once.
+6. **Update this roadmap** — status, new facts, new beads for discovered work.
+
+---
+
+## Steps
+
+### S0 — Arm the inotify watch · `workstation-t032` · **P0** · ARMED 2026-08-02 17:56 EDT
+
+Read-only observation of the 03:00 reset. **Already armed and verified against a
+live control write.** Exit: verdict recorded in the bead, bead closed, watch
+stopped (`systemctl --user stop shada-watch`).
+
+Re-arm (verbatim — this is what is actually running; the earlier draft of this
+doc printed a different, unfiltered command that logged to the journal):
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+IW=$(readlink -f ~/.cache/shada-watch-inotify)/bin/inotifywait
+systemctl --user stop shada-watch; systemctl --user reset-failed shada-watch
+systemd-run --user --unit=shada-watch --collect --setenv=PATH="$PATH" \
+  bash -c "exec $IW -m --timefmt '%F %T' --format '%T %e %w%f' \
+    -e create,delete,modify,moved_to,moved_from,close_write \
+    ~/.local/state/nvim/shada >> ~/.local/state/shada-watch.log 2>&1"
+```
+
+`systemd-run` (not `setsid nohup`) so it survives a restart of the opencode serve
+unit it was launched from — AGENTS.md, *Backgrounding Long-Running Processes*.
+The binary is GC-root pinned at `~/.cache/shada-watch-inotify`.
+
+**Before interpreting anything, check the watch was alive across 03:00:**
+`systemctl --user is-active shada-watch` **and** a log mtime past 03:00. The unit
+is `--collect`, so if it died it left no failed unit — a dead watch produces a
+short, clean-looking log that reads exactly like "no race tonight". inotify also
+watches *inodes*: if anything ever replaces the shada **directory**, the watch
+goes silently deaf (nothing does today; verify anyway).
+
+**Negative control — signature of a HEALTHY save (captured live):**
+
+```
+CREATE      main.shada.tmp.a
+MODIFY      main.shada.tmp.a   (xN)
+DELETE      main.shada          ← the unlink window; happens on EVERY healthy save
+MOVED_FROM  main.shada.tmp.a
+MOVED_TO    main.shada
+CLOSE_WRITE main.shada
+```
+
+**The discriminator.** The healthy path never emits `CREATE` or `MODIFY` on the
+name `main.shada` — writes land under a temp name, and the rename surfaces as
+`MOVED_TO`. Therefore:
+
+> **Any `CREATE` or `MODIFY` event on `main.shada` itself = a writer that opened
+> the real path directly.**
+
+Do **not** qualify that with "preceded/followed by MOVED_TO" — earlier drafts of
+this doc and of bead `t032` each did, differently, and both filters are wrong:
+healthy saves sprinkle `MOVED_TO main.shada` through the log at unbounded
+distance either side, so "not preceded" discards the real gun and "not followed"
+masks it.
+
+**Known benign producers of that same signature — exclude before concluding:**
+
+| Source | Signature | How to tell |
+|---|---|---|
+| Step 3.5 promotion — **as shipped in `8ff0790`, i.e. what is running during the first watched night** | `CREATE main.shada` + `MODIFY` + `CLOSE_WRITE` — **identical to the gun, and it fires at 03:00** | Only runs when `main.shada` was corrupt; preceded by `MOVED_FROM main.shada` → `MOVED_TO main.shada.corrupt.*` |
+| Step 3.5 promotion — **after S1 (#261)** | `CREATE main.shada.promote.<pid>` + `MODIFY` + `MOVED_FROM main.shada.promote.*` → `MOVED_TO main.shada`. **No `CREATE`/`MODIFY` on `main.shada` at all** | S1 made promotion atomic (temp + rename) for durability reasons, which as a side effect retires the worst false positive above: from now on the repair is indistinguishable from a healthy save, and the discriminator is clean |
+| Step 3.5 quarantine `mv` | `MOVED_FROM main.shada` + `MOVED_TO main.shada.corrupt.*` | — |
+| Step 3.5 reap | `DELETE main.shada.tmp.*` | — |
+| First write to a fresh/absent shada | `CREATE main.shada` (single writer, benign) | No second writer overlapping |
+
+Two or more direct writers **overlapping in time** is the finding. A single one
+is a curiosity.
+
+**Quantified control, 17:56–18:31 on the arming night** (ordinary interactive
+use, no reset): **103** `CREATE`/`MODIFY` events in the shada dir, of which
+**0** were on `main.shada` itself — every one landed on a `main.shada.tmp.*`
+name. So the discriminator's false-positive rate against normal traffic is zero
+over ~35 minutes, and the signature is genuinely rare rather than merely
+undocumented. If tomorrow's readout shows even one, that is signal.
+
+**If the log is clean, S2 still proceeds.** The mechanism is strace-proven
+independently of S0; the race is probabilistic and its window is milliseconds, so
+one quiet night is not evidence of absence. S0 exists to characterise the storm
+(how many writers, what Step 3.5 does, whether temps strand), **not** to decide
+whether the race exists. Do not re-gate S2 on a second night.
+
+Spine: no oracle, no SDD, no PR. Review the *interpretation* before acting on it.
+
+### S1 — Fix four defects in the Step 3.5 probe · `workstation-wro4` · P1
+
+All four make the repair **fail open** — declare a bad file healthy, or install
+an unvalidated one. All in code shipped by `8ff0790`. Review confirmed the list
+is complete (no fifth defect found).
+
+| # | Defect | Site | Fix |
+|---|---|---|---|
+| 1 | Greps only `E576`; nvim's reader also emits `E575` and `E886` | `default.nix:778`; classes at `shada.c:119,127` | widen to `E57[56]\|E886` |
+| 2 | `timeout 30` **inverts to healthy** — a hung probe yields empty output → no match → "parses". Same for the absent-nvim fallback. | `default.nix:777-778` | fail closed |
+| 3 | Promotion `cp`s straight onto the live path — a reset dying mid-copy manufactures the exact corruption this code exists to fix | `default.nix:793` | copy to a temp name, then `mv` |
+| 4 | "Newest parseable temp" can install months-stale history over fresher quarantined data (Aug 2 only worked because fresh temps existed) | `default.nix:786-792` | log the age gap; consider refusing a temp older than the quarantine |
+
+Also: a truncated-but-record-aligned file parses clean, so promotion can silently
+lose history after the cut. Acceptable, but log the size delta.
+
+Test with the sandbox pattern that already caught a real bug: `sed` the Step 3.5
+block out of the built script, run it against a seeded dir with `XDG_STATE_HOME`
+overridden. Static greps live in `pkgs/reset-workspace/test.sh`.
+
+**Exit:** four defects fixed, sandbox test covers each fail-closed path, static
+tests updated, PR merged, deployed via home-manager, verified in the built script.
+
+Spine: no oracle (mechanical), design review still mandatory but can be brief,
+SDD optional, PR yes.
+
+**DONE — `#261`, deployed.** Two deviations from the table above, both because
+the prescription was wrong:
+
+- **Fix #1 (widen the grep) was rejected.** Which read-error classes cause the
+  *refusal* is a guess about upstream's taxonomy, and a wrong guess quarantines
+  healthy files nightly. The probe now asks nvim the question that matters —
+  write to a scratch **copy**, look for the refusal — which is exact and
+  survives upstream renumbering. Match the **phrase** `does not look like a
+  ShaDa file`, never bare `E136`: five messages share that code and one of them
+  (*"errors during writing it"*) fires on a **healthy** file when the disk is
+  full, which would quarantine good history.
+- **Fix #2 ("fail closed") was rejected as stated.** "Cannot tell" is not
+  "corrupt". Wrongly-healthy is visible and recoverable; wrongly-corrupt
+  silently moves live history aside and installs a stale temp over it, every
+  night. Verdict is three-state; `unknown` does nothing, loudly, and keeps the
+  temps.
+
+**Fifth defect, missed by the review that produced the table:** the reap was
+unconditional. On false-healthy, failed quarantine, or failed promotion it
+deleted all 26 promotion candidates — converting a transient probe failure into
+permanent history loss. Now gated on verdict + repair success.
+
+Review also caught two bugs in the *fix's own design* before any code: the bare
+`E136` false-positive above, and a first sketch that re-shipped the exact
+pipeline inversion it was replacing (`nvim | grep -q` yields **grep's** status,
+so a hung nvim reads as healthy). Exit status is now read before grepping;
+measured, nvim exits 0 on both verdicts and `timeout` gives 124.
+
+Discrimination check — the same input against the old build, which is what makes
+the new tests meaningful rather than vacuous:
+
+```
+OLD code, nvim absent, corrupt master + one good temp:
+  survivors: main.shada                      <- good temp deleted, corrupt master kept
+NEW code, same input:
+  survivors: main.shada main.shada.tmp.a     <- both preserved
+```
+
+### S2 — Serialized graceful nvim exits · `workstation-zv0l` · P1 · gated on S0
+
+The actual prevention. Replace `pkill -9 -u dev -x nvim` with a walk of
+`/tmp/nvim-*.sock` driving graceful exits **one at a time**, SIGKILLing only
+stragglers after a bounded wait. Serial exits ⇒ at most one shada writer ⇒ no
+concurrent direct writers ⇒ the race is gone at its source.
+
+Hazards to design against: a modal/hung nvim stalling the reset; stale sockets
+hanging the connect; added latency to a nightly job that also restarts the serve
+pool; and the existing cgroup re-exec dance (reset-workspace can kill its own
+ancestors — a graceful loop touching the launching pane needs the same care).
+
+Complementary alternative reviewed: per-pane shada via `-i` keyed on
+`$TMUX_PANE` in `pkgs/nvims`. 18 writers on one file is inherently racy either
+way — but it costs shared history across panes, a real UX loss. Discuss before
+choosing; not mutually exclusive.
+
+**Exit:** reset completes with no SIGKILL of a live nvim on the happy path,
+measured latency recorded, a night observed with the watch re-armed showing no
+overlapping direct writers.
+
+Spine: **oracle consult yes** (design is open), **design review before code**,
+SDD yes, PR yes.
+
+### S3 — Upstream report to neovim · `workstation-z9i3` · P3 · optional, last
+
+Two upstream defects: the unnecessary `os_remove(to)` before `os_rename`
+(`fileio.c:2692` — rename(2) is already atomic on Linux), and the `nomerge`
+fallback (`shada.c:2711-2727`) that converts a transient open failure into a
+non-atomic overwrite of the real path.
+
+**Be precise or lose the maintainer on the first read:** only the **ENOENT** case
+is silent; other errnos do emit `E886`. ENOENT is exactly the window case, so the
+mechanism stands — but do not claim "no message" generally.
+
+Needs a minimal reproducer outside our setup (two headless nvims exiting
+simultaneously against one shada path, in a loop). Re-verify line numbers against
+master; check for an existing issue first.
+
+---
+
+## Status log
+
+| Date | Event |
+|---|---|
+| 2026-08-01 03:00:04 | Corruption written (header timestamp, pid 822121). Variant (a) vs (b) unresolved — see causal chain |
+| 2026-08-02 ~13:24 | Corrupt file quarantined, parseable temp promoted, warnings gone |
+| 2026-08-02 | `8ff0790` deployed — recovery only |
+| 2026-08-02 | Review killed the racing-temps hypothesis; direct-write mechanism verified |
+| 2026-08-02 17:56 | S0 watch armed and control-verified |
+| 2026-08-02 | Revision 2: review of this doc found 4 HIGH defects pre-merge; fixed |
+| 2026-08-02 22:29 | **S1 done** — `#261` merged and deployed. Probe replaced with a write-path oracle; three-state verdict; reap gated. Review found a 5th defect (unconditional reap) and 2 bugs in the fix's own design |
+| 2026-08-02 22:4x | S1 side effect: promotion is now atomic, so Step 3.5 no longer produces the S0 smoking-gun signature — the 03:00 false positive is retired |
