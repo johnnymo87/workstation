@@ -41,37 +41,45 @@ WRAPPERS=(
 
 echo "== serve PID fence: wrapper invariants =="
 
+# Every check below runs against a COMMENT-STRIPPED view of the file, never the raw
+# text. Checking the raw text was a real defect, caught in adversarial review and
+# reproduced: changing the export to `# export OPENCODE_SERVE_EXPECTED_PID=$$` left
+# this guard GREEN while shipping the fence UNARMED. Commenting a line out "to
+# debug" is the single most plausible human edit here, so the guard has to survive
+# exactly that. A green guard covering a disarmed fence is worse than no guard.
+#
+# Limitation, stated rather than hidden: `sed 's/#.*$//'` is a crude Nix comment
+# stripper and would also truncate a `#` inside a string literal. None of the lines
+# it must see (the export, the `opencode serve --port` launch) contain one, and the
+# manifest check below fails loudly if a wrapper ever stops matching these shapes.
+stripped_of() { sed 's/#.*$//' "$1"; }
+
 for f in "${WRAPPERS[@]}"; do
   file_fail=0
   if [[ ! -f "$f" ]]; then
     bad "$f: wrapper file not found (renamed? update WRAPPERS in this script)"
     continue
   fi
+  body=$(stripped_of "$f")
 
-  # 1. The export must be present. Without it the fence is UNARMED -- which is a
-  #    deliberate, safe state in the binary (unset = unarmed, never fatal, so the
-  #    binary release and the host rebuild are order-independent), but it is NOT a
-  #    state we intend to ship. Silence here would be a silently-disarmed fence,
-  #    the precise failure class this bead is about.
-  if ! grep -q 'export OPENCODE_SERVE_EXPECTED_PID=\$\$' "$f"; then
-    bad "$f: missing 'export OPENCODE_SERVE_EXPECTED_PID=\$\$' (fence would ship UNARMED)"
+  # 1. The export must be present AND LIVE (not commented out). Without it the
+  #    fence is UNARMED -- a deliberate, safe state in the binary (unset = unarmed,
+  #    never fatal, so the binary release and the host rebuild are order-independent),
+  #    but NOT a state we intend to ship.
+  if ! grep -q 'export OPENCODE_SERVE_EXPECTED_PID=\$\$' <<< "$body"; then
+    bad "$f: no live 'export OPENCODE_SERVE_EXPECTED_PID=\$\$' (missing or commented out) -- fence would ship UNARMED"
   fi
 
-  # 2. Every serve launch must be exec'd. This is the load-bearing half: the
-  #    export above is only TRUE because of the exec.
-  #
-  #    Matched on the launch shape `opencode serve --port`, which is how all three
-  #    wrappers invoke it. Comments are stripped first so the long rationale
-  #    comments that quote the command (and deliberately show the non-exec form as
-  #    the thing NOT to do) cannot trip the check.
-  launches=$(sed 's/#.*$//' "$f" | grep -n 'opencode serve --port' || true)
+  # 2. Every serve launch must be exec'd. This is the load-bearing half: the export
+  #    above is only TRUE because of the exec, which makes the serve REPLACE this
+  #    shell and inherit its pid.
+  launches=$(grep -n 'opencode serve --port' <<< "$body" || true)
   if [[ -z "$launches" ]]; then
     bad "$f: no 'opencode serve --port' launch found (did the invocation shape change?)"
     continue
   fi
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    # Strip the leading "N:" that grep -n adds, then the leading whitespace.
     stripped=$(printf '%s' "$line" | sed 's/^[0-9]*://; s/^[[:space:]]*//')
     if [[ "$stripped" != exec\ * ]]; then
       bad "$f: serve launch is not exec'd -> the serve becomes a CHILD, pid != \$\$, exit 21 crash-loop"
@@ -79,20 +87,36 @@ for f in "${WRAPPERS[@]}"; do
     fi
   done <<< "$launches"
 
+  # 3. EVERY export must precede EVERY launch. An export after the exec is dead code
+  #    that would still satisfy check 1.
+  last_exp=$(grep -n 'export OPENCODE_SERVE_EXPECTED_PID' <<< "$body" | tail -1 | cut -d: -f1 || true)
+  first_launch=$(grep -n 'opencode serve --port' <<< "$body" | head -1 | cut -d: -f1 || true)
+  if [[ -n "$last_exp" && -n "$first_launch" && "$last_exp" -gt "$first_launch" ]]; then
+    bad "$f: an export appears AFTER a serve launch (line $last_exp > $first_launch) -- that export is dead code"
+  fi
+
   [[ "$file_fail" -eq 0 ]] && note "$f: OK"
 done
 
-# 3. The export must come BEFORE the exec in each file. An export placed after the
-#    exec line is dead code and would ship an unarmed fence that LOOKS armed to
-#    check 1 above -- a green guard covering a disarmed fence is worse than none.
-for f in "${WRAPPERS[@]}"; do
-  [[ -f "$f" ]] || continue
-  exp_line=$(sed 's/#.*$//' "$f" | grep -n 'export OPENCODE_SERVE_EXPECTED_PID' | head -1 | cut -d: -f1 || true)
-  exec_line=$(sed 's/#.*$//' "$f" | grep -n 'opencode serve --port' | head -1 | cut -d: -f1 || true)
-  if [[ -n "$exp_line" && -n "$exec_line" && "$exp_line" -gt "$exec_line" ]]; then
-    bad "$f: export appears AFTER the serve launch (line $exp_line > $exec_line) -- fence would be unarmed"
-  fi
-done
+# 4. MANIFEST: the WRAPPERS list must be COMPLETE, not merely correct. A fourth
+#    wrapper added elsewhere would ship unfenced while this guard stayed green --
+#    the same "green guard, real gap" shape as the bug in check 1.
+#
+#    A pool wrapper is identified by the port fence marker it must already carry.
+#    Deliberately NOT keyed on `opencode serve`: pkgs/opencode-frontdoor's route-gate
+#    launches a serve with no OPENCODE_SERVE_ID / OPENCODE_ROUTING_DB, so it joins no
+#    pool, claims no registry slot, and is legitimately out of scope.
+echo "== serve PID fence: wrapper manifest =="
+found=$(grep -rl 'OPENCODE_SERVE_EXPECTED_PORT' --include='*.nix' . 2>/dev/null | sed 's|^\./||' | sort)
+declared=$(printf '%s\n' "${WRAPPERS[@]}" | sort)
+if [[ "$found" != "$declared" ]]; then
+  bad "WRAPPERS is stale. Files exporting OPENCODE_SERVE_EXPECTED_PORT != the declared list."
+  note "declared: $(printf '%s ' $declared)"
+  note "found:    $(printf '%s ' $found)"
+  note "A new wrapper must be ADDED to WRAPPERS in this script, or it ships unfenced."
+else
+  note "manifest complete ($(wc -w <<< "$found") wrappers)"
+fi
 
 if [[ "$fail" -ne 0 ]]; then
   echo
