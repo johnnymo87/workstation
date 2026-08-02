@@ -1,7 +1,7 @@
 # Cloudbox Serve Reliability Roadmap
 
 **Spine bead:** `workstation-7za8` · **Started:** 2026-08-01 · **Host:** cloudbox only
-**Status:** steps 0–1 done · next: step 2 (`workstation-h1y6`)
+**Status:** steps 0, 1, 3 done · next: step 2 (`workstation-h1y6`), with its risk model revised by step 3
 
 `opencode-serve@4098` had **one** confirmed throttle-band wedge on 2026-08-01
 (19:04–19:10), plus two earlier stall windows that self-recovered and are
@@ -578,9 +578,15 @@ kernel OOM kill → `OOMPolicy=stop` → `Restart=always` fires within 10 s — 
   after that, restart the pool in the 03:00 window. Verify with
   `systemctl show`, never by reading the Nix source (`workstation-am5v`).
 
-## Step 3 — Why does one member reach 7.35 G? *(investigation, not a fix)*
+## Step 3 — Why does one member reach 7.35 G? · **ANSWERED 2026-08-02**
 
 **Bead:** `workstation-9b3o` · **Sampling starts BEFORE step 2. Do not wait.**
+
+> **The question contains a false premise.** No member "reaches 7.35 G" as a
+> standing state. Every member bursts, the bursting member *moves*, and the
+> baseline is 1–2.7 G for all four. The answer, and the two things it changes
+> about step 2, are at the end of this section. The suspect list below is
+> preserved because one of the two suspects died and that is worth showing.
 
 Step 2 makes the *symptom* recoverable in 10 s. It does not explain why 4098
 grew 6× past its peers — and once step 2 lands, a ballooning member is killed by
@@ -609,6 +615,93 @@ measurement-only — do not pre-commit to a remedy.
 - **Exit:** a written answer, or an honest "did not correlate", plus a decision
   on whether any follow-up is warranted. A step whose output is "we do not know"
   is a valid outcome and must be recorded as such rather than quietly dropped.
+
+### The answer — 3 928 ticks over 17.5 h (08-01 21:34 → 08-02 15:00)
+
+Sampler: `/home/dev/s3-sampling/sample.sh`, appending
+`/home/dev/s3-sampling/samples.tsv` every 15 s from a **transient** `systemd
+--user` timer (`s3-sampler.timer`). Read-only: `/proc`, `systemctl show`,
+cgroup `memory.stat`, and a `mode=ro` handle on pigeon's routing DB. It survived
+this session, the 03:01 nightly reset and the 10:25 deploy; it would not survive
+a reboot.
+
+**1. It is bursts, and the burster moves.** 4098 burst on 08-01; **4096** burst
+on 08-02, peaking at *exactly* 7.00 G — `MemoryHigh` — five samples pinned
+there. 4097 and 4099 never crossed 6.0 G in the entire window. Every member
+returns to a 1.0–2.7 G baseline; **nothing accumulates.** The headline
+"7.35 G vs 0.67 G" pair was one sample of an oscillation taken while the peers
+happened to be idle.
+
+**2. Session count does not predict memory. Watcher/fd count does.** Pearson
+*r* against `MemoryCurrent`, computed *within* each port's own series:
+
+| metric | 4096 | 4097 | 4098 | 4099 |
+|---|---|---|---|---|
+| `threads` | 0.83 | 0.98 | 0.89 | 0.96 |
+| `fds` | 0.78 | 0.97 | 0.89 | 0.92 |
+| `inotify_fds` | 0.79 | 0.97 | 0.89 | 0.92 |
+| `notify_debounce` | 0.79 | 0.97 | 0.89 | 0.92 |
+| `inotify_watches` | 0.83 | 0.88 | 0.73 | 0.89 |
+| **`assign_total`** | **0.33** | **0.02** | **−0.18** | **−0.18** |
+| **`assign_active_1h`** | **0.39** | **0.01** | **0.05** | **0.06** |
+| **`assign_active_10m`** | **0.18** | **0.00** | **−0.08** | **0.01** |
+
+`rss`, `pagetables` and `file` also score 0.8–1.0 but are restatements of
+memory itself and are not evidence.
+
+**Suspect 2 (mega-sessions) is dead.** Between members the relationship is if
+anything *inverse*: 4098 medians 2.65 G on **38** assignments; 4097 medians
+0.65 G on **191**. Message history does not travel with memory.
+
+**Suspect 1 (notify-rs watchers) survives, in modified form:** what tracks is
+the count of watcher **instances** (≈ one per open project tree), not the raw
+watch count — 4097 and 4099 each hold ~43 k watches at a third of 4098's memory.
+
+*Honest caveat:* threads, fds and watchers all rise together when a session
+opens a tree, so this is co-movement, not isolated causation. The **negative**
+result is the solid one; the positive one is consistent but not proven.
+
+**3. An instrumented band entry** — 4096, 08-02, 48 s between rows:
+
+```
+11:18:23  1.75G  anon 1.18  file 0.51  swap 0.00
+11:19:59  6.73G  anon 2.99  file 3.53  swap 0.00   <- ramp is ~50% PAGE CACHE
+11:21:35  7.00G  anon 4.52  file 2.25  swap 0.00   <- pinned at MemoryHigh
+11:22:23  7.00G  anon 5.82  file 0.77  swap 1.49   <- cache evicted, now swapping
+11:23:11  2.93G  anon 2.30  file 0.38  swap 1.54   <- collapsed, recovered itself
+11:33:35  7.00G  anon 6.25  file 0.29  swap 6.22   <- second entry, 6.2G into zram
+11:34:23  1.30G  anon 0.97  file 0.08  swap 2.68
+```
+
+`assign_active_10m` was 0–1 throughout: **one session**, doing a burst of file
+reading — a big scan, not a leak.
+
+### What this changes about step 2 — read before deploying it
+
+- **BLOCKER-2 is confirmed on a real serve, not inferred from config.** The
+  cgroup pinned at exactly `MemoryHigh` and relieved the pressure by pushing
+  **6.22 GiB into zram**, then recovered. `MemorySwapMax` is not optional; without
+  it, dropping `MemoryHigh` most likely relocates this to 9 G instead of
+  converting it to a fast kill.
+- **Band entry is routine and usually harmless.** 4096 entered the band **three
+  times in 15 minutes** and the canary logged *nothing* — health probes never
+  failed. So hitting `MemoryHigh` is not the wedge; a band entry that *fails to
+  recover* is. This is the self-recovering class from the 08-01 episode table,
+  now captured with instrumentation. Removing `MemoryHigh` therefore removes
+  something that fires often and mostly benignly, and the open question becomes
+  whether `MemoryMax=9G` sits far enough above these routine 7.00 G peaks — or
+  whether the peaks simply move up and start dying. Decide that deliberately
+  rather than by devbox precedent.
+- **"100 % anonymous" was the post-throttle endpoint, not the composition.** The
+  ramp is roughly half reclaimable page cache, so reclaim gets ~2 G of cheap
+  progress before it is forced onto anon and swap.
+
+### Follow-up
+
+`workstation-9b3o` is answered and closed. The residual question — *what makes
+one session's file scan cost 5 GiB* — is not this roadmap's; it needs an
+application-level look at the watcher/scan path, and is worth filing only if the
+band entries stop self-recovering.
 
 ## Step 4 — Reclaim the 6.2 GiB of dead pages *(low priority)*
 
