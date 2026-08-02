@@ -1319,6 +1319,197 @@ EOF
     };
   };
 
+  # Phantom-busy sweeper (workstation-s5gl; step 1 of
+  # docs/plans/2026-08-01-cloudbox-serve-reliability-roadmap.md). Ported from
+  # devbox (users/dev/home.devbox.nix:1312-1358, workstation-utnw).
+  #
+  # WHAT IT FIXES. When a serve dies uncleanly (canary SIGKILL, OOM, hard
+  # reboot) its in-flight assistant messages are never finalized:
+  # `data.time.completed` stays NULL, so every TUI that (re)loads the session
+  # renders the "working" shimmer forever — observed burning ~1 CPU core per TUI
+  # in a GC storm for hours. Cloudbox had 303 such rows and no sweeper.
+  #
+  # TWO GATES, and the second one is the whole design:
+  #   (a) role=assistant, no time.completed, no error, row untouched >30min (a
+  #       streaming turn bumps time_updated on every part append; 30min leaves
+  #       headroom for long silent tool calls);
+  #   (b) created BEFORE the oldest currently-running pool serve booted.
+  # Gate (b) exists because of the 2026-07-05 incident: a row younger than all
+  # live serves may belong to a fiber that is alive-but-blocked in a serve's
+  # memory. DB-finalizing those does NOT free the session (the in-memory runner
+  # still holds the turn) and lies to observers until the serve's own completion
+  # write lands over ours. Gate (b) is structurally immune to the stalled-but-
+  # alive class: any row a pool serve is executing was created by that serve,
+  # hence after its boot, hence after CUTOFF = min(boot). A stall of any length
+  # cannot push it below the line.
+  #
+  # WHY SYSTEM SCOPE, WHEN DEVBOX'S IS A USER UNIT. Cloudbox's serves are system
+  # units (User=dev), devbox's are user units. Discovery must therefore query the
+  # system bus, and a `systemctl --user` copy-paste finds nothing here — which
+  # would silently collapse gate (b) (see the fail-closed handling below). Same
+  # scope as the discovery target means one bus and one deploy for the sweeper
+  # and the units it reads, and a pool resize in this file lands in the same
+  # diff. The earlier "a system unit would create root-owned -wal/-shm" argument
+  # was wrong: User=dev applies here exactly as it does to the serves, whose WAL
+  # is dev-owned today. No hardening (ProtectHome=true would hide the DB).
+  #
+  # KNOWN RESIDUAL (do not file as a bug): CUTOFF is the min over the pool, so an
+  # intraday single-member kill orphans rows younger than the *other* members'
+  # boots, which stay invisible until 03:00 bounces the whole pool via
+  # opencode-serve-pool.target and resets every boot epoch. The backlog and the
+  # drained-pool case sweep immediately; a fresh intraday orphan can shimmer
+  # until ~03:05. Fixing that needs per-session owner attribution (the routing DB
+  # has leases) and is deliberately out of scope here.
+  systemd.services.opencode-phantom-busy-sweeper = {
+    description = "Finalize orphaned in-flight opencode messages (phantom busy)";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      ExecStart = "${pkgs.writeShellScript "opencode-phantom-busy-sweeper" ''
+        set -u
+        # System-service PATH is minimal — be explicit. No procps: boot times come
+        # from systemd, not `ps` (see DISCOVERY below).
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.sqlite pkgs.systemd pkgs.gawk ]}
+
+        # Hardcoded, NOT "$HOME": a system unit with User= does not reliably set
+        # HOME (the serve template sets it explicitly for the same reason).
+        DB=/home/dev/.local/share/opencode/opencode.db
+
+        DRY=0
+        [ "''${1:-}" = "--dry-run" ] && DRY=1
+
+        # Fail closed, not `exit 0`: the path is hardcoded, so a typo here would
+        # otherwise be a permanently silent success.
+        if [ ! -f "$DB" ]; then
+          echo "sweeper: DB not found at $DB — refusing to run"
+          exit 1
+        fi
+
+        # DISCOVERY. Two independent guards, covering opposite drift directions:
+        #   - the EXPECTED list is generated from users/dev/serve-pool.nix, so a
+        #     renamed/removed template is caught (LoadState != loaded -> exit 1)
+        #     rather than silently matching nothing;
+        #   - the running GLOB additionally catches a STRAY instance still
+        #     running after its port was dropped from serve-pool.nix (nothing
+        #     stops it until 03:00). Its rows must keep protecting themselves.
+        # CUTOFF is the min over the union. Boot epochs come from systemd's
+        # ActiveEnterTimestamp rather than MainPID+`ps etimes`: no pid race (a pid
+        # exiting between the two calls would silently skip a unit and LOOSEN the
+        # gate), and truncation rounds the cutoff earlier (conservative) instead
+        # of later. Note `systemctl show` exits 0 even for a not-found unit, so
+        # LoadState must be checked explicitly — the exit code proves nothing.
+        EXPECTED="${lib.concatMapStringsSep " " (p: "opencode-serve@${toString p}.service") servePool.ports}"
+
+        # Note the exit status is checked on `systemctl` ALONE. Piping straight
+        # into awk would mask a systemctl failure behind awk's happy exit 0 —
+        # the same shape of silent degradation this whole port exists to remove.
+        if ! RAW=$(systemctl list-units 'opencode-serve@*.service' --no-legend --plain --state=active); then
+          echo "sweeper: systemctl list-units failed — refusing to run"
+          exit 1
+        fi
+        STRAYS=$(printf '%s\n' "$RAW" | awk '{print $1}')
+
+        # awk 'NF' drops blank lines; grep is deliberately NOT on the PATH above.
+        UNITS=$(printf '%s\n%s\n' "$EXPECTED" "$STRAYS" | tr ' ' '\n' | awk 'NF' | sort -u)
+
+        NOW=$(date +%s)
+        ACTIVE=0
+        OLDEST=""
+        for u in $UNITS; do
+          state=$(systemctl show "$u" --timestamp=unix -p LoadState,ActiveState,ActiveEnterTimestamp)
+          ls_=$(printf '%s\n' "$state" | awk -F= '/^LoadState=/{print $2}')
+          as_=$(printf '%s\n' "$state" | awk -F= '/^ActiveState=/{print $2}')
+          ts_=$(printf '%s\n' "$state" | awk -F= '/^ActiveEnterTimestamp=/{print $2}')
+
+          # An EXPECTED unit that is not loaded means the template was renamed or
+          # the pool definition drifted. Fail closed: a permissive sweep is the
+          # loot-incident class.
+          case " $EXPECTED " in
+            *" $u "*)
+              if [ "$ls_" != "loaded" ]; then
+                echo "sweeper: $u LoadState=$ls_ (expected loaded) — refusing to run"
+                exit 1
+              fi
+              ;;
+          esac
+
+          [ "$as_" = "active" ] || continue
+
+          # ANY active unit whose boot epoch will not parse is fatal. Skipping it
+          # would raise CUTOFF if it happened to be the oldest member, which is
+          # exactly the permissive failure gate (b) exists to prevent.
+          epoch=''${ts_#@}
+          case "$epoch" in
+            ""|*[!0-9]*)
+              echo "sweeper: $u is active but ActiveEnterTimestamp=''${ts_:-<empty>} — refusing to run"
+              exit 1
+              ;;
+          esac
+
+          ACTIVE=$(( ACTIVE + 1 ))
+          [ -n "$OLDEST" ] && [ "$OLDEST" -le "$epoch" ] || OLDEST=$epoch
+          [ "$DRY" = 1 ] && echo "sweeper: $u active since $epoch"
+        done
+
+        # No live pool serve -> no live-owner risk at all (a drained pool is the
+        # one case where sweeping everything stale is maximally correct). This is
+        # deliberately distinct from the discovery failures above, which exit 1.
+        if [ "$ACTIVE" -eq 0 ]; then
+          CUTOFF=$NOW
+        else
+          CUTOFF=$OLDEST
+        fi
+        echo "sweeper: active=$ACTIVE cutoff=$CUTOFF now=$NOW dry=$DRY"
+
+        # The predicate is byte-identical to devbox's, including
+        # json_extract(data,'$.time.created') where the indexed-looking
+        # time_created column would do. They never disagree (verified 360314/
+        # 360314 rows) but the only index is (session_id, time_created, id) and
+        # this query has no session filter, so both variants full-scan and parity
+        # with the month-proven script costs nothing. Measured 1.8s on a 13GB DB.
+        if [ "$DRY" = 1 ]; then
+          sqlite3 "file:$DB?mode=ro" "
+            PRAGMA busy_timeout=10000;
+            SELECT 'would finalize ' || count(*) || ' orphaned message(s) (cutoff=' || $CUTOFF || ')'
+            FROM message
+            WHERE json_extract(data, '\$.role') = 'assistant'
+              AND json_extract(data, '\$.time.completed') IS NULL
+              AND json_extract(data, '\$.error') IS NULL
+              AND time_updated < (strftime('%s','now') - 1800) * 1000
+              AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
+          "
+          exit 0
+        fi
+
+        # Safe against live serves: WAL mode, single short transaction,
+        # busy_timeout. Writes the canonical MessageAbortedError shape so clients
+        # treat it exactly like a user abort.
+        sqlite3 "$DB" "
+          PRAGMA busy_timeout=10000;
+          UPDATE message SET data = json_set(data,
+              '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
+              '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: in-flight row predates all live serves, silent >30min)\"}}'))
+          WHERE json_extract(data, '\$.role') = 'assistant'
+            AND json_extract(data, '\$.time.completed') IS NULL
+            AND json_extract(data, '\$.error') IS NULL
+            AND time_updated < (strftime('%s','now') - 1800) * 1000
+            AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
+          SELECT 'finalized ' || changes() || ' orphaned message(s) (cutoff=' || $CUTOFF || ')';
+        "
+      ''}";
+    };
+  };
+
+  systemd.timers.opencode-phantom-busy-sweeper = {
+    description = "Periodic phantom-busy message finalization";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*:0/5";
+      AccuracySec = "30s";
+    };
+  };
+
   # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
   # router forwards to when work Claude-on-Vertex spend is over budget
   # (8fe.15 PREREQ). Runs upstream KarpelesLab/teamclaude (tagged release,
