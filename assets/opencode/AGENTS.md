@@ -209,13 +209,20 @@ restarted 4096, 4097, 4098 — then died at 4098 and never reached 4099.
 
 ```bash
 # Fire-and-forget job that must outlive a restart of your own unit.
-# NOTE: transient units get a minimal PATH and no XDG_RUNTIME_DIR is set in
-# opencode bash calls -- pass both explicitly or the run fails with either
+# NOTE: transient units get a minimal PATH, and opencode bash calls have no
+# XDG_RUNTIME_DIR -- pass both explicitly or the run fails with either
 # "Failed to connect to user scope bus" or exit 127 "bash: No such file".
+# --collect + a unique name: without them a finished-failed or still-running
+# job holds the name and the NEXT invocation dies with "unit already exists",
+# in exactly the fire-and-forget context where nobody is watching.
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
-systemd-run --user --unit=my-job --no-block --setenv=PATH="$PATH" \
+systemd-run --user --unit="my-job-$$" --no-block --collect \
+  --setenv=PATH="$PATH" \
   bash -c '<command> >> /tmp/my-job.log 2>&1'
 ```
+
+If you reuse a fixed unit name deliberately (so you can find it in the journal),
+clear the old one first: `systemctl --user reset-failed my-job 2>/dev/null`.
 
 Use `--scope` instead when you need the job to inherit your stdio and run
 synchronously; use `--unit=... --no-block` for fire-and-forget with journal
@@ -230,7 +237,13 @@ committing to it, and degrade rather than hard-exit.
 serve pool it may itself be running inside); copy its shape rather than
 reinventing it.
 
-Two `pkill` footguns worth knowing, both hit while verifying the above:
-`pkill -f <pattern>` matches **your own** command line, so `pkill -f 'job scope'`
-issued from a shell whose argv contains that string kills the shell. Prefer
+One `pkill` footgun, hit twice while verifying the above: `pkill -f <pattern>`
+matches **your own** command line, so `pkill -f 'job scope'` issued from a shell
+whose argv contains that string kills the shell — and the surrounding command
+chain silently stops mid-way, which looks exactly like a hang. Prefer
 `kill <pid>` on PIDs you captured, or bracket the pattern (`'[j]ob scope'`).
+
+Two caveats on the table above. It assumes the default
+`KillMode=control-group`; a unit with `KillMode=process` does not sweep its
+cgroup on restart. And `systemd-run --user` needs dev's user manager to exist
+(lingering) — the throwaway probe catches its absence either way.

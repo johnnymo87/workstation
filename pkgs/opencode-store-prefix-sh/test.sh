@@ -76,18 +76,64 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# The staleness verdict itself
+# opencode_reference_prefix -- resolution of the comparison reference
+#
+# Exercised against REAL files, because the executability check is a filesystem
+# fact. An earlier revision of this suite re-implemented the composition inline
+# and consequently could not have caught the reference gate being deleted.
 # ---------------------------------------------------------------------------
-
-# The comparison as the canary performs it.
-verdict() { # ref_exe run_exe
-  local ref run
-  ref="$(opencode_store_prefix "$1")"
-  run="$(opencode_store_prefix "$2")"
-  opencode_is_opencode_prefix "$ref" || { echo UNKNOWN; return; }
-  [ -n "$run" ] || { echo UNKNOWN; return; }
-  if [ "$ref" = "$run" ]; then echo FRESH; else echo STALE; fi
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+mk_exe() { # relative path under $tmp -> absolute path
+  local p="$tmp/$1"
+  mkdir -p "$(dirname "$p")"
+  : > "$p"
+  chmod +x "$p"
+  printf '%s\n' "$p"
 }
+# An executable file that is NOT shaped like an opencode package. A mktemp root
+# means the prefix reduction yields /tmp/... , which the shape gate must reject
+# -- the same rejection that keeps a mid-switch `…-profile` path out.
+wrong_shaped_exe="$(mk_exe "nix/store/5ndra5mzxggfh28icamhcwqdi8h6hm5j-profile/bin/opencode")"
+
+# A correctly shaped path that cannot exist, so the executability branch is
+# exercised without depending on what happens to be installed on this host.
+MISSING_EXE="/nix/store/0000000000000000000000000000000z-opencode-patched-0.0.0/bin/opencode"
+assert_eq "" "$(opencode_reference_prefix "$MISSING_EXE" 2>/dev/null)" \
+  "correctly shaped but non-existent reference is UNKNOWN, not drift"
+
+assert_eq "" "$(opencode_reference_prefix "$wrong_shaped_exe" 2>/dev/null)" \
+  "executable but wrong-shaped reference is UNKNOWN, not drift (workstation-bcmi)"
+
+# Positive path: an executable, correctly shaped reference must yield its prefix.
+# This one needs a real opencode package on disk, which cannot be faked (the
+# shape gate is anchored at the literal /nix/store, and tests may not write
+# there). Reported as SKIP rather than silently dropped when unavailable, so an
+# environment where it never runs is visible instead of looking green.
+live_ref="$(readlink -f /home/dev/.nix-profile/bin/opencode 2>/dev/null || true)"
+if [ -n "$live_ref" ] && [ -x "$live_ref" ] \
+   && opencode_is_opencode_prefix "$(opencode_store_prefix "$live_ref")"; then
+  assert_eq "$(opencode_store_prefix "$live_ref")" \
+    "$(opencode_reference_prefix "$live_ref" 2>/dev/null)" \
+    "reference prefix returned for an executable opencode package path"
+else
+  printf 'SKIP  %s (no opencode package resolvable at ~/.nix-profile/bin/opencode)\n' \
+    "reference prefix returned for an executable opencode package path"
+fi
+
+assert_eq "" "$(opencode_reference_prefix "" 2>/dev/null)" \
+  "empty reference is UNKNOWN, not drift"
+
+# The NOTICE must reach the journal, on stderr, without polluting the value.
+notice="$(opencode_reference_prefix "$wrong_shaped_exe" 2>&1 >/dev/null)"
+case "$notice" in
+  NOTICE:*unexpected*) printf 'PASS  %s\n' "wrong-shaped reference logs a NOTICE on stderr" ;;
+  *) printf 'FAIL  %s\n        got: %q\n' "wrong-shaped reference logs a NOTICE on stderr" "$notice"; fail=1 ;;
+esac
+
+# ---------------------------------------------------------------------------
+# opencode_drift_verdict -- the decision the canary actually executes
+# ---------------------------------------------------------------------------
 
 # The comparison as it was written by hand on 2026-08-01, and as it must never
 # be written again. Kept executable so the difference is asserted, not narrated.
@@ -95,25 +141,25 @@ broken_verdict() { # ref_exe run_exe
   if [ "$1" = "$2" ]; then echo FRESH; else echo STALE; fi
 }
 
-assert_eq "FRESH" "$(verdict "$PROFILE_EXE" "$PROC_EXE")" \
+assert_eq "FRESH" "$(opencode_drift_verdict "$PKG" "$PROC_EXE")" \
   "fresh serve is NOT reported stale (the 2026-08-01 false positive)"
 assert_eq "STALE" "$(broken_verdict "$PROFILE_EXE" "$PROC_EXE")" \
   "full-path equality DOES misreport that same fresh serve (regression sentinel)"
 
 # True positives must survive: a real version bump is still caught.
 OLD="/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-opencode-patched-1.17.13.5/bin/.opencode-wrapped"
-assert_eq "STALE" "$(verdict "$PROFILE_EXE" "$OLD")" \
+assert_eq "STALE" "$(opencode_drift_verdict "$PKG" "$OLD")" \
   "serve running an older opencode store path IS reported stale"
 
 # A serve whose exe escaped the store must still compare unequal, not be
 # silently downgraded to UNKNOWN.
-assert_eq "STALE" "$(verdict "$PROFILE_EXE" "/usr/bin/opencode")" \
+assert_eq "STALE" "$(opencode_drift_verdict "$PKG" "/usr/bin/opencode")" \
   "serve running a non-store binary IS reported stale"
 
-# Reference unresolvable (home-manager switch in flight) => never alert.
-assert_eq "UNKNOWN" "$(verdict "/nix/store/5ndra5mzxggfh28icamhcwqdi8h6hm5j-profile/bin/opencode" "$PROC_EXE")" \
+# Either side untrustworthy => never alert.
+assert_eq "UNKNOWN" "$(opencode_drift_verdict "" "$PROC_EXE")" \
   "unresolvable reference is UNKNOWN, not drift (workstation-bcmi)"
-assert_eq "UNKNOWN" "$(verdict "$PROFILE_EXE" "")" \
+assert_eq "UNKNOWN" "$(opencode_drift_verdict "$PKG" "")" \
   "unreadable /proc/<pid>/exe is UNKNOWN, not drift"
 
 # ---------------------------------------------------------------------------
@@ -131,18 +177,28 @@ else
   printf 'FAIL  %s\n' "cloudbox serve-canary sources the shared prefix library"; fail=1
 fi
 
-# ...and actually calls it on BOTH sides of the comparison. Sourcing without
-# calling would leave a hand-rolled comparison in place, which is the defect.
-for fn_site in 'REF_PREFIX_CANDIDATE=$(opencode_store_prefix' 'RUN_PREFIX=$(opencode_store_prefix'; do
-  if grep -qF "$fn_site" "$canary_src"; then
-    printf 'PASS  %s\n' "cloudbox serve-canary derives prefix via helper: ${fn_site%%=*}"
+# ...and actually delegates BOTH decisions to it. Sourcing without calling would
+# leave a hand-rolled comparison in place, which is the defect. Note these guard
+# the *reference resolution* and the *verdict* -- not merely the prefix helper --
+# because an earlier revision wired only the prefix reduction, which left the
+# reference shape gate (workstation-bcmi) deletable with every test still green.
+declare -A required_calls=(
+  ["REF_PREFIX=\$(opencode_reference_prefix"]="reference resolution (incl. the shape gate)"
+  ["DRIFT_VERDICT=\$(opencode_drift_verdict"]="staleness verdict"
+)
+for call in "${!required_calls[@]}"; do
+  if grep -qF "$call" "$canary_src"; then
+    printf 'PASS  %s\n' "cloudbox serve-canary delegates ${required_calls[$call]}"
   else
-    printf 'FAIL  %s\n' "cloudbox serve-canary derives prefix via helper: ${fn_site%%=*}"; fail=1
+    printf 'FAIL  %s\n' "cloudbox serve-canary delegates ${required_calls[$call]}"; fail=1
   fi
 done
 
-# The canary must never compare the raw exe paths to each other.
-if grep -qE '\[ *"\$RUN_EXE" *!?= *"\$REF_EXE" *\]|\[ *"\$REF_EXE" *!?= *"\$RUN_EXE" *\]' "$canary_src"; then
+# Tripwire for the literal 2026-08-01 form. This is a backstop, NOT proof: a
+# renamed variable evades it. The real protection is that the verdict lives in
+# this library and is asserted above, so the call site has nothing left to get
+# wrong.
+if grep -qE '(\[\[?) *"?\$\{?(RUN|REF)_EXE\}?"? *!?= *"?\$\{?(REF|RUN)_EXE\}?"?' "$canary_src"; then
   printf 'FAIL  %s\n' "cloudbox serve-canary does not compare raw exe paths"; fail=1
 else
   printf 'PASS  %s\n' "cloudbox serve-canary does not compare raw exe paths"

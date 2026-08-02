@@ -25,6 +25,12 @@
 # that logic had ZERO test coverage, so nothing stopped it regressing into the
 # broken form. This library is that logic, extracted so it can be tested.
 #
+# Sole consumer today is the CLOUDBOX serve-canary (both sides of its one
+# comparison). Devbox's serve-canary is liveness-only, and both frontdoor
+# canaries compare a /healthz version against ExecStart instead, so neither
+# needs this. "Both call sites" means both sides of that one comparison, not
+# both hosts.
+#
 # The correct comparison is the /nix/store/<hash>-<name> prefix of both sides.
 #
 # Pure bash: no coreutils, no PATH dependency, safe to source from a systemd
@@ -81,4 +87,66 @@ opencode_is_opencode_prefix() {
     /nix/store/*-opencode-patched-*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# opencode_reference_prefix REF_EXE
+#
+# REF_EXE is `readlink -f`'d from the profile symlink. Echoes the verified
+# opencode store prefix to use as the comparison REFERENCE, or nothing at all if
+# the reference cannot be trusted (UNKNOWN). NOTICE lines explaining an UNKNOWN
+# go to stderr so they reach the journal without polluting the captured value.
+#
+# The two rejection paths are the whole point and must stay here rather than at
+# the call site: "unknown" and "drift" have to be distinguishable, and both of
+# the incidents this file records were caused by conflating them.
+opencode_reference_prefix() {
+  local ref_exe="${1:-}"
+  [ -n "$ref_exe" ] || return 0
+
+  if [ ! -x "$ref_exe" ]; then
+    printf 'NOTICE: reference binary path is not executable (home-manager switch in flight?); treating as unknown (no alert): %s\n' \
+      "$ref_exe" >&2
+    return 0
+  fi
+
+  local candidate
+  candidate="$(opencode_store_prefix "$ref_exe")"
+  if opencode_is_opencode_prefix "$candidate"; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  printf 'NOTICE: reference binary resolved to an unexpected path; treating as unknown (no alert): %s\n' \
+    "$ref_exe" >&2
+}
+
+# opencode_drift_verdict REF_PREFIX RUN_EXE
+#
+# Echoes exactly one of FRESH, STALE, UNKNOWN. REF_PREFIX comes from
+# opencode_reference_prefix; RUN_EXE is `readlink /proc/<pid>/exe`.
+#
+# This is the composition the canary actually executes. It lives here, rather
+# than being spelled out at the call site, so the tests exercise the deployed
+# decision instead of a transcript of it -- a test that re-implements the logic
+# it is checking is the same defect as a check that cannot fail.
+#
+# UNKNOWN is returned whenever either side is untrustworthy: an unverifiable
+# reference (home-manager switch in flight) or an unreadable /proc/<pid>/exe
+# (process died or is restarting). UNKNOWN must never be treated as drift --
+# false alerts during transient states train the operator to ignore the channel,
+# after which the alert throttle suppresses the one that matters.
+opencode_drift_verdict() {
+  local ref_prefix="${1:-}" run_exe="${2:-}" run_prefix
+
+  [ -n "$ref_prefix" ] || { printf 'UNKNOWN\n'; return 0; }
+  [ -n "$run_exe" ] || { printf 'UNKNOWN\n'; return 0; }
+
+  run_prefix="$(opencode_store_prefix "$run_exe")"
+  [ -n "$run_prefix" ] || { printf 'UNKNOWN\n'; return 0; }
+
+  if [ "$ref_prefix" = "$run_prefix" ]; then
+    printf 'FRESH\n'
+  else
+    printf 'STALE\n'
+  fi
 }

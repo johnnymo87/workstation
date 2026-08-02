@@ -955,21 +955,13 @@ ${serveIdCase}
         # (REF_PREFIX=""), which the logic below already handles correctly: never alert,
         # never clear throttle state. "Unknown" was previously modelled as "empty"; this
         # failure mode is unknown-but-not-empty.
+        # Structural sanity lives in opencode_reference_prefix: the reference MUST be a
+        # verified opencode package, not a profile, a wrapper, or anything else a future
+        # refactor might resolve to. Anything else yields "" (UNKNOWN) plus a NOTICE on
+        # stderr. That gate is load-bearing, not decorative -- see workstation-bcmi above
+        # -- and is locked by pkgs/opencode-store-prefix-sh/test.sh.
         REF_EXE=$(readlink -f /home/dev/.nix-profile/bin/opencode 2>/dev/null || true)
-        REF_PREFIX=""
-        if [ -n "$REF_EXE" ] && [ -x "$REF_EXE" ]; then
-          REF_PREFIX_CANDIDATE=$(opencode_store_prefix "$REF_EXE")
-          # Structural sanity: the reference MUST be an opencode package, not a profile,
-          # a wrapper, or anything else a future refactor might resolve to. This catches
-          # any wrong-shaped resolution, not just the missing-file case above.
-          if opencode_is_opencode_prefix "$REF_PREFIX_CANDIDATE"; then
-            REF_PREFIX="$REF_PREFIX_CANDIDATE"
-          else
-            echo "NOTICE: reference binary resolved to an unexpected path; treating as unknown (no alert): $REF_EXE"
-          fi
-        elif [ -n "$REF_EXE" ]; then
-          echo "NOTICE: reference binary path is not executable (home-manager switch in flight?); treating as unknown (no alert): $REF_EXE"
-        fi
+        REF_PREFIX=$(opencode_reference_prefix "$REF_EXE")
 
         # Track drifting ports across the pool to issue ONE aggregated alert per canary pass.
         #
@@ -1091,21 +1083,29 @@ ${serveIdCase}
             #
             # WHY unknown != drift:
             # If REF_PREFIX is empty (profile symlink briefly missing during home-manager switch)
-            # or MainPID /proc/<pid>/exe is missing/unreadable (process died/restarting), skip
-            # the check. False-positive alerts during transient state train users to ignore alerts.
+            # or MainPID /proc/<pid>/exe is missing/unreadable (process died/restarting),
+            # opencode_drift_verdict returns UNKNOWN and we skip the check. False-positive
+            # alerts during transient state train users to ignore alerts.
+            #
+            # The `[ -n "$REF_PREFIX" ]` test below is an optimisation (it avoids a
+            # `systemctl show` per port), NOT the safety gate: opencode_drift_verdict
+            # re-checks it. Deleting this `if` may waste a syscall; it cannot resurrect
+            # the workstation-bcmi false-drift storm.
             if [ -n "$REF_PREFIX" ]; then
               PID=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null || true)
               if [ -n "$PID" ] && [ "$PID" != "0" ]; then
                 RUN_EXE=$(readlink "/proc/$PID/exe" 2>/dev/null || true)
                 if [ -n "$RUN_EXE" ]; then
-                  # MUST be the store-path prefix, never $RUN_EXE itself: bin/opencode
-                  # execs bin/.opencode-wrapped, so the raw paths differ even when the
-                  # serve is fresh and a full-path equality check would report STALE on
-                  # every pass, forever. Locked by pkgs/opencode-store-prefix-sh/test.sh.
+                  # The verdict MUST come from a store-path PREFIX comparison, never from
+                  # $RUN_EXE vs $REF_EXE: bin/opencode execs bin/.opencode-wrapped, so the
+                  # raw paths differ even when the serve is fresh, and full-path equality
+                  # would report STALE on every pass, forever. RUN_PREFIX is derived only
+                  # for the alert text. Locked by pkgs/opencode-store-prefix-sh/test.sh.
                   RUN_PREFIX=$(opencode_store_prefix "$RUN_EXE")
-                  if [ -n "$RUN_PREFIX" ]; then
+                  DRIFT_VERDICT=$(opencode_drift_verdict "$REF_PREFIX" "$RUN_EXE")
+                  if [ "$DRIFT_VERDICT" != "UNKNOWN" ]; then
                     VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
-                    if [ "$RUN_PREFIX" != "$REF_PREFIX" ]; then
+                    if [ "$DRIFT_VERDICT" = "STALE" ]; then
                       echo "WARNING: $UNIT binary drift: running=$RUN_PREFIX installed=$REF_PREFIX"
                       DRIFT_PORTS="''${DRIFT_PORTS:+$DRIFT_PORTS }$PORT"
                       DRIFT_DETAILS="''${DRIFT_DETAILS}  - port $PORT: $RUN_PREFIX
