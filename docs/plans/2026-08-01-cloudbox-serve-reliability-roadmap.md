@@ -1,7 +1,7 @@
 # Cloudbox Serve Reliability Roadmap
 
 **Spine bead:** `workstation-7za8` · **Started:** 2026-08-01 · **Host:** cloudbox only
-**Status:** steps 0–1 done · next: step 2 (`workstation-h1y6`)
+**Status:** steps 0, 1, 2, 3 done and deployed · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-le0a`)
 
 `opencode-serve@4098` had **one** confirmed throttle-band wedge on 2026-08-01
 (19:04–19:10), plus two earlier stall windows that self-recovered and are
@@ -121,6 +121,11 @@ The devbox precedent has the **same hole**. `users/dev/home.devbox.nix` sets no
 `MemorySwapMax`, devbox has zram, and `workstation-94g8` records no
 post-fix OOM kill ever demonstrated. "No wedges since July" is absence of
 trigger, not proof of the kill path. **Do not import devbox's confidence.**
+
+> **Resolved 2026-08-02 (step 2).** Both halves were then demonstrated on this
+> host with scratch units: unbounded swap → the cap pins and never kills (6 G
+> allocated under a 2 G cap, `oom_kill=0`); bounded swap → kernel memcg OOM in
+> 44 s and an automatic restart. The hole is closed; see step 2.
 
 Devbox removed `MemoryHigh` for exactly this reason on 2026-07-03
 (`users/dev/home.devbox.nix:811-824`, bead `workstation-94g8`,
@@ -507,80 +512,192 @@ to land next.
 
 ---
 
-## Step 2 — Bound the swap, drop `MemoryHigh`, tighten `TimeoutStopSec`
+## Step 2 — Max-only memory, bounded swap, tighter stop · **DEPLOYED 2026-08-02** (slice backstop deferred)
 
 **Bead:** `workstation-h1y6` (filed **2026-07-03**) · **Prefers** step 1 first.
 
-`hosts/cloudbox/configuration.nix:841-842` → keep `MemoryMax=9G`, delete
-`MemoryHigh`, add `TimeoutStopSec=15` (mirroring devbox's rationale), and — the
-part devbox does *not* have — **add `MemorySwapMax`**. Rewrite the `DM5-5`
-comment so it explains Max-only rather than the band.
+`hosts/cloudbox/configuration.nix` → delete `MemoryHigh`, **raise `MemoryMax`
+9 G → 14 G**, add `MemorySwapMax=1G`, add `TimeoutStopSec=15`, and give the pool
+an explicit `Slice=opencode-serve.slice` capped at `MemoryMax=32G` /
+`MemorySwapMax=4G` as an aggregate backstop.
 
-**`MemorySwapMax` is not optional garnish; without it the step probably does
-nothing.** See "The zram problem" above: the serve cgroup currently has
-`memory.swap.max=max` against a 31.3 G zram device, and the wedged serve's
-working set was 100 % anon with zero reclaimable page cache. Reclaim into zram
-can make progress indefinitely, so `memory.max` need never escalate to an OOM
-kill — the stall just relocates from 7 G to 9 G. Setting a small
-`MemorySwapMax` (`0`, or a deliberate 256 M–1 G) is what makes "reclaim fails →
-OOM → restart" true. Pick the value deliberately and write down the reasoning:
-`0` forfeits zram's benefit for the serves entirely, which may be the right
-trade for a process whose whole failure mode is thrashing.
+This is **not** the devbox port that was originally scoped, and not the
+9 G-max/swap-0 design that survived the first review. Both were changed by
+measurement; the reasoning is below and the numbers are in
+`docs/investigations/2026-08-02-serve-memory-bursts/`.
 
-**Do not ship this on the argument "devbox did it."** Devbox's serves are user
-units in a user slice with a different `MemoryMax`; the recovery path must be
-demonstrated *on cloudbox*. The premise is a chain — `MemoryMax` exceeded →
-kernel OOM kill → `OOMPolicy=stop` → `Restart=always` fires within 10 s — and
-`OOMPolicy=stop` is exactly the link that a reasonable person would expect to
-*prevent* a restart. Prove it, on a scratch unit, before touching the pool.
+### Why `MemoryHigh` goes
 
-- Spine: 2 optional, 3 no, **4 mandatory**.
+`memory.high` does not kill, it throttles — every allocating thread sleeps in
+`mem_cgroup_handle_over_high` for as long as the cgroup is over the line.
+Measured 2026-08-02: serve 4099 sat pinned at **exactly 7.00 G for 13 minutes**,
+pushed **22.4 GiB into zram**, and spent **8.1 minutes at PSI `full`** (every
+task stopped). The liveness canary passed **every single minute** of it while
+the front door served **4 % 503s** off that member. Pool-wide `memory.events`:
+`high=1064918`, **`max=0`**, `oom=0` — the band fires constantly and the cap has
+never once been reached. The band *is* the wedge, and it manufactures exactly
+the "alive but stalling" class the canary cannot see (`workstation-nv5l`).
+
+### Why 14 G and not 9 G — the correction that matters
+
+The first version of this step kept `MemoryMax=9G`. That was wrong, and the
+front-door log says so. Joining 193 430 door requests against the 15 s sampler,
+bucketed per serve per minute by **true demand** (`anon` + `swap`):
+
+| demand | mins | reqs | 5xx | p50 | p95 |
+|---|---|---|---|---|---|
+| 0–8 G | 2524 | 192 807 | 0.02 % | 4 ms | ≤11 ms |
+| 9–10 G | 2 | 51 | 0 | 6 ms | 36 ms |
+| 10–12 G | 1 | 52 | 0 | 7 ms | 1004 ms |
+| 12–14 G | 1 | 12 | 0 | 24 ms | 170 ms |
+| 16–20 G | 3 | 101 | 0 | 62 ms | 1596 ms |
+| **> 24 G** | 10 | 344 | **4.36 %** | 204 ms | 4149 ms |
+
+Of the four cap-crossings in 20.6 h, **three peaked at 9.5–10.8 G and were
+completely clean at the door**; only 4099's 28.5 G runaway caused user-visible
+harm. `MemoryMax=9G` would have killed all four. 14 G sits above the highest
+observed benign peak (12.47 G) and far below the runaway.
+
+The cost asymmetry decides it: a wrong **kill** orphans ~45 sessions on that
+member until the 03:00 sweeper (`workstation-63wo` is still open, so intraday
+orphans are protected from the sweeper by the min-over-pool cutoff), while a
+wrong **non-kill** costs about a minute of elevated latency before the cap
+catches it anyway. Err high.
+
+> **The > 9 G rows above are thin — 18 minutes total.** They are a prior, not
+> proof, and the observation window below is written to correct them.
+
+### Why the measured swap numbers do *not* justify a large `MemorySwapMax`
+
+The tempting read of the swap data is "swap ≤ 5 G was always benign, so allow
+5 G." That is a trap: **serves only swap because `MemoryHigh=7G` forces reclaim
+at 7 G.** Remove the band and there is no reclaim pressure until `MemoryMax`; a
+serve wanting 8 G simply sits at 8 G resident. The benign swap class ceases to
+exist. Post-change, swap engages only at the cap or under global reclaim.
+
+`MemorySwapMax=1G`, not `0`, because with `0` a serve could be OOM-killed under
+*global* pressure while the box still has free RAM, and because a small
+overshoot of the cap is better absorbed than instantly fatal. 1 G is far too
+little to sustain a 22 G runaway.
+
+### Scratch-unit results — run 2026-08-02, both halves proven
+
+Transient **system** units, slow (50 MB/s) **compressible** anonymous allocator,
+scaled to `MemoryMax=2G` (the memcg OOM path is value-independent).
+
+- **Positive control** (`MemorySwapMax=150M`): kernel OOM at the cap in 44 s —
+  `Memory cgroup out of memory: Killed process ... CONSTRAINT_MEMCG`, unit
+  `Failed with result 'oom-kill'`, `Scheduled restart job, restart counter is
+  at 1`, back up 10 s later. Swap peaked at **149.8 M** — exactly the bound.
+  **`OOMPolicy=stop` does not suppress `Restart=always`.** Chain proven on this
+  host, as a system unit.
+- **Negative control** (same cap, **swap unbounded**): allocator reached its full
+  **6 G — three times the cap — and was never killed.** `memory.current` pinned
+  at exactly 2 G, `memory.swap.current` 4.4 G, `max=6951`, **`oom_kill=0`**.
+  This is the zram hypothesis confirmed outright: without `MemorySwapMax` the
+  cap produces a permanent pin, not a kill.
+- **File-heavy variant** (cap 2 G, swap 150 M, reading ~3000 files × 6 passes):
+  completed all six passes, exited 0, **no OOM**. Page-cache reclaim makes
+  progress indefinitely, so a file-dominated burst *stalls at the cap rather
+  than dying*. **Accepted residual**: this class is not converted to a fast
+  kill; the canary and per-port door p95 own it.
+- **Allocator bug worth remembering:** the first version reported 4.9 G while
+  actually holding 0.9 G (`b"COMPRESSIBLE" * 64` is 768 bytes, so the `[:4096]`
+  slice was a no-op). It would have produced a false "no OOM" pass. The script
+  now sums real retained bytes.
+
+### The `Slice=` trap — found by deploying, cost ~4 minutes of unprotected pool
+
+**The first deploy silently removed every memory limit from the pool.** Worth
+reading before re-landing the slice.
+
+`nixos-rebuild switch` with `restartIfChanged=false` correctly refused to bounce
+the serves ("would NOT stop the following changed units"). But systemd had
+already re-realized those units as members of the *new* `opencode-serve.slice`
+while their processes were still in the *old* `system-opencode\x2dserve.slice`.
+It therefore stopped managing the old slice and dropped `memory` from its
+`cgroup.subtree_control`. The per-serve `memory.max`, `memory.high` and
+`memory.swap.max` files **did not change value — they ceased to exist**, and
+the parent slice's own `memory.max` read `max`. The pool ran with no memory
+bound of any kind.
+
+`systemctl show` reported the new values throughout. Only the cgroupfs read
+caught it, which is exactly why that check is written into the exit criteria —
+and it is the difference between "the change didn't apply" (annoying) and "the
+change removed the protection it exists to add" (dangerous).
+
+**So `Slice=` is not shipped.** The slice is defined but unattached; the memory
+knobs, which *do* apply live, are deployed. Re-land `Slice=` only in a deploy
+that bounces the pool in the same step (`workstation-le0a`).
+
+### Deploy propagation — measured, not assumed
+
+Probed on a live scratch unit: editing the unit file and running
+`systemctl daemon-reload` **does** re-realize cgroup properties on a *running*
+unit, and **removing** `MemoryHigh` correctly resets the live cgroup to
+`memory.high=max`. So the memory knobs need no pool bounce.
+
+**But `Slice=` cannot change on a running unit** — a process cannot be moved
+between cgroups by reload, and attempting it strips the limits (above). The
+slice backstop therefore requires a deploy that restarts the pool in the same
+step.
+
+- Spine: 2 optional (**done**), 3 no, **4 mandatory (done — v1 and v2)**.
 - **Deploy in the 03:00 window**, or by an explicit `reset-workspace` run — a
-  pool restart abandons in-flight turns on all four members at once, which is
-  strictly worse than the bug on any ordinary afternoon. Note that
-  `nixos-rebuild switch` will **not** restart the serves by itself if only
-  `serviceConfig` changed in a way systemd applies live; verify what actually
-  took effect rather than assuming.
+  pool restart abandons in-flight turns on all four members at once.
+- **Verify on cgroupfs, never `systemctl show` alone.** `systemctl show` reports
+  loaded unit config and will happily report the new value while the kernel
+  still holds the old one. Ground truth:
+  ```bash
+  d=/sys/fs/cgroup/opencode-serve.slice/opencode-serve@4096.service
+  cat $d/memory.max $d/memory.high $d/memory.swap.max   # 15032385536, max, 1073741824
+  cat /sys/fs/cgroup/opencode-serve.slice/memory.max    # 34359738368
+  ```
+  A slice cap that silently did not land is worse than none, because you will
+  believe the backstop exists.
 - **Exit criteria:**
-  - **Swap-faithful scratch control.** A unit carrying *the same* `MemoryMax`
-    **and `MemorySwapMax`** as the pool, allocating **slowly-growing,
-    compressible anonymous** memory, is OOM-killed and restarted inside ~10 s
-    with the kill visible in `journalctl -k`. Both halves — killed *and*
-    restarted. A fast allocator writing incompressible pages outruns zram and
-    passes vacuously; that variant does not count.
-  - Same control **without** `MemorySwapMax` must **fail to OOM** within a
-    generous window. If it OOMs anyway, the zram analysis is wrong and
-    `MemorySwapMax` should be reconsidered rather than shipped on a bad reason.
-  - After deploy, on all four members: `MemoryHigh` = `infinity`,
-    `MemorySwapMax` = the chosen value, `TimeoutStopUSec` = 15 s.
-  - **Seven-day observation, reported as one of three outcomes** — never as a
-    bare "no wedges":
-    1. record daily max `MemoryCurrent` per member;
-    2. **if any member exceeded ~8.5 G**: require a matching `journalctl -k` OOM
-       entry, an `NRestarts` increment, and health restored within 60 s — this
-       is the only outcome that *confirms* the fix;
+  - Scratch positive + negative control. **Both done, above.**
+  - After deploy, on all four members, read from cgroupfs — **done 2026-08-02
+    18:57**, all four report `memory.high=max`, `memory.max=15032385536`,
+    `memory.swap.max=1073741824`, `TimeoutStopUSec=15s`, `NRestarts=0`, and the
+    door served 645/645 requests at 200 across the change. Slice `memory.max`
+    deferred with the slice itself (`workstation-le0a`).
+  - **Seven-day observation, reported as one of four outcomes** — never as a
+    bare "no wedges". The durable ledger is `journalctl -k` memcg-OOM lines;
+    `memory.events oom_kill` resets when a cgroup is recreated and `NRestarts`
+    resets on the nightly restart, so neither is trustworthy alone.
+    1. record daily max `MemoryCurrent` **and demand (`anon`+`swap`)** per member;
+    2. **if a member was killed at 14 G**: require a matching `journalctl -k`
+       memcg-OOM entry, a restart, and health restored within 60 s — the only
+       outcome that *confirms* the fix;
     3. **if no member approached the cap**: record **"no trigger —
-       inconclusive"**. Explicitly not success.
-
-  > The first draft's criterion was "zero canary wedge dumps attributable to the
-  > throttle band". Once `MemoryHigh` is gone **no** future dump can be
-  > attributed to the band, so that passes by construction. It is exactly the
-  > kind of criterion a tired future agent ticks without doing anything.
-
+       inconclusive"**. Explicitly not success;
+    4. **kill frequency** pool-wide per day, which adjudicates the cap value.
+  - **Pre-declared adjustment rule** (this is what makes the thin > 9 G data
+    self-correcting — decide it now, not after seeing results):
+    - a killed episode that was **door-clean** right up to death ⇒ **cap too
+      low**, raise per-unit to 16 G (the 32 G slice still bounds aggregate);
+    - a killed episode that was **already emitting 5xx or p95 > 1 s** ⇒
+      **confirmed**, leave it;
+    - **> 5 kills/day pool-wide** ⇒ raise the cap rather than accept the churn,
+      because `workstation-63wo` is still open and every kill strands that
+      member's sessions until 03:00.
 - **Rollback.** Trigger: **≥3 OOM kills on one member within an hour** (a kill
-  loop), or any member failing to come back healthy after a kill. Action:
-  `git revert` the config commit and rebuild; the pre-change band is a known,
-  survivable state. `RestartSec=10` is well inside systemd's default start-limit,
-  so systemd will not give up on its own — you must notice.
-- **If the deploy did not take effect:** `nixos-rebuild switch` may leave the
-  running units on the old cgroup properties. `systemctl daemon-reload`
-  reapplies cgroup settings to running units; if the properties still read old
-  after that, restart the pool in the 03:00 window. Verify with
-  `systemctl show`, never by reading the Nix source (`workstation-am5v`).
+  loop — possible, since a retrying session can re-inflate to 14 G in minutes),
+  or any member failing to come back healthy after a kill. Action: `git revert`
+  the config commit and rebuild; the pre-change band is a known, survivable
+  state. `RestartSec=10` is well inside systemd's start-limit, so systemd will
+  not give up on its own — you must notice.
 
-## Step 3 — Why does one member reach 7.35 G? *(investigation, not a fix)*
+## Step 3 — Why does one member reach 7.35 G? · **ANSWERED 2026-08-02**
 
 **Bead:** `workstation-9b3o` · **Sampling starts BEFORE step 2. Do not wait.**
+
+> **The question contains a false premise.** No member "reaches 7.35 G" as a
+> standing state. Every member bursts, the bursting member *moves*, and the
+> baseline is 1–2.7 G for all four. The answer, and the two things it changes
+> about step 2, are at the end of this section. The suspect list below is
+> preserved because one of the two suspects died and that is worth showing.
 
 Step 2 makes the *symptom* recoverable in 10 s. It does not explain why 4098
 grew 6× past its peers — and once step 2 lands, a ballooning member is killed by
@@ -609,6 +726,93 @@ measurement-only — do not pre-commit to a remedy.
 - **Exit:** a written answer, or an honest "did not correlate", plus a decision
   on whether any follow-up is warranted. A step whose output is "we do not know"
   is a valid outcome and must be recorded as such rather than quietly dropped.
+
+### The answer — 3 928 ticks over 17.5 h (08-01 21:34 → 08-02 15:00)
+
+Sampler: `/home/dev/s3-sampling/sample.sh`, appending
+`/home/dev/s3-sampling/samples.tsv` every 15 s from a **transient** `systemd
+--user` timer (`s3-sampler.timer`). Read-only: `/proc`, `systemctl show`,
+cgroup `memory.stat`, and a `mode=ro` handle on pigeon's routing DB. It survived
+this session, the 03:01 nightly reset and the 10:25 deploy; it would not survive
+a reboot.
+
+**1. It is bursts, and the burster moves.** 4098 burst on 08-01; **4096** burst
+on 08-02, peaking at *exactly* 7.00 G — `MemoryHigh` — five samples pinned
+there. 4097 and 4099 never crossed 6.0 G in the entire window. Every member
+returns to a 1.0–2.7 G baseline; **nothing accumulates.** The headline
+"7.35 G vs 0.67 G" pair was one sample of an oscillation taken while the peers
+happened to be idle.
+
+**2. Session count does not predict memory. Watcher/fd count does.** Pearson
+*r* against `MemoryCurrent`, computed *within* each port's own series:
+
+| metric | 4096 | 4097 | 4098 | 4099 |
+|---|---|---|---|---|
+| `threads` | 0.83 | 0.98 | 0.89 | 0.96 |
+| `fds` | 0.78 | 0.97 | 0.89 | 0.92 |
+| `inotify_fds` | 0.79 | 0.97 | 0.89 | 0.92 |
+| `notify_debounce` | 0.79 | 0.97 | 0.89 | 0.92 |
+| `inotify_watches` | 0.83 | 0.88 | 0.73 | 0.89 |
+| **`assign_total`** | **0.33** | **0.02** | **−0.18** | **−0.18** |
+| **`assign_active_1h`** | **0.39** | **0.01** | **0.05** | **0.06** |
+| **`assign_active_10m`** | **0.18** | **0.00** | **−0.08** | **0.01** |
+
+`rss`, `pagetables` and `file` also score 0.8–1.0 but are restatements of
+memory itself and are not evidence.
+
+**Suspect 2 (mega-sessions) is dead.** Between members the relationship is if
+anything *inverse*: 4098 medians 2.65 G on **38** assignments; 4097 medians
+0.65 G on **191**. Message history does not travel with memory.
+
+**Suspect 1 (notify-rs watchers) survives, in modified form:** what tracks is
+the count of watcher **instances** (≈ one per open project tree), not the raw
+watch count — 4097 and 4099 each hold ~43 k watches at a third of 4098's memory.
+
+*Honest caveat:* threads, fds and watchers all rise together when a session
+opens a tree, so this is co-movement, not isolated causation. The **negative**
+result is the solid one; the positive one is consistent but not proven.
+
+**3. An instrumented band entry** — 4096, 08-02, 48 s between rows:
+
+```
+11:18:23  1.75G  anon 1.18  file 0.51  swap 0.00
+11:19:59  6.73G  anon 2.99  file 3.53  swap 0.00   <- ramp is ~50% PAGE CACHE
+11:21:35  7.00G  anon 4.52  file 2.25  swap 0.00   <- pinned at MemoryHigh
+11:22:23  7.00G  anon 5.82  file 0.77  swap 1.49   <- cache evicted, now swapping
+11:23:11  2.93G  anon 2.30  file 0.38  swap 1.54   <- collapsed, recovered itself
+11:33:35  7.00G  anon 6.25  file 0.29  swap 6.22   <- second entry, 6.2G into zram
+11:34:23  1.30G  anon 0.97  file 0.08  swap 2.68
+```
+
+`assign_active_10m` was 0–1 throughout: **one session**, doing a burst of file
+reading — a big scan, not a leak.
+
+### What this changes about step 2 — read before deploying it
+
+- **BLOCKER-2 is confirmed on a real serve, not inferred from config.** The
+  cgroup pinned at exactly `MemoryHigh` and relieved the pressure by pushing
+  **6.22 GiB into zram**, then recovered. `MemorySwapMax` is not optional; without
+  it, dropping `MemoryHigh` most likely relocates this to 9 G instead of
+  converting it to a fast kill.
+- **Band entry is routine and usually harmless.** 4096 entered the band **three
+  times in 15 minutes** and the canary logged *nothing* — health probes never
+  failed. So hitting `MemoryHigh` is not the wedge; a band entry that *fails to
+  recover* is. This is the self-recovering class from the 08-01 episode table,
+  now captured with instrumentation. Removing `MemoryHigh` therefore removes
+  something that fires often and mostly benignly, and the open question becomes
+  whether `MemoryMax=9G` sits far enough above these routine 7.00 G peaks — or
+  whether the peaks simply move up and start dying. Decide that deliberately
+  rather than by devbox precedent.
+- **"100 % anonymous" was the post-throttle endpoint, not the composition.** The
+  ramp is roughly half reclaimable page cache, so reclaim gets ~2 G of cheap
+  progress before it is forced onto anon and swap.
+
+### Follow-up
+
+`workstation-9b3o` is answered and closed. The residual question — *what makes
+one session's file scan cost 5 GiB* — is not this roadmap's; it needs an
+application-level look at the watcher/scan path, and is worth filing only if the
+band entries stop self-recovering.
 
 ## Step 4 — Reclaim the 6.2 GiB of dead pages *(low priority)*
 

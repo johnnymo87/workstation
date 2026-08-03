@@ -854,18 +854,88 @@ ${serveIdCase}
         fi
         exec /home/dev/.nix-profile/bin/opencode serve --port "$PORT" --hostname 127.0.0.1
       ''} %i";
-      # DM5-5: PER-INSTANCE memory cap. The old single serve was capped at
-      # 40G/32G for the whole serve cgroup (~29 GiB observed working set across
-      # 15+ attached sessions). Under K=4 the load spreads across 4 cgroups, so
-      # cap each instance at 9G max / 7G high: aggregate 4x9=36G max, 4x7=28G
-      # high stays under the old 40G ceiling with burst headroom on this 62 GiB
-      # box, and OOMScoreAdjust=500 still sacrifices a serve first if the whole
-      # system runs out.
-      MemoryMax = "9G";
-      MemoryHigh = "7G";
+      # h1y6 step 2: MAX-ONLY, no MemoryHigh. Deliberately NOT the old
+      # 9G-max/7G-high band. `memory.high` does not kill -- it throttles, by
+      # putting every allocating thread to sleep in mem_cgroup_handle_over_high
+      # for as long as the cgroup stays over the line. Measured on this host
+      # 2026-08-02: serve 4099 sat pinned at EXACTLY 7.00G for 13 minutes,
+      # pushing 22.4 GiB into zram, 8.1 minutes of it with PSI `full` (every
+      # task stopped) -- and the liveness canary passed every single minute
+      # while the front door served 4% 503s off that member. `memory.events`
+      # across the pool: high=1064918, max=0, oom=0. In other words the band
+      # fires constantly and the cap has never once been reached. That is the
+      # wedge; a fast kill + 10s restart is strictly better than a silent
+      # 13-minute stall that our own detector cannot see.
+      #
+      # 14G, not 9G, because 9G would kill far more than the pathology. Of the
+      # four cap-crossings in a 20.6h sample, three peaked at 9.5-10.8G and
+      # were completely clean at the door (zero 5xx, p95 in the tens of ms);
+      # only 4099's 28.5G runaway caused user-visible harm. 14G sits above the
+      # highest observed benign peak (12.47G) and far below the runaway, so it
+      # kills the pathology and leaves the routine bursts alone. The cost
+      # asymmetry drives this: a wrong kill orphans ~45 sessions until the
+      # 03:00 sweeper (workstation-63wo is still open), while a wrong non-kill
+      # costs about a minute of latency before the cap catches it anyway.
+      #
+      # MemorySwapMax=1G is what makes the cap mean anything. Unbounded, the
+      # cgroup relieves cap pressure into 31.3G of zram instead of dying, and
+      # the stall simply relocates. It is 1G rather than 0 so that (a) global
+      # reclaim can still page out genuinely cold pages -- with 0, a serve
+      # could be OOM-killed while the box has free RAM -- and (b) a small
+      # overshoot of the cap is absorbed rather than instantly fatal. 1G is far
+      # too little to sustain a 22G runaway.
+      #
+      # NOTE: bash tools spawned by sessions live in the serve's cgroup, so the
+      # OOM killer may pick a fat child (a build, an nvim) rather than the serve
+      # itself. OOMPolicy=stop stops the whole unit on any kill in its cgroup,
+      # and Restart=always brings it back, so the outcome is the same either
+      # way -- but it does mean one session's runaway subprocess can restart the
+      # serve for everyone on that member.
+      MemoryMax = "14G";
+      MemorySwapMax = "1G";
       OOMScoreAdjust = "500";
       Restart = "always";
       RestartSec = 10;
+      # A wedged serve's SIGTERM handler is a JS-level `process.once` that a
+      # frozen event loop provably never runs (workstation-94g8), so the
+      # default 90s stop timeout is 90s of dead waiting on every stop of a
+      # wedged serve -- including inside the nightly reset. A healthy serve
+      # exits in well under a second, so this only ever shortens the SIGKILL
+      # wait. Matches devbox.
+      TimeoutStopSec = 15;
+      # NO `Slice=` here, deliberately -- see workstation-le0a / step 2 notes.
+      # Setting it is correct in principle (the implicit
+      # `system-opencode\x2dserve` slice has no unit file and can't be
+      # configured through `systemd.slices` without fighting the escaped name),
+      # but it CANNOT be deployed without simultaneously restarting the pool.
+      # Measured the hard way on 2026-08-02: `nixos-rebuild switch` with
+      # restartIfChanged=false left the processes in the OLD slice while
+      # systemd re-realized them as members of the new one, which dropped
+      # `memory` from the old slice's cgroup.subtree_control. The per-serve
+      # memory.max/high/swap.max files then vanished outright and the pool ran
+      # with NO memory limits at all until this was reverted. A silent removal
+      # of the very protection the change exists to add.
+      # Re-land it only as part of a deploy that bounces the pool in the same
+      # step, and verify on cgroupfs afterwards.
+    };
+  };
+
+  # h1y6 step 2: aggregate backstop for the serve pool. Defined but NOT yet
+  # attached -- the serve units deliberately carry no `Slice=` (see the comment
+  # on the unit above; attaching it without restarting the pool strips the
+  # per-serve memory limits entirely). Kept here so re-landing it during a
+  # restart window is a one-line change.
+  #
+  # Per-instance MemoryMax is 14G and there are four of them, so an unbounded
+  # parent would permit 56G on a 62 GiB box. This caps the whole pool at 32G
+  # (~half the box), comfortably above the observed concurrent pool maximum of
+  # 15.5G, and only engages if two members run away at once -- a single runaway
+  # is already bounded at 14G by its own cap and cannot reach 32G alone.
+  systemd.slices.opencode-serve = {
+    description = "OpenCode serve pool (aggregate memory backstop)";
+    sliceConfig = {
+      MemoryMax = "32G";
+      MemorySwapMax = "4G";
     };
   };
 
