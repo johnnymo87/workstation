@@ -1444,10 +1444,24 @@ EOF
 
         # Hardcoded, NOT "$HOME": a system unit with User= does not reliably set
         # HOME (the serve template sets it explicitly for the same reason).
-        DB=/home/dev/.local/share/opencode/opencode.db
+        #
+        # OPENCODE_SWEEPER_DB is a TEST SEAM, not configuration. The unit sets no
+        # Environment=, so production is byte-identical to the old hardcoded path;
+        # it exists so the test harness can exercise THIS script against scratch
+        # databases instead of re-implementing (and thereby not testing) its logic.
+        DB=''${OPENCODE_SWEEPER_DB:-/home/dev/.local/share/opencode/opencode.db}
 
         DRY=0
         [ "''${1:-}" = "--dry-run" ] && DRY=1
+
+        # An unrecognised argument must not silently perform a WET sweep. This
+        # script is now run by hand often enough (test harness, manual probes)
+        # that `--dryrun` or `-n` is a realistic typo, and the wrong outcome of
+        # that typo is destructive.
+        if [ $# -gt 0 ] && [ "$1" != "--dry-run" ]; then
+          echo "sweeper: unknown argument '$1' (only --dry-run is accepted) — refusing to run"
+          exit 1
+        fi
 
         # Fail closed, not `exit 0`: the path is hardcoded, so a typo here would
         # otherwise be a permanently silent success.
@@ -1530,43 +1544,148 @@ EOF
         else
           CUTOFF=$OLDEST
         fi
-        echo "sweeper: active=$ACTIVE cutoff=$CUTOFF now=$NOW dry=$DRY"
+        echo "sweeper: db=$DB active=$ACTIVE cutoff=$CUTOFF now=$NOW dry=$DRY"
 
+        # PHASE 1 — find candidates on a READ-ONLY connection.
+        #
+        # The scan itself was never the problem; holding the WAL write lock
+        # while doing it was. SQLite takes that lock at the START of a write
+        # statement and holds it for the statement's entire duration EVEN WHEN
+        # IT MATCHES 0 ROWS — which is every run in practice (173/173 finalized
+        # nothing between 2026-08-01 and 2026-08-03, each still holding the lock
+        # ~1.9s, ~288 stalls/day against the serves' 5s busy_timeout). On
+        # 2026-08-02 16:05 a cold-cache run held it 17.8s, blew that budget
+        # twice, and killed a live turn — stranding exactly the kind of orphan
+        # row this sweeper exists to clean up. Bead workstation-yvxh.
+        #
+        # A read-only connection takes no write lock, so this scan no longer
+        # touches the serves. (mode=ro can still create/recover the -shm, which
+        # needs a writable DIRECTORY — dev has one. It cannot write the DB.)
+        #
         # The predicate is byte-identical to devbox's, including
         # json_extract(data,'$.time.created') where the indexed-looking
         # time_created column would do. They never disagree (verified 360314/
         # 360314 rows) but the only index is (session_id, time_created, id) and
         # this query has no session filter, so both variants full-scan and parity
         # with the month-proven script costs nothing. Measured 1.8s on a 13GB DB.
-        if [ "$DRY" = 1 ]; then
-          sqlite3 "file:$DB?mode=ro" "
-            PRAGMA busy_timeout=10000;
-            SELECT 'would finalize ' || count(*) || ' orphaned message(s) (cutoff=' || $CUTOFF || ')'
-            FROM message
-            WHERE json_extract(data, '\$.role') = 'assistant'
-              AND json_extract(data, '\$.time.completed') IS NULL
-              AND json_extract(data, '\$.error') IS NULL
-              AND time_updated < (strftime('%s','now') - 1800) * 1000
-              AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
-          "
-          exit 0
-        fi
-
-        # Safe against live serves: WAL mode, single short transaction,
-        # busy_timeout. Writes the canonical MessageAbortedError shape so clients
-        # treat it exactly like a user abort.
-        sqlite3 "$DB" "
-          PRAGMA busy_timeout=10000;
-          UPDATE message SET data = json_set(data,
-              '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
-              '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: in-flight row predates all live serves, silent >30min)\"}}'))
+        # Phase 2 repeats it verbatim so the two phases cannot drift apart.
+        #
+        # `-cmd ".timeout N"`, not `PRAGMA busy_timeout=N;`: the pragma RETURNS A
+        # ROW, so the old script has been logging a bare "10000" line to the
+        # journal every five minutes since it was deployed. Harmless when the
+        # output was only ever read by a human; fatal here, where that line would
+        # be parsed as a candidate id. The dot-command sets the same timeout
+        # silently.
+        #
+        # `-init /dev/null -list -noheader` for the same reason: phase 1's output
+        # format is now load-bearing (it is parsed into a SQL id list), so it is
+        # pinned explicitly rather than left to the CLI's defaults, a stray
+        # ~/.sqliterc, or a future sqlite bump. Verified that sqlite 3.50.4 does
+        # not read an rc file non-interactively — this keeps that true by
+        # construction instead of by version.
+        if ! CANDIDATES=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "file:$DB?mode=ro" "
+          SELECT id FROM message
           WHERE json_extract(data, '\$.role') = 'assistant'
             AND json_extract(data, '\$.time.completed') IS NULL
             AND json_extract(data, '\$.error') IS NULL
             AND time_updated < (strftime('%s','now') - 1800) * 1000
             AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
-          SELECT 'finalized ' || changes() || ' orphaned message(s) (cutoff=' || $CUTOFF || ')';
-        "
+        "); then
+          # A failed probe must never be indistinguishable from "nothing to do".
+          echo "sweeper: candidate query failed — refusing to run"
+          exit 1
+        fi
+
+        # These ids get interpolated into a write statement below. They come
+        # from our own database, but "our own database" is precisely the thing
+        # whose contents we cannot assume when the next step is destructive, so
+        # anything that is not shaped like an opencode message id stops the run.
+        # This also guarantees the line-oriented chunking below can never be
+        # confused by an id containing a newline.
+        if ! printf '%s\n' "$CANDIDATES" | awk 'NF && !/^[A-Za-z0-9_.:-]+$/ { exit 1 }'; then
+          echo "sweeper: candidate id failed validation — refusing to write"
+          exit 1
+        fi
+
+        N=$(printf '%s\n' "$CANDIDATES" | awk 'NF' | wc -l)
+
+        if [ "$DRY" = 1 ]; then
+          echo "sweeper: would finalize $N orphaned message(s) (cutoff=$CUTOFF)"
+          exit 0
+        fi
+
+        # THE POINT OF ALL THIS: the overwhelmingly common case now ends here,
+        # having taken no write lock at all. Said out loud in the log so the
+        # behaviour is observable in `journalctl -u
+        # opencode-phantom-busy-sweeper`, and so a no-op run is distinguishable
+        # from a writing one. Keeps the "finalized N orphaned message(s)"
+        # prefix the old script logged, which existing greps rely on.
+        if [ "$N" -eq 0 ]; then
+          echo "sweeper: finalized 0 orphaned message(s) (cutoff=$CUTOFF) — no candidates, no write lock taken"
+          exit 0
+        fi
+
+        # PHASE 2 — targeted writes, chunked.
+        #
+        # Each chunk is its own autocommit transaction resolved through the id
+        # primary-key index (EXPLAIN QUERY PLAN: `SEARCH message USING INDEX
+        # sqlite_autoindex_message_1 (id=?)`, against `SCAN message` for the old
+        # statement), so the lock is held for the time it takes to rewrite at
+        # most 500 known rows — not the time to read the whole table — and other
+        # writers interleave between chunks. (Chunk size is therefore the knob if
+        # a huge backlog of large rows ever makes a single chunk slow; 500 rows
+        # of ~4KB JSON is nothing next to the 13GB scan it replaces.) Chunked because SQLite bounds expression
+        # depth / bound-variable count, and a drained-pool backlog sweep can
+        # legitimately produce thousands of ids.
+        #
+        # Every predicate is RE-CHECKED inside the UPDATE: a serve may
+        # legitimately finish one of these rows between phase 1 and phase 2, and
+        # a row that completed on its own must not be overwritten with an abort.
+        CHUNKS=$(printf '%s\n' "$CANDIDATES" | awk -v q="'" '
+          NF          { buf = buf sep q $0 q; sep = ","; n++ }
+          n == 500    { print buf; buf = ""; sep = ""; n = 0 }
+          END         { if (n) print buf }')
+
+        OLDIFS=$IFS
+        IFS='
+'
+        set -f
+        set -- $CHUNKS
+        IFS=$OLDIFS
+        set +f
+
+        NCHUNKS=$#
+        TOTAL=0
+        FAILED=0
+        for chunk in "$@"; do
+          if got=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "$DB" "
+            UPDATE message SET data = json_set(data,
+                '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
+                '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: in-flight row predates all live serves, silent >30min)\"}}'))
+            WHERE id IN ($chunk)
+              AND json_extract(data, '\$.role') = 'assistant'
+              AND json_extract(data, '\$.time.completed') IS NULL
+              AND json_extract(data, '\$.error') IS NULL
+              AND time_updated < (strftime('%s','now') - 1800) * 1000
+              AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
+            SELECT changes();
+          "); then
+            TOTAL=$(( TOTAL + got ))
+          else
+            FAILED=$(( FAILED + 1 ))
+          fi
+        done
+
+        echo "sweeper: finalized $TOTAL orphaned message(s) (cutoff=$CUTOFF) — $N candidate(s), $NCHUNKS chunk(s), $FAILED failed"
+
+        # TOTAL < N is normal and benign: it means a serve finished the row
+        # itself between the two phases and the re-check correctly declined to
+        # clobber it. A chunk that could not be written is NOT benign — surface
+        # it as a unit failure. The sweep is idempotent, so the next run retries.
+        if [ "$FAILED" -gt 0 ]; then
+          echo "sweeper: $FAILED chunk(s) failed to write — see above"
+          exit 1
+        fi
       ''}";
     };
   };
