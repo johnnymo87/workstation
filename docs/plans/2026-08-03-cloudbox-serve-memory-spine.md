@@ -422,6 +422,38 @@ mechanisms since removed — the throttle band and the sweeper's write lock.
 Record the door-log-join method instead. W1's effect must be measured
 **prospectively** (wedges after 2026-08-03 12:07); there is no before-sample.
 
+**Landed 2026-08-03 — main-thread wait-channel time series in the canary dump.**
+A peer session (W2a) established that `bun:sqlite`'s busy-wait runs on the serve's
+**main JS thread**, so `busy_timeout=5000` means a contended write freezes the
+event loop for up to 5 s — not a cousin of the "alive but frozen" wedge
+signature but a mechanism that produces it exactly.
+
+The canary already dumped `/proc/PID/wchan` and per-thread wchan, but only as a
+**single snapshot**, which cannot discriminate — sampling a *healthy* serve by
+hand returns `0` or `do_epoll_wait` depending purely on when you look. The
+discriminator is whether the loop ever returns to epoll across a window:
+
+| main-thread wchan across ~2 s | reading |
+|---|---|
+| `do_epoll_wait` | loop free — an HTTP stall is request serialization, **not** a blocked loop |
+| `hrtimer_nanosleep`, never returning to epoll | SQLite busy handler spinning |
+
+So the dump now samples the main thread 20× at 100 ms into `wchan-series`,
+inside the 2 s window `cpu-io-split` was already sleeping through — **zero added
+wedge-time**. `/proc/<tid>/syscall` would be richer but yama `ptrace_scope=1` on
+this host makes it unreadable; `wchan` is readable.
+
+Two incidental fixes made in the same edit, both in this spine's own spirit:
+`interval=2s` was **asserted** in the output and is now **measured** (it is
+really ~2.11 s, and the utime/stime delta is divided by it); and the sampler
+uses a plain shell counter rather than `seq`, because `lbe2` was a silent no-op
+caused by exactly one assumed-present binary.
+
+Deployed and verified **against the built artifact** (`systemctl cat` →
+`ExecStart` → grep the store path), not against the Nix source. `nixos-rebuild`
+rebuilt only the canary derivation; serve pool `NRestarts=0`, all four still
+active.
+
 ### S6 — Fix the metric that caused all this · `workstation-29k3`
 
 Rename `last_active_at` to say what it means, or touch it on route resolution.
