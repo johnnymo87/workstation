@@ -7,7 +7,14 @@
 `workstation-yvxh.4`. That roadmap fixed the **consequence** of the memory
 bursts. This one is about the **cause**, plus the residuals it left open.
 
-**Status:** S0 done · S1 done · S2 next (7-day report, 2026-08-09)
+**Status:** S0 done · S1 done · **S4 is the actionable item now**
+
+- **S2** is time-blocked: 7-day window ends **2026-08-09 22:37 Z**; ~0.9 days
+  elapsed, and **zero OOM kills so far** (`NRestarts=0` on all four,
+  `memory.events oom_kill=0`). Reporting now would be the "passes by
+  construction" non-result the step explicitly forbids.
+- **S3** (`le0a`) is gated on a peer's `workstation-yvxh.4`; wake set 08-10.
+- **S4** (`63wo`) is unblocked and is what to pick up next.
 
 ---
 
@@ -15,9 +22,23 @@ bursts. This one is about the **cause**, plus the residuals it left open.
 
 ### What is already deployed, and what it did
 
-Since 2026-08-02 18:57 the serves run **max-only** memory
-(`hosts/cloudbox/configuration.nix`): `MemoryHigh` removed, `MemoryMax` 9 G →
-**14 G**, `MemorySwapMax=1G`, `TimeoutStopSec=15`. Day-1 result over 14.1 h:
+The serves run **max-only** memory (`hosts/cloudbox/configuration.nix`):
+`MemoryHigh` removed, `MemoryMax` 9 G → **14 G**, `MemorySwapMax=1G`,
+`TimeoutStopSec=15`.
+
+> **Two different start times, and the observation window uses the later one.**
+> The config was deployed at **2026-08-02 18:57 Z**, but the live cgroup did not
+> get it until **2026-08-02 22:37:12 Z** — the sampler's `mem_high` column shows
+> `7516192768` → `max` at that instant, under an unchanged pid (2601066), i.e.
+> applied without a process restart. Earlier revisions of this doc dated the
+> regime from 18:57, which is the config-vs-kernel error this spine exists to
+> stamp out. **The S2 window runs from 22:37:12 Z and ends 2026-08-09 22:37 Z.**
+>
+> This also re-scopes the 28.50 G episode: at 19:52–20:05 on 08-02 `mem_high`
+> was still 7 G, so that episode is **pre-regime**, not a post-fix burst. Any
+> S2 table that includes it is comparing across the change it is measuring.
+
+Day-1 result over 14.1 h:
 
 | | before | after |
 |---|---|---|
@@ -369,9 +390,18 @@ and the duplicate-MCP accumulation. Not fixed here; S1 was scoped to attribution
 
 ### S2 — The 7-day report on the memory posture · `workstation-h1y6`
 
-Scheduled wake fires **2026-08-09 14:00 UTC**. Report as one of the four
-outcomes with the pre-declared cap-adjustment rule; the criteria live in the
+Wakes fire **2026-08-09 23:00 UTC** (primary) and **2026-08-10 00:30 UTC**
+(backstop), moved 2026-08-03 from 14:00/15:30: the window starts when the kernel
+got the limits (22:37:12 Z), not when the config shipped (18:57 Z), so the
+original times fired **8.6 h before the 7 days were up**. Report as one of the
+four outcomes with the pre-declared cap-adjustment rule; the criteria live in the
 predecessor roadmap's step 2 and must not be improvised.
+
+**Interim state as of 2026-08-03 21:10 Z (0.94 d elapsed) — not a result:**
+zero kills, `memory.events oom_kill=0` on all four, and post-regime peak
+`anon+swap` of 8.51 / 4.92 / 6.56 / 8.01 G against the 14 G cap. Recorded so the
+reporter can see the trend, *not* as an early finding — a quiet window is what
+this design produces when nothing is being stressed.
 
 **Redundant ownership, because a wake pointed at one session id is a single
 point of failure** and this doc's whole premise is surviving the loss of a
