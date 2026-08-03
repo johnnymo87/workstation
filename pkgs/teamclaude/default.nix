@@ -46,13 +46,19 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.11"; # upstream tag; bump per pinned release
+  version = "1.1.11-balanced"; # fork of upstream v1.1.11 + weekly-balanced routing
 
   src = fetchFromGitHub {
-    owner = "KarpelesLab";
+    # TEMPORARY FORK. Rollback = restore owner "KarpelesLab", rev
+    # b556533836d1f5b64dc4919a55368fae9e083751, hash
+    # sha256-2WmLMu6zTNHRonOV5Iw1QtGBa7Z4TCVfGB3Rj/lKznk=, and version "1.1.11".
+    # Branch feat/weekly-balanced-routing = v1.1.11 + 5 commits adding the opt-in
+    # `balanced` routing strategy (see claude-failover-proxy bead cto.3). Not yet
+    # upstreamed, so this cannot be a tag.
+    owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "b556533836d1f5b64dc4919a55368fae9e083751"; # tag v1.1.11
-    hash = "sha256-2WmLMu6zTNHRonOV5Iw1QtGBa7Z4TCVfGB3Rj/lKznk=";
+    rev = "79f1f69469d379ae84435ffefb7ca08c0d1c410e"; # feat/weekly-balanced-routing
+    hash = "sha256-R0S+4Fr750rblKTYQLERgEW4PmcFyuQO03ObP93Pw+g=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
