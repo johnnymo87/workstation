@@ -656,7 +656,7 @@ EOF
       # ---- Step 2: Confirm with user ----
       log ""
       log "About to:"
-      log "  1. SIGKILL all dev-owned nvim processes"
+      log "  1. Exit all dev-owned nvim processes one at a time (SIGKILL only stragglers)"
       log "  2. Restart opencode-serve-pool.target (this Claude session's TUI will reconnect)"
       log "  3. Launch recommendation session referencing $OPENCODE_COUNT captured sid(s)"
       log ""
@@ -732,39 +732,7 @@ EOF
     MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"
     OPENCODE_COUNT="$(count_manifest_sids "$MANIFEST_PATH")"
 
-    # ---- Step 3: Kill all nvims ----
-    update_sentinel "started" "kill-nvim"
-    log "killing all nvim/nvims processes (SIGKILL)..."
-    # -x nvim matches both `nvim` (TTY frontend) and `nvim --embed`
-    # (embedded server) because both have comm = `nvim`.
-    if pkill -9 -u dev -x nvim 2>/dev/null; then
-      log "  pkill returned matches"
-    else
-      log "  pkill returned no matches (none running, or already dead)"
-    fi
-
-    # ---- Step 3.5: Repair a corrupt ShaDa file, then reap its temps ----
-    # nvim persists ShaDa by writing `main.shada.tmp.<a-z>` and renaming it over
-    # `main.shada` -- but only after checking that the CURRENT `main.shada`
-    # parses. Once `main.shada` is corrupt, that check fails forever:
-    #
-    #   E576: Error while reading ShaDa file: expected positive integer at <pos>
-    #   E136: Did not rename ...tmp.g because ...main.shada does not look like a
-    #         ShaDa file
-    #
-    # so every nvim start/save warns, the rename never happens, and each exit
-    # strands one more temp until all 26 suffixes are taken. Observed on cloudbox
-    # 2026-08-02: the temps were the symptom, the corrupt master file the cause,
-    # so sweeping temps alone left the warnings in place.
-    #
-    # Repair (in order), all after Step 3 so no live nvim owns these files:
-    #   1. If nvim would REFUSE to rename over `main.shada`, quarantine it
-    #      alongside as `main.shada.corrupt.<ts>` (kept, never deleted).
-    #   2. Promote the newest temp nvim would accept into its place. Those temps
-    #      are complete files nvim just wrote, so this preserves most history;
-    #      if none is usable, leave no file and nvim starts a fresh one.
-    #   3. Reap the remaining temps -- but ONLY if we know they are expendable.
-    # Best-effort throughout: any failure logs a warning and the reset continues.
+    # ---- ShaDa helpers (used by Step 3's pre-walk guard and by Step 3.5) ----
     SHADA_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/nvim/shada"
     SHADA_MAIN="$SHADA_DIR/main.shada"
     # Verdict for one file: prints `healthy`, `corrupt`, or `unknown`.
@@ -807,6 +775,261 @@ EOF
       fi
       rm -rf "$scratch"; echo healthy
     }
+    # Promote the newest temp nvim would accept into $SHADA_MAIN. Prints the
+    # basename promoted, or nothing. Installs via a same-directory temp + rename
+    # so dying mid-write cannot leave a torn main.shada.
+    shada_promote_newest_healthy() {
+      local cand promoted="" promote_tmp
+      while IFS= read -r cand; do
+        [ -n "$cand" ] || continue
+        if [ "$(shada_verdict "$cand")" = healthy ]; then promoted="$cand"; break; fi
+      done <<EOF3
+$(find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+EOF3
+      [ -n "$promoted" ] || return 1
+      promote_tmp="$SHADA_MAIN.promote.$$"
+      if cp "$promoted" "$promote_tmp" 2>/dev/null &&
+         chmod 600 "$promote_tmp" 2>/dev/null &&
+         mv "$promote_tmp" "$SHADA_MAIN" 2>/dev/null; then
+        basename "$promoted"; return 0
+      fi
+      rm -f "$promote_tmp" 2>/dev/null || true
+      return 1
+    }
+
+    # ---- Step 3: Exit all nvims, one at a time ----
+    #
+    # This used to be `pkill -9 -u dev -x nvim`, which did NOT suppress ShaDa
+    # writes -- it triggered a burst of them. Each pane is a TUI client plus a
+    # child `nvim --embed` server (same comm, so `-x nvim` matched both). pkill
+    # signals in ascending pid order, so the lower-pid client died first, the
+    # server saw channel EOF and began a GRACEFUL exit -- which writes ShaDa --
+    # and ~10 servers did that in the same second. nvim's ShaDa write unlinks
+    # main.shada before renaming the new file over it, so every one of those
+    # writes opened an ENOENT window; on 2026-08-01 two writers landed in each
+    # other's window and spliced two msgpack streams into one file, corrupting
+    # it permanently. An inotify watch caught three concurrent writers and three
+    # unlink windows in one second on 2026-08-03.
+    #
+    # So: drive the exits ONE AT A TIME. At most one writer exists at any moment,
+    # which removes the race at its source. It also RESTORES history the burst was
+    # destroying: a writer re-reads and merges main.shada at write time (verified),
+    # so serialized exits accumulate every pane's history, where three concurrent
+    # renames onto one path kept only the last writer's.
+    #
+    # Mechanism is SIGTERM to the writer pid, deliberately NOT an RPC `:qa!` over
+    # /tmp/nvim-*.sock. Measured on cloudbox 2026-08-03: SIGTERM writes and merges
+    # ShaDa identically, runs VimLeavePre, unlinks the socket and closes the pane;
+    # while the RPC path cannot report success (a successful `:qa!` and a stale
+    # socket BOTH exit 2), can block forever on a socket that accepts but never
+    # answers, and misses writers whose socket is not /tmp/nvim-<pane>.sock (a
+    # default-address nvim listens on /tmp/nvim.dev/<x>/nvim.<pid>.0). nvim also
+    # delivers SIGTERM on the same main loop that services RPC, so RPC buys no
+    # coverage of a wedged nvim. Do not "restore" the RPC path: it is absent by
+    # decision, not by oversight. See docs/plans/2026-08-02-shada-corruption-roadmap.md.
+    #
+    # Landmine for the future: a deadly-signal exit sets v:dying=1, and persistence
+    # plugins conventionally SKIP their save when it is set. This config has no such
+    # plugin today (the only VimLeavePre consumer is a tabby timer cleanup), so
+    # SIGTERM loses nothing -- but adding an auto-session plugin would silently
+    # change that, and then the RPC path becomes worth its cost.
+    update_sentinel "started" "kill-nvim"
+
+    # A writer is any nvim that owns ShaDa state: every nvim EXCEPT a UI client,
+    # where a UI client is an nvim having an nvim child whose cmdline contains
+    # --embed. Defined by exclusion so `--headless` and `-es` are caught too --
+    # grepping for --embed would miss them. Prints `<pid> <starttime> <depth>`,
+    # deepest nvim-nesting first: a nested :terminal nvim must exit before the
+    # host whose teardown would otherwise take it down as unserialized collateral.
+    # Snapshot-based because the process set moves under you (a transient embed
+    # was observed appearing and vanishing between two enumerations).
+    nvim_writer_snapshot() {
+      local p ppid cmd st depth anc
+      declare -A PPID_OF=() CMD_OF=() START_OF=() IS_NVIM=() CLIENT=()
+      for p in $(pgrep -u dev -x nvim 2>/dev/null || true); do
+        st="$(cat /proc/"$p"/stat 2>/dev/null || true)"
+        [ -n "$st" ] || continue
+        # comm can contain spaces/parens: everything after the LAST ')' is fixed.
+        ppid="$(printf '%s' "$st" | sed 's/.*) //' | awk '{print $2}')"
+        START_OF[$p]="$(printf '%s' "$st" | sed 's/.*) //' | awk '{print $20}')"
+        cmd="$(tr '\0' ' ' < /proc/"$p"/cmdline 2>/dev/null || true)"
+        PPID_OF[$p]="$ppid"; CMD_OF[$p]="$cmd"; IS_NVIM[$p]=1
+      done
+      for p in "''${!IS_NVIM[@]}"; do
+        case "''${CMD_OF[$p]}" in
+          *--embed*) ppid="''${PPID_OF[$p]}"
+                     [ -n "''${IS_NVIM[$ppid]:-}" ] && CLIENT[$ppid]=1 ;;
+        esac
+      done
+      for p in "''${!IS_NVIM[@]}"; do
+        [ -n "''${CLIENT[$p]:-}" ] && continue
+        # depth = number of nvim ancestors, so deepest sorts first below.
+        depth=0; anc="''${PPID_OF[$p]}"
+        while [ -n "''${IS_NVIM[$anc]:-}" ]; do
+          depth=$(( depth + 1 )); anc="''${PPID_OF[$anc]}"
+          [ "$anc" -gt 1 ] 2>/dev/null || break
+        done
+        printf '%s %s %s\n' "$p" "''${START_OF[$p]}" "$depth"
+      done | sort -k3,3nr -k1,1n
+    }
+
+    # Is this pid still the same live process we snapshotted? Guards pid reuse
+    # (the pid counter has already wrapped on this host) and treats a ZOMBIE as
+    # gone -- a Z-state process has finished its ShaDa write, and `kill -0`
+    # reports it as alive, which would otherwise burn the whole timeout and log a
+    # bogus WARN for every zombie.
+    nvim_writer_live() {
+      local pid="$1" want_start="$2" st state start
+      st="$(cat /proc/"$pid"/stat 2>/dev/null || true)"
+      [ -n "$st" ] || return 1
+      state="$(printf '%s' "$st" | sed 's/.*) //' | awk '{print $1}')"
+      [ "$state" = Z ] && return 1
+      start="$(printf '%s' "$st" | sed 's/.*) //' | awk '{print $20}')"
+      [ "$start" = "$want_start" ] || return 1
+      grep -qx nvim /proc/"$pid"/comm 2>/dev/null || return 1
+      return 0
+    }
+
+    # Poll until a writer is gone (or Z). rc=1 on timeout.
+    nvim_writer_wait_gone() {
+      local pid="$1" start="$2" budget_ms="$3" waited=0
+      while [ "$waited" -lt "$budget_ms" ]; do
+        nvim_writer_live "$pid" "$start" || return 0
+        sleep 0.02; waited=$(( waited + 20 ))
+      done
+      ! nvim_writer_live "$pid" "$start"
+    }
+
+    # Pre-walk ShaDa guard. If main.shada is ALREADY corrupt entering the walk,
+    # every serialized writer would fail its rename (E136) and strand a temp
+    # holding only its own history, and the Step 3.5 repair afterwards would
+    # promote the newest = ONE pane's history. Quarantining first means the first
+    # writer direct-writes into the gap (safe: it is alone) and the rest merge
+    # onto it, so the walk accumulates everything instead of one pane.
+    if [ -f "$SHADA_MAIN" ]; then
+      prewalk_state="$(shada_verdict "$SHADA_MAIN")"
+      log "ShaDa pre-walk verdict: $prewalk_state ($(find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' 2>/dev/null | wc -l) temp(s) present)"
+      if [ "$prewalk_state" = corrupt ]; then
+        prewalk_q="$SHADA_MAIN.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
+        if mv "$SHADA_MAIN" "$prewalk_q" 2>/dev/null; then
+          log "  quarantined corrupt ShaDa BEFORE the walk -> $(basename "$prewalk_q")"
+          log "  (so the exits below accumulate history instead of each stranding a temp)"
+        else
+          log "  WARNING: could not quarantine corrupt ShaDa pre-walk; exits may strand temps"
+        fi
+      fi
+      # Quarantine preserves a CORRUPT file; this preserves a GOOD one.
+      if [ -f "$SHADA_MAIN" ]; then
+        cp -a "$SHADA_MAIN" "$SHADA_MAIN.pre-reset" 2>/dev/null ||           log "  WARNING: could not snapshot main.shada to .pre-reset (non-fatal)"
+      fi
+    else
+      log "ShaDa pre-walk: no main.shada present (nvim will create one)"
+    fi
+
+    # The walk. Bounded rounds because the set can change under us: nested
+    # collateral, tmux respawn, or an agent starting nvim mid-walk.
+    SELF_ANCESTORS=" "
+    walk_anc=$PPID
+    while [ "$walk_anc" -gt 1 ] 2>/dev/null; do
+      SELF_ANCESTORS="$SELF_ANCESTORS$walk_anc "
+      walk_anc="$(sed 's/.*) //' /proc/"$walk_anc"/stat 2>/dev/null | awk '{print $2}')"
+      [ -n "$walk_anc" ] || break
+    done
+    nvim_killed=0 nvim_exited=0 nvim_unkillable=0 nvim_deferred=""
+    for round in 1 2 3; do
+      round_writers="$(nvim_writer_snapshot || true)"
+      [ -n "$round_writers" ] || break
+      log "nvim exit round $round: $(printf '%s\n' "$round_writers" | grep -c . ) writer(s) [$(printf '%s\n' "$round_writers" | awk '{printf "%s ", $1}')]"
+      while read -r w_pid w_start _; do
+        [ -n "$w_pid" ] || continue
+        # Re-check: a previous writer's exit may have taken this one with it.
+        nvim_writer_live "$w_pid" "$w_start" || continue
+        case "$SELF_ANCESTORS" in
+          *" $w_pid "*)
+            log "  writer $w_pid is an ANCESTOR of this reset; deferring (killing it would HUP us)"
+            nvim_deferred="$nvim_deferred$w_pid "
+            continue ;;
+        esac
+        kill -TERM "$w_pid" 2>/dev/null || true
+        if nvim_writer_wait_gone "$w_pid" "$w_start" 3000; then
+          nvim_exited=$(( nvim_exited + 1 ))
+        else
+          # A straggler's write can land at any time, so it could overlap the
+          # NEXT writer's unlink window. SIGKILL is the only signal that
+          # suppresses the write: one pane's history costs less than the file.
+          log "  writer $w_pid did not exit in 3s; SIGKILL (its history is forfeit)"
+          kill -9 "$w_pid" 2>/dev/null || true
+          if nvim_writer_wait_gone "$w_pid" "$w_start" 1000; then
+            nvim_killed=$(( nvim_killed + 1 ))
+            # SIGKILL between unlink and rename leaves NO main.shada, with the
+            # history in that writer's temp. Step 3.5 promotes it, but say so.
+            [ -f "$SHADA_MAIN" ] ||               log "  NOTE: main.shada is absent after that SIGKILL; Step 3.5 will promote a temp"
+          else
+            nvim_unkillable=$(( nvim_unkillable + 1 ))
+            log "  WARNING: writer $w_pid survived SIGKILL; serialization invariant broken for it"
+          fi
+        fi
+        # INVARIANT: no nvim writer is mid-write at this point.
+      done <<EOF4
+$round_writers
+EOF4
+    done
+    log "  nvim writers: $nvim_exited exited gracefully, $nvim_killed SIGKILLed, $nvim_unkillable unkillable"
+    [ -z "$nvim_deferred" ] || log "  deferred (self-ancestor): $nvim_deferred"
+
+    # Final sweep. Order matters: SIGKILL any remaining WRITER first (suppressing
+    # its write), and only then the clients -- `pkill -9 -x nvim` on its own hits
+    # the low-pid client first, which is precisely what triggers the write burst.
+    while read -r s_pid _ _; do
+      [ -n "$s_pid" ] || continue
+      case "$SELF_ANCESTORS" in *" $s_pid "*) continue ;; esac
+      log "  sweep: SIGKILL leftover writer $s_pid"
+      kill -9 "$s_pid" 2>/dev/null || true
+    done <<EOF5
+$(nvim_writer_snapshot || true)
+EOF5
+    if pkill -9 -u dev -x nvim 2>/dev/null; then
+      log "  swept remaining nvim client processes"
+    else
+      log "  no nvim client processes left to sweep"
+    fi
+
+    # Reap orphan pane sockets (a graceful exit unlinks its own; a SIGKILL does
+    # not, which is why 17 of 27 were orphans before this change). Skip any that
+    # still has a live listener: an nvim started between the sweep and here would
+    # otherwise be left listening on an unlinked inode, invisible to
+    # oc-auto-attach and the session_switcher's socket discovery.
+    sock_live="$(ss -xlp 2>/dev/null | grep -o '/tmp/nvim-[0-9]*\.sock' | sort -u || true)"
+    sock_reaped=0
+    for sock in /tmp/nvim-*.sock; do
+      [ -S "$sock" ] || continue
+      printf '%s\n' "$sock_live" | grep -qxF "$sock" && continue
+      rm -f "$sock" 2>/dev/null && sock_reaped=$(( sock_reaped + 1 )) || true
+    done
+    [ "$sock_reaped" -eq 0 ] || log "  reaped $sock_reaped orphaned pane socket(s)"
+
+    # ---- Step 3.5: Repair a corrupt ShaDa file, then reap its temps ----
+    # nvim persists ShaDa by writing `main.shada.tmp.<a-z>` and renaming it over
+    # `main.shada` -- but only after checking that the CURRENT `main.shada`
+    # parses. Once `main.shada` is corrupt, that check fails forever:
+    #
+    #   E576: Error while reading ShaDa file: expected positive integer at <pos>
+    #   E136: Did not rename ...tmp.g because ...main.shada does not look like a
+    #         ShaDa file
+    #
+    # so every nvim start/save warns, the rename never happens, and each exit
+    # strands one more temp until all 26 suffixes are taken. Observed on cloudbox
+    # 2026-08-02: the temps were the symptom, the corrupt master file the cause,
+    # so sweeping temps alone left the warnings in place.
+    #
+    # Repair (in order), all after Step 3 so no live nvim owns these files:
+    #   1. If nvim would REFUSE to rename over `main.shada`, quarantine it
+    #      alongside as `main.shada.corrupt.<ts>` (kept, never deleted).
+    #   2. Promote the newest temp nvim would accept into its place. Those temps
+    #      are complete files nvim just wrote, so this preserves most history;
+    #      if none is usable, leave no file and nvim starts a fresh one.
+    #   3. Reap the remaining temps -- but ONLY if we know they are expendable.
+    # Best-effort throughout: any failure logs a warning and the reset continues.
     if [ -d "$SHADA_DIR" ]; then
       # The temps are the ONLY material a later run could recover history from,
       # so the reap is gated: it happens when the master file is known good, or
@@ -817,6 +1040,25 @@ EOF
       if [ -e "$SHADA_MAIN" ] && [ ! -f "$SHADA_MAIN" ]; then
         log "WARNING: $SHADA_MAIN exists but is not a regular file; skipping ShaDa repair and reap"
         shada_reap_ok=0
+      elif [ ! -e "$SHADA_MAIN" ]; then
+        # main.shada ABSENT. This branch used to be missing entirely, which meant
+        # shada_reap_ok stayed 1 and the reap below deleted every temp -- in the
+        # one state where the temps are the ONLY copy of the history. Step 3's
+        # straggler SIGKILL can land between a writer's unlink and its rename and
+        # produce exactly this, so promote here instead of reaping.
+        shada_missing_promoted="$(shada_promote_newest_healthy || true)"
+        if [ -n "$shada_missing_promoted" ]; then
+          log "main.shada was absent; promoted $shada_missing_promoted into its place (history preserved)"
+        else
+          shada_missing_temps=$(find "$SHADA_DIR" -maxdepth 1 -name 'main.shada.tmp.*' 2>/dev/null | wc -l)
+          if [ "$shada_missing_temps" -gt 0 ]; then
+            log "WARNING: main.shada absent and none of $shada_missing_temps temp(s) is usable;"
+            log "  keeping them all rather than reaping the only recovery material"
+            shada_reap_ok=0
+          else
+            log "main.shada absent and no temps to promote; nvim will start a fresh ShaDa file"
+          fi
+        fi
       elif [ -f "$SHADA_MAIN" ]; then
         shada_state=$(shada_verdict "$SHADA_MAIN")
         if [ "$shada_state" = unknown ]; then

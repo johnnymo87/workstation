@@ -506,11 +506,12 @@ if [ -f "$default_nix" ]; then
   # The gate must be CLEARED on every path that leaves recovery material behind,
   # and set once at the top. Counting keeps a new early-return from skipping one.
   gate_clears=$(grep -c 'shada_reap_ok=0' "$default_nix" || true)
-  if [ "$gate_clears" -eq 4 ]; then
-    echo "ok: reap gate is cleared on all 4 recovery paths"
+  if [ "$gate_clears" -eq 5 ]; then
+    echo "ok: reap gate is cleared on all 5 recovery paths"
   else
-    echo "FAIL: expected 4 'shada_reap_ok=0' (not-regular-file, unknown verdict,"
-    echo "      quarantine failed, promotion failed); found $gate_clears"; fail=1
+    echo "FAIL: expected 5 'shada_reap_ok=0' (not-regular-file, unknown verdict,"
+    echo "      quarantine failed, promotion failed, main-absent-with-unusable-temps);"
+    echo "      found $gate_clears"; fail=1
   fi
   quarantine_line=$(grep -n 'quarantining ->' "$default_nix" | head -1 | cut -d: -f1)
   reap_line=$(grep -n "main.shada.promote.\*' \\\\) -delete" "$default_nix" | head -1 | cut -d: -f1)
@@ -524,6 +525,65 @@ if [ -f "$default_nix" ]; then
   else
     echo "FAIL: shada reap must follow pkill (pkill at ${pkill_line:-?}, reap at ${reap_line:-?})"; fail=1
   fi
+
+  # ---- Step 3: serialized graceful nvim exits (workstation-zv0l) ----------
+  # The walk's behaviour is proven in test-nvim-walk.sh (it RUNS the extracted
+  # code against a lab of throwaway nvims). These are the invariants that are
+  # cheap to assert statically and expensive to discover in production.
+  want_grep "writers are exited with SIGTERM"        'kill -TERM "$w_pid"'
+  want_grep "stragglers escalate to SIGKILL"         'kill -9 "$w_pid"'
+  want_grep "a zombie counts as gone"                '[ "$state" = Z ] && return 1'
+  want_grep "pid reuse is guarded by starttime"      '[ "$start" = "$want_start" ] || return 1'
+  want_grep "the walk re-checks liveness per writer" 'nvim_writer_live "$w_pid" "$w_start" || continue'
+  want_grep "self-ancestors are deferred"            'is an ANCESTOR of this reset'
+  want_grep "socket reap skips live listeners"       'grep -qxF "$sock" && continue'
+  # The RPC path is absent BY DECISION (a successful :qa! and a stale socket both
+  # exit 2; an unresponsive socket blocks forever; a /tmp glob misses
+  # default-address nvims). If someone "restores" it, this fails and they must
+  # read the roadmap first.
+  refuse_grep "no RPC --remote-expr exit path"       '--remote-expr'
+  refuse_grep "the walk never talks to a socket"     'nvim --server'
+  # Every signal must tolerate a pid that vanished between snapshot and kill --
+  # the process set demonstrably moves mid-walk, and a bare `kill` on a dead pid
+  # returns 1, which under errexit would abort the reset and skip the pool restart.
+  bare_kills=$( { grep -nE '^\s*kill (-[A-Z0-9]+ )?"\$[a-z_]+"\s*$' "$default_nix" || true; } | wc -l)
+  if [ "$bare_kills" -eq 0 ]; then
+    echo "ok: no unguarded kill (errexit would abort the reset on a vanished pid)"
+  else
+    echo "FAIL: $bare_kills kill(s) lack '|| true'; a vanished pid would abort the reset"
+    { grep -nE '^\s*kill (-[A-Z0-9]+ )?"\$[a-z_]+"\s*$' "$default_nix" || true; } | head -5; fail=1
+  fi
+  # Sweep order is load-bearing: SIGKILLing leftover WRITERS must precede the
+  # client pkill, because killing a low-pid client first is exactly what makes
+  # its server start the graceful write this whole step exists to serialize.
+  sweep_writer_line=$(grep -n 'sweep: SIGKILL leftover writer' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$sweep_writer_line" ] && [ -n "$pkill_line" ] && [ "$sweep_writer_line" -lt "$pkill_line" ]; then
+    echo "ok: leftover writers are SIGKILLed before the client sweep"
+  else
+    echo "FAIL: writer sweep must precede the client pkill (writers at ${sweep_writer_line:-?}, pkill at ${pkill_line:-?})"; fail=1
+  fi
+  # A corrupt main.shada entering the walk makes every serialized writer fail its
+  # rename, so the quarantine has to happen BEFORE the exits, not only after.
+  prewalk_line=$(grep -n 'quarantined corrupt ShaDa BEFORE the walk' "$default_nix" | head -1 | cut -d: -f1)
+  first_term_line=$(grep -n 'kill -TERM "$w_pid"' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$prewalk_line" ] && [ -n "$first_term_line" ] && [ "$prewalk_line" -lt "$first_term_line" ]; then
+    echo "ok: a corrupt shada is quarantined before the walk, not just after"
+  else
+    echo "FAIL: pre-walk quarantine must precede the exits (quarantine at ${prewalk_line:-?}, first TERM at ${first_term_line:-?})"; fail=1
+  fi
+  want_grep "good shada is snapshotted pre-reset"    'cp -a "$SHADA_MAIN" "$SHADA_MAIN.pre-reset"'
+  # ...and that snapshot must not itself abort the reset when there is no file.
+  if grep -q 'if \[ -f "$SHADA_MAIN" \]; then\s*$' "$default_nix" && \
+     grep -B 2 'cp -a "$SHADA_MAIN" "$SHADA_MAIN.pre-reset"' "$default_nix" | grep -q '\[ -f "$SHADA_MAIN" \]'; then
+    echo "ok: the pre-reset snapshot is guarded by a file test"
+  else
+    echo "FAIL: cp -a must be guarded by [ -f ] or errexit aborts when shada is absent"; fail=1
+  fi
+  # main.shada absent + temps present is the state a straggler SIGKILL between
+  # unlink and rename produces. Reaping there destroys the only copy.
+  want_grep "absent main.shada promotes a temp"      'main.shada was absent; promoted'
+  want_grep "absent main.shada is a real branch"     'elif [ ! -e "$SHADA_MAIN" ]; then'
+  want_grep "straggler kill notes a missing main"    'main.shada is absent after that SIGKILL'
 
   # workstation-3smg: the manifest write must precede the pool restart, so a
   # restart/health-poll die can't discard a successful capture.

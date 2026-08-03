@@ -390,6 +390,99 @@ choosing; not mutually exclusive.
 measured latency recorded, a night observed with the watch re-armed showing no
 overlapping direct writers.
 
+#### Design, as measured 2026-08-03 (supersedes the sketch above)
+
+Every number here was measured on this host, not assumed. The sketch above said
+"walk `/tmp/nvim-*.sock`"; **that is wrong** and the design changed.
+
+| # | Measurement | Consequence |
+|---|---|---|
+| 1 | 10 panes = 20 nvim procs; the pane socket is bound by the **embed child**, not the client | the socket reaches the shada owner, but so does its pid |
+| 2 | 27 `/tmp/nvim-*.sock` files, **10 listeners** → 17 orphans | SIGKILL residue; a glob walks mostly garbage |
+| 3 | RPC `:qa!` on a realistic pane: embed dead 14ms, client 17ms, pane closed, socket unlinked, shada written | graceful exit works and is cheap |
+| 4 | **SIGTERM to the embed pid does the same**: embed 56ms, client 60ms, pane closed, socket unlinked, shada written | pid alone is a sufficient handle |
+| 5 | **Merge-at-write**: B started on an empty shada; A then wrote `MARKER_A`; SIGTERM B → **both markers** present | serialized exits *accumulate*; the nightly loss is caused by concurrency, not inherent |
+| 6 | A *successful* `:qa!` returns **rc=2** (`ch 3 was closed by the peer`); a stale socket returns **rc=2** (`E247`) | the RPC exit code cannot distinguish success from no-op |
+| 7 | A socket that accepts but never answers blocks forever (still hung at an 8s bound); `timeout 3` cuts it, rc=124 | the RPC path *requires* a timeout |
+| 8 | `&swapfile` is **0** in this config; 0 swap files after either exit path | the swap argument for preferring `:qa!` does not apply here |
+| 9 | `VimLeavePre` runs on **both** `:qa!` and SIGTERM | SIGTERM is a clean exit, not a truncated one |
+| 10 | A `/tmp` glob **misses** writers: a default-address nvim listens on `/tmp/nvim.dev/<x>/nvim.<pid>.0` | socket enumeration is unsound |
+| 11 | `kill -0` reports a **zombie** as ALIVE; SIGKILL returns 0 and it stays `Z` | a naive pid-gone oracle burns the full timeout and logs a false WARN per zombie |
+| 12 | A pid appeared in one enumeration and was gone before the next | the process set is a moving target; signals must tolerate vanishing pids |
+| 13 | Classifier from one `/proc` snapshot: writers == exactly the 10 embed pids, clients == the 10 parents; a bare `nvim --headless` classifies as a writer | pid classification is sound where the glob is not |
+
+**Therefore: SIGTERM by pid, no sockets, no RPC.** Measurements 4/8/9 make the RPC
+path behaviourally equivalent here, while 6/7/10 make it strictly more fragile
+(useless rc, mandatory timeout, misses writers). An advisor recommended a dual
+RPC-then-SIGTERM path; the simpler one is chosen deliberately, and the reason is
+recorded so a future reader does not "restore" the RPC path thinking it was an
+oversight. Adversarial review agreed and added the mechanism: nvim delivers
+SIGTERM on the **same main loop** that services RPC, so a wedged nvim blocks both
+identically — RPC buys zero coverage of the hung class it appears to address.
+
+**Writer** := any nvim that owns shada state = every nvim **except a UI client**,
+where a UI client is an nvim having an nvim child whose cmdline contains
+`--embed`. Defined by exclusion so `--headless` and `-es` are caught (a
+`--embed`-only grep would miss them, measurement 13).
+
+The walk, replacing `pkill -9 -u dev -x nvim`:
+
+1. **Pre-walk verdict, and quarantine if corrupt.** Not just logged — *acted on*.
+   If `main.shada` is already corrupt entering 03:00, every serialized writer
+   fails its rename (`E136`), strands a temp holding only its own history, and
+   the post-walk repair promotes the newest = **one pane's** history. Quarantining
+   first means writer 1 direct-writes into the gap (safe, it is alone) and
+   writers 2..10 merge onto it — full accumulation instead of one pane.
+2. `cp -a main.shada main.shada.pre-reset` (guarded by `[ -f ]`). Quarantine
+   preserves a *corrupt* file; this preserves a *good* one.
+3. Snapshot `/proc` once; classify writers; capture `starttime` (stat field 22)
+   per pid. Order deepest-nvim-nesting first, so a nested `:terminal` nvim exits
+   before the host that would otherwise take it down as collateral — an
+   unserialized write outside the loop.
+4. Defer a writer that is an ancestor of the script to last, logging loudly.
+5. Per writer, strictly serially: re-verify `comm` + `starttime` (pid reuse), then
+   `kill -TERM` → poll to 3s → `kill -9` → poll to 1s → WARN if unkillable.
+   **Advance only when the pid is gone or `Z`.** That is the invariant.
+6. Three bounded rounds, re-snapshotting, to absorb respawns and collateral.
+7. Final sweep: SIGKILL remaining **writers first** (SIGKILL is the only signal
+   that suppresses the write), *then* `pkill -9` the clients. Never the reverse:
+   killing the low-pid client first is exactly what triggers the burst.
+8. Reap orphan sockets, skipping any with a live listener.
+
+**Straggler SIGKILL is deliberate** — a straggler is by definition unbounded in
+when its write lands, so it can overlap the *next* pane's window. One pane's
+history is worth less than the file's integrity, and "it is alone by then" is
+false because the walk continues after it.
+
+#### A pre-existing blind spot this change makes reachable
+
+Step 3.5 sets `shada_reap_ok=1`, then branches on `[ -e ] && [ ! -f ]` /
+`elif [ -f ]` — with **no branch for `main.shada` absent entirely**. So when the
+file is missing, `reap_ok` stays 1 and the reap **deletes every temp**. Verified
+by reading the shipped code, not inferred.
+
+A straggler SIGKILLed between its `unlink` and its `rename` leaves exactly that
+state, with its temp holding all the accumulated history. So S2 must also teach
+Step 3.5 to **promote, not reap, when main is missing and temps exist**, and to
+log loudly when a straggler kill leaves no `main.shada`. Reachable today too (the
+`pkill -9` storm can leave main absent — roadmap variant (b)); S2 makes it
+likelier, so S2 owns the fix.
+
+#### Rejected: per-pane shada
+
+`-i` keyed on `$TMUX_PANE` removes the shared-file race but forfeits cross-pane
+history permanently. Measurement 5 shows serialization *recovers* that history
+instead, so per-pane shada trades away the thing the fix restores. Kept as
+break-glass only.
+
+#### Landmine noted, not fixed
+
+A deadly-signal exit sets `v:dying=1`, and well-behaved persistence plugins skip
+their save when it is set. This config has no such plugin (the only
+`VimLeavePre` consumer is a tabby timer cleanup), so SIGTERM loses nothing
+today — but adding an auto-session plugin would silently change that, which is
+why the script carries a comment saying so.
+
 Spine: **oracle consult yes** (design is open), **design review before code**,
 SDD yes, PR yes.
 
