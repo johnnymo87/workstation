@@ -1,6 +1,6 @@
 ---
 name: attributing-causes
-description: Use when attributing a failure or unexpected state to a cause, especially when a memorable recent event (a deploy, a nightly job, a restart, a merge) is the obvious suspect. Also use when acting on someone else's incident report, or before authorizing a destructive action based on a described state.
+description: Use when attributing a failure or unexpected state to a cause, especially when a memorable recent event (a deploy, a nightly job, a restart, a merge) is the obvious suspect. Also use when acting on someone else's incident report, before authorizing a destructive action based on a described state, or before trusting a metric/instrument to attribute with — what entity it measures, whether one sample can answer the question, and whether it is even aimed at a subject the suspect could appear in.
 ---
 
 # Attributing Causes
@@ -188,6 +188,73 @@ ignorance:
 The first error delayed the answer; the second actively pointed away from it.
 Both are sequencing failures, which is this skill's real subject.
 
+## Before you trust a number: what does the instrument measure?
+
+Every rule above assumes your measurements answer the question you are asking.
+Most of the expensive attribution failures in this repo did not come from bad
+reasoning over good numbers — they came from good reasoning over a number that
+described something adjacent. These fail *quietly*, because the output stays
+plausible.
+
+**Ask three questions of any number before attributing with it.**
+
+**1. What entity does it describe?** Two numbers in the same row can have
+different subjects. A serve-memory sampler read `threads`/`fds`/`rss` from
+`/proc/<MainPID>` but `anon`/`swap`/`pagetables` from the **cgroup**, which
+spans every child process. That produced a confident headline — "28 GiB
+allocated without opening a single thread or fd" — that was true of the *main
+process only*. The memory was in child processes the whole time; the conclusion
+survived two sessions and sent a third looking at the wrong subsystem. If a
+comparison crosses two scopes, it is not a comparison.
+
+**2. Is one sample enough?** A wait-channel read (`/proc/<pid>/wchan`) tells you
+where a thread is *right now*. Sampled once on a **healthy** process it returns
+`0` or `do_epoll_wait` depending purely on when you looked — four of five
+healthy samples are indistinguishable from a hung one caught mid-sleep. The
+discriminator was never the value; it was whether the value ever *changes*
+across a window. When a quantity oscillates, a snapshot is not weak evidence, it
+is misleading evidence.
+
+**3. Is it derived, and from what constant?** A forensics dump reported a CPU
+split over a hardcoded `interval=2s` while the real elapsed time was 2.11 s. A
+wrong *label* misreports a raw number; a wrong **divisor** silently scales a
+derived one, and the result stays plausible — which is exactly what lets it
+survive review. Emit measured intervals, not asserted ones.
+
+### The failure mode upstream of all three: a correct instrument, aimed wrong
+
+The three above fail at the point of **measurement**, so a careful check of the
+measurement can catch them. There is a worse one that cannot be caught that way.
+
+A serve-monitoring doc listed "port the JS-stack profiler to this host" as a
+known gap. The gap was real. The instrument would have been built correctly and
+would have produced clean, confident output. It would also have profiled the
+**main process**, when the memory under investigation lived in *child*
+processes — so it would have answered a real question that was not the one being
+asked. Nothing in the doing of it would have felt wrong.
+
+This fails at the point of **aim**, upstream of any check you would think to run
+on the result. The only defence is to state what the instrument observes and
+confirm the suspect can *appear* there — before building or running it. Catching
+this particular case required already knowing the answer, which is why leaving
+it listed as an open gap was worse than never documenting it at all.
+
+### Predict the direction of a mismatch, not just its existence
+
+When two scopes measure related things, "these will differ" is unfalsifiable and
+will not protect you under time pressure. Predict the **sign**:
+
+> The compacted DB file will land near *old size minus freelist bytes*. Filesystem
+> free space will read **lower**, because other writers consume it concurrently
+> and the WAL/shm are separate files.
+
+Now a number in the wrong direction is a stop-and-re-measure signal instead of
+something to shrug at with the pool down. Writing that prediction down also
+tends to expose stale inputs: in this case it surfaced that the freelist count
+being relied on was days old and drifting *directionally*, since the database had
+been taking writes the entire time. A specific number looks authoritative
+precisely *because* it is specific.
+
 ## Rules
 
 1. **Name the causal path before accusing.** "The reset broke my context"
@@ -223,6 +290,14 @@ Both are sequencing failures, which is this skill's real subject.
 8. **Read the line numbers.** A stack trace fingerprints the source that
    produced it. If the accused commit moved the code the trace points at, the
    trace is telling you which side of that commit your tree is on.
+9. **Say what the instrument observes before you trust what it reports.** Name
+   the entity (which process? which cgroup?), whether one sample can answer the
+   question, and any constant the number is derived through. Two numbers in one
+   row can have different subjects.
+10. **Check the aim before the reading.** Confirm the suspect could *appear* in
+    what the instrument observes. An instrument built correctly and pointed at
+    the wrong subject produces confident output and fails no check you would run
+    on the output itself.
 
 ## When someone hands you a diagnosis
 

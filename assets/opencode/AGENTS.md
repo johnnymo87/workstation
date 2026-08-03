@@ -38,7 +38,7 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 | Skill | Scope | Purpose |
 |-------|-------|---------|
 | [adding-opencode-skills](skills/adding-opencode-skills/SKILL.md) | cross | Add, edit, or move an OpenCode skill; debug why a newly-added skill is not picked up. |
-| [attributing-causes](skills/attributing-causes/SKILL.md) | cross | Treat a memorable event (deploy, nightly job, restart) as a suspect, not evidence. The "could X even reach that state?" test, and re-measuring inherited counts before destructive action. |
+| [attributing-causes](skills/attributing-causes/SKILL.md) | cross | Treat a memorable event (deploy, nightly job, restart) as a suspect, not evidence. The "could X even reach that state?" test, re-measuring inherited counts before destructive action, and interrogating the instrument itself — what entity it measures, snapshot-vs-series, and the correct-instrument-aimed-wrong failure that fails no check on its own output. |
 | [preparing-for-compaction](skills/preparing-for-compaction/SKILL.md) | cross | Persist durable context before compaction so work survives. Beads + plan files + resumption prompt. |
 | [searching-sessions](skills/searching-sessions/SKILL.md) | cross | `oc-search` patterns for grepping past session transcripts (PRs, Jira tickets, commands, payloads). |
 | [beads](skills/beads/SKILL.md) | cross | Activate `bd` issue tracking when work spans multiple sessions or has complex dependencies. |
