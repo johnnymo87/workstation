@@ -7,14 +7,19 @@
 `workstation-yvxh.4`. That roadmap fixed the **consequence** of the memory
 bursts. This one is about the **cause**, plus the residuals it left open.
 
-**Status:** S0 done · S1 done · **S4 is the actionable item now**
+**Status:** S0 done · S1 done · S4 worked (fix **rejected**, deferred to S2) ·
+**S6 (`29k3`) is the actionable item now**
 
 - **S2** is time-blocked: 7-day window ends **2026-08-09 22:37 Z**; ~0.9 days
   elapsed, and **zero OOM kills so far** (`NRestarts=0` on all four,
   `memory.events oom_kill=0`). Reporting now would be the "passes by
   construction" non-result the step explicitly forbids.
 - **S3** (`le0a`) is gated on a peer's `workstation-yvxh.4`; wake set 08-10.
-- **S4** (`63wo`) is unblocked and is what to pick up next.
+- **S4** (`63wo`) is **worked and closed out for now**: the proposed per-owner
+  gate is unsound, measured harm is 7-and-1 rows, and a pre-committed rule ties
+  the build/wontfix decision to S2's kill count. Wake set 08-10.
+- **S5** (`yvxh.6`, P3) is largely landed; **S6** (`29k3`) is the remaining
+  unblocked item.
 
 ---
 
@@ -437,11 +442,81 @@ reader after that date cannot otherwise tell slipped from landed. Their one hard
 restart between their VACUUM snapshot and their `mv`**. Verify on cgroupfs at
 the new path afterwards.
 
-### S4 — Bound the cost of a kill · `workstation-63wo`
+### S4 — Bound the cost of a kill · `workstation-63wo` · **WORKED 2026-08-03 — FIX REJECTED, DEFERRED TO S2**
 
-The sweeper's min-over-pool cutoff defers intraday orphans up to 24 h. Before
-step 2 this was cosmetic; now that OOM kills are possible it is what bounds
-their user-visible cost. Per-owner gate via routing leases.
+**The sweeper ships unchanged.** The bead's own fix direction — a per-owner gate
+via the routing DB — is unsound, and the measured harm does not yet buy even a
+sound fix. Full reasoning in the bead; the load-bearing parts:
+
+**Per-owner attribution has no sound source.** It needs "which serve owned
+session S at time T", and every candidate fails: `session_assignment` is
+current-state only; `session_lease` has a 30 s TTL and is released by `sweep()`
+long before the sweeper's 5-min timer plus 30-min staleness gate; and
+`reassignment_event` is **lossy by construction** — its insert is deliberately
+swallowed (`router.ts:259-269`) because an observability write must never fail a
+route, and the comment notes SQLITE_BUSY "happens on this shared DB **when
+serves restart together**", i.e. it is lossiest exactly around restarts. It also
+records only *moves*, never initial placements (measured: 0 rows with
+`from_serve_id IS NULL`).
+
+**The lease-liveness alternative fails on our own motivating case.** The lease is
+genuinely turn-scoped (`serve-lease.patch:1596`, TTL 30 s, renewal every 10 s),
+but three fail-open paths run turns with **no lease at all**, and a
+wedged-but-alive serve starves its own renewal fiber (`router.ts:361-380`) so its
+leases expire *while the turn still executes*. It would false-abort precisely the
+canary-wedge scenario that motivated the bead.
+
+> **The rejection is scoped to the routing DB — attribution is NOT impossible.**
+> Two sound signals exist. The **door log** carries `sid` + the target the request
+> was actually forwarded to, and the serve that received the turn-starting POST is
+> the serve that created the row; that is a sound condition, rejected on **cost**
+> (parsing journald JSON inside a destructive shell script), not soundness. Better
+> still is a **write-time provenance stamp**: we already patch the serve and it
+> already knows its identity, so stamping the serve instance into the row at
+> creation dissolves the whole problem, covers kernel OOM and pigeon-originated
+> turns alike, and degrades to today's gate for unstamped rows. **If S2 forces a
+> build, build the stamp.**
+
+**Corrected evidence — the first measurement was wrong.** An earlier pass claimed
+"2 weeks of journal, one single-member restart". This box's journal only reaches
+back to **2026-07-30** (4.8 days); `--since 2026-07-20` returned a *result* that
+was reported as a *window*. Same assert-instead-of-measure error as the S2 start
+time and the S1 scope mix — third instance in this spine. Corrected: **two**
+deferral-triggering events in the visible window, both on 08-01 — the
+17:45–17:46 restart of 4096/4097/4098 **without 4099** (a 3-of-4 partial defers
+identically, since `min` does not move) and the 19:10 canary kill.
+
+**Measured harm is what justifies waiting.** Across all 387 sweeper runs the
+finalize history is 297 (first run, unbounded historical backlog) → **7** → **1**.
+Right now: 11 phantom rows, 0 stale, 0 deferred. The honest defense is not
+"attribution is impossible" — it is *harm measured at 7-and-1 rows does not yet
+buy even a small patch*.
+
+**Pre-committed decision rule**, set before the data so "wait for S2" cannot decay
+into "never": if the S2 window records **≥1 kernel OOM kill** of a pool serve,
+build the provenance stamp; if it records zero, close `63wo` as wontfix. Wake
+scheduled 2026-08-10.
+
+**Assumption named so it can be invalidated:** "the 03:00 bounce is an adequate
+backstop" holds *only while a nightly whole-pool restart exists*. This spine's own
+direction makes single-member restarts a larger share of all restarts and could
+eventually remove that bounce, at which point the deferral becomes unbounded.
+**Reopen if the reset cadence changes.**
+
+**Open verify before any close:** confirm a phantom row is purely *cosmetic* on
+the restarted serve. Believed so (queueing is in-process) but unverified; if a
+phantom row blocks new turns, harm jumps to session-unusable-until-03:00 and this
+calculus changes.
+
+#### Found in passing — `workstation-rdsq.2`
+
+**The sweeper did not run at all for 13 hours** (08-01 21:25 → 08-02 10:25). A
+`nixos-rebuild switch` from `/tmp/wsdeploy` — a stale scratch checkout — silently
+removed the timer **57 minutes after it landed**. It was the *only* unit stopped
+in that switch and nothing restarted it, which is the signature of a unit absent
+from the new generation rather than a restart failure. Several sessions deploy
+this host from different worktrees; any deploy from a checkout lacking a peer's
+just-landed change reverts it, with no error and no alert.
 
 ### S5 — Record the wedge-attribution method · `workstation-yvxh.6` · P3
 
