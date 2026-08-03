@@ -508,7 +508,7 @@ the restarted serve. Believed so (queueing is in-process) but unverified; if a
 phantom row blocks new turns, harm jumps to session-unusable-until-03:00 and this
 calculus changes.
 
-#### Found in passing — `workstation-rdsq.2`
+#### Found in passing — `workstation-rdsq.2` · **CLOSED: education, not tooling**
 
 **The sweeper did not run at all for 13 hours** (08-01 21:25 → 08-02 10:25). A
 `nixos-rebuild switch` from `/tmp/wsdeploy` — a stale scratch checkout — silently
@@ -517,6 +517,14 @@ in that switch and nothing restarted it, which is the signature of a unit absent
 from the new generation rather than a restart failure. Several sessions deploy
 this host from different worktrees; any deploy from a checkout lacking a peer's
 just-landed change reverts it, with no error and no alert.
+
+**Disposition:** no guard will be built. A deploy applies the *whole* config the
+deploying checkout contains, so no tool can distinguish "intentionally removed a
+unit" from "accidentally missing a peer's unit" from the diff alone. Shipped
+instead as a convention in `.opencode/skills/rebuilding/SKILL.md` — deploy from
+`~/projects/workstation`, never a worktree or scratch dir — carrying this
+incident as the cost and the *`Stopped` with no matching `Started`* signature as
+the diagnostic.
 
 ### S5 — Record the wedge-attribution method · `workstation-yvxh.6` · P3
 
