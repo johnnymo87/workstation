@@ -967,7 +967,7 @@ ${serveIdCase}
         set -u
         # System-service PATH is minimal — be explicit.
         # gawk: awk is NOT in coreutils (first live wedge lost utime/stime silently).
-        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk ]}
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.elfutils pkgs.gawk pkgs.findutils ]}
 
         # Serve HTTP Basic credentials (workstation-km5f). Runs as root, so the
         # sops secret is readable. The resolver reads env then the secret file at
@@ -1223,7 +1223,14 @@ ${serveIdCase}
           mkdir -p "$DUMP"
 
           # Bound persistent forensics: keep only the 10 newest wedge dumps.
-          ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+          # lbe2: this needs `xargs`, which is why findutils is on the PATH above
+          # -- it was absent, so the whole prune was a silent no-op, and the
+          # `|| true` that used to be here hid it. Report failure instead of
+          # swallowing it; `set -e` is not on, so a warning cannot abort the
+          # forensics capture below.
+          if ! ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf; then
+            echo "canary: WARNING forensics retention prune failed (dumps accumulate)" >&2
+          fi
 
           PID=$(systemctl show "$UNIT" -p MainPID --value)
           CG=$(systemctl show "$UNIT" -p ControlGroup --value)
