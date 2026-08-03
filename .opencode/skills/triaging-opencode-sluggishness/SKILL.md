@@ -26,9 +26,12 @@ memory-limit rationale).
 Any unclean serve death (canary restart, OOM, reboot) leaves in-flight
 assistant messages with `time.created` but **no `time.completed`** — every TUI
 that loads the session renders "working" forever. The
-`opencode-phantom-busy-sweeper` timer (users/dev/home.devbox.nix, every 5min)
-finalizes rows that are incomplete, error-free, and untouched >30min, writing
-the canonical `MessageAbortedError` shape. Check it:
+`opencode-phantom-busy-sweeper` timer (every 5min) finalizes rows that are
+incomplete, error-free, and untouched >30min, writing the canonical
+`MessageAbortedError` shape. It exists twice and the unit *scope differs*: on
+devbox a systemd **user** unit (`users/dev/home.devbox.nix`), on cloudbox a
+**system** unit (`hosts/cloudbox/configuration.nix`) — so drop `--user` from
+every command below on cloudbox. Check it:
 `journalctl --user -u opencode-phantom-busy-sweeper --since -1h`. If a phantom
 persists anyway: run `systemctl --user start opencode-phantom-busy-sweeper`
 manually and check the journal for sqlite errors (busy_timeout, locked DB); a
@@ -44,15 +47,40 @@ WHERE json_extract(data,'$.role')='assistant'
   AND time_updated < (strftime('%s','now')-1800)*1000;
 ```
 
-The sweep itself (what the timer runs; safe against live serves — WAL mode,
-one short transaction):
+The sweep itself. **Never run this as one unbounded `UPDATE ... WHERE
+json_extract(...)`.** SQLite takes the WAL write lock at the *start* of a write
+statement and holds it for the statement's entire duration **even when it
+matches zero rows**, so the old single-statement form held the lock across a
+full table scan on every run. On a 13GB DB that was ~1.9s each time and once
+17.8s, which blew the serves' 5s `busy_timeout` and killed a live turn — the
+sweeper stranding exactly the phantom rows it exists to clean up (bead
+`workstation-yvxh`). Two phases instead, the same shape the timers now run:
 
 ```sql
-PRAGMA busy_timeout=10000;
+-- PHASE 1 — candidates, on a READ-ONLY connection so no write lock is taken.
+--   sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "file:$DB?mode=ro"
+-- NOT `PRAGMA busy_timeout=10000;` — the pragma RETURNS A ROW, which lands in
+-- this output and gets parsed as an id. Use the `.timeout` dot-command.
+SELECT id FROM message
+WHERE json_extract(data,'$.role')='assistant'
+  AND json_extract(data,'$.time.completed') IS NULL
+  AND json_extract(data,'$.error') IS NULL
+  AND time_updated < (strftime('%s','now')-1800)*1000;
+```
+
+If phase 1 returns nothing, **stop** — that is the common case and it should
+cost no write lock at all. Otherwise write in batches of ≤500 explicit ids
+(each its own short autocommit transaction, resolved through the `id` primary
+key instead of a scan), re-checking every predicate so a row that completed on
+its own between the phases is never clobbered:
+
+```sql
+-- PHASE 2 — per chunk of ids.
 UPDATE message SET data = json_set(data,
     '$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
     '$.error', json('{"name":"MessageAbortedError","data":{"message":"Aborted (phantom-busy sweeper: serve died mid-turn)"}}'))
-WHERE json_extract(data,'$.role')='assistant'
+WHERE id IN ('msg_...','msg_...')
+  AND json_extract(data,'$.role')='assistant'
   AND json_extract(data,'$.time.completed') IS NULL
   AND json_extract(data,'$.error') IS NULL
   AND time_updated < (strftime('%s','now')-1800)*1000;
@@ -60,6 +88,12 @@ WHERE json_extract(data,'$.role')='assistant'
 
 The 30-min gate leaves headroom for long silent tool calls; a false positive
 self-heals (the owning serve's completion write lands last).
+
+Both timers additionally gate on the oldest live serve's boot time and support
+`--dry-run`; prefer running the shipped unit over hand-SQL. Tests:
+`hosts/cloudbox/test-phantom-busy-sweeper.sh` and
+`hosts/devbox/test-phantom-busy-sweeper.sh` (either can be run from either
+host — they build the artifact under test out of the flake).
 
 ## Event-log maintenance
 
