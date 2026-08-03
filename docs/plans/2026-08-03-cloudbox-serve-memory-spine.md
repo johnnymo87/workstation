@@ -7,7 +7,7 @@
 `workstation-yvxh.4`. That roadmap fixed the **consequence** of the memory
 bursts. This one is about the **cause**, plus the residuals it left open.
 
-**Status:** S0 done · S1 next
+**Status:** S0 done · S1 done · S2 next (7-day report, 2026-08-09)
 
 ---
 
@@ -65,11 +65,17 @@ do **not** kill its episodic form, which matters because the thing we are huntin
 > oscillates back to baseline, so the correlation is forced negative regardless
 > of the truth. It has been removed. Do not reintroduce it.
 
-**The cleanest evidence against a watcher-driven burst** is not the directory
-count at all — it is that **`threads` (~70) and `fds` (~95) stayed flat through
-the entire 28.5 G ramp**. Watchers cost threads and fds; this ramp cost neither.
-That also constrains any explanation: whatever allocated 28 GiB did so **without
-opening anything**.
+> **RETRACTED 2026-08-03 by S1.** An earlier revision called this the cleanest
+> clue: "`threads` (~70) and `fds` (~95) stayed flat through the entire 28.5 G
+> ramp — whatever allocated 28 GiB did so **without opening anything**." That
+> inference is an **instrument artifact**. `sample.sh` reads `threads`, `fds`
+> and `rss_kb` from `/proc/<MainPID>/status` but reads `anon`, `swap` and
+> `pagetables` from the **cgroup**, which spans every process in the unit. The
+> flatness is therefore true of the *main opencode process only* and says
+> nothing about its children — which is precisely where the memory turned out
+> to be. Do not reintroduce it. It is the same failure mode as
+> `assign_active_10m`: a convenient surface answering a slightly different
+> question.
 
 Caveat on all four rows: they were measured **under the old band regime**
 (forced reclaim at 7 G, heavy swap churn). Post-2026-08-02 bursts may differ in
@@ -182,47 +188,155 @@ for this spine.
 
 ### S0 — This roadmap · `workstation-rdsq` · **DONE 2026-08-03**
 
-### S1 — Attribute the burst · `workstation-vpid` · **NEXT**
+### S1 — Attribute the burst · `workstation-vpid` · **DONE 2026-08-03**
 
-The discriminator between 4097 (2.17 G peak) and 4099 (28.50 G) is unidentified.
-It is episodic, not accumulative, and it allocated 28 GiB **without opening a
-single thread or fd**.
+**Mechanism: the burst memory is allocated outside the main opencode process,
+in the serve unit's child processes.** Identity is *suspected*, not proven —
+read the scoping below, it is the whole point of this section.
 
-**Test in this order. Each is cheaper than the one after it.**
+#### The instrument defect that hid it for two sessions
 
-1. **Read the per-request directory → instance path in the *patched* build.**
-   Code reading, no correlation needed. `defaultDirectory` resolves `?directory`
-   per request; find what that costs on a cache miss, how instances are keyed,
-   and whether they are ever disposed. Read
-   `wip/pre-v1.17.13-checkout-20260803` first — `share memoMap between TCP
-   listener and in-process webHandler` and `make InstanceBootstrap injectable`
-   are prior local work on exactly this path and may already contain the answer
-   or the reason it was abandoned.
-2. **The ~27 non-`/children` requests in the episode.** Of 969 requests to :4099
-   in the archived window, most are the poll; the remainder are the interesting
-   ones. Check for message/history/compaction/summarise endpoints — that is the
-   cheap test for the *episodic hydration* lead. One pass over the archived
-   `.jsonl.gz`.
-3. **Replicate across all four peaks, not one pair.** 28.50 / 12.47 / 6.33 /
-   2.17 G gives four points; any property proposed as the discriminator must
-   order all four, not just separate 4099 from 4097. At n=1 episode, *any*
-   post-hoc property separates one serve from another.
+`sample.sh` mixes two scopes in one row: `threads`, `fds`, `inotify_*`, `rss_kb`
+come from `/proc/<MainPID>/status`; `anon`, `swap`, `pagetables` come from the
+**cgroup**, which spans every process in the unit. Every "flat threads/fds"
+conclusion built on that row was scoped to the main process only. See the
+retraction above. Both scripts now carry that warning in a header comment.
 
-**Explicitly rejected as the opening move:** "subagent child count, because the
-hot endpoint is `/children`". The doc's own facts refute it — the TUI polls every
-~5 s regardless of child count, and `Session.children` returns session rows only,
-so even 100 children is tens of KB against 28.5 G. Three polling sessions means
-three attached TUIs, nothing more.
+#### The proof, chosen to be confound-free
 
-- **Escalation trigger, declared now so "inconclusive" cannot loop forever:** if
-  1–3 do not name a mechanism, arm a threshold capture — `anon > 8 G` on any
-  serve → collect JS stacks via the Bun inspector (prior art and its WS-contention
-  caveat in `users/dev/home.devbox.nix`, the canary's js-stacks connect). Bursts
-  crossed 9 G roughly four times per 20.6 h before the deploy, so a threshold
-  capture should catch one within days.
-- **Exit criteria:** either a named mechanism that orders all four peaks, or a
-  written statement of what was excluded and why, with the threshold capture
-  armed. **Do not** re-run anything in the dead table.
+The tempting statistic — `(anon+swap) − mainRSS` — is confounded: `VmRSS`
+excludes swapped-out pages, so a main process pushed to swap looks like it "lost"
+memory to children. `sample.sh` never recorded `VmSwap`, so that confound cannot
+be retired retroactively.
+
+**Resident anon at ignition retires it anyway, because swap was still zero:**
+
+| 19:51 UTC | cgroup resident `anon` | main-PID RSS | non-main resident | `swap` |
+|---|---|---|---|---|
+| :24 | 1.26 G | 1.35 G | ~0 | **0.00 G** |
+| :40 | **3.47 G** | **1.36 G** | **+2.11 G** | **0.00 G** |
+
+Main-process RSS is flat *across the ignition* while 2.11 GiB of **resident**
+anonymous memory appears in the cgroup, with no swap in existence to explain it.
+
+Three reasons this estimator is safe. `VmRSS = RssAnon + RssFile + RssShmem`, so
+main's *anon* ≤ `VmRSS` — the slack biases **against** the claim, making
+`cg_anon − VmRSS` a lower bound on non-main anon. Cgroup-v2 `anon` excludes
+shmem/tmpfs (charged to `file`) and excludes kernel-side charges (`slab`,
+`pagetables` are separate counters), so neither can fabricate it. And split-RSS
+counter lag is bounded by ~64 pages/thread ≈ 18 MB at 72 threads — three orders
+of magnitude short of 2.11 G.
+
+Nor is this a one-sample artifact: the plateau holds **≥5.7 G of non-main
+resident anon at every one of ~50 consecutive samples** across 19:51:56–20:02.
+No within-gap transient can alias that.
+
+**Shape correction.** Not the "~1 G/min for 13 min" this spine assumed: 1.26 →
+17.60 G in **65 seconds** (~5.8 G per 15 s tick, *while* `memory.high` was
+throttling the allocator), then a slow climb to 28.50 G at 20:00, then full
+release to 1.30 G by 20:06.
+
+#### Prime suspect: eager MCP fan-out on new-directory bootstrap — not tsserver
+
+The obvious story (tsserver indexing a big repo) **has no trigger and is close to
+excluded**. LSP clients spawn only via `lsp.touchFile`, whose only callers are the
+`read`/`write`/`edit`/`lsp`/`apply_patch` tools (`tool/read.ts:119`,
+`write.ts:75`, `edit.ts:197`, `tool/lsp.ts:80`, `apply_patch.ts:269`) plus a debug
+command. And **zero tool parts of any kind** were recorded for :4099's five tenant
+sessions or their direct children across 19:30–20:10. No tool touch on that serve
+means no LSP spawn from its tenants.
+
+MCP clients need no such trigger: the instance-state initializer spawns **every
+configured MCP server eagerly**, `concurrency: "unbounded"`, on instance
+creation (`mcp/index.ts:496-520`).
+
+The timeline fits that and only that:
+
+| UTC | event |
+|---|---|
+| 19:50:26.378 | first-ever appearance on :4099 of `/home/dev/projects/culinary-operations-server/.worktrees/pr-4602` — sid-less `global-ro` TUI-startup traffic (`/experimental/capabilities`, `/api/integration` 463 ms, `/api/command` 462 ms) |
+| 19:50:36 | main-pid `inotify_watches` +258, threads 68→72 — instance bootstrap |
+| 19:51:40 | ignition, +2.11 G resident anon outside main |
+
+74 seconds, bootstrap to ignition. tsserver is demoted to "possible only if a
+trigger is found"; the file-watcher bump is real but is a **main-process** metric
+(`sample.sh` reads `/proc/MainPID/fdinfo`, so it can never see a child's watches)
+— it evidences the bootstrap, not the allocation.
+
+#### Why the child fleet is never reclaimed
+
+- `LSP.state` and `MCP.state` are both `InstanceState.make<State>` — **per
+  instance, i.e. per directory** (`lsp.ts:145`, `mcp/index.ts:484`).
+- Teardown is an `Effect.addFinalizer` that runs **only on instance dispose**
+  (`lsp.ts:198`).
+- `InstanceStore` caches instances in a plain unbounded `Map` with **no TTL and
+  no LRU** (`instance-store.ts:43,108-124`); dispose happens only on explicit
+  `dispose`/`disposeDirectory`/`disposeAll` or process shutdown
+  (`instance-store.ts:192`).
+
+So one directory routed once to a serve pins a child fleet in that serve's cgroup
+for the life of the process. Verified live today: **24 MCP child processes on
+:4097**, in repeating identical trios. Grepped all 26 patches in
+`opencode-patched` — **none touch `lsp.ts`, `instance-store.ts`, or MCP spawn/
+dispose lifecycle**, so upstream v1.17.13 is the right source to read.
+
+This also retires the last directory-fan-out lead, but not in its favour:
+per-request resolution is cheap (`InstanceStore.load` is memoised, and for
+session-path requests `session.directory` wins over `?directory=` anyway —
+`workspace-routing.ts:182`). The cost is not *resolving* a directory; it is the
+**child fleet the first resolution spawns and never reaps**.
+
+#### Scope of the claim — what is proven, suspected, and unmeasured
+
+- **Proven:** allocation is non-main, for the resident core — ≥2.11 G at
+  ignition, ≥5.7 G at every sample through the plateau.
+- **Suspected, not proven:** that the children are the MCP/LSP fleet. The live
+  `cgroup.procs` inventory is a **different process generation** (unit has since
+  restarted, main pids differ) and is legitimate only as "this structure exists
+  and reproduces today" — never as episode identity. A fork transient or another
+  spawned helper is not excluded.
+- **Unmeasured:** the ~22 G that went to **swap** is attributed by parsimony
+  only. Without `VmSwap` we cannot exclude the main process allocating and
+  immediately swapping under `memory.high` — its RSS staying pinned low is
+  exactly what the band would do. **So "28.5 G was in children" is NOT
+  established; "≥6 G resident was, at every instant" is.**
+- The tool-part negative means "no tool-part rows recorded in-window for tenants
+  one level deep". It does not cover grandchildren, processes backgrounded
+  before 19:45 that linger in the cgroup, or sid-less actors — and the bootstrap
+  traffic itself was sid-less, hence invisible to any session join.
+- **Cut as unsound:** an earlier draft argued page-table overhead rising 0.39 % →
+  2.8 % showed "many sparse address spaces". Wrong. Per-byte PTE cost is ~0.195 %
+  *regardless of process count*; reaching 819 M that way needs thousands of
+  processes. High overhead indicates **sparse/fragmented VA** — which one
+  JS-engine heap produces just as well (GC/`MADV_DONTNEED` zaps PTEs without
+  freeing page-table pages). It discriminates neither count nor identity.
+
+#### The escalation was armed at the wrong target — corrected and deployed
+
+The pre-declared escalation was "JS stacks from the main process via the Bun
+inspector". Given the above that would have profiled the **wrong address space**.
+
+Deployed instead: `child-capture.sh` + `child-capture.timer` (transient user
+timer, 15 s). On any serve crossing `anon+swap ≥ 6 G` it writes **one row per
+process in the cgroup**, including `VmSwap` — the column whose absence is the one
+confound S1 could not retire. Threshold is 6 G not 8 G because the observed ramp
+was 5.8 G/tick *while throttled*; with the band gone a burst can cross 8 G, hit
+the 14 G `MemoryMax`, be killed and fall back inside one timer interval.
+Cooldown is **per port**, so one serve parked above threshold cannot suppress
+another's fresh ignition. `sample.sh` gained `main_swap_kb` and rotated to
+`samples-v2.tsv` (23 cols) so no file ever carries two column counts.
+
+**Free second instrument:** a `MemoryMax` OOM kill dumps a full per-process
+RSS/swap table to the kernel log. `journalctl -k` around any kill gives
+attribution for exactly the episode `child-capture` would outrun.
+
+Both are transient units and **do not survive reboot**.
+
+#### Follow-on filed
+
+`workstation-rdsq.1` — LSP/MCP child fleets are never reaped because instances are
+never evicted. That is the standing-memory defect behind both the burst headroom
+and the duplicate-MCP accumulation. Not fixed here; S1 was scoped to attribution.
 
 ### S2 — The 7-day report on the memory posture · `workstation-h1y6`
 
