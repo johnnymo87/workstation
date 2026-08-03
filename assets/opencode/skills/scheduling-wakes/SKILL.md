@@ -1,6 +1,6 @@
 ---
 name: scheduling-wakes
-description: Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean.
+description: Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong.
 ---
 
 # Scheduling Wakes
@@ -110,9 +110,55 @@ If the checkpoint gets handled early, cancel it —
 can cancel, and only while it is still queued. An uncancelled wake for work
 already done is exactly the pointless interruption this section is about.
 
+## A wake on the dependent does not cover the dependency
+
+**Coverage is a property of the chain, not of the item.** If your work is gated
+on someone else's, a trigger on *yours* is worth nothing while *theirs* has
+none — your wake fires, finds the gate still shut, and reschedules itself
+forever.
+
+The nasty part is the asymmetry. You can audit every item you own, find them all
+triggered, and still be blocking someone — because the gap is in *your* bead
+while the symptom appears on *theirs*. Neither party can see it from their own
+list, and no `bd` query surfaces it: it lives on the dependency edge. In practice
+it took two sessions comparing notes to notice.
+
+So when you gate an item on work you do not own:
+
+- Check the **dependency** has its own trigger, not just yours.
+- If it does not, the fix belongs on **their** item — a due date, or a word to
+  the owner. Tightening the wake on your own item just wakes you to discover
+  it is still blocked.
+- Write the expectation into your payload ("expect this landed or scheduled by
+  now"), so a surprise reads as a signal rather than as normal.
+
+## A queued payload cannot be edited — cancel and reschedule
+
+There is no amend. If a claim in a scheduled message turns out to be wrong, the
+only fix is `swarm_scheduled(action: "cancel", msg_id: ...)` followed by a fresh
+`swarm_schedule`. Verify the new one is queued and the old one shows
+`cancelled`.
+
+**Invert the claim; do not merely delete it.** A payload that silently drops a
+retracted inference leaves the underlying *fact* sitting there for the reader to
+re-derive the same wrong conclusion from. The retraction has to be reachable
+from the fact. If a payload said "this is urgent" and urgency was wrong, the
+replacement says **"there is no time pressure, and an earlier version of this
+wake said otherwise"** — not nothing.
+
+This matters more for wakes than for ordinary messages, because the recipient
+has no context to check the claim against and no sender to ask. A wake payload
+is read as settled fact by definition. Be especially wary of forwarding a
+conclusion you received pre-reasoned from someone closer to the data: that is
+exactly when re-deriving feels redundant, and a wake is the worst place to
+launder an unchecked inference into the future.
+
 ## Related
 
 - `swarm-messaging` — the envelope, kinds, priority, and the message economy a
   wake is a special case of.
 - `understanding-workspace-reset` — what the nightly 03:00 reset does to
   sessions and worktrees, which is what a wake has to survive.
+- `attributing-causes` — for the inference-forwarding hazard above: what an
+  instrument actually measures, and confirming a conclusion is aimed at the
+  question you are asking before you carry it forward.
