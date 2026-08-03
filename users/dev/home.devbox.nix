@@ -1324,16 +1324,64 @@ EOF
   # boot; the 30-min silence gate is the only protection there, same as the
   # original design. Writes the canonical MessageAbortedError shape so
   # clients treat it exactly like a user abort. Safe against live serves:
-  # WAL mode, single short transaction, busy_timeout.
+  # WAL mode, WAL-write-lock-free probe, short chunked transactions.
+  #
+  # TWO-PHASE SWEEP (workstation-yvxh.8, 2026-08-04) — ported from the cloudbox
+  # sibling in hosts/cloudbox/configuration.nix, which fixed it first
+  # (workstation-yvxh.1). Tests: hosts/devbox/test-phantom-busy-sweeper.sh.
+  #
+  # DELIBERATE DIVERGENCE FROM CLOUDBOX — DO NOT "FIX" THIS BLIND. The serve
+  # DISCOVERY block below is left exactly as it has run here since 2026-07-03
+  # (user units, MainPID, `ps -o etimes=`), while cloudbox has since moved to
+  # systemd ActiveEnterTimestamp plus a serve-pool.nix-generated expected-unit
+  # guard. That is not an oversight: devbox is not reachable from the machine
+  # this port was written on, discovery is the one part that cannot be
+  # exercised off-devbox (it finds USER units; cloudbox's pool is SYSTEM), and
+  # rewriting untestable code blind is how a permissive sweep gets shipped.
+  # Converging it is tracked as workstation-yvxh.10.
   systemd.user.services.opencode-phantom-busy-sweeper = {
     Unit.Description = "Finalize orphaned in-flight opencode messages (phantom busy)";
     Service = {
       Type = "oneshot";
       ExecStart = "${pkgs.writeShellScript "opencode-phantom-busy-sweeper" ''
         set -u
+        # procps is REQUIRED and must stay: discovery below shells out to `ps`.
+        # (Cloudbox's PATH drops procps because it gets boot times from systemd
+        # instead — copying that line here would break discovery SILENTLY: `ps`
+        # not found -> et empty -> the unit is skipped -> MAX_ETIMES stays 0 ->
+        # CUTOFF collapses to now -> the live-owner gate opens wide.)
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.sqlite pkgs.systemd pkgs.procps pkgs.gawk ]}
-        DB="$HOME/.local/share/opencode/opencode.db"
-        [ -f "$DB" ] || exit 0
+
+        # OPENCODE_SWEEPER_DB is a TEST SEAM, not configuration. The unit sets no
+        # Environment=, so production is byte-identical to the old hardcoded
+        # path; it exists so the test harness can exercise THIS script against
+        # scratch databases instead of re-implementing (and thereby not testing)
+        # its logic. $HOME-based, unlike cloudbox's hardcoded path: this is a
+        # systemd USER unit, so HOME is reliably set.
+        DB=''${OPENCODE_SWEEPER_DB:-$HOME/.local/share/opencode/opencode.db}
+
+        DRY=0
+        [ "''${1:-}" = "--dry-run" ] && DRY=1
+
+        # An unrecognised argument must not silently perform a WET sweep:
+        # `--dryrun` or `-n` is a realistic typo and the wrong outcome of that
+        # typo is destructive.
+        if [ $# -gt 0 ] && [ "$1" != "--dry-run" ]; then
+          echo "sweeper: unknown argument '$1' (only --dry-run is accepted) — refusing to run"
+          exit 1
+        fi
+
+        # Fail closed rather than `exit 0`: a missing DB used to be silently
+        # indistinguishable from a clean run forever. NOTE the consequence on a
+        # fresh devbox before opencode has ever started: this oneshot will enter
+        # `failed` every 5 minutes (visible in `systemctl --user --failed`)
+        # instead of quietly succeeding. That is the intended trade — loud and
+        # wrong-looking beats silent and blind.
+        if [ ! -f "$DB" ]; then
+          echo "sweeper: DB not found at $DB — refusing to run"
+          exit 1
+        fi
+
         # Oldest running pool-serve boot time (epoch seconds). Rows created
         # after this may still be executing in-memory on a live serve.
         NOW=$(date +%s)
@@ -1348,18 +1396,126 @@ EOF
         # the original staleness-only behavior (CUTOFF = now).
         CUTOFF=$(( NOW - MAX_ETIMES ))
         [ "$MAX_ETIMES" -eq 0 ] && CUTOFF=$NOW
-        sqlite3 "$DB" "
-          PRAGMA busy_timeout=10000;
-          UPDATE message SET data = json_set(data,
-              '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
-              '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: in-flight row predates all live serves, silent >30min)\"}}'))
+        echo "sweeper: db=$DB max_etimes=$MAX_ETIMES cutoff=$CUTOFF now=$NOW dry=$DRY"
+
+        # PHASE 1 — find candidates on a READ-ONLY connection.
+        #
+        # The scan was never the problem; holding the WAL write lock while doing
+        # it was. SQLite takes that lock at the START of a write statement and
+        # holds it for the statement's whole duration EVEN WHEN IT MATCHES 0
+        # ROWS — which is nearly every run. A read-only connection takes no
+        # write lock, so this scan no longer touches the serves. (mode=ro can
+        # still create/recover the -shm, which needs a writable DIRECTORY — dev
+        # has one. It cannot write the DB.)
+        #
+        # `-cmd ".timeout N"`, not `PRAGMA busy_timeout=N;`: the pragma RETURNS A
+        # ROW, so this script has been logging a bare "10000" line to the journal
+        # every five minutes since 2026-07-03. Harmless while a human was the
+        # only reader; fatal here, where phase 1's output is parsed as candidate
+        # ids. The dot-command sets the same timeout silently.
+        #
+        # `-init /dev/null -list -noheader` because that output format is now
+        # load-bearing: pinned explicitly rather than left to CLI defaults, a
+        # stray ~/.sqliterc, or a future sqlite bump.
+        if ! CANDIDATES=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "file:$DB?mode=ro" "
+          SELECT id FROM message
           WHERE json_extract(data, '\$.role') = 'assistant'
             AND json_extract(data, '\$.time.completed') IS NULL
             AND json_extract(data, '\$.error') IS NULL
             AND time_updated < (strftime('%s','now') - 1800) * 1000
             AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
-          SELECT 'finalized ' || changes() || ' orphaned message(s) (cutoff=' || $CUTOFF || ')';
-        "
+        "); then
+          # A failed probe must never be indistinguishable from "nothing to do".
+          echo "sweeper: candidate query failed — refusing to run"
+          exit 1
+        fi
+
+        # These ids get interpolated into a write statement below. They come
+        # from our own database, but "our own database" is precisely the thing
+        # whose contents we cannot assume when the next step is destructive, so
+        # anything not shaped like an opencode message id stops the run. This
+        # also guarantees the line-oriented chunking below cannot be confused by
+        # an id containing a newline.
+        if ! printf '%s\n' "$CANDIDATES" | awk 'NF && !/^[A-Za-z0-9_.:-]+$/ { exit 1 }'; then
+          echo "sweeper: candidate id failed validation — refusing to write"
+          exit 1
+        fi
+
+        N=$(printf '%s\n' "$CANDIDATES" | awk 'NF' | wc -l)
+
+        if [ "$DRY" = 1 ]; then
+          echo "sweeper: would finalize $N orphaned message(s) (cutoff=$CUTOFF)"
+          exit 0
+        fi
+
+        # THE POINT OF ALL THIS: the overwhelmingly common case ends here, having
+        # taken no write lock at all. Said out loud so a no-op run is
+        # distinguishable from a writing one in `journalctl --user -u
+        # opencode-phantom-busy-sweeper`. Keeps the "finalized N orphaned
+        # message(s)" prefix the old script logged, which existing greps rely on.
+        if [ "$N" -eq 0 ]; then
+          echo "sweeper: finalized 0 orphaned message(s) (cutoff=$CUTOFF) — no candidates, no write lock taken"
+          exit 0
+        fi
+
+        # PHASE 2 — targeted writes, chunked.
+        #
+        # Each chunk is its own autocommit transaction resolved through the id
+        # primary-key index, so the lock is held for the time it takes to rewrite
+        # at most 500 known rows — not the time to read the whole table — and
+        # other writers interleave between chunks. Chunked because SQLite bounds
+        # expression depth, and a drained-pool backlog sweep can legitimately
+        # produce thousands of ids.
+        #
+        # Every predicate is RE-CHECKED inside the UPDATE: a serve (or a
+        # standalone TUI) may legitimately finish one of these rows between the
+        # two phases, and a row that completed on its own must not be overwritten
+        # with an abort.
+        CHUNKS=$(printf '%s\n' "$CANDIDATES" | awk -v q="'" '
+          NF          { buf = buf sep q $0 q; sep = ","; n++ }
+          n == 500    { print buf; buf = ""; sep = ""; n = 0 }
+          END         { if (n) print buf }')
+
+        OLDIFS=$IFS
+        IFS='
+'
+        set -f
+        set -- $CHUNKS
+        IFS=$OLDIFS
+        set +f
+
+        NCHUNKS=$#
+        TOTAL=0
+        FAILED=0
+        for chunk in "$@"; do
+          if got=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "$DB" "
+            UPDATE message SET data = json_set(data,
+                '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
+                '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: in-flight row predates all live serves, silent >30min)\"}}'))
+            WHERE id IN ($chunk)
+              AND json_extract(data, '\$.role') = 'assistant'
+              AND json_extract(data, '\$.time.completed') IS NULL
+              AND json_extract(data, '\$.error') IS NULL
+              AND time_updated < (strftime('%s','now') - 1800) * 1000
+              AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
+            SELECT changes();
+          "); then
+            TOTAL=$(( TOTAL + got ))
+          else
+            FAILED=$(( FAILED + 1 ))
+          fi
+        done
+
+        echo "sweeper: finalized $TOTAL orphaned message(s) (cutoff=$CUTOFF) — $N candidate(s), $NCHUNKS chunk(s), $FAILED failed"
+
+        # TOTAL < N is normal and benign: a serve finished the row itself between
+        # the two phases and the re-check correctly declined to clobber it. A
+        # chunk that could not be written is NOT benign — surface it as a unit
+        # failure. The sweep is idempotent, so the next run retries.
+        if [ "$FAILED" -gt 0 ]; then
+          echo "sweeper: $FAILED chunk(s) failed to write — see above"
+          exit 1
+        fi
       ''}";
     };
   };
