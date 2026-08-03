@@ -43,10 +43,11 @@ bd memory `devbox-serve-4096-wedge-2026-07-03`).
 - State + forensics live in `/tmp/opencode-serve-canary/`:
   - `<port>.fails` — consecutive-failure counter.
   - `wedge-<ts>-<port>/` — pre-restart dump: `/proc/<pid>/{status,wchan,syscall}`,
-    per-thread `wchan` (`threads`), and cgroup
-    `memory.{current,peak,max,stat,pressure}`, `cpu.pressure`, `cgroup.procs`.
-    Captured BEFORE the restart because a SIGKILL destroys all evidence
-    (the 2026-07-03 wedge left none).
+    per-thread `wchan` (`threads`), `wchan-series` (main-thread wait channel,
+    20 samples at 100 ms — see below), `cpu-io-split`, `eu-stack.{1,2,3}`, and
+    cgroup `memory.{current,peak,max,stat,pressure}`, `cpu.pressure`,
+    `cgroup.procs`. Captured BEFORE the restart because a SIGKILL destroys all
+    evidence (the 2026-07-03 wedge left none).
 
 Inspect activity:
 
@@ -58,8 +59,38 @@ ls /tmp/opencode-serve-canary/
 
 A canary restart in the journal looks like:
 `RESTARTING wedged opencode-serve@4096.service (pid=...); forensics in ...`.
-If you find one, read the dump (especially `threads` wait-channels and
-`memory.pressure`) and attach it to a bead before it's lost to `/tmp`.
+If you find one, attach the dump to a bead before it's lost, and read it like
+this.
+
+### Read `wchan-series`, not the one-shot `wchan`
+
+**A single wait-channel reading is not evidence.** Sampling a *healthy* serve by
+hand returns `0` (running) or `do_epoll_wait` depending purely on when you look
+— four of five healthy samples are indistinguishable from a wedged serve caught
+mid-sleep. The one-shot `wchan` and `threads` files are kept for context only.
+
+What discriminates is whether the main thread **ever returns to epoll** across
+the window:
+
+| `wchan-series` (20 samples @ 100 ms) | reading |
+|---|---|
+| `do_epoll_wait` recurring | event loop is FREE. An HTTP stall here is request serialization, **not** a blocked loop. |
+| `hrtimer_nanosleep` solid, never returning to epoll | SQLite busy handler spinning |
+| isolated `hrtimer_nanosleep` between `do_epoll_wait` | brief contention, loop recovering — normal |
+
+The second row matters because `bun:sqlite`'s busy-wait runs on the **main JS
+thread**: with `busy_timeout=5000`, one contended write freezes the event loop
+for up to 5 s. That is not a cousin of the wedge signature above — it is a
+mechanism that produces it. Measured: `hrtimer_nanosleep` continuously from
+0.2 s to 3.4 s of a 4 s contended write, never once back to epoll.
+
+`/proc/<tid>/syscall` would be richer but yama `ptrace_scope=1` on cloudbox
+makes it unreadable; `wchan` is readable. Don't reach for the wrong file.
+
+Note `cpu-io-split` reports `interval=` **measured**, not assumed. It is the
+divisor for the utime/stime delta, so treat any hardcoded interval in a derived
+CPU number as suspect — a wrong divisor keeps the output plausible while
+silently scaling it (this one was ~5% off).
 
 ## Whole-pool crash-loop: the registry fences (exit 20 / exit 21)
 
@@ -116,8 +147,13 @@ reset; healthy stops take 1–2s.
 ## Known gaps / follow-ups
 
 - Cloudbox runs the same architecture (K=4, system units,
-  `hosts/cloudbox/configuration.nix`, MemoryHigh=32G/MemoryMax=40G) and has
-  the same wedge trap. To address this, cloudbox runs the liveness canary as
+  `hosts/cloudbox/configuration.nix`) and has the same wedge trap. Its limits
+  are **`MemoryMax=14G`, `MemorySwapMax=1G`, no `MemoryHigh`,
+  `TimeoutStopSec=15`** as of 2026-08-02 (this doc previously said
+  `MemoryHigh=32G/MemoryMax=40G`, which was the pre-fix band). **Verify limits
+  on cgroupfs, not `systemctl show`** — a unit re-realized into a new slice
+  without a process restart reports the new values while the kernel has dropped
+  the controller entirely. To address this, cloudbox runs the liveness canary as
   SYSTEM units (`systemd.services.opencode-serve-canary` + `.timer` in
   `hosts/cloudbox/configuration.nix`), running as ROOT, with forensics in
   root-owned `/var/lib/opencode-serve-canary/`.
@@ -126,11 +162,35 @@ reset; healthy stops take 1–2s.
     `journalctl -u opencode-serve-canary.service` (do NOT use `--user`).
   - Note: the inspector wedge-watcher + `BUN_INSPECT` NAMED-JS-stacks forensics
     are NOT ported to cloudbox (deferred; forensic-only, would require adding
-    `BUN_INSPECT` to every cloudbox serve).
+    `BUN_INSPECT` to every cloudbox serve). **Before porting it for a MEMORY
+    question, read the next bullet** — main-process JS stacks are the wrong
+    address space for cloudbox's bursts. For a wedge (CPU/loop) question it is
+    still the right instrument.
 - Durable fix candidates (beads): systemd watchdog patch (`sd_notify
   WATCHDOG=1` from the main loop → SIGABRT + core on freeze), and a
   dead-man's switch so the worker heartbeat degrades `health_state` when
   the main loop stops bumping a shared timestamp.
-- The canary treats symptom, not cause: the heap driver is mega-sessions
-  (7k+ messages) parking serves at the ceiling. Session rotation/compaction
-  is the upstream hygiene fix.
+- The canary treats symptom, not cause — but **the cause stated here until
+  2026-08-03 was wrong**, and it is worth knowing why before repeating it. This
+  doc asserted "the heap driver is mega-sessions (7k+ messages) parking serves
+  at the ceiling". On cloudbox that is refuted twice over:
+  - Mega-sessions/message history **as standing memory** is dead: `assign_total`
+    vs memory *r* = −0.18…0.33, and the serve with 191 assignments sat at 0.65 G
+    while one with 38 sat at 2.65 G.
+  - The burst memory is **not in the opencode process at all**. It is in the
+    serve unit's **child processes** — the per-directory LSP and MCP fleet.
+    Measured 2026-08-03 on `:4098`: cgroup anon 6.55 G = main process 1.88 G +
+    **44 children holding 6.31 G** (16 `tsserver` at 3.05 G, 11 MCP servers).
+    Instances are never evicted (`InstanceStore` is an unbounded `Map`, no
+    TTL/LRU), so the fleets are never reaped — 9 TypeScript language servers for
+    a single repo.
+
+  **The scope trap that hid this**, because it will recur: the step-3 sampler read
+  `threads`/`fds`/`rss` from `/proc/MainPID` but `anon`/`swap`/`pagetables` from
+  the **cgroup**. Any comparison across those two scopes is meaningless, and it
+  produced a confident, wrong headline ("28 GiB allocated without opening a
+  thread or fd" — true of the main process only).
+
+  Full analysis: `docs/plans/2026-08-03-cloudbox-serve-memory-spine.md` (S1,
+  bead `workstation-vpid`); the never-reaped fleet is `workstation-rdsq.1`.
+  Session rotation/compaction remains good hygiene, just not the memory fix.
