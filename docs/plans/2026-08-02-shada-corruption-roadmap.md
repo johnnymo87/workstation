@@ -246,6 +246,57 @@ name. So the discriminator's false-positive rate against normal traffic is zero
 over ~35 minutes, and the signature is genuinely rare rather than merely
 undocumented. If tomorrow's readout shows even one, that is signal.
 
+### S0 verdict — read out 2026-08-03 09:00
+
+**No direct writers.** Zero `CREATE`/`MODIFY` on the name `main.shada` across the
+whole 11.3h watch (326 events, 17:56 Aug 2 → 05:16 Aug 3), reset included. The
+race did not fire. Liveness was confirmed *first* (unit active, same
+`ExecMainPID` as at arming, log mtime past 03:00), so this is not the dead-watch
+false quiet the `--collect` trap produces.
+
+**The storm, on the other hand, is now observed rather than inferred** — 19
+events in one second, three writers, three unlink windows:
+
+```
+ 1  CREATE tmp.a          writer A opens its temp
+ 2  CREATE tmp.b          writer B starts while A is still writing
+ 3  MODIFY tmp.a
+ 4  DELETE main.shada     <- A's vim_rename unlink: ENOENT WINDOW OPEN
+ 5  MOVED_FROM tmp.a
+ 6  MOVED_TO main.shada   <- A renames; window closes
+ 7  MODIFY tmp.b
+ 8  DELETE main.shada     <- B's unlink: window 2
+ 9  MOVED_FROM tmp.b
+10  MOVED_TO main.shada   <- B renames
+11  CREATE tmp.a          writer C
+12  MODIFY tmp.a  (x2)
+14  DELETE main.shada     <- C's unlink: window 3
+15  MOVED_FROM tmp.a
+16  MOVED_TO main.shada   <- C renames
+17  CLOSE_WRITE main.shada (x3)
+```
+
+This upgrades **causal-chain point 4** from inference to observation: `pkill -9`
+does provoke graceful ShaDa writes from the embedded servers, and they overlap.
+Three windows opened; no writer's merge-read happened to land inside one. That
+is ordering luck, not safety — B had already created its temp (event 2) before
+A's unlink (event 4), so B's read preceded the window. The 2026-08-01 corrupt
+file's header is stamped `03:00:04`: the same second of the same nightly burst,
+different dice.
+
+**Second finding, unprompted: the burst destroys history every night even when
+nothing corrupts.** Three renames onto one path means the survivor is writer C
+alone. B created its temp before A's rename, so B cannot have read A's merged
+result — A's session history is silently discarded. Last-writer-wins, nightly.
+This is an independent argument for S2, and the same serialization fixes it:
+serialized exits make each writer read its predecessor's result instead of
+racing it.
+
+**Watch left armed** (deviation from the plan, which said stop it): S2's exit
+criterion needs an observed night anyway, and extra nights are free pre-S2
+baseline. Boundary for future readouts: the pre-S2 window ends at log line 326
+(05:16:28 Aug 3).
+
 **If the log is clean, S2 still proceeds.** The mechanism is strace-proven
 independently of S0; the race is probabilistic and its window is milliseconds, so
 one quiet night is not evidence of absence. S0 exists to characterise the storm
@@ -371,3 +422,5 @@ master; check for an existing issue first.
 | 2026-08-02 | Revision 2: review of this doc found 4 HIGH defects pre-merge; fixed |
 | 2026-08-02 22:29 | **S1 done** — `#261` merged and deployed. Probe replaced with a write-path oracle; three-state verdict; reap gated. Review found a 5th defect (unconditional reap) and 2 bugs in the fix's own design |
 | 2026-08-02 22:4x | S1 side effect: promotion is now atomic, so Step 3.5 no longer produces the S0 smoking-gun signature — the 03:00 false positive is retired |
+| 2026-08-03 03:00:04 | First reset under the S1 code. Step 3.5 silent = healthy verdict, nothing to reap (verified against the log and the directory) |
+| 2026-08-03 09:00 | **S0 read out, `t032` closed.** No direct writers (0 `CREATE`/`MODIFY` on `main.shada` in 326 events). Storm confirmed: **3 concurrent writers, 3 unlink windows in one second**. S2 proceeds per the pre-registered rule |
