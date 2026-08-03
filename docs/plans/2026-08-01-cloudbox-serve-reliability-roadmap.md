@@ -1,7 +1,7 @@
 # Cloudbox Serve Reliability Roadmap
 
 **Spine bead:** `workstation-7za8` · **Started:** 2026-08-01 · **Host:** cloudbox only
-**Status:** steps 0, 1, 2, 3 done and deployed · step 2 in its 7-day observation (day 1: 0 kills, 0 5xx/112k, 0 swap) · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-le0a`)
+**Status:** steps 0–3 done and deployed · step 2 in its 7-day observation (day 1: 0 kills, 0 5xx/112k, 0 swap) · **step 4 handed off to `workstation-yvxh.4`** · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-le0a`)
 
 `opencode-serve@4098` had **one** confirmed throttle-band wedge on 2026-08-01
 (19:04–19:10), plus two earlier stall windows that self-recovered and are
@@ -630,6 +630,12 @@ change removed the protection it exists to add" (dangerous).
 knobs, which *do* apply live, are deployed. Re-land `Slice=` only in a deploy
 that bounces the pool in the same step (`workstation-le0a`).
 
+**Sequencing agreed with the `yvxh` session 2026-08-03:** its W3 vacuum needs the
+same pool drain, so `le0a` rides that window — the `Slice=` change lands *after*
+the `mv`, and the single pool start that ends W3 is what realizes the new slice.
+The pool must **not** be restarted between W3's drain and its `mv`. Expect notice
+from that session; do not schedule a destructive window independently.
+
 ### Deploy propagation — measured, not assumed
 
 Probed on a live scratch unit: editing the unit file and running
@@ -672,7 +678,10 @@ step.
        outcome that *confirms* the fix;
     3. **if no member approached the cap**: record **"no trigger —
        inconclusive"**. Explicitly not success;
-    4. **kill frequency** pool-wide per day, which adjudicates the cap value.
+    4. **kill frequency** pool-wide per day, which adjudicates the cap value;
+    5. **orphaned phantom-busy rows created per kill** — see "A kill is more
+       expensive than this plan first claimed" above. A kill that strands a
+       session until 03:00 is not a clean win and must not be reported as one.
   - **Pre-declared adjustment rule** (this is what makes the thin > 9 G data
     self-correcting — decide it now, not after seeing results):
     - a killed episode that was **door-clean** right up to death ⇒ **cap too
@@ -682,6 +691,30 @@ step.
     - **> 5 kills/day pool-wide** ⇒ raise the cap rather than accept the churn,
       because `workstation-63wo` is still open and every kill strands that
       member's sessions until 03:00.
+### A kill is more expensive than this plan first claimed
+
+Raised 2026-08-03 by the `workstation-yvxh` session, and it is a real correction
+to the step-2 rationale above, which argued a fast kill is strictly better than a
+silent stall.
+
+**An OOM-killed serve never runs `SessionProcessor.cleanup`.** It therefore
+leaves an assistant row with `time.completed = NULL` and no `$.error` — a
+*phantom-busy* row, which shimmers as permanently busy until the sweeper's
+cutoff gate lets it through, worst case the next 03:00 bounce. A serve that
+throttled instead stayed alive and orphaned nothing.
+
+So step 2 does not purely remove a failure mode; it **trades a silent stall for a
+user-visible phantom-busy session**. That is still the right trade — a 13-minute
+PSI-full stall serving 503s is worse than one stranded shimmer — but it is a
+trade, not a free win, and it has three consequences:
+
+1. it sharpens the pre-declared **"> 5 kills/day ⇒ raise the cap"** rule below,
+   because each kill now has a named, user-visible cost;
+2. it promotes `workstation-63wo` (the sweeper's min-over-pool cutoff defers
+   intraday orphans) from residual to the thing that bounds that cost;
+3. the 7-day report must count **orphaned phantom rows created per kill**, not
+   just kills.
+
 ### Day-1 observation — 2026-08-03 09:00, 14.1 h post-deploy
 
 **No kills. The kill path remains UNTESTED — outcome 3, "no trigger".** What is
@@ -851,7 +884,38 @@ one session's file scan cost 5 GiB* — is not this roadmap's; it needs an
 application-level look at the watcher/scan path, and is worth filing only if the
 band entries stop self-recovering.
 
-## Step 4 — Reclaim the 6.2 GiB of dead pages *(low priority)*
+## Step 4 — Reclaim the dead pages · **HANDED OFF 2026-08-03, DO NOT EXECUTE FROM HERE**
+
+**Superseded by `workstation-yvxh.4` (W3) under the P1 spine `workstation-yvxh`**
+("opencode.db write-lock contention kills turns mid-flight"). `workstation-bm1i`
+is closed. That session confirmed sole ownership; coordinate with it rather than
+acting.
+
+**Do not run a `VACUUM INTO` + `mv` on `opencode.db` from this roadmap.** Both
+plans end in an atomic `mv` over the same file. If two sessions do that in one
+window, whichever swaps second silently discards every write the other captured.
+One named owner, and it is not this plan.
+
+Two things worth keeping from the analysis here, because they were re-measured
+2026-08-03 and the original framing was wrong:
+
+- **`bm1i`'s premise is dead.** It was filed 2026-07-03 as "event table 2.8 GB of
+  4.3 GB, `message.updated.1` snapshots, O(n²) growth". Measured read-only:
+  `event` rows = **0** (the event-log gate works), `page_count` 3 184 258,
+  `freelist_count` ~1.60 M (**50 %**), `page_size` 4096, file **13.04 GB**. The
+  bloat is now *pure freelist*; the O(n²) event-growth story must not be carried
+  forward as a live cause. Both sessions measured this independently and agree.
+- **The ordering below is correct and worth preserving.** The owning session's
+  first draft had `VACUUM INTO` *before* the drain, which would discard every
+  write between snapshot and `mv` — minutes of chat history on a 13 GB vacuum.
+  It has been corrected there. The rule: **snapshot only after the pool is fully
+  stopped**, and deleting stale `-wal`/`-shm` is safe *only* because of that
+  ordering. A snapshot taken while serves were live, paired with sidecar
+  deletion, throws away committed-but-uncheckpointed transactions.
+
+The original scoping follows, for reference only.
+
+### Original scoping (reference)
 
 **Bead:** `workstation-bm1i` (cloudbox arm; the devbox arm is done) · **Depends on:** step 1.
 
