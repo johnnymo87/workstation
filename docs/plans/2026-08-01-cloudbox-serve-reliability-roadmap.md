@@ -1,7 +1,7 @@
 # Cloudbox Serve Reliability Roadmap
 
 **Spine bead:** `workstation-7za8` · **Started:** 2026-08-01 · **Host:** cloudbox only
-**Status:** steps 0, 1, 2, 3 done and deployed · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-le0a`)
+**Status:** steps 0, 1, 2, 3 done and deployed · step 2 in its 7-day observation (day 1: 0 kills, 0 5xx/112k, 0 swap) · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-le0a`)
 
 `opencode-serve@4098` had **one** confirmed throttle-band wedge on 2026-08-01
 (19:04–19:10), plus two earlier stall windows that self-recovered and are
@@ -682,6 +682,43 @@ step.
     - **> 5 kills/day pool-wide** ⇒ raise the cap rather than accept the churn,
       because `workstation-63wo` is still open and every kill strands that
       member's sessions until 03:00.
+### Day-1 observation — 2026-08-03 09:00, 14.1 h post-deploy
+
+**No kills. The kill path remains UNTESTED — outcome 3, "no trigger".** What is
+already confirmed is the *band removal*, and it is confirmed strongly.
+
+| | pre-deploy (21.4 h) | post-deploy (14.1 h) |
+|---|---|---|
+| door 5xx | 3.05 % during swap ≥5 G episodes | **0 of 112 034 requests** |
+| max swap, any member | 22.43 GiB | **0 — not one byte** |
+| PSI `full` | 483 s on 4099 | **0 s** |
+| `memory.events high` | 1 064 918 | **0** |
+
+- Limits survived the 03:00 pool restart, verified on cgroupfs: all four report
+  `memory.high=max`, `memory.max=15032385536`, `memory.swap.max=1073741824`,
+  `TimeoutStopUSec=15s`. Fresh cgroups realize the config correctly, which is
+  the thing a reload-only deploy could not previously prove.
+- **16 minutes ran in the 7–13 G range** — every one of which the old band would
+  have throttled — at p95 20 ms with zero errors.
+- **Zero swap post-deploy confirms the step-2 prediction outright**: the entire
+  pre-deploy "benign swap" class was an artifact of `MemoryHigh` forcing reclaim
+  at 7 G. Remove the band, and serves simply hold their pages resident.
+
+**The cap was reached without a kill, and that is correct.** 4096 sat at exactly
+14.00 G for ~28 min (23:54–00:23) and was never OOM-killed, because the cgroup
+was **93 % page cache** — `file` 13.0–13.3 G against `anon` of only 0.37–0.50 G.
+Reclaim always makes progress on page cache, so the kernel never escalates. This
+is precisely the file-heavy residual the second review predicted and this plan
+accepted, now observed in production and measured harmless (p95 11 ms, zero 5xx
+across 944 requests at the cap).
+
+The practical lesson for the 7-day report: **`memory.current` touching the cap is
+not by itself an event.** It is routine and benign when the composition is page
+cache. Judge on `anon`+`swap` (true demand) and on door harm, never on
+`MemoryCurrent` alone — a report that counts cap-touches will badly overstate.
+
+No cap adjustment. The pre-declared rule keys off *kills*, and there were none.
+
 - **Rollback.** Trigger: **≥3 OOM kills on one member within an hour** (a kill
   loop — possible, since a retrying session can re-inflate to 14 G in minutes),
   or any member failing to come back healthy after a kill. Action: `git revert`
