@@ -48,6 +48,10 @@ SQLITE=$(command -v sqlite3 || true)
 # Build the sweeper the unit will actually run: pull the derivation out of the
 # ExecStart string's context and realise it. home-manager renders ExecStart as a
 # list, unlike the NixOS module's plain string — hence the isList branch.
+# SWEEPER_OVERRIDE escapes the HOME-pinning guarantee below — point it only at a
+# script that honours OPENCODE_SWEEPER_DB. Aimed at a pre-seam artifact (e.g. the
+# cloudbox sweeper, which hardcodes an absolute production path), these tests
+# would drive that script's writes into the real database on this machine.
 SWEEPER="${SWEEPER_OVERRIDE:-}"
 if [ -z "$SWEEPER" ]; then
   echo "building devbox sweeper from $REPO ..."
@@ -146,7 +150,17 @@ check "reports 1 finalized" "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphane
 check "completed set"       "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NOT NULL FROM message WHERE id='msg_orphan';")" 1
 check "error name"          "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.error.name') FROM message WHERE id='msg_orphan';")" MessageAbortedError
 
-echo "== T3: write-time re-check -- an already-finalized row is never clobbered =="
+echo "== T3: idempotence -- a second sweep does not re-touch a finalized row =="
+# HONEST SCOPE, do not read more into this than it proves. The second run
+# filters msg_race out in PHASE 1, so this tests the phase-1 predicate and
+# idempotence. It does NOT exercise the re-checked predicates inside the
+# phase-2 UPDATE, which are what protect a row that a serve completes BETWEEN
+# the two phases. Nothing in this suite exercises those in the declining
+# direction: a regression deleting every re-check from the UPDATE still passes.
+# Bounding the risk -- those predicates are a verbatim copy of phase 1's, so
+# only an always-TRUE corruption (e.g. AND -> OR) would slip through; an
+# always-FALSE one fails T2 and T6 loudly. Closing it properly needs a seam
+# that completes a row between the phases; tracked in workstation-yvxh.11.
 DB="$LAB/t3.db"; mkdb "$DB"
 addrow "$DB" msg_race "$OLD" "$STALE_UPD" NULL NULL
 run "$DB"
@@ -261,9 +275,22 @@ echo "  (control/old-shape: attempts=$CTRIES blocked=$CBLOCKED)"
 if [ "$CBLOCKED" -gt 0 ]; then ok "positive control: old unbounded UPDATE does block a writer at 0 matches"
 else bad "positive control did not block -- fixture too small, the result below is meaningless"; fi
 
-HOME="$FAKEHOME" OPENCODE_SWEEPER_DB="$DB" "$SWEEPER" >/dev/null 2>&1 &
+# The exit status goes through a FILE, not `wait`: hammer_while runs inside a
+# command substitution, i.e. a subshell, where `wait` cannot reap a process that
+# is a child of the parent shell (it returns 127 regardless of how the job
+# actually ended). The rc write happens before the subshell exits, so it is
+# there by the time the kill -0 loop notices the exit.
+( HOME="$FAKEHOME" OPENCODE_SWEEPER_DB="$DB" "$SWEEPER" >"$LAB/t9.out" 2>&1; echo $? >"$LAB/t9.rc" ) &
 read -r TRIES BLOCKED <<<"$(hammer_while $!)"
-echo "  (sweeper: attempts=$TRIES blocked=$BLOCKED)"
+SRC=$(cat "$LAB/t9.rc" 2>/dev/null || echo "no-rc")
+echo "  (sweeper: attempts=$TRIES blocked=$BLOCKED rc=$SRC)"
+# blocked=0 is only meaningful if the sweeper actually RAN. A sweeper that
+# crashed on startup would also block nobody, and would have passed this
+# assertion silently while its output went to /dev/null. Hold both: it must
+# have exited cleanly, and the hammer must have had real time to contend.
+check "sweeper exited 0"     "$SRC" 0
+if [ "$TRIES" -gt 5 ]; then ok "hammer got a real window ($TRIES attempts)"
+else bad "hammer only managed $TRIES attempt(s) -- sweeper returned too fast for this to mean anything; see $LAB/t9.out"; fi
 check "concurrent writer never blocked by sweeper" "$BLOCKED" 0
 
 echo

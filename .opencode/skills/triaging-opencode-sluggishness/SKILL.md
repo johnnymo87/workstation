@@ -86,6 +86,15 @@ WHERE id IN ('msg_...','msg_...')
   AND time_updated < (strftime('%s','now')-1800)*1000;
 ```
 
+**Neither phase above carries the live-owner gate**, which the shipped units add
+and which hand-SQL usually omits: `AND json_extract(data,'$.time.created') <
+<oldest-live-serve-boot-epoch> * 1000`. Without it, a row younger than a running
+serve can be finalized while a fiber is still alive-but-blocked in that serve's
+memory (a headless child parked on the `question` tool, say). That does not free
+the session — the serve still holds the turn — it just lies to every observer
+until the serve's own completion write lands. This is the 2026-07-05 loot
+incident. If serves are live and you are running this by hand, add the gate.
+
 The 30-min gate leaves headroom for long silent tool calls; a false positive
 self-heals (the owning serve's completion write lands last).
 
