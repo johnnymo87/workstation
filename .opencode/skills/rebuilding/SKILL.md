@@ -26,6 +26,32 @@ There are NixOS activation guards that will abort if you use the wrong target, b
 
 **macOS** uses `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (system + home combined).
 
+## Deploy From The Main Worktree, Never A Worktree Or Scratch Checkout
+
+Every command below says `cd ~/projects/workstation` and means it. **A deploy
+applies the whole config the deploying checkout happens to contain** — it is not
+a patch of your change onto the running system. So deploying from a worktree or a
+`/tmp` scratch dir *silently reverts every change that checkout does not have*,
+including work another session landed minutes ago.
+
+The failure is silent in both directions. There is no error, no alert, and the
+only trace is a systemd `Stopped …` line with **no matching `Started`** — a unit
+that vanished because it was absent from the new generation. The reverted state
+persists until somebody deploys a current tree.
+
+**This has happened.** On 2026-08-01 a `nixos-rebuild switch` from `/tmp/wsdeploy`
+removed the `opencode-phantom-busy-sweeper` timer **57 minutes after it landed**,
+and it stayed gone for **13 hours** — the mitigation an entire roadmap step
+depended on, deleted by an unrelated deploy (`workstation-rdsq.2`).
+
+So: **`git pull` in `~/projects/workstation` and deploy from there.** If you are
+working in a worktree, land your change first, then pull and deploy from the main
+checkout. Building from a worktree to check that it *evaluates* is fine
+(`nix build --no-link`, see below) — it is `switch` that is destructive.
+
+This is a convention, deliberately not enforced in code: it is cheap to follow
+and expensive to police.
+
 ## Applying Changes
 
 ### System Changes (requires sudo)
