@@ -1,7 +1,7 @@
 # Cloudbox Serve Reliability Roadmap
 
 **Spine bead:** `workstation-7za8` · **Started:** 2026-08-01 · **Host:** cloudbox only
-**Status:** steps 0–3 done and deployed · step 2 in its 7-day observation (day 1: 0 kills, 0 5xx/112k, 0 swap) · **step 4 handed off to `workstation-yvxh.4`** · remaining: step 4 (`workstation-bm1i`), slice backstop (`workstation-le0a`)
+**Status:** steps 0–3 done and deployed · step 2 in its 7-day observation (day 1: 0 kills, 0 5xx/112k, 0 swap) · **step 4 handed off to `workstation-yvxh.4`** · open here: slice backstop (`workstation-le0a`, rides yvxh's W3 window), 28 GiB idle allocator (`workstation-vpid`), sweeper orphan lag (`workstation-63wo`)
 
 `opencode-serve@4098` had **one** confirmed throttle-band wedge on 2026-08-01
 (19:04–19:10), plus two earlier stall windows that self-recovered and are
