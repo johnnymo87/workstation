@@ -332,6 +332,35 @@ attribution for exactly the episode `child-capture` would outrun.
 
 Both are transient units and **do not survive reboot**.
 
+#### First live capture, 2026-08-03 19:32:56 UTC — identity confirmed
+
+`child-capture` fired within minutes of arming, on **:4098 at 6.55 G**, and the
+row set says exactly what S1 predicted:
+
+| | |
+|---|---|
+| cgroup `anon` | 6.55 G |
+| main opencode process | **1.88 G** |
+| 44 child processes | **6.31 G** |
+
+| child category | procs | sum RSS |
+|---|---|---|
+| `typescript-language-server` / `tsserver` | **16** | **3.05 G** |
+| other node helpers | 13 | 2.21 G |
+| MCP servers | 11 | 0.75 G |
+| `bash` / `pyright` / `eslint` / `lua` LSP | 4 | 0.30 G |
+
+This **upgrades child identity from suspected to confirmed** for a live episode:
+the children are real, they are the LSP/MCP fleet, and they hold 3.4× the main
+process. It does not retroactively identify the 08-02 episode's children — that
+still requires a capture during a burst of that size — and the swap-attribution
+gap for the original 22 G stands unchanged.
+
+It also makes `workstation-rdsq.1` concrete rather than theoretical: those 16
+TypeScript LSP processes serve only **two** project roots (`pigeon` ×9,
+`internal-frontends` ×3). Nine language servers for one repository is the
+never-reaped fleet, measured.
+
 #### Follow-on filed
 
 `workstation-rdsq.1` — LSP/MCP child fleets are never reaped because instances are
