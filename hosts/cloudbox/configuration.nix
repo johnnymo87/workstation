@@ -1266,12 +1266,48 @@ ${serveIdCase}
           # ptrace stop, and the restart follows immediately anyway.
           if [ -n "$PID" ] && [ "$PID" != "0" ]; then
             {
+              wchan_t0=$(date +%s.%N)
               awk '{print "utime="$14, "stime="$15}' "/proc/$PID/stat" 2>/dev/null
               cat "/proc/$PID/io" 2>/dev/null
-              sleep 2
+              # Main-thread wait-channel TIME SERIES, sampled across the same 2s
+              # window this sleep already spent (so it costs nothing).
+              #
+              # A single /proc/PID/wchan snapshot is captured above, but a
+              # snapshot cannot discriminate: sampling a healthy serve by hand
+              # returns "0" (running) or "do_epoll_wait" depending on when you
+              # look. What discriminates is whether the loop EVER returns to
+              # epoll across the window:
+              #   do_epoll_wait ....... event loop free; an HTTP stall here is
+              #                         request serialization, NOT a blocked loop
+              #   hrtimer_nanosleep ... solid, never returning to epoll = the
+              #                         SQLite busy handler spinning
+              #
+              # Why that second case matters: bun:sqlite's busy-wait runs on the
+              # serve's MAIN JS THREAD, so busy_timeout=5000 means a contended
+              # write freezes the event loop for up to 5s. That is not merely
+              # similar to the "alive but frozen" wedge signature -- it is a
+              # mechanism that produces it exactly. Measured by a peer session
+              # (W2a): hrtimer_nanosleep continuously from 0.2s to 3.4s of a 4s
+              # contended write, never once back to epoll.
+              #
+              # /proc/<tid>/syscall would be richer, but yama ptrace_scope=1 is
+              # set on this host, so it is unreadable; wchan is not. Plain shell
+              # counter rather than `seq` -- coreutils is on the PATH above, but
+              # lbe2 was a silent no-op from exactly one assumed-present binary.
+              wchan_i=0
+              while [ "$wchan_i" -lt 20 ]; do
+                printf '%s\n' "$(cat "/proc/$PID/wchan" 2>/dev/null)" \
+                  >> "$DUMP/wchan-series" 2>/dev/null || true
+                wchan_i=$((wchan_i + 1))
+                sleep 0.1
+              done
               awk '{print "utime="$14, "stime="$15}' "/proc/$PID/stat" 2>/dev/null
               cat "/proc/$PID/io" 2>/dev/null
-              echo "clk_tck=100 interval=2s"
+              # Report the interval MEASURED, not the 2s it used to assert: the
+              # sampling loop above costs a little more than its sleeps, and the
+              # utime/stime delta is divided by this number.
+              echo "clk_tck=100 interval=$(awk -v a="$wchan_t0" -v b="$(date +%s.%N)" \
+                'BEGIN{printf "%.2f", b-a}')s"
             } > "$DUMP/cpu-io-split" 2>/dev/null || true
             for i in 1 2 3; do
               timeout 10 ${pkgs.elfutils}/bin/eu-stack -p "$PID" > "$DUMP/eu-stack.$i" 2>&1 || true
