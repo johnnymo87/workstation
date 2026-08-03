@@ -22,8 +22,16 @@ repo but not deployed to any machine yet.
 | Skill | Scope | Purpose |
 |-------|-------|---------|
 | [opencode-launch](skills/opencode-launch/SKILL.md) | cross | Spawn a headless opencode session in a given dir with an initial prompt. The basic primitive for swarm spin-up. |
-| [swarm-messaging](skills/swarm-messaging/SKILL.md) | cross | Sender + receiver protocol: the `swarm_send`/`swarm_read`/`swarm_list` tools, the `<swarm_message>` envelope, message kinds, priority, threading via `reply_to`, replay via `swarm_read`. Also **scheduled wakes** (`swarm_schedule`/`swarm_scheduled`) — waking yourself at a future time, durably across the nightly reset. |
+| [swarm-messaging](skills/swarm-messaging/SKILL.md) | cross | Sender + receiver protocol: the `swarm_send`/`swarm_read`/`swarm_list` tools, the `<swarm_message>` envelope, message kinds, priority, threading via `reply_to`, replay via `swarm_read`. |
+| [scheduling-wakes](skills/scheduling-wakes/SKILL.md) | cross | Waking yourself at a future time with `swarm_schedule`/`swarm_scheduled`. Durable across the nightly reset. Payload rules, what `delivered_late_ms` doesn't measure, and the silent pruned-worktree failure. |
 | [swarm-shaped-work](skills/swarm-shaped-work/SKILL.md) | cross | When to swarm vs. iterate sequentially. Coordinator + workers topology. Spin-up sequence (`opencode-launch` × N → tell coordinator the worker ids → kick off). |
+
+**Ending a turn with something owed to the future?** You cannot remember to do
+it — when the turn ends, nothing runs until someone prompts you. Schedule a
+wake *before you stop*:
+`swarm_schedule(after: "13h", ref: "bd:...", message: "<self-contained>")`.
+The payload must stand alone, because the session that receives it may have
+compacted away why it was scheduled. See `scheduling-wakes`.
 
 ### Session Workflow
 
