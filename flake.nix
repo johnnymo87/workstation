@@ -338,25 +338,41 @@
           --reporter=default \
           --reporter=json --outputFile.json="$TMPDIR/vitest.json"
 
-        # A green runner is NOT evidence that anything ran. Assert the set of
-        # files vitest actually EXECUTED equals the *.test.ts files on disk.
+        # A green runner is NOT evidence that anything ran. Two assertions.
         #
-        # Deliberately a set comparison and not a test count: the failure this
-        # bead exists to fix was whole-file EXCLUSION (a suite silently outside
-        # `include`), which a count cannot see and which a hardcoded count would
-        # invite reviewers to "fix" by bumping the number. The set is
-        # self-maintaining -- a new test file appears on both sides at once.
-        node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!(j.numTotalTests>0)){console.error("FAIL: vitest reported 0 tests");process.exit(1)}console.log(j.testResults.map(function(r){return r.name.split("/").pop()}).sort().join("\n"))' \
+        # (1) Nothing was SKIPPED. vitest exits 0 with `describe.skip`, keeps the
+        # file in testResults, and leaves numTotalTests unchanged -- so a skip is
+        # invisible to both the exit code and the file-set check below (measured:
+        # skipping one describe moved numPendingTests 0 -> 4 and nothing else).
+        # Baseline here is a clean 0 pending / 0 todo, so demanding that costs
+        # nothing and closes the cheapest possible way to silence a failing test
+        # at 2am. Per the store-prefix check above: a skipped assertion is not a
+        # passing one.
+        #
+        # (2) The set of files vitest EXECUTED equals the *.test.ts files on
+        # disk. Deliberately a set and not a count: the failure this bead exists
+        # to fix was whole-file EXCLUSION (a suite silently outside `include`),
+        # which a count cannot see and which a hardcoded count would invite
+        # reviewers to "fix" by bumping the number. The set is self-maintaining --
+        # a new test file appears on both sides at once.
+        #
+        # Paths are compared repo-relative, not by basename: `include` is
+        # `test/**`, so a nested test/unit/foo.test.ts is legitimate, and
+        # basenames would both collide across directories and mis-report a
+        # nested file as missing.
+        node -e 'const fs=require("fs"),path=require("path");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!(j.numTotalTests>0)){console.error("GATE FAILURE: vitest reported 0 tests.");process.exit(1)}if(j.numPendingTests>0||j.numTodoTests>0){console.error("GATE FAILURE: "+j.numPendingTests+" skipped and "+j.numTodoTests+" todo test(s). A skipped test is not a passing one; un-skip it or delete it.");process.exit(1)}console.log(j.testResults.map(function(r){return path.relative(process.cwd(),r.name)}).sort().join("\n"))' \
           "$TMPDIR/vitest.json" > "$TMPDIR/ran.txt"
 
-        for f in test/*.test.ts; do basename "$f"; done | sort > "$TMPDIR/ondisk.txt"
+        find test -name '*.test.ts' -type f | sort > "$TMPDIR/ondisk.txt"
 
-        if ! diff -u "$TMPDIR/ondisk.txt" "$TMPDIR/ran.txt"; then
+        if ! diff -u --label "on disk" --label "actually ran" "$TMPDIR/ondisk.txt" "$TMPDIR/ran.txt"; then
           echo "" >&2
           echo "GATE FAILURE: the *.test.ts files on disk are not the files vitest ran." >&2
-          echo "A file present on disk but absent from the run is excluded by pattern" >&2
-          echo "and is being silently skipped -- that is the whole defect this check" >&2
-          echo "was added to end. See assets/opencode/plugins/vitest.config.ts." >&2
+          echo "  A '-' line is a file that EXISTS but was NOT RUN -- silently excluded" >&2
+          echo "    by the include pattern in assets/opencode/plugins/vitest.config.ts." >&2
+          echo "    That is the whole defect this check was added to end." >&2
+          echo "  A '+' line is a file vitest ran that this check did not expect --" >&2
+          echo "    most likely the on-disk glob above needs widening, not the config." >&2
           exit 1
         fi
         touch $out
@@ -378,10 +394,20 @@
         # Seed a REAL-looking overlay dir. test/oc-session-list.spec.ts has a
         # tripwire asserting the live overlay directory is not touched by the
         # suite; with an empty HOME it compares [] to [] and passes having
-        # tested nothing. A sentinel file gives it something to actually guard.
+        # tested nothing.
+        #
+        # The sentinel must be GC-ELIGIBLE or the seeding is decoration. An
+        # arbitrary blob (say {"sentinel":true}) is skipped by runOrphanGc at
+        # oc-session-list-state.ts:205 for want of numeric pid/heartbeat, so it
+        # survives even a GC aimed straight at this directory -- i.e. it stays
+        # green through the exact disaster the tripwire exists to catch
+        # (measured). A dead pid plus an epoch heartbeat makes it collectable,
+        # so a mispointed GC deletes it and both this check and the tripwire go
+        # red.
         export HOME="$TMPDIR/home"
         mkdir -p "$HOME/.local/share/opencode/session-state.d"
-        echo '{"sentinel":true}' > "$HOME/.local/share/opencode/session-state.d/sentinel.json"
+        echo '{"version":1,"serveId":"sentinel","pid":999999,"heartbeat":0,"directory":"/sentinel","sessions":{}}' \
+          > "$HOME/.local/share/opencode/session-state.d/sentinel.json"
 
         n=0
         for f in test/*.spec.ts; do
@@ -391,6 +417,25 @@
             || { echo "GATE FAILURE: $f reported no passing tests." >&2; exit 1; }
           grep -qE '^ *0 fail' "$TMPDIR/bun-out.txt" \
             || { echo "GATE FAILURE: $f reported failures." >&2; exit 1; }
+
+          # Skips are counted, not ignored -- same reasoning as the vitest gate.
+          # EXACTLY ONE is expected and it is a known, reviewed degradation: the
+          # "against the REAL routing DB" case in oc-session-list.spec.ts, which
+          # needs a live pigeon daemon DB under $HOME and can never run in a
+          # sandbox. It is marked `it.skipIf` rather than early-returning so it
+          # lands in this count instead of masquerading as a pass.
+          #
+          # Deterministic here because HOME is the sandbox's, so the real DBs are
+          # always absent. A SECOND skip appearing means someone silenced a test
+          # that could have run; make that a decision, not a default.
+          skips=$(sed -nE 's/^ *([0-9]+) skip.*/\1/p' "$TMPDIR/bun-out.txt" | head -1)
+          skips=''${skips:-0}
+          if [ "$skips" -ne 1 ]; then
+            echo "GATE FAILURE: $f reported $skips skipped test(s); exactly 1 is expected" >&2
+            echo "(the REAL-routing-DB case). A new skip is a coverage loss that must be" >&2
+            echo "reviewed -- justify it here or un-skip the test." >&2
+            exit 1
+          fi
           n=$((n + 1))
         done
 

@@ -21,8 +21,10 @@ pass() { echo "PASS: $*"; }
 # Run with no env var (`bash pkgs/oc-session-list/test.sh`) and the script still
 # does the whole thing locally, including the build.
 if [ -n "${OC_SESSION_LIST_BIN:-}" ]; then
-  echo "== 1-2. SKIPPED (OC_SESSION_LIST_BIN supplied by caller) =="
+  # Echo the path. A stale OC_SESSION_LIST_BIN left exported in a shell would
+  # otherwise silently test yesterday's binary while reporting ALL PASS.
   BIN="$OC_SESSION_LIST_BIN"
+  echo "== 1-2. SKIPPED -- testing caller-supplied binary: $BIN =="
   [ -x "$BIN" ] || fail "OC_SESSION_LIST_BIN=$BIN is not executable"
 else
   echo "== 1. Running bun unit tests =="

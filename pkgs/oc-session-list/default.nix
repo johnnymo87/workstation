@@ -48,6 +48,13 @@ stdenvNoCC.mkDerivation {
 
   doCheck = true;
 
+  # Smoke test only -- this deliberately does NOT run pkgs/oc-session-list/test.sh.
+  #
+  # `doCheck = true` next to a lone `--help` reads like the package is tested.
+  # It is not, and that misreading is exactly how test.sh's 116 lines sat unrun
+  # for months. The real suite runs in the `oc-session-list-bin` flake check,
+  # which hands the BUILT binary to test.sh via OC_SESSION_LIST_BIN; it cannot
+  # run here, because test.sh shells out to `nix build` and this IS that build.
   checkPhase = ''
     runHook preCheck
 

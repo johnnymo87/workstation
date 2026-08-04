@@ -268,15 +268,20 @@ describe("buildOwnersMap", () => {
     }
   });
 
-  it("against the REAL routing DB, asserts constructed owners map is NON-EMPTY and at least one CHILD session inherits root serve", () => {
-    const realRoutingDb = `${process.env.HOME}/projects/pigeon/packages/daemon/data/pigeon-daemon.db`;
-    const realBaseDbPath = process.env.HOME + "/.local/share/opencode/opencode.db";
+  // Machine-dependent: needs a live pigeon daemon DB and a real opencode.db
+  // under $HOME, so it can never run in a build sandbox.
+  //
+  // `it.skipIf` rather than an early `return`: returning made this a counted
+  // PASS while asserting nothing, so if the pigeon DB path ever moved the test
+  // would retire itself silently and permanently, with no counter anywhere
+  // showing the loss. As a skip it is visible, and the plugin-bun check in
+  // flake.nix pins the skip count at exactly 1 so a SECOND silent skip cannot
+  // slip in behind it.
+  const realRoutingDb = `${process.env.HOME ?? ""}/projects/pigeon/packages/daemon/data/pigeon-daemon.db`;
+  const realBaseDbPath = `${process.env.HOME ?? ""}/.local/share/opencode/opencode.db`;
+  const realDbsPresent = existsSync(realRoutingDb) && existsSync(realBaseDbPath);
 
-    if (!existsSync(realRoutingDb) || !existsSync(realBaseDbPath)) {
-      console.log("Skipping real DB test: real DB files not found");
-      return;
-    }
-
+  it.skipIf(!realDbsPresent)("against the REAL routing DB, asserts constructed owners map is NON-EMPTY and at least one CHILD session inherits root serve", () => {
     const baseDb = new Database(realBaseDbPath, { readonly: true });
     const baseRows = queryBaseList(baseDb, { limit: 1000 });
     baseDb.close();

@@ -70,6 +70,32 @@ fi
 pass "every file under $TEST_DIR/ is claimed by a runner (*.test.ts or *.spec.ts)"
 
 # ---------------------------------------------------------------------------
+# 1b. No test file hides OUTSIDE test/.
+#
+# Both runners are scoped to test/ (vitest's include is "test/**/*.test.ts";
+# the bun check globs test/*.spec.ts). Colocating a test next to its source --
+# assets/opencode/plugins/shell-env.test.ts -- is an ordinary habit in JS
+# projects and would be run by NOTHING here, with every check still green.
+# That is this bead's defect wearing different clothes, so refuse it at the
+# door rather than discovering it in six months.
+# ---------------------------------------------------------------------------
+stray=()
+while IFS= read -r f; do
+  stray+=("$f")
+done < <(find . -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) \
+           -not -path "./$TEST_DIR/*" -not -path "./node_modules/*" | sort)
+
+if [ ${#stray[@]} -gt 0 ]; then
+  echo "FAIL: test file(s) outside $TEST_DIR/, which no runner is scoped to:" >&2
+  printf '  %s\n' "${stray[@]}" >&2
+  echo "" >&2
+  echo "Move them into $TEST_DIR/. Both runners look only there, so a colocated" >&2
+  echo "test is never executed and every check stays green while it rots." >&2
+  exit 1
+fi
+pass "no *.test.ts / *.spec.ts files outside $TEST_DIR/"
+
+# ---------------------------------------------------------------------------
 # 2. Both runners actually have something to claim.
 #
 # Without this, deleting the last *.spec.ts silently retires the bun check
