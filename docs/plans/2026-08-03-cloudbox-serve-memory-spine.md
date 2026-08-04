@@ -714,6 +714,146 @@ which reads exactly like "the timer is gone". It cost a detour here. Use:
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user list-timers
 ```
 
+### S7 — Reap idle instances in serve mode · `workstation-rdsq.1` · **DESIGNED 2026-08-04, NOT YET BUILT**
+
+Worked against upstream **v1.17.13** (`10c894bdee`) in `/home/dev/projects/opencode`,
+which is the exact version the pool runs as `opencode-patched-1.17.13.7`. Newer tags
+exist (v1.17.15..v1.17.19); they are the wrong tree for this.
+
+#### The defect
+
+`opencode serve` is long-lived and serves many directories; each is an "Instance".
+`InstanceStore`'s cache is `new Map<string, Entry>()` (`instance-store.ts:43`) —
+**unbounded, no TTL, no LRU, no timestamps**; `Entry` holds only a `Deferred`. Disposal
+exists but **in serve mode nothing ever calls it for an idle directory**. Every caller
+is something else: CLI one-shot exit (`cli/effect-cmd.ts:88`), worktree removal
+(`worktree/index.ts:397,417`), the explicit HTTP lifecycle endpoints, and
+config-change/shutdown `disposeAll` (`instance-store.ts:192`).
+
+So one directory routed once pins its child fleet for the life of the process.
+
+The teardown plumbing is already complete and correct — this is worth knowing before
+anyone tries to build it: `disposeContext` → `runDisposers` (`instance-registry.ts`)
+→ `ScopedCache.invalidate` → scope close → finalizer → MCP `SIGTERM`s client **and
+descendants** (`mcp/index.ts:523+`), LSP `client.shutdown()` (`lsp.ts:198-202`).
+**Nothing needs to be built to kill the children. Only the decision to call it.**
+
+#### Two corrections to S1's numbers — read before tuning anything
+
+**S1's headline equation does not add and its metrics are not addable.** The note
+read `cgroup anon 6.55G = main 1.88G + 44 children 6.31G`; 1.88 + 6.31 = 8.19.
+Recomputed from `child-capture.tsv` at 19:32:56Z on `:4098`:
+
+| quantity | value |
+|---|---|
+| `cg_anon` (cgroup anonymous charge) | **6.551 G** |
+| sum of per-process RSS | **8.182 G** |
+| main RSS / children RSS | 1.875 G / 6.306 G |
+
+Sum-of-RSS exceeds cgroup anon because RSS counts file-backed pages (which are not
+anon) and **double-counts shared/COW pages** across parent and children. You may not
+add per-process RSS and compare the total to `cg_anon`. What survives, stated as RSS
+ratios: children are **77.1%** of total RSS and **3.36x** the main process.
+
+**That capture is also unrepresentative, and it misdirected the fix.** Classifying all
+28 captures by cmdline, share of summed RSS:
+
+| class | share |
+|---|---|
+| MAIN (opencode itself) | 32.7% |
+| **BAZEL/JVM** | **32.6%** |
+| LSP: tsserver | 12.9% |
+| MCP | 12.0% |
+| node-misc | 4.2% |
+| LSP: other | 3.8% |
+
+LSP+MCP — everything an instance eviction can reclaim — is **~29%**, not the dominant
+term. In the 19:32 capture LSP happened to be 49% of children, which is the only
+reason the original note reads as an LSP story. Two consequences, both filed:
+`workstation-mqp3` (bazel/JVM in the serve cgroup, ~33%, **not evictable by this fix**)
+and `workstation-0svg` (the main process alone holds 1.5–2.8G and climbs).
+
+**S7 is therefore not "the root cause of the OOM".** It reclaims a standing floor.
+`:4098` was 5.43G at 21:51:34Z and was killed at 21:56:21Z at 14G+1G — ~9.5G in under
+five minutes, which no term in the floor moves fast enough to explain. The floor
+removes headroom; something else does the killing. The instrument cannot see it
+(`workstation-lwde`).
+
+#### The design
+
+Split mechanism from policy. **Mechanism** in `instance-store.ts` (~40 lines,
+additive): `Entry` gains `lastAccess` and `evicting?: Deferred`; `load()`'s hot path
+adds one synchronous property write and one branch (if evicting, await the deferred
+then **retry the lookup**); new `tryEvict(dir, guard)` marks synchronously, runs the
+guard, then disposes through the existing `disposeEntry`; new `snapshot()`.
+**Policy** in a new serve-only file composed only by the httpapi server, so CLI and
+TUI behaviour is byte-identical: a 60s fiber evicting entries idle past a TTL whose
+guard passes.
+
+**Why eviction works at all despite every directory having an attached TUI** — this is
+not obvious and nearly sank the design. Disposal emits `server.instance.disposed`
+(`instance-store.ts:97`); the SSE stream self-terminates on it (`handlers/event.ts:61`,
+`Stream.takeUntil`) and the TUI **immediately re-bootstraps**
+(`packages/tui/src/context/sync.tsx:172-173`). On cloudbox every hosted directory has
+a TUI attached, so eviction is followed by re-boot within seconds. That is acceptable
+only because the expensive children do **not** come back: `InstanceBootstrap`'s deps
+are Config/Format/LSP/Plugin/Project/ShareNext/Snapshot/Vcs (`bootstrap.ts:55`) —
+**MCP is absent entirely**, and `LSP.init()` (`lsp.ts:309-311`) only materialises
+config; language servers spawn lazily per file. A reaper cycle costs a JS re-bootstrap
+and reclaims the child RSS. Verify churn in canary before trusting it.
+
+#### Six defects found in adversarial review — all must be in the spec before coding
+
+1. **Counter ordering.** The in-flight counter must be acquired **before**
+   `store.load()`, keyed by `FSUtil.resolve(decode(route.directory))` — the same
+   normalisation as `instance-store.ts:109`. Acquiring after `load` leaves a window
+   where a fiber holds a ctx with counter 0 and no busy status. TTL mode survives it
+   by luck (the fresh `lastAccess` write); **pressure mode ignores TTL and walks
+   straight into it**.
+2. **BackgroundJob.** A finished turn deletes its `SessionStatus` entry
+   (`status.ts:42-46`) while a background job still runs, and owner-scope closure
+   interrupts those jobs. `SessionStatus`-empty alone silently kills the user's
+   background processes.
+3. **Disposal timeout.** `runDisposers` is `Promise.allSettled`
+   (`instance-registry.ts:11`) — never rejects, but **can hang**: the MCP finalizer
+   awaits `client.close()` untimed (`mcp/index.ts:542`), LSP awaits `client.shutdown()`
+   untimed. A hung disposal leaves the evicting deferred incomplete and **every future
+   `load` for that directory awaits forever**. Complete it via `ensuring` on all exits
+   including defect.
+4. **`reload`/`dispose`/`disposeDirectory` must await an in-progress eviction.**
+   `reload` swaps a new entry in synchronously (`instance-store.ts:132`) then disposes
+   the old in a forked fiber — concurrent with `tryEvict` that reproduces the exact
+   boot-races-teardown collision the design claims to close, because `InstanceState`
+   ScopedCaches are keyed by bare directory string globally (`instance-state.ts:30-38`).
+5. **`lastAccess` is written at request start only**, so a long turn that goes idle is
+   evicted ~60s later and the user pays a full re-boot on their next prompt. Touch it
+   on release too.
+6. **Cross-generation resurrection.** A fiber holding a pre-eviction ctx from an
+   uncounted loader (`acp/usage.ts:129`, `acp/directory.ts:117`, `worktree/index.ts:250`,
+   `control-plane/workspace.ts:273`) that later calls `InstanceState.get` **re-runs init
+   in the still-registered ScopedCache**, respawning e.g. the whole MCP fleet with no
+   store entry tracking it.
+
+#### Rollout, and what is explicitly rejected
+
+Default-**off** behind an env var (unset ⇒ the reaper layer is never composed). Stage:
+mechanism patch alone → enable TTL on **one** serve via a unit env override (no
+lockstep nix release needed to toggle) → watch churn by counting
+`server.instance.disposed` → pressure mode last, and triggered on `memory.stat` **anon**,
+not `memory.current` (which includes reclaimable page cache and would fire on
+cache-warm workloads that would never OOM).
+
+Rejected: a TTL on the `instance-state.ts` ScopedCache (wrong granularity — expires
+`SessionRunState` independently and cancels live runners, `run-state.ts:39-45`);
+calling `runDisposers` directly from the reaper (leaves a stale entry serving a dead
+ctx); per-instance RSS attribution; an LRU capacity cap (count is uncorrelated with
+memory — two roots held 6.31G).
+
+The review also recommended shipping LSP bounding **first** on the grounds the problem
+is "80% LSP". That generalised from the single 19:32 capture; across all 28 it is 16.7%.
+Not adopted on those grounds. LSP-specific idle shutdown remains a reasonable smaller
+alternative, but it is not 80% of the win.
+
 ## Deliberately NOT doing
 
 - **The opencode.db vacuum.** `workstation-yvxh.4` owns it and owns the `mv`.
