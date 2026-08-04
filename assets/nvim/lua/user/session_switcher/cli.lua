@@ -13,7 +13,11 @@
 --   1. Real today: the call is not free. Measured on cloudbox against the live
 --      13 GB opencode.db, `--with-state --limit 50` takes 120-250 ms and emits
 --      ~300 KB of JSON (the limit is per ROOT TREE, so 50 roots expanded to
---      621 rows). Blocking the editor for a quarter second on every picker
+--      621 rows; `--fold` collapses that back to ~50 rows). `--fold` does not
+--      make the call cheaper: when a live writer reports attention-worthy
+--      sessions outside the recency window it runs a SECOND recursive ancestry
+--      walk to union them in, so the degraded case costs more, not less.
+--      Blocking the editor for a quarter second on every picker
 --      open is bad; the DB is unbounded and contended, so that figure is a
 --      floor, not a ceiling.
 --   2. Prospective: if the CLI ever performs socket discovery via
@@ -58,6 +62,14 @@ M.DEFAULT_TIMEOUT_MS = 5000
 --- @return string[]
 function M.build_argv(opts)
   local argv = { opts.cmd or M.CMD, "--with-state" }
+  -- `--fold` (S6) asks for the ROW MODEL: one row per root tree, children folded
+  -- into child_state, sorted by attention, plus attention-worthy roots the
+  -- recency window dropped. Opt-in rather than default because the flat shape is
+  -- what makes an individual child's nodata inspectable, and the S3 outage
+  -- forensics workflow reads it.
+  if opts.fold then
+    table.insert(argv, "--fold")
+  end
   if opts.limit then
     table.insert(argv, "--limit")
     table.insert(argv, tostring(opts.limit))

@@ -132,4 +132,36 @@ echo "$JSON_LIVE_OUT" | grep -q '"activity": "idle"' \
   || fail "--with-state must report idle when a live writer is present and silent"
 pass "--with-state distinguishes nodata (no writer) from idle (live writer, silent)"
 
+# --- Stage 5: the S6 row model, end to end through the BUILT binary. ---------
+#
+# The unit tests cover foldRows in isolation. This asserts the flag is actually
+# wired in the shipped artifact -- the gap that let pkgs/oc-session-list/test.sh
+# itself sit unrun for months (see default.nix's checkPhase note).
+JSON_FOLD_OUT="$("$BIN" --db "$TEST_DB" --with-state --fold --limit 10 \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list --fold failed on fixture DB"
+
+# Roots only: the 3-level tree collapses to root_1, and its descendants are gone
+# as ROWS. Anchored on the "id" field for the reason stage 3 documents.
+echo "$JSON_FOLD_OUT" | grep -q '"id": "root_1"' \
+  || fail "--fold dropped the root itself"
+echo "$JSON_FOLD_OUT" | grep -q '"id": "grandchild_1"' \
+  && fail "--fold emitted a DESCENDANT as its own row -- the fold did not happen"
+echo "$JSON_FOLD_OUT" | grep -q '"id": "child_1"' \
+  && fail "--fold emitted a DESCENDANT as its own row -- the fold did not happen"
+
+# Paired POSITIVE, so the two negatives above cannot pass by the command simply
+# failing or printing nothing: the fold must report the children it swallowed.
+echo "$JSON_FOLD_OUT" | grep -q '"child_count": 2' \
+  || fail "--fold lost the child_count for the 3-level tree (empty output would pass the negatives above)"
+echo "$JSON_FOLD_OUT" | grep -q '"effective_state"' \
+  || fail "--fold emitted no effective_state"
+echo "$JSON_FOLD_OUT" | grep -q '"sort_rank"' \
+  || fail "--fold emitted no sort_rank"
+
+# And --fold must not have leaked into the plain shape.
+echo "$JSON_LIVE_OUT" | grep -q '"effective_state"' \
+  && fail "--with-state alone emitted row-model fields -- the flag is not gating anything"
+pass "--fold folds descendants into one root row and leaves --with-state untouched"
+
 echo "ALL PASS (oc-session-list)"
