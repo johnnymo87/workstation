@@ -96,6 +96,30 @@
       allProjects;
     # All systems we target
     systems = [ devboxSystem darwinSystem ];
+
+    pluginSrc = ./assets/opencode/plugins;
+
+    # node_modules INCLUDING devDependencies, for the TypeScript test checks
+    # below. Deliberately a SECOND deps stage rather than a reuse of the one in
+    # pkgs/opencode-plugin-bundle: that one passes `--omit=dev` because a
+    # shipped bundle needs no test tooling, and vitest lives in
+    # devDependencies. Sharing a single stage would mean either shipping test
+    # tooling into every plugin bundle or having no vitest to run here.
+    #
+    # Built with `importNpmLock.buildNodeModules` (not buildNpmPackage +
+    # npmDepsHash) to match the convention pkgs/opencode-plugin-bundle
+    # documents at length: each dep is fetched by the lockfile's own SRI
+    # integrity, so there is NO output hash to maintain and a nixpkgs nodejs
+    # bump can at most trigger a rebuild, never a hash mismatch.
+    pluginTestNodeModules = devboxPkgs.importNpmLock.buildNodeModules {
+      package = devboxPkgs.lib.importJSON (pluginSrc + "/package.json");
+      packageLock = devboxPkgs.lib.importJSON (pluginSrc + "/package-lock.json");
+      nodejs = devboxPkgs.nodejs;
+      derivationArgs = {
+        pname = "opencode-plugin-node-modules-dev";
+        version = "0.1.0";
+      };
+    };
   in {
     # Expose local packages for nix-update and nix build.
     # Filter out packages whose meta.platforms excludes the target system
@@ -252,16 +276,213 @@
         touch $out
       '';
 
-      # Loader-replica pin guard. Same rationale as the opacity guard above, and
-      # the same failure it was written to avoid: the assertion also exists as a
-      # vitest case, but CI runs `nix flake check` and never runs vitest, so the
-      # vitest copy fires only on a local run -- i.e. after a bump has shipped.
-      # Enforced here so a stale pin is red in the checked path.
+      # Loader-replica pin guard. Same rationale as the opacity guard above.
+      #
+      # The assertion also exists as a vitest case, which -- as of the
+      # plugin-vitest check below -- now DOES run in CI. This bash copy stays
+      # anyway, deliberately, for two reasons. It is dependency-free, so it
+      # still fires when the node_modules stage or vitest itself is broken,
+      # which is exactly when the vitest copy goes dark. And it covers ground
+      # vitest cannot reach: the LOADER_SEMANTICS_PIN marker inside
+      # pkgs/opencode-plugin-bundle/default.nix, which is a third copy of loader
+      # semantics living in a derivation, not in a test file.
       loader-pin = devboxPkgs.runCommand "loader-pin-guard" {
         nativeBuildInputs = [ devboxPkgs.bash ];
       } ''
         cd ${self}
         bash users/dev/test-loader-pin.sh
+        touch $out
+      '';
+
+      # ---- assets/opencode/plugins TypeScript suites (bead workstation-dmat) ----
+      #
+      # WHY THESE EXIST: this directory held THREE test harnesses and CI ran
+      # NONE of them -- 205 vitest tests, 34 bun tests, and a 116-line
+      # integration script, all invisible to `nix flake check`. Worse than
+      # absent: `npm test` exited GREEN over the bun suite it never loaded
+      # (vitest's `include` matches *.test.ts, and that file is a bun *.spec.ts),
+      # so the pre-push signal actively said "covered". The same sentence the
+      # opacity guard above earned applies to a test nobody runs.
+      #
+      # Split into separate checks on purpose: CI runs `nix flake check
+      # --keep-going`, so three checks report three independent verdicts in one
+      # run, and the check NAME attributes the failure without reading a log.
+
+      # Naming taxonomy + runner-claim guard. Bash-only and dependency-free, so
+      # it still fails when the node_modules stage or a runner is itself broken
+      # -- precisely when the two checks below go dark.
+      plugin-test-coverage = devboxPkgs.runCommand "plugin-test-coverage-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.findutils ];
+      } ''
+        cd ${self}
+        bash assets/opencode/plugins/test-runner-coverage.sh
+        touch $out
+      '';
+
+      # The vitest half (test/**/*.test.ts).
+      #
+      # Copies the whole ${self} rather than just the plugins directory because
+      # test/plugin-loader-contract.test.ts resolves ../../../users/dev/*.nix and
+      # needs the real repo layout; with only the plugins dir it fails ENOENT
+      # while the other eight files pass.
+      plugin-vitest = devboxPkgs.runCommand "plugin-vitest-tests" {
+        nativeBuildInputs = [ devboxPkgs.nodejs ];
+      } ''
+        cp -r --no-preserve=mode,ownership ${self} ./repo
+        cd ./repo/assets/opencode/plugins
+        ln -s ${pluginTestNodeModules}/node_modules ./node_modules
+        export HOME="$TMPDIR/home"
+        mkdir -p "$HOME"
+
+        node_modules/.bin/vitest run \
+          --reporter=default \
+          --reporter=json --outputFile.json="$TMPDIR/vitest.json"
+
+        # A green runner is NOT evidence that anything ran. Two assertions.
+        #
+        # (1) Nothing was SKIPPED. vitest exits 0 with `describe.skip`, keeps the
+        # file in testResults, and leaves numTotalTests unchanged -- so a skip is
+        # invisible to both the exit code and the file-set check below (measured:
+        # skipping one describe moved numPendingTests 0 -> 4 and nothing else).
+        # Baseline here is a clean 0 pending / 0 todo, so demanding that costs
+        # nothing and closes the cheapest possible way to silence a failing test
+        # at 2am. Per the store-prefix check above: a skipped assertion is not a
+        # passing one.
+        #
+        # (2) The set of files vitest EXECUTED equals the *.test.ts files on
+        # disk. Deliberately a set and not a count: the failure this bead exists
+        # to fix was whole-file EXCLUSION (a suite silently outside `include`),
+        # which a count cannot see and which a hardcoded count would invite
+        # reviewers to "fix" by bumping the number. The set is self-maintaining --
+        # a new test file appears on both sides at once.
+        #
+        # Paths are compared repo-relative, not by basename: `include` is
+        # `test/**`, so a nested test/unit/foo.test.ts is legitimate, and
+        # basenames would both collide across directories and mis-report a
+        # nested file as missing.
+        node -e 'const fs=require("fs"),path=require("path");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!(j.numTotalTests>0)){console.error("GATE FAILURE: vitest reported 0 tests.");process.exit(1)}if(j.numPendingTests>0||j.numTodoTests>0){console.error("GATE FAILURE: "+j.numPendingTests+" skipped and "+j.numTodoTests+" todo test(s). A skipped test is not a passing one; un-skip it or delete it.");process.exit(1)}console.log(j.testResults.map(function(r){return path.relative(process.cwd(),r.name)}).sort().join("\n"))' \
+          "$TMPDIR/vitest.json" > "$TMPDIR/ran.txt"
+
+        find test -name '*.test.ts' -type f | sort > "$TMPDIR/ondisk.txt"
+
+        if ! diff -u --label "on disk" --label "actually ran" "$TMPDIR/ondisk.txt" "$TMPDIR/ran.txt"; then
+          echo "" >&2
+          echo "GATE FAILURE: the *.test.ts files on disk are not the files vitest ran." >&2
+          echo "  A '-' line is a file that EXISTS but was NOT RUN -- silently excluded" >&2
+          echo "    by the include pattern in assets/opencode/plugins/vitest.config.ts." >&2
+          echo "    That is the whole defect this check was added to end." >&2
+          echo "  A '+' line is a file vitest ran that this check did not expect --" >&2
+          echo "    most likely the on-disk glob above needs widening, not the config." >&2
+          exit 1
+        fi
+        touch $out
+      '';
+
+      # The bun half (test/*.spec.ts). Needs no node_modules: that suite's
+      # import graph is closed over relative + node: + bun: specifiers only.
+      #
+      # The glob is EXPLICIT rather than a bare `bun test` because bun's default
+      # matcher also picks up the *.test.ts files, which import vitest and fail
+      # under it (measured: 43 failures, 4 errors). Globbing is also what makes
+      # a newly added *.spec.ts run automatically -- execution is enumeration.
+      plugin-bun = devboxPkgs.runCommand "plugin-bun-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.bun devboxPkgs.gnugrep ];
+      } ''
+        cp -r --no-preserve=mode,ownership ${self} ./repo
+        cd ./repo/assets/opencode/plugins
+
+        # Seed a REAL-looking overlay dir. test/oc-session-list.spec.ts has a
+        # tripwire asserting the live overlay directory is not touched by the
+        # suite; with an empty HOME it compares [] to [] and passes having
+        # tested nothing.
+        #
+        # The sentinel must be GC-ELIGIBLE or the seeding is decoration. An
+        # arbitrary blob (say {"sentinel":true}) is skipped by runOrphanGc at
+        # oc-session-list-state.ts:205 for want of numeric pid/heartbeat, so it
+        # survives even a GC aimed straight at this directory -- i.e. it stays
+        # green through the exact disaster the tripwire exists to catch
+        # (measured). A dead pid plus an epoch heartbeat makes it collectable,
+        # so a mispointed GC deletes it and both this check and the tripwire go
+        # red.
+        export HOME="$TMPDIR/home"
+        mkdir -p "$HOME/.local/share/opencode/session-state.d"
+        echo '{"version":1,"serveId":"sentinel","pid":999999,"heartbeat":0,"directory":"/sentinel","sessions":{}}' \
+          > "$HOME/.local/share/opencode/session-state.d/sentinel.json"
+
+        n=0
+        for f in test/*.spec.ts; do
+          echo "== bun test $f =="
+          bun test "$f" 2>&1 | tee "$TMPDIR/bun-out.txt"
+          grep -qE '^ *[1-9][0-9]* pass' "$TMPDIR/bun-out.txt" \
+            || { echo "GATE FAILURE: $f reported no passing tests." >&2; exit 1; }
+          grep -qE '^ *0 fail' "$TMPDIR/bun-out.txt" \
+            || { echo "GATE FAILURE: $f reported failures." >&2; exit 1; }
+
+          # Skips are counted, not ignored -- same reasoning as the vitest gate.
+          # EXACTLY ONE is expected and it is a known, reviewed degradation: the
+          # "against the REAL routing DB" case in oc-session-list.spec.ts, which
+          # needs a live pigeon daemon DB under $HOME and can never run in a
+          # sandbox. It is marked `it.skipIf` rather than early-returning so it
+          # lands in this count instead of masquerading as a pass.
+          #
+          # Deterministic here because HOME is the sandbox's, so the real DBs are
+          # always absent. A SECOND skip appearing means someone silenced a test
+          # that could have run; make that a decision, not a default.
+          skips=$(sed -nE 's/^ *([0-9]+) skip.*/\1/p' "$TMPDIR/bun-out.txt" | head -1)
+          skips=''${skips:-0}
+          if [ "$skips" -ne 1 ]; then
+            echo "GATE FAILURE: $f reported $skips skipped test(s); exactly 1 is expected" >&2
+            echo "(the REAL-routing-DB case). A new skip is a coverage loss that must be" >&2
+            echo "reviewed -- justify it here or un-skip the test." >&2
+            exit 1
+          fi
+          n=$((n + 1))
+        done
+
+        if [ "$n" -eq 0 ]; then
+          echo "GATE FAILURE: no test/*.spec.ts matched, so this check ran nothing." >&2
+          exit 1
+        fi
+
+        # The tripwire above is only meaningful while its subject exists.
+        [ -f "$HOME/.local/share/opencode/session-state.d/sentinel.json" ] \
+          || { echo "GATE FAILURE: the suite deleted the sentinel overlay file." >&2; exit 1; }
+
+        echo "bun: $n spec file(s) executed"
+        touch $out
+      '';
+
+      # The BUILT ARTIFACT (pkgs/oc-session-list/test.sh stages 3-4).
+      #
+      # That script sat unrun despite its derivation setting doCheck = true --
+      # the checkPhase only ran `--help`. It is the sole coverage of the nix-built
+      # binary: recursive-CTE root resolution over a 3-level session tree,
+      # archived-session exclusion, and the S3 nodata-vs-idle distinction whose
+      # absence made the 2026-08-01 outage look normal for ~9 hours.
+      #
+      # The binary is injected via OC_SESSION_LIST_BIN (same fixture-injection
+      # shape as store-prefix above) because the script otherwise runs `nix build`
+      # on itself, which a build sandbox cannot do. A side effect worth naming:
+      # this is the first time oc-session-list is BUILT in CI rather than merely
+      # evaluated.
+      oc-session-list-bin = devboxPkgs.runCommand "oc-session-list-bin-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.bun devboxPkgs.gnugrep ];
+        OC_SESSION_LIST_BIN = "${(localPkgsFor devboxSystem).oc-session-list}/bin/oc-session-list";
+      } ''
+        cd ${self}
+        bash pkgs/oc-session-list/test.sh 2>&1 | tee "$TMPDIR/out.txt"
+
+        # Assert the assertions RAN. The env var above skips stages 1-2 by
+        # design, and a future edit that widened that skip would otherwise leave
+        # this check green over nothing -- the store-prefix lesson.
+        grep -q '^PASS: --with-state distinguishes nodata' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the nodata-vs-idle assertion did not run." >&2
+          exit 1
+        }
+        grep -q '^ALL PASS (oc-session-list)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the suite did not reach its final ALL PASS line." >&2
+          exit 1
+        }
         touch $out
       '';
     };

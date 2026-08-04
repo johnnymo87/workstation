@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "vitest run --passWithNoTests",
+    "test": "npm run test:vitest && npm run test:bun",
+    "test:vitest": "vitest run",
+    "test:bun": "bun test test/*.spec.ts",
     "test:watch": "vitest",
     "typecheck": "npx tsc --noEmit"
   },
