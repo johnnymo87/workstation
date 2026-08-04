@@ -1742,6 +1742,58 @@ EOF
     };
   };
 
+  # W2d (bead workstation-yvxh.12): read-only instrumentation of opencode.db
+  # write-lock contention, feeding W2's busy_timeout/retry tuning decision.
+  # Spec: docs/plans/2026-08-03-w2d-lockprobe-spec.md
+  #
+  # Measures TWO quantities and never conflates them: hold duration H (from
+  # /proc/locks, byte 120 of the -shm file, holder PID visible) and observed
+  # main-thread freeze F (from /proc/<pid>/wchan). F is the RESIDUAL hold at
+  # contender arrival, not H -- see the spec before quoting either number.
+  #
+  # Continuous rather than a timer: the quantity is a distribution, so its value
+  # accrues with wall-clock coverage. A periodic oneshot would sample a biased
+  # slice and miss precisely the rare long holds that matter.
+  systemd.services.opencode-lockprobe = {
+    description = "Sample opencode.db write-lock holds and serve event-loop freezes (read-only)";
+    wantedBy = [ "multi-user.target" ];
+    # Not Requires=: the probe must keep running (and keep emitting the rollup
+    # heartbeat) across a pool restart, precisely so a reset is visible in the
+    # data as a PID change rather than as a silent gap.
+    after = [ "opencode-serve-pool.target" ];
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      # /var/lib/opencode-lockprobe, created and chowned by systemd.
+      StateDirectory = "opencode-lockprobe";
+      ExecStart = "${pkgs.python3}/bin/python3 ${./opencode-lockprobe.py}";
+      Environment = [
+        # systemctl is needed for serve discovery (a unit GLOB -- no port is
+        # ever named, which keeps this clear of the front-door opacity guard
+        # by construction rather than by exemption).
+        "PATH=${lib.makeBinPath [ pkgs.systemd pkgs.coreutils ]}"
+        "LOCKPROBE_OUT=/var/lib/opencode-lockprobe/episodes.jsonl"
+      ];
+      Restart = "always";
+      RestartSec = "10s";
+      # This is a measurement of a contended box; it must not become a
+      # contributor to that contention. Deprioritised on CPU and IO, and capped
+      # on memory so a leak degrades the probe rather than the machine.
+      Nice = 10;
+      CPUWeight = 20;
+      IOWeight = 20;
+      MemoryMax = "192M";
+      # Read-only observation. It reads procfs and stats the -shm file; the only
+      # thing it writes is its own state directory.
+      ProtectSystem = "strict";
+      ProtectHome = "read-only";
+      PrivateTmp = true;
+      NoNewPrivileges = true;
+      RestrictSUIDSGID = true;
+    };
+  };
+
   # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
   # router forwards to when work Claude-on-Vertex spend is over budget
   # (8fe.15 PREREQ). Runs upstream KarpelesLab/teamclaude (tagged release,
