@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-Tw9DJZM1U0qAEVz/e88SQ5OTJA6JztEvPJr6PqZB0l0=";
+      hash = "sha256-9crSrtX5ujXtLuPvmiIPRwq5sKePrl4rCcDsCEbS1DU=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-KrmD5Nu7tNF9IUbh7WZeFfHbIYLTSCmi8hk3kTtxtQ8=";
+      hash = "sha256-7tbfPROGYkXtyJDPV2C4W60Tv5xfnMQwTbLvEhzNApI=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-Vn3F6DeJAJQVWBmGl3CBgwJ08yOyL4mtTV5HnT1TKqo=";
+      hash = "sha256-HStc/Tm2pdCmnNDLp7wtM/t8va5+LWjDAo9Ef0fFcYQ=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-MtB+q1YERU+wedBc54AV0/i5JkXMRr8RUyadN6oC8R4=";
+      hash = "sha256-GWk+P4witQpstQS5WdCL9CTaumyBmG1GNMoXFiBXgxQ=";
       isZip = true;
     };
   };
@@ -271,7 +271,7 @@ let
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.13";
-    patchedRevision = "7";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "8";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
