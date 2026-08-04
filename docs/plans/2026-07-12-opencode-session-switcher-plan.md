@@ -25,9 +25,15 @@ and forcing SDD onto it would be theatre.
 | ~~S3~~ | `workstation-rq7k` | ~~Emit `nodata`, not `idle`~~ **DONE 2026-08-01** (PR #243) — predicate is a recency-keyed hybrid, not the obvious per-directory rule (see S3 write-up) | compact → oracle → TDD → adversarial → PR | — |
 | ~~S4~~ | `workstation-vyad` | ~~Task 4: thin **async** Lua caller~~ **DONE 2026-08-02** (PR #251) — `session_switcher/cli.lua`; async justified by measurement, not by the (currently unreachable) deadlock | compact → TDD → adversarial → PR | — |
 | ~~S5~~ | `workstation-afp2` | ~~Task 5: Lua socket discovery~~ **DONE 2026-08-02** (PR #253) — liveness is `attach_status` **and** per-buffer job truth; dedupe is live-beats-dead, not last-writer | compact → TDD → adversarial → PR | — |
-| S6 | `workstation-vk9y` | Task 8: join + row model | compact → SDD → adversarial → PR | ✅ ready |
+| S6 | `workstation-vk9y` | Task 8: join + row model | compact → SDD → adversarial → PR | `workstation-dmat` ✅ **cleared 2026-08-04** (PR #292) |
 
 `bd ready` currently returns **S6** (S0/S1/S3/S4/S5 done, S2 folded).
+
+S6 was briefly blocked on `workstation-dmat`, deliberately: its join logic lands
+in `assets/opencode/plugins/oc-session-list-state.ts`, and until #292 **nothing
+in CI ran that package's 239 tests**. Writing new tests there first would have
+put S6's correctness behind a harness that never executes — the same mistake
+S4 documented in `checks.nvim-lua` and routed around. That block is now cleared.
 
 ### Spawned work — beads this roadmap's own cycles produced
 
@@ -43,12 +49,22 @@ findings into the issue tracker and forget them.
 | `workstation-9i5k` | S3 | Verify the nightly reset does not cause a **morning `nodata` storm** | Raised by S3's adversarial review and explicitly **suspected, not measured**. A restarted serve with no instances yet has no files, so it reads as "not reporting". Measure the reset→reopen ordering before changing anything |
 | `workstation-pscu` | S4 | **`pkgs/oc-auto-attach/test-project-key.sh` runs nowhere** — no `doCheck`, and CI runs only `nix flake check`, so its assertions are inert | S4 needed a harness, not a fix to that one. It routed around the problem (`checks.nvim-lua`) rather than inheriting it; oc-auto-attach's own coverage is still fake and nobody should assume it is green |
 | `workstation-095u` | S5 | Sessions in **non-tmux or nested nvims are undiscoverable** — nvims creates no socket there, so no peer can see them | A limitation of the socket convention, not of discovery. S5's job was to stop reporting corpses as live; this is about sessions it cannot see at all. Recorded as a consumer contract on S6: *absence is not proof* |
+| `workstation-dmat` | S6 | **The three TS harnesses under `assets/opencode/plugins/` ran nowhere** — 205 vitest tests, 34 bun tests, and a 116-line integration script, none reachable from `nix flake check`. Worse than absent: `npm test` exited green over the bun suite it never loaded | ✅ **Done** (PR #292). The one spawned bead that *did* block a spine step: S6 puts its join logic in `oc-session-list-state.ts`, and landing that behind an unrun harness would have been the fourth instance of this pattern, committed knowingly |
+| `workstation-oeyv` | `dmat` | Repo-wide meta-guard: assert every test file is reachable from *some* flake check | `dmat` wired the three known harnesses; this is the structural fix that would have caught them mechanically. Deliberately not folded in — `dmat` shipped the narrow within-package version, and the repo-wide sweep is a bigger, separate change |
 
 Note that `pscu` is the same shape one level up: a *test* that was not running
 where we assumed it was. S0/S1/`h0mp` were an unrun writer; `pscu` is an unrun
-guard; the frontdoor-opacity check `flake.nix` already documents was a third.
-Three independent instances is a pattern, not a coincidence — when this repo
-says something is covered, check that the thing doing the covering executes.
+guard; the frontdoor-opacity check `flake.nix` already documents was a third;
+`dmat` was a fourth and the largest — 239 tests plus an integration script.
+Four independent instances is not a coincidence — when this repo says something
+is covered, check that the thing doing the covering executes.
+
+`dmat` also sharpened the diagnosis. The failure is **not** always "no harness
+exists". There, a harness existed and passed locally while silently skipping a
+whole suite, because vitest's `include` did not match a bun-based `.spec.ts`.
+So the property worth guarding is *runner coverage* — is this file actually
+executed by something — not merely "is there a test file". That is what
+`oeyv` is scoped to, and why a green local `npm test` is not evidence.
 
 The through-line: S0, S1, and `h0mp` are all the same failure — **the writer was
 not running where we assumed it was**, and nothing said so. S3 is the tripwire
