@@ -1,7 +1,8 @@
 # Unverified-Claims Roadmap — guards for things this repo asserts but never checks
 
-**Beads:** `workstation-pscu` (P1) · `workstation-oeyv` (P2) · `workstation-h0mp` (P1)
-**Started:** 2026-08-04 · **Status:** none shipped
+**Beads:** ~~`workstation-pscu`~~ (done) · `workstation-oeyv` (P2) · `workstation-h0mp` (P1)
+**Started:** 2026-08-04 · **Status:** step 1 shipped (PR #305)
+**Spawned:** `workstation-dimz` (P2, mirror drift) · `workstation-om5r` (P3, NIX_BUILD_TOP heuristic)
 
 These three items were discovered while executing *other* roadmaps and were
 parked in the session-switcher plan's "spawned work" table, which recorded why
@@ -24,7 +25,7 @@ Four measured instances, all found by hand, none by machine:
 |---|---|---|---|
 | `frontdoor-opacity` guard | "no consumer addresses an individual serve" | Red on `main` from **#217 until 2026-08-01** — wired to no flake check, no CI step, no canary (`flake.nix:185-186`) | Someone reading the file |
 | `dmat` — three TS harnesses | "the plugin package has 239 tests" | Unknown duration; `npm test` exited **green over a bun suite it never loaded** | S6 needing a place to put tests |
-| `pscu` — `test-project-key.sh` | "oc-auto-attach is tested" | Since it was written — no `doCheck`, and CI runs only `nix flake check` | S4 needing the same |
+| `pscu` — `test-project-key.sh` | "oc-auto-attach is tested" | Since it was written until **2026-08-04** — no `doCheck`, and CI runs only `nix flake check`. When finally run it failed, and on a stripped PATH silently dropped 20 of 71 assertions | S4 needing the same |
 | `h0mp` — home-manager switch | "the deploy shipped the config it declares" | ~32h of `shell-env.ts` silently un-deployed; also S0's actual root cause | Reading a generation by hand |
 
 The lesson is already written in `flake.nix:226` — *a guard nothing runs is
@@ -35,7 +36,7 @@ point of this roadmap is to stop learning it.
 
 ## Ordering constraint (do not get this wrong)
 
-**`pscu` must land before `oeyv`.**
+**`pscu` must land before `oeyv`.** — *satisfied 2026-08-04 (PR #305); `oeyv` is now unblocked and lands on a repo that already satisfies it.*
 
 `oeyv` is a repo-wide meta-guard that enumerates candidate test files
 (`*test*.sh`, `*.test.ts`, `*.spec.ts`, `test-*.lua`, nix `checkPhase` scripts)
@@ -54,32 +55,57 @@ Fix `pscu` first. Then `oeyv` lands green on a repo that already satisfies it.
 
 ---
 
-## Step 1 — `pscu`: wire `test-project-key.sh`, then fix what it finds · **NOT STARTED**
+## Step 1 — `pscu`: wire `test-project-key.sh`, then fix what it finds · **DONE** (PR #305)
 
-**Bead:** `workstation-pscu` (P1, filed 2026-08-02, oldest unaddressed item here)
+**Bead:** `workstation-pscu` (P1, filed 2026-08-02) — closed 2026-08-04.
 
-`pkgs/oc-auto-attach/default.nix` sets no `doCheck`/`checkPhase`, so nothing
-executes the script — including its `nvim -l` harness (`:682`) and the tmux
-`list_session_panes` regression tests referenced from `default.nix:171`.
+Registered as `checks.oc-auto-attach`. The step was never "wire it up", and the
+prediction that it would not simply be green held.
 
-**The step is not "wire it up".** It is *wire it up and then fix whatever turns
-out to be broken*. This script has never run. Assuming it is green is the same
-assumption that made all four rows in the table above invisible, and `dmat`
-already produced the counterexample: when its three harnesses were finally
-executed, they did not simply pass.
+**What running it for the first time found.** The `nvim -l` harness called
+`loadfile()` on a **cwd-relative** path: the suite passed from the repo root and
+failed from its own directory. Now absolute via `BASH_SOURCE`. The check
+deliberately does *not* `cd ${self}` — it runs from `$TMPDIR` by absolute store
+path, so cwd-independence is exercised rather than masked. The first draft *did*
+`cd ${self}` and would have been green over the very bug it was added to catch.
 
-Copy the shape `dmat` used — a `runCommand` flake check (`flake.nix`
-`checks.${devboxSystem}`), not a derivation `checkPhase`, unless the script
-proves sandbox-clean. `pkgs/oc-session-list/default.nix:51-61` documents why:
-its `doCheck = true` runs only `--help`, which is the misleading shape that hid
-`test.sh` for months.
+**What would have made the fix fake.** On a stripped PATH the suite printed `all
+oc-auto-attach helper tests passed` and **exited 0 having run 51 of its 71
+assertions** — dropping every tmux, lua and production-artifact assertion it
+has. A naive `runCommand` would have closed this bead while asserting nothing.
+Two gates prevent it: `OC_AA_REQUIRE_ALL_TOOLS=1` makes a missing tool fatal,
+and `EXPECTED_ASSERTIONS=71` plus a flake-side grep for the exact tally and for
+the absence of `SKIP` means coverage cannot shrink quietly.
 
-**Exit:** the script runs in `nix flake check`, its assertions pass for real, and
-the count of assertions actually executed is asserted (not just "it exited 0").
+**One heuristic that looked obvious and was wrong.** The natural guard —
+"`NIX_BUILD_TOP` is set, therefore we are inside a Nix build" — is false.
+`nix-shell` exports `NIX_BUILD_TOP=/tmp/nix-shell-<pid>` and
+`IN_NIX_SHELL=impure` (measured). Shipping it would have hard-failed any
+developer in a nix-shell without tmux, with a message asserting their check was
+mis-wired. The fix is positive control: the *runner* declares that it guarantees
+the tools. Sniffing the ambient environment guesses; a variable the runner sets
+states. `assets/nvim/test-session-switcher.sh` still carries the original
+heuristic — `workstation-om5r`.
+
+**Verified by mutation** (17, all caught), because a guard that cannot fail is
+the bug being fixed. One was a **false positive worth recording**: mutating
+`list-panes -a -f` in `default.nix` produced a bash syntax error, so the package
+never built and the drift guard never ran — "caught" for the wrong reason. Redone
+with syntactically valid mutations it fires correctly, and adding the fragile
+scan form while *keeping* the good one proves the negative assertion is not
+vacuous.
+
+**Left open deliberately:** the suite exercises **mirrors** of the production
+helpers rather than production itself — `workstation-dimz`, with
+`classify_session_probe` named as the concrete hole (its grep pins only the
+function's existence, and the companion `OC_AA_404_GRACE_SECS` grep matches the
+*caller*, so a revert of the `workstation-ovqu` 30s-hang fix would pass every
+check). Fixable by `eval`-ing the function bodies straight out of the built
+artifact, which the test already reads.
 
 ---
 
-## Step 2 — `oeyv`: the meta-guard · **NOT STARTED, blocked by step 1**
+## Step 2 — `oeyv`: the meta-guard · **NOT STARTED** (unblocked 2026-08-04)
 
 **Bead:** `workstation-oeyv` (P2)
 
