@@ -45,6 +45,10 @@ RUN_SECONDS = float(os.environ.get("LOCKPROBE_DURATION", "0"))  # 0 = forever
 # real systemd discovery". An empty string cannot carry that distinction, and
 # conflating them let a zero-serve test silently fall through to the live pool.
 DISCOVER_STATIC = os.environ.get("LOCKPROBE_DISCOVER_STATIC", "")
+# Like DISCOVER_STATIC but re-read on every discovery, so a test can make the
+# serve set CHANGE mid-run. Without it the rediscovery branch -- the code that
+# has to survive the nightly reset -- is structurally untestable.
+DISCOVER_FILE = os.environ.get("LOCKPROBE_DISCOVER_FILE", "")
 SHM_INO_OVERRIDE = os.environ.get("LOCKPROBE_SHM_INO", "")
 
 # WAL index lock bytes (sqlite3: wal.c). 120 is the one that serialises writers.
@@ -111,24 +115,33 @@ def log(msg: str) -> None:
     print(f"lockprobe: {msg}", flush=True)
 
 
+def _parse_static(spec: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if spec == "none":
+        return out
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        pid, _, port = tok.partition(":")
+        out[pid] = port or "?"
+    return out
+
+
 def discover_serves() -> dict[str, str]:
     """Return {pid: port}. Uses a systemd unit GLOB -- never names a port."""
-    if DISCOVER_STATIC == "none":
-        return {}
+    if DISCOVER_FILE:
+        try:
+            return _parse_static(open(DISCOVER_FILE).read().strip())
+        except OSError:
+            return {}
     if DISCOVER_STATIC:
-        out = {}
-        for tok in DISCOVER_STATIC.split(","):
-            tok = tok.strip()
-            if not tok:
-                continue
-            pid, _, port = tok.partition(":")
-            out[pid] = port or "?"
-        return out
+        return _parse_static(DISCOVER_STATIC)
     try:
         res = subprocess.run(
             ["systemctl", "show", "opencode-serve@*.service",
              "--property=Id", "--property=MainPID", "--no-pager"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=2,
         )
     except (OSError, subprocess.SubprocessError) as e:
         log(f"discovery failed: {e}")
@@ -148,13 +161,14 @@ def discover_serves() -> dict[str, str]:
     return serves
 
 
-def shm_inode() -> str | None:
+def shm_inode(quiet: bool = False) -> str | None:
     if SHM_INO_OVERRIDE:
         return SHM_INO_OVERRIDE
     try:
         return str(os.stat(DB + "-shm").st_ino)
     except OSError as e:
-        log(f"cannot stat {DB}-shm: {e}")
+        if not quiet:
+            log(f"cannot stat {DB}-shm: {e}")
         return None
 
 
@@ -204,8 +218,11 @@ def main() -> int:
     em.emit({"t": time.time(), "type": "start", "shm_ino": shm_ino, "hz": HZ,
              "serves": serves, "res_ms": period * 1000}, detail=False)
 
-    open_holds: dict[tuple[str, int], float] = {}
+    # Durations are computed off time.monotonic() so an NTP step cannot distort
+    # an episode; wall-clock is kept only for record timestamps.
+    open_holds: dict[tuple[str, int], tuple[float, float]] = {}
     open_freeze: dict[str, dict] = {}
+    disc_misses = 0
     stop = {"now": False}
 
     def on_term(_sig, _frm):
@@ -224,33 +241,45 @@ def main() -> int:
             "freeze_hist": {},
             "freeze_max_ms": 0.0,
             "freeze_validated": 0,
+            # Worst inter-sample gap in the window. res_ms is the NOMINAL
+            # period; under CPU pressure the real gap grows, and since this unit
+            # is deliberately deprioritised (Nice=10/CPUWeight=20) that happens
+            # exactly when contention happens. A 300s-average hz hides a multi-
+            # second stall; this does not.
+            "max_gap_ms": 0.0,
         }
 
     c = new_counters()
-    t_start = time.time()
+    t_start = time.monotonic()
     t_rollup = t_start
     t_disc = t_start
+    last_mono = t_start
 
     while not stop["now"]:
-        now = time.time()
+        now = time.time()         # wall clock: record timestamps only
+        mono = time.monotonic()   # monotonic: every duration
         c["samples"] += 1
+        gap_ms = (mono - last_mono) * 1000.0
+        if c["samples"] > 1:
+            c["max_gap_ms"] = max(c["max_gap_ms"], gap_ms)
+        last_mono = mono
 
         # ---- hold side (H): /proc/locks
         cur = read_locks(shm_ino)
         for k in cur:
             if k not in open_holds:
-                open_holds[k] = now
+                open_holds[k] = (mono, now)
         for k in list(open_holds):
             if k not in cur:
-                start = open_holds.pop(k)
-                dur_ms = (now - start) * 1000.0
+                start_mono, start_wall = open_holds.pop(k)
+                dur_ms = (mono - start_mono) * 1000.0
                 pid, b = k
                 name = LOCK_BYTE_NAMES.get(b, f"byte{b}")
                 c["holds"][name] = c["holds"].get(name, 0) + 1
                 c["hold_hist"][bucket(dur_ms)] = c["hold_hist"].get(bucket(dur_ms), 0) + 1
                 c["hold_max_ms"] = max(c["hold_max_ms"], dur_ms)
                 if dur_ms >= HOLD_DETAIL_MS:
-                    em.emit({"t": round(start, 3), "type": "hold", "pid": pid,
+                    em.emit({"t": round(start_wall, 3), "type": "hold", "pid": pid,
                              "byte": b, "byte_name": name, "dur_ms": round(dur_ms, 1),
                              "res_ms": round(period * 1000, 2)})
 
@@ -262,7 +291,8 @@ def main() -> int:
             if w == FREEZE_WCHAN:
                 st = open_freeze.get(pid)
                 if st is None:
-                    open_freeze[pid] = {"start": now, "port": port, "holder": None}
+                    open_freeze[pid] = {"mono": mono, "wall": now,
+                                        "port": port, "holder": None}
                     st = open_freeze[pid]
                 # Coincidence: a byte-120 hold by ANOTHER pid during our freeze
                 # is near-conclusive evidence this is a SQLite busy-wait rather
@@ -274,14 +304,14 @@ def main() -> int:
             else:
                 st = open_freeze.pop(pid, None)
                 if st is not None:
-                    dur_ms = (now - st["start"]) * 1000.0
+                    dur_ms = (mono - st["mono"]) * 1000.0
                     c["freezes"] += 1
                     c["freeze_hist"][bucket(dur_ms)] = c["freeze_hist"].get(bucket(dur_ms), 0) + 1
                     c["freeze_max_ms"] = max(c["freeze_max_ms"], dur_ms)
                     if st["holder"]:
                         c["freeze_validated"] += 1
                     if dur_ms >= FREEZE_DETAIL_MS:
-                        em.emit({"t": round(st["start"], 3), "type": "freeze",
+                        em.emit({"t": round(st["wall"], 3), "type": "freeze",
                                  "pid": pid, "port": st["port"],
                                  "dur_ms": round(dur_ms, 1),
                                  "overlapped_hold_pid": st["holder"],
@@ -289,25 +319,62 @@ def main() -> int:
 
         # ---- rediscovery. The nightly reset changes every PID; a sampler
         # ---- pinned to boot-time PIDs reports a confident empty distribution.
-        if now - t_disc >= REDISCOVER_SEC:
-            t_disc = now
+        if mono - t_disc >= REDISCOVER_SEC:
+            t_disc = mono
+
+            # RE-STAT THE -shm INODE. It is not stable for the life of the
+            # probe: the file is unlinked and recreated whenever the last
+            # connection closes (a full pool stop, an opencode upgrade, a
+            # reboot, WAL recovery). Statting once at startup and filtering
+            # /proc/locks against that frozen inode forever would make the hold
+            # side match nothing -- while rollups kept flowing and serves_found
+            # stayed healthy. The spec's own continuity rule would then certify
+            # the blindness as a genuine null result. That is exactly the
+            # confidently-wrong number this whole instrument exists to avoid.
+            fresh_ino = shm_inode(quiet=True)
+            if fresh_ino is None:
+                log("WARNING: cannot stat -shm during rediscovery; hold side may be blind")
+                em.emit({"t": now, "type": "shm_unstattable",
+                         "ino": shm_ino}, detail=False)
+            elif fresh_ino != shm_ino:
+                log(f"-shm inode changed {shm_ino} -> {fresh_ino}: db file recreated; "
+                    f"re-targeting hold side (holds open across the change are dropped)")
+                em.emit({"t": now, "type": "shm_changed", "old": shm_ino,
+                         "new": fresh_ino}, detail=False)
+                shm_ino = fresh_ino
+                open_holds.clear()
+
             fresh = discover_serves()
-            if fresh and set(fresh) != set(serves):
-                gone = set(serves) - set(fresh)
-                for pid in gone:
-                    open_freeze.pop(pid, None)
-                log(f"serve pids changed: {sorted(serves)} -> {sorted(fresh)}")
-                em.emit({"t": now, "type": "pids_changed",
-                         "old": serves, "new": fresh}, detail=False)
-                serves = fresh
-            elif not fresh:
-                log("WARNING: rediscovery found zero serves")
+            if fresh:
+                disc_misses = 0
+                if set(fresh) != set(serves):
+                    for pid in set(serves) - set(fresh):
+                        open_freeze.pop(pid, None)
+                    log(f"serve pids changed: {sorted(serves)} -> {sorted(fresh)}")
+                    em.emit({"t": now, "type": "pids_changed",
+                             "old": serves, "new": fresh}, detail=False)
+                    serves = fresh
+            else:
+                # Keeping a stale serve set here would make the advertised
+                # broken-instrument signal (serves_found == 0) unreachable after
+                # startup, and would leave us reading wchan of dead PIDs -- which
+                # after PID reuse yields plausible FAKE freeze records, since
+                # hrtimer_nanosleep is the wchan of any sleeping process. So
+                # tolerate a transient blip, then commit the empty set loudly.
+                disc_misses += 1
+                log(f"WARNING: rediscovery found zero serves ({disc_misses} consecutive)")
+                if disc_misses >= 3 and serves:
+                    log("committing empty serve set; freeze side is now blind and says so")
+                    em.emit({"t": now, "type": "serves_lost",
+                             "after_misses": disc_misses, "old": serves}, detail=False)
+                    serves = {}
+                    open_freeze.clear()
 
         # ---- rollup. This doubles as the HEARTBEAT: it is what distinguishes
         # ---- "genuinely quiet" from "instrument broken". Analysis must check
         # ---- rollup continuity before quoting any distribution.
-        if now - t_rollup >= ROLLUP_SEC:
-            span = now - t_rollup
+        if mono - t_rollup >= ROLLUP_SEC:
+            span = mono - t_rollup
             rec = {
                 "t": round(now, 3), "type": "rollup", "span_s": round(span, 1),
                 "samples": c["samples"], "hz": round(c["samples"] / span, 1) if span else 0,
@@ -318,25 +385,28 @@ def main() -> int:
                 "freeze_max_ms": round(c["freeze_max_ms"], 1),
                 "freeze_validated": c["freeze_validated"],
                 "res_ms": round(period * 1000, 2),
+                "max_gap_ms": round(c["max_gap_ms"], 1),
+                "shm_ino": shm_ino,
                 "capped": em.capped,
             }
             em.emit(rec, detail=False)
             log(f"rollup samples={c['samples']} hz={rec['hz']} serves={len(serves)} "
                 f"holds={sum(c['holds'].values())} hold_max={rec['hold_max_ms']}ms "
-                f"freezes={c['freezes']} freeze_max={rec['freeze_max_ms']}ms")
+                f"freezes={c['freezes']} freeze_max={rec['freeze_max_ms']}ms "
+                f"max_gap={rec['max_gap_ms']}ms")
             c = new_counters()
-            t_rollup = now
+            t_rollup = mono
 
-        if RUN_SECONDS and (now - t_start) >= RUN_SECONDS:
+        if RUN_SECONDS and (mono - t_start) >= RUN_SECONDS:
             break
 
-        drift = time.time() - now
+        drift = time.monotonic() - mono
         time.sleep(max(0.0, period - drift))
 
     # Final rollup so a SIGTERM (nightly reset, reboot) does not silently drop
     # the tail of the window.
     now = time.time()
-    span = max(now - t_rollup, 1e-9)
+    span = max(time.monotonic() - t_rollup, 1e-9)
     em.emit({"t": round(now, 3), "type": "rollup", "final": True,
              "span_s": round(span, 1), "samples": c["samples"],
              "hz": round(c["samples"] / span, 1),
@@ -346,7 +416,9 @@ def main() -> int:
              "freezes": c["freezes"], "freeze_hist": c["freeze_hist"],
              "freeze_max_ms": round(c["freeze_max_ms"], 1),
              "freeze_validated": c["freeze_validated"],
-             "res_ms": round(period * 1000, 2), "capped": em.capped}, detail=False)
+             "res_ms": round(period * 1000, 2),
+             "max_gap_ms": round(c["max_gap_ms"], 1), "shm_ino": shm_ino,
+             "capped": em.capped}, detail=False)
     log("exit (final rollup written)")
     return 0
 

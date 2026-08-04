@@ -28,6 +28,12 @@ So: **report `F` as residual, report `H` as hold, never substitute one for the
 other.** W2c's model `freeze ≈ min(A*T, H)` names `H`; this document
 deliberately does not reuse that symbol for `F`.
 
+`P(residual < 5s)` is the decision quantity, but it is **not** simply
+`P(F < 5s)` — raw freeze runs are truncated at `T` and split across retries, so
+the naive read is biased. The estimator is pre-registered in §5 before any data
+exists, precisely so the tempting-but-wrong version cannot be reached for on
+2026-08-09.
+
 ### Why not infer `H` from `F` by censoring
 
 Tempting and unnecessary. Three ways it breaks:
@@ -127,14 +133,70 @@ detail records but **keeps emitting rollups**, so a capped run degrades to
   precision, nothing more.
 - **No `A` reconstruction** from wchan (see run-splitting above).
 
-## 5. What a result looks like
-- **Rich tail:** report `H` distribution above the resolution floor, the
-  arrival rate, and `P(residual < 5s)` from freeze runs. W2 tunes against that.
-- **Null result** (no freezes over D days, rollups healthy): by the rule of
-  three, the episode rate is `< 3/D` per day at 95% confidence. With D=5 that
-  is `<0.6/day` — decision-useful, and it says the conservative retry span
-  costs nothing. **A null result is only reportable if rollup continuity
-  holds.**
+## 5. The estimator, pre-registered
+
+Written **before** the data exists. Choosing an estimator after seeing results
+is how a wrong number gets rationalised into a decision.
+
+### 5.1 The trap: do NOT compute `P(F < 5s)` from `freeze_hist`
+
+The rollup histogram is for *monitoring*, not for the decision. Two effects
+make a naive `P(F < 5s)` read from it wrong **in the dangerous direction**:
+
+- Each attempt is truncated at `T=5000ms`, so a *failing* 12s wait appears as
+  several sub-5s runs.
+- Runs split across retries (§6 observed 2769ms + 7082ms for one 10s wait).
+
+A 2769ms fragment of a **failed** wait is indistinguishable, in the histogram,
+from a genuine 2769ms residual where the write then **succeeded**. Counting
+fragments as successes **overstates** today's success rate, which biases toward
+approving the aggressive `busy_timeout` cut — the exact error this instrument
+exists to prevent.
+
+### 5.2 The estimator to actually use
+
+From **`freeze` detail records only** (they carry `start`, `dur_ms`, pid, and
+`overlapped_hold_pid`; the rollup histogram does not):
+
+1. **Stitch** consecutive freeze runs on the same pid separated by a gap
+   `<= 500ms` into a single *wait episode*. (Observed inter-attempt gap was
+   ~111ms; 500ms is a deliberately generous margin.)
+2. **Classify** each episode by its **final** run:
+   - final run ends well below `T` (say `< 0.9*T = 4500ms`) → the lock was
+     **acquired**; the episode **succeeded**. Episode residual = total stitched
+     duration.
+   - final run ends at `~T` (`>= 4500ms`) → the attempt **timed out**; the
+     episode is **right-censored** at its total duration.
+3. **Report** `P(residual < 5s) = successes / episodes`, with a
+   Clopper–Pearson interval, and state N explicitly.
+4. **Segment** by `overlapped_hold_pid`: episodes with a confirmed overlapping
+   holder are validated busy-waits. Report validated and unvalidated
+   separately; do not pool them without saying so.
+
+### 5.3 What the hold side reports independently
+`H` distribution above the resolution floor, the arrival rate (~64/min
+baseline), and the long tail by lock byte (120 write vs 121 checkpoint). This
+is the richer dataset — every hold is observed, contended or not — and it does
+not depend on contention actually occurring during the window.
+
+### 5.4 Null result
+No freezes over D days **with rollup continuity intact**: by the rule of three
+the episode rate is `< 3/D` per day at 95% confidence. With D=5, `<0.6/day` —
+decision-useful, and it says the conservative retry span costs nothing.
+
+**A null result is only reportable if the continuity checks in §5.5 all pass.**
+
+### 5.5 Mandatory pre-analysis checks
+Before quoting any number, verify:
+- `rollup` records are continuous across the window (no unexplained gaps).
+- `serves_found` is 4 throughout, apart from explained restarts.
+- `shm_ino` is stable, or every change is paired with a `shm_changed` record.
+- No `serves_lost` or `shm_unstattable` records, or they are accounted for.
+- `max_gap_ms` stays near the nominal period; a large gap means durations in
+  that window are bounded by the gap, not by `res_ms`.
+- `capped` is false, or detail-record loss is accounted for.
+
+Any of these failing means the window is **suspect**, not quiet.
 
 ## 6. End-to-end validation (run 2026-08-03, before deployment)
 
@@ -180,10 +242,19 @@ hold was 3000ms — the sampler having started 500ms late. That is
   episode after a start/restart; negligible against ~92k episodes/day, but a
   restart-heavy window should not be read closely.
 - Holds shorter than the sample period are undercounted; detection probability
-  is roughly `min(1, dur/period)`. This biases *against* seeing short residuals,
-  which is the direction that would wrongly encourage an aggressive
-  `busy_timeout` cut — so short-residual mass is a **lower** bound and must be
-  reported as such.
+  is roughly `min(1, dur/period)`. Short-residual mass is therefore a **lower**
+  bound and must be reported as such. The direction is *conservative*: it
+  removes mass from the short bins, so it under-states how often the current 5s
+  attempt succeeds, and thus argues against the aggressive cut rather than for
+  it. (The bias that argues *for* the cut is the estimator trap in §5.1, which
+  is why §5.2 is pre-registered.)
+- The `0-5` and `5-10` histogram buckets are at or below the resolution floor
+  at 100Hz. Their emptiness is an artifact, not a finding.
+- Episodes still open when the probe is stopped are never counted — one lost
+  long hold per restart, biased against the tail.
+- `/var/lib/opencode-lockprobe/episodes.jsonl` must **not** be rotated or
+  deleted while the probe runs: writes would continue to the unlinked inode and
+  the data would vanish silently at close. Nothing rotates it today.
 - Waiters are invisible in `/proc/locks`: SQLite polls with non-blocking
   `F_SETLK` rather than blocking, so there are no `->` blocked entries. The
   wait side is covered by wchan instead. (This is itself corroboration that the

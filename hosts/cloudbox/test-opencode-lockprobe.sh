@@ -190,6 +190,86 @@ wait
 chk "checkpoint byte 121 captured as 'ckpt'" \
   "$(field "$(jq_type "$TMP/o10.jsonl" hold | head -1)" byte_name)" "ckpt"
 
+echo "=== 9. -shm inode change must not silently blind the hold side ==="
+# The BLOCKER found in adversarial review. The -shm file is unlinked and
+# recreated whenever the last connection closes (pool stop, upgrade, reboot,
+# WAL recovery) -- confirmed to have happened on cloudbox mid-uptime. A probe
+# that statted the inode once would then match nothing in /proc/locks while
+# rollups kept flowing and serves_found stayed healthy, and the spec's
+# continuity rule would certify that blindness as a real null result.
+# Deliberately does NOT set LOCKPROBE_SHM_INO: the static override would bake
+# in the very assumption under test.
+SHMDIR="$TMP/shm"; mkdir -p "$SHMDIR"
+: > "$SHMDIR/x.db-shm"
+INO_A="$(stat -c %i "$SHMDIR/x.db-shm")"
+printf '1: POSIX  ADVISORY  WRITE %s 103:02:%s 120 120\n' "$HOLDER_PID" "$INO_A" > "$TMP/locks"
+# Create-then-rename, NOT rm-then-touch: a freed inode can be immediately
+# REUSED, which silently produces INO_B == INO_A and a vacuously passing test.
+# That flake was observed once before this comment existed.
+: > "$SHMDIR/staged"
+INO_B="$(stat -c %i "$SHMDIR/staged")"
+chk_ne() { if [ "$2" != "$3" ]; then ok "$1"; else no "$1 (both '$2')"; fi; }
+chk_ne "test precondition: the two inodes really differ" "$INO_A" "$INO_B"
+(
+  sleep 1.2
+  mv -f "$SHMDIR/staged" "$SHMDIR/x.db-shm"   # atomically swap in the new inode
+  printf '1: POSIX  ADVISORY  WRITE %s 103:02:%s 120 120\n' "$HOLDER_PID" "$INO_B" > "$TMP/locks"
+  sleep 1.0
+  printf '7: POSIX  ADVISORY  READ 5555 103:02:999999 128 128\n' > "$TMP/locks"
+) &
+env LOCKPROBE_LOCKS="$TMP/locks" LOCKPROBE_WCHAN_FMT="$TMP/proc/{pid}/wchan" \
+    LOCKPROBE_DB="$SHMDIR/x.db" LOCKPROBE_OUT="$TMP/o11.jsonl" LOCKPROBE_HZ=100 \
+    LOCKPROBE_DURATION=3.2 LOCKPROBE_ROLLUP_SEC=999 LOCKPROBE_REDISCOVER_SEC=0.3 \
+    LOCKPROBE_HOLD_DETAIL_MS=50 LOCKPROBE_DISCOVER_STATIC="$SERVE_PID:4096" \
+    python3 "$PROBE" > "$TMP/o11.jsonl.log" 2>&1
+wait
+chk "inode change is detected and recorded" \
+  "$(jq_type "$TMP/o11.jsonl" shm_changed | wc -l | tr -d ' ')" "1"
+chk "old inode reported" "$(field "$(jq_type "$TMP/o11.jsonl" shm_changed)" old)" "$INO_A"
+# The point of the fix: holds on the NEW inode are still measured afterwards.
+chk_ge "hold on the NEW inode is still captured" \
+  "$(jq_type "$TMP/o11.jsonl" hold | wc -l | tr -d ' ')" 1
+chk "rollup carries the live inode for auditability" \
+  "$(field "$(jq_type "$TMP/o11.jsonl" rollup | tail -1)" shm_ino)" \
+  "$(stat -c %i "$SHMDIR/x.db-shm")"
+
+echo "=== 10. rediscovery survives the nightly reset (pids change) ==="
+locks_write "$(noise)"; mk_wchan "$SERVE_PID" do_epoll_wait
+DF="$TMP/discover"; echo "$SERVE_PID:4096" > "$DF"
+mk_wchan 4321 do_epoll_wait
+( sleep 0.8; echo "4321:4097" > "$DF" ) &     # pool restarts, every PID changes
+run_probe 2 "$TMP/o12.jsonl" LOCKPROBE_REDISCOVER_SEC=0.3 LOCKPROBE_DISCOVER_FILE="$DF"
+wait
+PC="$(jq_type "$TMP/o12.jsonl" pids_changed | head -1)"
+have "pid change detected" "$PC"
+chk "rollup follows the new pid set" \
+  "$(field "$(jq_type "$TMP/o12.jsonl" rollup | tail -1)" pids)" "['4321']"
+
+echo "=== 11. discovery failure eventually admits blindness ==="
+# Stale serve set would make serves_found=0 unreachable after startup, and
+# reading wchan of dead PIDs yields plausible FAKE freezes after PID reuse
+# (hrtimer_nanosleep is the wchan of ANY sleeping process).
+echo "$SERVE_PID:4096" > "$DF"
+( sleep 0.6; echo "none" > "$DF" ) &
+run_probe 2.5 "$TMP/o13.jsonl" LOCKPROBE_REDISCOVER_SEC=0.3 LOCKPROBE_DISCOVER_FILE="$DF"
+wait
+chk "serves_lost recorded after repeated misses" \
+  "$(jq_type "$TMP/o13.jsonl" serves_lost | wc -l | tr -d ' ')" "1"
+chk_ge "only after tolerating a transient blip" \
+  "$(field "$(jq_type "$TMP/o13.jsonl" serves_lost)" after_misses)" 3
+chk "and serves_found=0 then actually fires" \
+  "$(field "$(jq_type "$TMP/o13.jsonl" rollup | tail -1)" serves_found)" "0"
+
+echo "=== 12. rollup exposes sampling degradation, not just an average ==="
+locks_write "$(noise)"; mk_wchan "$SERVE_PID" do_epoll_wait
+run_probe 1.2 "$TMP/o14.jsonl"
+RG="$(jq_type "$TMP/o14.jsonl" rollup | tail -1)"
+have "rollup reports max inter-sample gap" "$(field "$RG" max_gap_ms)"
+# res_ms is the NOMINAL period; max_gap_ms is what actually bounds the error.
+python3 -c "
+import sys; g=float(sys.argv[1]); sys.exit(0 if 0 < g < 200 else 1)" "$(field "$RG" max_gap_ms)" \
+  && ok "max gap is plausible on an idle box" || no "max gap is plausible on an idle box"
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
