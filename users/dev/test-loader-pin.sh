@@ -16,12 +16,14 @@
 # documentation with a shebang." So the pin is enforced here, in the checked
 # path, and duplicated in the test suite for fast local feedback.
 #
-# Three constants must agree:
+# Five constants must agree:
 #   1. upstreamVersion      users/dev/home.base.nix          (what we deploy)
 #   2. LOADER_VERSION       plugin-loader-contract.test.ts   (what we replicate)
 #   3. fixtures/VERSION     test/fixtures/                   (what we vendored)
 #   4. LOADER_SEMANTICS_PIN pkgs/opencode-plugin-bundle/     (what the bundle
 #                                                            checkPhase asserts)
+#   5. LOADER_SEMANTICS_PIN pkgs/opencode-plugin-canary-sh/  (what the production
+#                                                            canary greps for)
 #
 # (3) exists because the lazy path out of a red (1)!=(2) is to bump
 # LOADER_VERSION and skip refreshing the fixtures, leaving the "mechanical diff"
@@ -34,6 +36,15 @@
 # same rot (2) and (3) are here to prevent, restated as a hope. Step 3 of
 # docs/plans/2026-08-01-plugin-loader-hardening-roadmap.md WILL move the pin, so
 # it is coupled now rather than after it silently drifts.
+#
+# (5) is the FOURTH copy, and the only one that runs in PRODUCTION. The E2 canary
+# greps the serve log for opencode's own load-failure line, so the message string
+# and the `path=file://...` field it parses are upstream internals on an 8-hourly
+# auto-bump. If upstream rewords that line the canary's log leg goes blind while
+# its test fixtures, carrying the old string, stay green -- and that leg is the
+# ONLY cover for 8 of the 9 deployed plugin files, including the two external
+# ones that have no build-time cover at all. Coupled here so a bump forces
+# re-reading the real logError call site.
 
 set -euo pipefail
 
@@ -43,6 +54,7 @@ nix_file="$repo_root/users/dev/home.base.nix"
 test_file="$repo_root/assets/opencode/plugins/test/plugin-loader-contract.test.ts"
 fixture_version_file="$repo_root/assets/opencode/plugins/test/fixtures/VERSION"
 bundle_file="$repo_root/pkgs/opencode-plugin-bundle/default.nix"
+canary_file="$repo_root/pkgs/opencode-plugin-canary-sh/opencode-plugin-canary.sh"
 
 fail() {
   echo "FAIL: loader-replica pin guard" >&2
@@ -51,7 +63,7 @@ fail() {
   exit 1
 }
 
-for f in "$nix_file" "$test_file" "$fixture_version_file" "$bundle_file"; do
+for f in "$nix_file" "$test_file" "$fixture_version_file" "$bundle_file" "$canary_file"; do
   [ -f "$f" ] || fail "missing required file: $f" \
     "" \
     "If this file was moved or renamed, this guard is silently dead." \
@@ -62,6 +74,7 @@ deployed="$(sed -nE 's/^[[:space:]]*upstreamVersion[[:space:]]*=[[:space:]]*"([^
 replica="$(sed -nE 's/^const LOADER_VERSION = "([^"]+)".*/\1/p' "$test_file" | head -1)"
 fixtures="$(tr -d '[:space:]' < "$fixture_version_file")"
 bundle="$(sed -nE 's/^[[:space:]]*#[[:space:]]*LOADER_SEMANTICS_PIN:[[:space:]]*([0-9][^[:space:]]*).*/\1/p' "$bundle_file" | head -1)"
+canary="$(sed -nE 's/^[[:space:]]*#[[:space:]]*LOADER_SEMANTICS_PIN:[[:space:]]*([0-9][^[:space:]]*).*/\1/p' "$canary_file" | head -1)"
 
 [ -n "$deployed" ] || fail "could not parse \`upstreamVersion\` from $nix_file"
 [ -n "$replica" ] || fail "could not parse \`LOADER_VERSION\` from $test_file"
@@ -71,6 +84,11 @@ bundle="$(sed -nE 's/^[[:space:]]*#[[:space:]]*LOADER_SEMANTICS_PIN:[[:space:]]*
   "That marker couples the bundle checkPhase's v1-shape assertions to the loader" \
   "version they mirror. If the marker was deleted or reworded, this arm of the" \
   "guard is silently dead -- restore it rather than dropping the check."
+[ -n "$canary" ] || fail "could not find a \`# LOADER_SEMANTICS_PIN: <version>\` marker in $canary_file" \
+  "" \
+  "That marker couples the PRODUCTION canary's log pattern to the loader version" \
+  "whose output it greps. Without it, an upstream reword blinds the only leg that" \
+  "covers 8 of the 9 deployed plugin files -- silently, and green."
 
 refresh_recipe() {
   cat <<EOF
@@ -136,4 +154,26 @@ if [ "$bundle" != "$replica" ]; then
     "it should survive a pin bump untouched."
 fi
 
-echo "OK: loader pin consistent (deployed=$deployed replica=$replica fixtures=$fixtures bundle=$bundle)"
+if [ "$canary" != "$replica" ]; then
+  fail \
+    "  loader replica pin (LOADER_VERSION):              $replica" \
+    "  plugin canary (LOADER_SEMANTICS_PIN):            $canary" \
+    "" \
+    "pkgs/opencode-plugin-canary-sh/opencode-plugin-canary.sh greps the SERVE LOG" \
+    "for opencode's own plugin load-failure line. The message string and the" \
+    "\`path=file://...\` field it parses are upstream internals, and this is the" \
+    "only copy of loader semantics that runs in production." \
+    "" \
+    "If upstream reworded that line, the canary's log leg is now blind -- and it is" \
+    "the ONLY cover for 8 of the 9 deployed plugin files, including opencode-pigeon.ts" \
+    "and superpowers.js, which have no build-time cover at all. It fails GREEN: the" \
+    "fixtures below still carry the old string." \
+    "" \
+    "Re-read the logError call in the refreshed fixtures and confirm both the" \
+    "message text and the path= field still match:" \
+    "  grep -n 'failed to load plugin' assets/opencode/plugins/test/fixtures/plugin-index.ts" \
+    "" \
+    "Then move the marker to $replica. Do NOT move it to make this quiet."
+fi
+
+echo "OK: loader pin consistent (deployed=$deployed replica=$replica fixtures=$fixtures bundle=$bundle canary=$canary)"

@@ -1,6 +1,6 @@
 # Plugin-Loader Hardening Roadmap
 
-**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-1 shipped
+**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-2 shipped
 
 > **Revision 2.** The first draft of this file (PR #242) was written and merged
 > *without* the adversarial review it makes mandatory. Review afterwards found
@@ -234,6 +234,66 @@ the v1 shape.
 - Exit: **all six** repo plugins on the v1 shape; `plugin-loader-contract` green;
   real-process check shows 0 load failures.
 
+## Step 2 — E2 canary log-watch · **DONE** (PR #294)
+
+Shipped as `opencode-plugin-canary`, a minutely detect-only system unit on
+cloudbox. Design: `docs/plans/2026-08-04-e2-plugin-canary-design.md`. Two legs,
+orthogonal rather than ranked — leg A (probe through the door) sees *any* failure
+shape but one file; leg B (log tail) sees one failure shape but *all nine*.
+
+**Nine plugin files load here, not six.** The roadmap counted the ones we author.
+`caveman/plugin.js` loads via the config `plugin` array rather than the glob, and
+`opencode-pigeon.ts` / `superpowers.js` are `mkOutOfStoreSymlink`s into other
+repos' live checkouts — no build-time cover at all, covered *only* by leg B. Any
+coverage claim in this file that says six is wrong.
+
+**Four things measured that were previously assumed:**
+
+- **Plugin loading is LAZY.** A broken plugin logged nothing at serve start; the
+  error appeared only when a request arrived. So the "logs once per serve start"
+  model in this file is wrong — it is once per *directory App init*, and can
+  therefore happen at any time. This makes leg B's latch (edge detection, level
+  alerting) more clearly right, and it shrinks the first-run blind window.
+- **An import-time throw is COMPLETELY silent** — zero matching lines, zero
+  `level=ERROR` lines, and nothing on stdout/stderr either, so journald has it
+  too. Predicted "probably no line"; now measured. G4 confirmed.
+- **That throw is isolated to its own file** — a sibling plugin still loaded and
+  its tool was still registered. Checked because the opposite would have widened
+  leg A a lot; it does not. The blind cell stands.
+- **Delivery was fire-drilled end to end.** Pigeon accepted the POST (it writes
+  state only on 2xx, and 502s if Telegram rejects), and three consecutive passes
+  produced exactly one message.
+
+**The defect worth remembering.** The first design was edge-triggered: it called
+`driftAlert` once per detection. But `driftAlert` is a **throttle, not a
+scheduler** — it re-alerts only when the caller re-invokes, and it swallows a
+failed POST (`exit 0` always, state written only on 2xx). That design would have
+sent one `warning`-severity page, never nagged, never escalated, and lost the
+alert entirely if pigeon were down for that minute: **the 2026-07-26 frontdoor
+incident rebuilt inside the fix for it** (760 detections, one page, missed,
+12h39m silence). Caught by the design review, before code. The fix is a latch
+written before the offset advances, re-alerted every pass.
+
+Also from review: threshold **7**, not 3 — the post-boot catalog burn runs 5-6
+min and `/config/providers` *is* the provider catalog, so a lower threshold pages
+on routine restarts. And the probe routes are pinned anchor-forwarded, because
+`forward-pool` fails over only on *unreachable*: a plugin-broken-but-alive member
+would answer wrong content 1 probe in 4 and never cross a threshold.
+
+**Testing lesson, again.** `test.sh`'s three ordering markers are *static greps*
+for comments — deletion tripwires, nothing more; a refactor that hoists the
+offset write above the latch loop passes all three while breaking the design. So
+`test-behaviour.sh` extracts the real `ExecStart` from the evaluated NixOS config
+and **runs it**. Both new guards caught real defects while being written: the
+route-table check matched its own prose warning containing "poolSafe", and the
+pin check was upgraded from comparing version numbers to asserting the pattern
+against the vendored upstream fixture.
+
+Filed: `workstation-j95n` (unbounded 668MB log, no rotation), `workstation-im79`
+(a masked timer is still invisible — `OnFailure` covers only a crashing script).
+
+### Original scope (kept for the record)
+
 ## Step 2 — E2 canary log-watch
 
 Cheapest real detection, and it runs **before** the loader patch on purpose.
@@ -295,6 +355,23 @@ Only step that protects plugins we do not author (`superpowers.js`,
 `opencode-pigeon.ts`) and cannot lint. **This is the class-killer — do not let
 the bead decay into "add more tests."**
 
+- **The patch must also LOG per plugin, on success and on failure** — added by
+  step 2, and it is now the cheapest per-file coverage left anywhere in this
+  roadmap. Three things measured in step 2 make it load-bearing rather than
+  nice-to-have: an import-time throw currently produces *zero* output anywhere
+  (log, stdout, stderr), that throw is isolated to its own file so no probe
+  elsewhere can infer it, and nine files load while only one is behaviourally
+  probeable. A success line converts "no positive signal exists" from a fact of
+  nature into a temporary condition: leg B could then assert per-file
+  *presence*, the canary's latches could clear automatically instead of by hand,
+  and the shared blind cell closes. It is a few lines in a patch we are writing
+  anyway.
+- **The canary's log pattern is now a FIFTH pinned constant.** `test-loader-pin.sh`
+  couples `pkgs/opencode-plugin-canary-sh`'s `LOADER_SEMANTICS_PIN`, and its
+  test asserts the anchored pattern against the vendored fixture's real
+  `logError` call. If this step changes what the loader logs — which the bullet
+  above requires — that check goes red by design. Update the pattern and the
+  fixture together; do not move the marker to quiet it.
 - Spine: 2 **recommended** (design is genuinely open); **3 mandatory**; 4 if
   the work splits into fork-patch and upstream-PR tracks.
 - Exit: patched loader rejects a non-hook return with a named error; upstream PR

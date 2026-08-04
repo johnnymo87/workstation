@@ -352,6 +352,24 @@ describe('Route Dispatcher', () => {
       expect(isPoolSafe('GET', '/api/model')).toBe(true);
     });
 
+    // The plugin-load canary (bead workstation-5yox) probes exactly these two
+    // routes through the door and requires a DETERMINISTIC target. Promoting
+    // either to poolSafe would silently break it: forward-pool is a round-robin
+    // cursor that fails over only on UNREACHABLE, so a member that is alive but
+    // plugin-broken answers wrong content roughly 1 probe in 4 and can never
+    // cross the canary's 7-consecutive-failure threshold -- converting a
+    // detectable failure into a permanently suppressed one.
+    //
+    // Both routes WILL pass a cross-member diff on any healthy day (every serve
+    // reads the same plugin directory), so the usual promotion evidence cannot
+    // see the problem. This test is the thing that fails the promoting PR.
+    test('keeps the plugin-canary probe routes anchor-pinned (workstation-5yox)', () => {
+      expect(dispatch('GET', '/experimental/tool/ids').action).toBe('forward-anchor');
+      expect(dispatch('GET', '/config/providers').action).toBe('forward-anchor');
+      expect(isPoolSafe('GET', '/experimental/tool/ids')).toBe(false);
+      expect(isPoolSafe('GET', '/config/providers')).toBe(false);
+    });
+
     test('keeps unflagged global-ro on forward-anchor', () => {
       expect(dispatch('GET', '/permission').action).toBe('forward-anchor');
       expect(dispatch('GET', '/config').action).toBe('forward-anchor');
