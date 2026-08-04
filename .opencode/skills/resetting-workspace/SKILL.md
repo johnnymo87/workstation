@@ -95,21 +95,32 @@ missing from PATH), you'll see a `WARNING: opencode-launch failed` or
 
 ## What it does (in order)
 
-1. Tears down the `lgtm` junk-drawer tmux session (memory hygiene; its
-   sessions are excluded from recommendations structurally, not by pid).
-2. Builds the `main` tmux session allowlist (pid subtree of every
+1. Builds the `main` tmux session allowlist (pid subtree of every
    `main` pane).
-3. Snapshots live opencode TUIs whose pid is in the allowlist (both
+2. Snapshots live opencode TUIs whose pid is in the allowlist (both
    argv-based and cwd-resolved branches).
-4. Confirms with the user (skip with `--yes`).
-5. Writes the captured sids to `/tmp/reset-workspace-last-manifest.txt`
+3. Confirms with the user (skip with `--yes`).
+4. Writes the captured sids to `/tmp/reset-workspace-last-manifest.txt`
    (before the kill/restart gauntlet, so a failed restart can't discard
    the capture — workstation-3smg).
-6. SIGKILLs all `nvim` processes owned by `dev`.
-7. Restarts the opencode serve pool (`opencode-serve-pool.target`; user
+5. Exits every `nvim` owned by `dev` **one at a time** (`kill -TERM`, wait,
+   SIGKILL only a straggler). Not a `pkill -9`: killing a pane's client makes
+   its `nvim --embed` server graceful-*write* its ShaDa, and a burst of those
+   corrupted the history file. Serialized exits also *merge* history rather
+   than clobbering it (workstation-zv0l).
+6. Tears down the `lgtm` junk-drawer tmux session (memory hygiene). This runs
+   **here**, after the walk, not first: `kill-session` tears down every pane at
+   once, and each pane's server graceful-writes ShaDa, so doing it early
+   produced exactly the write burst step 5 exists to prevent
+   (workstation-n0yh.1). lgtm sessions are excluded from recommendations
+   structurally via the `main` allowlist, never by killing them early. Because
+   it is now in the destructive tail, **aborting at the `[y/N]` prompt leaves
+   the lgtm session alive** (it used to be destroyed before you answered).
+7. Repairs a corrupt `main.shada` if one is found, then reaps its temps.
+8. Restarts the opencode serve pool (`opencode-serve-pool.target`; user
    `systemctl --user` on devbox, passwordless sudo on cloudbox) and
    waits for every pool member to report healthy.
-8. Launches an opencode session in `~/morning` (opened as a `morning`
+9. Launches an opencode session in `~/morning` (opened as a `morning`
    window in `main`) with a baked-in prompt that handles enrichment,
    Telegram messaging, and selective re-open on reply.
 
@@ -142,7 +153,7 @@ sudo systemctl start nightly-restart-background.service
 - Opencode workers spawned via `opencode-launch` or pigeon `/launch` get a TUI attached (via `oc-auto-attach`) in whatever tmux session is current at launch — usually `main`, in which case their sid is captured and shows up in the morning recommendation (no TUI is auto-restored; the session persists in the DB). A worker whose TUI landed outside `main`, or that has no tmux TUI at all, is not in the allowlist and won't be recommended, though its session still persists in the DB. Any nvim host dies in the SIGKILL pass regardless.
 - nvim is treated as disposable — no graceful quit, no `:wa`. By design (cloudbox nvim is purely a host for opencode tabs).
 - **Cgroup gotcha (fixed 2026-04-26).** Earlier versions of `reset-workspace` would silently die when invoked from an opencode-agent bash tool whose TUI was attached to `opencode-serve.service`. Steps 1–5 (snapshot + kill nvims + fire systemctl restart) ran, but the SIGTERM cascade from `KillMode=control-group` killed the script itself before steps 6–7 (respawn nvims, restore TUIs) could run. The script now self-detaches into a `systemd-run --user --scope` transient unit at entry if it detects `opencode-serve.service` in its own cgroup. See `docs/plans/2026-04-26-reset-workspace-cgroup-survival-design.md` for details.
-- **Your session's long-running child processes die, and that is intended, not a bug.** The pool restart bounces every `opencode-serve@<port>.service`, and their `PartOf=` linkage tears down each serve's whole cgroup. So anything a session spawned and left running — `kubectl port-forward`, `kubectl exec`, `kubectl run -it`, `az`, tunnels, watchers, dev servers — is SIGKILLed along with the serve. `tmux kill-session -t '=lgtm'` does the same to that session's panes. A session mid-investigation genuinely loses its port-forwards at 03:00; that is the cost of a workspace reset, not an incidental defect, and there is no fix at the reset layer (avoiding it means launching those processes *outside* the serve cgroup, e.g. under `systemd-run --scope` — session tooling, not `reset-workspace`).
+- **Your session's long-running child processes die, and that is intended, not a bug.** The pool restart bounces every `opencode-serve@<port>.service`, and their `PartOf=` linkage tears down each serve's whole cgroup. So anything a session spawned and left running — `kubectl port-forward`, `kubectl exec`, `kubectl run -it`, `az`, tunnels, watchers, dev servers — is SIGKILLed along with the serve. `tmux kill-session -t '=lgtm'` does the same to that session's panes (since workstation-n0yh.1 it runs after every nvim has already been exited one at a time, so it no longer triggers a ShaDa write burst). A session mid-investigation genuinely loses its port-forwards at 03:00; that is the cost of a workspace reset, not an incidental defect, and there is no fix at the reset layer (avoiding it means launching those processes *outside* the serve cgroup, e.g. under `systemd-run --scope` — session tooling, not `reset-workspace`).
 
   **It kills local clients, not remote resources.** This distinction has already caused one misdiagnosis (2026-07-27): a session concluded the reset had killed its *prod pods* and broken its *kube context*. Neither was true. `reset-workspace` contains zero kube references; `find ~/.kube -newermt 02:55 ! -newermt 03:10` across the reset window returns empty; `~/.kube/config`'s mtime was four hours *before* the reset. The context had been repointed by **another session** — `~/.kube/config` is one mutable file shared by every session on the box (see `bd workstation-ev9n`) — and the "killed" pods were bare `kubectl run … sleep infinity` pods with no `ownerReferences`, which in fact *survive* resets indefinitely (`bd workstation-oc4g`). Before blaming the reset for remote state, check whether it could reach that state at all: it only ever kills local processes.
 

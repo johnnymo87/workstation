@@ -585,6 +585,63 @@ if [ -f "$default_nix" ]; then
   want_grep "absent main.shada is a real branch"     'elif [ ! -e "$SHADA_MAIN" ]; then'
   want_grep "straggler kill notes a missing main"    'main.shada is absent after that SIGKILL'
 
+  # workstation-n0yh.1: the lgtm junk-drawer teardown is a shada writer trigger.
+  # `tmux kill-session` tears down every pane AT ONCE, and each pane's embed
+  # server graceful-writes when its client dies -- the identical mechanism to the
+  # old `pkill -9` storm. Measured 2026-08-04: 3 concurrent writers at 03:00:03,
+  # two seconds before the walk. So the teardown must happen where no nvim is
+  # left alive, i.e. AFTER the walk's client sweep. These guards pin that
+  # ordering; without them a future refactor moves it back into the head phase
+  # and silently restores the burst.
+  lgtm_kill_line=$(grep -n "tmux kill-session -t '=lgtm'" "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$lgtm_kill_line" ] && [ -n "$pkill_line" ] && [ "$lgtm_kill_line" -gt "$pkill_line" ]; then
+    echo "ok: the lgtm teardown runs after the nvim sweep (no live writers to burst)"
+  else
+    echo "FAIL: lgtm teardown must follow the client sweep (teardown at ${lgtm_kill_line:-?}, pkill at ${pkill_line:-?})"; fail=1
+  fi
+  # It must still precede Step 3.5, so that a write from any nvim that appeared
+  # mid-walk lands where the repair can still see and fix it.
+  repair_line=$(grep -n '^    # ---- Step 3.5' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$lgtm_kill_line" ] && [ -n "$repair_line" ] && [ "$lgtm_kill_line" -lt "$repair_line" ]; then
+    echo "ok: the lgtm teardown precedes the shada repair"
+  else
+    echo "FAIL: lgtm teardown must precede Step 3.5 (teardown at ${lgtm_kill_line:-?}, repair at ${repair_line:-?})"; fail=1
+  fi
+  # ...and precede the socket reap, so a straggler SIGKILLed by the drain below
+  # (a SIGKILL does not unlink its own socket) does not leak an orphan socket.
+  reap_line=$(grep -n 'reaped %s orphaned pane socket\|orphaned pane socket(s)' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$lgtm_kill_line" ] && [ -n "$reap_line" ] && [ "$lgtm_kill_line" -lt "$reap_line" ]; then
+    echo "ok: the lgtm teardown precedes the socket reap"
+  else
+    echo "FAIL: lgtm teardown must precede the socket reap (teardown at ${lgtm_kill_line:-?}, reap at ${reap_line:-?})"; fail=1
+  fi
+  # The teardown must be in the destructive tail, not the interactive head:
+  # it is a destructive act and belongs behind the [y/N] confirmation.
+  confirm_line=$(grep -n 'Continue? \[y/N\]' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$lgtm_kill_line" ] && [ -n "$confirm_line" ] && [ "$lgtm_kill_line" -gt "$confirm_line" ]; then
+    echo "ok: the lgtm teardown is gated behind the confirmation prompt"
+  else
+    echo "FAIL: lgtm teardown must follow the confirm (teardown at ${lgtm_kill_line:-?}, confirm at ${confirm_line:-?})"; fail=1
+  fi
+  # The lgtm-run timer fires `*:0/10`, i.e. at 03:00:00 -- the same second the
+  # nightly reset starts (verified: lgtm-run began 03:00:03.461, 113ms before
+  # the teardown logged at 03:00:03.574). It dispatches FRESH nvims into the
+  # lgtm session, so the window between the sweep and the teardown can acquire
+  # new writers. Draining them serially first is what keeps max-concurrent == 1;
+  # a log-only check would merely observe the burst it is meant to prevent.
+  drain_line=$(grep -n 'draining .* writer' "$default_nix" | head -1 | cut -d: -f1 || true)
+  if [ -n "$drain_line" ] && [ -n "$lgtm_kill_line" ] && [ "$drain_line" -lt "$lgtm_kill_line" ]; then
+    echo "ok: late-arriving writers are drained serially before the teardown"
+  else
+    echo "FAIL: a serialized drain must precede the lgtm teardown (drain at ${drain_line:-?}, teardown at ${lgtm_kill_line:-?})"; fail=1
+  fi
+  # Exact-match target: `lgtm-foo` is somebody else's session, not ours.
+  if [ "$(grep -c "kill-session -t '=lgtm'" "$default_nix" || true)" -eq 1 ]; then
+    echo "ok: exactly one exact-match lgtm kill-session"
+  else
+    echo "FAIL: expected exactly one \`kill-session -t '=lgtm'\`"; fail=1
+  fi
+
   # workstation-3smg: the manifest write must precede the pool restart, so a
   # restart/health-poll die can't discard a successful capture.
   manifest_line=$(grep -n 'MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"' "$default_nix" | head -1 | cut -d: -f1)
