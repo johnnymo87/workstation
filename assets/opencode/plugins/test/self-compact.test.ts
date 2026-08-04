@@ -614,7 +614,7 @@ describe("self-compact plugin auth integration", () => {
       return new Response(null, { status: 200 })
     })
 
-    const p = await plugin({
+    const p = await plugin.server({
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } } as any,
       serverUrl: new URL("http://localhost:54321"),
       directory: "/tmp/test",
@@ -658,7 +658,7 @@ describe("self-compact plugin auth integration", () => {
       return new Response(null, { status: 200 })
     })
 
-    const p = await plugin({
+    const p = await plugin.server({
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } } as any,
       serverUrl: new URL("http://localhost:54321"),
       directory: "/tmp/test",

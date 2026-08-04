@@ -31,7 +31,7 @@ describe("session-state plugin integration", () => {
       client: {},
     } as any
 
-    const result = await plugin(ctx, { cmdline: "/bin/opencode\x00run\x00", dir: overlayDir, fetch: vi.fn(), expectedPort: "1" })
+    const result = await plugin.server(ctx, { cmdline: "/bin/opencode\x00run\x00", dir: overlayDir, fetch: vi.fn(), expectedPort: "1" })
     expect(result).toEqual({})
   })
 
@@ -51,7 +51,7 @@ describe("session-state plugin integration", () => {
       client: {},
     } as any
 
-    const result = await plugin(ctx, {
+    const result = await plugin.server(ctx, {
       cmdline: poolCmdline,
       dir: overlayDir,
       fetch: vi.fn(),
@@ -77,7 +77,7 @@ describe("session-state plugin integration", () => {
       client: {},
     } as any
 
-    const result = await plugin(ctx, {
+    const result = await plugin.server(ctx, {
       cmdline: "/bin/opencode\x00serve\x00--port\x004098\x00",
       dir: overlayDir,
       fetch: vi.fn(),
@@ -110,7 +110,7 @@ describe("session-state plugin integration", () => {
     const saved = process.env.OPENCODE_SERVE_EXPECTED_PORT
     delete process.env.OPENCODE_SERVE_EXPECTED_PORT
     try {
-      const result = await plugin(ctx, {
+      const result = await plugin.server(ctx, {
         cmdline: poolCmdline,
         dir: overlayDir,
         fetch: mockFetch,
@@ -136,7 +136,7 @@ describe("session-state plugin integration", () => {
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } },
     } as any
 
-    const result = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch, expectedPort: "1" })
+    const result = await plugin.server(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch, expectedPort: "1" })
     expect(result.event).toBeDefined()
 
     // Send busy event
@@ -196,7 +196,7 @@ describe("session-state plugin integration", () => {
       client: {},
     } as any
 
-    await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: injected, expectedPort: "1" })
+    await plugin.server(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: injected, expectedPort: "1" })
     await new Promise((r) => setTimeout(r, 50))
 
     expect(injected).toHaveBeenCalled()
@@ -215,7 +215,7 @@ describe("session-state plugin integration", () => {
       client: { _client: { getConfig: () => ({ fetch: mockFetch }) } },
     } as any
 
-    const instance1 = await plugin(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch, expectedPort: "1" })
+    const instance1 = await plugin.server(ctx, { cmdline: poolCmdline, dir: overlayDir, fetch: mockFetch, expectedPort: "1" })
 
     const files = fs.readdirSync(overlayDir).filter((f) => f.startsWith("serve-0-") && f.endsWith(".json"))
     expect(files.length).toBeGreaterThan(0)

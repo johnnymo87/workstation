@@ -20,10 +20,20 @@
 #   1. upstreamVersion      users/dev/home.base.nix          (what we deploy)
 #   2. LOADER_VERSION       plugin-loader-contract.test.ts   (what we replicate)
 #   3. fixtures/VERSION     test/fixtures/                   (what we vendored)
+#   4. LOADER_SEMANTICS_PIN pkgs/opencode-plugin-bundle/     (what the bundle
+#                                                            checkPhase asserts)
 #
 # (3) exists because the lazy path out of a red (1)!=(2) is to bump
 # LOADER_VERSION and skip refreshing the fixtures, leaving the "mechanical diff"
 # recipe pointing at sources that describe a different version.
+#
+# (4) is the THIRD in-repo copy of loader semantics: the bundle checkPhase
+# asserts the v1 plugin shape against the built artifact, mirroring
+# readV1Plugin/readPluginId. It was added uncoupled, with only a comment saying
+# "when the pin moves, update this too; nothing will tell you" -- which is the
+# same rot (2) and (3) are here to prevent, restated as a hope. Step 3 of
+# docs/plans/2026-08-01-plugin-loader-hardening-roadmap.md WILL move the pin, so
+# it is coupled now rather than after it silently drifts.
 
 set -euo pipefail
 
@@ -32,6 +42,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 nix_file="$repo_root/users/dev/home.base.nix"
 test_file="$repo_root/assets/opencode/plugins/test/plugin-loader-contract.test.ts"
 fixture_version_file="$repo_root/assets/opencode/plugins/test/fixtures/VERSION"
+bundle_file="$repo_root/pkgs/opencode-plugin-bundle/default.nix"
 
 fail() {
   echo "FAIL: loader-replica pin guard" >&2
@@ -40,7 +51,7 @@ fail() {
   exit 1
 }
 
-for f in "$nix_file" "$test_file" "$fixture_version_file"; do
+for f in "$nix_file" "$test_file" "$fixture_version_file" "$bundle_file"; do
   [ -f "$f" ] || fail "missing required file: $f" \
     "" \
     "If this file was moved or renamed, this guard is silently dead." \
@@ -50,10 +61,16 @@ done
 deployed="$(sed -nE 's/^[[:space:]]*upstreamVersion[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$nix_file" | head -1)"
 replica="$(sed -nE 's/^const LOADER_VERSION = "([^"]+)".*/\1/p' "$test_file" | head -1)"
 fixtures="$(tr -d '[:space:]' < "$fixture_version_file")"
+bundle="$(sed -nE 's/^[[:space:]]*#[[:space:]]*LOADER_SEMANTICS_PIN:[[:space:]]*([0-9][^[:space:]]*).*/\1/p' "$bundle_file" | head -1)"
 
 [ -n "$deployed" ] || fail "could not parse \`upstreamVersion\` from $nix_file"
 [ -n "$replica" ] || fail "could not parse \`LOADER_VERSION\` from $test_file"
 [ -n "$fixtures" ] || fail "$fixture_version_file is empty"
+[ -n "$bundle" ] || fail "could not find a \`# LOADER_SEMANTICS_PIN: <version>\` marker in $bundle_file" \
+  "" \
+  "That marker couples the bundle checkPhase's v1-shape assertions to the loader" \
+  "version they mirror. If the marker was deleted or reworded, this arm of the" \
+  "guard is silently dead -- restore it rather than dropping the check."
 
 refresh_recipe() {
   cat <<EOF
@@ -99,4 +116,24 @@ if [ "$fixtures" != "$replica" ]; then
     "$(refresh_recipe)"
 fi
 
-echo "OK: loader pin consistent (deployed=$deployed replica=$replica fixtures=$fixtures)"
+if [ "$bundle" != "$replica" ]; then
+  fail \
+    "  loader replica pin (LOADER_VERSION):            $replica" \
+    "  bundle checkPhase (LOADER_SEMANTICS_PIN):       $bundle" \
+    "" \
+    "pkgs/opencode-plugin-bundle/default.nix asserts the v1 plugin shape against" \
+    "the BUILT artifact -- a third copy of loader semantics, and the only cover" \
+    "the bundled plugins have until step 4 of the plugin-loader hardening" \
+    "roadmap runs CI against deployed artifacts." \
+    "" \
+    "Re-read readV1Plugin and readPluginId in the refreshed fixtures and confirm" \
+    "the checkPhase still mirrors them (id trimming, the server/tui rules), then" \
+    "move its LOADER_SEMANTICS_PIN marker to $replica." \
+    "" \
+    "Note the checkPhase is deliberately STRICTER than the loader in one place:" \
+    "it rejects a bare-function default, which the loader still accepts. That is" \
+    "a policy ratchet against reverting to the legacy shape, not a mirror, and" \
+    "it should survive a pin bump untouched."
+fi
+
+echo "OK: loader pin consistent (deployed=$deployed replica=$replica fixtures=$fixtures bundle=$bundle)"
