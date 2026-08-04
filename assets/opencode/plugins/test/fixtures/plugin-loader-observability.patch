@@ -1,0 +1,324 @@
+diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugin/index.ts
+index 1558c70..deaec37 100644
+--- a/packages/opencode/src/plugin/index.ts
++++ b/packages/opencode/src/plugin/index.ts
+@@ -136,6 +136,17 @@ const layer = Layer.effect(
+           bridge.fork(events.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() }))
+         }
+ 
++        // Structured, per-plugin failure line for every non-loading shape.
++        //
++        // Deliberately reuses the exact message text and `path` field of the
++        // load-failure logError further down, so that one log consumer covers
++        // every shape: a plugin that fails to import, one whose entrypoint is
++        // missing, and one whose factory rejects all read identically.
++        // `stage` distinguishes them for a human without changing the shape.
++        function logPluginError(spec: string, stage: string, message: string) {
++          bridge.fork(Effect.logError("failed to load plugin", { path: spec, stage, error: message }))
++        }
++
+         const { Server } = yield* Effect.promise(() => import("../server/server"))
+ 
+         const serverUrl = Server.url
+@@ -185,12 +196,29 @@ const layer = Layer.effect(
+             kind: "server",
+             report: {
+               start(candidate) {},
+-              missing(candidate, _retry, message) {},
++              missing(candidate, _retry, message) {
++                // A resolved target that exposes no entrypoint for this kind was
++                // previously reported NOWHERE: not a log line, not an event, not
++                // stderr. Same message string as the load-failure line below so a
++                // single log consumer covers every non-loading shape.
++                logPluginError(candidate.plan.spec, "missing", message)
++              },
+               error(candidate, _retry, stage, error, resolved) {
+                 const spec = candidate.plan.spec
+                 const cause = error instanceof Error ? (error.cause ?? error) : error
+                 const message = stage === "load" ? errorMessage(error) : errorMessage(cause)
+ 
++                // Every stage logs, in addition to publishing the event below.
++                // publishPluginError only emits a Session.Event.Error, which no
++                // log sink observes, so these failures produced NO output at all
++                // -- no log line, nothing on stderr -- while the server happily
++                // answered 200. Measured, on a real serve.
++                //
++                // All four stages are covered rather than the one that looks
++                // interesting: an import-time throw arrives as "load", not the
++                // "entry" one might reasonably predict.
++                logPluginError(spec, stage, message)
++
+                 if (stage === "install") {
+                   const parsed = parsePluginSpecifier(spec)
+                   publishPluginError(`Failed to install plugin ${parsed.pkg}@${parsed.version}: ${message}`)
+@@ -224,6 +252,7 @@ const layer = Layer.effect(
+               return message
+             },
+           }).pipe(
++            Effect.tap(() => Effect.logInfo("plugin loaded", { path: load.spec })),
+             Effect.tapError((error) => Effect.logError("failed to load plugin", { path: load.spec, error })),
+             Effect.catch(() => {
+               // TODO: make proper events for this
+diff --git a/packages/opencode/test/plugin/loader-observability.test.ts b/packages/opencode/test/plugin/loader-observability.test.ts
+new file mode 100644
+index 0000000..2ed07ef
+--- /dev/null
++++ b/packages/opencode/test/plugin/loader-observability.test.ts
+@@ -0,0 +1,257 @@
++import { describe, expect, afterEach } from "bun:test"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { Effect, Layer } from "effect"
++import * as TestConsole from "effect/testing/TestConsole"
++import path from "path"
++import { pathToFileURL } from "url"
++import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { Config } from "@/config/config"
++import { disposeAllInstances, provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
++import { testEffect } from "../lib/effect"
++
++const { Plugin } = await import("../../src/plugin/index")
++const { TestConfig } = await import("../fixture/config")
++const { RuntimeFlags } = await import("../../src/effect/runtime-flags")
++
++afterEach(async () => {
++  await disposeAllInstances()
++})
++
++const it = testEffect(
++  Layer.mergeAll(LayerNode.compile(LayerNode.group([CrossSpawnSpawner.node, FSUtil.node])), testInstanceStoreLayer),
++)
++
++type Record_ = { level: string; message: string; annotations: Record<string, unknown> }
++
++/**
++ * Reassembles the flat console output into log records.
++ *
++ * The logger emits three consecutive arguments per record -- a `[time] LEVEL
++ * (#fiber):` prefix, the message, and an annotations object -- so the level and
++ * the annotations are recovered by position.
++ */
++function records(lines: ReadonlyArray<unknown>): Record_[] {
++  const out: Record_[] = []
++  for (let i = 0; i < lines.length; i++) {
++    const head = lines[i]
++    if (typeof head !== "string") continue
++    const level = head.match(/\]\s+([A-Z]+)\s+\(#/)?.[1]
++    if (!level) continue
++    const message = lines[i + 1]
++    if (typeof message !== "string") continue
++    const next = lines[i + 2]
++    const annotations = typeof next === "object" && next !== null && !Array.isArray(next) ? (next as Record<string, unknown>) : {}
++    out.push({ level, message, annotations })
++  }
++  return out
++}
++
++/**
++ * Loads the plugins declared in `dir/opencode.json` and returns the log records
++ * emitted while doing so.
++ *
++ * The log line IS the contract these tests protect. For several failure shapes
++ * it is the only signal that reaches anywhere at all: upstream reported them
++ * through `publishPluginError`, which emits a `Session.Event.Error` that no log
++ * sink observes, so a plugin could fail while the server answered 200 and
++ * nothing recorded it. Asserting on emitted records rather than on internal
++ * state keeps these tests pointed at what is observable in production.
++ */
++function loadCapturingLogs(dir: string) {
++  const source = path.join(dir, "opencode.json")
++  return Effect.gen(function* () {
++    const config = yield* Effect.promise(
++      () => Bun.file(source).json() as Promise<{ plugin?: Array<string | [string, Record<string, unknown>]> }>,
++    )
++    const plugins = config.plugin ?? []
++
++    yield* Effect.gen(function* () {
++      const plugin = yield* Plugin.Service
++      yield* plugin.list()
++    }).pipe(
++      Effect.provide(
++        LayerNode.compile(Plugin.node, [
++          [
++            Config.node,
++            TestConfig.layer({
++              get: () =>
++                Effect.succeed({
++                  plugin: plugins,
++                  plugin_origins: plugins.map((plugin) => ({ spec: plugin, source, scope: "local" as const })),
++                }),
++              directories: () => Effect.succeed([dir]),
++            }),
++          ],
++          [RuntimeFlags.node, RuntimeFlags.layer({ disableDefaultPlugins: true })],
++        ]),
++      ),
++      provideInstance(dir),
++    )
++
++    // The failure lines are emitted from a forked root fiber -- the reporting
++    // callback is not in Effect context -- so they are not ordered with respect
++    // to the load completing. Poll rather than sleeping a fixed interval, which
++    // is both faster in the normal case and less flaky on a loaded runner.
++    let seen: Record_[] = []
++    for (let i = 0; i < 100; i++) {
++      seen = records(yield* TestConsole.logLines)
++      if (seen.some((r) => r.message === "failed to load plugin" || r.message === "plugin loaded")) break
++      yield* Effect.sleep("10 millis")
++    }
++    return seen
++  })
++}
++
++function withTmp<A, E, R>(init: (dir: string) => Promise<void>, body: (dir: string) => Effect.Effect<A, E, R>) {
++  return Effect.gen(function* () {
++    const dir = yield* tmpdirScoped()
++    yield* Effect.promise(() => init(dir))
++    return yield* body(dir)
++  })
++}
++
++const failures = (rs: Record_[]) => rs.filter((r) => r.message === "failed to load plugin")
++const successes = (rs: Record_[]) => rs.filter((r) => r.message === "plugin loaded")
++
++describe("plugin.loader.observability", () => {
++  it.live("logs a failure line for a plugin that throws while being imported", () =>
++    withTmp(
++      async (dir) => {
++        const file = path.join(dir, "boom.ts")
++        await Bun.write(file, 'throw new Error("deliberate import-time explosion")\n')
++        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ plugin: [pathToFileURL(file).href] }))
++      },
++      (dir) =>
++        Effect.gen(function* () {
++          const failed = failures(yield* loadCapturingLogs(dir))
++
++          // EXACTLY one. loadExternal only retries when called with `wait`, and
++          // this call site does not pass it -- it awaits config dependencies
++          // beforehand instead -- so a failure is reported once. Asserting `>= 1`
++          // here would let a duplicate-emitter regression pass green.
++          expect(failed.length).toBe(1)
++          expect(failed[0]!.level).toBe("ERROR")
++          expect(String(failed[0]!.annotations["path"])).toContain("boom.ts")
++          // An import-time throw surfaces as "load", not the "entry" one might
++          // predict. Pinned, because that expectation is what justifies covering
++          // every stage rather than the interesting-looking one.
++          expect(failed[0]!.annotations["stage"]).toBe("load")
++          expect(String(failed[0]!.annotations["error"])).toContain("deliberate import-time explosion")
++
++          // The production log consumer extracts the plugin key from a
++          // `path=file://...` field and yields a shared "unknown" key without it,
++          // silently collapsing per-file signal. Config normalisation is what
++          // guarantees the shape, so it is asserted rather than assumed.
++          expect(String(failed[0]!.annotations["path"]).startsWith("file://")).toBe(true)
++        }),
++    ),
++  )
++
++  it.live("logs a failure line when the target exposes no server entrypoint", () =>
++    withTmp(
++      async (dir) => {
++        // A directory plugin whose package.json carries an `exports` record that
++        // resolves no server entrypoint reaches the "missing" stage. Upstream
++        // reports that stage through a callback that is a bare no-op -- it does
++        // not even publish an event -- so this shape was strictly quieter than a
++        // load error, and completely invisible.
++        const plugdir = path.join(dir, "noentry")
++        await Bun.write(
++          path.join(plugdir, "package.json"),
++          JSON.stringify({ name: "noentry", version: "0.0.1", type: "module", exports: { "./tui": "./tui.js" } }),
++        )
++        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ plugin: [plugdir] }))
++      },
++      (dir) =>
++        Effect.gen(function* () {
++          const failed = failures(yield* loadCapturingLogs(dir))
++
++          expect(failed.length).toBe(1)
++          expect(failed[0]!.level).toBe("ERROR")
++          expect(failed[0]!.annotations["stage"]).toBe("missing")
++          expect(String(failed[0]!.annotations["path"])).toContain("noentry")
++        }),
++    ),
++  )
++
++  it.live("logs a success line naming each plugin that loaded", () =>
++    withTmp(
++      async (dir) => {
++        const file = path.join(dir, "fine.ts")
++        await Bun.write(file, 'export default { id: "fine", server: async () => ({}) }\n')
++        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ plugin: [pathToFileURL(file).href] }))
++      },
++      (dir) =>
++        Effect.gen(function* () {
++          const rs = yield* loadCapturingLogs(dir)
++          const ok = successes(rs)
++
++          expect(ok.length).toBe(1)
++          expect(ok[0]!.level).toBe("INFO")
++          expect(String(ok[0]!.annotations["path"])).toContain("fine.ts")
++          expect(failures(rs).length).toBe(0)
++        }),
++    ),
++  )
++
++  it.live("logs a failure line when the plugin factory itself rejects", () =>
++    withTmp(
++      async (dir) => {
++        const file = path.join(dir, "rejects.ts")
++        await Bun.write(file, 'export default { id: "rejects", server: async () => { throw new Error("factory rejected") } }\n')
++        await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ plugin: [pathToFileURL(file).href] }))
++      },
++      (dir) =>
++        Effect.gen(function* () {
++          const rs = yield* loadCapturingLogs(dir)
++          const failed = failures(rs)
++
++          // This shape is reported by the loader's PRE-EXISTING logError, not by
++          // the one this patch adds -- so it carries no `stage`. It is pinned
++          // here anyway: it shares the message string that the production log
++          // consumer matches on, and nothing else in this suite would notice if
++          // an upstream rebase reworded it.
++          expect(failed.length).toBe(1)
++          expect(failed[0]!.level).toBe("ERROR")
++          expect(String(failed[0]!.annotations["path"])).toContain("rejects.ts")
++          expect(String(failed[0]!.annotations["error"])).toContain("factory rejected")
++
++          // A factory that rejects never applied, so it must not be reported as
++          // loaded. The success line is what a future consumer will treat as
++          // proof of health.
++          expect(successes(rs).length).toBe(0)
++        }),
++    ),
++  )
++
++  it.live("attributes the failure to the failing file and still loads its sibling", () =>
++    withTmp(
++      async (dir) => {
++        const bad = path.join(dir, "bad.ts")
++        const good = path.join(dir, "good.ts")
++        await Bun.write(bad, 'throw new Error("sibling explosion")\n')
++        await Bun.write(good, 'export default { id: "good", server: async () => ({}) }\n')
++        await Bun.write(
++          path.join(dir, "opencode.json"),
++          JSON.stringify({ plugin: [pathToFileURL(bad).href, pathToFileURL(good).href] }),
++        )
++      },
++      (dir) =>
++        Effect.gen(function* () {
++          const rs = yield* loadCapturingLogs(dir)
++
++          // Per-file attribution is what lets a consumer latch per plugin: a
++          // failure in one file must not be reported against another, and must
++          // not suppress the sibling's success line.
++          const ok = successes(rs)
++          expect(ok.length).toBe(1)
++          expect(String(ok[0]!.annotations["path"])).toContain("good.ts")
++
++          const failed = failures(rs)
++          expect(failed.length).toBe(1)
++          expect(String(failed[0]!.annotations["path"])).toContain("bad.ts")
++        }),
++    ),
++  )
++})

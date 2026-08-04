@@ -31,6 +31,36 @@
 # the refreshed fixtures (assets/opencode/plugins/test/fixtures/plugin-index.ts)
 # and confirm the message string and the path= field still match before moving
 # this marker. Do not move the marker to make the guard quiet.
+#
+# THE CALL SITE IS NOT THE WHOLE CONTRACT. Everything this script parses is
+# produced by the log RENDERER, not by the loader, and re-reading only the
+# logError call will miss a renderer change completely. On a pin bump check
+# `assets/opencode/plugins/test/fixtures/logging.ts` (upstream
+# packages/core/src/observability/logging.ts) for all four of:
+#
+#   * `timestamp` first and `level` second in the field list (formatter():10-16)
+#     -- the anchor in plugin_canary_load_pattern depends on that ORDER.
+#   * the quoting rule in format() -- `/^[^\s="\\]+$/ ? value : JSON.stringify`.
+#     A `file://` path has no spaces, so it renders UNQUOTED as path=file://...
+#     If that regex tightens, the field becomes path="file://..." and
+#     plugin_canary_plugin_key stops matching -- per-file attribution silently
+#     collapses to one shared `unknown` latch.
+#   * annotations rendered FLAT (`path=`), not namespaced (`annotations.path=`).
+#   * the log filename, `opencode.log` (fileLogger()) -- upstream has changed
+#     log naming once already; see the note further down.
+#
+# `Logger.formatStructured`'s own output (level casing, timestamp format) comes
+# from the effect library and is one layer below even that -- vendoring cannot
+# pin it. If a bump changes those, only reading a real log line will show it.
+#
+# LOADER_PATCH_SHA256: a35336c7bcd4c61e7920d53720d270c92f53feac589418428b1a48bbc8e4303a
+#
+# The second identity pinned here, and the one that moves independently of the
+# version above: OUR patch, `plugin-loader-observability.patch`. Upstream logs
+# NOTHING at the four report.error stages or at report.missing -- measured, a
+# real unpatched binary emitted 0 log lines while 3 plugins failed to load. That
+# patch is the sole reason this script's log leg sees anything there. Editing it
+# lands you here, in the greps it has to keep satisfying. See test-loader-pin.sh.
 # ---------------------------------------------------------------------------
 #
 # Depends on: gawk (for RT), grep, sed, coreutils. Callers pin PATH; see the unit.
