@@ -11,14 +11,15 @@ bursts. This one is about the **cause**, plus the residuals it left open.
 S6 done (pigeon PR #56 + sampler v3) · **nothing unblocked; every remaining step
 is time- or peer-gated**
 
-- **S2** is time-blocked: 7-day window ends **2026-08-09 22:37 Z**; ~0.9 days
-  elapsed, and **zero OOM kills so far** (`NRestarts=0` on all four,
-  `memory.events oom_kill=0`). Reporting now would be the "passes by
-  construction" non-result the step explicitly forbids.
+- **S2** is time-blocked: 7-day window ends **2026-08-09 22:37 Z**. It is **no
+  longer a zero-event window** — the first kernel **OOM kill landed 2026-08-03
+  21:56:21 Z** on `:4098` (details below). Still do not report early; one kill is
+  an event, not a verdict.
 - **S3** (`le0a`) is gated on a peer's `workstation-yvxh.4`; wake set 08-10.
-- **S4** (`63wo`) is **worked and closed out for now**: the proposed per-owner
-  gate is unsound, measured harm is 7-and-1 rows, and a pre-committed rule ties
-  the build/wontfix decision to S2's kill count. Wake set 08-10.
+- **S4** (`63wo`) is worked, fix rejected — and its **pre-committed trigger has now
+  fired** (the 21:56 Z kill), so the 08-10 wake is an execution trigger, not a
+  decision: build the provenance stamp. The per-owner gate it originally proposed
+  remains rejected as unsound; measured harm was 7-and-1 rows.
 - **S5** (`yvxh.6`, P3) is largely landed.
 - **S6** (`29k3`) is **done**: pigeon PR #56 (merged `04401f5`) renames the field
   and deletes the dead renewal path; the sampler rotated to `samples-v3.tsv` and
@@ -431,11 +432,50 @@ original times fired **8.6 h before the 7 days were up**. Report as one of the
 four outcomes with the pre-declared cap-adjustment rule; the criteria live in the
 predecessor roadmap's step 2 and must not be improvised.
 
-**Interim state as of 2026-08-03 21:10 Z (0.94 d elapsed) — not a result:**
-zero kills, `memory.events oom_kill=0` on all four, and post-regime peak
-`anon+swap` of 8.51 / 4.92 / 6.56 / 8.01 G against the 14 G cap. Recorded so the
-reporter can see the trend, *not* as an early finding — a quiet window is what
-this design produces when nothing is being stressed.
+**FIRST KILL: 2026-08-03 21:56:21 Z, `:4098`.** Found incidentally during S6, ~45
+minutes after the "interim state" paragraph below was written.
+
+```
+21:56:21Z opencode-serve@4098.service: A process of this unit has been killed by the OOM killer.
+21:56:24Z opencode-serve@4098.service: Main process exited, code=killed, status=9/KILL
+21:56:24Z opencode-serve@4098.service: Failed with result 'oom-kill'.
+21:56:24Z ... Consumed 3h 26min CPU, 14G memory peak, 1G memory swap peak
+21:56:34Z opencode-serve@4098.service: Scheduled restart job, restart counter is at 1.
+```
+
+Peak was **exactly `MemoryMax`=14 G and `MemorySwapMax`=1 G**, and the unit was
+back up **13 s later**. That is the max-only regime doing what it was designed to
+do — terminate rather than swap-thrash — as against the pre-regime episode that
+pinned at `MemoryHigh`=7 G and dragged swap to 22.43 G for 13 minutes. It is
+**one event, not the verdict**; S2 still reports at the window's end.
+
+> #### The detector that said "zero" cannot see this, and never could
+>
+> **`memory.events oom_kill` resets when the cgroup is recreated.** Right now it
+> reads `oom_kill 0` for `:4098` — *after* the kill — because the restart made a
+> new cgroup. `NRestarts` is no better: `systemctl reset-failed` clears it, and it
+> counts restarts of any cause, not kills.
+>
+> **The journal is the only durable record.** Use it, and measure its reach rather
+> than assuming it (`journalctl -o short-iso | head -1` → currently 2026-07-30,
+> about 5 days, 2.1 G cap):
+>
+> ```bash
+> for p in 4096 4097 4098 4099; do
+>   journalctl -u opencode-serve@$p --no-pager -o short-iso |
+>     grep -iE 'oom-kill|OOM killer'
+> done
+> ```
+>
+> Every earlier "zero OOM kills" claim in this doc was produced by the resetting
+> instrument and is **not evidence of a quiet window** — it is evidence that
+> nothing had restarted recently enough to be counted. Over the journal's full
+> reach there is exactly **one** kill (this one) and one unrelated `:4098` restart
+> at 2026-08-01 18:11 with no OOM lines.
+
+**Interim state as of 2026-08-03 21:10 Z (0.94 d elapsed) — superseded by the
+above, kept for the trend:** post-regime peak `anon+swap` of 8.51 / 4.92 / 6.56 /
+8.01 G against the 14 G cap.
 
 **Redundant ownership, because a wake pointed at one session id is a single
 point of failure** and this doc's whole premise is surviving the loss of a
@@ -525,6 +565,17 @@ buy even a small patch*.
 into "never": if the S2 window records **≥1 kernel OOM kill** of a pool serve,
 build the provenance stamp; if it records zero, close `63wo` as wontfix. Wake
 scheduled 2026-08-10.
+
+> **THE TRIGGER HAS FIRED.** `:4098` was OOM-killed at **2026-08-03 21:56:21 Z**,
+> inside the window (see S2). The condition is `≥1` and the count is monotonic, so
+> the outcome is already settled: **build the write-time provenance stamp.** The
+> 08-10 wake is now an execution trigger, not a decision point — and it must not
+> re-derive the count from `memory.events oom_kill`, which reads 0 for `:4098`
+> *after* the kill because the cgroup was recreated. Read the journal.
+>
+> Honouring this is the entire point of pre-committing: the rule was written when
+> zero kills looked likely, and it would be trivially easy to now discover reasons
+> why one kill "doesn't really count".
 
 **Assumption named so it can be invalidated:** "the 03:00 bounce is an adequate
 backstop" holds *only while a nightly whole-pool restart exists*. This spine's own
