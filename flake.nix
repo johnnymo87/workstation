@@ -279,6 +279,32 @@
         touch $out
       '';
 
+      # Behavioural half of the canary suite: runs the ACTUAL ExecStart script
+      # from the evaluated cloudbox config, via its four test seams, against a
+      # scratch state dir and a dead door.
+      #
+      # The check above asserts the library's logic plus three static greps for
+      # ordering markers in configuration.nix. Those greps are deletion
+      # tripwires and little more -- a refactor hoisting the offset write above
+      # the latch loop keeps the comment and passes all three. The property they
+      # gesture at is the entire design: driftAlert is a throttle, not a
+      # scheduler, so an edge-triggered caller sends one page and goes quiet
+      # forever. This check executes that property instead of describing it: it
+      # runs three passes with no new log content and requires three
+      # re-invocations, and it requires an alert whose delivery failed at
+      # detection time to still be delivered on a later pass.
+      #
+      # Hermetic: the door URL is pointed at a dead port, so leg A takes its SKIP
+      # path and the sandbox needs no network.
+      plugin-canary-behaviour = devboxPkgs.runCommand "opencode-plugin-canary-behaviour" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gawk devboxPkgs.gnugrep devboxPkgs.util-linux ];
+        CANARY_SCRIPT = self.nixosConfigurations.cloudbox.config.systemd.services.opencode-plugin-canary.serviceConfig.ExecStart;
+      } ''
+        cd ${self}
+        bash pkgs/opencode-plugin-canary-sh/test-behaviour.sh
+        touch $out
+      '';
+
       store-prefix = devboxPkgs.runCommand "opencode-store-prefix-test" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
         OPENCODE_TEST_PKG_BIN = "${devboxPkgs.runCommand "opencode-patched-0.0.0-fixture" { } ''

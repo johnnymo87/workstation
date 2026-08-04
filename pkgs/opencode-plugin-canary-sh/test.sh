@@ -215,6 +215,45 @@ eq "unreachable wins over cannot-evaluate" \
   "SKIP" "$(plugin_canary_probe_action 404 no 503)"
 
 # ---------------------------------------------------------------------------
+# The log pattern must still describe the UPSTREAM CALL SITE.
+#
+# users/dev/test-loader-pin.sh couples this file's LOADER_SEMANTICS_PIN to the
+# other three loader constants, so an opencode bump goes red until a human edits
+# this file. But that only catches "forgot to look" -- a human rubber-stamping
+# five version numbers passes green straight over a reworded upstream message,
+# and the log leg (sole cover for 8 of the 9 deployed plugin files) goes silently
+# blind.
+#
+# The vendored fixture is refreshed from the deployed tag by that same guard's
+# recipe, and it contains the literal logError call. So assert the pattern against
+# it: an upstream reword now fails MECHANICALLY at fixture-refresh time, with no
+# ceremony required and no chance to nod it through.
+# ---------------------------------------------------------------------------
+
+fixture="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/assets/opencode/plugins/test/fixtures/plugin-index.ts"
+
+if [ -f "$fixture" ]; then
+  if LC_ALL=C grep -q 'logError("failed to load plugin"' "$fixture"; then
+    ok "the message string in plugin_canary_load_pattern still matches upstream's logError call"
+  else
+    no "the message string in plugin_canary_load_pattern still matches upstream's logError call" \
+      'logError("failed to load plugin" present in the vendored fixture' \
+      "absent -- upstream reworded it, so the canary's log leg is now blind"
+  fi
+
+  # The pattern parses `path=` out of that line; upstream must still log it.
+  if LC_ALL=C grep -q 'logError("failed to load plugin", { path' "$fixture"; then
+    ok "upstream still logs the path= field the plugin key is parsed from"
+  else
+    no "upstream still logs the path= field the plugin key is parsed from" \
+      "{ path present in the logError payload" \
+      "absent -- plugin keys, signatures and latches cannot be derived"
+  fi
+else
+  no "the vendored loader fixture exists" "found" "missing: $fixture"
+fi
+
+# ---------------------------------------------------------------------------
 # The canary script's own invariants, asserted statically.
 #
 # These are grep assertions against the deployed script rather than behavioural
@@ -285,9 +324,30 @@ fi
 
 routes="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/pkgs/opencode-frontdoor/src/routes.classification.ts"
 
+# NOTE ON WHERE THIS IS ASSERTED. The semantically stronger form --
+# `dispatch('GET', route).action === 'forward-anchor'` -- now also exists in
+# pkgs/opencode-frontdoor/test/dispatch.test.ts. But that suite has
+# `doCheck = false` (it binds loopback sockets, which the hermetic sandbox
+# forbids) and is run by hand via ./test.sh, so it does NOT run in CI. Relying on
+# it alone would be this bead's own failure mode: a correct assertion nothing
+# executes. So the CI-side check lives here, and both are kept.
+#
+# The honest limit: this checks the TABLE, not the dispatcher. If dispatch.ts
+# ever stops mapping "global-ro without poolSafe" to forward-anchor, this stays
+# green and only the non-CI vitest catches it.
+#
+# Parsed by object rather than by line so that reformatting a row across multiple
+# lines cannot hide a `poolSafe` flag from a line-oriented grep.
 if [ -f "$routes" ]; then
   for r in "/experimental/tool/ids" "/config/providers"; do
-    row="$(LC_ALL=C grep -F "path: \"$r\"" "$routes" | head -1)"
+    # Comments are stripped FIRST. The rows carry a prose warning that contains
+    # the word "poolSafe", so a naive scan of the object matches its own
+    # documentation and reports a promotion that has not happened -- a false
+    # positive that would have shipped had this check not been mutation-tested.
+    row="$(LC_ALL=C sed 's|//.*||' "$routes" | LC_ALL=C gawk -v want="path: \"$r\"" '
+      BEGIN { RS = "}" }
+      index($0, want) { gsub(/\n/, " "); print; exit }
+    ')"
     if [ -z "$row" ]; then
       no "probe route $r is present in the classification table" "a row" "none"
     elif printf '%s' "$row" | grep -q 'poolSafe'; then

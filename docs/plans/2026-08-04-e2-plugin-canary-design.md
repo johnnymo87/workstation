@@ -214,6 +214,16 @@ be repeated on a schedule.)
    happen, and it makes a failed POST retry for free on the next pass instead of
    being swallowed forever.
 
+**Window states.** `INIT` (no usable state — record EOF, read nothing), `READ`,
+`NOOP`, `RESET` (rotation or truncation — read from 0), and `INIT_OVERSIZE`: a
+reset was indicated but the file exceeds 8MiB, so it is not a freshly rotated one.
+That last state exists because the log path could be repointed at something with
+history — reading it from 0 would drag hundreds of MB through a minutely unit and
+re-latch everything in it. It behaves as `INIT` but **latches**, so it nags: the
+thing it reports is an unexamined span of log, which is the exact silence this
+canary exists to prevent, and a single edge-triggered alert for it would be the
+revision-1 defect in miniature.
+
 **First run initialises the offset to EOF and scans nothing.** The file holds
 ~2500 historical matches; a scan-from-zero detector is unconditionally red on
 its first pass and would be switched off within a day. **Accepted bound:** if
@@ -266,7 +276,8 @@ Signatures are the *identity of the failure*, never the time or the port:
 
 | Leg | Signature |
 |---|---|
-| B | `plugin-canary:load-failed:<basename>` |
+| B | `plugin-canary:load-failed:<key>`, where `<key>` is the path *relative to the plugins dir*, sanitised to `[A-Za-z0-9._-]` — not the bare basename, which cannot distinguish `caveman/plugin.js` |
+| B | `plugin-canary:logtail-oversize-reset` (detector degraded, not a plugin fault) |
 | A | `plugin-canary:tool-missing:self_compact_and_resume` |
 | A | `plugin-canary:providers-unhealthy` |
 | A | `plugin-canary:cannot-evaluate:<status>` |
@@ -322,7 +333,22 @@ roadmap then shipped a *second* guard wired to nothing. So:
   - first run → offset lands at EOF, history not scanned;
   - lock held → no state mutation at all;
   - each row of the status→action table;
-  - dispatch for both probe routes is `forward-anchor`.
+  - dispatch for both probe routes is `forward-anchor` (asserted in the
+    frontdoor's own `dispatch.test.ts`, against the real dispatcher rather than
+    the table text, so a reformat of the table cannot hide a promotion);
+  - the anchored pattern still matches upstream's actual `logError` call, checked
+    against the vendored fixture so an upstream reword fails mechanically rather
+    than relying on a human noticing during a version bump.
+
+  A second, behavioural suite (`test-behaviour.sh`) runs **the shipped ExecStart
+  script itself**, extracted from the evaluated NixOS config and driven through
+  its four test seams against a scratch state dir and a dead door. It exists
+  because the ordering markers above are only deletion tripwires — a refactor that
+  hoists the offset write above the latch loop keeps the comments and passes every
+  grep. The behavioural suite instead *executes* the property: three passes with
+  no new log content must produce three alert re-invocations, and an alert whose
+  delivery failed at detection must still be delivered later. Verified non-vacuous
+  by mutation: disabling the relatch loop turns 7 assertions red.
 - Unit tests are necessary and **not sufficient**, because that is this bead's
   entire lesson. Also required before calling the step done:
   1. **Three controls** on a scratch serve (`XDG_DATA_HOME` redirected, or the

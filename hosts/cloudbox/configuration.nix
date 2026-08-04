@@ -1513,6 +1513,11 @@ EOF
         LATCH="$STATE/latch"
         OFF_FILE="$STATE/logtail.state"
 
+        # Latch key for the detector-degraded condition. Prefixed so the relatch
+        # loop can tell it from a plugin name; `!` cannot appear in a plugin key,
+        # which is sanitised to [A-Za-z0-9._-].
+        OVERSIZE_KEY="!logtail-oversize"
+
         # The FRONT DOOR, never an individual serve. Both probed routes are
         # global-ro and deliberately NOT poolSafe, so the door forwards them to the
         # anchor; see the notes in pkgs/opencode-frontdoor/src/routes.classification.ts.
@@ -1547,13 +1552,19 @@ EOF
         # LEG A -- behavioural probe, level-triggered
         # =====================================================================
         TOOL_BODY="$(mktemp "$STATE/probe.XXXXXX")"
-        trap 'rm -f "$TOOL_BODY"' EXIT
+        CHUNK=""
+        trap 'rm -f "$TOOL_BODY" ''${CHUNK:+"$CHUNK"}' EXIT
 
         TOOL_STATUS="$(curl -s -o "$TOOL_BODY" -w '%{http_code}' \
           --max-time 10 --connect-timeout 3 "$DOOR/experimental/tool/ids" 2>/dev/null || true)"
         PROV_STATUS="$(curl -s -o /dev/null -w '%{http_code}' \
           --max-time 20 --connect-timeout 3 "$DOOR/config/providers" 2>/dev/null || true)"
 
+        # The `type == "array"` clause is load-bearing, not defensive noise: jq's
+        # index() on a STRING does a substring search, so a body that is a bare JSON
+        # string mentioning the tool would report present -- a false negative, in the
+        # one direction that fails quiet. Every other malformed shape already reads
+        # as absent and alerts.
         # self_compact_and_resume exists ONLY because self-compact.js loaded and its
         # `tool` hook registered. This is a real load-proof, and the only one
         # available over HTTP. Note what this is NOT: `opencode debug info` lists
@@ -1561,7 +1572,7 @@ EOF
         # it must never be substituted here as a "simplification".
         TOOL_PRESENT=no
         if [ "$TOOL_STATUS" = "200" ] \
-          && jq -e 'index("self_compact_and_resume") != null' < "$TOOL_BODY" >/dev/null 2>&1; then
+          && jq -e 'type == "array" and index("self_compact_and_resume") != null' < "$TOOL_BODY" >/dev/null 2>&1; then
           TOOL_PRESENT=yes
         fi
 
@@ -1654,10 +1665,17 @@ EOF
         # LEG B -- log tail. Detection is EDGE, alerting is LEVEL.
         # =====================================================================
         CUR_ID="$(plugin_canary_file_id "$LOG")"
-        CUR_SIZE=0
+        CUR_SIZE=""
         if [ -f "$LOG" ]; then
-          CUR_SIZE="$(stat -c %s "$LOG" 2>/dev/null || echo 0)"
+          # NOT `|| echo 0`. A transient stat failure on a file that EXISTS would
+          # then report size 0, which reads as truncation -> RESET -> and because
+          # the size looked like 0, the oversize guard built to prevent exactly
+          # this is bypassed -> the offset is persisted as 0 -> the next pass
+          # rescans 668MB of history from the start. Empty means "could not
+          # measure", and the leg goes inert for one pass instead.
+          CUR_SIZE="$(stat -c %s "$LOG" 2>/dev/null || true)"
         fi
+        case "$CUR_SIZE" in *[!0-9]*) CUR_SIZE="" ;; esac
 
         STORED_ID=""
         STORED_OFF=""
@@ -1665,8 +1683,8 @@ EOF
           read -r STORED_ID STORED_OFF < "$OFF_FILE" || true
         fi
 
-        if [ -z "$CUR_ID" ]; then
-          echo "WARNING: $LOG does not exist; log leg inert this pass"
+        if [ -z "$CUR_ID" ] || [ -z "$CUR_SIZE" ]; then
+          echo "WARNING: cannot identify or measure $LOG (id='$CUR_ID' size='$CUR_SIZE'); log leg inert this pass"
         else
           WINDOW="$(plugin_canary_window_action "$STORED_ID" "$STORED_OFF" "$CUR_ID" "$CUR_SIZE")"
           START=-1
@@ -1678,15 +1696,20 @@ EOF
             INIT_OVERSIZE)
               printf '%s %s\n' "$CUR_ID" "$CUR_SIZE" > "$OFF_FILE"
               echo "WARNING: logtail reset indicated but the file is $CUR_SIZE bytes -- too large to be freshly rotated. Re-initialising at EOF; an unknown span of log went unexamined."
-              "$ALERT" "$STATE/alert-oversize" "plugin-canary:logtail-oversize-reset" \
-                "OpenCode plugin canary: the log tail had to re-initialise at EOF.
-
-A rotation or truncation was indicated (stored $STORED_ID@$STORED_OFF, now $CUR_ID@$CUR_SIZE) but the file is too large to be a fresh rotation, so reading it from 0 was refused. An unknown span of log was NOT examined for plugin load failures, and leg B is the only cover for 8 of the 9 deployed plugin files.
-
-Check that the log path has not been repointed, then confirm plugins are loaded:
-  ls -la /home/dev/.local/share/opencode/log/
-  curl -s $DOOR/experimental/tool/ids | jq 'index(\"self_compact_and_resume\")'" \
-                3600 21600
+              # LATCHED, not alerted inline. Alerting here directly would be the
+              # revision-1 defect rebuilt in miniature: a single edge invocation of
+              # a throttle, lost for good if pigeon happens to be down that minute.
+              # The condition it reports -- an unexamined span of log -- is exactly
+              # the silence this canary exists to prevent, so it gets the same
+              # level-alerting treatment as a load failure.
+              if [ ! -e "$LATCH/$OVERSIZE_KEY" ]; then
+                {
+                  printf 'first_seen=%s\n' "$(date -Is)"
+                  printf 'run=\n'
+                  printf 'line=logtail re-initialised at EOF: stored %s@%s, now %s@%s (too large to be a fresh rotation)\n' \
+                    "$STORED_ID" "$STORED_OFF" "$CUR_ID" "$CUR_SIZE"
+                } > "$LATCH/$OVERSIZE_KEY"
+              fi
               ;;
             NOOP) ;;
             RESET)
@@ -1697,6 +1720,9 @@ Check that the log path has not been repointed, then confirm plugins are loaded:
           esac
 
           if [ "$START" -ge 0 ]; then
+            # Assigned to the pre-declared CHUNK so the EXIT trap removes it; a
+            # crash between here and the offset write would otherwise leave one
+            # stray chunk file in the state dir per crash.
             CHUNK="$(mktemp "$STATE/chunk.XXXXXX")"
             # Bounded to the size measured above, so bytes appended mid-read are
             # left for the next pass rather than being counted as consumed.
@@ -1730,6 +1756,7 @@ Check that the log path has not been repointed, then confirm plugins are loaded:
 
             printf '%s %s\n' "$CUR_ID" "$((START + CONSUMED))" > "$OFF_FILE"
             rm -f "$CHUNK"
+            CHUNK=""
           fi
         fi
 
@@ -1758,6 +1785,33 @@ Check that the log path has not been repointed, then confirm plugins are loaded:
           FIRST="$(sed -nE 's/^first_seen=(.*)/\1/p' "$latch" | head -1)"
           RUNID="$(sed -nE 's/^run=(.*)/\1/p' "$latch" | head -1)"
           LINE="$(sed -nE 's/^line=(.*)/\1/p' "$latch" | head -1)"
+
+          if [ "$KEY" = "$OVERSIZE_KEY" ]; then
+            # The detector degraded, rather than a plugin failing. Different
+            # remedy, so a different signature and a different text -- reporting
+            # this as a plugin failure would send someone hunting a broken file
+            # that is not broken.
+            "$ALERT" "$STATE/alert-oversize" "plugin-canary:logtail-oversize-reset" \
+              "OpenCode plugin canary: the log tail had to RE-INITIALISE at EOF.
+
+A rotation or truncation was indicated, but the file was too large to be a fresh
+rotation, so reading it from 0 was refused. An unknown span of log was NOT examined
+for plugin load failures -- and this leg is the only cover for 8 of the 9 deployed
+plugin files.
+
+This is a DEGRADED DETECTOR, not a broken plugin.
+
+First seen: $FIRST
+$LINE
+
+Check the log path has not been repointed, confirm plugins are loaded, then clear:
+  ls -la /home/dev/.local/share/opencode/log/
+  curl -s $DOOR/experimental/tool/ids
+  rm '/var/lib/opencode-plugin-canary/latch/$OVERSIZE_KEY'" \
+              3600 21600
+            continue
+          fi
+
           "$ALERT" "$STATE/alert-load-$KEY" "plugin-canary:load-failed:$KEY" \
             "OpenCode plugin FAILED TO LOAD: $KEY
 
