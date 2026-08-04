@@ -81,7 +81,9 @@ Options:
   --limit <N>          Maximum number of recent root session trees to return (default: 50)
   --db <path>          Path to opencode.db (default: $HOME/.local/share/opencode/opencode.db)
   --with-state         Merge base session list with live overlay state
-  --fold               Roots only, children folded into child_state, sorted by attention (implies --with-state)
+  --fold               Roots only, children folded into child_state, sorted by attention (implies --with-state).
+                       Also UNIONS IN attention-worthy sessions that fall outside --limit's recency
+                       window, so this changes which sessions appear, not just their shape.
   --routing-db <path>   Path to pigeon-daemon.db (default: $OPENCODE_ROUTING_DB, else $HOME/projects/pigeon/packages/daemon/data/pigeon-daemon.db)
   --overlay-dir <path> Directory containing session-state overlays (default: $HOME/.local/share/opencode/session-state.d)
   --gc                 Perform orphan GC on dead overlay files older than 10 minutes

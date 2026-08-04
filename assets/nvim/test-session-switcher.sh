@@ -230,4 +230,33 @@ case "$model_out" in
   *) printf 'FAIL  session_switcher.model unit tests\n        out: %s\n' "$model_out"; exit 1 ;;
 esac
 
+# --- Cross-language contract: the state vocabulary must not DRIFT. -----------
+#
+# oc-session-list-fold.ts owns `effective_state`; model.lua mirrors the list in
+# M.STATES and keys its pierce off two of them. Nothing else binds the two
+# sides: the bun tests build TS fixtures and the Lua tests build Lua fixtures,
+# each using its OWN copy of the literals, so renaming a state CLI-side would
+# leave the pierce matching nothing while both suites stayed green. That is the
+# drift this repo keeps getting bitten by, so it is checked mechanically rather
+# than by convention.
+ts_states="$(sed -n '/^const SEVERITY: Record<EffectiveState, number> = {/,/^};/p' \
+  assets/opencode/plugins/oc-session-list-fold.ts \
+  | sed -n 's/^  \([a-z]*\):.*/\1/p' | sort | tr '\n' ' ')"
+lua_states="$(sed -n 's/^M.STATES = {\(.*\)}$/\1/p' \
+  assets/nvim/lua/user/session_switcher/model.lua \
+  | tr -d '" ' | tr ',' '\n' | sort | tr '\n' ' ')"
+
+if [ -z "$ts_states" ] || [ -z "$lua_states" ]; then
+  # An empty extraction would make the comparison below pass vacuously -- the
+  # exact failure mode this whole file exists to prevent.
+  printf 'FAIL  could not extract the state vocabulary (ts=%s lua=%s)\n' "$ts_states" "$lua_states"
+  exit 1
+fi
+if [ "$ts_states" != "$lua_states" ]; then
+  printf 'FAIL  effective_state vocabulary DRIFTED between CLI and model.lua\n'
+  printf '        oc-session-list-fold.ts: %s\n        model.lua M.STATES:      %s\n' "$ts_states" "$lua_states"
+  exit 1
+fi
+printf 'PASS  effective_state vocabulary matches across CLI and model.lua (%s)\n' "$ts_states"
+
 printf 'all session_switcher lua tests passed\n'

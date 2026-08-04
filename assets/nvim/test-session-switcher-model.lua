@@ -36,10 +36,8 @@ local function make_row(id, state, child_state, sort_rank)
     effective_state = state or "idle",
     child_state = child_state,
     child_count = child_state and 1 or 0,
-    -- Deliberately NOT all-zero by default. With a constant sort_rank a mutant
-    -- that sorts the model's output by sort_rank is a no-op, and the
-    -- order-preservation test below passes while the module reorders rows.
-    -- Measured 2026-08-04: that mutant survived until these values differed.
+    -- Overridable, and test 8 DOES override it. See the note there: with a
+    -- constant sort_rank, a mutant that sorts by sort_rank is a no-op.
     sort_rank = sort_rank or 0,
   }
 end
@@ -138,6 +136,10 @@ end
 -- 8. Order preservation: feed rows in a deliberately non-sorted order (e.g. idle first, blocked last)
 -- and assert output id sequence EQUALS input id sequence.
 do
+  -- These fixtures carry DISTINCT sort_rank values, unlike every other test
+  -- here, and that is load-bearing: measured 2026-08-04, a mutant adding
+  -- `table.sort(out, by sort_rank)` SURVIVED while the fixtures were all-zero,
+  -- because sorting an all-equal list changes nothing.
   -- sort_rank DESCENDING in input order: the CLI's own ordering key, fed in
   -- backwards. Any re-sort by attention tier -- the tempting "helpful" mutation
   -- -- reverses this list and fails. The module must trust the CLI's order.
@@ -245,6 +247,25 @@ do
   assert(out[1].attached == false,
     "unresolvable discovery -> NOT attached (a false 'live' teleports the user into a corpse)")
   assert(out[1].pane == "%9", "unresolvable discovery: diagnostic hit fields still carried")
+end
+
+-- 15. A PIERCED row is marked as such.
+-- Task 9 jumps to `pane`, and a pierced row can be in the "attached" facet
+-- while being detached and pane-less. The picker must be able to tell those
+-- apart without re-deriving the filter, so the reason for survival is a field.
+-- Paired with an ordinary attached row asserting pierced == false, so this
+-- cannot pass by marking everything.
+do
+  local blocked = make_row("ses_pierced", "blocked")
+  local normal = make_row("ses_normal", "idle")
+  local hits = { ses_normal = { sid = "ses_normal", attach_status = "running", pane = "%3" } }
+  local out = model.build({ blocked, normal }, hits, { facet = "attached" })
+  assert(#out == 2, "pierced test: blocked row survives alongside the attached one")
+  assert(out[1].id == "ses_pierced", "pierced test: order still preserved")
+  assert(out[1].pierced == true, "blocked+detached row is marked pierced")
+  assert(out[1].attached == false, "pierced row is still reported as DETACHED")
+  assert(out[1].pane == nil, "pierced row has no pane -- the landmine this field warns about")
+  assert(out[2].pierced == false, "an ordinary attached row is NOT marked pierced")
 end
 
 print("LUA_TEST_OK")

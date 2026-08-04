@@ -34,6 +34,21 @@ end
 
 local M = {}
 
+--- The `effective_state` vocabulary, mirrored from the CLI.
+---
+--- MIRRORED, NOT INVENTED: oc-session-list-fold.ts's SEVERITY table is the source
+--- of truth, and assets/nvim/test-session-switcher.sh mechanically asserts these
+--- two lists are equal. Without that guard the seam could drift silently -- a
+--- state renamed CLI-side would leave the pierce below matching nothing, and both
+--- test suites would stay green because each one builds its own fixtures using
+--- its own copy of the literals.
+M.STATES = { "blocked", "error", "idle", "nodata", "retry", "unknown", "working" }
+
+--- States that always survive a facet filter. A blocked or errored session is
+--- the most attention-worthy thing in the list; hiding it behind a scope toggle
+--- is how completed-but-unreviewed work goes missing.
+M.ATTENTION = { error = true, blocked = true }
+
 --- Annotate session rows with live attachment state and filter by facet.
 ---
 --- @param rows table[]|nil Pre-sorted root rows from cli.lua
@@ -81,13 +96,18 @@ function M.build(rows, hits, opts)
       end
 
       local is_blocked = (
-        row.effective_state == "error"
-        or row.effective_state == "blocked"
-        or row.child_state == "error"
-        or row.child_state == "blocked"
+        M.ATTENTION[row.effective_state] == true
+        or M.ATTENTION[row.child_state] == true
       )
 
-      local pierces = blocked_pierces and is_blocked
+      local pierces = blocked_pierces and is_blocked == true
+
+      -- Why this row survived. A pierced row is in the list DESPITE the facet,
+      -- so it can be detached (and pane-less) while facet == "attached". Task 9
+      -- must branch on `attached`, not on the facet it asked for, or it will try
+      -- to jump to a pane that is not there. Marked explicitly rather than left
+      -- for the picker to reverse-engineer.
+      copy.pierced = pierces
 
       local keep = false
       if pierces then

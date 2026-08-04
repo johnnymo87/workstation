@@ -243,6 +243,13 @@ export function runOrphanGc(
  *
  * `idle` is likewise excluded: the whole point of the union is rows that demand
  * action, and merge already prunes plain idle entries anyway.
+ *
+ * KNOWN COST of the live-only rule: a session blocked on a serve that is alive
+ * but WEDGED (heartbeat stops, pid does not -- the documented "alive but frozen"
+ * mode) goes stale after staleMs, merges as `unknown`, and is therefore not a
+ * union candidate. Inside the recency window it still renders, as `unknown`;
+ * outside it, it is absent. Accepted: stale state is not evidence about now, and
+ * the serve canary restarts wedged serves. Revisit if that stops being true.
  */
 export function attentionCandidates(prepared: PreparedFile[]): string[] {
   const out = new Set<string>();
@@ -304,7 +311,19 @@ export function queryWithState(
   // leaves stale overlays behind cannot flood the list.
   if (options.unionLookup) {
     const known = new Set(baseRows.map((r) => r.id));
-    const candidates = attentionCandidates(preparedFiles).filter((sid) => !known.has(sid));
+    let candidates = attentionCandidates(preparedFiles).filter((sid) => !known.has(sid));
+    // Bounded, and LOUDLY so. This repo's rule is that every degraded path
+    // reports (see buildOwnersMap): a cap that silently drops candidate 201 goes
+    // quiet in exactly the runaway-writer scenario it exists to contain.
+    const UNION_CAP = 200;
+    if (candidates.length > UNION_CAP) {
+      options.onWarn?.(
+        `${candidates.length} sessions outside the recency window need attention, ` +
+          `which exceeds the union cap of ${UNION_CAP} -- ${candidates.length - UNION_CAP} ` +
+          `are omitted from this list`,
+      );
+      candidates = candidates.slice(0, UNION_CAP);
+    }
     if (candidates.length > 0) {
       let extra: SessionRow[] = [];
       try {

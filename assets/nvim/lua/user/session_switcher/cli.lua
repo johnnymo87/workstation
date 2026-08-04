@@ -13,8 +13,10 @@
 --   1. Real today: the call is not free. Measured on cloudbox against the live
 --      13 GB opencode.db, `--with-state --limit 50` takes 120-250 ms and emits
 --      ~300 KB of JSON (the limit is per ROOT TREE, so 50 roots expanded to
---      621 rows; `--fold` collapses that back to ~50 rows, but the DB work --
---      which is the 120-250 ms -- is unchanged, so this stays async either way).
+--      621 rows; `--fold` collapses that back to ~50 rows). `--fold` does not
+--      make the call cheaper: when a live writer reports attention-worthy
+--      sessions outside the recency window it runs a SECOND recursive ancestry
+--      walk to union them in, so the degraded case costs more, not less.
 --      Blocking the editor for a quarter second on every picker
 --      open is bad; the DB is unbounded and contended, so that figure is a
 --      floor, not a ceiling.
