@@ -271,6 +271,25 @@
       # gawk is a real dependency, not incidental: the partial-line rule uses
       # gawk's RT to tell a terminated record from a final unterminated one, which
       # is what stops the canary from consuming a half-written failure line.
+      # The mono-root fast-forwarder. Worth a check rather than trusting review:
+      # the script decides between fast-forwarding and skipping in a SHARED
+      # working tree that holds peer sessions' uncommitted data, so the
+      # never-discard promise and the never-silently-skip-forever tripwire both
+      # need pinning. Test 7 in particular pins a bug found by review, not by
+      # running it: `merge --ff-only origin/main` while parked on a feature
+      # branch silently relocates that branch.
+      ff-mono-root = devboxPkgs.runCommand "ff-mono-root-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils
+          devboxPkgs.gnugrep devboxPkgs.util-linux
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash assets/scripts/test-ff-mono-root.sh
+        touch $out
+      '';
+
       plugin-canary = devboxPkgs.runCommand "opencode-plugin-canary-test" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gawk devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.coreutils ];
       } ''

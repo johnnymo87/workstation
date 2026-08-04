@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# ff-mono-root -- fast-forward the mono PRIMARY checkout, or skip loudly.
+#
+# WHY: ~/projects/mono rots. Measured behind-counts of origin/main: 84 commits
+# (2026-07-08), 175 (07-27), 272 (08-03). It was hand-refreshed to 0 behind on
+# 08-03 and was 27 behind 24h later (~25 commits/day). mono/.agents/skills lives
+# in that tree, so a stale root serves stale agent skills: on 08-03 it served a
+# 3.5-week-old observability skill missing its environment-scoping rule, and a
+# session published a production finding that was 100x wrong. Nothing else
+# refreshes this checkout.
+#
+# CONTRACT: this script only ever FAST-FORWARDS. It never resets, stashes,
+# cleans, checks out, or otherwise discards. The mono root is a SHARED working
+# tree -- multiple concurrent agent sessions read it and keep uncommitted and
+# untracked data there, and a "cleanup" in a shared tree has already destroyed a
+# peer session's uncommitted database once. When anything is in the way, git
+# refuses, we log why, and we leave the tree exactly as we found it.
+#
+# Deliberately NOT here: a `git status --porcelain` dirty-check. The sibling
+# pull-workstation unit opens with one, but the mono root is PERMANENTLY dirty
+# (8 untracked entries plus a modified submodule pointer, measured 2026-08-04),
+# so that check would skip on every run while logging a healthy-looking
+# message -- a silent no-op, which is the exact failure this script exists to
+# end. Untracked files do not block a fast-forward unless they collide with an
+# incoming path, so we simply attempt the merge and let git adjudicate.
+#
+# Deliberately NOT here: `git submodule update`. It can detach or discard work
+# inside a submodule checkout. Stale submodule pointers show up as cosmetic ` M`
+# dirt and were verified not to block a fast-forward.
+#
+# Test seams (used by test-ff-mono-root.sh):
+#   MONO_ROOT           repo to operate on      (default ~/projects/mono)
+#   FF_STALE_THRESHOLD  commits behind that     (default 150, ~6 days of rot)
+#                       trip the failure exit
+#
+# Exit codes: 0 = fast-forwarded, already current, or a KNOWN skip (fail-open --
+# this must never wedge a boot or timer chain). Nonzero = the root has been
+# stuck behind for longer than the threshold, or an unexpected error; either way
+# systemd marks the unit failed, which is the monitoring.
+
+set -o errexit -o nounset -o pipefail
+
+MONO_ROOT="${MONO_ROOT:-$HOME/projects/mono}"
+FF_STALE_THRESHOLD="${FF_STALE_THRESHOLD:-150}"
+
+# Never let git try to prompt for credentials from a headless timer.
+export GIT_TERMINAL_PROMPT=0
+
+# Make the GitHub token available so `gh auth git-credential` (configured as the
+# credential helper for https://github.com in home.base.nix) can authenticate
+# against mono's PRIVATE https remote. Without this the unit is dead on arrival:
+# gh keeps no stored token on this host (~/.config/gh does not exist), the token
+# lives only in the environment, and a systemd user unit inherits none of the
+# login-shell exports -- so every fetch fails with "could not read Username for
+# 'https://github.com': terminal prompts disabled". Verified by running git with
+# the unit's exact environment. Identical to the precedent (and the identical
+# comment) in users/dev/disk-cleanup.nix.
+GH_TOKEN_FILE="/run/secrets/github_api_token"
+if [ -z "${GH_TOKEN:-}" ] && [ -r "$GH_TOKEN_FILE" ]; then
+  export GH_TOKEN="$(cat "$GH_TOKEN_FILE")"
+fi
+
+log() { echo "ff-mono-root: $*"; }
+
+if [ ! -d "$MONO_ROOT/.git" ] && [ ! -f "$MONO_ROOT/.git" ]; then
+  log "no git repo at $MONO_ROOT; nothing to do"
+  exit 0
+fi
+
+cd "$MONO_ROOT"
+
+# Serialize against a concurrent run of this script and against a human running
+# a manual refresh at the same time.
+lock="${XDG_RUNTIME_DIR:-/tmp}/ff-mono-root.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$lock"
+  flock -n 9 || { log "already running; skipping"; exit 0; }
+fi
+
+# Emit the staleness verdict and exit. A skip is fine once; a skip that persists
+# for days is a silent failure, so past the threshold we exit nonzero to surface
+# it as a failed systemd unit rather than a line nobody reads in the journal.
+finish() { # finish <reason>
+  local reason="$1" behind
+  # Fail TOWARD the alert, not toward silence: if the count itself breaks, a 0
+  # would print a healthy-looking "behind by 0" and switch the tripwire off,
+  # which is precisely the invisible-failure mode this script exists to end.
+  behind="$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 999999)"
+  if [ "$behind" -gt "$FF_STALE_THRESHOLD" ]; then
+    log "ALERT: root is $behind commits behind origin/main (threshold $FF_STALE_THRESHOLD) and the fast-forward is not landing: $reason"
+    log "Resolve by hand. Do NOT reset/stash/clean: peer sessions keep uncommitted work in this shared tree."
+    exit 1
+  fi
+  log "$reason (behind by $behind)"
+  exit 0
+}
+
+if ! git fetch --quiet origin main 2>&1; then
+  log "fetch failed"
+  exit 1
+fi
+
+# Guard: only ever fast-forward `main` itself.
+#
+# Without this, `merge --ff-only origin/main` while the root is parked on a
+# feature branch fast-forwards THAT BRANCH onto main's tip whenever it is an
+# ancestor -- silently relocating a branch someone else is using. mono's
+# AGENTS.md states the root is frequently parked on a feature branch, so this is
+# a live hazard, not a theoretical one. `symbolic-ref` also fails on a detached
+# HEAD, which is covered by the same guard.
+branch="$(git symbolic-ref --short -q HEAD || true)"
+if [ "$branch" != "main" ]; then
+  finish "not on main (on '${branch:-detached HEAD}'); skipping"
+fi
+
+if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+  log "already up to date"
+  exit 0
+fi
+
+# Distinguish "someone left local commits here" from "something is in the way",
+# so the journal line names the actual problem. --ff-only would reject both.
+if ! git merge-base --is-ancestor HEAD origin/main; then
+  finish "local commits present (diverged from origin/main); skipping"
+fi
+
+# -c submodule.recurse=false is belt-and-braces: the repo has it off today, but
+# if it were ever turned on, merge would start mutating submodule checkouts --
+# the destructive behaviour this script promises never to perform.
+if ! git -c submodule.recurse=false merge --ff-only origin/main; then
+  finish "fast-forward refused (local changes are in the way); skipping"
+fi
+
+finish "fast-forwarded to origin/main"
