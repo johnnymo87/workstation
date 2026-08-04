@@ -146,6 +146,10 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/command", class: "global-ro" },
   { method: "GET", path: "/config", class: "global-ro" },
   { method: "PATCH", path: "/config", class: "global-sideeffect" },
+  // MUST STAY ANCHOR-FORWARDED: probed by the plugin-canary (workstation-5yox E2).
+  // Do NOT promote to poolSafe. It would pass a cross-member diff on any healthy
+  // day -- see the note on /experimental/tool/ids below for why that is exactly
+  // the trap. pkgs/opencode-plugin-canary-sh/test.sh fails if this gains poolSafe.
   { method: "GET", path: "/config/providers", class: "global-ro" },
   { method: "GET", path: "/doc", class: "global-ro", poolSafe: true, note: "POOL-SAFE (eon4): verified by cross-member diff on 2026-08-01 (FABLE-W6)" },
   { method: "GET", path: "/event", class: "session-query", note: "Can receive session_ids query param (source: event-session-scope.patch)" },
@@ -163,6 +167,18 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/experimental/session", class: "global-ro" },
   { method: "POST", path: "/experimental/session/{sessionID}/background", class: "session-path" },
   { method: "GET", path: "/experimental/tool", class: "global-ro" },
+  // MUST STAY ANCHOR-FORWARDED: probed by the plugin-canary (workstation-5yox E2)
+  // to prove self-compact.js actually loaded, by asserting its registered tool is
+  // present. Do NOT promote to poolSafe.
+  //
+  // It WILL pass a cross-member diff -- every serve reads the same plugin dir, so
+  // on a healthy day all members return identical tool lists. That makes it a
+  // natural promotion candidate and the promotion method cannot see the problem.
+  // But forward-pool is a round-robin cursor that fails over only on UNREACHABLE,
+  // so a member that is alive-but-plugin-broken answers wrong content ~1 probe in
+  // 4 and can never cross the canary's 7-consecutive threshold. Promotion would
+  // silently convert a detectable failure into a permanently suppressed one.
+  // pkgs/opencode-plugin-canary-sh/test.sh fails if this gains poolSafe.
   { method: "GET", path: "/experimental/tool/ids", class: "global-ro" },
   { method: "GET", path: "/experimental/workspace", class: "global-ro" },
   { method: "POST", path: "/experimental/workspace", class: "global-sideeffect" },

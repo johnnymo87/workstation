@@ -254,6 +254,31 @@
       # its path to the suite, then assert the assertion RAN. Grepping for the
       # PASS line is the point: a future edit that drops the env var would
       # otherwise silently restore the blind spot.
+      # Plugin-load canary logic (E2, workstation-5yox step 2). The canary itself
+      # is a minutely systemd oneshot, and everything hard about it -- byte-offset
+      # windowing over a shared 668MB log, rotation and truncation detection, the
+      # partial-line rule, the latch lifecycle that turns edge detection into
+      # level alerting, and the probe status table -- is invisible in a green
+      # timer. Both of the tempting one-liners for that table are silently wrong
+      # in opposite directions (page on every routine restart, or go permanently
+      # quiet when upstream moves a route), so the table is asserted row by row.
+      #
+      # Registered here because `nix flake check` is all CI runs. That is not a
+      # theoretical concern in this bead: it already shipped a well-designed pin
+      # guard wired into no CI path at all, and #292 landed the same day this was
+      # written because three plugin test harnesses were green and unreachable.
+      #
+      # gawk is a real dependency, not incidental: the partial-line rule uses
+      # gawk's RT to tell a terminated record from a final unterminated one, which
+      # is what stops the canary from consuming a half-written failure line.
+      plugin-canary = devboxPkgs.runCommand "opencode-plugin-canary-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gawk devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash pkgs/opencode-plugin-canary-sh/test.sh
+        touch $out
+      '';
+
       store-prefix = devboxPkgs.runCommand "opencode-store-prefix-test" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
         OPENCODE_TEST_PKG_BIN = "${devboxPkgs.runCommand "opencode-patched-0.0.0-fixture" { } ''

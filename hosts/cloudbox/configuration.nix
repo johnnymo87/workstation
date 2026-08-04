@@ -66,6 +66,13 @@ let
   # See pkgs/opencode-store-prefix-sh/test.sh.
   opencode-store-prefix-sh = pkgs.callPackage ../../pkgs/opencode-store-prefix-sh { };
 
+  # Windowing/rotation/partial-line/probe-table logic for the plugin-load canary
+  # (E2, workstation-5yox). Extracted for the same reason as the library above:
+  # byte-offset arithmetic over a shared 668MB log cannot be verified by looking
+  # at a green timer. See pkgs/opencode-plugin-canary-sh/test.sh, wired into
+  # `nix flake check`.
+  opencode-plugin-canary-sh = pkgs.callPackage ../../pkgs/opencode-plugin-canary-sh { };
+
   # mn9r M5: serve-pool descriptor (single source of truth in
   # users/dev/serve-pool.nix). cloudbox = K=4 on ports 4096..4099, serve-0 ==
   # :4096. routingDbPath is the file BOTH the serves (OPENCODE_ROUTING_DB) and
@@ -1429,6 +1436,393 @@ EOF
     timerConfig = {
       OnCalendar = "minutely";
       AccuracySec = "15s";
+    };
+  };
+
+  # ---------------------------------------------------------------------------
+  # Plugin-load canary (E2). Bead workstation-5yox, step 2 of
+  # docs/plans/2026-08-01-plugin-loader-hardening-roadmap.md; design in
+  # docs/plans/2026-08-04-e2-plugin-canary-design.md.
+  #
+  # WHAT IT IS FOR: opencode's plugin loader can reject a plugin FILE and leave
+  # the serve otherwise healthy, logging one ERROR line and nothing else. That
+  # happened on 2026-07-30 and disabled shell-env.ts -- per-session KUBECONFIG
+  # and all sops secret injection -- for ~32 hours before a human noticed. There
+  # is no health check that would have caught it: /config/providers returned 200
+  # the whole time, and upstream's user-visible plugin-error event is commented
+  # out, so the log line is quite literally the only signal that exists.
+  #
+  # WHY BEFORE the loader patch (step 3): that patch makes the loader validate
+  # and throw, which converts the LOUD failure shape (poisoned hooks array,
+  # every request 500s, impossible to miss) into the QUIET one (one log line).
+  # Shipping it without a detector would manufacture more 32-hour silences. This
+  # unit is its prerequisite, not merely a cheaper alternative.
+  #
+  # TWO LEGS, and neither is a backup for the other -- they fail along different
+  # axes. Nine plugin files load on this host:
+  #   - Leg A (behavioural probe) sees ANY failure shape, including ones we have
+  #     never met, but covers self-compact.js by name plus the host-wide LOUD
+  #     symptom.
+  #   - Leg B (log tail) sees only failures that emit the known string, but
+  #     covers all nine -- including opencode-pigeon.ts and superpowers.js, which
+  #     are mkOutOfStoreSymlinks into other repos' live checkouts and have NO
+  #     build-time cover at all. They change on a `git pull` nobody here reviews.
+  # Shared blind cell: a non-logging failure (e.g. an import-time throw, which
+  # goes through publishPluginError with no logError) in one of the eight files
+  # leg A does not probe. Step 3 closes it by making the loader log per-plugin.
+  #
+  # DETECT-ONLY. It never restarts anything: a restart cannot fix a bad plugin
+  # file, and a restart loop here would fight opencode-serve-canary, whose
+  # contract is restart-the-wedged. Separate unit for that reason.
+  # ---------------------------------------------------------------------------
+  systemd.services.opencode-plugin-canary = {
+    description = "OpenCode plugin-load canary (detect-only; alerts via pigeon)";
+    onFailure = [ "opencode-plugin-canary-failure.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      # Runs as dev, not root: it reads dev's opencode log and dev-owned
+      # /run/secrets/pigeon_daemon_auth_token (0400 dev), and needs no privilege
+      # beyond that. StateDirectory is chowned to User.
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "opencode-plugin-canary";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      ExecStart = "${pkgs.writeShellScript "opencode-plugin-canary" ''
+        set -u
+        # System-service PATH is minimal -- be explicit. gawk specifically: awk is
+        # NOT in coreutils, and the library's partial-line rule depends on gawk's
+        # RT variable.
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gawk pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.util-linux pkgs.jq ]}
+
+        # Windowing, rotation, partial-line, plugin-key and probe-table logic,
+        # with its own tests in `nix flake check` (check `plugin-canary`).
+        source "${opencode-plugin-canary-sh}"
+
+        # TEST SEAMS. The four values below are overridable so the whole script can
+        # be exercised end to end against a scratch state dir, a scratch log, and a
+        # stub alert sink -- which is how the roadmap's three controls are run. This
+        # bead exists because a guard was verified as a module and never in the role
+        # it actually plays; a canary with no seam can only be "verified" by reading
+        # it, or by letting it page the on-call to prove it works. Defaults are
+        # production, so the unit below passes none of them.
+        STATE="''${PLUGIN_CANARY_STATE:-/var/lib/opencode-plugin-canary}"
+        LOG="''${PLUGIN_CANARY_LOG:-/home/dev/.local/share/opencode/log/opencode.log}"
+        ALERT="''${PLUGIN_CANARY_ALERT:-${driftAlert}}"
+
+        LATCH="$STATE/latch"
+        OFF_FILE="$STATE/logtail.state"
+
+        # The FRONT DOOR, never an individual serve. Both probed routes are
+        # global-ro and deliberately NOT poolSafe, so the door forwards them to the
+        # anchor; see the notes in pkgs/opencode-frontdoor/src/routes.classification.ts.
+        DOOR="''${PLUGIN_CANARY_DOOR:-http://127.0.0.1:4700}"
+
+        # 7, matching opencode-serve-canary, and for its reason (workstation-g3iy):
+        # the post-boot catalog/credential burn runs ~5-6 min, and /config/providers
+        # IS the provider catalog, so it is legitimately unhealthy for minutes after
+        # every restart. A threshold of 2-3 would page on routine restarts, and an
+        # operator who learns to ignore this channel is worse than a missed alert.
+        THRESHOLD=7
+
+        mkdir -p "$LATCH"
+
+        # PLUGIN_CANARY_LOCK_SKIP_BEFORE_STATE
+        # Don't fight an in-flight reset-workspace: it stops and starts the pool
+        # deliberately, so probes through that window mean nothing. This MUST come
+        # before any state mutation -- in particular before the offset advances --
+        # or error lines written during the reset get consumed unexamined. Shared,
+        # non-blocking probe; the `flock <file> <cmd>` form execvp()s the command,
+        # which fails on this minimal PATH and misreads as "lock held".
+        if [ -e /tmp/reset-workspace.lock ]; then
+          exec 9< /tmp/reset-workspace.lock
+          if ! flock -n -s 9; then
+            echo "reset-workspace in progress; skipping this run"
+            exit 0
+          fi
+          exec 9<&-
+        fi
+
+        # =====================================================================
+        # LEG A -- behavioural probe, level-triggered
+        # =====================================================================
+        TOOL_BODY="$(mktemp "$STATE/probe.XXXXXX")"
+        trap 'rm -f "$TOOL_BODY"' EXIT
+
+        TOOL_STATUS="$(curl -s -o "$TOOL_BODY" -w '%{http_code}' \
+          --max-time 10 --connect-timeout 3 "$DOOR/experimental/tool/ids" 2>/dev/null || true)"
+        PROV_STATUS="$(curl -s -o /dev/null -w '%{http_code}' \
+          --max-time 20 --connect-timeout 3 "$DOOR/config/providers" 2>/dev/null || true)"
+
+        # self_compact_and_resume exists ONLY because self-compact.js loaded and its
+        # `tool` hook registered. This is a real load-proof, and the only one
+        # available over HTTP. Note what this is NOT: `opencode debug info` lists
+        # CONFIGURED plugins and reports success for a file the loader rejected, so
+        # it must never be substituted here as a "simplification".
+        TOOL_PRESENT=no
+        if [ "$TOOL_STATUS" = "200" ] \
+          && jq -e 'index("self_compact_and_resume") != null' < "$TOOL_BODY" >/dev/null 2>&1; then
+          TOOL_PRESENT=yes
+        fi
+
+        PROBE_ACTION="$(plugin_canary_probe_action "$TOOL_STATUS" "$TOOL_PRESENT" "$PROV_STATUS")"
+        FAILS_FILE="$STATE/probe.fails"
+        FAILS="$(cat "$FAILS_FILE" 2>/dev/null || echo 0)"
+        # Written without a `'''` empty-string case pattern on purpose: inside a Nix
+        # indented string a bare pair of single quotes terminates the string.
+        if [ -z "$FAILS" ]; then FAILS=0; fi
+        case "$FAILS" in *[!0-9]*) FAILS=0 ;; esac
+
+        case "$PROBE_ACTION" in
+          HEALTHY)
+            rm -f "$FAILS_FILE" "$STATE/alert-probe"
+            ;;
+          SKIP)
+            # Door or anchor unreachable. That is opencode-serve-canary's
+            # jurisdiction and it already pages; alerting here too would make this
+            # a duplicate pager for an unrelated fault. The counter is deliberately
+            # NOT reset: a fault that alternates unreachable/broken is still a fault.
+            echo "probe skipped (tool=$TOOL_STATUS providers=$PROV_STATUS): door or anchor not answering"
+            ;;
+          *)
+            FAILS=$((FAILS + 1))
+            printf '%s\n' "$FAILS" > "$FAILS_FILE"
+            echo "probe FAILED ($PROBE_ACTION) $FAILS/$THRESHOLD (tool=$TOOL_STATUS present=$TOOL_PRESENT providers=$PROV_STATUS)"
+            if [ "$FAILS" -ge "$THRESHOLD" ]; then
+              case "$PROBE_ACTION" in
+                ALERT:tool-missing)
+                  PROBE_SIG="plugin-canary:tool-missing:self_compact_and_resume"
+                  PROBE_TEXT="$(cat <<EOF
+OpenCode plugin canary: self-compact.js is NOT loaded.
+
+The anchor serve answers HTTP 200 but its tool list no longer contains
+self_compact_and_resume, which exists only while that plugin is loaded. A plugin
+file was almost certainly rejected at load time. Other plugins may be affected;
+this is the one probe that can prove it.
+
+Failed $FAILS consecutive passes (~$FAILS min).
+
+Check:
+  grep -E '^timestamp=[^ ]+ level=ERROR .*failed to load plugin' /home/dev/.local/share/opencode/log/opencode.log | tail -5
+  curl -s $DOOR/experimental/tool/ids | jq .
+EOF
+)"
+                  ;;
+                ALERT:providers-unhealthy)
+                  PROBE_SIG="plugin-canary:providers-unhealthy"
+                  PROBE_TEXT="$(cat <<EOF
+OpenCode plugin canary: /config/providers is 500 through the door.
+
+This is the exact symptom of the 2026-07-30 outage: a plugin factory returned a
+non-hook value, the hooks array was poisoned, and every later hook iteration
+threw -- so the serve loses its provider catalog and can run NO prompt at all.
+
+Failed $FAILS consecutive passes (~$FAILS min).
+
+Check:
+  grep -E '^timestamp=[^ ]+ level=ERROR .*(failed to load plugin|hook)' /home/dev/.local/share/opencode/log/opencode.log | tail -20
+  curl -s -o /dev/null -w '%{http_code}\n' $DOOR/config/providers
+EOF
+)"
+                  ;;
+                *)
+                  PROBE_SIG="plugin-canary:cannot-evaluate:''${PROBE_ACTION#CANNOT_EVALUATE:}"
+                  PROBE_TEXT="$(cat <<EOF
+OpenCode plugin canary CANNOT EVALUATE the behavioural leg ($PROBE_ACTION).
+
+The door answered, but with a status this canary cannot interpret: tool route
+$TOOL_STATUS, providers route $PROV_STATUS. Likely an upstream route change (the
+/experimental namespace is unstable and opencode-patched bumps every 8h) or auth
+drift. This is NOT a plugin failure report -- it means leg A is blind until fixed,
+so treat it as a broken detector rather than a broken plugin.
+
+Failed $FAILS consecutive passes (~$FAILS min).
+
+Check:
+  curl -s -o /dev/null -w '%{http_code}\n' $DOOR/experimental/tool/ids
+  systemctl status opencode-frontdoor --no-pager | head -20
+EOF
+)"
+                  ;;
+              esac
+              "$ALERT" "$STATE/alert-probe" "$PROBE_SIG" "$PROBE_TEXT" 3600 21600
+            fi
+            ;;
+        esac
+
+        # =====================================================================
+        # LEG B -- log tail. Detection is EDGE, alerting is LEVEL.
+        # =====================================================================
+        CUR_ID="$(plugin_canary_file_id "$LOG")"
+        CUR_SIZE=0
+        if [ -f "$LOG" ]; then
+          CUR_SIZE="$(stat -c %s "$LOG" 2>/dev/null || echo 0)"
+        fi
+
+        STORED_ID=""
+        STORED_OFF=""
+        if [ -r "$OFF_FILE" ]; then
+          read -r STORED_ID STORED_OFF < "$OFF_FILE" || true
+        fi
+
+        if [ -z "$CUR_ID" ]; then
+          echo "WARNING: $LOG does not exist; log leg inert this pass"
+        else
+          WINDOW="$(plugin_canary_window_action "$STORED_ID" "$STORED_OFF" "$CUR_ID" "$CUR_SIZE")"
+          START=-1
+          case "$WINDOW" in
+            INIT)
+              printf '%s %s\n' "$CUR_ID" "$CUR_SIZE" > "$OFF_FILE"
+              echo "logtail initialised at EOF ($CUR_SIZE bytes). History deliberately NOT scanned: the file holds ~2500 historical matches from the incident this canary is about."
+              ;;
+            INIT_OVERSIZE)
+              printf '%s %s\n' "$CUR_ID" "$CUR_SIZE" > "$OFF_FILE"
+              echo "WARNING: logtail reset indicated but the file is $CUR_SIZE bytes -- too large to be freshly rotated. Re-initialising at EOF; an unknown span of log went unexamined."
+              "$ALERT" "$STATE/alert-oversize" "plugin-canary:logtail-oversize-reset" \
+                "OpenCode plugin canary: the log tail had to re-initialise at EOF.
+
+A rotation or truncation was indicated (stored $STORED_ID@$STORED_OFF, now $CUR_ID@$CUR_SIZE) but the file is too large to be a fresh rotation, so reading it from 0 was refused. An unknown span of log was NOT examined for plugin load failures, and leg B is the only cover for 8 of the 9 deployed plugin files.
+
+Check that the log path has not been repointed, then confirm plugins are loaded:
+  ls -la /home/dev/.local/share/opencode/log/
+  curl -s $DOOR/experimental/tool/ids | jq 'index(\"self_compact_and_resume\")'" \
+                3600 21600
+              ;;
+            NOOP) ;;
+            RESET)
+              echo "logtail detected rotation (stored $STORED_ID@$STORED_OFF, now $CUR_ID@$CUR_SIZE); reading from 0"
+              START=0
+              ;;
+            READ) START="$STORED_OFF" ;;
+          esac
+
+          if [ "$START" -ge 0 ]; then
+            CHUNK="$(mktemp "$STATE/chunk.XXXXXX")"
+            # Bounded to the size measured above, so bytes appended mid-read are
+            # left for the next pass rather than being counted as consumed.
+            tail -c "+$((START + 1))" "$LOG" 2>/dev/null \
+              | head -c "$((CUR_SIZE - START))" > "$CHUNK" || true
+
+            # Only complete (newline-terminated) lines count, and the offset
+            # advances only that far. The log is appended by every serve, TUI and
+            # headless session on the host, so a read routinely lands mid-line --
+            # and the lines being written during a serve start are exactly the ones
+            # that carry plugin load failures.
+            CONSUMED="$(plugin_canary_complete_bytes < "$CHUNK")"
+
+            # PLUGIN_CANARY_LATCH_BEFORE_OFFSET
+            # Latch every match BEFORE advancing the offset. If this process dies,
+            # or pigeon is unreachable, the evidence must not have been consumed.
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              KEY="$(plugin_canary_plugin_key "$line")"
+              [ -n "$KEY" ] || KEY="unknown"
+              if [ ! -e "$LATCH/$KEY" ]; then
+                {
+                  printf 'first_seen=%s\n' "$(date -Is)"
+                  printf 'run=%s\n' "$(plugin_canary_run_id "$line")"
+                  printf 'line=%s\n' "$line"
+                } > "$LATCH/$KEY"
+                echo "LATCHED plugin load failure: $KEY"
+              fi
+            done < <(plugin_canary_complete_lines < "$CHUNK" \
+              | grep -E "$(plugin_canary_load_pattern)" || true)
+
+            printf '%s %s\n' "$CUR_ID" "$((START + CONSUMED))" > "$OFF_FILE"
+            rm -f "$CHUNK"
+          fi
+        fi
+
+        # PLUGIN_CANARY_RELATCH_EVERY_PASS
+        # Re-invoke driftAlert for EVERY live latch, every pass -- not only for
+        # matches found in this window.
+        #
+        # This is the whole reason latches exist. A rejected plugin logs its line
+        # ONCE per serve start and never again, so detection is inherently edge.
+        # But driftAlert is a THROTTLE, not a scheduler: it re-alerts only when the
+        # caller invokes it again with the same signature, and it swallows a failed
+        # POST (exit 0 always, state written only on HTTP 2xx). A canary that called
+        # it once per detection would therefore send exactly one warning-severity
+        # page, never nag, never escalate, and lose the alert entirely if pigeon
+        # happened to be down for that one minute.
+        #
+        # That is the 2026-07-26 frontdoor incident rebuilt -- 760 correct
+        # detections, ONE notification, missed, 12h39m of silence -- while
+        # appearing to use the escalation logic written in response to it. Turning
+        # edge detection into level alerting here is what makes the documented
+        # backoff and escalation real, and makes a failed POST retry for free next
+        # pass.
+        for latch in "$LATCH"/*; do
+          [ -e "$latch" ] || continue
+          KEY="$(basename "$latch")"
+          FIRST="$(sed -nE 's/^first_seen=(.*)/\1/p' "$latch" | head -1)"
+          RUNID="$(sed -nE 's/^run=(.*)/\1/p' "$latch" | head -1)"
+          LINE="$(sed -nE 's/^line=(.*)/\1/p' "$latch" | head -1)"
+          "$ALERT" "$STATE/alert-load-$KEY" "plugin-canary:load-failed:$KEY" \
+            "OpenCode plugin FAILED TO LOAD: $KEY
+
+opencode rejected this plugin file at load time. The serve stays healthy and
+answers 200, so nothing else will tell you: the last time this happened it went
+unnoticed for ~32 hours and silently disabled per-session KUBECONFIG and all sops
+secret injection.
+
+First seen: $FIRST (run=$RUNID)
+$LINE
+
+Fix the file, then get the pool to reload plugins (they are read once at serve
+start -- the nightly reset does it, or restart the pool per
+.opencode/skills/resetting-workspace), then clear the latch:
+  rm /var/lib/opencode-plugin-canary/latch/$KEY
+
+The latch is cleared by hand on purpose. Auto-clearing needs proof that the plugin
+now LOADS, and no such signal exists until the loader patch (step 3) emits one --
+every cheap proxy for it would clear this while the plugin is still broken." \
+            3600 21600
+        done
+
+        # `ls | wc -l` rather than `find`: findutils is not on this unit's PATH, and
+        # a canary whose own summary line errors every minute is training the reader
+        # to skim its journal.
+        echo "plugin canary pass complete (probe=$PROBE_ACTION latches=$(ls -1 "$LATCH" 2>/dev/null | wc -l))"
+      ''}";
+    };
+  };
+
+  systemd.timers.opencode-plugin-canary = {
+    description = "Minutely OpenCode plugin-load canary";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
+    };
+  };
+
+  # The canary crashing is itself a silent failure -- the exact shape bead
+  # workstation-5yox is about. This covers the script-dying half of "nothing
+  # watches the watcher"; a masked TIMER is still invisible and is filed as a
+  # follow-up.
+  systemd.services.opencode-plugin-canary-failure = {
+    description = "Alert that the OpenCode plugin-load canary itself failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "opencode-plugin-canary";
+      ExecStart = "${pkgs.writeShellScript "opencode-plugin-canary-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq ]}
+        ${driftAlert} /var/lib/opencode-plugin-canary/alert-canary-crashed \
+          "plugin-canary:canary-crashed" \
+          "OpenCode plugin canary FAILED TO RUN.
+
+opencode-plugin-canary.service exited non-zero, so the plugin-load detector is
+down. While it is down, a rejected plugin file produces no signal at all.
+
+Check:
+  systemctl status opencode-plugin-canary.service --no-pager
+  journalctl -u opencode-plugin-canary.service -n 50 --no-pager" \
+          3600 21600
+      ''}";
     };
   };
 
