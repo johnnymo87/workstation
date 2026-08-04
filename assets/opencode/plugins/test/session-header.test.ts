@@ -3,7 +3,7 @@ import plugin from "../session-header"
 
 // Resolve the chat.headers hook the plugin registers.
 async function getChatHeadersHook() {
-  const hooks = await plugin({} as never)
+  const hooks = await plugin.server({} as never)
   const hook = hooks["chat.headers"]
   if (!hook) throw new Error("plugin did not register a chat.headers hook")
   return hook

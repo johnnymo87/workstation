@@ -255,4 +255,16 @@ const plugin: Plugin = async (ctx, opts?: any) => {
   }
 }
 
-export default plugin
+/**
+ * v1 plugin shape. `readV1Plugin` takes the default-export object and
+ * `applyPlugin` returns before it ever reaches `getLegacyPlugins`, which throws
+ * `Plugin export is not a function` on the first named export that is not a
+ * function -- rejecting the WHOLE FILE, with one log line and an otherwise
+ * healthy serve. This file has no named runtime exports today; the v1 shape is
+ * what stops a future one from silently disabling the plugin. See the longer
+ * rationale in shell-env.ts, which that failure actually hit.
+ *
+ * `id` is mandatory: resolvePluginId() throws `Path plugin ... must export id`
+ * for file-sourced plugins without one (shared.ts:313-316).
+ */
+export default { id: "session-state", server: plugin }
