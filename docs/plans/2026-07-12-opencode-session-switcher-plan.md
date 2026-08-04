@@ -46,20 +46,24 @@ immediately: S6 added 22 bun tests to that file, and all of them run.
 
 ### Spawned work — beads this roadmap's own cycles produced
 
-These are NOT spine steps and deliberately do not block S4-S6, but each was
-discovered while executing one, and every one of them is a hazard to the same
-data path. Tracking them here so the roadmap does not quietly leak its own
-findings into the issue tracker and forget them.
+These are NOT spine steps, but each was discovered while executing one.
+
+**Restructured 2026-08-04.** The original framing — "deliberately do not block
+S4-S6" — recorded why each was deferred and nothing else: no owner, no next
+action, no exit condition. Forty PRs merged while three P1s sat here. A table
+that only explains deferral is a graveyard, so each row now names **where the
+work actually lives**, and the three items that are not switcher work have moved
+out to `docs/plans/2026-08-04-unverified-claims-roadmap.md`.
 
 | Bead | From | What | Why it is not a spine step |
 |---|---|---|---|
-| `workstation-5yox` | S0/S1 | Plugin-loader footgun: guard deployed plugins against the shape that took devbox down | Resolved in substance by the gen-528 deploy; the remaining work is the *guard*, which is loader policy, not switcher behaviour |
-| `workstation-h0mp` | S1 | Guard: detect when a `home-manager switch` deploys a **stale** config | This was S0's actual root cause — a switch from a stale worktree silently un-deployed the writer fleet-wide. Deploy-lifecycle safety, not switcher code |
-| `workstation-9i5k` | S3 | Verify the nightly reset does not cause a **morning `nodata` storm** | Raised by S3's adversarial review and explicitly **suspected, not measured**. A restarted serve with no instances yet has no files, so it reads as "not reporting". Measure the reset→reopen ordering before changing anything |
-| `workstation-pscu` | S4 | **`pkgs/oc-auto-attach/test-project-key.sh` runs nowhere** — no `doCheck`, and CI runs only `nix flake check`, so its assertions are inert | S4 needed a harness, not a fix to that one. It routed around the problem (`checks.nvim-lua`) rather than inheriting it; oc-auto-attach's own coverage is still fake and nobody should assume it is green |
-| `workstation-095u` | S5 | Sessions in **non-tmux or nested nvims are undiscoverable** — nvims creates no socket there, so no peer can see them | A limitation of the socket convention, not of discovery. S5's job was to stop reporting corpses as live; this is about sessions it cannot see at all. Recorded as a consumer contract on S6: *absence is not proof* |
+| `workstation-5yox` | S0/S1 | Plugin-loader footgun: guard deployed plugins against the shape that took devbox down | **Has its own roadmap** — `docs/plans/2026-08-01-plugin-loader-hardening-roadmap.md`, steps 0-2 shipped, step 3 split 3a/3b, step 4 pending. Not a leftover; do not describe it as unaddressed |
+| `workstation-h0mp` | S1 | Guard: detect when a `home-manager switch` deploys a **stale** config | **Moved out** → unverified-claims roadmap, step 3. S0's actual root cause, but deploy-lifecycle safety rather than switcher code |
+| `workstation-9i5k` | S3 | Verify the nightly reset does not cause a **morning `nodata` storm** | Raised by S3's adversarial review and explicitly **suspected, not measured**. A restarted serve with no instances yet has no files, so it reads as "not reporting". Measure the reset→reopen ordering before changing anything. **Stays here** — switcher-domain, and the next action is a MEASUREMENT, not a fix |
+| `workstation-pscu` | S4 | **`pkgs/oc-auto-attach/test-project-key.sh` runs nowhere** — no `doCheck`, and CI runs only `nix flake check`, so its assertions are inert | **Moved out** → unverified-claims roadmap, step 1. Not switcher work, and it must land before `oeyv` (which would otherwise force allowlisting the file it exists to catch) |
+| `workstation-095u` | S5 | Sessions in **non-tmux or nested nvims are undiscoverable** — nvims creates no socket there, so no peer can see them | A limitation of the socket convention, not of discovery. S5's job was to stop reporting corpses as live; this is about sessions it cannot see at all. Recorded as a consumer contract on S6 and S7: *absence is not proof*. **Stays here** — switcher-domain |
 | `workstation-dmat` | S6 | **The three TS harnesses under `assets/opencode/plugins/` ran nowhere** — 205 vitest tests, 34 bun tests, and a 116-line integration script, none reachable from `nix flake check`. Worse than absent: `npm test` exited green over the bun suite it never loaded | ✅ **Done** (PR #292). The one spawned bead that *did* block a spine step: S6 puts its join logic in `oc-session-list-state.ts`, and landing that behind an unrun harness would have been the fourth instance of this pattern, committed knowingly |
-| `workstation-oeyv` | `dmat` | Repo-wide meta-guard: assert every test file is reachable from *some* flake check | `dmat` wired the three known harnesses; this is the structural fix that would have caught them mechanically. Deliberately not folded in — `dmat` shipped the narrow within-package version, and the repo-wide sweep is a bigger, separate change |
+| `workstation-oeyv` | `dmat` | Repo-wide meta-guard: assert every test file is reachable from *some* flake check | **Moved out** → unverified-claims roadmap, step 2, **blocked by `pscu`**. Needs an adversarial review *before* implementation: it gates every future PR, and this repo has already reverted one meta-guard's exemption mechanism |
 
 Note that `pscu` is the same shape one level up: a *test* that was not running
 where we assumed it was. S0/S1/`h0mp` were an unrun writer; `pscu` is an unrun
@@ -67,6 +71,9 @@ guard; the frontdoor-opacity check `flake.nix` already documents was a third;
 `dmat` was a fourth and the largest — 239 tests plus an integration script.
 Four independent instances is not a coincidence — when this repo says something
 is covered, check that the thing doing the covering executes.
+
+That observation now has a roadmap of its own rather than a paragraph in someone
+else's: `docs/plans/2026-08-04-unverified-claims-roadmap.md`.
 
 `dmat` also sharpened the diagnosis. The failure is **not** always "no harness
 exists". There, a harness existed and passed locally while silently skipping a
