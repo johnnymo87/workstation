@@ -541,6 +541,81 @@
         }
         touch $out
       '';
+
+      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is a 71-assertion
+      # suite covering project_key/window_name derivation, pool-aware serve
+      # resolution, the tmux window/session name collision that once leaked
+      # `main`'s panes into confined sessions, and an `nvim -l` unit test of the
+      # pre/post-settle discriminator. Until this check existed it ran NOWHERE:
+      # pkgs/oc-auto-attach/default.nix sets no doCheck/checkPhase and CI runs
+      # only `nix flake check`. Every assertion in it was inert from the day it
+      # was written -- the same failure flake.nix documents for the opacity guard
+      # a few hundred lines above, and the reason assets/nvim/test-session-switcher.sh
+      # exists as a separate file rather than an extension of that suite.
+      #
+      # THE TOOL LIST IS THE CHECK. jq, tmux, neovim and the oc-auto-attach
+      # package are not conveniences: each gates a block that SKIPs when its tool
+      # is absent. Measured on a stripped PATH, the suite dropped 20 of its 71
+      # assertions -- every tmux, lua and production-artifact assertion it has --
+      # and still printed a triumphant final line and exited 0. Removing an entry
+      # here does not fail this check; it silently empties it. That is why the
+      # script hard-fails on a missing tool when NIX_BUILD_TOP is set, and why
+      # the gates below assert the COUNT rather than the exit status.
+      oc-auto-attach = devboxPkgs.runCommand "oc-auto-attach-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash
+          devboxPkgs.jq
+          devboxPkgs.tmux
+          devboxPkgs.neovim
+          devboxPkgs.gnugrep
+          (localPkgsFor devboxSystem).oc-auto-attach
+        ];
+        # Positive control: this runner promises every tool above, so a missing
+        # one is a mis-wired check and must be fatal rather than a SKIP. The
+        # suite deliberately does NOT infer this from NIX_BUILD_TOP -- nix-shell
+        # exports that too (measured), which would hard-fail developers.
+        OC_AA_REQUIRE_ALL_TOOLS = "1";
+      } ''
+        # Deliberately NOT `cd ${self}`. The suite derives its own repo root from
+        # BASH_SOURCE, and running it from a neutral cwd is what proves that: the
+        # nvim harness used to `loadfile` a path relative to the caller's cwd, so
+        # it passed from the repo root and failed from anywhere else. A check
+        # that cd'd to the repo root first would have been green over that bug.
+        cd "$TMPDIR"
+        bash ${self}/pkgs/oc-auto-attach/test-project-key.sh 2>&1 | tee "$TMPDIR/out.txt"
+
+        # Assert the assertions RAN, not merely that the script exited 0 -- the
+        # store-prefix / oc-session-list-bin lesson. The count is the gate: any
+        # block that goes dark changes it.
+        grep -q '^ALL PASS (oc-auto-attach): 71 assertions' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the suite did not report its full 71-assertion tally." >&2
+          echo "If you deliberately changed coverage, update EXPECTED_ASSERTIONS in" >&2
+          echo "pkgs/oc-auto-attach/test-project-key.sh and this gate together." >&2
+          exit 1
+        }
+
+        # Belt and braces: SKIP must be unreachable in the sandbox. If this ever
+        # matches, a tool vanished from nativeBuildInputs and the suite quietly
+        # shrank -- the exact regression this check was created to end.
+        if grep -q '^SKIP' "$TMPDIR/out.txt"; then
+          echo "GATE FAILURE: a block SKIPped inside the Nix build:" >&2
+          grep '^SKIP' "$TMPDIR/out.txt" >&2
+          exit 1
+        fi
+
+        # Name the two assertions that are worthless if they go dark and cheap to
+        # lose: the tmux collision regression (needs a real tmux server in the
+        # sandbox) and the nvim -l lua harness (needs a writable HOME).
+        grep -q '^PASS  list_session_panes: ignores same-named window in another session' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the tmux window/session collision regression did not run." >&2
+          exit 1
+        }
+        grep -q '^PASS  lua module unit test via nvim -l' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the nvim -l lua unit test did not run." >&2
+          exit 1
+        }
+        touch $out
+      '';
     };
 
     # NixOS system configuration
