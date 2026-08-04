@@ -421,16 +421,45 @@ whose hook throws when triggered. `trigger` uses `Effect.promise`, not
 `tryPromise`, so there is no per-hook catch and the request 500s. Neither step 3
 nor step 4 catches this.
 
-**Import-time throw** (bead gap G4, dropped from the first draft of this file).
-A module that throws while being imported fails earlier, in `loadExternal`'s
-`entry` stage, which calls `publishPluginError` — **an event, with no
-`logError`**. So the likely answer is that *no line reaches the log at all*,
-making this invisible to any log-watching detector including step 2's secondary
-grep. This is the strongest single argument for the behavioural positive signal
-above: it is the only proposed mechanism that would notice. Step 2 must test
-this shape as its third control and record what it observes.
+**Import-time throw** (bead gap G4). **Measured in step 2, and the earlier
+prediction here was half right in the way that mattered least.**
 
-Both are filed here so they are not rediscovered as surprises.
+Confirmed: a module that throws while being imported fails in `loadExternal`'s
+`entry` stage, which calls `publishPluginError` — an event with no `logError` —
+and it writes **nothing at all**. Not a matching line, not a `level=ERROR` line,
+and nothing on stdout/stderr either, so journald does not have it. The serve
+answers 200 throughout. Step 2's log leg is blind to it, as predicted.
+
+**But the claim this file made next was wrong**, and it was wrong in the
+dangerous direction: that the behavioural probe "is the only proposed mechanism
+that would notice." Step 2 tested it — a plugin that throws at import is
+**isolated to its own file**, and a sibling plugin still loads and still
+registers its tool. So leg A notices only if the throw happens in the one file it
+probes (`self-compact.js`). For the other eight it is as invisible as it is to
+the log leg.
+
+That is the roadmap's real blind cell, stated properly: **any non-logging failure
+in a file the behavioural probe does not cover.** Import-time throw is the member
+we have met, not the whole set. **Step 3 is the only thing that closes it**, which
+is why step 3 now carries a requirement to make the patched loader log per plugin
+on success *and* failure — including this shape, which upstream currently
+swallows entirely.
+
+**The canary's own dependencies can rot** (filed during step 2, both affecting
+the machinery this roadmap now relies on rather than the loader itself):
+
+- `workstation-j95n` — `opencode.log` is 668MB and **has no rotation**. Step 2's
+  log leg handles rotation when it comes (inode + truncation detection, and an
+  8MiB bound on the reset path), but whoever adds it should keep it out of the
+  nightly reset window: the canary lock-skips during reset, so a rotation there
+  can eat the per-start error lines between the last offset and the rotation.
+- `workstation-im79` — **nothing detects a masked canary timer.** `OnFailure=`
+  covers the script crashing, not the timer being disabled or never scheduled, in
+  which case silence is indistinguishable from health. That is this bead's own
+  signature failure applied to its own detector, and it is generic across all
+  four cloudbox canaries.
+
+All are filed here so they are not rediscovered as surprises.
 
 ## Out of scope
 
