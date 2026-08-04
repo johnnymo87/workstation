@@ -338,7 +338,12 @@
       # pkgs/opencode-plugin-bundle/default.nix, which is a third copy of loader
       # semantics living in a derivation, not in a test file.
       loader-pin = devboxPkgs.runCommand "loader-pin-guard" {
-        nativeBuildInputs = [ devboxPkgs.bash ];
+        # gnupatch/diffutils/coreutils: the guard recomposes the patched loader
+        # fixture from pristine upstream + our own patch and byte-compares it,
+        # and hashes the patch. All offline -- the sandbox has no network, which
+        # is exactly why the cross-repo half of this lives in
+        # .github/workflows/update-opencode-patched.yml instead.
+        nativeBuildInputs = with devboxPkgs; [ bash gnupatch diffutils coreutils ];
       } ''
         cd ${self}
         bash users/dev/test-loader-pin.sh

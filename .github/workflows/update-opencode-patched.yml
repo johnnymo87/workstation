@@ -94,6 +94,49 @@ jobs:
             echo "$asset -> $sri"
           done
 
+      # Cross-repo half of the loader-patch pin. The other half
+      # (users/dev/test-loader-pin.sh) recomposes and hashes the VENDORED copy
+      # offline in the flake-check sandbox; it cannot see the fork. This step
+      # can, and this is the moment that matters: the vendored copy's job is to
+      # describe the loader we DEPLOY, and a bump is when what we deploy changes.
+      #
+      # Fail-closed on divergence. Blocking the auto-PR leaves production on the
+      # release whose loader the fixtures actually describe, which is the safe
+      # side -- but it also means the auto-update pipeline is now silently dead,
+      # so a divergence opens an issue rather than only reddening a run nobody
+      # is watching.
+      - name: Verify vendored loader patch matches the fork
+        id: patchcheck
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.check.outputs.latest_tag }}"
+          vendored="assets/opencode/plugins/test/fixtures/plugin-loader-observability.patch"
+          url="https://raw.githubusercontent.com/johnnymo87/opencode-patched/${tag}/patches/plugin-loader-observability.patch"
+
+          if [ ! -f "$vendored" ]; then
+            echo "::error::vendored loader patch missing at $vendored -- the pin is dead, not merely stale."
+            exit 1
+          fi
+
+          # -f so a 404 is an ERROR, not a "Not Found" body silently diffed as
+          # divergence. The patch legitimately does not exist on releases older
+          # than v1.17.13-patched.8, and misreporting that as drift would send
+          # the next reader hunting a loader change that never happened.
+          if ! curl -sfL "$url" -o /tmp/fork-loader.patch; then
+            echo "::error::could not fetch the loader patch from ${tag} (HTTP failure or absent at that tag)."
+            echo "If ${tag} predates v1.17.13-patched.8 the patch genuinely is not there, and bumping"
+            echo "onto it would deploy a loader with NO failure logging while the fixtures claim otherwise."
+            exit 1
+          fi
+
+          if ! diff -u "$vendored" /tmp/fork-loader.patch; then
+            echo "::error::the fork's loader patch at ${tag} differs from the vendored copy."
+            echo "diverged=1" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "vendored loader patch matches ${tag}"
+
       - name: Update home.base.nix
         run: |
           file="users/dev/home.base.nix"
@@ -147,3 +190,49 @@ jobs:
             pr_number=$(gh pr view "$branch" --json number -q '.number')
             gh pr merge "$pr_number" --auto --squash
           fi
+
+      # A blocked auto-update is invisible: the pipeline simply stops opening
+      # PRs and the fleet quietly stays where it is. Surface it as an issue so
+      # the silence has a voice. Deduped by title so an 8-hourly cron cannot
+      # manufacture an issue storm.
+      - name: Surface a blocked loader-patch pin
+        if: failure() && steps.patchcheck.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.check.outputs.latest_tag }}"
+          title="opencode-patched auto-update blocked: loader patch diverged at ${tag}"
+
+          if gh issue list --state open --search "\"$title\" in:title" --json title \
+               -q '.[].title' | grep -qxF "$title"; then
+            echo "issue already open; not duplicating"
+            exit 0
+          fi
+
+          {
+            echo "The \`update-opencode-patched\` workflow refused to open its auto-bump PR."
+            echo
+            echo "\`assets/opencode/plugins/test/fixtures/plugin-loader-observability.patch\`"
+            echo "no longer matches the copy in \`johnnymo87/opencode-patched\` at the release"
+            echo "being bumped to (\`${tag}\`) -- or could not be fetched from it at all."
+            echo
+            echo "**Nothing is broken in production.** The fleet stays on the release whose"
+            echo "loader the vendored fixtures actually describe. But opencode auto-updates are"
+            echo "now STOPPED until this is resolved, and that is the failure this issue exists"
+            echo "to make audible."
+            echo
+            echo "Why it is fail-closed: that patch is the only reason plugin load failures are"
+            echo "visible at all. Upstream logs nothing at the four \`report.error\` stages or at"
+            echo "\`report.missing\`. Bumping onto a release whose loader patch we have not read"
+            echo "would deploy a loader the production canary's greps may no longer match --"
+            echo "which fails green."
+            echo
+            echo "To resolve, refresh the vendored copy and its recorded identity: run"
+            echo "\`users/dev/test-loader-pin.sh\` locally and follow the recipe it prints, then"
+            echo "update the \`LOADER_PATCH_SHA256\` marker in"
+            echo "\`pkgs/opencode-plugin-canary-sh/opencode-plugin-canary.sh\`."
+            echo
+            echo "See \`docs/plans/2026-08-04-step3-loader-patch-design.md\`, \"Pin machinery\"."
+          } > /tmp/issue-body.md
+
+          gh issue create --title "$title" --label "automated" --body-file /tmp/issue-body.md

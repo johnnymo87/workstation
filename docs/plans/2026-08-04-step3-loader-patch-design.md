@@ -229,6 +229,55 @@ stays **green**. One rehearsal of exactly that would have caught the compound
 design before it shipped; its absence is why the flaw survived into a written
 design.
 
+### Revision 3 — what the implementation review changed
+
+Four corrections, all from the `adversarial-reviewer-fable` pass on this section
+before any code was written.
+
+**The renderer was the unpinned drift vector.** Everything the canary parses is
+produced by `packages/core/src/observability/logging.ts`, not by the loader:
+field order (`timestamp` first, `level` second) feeding the anchored pattern; the
+quoting rule at `:46` (`/^[^\s="\\]+$/ ? value : JSON.stringify`) which is the
+*only* reason `path=file://...` renders unquoted and the key extraction matches
+at all; flat annotations; and the `opencode.log` filename. None of the files this
+design named could see any of it, and the guard's failure text sent the reader to
+the `logError` **call site** — a ritual a reader can complete faithfully while a
+renderer change walks straight through. Same shape as the spec-normalisation hole
+this design already had, one layer down. `logging.ts` is now vendored and the
+canary's failure text carries a four-point renderer checklist.
+
+**The `sha256` marker alone pins bytes, not meaning** — it is regenerable in one
+command, so on its own it is an escort, not a ratchet. The guard now also greps
+the canary's *literal* message pattern against the composed loader, and requires
+**every** `failed to load plugin` site to carry the `path` annotation. That
+per-site form is deliberate: checking `path:` appears merely *somewhere* is
+satisfied by upstream's own apply-stage call, so it could not see our patch
+dropping `path` from the five load-stage sites that are the entire point. It is
+the one assertion a dutifully-regenerated `sha256` marker cannot silence, and it
+was verified in exactly that role — patch edited, fixture recomposed, marker
+updated, everything else green, and it still fired.
+
+**Nothing verified the patched fixture was actually upstream + patch.** As first
+designed, a hand-edit or half-finished refresh of the "patched" fixture was caught
+by nothing, while the guard and the re-verification ritual both read it as ground
+truth. So `plugin-index.ts` **stays pristine upstream** (the `curl | diff` recipe
+keeps coming back empty) and `plugin-index.patched.ts` sits beside it, recomposed
+and byte-compared by the guard offline. The relationship is proven, not trusted.
+
+**Ordering is a constraint, not an incident.** The `patchedRevision` bump must
+merge *before* the pin machinery: the cross-repo fetch is only coherent once the
+target tag contains the patch (it 404s on `.7`), and the rewritten "diff against
+upstream + patch" instructions are wrong until the patched loader is what
+deploys. The window is safe rather than lucky — `opencodePatchedHold` at
+`1.17.13` means no upstream loader change can arrive by automation; only a
+deliberate human bump, which reds the guard anyway.
+
+*(Also flagged, and filed as `workstation-qzya` rather than fixed here: the
+fork's own `loader-observability.test.ts` asserts the `file://` shape against
+`plugin_origins` it constructed as `file://` itself. The production behaviour is
+real — verified directly in `config/plugin.ts:21-27` — but that test does not
+establish it. This bead's signature error, inside the patch written to fix it.)*
+
 *(The `sst/opencode` vs `anomalyco/opencode` discrepancy between the guard's
 recipe and `build-release.yml:60-61` was checked: both serve byte-identical
 content for `v1.17.13`, so it is cosmetic. Worth a note in the recipe, not a
