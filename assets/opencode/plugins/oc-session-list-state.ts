@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionRow } from "./oc-session-list-base.js";
-import { mergeOverlays, prepareFiles } from "./session-state-merge.js";
+import { mergeOverlays, prepareFiles, type PreparedFile } from "./session-state-merge.js";
 import type { OverlayData } from "./session-state-impl.js";
 
 export interface SessionWithStateRow extends SessionRow {
@@ -36,6 +36,12 @@ export interface QueryWithStateOptions {
   owners?: Record<string, string>;
   /** Reports degraded-ownership paths; see buildOwnersMap. Default: silent. */
   onWarn?: (msg: string) => void;
+  /**
+   * Resolve overlay-reported sessions that fell outside the base list's recency
+   * window, returning each one's FULL root tree with archived rows excluded.
+   * Omitted => no union (the pre-S6 behaviour). See the union block below.
+   */
+  unionLookup?: (sessionIds: string[]) => SessionRow[];
 }
 
 /**
@@ -225,10 +231,43 @@ export function runOrphanGc(
   return unlinked;
 }
 
+/**
+ * Session ids that a LIVE writer currently reports as needing attention.
+ *
+ * Live files only, deliberately. A stale file's entries merge as `unknown`
+ * (session-state-merge.ts:210-216) -- last-known state from a dead source, which
+ * is not evidence that anything is happening now. Unioning those in would let a
+ * fleet-wide un-deploy, whose orphaned overlays age out but are never collected
+ * while the serves keep running, drag an unbounded pile of dead sessions into
+ * the picker.
+ *
+ * `idle` is likewise excluded: the whole point of the union is rows that demand
+ * action, and merge already prunes plain idle entries anyway.
+ */
+export function attentionCandidates(prepared: PreparedFile[]): string[] {
+  const out = new Set<string>();
+  for (const pf of prepared) {
+    if (!pf.live) continue;
+    for (const [sid, entry] of Object.entries(pf.file.sessions ?? {})) {
+      const e = entry as any;
+      if (!e) continue;
+      const needsAttention =
+        e.error === true ||
+        (Array.isArray(e.pendingPermissions) && e.pendingPermissions.length > 0) ||
+        (Array.isArray(e.pendingQuestions) && e.pendingQuestions.length > 0) ||
+        e.activity === "working" ||
+        e.activity === "retry";
+      if (needsAttention) out.add(sid);
+    }
+  }
+  return [...out].sort();
+}
+
 export function queryWithState(
-  baseRows: SessionRow[],
+  baseRowsIn: SessionRow[],
   options: QueryWithStateOptions = {}
 ): SessionWithStateRow[] {
+  let baseRows = baseRowsIn;
   const now = options.now ?? Date.now();
   const staleMs = options.staleMs ?? 45000;
   const isAlive = options.isAlive ?? ((pid: number) => {
@@ -242,13 +281,57 @@ export function queryWithState(
     }
   });
 
+  // Overlays are read ONCE, before anything else needs them. Reading them again
+  // for the union below would open a window in which orphan GC ran between the
+  // two reads, leaving the candidate set and the merge disagreeing about which
+  // files exist.
+  const overlayFiles = loadOverlayFiles(options.overlayDir ?? "", options.onWarn);
+  const preparedFiles = prepareFiles(overlayFiles, { now, staleMs, isAlive });
+
+  // OVERLAY-TRUTH UNION. The base list is capped by a recency LIMIT over root
+  // trees, so a session that a live writer says is blocked or working can fall
+  // outside the window and vanish from the picker -- the one place the list is
+  // WORSE than useless, because the row it drops is the row the user is being
+  // asked to act on.
+  //
+  // This must inject at the baseRows level, BEFORE ownership is resolved. Bolting
+  // the extra rows on afterwards would give them no owner, no nodata predicate and
+  // no warning coverage -- the quiet-wrongness class documented in buildOwnersMap.
+  //
+  // The lookup is the caller's job (it owns the DB handle) and is expected to
+  // return each candidate's FULL root tree, archived rows excluded. Bounded by
+  // construction: only LIVE files contribute candidates, so an un-deploy that
+  // leaves stale overlays behind cannot flood the list.
+  if (options.unionLookup) {
+    const known = new Set(baseRows.map((r) => r.id));
+    const candidates = attentionCandidates(preparedFiles).filter((sid) => !known.has(sid));
+    if (candidates.length > 0) {
+      let extra: SessionRow[] = [];
+      try {
+        extra = options.unionLookup(candidates) ?? [];
+      } catch (err) {
+        options.onWarn?.(
+          `failed to resolve ${candidates.length} overlay-reported session(s) not in the ` +
+            `recency window (${String(err)}) -- they are missing from this list`,
+        );
+      }
+      const added: SessionRow[] = [];
+      for (const row of extra) {
+        if (!known.has(row.id)) {
+          known.add(row.id);
+          added.push(row);
+        }
+      }
+      if (added.length > 0) {
+        baseRows = [...baseRows, ...added];
+      }
+    }
+  }
+
   // Call buildOwnersMap even when routingDbPath is "" (HOME unset and no env):
   // it warns on <unset>, whereas skipping it was the one degraded path that
   // stayed silent.
   const owners = options.owners ?? buildOwnersMap(options.routingDbPath ?? "", baseRows, options.onWarn);
-
-  const overlayFiles = loadOverlayFiles(options.overlayDir ?? "", options.onWarn);
-  const preparedFiles = prepareFiles(overlayFiles, { now, staleMs, isAlive });
   const mergedStateMap = mergeOverlays(overlayFiles, {
     now, staleMs, isAlive, owners, prepared: preparedFiles,
   });

@@ -25,15 +25,18 @@ and forcing SDD onto it would be theatre.
 | ~~S3~~ | `workstation-rq7k` | ~~Emit `nodata`, not `idle`~~ **DONE 2026-08-01** (PR #243) — predicate is a recency-keyed hybrid, not the obvious per-directory rule (see S3 write-up) | compact → oracle → TDD → adversarial → PR | — |
 | ~~S4~~ | `workstation-vyad` | ~~Task 4: thin **async** Lua caller~~ **DONE 2026-08-02** (PR #251) — `session_switcher/cli.lua`; async justified by measurement, not by the (currently unreachable) deadlock | compact → TDD → adversarial → PR | — |
 | ~~S5~~ | `workstation-afp2` | ~~Task 5: Lua socket discovery~~ **DONE 2026-08-02** (PR #253) — liveness is `attach_status` **and** per-buffer job truth; dedupe is live-beats-dead, not last-writer | compact → TDD → adversarial → PR | — |
-| S6 | `workstation-vk9y` | Task 8: join + row model | compact → SDD → adversarial → PR | `workstation-dmat` ✅ **cleared 2026-08-04** (PR #292) |
+| ~~S6~~ | `workstation-vk9y` | ~~Task 8: join + row model~~ **DONE 2026-08-04** (PR #294) — split join: the CLI folds/sorts/unions, `model.lua` only annotates attachment and filters | compact → oracle → SDD → adversarial → PR | — |
 
-`bd ready` currently returns **S6** (S0/S1/S3/S4/S5 done, S2 folded).
+`bd ready` no longer returns a spine step (S0/S1/S3/S4/S5/S6 done, S2 folded).
+The next switcher work is **Task 9** (the Telescope picker), which has no bead
+yet — it is the first step that produces something a user can actually press.
 
 S6 was briefly blocked on `workstation-dmat`, deliberately: its join logic lands
 in `assets/opencode/plugins/oc-session-list-state.ts`, and until #292 **nothing
 in CI ran that package's 239 tests**. Writing new tests there first would have
 put S6's correctness behind a harness that never executes — the same mistake
-S4 documented in `checks.nvim-lua` and routed around. That block is now cleared.
+S4 documented in `checks.nvim-lua` and routed around. The block paid for itself
+immediately: S6 added 22 bun tests to that file, and all of them run.
 
 ### Spawned work — beads this roadmap's own cycles produced
 
@@ -1175,10 +1178,16 @@ file to be live — a dormant session's owner simply omits it, and "absence is
 authoritative" then yields idle, which is correct. Do not filter on `state`
 without re-deriving that argument.
 
-**Testing note (cycle 6):** the bun-based tests live in `test/*.spec.ts`, which
-is deliberately OUTSIDE vitest's `test/**/*.test.ts` glob — they need `bun:test`
-and `bun:sqlite` and cannot run under vitest. They run via
-`pkgs/oc-session-list/test.sh`. Renaming them to `.test.ts` breaks `npm test`.
+**Testing note (cycle 6, CORRECTED 2026-08-04):** the bun-based tests live in
+`test/*.spec.ts`, which is deliberately OUTSIDE vitest's `test/**/*.test.ts`
+glob — they need `bun:test` and `bun:sqlite` and cannot run under vitest.
+Renaming them to `.test.ts` breaks `npm test`.
+
+The claim that "they run via `pkgs/oc-session-list/test.sh`" was **false when
+written** — `test.sh` never invoked them, and nothing invoked `test.sh`
+(`workstation-dmat`). Since #292 they run in the `plugin-bun` flake check, and
+`test.sh` runs separately in `oc-session-list-bin` against the *built binary*.
+Two different harnesses covering two different things; neither calls the other.
 
 **bun:sqlite is the chosen SQLite access path.** SQLite is compiled into the bun
 binary, so there is *zero* store-path-rot surface — which is the actual intent of
@@ -1340,7 +1349,43 @@ tmux session/window for attached sessions; directory-classify otherwise.
 
 ## Task 8: Join + row model (pure)
 
-**Files:** Create `.../model.lua`; extend `test.sh`.
+> **SUPERSEDED IN PART — implemented 2026-08-04 as S6 (PR #294).** The step
+> below was written when the join was going to live in Lua. Step 3b moved it
+> CLI-side, so the work SPLIT along data gravity, and the "Files" line no longer
+> describes what was built:
+>
+> * **TypeScript** — `oc-session-list-fold.ts` (new): `effective_state`, the
+>   child fold, dir-missing stat, and the sort. `oc-session-list-state.ts`: the
+>   overlay-truth union. `oc-session-list-base.ts`: `queryTreesForSessions`.
+>   Exposed as **`--fold`**, an opt-in flag — folding `--with-state` in place
+>   would have destroyed the flat per-row view that the S3 nodata-vs-idle
+>   forensics (and `pkgs/oc-session-list/test.sh`) read.
+> * **Lua** — `.../model.lua` is now *small*: annotate attachment from
+>   `discovery.locate()`, filter, preserve order. It recomputes nothing and
+>   **must never sort**; the CLI owns ordering.
+> * **The union moved too.** Bullet 7 below assigns it to the picker ("fetch
+>   their rows individually", Task 9). That is dead text: Lua has no SQLite, so
+>   implementing it there would have required a new per-sid CLI mode plus N
+>   process spawns at ~120-250 ms each. The CLI already holds the DB handle and
+>   does it in one pass, injected at the `baseRows` level *before* ownership is
+>   resolved — appending later would silently drop those rows to merge Rule 2.
+>
+> **Phase-1 scope cuts, deliberate.** `seen_at`, `space` and `tags` do not exist
+> in any implementation, so the **`idle`+`unseen` sort tier** (bullets 5-6) and
+> the **space/tag scope filter** (bullet 8) are NOT built — inventing the inputs
+> would have produced a filter that passes everything and a test that asserts
+> nothing. The blocked-pierces-scope requirement survives in the form that *is*
+> implementable today: it pierces the **attached/detached facet**. Project
+> clustering is also cut; it conflicts with a global attention sort, and
+> Telescope's own sorter groups by the `[project]` ordinal once the user types.
+>
+> **`child_state` lifts the parent's SORT, not just its glyph.** Bullet 1 forbids
+> the parent masquerading as blocked; it says nothing about ordering. A fold that
+> left the sort alone would bury the single most attention-worthy row in the list
+> under whatever its parent happened to be doing — so the tier is
+> `min(own, worst-descendant)` while the glyph stays distinct.
+
+**Files:** ~~Create `.../model.lua`; extend `test.sh`.~~ See the note above.
 
 **Step 1: Tests** for `model.build(baselist, overlay, location, tags, {current_space})`:
 - roots only; children folded → parent gets `child_state` (a blocked child →

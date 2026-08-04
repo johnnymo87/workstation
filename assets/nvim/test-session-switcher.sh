@@ -167,6 +167,14 @@ cat >"$lua_file" <<'LUA'
   assert(got_cmd[1] == "oc-session-list", "argv[1] is oc-session-list, got " .. tostring(got_cmd[1]))
   assert(vim.tbl_contains(got_cmd, "--with-state"), "argv contains --with-state")
 
+  -- 10b. S6: `--fold` is OPT-IN. Both directions asserted, because a
+  --      build_argv that always appended it, or never did, would each pass a
+  --      one-sided check -- and the flag silently changes the CLI's output
+  --      shape from a flat list to one row per root.
+  local folded = cli.build_argv({ fold = true })
+  assert(vim.tbl_contains(folded, "--fold"), "fold=true -> argv contains --fold")
+  assert(not vim.tbl_contains(cli.build_argv({}), "--fold"), "fold unset -> argv omits --fold")
+
   -- 11. Callback runs on the main loop, where vim API calls are legal.
   --     vim.system's on_exit fires in a fast event context; forgetting
   --     vim.schedule makes any API call in the picker raise E5560.
@@ -213,6 +221,13 @@ disc_out="$(nvim --clean -l assets/nvim/test-session-switcher-discovery.lua 2>&1
 case "$disc_out" in
   *LUA_TEST_OK*) printf 'PASS  session_switcher.discovery + .rpc unit tests (nvim -l)\n' ;;
   *) printf 'FAIL  session_switcher.discovery + .rpc unit tests\n        out: %s\n' "$disc_out"; exit 1 ;;
+esac
+
+model_out="$(nvim --clean -l assets/nvim/test-session-switcher-model.lua 2>&1 || true)"
+
+case "$model_out" in
+  *LUA_TEST_OK*) printf 'PASS  session_switcher.model unit tests (nvim -l)\n' ;;
+  *) printf 'FAIL  session_switcher.model unit tests\n        out: %s\n' "$model_out"; exit 1 ;;
 esac
 
 printf 'all session_switcher lua tests passed\n'

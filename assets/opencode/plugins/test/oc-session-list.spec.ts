@@ -3,13 +3,16 @@ import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { queryBaseList } from "../oc-session-list-base.js";
+import { queryBaseList, queryTreesForSessions } from "../oc-session-list-base.js";
 import { parseCliArgs } from "../oc-session-list.js";
 import {
+  attentionCandidates,
   buildOwnersMap,
   queryWithState,
   runOrphanGc,
+  type SessionWithStateRow,
 } from "../oc-session-list-state.js";
+import { foldRows } from "../oc-session-list-fold.js";
 import { OVERLAY_VERSION } from "../session-state-impl.js";
 
 const REAL_OVERLAY_DIR = process.env.HOME
@@ -835,5 +838,446 @@ describe("S3: outage warnings survive stale files (review finding 3)", () => {
       });
       expect(warnings.some((w) => /no live writer|not writing/i.test(w))).toBe(false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S6 (Task 8): fold + row model, and the overlay-truth union.
+// ---------------------------------------------------------------------------
+
+describe("S6: effective_state and the child fold", () => {
+  const srow = (o: Partial<SessionWithStateRow> & { id: string }): SessionWithStateRow => ({
+    title: o.id,
+    parent_id: null,
+    directory: "/live",
+    time_updated: 1000,
+    root_id: o.id,
+    activity: "idle",
+    error: false,
+    pendingPermissions: [],
+    pendingQuestions: [],
+    lastActivity: 1000,
+    updatedAt: 1000,
+    ...o,
+  });
+  // Only "/gone" is missing, so a fixture opts INTO the dir-missing path.
+  const statDir = (d: string) => d !== "/gone";
+  const fold = (rows: SessionWithStateRow[]) => foldRows(rows, { statDir });
+
+  it("emits roots only, and a blocked CHILD marks the parent without masquerading as its own state", () => {
+    const out = fold([
+      srow({ id: "r1" }),
+      srow({ id: "c1", parent_id: "r1", root_id: "r1", pendingPermissions: ["edit"] }),
+    ]);
+
+    // Non-vacuous: exactly one row survives AND it is the root, not the child.
+    expect(out.length).toBe(1);
+    expect(out[0].id).toBe("r1");
+    expect(out[0].child_count).toBe(1);
+    expect(out[0].child_state).toBe("blocked");
+    // The whole point of the fold: the parent must NOT claim to be blocked itself.
+    expect(out[0].effective_state).toBe("idle");
+  });
+
+  it("a childless root reports child_state null -- so the assertion above cannot pass vacuously", () => {
+    const out = fold([srow({ id: "lonely" })]);
+    expect(out.length).toBe(1);
+    expect(out[0].child_state).toBeNull();
+    expect(out[0].child_count).toBe(0);
+  });
+
+  it("lifts the parent's SORT into the child's tier, or the fold would bury the blocked row", () => {
+    const out = fold([
+      srow({ id: "busy", activity: "working" }),
+      srow({ id: "quiet" }),
+      srow({ id: "kid", parent_id: "quiet", root_id: "quiet", pendingQuestions: ["q?"] }),
+    ]);
+
+    expect(out.map((r) => r.id)).toEqual(["quiet", "busy"]);
+    expect(out[0].sort_rank).toBeLessThan(out[1].sort_rank);
+  });
+
+  it("folds a GRANDCHILD's state up to the true root (depth > 1, which live data never exercises)", () => {
+    const out = fold([
+      srow({ id: "gr" }),
+      srow({ id: "mid", parent_id: "gr", root_id: "gr" }),
+      srow({ id: "grand", parent_id: "mid", root_id: "gr", error: true }),
+    ]);
+
+    expect(out.length).toBe(1);
+    expect(out[0].id).toBe("gr");
+    expect(out[0].child_count).toBe(2);
+    expect(out[0].child_state).toBe("error");
+    expect(out[0].sort_rank).toBe(0);
+  });
+
+  it("takes the WORST child, not the first or last one seen", () => {
+    const out = fold([
+      srow({ id: "r" }),
+      srow({ id: "a", parent_id: "r", root_id: "r", activity: "working" }),
+      srow({ id: "b", parent_id: "r", root_id: "r", error: true }),
+      srow({ id: "c", parent_id: "r", root_id: "r", activity: "idle" }),
+    ]);
+    expect(out[0].child_state).toBe("error");
+    expect(out[0].child_count).toBe(3);
+  });
+
+  it("resolves effective_state by precedence, not by whichever field it looked at first", () => {
+    const seen = (r: SessionWithStateRow) => fold([r])[0].effective_state;
+
+    // unknown outranks everything: its data came from a dead writer, so every
+    // other field on the row is last-known rather than current.
+    expect(seen(srow({ id: "u", unknown: true, error: true, activity: "working" }))).toBe("unknown");
+    expect(seen(srow({ id: "e", error: true, pendingPermissions: ["x"] }))).toBe("error");
+    expect(seen(srow({ id: "b1", pendingPermissions: ["x"] }))).toBe("blocked");
+    expect(seen(srow({ id: "b2", pendingQuestions: ["x"] }))).toBe("blocked");
+    expect(seen(srow({ id: "rt", activity: "retry" }))).toBe("retry");
+    expect(seen(srow({ id: "w", activity: "working" }))).toBe("working");
+    expect(seen(srow({ id: "n", activity: "nodata" }))).toBe("nodata");
+    expect(seen(srow({ id: "i" }))).toBe("idle");
+  });
+
+  it("sorts nodata ABOVE idle and unknown (S3's tripwire must not be buried)", () => {
+    const out = fold([
+      srow({ id: "idle1" }),
+      srow({ id: "unk", unknown: true }),
+      srow({ id: "nod", activity: "nodata" }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["nod", "unk", "idle1"]);
+  });
+
+  it("keeps a dir-gone row's state TRUTHFUL but refuses to let it sort as working", () => {
+    const out = fold([
+      srow({ id: "gone", activity: "working", directory: "/gone", lastActivity: 9999 }),
+      srow({ id: "real", activity: "working", directory: "/live", lastActivity: 1 }),
+    ]);
+
+    const gone = out.find((r) => r.id === "gone")!;
+    expect(gone.dir_missing).toBe(true);
+    // Still truthful -- the session really is working; it simply cannot progress.
+    expect(gone.effective_state).toBe("working");
+    // ...but it must not pin itself to the top forever (Task 0 finding), even
+    // though its lastActivity is far newer than the healthy row's.
+    expect(out.map((r) => r.id)).toEqual(["real", "gone"]);
+    expect(out.find((r) => r.id === "real")!.dir_missing).toBe(false);
+  });
+
+  it("does not let a dir-gone CHILD pin its parent to the top either", () => {
+    const out = fold([
+      srow({ id: "p1" }),
+      srow({ id: "k1", parent_id: "p1", root_id: "p1", activity: "working", directory: "/gone" }),
+      srow({ id: "p2", activity: "working" }),
+    ]);
+    // p2 is genuinely working; p1's only "working" child can never progress.
+    expect(out.map((r) => r.id)).toEqual(["p2", "p1"]);
+    // The child's state is still REPORTED, just not allowed to drive the sort.
+    expect(out.find((r) => r.id === "p1")!.child_state).toBe("working");
+  });
+
+  it("dates a root by its whole TREE, so a working subagent does not sink its silent parent", () => {
+    const out = fold([
+      srow({ id: "old", lastActivity: 100 }),
+      srow({ id: "kid", parent_id: "old", root_id: "old", lastActivity: 5000 }),
+      srow({ id: "recent", lastActivity: 900 }),
+    ]);
+    expect(out.find((r) => r.id === "old")!.lastActivity).toBe(5000);
+    expect(out.map((r) => r.id)).toEqual(["old", "recent"]);
+  });
+
+  it("stats each distinct directory once, however many rows share it", () => {
+    const calls: string[] = [];
+    foldRows(
+      [srow({ id: "a" }), srow({ id: "b" }), srow({ id: "c", directory: "/other" })],
+      { statDir: (d) => { calls.push(d); return true; } },
+    );
+    expect(calls.sort()).toEqual(["/live", "/other"]);
+  });
+
+  it("orders ties deterministically rather than by input order", () => {
+    const a = fold([srow({ id: "z" }), srow({ id: "y" })]).map((r) => r.id);
+    const b = fold([srow({ id: "y" }), srow({ id: "z" })]).map((r) => r.id);
+    expect(a).toEqual(b);
+    expect(a).toEqual(["y", "z"]);
+  });
+
+  it("returns [] for no rows -- paired with a non-empty case so it cannot pass by always returning []", () => {
+    expect(fold([])).toEqual([]);
+    expect(fold([srow({ id: "one" })]).length).toBe(1);
+  });
+});
+
+describe("S6: overlay-truth union (attention rows outside the recency window)", () => {
+  const mk = (tag: string) => mkdtempSync(join(tmpdir(), `s6-${tag}-`));
+  const writeOverlay = (
+    dir: string,
+    name: string,
+    o: { serveId: string; pid?: number; heartbeat?: number; sessions: any },
+  ) => {
+    writeFileSync(
+      join(dir, `${name}.json`),
+      JSON.stringify({
+        version: OVERLAY_VERSION,
+        instanceStamp: 1,
+        pid: o.pid ?? process.pid,
+        serveId: o.serveId,
+        heartbeat: o.heartbeat ?? Date.now(),
+        sessions: o.sessions,
+      }),
+    );
+  };
+  const working = (lastActivity = 5000) => ({
+    activity: "working",
+    error: false,
+    pendingPermissions: [],
+    pendingQuestions: [],
+    lastActivity,
+    updatedAt: lastActivity,
+  });
+  const insert = (db: Database, id: string, parent: string | null, t: number, archived: number | null = null) =>
+    db.exec(
+      `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated, time_archived)
+       VALUES ('${id}', 'p', ${parent ? `'${parent}'` : "NULL"}, '${id}', '/w', '${id}', '1.0', 1, ${t}, ${archived === null ? "NULL" : archived})`,
+    );
+
+  it("pulls in a blocked/working session the recency LIMIT dropped -- and drops it again without the lookup", () => {
+    const db = createTestDb();
+    insert(db, "recent", null, 9000);
+    insert(db, "forgotten", null, 10); // far outside a limit=1 window
+    const dir = mk("union");
+    try {
+      writeOverlay(dir, "s1", { serveId: "serve-1", sessions: { forgotten: working() } });
+      const base = queryBaseList(db, { limit: 1 });
+      expect(base.map((r) => r.id)).toEqual(["recent"]); // the row IS outside the window
+
+      // Two-sided: without the lookup the attention row is genuinely absent...
+      const without = queryWithState(base, { overlayDir: dir, owners: {} });
+      expect(without.map((r) => r.id)).not.toContain("forgotten");
+
+      // ...and with it, present.
+      const withUnion = queryWithState(base, {
+        overlayDir: dir,
+        owners: {},
+        unionLookup: (sids) => queryTreesForSessions(db, sids),
+      });
+      expect(withUnion.map((r) => r.id)).toContain("forgotten");
+      // It went through the MERGE, not merely appended: it carries live state.
+      expect(withUnion.find((r) => r.id === "forgotten")!.activity).toBe("working");
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to resurrect an ARCHIVED session, while its unarchived twin proves the overlay loaded", () => {
+    const db = createTestDb();
+    insert(db, "recent", null, 9000);
+    insert(db, "archived_one", null, 10, 12345);
+    insert(db, "live_one", null, 10);
+    const dir = mk("archived");
+    try {
+      writeOverlay(dir, "s1", {
+        serveId: "serve-1",
+        sessions: { archived_one: working(), live_one: working() },
+      });
+      const rows = queryWithState(queryBaseList(db, { limit: 1 }), {
+        overlayDir: dir,
+        owners: {},
+        unionLookup: (sids) => queryTreesForSessions(db, sids),
+      });
+      const ids = rows.map((r) => r.id);
+      expect(ids).not.toContain("archived_one");
+      // The paired positive: same file, same code path, so "absent" above is a
+      // decision about archiving rather than an overlay that never parsed.
+      expect(ids).toContain("live_one");
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unions the WHOLE TREE when the overlay names a child, so the fold has a root to fold into", () => {
+    const db = createTestDb();
+    insert(db, "recent", null, 9000);
+    insert(db, "old_root", null, 10);
+    insert(db, "old_kid", "old_root", 20);
+    const dir = mk("tree");
+    try {
+      writeOverlay(dir, "s1", { serveId: "serve-1", sessions: { old_kid: working() } });
+      const rows = queryWithState(queryBaseList(db, { limit: 1 }), {
+        overlayDir: dir,
+        owners: {},
+        unionLookup: (sids) => queryTreesForSessions(db, sids),
+      });
+      const ids = rows.map((r) => r.id);
+      expect(ids).toContain("old_kid");
+      expect(ids).toContain("old_root"); // the root came too
+      expect(rows.find((r) => r.id === "old_kid")!.root_id).toBe("old_root");
+
+      // And the fold turns that into one root row carrying the child's state.
+      const folded = foldRows(rows, { statDir: () => true });
+      const root = folded.find((r) => r.id === "old_root")!;
+      expect(root.child_state).toBe("working");
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores STALE files, so an un-deploy's orphaned overlays cannot flood the list", () => {
+    const db = createTestDb();
+    insert(db, "recent", null, 9000);
+    insert(db, "ghost", null, 10);
+    const dir = mk("stale");
+    try {
+      // Dead pid + ancient heartbeat: the un-deploy shape (files linger, serve gone).
+      writeOverlay(dir, "s1", {
+        serveId: "serve-1",
+        pid: 999999,
+        heartbeat: 0,
+        sessions: { ghost: working() },
+      });
+      const rows = queryWithState(queryBaseList(db, { limit: 1 }), {
+        overlayDir: dir,
+        owners: {},
+        isAlive: () => false,
+        unionLookup: (sids) => queryTreesForSessions(db, sids),
+      });
+      expect(rows.map((r) => r.id)).not.toContain("ghost");
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unions only attention states -- a live-but-idle session stays out", () => {
+    const db = createTestDb();
+    insert(db, "recent", null, 9000);
+    insert(db, "sleepy", null, 10);
+    insert(db, "busy", null, 10);
+    const dir = mk("idle");
+    try {
+      writeOverlay(dir, "s1", {
+        serveId: "serve-1",
+        sessions: {
+          sleepy: { ...working(), activity: "idle" },
+          busy: working(),
+        },
+      });
+      const rows = queryWithState(queryBaseList(db, { limit: 1 }), {
+        overlayDir: dir,
+        owners: {},
+        unionLookup: (sids) => queryTreesForSessions(db, sids),
+      });
+      const ids = rows.map((r) => r.id);
+      expect(ids).not.toContain("sleepy");
+      expect(ids).toContain("busy"); // paired positive: the file was read
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never duplicates a row a lookup hands back twice (or hands back one we already had)", () => {
+    // Today's queryTreesForSessions cannot produce an overlap -- queryBaseList
+    // returns whole trees, so a candidate's root is either fully in the window
+    // or fully out. This pins the CONTRACT rather than that coincidence: a
+    // lookup is allowed to be sloppy, and the union must still be a set. Without
+    // it the dedupe is unexercised code that a future lookup change would break
+    // into a picker showing the same session twice.
+    const db = createTestDb();
+    insert(db, "recent", null, 9000);
+    insert(db, "outside", null, 10);
+    const dir = mk("dupe");
+    try {
+      writeOverlay(dir, "s1", { serveId: "serve-1", sessions: { outside: working() } });
+      const base = queryBaseList(db, { limit: 1 });
+      const dupRow = { id: "outside", title: "outside", parent_id: null, directory: "/w", time_updated: 10, root_id: "outside" };
+      const rows = queryWithState(base, {
+        overlayDir: dir,
+        owners: {},
+        // Returns the same row twice AND a row already in the base list.
+        unionLookup: () => [dupRow, dupRow, base[0]],
+      });
+      const ids = rows.map((r) => r.id);
+      expect(ids).toContain("outside");
+      expect(ids.filter((i) => i === "outside").length).toBe(1);
+      expect(ids.filter((i) => i === "recent").length).toBe(1);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("names candidates from LIVE files only, deduped and ordered", () => {
+    const live = {
+      file: { serveId: "s1", pid: 1, heartbeat: 0, sessions: { b: working(), a: { ...working(), activity: "retry" }, z: { ...working(), activity: "idle" } } },
+      serveId: "s1", pid: 1, live: true,
+    } as any;
+    const dead = {
+      file: { serveId: "s2", pid: 2, heartbeat: 0, sessions: { ghost: working() } },
+      serveId: "s2", pid: 2, live: false,
+    } as any;
+    expect(attentionCandidates([live, dead])).toEqual(["a", "b"]);
+  });
+});
+
+describe("S6: --fold CLI flag", () => {
+  it("parses --fold and implies --with-state (folding unmerged rows would be silently empty)", () => {
+    const opts = parseCliArgs(["--fold"]);
+    expect(opts.fold).toBe(true);
+    expect(opts.withState).toBe(true);
+    expect(parseCliArgs(["--with-state"]).fold).toBe(false);
+  });
+});
+
+describe("S6: the union lands BEFORE ownership is resolved", () => {
+  it("arbitrates a unioned session by its OWNER, not merely by the newest file", () => {
+    // Two live writers disagree about the same unioned session. Rule 1 says a
+    // live OWNER wins outright; Rule 2 (no owner known) says newest wins. They
+    // are made to disagree here, so the assertion can only pass if the unioned
+    // row was present when buildOwnersMap ran. Appending unioned rows after
+    // ownership -- the tempting refactor -- silently drops them to Rule 2.
+    const db = createTestDb();
+    db.exec(
+      `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated, time_archived)
+       VALUES ('recent','p',NULL,'recent','/w','recent','1.0',1,9000,NULL)`,
+    );
+    db.exec(
+      `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated, time_archived)
+       VALUES ('outside','p',NULL,'outside','/w','outside','1.0',1,10,NULL)`,
+    );
+
+    const dir = mkdtempSync(join(tmpdir(), "s6-owner-"));
+    const routingPath = join(dir, "routing.db");
+    const routing = new Database(routingPath);
+    routing.exec(`CREATE TABLE session_assignment (session_id TEXT PRIMARY KEY, desired_serve_id TEXT)`);
+    routing.exec(`INSERT INTO session_assignment VALUES ('outside','serve-owner')`);
+    routing.close();
+
+    const entry = (activity: string, lastActivity: number) => ({
+      activity, error: false, pendingPermissions: [], pendingQuestions: [], lastActivity, updatedAt: lastActivity,
+    });
+    const file = (name: string, serveId: string, e: any) =>
+      writeFileSync(join(dir, name), JSON.stringify({
+        version: OVERLAY_VERSION, instanceStamp: 1, pid: process.pid, serveId,
+        directory: "/w", heartbeat: Date.now(), sessions: { outside: e },
+      }));
+    // The owner is OLDER, so "newest wins" and "owner wins" give different answers.
+    file("owner.json", "serve-owner", entry("working", 100));
+    file("other.json", "serve-other", entry("retry", 5000));
+
+    try {
+      const rows = queryWithState(queryBaseList(db, { limit: 1 }), {
+        overlayDir: dir,
+        routingDbPath: routingPath,
+        unionLookup: (sids) => queryTreesForSessions(db, sids),
+      });
+      const outside = rows.find((r) => r.id === "outside");
+      expect(outside).toBeDefined();
+      expect(outside!.activity).toBe("working"); // owner won; Rule 2 would say "retry"
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

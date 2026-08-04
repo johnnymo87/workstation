@@ -22,6 +22,68 @@ export interface BaseListOptions {
   limit?: number;
 }
 
+/**
+ * Resolve specific session ids to their FULL root trees (S6 overlay-truth union).
+ *
+ * Two properties this must not lose, both inherited from the same ancestry walk
+ * `queryBaseList` uses:
+ *
+ *  1. ARCHIVED STAYS GONE. The anchor filters `time_archived IS NULL`, so an
+ *     archived session is not a leaf and cannot be resurrected by a live overlay
+ *     that still names it. Dropping that filter here would let the union quietly
+ *     undo the base list's own exclusion.
+ *  2. WHOLE TREE, NOT THE NAMED ROW. An overlay can name a CHILD whose root fell
+ *     outside the recency window. Returning only that child would give the fold
+ *     nothing to fold it into, and it would render as a root it is not.
+ */
+export function queryTreesForSessions(db: Database, sessionIds: string[]): SessionRow[] {
+  const ids = [...new Set(sessionIds.filter((s) => typeof s === "string" && s !== ""))];
+  if (ids.length === 0) return [];
+  // Bound the statement: the candidate set comes from live overlay files, which
+  // is small in practice, but an unbounded IN list is a footgun a future writer
+  // bug could pull.
+  const capped = ids.slice(0, 200);
+  const placeholders = capped.map(() => "?").join(",");
+
+  db.exec("PRAGMA busy_timeout = 5000;");
+
+  const query = db.query<SessionRow, string[]>(`
+    WITH RECURSIVE session_ancestry(leaf_id, curr_id, parent_id, depth) AS (
+      SELECT id AS leaf_id, id AS curr_id, parent_id, 0 AS depth
+      FROM session
+      WHERE time_archived IS NULL
+
+      UNION ALL
+
+      SELECT sa.leaf_id, p.id, p.parent_id, sa.depth + 1
+      FROM session_ancestry sa
+      JOIN session p ON p.id = sa.parent_id
+      WHERE sa.parent_id IS NOT NULL
+        AND p.time_archived IS NULL
+        AND sa.depth < 8
+    ),
+    leaf_root AS (
+      SELECT leaf_id, curr_id AS root_id
+      FROM (
+        SELECT leaf_id, curr_id,
+               ROW_NUMBER() OVER (PARTITION BY leaf_id ORDER BY depth DESC) AS rn
+        FROM session_ancestry
+      )
+      WHERE rn = 1
+    ),
+    target_roots AS (
+      SELECT DISTINCT root_id FROM leaf_root WHERE leaf_id IN (${placeholders})
+    )
+    SELECT s.id, s.title, s.parent_id, s.directory, s.time_updated, lr.root_id
+    FROM leaf_root lr
+    JOIN target_roots tr ON tr.root_id = lr.root_id
+    JOIN session s ON s.id = lr.leaf_id
+    ORDER BY s.time_updated DESC;
+  `);
+
+  return query.all(...capped);
+}
+
 export function queryBaseList(db: Database, options?: BaseListOptions): SessionRow[] {
   const limit = options?.limit ?? 50;
 
