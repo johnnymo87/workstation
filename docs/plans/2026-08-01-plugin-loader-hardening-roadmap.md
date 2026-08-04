@@ -1,6 +1,6 @@
 # Plugin-Loader Hardening Roadmap
 
-**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-2 shipped
+**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-2 shipped; 3a fork patch merged, **not yet deployed**
 
 > **Revision 2.** The first draft of this file (PR #242) was written and merged
 > *without* the adversarial review it makes mandatory. Review afterwards found
@@ -355,8 +355,15 @@ devbox, where the founding LOUD incident happened, and which deploys
 
 | | Contents | Status |
 |---|---|---|
-| **3a — observability** | Log per plugin on failure (all four `report.error` stages **and** `report.missing`) and on success. Pure signal addition, safe on every host. | Fork patch **shipped** — `opencode-patched` PR #36. Workstation-side pin machinery outstanding. |
-| **3b — validation** | `assertHooks` + buffer-then-commit at both push sites. The class-killer. | **Gated** on `workstation-fg2w` (devbox cover) or a recorded acceptance. |
+| **3a — observability** | Log per plugin on failure (all four `report.error` stages **and** `report.missing`) and on success. Pure signal addition, safe on every host. | Fork patch **merged** — `opencode-patched` PR #36 (`8ce5fe9`). **Not released, not deployed.** |
+| **3b — validation** | `assertHooks` + buffer-then-commit at both push sites. The class-killer. | `workstation-l7bz`, **blocked** on `workstation-fg2w` (devbox cover) or a recorded acceptance. |
+
+> **Merged is not live.** A patch in `opencode-patched` does nothing until a
+> release is cut *and* `patchedRevision` is bumped *and* the serves restart onto
+> it. Production is still `1.17.13.7`, whose loader has none of this — so every
+> claim above about failures being logged describes the *next* deploy, not the
+> running fleet. The remaining 3a work (release, pin machinery, bump, deploy) is
+> tracked on `workstation-5yox`.
 
 3a makes 3b cheaper *and* safer: after it deploys, a load failure is a real ERROR
 line on every host, so a devbox detector needs **leg B only** — no frontdoor, no

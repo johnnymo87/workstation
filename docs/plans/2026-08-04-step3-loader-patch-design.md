@@ -359,9 +359,9 @@ verbatim, on the founding-incident host, with nobody watching.
 | | Contents | Gate |
 |---|---|---|
 | **3a — observability** | Changes **2 + 3**: `logError` in `report.error` (4 stages) and `report.missing`, plus the `plugin loaded` INFO line. Pin machinery. | **None.** Pure signal addition; strictly improves every host. |
-| ↳ *3a-fork* | The patch itself. **Shipped:** `opencode-patched` PR #36. | — |
+| ↳ *3a-fork* | The patch itself. **Merged:** `opencode-patched` PR #36 (`8ce5fe9`). Not released, not deployed — production still runs `1.17.13.7`. | — |
 | ↳ *3a-workstation* | Pin machinery: vendored fixtures (`plugin-index.ts` patched, `loader.ts`, spec normalisation), patch-identity hash, `update-opencode-patched.yml` cross-check, release + `patchedRevision` bump + deploy. | Needs a fork release to pin against. |
-| **3b — validation** | Change **1**: `assertHooks` + buffer-then-commit. The LOUD→QUIET converter. | Devbox has *some* detector, or an explicit, recorded acceptance. |
+| **3b — validation** | Change **1**: `assertHooks` + buffer-then-commit. The LOUD→QUIET converter. Tracked as `workstation-l7bz`. | Devbox has *some* detector (`workstation-fg2w`), or an explicit, recorded acceptance. The gate is a `bd` dependency, not just prose. |
 
 This costs one extra release cut and loses nothing, because **3a makes 3b
 cheaper and safer**:
