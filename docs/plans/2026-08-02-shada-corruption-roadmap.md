@@ -475,6 +475,43 @@ history permanently. Measurement 5 shows serialization *recovers* that history
 instead, so per-pane shada trades away the thing the fix restores. Kept as
 break-glass only.
 
+#### First-night readout, 2026-08-04 — verified, and incomplete
+
+Deployment was confirmed *before* the log was read (the profile binary contains
+the walk; the old `pkill` is absent), and watch liveness *before* reading absence
+as success (active, same `ExecMainPID` 225669, log mtime 03:00:06). So this is a
+real observation, not the dead-instrument false quiet the `--collect` unit can
+manufacture.
+
+Splitting the 03:00 window by phase is what makes the result legible:
+
+| phase | temps | **max concurrent** | unlink windows | overlapping |
+|---|---|---|---|---|
+| pre-walk — Step 1.5 lgtm teardown | 8 | **3** | 8 | 0 |
+| the walk — Step 3 | 7 | **1** | 7 | 0 |
+
+**The walk does exactly what it was designed to do.** Max concurrent = 1 is the
+invariant, verified in production, one round, ~1 second, `7 exited gracefully, 0
+SIGKILLed, 0 unkillable` — so the "no SIGKILL of a live nvim on the happy path"
+clause is met. Accumulation holds too: `main.shada` grew 44138 → 44486 bytes
+across the reset instead of collapsing to one pane's worth, with a healthy
+verdict, no new quarantine, and zero stranded temps.
+
+**But the night is not clean.** Three concurrent writers appear at 03:00:03, two
+seconds *before* the walk, from Step 1.5 (`default.nix:419-422`):
+`tmux kill-session -t '=lgtm'` tears down every lgtm pane at once, each pane's
+client dies, and each embed server graceful-writes. That is the identical
+mechanism to the old `pkill -9` — killing the client is what triggers the
+server's write — with a different trigger, in a step S2 never touched.
+
+Zero overlapping windows in that burst, so nothing corrupted. **That is ordering
+luck, not safety**, the same way the clean S0 night was. The property that
+matters is max-concurrent == 1, and Step 1.5 violates it. Tracked as `n0yh.1`.
+
+Generalisable lesson: "we fixed the thing that kills nvims" was too narrow a
+frame. Anything that tears down a pane triggers a shada write, so the invariant
+has to hold across the *whole* reset, not just the step that was rewritten.
+
 #### Landmine noted, not fixed
 
 A deadly-signal exit sets `v:dying=1`, and well-behaved persistence plugins skip
@@ -516,5 +553,6 @@ master; check for an existing issue first.
 | 2026-08-02 22:29 | **S1 done** — `#261` merged and deployed. Probe replaced with a write-path oracle; three-state verdict; reap gated. Review found a 5th defect (unconditional reap) and 2 bugs in the fix's own design |
 | 2026-08-02 22:4x | S1 side effect: promotion is now atomic, so Step 3.5 no longer produces the S0 smoking-gun signature — the 03:00 false positive is retired |
 | 2026-08-03 03:00:04 | First reset under the S1 code. Step 3.5 silent = healthy verdict, nothing to reap (verified against the log and the directory) |
+| 2026-08-04 03:00 | **S2 verified, and incomplete.** Walk invariant holds in production: **max concurrent writers = 1** across 7 writers, "7 exited gracefully, 0 SIGKILLed". History accumulated (44138 → 44486 bytes). But a **3-writer burst at 03:00:03**, two seconds earlier, from Step 1.5's `tmux kill-session -t =lgtm` — same mechanism, outside S2's scope. `zv0l` closed, **`n0yh.1` (S2b) opened** |
 | 2026-08-03 16:34 | **S2 shipped** — `#268` merged and deployed (`.#cloudbox`; `~/.nix-profile/bin/reset-workspace` verified to contain the walk). SIGTERM by pid, not the planned socket walk — measurement killed that plan. Discovered **merge-at-write**, so S2 also *restores* the history the burst destroyed. Test suite 133 → 150, plus a behavioural test that runs the extracted walk. **Verification still owed: one observed night** |
 | 2026-08-03 09:00 | **S0 read out, `t032` closed.** No direct writers (0 `CREATE`/`MODIFY` on `main.shada` in 326 events). Storm confirmed: **3 concurrent writers, 3 unlink windows in one second**. S2 proceeds per the pre-registered rule |
