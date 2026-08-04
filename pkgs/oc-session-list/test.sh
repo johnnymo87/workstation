@@ -10,17 +10,34 @@ cd "$REPO_ROOT"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
-echo "== 1. Running bun unit tests =="
-bun test assets/opencode/plugins/test/oc-session-list.spec.ts || fail "unit tests failed"
-pass "unit tests passed"
+# OC_SESSION_LIST_BIN lets a caller supply an ALREADY-BUILT binary and skip
+# stages 1-2. That is how the `oc-session-list-bin` flake check runs this file:
+# a build sandbox has neither a nix daemon nor a network, so stage 2's inner
+# `nix build` cannot work there, and stage 1 is the `plugin-bun` check's job
+# (running it twice doubles the cost and blurs which check failed).
+#
+# Everything below stage 2 is the part worth having in CI -- it is the only
+# coverage anywhere of the BUILT ARTIFACT, per the comment at the greps below.
+# Run with no env var (`bash pkgs/oc-session-list/test.sh`) and the script still
+# does the whole thing locally, including the build.
+if [ -n "${OC_SESSION_LIST_BIN:-}" ]; then
+  echo "== 1-2. SKIPPED (OC_SESSION_LIST_BIN supplied by caller) =="
+  BIN="$OC_SESSION_LIST_BIN"
+  [ -x "$BIN" ] || fail "OC_SESSION_LIST_BIN=$BIN is not executable"
+else
+  echo "== 1. Running bun unit tests =="
+  bun test assets/opencode/plugins/test/oc-session-list.spec.ts || fail "unit tests failed"
+  pass "unit tests passed"
 
-echo "== 2. Building nix derivation .#oc-session-list =="
-OUT_PATH="$(nix build .#oc-session-list --no-link --print-out-paths)" || fail "nix build failed"
-[ -x "$OUT_PATH/bin/oc-session-list" ] || fail "binary $OUT_PATH/bin/oc-session-list not found or not executable"
-pass "built derivation at $OUT_PATH"
+  echo "== 2. Building nix derivation .#oc-session-list =="
+  OUT_PATH="$(nix build .#oc-session-list --no-link --print-out-paths)" || fail "nix build failed"
+  BIN="$OUT_PATH/bin/oc-session-list"
+  [ -x "$BIN" ] || fail "binary $BIN not found or not executable"
+  pass "built derivation at $OUT_PATH"
+fi
 
 echo "== 3. Testing --help output =="
-HELP_OUT="$("$OUT_PATH/bin/oc-session-list" --help)" || fail "--help exited non-zero"
+HELP_OUT="$("$BIN" --help)" || fail "--help exited non-zero"
 echo "$HELP_OUT" | grep -q "Usage: oc-session-list" || fail "--help missing usage text"
 pass "--help works"
 
@@ -56,7 +73,7 @@ db.exec(`
 `);
 '
 
-JSON_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --limit 10)" || fail "oc-session-list failed on fixture DB"
+JSON_OUT="$("$BIN" --db "$TEST_DB" --limit 10)" || fail "oc-session-list failed on fixture DB"
 
 # Assert JSON output includes 3-level tree items and excludes archived_1.
 #
@@ -85,7 +102,7 @@ pass "fixture DB query assertions passed (3-level nesting + archived exclusion)"
 # test destroy a live serve's overlay file, so the isolation is by construction.
 EMPTY_OVERLAY_DIR="$TMP_DIR/empty-overlays"
 mkdir -p "$EMPTY_OVERLAY_DIR"
-JSON_STATE_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --with-state --limit 10 \
+JSON_STATE_OUT="$("$BIN" --db "$TEST_DB" --with-state --limit 10 \
   --overlay-dir "$EMPTY_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
   || fail "oc-session-list --with-state failed on fixture DB"
 
@@ -106,7 +123,7 @@ cat > "$LIVE_OVERLAY_DIR/serve-t-fixture.json" <<JSON
 {"version":1,"instanceStamp":1,"pid":$$,"serveId":"serve-t","directory":"/fixture",
  "heartbeat":$(($(date +%s) * 1000)),"sessions":{}}
 JSON
-JSON_LIVE_OUT="$("$OUT_PATH/bin/oc-session-list" --db "$TEST_DB" --with-state --limit 10 \
+JSON_LIVE_OUT="$("$BIN" --db "$TEST_DB" --with-state --limit 10 \
   --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
   || fail "oc-session-list --with-state failed with a live overlay"
 echo "$JSON_LIVE_OUT" | grep -q '"activity": "idle"' \
