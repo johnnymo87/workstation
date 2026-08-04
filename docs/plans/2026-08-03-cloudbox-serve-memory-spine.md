@@ -8,7 +8,8 @@
 bursts. This one is about the **cause**, plus the residuals it left open.
 
 **Status:** S0 done · S1 done · S4 worked (fix **rejected**, deferred to S2) ·
-**S6 (`29k3`) is the actionable item now**
+S6 done (pigeon PR #56 + sampler v3) · **nothing unblocked; every remaining step
+is time- or peer-gated**
 
 - **S2** is time-blocked: 7-day window ends **2026-08-09 22:37 Z**; ~0.9 days
   elapsed, and **zero OOM kills so far** (`NRestarts=0` on all four,
@@ -18,8 +19,13 @@ bursts. This one is about the **cause**, plus the residuals it left open.
 - **S4** (`63wo`) is **worked and closed out for now**: the proposed per-owner
   gate is unsound, measured harm is 7-and-1 rows, and a pre-committed rule ties
   the build/wontfix decision to S2's kill count. Wake set 08-10.
-- **S5** (`yvxh.6`, P3) is largely landed; **S6** (`29k3`) is the remaining
-  unblocked item.
+- **S5** (`yvxh.6`, P3) is largely landed.
+- **S6** (`29k3`) is **done**: pigeon PR #56 (merged `04401f5`) renames the field
+  and deletes the dead renewal path; the sampler rotated to `samples-v3.tsv` and
+  now emits `lease_live` instead of the two lying `assign_active_*` columns. Note
+  the merged pigeon commit is **not yet deployed** — the live checkout is a pull
+  behind and the daemon runs off it, so the operator's next pull+restart picks up
+  #54 and #56 together.
 
 ---
 
@@ -115,14 +121,37 @@ During the episode 4099 served **602 requests from 5 distinct sessions**
 (580 session-path), at **p50 132 ms / p95 1629 ms / max 5008 ms** — degraded
 while serving. One of the five sessions was the roadmap session itself.
 
-The "idle" reading came from `assign_active_10m=0`, which is a lie of naming:
-`session_assignment.last_active_at` is written **only** by
-`RouteRepo.touchActive`, called from `Router.touch()` on **lease renewal**
-(`pigeon/packages/daemon/src/routing/router.ts:294`). Ordinary route resolution
-does not touch it, so it reads 0 under continuous load. That is `S6`.
+The "idle" reading came from `assign_active_10m=0`, which is a lie of naming.
+`S6` fixed it; the mechanism is not what this section first said, and the first
+correction was wrong too, so it is worth stating exactly.
 
-**Every "idle" claim anywhere in the predecessor roadmap must be re-read as
-"no recent lease renewal".**
+`session_assignment.last_active_at` is written by **one** path: `RouteRepo.upsert`,
+whose only caller is `Router.placeSession`. It records when pigeon last **placed**
+the session on a serve. (This doc previously said "written only by
+`RouteRepo.touchActive` on lease renewal". `touchActive` was real but **dead** —
+its only caller, `Router.touch()`, had no production callers and never had one.
+pigeon renews nothing; the **serve** renews its own lease out of process.)
+
+Placement recency is not a weak activity signal, it is a **path-dependent** one,
+which is worse:
+
+- **A live lease suppresses placement.** `placeSession` runs only when
+  `resolveRoute` returns null, and `resolveRoute` succeeds while a live lease
+  exists — which the serve renews on a 10s fiber for the whole duration of a turn.
+  Sustained work suppresses the very placement one wants to read as evidence of it.
+- **Most traffic never places at all.** Placement happens only on pigeon's own
+  paths (`POST /place`, `OpencodeClientFactory.forSession`). A TUI or front-door
+  request is served by `GET /route`, which is deliberately read-only.
+
+So the field is fresh for pigeon-delivered sessions and arbitrarily ancient for
+TUI-driven ones. A uniformly wrong metric gets distrusted the first time anyone
+checks it; this one stays plausible on whichever session you spot-check, which is
+exactly how it survived to frame this investigation.
+
+**Every "idle" claim anywhere in the predecessor roadmap must be re-read as "no
+recent pigeon *placement*", which implies nothing whatsoever about load.** Where
+you need real activity, read `session_lease` — the serve holds a lease for the
+duration of a turn and releases it in a finalizer at turn end.
 
 ### The episode itself — the one worked example
 
@@ -567,10 +596,72 @@ Deployed and verified **against the built artifact** (`systemctl cat` →
 rebuilt only the canary derivation; serve pool `NRestarts=0`, all four still
 active.
 
-### S6 — Fix the metric that caused all this · `workstation-29k3`
+### S6 — Fix the metric that caused all this · `workstation-29k3` · **DONE**
 
-Rename `last_active_at` to say what it means, or touch it on route resolution.
-Renaming is cheaper and does not churn the hot path.
+Two halves, because the lying name and the lying instrument live in different
+repos.
+
+**pigeon — [PR #56](https://github.com/johnnymo87/pigeon/pull/56), merged
+`04401f5`.** The TS field is now `AssignmentRecord.lastPlacedAt`. `Router.touch()`
+and `RouteRepo.touchActive()` are deleted as dead code, following the
+`countActiveForServe` precedent from `pigeon-76k`.
+
+**The SQL column keeps its wrong name on purpose**, and this is the part worth
+remembering: `ROUTING_DDL` is sha256'd into `routing_meta.ddl_checksum`, and every
+serve validates that digest against a constant compiled into `opencode-patched`.
+Renaming the column — or editing *any byte* of that string, including adding a SQL
+comment inside it — forks the digest and **crash-loops the entire serve pool**
+until a lockstep serve release ships. The explanation therefore lives in a TS
+comment *above* the string. Verified byte-identical across `origin/main`, the
+branch, the live DB, and the serve's compiled constant (`e5c8e409…`).
+
+`renewCAS` was deliberately **not** followed down the dead-code thread. It has no
+TS caller, but renewal is emphatically not dead — the serve writes this same
+SQLite file directly. Deleting it would silently break out-of-process renewal and
+no TypeScript test would notice.
+
+**sampler — `/home/dev/s3-sampling/sample.sh`, rotated to `samples-v3.tsv`.**
+`assign_active_1h` / `assign_active_10m` are **gone**, replaced by `lease_live`:
+sessions holding an unexpired lease at the current binary epoch, which is what
+pigeon's own load measure counts (`countLiveForServe`). The epoch fence matters —
+after a restart bumps the epoch, the previous process's leases survive up to one
+TTL and would inflate the count exactly during the restart window we care about.
+
+`lease_live` is an instantaneous gauge, not a window: it means "turns in flight
+right now" and will miss turns shorter than the 15s tick. Fine for memory
+attribution, useless as a request rate — the routing DB cannot give you one.
+
+#### Consequences for S2, which is mid-window
+
+**The S2 series now spans three files** (it already spanned two):
+
+| file | cols | covers |
+|---|---|---|
+| `samples.tsv` | 22 | 2026-08-02 01:34Z → 08-03 19:27Z |
+| `samples-v2.tsv` | 23 | 08-03 19:27Z → 08-04 00:08Z |
+| `samples-v3.tsv` | 22 | 08-04 00:08Z → |
+
+The memory columns are named identically across all three, so a **header-name**
+read concatenates cleanly. **`v1` and `v3` have the same column count and
+different meanings** — a positional read across them yields plausible, wrong
+numbers, which has already happened once across v1/v2 and produced a bogus 13.29 G
+peak.
+
+#### Found in passing — the instrument is more fragile than assumed
+
+`s3-sampler.timer` and `child-capture.timer` are **transient** `systemd --user`
+units (created via `systemd-run`, living in `/run/user/1000/systemd/transient`).
+They are on tmpfs and are **not** recreated on reboot or user-manager restart. S2
+depends on this series running unbroken until 08-09; if it has a hole, check the
+timer exists before theorising about the serves.
+
+Worse, the obvious check silently lies: `systemctl --user list-timers` from an
+opencode bash call reports **nothing at all** because `XDG_RUNTIME_DIR` is unset,
+which reads exactly like "the timer is gone". It cost a detour here. Use:
+
+```bash
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user list-timers
+```
 
 ## Deliberately NOT doing
 
