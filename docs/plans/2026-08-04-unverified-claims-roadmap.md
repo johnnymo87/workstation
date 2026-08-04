@@ -2,7 +2,7 @@
 
 **Beads:** ~~`workstation-pscu`~~ (done) · `workstation-oeyv` (P2) · `workstation-h0mp` (P1)
 **Started:** 2026-08-04 · **Status:** step 1 shipped (PR #305)
-**Spawned:** `workstation-dimz` (P2, mirror drift) · `workstation-om5r` (P3, NIX_BUILD_TOP heuristic)
+**Also owned here:** `workstation-dimz` (P2, step 4) · `workstation-om5r` (P3, step 5) — both spawned by step 1
 
 These three items were discovered while executing *other* roadmaps and were
 parked in the session-switcher plan's "spawned work" table, which recorded why
@@ -27,6 +27,8 @@ Four measured instances, all found by hand, none by machine:
 | `dmat` — three TS harnesses | "the plugin package has 239 tests" | Unknown duration; `npm test` exited **green over a bun suite it never loaded** | S6 needing a place to put tests |
 | `pscu` — `test-project-key.sh` | "oc-auto-attach is tested" | Since it was written until **2026-08-04** — no `doCheck`, and CI runs only `nix flake check`. When finally run it failed, and on a stripped PATH silently dropped 20 of 71 assertions | S4 needing the same |
 | `h0mp` — home-manager switch | "the deploy shipped the config it declares" | ~32h of `shell-env.ts` silently un-deployed; also S0's actual root cause | Reading a generation by hand |
+| `dimz` — the oc-auto-attach suite | "oc-auto-attach's helpers are tested" | Since written — the assertions exercise *copies* of the helpers, not the helpers | Adversarial review of step 1 |
+| `om5r` — `NIX_BUILD_TOP` guard | "this is running inside a Nix build" | Since written — `nix-shell` sets it too | Step 1 needing the same guard |
 
 The lesson is already written in `flake.nix:226` — *a guard nothing runs is
 documentation with a shebang* — and it has now been re-learned four times. The
@@ -158,6 +160,75 @@ second step and should not block the first.
 **Exit:** a switch from a deliberately stale worktree fails, or warns loudly
 enough that nobody misses it — verified by actually doing it, not by reasoning
 about it.
+
+---
+
+## Step 4 — `dimz`: stop testing mirrors of the production helpers · **NOT STARTED**
+
+**Bead:** `workstation-dimz` (P2, spawned by step 1, 2026-08-04)
+
+`pkgs/oc-auto-attach/test-project-key.sh` defines its own copies of
+`project_key`, `window_name`, `parse_serve_url`, `classify_session_probe` and
+`list_session_panes`, and asserts against the copies. Production lives in
+`pkgs/oc-auto-attach/default.nix`. Step 1 made those assertions *run*, which is
+strictly better than inert — but running a test against a copy still cannot see
+production drift.
+
+About 35 greps pin the production source's *shape*, and they are uneven:
+`project_key`/`window_name` are pinned to their exact derivation lines and
+`list_session_panes` has both a positive and a negative anchor, but
+`parse_serve_url`, `resolve_nvims` and `classify_session_probe` are pinned **by
+name only**.
+
+**The concrete hole is `classify_session_probe`.** Its grep asserts only that the
+function exists; the companion `OC_AA_404_GRACE_SECS` grep matches the *caller*,
+not the classifier. So a revert of `workstation-ovqu` — the fix for a definitive
+404 hanging a terminal for 30s — passes every grep and every mirror assertion,
+because the mirror in the test file still holds the corrected logic.
+
+**Next action:** the built artifact is plain text and the suite already reads it
+as `$oc_aa`. Extract the production function bodies and run the *existing*
+behavioural assertions against them:
+`eval "$(sed -n '/^classify_session_probe()/,/^}$/p' "$oc_aa")"`. Nix `''`
+string indent-stripping puts them at column 0, so extraction works. Do it for
+the four pure functions, then delete the mirrors (or keep them and byte-diff
+extracted-vs-mirror).
+
+**Exit:** a mutation that changes production's 404 handling in `default.nix`,
+without touching the test file, fails `nix flake check`. Verify by actually
+applying that mutation — and make it a *syntactically valid* one, because step 1
+already produced a false positive where a mutation broke the package build and
+the guard never ran.
+
+---
+
+## Step 5 — `om5r`: the `NIX_BUILD_TOP` heuristic is false · **NOT STARTED**
+
+**Bead:** `workstation-om5r` (P3, spawned by step 1, 2026-08-04)
+
+`assets/nvim/test-session-switcher.sh:19-30` hard-fails when `nvim` is missing
+*if* `NIX_BUILD_TOP` is set, reasoning that "inside a Nix build the derivation
+guarantees nvim". The inference is false, measured on cloudbox:
+
+```
+$ nix-shell -E 'derivation {...}' --run 'echo $NIX_BUILD_TOP $IN_NIX_SHELL'
+NIX_BUILD_TOP=/tmp/nix-shell-466095-579280698   IN_NIX_SHELL=impure
+```
+
+A developer in any nix-shell without `nvim` gets
+`FAIL nvim missing inside the Nix build (check is mis-wired)` — a message that
+is simply a lie about their situation. The failure is loud rather than silent,
+so this is a papercut, not an outage, which is why it is P3 and was not fixed
+inside PR #305.
+
+**Next action:** port step 1's positive control. `checks.nvim-lua` sets the
+guarantee explicitly in the derivation env and the script trusts *that* rather
+than sniffing ambient state — which also covers `nix develop` and any future
+runner without having to know how each one sets its environment.
+
+**Exit:** running `assets/nvim/test-session-switcher.sh` inside a nix-shell
+without `nvim` SKIPs honestly; removing `neovim` from the `nvim-lua` check's
+`nativeBuildInputs` still hard-fails. Both verified by doing them.
 
 ---
 
