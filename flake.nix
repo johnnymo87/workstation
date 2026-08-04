@@ -254,6 +254,57 @@
       # its path to the suite, then assert the assertion RAN. Grepping for the
       # PASS line is the point: a future edit that drops the env var would
       # otherwise silently restore the blind spot.
+      # Plugin-load canary logic (E2, workstation-5yox step 2). The canary itself
+      # is a minutely systemd oneshot, and everything hard about it -- byte-offset
+      # windowing over a shared 668MB log, rotation and truncation detection, the
+      # partial-line rule, the latch lifecycle that turns edge detection into
+      # level alerting, and the probe status table -- is invisible in a green
+      # timer. Both of the tempting one-liners for that table are silently wrong
+      # in opposite directions (page on every routine restart, or go permanently
+      # quiet when upstream moves a route), so the table is asserted row by row.
+      #
+      # Registered here because `nix flake check` is all CI runs. That is not a
+      # theoretical concern in this bead: it already shipped a well-designed pin
+      # guard wired into no CI path at all, and #292 landed the same day this was
+      # written because three plugin test harnesses were green and unreachable.
+      #
+      # gawk is a real dependency, not incidental: the partial-line rule uses
+      # gawk's RT to tell a terminated record from a final unterminated one, which
+      # is what stops the canary from consuming a half-written failure line.
+      plugin-canary = devboxPkgs.runCommand "opencode-plugin-canary-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gawk devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash pkgs/opencode-plugin-canary-sh/test.sh
+        touch $out
+      '';
+
+      # Behavioural half of the canary suite: runs the ACTUAL ExecStart script
+      # from the evaluated cloudbox config, via its four test seams, against a
+      # scratch state dir and a dead door.
+      #
+      # The check above asserts the library's logic plus three static greps for
+      # ordering markers in configuration.nix. Those greps are deletion
+      # tripwires and little more -- a refactor hoisting the offset write above
+      # the latch loop keeps the comment and passes all three. The property they
+      # gesture at is the entire design: driftAlert is a throttle, not a
+      # scheduler, so an edge-triggered caller sends one page and goes quiet
+      # forever. This check executes that property instead of describing it: it
+      # runs three passes with no new log content and requires three
+      # re-invocations, and it requires an alert whose delivery failed at
+      # detection time to still be delivered on a later pass.
+      #
+      # Hermetic: the door URL is pointed at a dead port, so leg A takes its SKIP
+      # path and the sandbox needs no network.
+      plugin-canary-behaviour = devboxPkgs.runCommand "opencode-plugin-canary-behaviour" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gawk devboxPkgs.gnugrep devboxPkgs.util-linux ];
+        CANARY_SCRIPT = self.nixosConfigurations.cloudbox.config.systemd.services.opencode-plugin-canary.serviceConfig.ExecStart;
+      } ''
+        cd ${self}
+        bash pkgs/opencode-plugin-canary-sh/test-behaviour.sh
+        touch $out
+      '';
+
       store-prefix = devboxPkgs.runCommand "opencode-store-prefix-test" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
         OPENCODE_TEST_PKG_BIN = "${devboxPkgs.runCommand "opencode-patched-0.0.0-fixture" { } ''

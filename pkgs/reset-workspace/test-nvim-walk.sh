@@ -59,11 +59,16 @@ funcs="$(awk '
   on && /^    nvim_writer_wait_gone\(\) \{/ { tail=1 }
   tail && /^    \}$/ { exit }
 ' "$src")"
-# Stop BEFORE the orphan-socket reap: that block globs the real /tmp/nvim-*.sock,
-# and a test must not mutate paths outside its lab. The reap's listener-skip is
-# asserted statically in test.sh instead.
+# Stop BEFORE the lgtm teardown (Step 3.4) and the orphan-socket reap. Both act
+# on real, outside-the-lab state: the reap globs the real /tmp/nvim-*.sock, and
+# the teardown drives the real tmux server. Only `pgrep`/`pkill` are stubbed, so
+# an extraction that runs past here kills the user's actual lgtm session -- which
+# is exactly what happened when Step 3.4 was first inserted between the sweep and
+# the reap and silently landed inside this extraction. Both blocks are asserted
+# statically in test.sh instead.
 walk="$(awk '
   /^    SELF_ANCESTORS=" "$/ { on=1 }
+  on && /^    # ---- Step 3\.4/ { exit }
   on && /^    # Reap orphan pane sockets/ { exit }
   on { print }
 ' "$src")"
@@ -76,6 +81,10 @@ printf '%s\n' "$funcs" | grep -q 'state" = Z' || { echo "FAIL: extracted funcs l
 printf '%s\n' "$walk"  | grep -q 'kill -TERM' || { echo "FAIL: extracted walk lacks kill -TERM"; exit 1; }
 printf '%s\n' "$walk"  | grep -q 'pkill -9 -u dev -x nvim' || { echo "FAIL: extracted walk lacks the sweep"; exit 1; }
 printf '%s\n' "$walk"  | grep -q 'sock_reaped' && { echo "FAIL: extraction includes the real-/tmp socket reap"; exit 1; }
+# tmux is NOT stubbed here, so any tmux call in the extracted body would hit the
+# user's real server. This guard is the one that was missing when Step 3.4 was
+# added; it cost a live lgtm session to learn.
+printf '%s\n' "$walk"  | grep -q 'tmux ' && { echo "FAIL: extraction includes a real tmux command"; exit 1; }
 echo "ok: extracted the real walk from $src"
 
 # ---- Lab -------------------------------------------------------------------

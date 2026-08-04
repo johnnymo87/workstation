@@ -406,20 +406,14 @@ EOF
     # When RESET_WORKSPACE_DESTRUCTIVE_DETACHED is set (re-exec'd under setsid),
     # skip the interactive head and jump straight to the destructive gauntlet.
     if [ "''${RESET_WORKSPACE_DESTRUCTIVE_DETACHED:-}" != "1" ]; then
-      # ---- Step 1.5: Tear down the lgtm junk-drawer tmux session ----
-      # lgtm confines its OpenCode launches to a tmux session literally named
-      # `lgtm` (see lgtm src/dispatch.ts LGTM_TMUX_SESSION + workstation
-      # oc-auto-attach --tmux-session). We tear it down for memory hygiene.
-      # Its exclusion from the recommendation manifest is now handled
-      # structurally by the `main` allowlist (Step 1.6) -- we no longer
-      # enumerate its pids here (the old denylist leaked: orphaned lgtm attach
-      # clients whose pane had been torn down were reparented to init, escaped
-      # the subtree walk, and landed in the manifest). `=lgtm` is an
-      # exact-match so a session named e.g. `lgtm-foo` is untouched.
-      if tmux has-session -t '=lgtm' 2>/dev/null; then
-        log "tearing down lgtm junk-drawer tmux session"
-        tmux kill-session -t '=lgtm' 2>/dev/null || true
-      fi
+      # ---- Step 1.5: (moved) ----
+      # The lgtm junk-drawer teardown used to live here. It is now Step 3.4, in
+      # the destructive tail, because `tmux kill-session` triggers a ShaDa write
+      # from every pane it tears down and doing that here produced a burst of
+      # concurrent writers BEFORE the walk that exists to serialize them
+      # (workstation-n0yh.1). Nothing in the head phase depends on lgtm being
+      # gone: the recommendation manifest excludes it structurally via the
+      # `main` allowlist below, not by killing it first.
 
       # ---- Step 1.6: Build the `main` tmux session allowlist ----
       # The user's interactive opencode TUIs all live in the `main` tmux
@@ -992,6 +986,57 @@ EOF5
       log "  swept remaining nvim client processes"
     else
       log "  no nvim client processes left to sweep"
+    fi
+
+    # ---- Step 3.4: Tear down the lgtm junk-drawer tmux session ----
+    # lgtm confines its OpenCode launches to a tmux session literally named
+    # `lgtm` (see lgtm src/dispatch.ts LGTM_TMUX_SESSION + workstation
+    # oc-auto-attach --tmux-session). We tear it down for memory hygiene.
+    # `=lgtm` is an exact match, so a session named e.g. `lgtm-foo` is untouched.
+    #
+    # This was Step 1.5, in the interactive head, until workstation-n0yh.1.
+    # `tmux kill-session` tears down every pane AT ONCE; each pane's TUI client
+    # dies, its `nvim --embed` server sees channel EOF and begins a GRACEFUL
+    # exit -- which writes ShaDa. That is the identical mechanism to the old
+    # `pkill -9` storm, only the trigger differs, and it produced 3 concurrent
+    # writers at 03:00:03 on 2026-08-04 -- two seconds before the walk built to
+    # prevent exactly that. It runs HERE instead: after the walk and its sweep,
+    # where no nvim is left alive to write. It must stay BEFORE the socket reap
+    # (a straggler SIGKILLed by the drain below does not unlink its own socket)
+    # and BEFORE Step 3.5 (so any write that does slip through still lands where
+    # the repair can see it).
+    #
+    # Its exclusion from the recommendation manifest never depended on this
+    # teardown: the `main` allowlist (Step 1.6) is built from `=main` panes only,
+    # so lgtm panes are out of scope whether they are alive or dead.
+    #
+    # The drain below is not paranoia. The lgtm-run timer is OnCalendar=*:0/10,
+    # so it fires at 03:00:00 -- the same second this reset starts (measured:
+    # lgtm-run began 03:00:03.461, 113ms BEFORE this teardown logged at
+    # 03:00:03.574) -- and dispatches fresh nvims into the lgtm session. Any that
+    # land between the sweep and here are exited ONE AT A TIME, which is what
+    # keeps max-concurrent-writers == 1 across the WHOLE reset rather than just
+    # across the walk. Logging the count without draining would merely observe
+    # the burst it is supposed to prevent.
+    late_writers="$(nvim_writer_snapshot || true)"
+    if [ -n "$late_writers" ]; then
+      log "  draining $(printf '%s\n' "$late_writers" | grep -c . ) late writer(s) before the lgtm teardown [$(printf '%s\n' "$late_writers" | awk '{printf "%s ", $1}')]"
+      while read -r l_pid l_start _; do
+        [ -n "$l_pid" ] || continue
+        case "$SELF_ANCESTORS" in *" $l_pid "*) continue ;; esac
+        nvim_writer_live "$l_pid" "$l_start" || continue
+        kill -TERM "$l_pid" 2>/dev/null || true
+        if ! nvim_writer_wait_gone "$l_pid" "$l_start" 3000; then
+          log "    late writer $l_pid did not exit in 3s; SIGKILL (its history is forfeit)"
+          kill -9 "$l_pid" 2>/dev/null || true
+        fi
+      done <<EOF6
+$late_writers
+EOF6
+    fi
+    if tmux has-session -t '=lgtm' 2>/dev/null; then
+      log "tearing down lgtm junk-drawer tmux session"
+      tmux kill-session -t '=lgtm' 2>/dev/null || true
     fi
 
     # Reap orphan pane sockets (a graceful exit unlinks its own; a SIGKILL does

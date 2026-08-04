@@ -523,6 +523,48 @@ why the script carries a comment saying so.
 Spine: **oracle consult yes** (design is open), **design review before code**,
 SDD yes, PR yes.
 
+### S2b — The lgtm teardown · `workstation-n0yh.1` · P1 · done 2026-08-04
+
+The teardown moved out of the interactive head (old Step 1.5) into the
+destructive tail as **Step 3.4**, after the walk and its sweep, where no nvim is
+left alive for `kill-session` to make write. Three findings decided the shape:
+
+**The manifest-leak worry was unfounded.** The allowlist is built from `'=main'`
+panes only (`default.nix:437,443`), so lgtm panes are out of scope whether alive
+or dead. Delaying the teardown cannot leak them into the recommendation
+manifest; the capture loops filter on that allowlist before doing anything.
+
+**The alternative — serializing lgtm's nvims in place at Step 1.5 — is worse,
+and not for cost reasons.** It would run writer exits *before* the pre-walk
+corruption guard, so a main.shada that was already corrupt on entry would make
+every one of those exits fail its rename and strand a one-pane temp, which
+Step 3.5 would then promote. That is precisely the failure the guard exists to
+prevent. Hoisting the guard instead would put a destructive quarantine ahead of
+the `[y/N]` prompt.
+
+**A log-only guard would have been too weak, because of a scheduled collision.**
+`lgtm-run.timer` is `OnCalendar=*:0/10`, so it fires at 03:00:00 — the same
+second the reset starts. Measured on 2026-08-04: `lgtm-run` began at
+**03:00:03.461**, 113 ms *before* the teardown logged at 03:00:03.574, and it
+dispatches fresh nvims into the lgtm session. Moving the teardown later widens
+the window in which such an nvim can appear, so Step 3.4 **drains** any writer
+that arrives after the sweep, one at a time, before calling `kill-session`.
+Merely logging the count would have observed the burst instead of preventing it.
+
+Behaviour change, deliberate: the teardown is now behind the confirmation gate,
+so **aborting at `[y/N]` leaves the lgtm session alive**. It used to be destroyed
+before the user answered — a destructive act ahead of consent. The manual
+substitute is one command.
+
+Cost paid to learn something: `test-nvim-walk.sh` *executes* the region it
+extracts and stubs only `pgrep`/`pkill`. Step 3.4 was first placed inside that
+region, so running the harness drove the **real** tmux server and killed the
+live lgtm session and its two nvims. The extraction now stops at the Step 3.4
+marker and a new guard rejects any `tmux` command in the extracted body — the
+same shape as the existing guard that keeps the real `/tmp` socket reap out of
+the lab. Generalisable: an extraction harness is only as safe as its least
+stubbed command, and its boundary is load-bearing test infrastructure.
+
 ### S3 — Upstream report to neovim · `workstation-z9i3` · P3 · optional, last
 
 Two upstream defects: the unnecessary `os_remove(to)` before `os_rename`
@@ -554,5 +596,6 @@ master; check for an existing issue first.
 | 2026-08-02 22:4x | S1 side effect: promotion is now atomic, so Step 3.5 no longer produces the S0 smoking-gun signature — the 03:00 false positive is retired |
 | 2026-08-03 03:00:04 | First reset under the S1 code. Step 3.5 silent = healthy verdict, nothing to reap (verified against the log and the directory) |
 | 2026-08-04 03:00 | **S2 verified, and incomplete.** Walk invariant holds in production: **max concurrent writers = 1** across 7 writers, "7 exited gracefully, 0 SIGKILLed". History accumulated (44138 → 44486 bytes). But a **3-writer burst at 03:00:03**, two seconds earlier, from Step 1.5's `tmux kill-session -t =lgtm` — same mechanism, outside S2's scope. `zv0l` closed, **`n0yh.1` (S2b) opened** |
+| 2026-08-04 11:00 | **S2b fixed.** lgtm teardown moved from the interactive head to **Step 3.4** in the destructive tail, after the walk + sweep. Manifest-leak worry disproved (allowlist is `=main`-only). Added a **serialized drain** before it, because `lgtm-run.timer` (`*:0/10`) fires at 03:00:00 and dispatches fresh nvims mid-reset — measured starting 03:00:03.461, 113ms before the teardown. Abort now leaves lgtm alive (destruction moved behind the `[y/N]` gate). Harness bug found the hard way: it executed the extracted Step 3.4 against the **real** tmux server and killed the live lgtm session; extraction boundary + a no-`tmux` guard added. 156 static assertions, walk harness green. Awaiting the 03:00 readout |
 | 2026-08-03 16:34 | **S2 shipped** — `#268` merged and deployed (`.#cloudbox`; `~/.nix-profile/bin/reset-workspace` verified to contain the walk). SIGTERM by pid, not the planned socket walk — measurement killed that plan. Discovered **merge-at-write**, so S2 also *restores* the history the burst destroyed. Test suite 133 → 150, plus a behavioural test that runs the extracted walk. **Verification still owed: one observed night** |
 | 2026-08-03 09:00 | **S0 read out, `t032` closed.** No direct writers (0 `CREATE`/`MODIFY` on `main.shada` in 326 events). Storm confirmed: **3 concurrent writers, 3 unlink windows in one second**. S2 proceeds per the pre-registered rule |
