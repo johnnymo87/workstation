@@ -1,6 +1,6 @@
 # Plugin-Loader Hardening Roadmap
 
-**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-2 shipped; 3a fork patch merged, **not yet deployed**
+**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-2 shipped; 3a merged and built, **pending a serve restart**
 
 > **Revision 2.** The first draft of this file (PR #242) was written and merged
 > *without* the adversarial review it makes mandatory. Review afterwards found
@@ -355,15 +355,18 @@ devbox, where the founding LOUD incident happened, and which deploys
 
 | | Contents | Status |
 |---|---|---|
-| **3a — observability** | Log per plugin on failure (all four `report.error` stages **and** `report.missing`) and on success. Pure signal addition, safe on every host. | Fork patch **merged** — `opencode-patched` PR #36 (`8ce5fe9`). **Not released, not deployed.** |
+| **3a — observability** | Log per plugin on failure (all four `report.error` stages **and** `report.missing`) and on success. Pure signal addition, safe on every host. | **Done bar the restart.** Fork patch `8ce5fe9`, released `v1.17.13-patched.8`, auto-bumped in #301, pin machinery in #303. |
 | **3b — validation** | `assertHooks` + buffer-then-commit at both push sites. The class-killer. | `workstation-l7bz`, **blocked** on `workstation-fg2w` (devbox cover) or a recorded acceptance. |
 
-> **Merged is not live.** A patch in `opencode-patched` does nothing until a
-> release is cut *and* `patchedRevision` is bumped *and* the serves restart onto
-> it. Production is still `1.17.13.7`, whose loader has none of this — so every
-> claim above about failures being logged describes the *next* deploy, not the
-> running fleet. The remaining 3a work (release, pin machinery, bump, deploy) is
-> tracked on `workstation-5yox`.
+> **Built is not running.** `~/.nix-profile/bin/opencode` now resolves to
+> `1.17.13.8`, but all four serve PIDs still exec `1.17.13.7` — they are system
+> units and hold the old binary until restarted. So the fleet is *still* blind at
+> the four `report.error` stages and at `report.missing`; the claims above
+> describe the next restart, not the running processes. Measured in a scratch
+> serve on the real `.8` binary rather than inferred: the failure and success
+> lines appear, the deployed canary pattern matches them, and per-file keys
+> extract correctly. The restart kills every live session, so it is deliberately
+> left for a chosen window — tracked on `workstation-5yox`.
 
 3a makes 3b cheaper *and* safer: after it deploys, a load failure is a real ERROR
 line on every host, so a devbox detector needs **leg B only** — no frontdoor, no
