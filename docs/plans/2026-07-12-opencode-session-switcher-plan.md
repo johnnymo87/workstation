@@ -25,7 +25,7 @@ and forcing SDD onto it would be theatre.
 | ~~S3~~ | `workstation-rq7k` | ~~Emit `nodata`, not `idle`~~ **DONE 2026-08-01** (PR #243) — predicate is a recency-keyed hybrid, not the obvious per-directory rule (see S3 write-up) | compact → oracle → TDD → adversarial → PR | — |
 | ~~S4~~ | `workstation-vyad` | ~~Task 4: thin **async** Lua caller~~ **DONE 2026-08-02** (PR #251) — `session_switcher/cli.lua`; async justified by measurement, not by the (currently unreachable) deadlock | compact → TDD → adversarial → PR | — |
 | ~~S5~~ | `workstation-afp2` | ~~Task 5: Lua socket discovery~~ **DONE 2026-08-02** (PR #253) — liveness is `attach_status` **and** per-buffer job truth; dedupe is live-beats-dead, not last-writer | compact → TDD → adversarial → PR | — |
-| ~~S6~~ | `workstation-vk9y` | ~~Task 8: join + row model~~ **DONE 2026-08-04** (PR #294) — split join: the CLI folds/sorts/unions, `model.lua` only annotates attachment and filters | compact → oracle → SDD → adversarial → PR | — |
+| ~~S6~~ | `workstation-vk9y` | ~~Task 8: join + row model~~ **DONE 2026-08-04** (PR #295) — split join: the CLI folds/sorts/unions, `model.lua` only annotates attachment and filters | compact → oracle → SDD → adversarial → PR | — |
 
 `bd ready` no longer returns a spine step (S0/S1/S3/S4/S5/S6 done, S2 folded).
 The next switcher work is **Task 9** (the Telescope picker), which has no bead
@@ -1349,7 +1349,7 @@ tmux session/window for attached sessions; directory-classify otherwise.
 
 ## Task 8: Join + row model (pure)
 
-> **SUPERSEDED IN PART — implemented 2026-08-04 as S6 (PR #294).** The step
+> **SUPERSEDED IN PART — implemented 2026-08-04 as S6 (PR #295).** The step
 > below was written when the join was going to live in Lua. Step 3b moved it
 > CLI-side, so the work SPLIT along data gravity, and the "Files" line no longer
 > describes what was built:
