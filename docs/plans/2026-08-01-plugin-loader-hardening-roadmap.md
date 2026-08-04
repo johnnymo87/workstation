@@ -340,7 +340,58 @@ is quite literally the only signal that exists.
   (different upstream message, see Residual). Scratch serve must use the
   `XDG_DATA_HOME` recipe in Facts, or the test contaminates the detector.
 
-## Step 3 — D patch the loader
+## Step 3 — D patch the loader · **SPLIT into 3a / 3b** (design: `docs/plans/2026-08-04-step3-loader-patch-design.md`)
+
+Design review split this step, and the reason is the roadmap's own gating rule
+turned back on itself. Change 1 (validate-and-throw) converts LOUD → QUIET, and
+**only cloudbox has a canary** — verified: `opencode-plugin-canary` appears in
+`hosts/cloudbox/configuration.nix` and nowhere else, and `hosts/devbox` has zero
+`drift-alert` references. Line 328 below calls E2 "a devbox/cloudbox canary";
+that was never true in the shipped artifact. So by *"D without E2 manufactures
+more 32-hour silent failures"*, D is ungated on two of three hosts — including
+devbox, where the founding LOUD incident happened, and which deploys
+`opencode-pigeon.ts` and `superpowers.js` **unconditionally**
+(`opencode-config.nix:646-658`).
+
+| | Contents | Status |
+|---|---|---|
+| **3a — observability** | Log per plugin on failure (all four `report.error` stages **and** `report.missing`) and on success. Pure signal addition, safe on every host. | Fork patch **shipped** — `opencode-patched` PR #36. Workstation-side pin machinery outstanding. |
+| **3b — validation** | `assertHooks` + buffer-then-commit at both push sites. The class-killer. | **Gated** on `workstation-fg2w` (devbox cover) or a recorded acceptance. |
+
+3a makes 3b cheaper *and* safer: after it deploys, a load failure is a real ERROR
+line on every host, so a devbox detector needs **leg B only** — no frontdoor, no
+drift-alert, just pigeon, which devbox has. **3b stays P1;** its gate is a
+log-tail port, not an open-ended project.
+
+**Measured while building 3a** (real serves, patched vs. unpatched binaries):
+
+- **`report.missing` was a fifth silent stage nobody had enumerated** — a bare
+  no-op that does not even `publishPluginError`, i.e. *quieter* than the error
+  path. Reachable for a directory plugin whose `package.json` `exports` resolve
+  no server entrypoint. A patch closing G4 while leaving this open would have
+  shipped G4's signature inside the fix for G4.
+- **An import-time throw arrives as stage `load`, not `entry`.** The prediction
+  was wrong; covering all stages rather than the interesting-looking one is what
+  saved it.
+- **Unpatched, three broken plugins produced 0 log lines, 0 `level=ERROR` lines
+  and 118 bytes of stdout while answering 200.** The blind cell, quantified.
+- **`loadExternal` retries only when passed `wait`, which this call site does
+  not pass** — so failures are reported exactly once. A first draft asserted
+  `>= 1` on the strength of a retry path that cannot be reached here.
+
+**Two corrections to this file's own machinery, both found by review:**
+
+- **The compound-version pin was withdrawn.** Making the five constants
+  `${upstreamVersion}.${patchedRevision}` would have gone red on *every* fork
+  release — 26 patches, ~25 loader-unrelated — against an auto-merged bump PR,
+  training exactly the ritual bumping `test-loader-pin.sh:176` forbids. The pin
+  must key on the loader patch's **identity**, not the fork's revision number.
+- **The pin must also cover spec normalisation** (`config/plugin.ts:42-54`).
+  The canary's per-file key requires `path=file://`; without it every failure
+  collapses to one shared `unknown` latch. That shape is produced in a file the
+  design had not vendored.
+
+### Original scope (kept for the record)
 
 Validate the awaited result before `hooks.push` — at **BOTH** sites. The line
 usually cited, `index.ts:119`, is only the *legacy* loop. The v1 branch pushes
