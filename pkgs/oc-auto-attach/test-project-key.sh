@@ -2,8 +2,85 @@
 # Unit tests for oc-auto-attach helper functions.
 # Mirror the helpers from default.nix and exercise them directly.
 # Run: bash test-project-key.sh
+#
+# Wired into `nix flake check` as checks.oc-auto-attach (flake.nix). Before
+# 2026-08-04 it was wired into NOTHING -- pkgs/oc-auto-attach/default.nix sets
+# no doCheck/checkPhase and CI runs only `nix flake check` -- so every assertion
+# below was, in flake.nix's own words, documentation with a shebang
+# (workstation-pscu). Two things follow from that history and must not be
+# undone:
+#
+#   1. TOOL ABSENCE IS FATAL INSIDE A NIX BUILD. Every optional-dependency
+#      branch below SKIPs when its tool is missing, which is correct for a
+#      developer laptop and catastrophic in CI: with jq/tmux/nvim absent this
+#      suite printed "all oc-auto-attach helper tests passed" and exited 0
+#      having silently dropped 20 of its 71 assertions -- including every
+#      interesting one. Any runner that guarantees the tools sets
+#      OC_AA_REQUIRE_ALL_TOOLS=1, which turns a missing tool into a hard
+#      failure. That is POSITIVE CONTROL on purpose: the obvious heuristic,
+#      "NIX_BUILD_TOP is set, so we are inside a Nix build", is simply false --
+#      `nix-shell` exports NIX_BUILD_TOP=/tmp/nix-shell-<pid> and
+#      IN_NIX_SHELL=impure, so a developer in any nix-shell without tmux would
+#      get a hard failure whose message ("check is mis-wired") is a lie.
+#      Sniffing the ambient environment guesses; an env var the runner sets
+#      states. Forgetting to set it cannot open a silent hole either: the
+#      flake check greps for the full tally and for the absence of SKIP.
+#
+#   2. THE ASSERTION COUNT IS ASSERTED. Reaching the end proves nothing about
+#      how much ran; a suite that asserts nothing also exits 0. EXPECTED_ASSERTIONS
+#      pins the number, so silently losing coverage fails loudly instead.
 
 set -o errexit -o nounset -o pipefail
+
+# Total assertions this suite makes when nothing is skipped. Bump it in the same
+# commit that adds or removes an assertion -- a diff that changes coverage
+# without touching this number is exactly the silent drift this pins down.
+EXPECTED_ASSERTIONS=71
+
+ASSERT_COUNT=0
+SKIP_COUNT=0
+
+# pass <msg>: record and report one satisfied assertion. Every PASS in this file
+# goes through here so the count cannot drift from what is printed.
+pass() {
+  ASSERT_COUNT=$((ASSERT_COUNT + 1))
+  printf 'PASS  %s\n' "$1"
+}
+
+# require_tool <tool> <what-would-be-skipped>: 0 if the tool is usable, 1 if the
+# caller should SKIP. When OC_AA_REQUIRE_ALL_TOOLS is set there is no third
+# option -- the runner promised the tool, so absence is a mis-wired check, not a
+# degraded environment, and skipping would restore the blind spot this suite was
+# un-blinded to fix.
+require_tool() {
+  local tool="$1" what="$2"
+  if command -v "$tool" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ -n "${OC_AA_REQUIRE_ALL_TOOLS:-}" ]; then
+    printf 'FAIL  %s: %s missing but OC_AA_REQUIRE_ALL_TOOLS is set (check is mis-wired)\n' "$what" "$tool"
+    exit 1
+  fi
+  printf 'SKIP  %s (%s not on PATH)\n' "$what" "$tool"
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+  return 1
+}
+
+# Absolute repo root, so every path below is independent of the caller's cwd.
+# The nvim harness used to `loadfile` a path relative to cwd, which meant the
+# suite passed from the repo root and failed from its own directory -- and a
+# Nix build runs from neither by default.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+
+# nvim writes state/shada under $HOME; in a Nix sandbox HOME is /homeless-shelter
+# and unwritable. Give it a scratch one there (TMPDIR is the build dir, which Nix
+# removes for us). Outside the sandbox the caller's HOME is left alone -- these
+# tests read it symbolically and asserting against the real one is the point.
+if [ ! -w "${HOME:-/nonexistent}" ]; then
+  export HOME="${TMPDIR:-/tmp}/oc-aa-test-home-$$"
+  mkdir -p "$HOME"
+fi
 
 # ---- helpers under test (mirror of default.nix) -----------------------------
 
@@ -142,7 +219,7 @@ resolve_pigeon_auth() {
 assert_eq() {
   local expected="$1" actual="$2" msg="$3"
   if [ "$expected" = "$actual" ]; then
-    printf 'PASS  %s\n' "$msg"
+    pass "$msg"
   else
     printf 'FAIL  %s\n        expected: %s\n        actual:   %s\n' "$msg" "$expected" "$actual"
     exit 1
@@ -152,7 +229,7 @@ assert_eq() {
 assert_exit() {
   local expected_rc="$1" actual_rc="$2" msg="$3"
   if [ "$expected_rc" = "$actual_rc" ]; then
-    printf 'PASS  %s\n' "$msg"
+    pass "$msg"
   else
     printf 'FAIL  %s\n        expected exit: %s\n        actual exit:   %s\n' "$msg" "$expected_rc" "$actual_rc"
     exit 1
@@ -225,7 +302,7 @@ assert_eq "$fake_path_nvims" "$missing_out" "resolve_nvims: missing env falls ba
 # Scenario 6: stale env should emit a warning on stderr.
 warn_stderr="$(OC_NVIMS_BIN="$nonexec_path" PATH="$fake_path_dir" resolve_nvims 2>&1 >/dev/null)"
 case "$warn_stderr" in
-  *"OC_NVIMS_BIN=$nonexec_path is set but not executable"*) printf 'PASS  resolve_nvims: warns on stale env\n' ;;
+  *"OC_NVIMS_BIN=$nonexec_path is set but not executable"*) pass 'resolve_nvims: warns on stale env' ;;
   *) printf 'FAIL  resolve_nvims: warns on stale env\n        stderr: %s\n' "$warn_stderr"; exit 1 ;;
 esac
 
@@ -246,7 +323,7 @@ assert_exit "1" "$none_rc"  "resolve_nvims: nothing available -> exit 1"
 # never be worse than the pre-pool behavior. Needs jq (a runtimeInput of the
 # package); SKIP if absent in a stripped shell.
 fallback_url="http://127.0.0.1:4096"
-if command -v jq >/dev/null 2>&1; then
+if require_tool jq 'parse_serve_url tests'; then
   # Happy path: a real /route body routes the TUI to the owning serve (:4097).
   route_body='{"sessionId":"ses_x","serveId":"serve-1","apiBase":"http://127.0.0.1:4097","eventUrl":"http://127.0.0.1:4097/event?session_ids=ses_x"}'
   assert_eq "http://127.0.0.1:4097" "$(parse_serve_url "$route_body" "$fallback_url")" \
@@ -284,8 +361,6 @@ if command -v jq >/dev/null 2>&1; then
     "parse_serve_url: api_base null -> fallback"
   assert_eq "$fallback_url" "$(parse_serve_url '{"api_base":""}' "$fallback_url")" \
     "parse_serve_url: api_base empty string -> fallback"
-else
-  printf 'SKIP  parse_serve_url tests (jq not on PATH)\n'
 fi
 
 # ---- classify_session_probe tests -------------------------------------------
@@ -297,7 +372,7 @@ fi
 # `curl -sf ... || true` and burned the whole 30s window on a session that
 # could never appear -- a manual attach of a stale/nonexistent sid hung the
 # terminal for 30s (workstation-ovqu). Needs jq (a runtimeInput); SKIP if absent.
-if command -v jq >/dev/null 2>&1; then
+if require_tool jq 'classify_session_probe tests'; then
   assert_eq "FOUND /home/dev/projects/workstation" \
     "$(classify_session_probe 200 '{"directory":"/home/dev/projects/workstation"}')" \
     "classify_session_probe: 200 + directory -> FOUND <dir>"
@@ -327,8 +402,6 @@ if command -v jq >/dev/null 2>&1; then
   assert_eq "WAIT" \
     "$(classify_session_probe 200 '{"directory":null}')" \
     "classify_session_probe: 200 with null directory -> WAIT"
-else
-  printf 'SKIP  classify_session_probe tests (jq not on PATH)\n'
 fi
 
 # ---- resolve_pigeon_auth tests ----------------------------------------------
@@ -365,7 +438,7 @@ unset PIGEON_DAEMON_AUTH_TOKEN_FILE
 # `main`. list_session_panes must return ONLY the target session's panes.
 #
 # Needs a real tmux; SKIP if absent (e.g. stripped CI shell).
-if command -v tmux >/dev/null 2>&1; then
+if require_tool tmux 'list_session_panes tmux tests'; then
   scan_sock="oc_aa_scan_test_$$"
   scan_tmpdir="$(mktemp -d)"
   scan_cleanup() {
@@ -408,7 +481,14 @@ if command -v tmux >/dev/null 2>&1; then
   # with a clear setup diagnostic if they never settle -- so a half-born pane
   # can never masquerade as a list_session_panes logic bug. (`SECONDS` is a
   # bash builtin counting whole seconds since shell start.)
-  settle_deadline=$(( SECONDS + 5 ))
+  #
+  # The deadline is 30s, not the 5s that sufficed locally: this now runs in CI
+  # alongside every other check on a shared aarch64 runner, and the repo already
+  # documents 5-15s stalls for its own processes under load (default.nix:285).
+  # The deadline only costs time when something is actually broken, and a check
+  # that flakes under load gets disabled -- which would restore the blindness
+  # this whole change exists to end.
+  settle_deadline=$(( SECONDS + 30 ))
   while :; do
     panes_a="$(list_session_panes lgtm)"
     panes_b="$(list_session_panes main)"
@@ -427,7 +507,7 @@ if command -v tmux >/dev/null 2>&1; then
 
   case "$scan_out" in
     *"$scan_tmpdir/proj-a"*)
-      printf 'PASS  list_session_panes: returns target session pane\n' ;;
+      pass 'list_session_panes: returns target session pane' ;;
     *)
       printf 'FAIL  list_session_panes: returns target session pane\n        out: %s\n' "$scan_out"; exit 1 ;;
   esac
@@ -436,14 +516,12 @@ if command -v tmux >/dev/null 2>&1; then
     *"$scan_tmpdir/proj-b"*)
       printf 'FAIL  list_session_panes: leaks main-session pane via window-name collision\n        out: %s\n' "$scan_out"; exit 1 ;;
     *)
-      printf 'PASS  list_session_panes: ignores same-named window in another session\n' ;;
+      pass 'list_session_panes: ignores same-named window in another session' ;;
   esac
 
   unset -f tmux
   scan_cleanup
   trap 'rm -rf "$nvims_tmpdir"' EXIT
-else
-  printf 'SKIP  list_session_panes tmux tests (tmux not on PATH)\n'
 fi
 
 # ---- production-script integration check ------------------------------------
@@ -461,19 +539,24 @@ fi
 oc_aa="$(command -v oc-auto-attach || true)"
 if [ -n "$oc_aa" ]; then
   if grep -q '^[[:space:]]*resolve_nvims()' "$oc_aa"; then
-    printf 'PASS  production script defines resolve_nvims\n'
+    pass 'production script defines resolve_nvims'
   else
     printf 'FAIL  production script defines resolve_nvims\n        not found in: %s\n' "$oc_aa"
     exit 1
   fi
   if grep -q 'OC_NVIMS_BIN' "$oc_aa"; then
-    printf 'PASS  production script honors OC_NVIMS_BIN\n'
+    pass 'production script honors OC_NVIMS_BIN'
   else
     printf 'FAIL  production script honors OC_NVIMS_BIN\n        OC_NVIMS_BIN never referenced in: %s\n' "$oc_aa"
     exit 1
   fi
+elif [ -n "${OC_AA_REQUIRE_ALL_TOOLS:-}" ]; then
+  # The runner promised oc-auto-attach on PATH; absence means mis-wiring.
+  printf 'FAIL  production-script integration check: oc-auto-attach missing but OC_AA_REQUIRE_ALL_TOOLS is set (check is mis-wired)\n'
+  exit 1
 else
   printf 'SKIP  production-script integration check (oc-auto-attach not on PATH)\n'
+  SKIP_COUNT=$((SKIP_COUNT + 1))
 fi
 
 # ---- production-source check (default.nix) -----------------------------------
@@ -483,17 +566,16 @@ fi
 # a source-level regression (reintroducing the fragile confined scan) trips
 # immediately, before deploy. The session-scan command form survives Nix's
 # '' string verbatim (no ${ } or '' sequences), so a literal grep is reliable.
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 default_nix="$script_dir/default.nix"
 if [ -f "$default_nix" ]; then
   if grep -q 'list_session_panes()' "$default_nix"; then
-    printf 'PASS  source defines list_session_panes\n'
+    pass 'source defines list_session_panes'
   else
     printf 'FAIL  source defines list_session_panes\n        not found in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -q 'list-panes -a -f' "$default_nix"; then
-    printf 'PASS  source scans session via #{session_name} filter\n'
+    pass 'source scans session via #{session_name} filter'
   else
     printf 'FAIL  source scans session via #{session_name} filter\n        "list-panes -a -f" not found in: %s\n' "$default_nix"
     exit 1
@@ -504,49 +586,49 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source still uses fragile confined scan (list-panes -s -t "=...")\n        in: %s\n' "$default_nix"
     exit 1
   else
-    printf 'PASS  source has no fragile confined scan (list-panes -s -t "=...")\n'
+    pass 'source has no fragile confined scan (list-panes -s -t "=...")'
   fi
   # Pool-aware serve resolution must be present in the source: the
   # parse_serve_url helper, the PIGEON_DAEMON_URL env, and the /route query.
   if grep -q 'parse_serve_url()' "$default_nix"; then
-    printf 'PASS  source defines parse_serve_url\n'
+    pass 'source defines parse_serve_url'
   else
     printf 'FAIL  source defines parse_serve_url\n        not found in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -q 'resolve_pigeon_auth()' "$default_nix"; then
-    printf 'PASS  source defines resolve_pigeon_auth\n'
+    pass 'source defines resolve_pigeon_auth'
   else
     printf 'FAIL  source defines resolve_pigeon_auth\n        not found in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -q 'place_auth' "$default_nix" && grep -q '/route?session_id=' "$default_nix"; then
-    printf 'PASS  source passes place_auth array to GET /route\n'
+    pass 'source passes place_auth array to GET /route'
   else
     printf 'FAIL  source passes place_auth array to GET /route\n        not found in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -q 'PIGEON_DAEMON_URL' "$default_nix"; then
-    printf 'PASS  source honors PIGEON_DAEMON_URL\n'
+    pass 'source honors PIGEON_DAEMON_URL'
   else
     printf 'FAIL  source honors PIGEON_DAEMON_URL\n        PIGEON_DAEMON_URL never referenced in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -q '/route?session_id=' "$default_nix"; then
-    printf 'PASS  source queries pigeon /route?session_id=\n'
+    pass 'source queries pigeon /route?session_id='
   else
     printf 'FAIL  source queries pigeon /route?session_id=\n        "/route?session_id=" not found in: %s\n' "$default_nix"
     exit 1
   fi
   # Front door polling: the step-1 readiness poll must go through the front door.
   if grep -qF 'FRONTDOOR_URL=' "$default_nix"; then
-    printf 'PASS  source defines FRONTDOOR_URL\n'
+    pass 'source defines FRONTDOOR_URL'
   else
     printf 'FAIL  source defines FRONTDOOR_URL\n        "FRONTDOOR_URL=" not found in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -qF '"$FRONTDOOR_URL"' "$default_nix"; then
-    printf 'PASS  source passes FRONTDOOR_URL to the poll subshell\n'
+    pass 'source passes FRONTDOOR_URL to the poll subshell'
   else
     printf 'FAIL  source passes FRONTDOOR_URL to the poll subshell\n        "\"$FRONTDOOR_URL\"" not found in: %s\n' "$default_nix"
     exit 1
@@ -558,7 +640,7 @@ if [ -f "$default_nix" ]; then
   # it (else the TUI pins to the anchor and goes stale). Assert the fallback call
   # is present. Match the actual call so accurate comments don't trip the guard.
   if grep -q '\-X POST "\$PIGEON_DAEMON_URL/place"' "$default_nix"; then
-    printf 'PASS  source falls back to POST /place for never-placed sessions\n'
+    pass 'source falls back to POST /place for never-placed sessions'
   else
     printf 'FAIL  source falls back to POST /place for never-placed sessions\n        -X POST "$PIGEON_DAEMON_URL/place" not found in: %s\n' "$default_nix"
     exit 1
@@ -568,13 +650,13 @@ if [ -f "$default_nix" ]; then
   # still polling through transient 000/5xx stalls. Guard that the source
   # defines the classifier and wires the bounded 404-grace fast-fail path.
   if grep -q 'classify_session_probe()' "$default_nix"; then
-    printf 'PASS  source defines classify_session_probe\n'
+    pass 'source defines classify_session_probe'
   else
     printf 'FAIL  source defines classify_session_probe\n        not found in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -q 'OC_AA_404_GRACE_SECS' "$default_nix"; then
-    printf 'PASS  source fast-fails on definitive 404 (OC_AA_404_GRACE_SECS grace)\n'
+    pass 'source fast-fails on definitive 404 (OC_AA_404_GRACE_SECS grace)'
   else
     printf 'FAIL  source fast-fails on definitive 404\n        OC_AA_404_GRACE_SECS not found in: %s\n' "$default_nix"
     exit 1
@@ -587,20 +669,20 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source still uses 404-swallowing /session probe (curl -sf .../session/...)\n        in: %s\n' "$default_nix"
     exit 1
   else
-    printf 'PASS  source /session probe no longer swallows the http status (curl -sf)\n'
+    pass 'source /session probe no longer swallows the http status (curl -sf)'
   fi
   # The morning-agent fix relies on oc-auto-attach deriving window_name from the
   # session dir basename for non-~/projects paths (so $HOME/morning -> `morning`),
   # and NOT collapsing non-project dirs. Guard the production derivation so a
   # source-side refactor trips here instead of silently breaking the morning window.
   if grep -qF '/projects/"([^/]+)(/.*)?$' "$default_nix"; then
-    printf 'PASS  source derives project via ~/projects/<P> regex\n'
+    pass 'source derives project via ~/projects/<P> regex'
   else
     printf 'FAIL  source derives project via ~/projects/<P> regex\n        derivation regex not found in: %s\n' "$default_nix"
     exit 1
   fi
   if grep -qF 'window_name="$(basename "$session_dir")"' "$default_nix"; then
-    printf 'PASS  source derives window_name as basename for non-project dirs\n'
+    pass 'source derives window_name as basename for non-project dirs'
   else
     printf 'FAIL  source derives window_name as basename for non-project dirs\n        basename derivation not found in: %s\n' "$default_nix"
     exit 1
@@ -609,14 +691,14 @@ if [ -f "$default_nix" ]; then
   # ---- backpressure / settle & flock source guards ---------------------------
 
   if grep -q 'util-linux' "$default_nix"; then
-    printf 'PASS  source includes util-linux in runtimeInputs\n'
+    pass 'source includes util-linux in runtimeInputs'
   else
     printf 'FAIL  source includes util-linux in runtimeInputs\n        util-linux not found in: %s\n' "$default_nix"
     exit 1
   fi
 
   if grep -q 'OC_AA_SERIALIZE' "$default_nix"; then
-    printf 'PASS  source defines serialization knob (OC_AA_SERIALIZE)\n'
+    pass 'source defines serialization knob (OC_AA_SERIALIZE)'
   else
     printf 'FAIL  source defines serialization knob (OC_AA_SERIALIZE)\n        OC_AA_SERIALIZE not found in: %s\n' "$default_nix"
     exit 1
@@ -626,61 +708,66 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source still contains misleading OC_AA_MAX_CONCURRENCY knob\n        in: %s\n' "$default_nix"
     exit 1
   else
-    printf 'PASS  source removed misleading OC_AA_MAX_CONCURRENCY knob\n'
+    pass 'source removed misleading OC_AA_MAX_CONCURRENCY knob'
   fi
 
   if grep -q 'OC_AA_SETTLE_SECS' "$default_nix"; then
-    printf 'PASS  source defines settle window timeout (OC_AA_SETTLE_SECS)\n'
+    pass 'source defines settle window timeout (OC_AA_SETTLE_SECS)'
   else
     printf 'FAIL  source defines settle window timeout (OC_AA_SETTLE_SECS)\n        OC_AA_SETTLE_SECS not found in: %s\n' "$default_nix"
     exit 1
   fi
 
   if grep -qF '5000 ms + margin' "$default_nix"; then
-    printf 'PASS  source includes 5000 ms + margin derivation comment for settle window\n'
+    pass 'source includes 5000 ms + margin derivation comment for settle window'
   else
     printf 'FAIL  source includes 5000 ms + margin derivation comment for settle window\n        derivation comment not found in: %s\n' "$default_nix"
     exit 1
   fi
 
   if grep -q 'require('"'"'user.oc_auto_attach'"'"').status' "$default_nix"; then
-    printf 'PASS  source queries user.oc_auto_attach.status via RPC\n'
+    pass 'source queries user.oc_auto_attach.status via RPC'
   else
     printf 'FAIL  source queries user.oc_auto_attach.status via RPC\n        status query expression not found in: %s\n' "$default_nix"
     exit 1
   fi
 
   if grep -q 'exit 6' "$default_nix"; then
-    printf 'PASS  source exits non-zero on attach failure / settle timeout\n'
+    pass 'source exits non-zero on attach failure / settle timeout'
   else
     printf 'FAIL  source exits non-zero on attach failure / settle timeout\n        exit 6 not found in: %s\n' "$default_nix"
     exit 1
   fi
 else
+  if [ -n "${OC_AA_REQUIRE_ALL_TOOLS:-}" ]; then
+    printf 'FAIL  production-source check: %s missing but OC_AA_REQUIRE_ALL_TOOLS is set (check is mis-wired)\n' "$default_nix"
+    exit 1
+  fi
   printf 'SKIP  production-source check (default.nix not next to test)\n'
+  SKIP_COUNT=$((SKIP_COUNT + 1))
 fi
 
 # ---- lua helper guards & unit tests ------------------------------------------
 
-lua_source="$script_dir/../../assets/nvim/lua/user/oc_auto_attach.lua"
+lua_source="$repo_root/assets/nvim/lua/user/oc_auto_attach.lua"
 if [ -f "$lua_source" ]; then
   if grep -q 'on_exit' "$lua_source"; then
-    printf 'PASS  lua source defines on_exit handler\n'
+    pass 'lua source defines on_exit handler'
   else
     printf 'FAIL  lua source defines on_exit handler\n        on_exit not found in: %s\n' "$lua_source"
     exit 1
   fi
 
   if grep -q 'function M\.status' "$lua_source"; then
-    printf 'PASS  lua source exposes status query function (M.status)\n'
+    pass 'lua source exposes status query function (M.status)'
   else
     printf 'FAIL  lua source exposes status query function (M.status)\n        function M.status not found in: %s\n' "$lua_source"
     exit 1
   fi
 
-  if command -v nvim >/dev/null 2>&1; then
-    lua_out="$(nvim -l /dev/stdin <<< '
-      local M = loadfile("assets/nvim/lua/user/oc_auto_attach.lua")()
+  if require_tool nvim 'lua module unit test via nvim -l'; then
+    lua_out="$(OC_AA_LUA_SOURCE="$lua_source" nvim -l /dev/stdin <<< '
+      local M = loadfile(os.getenv("OC_AA_LUA_SOURCE"))()
       assert(type(M.status) == "function", "M.status is function")
       assert(M.status("ses_test") == "unknown", "unknown sid -> unknown")
       assert(M.open(nil) == 0, "invalid opts -> 0")
@@ -715,14 +802,44 @@ if [ -f "$lua_source" ]; then
       print("LUA_TEST_OK")
     ' 2>&1 || true)"
     case "$lua_out" in
-      *"LUA_TEST_OK"*) printf 'PASS  lua module unit test via nvim -l (pre/post-settle discriminator)\n' ;;
+      *"LUA_TEST_OK"*) pass 'lua module unit test via nvim -l (pre/post-settle discriminator)' ;;
       *) printf 'FAIL  lua module unit test via nvim -l\n        out: %s\n' "$lua_out"; exit 1 ;;
     esac
-  else
-    printf 'SKIP  lua module unit test via nvim -l (nvim not on PATH)\n'
   fi
 else
+  if [ -n "${OC_AA_REQUIRE_ALL_TOOLS:-}" ]; then
+    printf 'FAIL  lua source check: %s missing but OC_AA_REQUIRE_ALL_TOOLS is set (check is mis-wired)\n' "$lua_source"
+    exit 1
+  fi
   printf 'SKIP  lua source check (oc_auto_attach.lua not found)\n'
+  SKIP_COUNT=$((SKIP_COUNT + 1))
 fi
 
-echo "all oc-auto-attach helper tests passed"
+# ---- coverage gate ----------------------------------------------------------
+#
+# Reaching this line proves the suite did not fail. It proves nothing about how
+# much of it RAN -- which is the failure that made this file worth fixing: with
+# jq/tmux/nvim absent it printed a triumphant final line having quietly dropped
+# 20 of its 71 assertions. Pin the number.
+
+if [ "$SKIP_COUNT" -gt 0 ]; then
+  # Only reachable outside a Nix build (require_tool hard-fails inside one).
+  # Not fatal -- a laptop without tmux may still run the rest -- but never
+  # silent, and never dressed up as full coverage.
+  printf 'INCOMPLETE (oc-auto-attach): %d/%d assertions ran, %d group(s) skipped for missing tools.\n' \
+    "$ASSERT_COUNT" "$EXPECTED_ASSERTIONS" "$SKIP_COUNT"
+  printf '  This is NOT full coverage. CI runs the complete suite via `nix flake check`.\n'
+  exit 0
+fi
+
+if [ "$ASSERT_COUNT" -ne "$EXPECTED_ASSERTIONS" ]; then
+  printf 'FAIL  assertion-count gate: ran %d assertions, expected %d.\n' \
+    "$ASSERT_COUNT" "$EXPECTED_ASSERTIONS"
+  printf '        Nothing was skipped, so coverage changed without EXPECTED_ASSERTIONS\n'
+  printf '        being updated. If you added or removed assertions deliberately,\n'
+  printf '        bump EXPECTED_ASSERTIONS in the same commit. If you did not, a\n'
+  printf '        branch you did not expect is being taken.\n'
+  exit 1
+fi
+
+printf 'ALL PASS (oc-auto-attach): %d assertions\n' "$ASSERT_COUNT"
