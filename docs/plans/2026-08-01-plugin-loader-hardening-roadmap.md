@@ -234,7 +234,7 @@ the v1 shape.
 - Exit: **all six** repo plugins on the v1 shape; `plugin-loader-contract` green;
   real-process check shows 0 load failures.
 
-## Step 2 — E2 canary log-watch · **DONE** (PR #293)
+## Step 2 — E2 canary log-watch · **DONE** (PR #294)
 
 Shipped as `opencode-plugin-canary`, a minutely detect-only system unit on
 cloudbox. Design: `docs/plans/2026-08-04-e2-plugin-canary-design.md`. Two legs,
