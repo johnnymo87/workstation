@@ -26,10 +26,16 @@ and forcing SDD onto it would be theatre.
 | ~~S4~~ | `workstation-vyad` | ~~Task 4: thin **async** Lua caller~~ **DONE 2026-08-02** (PR #251) — `session_switcher/cli.lua`; async justified by measurement, not by the (currently unreachable) deadlock | compact → TDD → adversarial → PR | — |
 | ~~S5~~ | `workstation-afp2` | ~~Task 5: Lua socket discovery~~ **DONE 2026-08-02** (PR #253) — liveness is `attach_status` **and** per-buffer job truth; dedupe is live-beats-dead, not last-writer | compact → TDD → adversarial → PR | — |
 | ~~S6~~ | `workstation-vk9y` | ~~Task 8: join + row model~~ **DONE 2026-08-04** (PR #295) — split join: the CLI folds/sorts/unions, `model.lua` only annotates attachment and filters | compact → oracle → SDD → adversarial → PR | — |
+| S7 | `workstation-7w9z` | Task 9: Telescope picker (title mode) | compact → SDD → adversarial → PR | — |
 
-`bd ready` no longer returns a spine step (S0/S1/S3/S4/S5/S6 done, S2 folded).
-The next switcher work is **Task 9** (the Telescope picker), which has no bead
-yet — it is the first step that produces something a user can actually press.
+The next switcher work is **S7 / `workstation-7w9z`** — Task 9, the Telescope
+picker, and the first step that produces something a user can actually press.
+S6 recorded its consumer contract on that bead; two items are landmines rather
+than preferences. The picker must branch on `row.attached`, **not** on the facet
+it asked for: a `pierced` row (error/blocked, own or child) survives
+`facet="attached"` while being detached and pane-less, so jumping to `row.pane`
+would jump into nothing. And the **CLI owns ordering** — `sort_rank` is emitted
+for rendering, not for the picker to re-apply.
 
 S6 was briefly blocked on `workstation-dmat`, deliberately: its join logic lands
 in `assets/opencode/plugins/oc-session-list-state.ts`, and until #292 **nothing
