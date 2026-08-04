@@ -72,9 +72,15 @@ fail() {
   exit 1
 }
 
+shared_fixture="$fixtures_dir/plugin-shared.ts"
+loader_fixture="$fixtures_dir/loader.ts"
+
+# Every vendored file is listed here. A fixture that nothing references can be
+# deleted without failing anything, which makes the refresh ritual quietly
+# optional -- plugin-shared.ts and loader.ts were both in that state.
 for f in "$nix_file" "$test_file" "$fixture_version_file" "$bundle_file" "$canary_file" \
          "$patch_file" "$pristine_index" "$patched_index" "$logging_fixture" \
-         "$config_plugin_fixture"; do
+         "$config_plugin_fixture" "$shared_fixture" "$loader_fixture"; do
   [ -f "$f" ] || fail "missing required file: $f" \
     "" \
     "If this file was moved or renamed, this guard is silently dead." \
@@ -114,9 +120,11 @@ refresh_recipe() {
 
   # 1. Upstream sources, verbatim. (sst/opencode and anomalyco/opencode serve
   #    byte-identical content for v1.17.13; the difference is cosmetic.)
-  for f in index shared loader; do
+  for f in index shared; do
     curl -sfL "\$U/opencode/src/plugin/\$f.ts" -o "\$F/plugin-\$f.ts"
   done
+  # NB: loader.ts is vendored under its own name, NOT as plugin-loader.ts.
+  curl -sfL "\$U/opencode/src/plugin/loader.ts"        -o "\$F/loader.ts"
   curl -sfL "\$U/opencode/src/config/plugin.ts"        -o "\$F/config-plugin.ts"
   curl -sfL "\$U/core/src/observability/logging.ts"    -o "\$F/logging.ts"
 
@@ -356,6 +364,71 @@ if [ -n "$missing_path" ]; then
     "That is a silent downgrade: the canary keeps working, so nothing announces" \
     "that per-file attribution was lost."
 fi
+
+# 6d: the CALL SITES, which neither check above can see.
+#
+# Our patch routes all five stages through one helper, so the literal
+# "failed to load plugin" appears only at the helper's definition and at
+# upstream's own apply-stage call. Delete both call sites -- a plausible
+# outcome of resolving a rebase conflict in the report.error region -- and every
+# check above stays green while all five stages go silent again: the exact
+# blindness this whole bead exists to kill, reinstated inside its own fix.
+#
+# Checking the emitted STRING therefore cannot establish that anything emits it.
+# These assertions name the call sites instead. They will red on a legitimate
+# refactor of the patch; that is the same reconcile-and-move cost the other
+# constants impose, and it is paid at a moment when the loader really did change.
+assert_site() {
+  local needle="$1" what="$2"
+  grep -qF "$needle" "$patched_index" || fail \
+    "$what is missing from $patched_index" \
+    "" \
+    "  expected to find: $needle" \
+    "" \
+    "This file is composed from pristine upstream plus our loader patch, so the" \
+    "site vanished from the PATCH -- most likely a rebase onto a new upstream" \
+    "where a hunk in this region was resolved by dropping it." \
+    "" \
+    "Upstream logs NOTHING at the four report.error stages or at report.missing." \
+    "Measured: a real unpatched binary emitted 0 log lines, 0 level=ERROR lines," \
+    "and 118 bytes of stdout while THREE plugins failed to load, returning HTTP" \
+    "200 throughout. Our patch is the only thing standing between that and the" \
+    "production canary." \
+    "" \
+    "Losing one of these sites is invisible to every other check here: the" \
+    "message string still occurs elsewhere in the file, so the canary's pattern" \
+    "still matches something and the guard would otherwise stay green while the" \
+    "stage it covered went dark. Restore the site; do not weaken this check."
+}
+
+assert_site 'function logPluginError('                          "the load-failure log helper"
+
+# ...and the helper must emit the string the canary greps for. Checking only
+# that the literal occurs SOMEWHERE in the file (6c) is satisfied by upstream's
+# own apply-stage call at the bottom, so rewording just our helper would leave
+# 6c green while install/compatibility/entry/load/missing all stopped matching.
+# Same shape as the two weaknesses already fixed above: a check answered by a
+# line other than the one it is actually about.
+helper_body="$(sed -n '/function logPluginError(/,/^ *}/p' "$patched_index")"
+if ! printf '%s' "$helper_body" | grep -qF "$canary_msg"; then
+  fail \
+    "the load-failure helper does not emit the message the canary greps for" \
+    "" \
+    "  canary greps for: \"$canary_msg\"" \
+    "  helper body:" \
+    "$helper_body" \
+    "" \
+    "Every one of the five previously-silent stages logs through this helper." \
+    "If its message no longer matches, the canary goes blind on all five at once" \
+    "-- while staying GREEN, because upstream's own apply-stage call still" \
+    "carries the old string elsewhere in this file." \
+    "" \
+    "Reconcile the two. If the wording changed deliberately, update the canary" \
+    "pattern at $canary_file:50 to match."
+fi
+assert_site 'logPluginError(candidate.plan.spec, "missing"'     "the report.missing call site (the quietest stage: upstream's is a bare no-op that does not even publishPluginError)"
+assert_site 'logPluginError(spec, stage, message)'              "the report.error call site (covers all four of install/compatibility/entry/load)"
+assert_site 'Effect.logInfo("plugin loaded"'                    "the per-plugin success line (workstation-0lkp will key auto-clear on it)"
 
 echo "OK: loader pin consistent (deployed=$deployed replica=$replica fixtures=$fixtures bundle=$bundle canary=$canary)"
 echo "OK: loader patch identity ${actual_sha:0:12}… ; composed fixture matches; canary literal \"$canary_msg\" present"

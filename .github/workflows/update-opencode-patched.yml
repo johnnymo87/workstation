@@ -16,6 +16,12 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # issues: write is load-bearing, not decoration. The divergence alarm
+      # below creates an issue, and an explicit permissions block sets every
+      # unlisted scope to `none` -- so without this the alarm 403s and a blocked
+      # auto-update stays exactly as silent as it would have been with no alarm
+      # at all. `bash -n` cannot catch that; only running it can.
+      issues: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -123,16 +129,21 @@ jobs:
           # divergence. The patch legitimately does not exist on releases older
           # than v1.17.13-patched.8, and misreporting that as drift would send
           # the next reader hunting a loader change that never happened.
-          if ! curl -sfL "$url" -o /tmp/fork-loader.patch; then
-            echo "::error::could not fetch the loader patch from ${tag} (HTTP failure or absent at that tag)."
+          # --retry so a transient raw.githubusercontent.com blip is not reported as
+          # drift. This step runs on every 8-hourly cron, including no-op ones, so
+          # an un-retried fetch would manufacture false "diverged" alarms.
+          if ! curl -sfL --retry 3 --retry-all-errors --retry-delay 2 "$url" -o /tmp/fork-loader.patch; then
+            echo "::error::could not fetch the loader patch from ${tag} after retries."
             echo "If ${tag} predates v1.17.13-patched.8 the patch genuinely is not there, and bumping"
             echo "onto it would deploy a loader with NO failure logging while the fixtures claim otherwise."
+            echo "Otherwise this is a network/availability failure and the next cron will retry."
+            echo "reason=unreachable" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           if ! diff -u "$vendored" /tmp/fork-loader.patch; then
             echo "::error::the fork's loader patch at ${tag} differs from the vendored copy."
-            echo "diverged=1" >> "$GITHUB_OUTPUT"
+            echo "reason=diverged" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "vendored loader patch matches ${tag}"
@@ -196,7 +207,10 @@ jobs:
       # the silence has a voice. Deduped by title so an 8-hourly cron cannot
       # manufacture an issue storm.
       - name: Surface a blocked loader-patch pin
-        if: failure() && steps.patchcheck.outcome == 'failure'
+        # Only on ACTUAL divergence. An unreachable-fetch run self-heals on the
+        # next cron, and raising "diverged" for it would misattribute a blip as a
+        # loader change -- sending the reader hunting something that never happened.
+        if: failure() && steps.patchcheck.outputs.reason == 'diverged'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -227,10 +241,32 @@ jobs:
             echo "would deploy a loader the production canary's greps may no longer match --"
             echo "which fails green."
             echo
-            echo "To resolve, refresh the vendored copy and its recorded identity: run"
-            echo "\`users/dev/test-loader-pin.sh\` locally and follow the recipe it prints, then"
-            echo "update the \`LOADER_PATCH_SHA256\` marker in"
-            echo "\`pkgs/opencode-plugin-canary-sh/opencode-plugin-canary.sh\`."
+            echo "To resolve -- and note the local guard is GREEN right now, because the"
+            echo "vendored copy is self-consistent; it is only stale relative to \`${tag}\`, so"
+            echo "it will not print a recipe. Run these, from the repo root:"
+            echo
+            echo '```bash'
+            echo "F=assets/opencode/plugins/test/fixtures"
+            echo "curl -sfL https://raw.githubusercontent.com/johnnymo87/opencode-patched/${tag}/patches/plugin-loader-observability.patch \\"
+            echo "  -o \"\$F/plugin-loader-observability.patch\""
+            echo
+            echo "# READ THE DIFF before regenerating anything -- what changed in the loader"
+            echo "# patch is the whole question this issue is asking."
+            echo "git diff -- \"\$F/plugin-loader-observability.patch\""
+            echo
+            echo "# Recompose the patched loader fixture from pristine upstream + the new patch:"
+            echo "s=\$(mktemp -d); mkdir -p \"\$s/packages/opencode/src/plugin\""
+            echo "cp \"\$F/plugin-index.ts\" \"\$s/packages/opencode/src/plugin/index.ts\""
+            echo "(cd \"\$s\" && patch -p1 --silent < \"\$OLDPWD/\$F/plugin-loader-observability.patch\")"
+            echo "cp \"\$s/packages/opencode/src/plugin/index.ts\" \"\$F/plugin-index.patched.ts\"; rm -rf \"\$s\""
+            echo
+            echo "sha256sum \"\$F/plugin-loader-observability.patch\"   # -> LOADER_PATCH_SHA256 marker"
+            echo '```'
+            echo
+            echo "Then paste that sha into the \`LOADER_PATCH_SHA256\` marker in"
+            echo "\`pkgs/opencode-plugin-canary-sh/opencode-plugin-canary.sh\`, confirm the greps"
+            echo "at :50/:97/:100 still match the reworded patch, and run"
+            echo "\`nix build .#checks.aarch64-linux.loader-pin\`."
             echo
             echo "See \`docs/plans/2026-08-04-step3-loader-patch-design.md\`, \"Pin machinery\"."
           } > /tmp/issue-body.md

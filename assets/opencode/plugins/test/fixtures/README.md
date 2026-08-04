@@ -43,3 +43,12 @@ patched loader, and prints the `sha256` to paste into the canary marker.
 difference is cosmetic.)*
 
 These are reference material: not compiled, not imported by the test suite.
+
+**What the guard actually enforces**, as opposed to what vendoring merely makes
+available to read: the patch's `sha256`; that `plugin-index.patched.ts` really is
+`plugin-index.ts` + the patch; that the canary's message literal appears in the
+helper emitting it; that every load-failure site carries `path`; and that the
+call sites for all five stages plus the success line still exist. `logging.ts`
+and `config-plugin.ts` are **not** content-checked — proving anything about them
+offline would mean replicating the renderer. They are here so that the refresh
+ritual puts them in front of you.

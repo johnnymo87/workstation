@@ -246,6 +246,16 @@ renderer change walks straight through. Same shape as the spec-normalisation hol
 this design already had, one layer down. `logging.ts` is now vendored and the
 canary's failure text carries a four-point renderer checklist.
 
+Be precise about what that buys, though, because the earlier draft of this
+section overstated it: `logging.ts` and `config-plugin.ts` are pinned by
+*existence and refresh ritual*, not mechanically. The guard proves nothing about
+their contents — it cannot, offline, without replicating the renderer. They are
+escorts that put the right file in front of the next reader at the moment of a
+bump. The mechanically-enforced claims are only these: the patch's identity, that
+the patched fixture really is pristine + patch, that the canary's literal appears
+in the helper that emits it, that every emission site carries `path`, and that
+the five stages' call sites still exist.
+
 **The `sha256` marker alone pins bytes, not meaning** — it is regenerable in one
 command, so on its own it is an escort, not a ratchet. The guard now also greps
 the canary's *literal* message pattern against the composed loader, and requires
