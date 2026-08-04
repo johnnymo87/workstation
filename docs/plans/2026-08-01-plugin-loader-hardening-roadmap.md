@@ -1,6 +1,6 @@
 # Plugin-Loader Hardening Roadmap
 
-**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** step 0 shipped
+**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-1 shipped
 
 > **Revision 2.** The first draft of this file (PR #242) was written and merged
 > *without* the adversarial review it makes mandatory. Review afterwards found
@@ -119,9 +119,21 @@ survives even if the step's details are lost.
    step splits into independent tasks; dispatch `implementer`, then
    `spec-reviewer` to check the diff against the reviewed design. Skip the
    subagents for single-file changes; do not skip the review in 3.
-5. **PR** *(if applicable)* — throwaway worktree off `origin/main`, never the
+5. **`adversarial-reviewer-fable` on the IMPLEMENTATION** — **also mandatory,
+   also before the PR opens.** Added by the user on 2026-08-01 after the
+   evidence became one-sided: the design pass caught three HIGH defects in this
+   document's first draft, and an implementation pass caught the *inert* pin
+   guard shipped in #249 — a check wired nowhere, which every design review in
+   the world would have approved because the design was right and the wiring
+   was not. **Neither pass substitutes for the other; they read different
+   artifacts.** Step 1 then proved it again: the design pass produced the
+   fail-on-throw idea, and the implementation pass found that the very check
+   implementing it had a `hooks = undefined` catch-path that would have skipped
+   the assertion for a factory *successfully* resolving to `undefined` — the
+   exact outage shape.
+6. **PR** *(if applicable)* — throwaway worktree off `origin/main`, never the
    shared checkout. Body states what was verified *and how*.
-6. **Update roadmap** — tick the step here, file new beads for anything
+7. **Update roadmap** — tick the step here, file new beads for anything
    discovered, note what the next step inherits.
 
 > **Why review precedes implementation.** Earlier drafts of this list numbered
@@ -133,7 +145,7 @@ survives even if the step's details are lost.
 > wrong role — not an implementation typo. Design review is the only place those
 > get caught.
 
-> Steps 2 and 3 both name the `fable` variants, which are otherwise
+> Steps 3 and 5 both name the `fable` variants, which are otherwise
 > use-only-when-explicitly-asked. The user asked for them in this roadmap; that
 > standing request applies to these steps only.
 
@@ -155,7 +167,48 @@ the first time at that moment — it was inert from merge until then.
 
 ---
 
-## Step 1 — E1 across the remaining plugins
+## Step 1 — E1 across the remaining plugins · **DONE** (PR #288, `424d590`)
+
+All six repo plugins are now on `export default { id, server }`. Deployed
+2026-08-04; the artifacts on disk carry the shape, and running serves keep their
+old in-memory modules until the pool next restarts (the mixed state is safe --
+the old modules are the legacy shape, which worked).
+
+The consequent change was **not** in the plugins. `pkgs/opencode-plugin-bundle`'s
+checkPhase asserted `typeof m.default === 'function'`, so the v1 shape broke both
+bundle builds. It was replaced with a v1-shape assertion that also *invokes* the
+factory and asserts a hooks object — the v1 branch pushes that return value
+unvalidated exactly as the legacy branch does (`plugin-index.ts:114`), so the
+LOUD outage shape survives into the v1 world untouched. Until step 4, that line
+is the only cover the two bundles have for it.
+
+Three things worth carrying forward:
+
+- **A sandbox throw now FAILS the bundle build** rather than passing, with an
+  explicit `factoryMayThrowInSandbox` opt-out. Treating a throw as a pass meant
+  the hook-shape assertion could silently cover nothing, announced only by an
+  `OK: factory threw` line in a green build log. Same family as the SKIPping
+  store-prefix gate in `flake.nix`. This bit for real: with `client: undefined`,
+  self-compact threw on `ctx.client._client` and the assertion covered nothing.
+- **The checkPhase is a third in-repo copy of loader semantics**, now coupled to
+  the other two by a `# LOADER_SEMANTICS_PIN` marker that `test-loader-pin.sh`
+  checks. It shipped for one revision with only a comment saying "nothing will
+  tell you" when the pin moves — which is the rot the pin guard exists to
+  prevent, restated as a hope.
+- **`/config/providers` returning 200 does NOT mean plugin loading has
+  finished.** During the negative control the anchored grep found nothing, then
+  found the error moments later: the serve answers HTTP *before* the
+  `failed to load plugin` line is flushed. **Step 2 must not sample at HTTP
+  readiness** — it will miss the very line it exists to find. Poll for the
+  line, or window by `run=` and sample after a settle delay.
+
+Also filed: `workstation-u59h` — the older replica in
+`plugin-loader-contract.test.ts:164` checks `tui` is not a *function*, so it
+passes `tui: 42` while upstream throws `invalid tui export` and rejects the
+file. The new checkPhase gets this right; the two copies disagree.
+
+### Original scope (kept for the record)
+
 
 **Six repo-authored plugins, not four.** Deployed directly as `.ts`:
 `compaction-context.ts`, `session-header.ts`, `subagent-routing.ts`. Deployed as
@@ -215,6 +268,13 @@ is quite literally the only signal that exists.
 - Coverage gap to state plainly: this is a devbox/cloudbox canary, but **macOS
   deploys these same plugins** and has no canary. D is the only macOS cover.
 - Spine: consider 2 (alert routing is an open design); **3 applies**.
+- **Do not sample at HTTP readiness.** Measured in step 1: `/config/providers`
+  returned 200 while the `failed to load plugin` line had not yet been written,
+  so an anchored grep run at readiness found nothing and the same grep moments
+  later found the error. A canary built on "wait for healthy, then grep" is
+  green by construction on the fastest-moving failures. Poll for the line with a
+  timeout, or settle first, and make the *absence* claim only after the window
+  closes.
 - Exit: three controls, not two — (a) clean restart is silent; (b) a deliberately
   broken plugin raises the alert; (c) an **import-time** throw also raises it
   (different upstream message, see Residual). Scratch serve must use the
@@ -222,8 +282,12 @@ is quite literally the only signal that exists.
 
 ## Step 3 — D patch the loader
 
-Validate the awaited result before `hooks.push` (`index.ts:119`); prefer
-**throw** over silent-skip, consistent with upstream's existing shape-throw.
+Validate the awaited result before `hooks.push` — at **BOTH** sites. The line
+usually cited, `index.ts:119`, is only the *legacy* loop. The v1 branch pushes
+its result unvalidated at **`index.ts:114`**, and every plugin we author is now
+on the v1 shape (step 1), so a patch that covers only `:119` would protect
+nothing we ship. Prefer **throw** over silent-skip, consistent with upstream's
+existing shape-throw.
 Land in `opencode-patched` (`patches/`, ~20 existing; none touch the loader) and
 open an upstream PR — fable judges it genuinely upstreamable.
 
@@ -242,7 +306,13 @@ the bead decay into "add more tests."**
   message — while `test-loader-pin.sh` stays green. Before this step is done:
   extend the guard to couple `patchedRevision` as well, and re-point the
   fixtures at the fork's patched sources. A pin that cannot see our own patch is
-  the same silent-rot failure in a new costume.
+  the same silent-rot failure in a new costume. **Three constants move, not
+  two:** `LOADER_VERSION`, `fixtures/VERSION`, and the `# LOADER_SEMANTICS_PIN`
+  marker in `pkgs/opencode-plugin-bundle/default.nix` added in step 1.
+  `test-loader-pin.sh` fails on any of them drifting, so this cannot be
+  forgotten — but note the bundle checkPhase is deliberately *stricter* than the
+  loader in one place (it rejects a bare-function default as a policy ratchet),
+  and that clause should survive a pin bump untouched.
 
 ## Step 4 — B loader replica vs deployed artifacts in CI
 
