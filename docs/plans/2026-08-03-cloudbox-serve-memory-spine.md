@@ -854,6 +854,94 @@ is "80% LSP". That generalised from the single 19:32 capture; across all 28 it i
 Not adopted on those grounds. LSP-specific idle shutdown remains a reasonable smaller
 alternative, but it is not 80% of the win.
 
+### S8 — Stop builds OOM-killing their serve · `workstation-mqp3` · **MITIGATED 2026-08-04, shim still open**
+
+Found while reviewing S7. S7 was scoped to instance retention; this is a different
+consumer that S7 cannot touch, and it is the one that was actually killing serves.
+
+#### Four kills, not one
+
+`opencode-serve@4098` was OOM-killed **four times in about six hours**: 17:56:21,
+20:22:56, 23:00:38, 23:25:17 EDT (restart counter reached 3, reset, climbed again).
+S2 had recorded only the first. Kills 2–4 all landed *after* the existing `~/.bazelrc`
+worker and idle-server limits were live, which is the evidence that those limits were
+aimed at the wrong thing.
+
+The agent's bash tool spawns builds as children of `opencode serve`, so every bazel
+process is charged to that serve's cgroup. A per-process capture **35 seconds before
+kill #3** shows `:4098` at 114 processes and 9.04 G anon, of which **7.61 G was
+bazel/JVM** (workspace server JVMs plus ~100 `processwrapper-sandbox` javac actions at
+~0.5 G each). LSP was 1.04 G; MCP was zero.
+
+#### Victim selection is a red herring — `OOMPolicy=stop`
+
+It is true, and verified, that every child inherits `oom_score_adj=500` from the unit,
+so the adjustment cancels out and the kernel kills the **largest single anon process** —
+which is opencode itself (1.5–2.9 G) rather than any one of bazel's ~100 small actions.
+It is tempting to conclude the fix is to redirect the victim.
+
+It is not. The unit sets **`OOMPolicy=stop`**, so *any* OOM kill inside that cgroup
+stops and restarts the whole serve and takes every session on it down. Killing bazel
+instead would restart the serve just the same. **Do not spend effort on `oom_score_adj`.**
+Either the ceiling is not reached, or the build does not live in that cgroup.
+
+#### Why the limits that were already there did nothing
+
+| existing flag | what it actually bounds |
+|---|---|
+| `--worker_max_instances`, `--experimental_total_worker_memory_limit_mb` | **persistent workers** |
+| `--max_idle_secs=900` | **idle servers** (verified honored — resident servers were merely recently used) |
+| `--shutdown_on_low_sys_mem` | **`/proc/meminfo`**, i.e. host-wide free RAM |
+
+None of them is the sandboxed action fleet. The last one is the sharpest trap: it never
+fires in our failure mode, because one cgroup starves while the box still has 19 G free.
+
+#### Shipped (PR #287), Linux-only
+
+```
+build --jobs=8                       # the enforced knob
+build --local_resources=memory=4096  # belt: default is HOST_RAM*0.67 ~= 41G, so the
+                                     # scheduler believed it had 3x the cgroup's room
+test  --local_test_jobs=4            # see below
+startup --host_jvm_args=-Xmx2g       # JVM is container-aware and otherwise sizes heap
+                                     # from the cgroup at 14G/4 = 3.5G PER server
+```
+
+`--local_test_jobs` closes a hole found in review: `mono/.bazelrc` pairs
+`build:remote --jobs=50` (:191) with `test:remote --strategy=TestRunner=local` (:202),
+so a `--config=remote` **test** run keeps its runners local — the one path that
+overrides the `--jobs` cap.
+
+#### A verification error worth not repeating
+
+I checked flag existence with `bazel help build` from `/tmp` and concluded
+`--local_ram_resources` "does not exist in 9.2.0". But `bazel` here is **bazelisk**,
+which outside a workspace runs a *fallback* version. Every `mono` checkout pins
+**8.5.1** via `.bazelversion` (`rules_kotlin` pins 9.0.0), and 8.5.1 still has the
+deprecated flag. The new spelling was still the right choice — `mono/.bazelrc:101`
+already uses `--local_resources=memory=4096` — but the stated reason was wrong.
+**Check `.bazelversion` before asserting anything about bazel flags on this box.**
+
+#### This is a mitigation. What is still open
+
+`--jobs` is **per-invocation**: two concurrent builds on one serve still breach 14 G,
+and nothing here bounds the aggregate across invocations, server JVMs, or throwaway
+worktrees — a server for a `mktemp` worktree (`tmp.93BNSzRJBR`) was observed resident,
+so "six checkouts" is not a real bound. Worst-case arithmetic for a *single* build
+post-caps lands near 13.7 G against a 14 G ceiling.
+
+The structural fix is a `bazel` shim running builds in their own
+`systemd-run --user --scope` with an **explicit `MemoryMax`** — explicit because the
+JVM is container-aware, so an uncapped scope would size heap against 62 G rather than
+the cgroup. Shim hazards are already in `AGENTS.md`: needs `XDG_RUNTIME_DIR`, transient
+units get a minimal `PATH`, must call the real binary by absolute path to avoid
+recursion, and must degrade to raw bazel if `systemd-run` fails.
+
+Also standing, and not caused by this: **three of four serves sit at
+`swap.current == MemorySwapMax == 1.00G`** — swap is fully consumed, no cushion. And
+4 × 14 G = 56 G of `MemoryMax` on a 62 G box with the parent slice at
+`MemoryMax=infinity` (`workstation-le0a` owns the aggregate cap).
+
 ## Deliberately NOT doing
 
 - **The opencode.db vacuum.** `workstation-yvxh.4` owns it and owns the `mv`.
