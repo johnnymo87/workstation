@@ -50,6 +50,10 @@
       p = pkgsFor system;
     in {
       ask-question = p.callPackage ./pkgs/ask-question { };
+      # Named `bazel-scope` rather than `bazel`: the DERIVATION provides bin/bazel
+      # (it has to shadow the real one on PATH), but a flake output called `bazel`
+      # would be a trap for anyone running `nix build .#bazel` expecting bazel.
+      bazel-scope = p.callPackage ./pkgs/bazel-scope { };
       bb = p.callPackage ./pkgs/bb { };
       beads = p.callPackage ./pkgs/beads { };
       caveman = p.callPackage ./pkgs/caveman { };
@@ -253,6 +257,27 @@
       } ''
         cd ${self}
         bash users/dev/test-serve-pid-fence.sh
+        touch $out
+      '';
+
+      # bazel scope shim behaviour (bead workstation-mqp3, epic workstation-rdsq).
+      #
+      # The shim keeps bazel builds out of the opencode serve cgroup, where four
+      # OOM kills of opencode-serve@4098 on 2026-08-03/04 took down every session
+      # on that serve and produced 960 HTTP 502s at the door.
+      #
+      # BEHAVIOURAL, not a grep: it runs the real built shim against a stubbed
+      # systemd-run and asserts on the argv the shim actually emits. That matters
+      # because every interesting failure mode here is silent -- a shim that
+      # forgets to export XDG_RUNTIME_DIR (which is UNSET under `opencode serve`)
+      # still installs, still runs builds, and still charges every one of them to
+      # the serve. There is no symptom until the next OOM kill.
+      bazel-scope-shim = devboxPkgs.runCommand "bazel-scope-shim-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+        BAZEL_SCOPE_SHIM_BIN = "${(localPkgsFor devboxSystem).bazel-scope}/bin/bazel";
+      } ''
+        cd ${self}
+        bash users/dev/test-bazel-scope-shim.sh
         touch $out
       '';
 

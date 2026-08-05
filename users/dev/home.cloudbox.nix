@@ -242,6 +242,20 @@ lib.mkIf isCloudbox {
   # Developer tooling (project-specific)
   home.packages = with pkgs; [
     bazelisk    # Bazel version manager (respects .bazelversion)
+
+    # `bazel` on PATH is a SHIM, not bazelisk (bead workstation-mqp3). It re-execs
+    # the build inside `systemd-run --user --scope --slice=bazel`, so bazel is
+    # charged to bazel.slice (declared below) instead of to the cgroup of whatever
+    # spawned it. Under `opencode serve` that cgroup is
+    # opencode-serve@<port>.service, MemoryMax=14G, OOMPolicy=stop -- so a build
+    # that OOMs there restarts the whole serve and destroys every session on it.
+    # That happened four times in ~6h on 2026-08-03/04 (960 HTTP 502s at the door).
+    #
+    # This provides bin/bazel and MUST win over the legacy ~/.local/bin/bazel
+    # symlink. It does: ~/.nix-profile/bin precedes ~/.local/bin both in the login
+    # PATH and in the serve unit's own `path=`. The activation below repoints that
+    # legacy symlink anyway, for callers that bypass PATH order.
+    (callPackage ../../pkgs/bazel-scope { })
     buf         # Protobuf linting, breaking change detection, codegen
     protobuf    # protoc compiler
     python3     # Required by Docker image build steps
@@ -260,8 +274,13 @@ lib.mkIf isCloudbox {
 
   # Export secrets from sops-nix (system-level decryption to /run/secrets/)
   programs.bash.initExtra = lib.mkAfter ''
-    # Alias bazelisk as bazel (projects expect `bazel` on PATH)
-    alias bazel=bazelisk
+    # NOTE: there is deliberately NO `alias bazel=bazelisk` here any more.
+    # `bazel` is now a real binary on PATH -- the scope shim in home.packages
+    # above (bead workstation-mqp3). A shell alias takes precedence over PATH
+    # lookup, so keeping it would have silently bypassed the shim in every
+    # interactive shell while the agent's non-interactive bash used the shim: the
+    # exact split where a human "verifies" a fix that is not in the path being
+    # measured.
 
     # GitHub API token for gh CLI
     if [ -r /run/secrets/github_api_token ]; then
@@ -566,6 +585,72 @@ lib.mkIf isCloudbox {
   };
 
   # Systemd user service to ensure projects on login
+  # ---- bazel.slice: the AGGREGATE cap (bead workstation-mqp3) ----------------
+  #
+  # The shim gives each bazel invocation its own scope with MemoryMax=10G. That
+  # bounds ONE workspace; it does not bound how many workspaces build at once.
+  # This slice is the parent of every one of those scopes and bounds the total.
+  # Without it, N concurrent builds would be N x 10G and we would have moved the
+  # host-OOM problem rather than solved it.
+  #
+  # SIZING. One active build <=10G (the scope cap) + resident idle server JVMs of
+  # other workspaces (~2.4G measured across two on a single serve) + headroom for
+  # a second build spinning up => 16G. A genuinely concurrent second full build
+  # will hit this cap; the kernel then kills the fattest JVM inside the slice and
+  # that build fails. That is the intended trade on a 62G box whose swap is
+  # already saturated -- budgeting 2x10G here would just relocate the OOM to the
+  # host, where OOMScoreAdjust=500 makes the serves the preferred victim.
+  #
+  # MemorySwapMax bounds swap churn: swap on this host is already fully consumed,
+  # and an unbounded build would thrash it host-wide before ever reaching
+  # memory.max. Deliberately NO MemoryHigh -- throttling reclaim against a
+  # saturated swap device stalls builds for minutes, which is worse than a clean
+  # kill and much harder to diagnose.
+  #
+  # The serve units are in /system.slice/system-opencode\x2dserve.slice/..., a
+  # different cgroup subtree, so a memcg OOM in here cannot reach them.
+  systemd.user.slices.bazel = {
+    Unit = {
+      Description = "Bazel builds, capped and held outside the opencode serve cgroup";
+      Documentation = [ "https://github.com/johnnymo87/workstation/blob/main/pkgs/bazel-scope/default.nix" ];
+    };
+    Slice = {
+      MemoryMax = "16G";
+      MemorySwapMax = "2G";
+    };
+  };
+
+  # Repoint the legacy hand-made ~/.local/bin/bazel symlink at the shim.
+  #
+  # It predates this repo's management of bazel (created by hand in 2026-04) and
+  # points straight at bazelisk, which is precisely the unscoped path the shim
+  # exists to close. PATH order already makes it unreachable in practice
+  # (~/.nix-profile/bin precedes ~/.local/bin everywhere that matters), so this is
+  # belt-and-braces for anything invoking the absolute path.
+  #
+  # Guarded: only ever replaces a SYMLINK, never a real file, and only one that
+  # resolves to bazelisk or to a bazel-scope shim. Anything else is left alone and
+  # reported, because silently eating a file someone put there by hand is worse
+  # than an unrepointed symlink.
+  home.activation.repointLegacyBazelSymlink =
+    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      legacy="$HOME/.local/bin/bazel"
+      want="$HOME/.nix-profile/bin/bazel"
+      if [ -L "$legacy" ]; then
+        target=$(readlink -f "$legacy" || true)
+        case "$target" in
+          *bazelisk*|*bazel-scope*|*/bin/bazel)
+            run ln -sfn "$want" "$legacy"
+            ;;
+          *)
+            echo "NOTE: leaving $legacy alone; it resolves to $target, not bazelisk." >&2
+            ;;
+        esac
+      elif [ -e "$legacy" ]; then
+        echo "NOTE: $legacy is a real file, not a symlink; leaving it alone." >&2
+      fi
+    '';
+
   systemd.user.services.ensure-projects = {
     Unit = {
       Description = "Ensure declared dev projects are present in ~/projects";
