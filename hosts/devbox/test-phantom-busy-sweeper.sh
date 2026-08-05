@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Tests for systemd.user.services.opencode-phantom-busy-sweeper
 # (users/dev/home.devbox.nix — the DEVBOX sweeper, a systemd USER unit).
 #

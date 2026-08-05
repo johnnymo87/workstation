@@ -1,3 +1,4 @@
+// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import { describe, test, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { installCrashHandlers } from "../src/crash.js";

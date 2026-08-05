@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Unit tests for opencode-launch --mcp tools-JSON builder.
 # Mirrors build_mcp_tools_json from users/dev/home.base.nix.
 # Run: bash users/dev/test-opencode-launch-mcp.sh

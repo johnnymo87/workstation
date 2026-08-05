@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 # The frontdoor vitest suite runs OUTSIDE the nix build sandbox: the integration
 # tests bind loopback sockets and drive undici/fake-timers against 127.0.0.1,
 # which a hermetic sandbox forbids. Hence default.nix sets doCheck=false and the

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 // Proves the compaction exemption on the ACTUAL artifact we ship, by importing
 // the patched plugin.js and driving its hooks directly. Runs in the derivation's
 // installCheckPhase, so the property is enforced on every build/bump — not

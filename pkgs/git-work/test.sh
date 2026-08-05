@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 # Unit and integration tests for the `work` git-worktree helper.
 #
 # Run: bash test.sh

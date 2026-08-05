@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Behavioural acceptance test for Step 3's serialized nvim exit walk.
 #
 # The static suite (test.sh) greps the source; this one RUNS it. It extracts the

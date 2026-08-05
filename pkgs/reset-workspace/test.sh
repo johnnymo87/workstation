@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Unit + source-guard tests for reset-workspace's pool-aware health poll.
 #
 # mn9r M7: after restarting opencode-serve-pool.target, readiness must be

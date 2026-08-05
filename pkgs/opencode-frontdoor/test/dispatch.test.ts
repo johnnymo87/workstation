@@ -1,3 +1,4 @@
+// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import { describe, test, expect } from 'vitest';
 import { classify, dispatch, isPoolSafe } from '../src/dispatch.js';
 import { ROUTE_CLASSIFICATION_TABLE } from '../src/routes.classification.js';

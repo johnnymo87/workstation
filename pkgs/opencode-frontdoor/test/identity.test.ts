@@ -1,3 +1,4 @@
+// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import { describe, expect, test } from "vitest";
 import { identify } from "../src/identity.js";
 import type { IncomingMessage } from "node:http";

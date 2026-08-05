@@ -1,3 +1,4 @@
+# unwired-test(workstation-dad9): wirable as a hermetic pytest check, not yet done
 """Tests for oc-cost. Run: python3 -m unittest pkgs/oc-cost/test_oc_cost.py"""
 
 from __future__ import annotations
