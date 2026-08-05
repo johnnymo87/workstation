@@ -473,9 +473,21 @@ Stated so the "class-killer" framing does not overclaim in the PR body:
   fallback at `configuration.nix:1745`). Install- and compatibility-stage
   failures carry an npm spec like `pkg@version`, so two distinct such failures
   share one latch and the second is swallowed by the first's backoff — losing the
-  per-file-signature property the E2 design defends. Bounded and accepted today:
-  all nine deployed plugins are file plugins and there are zero npm plugins.
-  Stated here rather than left as an unanswered "may not be `file://`".
+  per-file-signature property the E2 design defends. **This bound was false when
+  written, and the residual is live today** (`workstation-njer`, which now blocks
+  `workstation-0lkp`). Production has **three** npm-spec plugins —
+  `opencode-beads`, `@ex-machina/opencode-anthropic-auth`,
+  `opencode-gemini-auth@1.3.11` — so three of twelve sources share one `unknown`
+  latch right now. Measured 2026-08-05 by rewriting real `plugin loaded` lines to
+  the failure shape and running the canary's own extraction: all three returned
+  empty; a `file://` plugin returned `caveman/plugin.js`.
+
+  Worth dwelling on, because the failure is not the missed fact but the shape of
+  the sentence. This section correctly *identified* the hazard and then retired it
+  with an unchecked empirical claim — "there are zero npm plugins" — of exactly
+  the kind that reads as settled. The alert still fires; only attribution
+  degrades. But a residual dismissed by an assumption is indistinguishable from a
+  residual that was actually bounded, right up until someone counts.
 - **`assertHooks` is deliberately shallow** (3b). `{ config: 42 }` passes, and
   the trigger path (`plugin-index.ts:290`, `Effect.promise`, no per-hook catch)
   then 500s. Deepening it to "all members are functions" would reject legal
