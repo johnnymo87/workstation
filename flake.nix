@@ -62,6 +62,7 @@
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
       gws = p.callPackage ./pkgs/gws { };
+      hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
@@ -391,6 +392,48 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash assets/scripts/test-ff-mono-root.sh
+        touch $out
+      '';
+
+      # Stale-deploy gate (bead workstation-h0mp). The gate aborts a
+      # `home-manager switch` that would drop live commits, so its logic can
+      # only be exercised by a real switch -- which on this box means either
+      # deploying or refusing to deploy for every other agent. The decision
+      # logic therefore lives in a sourceable library with real throwaway git
+      # repos behind it, and runs here.
+      hm-deploy-gate = devboxPkgs.runCommand "hm-deploy-gate-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash pkgs/hm-deploy-gate-sh/test.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        # Assert the assertions RAN. A suite that exits 0 having executed
+        # nothing is the failure mode this whole roadmap is about.
+        grep -q '^hm-deploy-gate: ALL PASS$' "$TMPDIR/out.txt"
+        touch $out
+      '';
+
+      # Behavioural half: runs the ACTUAL activation script from the evaluated
+      # cloudbox config through its three test seams. The library check above
+      # only proves the decision logic; it cannot see a guard whose glue never
+      # reaches `exit 1`. This check earned its place immediately -- it caught
+      # the gate silently ALLOWING every deploy when its own library failed to
+      # source (empty verdict, no matching case branch). Nothing in the library
+      # suite could have found that.
+      hm-deploy-gate-behaviour = devboxPkgs.runCommand "hm-deploy-gate-behaviour" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils devboxPkgs.gnused ];
+        GATE_SCRIPT = devboxPkgs.writeText "hm-deploy-gate-activation.sh"
+          self.homeConfigurations.cloudbox.config.home.activation.assertFreshDeploy.data;
+      } ''
+        export HOME="$TMPDIR/home"; mkdir -p "$HOME"
+        cd ${self}
+        bash pkgs/hm-deploy-gate-sh/test-behaviour.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        grep -q '^hm-deploy-gate-behaviour: ALL PASS$' "$TMPDIR/out.txt"
         touch $out
       '';
 
