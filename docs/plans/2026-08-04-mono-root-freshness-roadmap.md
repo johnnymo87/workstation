@@ -86,14 +86,20 @@ behind >150 commits (~6 days) exits nonzero so the unit goes `failed`.
 | Bead | P | What | Gate |
 |---|---|---|---|
 | `workstation-v03j.6` | 1 | ff-only auto-updater | **Merged but unverified on the host.** See below. |
+| `workstation-faj7` | 1 | Untracked droppings at the root permanently block the fast-forward | **Live now.** See below |
 | `workstation-yb4b` | 2 | Nothing watches failed systemd *user* units | Makes v03j.6's tripwire mean something |
 | `workstation-v03j.7` | 2 | Generalize enrollment beyond mono (nix multi-repo list) | — |
 | `workstation-v03j.8` | 3 | Live-session-aware worktree prune + reopen-cwd fallback | — |
 
-### Next action: verify v03j.6 on the real host
+### Status: deployed, and blocked on its first real run
 
-Merged ≠ running. The change reaches cloudbox only when home-manager next
-switches, which the `pull-workstation` timer does within ~4h. Then, once:
+Home-manager switched on cloudbox 2026-08-04 20:18; the unit exists and the
+timer is armed for 02:45. Run by hand once at 20:19, it **refused correctly** —
+named the reason, exited 0, touched nothing — so the code is verified. What is
+*not* yet verified is a successful fast-forward end to end, because of
+`workstation-faj7` below.
+
+To verify once that is cleared:
 
 ```bash
 systemctl --user list-timers ff-mono-root            # exists, next elapse 02:45
@@ -105,6 +111,30 @@ git -C ~/projects/mono rev-list --count HEAD..origin/main   # expect 0
 **Do not verify by loading a skill in a running session.** Skills are cached at
 session start, so you will see stale content and wrongly conclude it failed.
 Check the file (`wc -l`) or the behind-count.
+
+### `faj7`: the collision class, found on day one
+
+The first real run refused because an **untracked** file at the root
+(`wonder/blueapron/fulfillment/docs/plans/2026-08-04-fbm-stranded-cohort-drain.md`)
+is now also a **tracked** file on `origin/main` (mono PR #4079). Git will not
+fast-forward over it, and will not until the untracked copy moves.
+
+This is structural, not bad luck. The v03j hook blocks *commits* at the root but
+nothing stops file *creation* there, so sessions still drop plan docs at the root
+and later land the same path from a worktree. Every such file is a future
+permanent block. Expect it roughly weekly.
+
+Containment holds — the script refuses safely, and the tripwire converts the
+freeze into a failed unit at 150 behind (~6 days) — but containment is not a fix,
+and it inherits `yb4b`'s "assumes something looks" problem.
+
+Four options are recorded on the bead, none chosen. Note that the tempting one
+(have the timer auto-quarantine colliding files and retry) means the timer moves
+a peer's data unattended, which is the never-discard line the script was
+deliberately written not to cross.
+
+**Never resolve an instance with `git clean` on the mono root.** Shared worktree,
+peer data; a prior cleanup destroyed a peer session's uncommitted database.
 
 ### Why `yb4b` matters more than its priority suggests
 
