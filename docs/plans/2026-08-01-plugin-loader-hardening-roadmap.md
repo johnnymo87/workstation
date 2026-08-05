@@ -1,6 +1,6 @@
 # Plugin-Loader Hardening Roadmap
 
-**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-3a **live**; 3b blocked on `workstation-fg2w`
+**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-3a **live**; devbox detector merged (#320); 3b blocked on an OBSERVED fire drill (`workstation-y8ql`)
 
 > **Revision 2.** The first draft of this file (PR #242) was written and merged
 > *without* the adversarial review it makes mandatory. Review afterwards found
@@ -356,7 +356,31 @@ devbox, where the founding LOUD incident happened, and which deploys
 | | Contents | Status |
 |---|---|---|
 | **3a — observability** | Log per plugin on failure (all four `report.error` stages **and** `report.missing`) and on success. Pure signal addition, safe on every host. | **LIVE** since 2026-08-05 03:01 EDT. Fork patch `8ce5fe9`, released `v1.17.13-patched.8`, auto-bumped in #301, pin machinery in #303. |
-| **3b — validation** | `assertHooks` + buffer-then-commit at both push sites. The class-killer. | `workstation-l7bz`, **blocked** on `workstation-fg2w` (devbox cover) or a recorded acceptance. |
+| **3b — validation** | `assertHooks` + buffer-then-commit at both push sites. The class-killer. | `workstation-l7bz`, **blocked** on `workstation-y8ql` (an *observed* alert), not on merged config. |
+
+**Devbox cover shipped in #320 (`workstation-fg2w` closed), and it does NOT open
+the 3b gate.** Leg B moved into the shared library so both hosts run one
+implementation; devbox got a `systemd.user` unit, because nothing auto-applies
+NixOS *system* config here — there is no `system.autoUpgrade` and
+`pull-workstation.timer` runs `home-manager switch` only, so a system unit would
+have sat merged-but-inert and looked, from off-host, exactly like a working
+detector.
+
+The gate now hangs on `workstation-y8ql`: a fire drill that appends one synthetic
+anchored ERROR line and requires the Telegram message, the `LATCHED` journal
+line, and a *re-alert* on a later pass to be pasted in as evidence. The reason is
+this roadmap's own repeated lesson — merged is not deployed is not working — and
+it applies with unusual force here, because nobody has observed either host fire
+since the extraction, and devbox is unreachable from cloudbox. A detector that
+has never been seen to fire is mechanically no worse than nothing, but it becomes
+*worse than nothing* the moment a gate opens on its existence.
+
+**macOS gets 3b too, and has no canary and never will.** The gate as previously
+written was silent about this, which is the same unchecked-claim shape one host
+over: 3b ships as a fork binary through the shared `home.base.nix` bump, so
+per-host gating of the *binary* is not available. Step D is the only macOS cover.
+Recording the gap here rather than leaving it implied — **the decision to accept
+it is the user's to make, not this document's to assume.**
 
 > **Running, verified 2026-08-05 03:50 EDT.** The 03:00 nightly reset was the
 > deploy window (it restarts the serve pool), so nothing had to be killed by
