@@ -90,6 +90,45 @@ hm_gate_relation "$REPO" "$SHA_A" "$SHA_B" >/dev/null
 AFTER="$(git -C "$REPO" rev-parse HEAD)$(git -C "$REPO" status --porcelain)$(git -C "$REPO" for-each-ref)"
 ok "relation: read-only (no ref/HEAD/tree mutation)" "$BEFORE" "$AFTER"
 
+# --- published-loss: the squash-merge trap ----------------------------------
+# Fixture gets a published ref. main is A->B; `side` (C) is cut from A, standing
+# in for a PR branch. D extends main past B; E is a branch cut from D.
+git -C "$REPO" update-ref refs/remotes/origin/main "$SHA_B"
+git -C "$REPO" checkout -q main
+echo d > "$REPO/f"; git -C "$REPO" commit -qam D; SHA_D="$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" checkout -q -b side2 "$SHA_D"
+echo e > "$REPO/h"; git -C "$REPO" add -A; git -C "$REPO" commit -qm E; SHA_E="$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" checkout -q main
+
+# THE PRODUCTION FALSE POSITIVE (cloudbox 2026-08-05): deployed from a PR branch
+# that was then squash-merged. Switching from main drops the branch commit's SHA
+# but none of its content, and nothing published. Must NOT refuse.
+ok "published: squash-merged branch deploy is not a regression" "regress-unpub" \
+   "$(hm_gate_relation "$REPO" "$SHA_B" "$SHA_C" refs/remotes/origin/main)"
+
+# The incident is unchanged: dropping a PUBLISHED main commit still refuses.
+ok "published: dropping a published commit still refuses" "regress" \
+   "$(hm_gate_relation "$REPO" "$SHA_A" "$SHA_B" refs/remotes/origin/main)"
+
+# A branch cut from a NEWER main than the incoming tree DOES lose published
+# commits (D), even though its own tip is unpublished. Must still refuse -- this
+# is where a naive "is the deployed tip published?" test would fail open.
+git -C "$REPO" update-ref refs/remotes/origin/main "$SHA_D"
+ok "published: branch on newer main still refuses" "regress" \
+   "$(hm_gate_relation "$REPO" "$SHA_A" "$SHA_E" refs/remotes/origin/main)"
+# ...while switching to that newer main from the same branch loses nothing.
+ok "published: forward onto the branch's own base" "contains" \
+   "$(hm_gate_relation "$REPO" "$SHA_E" "$SHA_D" refs/remotes/origin/main)"
+
+# With no published ref to reason about, fall back to the strict answer.
+ok "published: missing ref falls back to refuse" "regress" \
+   "$(hm_gate_relation "$REPO" "$SHA_A" "$SHA_B" refs/remotes/origin/nonexistent)"
+
+ok "verdict: regress-unpub warns, never refuses" "warn:regress-unpub" \
+   "$(hm_gate_verdict regress-unpub "")"
+ok "classify: squash case end to end" "warn:regress-unpub" \
+   "$(hm_gate_verdict "$(hm_gate_classify "$REPO" "$SHA_B" "$SHA_C" refs/remotes/origin/main)" "")"
+
 # --- hm_gate_verdict ---------------------------------------------------------
 ok "verdict: same"     "allow:same"           "$(hm_gate_verdict same "")"
 ok "verdict: contains" "allow:forward"        "$(hm_gate_verdict contains "")"
@@ -144,7 +183,7 @@ if [ "$FAIL" -ne 0 ]; then
 fi
 # The check greps for this exact line, so a suite that silently runs zero
 # assertions cannot pass as green.
-if [ "$PASS" -lt 40 ]; then
+if [ "$PASS" -lt 48 ]; then
   echo "hm-deploy-gate: TOO FEW ASSERTIONS RAN ($PASS) -- suite truncated?" >&2
   exit 1
 fi

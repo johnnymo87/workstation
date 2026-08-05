@@ -83,9 +83,13 @@ hm_gate_beacon_dirty() {
 #
 #   same           identical revisions
 #   contains       incoming has deployed as an ancestor -- moving forward
-#   regress        deployed is NOT contained in incoming -- activating would
-#                  drop commits that are live right now (covers both the
-#                  strictly-older case and the diverged case; both lose commits)
+#   regress        deployed is NOT contained in incoming AND the commits that
+#                  would be dropped include PUBLISHED ones (reachable from the
+#                  published ref, default origin/main). Real loss.
+#   regress-unpub  deployed is not contained in incoming, but everything that
+#                  would be dropped is unpublished. This is the SQUASH-MERGE
+#                  case and it is the normal state of this repo, not a fault --
+#                  see below.
 #   unknown-object at least one sha is not present in this repo, so ancestry
 #                  cannot be computed
 #   no-repo        the repo path is missing or is not a git repository
@@ -93,8 +97,27 @@ hm_gate_beacon_dirty() {
 # Read-only: runs only `git cat-file -e` and `git merge-base --is-ancestor`.
 # Never fetches, never writes refs, never touches a working tree -- this runs
 # during activation on a box where other agents hold live worktrees.
+# THE SQUASH-MERGE TRAP, found in production within hours of shipping v1.
+# An agent deploys from its PR branch (normal: you test a config change before
+# merging it). The PR is then merged with `gh pr merge --squash`, which creates
+# a NEW commit with the same content and a DIFFERENT sha. From then on the
+# branch commit is not reachable from main, so a plain ancestry test calls the
+# next switch-from-main a regression and REFUSES it -- forever, for everyone.
+# Measured on cloudbox 2026-08-05: deployed 1c11c82 (branch
+# docs/s8-shim-verified), squash-merged as 58c7310; the gate refused a switch
+# from main that dropped nothing at all. This repo merges exclusively with
+# --squash, so that false refusal was structural, not a corner case.
+#
+# The fix is to ask what would actually be LOST, not whether the shas line up.
+# The newest published ancestor of the deployed rev is merge-base(deployed,
+# ref). If the incoming tree already contains that commit, then everything
+# being dropped is unpublished work (a squashed or abandoned branch) and no
+# shared configuration regresses. If it does NOT, a published commit is being
+# dropped and that is the incident this gate exists for. Two git calls, exact
+# in both directions -- including a branch cut from a NEWER main than the
+# incoming tree, which loses published commits and still refuses.
 hm_gate_relation() {
-  local repo="${1-}" incoming="${2-}" deployed="${3-}"
+  local repo="${1-}" incoming="${2-}" deployed="${3-}" ref="${4-origin/main}"
 
   if [ -z "$repo" ] || [ ! -d "$repo" ] || ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     printf 'no-repo\n'; return 0
@@ -111,6 +134,20 @@ hm_gate_relation() {
   fi
   if git -C "$repo" merge-base --is-ancestor "$deployed" "$incoming" 2>/dev/null; then
     printf 'contains\n'; return 0
+  fi
+
+  # Something would be dropped. Is any of it published?
+  local base
+  if ! git -C "$repo" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+    # No published ref to reason about. Fall back to the strict answer: a
+    # regression is still a regression, we just cannot tell if it is the benign
+    # squash shape. Refusing here is the safe direction -- the message names the
+    # escape hatch, and the drift canary (workstation-4ze8) covers the rest.
+    printf 'regress\n'; return 0
+  fi
+  base="$(git -C "$repo" merge-base "$deployed" "$ref" 2>/dev/null)"
+  if [ -n "$base" ] && git -C "$repo" merge-base --is-ancestor "$base" "$incoming" 2>/dev/null; then
+    printf 'regress-unpub\n'; return 0
   fi
   printf 'regress\n'
 }
@@ -129,7 +166,7 @@ hm_gate_relation() {
 # the incoming rev is also unknown, because that is the self-healing bootstrap
 # case (the next switch writes one) and the more actionable label.
 hm_gate_classify() {
-  local repo="${1-}" inc_raw="${2-}" dep_raw="${3-}"
+  local repo="${1-}" inc_raw="${2-}" dep_raw="${3-}" ref="${4-origin/main}"
   local inc dep
   inc="$(hm_gate_beacon_rev "$inc_raw")"
   dep="$(hm_gate_beacon_rev "$dep_raw")"
@@ -139,7 +176,7 @@ hm_gate_classify() {
   elif [ -z "$inc" ]; then
     printf 'unknown-rev\n'
   else
-    hm_gate_relation "$repo" "$inc" "$dep"
+    hm_gate_relation "$repo" "$inc" "$dep" "$ref"
   fi
 }
 
@@ -177,6 +214,7 @@ hm_gate_verdict() {
     same)           printf 'allow:same\n' ;;
     contains)       printf 'allow:forward\n' ;;
     regress)        printf 'refuse:regress\n' ;;
+    regress-unpub)  printf 'warn:regress-unpub\n' ;;
     unknown-object) printf 'warn:unknown-object\n' ;;
     no-repo)        printf 'warn:no-repo\n' ;;
     no-beacon)      printf 'warn:no-beacon\n' ;;
