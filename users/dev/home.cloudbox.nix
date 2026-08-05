@@ -4,7 +4,7 @@
 # Closely mirrors home.devbox.nix but without:
 #   - /persist volume checks (GCP uses single persistent boot disk)
 # And uses #cloudbox for the pull-workstation HM flake target.
-{ config, pkgs, lib, localPkgs, projects, isCloudbox, ... }:
+{ config, pkgs, lib, localPkgs, projects, isCloudbox, assetsPath, ... }:
 
 let
   # Serve-pool descriptor: the SAME single source of truth the serve units and
@@ -672,6 +672,94 @@ lib.mkIf isCloudbox {
         "HOME=%h"
         "PATH=${pkgs.nix}/bin:${pkgs.git}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
       ];
+    };
+  };
+
+  # ---------------------------------------------------------------------------
+  # ff-mono-root: keep the mono PRIMARY checkout current.
+  #
+  # The mono root rots: 84 commits behind origin/main on 2026-07-08, 175 on
+  # 07-27, 272 on 08-03, and 27 again within a day of a manual refresh.
+  # mono/.agents/skills lives in that tree, so a stale root serves stale agent
+  # skills -- on 08-03 that produced a production finding 100x off. Nothing else
+  # refreshes it (reset-workspace only prunes merged worktrees).
+  #
+  # Cloudbox only, and deliberately so: cloudbox is the work machine, devbox is
+  # personal, and mono is work. No devbox counterpart is wanted. This file is
+  # cloudbox-only by construction, so no isCloudbox guard is needed here -- the
+  # same reason its neighbour pull-workstation has none.
+  #
+  # The script's contract (fast-forward or skip; never reset/stash/clean) is
+  # documented at assets/scripts/ff-mono-root and pinned by
+  # assets/scripts/test-ff-mono-root.sh, wired into `nix flake check`.
+  # ---------------------------------------------------------------------------
+  home.file.".local/bin/ff-mono-root" = {
+    source = "${assetsPath}/scripts/ff-mono-root";
+    executable = true;
+  };
+
+  systemd.user.services.ff-mono-root = {
+    Unit = {
+      Description = "Fast-forward the mono primary checkout (skips if anything is in the way)";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "%h/.local/bin/ff-mono-root";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      Nice = 15;                          # Low scheduling priority
+      IOSchedulingClass = "idle";         # Yield IO to interactive work
+      # Type=oneshot defaults to TimeoutStartSec=infinity, and `git fetch` has
+      # no timeout of its own. A network black hole would leave the unit
+      # "activating" forever; the timer does not re-fire a unit that is still
+      # activating, so every subsequent night would be skipped with no failure
+      # recorded and no log line -- the one genuinely silent-forever path in
+      # this design. Bounding it turns that into a visible failed unit.
+      TimeoutStartSec = "10min";
+      Environment = [
+        "HOME=%h"
+        "PATH=${pkgs.git}/bin:${pkgs.util-linux}/bin:${pkgs.coreutils}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+      ];
+    };
+  };
+
+  # Fires at 02:45, fifteen minutes BEFORE the 03:00 nightly-restart-background
+  # timer (hosts/cloudbox/configuration.nix) tears down and respawns sessions.
+  # The ordering is the whole point: OpenCode snapshots skill content at SESSION
+  # START, so refreshing the tree mid-session does nothing for sessions already
+  # running. Landing the fast-forward before the 03:00 turnover is what makes
+  # every session created afterwards -- including the morning recommendation
+  # session that reset-workspace spawns -- read fresh skills.
+  #
+  # Daily rather than every-N-hours for the same reason: a mid-day run would
+  # mutate a shared working tree that live sessions are reading, and would only
+  # benefit sessions spawned later that same day.
+  #
+  # Honest about the residual risk: 02:45 is BEFORE the 03:00 teardown, so
+  # sessions may still be alive and reading the tree while the fast-forward
+  # lands. Working-tree file replacement during a merge is not atomic across
+  # files, so a session reading at that instant can see a torn mix of old and
+  # new. Accepted deliberately: those sessions are idle at 02:45, the window is
+  # seconds long, and the alternative (running after teardown but before
+  # respawn) means synchronising a user timer against a system unit's internals
+  # for a much smaller gain.
+  #
+  # Persistent is deliberately NOT set. A catch-up run would fire at an
+  # arbitrary moment after boot -- likely mid-day, with live sessions actively
+  # reading the tree -- which is exactly the mid-day mutation this schedule
+  # exists to avoid. The host is always-on, so a missed night is rare and costs
+  # one day of drift; a sustained run of misses shows up as the staleness
+  # tripwire failing the unit.
+  systemd.user.timers.ff-mono-root = {
+    Unit = {
+      Description = "Nightly fast-forward of the mono primary checkout";
+    };
+    Timer = {
+      OnCalendar = "*-*-* 02:45:00";
+      RandomizedDelaySec = "2min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
     };
   };
 
