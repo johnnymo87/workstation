@@ -1518,6 +1518,21 @@ EOF
         # which is sanitised to [A-Za-z0-9._-].
         OVERSIZE_KEY="!logtail-oversize"
 
+        # Latch key for "the leg is reading nothing at all". Same `!` prefix and
+        # same reason: it cannot collide with a sanitised plugin key.
+        UNMEASURABLE_KEY="!logtail-unmeasurable"
+
+        # 60 minutely passes. One inert pass is a transient stat failure; an hour
+        # of them is a blind detector. Low enough to catch a repointed log before
+        # a night of meaningless silence, high enough not to page on a boot race.
+        # A seam so the behaviour suite can drive it without sleeping an hour.
+        UNMEASURABLE_THRESHOLD="''${PLUGIN_CANARY_UNMEASURABLE_THRESHOLD:-60}"
+
+        # Cloudbox runs the pool as SYSTEM units; devbox runs it as user units.
+        # The alert text interpolates this, so each host tells the reader the
+        # command that actually works there.
+        POOL_RESTART_HINT="sudo systemctl restart opencode-serve-pool.target"
+
         # The FRONT DOOR, never an individual serve. Both probed routes are
         # global-ro and deliberately NOT poolSafe, so the door forwards them to the
         # anchor; see the notes in pkgs/opencode-frontdoor/src/routes.classification.ts.
@@ -1663,176 +1678,13 @@ EOF
 
         # =====================================================================
         # LEG B -- log tail. Detection is EDGE, alerting is LEVEL.
+        #
+        # The body is in the shared library so devbox runs the SAME code rather
+        # than a fork of it; see plugin_canary_run_logtail_leg there for the
+        # latch-before-offset and relatch-every-pass invariants and why they
+        # exist. Everything it needs is set above.
         # =====================================================================
-        CUR_ID="$(plugin_canary_file_id "$LOG")"
-        CUR_SIZE=""
-        if [ -f "$LOG" ]; then
-          # NOT `|| echo 0`. A transient stat failure on a file that EXISTS would
-          # then report size 0, which reads as truncation -> RESET -> and because
-          # the size looked like 0, the oversize guard built to prevent exactly
-          # this is bypassed -> the offset is persisted as 0 -> the next pass
-          # rescans 668MB of history from the start. Empty means "could not
-          # measure", and the leg goes inert for one pass instead.
-          CUR_SIZE="$(stat -c %s "$LOG" 2>/dev/null || true)"
-        fi
-        case "$CUR_SIZE" in *[!0-9]*) CUR_SIZE="" ;; esac
-
-        STORED_ID=""
-        STORED_OFF=""
-        if [ -r "$OFF_FILE" ]; then
-          read -r STORED_ID STORED_OFF < "$OFF_FILE" || true
-        fi
-
-        if [ -z "$CUR_ID" ] || [ -z "$CUR_SIZE" ]; then
-          echo "WARNING: cannot identify or measure $LOG (id='$CUR_ID' size='$CUR_SIZE'); log leg inert this pass"
-        else
-          WINDOW="$(plugin_canary_window_action "$STORED_ID" "$STORED_OFF" "$CUR_ID" "$CUR_SIZE")"
-          START=-1
-          case "$WINDOW" in
-            INIT)
-              printf '%s %s\n' "$CUR_ID" "$CUR_SIZE" > "$OFF_FILE"
-              echo "logtail initialised at EOF ($CUR_SIZE bytes). History deliberately NOT scanned: the file holds ~2500 historical matches from the incident this canary is about."
-              ;;
-            INIT_OVERSIZE)
-              printf '%s %s\n' "$CUR_ID" "$CUR_SIZE" > "$OFF_FILE"
-              echo "WARNING: logtail reset indicated but the file is $CUR_SIZE bytes -- too large to be freshly rotated. Re-initialising at EOF; an unknown span of log went unexamined."
-              # LATCHED, not alerted inline. Alerting here directly would be the
-              # revision-1 defect rebuilt in miniature: a single edge invocation of
-              # a throttle, lost for good if pigeon happens to be down that minute.
-              # The condition it reports -- an unexamined span of log -- is exactly
-              # the silence this canary exists to prevent, so it gets the same
-              # level-alerting treatment as a load failure.
-              if [ ! -e "$LATCH/$OVERSIZE_KEY" ]; then
-                {
-                  printf 'first_seen=%s\n' "$(date -Is)"
-                  printf 'run=\n'
-                  printf 'line=logtail re-initialised at EOF: stored %s@%s, now %s@%s (too large to be a fresh rotation)\n' \
-                    "$STORED_ID" "$STORED_OFF" "$CUR_ID" "$CUR_SIZE"
-                } > "$LATCH/$OVERSIZE_KEY"
-              fi
-              ;;
-            NOOP) ;;
-            RESET)
-              echo "logtail detected rotation (stored $STORED_ID@$STORED_OFF, now $CUR_ID@$CUR_SIZE); reading from 0"
-              START=0
-              ;;
-            READ) START="$STORED_OFF" ;;
-          esac
-
-          if [ "$START" -ge 0 ]; then
-            # Assigned to the pre-declared CHUNK so the EXIT trap removes it; a
-            # crash between here and the offset write would otherwise leave one
-            # stray chunk file in the state dir per crash.
-            CHUNK="$(mktemp "$STATE/chunk.XXXXXX")"
-            # Bounded to the size measured above, so bytes appended mid-read are
-            # left for the next pass rather than being counted as consumed.
-            tail -c "+$((START + 1))" "$LOG" 2>/dev/null \
-              | head -c "$((CUR_SIZE - START))" > "$CHUNK" || true
-
-            # Only complete (newline-terminated) lines count, and the offset
-            # advances only that far. The log is appended by every serve, TUI and
-            # headless session on the host, so a read routinely lands mid-line --
-            # and the lines being written during a serve start are exactly the ones
-            # that carry plugin load failures.
-            CONSUMED="$(plugin_canary_complete_bytes < "$CHUNK")"
-
-            # PLUGIN_CANARY_LATCH_BEFORE_OFFSET
-            # Latch every match BEFORE advancing the offset. If this process dies,
-            # or pigeon is unreachable, the evidence must not have been consumed.
-            while IFS= read -r line; do
-              [ -n "$line" ] || continue
-              KEY="$(plugin_canary_plugin_key "$line")"
-              [ -n "$KEY" ] || KEY="unknown"
-              if [ ! -e "$LATCH/$KEY" ]; then
-                {
-                  printf 'first_seen=%s\n' "$(date -Is)"
-                  printf 'run=%s\n' "$(plugin_canary_run_id "$line")"
-                  printf 'line=%s\n' "$line"
-                } > "$LATCH/$KEY"
-                echo "LATCHED plugin load failure: $KEY"
-              fi
-            done < <(plugin_canary_complete_lines < "$CHUNK" \
-              | grep -E "$(plugin_canary_load_pattern)" || true)
-
-            printf '%s %s\n' "$CUR_ID" "$((START + CONSUMED))" > "$OFF_FILE"
-            rm -f "$CHUNK"
-            CHUNK=""
-          fi
-        fi
-
-        # PLUGIN_CANARY_RELATCH_EVERY_PASS
-        # Re-invoke driftAlert for EVERY live latch, every pass -- not only for
-        # matches found in this window.
-        #
-        # This is the whole reason latches exist. A rejected plugin logs its line
-        # ONCE per serve start and never again, so detection is inherently edge.
-        # But driftAlert is a THROTTLE, not a scheduler: it re-alerts only when the
-        # caller invokes it again with the same signature, and it swallows a failed
-        # POST (exit 0 always, state written only on HTTP 2xx). A canary that called
-        # it once per detection would therefore send exactly one warning-severity
-        # page, never nag, never escalate, and lose the alert entirely if pigeon
-        # happened to be down for that one minute.
-        #
-        # That is the 2026-07-26 frontdoor incident rebuilt -- 760 correct
-        # detections, ONE notification, missed, 12h39m of silence -- while
-        # appearing to use the escalation logic written in response to it. Turning
-        # edge detection into level alerting here is what makes the documented
-        # backoff and escalation real, and makes a failed POST retry for free next
-        # pass.
-        for latch in "$LATCH"/*; do
-          [ -e "$latch" ] || continue
-          KEY="$(basename "$latch")"
-          FIRST="$(sed -nE 's/^first_seen=(.*)/\1/p' "$latch" | head -1)"
-          RUNID="$(sed -nE 's/^run=(.*)/\1/p' "$latch" | head -1)"
-          LINE="$(sed -nE 's/^line=(.*)/\1/p' "$latch" | head -1)"
-
-          if [ "$KEY" = "$OVERSIZE_KEY" ]; then
-            # The detector degraded, rather than a plugin failing. Different
-            # remedy, so a different signature and a different text -- reporting
-            # this as a plugin failure would send someone hunting a broken file
-            # that is not broken.
-            "$ALERT" "$STATE/alert-oversize" "plugin-canary:logtail-oversize-reset" \
-              "OpenCode plugin canary: the log tail had to RE-INITIALISE at EOF.
-
-A rotation or truncation was indicated, but the file was too large to be a fresh
-rotation, so reading it from 0 was refused. An unknown span of log was NOT examined
-for plugin load failures -- and this leg is the only cover for 8 of the 9 deployed
-plugin files.
-
-This is a DEGRADED DETECTOR, not a broken plugin.
-
-First seen: $FIRST
-$LINE
-
-Check the log path has not been repointed, confirm plugins are loaded, then clear:
-  ls -la /home/dev/.local/share/opencode/log/
-  curl -s $DOOR/experimental/tool/ids
-  rm '/var/lib/opencode-plugin-canary/latch/$OVERSIZE_KEY'" \
-              3600 21600
-            continue
-          fi
-
-          "$ALERT" "$STATE/alert-load-$KEY" "plugin-canary:load-failed:$KEY" \
-            "OpenCode plugin FAILED TO LOAD: $KEY
-
-opencode rejected this plugin file at load time. The serve stays healthy and
-answers 200, so nothing else will tell you: the last time this happened it went
-unnoticed for ~32 hours and silently disabled per-session KUBECONFIG and all sops
-secret injection.
-
-First seen: $FIRST (run=$RUNID)
-$LINE
-
-Fix the file, then get the pool to reload plugins (they are read once at serve
-start -- the nightly reset does it, or restart the pool per
-.opencode/skills/resetting-workspace), then clear the latch:
-  rm /var/lib/opencode-plugin-canary/latch/$KEY
-
-The latch is cleared by hand on purpose. Auto-clearing needs proof that the plugin
-now LOADS, and no such signal exists until the loader patch (step 3) emits one --
-every cheap proxy for it would clear this while the plugin is still broken." \
-            3600 21600
-        done
+        plugin_canary_run_logtail_leg
 
         # `ls | wc -l` rather than `find`: findutils is not on this unit's PATH, and
         # a canary whose own summary line errors every minute is training the reader

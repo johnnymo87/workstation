@@ -37,6 +37,10 @@ let
   # request, blocking sessions on unanswerable questions. Nobody reads the
   # journal; the fix is to make the door's staleness page a human.
   driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+  # The plugin-load canary's logic + leg B body, shared verbatim with cloudbox.
+  # Bead workstation-fg2w: devbox had NO plugin-load detector at all, while the
+  # founding 32h-silent incident (2026-07-30) happened HERE. Sourced, not forked.
+  opencode-plugin-canary-sh = pkgs.callPackage ../../pkgs/opencode-plugin-canary-sh { };
   # workstation-g3iy: JS-level stack capture for wedged serves. The pool units
   # run with BUN_INSPECT listening on 127.0.0.1:1<port> (14096/14097); this
   # client connects, enables the JSC debugger, and pause/capture/resumes N
@@ -1288,6 +1292,128 @@ EOF
         echo "WARNING: unexpected /healthz HTTP status: $HTTP_CODE (loop alive, not restarting)"
         rm -f "$FAILFILE" "$SICKFILE"
         exit 0
+      ''}";
+    };
+  };
+
+  # ---------------------------------------------------------------------------
+  # OpenCode plugin-load canary -- LEG B ONLY (workstation-fg2w).
+  #
+  # Cloudbox's canary has two legs: a behavioural probe through the front door
+  # (leg A) and this log tail (leg B). Devbox gets leg B alone, deliberately:
+  # after roadmap step 3a the loader logs a real ERROR line per failing plugin on
+  # every host, so the log tail alone is a complete detector for the failure
+  # class -- and it needs no front door and no probe credential.
+  #
+  # WHY A USER UNIT, not a system unit like cloudbox's. Nothing auto-applies
+  # NixOS system config on devbox: there is no system.autoUpgrade anywhere in
+  # this repo, and pull-workstation.timer runs `home-manager switch` only. A
+  # system unit would therefore sit merged-but-inert until someone ran
+  # `sudo nixos-rebuild switch` ON devbox -- indistinguishable, from off-host,
+  # from a working detector. That is the exact "merged is not deployed" trap
+  # this bead exists to close, so the detector ships down the channel that
+  # actually moves.
+  #
+  # State lives under StateDirectory (=> ~/.local/state/opencode-plugin-canary),
+  # NOT /tmp like the frontdoor canary: latches and the byte offset must survive
+  # a reboot, or every boot silently rescans-or-forgets.
+  # ---------------------------------------------------------------------------
+  systemd.user.services.opencode-plugin-canary = {
+    Unit = {
+      Description = "OpenCode plugin-load canary, log-tail leg (detect-only; alerts via pigeon)";
+      OnFailure = [ "opencode-plugin-canary-failure.service" ];
+    };
+    Service = {
+      Type = "oneshot";
+      StateDirectory = "opencode-plugin-canary";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      ExecStart = "${pkgs.writeShellScript "opencode-plugin-canary" ''
+        set -u
+        # User-service PATH is minimal -- be explicit. gawk specifically: awk is
+        # NOT in coreutils, and the library's partial-line rule depends on gawk's
+        # RT variable.
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gawk pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.util-linux pkgs.jq ]}
+
+        source "${opencode-plugin-canary-sh}"
+
+        # Same four test seams as cloudbox, so the behaviour suite can drive this
+        # host's real ExecStart against fixtures too. Defaults are production.
+        STATE="''${PLUGIN_CANARY_STATE:-$HOME/.local/state/opencode-plugin-canary}"
+        LOG="''${PLUGIN_CANARY_LOG:-$HOME/.local/share/opencode/log/opencode.log}"
+        ALERT="''${PLUGIN_CANARY_ALERT:-${driftAlert}}"
+
+        LATCH="$STATE/latch"
+        OFF_FILE="$STATE/logtail.state"
+        OVERSIZE_KEY="!logtail-oversize"
+        UNMEASURABLE_KEY="!logtail-unmeasurable"
+        UNMEASURABLE_THRESHOLD="''${PLUGIN_CANARY_UNMEASURABLE_THRESHOLD:-60}"
+
+        # Devbox's pool is USER units; cloudbox's are system units. Wrong 3am
+        # remediation costs more than absent remediation.
+        POOL_RESTART_HINT="systemctl --user restart opencode-serve-pool.target"
+
+        mkdir -p "$LATCH"
+
+        # PLUGIN_CANARY_LOCK_SKIP_BEFORE_STATE
+        # Don't fight an in-flight reset-workspace: it stops and starts the pool
+        # deliberately. This MUST come before any state mutation -- in particular
+        # before the offset advances -- or error lines written during the reset
+        # get consumed unexamined. Devbox runs the same shared reset package and
+        # therefore the same /tmp/reset-workspace.lock. Shared, non-blocking, and
+        # fd-based: the `flock <file> <cmd>` form execvp()s the command, which
+        # fails on this minimal PATH and misreads as "lock held".
+        if [ -e /tmp/reset-workspace.lock ]; then
+          exec 9< /tmp/reset-workspace.lock
+          if ! flock -n -s 9; then
+            echo "reset-workspace in progress; skipping this run"
+            exit 0
+          fi
+          exec 9<&-
+        fi
+
+        # CHUNK must be global for the trap to be able to remove it; see the
+        # library function's header.
+        CHUNK=""
+        trap 'rm -f ''${CHUNK:+"$CHUNK"}' EXIT
+
+        plugin_canary_run_logtail_leg
+
+        # No probe= field: this host has no leg A, and printing one would imply a
+        # probe ran.
+        echo "plugin canary pass complete (log-tail leg only; latches=$(ls -1 "$LATCH" 2>/dev/null | wc -l))"
+      ''}";
+    };
+  };
+
+  systemd.user.timers.opencode-plugin-canary = {
+    Unit.Description = "Minutely OpenCode plugin-load canary";
+    Timer = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
+    };
+    Install.WantedBy = [ "timers.target" ];
+  };
+
+  # The canary crashing is itself a silent failure -- the shape this whole bead
+  # is about. Mirrors cloudbox's failure unit.
+  systemd.user.services.opencode-plugin-canary-failure = {
+    Unit.Description = "Alert that the OpenCode plugin canary crashed";
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.writeShellScript "opencode-plugin-canary-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq ]}
+        ${driftAlert} "$HOME/.local/state/opencode-plugin-canary/alert-canary-crashed" \
+          "plugin-canary:canary-crashed" \
+          "OpenCode plugin canary CRASHED on devbox.
+
+opencode-plugin-canary.service exited non-zero, so the plugin-load detector is
+down and its silence means nothing. This host has no second leg.
+
+  systemctl --user status opencode-plugin-canary.service --no-pager
+  journalctl --user -u opencode-plugin-canary.service -n 50 --no-pager" \
+          3600 21600
       ''}";
     };
   };
