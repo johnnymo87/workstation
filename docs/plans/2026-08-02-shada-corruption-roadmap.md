@@ -565,6 +565,58 @@ same shape as the existing guard that keeps the real `/tmp` socket reap out of
 the lab. Generalisable: an extraction harness is only as safe as its least
 stubbed command, and its boundary is load-bearing test infrastructure.
 
+#### First-night readout, 2026-08-05 — the invariant held, but it was a null test
+
+Both traps passed before anything was read: the deployed binary is the fixed one
+(client sweep 976 < drain 1010 < `kill-session` 1030), and the watch was alive
+through the window (same `ExecMainPID` 225669, log mtime 03:00:06, 93 events).
+
+Measured across the whole 02:59–03:02 window: **9 temps, max concurrent = 1**,
+none stranded, `9 exited gracefully, 0 SIGKILLed, 0 unkillable`, pre-walk verdict
+healthy. Independent corroboration that nothing overlapped: every temp was
+`main.shada.tmp.a`. nvim picks the first *free* letter, so `.b`/`.c` never
+appearing means no writer ever coexisted with another.
+
+**But S2b was not exercised.** There was no lgtm session at 03:00: no "tearing
+down" line, zero occurrences of `lgtm` anywhere in the reset's journal, and
+`lgtm-run` logged "Nothing to review. Done." at 02:50 and 03:00, so it dispatched
+nothing and created no session. With no session to tear down, the *old* code
+would have produced an equally clean night. The result re-confirms the S2 walk
+and says nothing about the S2b change.
+
+This is the failure mode the roadmap keeps warning about, in a new costume: a
+memorable change plus a clean measurement invites the conclusion that the change
+caused the cleanliness. The check that catches it is asking whether the change
+could have influenced the measurement *at all* — here, whether the code path
+even ran.
+
+#### The evidence production could not supply — `test-lgtm-teardown.sh`
+
+Since an lgtm session at 03:00 cannot be scheduled (present 08-04, absent 08-05),
+the claim is pinned in a lab instead. The harness extracts the **real** Step 3.4
+and runs it against a tmux session literally named `lgtm` on a **private tmux
+server** (`tmux -L`), so the extracted code is unmodified yet cannot reach the
+user's sessions — the isolation the walk harness lacked when it killed the live
+lgtm session.
+
+Two lab findings shaped it. A fresh state dir makes nvim write `main.shada`
+*directly*, with no temp, so every measurement would have read zero; the lab now
+seeds a real file first, as production always has. And three fast lab nvims often
+serialize by luck, so "the old ordering bursts" is too flaky to assert. The
+deterministic form of the same claim is used instead: **how many ShaDa writes
+does the teardown itself cause?** The `tmux` stub marks the watch log at the
+instant `kill-session` is invoked, and writes after that mark are attributable to
+the teardown.
+
+| ordering | writes caused by the teardown | max concurrent |
+|---|---|---|
+| old (teardown before the walk) | **3** | 1 |
+| new (Step 3.4, drain first) | **0** | 1 |
+
+The drain reported all three as late writers and every history survived, so this
+also exercises the `lgtm-run`-collision path — the one the adversarial review
+insisted on and the one production has never hit.
+
 ### S3 — Upstream report to neovim · `workstation-z9i3` · P3 · optional, last
 
 Two upstream defects: the unnecessary `os_remove(to)` before `os_rename`
@@ -597,5 +649,6 @@ master; check for an existing issue first.
 | 2026-08-03 03:00:04 | First reset under the S1 code. Step 3.5 silent = healthy verdict, nothing to reap (verified against the log and the directory) |
 | 2026-08-04 03:00 | **S2 verified, and incomplete.** Walk invariant holds in production: **max concurrent writers = 1** across 7 writers, "7 exited gracefully, 0 SIGKILLed". History accumulated (44138 → 44486 bytes). But a **3-writer burst at 03:00:03**, two seconds earlier, from Step 1.5's `tmux kill-session -t =lgtm` — same mechanism, outside S2's scope. `zv0l` closed, **`n0yh.1` (S2b) opened** |
 | 2026-08-04 11:00 | **S2b fixed.** lgtm teardown moved from the interactive head to **Step 3.4** in the destructive tail, after the walk + sweep. Manifest-leak worry disproved (allowlist is `=main`-only). Added a **serialized drain** before it, because `lgtm-run.timer` (`*:0/10`) fires at 03:00:00 and dispatches fresh nvims mid-reset — measured starting 03:00:03.461, 113ms before the teardown. Abort now leaves lgtm alive (destruction moved behind the `[y/N]` gate). Harness bug found the hard way: it executed the extracted Step 3.4 against the **real** tmux server and killed the live lgtm session; extraction boundary + a no-`tmux` guard added. 156 static assertions, walk harness green. Awaiting the 03:00 readout |
+| 2026-08-05 03:00 | **S2b readout: clean, but a NULL TEST.** Whole-window max concurrent = **1** (9 temps, all `.tmp.a`, 9/9 graceful) — but **no lgtm session existed** at 03:00 (`lgtm-run`: "Nothing to review"), so the teardown never ran and the old code would have looked identical. Re-confirms S2, proves nothing about S2b. Evidence supplied instead by a new lab harness `test-lgtm-teardown.sh` (real Step 3.4, private `tmux -L` server): teardown causes **3 writes old vs 0 new**, drain exercised, histories accumulated. `n0yh.1` closed |
 | 2026-08-03 16:34 | **S2 shipped** — `#268` merged and deployed (`.#cloudbox`; `~/.nix-profile/bin/reset-workspace` verified to contain the walk). SIGTERM by pid, not the planned socket walk — measurement killed that plan. Discovered **merge-at-write**, so S2 also *restores* the history the burst destroyed. Test suite 133 → 150, plus a behavioural test that runs the extracted walk. **Verification still owed: one observed night** |
 | 2026-08-03 09:00 | **S0 read out, `t032` closed.** No direct writers (0 `CREATE`/`MODIFY` on `main.shada` in 326 events). Storm confirmed: **3 concurrent writers, 3 unlink windows in one second**. S2 proceeds per the pre-registered rule |
