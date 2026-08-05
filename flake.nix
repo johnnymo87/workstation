@@ -59,6 +59,10 @@
       caveman = p.callPackage ./pkgs/caveman { };
       claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
       clerk = p.callPackage ./pkgs/clerk { };
+      # DevCycle CLI. Provides BOTH `dvc` (CLI, on PATH via home.base.nix) and
+      # `dvc-mcp` (the local MCP server opencode-config.nix wires up), so the
+      # two can never drift to different @devcycle/cli versions.
+      dvc = p.callPackage ./pkgs/dvc { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
       gws = p.callPackage ./pkgs/gws { };

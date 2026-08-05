@@ -28,8 +28,15 @@ the MCP entry's `environment` block. This mirrors the `pagerduty-mcp` /
 
 `users/dev/opencode-config.nix`:
 
-- **`devcycle-mcp` wrapper** — `writeShellApplication` running
-  `npx -y --package @devcycle/cli@6.3.2 dvc-mcp`.
+- **`devcycle-mcp`** — the `dvc-mcp` bin from `pkgs/dvc` (a `buildNpmPackage`
+  derivation pinning `@devcycle/cli`). That same derivation puts the `dvc` CLI
+  on PATH via `users/dev/home.base.nix`, so the MCP server and the CLI share one
+  version pin and cannot drift. It replaced an `npx -y --package
+  '@devcycle/cli@<ver>' dvc-mcp` wrapper.
+
+  Note: the packaged `dvc` is a workstation convenience. The shared
+  `managing-devcycle-flags` skill deliberately stays `npx`-based — it is written
+  for readers who do not have this Nix setup.
 - **`injectDevcycleMcpSecrets`** (macOS, Keychain) and
   **`injectDevcycleMcpSecretsSops`** (cloudbox, sops) activation blocks — splice
   an `mcp.devcycle` entry (`type: local`, `enabled: false`) into
@@ -59,8 +66,8 @@ access-token lifetime.
 
 **On a machine with a browser (macOS):** the DevCycle CLI does it in one shot —
 ```bash
-npx -y --package '@devcycle/cli@6.3.2' dvc login sso
-npx -y --package '@devcycle/cli@6.3.2' dvc projects select
+dvc login sso
+dvc projects select
 ```
 
 **On headless cloudbox** the CLI's own `dvc login sso` is unreliable (it binds a
@@ -111,7 +118,7 @@ The flow:
 6. `nix run home-manager -- switch --flake .#<host>` — the inject block sees
    `auth.yml` and emits the `mcp.devcycle` entry (no `environment`).
 
-Verify: `npx -y --package '@devcycle/cli@6.3.2' dvc projects current --headless`
+Verify: `dvc projects current --headless`
 should print your project, and `opencode mcp debug devcycle` (or an MCP
 `tools/list` handshake against the wrapper) should return 21 tools.
 
@@ -213,8 +220,7 @@ _"List all features in my DevCycle project"_.
 ## Sanity-check the local server standalone
 
 ```bash
-DEVCYCLE_CLIENT_ID=... DEVCYCLE_CLIENT_SECRET=... \
-  npx -y --package '@devcycle/cli@6.3.2' dvc-mcp
+DEVCYCLE_CLIENT_ID=... DEVCYCLE_CLIENT_SECRET=... dvc-mcp
 ```
 
 Without creds it prints `No authentication found` and exits 1 — that's the
@@ -222,7 +228,8 @@ signal the bin resolves and the env-var contract is what's missing.
 
 ## Related
 
-- `users/dev/opencode-config.nix` — `devcycle-mcp` wrapper + `injectDevcycleMcp*`
+- `pkgs/dvc/` — the packaged CLI/MCP (version pin + `update-lock.sh` for bumps)
+- `users/dev/opencode-config.nix` — `devcycle-mcp` binding + `injectDevcycleMcp*`
   activations
 - `managing-secrets` skill — sops workflow for cloudbox secrets
 - `rollbar-mcp-setup` / `pagerduty-mcp-setup` skills — the same token-gated
