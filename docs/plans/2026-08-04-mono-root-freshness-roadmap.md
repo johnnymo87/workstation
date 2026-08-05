@@ -85,21 +85,31 @@ behind >150 commits (~6 days) exits nonzero so the unit goes `failed`.
 
 | Bead | P | What | Gate |
 |---|---|---|---|
-| `workstation-v03j.6` | 1 | ff-only auto-updater | **Merged but unverified on the host.** See below. |
-| `workstation-faj7` | 1 | Untracked droppings at the root permanently block the fast-forward | **Live now.** See below |
+
+| `workstation-faj7` | 1 | Untracked droppings at the root permanently block the fast-forward | First instance cleared; the class is open. See below |
 | `workstation-yb4b` | 2 | Nothing watches failed systemd *user* units | Makes v03j.6's tripwire mean something |
 | `workstation-v03j.7` | 2 | Generalize enrollment beyond mono (nix multi-repo list) | — |
 | `workstation-v03j.8` | 3 | Live-session-aware worktree prune + reopen-cwd fallback | — |
 
-### Status: deployed, and blocked on its first real run
+### Verified on the host 2026-08-04 (`v03j.6` closed)
 
-Home-manager switched on cloudbox 2026-08-04 20:18; the unit exists and the
-timer is armed for 02:45. Run by hand once at 20:19, it **refused correctly** —
-named the reason, exited 0, touched nothing — so the code is verified. What is
-*not* yet verified is a successful fast-forward end to end, because of
-`workstation-faj7` below.
+Home-manager switched at 20:18; timer armed for 02:45.
 
-To verify once that is cleared:
+- **Run 1 (20:19) — refused, correctly.** An untracked plan doc at the root had
+  become a tracked path on `origin/main`. `fast-forward refused (local changes
+  are in the way); skipping (behind by 30)`, exit 0, file untouched. Test 5
+  firing in production on day one. That is `faj7`, below.
+- **Run 2 (20:41), after the owner cleared it** — `fast-forwarded to
+  origin/main (behind by 0)`. Root went 30 → 0.
+
+The measurement that matters most: `git status --porcelain | wc -l` was **8
+before and 8 after** — seven untracked entries plus the modified submodule
+pointer, all intact. That is the dirty-check trap proven in production. Had this
+copied `pull-workstation`'s opening `git status --porcelain` guard, it would
+have skipped here and every night after, while logging a healthy-looking line.
+It also re-confirms that a dirty submodule pointer does not block the merge.
+
+To re-verify later:
 
 ```bash
 systemctl --user list-timers ff-mono-root            # exists, next elapse 02:45
