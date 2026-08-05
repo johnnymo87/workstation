@@ -47,11 +47,11 @@ NEW="$(git -C "$REPO" rev-parse HEAD)"
 
 BEACON="$(mktemp -d)/beacon"
 
-run() { # run <incoming> <beacon-contents|__none__> [allow-stale]
-  local inc="$1" bec="$2" allow="${3:-}"
+run() { # run <incoming> <beacon-contents|__none__> [allow-stale] [pub-ref]
+  local inc="$1" bec="$2" allow="${3:-}" pub="${4:-refs/remotes/origin/main}"
   if [ "$bec" = "__none__" ]; then rm -f "$BEACON"; else printf '%s\n' "$bec" > "$BEACON"; fi
   HM_GATE_INCOMING="$inc" HM_GATE_BEACON="$BEACON" HM_GATE_REPO="$REPO" \
-    HM_ALLOW_STALE_DEPLOY="$allow" bash "$GATE_SCRIPT" 2>&1
+    HM_GATE_PUBLISHED_REF="$pub" HM_ALLOW_STALE_DEPLOY="$allow" bash "$GATE_SCRIPT" 2>&1
 }
 rc() { # same, but echo the exit code
   local out; out="$(run "$@")"; printf '%s' "$?"
@@ -70,6 +70,24 @@ contains "incident: cites the bead"        "workstation-h0mp" "$OUT"
 
 # A dirty stale tree is still stale.
 ok "incident: dirty tree also aborts" "1" "$(rc "${OLD}-dirty" "$NEW")"
+
+# --- the squash-merge false positive (production, 2026-08-05) ---------------
+# Deployed from a PR branch; the PR was then squash-merged. Switching from main
+# drops that branch sha but nothing published and no content. v1 REFUSED this,
+# which would have blocked every agent on the box.
+git -C "$REPO" update-ref refs/remotes/origin/main "$NEW"
+git -C "$REPO" checkout -q -b pr "$OLD" 2>/dev/null
+echo pr > "$REPO/p"; git -C "$REPO" add -A; git -C "$REPO" commit -qm PR
+BRANCH="$(git -C "$REPO" rev-parse HEAD)"; git -C "$REPO" checkout -q main
+OUT="$(run "$NEW" "$BRANCH")"
+ok       "squash: does not abort"      "0" "$(rc "$NEW" "$BRANCH")"
+contains "squash: explains itself accurately" "nothing published is being dropped" "$OUT"
+# It must NOT claim doubt: the gate checked, and a misleading message on a
+# correct verdict trains people to ignore the guard.
+case "$OUT" in
+  *"could not verify"*) FAIL=$((FAIL + 1)); echo "FAIL: squash: must not claim it could not verify" >&2 ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
 
 # --- the allow paths must NOT abort -----------------------------------------
 ok "forward: allows"        "0" "$(rc "$NEW" "$OLD")"
@@ -144,7 +162,7 @@ echo "hm-deploy-gate-behaviour: $PASS passed, $FAIL failed"
 if [ "$FAIL" -ne 0 ]; then
   echo "hm-deploy-gate-behaviour: FAILURES PRESENT" >&2; exit 1
 fi
-if [ "$PASS" -lt 25 ]; then
+if [ "$PASS" -lt 30 ]; then
   echo "hm-deploy-gate-behaviour: TOO FEW ASSERTIONS RAN ($PASS)" >&2; exit 1
 fi
 echo "hm-deploy-gate-behaviour: ALL PASS"

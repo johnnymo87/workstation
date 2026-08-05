@@ -109,7 +109,11 @@ lib.mkIf enabled {
 
       # hm_gate_classify, not an inlined `if` -- the tests call this exact
       # function, so the dispatch cannot drift out from under them.
-      RELATION="$(hm_gate_classify "$GATE_REPO" "$INCOMING" "$DEPLOYED_RAW")"
+      # The ref that decides whether a dropped commit is PUBLISHED. Deploying
+      # from a PR branch is normal here, and `gh pr merge --squash` rewrites it
+      # to a new sha, so shas alone cannot answer "would this lose anything".
+      PUB_REF="''${HM_GATE_PUBLISHED_REF:-origin/main}"
+      RELATION="$(hm_gate_classify "$GATE_REPO" "$INCOMING" "$DEPLOYED_RAW" "$PUB_REF")"
       VERDICT="$(hm_gate_verdict "$RELATION" "''${HM_ALLOW_STALE_DEPLOY:-}")"
 
       case "$VERDICT" in
@@ -152,6 +156,14 @@ lib.mkIf enabled {
           # but an empty VERDICT is exactly what a broken library produced, and
           # the failure mode was silence. Never fall through quietly again.
           echo "WARNING [hm-deploy-gate]: produced no verdict (relation='$RELATION'); this deploy is UNCHECKED." >&2
+          ;;
+        warn:regress-unpub)
+          # NOT the same as doubt: the gate checked and found that everything
+          # being dropped is unpublished. Saying "could not verify" here would
+          # be a misleading message on a correct verdict, which is its own
+          # defect -- it teaches people the gate is unreliable and to ignore it.
+          echo "NOTE [hm-deploy-gate]: the live generation was deployed from $DEP, which is not on ''${PUB_REF}." >&2
+          echo "NOTE [hm-deploy-gate]: nothing published is being dropped (typically a squash-merged PR branch). Proceeding." >&2
           ;;
         warn:*)
           # Doubt, not proof. Never blocks -- see BLAST RADIUS above. Each of

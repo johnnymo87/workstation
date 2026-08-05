@@ -248,6 +248,30 @@ one means deploying an unmerged branch to the box every other agent is working o
 The seams run the same script on the same code path with scratch inputs; that is
 the honest substitute, and the gap is stated rather than papered over.
 
+### Follow-up: v1 shipped a structural false positive (fixed same day)
+
+The first real deploy exposed one. An agent had deployed from a PR branch —
+normal, you test a config change before merging — and that PR was then merged
+with `gh pr merge --squash`, which rewrites the commit to a new sha. The branch
+commit was no longer reachable from `main`, so the ancestry test called the next
+switch-from-main a regression and refused it. Measured on cloudbox 2026-08-05:
+deployed `1c11c82` (`docs/s8-shim-verified`), squash-merged as `58c7310`; the
+gate blocked a switch that dropped nothing. This repo merges exclusively with
+`--squash`, so the false refusal was structural, and it blocked *every* agent.
+
+The fix asks what would actually be **lost** rather than whether the shas line
+up: the newest published ancestor of the deployed rev is
+`merge-base(deployed, origin/main)`, and if the incoming tree already contains
+it, everything being dropped is unpublished. Exact in both directions — a branch
+cut from a *newer* main than the incoming tree does lose published commits and
+still refuses, where a naive "is the deployed tip published?" test would fail
+open.
+
+Worth recording as its own lesson: the blast-radius reasoning in this step was
+right in the abstract and still under-imagined the *shape* of the false
+positive. A gate on a shared deploy path needs its benign cases enumerated from
+the repo's actual workflow, not from the incident alone.
+
 **Spawned:** `workstation-4ze8` (P1) — the drift canary as a *second layer*, in a
 different deploy channel (a NixOS system unit cannot be removed by a home-manager
 switch). It owns every `warn:` path the gate cannot close itself: the bootstrap
