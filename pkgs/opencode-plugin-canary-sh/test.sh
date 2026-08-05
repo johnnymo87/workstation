@@ -299,6 +299,20 @@ if [ -f "$canary_lib" ]; then
   else
     no "library marks the unmeasurable-log latch" "marker present" "missing"
   fi
+  # Never restart anything: that is opencode-serve-canary's contract, and a
+  # restart cannot fix a bad plugin file anyway.
+  #
+  # Scanned HERE as well as per-host because extraction moved the leg body out of
+  # the host files: the per-host scan below now covers only each host's preamble,
+  # so a `systemctl restart` added to the shared leg would escape the tripwire on
+  # BOTH hosts at once -- the guard would still be green while covering less than
+  # it did before the refactor. No exclusion needed: the library holds no literal
+  # systemctl (the per-host POOL_RESTART_HINT is what carries that text).
+  if grep -qE 'systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(restart|stop|kill)' "$canary_lib"; then
+    no "shared leg never restarts a serve" "no systemctl restart/stop/kill" "found one"
+  else
+    ok "shared leg never restarts a serve"
+  fi
 else
   no "canary library exists" "found" "missing: $canary_lib"
 fi

@@ -368,6 +368,7 @@ plugin_canary_run_logtail_leg() {
       read -r INERT_N < "$STATE/unmeasurable.count" || INERT_N=0
     fi
     case "$INERT_N" in *[!0-9]*) INERT_N=0 ;; esac
+    case "$UNMEASURABLE_THRESHOLD" in ''|*[!0-9]*) UNMEASURABLE_THRESHOLD=60 ;; esac
     INERT_N=$((INERT_N + 1))
     printf '%s\n' "$INERT_N" > "$STATE/unmeasurable.count"
     if [ "$INERT_N" -ge "$UNMEASURABLE_THRESHOLD" ] && [ ! -e "$LATCH/$UNMEASURABLE_KEY" ]; then
@@ -380,7 +381,8 @@ plugin_canary_run_logtail_leg() {
     fi
   else
     # Measurable again: forget the streak, and drop a latch raised by a past one.
-    rm -f "$STATE/unmeasurable.count" "$LATCH/$UNMEASURABLE_KEY"
+    rm -f "$STATE/unmeasurable.count" "$LATCH/$UNMEASURABLE_KEY" \
+      "$STATE/alert-unmeasurable"
     WINDOW="$(plugin_canary_window_action "$STORED_ID" "$STORED_OFF" "$CUR_ID" "$CUR_SIZE")"
     START=-1
     case "$WINDOW" in
@@ -486,18 +488,18 @@ plugin_canary_run_logtail_leg() {
       "$ALERT" "$STATE/alert-unmeasurable" "plugin-canary:logtail-unmeasurable" \
         "OpenCode plugin canary: the log tail is BLIND.
 
-  $LOG could not be identified or measured for $UNMEASURABLE_THRESHOLD consecutive
-  passes, so NO plugin load failure can be detected on this host by this leg.
+$LOG could not be identified or measured for $UNMEASURABLE_THRESHOLD consecutive
+passes, so NO plugin load failure can be detected on this host by this leg.
 
-  This is a BLIND DETECTOR, not a broken plugin. Its silence has been meaningless
-  for at least that long.
+This is a BLIND DETECTOR, not a broken plugin. Its silence has been meaningless
+for at least that long.
 
-  First seen: $FIRST
-  $LINE
+First seen: $FIRST
+$LINE
 
-    ls -la $(dirname "$LOG")
-  Fix the path (or the unit's ability to read it), then clear:
-    rm "$LATCH/$UNMEASURABLE_KEY"" \
+Fix the path (or the unit's ability to read it), then clear:
+  ls -la $(dirname "$LOG")
+  rm '$LATCH/$UNMEASURABLE_KEY'" \
         3600 21600
       continue
     fi
@@ -510,20 +512,20 @@ plugin_canary_run_logtail_leg() {
       "$ALERT" "$STATE/alert-oversize" "plugin-canary:logtail-oversize-reset" \
         "OpenCode plugin canary: the log tail had to RE-INITIALISE at EOF.
 
-  A rotation or truncation was indicated, but the file was too large to be a fresh
-  rotation, so reading it from 0 was refused. An unknown span of log was NOT examined
-  for plugin load failures. On a host with no behavioural probe this leg is the
-  ONLY cover for plugin load failures.
+A rotation or truncation was indicated, but the file was too large to be a fresh
+rotation, so reading it from 0 was refused. An unknown span of log was NOT examined
+for plugin load failures. On a host with no behavioural probe this leg is the
+ONLY cover for plugin load failures.
 
-  This is a DEGRADED DETECTOR, not a broken plugin.
+This is a DEGRADED DETECTOR, not a broken plugin.
 
-  First seen: $FIRST
-  $LINE
+First seen: $FIRST
+$LINE
 
-  Check the log path has not been repointed, confirm plugins are loading, then clear:
-    ls -la $(dirname "$LOG")
-    grep -c 'plugin loaded' "$LOG"
-    rm "$LATCH/$OVERSIZE_KEY"" \
+Check the log path has not been repointed, confirm plugins are loading, then clear:
+  ls -la $(dirname "$LOG")
+  grep -c 'plugin loaded' "$LOG"
+  rm '$LATCH/$OVERSIZE_KEY'" \
         3600 21600
       continue
     fi
@@ -531,23 +533,23 @@ plugin_canary_run_logtail_leg() {
     "$ALERT" "$STATE/alert-load-$KEY" "plugin-canary:load-failed:$KEY" \
       "OpenCode plugin FAILED TO LOAD: $KEY
 
-  opencode rejected this plugin file at load time. The serve stays healthy and
-  answers 200, so nothing else will tell you: the last time this happened it went
-  unnoticed for ~32 hours and silently disabled per-session KUBECONFIG and all sops
-  secret injection.
+opencode rejected this plugin file at load time. The serve stays healthy and
+answers 200, so nothing else will tell you: the last time this happened it went
+unnoticed for ~32 hours and silently disabled per-session KUBECONFIG and all sops
+secret injection.
 
-  First seen: $FIRST (run=$RUNID)
-  $LINE
+First seen: $FIRST (run=$RUNID)
+$LINE
 
-  Fix the file, then get the pool to reload plugins (they are read once at serve
-  start -- the nightly reset does it, or restart the pool with:
-    $POOL_RESTART_HINT
-  ), then clear the latch:
-    rm "$LATCH/$KEY"
+Fix the file, then get the pool to reload plugins (they are read once at serve
+start -- the nightly reset does it, or restart the pool with:
+  $POOL_RESTART_HINT
+), then clear the latch:
+  rm "$LATCH/$KEY"
 
-  The latch is cleared by hand on purpose. Auto-clearing needs proof that the plugin
-  now LOADS, and no such signal exists until the loader patch (step 3) emits one --
-  every cheap proxy for it would clear this while the plugin is still broken." \
+The latch is cleared by hand on purpose. Auto-clearing needs proof that the plugin
+now LOADS, and no such signal exists until the loader patch (step 3) emits one --
+every cheap proxy for it would clear this while the plugin is still broken." \
       3600 21600
   done
 }

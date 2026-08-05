@@ -328,6 +328,13 @@ eq "a sustained blind streak latches and alerts" \
 
 # ...and recovers by itself once the log is readable again, so a transient
 # outage does not leave a latch requiring hand-clearing.
+#
+# The throttle state file is created by hand here because the recording alert
+# stub does NOT write one -- it only appends the signature. Without this touch
+# the "clears the alert throttle state" assertion below counts a file that never
+# existed and passes no matter what the code does; it was written that way first
+# and caught by mutating the cleanup away and watching the suite stay green.
+touch "$S40/alert-unmeasurable"
 printf 'timestamp=1 level=INFO message="back"\n' > "$WORK/l40.log"
 : > "$WORK/sink42"
 PLUGIN_CANARY_STATE="$S40" PLUGIN_CANARY_LOG="$WORK/l40.log" \
@@ -336,6 +343,15 @@ PLUGIN_CANARY_STATE="$S40" PLUGIN_CANARY_LOG="$WORK/l40.log" \
   ALERT_SINK="$WORK/sink42" "$CANARY" >>"$WORK/out.log" 2>&1
 eq "a readable log clears the blind latch without hand-clearing" "0" \
   "$(ls -1 "$S40/latch" 2>/dev/null | grep -c 'logtail-unmeasurable')"
+# ...and the streak counter goes with it. If the counter survived, the NEXT
+# blindness episode would start part-way to the threshold; if the alert throttle
+# state survived, that episode would open mid-escalation announcing it had been
+# unresolved for days. Both are "the alert still fires but lies to the reader",
+# which is this canary's stated anti-goal.
+eq "recovery also resets the streak counter" "0" \
+  "$(ls -1 "$S40" 2>/dev/null | grep -c 'unmeasurable.count')"
+eq "recovery also clears the alert throttle state" "0" \
+  "$(ls -1 "$S40" 2>/dev/null | grep -c 'alert-unmeasurable')"
 
 printf '\n%s\n' "-- plugin-canary behaviour (LEGS=$LEGS): $pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then
