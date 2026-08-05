@@ -50,6 +50,10 @@
       p = pkgsFor system;
     in {
       ask-question = p.callPackage ./pkgs/ask-question { };
+      # Named `bazel-scope` rather than `bazel`: the DERIVATION provides bin/bazel
+      # (it has to shadow the real one on PATH), but a flake output called `bazel`
+      # would be a trap for anyone running `nix build .#bazel` expecting bazel.
+      bazel-scope = p.callPackage ./pkgs/bazel-scope { };
       bb = p.callPackage ./pkgs/bb { };
       beads = p.callPackage ./pkgs/beads { };
       caveman = p.callPackage ./pkgs/caveman { };
@@ -253,6 +257,65 @@
       } ''
         cd ${self}
         bash users/dev/test-serve-pid-fence.sh
+        touch $out
+      '';
+
+      # bazel scope shim behaviour (bead workstation-mqp3, epic workstation-rdsq).
+      #
+      # The shim keeps bazel builds out of the opencode serve cgroup, where four
+      # OOM kills of opencode-serve@4098 on 2026-08-03/04 took down every session
+      # on that serve and produced 960 HTTP 502s at the door.
+      #
+      # BEHAVIOURAL, not a grep: it runs the real built shim against a stubbed
+      # systemd-run and asserts on the argv the shim actually emits. That matters
+      # because every interesting failure mode here is silent -- a shim that
+      # forgets to export XDG_RUNTIME_DIR (which is UNSET under `opencode serve`)
+      # still installs, still runs builds, and still charges every one of them to
+      # the serve. There is no symptom until the next OOM kill.
+      bazel-scope-shim = devboxPkgs.runCommand "bazel-scope-shim-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+        BAZEL_SCOPE_SHIM_BIN = "${(localPkgsFor devboxSystem).bazel-scope}/bin/bazel";
+      } ''
+        cd ${self}
+        bash users/dev/test-bazel-scope-shim.sh
+        touch $out
+      '';
+
+      # The shim's --slice= must name a slice unit that actually SHIPS.
+      #
+      # This is the one failure in the bazel work that no other check can see.
+      # `systemd-run --slice=NAME` does not fail on an undeclared slice: it
+      # silently creates a transient one with NO limits. So a rename on either
+      # side leaves every build still scoped, still green, still passing
+      # bazel-scope-shim above -- and silently unbounded in aggregate, with no
+      # symptom until the host OOMs. home.cloudbox.nix binds both sides to one
+      # `bazelSliceName`; this asserts that binding held all the way into the
+      # built generation, which is the only place the two can be compared.
+      bazel-slice-wiring = devboxPkgs.runCommand "bazel-slice-wiring-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+        gen = self.homeConfigurations.cloudbox.activationPackage;
+      } ''
+        shim="$gen/home-path/bin/bazel"
+        [ -e "$shim" ] || { echo "FAIL: no bazel on the generation's PATH"; exit 1; }
+
+        slice=$(sed -n 's/^SLICE_NAME="\(.*\)"$/\1/p' "$(readlink -f "$shim")")
+        [ -n "$slice" ] || { echo "FAIL: could not read SLICE_NAME from the shim"; exit 1; }
+
+        unit="$gen/home-files/.config/systemd/user/$slice.slice"
+        if [ ! -e "$unit" ]; then
+          echo "FAIL: shim targets --slice=$slice but no $slice.slice unit ships."
+          echo "      systemd would create it transiently with NO MemoryMax, so the"
+          echo "      aggregate cap would silently not exist. See workstation-mqp3."
+          exit 1
+        fi
+
+        grep -q '^MemoryMax=' "$unit" || {
+          echo "FAIL: $slice.slice ships without a MemoryMax; the aggregate cap is the"
+          echo "      entire reason the slice exists."
+          exit 1
+        }
+
+        echo "ALL PASS (bazel slice wiring: shim --slice=$slice matches a capped $slice.slice)"
         touch $out
       '';
 
