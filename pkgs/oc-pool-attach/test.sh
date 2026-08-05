@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Unit tests for oc-pool-attach classify_oc_invocation pure helper.
 # Run: bash test.sh
 

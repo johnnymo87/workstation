@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 # Unit/integration tests for the git worktree-guard pre-commit hook.
 #
 # Asserts:

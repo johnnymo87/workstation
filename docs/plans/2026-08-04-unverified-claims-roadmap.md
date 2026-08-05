@@ -1,8 +1,9 @@
 # Unverified-Claims Roadmap — guards for things this repo asserts but never checks
 
-**Beads:** ~~`workstation-pscu`~~ (done) · `workstation-oeyv` (P2) · `workstation-h0mp` (P1)
+**Beads:** ~~`workstation-pscu`~~ (done) · ~~`workstation-oeyv`~~ (done) · `workstation-h0mp` (P1)
 **Started:** 2026-08-04 · **Status:** step 1 shipped (PR #305)
-**Also owned here:** `workstation-dimz` (P2, step 4) · `workstation-om5r` (P3, step 5) — both spawned by step 1
+**Also owned here:** `workstation-dimz` (P2, step 4) · `workstation-om5r` (P3, step 5) — spawned by step 1
+**Spawned by step 2:** `workstation-5m47` (P1) · `workstation-k7t4` (P2) · `workstation-dad9` (P2) · `workstation-m98t` (P3) — the 50 unwired test files the guard found, now each carrying a marker
 
 These three items were discovered while executing *other* roadmaps and were
 parked in the session-switcher plan's "spawned work" table, which recorded why
@@ -107,35 +108,64 @@ artifact, which the test already reads.
 
 ---
 
-## Step 2 — `oeyv`: the meta-guard · **NOT STARTED** (unblocked 2026-08-04)
+## Step 2 — `oeyv`: the meta-guard · **DONE** (PR pending)
 
 **Bead:** `workstation-oeyv` (P2)
 
-Converts the recurring human catch into a mechanical one. Enumerate candidate
-test files repo-wide, assert each is referenced by a flake check, a derivation
-`checkPhase`, or a runner include pattern. `dmat` shipped the within-package
-version (`assets/opencode/plugins/test-runner-coverage.sh`); this is the repo-wide
-sweep.
+Shipped as `checks.test-reachability` (`users/dev/test-unwired-tests.sh` plus its
+meta-test). Every test file must be executed by CI — via a `checks.*` entry
+(transitively) or an explicit workflow step. `checkPhase` is deliberately **not**
+accepted, because that is exactly where this repo has been fooled: oc-session-list
+set `doCheck = true` while its checkPhase ran `--help`, and its 700-line suite ran
+for months. Accepting checkPhase would make the guard certify a known instance of
+its own motivating defect as covered.
 
-**Must check RUNNER COVERAGE, not file existence.** `dmat`'s failure was a
-harness that existed and passed locally while silently skipping a whole suite,
-because vitest's `test/**/*.test.ts` include did not match a bun `.spec.ts` file.
-"Is there a harness?" would have answered yes.
+### What running it found: the step's own premise was wrong
 
-**This step requires an adversarial review before implementation, not after.**
-It is a guard that gates every future PR, and this repo has already shipped a
-meta-guard whose exemption mechanism was wrong badly enough to be reverted (the
-front-door opacity guard's borrowed-row exemption — see the repo `AGENTS.md`
-section "Front-Door Opacity Guard", which now rejects citing a row that does not
-describe your file). The failure mode is not a missed test; it is **false
-positives that train everyone to reach for the allowlist**, which is strictly
-worse than no guard. Copy the exemption-with-reason shape from
-`users/dev/test-frontdoor-opacity.sh` (`EXPECTED_MANIFEST`) rather than inventing
-a second convention.
+This step was sequenced after `pscu` on the reasoning that the guard should land
+on a repo that already satisfies it, or you end up allowlisting the very files it
+exists to catch. Sound reasoning, wrong arithmetic. **`pscu` fixed 1 of 51.**
 
-**Exit:** the guard runs in CI, the allowlist has a reason string per entry, and
-the guard is mutation-tested — including the vacuity case where its own
-enumeration returns nothing.
+Measured on `main`: **76 candidate test files, 24 executed by CI, 50 not.** Not a
+handful of stragglers — two thirds of the repo's test files, including
+`pkgs/opencode-frontdoor`'s entire 25-file suite covering the routing layer.
+The plan asserted a state of the world it had never counted.
+
+A strict guard would therefore have shipped with a 50-entry allowlist on day one.
+So the debt is declared **in each unwired file's own header** —
+`unwired-test(<bead>): <reason>` — not in a central list. That shape is not a
+preference: `test-frontdoor-opacity.sh` documents, from two prior failures here,
+why a central allowlist rots (nothing forces it to be revisited when code moves)
+and the roadmap's own history is a table of items nobody looked at again. A marker
+appears in the diff that creates it, self-deletes when the file is wired, and
+`git grep -c 'unwired-test('` is the census. The guard fails in **both**
+directions: an unwired file without a marker, and a wired file that still has one.
+
+The 50 are owned by four beads: `workstation-5m47` (the frontdoor suite — needs a
+CI step, not a nix check: `npm ci` and loopback sockets cannot be hermetic),
+`workstation-k7t4` (suites probing live host state), `workstation-dad9` (7 that
+look cheaply wirable — start here), `workstation-m98t` (the plugin-bundle family,
+which runs `nix build` on itself).
+
+### Mutation-tested, and it found two defects in the guard
+
+Six mutations, all syntactically valid so the guard actually ran. Four were caught
+immediately. Two were not, and both were the dangerous kind:
+
+* A broken checks-block seed **failed for the wrong reason** — it reported "14
+  test files nothing executes", naming correctly-wired files. Failing loudly is
+  not enough when the message tells people to add markers to covered files. It now
+  detects its own extraction failure and says *do not add markers*.
+* The runner-glob tripwire **did not fire at all**: it grepped for the bare string
+  `plugin-vitest`, which survived in prose after the attribute was renamed. It now
+  matches attribute definitions. That is dmat's defect — trusting an include
+  pattern that stopped including — rebuilt inside the guard meant to prevent it.
+
+Both are now meta-test cases. The meta-test runs in the same derivation, because a
+guard that cannot fail is the defect it exists to detect, and this repo has already
+shipped one that sat inert.
+
+**Exit:** met. Guard in CI, reason per entry, mutation-tested including vacuity.
 
 ---
 

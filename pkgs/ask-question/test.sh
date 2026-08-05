@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 # Durability + reproducibility tests for the ask-question deps stage.
 #
 # workstation-g9fe: the node_modules deps stage must be content-addressed by the

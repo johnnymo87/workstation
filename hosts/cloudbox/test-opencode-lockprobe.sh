@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Tests for hosts/cloudbox/opencode-lockprobe.py (W2d, bead workstation-yvxh.12).
 #
 # The sampler's whole job is to be believed about a distribution nobody can

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-m98t): runs 'nix build' on itself; cannot nest inside a build sandbox
 # Durability + reproducibility tests for a bundled opencode plugin, shared by
 # every caller of pkgs/opencode-plugin-bundle.
 #

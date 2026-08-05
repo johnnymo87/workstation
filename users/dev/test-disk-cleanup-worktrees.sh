@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Regression tests for disk-cleanup worktree pruning decisions.
 # Run: bash users/dev/test-disk-cleanup-worktrees.sh
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Runtime regression guard for Pigeon Auth & Frontdoor Aggregate Degrade Detection (dx8p Stage 1, Task 8)
 #
 # Asserts two live-service properties:

@@ -195,6 +195,47 @@
         touch $out
       '';
 
+      # Repo-wide test reachability (bead workstation-oeyv).
+      #
+      # Five times a test file was added here and executed by nothing, each one
+      # caught by a human reading code: an unrun writer (h0mp), a guard enforced
+      # nowhere that sat red on main for weeks (frontdoor-opacity), a 71-assertion
+      # suite with no doCheck (pscu), three TS harnesses totalling 238 tests
+      # (dmat), and oc-session-list's 700-line suite sitting beside a checkPhase
+      # that only ran `--help`. This makes the sixth fail CI instead.
+      #
+      # The meta-test runs in the SAME derivation on purpose. A guard that cannot
+      # fail is precisely the defect being guarded against, and this repo has the
+      # receipts: the opacity guard shipped inert. Splitting them into two checks
+      # would let the meta-test be dropped while the guard kept reporting green.
+      #
+      # Deliberately run from $TMPDIR rather than `cd ${self}`. The guard resolves
+      # the repo root from its own BASH_SOURCE, and pscu's suite passed for months
+      # partly because nobody noticed it only worked from one directory.
+      test-reachability = devboxPkgs.runCommand "test-reachability-guard" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.gnused
+          devboxPkgs.findutils devboxPkgs.gawk devboxPkgs.coreutils
+        ];
+      } ''
+        cd "$TMPDIR"
+        bash ${self}/users/dev/test-unwired-tests.sh 2>&1 | tee "$TMPDIR/guard.txt"
+        bash ${self}/users/dev/test-unwired-tests-guard.sh 2>&1 | tee "$TMPDIR/meta.txt"
+
+        # Assert the assertions RAN. Both scripts could exit 0 having adjudicated
+        # nothing if find(1) or the seed broke; the store-prefix lesson is that a
+        # check which merely runs a script proves nothing about what it proved.
+        grep -q '^ALL PASS (test reachability)' "$TMPDIR/guard.txt" || {
+          echo "GATE FAILURE: the reachability guard did not reach its ALL PASS line." >&2
+          exit 1
+        }
+        grep -q '^ALL PASS (test-unwired-tests guard meta-test' "$TMPDIR/meta.txt" || {
+          echo "GATE FAILURE: the guard's meta-test did not reach its ALL PASS line." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # Serve registry PID fence wrapper invariant (bead workstation-4b1q).
       #
       # The fence is only sound while each serve wrapper `exec`s the serve: exec

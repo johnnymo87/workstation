@@ -1,3 +1,4 @@
+// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { rootOf, clearRootCache, FAILURE_TTL_MS, NOT_FOUND_TTL_MS } from '../src/parent.js';
 import type { Config } from '../src/config.js';

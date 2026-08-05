@@ -1,3 +1,4 @@
+// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import { describe, it, expect } from "vitest";
 import { redactQuery, QUERY_VALUE_ALLOWLIST } from "../src/log.js";
 

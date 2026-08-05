@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Source-guard tests for the front-door disposition of the lgtm-sessions inline
 # home.base.nix client, plus the Phase 7.8 infra/control-plane exemptions.
 #

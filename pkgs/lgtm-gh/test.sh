@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 # Unit tests for the lgtm-gh wrapper. Mirrors the resolution logic from
 # default.nix and exercises it directly against fixtures (with a fake `gh` on
 # PATH so no real GitHub call happens), plus a source-grep guard so the mirror
