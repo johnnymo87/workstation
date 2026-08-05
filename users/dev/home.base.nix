@@ -555,6 +555,9 @@ in
     # OpenCode usage and cost reporting
     localPkgs.oc-cost
 
+    # OpenCode per-session context-window usage ("who should compact?")
+    localPkgs.oc-context
+
     # OpenCode session list CLI
     localPkgs.oc-session-list
 
