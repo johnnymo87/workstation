@@ -48,6 +48,13 @@ if [ -z "$CANARY" ] || [ ! -x "$CANARY" ]; then
   exit 1
 fi
 
+# Which legs the script under test actually has. Cloudbox runs the frontdoor
+# probe (leg A) plus the log tail (leg B); devbox runs leg B alone, because it
+# has no front door. Declared rather than sniffed: a suite that inferred "no
+# probe alerts appeared, so this must be a leg-B host" would report a BROKEN leg
+# A as a passing devbox, which is the failure mode this whole bead is about.
+LEGS="${CANARY_LEGS:-AB}"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -203,12 +210,19 @@ fi
 #    opencode-serve-canary, which already pages for it; a duplicate pager for an
 #    unrelated fault is how a channel gets ignored.
 # ---------------------------------------------------------------------------
-S10="$WORK/s10"; mkdir -p "$S10"
-: > "$WORK/l10.log"; : > "$WORK/sink10"
-for _ in 1 2 3 4 5 6 7 8 9 10; do run_pass "$S10" "$WORK/l10.log" "$WORK/sink10"; done
-eq "10 passes against an unreachable door raise no probe alert" "0" "$(wc -l < "$WORK/sink10")"
-eq "and the failure counter is not left claiming healthy" "0" \
-  "$(cat "$S10/probe.fails" 2>/dev/null || echo 0)"
+case "$LEGS" in
+  *A*)
+    S10="$WORK/s10"; mkdir -p "$S10"
+    : > "$WORK/l10.log"; : > "$WORK/sink10"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do run_pass "$S10" "$WORK/l10.log" "$WORK/sink10"; done
+    eq "10 passes against an unreachable door raise no probe alert" "0" "$(wc -l < "$WORK/sink10")"
+    eq "and the failure counter is not left claiming healthy" "0" \
+      "$(cat "$S10/probe.fails" 2>/dev/null || echo 0)"
+    ;;
+  *)
+    echo "SKIP: leg A assertions (this host runs LEGS=$LEGS)"
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 7. A partially written final line must not be consumed.
@@ -226,7 +240,104 @@ printf 'ugin" path=file:///x/plugins/late.ts error="e"\n' >> "$WORK/l11.log"
 run_pass "$S11" "$WORK/l11.log" "$WORK/sink13"
 eq "and IS detected once it completes" "plugin-canary:load-failed:late.ts" "$(cat "$WORK/sink13")"
 
-printf '\n%s\n' "-- plugin-canary behaviour: $pass passed, $fail failed"
+# ---------------------------------------------------------------------------
+# 8. INIT_OVERSIZE: a rotation is indicated but the file is too large to be a
+#    fresh rotation, so reading from 0 is refused and the gap is LATCHED.
+#
+# This branch had no test until workstation-fg2w, and it is precisely where the
+# extraction could have detonated: the oversize alert text used to interpolate
+# $DOOR -- leg A's variable -- so on a leg-B-only host (devbox) the FIRST time
+# this branch was reached, `set -u` would abort the relatch loop with an unbound
+# variable. Silent branches are where cross-leg coupling hides, and this suite is
+# now run against BOTH hosts' real ExecStart.
+#
+# Sparse file: 9 MiB by `truncate`, which exceeds the 8 MiB max_reset without
+# writing 9 MiB or needing a production seam to lower the threshold.
+# ---------------------------------------------------------------------------
+S20="$WORK/s20"; mkdir -p "$S20"
+printf 'timestamp=1 level=INFO message="small"\n' > "$WORK/l20.log"
+: > "$WORK/sink20"
+run_pass "$S20" "$WORK/l20.log" "$WORK/sink20"   # INIT at EOF
+
+# mv-over, NOT rm-then-recreate: `rm` frees the inode and the very next create
+# in the same directory reuses the SAME inode number, so the file id is
+# unchanged and no rotation is detected at all -- the test would then quietly
+# exercise the ordinary READ path while appearing to cover INIT_OVERSIZE.
+# Verified by measurement, not assumed. mv is also what logrotate actually does.
+truncate -s 9M "$WORK/l20.new"                    # far too big to be a fresh rotation
+mv "$WORK/l20.new" "$WORK/l20.log"                # new inode => rotation indicated
+: > "$WORK/sink21"
+run_pass "$S20" "$WORK/l20.log" "$WORK/sink21"
+
+eq "oversize rotation is latched, not silently rescanned" "1" \
+  "$(ls -1 "$S20/latch" | grep -c 'logtail-oversize')"
+eq "and it alerts as a DEGRADED DETECTOR, not as a broken plugin" \
+  "plugin-canary:logtail-oversize-reset" "$(head -1 "$WORK/sink21")"
+
+# The relatch loop must survive the branch on a leg-B-only script: re-run and
+# require a SECOND invocation. An unbound-variable abort would show up here as a
+# missing repeat even though the latch above already exists.
+: > "$WORK/sink22"
+run_pass "$S20" "$WORK/l20.log" "$WORK/sink22"
+eq "oversize latch re-alerts every pass (survives the relatch loop)" \
+  "plugin-canary:logtail-oversize-reset" "$(head -1 "$WORK/sink22")"
+
+# ---------------------------------------------------------------------------
+# 9. RESET: a genuine small rotation IS rescanned from 0, and a failure line
+#    that was written into the new file is found.
+# ---------------------------------------------------------------------------
+S30="$WORK/s30"; mkdir -p "$S30"
+printf 'timestamp=1 level=INFO message="before rotation"\n' > "$WORK/l30.log"
+: > "$WORK/sink30"
+run_pass "$S30" "$WORK/l30.log" "$WORK/sink30"
+
+printf '%s\n' "$REAL_LINE" > "$WORK/l30.new"      # small + new inode => RESET
+mv "$WORK/l30.new" "$WORK/l30.log"                # (mv-over, per the note above)
+: > "$WORK/sink31"
+run_pass "$S30" "$WORK/l30.log" "$WORK/sink31"
+eq "a small rotation is rescanned from 0 and the failure is caught" \
+  "plugin-canary:load-failed:shell-env.ts" "$(head -1 "$WORK/sink31")"
+
+# ---------------------------------------------------------------------------
+# 10. A log that cannot be measured must not stay quietly inert forever.
+#
+# On devbox this leg is the WHOLE detector, so an unreadable log means its
+# silence carries no information at all -- indistinguishable from health, which
+# is the founding failure of this roadmap wearing the detector's own clothes.
+# One inert pass is a transient stat failure and must stay quiet; a sustained
+# streak must latch and alert.
+# ---------------------------------------------------------------------------
+S40="$WORK/s40"; mkdir -p "$S40"
+: > "$WORK/sink40"
+PLUGIN_CANARY_STATE="$S40" PLUGIN_CANARY_LOG="$WORK/does-not-exist.log" \
+  PLUGIN_CANARY_ALERT="$WORK/alert-stub" PLUGIN_CANARY_DOOR="$DEAD_DOOR" \
+  PLUGIN_CANARY_UNMEASURABLE_THRESHOLD=3 \
+  ALERT_SINK="$WORK/sink40" "$CANARY" >>"$WORK/out.log" 2>&1
+eq "one unmeasurable pass stays quiet (transient stat failure)" "0" \
+  "$(wc -l < "$WORK/sink40")"
+
+: > "$WORK/sink41"
+for _ in 1 2; do
+  PLUGIN_CANARY_STATE="$S40" PLUGIN_CANARY_LOG="$WORK/does-not-exist.log" \
+    PLUGIN_CANARY_ALERT="$WORK/alert-stub" PLUGIN_CANARY_DOOR="$DEAD_DOOR" \
+    PLUGIN_CANARY_UNMEASURABLE_THRESHOLD=3 \
+    ALERT_SINK="$WORK/sink41" "$CANARY" >>"$WORK/out.log" 2>&1
+done
+eq "a sustained blind streak latches and alerts" \
+  "plugin-canary:logtail-unmeasurable" "$(head -1 "$WORK/sink41")"
+
+# ...and recovers by itself once the log is readable again, so a transient
+# outage does not leave a latch requiring hand-clearing.
+printf 'timestamp=1 level=INFO message="back"\n' > "$WORK/l40.log"
+: > "$WORK/sink42"
+PLUGIN_CANARY_STATE="$S40" PLUGIN_CANARY_LOG="$WORK/l40.log" \
+  PLUGIN_CANARY_ALERT="$WORK/alert-stub" PLUGIN_CANARY_DOOR="$DEAD_DOOR" \
+  PLUGIN_CANARY_UNMEASURABLE_THRESHOLD=3 \
+  ALERT_SINK="$WORK/sink42" "$CANARY" >>"$WORK/out.log" 2>&1
+eq "a readable log clears the blind latch without hand-clearing" "0" \
+  "$(ls -1 "$S40/latch" 2>/dev/null | grep -c 'logtail-unmeasurable')"
+
+printf '\n%s\n' "-- plugin-canary behaviour (LEGS=$LEGS): $pass passed, $fail failed"
 if [ "$fail" -ne 0 ]; then
   echo "--- canary output ---" >&2
   cat "$WORK/out.log" >&2

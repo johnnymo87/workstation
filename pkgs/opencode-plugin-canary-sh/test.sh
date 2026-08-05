@@ -263,9 +263,14 @@ fi
 # loudly on an edit beats a comment that hopes.
 # ---------------------------------------------------------------------------
 
-canary_src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/hosts/cloudbox/configuration.nix"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+canary_lib="$repo_root/pkgs/opencode-plugin-canary-sh/opencode-plugin-canary.sh"
 
-if [ -f "$canary_src" ]; then
+# The two ordering invariants moved INTO this library when leg B was extracted so
+# devbox could run it too (workstation-fg2w). Assert them where they now live --
+# a grep left pointing at the old location would pass on a file that no longer
+# contains the logic, which is the deletion this tripwire exists to catch.
+if [ -f "$canary_lib" ]; then
   # HIGH-1: the whole point of the latch. Detection is edge (a rejected file logs
   # once per serve start) but driftAlert is a THROTTLE, not a scheduler -- it
   # re-alerts only when the caller re-invokes with the same signature, and it
@@ -274,37 +279,87 @@ if [ -f "$canary_src" ]; then
   # then goes quiet forever, which is the 2026-07-26 frontdoor incident rebuilt
   # (760 detections, one page, missed, 12h39m silence) while appearing to use the
   # escalation logic written to prevent it.
-  if grep -q 'PLUGIN_CANARY_LATCH_BEFORE_OFFSET' "$canary_src"; then
-    ok "canary marks the latch-before-offset ordering (HIGH-1)"
+  if grep -q 'PLUGIN_CANARY_LATCH_BEFORE_OFFSET' "$canary_lib"; then
+    ok "library marks the latch-before-offset ordering (HIGH-1)"
   else
-    no "canary marks the latch-before-offset ordering (HIGH-1)" "marker present" "missing"
+    no "library marks the latch-before-offset ordering (HIGH-1)" "marker present" "missing"
   fi
 
-  if grep -q 'PLUGIN_CANARY_RELATCH_EVERY_PASS' "$canary_src"; then
-    ok "canary marks the re-alert-every-pass loop (HIGH-1)"
+  if grep -q 'PLUGIN_CANARY_RELATCH_EVERY_PASS' "$canary_lib"; then
+    ok "library marks the re-alert-every-pass loop (HIGH-1)"
   else
-    no "canary marks the re-alert-every-pass loop (HIGH-1)" "marker present" "missing"
+    no "library marks the re-alert-every-pass loop (HIGH-1)" "marker present" "missing"
+  fi
+
+  # A permanently inert leg is a blind detector whose silence reads as health --
+  # on devbox, where this is the ONLY leg, that is the founding failure wearing
+  # the detector's clothes.
+  if grep -q 'PLUGIN_CANARY_LATCH_UNMEASURABLE' "$canary_lib"; then
+    ok "library marks the unmeasurable-log latch"
+  else
+    no "library marks the unmeasurable-log latch" "marker present" "missing"
+  fi
+else
+  no "canary library exists" "found" "missing: $canary_lib"
+fi
+
+# Per-host assertions. BOTH hosts run leg B now, so anything host-shaped has to
+# be asserted per host or it silently covers one of them: devbox is the host that
+# already slipped out of the E2 net once, between design and ship.
+for host_src in \
+  "$repo_root/hosts/cloudbox/configuration.nix" \
+  "$repo_root/users/dev/home.devbox.nix"; do
+
+  host_label="$(basename "$(dirname "$host_src")")/$(basename "$host_src")"
+
+  if [ ! -f "$host_src" ]; then
+    no "$host_label carries a plugin canary" "found" "missing: $host_src"
+    continue
   fi
 
   # The lock skip must precede any state mutation, or error lines written during
-  # the nightly reset are consumed by an offset advance and never examined.
-  if grep -q 'PLUGIN_CANARY_LOCK_SKIP_BEFORE_STATE' "$canary_src"; then
-    ok "canary marks the lock-skip-before-state ordering"
+  # the nightly reset are consumed by an offset advance and never examined. It
+  # lives in the per-host unit body (not the library) because the leg runs inside
+  # each host's own preamble, so omitting it on one host is exactly the drift
+  # this loop is here to catch.
+  if grep -q 'PLUGIN_CANARY_LOCK_SKIP_BEFORE_STATE' "$host_src"; then
+    ok "$host_label marks the lock-skip-before-state ordering"
   else
-    no "canary marks the lock-skip-before-state ordering" "marker present" "missing"
+    no "$host_label marks the lock-skip-before-state ordering" "marker present" "missing"
+  fi
+
+  # Each host must actually CALL the shared leg. Without this, a host could carry
+  # every marker above and run no log tail at all.
+  if grep -q 'plugin_canary_run_logtail_leg' "$host_src"; then
+    ok "$host_label calls the shared log-tail leg"
+  else
+    no "$host_label calls the shared log-tail leg" "call present" "missing"
   fi
 
   # Never restart anything: that is opencode-serve-canary's contract, and a
   # restart cannot fix a bad plugin file anyway.
-  canary_block="$(LC_ALL=C sed -n '/opencode-plugin-canary = /,/^  };$/p' "$canary_src")"
-  if printf '%s' "$canary_block" | grep -qE 'systemctl[[:space:]]+(restart|stop|kill)'; then
-    no "canary never restarts a serve" "no systemctl restart/stop/kill" "found one"
+  #
+  # POOL_RESTART_HINT is excluded by design: it is a STRING interpolated into
+  # alert text to tell a human which command works on this host (the pool is
+  # system units on cloudbox, user units on devbox). It is data, never executed.
+  # Without this exclusion the guard fires on its own remediation advice -- which
+  # it did on the first run of this change, and the tempting "fix" is to delete
+  # the advice rather than the false positive.
+  #
+  # The flag-tolerant regex matters: the original `systemctl[[:space:]]+(restart
+  # |stop|kill)` cannot match `systemctl --user restart`, which is precisely how
+  # a restart is spelled in devbox's USER unit. Extending the guard to devbox
+  # with the old pattern would have shipped a tripwire that could not fire on the
+  # host it was being extended to cover -- a guard verified in the wrong role,
+  # which is this bead family's signature defect. Found by asking why devbox
+  # passed the mutation that cloudbox failed, rather than accepting that it did.
+  canary_block="$(LC_ALL=C sed -n '/opencode-plugin-canary = /,/^  };$/p' "$host_src" | grep -v 'POOL_RESTART_HINT=')"
+  if printf '%s' "$canary_block" | grep -qE 'systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(restart|stop|kill)'; then
+    no "$host_label canary never restarts a serve" "no systemctl restart/stop/kill" "found one"
   else
-    ok "canary never restarts a serve"
+    ok "$host_label canary never restarts a serve"
   fi
-else
-  no "cloudbox configuration.nix is where the canary lives" "found" "missing: $canary_src"
-fi
+done
 
 # ---------------------------------------------------------------------------
 # The probe routes must stay ANCHOR-forwarded.

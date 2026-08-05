@@ -471,6 +471,36 @@
         touch $out
       '';
 
+      # The SAME behavioural suite against DEVBOX's real ExecStart.
+      #
+      # This is the load-bearing half of workstation-fg2w. Leg B was extracted
+      # into the shared library so devbox runs the identical code rather than a
+      # fork, but "shares a library" is not the property that matters -- the
+      # property is that devbox's assembled unit actually tails a log, latches,
+      # and re-alerts. Only running devbox's own evaluated script proves that,
+      # and it is what catches a host-shaped omission (a missing variable, a lock
+      # gate left out) that the cloudbox check passes straight over.
+      #
+      # LEGS=B: devbox has no front door, so the leg A assertions are skipped by
+      # declaration rather than by inference. Sniffing "no probe alert appeared"
+      # would report a BROKEN leg A as a passing devbox.
+      plugin-canary-behaviour-devbox = devboxPkgs.runCommand "opencode-plugin-canary-behaviour-devbox" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gawk devboxPkgs.gnugrep devboxPkgs.util-linux ];
+        # home-manager normalises Service.ExecStart to a LIST, while the NixOS
+        # module yields a bare string. Unwrapped explicitly: the naive
+        # cross-module copy fails eval with "cannot coerce a list to a string",
+        # and the tempting `toString` "fix" would silently hand the suite a
+        # space-joined string that is not an executable path.
+        CANARY_SCRIPT =
+          let e = self.homeConfigurations.dev.config.systemd.user.services.opencode-plugin-canary.Service.ExecStart;
+          in if builtins.isList e then builtins.head e else e;
+        CANARY_LEGS = "B";
+      } ''
+        cd ${self}
+        bash pkgs/opencode-plugin-canary-sh/test-behaviour.sh
+        touch $out
+      '';
+
       store-prefix = devboxPkgs.runCommand "opencode-store-prefix-test" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
         OPENCODE_TEST_PKG_BIN = "${devboxPkgs.runCommand "opencode-patched-0.0.0-fixture" { } ''
