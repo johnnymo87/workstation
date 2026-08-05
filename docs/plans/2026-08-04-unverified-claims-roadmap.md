@@ -169,27 +169,92 @@ shipped one that sat inert.
 
 ---
 
-## Step 3 — `h0mp`: detect a stale `home-manager switch` · **NOT STARTED**
+## Step 3 — `h0mp`: detect a stale `home-manager switch` · **DONE**
 
-**Bead:** `workstation-h0mp` (P1, filed 2026-08-01)
+**Bead:** `workstation-h0mp` (P1, filed 2026-08-01) · shipped as
+`home.activation.assertFreshDeploy` (`users/dev/hm-deploy-gate.nix`), logic in
+`pkgs/hm-deploy-gate-sh/`, checks `hm-deploy-gate` + `hm-deploy-gate-behaviour`.
 
 home-manager is **last-writer-wins across concurrent worktrees**. A switch run
 from a checkout branched before a config landed silently reverts it fleet-wide —
 this was S0's actual root cause, and it un-deployed the session-state writer
 across the whole fleet while `main` still shipped the block that declares it.
 
-Different family from steps 1-2 (a deploy claim, not a test claim) but the same
-shape: *the artifact asserts a config is deployed; nothing verifies the generation
-contains it.*
+### The step's own MVP was vacuous — measured, not argued
 
-**Minimum viable version:** after a switch, verify the expected files exist in the
-new generation and fail loudly if not. That alone would have caught the 32-hour
-`shell-env.ts` outage. Anything more (branch-freshness checks, locking) is a
-second step and should not block the first.
+The bead and this roadmap both claimed that verifying "the expected files exist in
+the new generation" would alone have caught the 32-hour outage. It would not have
+caught **either half**:
 
-**Exit:** a switch from a deliberately stale worktree fails, or warns loudly
-enough that nobody misses it — verified by actually doing it, not by reasoning
-about it.
+* `git show 84900bd~1:users/dev/opencode-config.nix | grep -c session-state` is
+  **0**. The stale worktree predated #230, so its config declared the plugin zero
+  times and its generation *correctly* lacked the file. An existence check passes.
+* The same command for `shell-env` is **1** — declared before and after, so the
+  file existed in both generations and only its *content* reverted. An existence
+  check passes.
+
+home-manager already guarantees declared→linked (activation fails otherwise), so
+that check largely re-tests home-manager. Detecting this class **requires a
+reference from outside the config being deployed** — which the bead had
+deprioritised as a "SECOND step [that] must not block the first". The
+decomposition was inverted: the deferred half was the only half that works.
+
+### What shipped, and why not the canary the bead leaned toward
+
+Each switch records the revision it deployed in a beacon
+(`~/.local/state/hm-deploy-rev`). The gate runs `entryBefore writeBoundary`,
+reads the *previous* switch's beacon, and refuses when the incoming revision does
+not contain it — i.e. when activating would drop commits that are live right now.
+No network, no plugin inventory, no `.nix` parser to rot: any regression is caught
+regardless of which file changed. `merge-base --is-ancestor` also catches the
+*diverged* case, which a "is HEAD behind main" check misses entirely.
+
+A periodic canary lets the bad switch land and pages someone later, if the alert
+path happens to be up. The gate aborts in the terminal of the agent making the
+mistake. The bead's own tiebreaker — "fails LOUDLY and cannot be silently
+skipped" — picks the gate.
+
+The pre-implementation review overturned a claim of mine: I asserted there was no
+hook point, since AGENTS.md documents a raw `nix run home-manager -- switch` with
+no wrapper. `home.activation.assertPlatform` (`users/dev/home.cloudbox.nix:232`)
+already aborts activation for the sibling "wrong config silently deployed" class.
+Same shape, no wrapper needed, no human compliance required.
+
+### Fail-closed on proof, fail-open on doubt — but never silent
+
+This gate can block every agent on a shared box (four switches landed on
+2026-08-04 alone), so a false refusal is worse than the incident. It aborts only
+on a *proven* regression and warns on every form of doubt.
+
+The behavioural suite caught the defect that shape invites: with its library
+absent, every `hm_gate_*` call became "command not found", `VERDICT` was empty,
+the `case` matched nothing and **the gate allowed every deploy in silence** —
+fail-green, inside the guard family built to kill fail-green. The library suite
+could not have found it; everything it exercises returns a string. Only running
+the real activation script does. There is now an explicit library-load check, a
+catch-all branch, and a regression test.
+
+Also caught, in my own tests: the dispatch was inlined in the module and
+*mirrored* in the test file, so the suite tested its own copy. That is precisely
+step 4's defect, one step early. It is now one shared `hm_gate_classify`.
+
+**Exit: met, with a stated limit.** Verified by running the *real* activation
+script from the evaluated cloudbox config against the *real* repo and the *real*
+incident commits: deploying `84900bd~1` over today's `main` aborts with exit 1 and
+names the 85 commits it would drop. Forward deploys and the no-beacon bootstrap
+case do not block. What was **not** done: a literal end-to-end `home-manager
+switch`. Making one refuse requires a beacon in the live profile, and installing
+one means deploying an unmerged branch to the box every other agent is working on.
+The seams run the same script on the same code path with scratch inputs; that is
+the honest substitute, and the gap is stated rather than papered over.
+
+**Spawned:** `workstation-4ze8` (P1) — the drift canary as a *second layer*, in a
+different deploy channel (a NixOS system unit cannot be removed by a home-manager
+switch). It owns every `warn:` path the gate cannot close itself: the bootstrap
+window, absent objects, the escape hatch, and drift with no switch at all
+(hand-deleted files, dangling `mkOutOfStoreSymlink` targets — which, note, do
+*not* fail activation). It should also serve `workstation-5yox` step 3, which
+needs an expected-set reference and would otherwise grow a second list that rots.
 
 ---
 
