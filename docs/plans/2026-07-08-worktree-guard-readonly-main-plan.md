@@ -1,5 +1,12 @@
 # Impl plan: read-only `main` + enforced fresh-worktree work (mono v1)
 
+> **SUPERSEDED 2026-08-04 — historical.** Phases 1–3 are shipped and the
+> unchecked boxes below are misleading. Phase 2's opencode plugin layer was
+> removed 2026-07-25 and never landed. For the live view — what shipped, what is
+> open, and the next action — see
+> [`2026-08-04-mono-root-freshness-roadmap.md`](2026-08-04-mono-root-freshness-roadmap.md)
+> and `bd show workstation-v03j`.
+
 Status: **APPROVED SCOPE (rev.3) — NOT implemented.**
 Date: 2026-07-08
 Companion design: `2026-07-08-worktree-guard-readonly-main-design.md`
