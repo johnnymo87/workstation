@@ -854,7 +854,7 @@ is "80% LSP". That generalised from the single 19:32 capture; across all 28 it i
 Not adopted on those grounds. LSP-specific idle shutdown remains a reasonable smaller
 alternative, but it is not 80% of the win.
 
-### S8 — Stop builds OOM-killing their serve · `workstation-mqp3` · **MITIGATED 2026-08-04, shim still open**
+### S8 — Stop builds OOM-killing their serve · `workstation-mqp3` · **FIXED 2026-08-05 — shim shipped and verified; soaking**
 
 Found while reviewing S7. S7 was scoped to instance retention; this is a different
 consumer that S7 cannot touch, and it is the one that was actually killing serves.
@@ -941,6 +941,62 @@ Also standing, and not caused by this: **three of four serves sit at
 `swap.current == MemorySwapMax == 1.00G`** — swap is fully consumed, no cushion. And
 4 × 14 G = 56 G of `MemoryMax` on a 62 G box with the parent slice at
 `MemoryMax=infinity` (`workstation-le0a` owns the aggregate cap).
+
+#### The mitigation was verified, and it was not enough
+
+Over 07:01Z→14:45Z on 08-04, with the caps live: **zero OOM kills**, down from four in
+about six hours. But it was not a quiet window, so this is a real result rather than an
+absence of events — `:4098` **rode the ceiling for about six minutes**, from 8.35 G at
+14:29:10 to **13.99 G** at 14:31:18, oscillating, touching **14.00 G exactly** at
+14:35:02, and falling back to 7.50 G by 14:41. 6755 reclaim events, no kill. It survived
+on reclaim where the same approach had killed it four times.
+
+Composition during the ride, from `child-capture`: bazel was **88%** of anon at
+14:31:39 and **93%** at 14:36:42. So every per-invocation cap was honored — `--jobs=8`
+held, the implied ~3.2 G of actions is consistent with 8 × ~0.4 G — and bazel still
+walked the cgroup to its ceiling. That is exactly the predicted limit of a
+per-invocation mitigation, and it is what justified building the shim.
+
+(A correction this produced: `workstation-lwde` had claimed 5-minute sampling could not
+resolve the spike. That conflated two instruments. `samples-v3.tsv` is **16-second**
+resolution and resolved the shape fine; only `child-capture`, the per-process
+composition, is on a 5-minute clock — and it happened to fire twice inside the ride.
+Retitled and downgraded to P3, reframed as "trigger composition capture on pressure,
+not on a clock".)
+
+#### The shim shipped (PR #312) and is verified working
+
+Built by a peer session while this was in flight. `pkgs/bazel-scope` puts a `bazel`
+wrapper earlier on `PATH` that re-execs the real bazelisk under
+`systemd-run --user --scope`, with `users/dev/test-bazel-scope-shim.sh` covering it.
+
+Verified by direct observation rather than inference — from a shell running *inside* a
+serve cgroup:
+
+| | cgroup |
+|---|---|
+| the shell | `/system.slice/system-opencode\x2dserve.slice/opencode-serve@4099.service` |
+| the bazel server it spawned | `/user.slice/…/bazel.slice/run-p731610-i394880965.scope` |
+
+The server escapes into `bazel.slice`. The scope really carries `memory.max` = 10 GiB,
+the server JVM runs `-Xmx2g` (so the container-aware heap-sizing hazard is moot — the
+heap is explicit), and `:4099` sat at 1.16 G current / 1.31 G peak *during* the build,
+i.e. untouched. Contrast the pre-shim measurement above: 14.00 G for six minutes.
+
+Two things for whoever soaks it:
+
+- A bazel **server that predates the switch keeps serving scoped clients from the old
+  cgroup**, so its builds stay charged to the serve until it idles out (900 s). Run
+  `bazel shutdown` in each active workspace before measuring, or the shim will look
+  broken when it is not.
+- The scope sets `MemoryMax=10G` but leaves **`memory.swap.max = max`** while the serve
+  units cap swap at 1 G. Swap is shared, so an unbounded-swap build scope can thrash the
+  box instead of failing fast inside its own cap — which partly defeats the isolation
+  the scope exists to give. Folded into `workstation-8rou`.
+
+Follow-ups split out: `workstation-8rou` (post-soak: serve `MemoryMax` 14→10 G,
+`OOMPolicy` stop→continue, plus the swap cap above) and `workstation-daa0`
+(`bb`, the BuildBuddy bazel, bypasses the shim).
 
 ## Deliberately NOT doing
 
