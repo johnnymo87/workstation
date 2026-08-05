@@ -114,9 +114,27 @@ plugin_canary_complete_bytes() {
 # is ambiguous: caveman deploys as `plugins/caveman/plugin.js` (it must ship as a
 # directory so plugin.js can resolve caveman-config.cjs as a real sibling), and a
 # bare `plugin.js` would neither identify it nor survive a second directory-shaped
-# plugin. Falls back to the final component for anything outside that directory,
-# e.g. an npm-installed plugin, so such a failure still gets a distinct signature
-# rather than being silently dropped.
+# plugin. Falls back to the final component for anything outside that directory.
+#
+# KNOWN GAP -- npm-spec plugins get NO key (workstation-njer). Both extractions
+# require a literal `file://`, and opencode logs a package-spec plugin as a bare
+# name: `path=opencode-beads`, `path=@ex-machina/opencode-anthropic-auth`,
+# `path=opencode-gemini-auth@1.3.11`. Three of the twelve deployed plugin sources
+# are that shape. config/plugin.ts normalises only PATH-LIKE specs (Glob.scan ->
+# pathToFileURL for the plugins dir, pathToFileURL for absolute/relative); package
+# specs fall through unchanged, by design. So this is not drift -- it is a shape
+# this function was never written for.
+#
+# An earlier version of this comment claimed the fallback covered "an
+# npm-installed plugin ... rather than being silently dropped". Measured on real
+# production lines (INFO success lines rewritten to the failure shape, run through
+# the extraction below): all three npm specs returned EMPTY, while a file:// plugin
+# returned `caveman/plugin.js`. The claim was written from the file case and
+# generalised.
+#
+# The alert itself is NOT lost -- the anchored pattern still matches, so the canary
+# still goes red. What degrades is attribution: those three share one `unknown`
+# latch, so a single stuck one masks the others.
 #
 # The result is used as a driftAlert signature and as a latch filename, so it is
 # reduced to [A-Za-z0-9._-]: a `/` would create a spurious directory level, and
