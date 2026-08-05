@@ -1,6 +1,6 @@
 # Plugin-Loader Hardening Roadmap
 
-**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-2 shipped; 3a merged and built, **pending a serve restart**
+**Bead:** `workstation-5yox` (P1) · **Started:** 2026-08-01 · **Status:** steps 0-3a **live**; 3b blocked on `workstation-fg2w`
 
 > **Revision 2.** The first draft of this file (PR #242) was written and merged
 > *without* the adversarial review it makes mandatory. Review afterwards found
@@ -355,18 +355,22 @@ devbox, where the founding LOUD incident happened, and which deploys
 
 | | Contents | Status |
 |---|---|---|
-| **3a — observability** | Log per plugin on failure (all four `report.error` stages **and** `report.missing`) and on success. Pure signal addition, safe on every host. | **Done bar the restart.** Fork patch `8ce5fe9`, released `v1.17.13-patched.8`, auto-bumped in #301, pin machinery in #303. |
+| **3a — observability** | Log per plugin on failure (all four `report.error` stages **and** `report.missing`) and on success. Pure signal addition, safe on every host. | **LIVE** since 2026-08-05 03:01 EDT. Fork patch `8ce5fe9`, released `v1.17.13-patched.8`, auto-bumped in #301, pin machinery in #303. |
 | **3b — validation** | `assertHooks` + buffer-then-commit at both push sites. The class-killer. | `workstation-l7bz`, **blocked** on `workstation-fg2w` (devbox cover) or a recorded acceptance. |
 
-> **Built is not running.** `~/.nix-profile/bin/opencode` now resolves to
-> `1.17.13.8`, but all four serve PIDs still exec `1.17.13.7` — they are system
-> units and hold the old binary until restarted. So the fleet is *still* blind at
-> the four `report.error` stages and at `report.missing`; the claims above
-> describe the next restart, not the running processes. Measured in a scratch
-> serve on the real `.8` binary rather than inferred: the failure and success
-> lines appear, the deployed canary pattern matches them, and per-file keys
-> extract correctly. The restart kills every live session, so it is deliberately
-> left for a chosen window — tracked on `workstation-5yox`.
+> **Running, verified 2026-08-05 03:50 EDT.** The 03:00 nightly reset was the
+> deploy window (it restarts the serve pool), so nothing had to be killed by
+> hand. All four serve PIDs now exec `1.17.13.8`, restarted 03:01:16; 267
+> `plugin loaded` lines, zero failures, canary exit 0.
+>
+> The count is the interesting part: **267 did not reconcile with 9 × 24 = 216.**
+> Chasing the 51-line gap found that there are **twelve** plugin sources, not
+> nine — nine `file://` plugins plus `opencode-beads`,
+> `@ex-machina/opencode-anthropic-auth`, and `opencode-gemini-auth@1.3.11` (the
+> last config-scoped to two projects, hence 3 loads not 24). "Nine deployed
+> plugins" is right about *files* and undercounts what the canary sees. Stopping
+> at "all three checks green" would have recorded a clean pass and missed both
+> this and the residual below.
 
 3a makes 3b cheaper *and* safer: after it deploys, a load failure is a real ERROR
 line on every host, so a devbox detector needs **leg B only** — no frontdoor, no
