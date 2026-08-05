@@ -281,6 +281,44 @@
         touch $out
       '';
 
+      # The shim's --slice= must name a slice unit that actually SHIPS.
+      #
+      # This is the one failure in the bazel work that no other check can see.
+      # `systemd-run --slice=NAME` does not fail on an undeclared slice: it
+      # silently creates a transient one with NO limits. So a rename on either
+      # side leaves every build still scoped, still green, still passing
+      # bazel-scope-shim above -- and silently unbounded in aggregate, with no
+      # symptom until the host OOMs. home.cloudbox.nix binds both sides to one
+      # `bazelSliceName`; this asserts that binding held all the way into the
+      # built generation, which is the only place the two can be compared.
+      bazel-slice-wiring = devboxPkgs.runCommand "bazel-slice-wiring-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash ];
+        gen = self.homeConfigurations.cloudbox.activationPackage;
+      } ''
+        shim="$gen/home-path/bin/bazel"
+        [ -e "$shim" ] || { echo "FAIL: no bazel on the generation's PATH"; exit 1; }
+
+        slice=$(sed -n 's/^SLICE_NAME="\(.*\)"$/\1/p' "$(readlink -f "$shim")")
+        [ -n "$slice" ] || { echo "FAIL: could not read SLICE_NAME from the shim"; exit 1; }
+
+        unit="$gen/home-files/.config/systemd/user/$slice.slice"
+        if [ ! -e "$unit" ]; then
+          echo "FAIL: shim targets --slice=$slice but no $slice.slice unit ships."
+          echo "      systemd would create it transiently with NO MemoryMax, so the"
+          echo "      aggregate cap would silently not exist. See workstation-mqp3."
+          exit 1
+        fi
+
+        grep -q '^MemoryMax=' "$unit" || {
+          echo "FAIL: $slice.slice ships without a MemoryMax; the aggregate cap is the"
+          echo "      entire reason the slice exists."
+          exit 1
+        }
+
+        echo "ALL PASS (bazel slice wiring: shim --slice=$slice matches a capped $slice.slice)"
+        touch $out
+      '';
+
       # Headless-Lua unit tests for assets/nvim/lua/user/session_switcher/.
       #
       # Registered here rather than bolted onto pkgs/oc-auto-attach's

@@ -80,6 +80,15 @@ else
   bad "REAL_BAZEL must be an absolute /nix/store path, got: ${real_line:-<missing>}"
 fi
 
+for v in PROC_ROOT CGROUP_ROOT; do
+  line=$(grep -m1 "^$v=" "$SHIM" || true)
+  if [[ "$line" =~ ^"$v"=\"?/ ]]; then
+    ok "$v is an absolute path in the shipped script"
+  else
+    bad "$v must be an absolute path, got: ${line:-<missing>}"
+  fi
+done
+
 if [[ "$sdrun_line" =~ ^SYSTEMD_RUN=\"?/nix/store/ ]]; then
   ok "SYSTEMD_RUN is an absolute /nix/store path"
 else
@@ -122,10 +131,30 @@ STUB
 
 chmod +x "$WORK/stub-bazel" "$WORK/stub-systemd-run"
 
+# Fixture tree for the degrade path's "is a bazel server resident in my own
+# cgroup?" probe. Two variants: one where the cgroup holds a bazel SERVER
+# (argv[0] is rewritten to `bazel(<name>)`) and one where it holds something else.
+mkfake() { # mkfake <dir> <argv0>
+  mkdir -p "$1/proc/self" "$1/proc/999" "$1/cg/fake"
+  printf '0::/fake\n' > "$1/proc/self/cgroup"
+  printf '999\n'      > "$1/cg/fake/cgroup.procs"
+  printf '%s\0--flag\0' "$2" > "$1/proc/999/cmdline"
+}
+mkfake "$WORK/withserver" 'bazel(demo)'
+mkfake "$WORK/noserver"   'node'
+
 sed -e "s|^REAL_BAZEL=.*|REAL_BAZEL=\"$WORK/stub-bazel\"|" \
     -e "s|^SYSTEMD_RUN=.*|SYSTEMD_RUN=\"$WORK/stub-systemd-run\"|" \
+    -e "s|^PROC_ROOT=.*|PROC_ROOT=\"$WORK/withserver/proc\"|" \
+    -e "s|^CGROUP_ROOT=.*|CGROUP_ROOT=\"$WORK/withserver/cg\"|" \
     "$SHIM" > "$WORK/shim"
 chmod +x "$WORK/shim"
+
+# Same shim, but its cgroup holds no bazel server.
+sed -e "s|^PROC_ROOT=.*|PROC_ROOT=\"$WORK/noserver/proc\"|" \
+    -e "s|^CGROUP_ROOT=.*|CGROUP_ROOT=\"$WORK/noserver/cg\"|" \
+    "$WORK/shim" > "$WORK/shim-noserver"
+chmod +x "$WORK/shim-noserver"
 
 grep -q "$WORK/stub-bazel" "$WORK/shim" || { echo "FAIL: harness did not rewrite REAL_BAZEL"; exit 1; }
 grep -q "$WORK/stub-systemd-run" "$WORK/shim" || { echo "FAIL: harness did not rewrite SYSTEMD_RUN"; exit 1; }
@@ -202,7 +231,7 @@ log4=$(cat "$WORK/log4")
 
 refute "degrade does not run under systemd-run" "SDRUN_ARGV" "$log4"
 check  "degrade still runs the build"           "build //z"  "$log4"
-check  "degrade shuts the server down after"    "shutdown"   "$log4"
+check  "degrade shuts down the server it left in this cgroup" "shutdown" "$log4"
 check  "degrade warns on stderr"                "WARNING"    "$(cat "$WORK/log4.err")"
 
 # Ordering: the build must run BEFORE the shutdown, or we kill the server the
@@ -217,6 +246,26 @@ fi
 CANARY_RC=1 BAZEL_RC=12 run_shim "$WORK/log5" build //w
 [[ "$RC" == 12 ]] && ok "degrade propagates the BUILD's exit code, not shutdown's" \
                   || bad "expected exit 12 on the degrade path, got $RC"
+
+# ...and the other half of that bargain: do NOT shut down a server that is not
+# ours to kill. The degrade trigger (a transiently full /run/user) says nothing
+# about where this workspace's server lives; if it is healthy in its own scope,
+# an unconditional shutdown would throw away its analysis cache for no benefit.
+# `bazel version` on the degrade path must likewise not fork a JVM just to kill it.
+: > "$WORK/log6"
+STUB_LOG="$WORK/log6" STUB_CANARY_RC=1 STUB_BAZEL_RC=0 \
+  "$WORK/shim-noserver" build //v > /dev/null 2>&1 || true
+log6=$(cat "$WORK/log6")
+check  "degrade still runs the build when no server is resident" "build //v" "$log6"
+refute "degrade does NOT shut down a server living outside this cgroup" "shutdown" "$log6"
+
+# The gate must key on a real bazel SERVER (argv[0] = `bazel(<name>)`), not on
+# any old process, or it would fire on almost every cgroup.
+if [[ "$(grep -c 'BAZEL_ARGV' <<< "$log6")" == 1 ]]; then
+  ok "no-server degrade path invokes bazel exactly once"
+else
+  bad "expected exactly one bazel invocation with no resident server; got: $log6"
+fi
 
 # ---------------------------------------------------------------------------
 echo

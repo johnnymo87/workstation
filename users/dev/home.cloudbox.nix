@@ -11,6 +11,20 @@ let
   # pigeon read (users/dev/serve-pool.nix). The pool-auth CLI below must never
   # hardcode ports -- a stale port list would write the credential to a serve
   # that no longer exists and silently skip one that does.
+  # Single source of truth for the bazel slice name (bead workstation-mqp3).
+  #
+  # It is used TWICE: the shim passes it to `systemd-run --slice=`, and the slice
+  # unit below is declared under it. They must agree. If they ever diverge,
+  # systemd-run does not fail -- it silently creates a transient slice of that
+  # name with NO limits, the 16G aggregate cap disappears, and nothing goes red
+  # until the host OOMs. That is exactly the silent-failure class this whole
+  # change exists to eliminate, so the name is bound once here rather than
+  # written as a literal in two places.
+  bazelSliceName = "bazel";
+  bazelScope = pkgs.callPackage ../../pkgs/bazel-scope {
+    sliceName = bazelSliceName;
+  };
+
   servePool = (import ./serve-pool.nix).forHost.cloudbox;
   anchorUrl = builtins.head servePool.endpoints;
   allEndpoints = builtins.concatStringsSep " " servePool.endpoints;
@@ -241,7 +255,6 @@ lib.mkIf isCloudbox {
 
   # Developer tooling (project-specific)
   home.packages = with pkgs; [
-    bazelisk    # Bazel version manager (respects .bazelversion)
 
     # `bazel` on PATH is a SHIM, not bazelisk (bead workstation-mqp3). It re-execs
     # the build inside `systemd-run --user --scope --slice=bazel`, so bazel is
@@ -255,7 +268,11 @@ lib.mkIf isCloudbox {
     # symlink. It does: ~/.nix-profile/bin precedes ~/.local/bin both in the login
     # PATH and in the serve unit's own `path=`. The activation below repoints that
     # legacy symlink anyway, for callers that bypass PATH order.
-    (callPackage ../../pkgs/bazel-scope { })
+    # Provides BOTH `bazel` and `bazelisk`. The real bazelisk is deliberately NOT
+    # a separate entry here any more: it would sit on PATH as a fully unscoped
+    # bypass for anyone -- human or agent -- who types `bazelisk build`. The shim
+    # reaches the real bazelisk by absolute store path instead.
+    bazelScope
     buf         # Protobuf linting, breaking change detection, codegen
     protobuf    # protoc compiler
     python3     # Required by Docker image build steps
@@ -609,7 +626,15 @@ lib.mkIf isCloudbox {
   #
   # The serve units are in /system.slice/system-opencode\x2dserve.slice/..., a
   # different cgroup subtree, so a memcg OOM in here cannot reach them.
-  systemd.user.slices.bazel = {
+  #
+  # NOTE the new neighbours. This slice nests under user-1000.slice, so builds
+  # that used to sit in system.slice now also count against that slice's
+  # MemoryHigh/MemorySwapMax/TasksMax (hosts/cloudbox/configuration.nix), which
+  # they share with tmux, nvim and every interactive shell. TasksMax in
+  # particular is worth remembering: bazel's symlink-forest and sandbox phases
+  # are thread-hungry, so a pathological build now shows up as task exhaustion
+  # for the interactive session rather than as memory pressure on a serve.
+  systemd.user.slices.${bazelSliceName} = {
     Unit = {
       Description = "Bazel builds, capped and held outside the opencode serve cgroup";
       Documentation = [ "https://github.com/johnnymo87/workstation/blob/main/pkgs/bazel-scope/default.nix" ];
@@ -636,18 +661,31 @@ lib.mkIf isCloudbox {
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       legacy="$HOME/.local/bin/bazel"
       want="$HOME/.nix-profile/bin/bazel"
-      if [ -L "$legacy" ]; then
-        target=$(readlink -f "$legacy" || true)
-        case "$target" in
-          *bazelisk*|*bazel-scope*|*/bin/bazel)
-            run ln -sfn "$want" "$legacy"
-            ;;
-          *)
-            echo "NOTE: leaving $legacy alone; it resolves to $target, not bazelisk." >&2
-            ;;
-        esac
-      elif [ -e "$legacy" ]; then
+
+      if [ ! -L "$legacy" ] && [ -e "$legacy" ]; then
         echo "NOTE: $legacy is a real file, not a symlink; leaving it alone." >&2
+      elif [ -L "$legacy" ]; then
+        # Compare the UNRESOLVED link: once repointed it names the profile path,
+        # which is the idempotent no-op case. Resolving first would instead follow
+        # through to the store and re-run the match every activation.
+        if [ "$(readlink "$legacy")" = "$want" ]; then
+          : # already points at the shim
+        else
+          target=$(readlink -f "$legacy" 2>/dev/null || true)
+          case "$target" in
+            # Only the two things we are willing to replace: the real bazelisk,
+            # or an older shim generation. Deliberately NOT a bare */bin/bazel
+            # glob -- that would also match a hand-pinned real bazel (e.g. one
+            # under ~/.cache/bazelisk/downloads/.../bin/bazel), contradicting the
+            # promise not to touch anything the user put there on purpose.
+            *"/bin/bazelisk"|/nix/store/*-bazel-scope/bin/bazel|/nix/store/*-bazel/bin/bazel)
+              run ln -sfn "$want" "$legacy"
+              ;;
+            *)
+              echo "NOTE: leaving $legacy alone; it resolves to ''${target:-a broken target}, which is neither bazelisk nor the shim." >&2
+              ;;
+          esac
+        fi
       fi
     '';
 
