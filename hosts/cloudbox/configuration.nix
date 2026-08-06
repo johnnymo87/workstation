@@ -462,24 +462,21 @@ in
     after = [ "network-online.target" "cloudflared-tunnel.service" ];
     requires = [ "cloudflared-tunnel.service" ];
 
-    # `/home/dev/.nix-profile` sits BEFORE pkgs.neovim on purpose, and only
-    # before it: the pinned nodejs/bash/coreutils above still win.
+    # NO neovim here, deliberately -- see NVIM_BIN below.
     #
-    # pkgs.neovim here is a BARE neovim, kept because the daemon's own
-    # `nvim --server` RPC client needs an nvim and does not need the plugin set
-    # (adapters/nvim-rpc.ts execFile("nvim", ...); see the note on
-    # environment.systemPackages below). The problem is that it does not stay
-    # in the daemon. oc-auto-attach spawns tmux panes, and tmux stamps the
-    # CLIENT's PATH into every pane it creates -- so this bare neovim became
-    # the `nvim` that `nvims` exec'd inside the user's editor pane, shadowing
-    # the home-manager-wrapped one and failing at startup with
-    # `module 'nvim-treesitter.configs' not found`. Putting the user profile
-    # first means the wrapped nvim wins everywhere, while the bare one remains
-    # as a fallback if the profile is ever missing.
+    # This list does not stay inside the daemon. oc-auto-attach spawns tmux
+    # panes on pigeon's behalf, and tmux stamps the spawning process's PATH
+    # into every pane it creates, so anything here becomes what the user's
+    # editor pane resolves. A bare pkgs.neovim used to sit in this list (for
+    # the daemon's own `nvim --server` RPC client) and consequently shadowed
+    # the home-manager-wrapped nvim in that pane, failing at startup with
+    # `module 'nvim-treesitter.configs' not found` -- the same landmine the
+    # note on environment.systemPackages below already warned about, re-trodden
+    # one layer down. Treat this list as user-visible, not unit-private.
     #
     # This is the systemd half of workstation-v8t5; the PATH half lives in
     # pkgs/oc-auto-attach/canonical-path.sh.
-    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils "/home/dev/.nix-profile" pkgs.neovim ];
+    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils ];
 
     serviceConfig = {
       Type = "simple";
@@ -527,6 +524,16 @@ in
         # Absolute path to nvims so oc-auto-attach can spawn it when it has
         # to create a fresh tmux window. Same locked-down-PATH reasoning.
         "OC_NVIMS_BIN=${nvims}/bin/nvims"
+        # Absolute path to a BARE neovim for the daemon's own `nvim --server`
+        # RPC client (adapters/nvim-rpc.ts, honored since pigeon-d45j). Pinned
+        # here rather than placed on `path` above precisely so it cannot leak
+        # into the tmux panes oc-auto-attach creates and shadow the user's
+        # plugin-wrapped nvim (workstation-v8t5).
+        #
+        # Bare is correct, not a compromise: `nvim --headless --server X
+        # --remote-expr` does not source init.lua, so the RPC client never
+        # needs the plugin set.
+        "NVIM_BIN=${pkgs.neovim}/bin/nvim"
         # Absolute paths to tmux/pgrep so the /current-state command's
         # main-session enumeration (main-session-allowlist.ts) can shell out
         # to them despite the locked-down systemd PATH. Same reasoning as
