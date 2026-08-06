@@ -265,6 +265,7 @@ lib.mkIf isCloudbox {
           "$HOME/.cache/ms-playwright" \
           "$HOME/.cache/node-gyp" \
           "$HOME/.cache/electron" \
+          "$HOME/.npm/_cacache" \
         ; do
           if [ -d "$cache_dir" ]; then
             size=$(du -sh "$cache_dir" 2>/dev/null | cut -f1)
@@ -273,6 +274,12 @@ lib.mkIf isCloudbox {
           fi
         done
 
+        # NB: _cacache above, NOT $HOME/.npm wholesale. $HOME/.npm/_npx holds
+        # UNPACKED packages that long-running `npm exec` processes execute out
+        # of -- the Slack and nx MCP servers were observed running directly
+        # from _npx binaries. Deleting it kills them mid-session. _cacache is
+        # only the download cache and was measured at 35 GB.
+
         # Stale /tmp files
         sudo find /tmp -maxdepth 1 -name "nix-shell.*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
         sudo find /tmp -maxdepth 1 -name "nix-*" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
@@ -280,7 +287,114 @@ lib.mkIf isCloudbox {
         sudo find /tmp -maxdepth 1 -name "pyright-*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
         sudo find /tmp -maxdepth 1 -name "fp-digest-*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
 
+        cleanup_tmp_scratch
+
         log "Cache cleanup complete"
+      }
+
+      # --- 4b. Stale /tmp scratch directories ---
+      #
+      # The name-pattern sweep above only catches tool-generated names
+      # (nix-shell.*, pip-*, ...). It caught none of the 26 GB of abandoned
+      # agent-session scratch found on cloudbox in 2026-08: build checkouts,
+      # throwaway clones and $(mktemp -d) trees with arbitrary names, the
+      # oldest from June. Those accumulate forever, so sweep by AGE and SIZE
+      # instead of by name.
+      #
+      # Three guards, because /tmp on this host is shared by a dozen concurrent
+      # agent sessions and one of them deleting another's working tree is a
+      # real data-loss event:
+      #
+      #   1. older than TMP_SCRATCH_AGE_DAYS and at least TMP_SCRATCH_MIN_MB
+      #   2. no live process has it as cwd/exe or holds an fd inside it
+      #   3. if it is a git repo: skip when dirty OR carrying unpushed commits
+      #
+      # Guard 3 distinguishes a REAL repo from a gutted `.git` left behind by a
+      # half-removed worktree. An earlier version of this conflated "git cannot
+      # read this" with "this has uncommitted work" and would have protected
+      # 12 GB of unrecoverable junk forever while sounding careful.
+      TMP_SCRATCH_AGE_DAYS=7
+      TMP_SCRATCH_MIN_MB=100
+
+      cleanup_tmp_scratch() {
+        log "Sweeping stale /tmp scratch (>''${TMP_SCRATCH_AGE_DAYS}d, >=''${TMP_SCRATCH_MIN_MB}MB)..."
+        python3 - "$TMP_SCRATCH_AGE_DAYS" "$TMP_SCRATCH_MIN_MB" <<'PYEOF' || log "WARN: /tmp scratch sweep failed"
+      import os, shutil, subprocess, sys, time
+
+      age_days, min_mb = int(sys.argv[1]), int(sys.argv[2])
+      cutoff = time.time() - age_days * 86400
+      roots = ["/tmp", "/tmp/opencode"]
+
+      def du_mb(p):
+          r = subprocess.run(["du", "-xsm", p], capture_output=True, text=True)
+          try: return int(r.stdout.split("\t")[0])
+          except (ValueError, IndexError): return 0
+
+      def classify(p):
+          """'no-repo' | 'clean' | 'dirty' | 'unpushed'. Only the last two protect."""
+          if not os.path.exists(os.path.join(p, ".git")):
+              return "no-repo"
+          if subprocess.run(["git", "-C", p, "rev-parse", "--git-dir"],
+                            capture_output=True).returncode != 0:
+              return "no-repo"          # stray or gutted .git, not a real repo
+          st = subprocess.run(["git", "-C", p, "status", "--porcelain",
+                               "--untracked-files=all"], capture_output=True, text=True)
+          if st.returncode != 0 or st.stdout.strip():
+              return "dirty"            # cannot tell counts as dirty
+          up = subprocess.run(["git", "-C", p, "log", "--branches", "--not",
+                               "--remotes", "--oneline"], capture_output=True, text=True)
+          return "unpushed" if (up.returncode == 0 and up.stdout.strip()) else "clean"
+
+      cands = []
+      for root in roots:
+          if not os.path.isdir(root): continue
+          for name in sorted(os.listdir(root)):
+              p = os.path.join(root, name)
+              if root == "/tmp" and name == "opencode": continue   # swept per-child
+              if not os.path.isdir(p) or os.path.islink(p): continue
+              try: st = os.lstat(p)
+              except OSError: continue
+              if st.st_uid != os.getuid(): continue
+              if st.st_mtime >= cutoff: continue
+              mb = du_mb(p)
+              if mb >= min_mb: cands.append((mb, p))
+
+      inuse = set()
+      for pid in os.listdir("/proc"):
+          if not pid.isdigit(): continue
+          links = [f"/proc/{pid}/cwd", f"/proc/{pid}/exe"]
+          try: links += [f"/proc/{pid}/fd/{f}" for f in os.listdir(f"/proc/{pid}/fd")]
+          except OSError: pass
+          for link in links:
+              try: real = os.readlink(link)
+              except OSError: continue
+              for _, p in cands:
+                  if real == p or real.startswith(p + "/"): inuse.add(p)
+
+      freed = 0
+      for mb, p in sorted(cands, reverse=True):
+          if p in inuse:
+              print(f"  keep {mb}M {p} (open by a live process)"); continue
+          state = classify(p)
+          if state in ("dirty", "unpushed"):
+              print(f"  keep {mb}M {p} ({state})"); continue
+          gitfile = os.path.join(p, ".git")
+          if os.path.isfile(gitfile):
+              # A registered worktree: deregister so the parent repo does not
+              # keep a dangling administrative entry.
+              try:
+                  gitdir = open(gitfile).read().strip().split("gitdir:", 1)[1].strip()
+                  main = gitdir.split("/.git/worktrees/")[0]
+                  subprocess.run(["git", "-C", main, "worktree", "remove", "--force", p],
+                                 capture_output=True)
+              except (IndexError, OSError):
+                  pass
+          if os.path.exists(p):
+              shutil.rmtree(p, ignore_errors=True)
+          print(f"  removed {mb}M {p} ({state})")
+          freed += mb
+      print(f"  /tmp scratch sweep freed {freed} MB")
+      PYEOF
       }
 
       # --- 5. OpenCode WAL checkpoint ---
