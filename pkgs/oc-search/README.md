@@ -107,11 +107,28 @@ term lgtm actually searches for, occurs in 17.5% of parts, so verification
 would have meant reading ~700 MB per query and we would be back where we
 started.
 
-Cost of the choice, measured: ~2.8× the indexed text, so ~11 GB for the
-current 4.1 GB corpus, and ~25 minutes to build once. `--index` estimates the
-space from a bounded sample before it starts, refuses to begin if it would not
-fit, and stops with a readable message if free space drops below 5 GB
-mid-build.
+**Cost of the choice, measured on the real corpus rather than extrapolated:**
+the finished index is **10.88 GB** for 1,576,152 rows (2.65× the 4.1 GB of
+indexed text, close to the 2.8× the sample predicted). Building it took
+roughly **80 minutes** — the final, uninterrupted 726,152 rows went in at 331
+rows/s — on a host that was simultaneously serving a dozen opencode sessions
+and a bazel build. Refreshes are incremental and take about a second an hour.
+
+That is a real amount of disk, and this was learned the uncomfortable way:
+during the build, free space on the host fell from 60 GB to 16 GB. Only ~11 GB
+of that was the index (a concurrent bazel cache took the rest), but the margin
+was thin enough to matter. So `--index`:
+
+- estimates the space it needs from a bounded sample and refuses to start if it
+  will not fit (the first version of this precheck used
+  `SUM(length(data))`, which is itself the multi-minute full scan this package
+  exists to avoid — it timed itself out);
+- aborts with a readable message if free space falls below 5 GB mid-build,
+  leaving a smaller but perfectly usable index;
+- commits every 10,000 rows with `journal_size_limit` set, because FTS5 segment
+  merges amplify a transaction far past the bytes inserted into it — at 50,000
+  rows per commit the WAL was observed at 3.0 GB, and SQLite's default leaves
+  the WAL at its high-water mark forever.
 
 ### 2. A stale index costs time, never truth
 
@@ -154,6 +171,33 @@ With no usable index, oc-search still answers — by scanning — but:
 
 That last point is the fix for a specific bug, below.
 
+## Before and after
+
+All timings on cloudbox against the live 13 GB `opencode.db`. "cold" means the
+page cache was dropped (`posix_fadvise(DONTNEED)`) over the database *and* the
+index immediately beforehand; "warm" is a repeat run. "before" is the shipped
+bash implementation, run from the same shell on the same data.
+
+| query | before | after, no index (16-way scan) | after, indexed, cold | after, indexed, warm |
+|---|---|---|---|---|
+| `FbmEmployeeCutoffRepublishService` (default `tool` scope) | **5m20.9s** | — | **15.1s** | **5.6s** |
+| `--types tool,text mono` (the lgtm query) | **6m14.5s** | **1m21.5s** | **18.4s** | **0.46s** |
+| `--all fbm-delete-employee-republish` | killed at 120s, no output | — | **15.4s** | — |
+
+That is 21× cold / 57× warm on the first, and 20× cold / 813× warm on lgtm's.
+The fallback scan alone — no index at all — is 4.6× the old one.
+
+**The results are identical, not merely similar.** Both queries were run under
+both implementations and the session-id sets compared:
+
+    query 1:  361 sessions before, 361 after, 0 differing
+    lgtm:   6,902 sessions before, 6,902 after, 0 differing
+
+Note what the cold numbers say about where the remaining time goes: 18.4s cold
+versus 0.46s warm for `mono` is all I/O against a 10.9 GB index whose posting
+lists for a common trigram are large. A rare term is cheaper. Neither is
+anywhere near a caller's timeout.
+
 ## The lgtm failure
 
 The lgtm PR-review daemon builds its review context by shelling out
@@ -181,14 +225,30 @@ nothing had gone wrong from oc-search's point of view — it was still working
 when node killed it. Every review dispatched in that state was built without
 its session-history section, and nothing anywhere said so.
 
-Both halves are addressed:
+Both halves are addressed, and both were re-run through the same node harness
+against the built package:
 
-- **Speed:** with the index, that query returns in well under a second, so the
-  30s budget is not in play.
-- **Loudness:** if it ever is in play again, oc-search now trips its own
-  deadline first and exits 2 with an explanation on stderr. Node's
-  `execFile` error message concatenates the child's stderr, so the reason
-  lands in lgtm's journal line instead of an unexplained `Command failed`.
+**Speed.** The exact call now succeeds:
+
+```
+OK 10130 ms, stdout len 1035600
+```
+
+**Loudness.** Forced back onto the scan path (`--index-path /nonexistent`),
+this is what lgtm's journal line would now read:
+
+```
+shell.run failed: oc-search --types tool,text mono -- Command failed: oc-search --index-path /nonexistent/index.db --types tool,text mono
+oc-search: no usable index at /nonexistent/index.db: scanning every part row (16-way). This reads gigabytes and takes minutes on a cold cache. Build the index once with `oc-search --index`.
+oc-search: aborted after 25s: full scan of /home/dev/.local/share/opencode/opencode.db did not finish. Run `oc-search --index` once to make this fast.
+
+code: 2 signal: null killed: false
+```
+
+`code: 2 signal: null` rather than `code: null signal: SIGTERM` is the whole
+point: oc-search now ends its own run, at 25s, before the caller's 30s budget
+expires, and says why. Node's `execFile` concatenates the child's stderr into
+the error message, so the reason travels into the consumer's log by itself.
 
 There is a remaining gap that this package cannot close: lgtm swallows the
 failure and returns `""`. A packet built without session history is still

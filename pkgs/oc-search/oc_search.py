@@ -93,8 +93,11 @@ INDEX_SIZE_RATIO = 2.8
 MIN_FREE_BYTES = 5_000_000_000
 
 # Rows per index-build transaction. Bounds WAL growth and bounds the work lost
-# if the build is interrupted.
-COMMIT_EVERY = 50_000
+# if the build is interrupted. Measured: at 50,000 the WAL still reached 2.2 GB
+# mid-build, because FTS5 segment merges amplify a transaction far past the
+# bytes inserted into it. 10,000 keeps the checkpoint interval short enough for
+# journal_size_limit to actually claw the file back.
+COMMIT_EVERY = 10_000
 
 
 # --------------------------------------------------------------------------
@@ -288,6 +291,11 @@ def open_index_rw(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-262144")
+    # Truncate the WAL back down after each checkpoint. SQLite's default
+    # (journal_size_limit = -1) leaves the file at its high-water mark, and an
+    # FTS5 bulk load pushes that mark to gigabytes -- observed at 3.0 GB during
+    # the first full build, on a host that was concurrently 94% full.
+    conn.execute("PRAGMA journal_size_limit=67108864")
     conn.executescript(_INDEX_SCHEMA)
     return conn
 
