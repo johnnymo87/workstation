@@ -70,6 +70,7 @@
       lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
+      oc-context = p.callPackage ./pkgs/oc-context { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
@@ -721,6 +722,32 @@
       # on itself, which a build sandbox cannot do. A side effect worth naming:
       # this is the first time oc-session-list is BUILT in CI rather than merely
       # evaluated.
+      # oc-context's suite: hermetic (stdlib unittest, temp sqlite fixtures, no
+      # network -- the model catalog is injected via --models-json/--no-server),
+      # so it runs as a plain check rather than needing a workflow step.
+      #
+      # A `checks.*` entry rather than leaning on pkgs/oc-context's checkPhase,
+      # because test-unwired-tests.sh deliberately does not accept checkPhase as
+      # evidence -- see the oc-session-list story in its header.
+      oc-context = devboxPkgs.runCommand "oc-context-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        python3 ${self}/pkgs/oc-context/test_oc_context.py 2>&1 | tee "$TMPDIR/out.txt"
+
+        # Assert the assertions RAN. `unittest.main` exits 0 on a suite that
+        # collected nothing, which is exactly the vacuously-green failure the
+        # reachability guard exists to prevent.
+        grep -qE '^Ran [0-9]+ tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: no tests were collected." >&2
+          exit 1
+        }
+        grep -qE '^Ran ([3-9][0-9]|[0-9]{3,}) tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: fewer than 30 tests ran; the suite was gutted." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       oc-session-list-bin = devboxPkgs.runCommand "oc-session-list-bin-tests" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.bun devboxPkgs.gnugrep ];
         OC_SESSION_LIST_BIN = "${(localPkgsFor devboxSystem).oc-session-list}/bin/oc-session-list";
