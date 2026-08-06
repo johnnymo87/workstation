@@ -25,6 +25,10 @@ let
     sliceName = bazelSliceName;
   };
 
+  # Memory + PSI sampler. Separate from the S2 series on purpose -- see the long
+  # comment in pkgs/pressure-sampler/default.nix.
+  pressureSampler = pkgs.callPackage ../../pkgs/pressure-sampler { };
+
   servePool = (import ./serve-pool.nix).forHost.cloudbox;
   anchorUrl = builtins.head servePool.endpoints;
   allEndpoints = builtins.concatStringsSep " " servePool.endpoints;
@@ -884,6 +888,44 @@ lib.mkIf isCloudbox {
     Install = {
       WantedBy = [ "timers.target" ];
     };
+  };
+
+  # ---- pressure-sampler: the instrument for "does this box run well" --------
+  #
+  # DURABLE ON PURPOSE, unlike the S2 samplers. Those are transient units on
+  # tmpfs (workstation-rdsq.3) and that was the right call for a six-day
+  # throwaway measurement. This one answers a standing question -- is the box
+  # right-sized, and is anything stalling -- so it has to survive a reboot or a
+  # user-manager restart without anyone remembering to recreate it.
+  #
+  # 15s cadence: PSI totals are monotonic counters, so resolution only bounds how
+  # short a stall can be localised, and a bazel scope's whole life can be under a
+  # minute. Cost is ~10 cgroups x 4 small sysfs reads per tick.
+  systemd.user.services.pressure-sampler = {
+    Unit = {
+      Description = "Sample memory + PSI stall pressure (serves, bazel scopes, host)";
+      Documentation = [ "https://github.com/johnnymo87/workstation/blob/main/pkgs/pressure-sampler/default.nix" ];
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${pressureSampler}/bin/pressure-sampler";
+      # Never let the instrument become the incident: it must not be able to
+      # starve or stall the thing it is measuring.
+      Nice = 10;
+      IOSchedulingClass = "idle";
+      MemoryMax = "128M";
+    };
+  };
+
+  systemd.user.timers.pressure-sampler = {
+    Unit.Description = "Sample memory + PSI stall pressure every 15s";
+    Timer = {
+      OnBootSec = "1min";
+      OnUnitActiveSec = "15s";
+      AccuracySec = "1s";
+      Unit = "pressure-sampler.service";
+    };
+    Install.WantedBy = [ "timers.target" ];
   };
 
   # Timer: run at startup + every 4 hours
