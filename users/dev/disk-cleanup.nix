@@ -325,10 +325,36 @@ lib.mkIf isCloudbox {
       cutoff = time.time() - age_days * 86400
       roots = ["/tmp", "/tmp/opencode"]
 
-      def du_mb(p):
-          r = subprocess.run(["du", "-xsm", p], capture_output=True, text=True)
-          try: return int(r.stdout.split("\t")[0])
-          except (ValueError, IndexError): return 0
+      def measure(p):
+          """(megabytes, newest mtime anywhere in the tree).
+
+          The newest mtime is the load-bearing half. A DIRECTORY's own mtime
+          only moves when its top-level entries change -- writing to
+          `<dir>/sub/file` does not touch `<dir>`. Long-running agent scratch is
+          created once and then written through nested paths, so judging it by
+          `os.lstat(dir).st_mtime` would read a tree that was active five
+          minutes ago as untouched for a month, and delete it.
+
+          The in-use check below does not cover that gap: it sees only
+          processes holding a handle at the instant the sweep runs, and scratch
+          written by a series of short-lived commands holds nothing in between.
+
+          So "abandoned" has to mean "nothing ANYWHERE underneath has changed
+          within the window". Walking is also cheaper than it looks -- it
+          replaces the `du` subprocess rather than adding to it.
+          """
+          total = 0
+          newest = 0.0
+          for dirpath, dirnames, filenames in os.walk(p, onerror=lambda e: None):
+              try: newest = max(newest, os.lstat(dirpath).st_mtime)
+              except OSError: pass
+              for name in filenames + dirnames:
+                  try: st = os.lstat(os.path.join(dirpath, name))
+                  except OSError: continue
+                  newest = max(newest, st.st_mtime)
+                  if not os.path.islink(os.path.join(dirpath, name)):
+                      total += getattr(st, "st_blocks", 0) * 512
+          return total // (1024 * 1024), newest
 
       def classify(p):
           """'no-repo' | 'clean' | 'dirty' | 'unpushed'. Only the last two protect."""
@@ -355,8 +381,11 @@ lib.mkIf isCloudbox {
               try: st = os.lstat(p)
               except OSError: continue
               if st.st_uid != os.getuid(): continue
-              if st.st_mtime >= cutoff: continue
-              mb = du_mb(p)
+              if st.st_mtime >= cutoff: continue      # cheap reject first
+              mb, newest = measure(p)                 # then the honest test
+              if newest >= cutoff:
+                  print(f"  keep {mb}M {p} (touched {(time.time()-newest)/86400:.1f}d ago, nested)")
+                  continue
               if mb >= min_mb: cands.append((mb, p))
 
       inuse = set()
