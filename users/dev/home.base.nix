@@ -567,6 +567,7 @@ in
 
     # OpenCode per-session context-window usage ("who should compact?")
     localPkgs.oc-context
+    localPkgs.oc-search
 
     # OpenCode session list CLI
     localPkgs.oc-session-list
@@ -1081,144 +1082,40 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
     source = "${assetsPath}/gclpr/key.pub";
   };
 
-  # OpenCode session history search CLI
-  home.file.".local/bin/oc-search" = {
-    executable = true;
-    text = ''
-      #!${pkgs.bash}/bin/bash
-      set -euo pipefail
+  # oc-search now ships as pkgs/oc-search (see localPkgs above), not as an
+  # inline bash + sqlite3 heredoc. The heredoc ran an unindexed full scan of
+  # `part` -- 1.57M rows, 4.1 GB of JSON, measured at 4-6 minutes -- which the
+  # lgtm daemon had been silently SIGTERM-ing at its 30s execFile timeout.
+  # See pkgs/oc-search/README.md for the measurements.
+  #
+  # Keeping the trigram index caught up. Searches stay CORRECT without this
+  # (anything past the index watermark is resolved by a bounded tail scan);
+  # the timer only keeps that tail short enough that they also stay FAST. An
+  # hour of transcript is ~1k parts, so each run is a second of work.
+  systemd.user.services.oc-search-index = lib.mkIf (!isDarwin) {
+    Unit.Description = "Refresh the oc-search trigram index";
+    Service = {
+      Type = "oneshot";
+      # --if-exists: refresh an index somebody opted into, never create one.
+      # The first build is ~11 GB and ~80 minutes; a timer must not decide that
+      # on a host's behalf. `oc-search --index` by hand is the opt-in.
+      ExecStart = "${localPkgs.oc-search}/bin/oc-search --index --if-exists";
+      # This walks the same disk opencode is actively writing to; never win a
+      # priority contest against the thing whose data we are indexing.
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      Environment = [ "HOME=%h" ];
+    };
+  };
 
-      show_help() {
-        cat <<'HELP_EOF'
-      Usage: oc-search [OPTIONS] QUERY
-
-      Search OpenCode session history for QUERY.
-
-      Options:
-        --types TYPES    Comma-separated list of part types to search (default: tool)
-        --all            Search all part types (ignores --types)
-        -h, --help       Show this help message
-      HELP_EOF
-      }
-
-      types="tool"
-      search_all=false
-      query=""
-
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          -h|--help)
-            show_help
-            exit 0
-            ;;
-          --types)
-            if [[ $# -gt 1 && ! "$2" == -* ]]; then
-              types="$2"
-              shift 2
-            else
-              echo "Error: --types requires an argument." >&2
-              show_help >&2
-              exit 1
-            fi
-            ;;
-          --types=*)
-            types="''${1#*=}"
-            shift
-            ;;
-          --all)
-            search_all=true
-            shift
-            ;;
-          --)
-            shift
-            for arg in "$@"; do
-              if [[ -n "$query" ]]; then
-                echo "Error: Multiple queries provided." >&2
-                show_help >&2
-                exit 1
-              fi
-              query="$arg"
-            done
-            break
-            ;;
-          -*)
-            echo "Unknown option: $1" >&2
-            show_help >&2
-            exit 1
-            ;;
-          *)
-            if [[ -n "$query" ]]; then
-              echo "Error: Multiple queries provided ('$query' and '$1')" >&2
-              show_help >&2
-              exit 1
-            fi
-            query="$1"
-            shift
-            ;;
-        esac
-      done
-
-      if [[ -z "$query" ]]; then
-        echo "Error: Search query is required." >&2
-        show_help >&2
-        exit 1
-      fi
-
-      DB_PATH="$HOME/.local/share/opencode/opencode.db"
-
-      if [[ ! -f "$DB_PATH" ]]; then
-        echo "Error: Database not found at $DB_PATH" >&2
-        exit 1
-      fi
-
-      type_filter=""
-      if [[ "$search_all" == false ]]; then
-        IFS=',' read -ra type_array <<< "$types"
-        in_list=""
-        for t in "''${type_array[@]}"; do
-          t_clean="''${t//\'/}"
-          if [[ -z "$in_list" ]]; then
-            in_list="'$t_clean'"
-          else
-            in_list="$in_list, '$t_clean'"
-          fi
-        done
-        type_filter="AND json_extract(p.data, '$.type') IN ($in_list)"
-      fi
-
-      query_escaped="''${query//\'/\'\'}"
-
-      # Execute SQLite query (pragmas use .output /dev/null to suppress echo)
-      ${pkgs.sqlite}/bin/sqlite3 "file:$DB_PATH?mode=ro" <<SQL_EOF
-      .output /dev/null
-      PRAGMA query_only=ON;
-      PRAGMA busy_timeout=2000;
-      PRAGMA temp_store=MEMORY;
-      PRAGMA cache_size=-65536;
-      .output stdout
-      .headers on
-      .mode column
-      WITH matched AS (
-        SELECT
-          p.session_id,
-          COUNT(*) AS match_count,
-          MAX(p.time_created) AS last_match_ms
-        FROM part p
-        WHERE instr(p.data, '$query_escaped') > 0
-          $type_filter
-        GROUP BY p.session_id
-      )
-      SELECT
-        s.id,
-        substr(s.title, 1, 40) AS title,
-        substr(s.directory, 1, 45) AS directory,
-        datetime(m.last_match_ms / 1000, 'unixepoch', 'localtime') AS last_match,
-        m.match_count AS matches
-      FROM matched m
-      JOIN session s ON s.id = m.session_id
-      ORDER BY m.last_match_ms DESC;
-      SQL_EOF
-    '';
+  systemd.user.timers.oc-search-index = lib.mkIf (!isDarwin) {
+    Unit.Description = "Refresh the oc-search trigram index hourly";
+    Timer = {
+      OnCalendar = "hourly";
+      Persistent = true;
+      RandomizedDelaySec = "10min";
+    };
+    Install.WantedBy = [ "timers.target" ];
   };
 
   # lgtm-sessions: list active OpenCode sessions dispatched by lgtm.
