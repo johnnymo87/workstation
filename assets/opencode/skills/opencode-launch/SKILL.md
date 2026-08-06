@@ -1,6 +1,6 @@
 ---
 name: opencode-launch
-description: Launch headless opencode sessions from CLI. Use when you need to start a new opencode session in the background to work on a task in parallel, or when spawning work on a specific directory.
+description: Launch headless opencode sessions from CLI, and grant MCP servers (slack, atlassian, ...) to sessions. Use when you need to start a new opencode session in the background to work on a task in parallel, when spawning work on a specific directory, or when an ALREADY-RUNNING session (e.g. a swarm worker) needs an MCP server it wasn't launched with.
 allowed-tools: [Bash, Read]
 ---
 
@@ -84,11 +84,99 @@ Key caveats:
 - **slack is read + write.** `--mcp slack` enables `slack_*`, which **includes
   the post-message tool** (`slack_conversations_add_message`). A session launched
   this way can post to Slack — grant it deliberately, especially for swarm
-  workers.
-- **Per-message scope.** The `tools` override applies to the launch prompt's full
-  agent loop (multi-step tool use within that turn works). A *later, separate*
-  prompt to the same session (e.g. via a `swarm_send` from another session) is
-  **not** covered and would need its own enablement.
+  workers. Prefer `--mcp slack-ro` when the worker only needs to read.
+- **Launch-time only.** `--mcp` is a flag on `opencode-launch`; it cannot help a
+  session that is already running. For that, use `oc-mcp-enable` (next section).
+
+> **The `tools` map is not per-message.** An earlier version of this doc said the
+> `tools` override "applies only to the launch prompt". That is wrong, and it is
+> worth knowing because it is a footgun: opencode's prompt-body `tools` map is
+> `@deprecated`, and the server converts it into permission rules that
+> **overwrite `session.permission` wholesale** for the rest of the session
+> (`session/prompt.ts`, `input.tools` → `session.permission = permissions`).
+> Only the `tools[k] === false` *exposure* filter is genuinely per-message.
+> The reason a later `swarm_send` to a worker still can't reach Slack is not the
+> `tools` map expiring — it's that a worker launched **without** `--mcp` never
+> had the MCP client connected in the first place.
+
+## Granting MCP to an Already-Running Session (`oc-mcp-enable`)
+
+`opencode-launch --mcp` only works at launch. When a session is **already
+running** — the classic case: a coordinator decides mid-swarm that a worker
+needs to post to Slack — use `oc-mcp-enable` instead of killing and relaunching
+the worker (which would throw away its context):
+
+```bash
+oc-mcp-enable <session-id> slack-ro          # read-oriented
+oc-mcp-enable <session-id> slack             # READ + WRITE (can post!)
+oc-mcp-enable <session-id> slack atlassian   # several at once
+oc-mcp-enable --status <session-id>          # what's connected + the ruleset
+oc-mcp-enable --revoke <session-id> slack    # take it away again
+```
+
+**The grant takes effect on that session's NEXT prompt.** Tools are resolved per
+message, so the sequence for a swarm coordinator is: `oc-mcp-enable <worker>
+slack` → then `swarm_send` the actual instruction. Verified end to end on
+cloudbox 2026-08-05: a running session that answered "NONE" to "what slack tools
+do you have?" gained the full `slack-ro_*` set and successfully executed
+`slack-ro_channels_me` on a pigeon-delivered `swarm_send` — no relaunch.
+
+It does exactly two HTTP calls through the front door, and **both are required**:
+
+1. `POST /session/<id>/mcp/<server>/connect` — spawns/attaches the MCP client.
+   This is what puts the server's tools into the candidate tool set. There is no
+   auto-connect: a disabled server's tools simply don't exist until you connect.
+2. `PATCH /session/<id>` with a `{permission: [...]}` ruleset allowing
+   `<server>_*`. Without it the tools are *visible* to the model but every call
+   falls through to the default `ask` action, which in a headless session blocks
+   forever waiting for a human who isn't there.
+
+### Scope: connect is per-DIRECTORY, permission is per-SESSION
+
+This asymmetry matters and is easy to get wrong:
+
+- **MCP connection state is per-directory**, held in opencode's `InstanceState`
+  on the serve process that owns the session (keyed by the session's
+  `directory`). The `<session-id>` in the connect path is a **routing key** — it
+  tells the front door which serve owns the session and supplies the directory.
+  Connecting `slack` for session A therefore also connects it for **every other
+  session in the same directory on that serve**. It does *not* reach a session in
+  a different directory, and it does not survive a serve restart.
+- **Tool authorization is per-session and persistent**, living in
+  `session.permission`. `PATCH /session/<id>` **merges** (appends) rules, and the
+  last matching rule wins — unlike the prompt `tools` map, which replaces.
+
+Consequence for `--revoke`: it appends a `deny` rule for `<server>_*` on that one
+session and deliberately does **not** disconnect the server, because the
+connection is shared. Denying removes the tools from that session's view
+entirely (verified: the session answers `TOOL_UNAVAILABLE`), while leaving peers
+in the same directory untouched.
+
+### Security: this lets one session grant another the ability to post to Slack
+
+`oc-mcp-enable <worker> slack` gives that worker
+`slack_conversations_add_message` — a real, unreviewable write to a shared
+company channel, granted by an agent rather than by Jonathan. There is no
+authentication on this path: the front door is uncredentialed on loopback, so
+any process on the box (including any opencode session) can already do these two
+HTTP calls by hand. `oc-mcp-enable` makes an existing capability ergonomic; it
+does not create one. Hardening the CLI alone would therefore be theater — the
+control has to sit at the front door or in opencode itself to mean anything.
+
+Given that, the discipline is conventional rather than enforced:
+
+- **Default to `slack-ro`.** Grant `slack` (write) only when posting is the
+  actual task. Note `slack-ro` is "read-oriented", not inert — it still exposes
+  `conversations_join/leave/mark` and `usergroups_create/update`. It does not
+  expose the post-message tool, which is the property that matters here.
+- **Grant late and narrow.** Enable immediately before the `swarm_send` that
+  needs it, and `--revoke` after, rather than granting a worker Slack for its
+  whole life.
+- **Remember connect is directory-wide.** Granting write to one session in a
+  directory connects the write-capable client for every session there. Only the
+  permission rule is per-session, and only the sessions you PATCH can call it —
+  but a peer in that directory is one `PATCH` (or one prompt-body `tools` map)
+  away from the same capability.
 
 ## Landing a Writable Session in a Worktree (`--worktree`)
 

@@ -72,6 +72,7 @@
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-context = p.callPackage ./pkgs/oc-context { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
+      oc-mcp-enable = p.callPackage ./pkgs/oc-mcp-enable { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
       # NOTE: `opencode-frontdoor-route-gate` is deliberately NOT exposed here.
@@ -439,6 +440,26 @@
         }
         cat "$TMPDIR/out.txt"
         grep -q '^hm-deploy-gate-behaviour: ALL PASS$' "$TMPDIR/out.txt"
+        touch $out
+      '';
+
+      # oc-mcp-enable grants a RUNNING session an MCP server (connect + a
+      # session-scoped allow rule). The suite pins the two things a silent
+      # regression would break: the `<server>_*` permission pattern (a wrong
+      # pattern grants nothing, and the session just fails to use the tool with
+      # no error anywhere), and the source guards -- connect-before-PATCH,
+      # front-door-only, and never disconnecting a per-directory-shared client.
+      oc-mcp-enable-tests = devboxPkgs.runCommand "oc-mcp-enable-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.jq devboxPkgs.gnugrep devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash pkgs/oc-mcp-enable/test.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        # Assert the assertions RAN: a suite that exits 0 having executed
+        # nothing (e.g. jq missing, helper renamed) is green and worthless.
+        grep -q '^all oc-mcp-enable helper tests passed$' "$TMPDIR/out.txt"
         touch $out
       '';
 

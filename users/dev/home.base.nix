@@ -536,6 +536,10 @@ in
     # Headless opencode session launcher
     localPkgs.opencode-launch
 
+    # Grant an MCP server to an ALREADY-RUNNING session (the mid-flight
+    # counterpart to `opencode-launch --mcp`, which is launch-time only).
+    localPkgs.oc-mcp-enable
+
     # Identity-resolving `gh` wrapper for lgtm's multi-reviewer feature.
     # Dispatched review sessions invoke `lgtm-gh` (not `gh`) so the review
     # posts under the reviewer identity lgtm wrote into .lgtm-reviewer; it
