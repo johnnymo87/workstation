@@ -71,6 +71,7 @@
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-context = p.callPackage ./pkgs/oc-context { };
+      oc-search = p.callPackage ./pkgs/oc-search { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
@@ -737,6 +738,31 @@
         # Assert the assertions RAN. `unittest.main` exits 0 on a suite that
         # collected nothing, which is exactly the vacuously-green failure the
         # reachability guard exists to prevent.
+        grep -qE '^Ran [0-9]+ tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: no tests were collected." >&2
+          exit 1
+        }
+        grep -qE '^Ran ([3-9][0-9]|[0-9]{3,}) tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: fewer than 30 tests ran; the suite was gutted." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # oc-search's suite: same shape and same reasoning as oc-context above --
+      # hermetic stdlib unittest over temp sqlite fixtures, wired here rather
+      # than relying on pkgs/oc-search's checkPhase.
+      #
+      # The gate is set at 30 because the load-bearing test
+      # (test_index_matches_scan_for_every_substring, >1000 substrings checked
+      # three ways) is a single test method: a suite that silently lost it
+      # would still "Ran N tests". The floor catches wholesale gutting; the
+      # equivalence assertion inside the suite catches the subtle case.
+      oc-search = devboxPkgs.runCommand "oc-search-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        python3 ${self}/pkgs/oc-search/test_oc_search.py 2>&1 | tee "$TMPDIR/out.txt"
+
         grep -qE '^Ran [0-9]+ tests' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: no tests were collected." >&2
           exit 1
