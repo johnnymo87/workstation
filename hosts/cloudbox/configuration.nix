@@ -2617,8 +2617,279 @@ EOF
         export CFP_ENTERPRISE_API_KEY="$(${pkgs.coreutils}/bin/cat /run/secrets/anthropic_enterprise_api_key)"
         exec ${claude-failover-proxy}/bin/claude-failover-proxy
       ''}";
-      Restart = "on-failure";
-      RestartSec = 10;
+      # Restart=ALWAYS, not on-failure (2026-08-06 outage, 36 minutes).
+      #
+      # cfp is the baseURL of opencode's google-vertex-anthropic provider, so a
+      # dead :8789 is not a degraded mode — it is an immediate ECONNREFUSED on
+      # every Claude request, fleet-wide ("Cannot connect to API: Unable to
+      # connect", AI_APICallError).
+      #
+      # On 2026-08-06 13:54:31 a SIGTERM storm of unknown origin hit a broad set
+      # of dev-uid daemons within ~900ms. Every peer came back within ~10s;
+      # cfp stayed dead for 36 minutes until a human ran `systemctl start`.
+      # The sole difference was this line. `Restart=on-failure` does not restart
+      # on SIGHUP/SIGINT/SIGTERM/SIGPIPE — systemd scores a clean SIGTERM death
+      # as SUCCESS and schedules no restart job at all.
+      #
+      # (pigeon-daemon is also on-failure and DID come back — only because it
+      # installs a SIGTERM handler and exits 143, a non-zero code. That is an
+      # accident of the app's exit path, not of the unit config. See bead
+      # workstation-cfp-restart-audit.)
+      Restart = "always";
+      # 5s, down from 10s: matches opencode-frontdoor, the other loopback SPOF
+      # in the request path. Every second here is a second of hard failures for
+      # every live session, and cfp's startup is network-tolerant (it binds and
+      # logs before any upstream call), so there is nothing to wait for.
+      RestartSec = 5;
+    };
+    # Rate limiting DISABLED deliberately (default is 5 starts / 10s, after
+    # which systemd gives up and leaves the unit `failed` until a human
+    # intervenes). That terminal state is the exact failure this change exists
+    # to remove: a silent systemd decision not to restart a component whose
+    # absence breaks every session. For a process this cheap, "retry forever at
+    # 5s and page a human" strictly dominates "give up quietly" — a start that
+    # fails on a transient cause (unreadable sops secret during early boot,
+    # e.g.) then heals on its own, and one that fails permanently is caught by
+    # claude-failover-proxy-canary's restart-loop alert below rather than by a
+    # user noticing their sessions are broken.
+    startLimitIntervalSec = 0;
+  };
+
+  # claude-failover-proxy liveness canary.
+  #
+  # WHY IT EXISTS. The 2026-08-06 outage above was discovered only because
+  # sessions broke; nothing watched :8789. Restart=always closes the "process
+  # died" half of that hole on its own. This canary covers what systemd
+  # structurally cannot see:
+  #   1. LISTENING BUT WEDGED — the port is bound and the unit is `active`, but
+  #      the event loop no longer answers. Identical in shape to the serve/door
+  #      wedge documented in the monitoring-serve-pool skill; Restart= never
+  #      fires because nothing exits. This branch auto-restarts.
+  #   2. RESTART-LOOPING — Restart=always with no start limit (see above) means
+  #      a genuinely broken binary retries forever and *silently*. This branch
+  #      is the alarm that replaces the start limit we deliberately removed.
+  #   3. STOPPED AND STAYING STOPPED — a human `systemctl stop`, or a start that
+  #      keeps failing. Alert only; auto-starting would fight an intentional
+  #      stop, and repeatedly `start`ing a broken binary is just the restart
+  #      loop by another name.
+  #
+  # PROBE: GET /stats. It is the only unauthenticated endpoint (verified
+  # 2026-08-06: /health, /healthz, /readyz, /status and / all return 401), it is
+  # served by cfp itself rather than proxied upstream, and it returns JSON, so a
+  # parseable body proves the JS loop is actually running rather than merely
+  # that the kernel accepted a connection. A bare port check would have said
+  # "fine" for the entire wedge class this canary is for.
+  #
+  # UNKNOWN MUST NEVER ALERT (the rule the frontdoor and teamclaude canaries
+  # both learned): an unparseable body or an unexpected status logs a warning
+  # and exits 0. Only "no response at all" counts as a wedge.
+  systemd.services.claude-failover-proxy-canary = {
+    description = "claude-failover-proxy liveness canary (restart wedged cfp, alert when it is down or looping)";
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "claude-failover-proxy-canary";
+      ExecStart = "${pkgs.writeShellScript "claude-failover-proxy-canary" ''
+        set -u
+        # System-service PATH is minimal — be explicit. Deep stack dumps
+        # (eu-stack, cpu-io-split) are omitted as on the frontdoor canary:
+        # time-to-recovery matters more than depth for a request-path SPOF.
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.findutils pkgs.jq ]}
+
+        STATE=/var/lib/claude-failover-proxy-canary
+        UNIT=claude-failover-proxy.service
+        PORT=8789
+        FAILFILE="$STATE/fails"
+        DOWNFILE="$STATE/down-pending"
+        WINDOW="$STATE/restart-window"
+        NOW=$(date +%s)
+
+        # No /tmp/reset-workspace.lock check: the nightly reset does not touch
+        # cfp (it restarts the serve pool and respawns nvims only).
+
+        capture_and_restart() {
+          local reason="''${1:-unknown}"
+          TS=$(date +%Y%m%dT%H%M%S)
+          DUMP="$STATE/wedge-$TS"
+          mkdir -p "$DUMP"
+
+          # Bound persistent forensics: keep only the 10 newest wedge dumps.
+          ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+
+          PID=$(systemctl show "$UNIT" -p MainPID --value)
+          CG=$(systemctl show "$UNIT" -p ControlGroup --value)
+          if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+            for f in status wchan syscall; do
+              cat "/proc/$PID/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+            # Per-thread kernel wait channels. Read the SERIES, not one sample:
+            # a single wchan reading cannot distinguish a wedged loop from a
+            # healthy one caught mid-sleep (monitoring-serve-pool skill).
+            for t in /proc/$PID/task/*/; do
+              [ -d "$t" ] || continue  # skip the literal glob if the process just died
+              tid=$(basename "$t")
+              printf '%s %s %s\n' "$tid" "$(cat "$t/wchan" 2>/dev/null)" \
+                "$(cat "$t/comm" 2>/dev/null)" >> "$DUMP/threads" 2>/dev/null || true
+            done
+            i=0
+            while [ "$i" -lt 20 ]; do
+              printf '%s\n' "$(cat "/proc/$PID/wchan" 2>/dev/null)" >> "$DUMP/wchan-series" 2>/dev/null || true
+              sleep 0.1
+              i=$((i + 1))
+            done
+          fi
+          if [ -n "$CG" ]; then
+            for f in memory.current memory.peak memory.max memory.stat memory.pressure cpu.pressure cgroup.procs; do
+              cat "/sys/fs/cgroup$CG/$f" > "$DUMP/$f" 2>/dev/null || true
+            done
+          fi
+
+          echo "RESTARTING $UNIT (reason: $reason, pid=$PID); forensics in $DUMP"
+          systemctl restart "$UNIT"
+          rm -f "$FAILFILE"
+          # A manual restart zeroes NRestarts; drop the loop baseline with it so
+          # the next pass re-seeds instead of reading a negative delta.
+          rm -f "$WINDOW"
+        }
+
+        # ---- 1. Is it even supposed to be running, and is it? -----------------
+        ACTIVE=$(systemctl is-active "$UNIT" 2>/dev/null || true)
+        if [ "$ACTIVE" != "active" ]; then
+          rm -f "$FAILFILE"
+          DOWN_N=$(( $(cat "$DOWNFILE" 2>/dev/null || echo 0) + 1 ))
+          echo "$DOWN_N" > "$DOWNFILE"
+          echo "WARNING: $UNIT is $ACTIVE ($DOWN_N/2 consecutive)"
+          # 2 consecutive (~2 min) so a legitimate restart in flight — including
+          # one this canary just issued — cannot page.
+          [ "$DOWN_N" -ge 2 ] || exit 0
+
+          DOWN_TEXT=$(cat <<EOF
+claude-failover-proxy is $ACTIVE. EVERY opencode Claude request is failing.
+
+opencode's google-vertex-anthropic baseURL points at 127.0.0.1:8789, so with
+nothing listening every request is an immediate ECONNREFUSED, surfaced as:
+  AI_APICallError: Cannot connect to API: Unable to connect.
+
+The unit is Restart=always with no start limit, so if it is still down it was
+either stopped deliberately or it cannot start at all.
+
+To fix (on cloudbox):
+  sudo systemctl start claude-failover-proxy
+  journalctl -u claude-failover-proxy -n 50 --no-pager
+
+Precedent: 2026-08-06, dead 36 minutes, discovered only by sessions breaking.
+EOF
+)
+          ${driftAlert} "$STATE/down-alerted" "down:$ACTIVE" "$DOWN_TEXT" 900 14400
+          exit 0
+        fi
+        rm -f "$DOWNFILE" "$STATE/down-alerted"
+
+        # ---- 2. Restart-loop detection ----------------------------------------
+        # This replaces the StartLimitBurst we deliberately removed: the unit now
+        # retries forever, so the loop must be LOUD instead of terminal.
+        NR=$(systemctl show "$UNIT" -p NRestarts --value 2>/dev/null || true)
+        case "$NR" in
+          ""|*[!0-9]*)
+            echo "WARNING: could not read NRestarts for $UNIT (unknown; not alerting)"
+            ;;
+          *)
+            W_TS=""; W_NR=""
+            # Guarded by -f, NOT by `2>/dev/null` on the redirect: bash reports a
+            # failed input redirection on the SHELL's stderr before it applies
+            # the command's own 2>/dev/null, so the missing-file case would spam
+            # the journal on the very first pass.
+            if [ -f "$WINDOW" ]; then
+              { read -r W_TS; read -r W_NR; } < "$WINDOW" || true
+            fi
+            case "$W_TS" in ""|*[!0-9]*) W_TS="" ;; esac
+            case "$W_NR" in ""|*[!0-9]*) W_NR="" ;; esac
+            # Re-seed the window when it is missing, older than 15 minutes, or
+            # when NRestarts went BACKWARDS (a manual restart or a reboot zeroes
+            # it, and a negative delta would otherwise wedge the detector).
+            if [ -z "$W_TS" ] || [ -z "$W_NR" ] || [ "$((NOW - W_TS))" -ge 900 ] || [ "$NR" -lt "$W_NR" ]; then
+              printf '%s\n%s\n' "$NOW" "$NR" > "$WINDOW"
+            else
+              DELTA=$((NR - W_NR))
+              if [ "$DELTA" -ge 5 ]; then
+                echo "WARNING: $UNIT restarted $DELTA times in the last $((NOW - W_TS))s"
+                LOOP_TEXT=$(cat <<EOF
+claude-failover-proxy is restart-looping: $DELTA restarts in $((NOW - W_TS))s.
+
+It is Restart=always with startLimitIntervalSec=0, so it will keep retrying
+every 5s forever rather than landing in the failed state. That is deliberate,
+but it
+means a genuinely broken start is INVISIBLE without this alert. Sessions are
+likely seeing intermittent connection failures against 127.0.0.1:8789.
+
+Diagnose (on cloudbox):
+  journalctl -u claude-failover-proxy -n 100 --no-pager
+  systemctl status claude-failover-proxy
+
+Usual suspects: unreadable /run/secrets/teamclaude_api_key or
+/run/secrets/anthropic_enterprise_api_key (the ExecStart shim is set -e), or a
+bad cfp binary from a package bump.
+EOF
+)
+                ${driftAlert} "$STATE/loop-alerted" "loop:$W_TS" "$LOOP_TEXT" 900 14400
+              fi
+            fi
+            ;;
+        esac
+
+        # ---- 3. Liveness probe -------------------------------------------------
+        BODY_FILE=$(mktemp)
+        trap 'rm -f "$BODY_FILE"' EXIT
+
+        HTTP_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o "$BODY_FILE" -w "%{http_code}" \
+          "http://127.0.0.1:$PORT/stats")
+        CURL_EXIT=$?
+
+        # 3a. No HTTP response at all: frozen loop or dead-but-active process.
+        if [ "$CURL_EXIT" -ne 0 ] || [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" -eq 0 ]; then
+          THRESHOLD=3
+          FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+          echo "$FAILS" > "$FAILFILE"
+          echo "WARNING: $UNIT failed /stats ($FAILS/$THRESHOLD consecutive timeouts/failures)"
+          # 3 rather than the door's 2: a cfp restart drops in-flight LLM legs
+          # and loses the in-memory session->tier stickiness map, so one extra
+          # minute of confirmation is cheap insurance against a flap.
+          if [ "$FAILS" -ge "$THRESHOLD" ]; then
+            capture_and_restart "no response on /stats"
+          fi
+          exit 0
+        fi
+
+        # 3b. 200 with a parseable body: healthy.
+        if [ "$HTTP_CODE" -eq 200 ]; then
+          UPTIME=$(jq -r 'if .uptimeSeconds == null then "" else .uptimeSeconds end' "$BODY_FILE" 2>/dev/null || echo "")
+          case "$UPTIME" in
+            ""|*[!0-9.]*)
+              # Answered, so the loop is alive — but we could not read it.
+              # Unknown never alerts.
+              echo "WARNING: /stats returned 200 but uptimeSeconds was unparseable (unknown; not alerting)"
+              ;;
+            *)
+              : # healthy
+              ;;
+          esac
+          rm -f "$FAILFILE"
+          exit 0
+        fi
+
+        # 3c. Anything else: the loop answered, so it is not wedged.
+        echo "WARNING: unexpected /stats HTTP status: $HTTP_CODE (loop alive, not restarting)"
+        rm -f "$FAILFILE"
+        exit 0
+      ''}";
+    };
+  };
+
+  systemd.timers.claude-failover-proxy-canary = {
+    description = "Minutely claude-failover-proxy liveness canary";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "minutely";
+      AccuracySec = "15s";
     };
   };
 
