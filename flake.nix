@@ -55,6 +55,7 @@
       # would be a trap for anyone running `nix build .#bazel` expecting bazel.
       bazel-scope = p.callPackage ./pkgs/bazel-scope { };
       bb = p.callPackage ./pkgs/bb { };
+      pressure-sampler = p.callPackage ./pkgs/pressure-sampler { };
       beads = p.callPackage ./pkgs/beads { };
       caveman = p.callPackage ./pkgs/caveman { };
       claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
