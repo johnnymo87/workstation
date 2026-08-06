@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=71
+EXPECTED_ASSERTIONS=83
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -812,6 +812,254 @@ else
     exit 1
   fi
   printf 'SKIP  lua source check (oc_auto_attach.lua not found)\n'
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+fi
+
+# ---- canonical login PATH (workstation-v8t5) --------------------------------
+#
+# Unlike most of this file, these tests source PRODUCTION code
+# (canonical-path.sh, the same file default.nix reads) rather than a mirror of
+# it -- see workstation-dimz for why the mirroring elsewhere is a problem.
+
+canonical_src="$script_dir/canonical-path.sh"
+if [ -f "$canonical_src" ]; then
+  # shellcheck source=/dev/null
+  . "$canonical_src"
+
+  # Hermetic fixture: a stand-in /etc/set-environment plus a stand-in
+  # home-manager profile, so these assertions hold identically on a live
+  # cloudbox and inside a Nix build sandbox (which has neither).
+  cpath_tmpdir="$(mktemp -d)"
+  cpath_home="$cpath_tmpdir/home"
+  mkdir -p "$cpath_home/.nix-profile/etc/profile.d" "$cpath_home/.local/bin"
+  # Mirrors the real file's shape in the one way that matters: PATH is
+  # ASSIGNED, not appended to. That is what lets the repair overwrite a
+  # polluted inherited PATH instead of merging with it.
+  cat > "$cpath_tmpdir/set-environment" <<EOF
+export PATH="\$HOME/.nix-profile/bin:/etc/profiles/per-user/\$USER/bin:/run/current-system/sw/bin"
+EOF
+  cat > "$cpath_home/.nix-profile/etc/profile.d/hm-session-vars.sh" <<'EOF'
+export PATH="$HOME/.local/bin${PATH:+:}$PATH"
+EOF
+
+  # The derivation must find the user profile. This is the entry whose absence
+  # IS the bug: without it a created pane cannot resolve oc-pool-attach.
+  derived_path="$(HOME="$cpath_home" OC_AA_SET_ENVIRONMENT="$cpath_tmpdir/set-environment" \
+    canonical_login_path || true)"
+  case ":$derived_path:" in
+    *":$cpath_home/.nix-profile/bin:"*)
+      pass 'canonical_login_path includes ~/.nix-profile/bin' ;;
+    *)
+      printf 'FAIL  canonical_login_path missing ~/.nix-profile/bin\n        out: %s\n' "$derived_path"
+      exit 1 ;;
+  esac
+
+  # hm-session-vars carries ~/.local/bin (ba, oc-search, ensure-projects).
+  # Losing it is a quieter version of the same bug, so pin it separately.
+  case ":$derived_path:" in
+    *":$cpath_home/.local/bin:"*)
+      pass 'canonical_login_path includes ~/.local/bin from hm-session-vars' ;;
+    *)
+      printf 'FAIL  canonical_login_path missing ~/.local/bin\n        out: %s\n' "$derived_path"
+      exit 1 ;;
+  esac
+
+  # The guards must not defeat the derivation. A polluted caller has them set,
+  # and if they leaked into the child, set-environment would be skipped and the
+  # repair would return exactly the broken PATH it was called to fix.
+  guarded_path="$(HOME="$cpath_home" OC_AA_SET_ENVIRONMENT="$cpath_tmpdir/set-environment" \
+    __NIXOS_SET_ENVIRONMENT_DONE=1 __HM_SESS_VARS_SOURCED=1 \
+    canonical_login_path || true)"
+  if [ "$guarded_path" = "$derived_path" ]; then
+    pass 'canonical_login_path ignores inherited __*_DONE guards'
+  else
+    printf 'FAIL  guards changed the derived PATH\n        clean: %s\n        guarded: %s\n' \
+      "$derived_path" "$guarded_path"
+    exit 1
+  fi
+
+  # A host with no set-environment at all must degrade, not emit "".
+  if HOME="$cpath_home" OC_AA_SET_ENVIRONMENT="$cpath_tmpdir/nonexistent" \
+     canonical_login_path >/dev/null 2>&1; then
+    printf 'FAIL  canonical_login_path succeeded with no set-environment file\n'
+    exit 1
+  else
+    pass 'canonical_login_path fails closed when set-environment is absent'
+  fi
+
+  # repair_path must APPEND: the pinned runtimeInputs of the calling script
+  # keep priority, and only missing entries are added. A prepend here would
+  # silently hand tool resolution to whatever the user has installed.
+  (
+    export PATH="/oc-aa-test-decoy/bin"
+    export HOME="$cpath_home" OC_AA_SET_ENVIRONMENT="$cpath_tmpdir/set-environment"
+    repair_path
+    case "$PATH" in
+      "/oc-aa-test-decoy/bin:"*) exit 0 ;;
+      *) printf 'FAIL  repair_path did not append (decoy lost priority)\n        out: %s\n' "$PATH"; exit 1 ;;
+    esac
+  ) && pass 'repair_path appends, preserving caller priority'
+
+  (
+    export PATH="/oc-aa-test-decoy/bin"
+    export HOME="$cpath_home" OC_AA_SET_ENVIRONMENT="$cpath_tmpdir/set-environment"
+    repair_path
+    case ":$PATH:" in
+      *":$cpath_home/.nix-profile/bin:"*) exit 0 ;;
+      *) printf 'FAIL  repair_path did not add ~/.nix-profile/bin\n        out: %s\n' "$PATH"; exit 1 ;;
+    esac
+  ) && pass 'repair_path adds the missing profile bin'
+
+  # repair_path must leave PATH alone when it cannot derive one. Returning a
+  # truncated or empty PATH here would turn a degraded host into a broken one.
+  (
+    export PATH="/oc-aa-test-decoy/bin"
+    export HOME="$cpath_home" OC_AA_SET_ENVIRONMENT="$cpath_tmpdir/nonexistent"
+    repair_path || true
+    [ "$PATH" = "/oc-aa-test-decoy/bin" ] && exit 0
+    printf 'FAIL  repair_path mutated PATH despite failing\n        out: %s\n' "$PATH"
+    exit 1
+  ) && pass 'repair_path leaves PATH untouched when derivation fails'
+
+  rm -rf "$cpath_tmpdir"
+else
+  if [ -n "${OC_AA_REQUIRE_ALL_TOOLS:-}" ]; then
+    printf 'FAIL  canonical-path.sh not found at %s but OC_AA_REQUIRE_ALL_TOOLS is set (check is mis-wired)\n' "$canonical_src"
+    exit 1
+  fi
+  printf 'SKIP  canonical login PATH tests (canonical-path.sh not found)\n'
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+fi
+
+# ---- the fix is actually WIRED IN (workstation-v8t5) ------------------------
+#
+# canonical-path.sh passing its own unit tests proves nothing if default.nix
+# never sources it or never calls repair_path. These assertions are the link.
+
+prod_src="$script_dir/default.nix"
+if [ -f "$prod_src" ]; then
+  prod_text="$(cat "$prod_src")"
+
+  if [[ "$prod_text" == *"canonical-path.sh"* && "$prod_text" == *"repair_path"* ]]; then
+    pass 'default.nix embeds canonical-path.sh and calls repair_path'
+  else
+    printf 'FAIL  default.nix does not wire canonical-path.sh / repair_path\n'
+    exit 1
+  fi
+
+  # Both spawn branches must blank the guards, or a pane created down the
+  # new-session path (server not yet running) keeps the un-repairable
+  # `exec bash -l` behavior that made this bug so confusing to diagnose.
+  guard_defs="$(printf '%s\n' "$prod_text" | grep -c -- '-e __NIXOS_SET_ENVIRONMENT_DONE=' || true)"
+  guard_uses="$(printf '%s\n' "$prod_text" | grep -c -- 'pane_guard_env\[@\]' || true)"
+  if [ "$guard_defs" -ge 1 ] && [ "$guard_uses" -ge 2 ]; then
+    pass 'both tmux spawn branches blank the profile guards'
+  else
+    printf 'FAIL  guard blanking not applied to both spawn branches (defs=%s uses=%s)\n' \
+      "$guard_defs" "$guard_uses"
+    exit 1
+  fi
+
+  # The design explicitly rejects -e PATH= because tmux ignores it. If someone
+  # "helpfully" adds it back, the fix looks stronger and is not.
+  # Comment lines are stripped first: the surrounding prose necessarily
+  # mentions `-e PATH=` in order to explain why it is absent.
+  prod_code="$(printf '%s\n' "$prod_text" | grep -v '^[[:space:]]*#' || true)"
+  if [[ "$prod_code" == *"-e PATH="* ]]; then
+    printf 'FAIL  default.nix passes -e PATH= to tmux, which tmux ignores (see canonical-path.sh)\n'
+    exit 1
+  else
+    pass 'default.nix does not pass the inert -e PATH='
+  fi
+else
+  if [ -n "${OC_AA_REQUIRE_ALL_TOOLS:-}" ]; then
+    printf 'FAIL  default.nix not found at %s but OC_AA_REQUIRE_ALL_TOOLS is set (check is mis-wired)\n' "$prod_src"
+    exit 1
+  fi
+  printf 'SKIP  fix-wiring tests (default.nix not found)\n'
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+fi
+
+# ---- tmux clobbers PATH, honors other -e vars (workstation-v8t5) ------------
+#
+# This is a PROPERTY OF TMUX, not of our code, and the entire design rests on
+# it: because `-e PATH=` loses, oc-auto-attach must repair its own PATH before
+# spawning. If a future tmux starts honoring `-e PATH=`, this test fails and
+# tells us the simpler fix is now available. If tmux ever stops honoring the
+# other -e vars, the guard-blanking below silently stops working -- also caught.
+
+if require_tool tmux 'tmux -e semantics tests'; then
+  esem_sock="oc_aa_esem_test_$$"
+  esem_cleanup() { command tmux -L "$esem_sock" kill-server 2>/dev/null || true; }
+  trap 'rm -rf "$nvims_tmpdir"; scan_cleanup; esem_cleanup' EXIT
+  unset TMUX TMUX_PANE
+
+  # Absolute paths resolved BEFORE we drop into the polluted environment. The
+  # pane command must be absolute for a reason worth stating: tmux resolves it
+  # using the client's PATH, so a bare `sleep` here is not found, the pane dies
+  # at birth, and the window vanishes -- which presents as a confusing "probe
+  # pane never appeared" setup failure rather than as the PATH bug it is. That
+  # is the same mechanism under test, hit one layer earlier.
+  #
+  # `type -P`, not `command -v`: the scan block above defines a `tmux` SHADOW
+  # FUNCTION (to inject -L), and `command -v tmux` happily returns the string
+  # "tmux" for it. Handing that to `env -i` produces a 127 that this test used
+  # to swallow, surfacing as "probe pane never appeared (setup)". `type -P`
+  # searches PATH only, never functions.
+  esem_tmux="$(type -P tmux)"
+  esem_sleep="$(type -P sleep)"
+
+  command tmux -L "$esem_sock" new-session -d -s s1 -n w -- "$esem_sleep" 300
+  # Spawn from a deliberately polluted client, exactly as a locked-down systemd
+  # unit would. `env -i` keeps this deterministic from any caller environment.
+  if ! env -i PATH="/oc-aa-polluted/bin" HOME="$HOME" TERM=xterm \
+    "$esem_tmux" -L "$esem_sock" new-window -d -t 's1:' \
+      -e PATH=/oc-aa-good/bin -e __OC_AA_GUARD= -n probe -- "$esem_sleep" 300
+  then
+    printf 'FAIL  tmux -e semantics: probe spawn command itself failed (setup)\n'
+    exit 1
+  fi
+
+  probe_pid=""
+  esem_deadline=$(( SECONDS + 30 ))
+  while :; do
+    # -s: every pane in the SESSION. Without it, `-t s1:` means only s1's
+    # CURRENT window, so the probe (created with -d, never focused) is
+    # invisible and this polls until the deadline for no reason.
+    probe_pid="$(command tmux -L "$esem_sock" list-panes -s -t s1 \
+      -F '#{window_name} #{pane_pid}' | awk '$1=="probe"{print $2}')"
+    [ -n "$probe_pid" ] && [ -r "/proc/$probe_pid/environ" ] && break
+    if [ "$SECONDS" -ge "$esem_deadline" ]; then
+      printf 'FAIL  tmux -e semantics: probe pane never appeared (setup)\n'
+      exit 1
+    fi
+  done
+
+  probe_env="$(tr '\0' '\n' < "/proc/$probe_pid/environ")"
+
+  case "$probe_env" in
+    *"PATH=/oc-aa-polluted/bin"*)
+      pass 'tmux stamps the client PATH into the pane, ignoring -e PATH=' ;;
+    *"PATH=/oc-aa-good/bin"*)
+      printf 'FAIL  tmux now HONORS -e PATH= -- oc-auto-attach can stop repairing its own PATH.\n'
+      printf '        This is good news, not a regression: see canonical-path.sh.\n'
+      exit 1 ;;
+    *)
+      printf 'FAIL  tmux -e semantics: pane PATH is neither value\n        env: %s\n' "$probe_env"
+      exit 1 ;;
+  esac
+
+  case "$probe_env" in
+    *"__OC_AA_GUARD="*)
+      pass 'tmux -e sets a non-PATH var (guard blanking works)' ;;
+    *)
+      printf 'FAIL  tmux -e did not set __OC_AA_GUARD; guard blanking is inert\n        env: %s\n' "$probe_env"
+      exit 1 ;;
+  esac
+
+  esem_cleanup
+else
+  printf 'SKIP  tmux -e semantics tests (tmux not found)\n'
   SKIP_COUNT=$((SKIP_COUNT + 1))
 fi
 

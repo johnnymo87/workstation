@@ -462,7 +462,24 @@ in
     after = [ "network-online.target" "cloudflared-tunnel.service" ];
     requires = [ "cloudflared-tunnel.service" ];
 
-    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ];
+    # `/home/dev/.nix-profile` sits BEFORE pkgs.neovim on purpose, and only
+    # before it: the pinned nodejs/bash/coreutils above still win.
+    #
+    # pkgs.neovim here is a BARE neovim, kept because the daemon's own
+    # `nvim --server` RPC client needs an nvim and does not need the plugin set
+    # (adapters/nvim-rpc.ts execFile("nvim", ...); see the note on
+    # environment.systemPackages below). The problem is that it does not stay
+    # in the daemon. oc-auto-attach spawns tmux panes, and tmux stamps the
+    # CLIENT's PATH into every pane it creates -- so this bare neovim became
+    # the `nvim` that `nvims` exec'd inside the user's editor pane, shadowing
+    # the home-manager-wrapped one and failing at startup with
+    # `module 'nvim-treesitter.configs' not found`. Putting the user profile
+    # first means the wrapped nvim wins everywhere, while the bare one remains
+    # as a fallback if the profile is ever missing.
+    #
+    # This is the systemd half of workstation-v8t5; the PATH half lives in
+    # pkgs/oc-auto-attach/canonical-path.sh.
+    path = [ pkgs.nodejs pkgs.bash pkgs.coreutils "/home/dev/.nix-profile" pkgs.neovim ];
 
     serviceConfig = {
       Type = "simple";
@@ -3132,7 +3149,10 @@ EOF
     # `module 'nvim-treesitter.configs' not found` and breaking
     # :FetchJiraTicket / oc-auto-attach. Pigeon's systemd `path` still
     # references pkgs.neovim explicitly for its `nvim --server` RPC client,
-    # which doesn't need the plugin set.
+    # which doesn't need the plugin set -- but note that it re-tripped this
+    # very landmine once (workstation-v8t5): the bare neovim escaped the unit
+    # into tmux panes oc-auto-attach created for it. That `path` now lists
+    # /home/dev/.nix-profile ahead of pkgs.neovim so the wrapper wins.
     gh gnupg pinentry-curses
     nodejs  # For pigeon
     xorg.xvfb  # Provides `Xvfb`; prebuilt Cypress spawns it for headless e2e

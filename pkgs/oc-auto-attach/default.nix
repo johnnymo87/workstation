@@ -41,6 +41,22 @@ pkgs.writeShellApplication {
       printf '[oc-auto-attach] %s\n' "$*" >&2
     }
 
+${builtins.readFile ./canonical-path.sh}
+    # Repair PATH before anything else, and above all before we shell out to
+    # tmux: tmux copies OUR PATH into every pane it creates, so a pane born
+    # from a locked-down systemd caller (pigeon-daemon) inherits a PATH with no
+    # ~/.nix-profile/bin and cannot fix itself. Details in canonical-path.sh;
+    # incident in workstation-v8t5.
+    #
+    # Best-effort by design: a host without /etc/set-environment (macOS, a
+    # container) keeps the inherited PATH and everything downstream behaves
+    # exactly as it did before this call existed.
+    if repair_path; then
+      log "PATH repaired with canonical login entries"
+    else
+      log "could not derive canonical login PATH; continuing with inherited PATH"
+    fi
+
     # resolve_nvims: locate the `nvims` launcher.
     #
     # Precedence:
@@ -447,11 +463,31 @@ pkgs.writeShellApplication {
         exit 1
       fi
       log "resolved nvims at $nvims_path"
+      # Blank the "already sourced" guards in the new pane.
+      #
+      # A pane inherits these from whatever process created it (via the tmux
+      # server's global environment, or our own env). While they are set,
+      # /etc/profile skips /etc/set-environment -- so `exec bash -l`, the one
+      # thing a user would reflexively try in a pane with a broken PATH, is a
+      # silent no-op. Blanking them restores self-repair. Empty is enough: the
+      # guards test with [ -z ] / [ -n ].
+      #
+      # There is deliberately no `-e PATH=` here. tmux overrides it with the
+      # client's PATH at spawn time (verified on 3.6a; test-project-key.sh pins
+      # the behavior), which is why repair_path exists at all.
+      pane_guard_env=(
+        -e __NIXOS_SET_ENVIRONMENT_DONE=
+        -e __ETC_PROFILE_DONE=
+        -e __ETC_PROFILE_SOURCED=
+        -e __HM_SESS_VARS_SOURCED=
+      )
       if tmux has-session -t "=$target_session" 2>/dev/null; then
         pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
+          "''${pane_guard_env[@]}" \
           -t "$target_session:" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
       else
         pane_id="$(tmux new-session -d -P -F '#{pane_id}' \
+          "''${pane_guard_env[@]}" \
           -s "$target_session" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
       fi
       if [ -z "$pane_id" ]; then
