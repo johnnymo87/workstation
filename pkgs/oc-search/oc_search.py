@@ -136,6 +136,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Build or incrementally refresh the sidecar index, then exit.",
     )
     p.add_argument(
+        "--if-exists",
+        action="store_true",
+        help=(
+            "With --index: refresh an existing index, but do not create one. "
+            "What the hourly timer uses -- the first build is ~11 GB and stays "
+            "a deliberate act."
+        ),
+    )
+    p.add_argument(
         "--rebuild",
         action="store_true",
         help="With --index: discard and rebuild from scratch.",
@@ -734,6 +743,11 @@ def run(argv: list[str]) -> int:
         return 0
 
     if args.index:
+        if args.if_exists and not os.path.exists(index_path):
+            # Not an error: this is the timer finding nothing to do on a host
+            # where nobody has opted into the index yet.
+            print(f"no index at {index_path}; nothing to refresh")
+            return 0
         ok, why = fts5_trigram_available()
         if not ok:
             warn(f"this SQLite cannot build the index (FTS5 trigram: {why})")

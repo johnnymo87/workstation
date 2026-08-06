@@ -1092,7 +1092,10 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
     Unit.Description = "Refresh the oc-search trigram index";
     Service = {
       Type = "oneshot";
-      ExecStart = "${localPkgs.oc-search}/bin/oc-search --index";
+      # --if-exists: refresh an index somebody opted into, never create one.
+      # The first build is ~11 GB and ~80 minutes; a timer must not decide that
+      # on a host's behalf. `oc-search --index` by hand is the opt-in.
+      ExecStart = "${localPkgs.oc-search}/bin/oc-search --index --if-exists";
       # This walks the same disk opencode is actively writing to; never win a
       # priority contest against the thing whose data we are indexing.
       Nice = 19;

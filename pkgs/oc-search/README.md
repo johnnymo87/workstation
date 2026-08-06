@@ -21,6 +21,7 @@ ses_0e1f35200ffeh8OCz65MM0vpfd  Code review Task 1 (@code-reviewer subag   /home
     oc-search --json --limit 10 mono        # machine-readable
 
     oc-search --index                       # build / refresh the index
+    oc-search --index --if-exists           # refresh only if one exists (timer)
     oc-search --index --rebuild             # start over
     oc-search --index-info                  # what state is the index in?
     oc-search --no-index mono               # ignore the index (a full scan)
@@ -155,7 +156,9 @@ Consequences worth stating plainly:
 
 A user timer (`oc-search-index.timer`, hourly, `Nice=19`,
 `IOSchedulingClass=idle`) keeps the tail short. It is an optimisation, not a
-correctness requirement.
+correctness requirement, and it runs `--index --if-exists`: it refreshes an
+index somebody opted into and never creates one. Deciding to spend 11 GB is a
+human's call, made once per host by running `oc-search --index`.
 
 ### 3. The fallback is parallel, and it is loud
 

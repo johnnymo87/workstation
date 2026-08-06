@@ -38,7 +38,7 @@ The full id is required — slugs are not unique and `opencode -s` won't accept 
 
 ```bash
 oc-search --index-info     # is there one, and how far behind is it?
-oc-search --index          # build or catch it up (first build: ~25 min, ~11 GB)
+oc-search --index          # build or catch it up
 ```
 
 Searches are **correct either way** — without an index oc-search falls back to
@@ -46,8 +46,11 @@ scanning all 4.1 GB of transcript, which takes minutes and says so on stderr.
 A stale index is also safe: everything newer than the index watermark is
 resolved by a bounded tail scan.
 
-An hourly user timer (`oc-search-index.timer`) keeps it caught up on NixOS
-hosts, so normally you never touch this.
+The first build is a deliberate act: **~80 minutes and ~10.9 GB** in
+`~/.cache/oc-search`. Check `df -h` first. After that an hourly user timer
+(`oc-search-index.timer`) keeps it caught up in about a second a run — but it
+runs `--index --if-exists`, so it will never create an index you did not ask
+for.
 
 ## Calling it from a script
 

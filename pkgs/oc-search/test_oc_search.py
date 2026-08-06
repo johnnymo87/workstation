@@ -516,6 +516,41 @@ class IndexInfoTest(unittest.TestCase):
         f.close()
 
 
+class IfExistsTest(unittest.TestCase):
+    """The timer must never create an 11 GB index nobody asked for."""
+
+    def setUp(self):
+        self.f = Fixture()
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="FbmEmployeeCutoffRepublish")
+        self.f.commit()
+
+    def tearDown(self):
+        self.f.close()
+
+    def test_refuses_to_create_one(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = oc_search.run(
+                ["--index", "--if-exists", "--db", self.f.db, "--index-path", self.f.index]
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing to refresh", out.getvalue())
+        self.assertFalse(os.path.exists(self.f.index))
+
+    def test_refreshes_an_existing_one(self):
+        self.f.build_index()
+        add_part(self.f.conn, "ses_a", type="tool", text="more FbmEmployeeCutoffRepublish")
+        self.f.commit()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = oc_search.run(
+                ["--index", "--if-exists", "--db", self.f.db, "--index-path", self.f.index]
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("indexed 1 rows", out.getvalue())
+
+
 class Fts5CapabilityTest(unittest.TestCase):
     def test_this_sqlite_can_do_trigram_fts(self):
         """If this ever fails, the index is not buildable on this platform.
