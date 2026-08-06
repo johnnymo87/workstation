@@ -205,13 +205,13 @@ let
   # mirroring the pagerduty-mcp / rollbar-mcp token-gated pattern. Pinned to
   # avoid surprise upstream changes. Several tools are writes (create/update/
   # delete feature|variable), so the entry stays enabled:false by default.
-  devcycle-mcp = pkgs.writeShellApplication {
-    name = "devcycle-mcp";
-    runtimeInputs = [ pkgs.nodejs ];
-    text = ''
-      exec npx -y --package '@devcycle/cli@6.3.2' dvc-mcp "$@"
-    '';
-  };
+  #
+  # This used to shell out to `npx -y --package '@devcycle/cli@6.3.2' dvc-mcp`.
+  # It now runs the `dvc-mcp` bin out of pkgs/dvc — the same derivation that
+  # puts the `dvc` CLI on PATH — so the MCP server and the CLI cannot drift to
+  # different @devcycle/cli versions, and there is no npx resolve on startup.
+  # The version pin lives in pkgs/dvc/default.nix.
+  devcycle-mcp = "${localPkgs.dvc}/bin/dvc-mcp";
 
   # ---------------------------------------------------------------------------
   # MCP credential indirection ({file:...} references, not values)
@@ -1272,7 +1272,7 @@ in
   # Inject the DevCycle MCP entry on macOS.
   # Uses DevCycle's local stdio server (dvc-mcp from @devcycle/cli); the hosted
   # remote endpoint is unusable (no dynamic client registration — see the
-  # devcycle-mcp wrapper above). Two auth modes, either of which surfaces the
+  # devcycle-mcp binding above). Two auth modes, either of which surfaces the
   # entry:
   #   1. Client credentials in Keychain (devcycle-client-id/-secret[/-project-key])
   #      -> injected into the `environment` block (durable, reproducible path).
@@ -1326,7 +1326,7 @@ in
       if [[ ( "$have_creds" -eq 1 || "$have_sso" -eq 1 ) && -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
         ${pkgs.jq}/bin/jq \
-          --arg command "${devcycle-mcp}/bin/devcycle-mcp" \
+          --arg command "${devcycle-mcp}" \
           --argjson env "$env_json" \
           '.mcp.devcycle = ({
             "type": "local",
@@ -1385,7 +1385,7 @@ in
       if [[ ( "$have_creds" -eq 1 || "$have_sso" -eq 1 ) && -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
         ${pkgs.jq}/bin/jq \
-          --arg command "${devcycle-mcp}/bin/devcycle-mcp" \
+          --arg command "${devcycle-mcp}" \
           --argjson env "$env_json" \
           '.mcp.devcycle = ({
             "type": "local",
