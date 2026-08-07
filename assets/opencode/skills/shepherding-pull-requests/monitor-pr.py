@@ -255,20 +255,133 @@ def fetch_review_threads(owner, repo, pr_num):
     return threads
 
 
-def detect_lgtm_bound(owner, repo):
-    """Read ~/projects/lgtm/lgtm.yml and check whether owner/repo is listed.
-    Matches lines like "  owner/repo:" (two-space indent + repo key + colon)
-    per SKILL.md "Once, before the loop". Returns False if the file is
-    absent (consistent with the skill: devbox/personal hosts treat all PRs
-    as not lgtm-bound)."""
+def _parse_lgtm_config(owner, repo):
+    """Minimal indentation-based reader for the two things lgtm-boundness needs
+    from lgtm.yml: whether owner/repo is listed under `repos:`, and the set of
+    logins allowed to AUTHOR a dispatched PR for it.
+
+    Deliberately stdlib-only and line-based, matching the rest of this file's
+    no-yq/no-PyYAML posture. Structure it understands:
+
+        authors:                 # col 0  -> global author allowlist
+          - login                # col 2
+        onRequestAuthors:        # col 0  -> reviewed only when the daemon's
+          - login                #          reviewer is explicitly requested
+        repos:                   # col 0
+          owner/repo:            # col 2
+            authors:             # col 4  -> repo-scoped author allowlist
+              - login            # col 6
+
+    Returns (repo_listed: bool, allowed_authors: set[str]).
+    """
+    repo_listed = False
+    allowed = set()
+    global_authors = set()  # only `authors:`; needed for the back-compat rule below
+    per_repo_any = False
+
+    section = None          # current col-0 key
+    in_repos = False
+    cur_repo = None         # current "owner/repo" under repos:
+    repo_sub = None         # current col-4 key inside a repo block
+
+    item_re = re.compile(r"^(\s*)-\s+(\S+)\s*$")
+    key_re = re.compile(r"^(\s*)([^\s#][^:]*):\s*$")
+    target = f"{owner}/{repo}"
+
+    with open(LGTM_CONFIG_PATH) as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+
+            m = key_re.match(line)
+            if m:
+                indent, key = len(m.group(1)), m.group(2).strip()
+                if indent == 0:
+                    section, in_repos, cur_repo, repo_sub = key, key == "repos", None, None
+                elif in_repos and indent == 2:
+                    cur_repo, repo_sub = key, None
+                    if key == target:
+                        repo_listed = True
+                elif in_repos and indent == 4:
+                    repo_sub = key
+                continue
+
+            m = item_re.match(line)
+            if not m:
+                continue
+            indent, value = len(m.group(1)), m.group(2)
+
+            # Global lists. `reviewers` is included because lgtm treats the reviewer
+            # pool as implicitly-trusted AUTHORS -- see filterByAuthors in
+            # lgtm/src/discover.ts: `new Set([...authors, ...reviewers])`.
+            if not in_repos and indent == 2 and section in ("authors", "reviewers", "onRequestAuthors"):
+                allowed.add(value)
+                if section == "authors":
+                    global_authors.add(value)
+            # Repo-scoped authors. Track presence for the back-compat rule, but only
+            # admit the ones belonging to the repo we are asked about.
+            elif in_repos and indent == 6 and repo_sub == "authors":
+                per_repo_any = True
+                if cur_repo == target:
+                    allowed.add(value)
+
+    # Back-compat, mirroring filterByAuthors: with NO author config at all
+    # (`authors` empty AND every per-repo list empty) there is no author
+    # filtering and every PR passes.
+    if not global_authors and not per_repo_any:
+        return repo_listed, None
+
+    return repo_listed, allowed
+
+
+def detect_lgtm_bound(owner, repo, author_login=None):
+    """Whether the lgtm daemon will actually dispatch a review for THIS PR.
+
+    Two conditions, and the second one is the whole point of this function
+    having grown past a grep:
+
+      1. owner/repo is listed under `repos:` in ~/projects/lgtm/lgtm.yml, and
+      2. the PR's AUTHOR appears in one of the author allowlists -- global
+         `authors:`, `onRequestAuthors:`, or the repo's own `authors:`.
+
+    Returns False if the config is absent (devbox/personal hosts treat all PRs
+    as not lgtm-bound), and False if the author is unknown to the caller, which
+    fails toward the cheaper mistake -- see below.
+
+    WHY THE AUTHOR CHECK IS LOAD-BEARING AND NOT A REFINEMENT. This used to test
+    repo-presence alone, and SKILL.md justified the looseness by observing that
+    lgtm's `paths:` sub-filter might make us over-wait, which is "fine, the user
+    can short-circuit". That argument is true for `paths:` and FALSE here, and
+    the difference is bounded versus unbounded:
+
+      * paths over-waiting  -> the gate opens for some PRs; you wait too long.
+      * AUTHOR over-waiting -> the gate NEVER opens for this author. The loop
+        waits for an approval that cannot arrive, so it either polls forever or
+        the agent invents a reason to stop -- which is worse than either.
+
+    Observed 2026-08-07 on food-truck/mono#4143: the author appears in lgtm.yml
+    only under `reviewers:` (and `ownerReviewers:`), never in any author list.
+    That is correct by design -- lgtm is that user's own review daemon and does
+    not review PRs they authored -- but repo-presence alone reported the PR as
+    lgtm-bound and the monitor waited on an approval no daemon would ever post.
+    Presence in the config is not coverage; `reviewers:` and `authors:` are
+    different roles and only the latter gates dispatch.
+
+    Fails toward NOT-lgtm-bound when the author is unavailable: a false negative
+    costs an early exit the user can correct, a false positive costs an
+    unbounded wait nobody notices.
+    """
     if not LGTM_CONFIG_PATH.is_file():
         return False
-    needle = re.compile(rf"^  {re.escape(owner)}/{re.escape(repo)}:\s*$")
-    with open(LGTM_CONFIG_PATH) as f:
-        for line in f:
-            if needle.match(line.rstrip("\n")):
-                return True
-    return False
+    repo_listed, allowed_authors = _parse_lgtm_config(owner, repo)
+    if not repo_listed:
+        return False
+    if allowed_authors is None:
+        return True          # no author filtering configured; every author passes
+    if not author_login:
+        return False
+    return author_login in allowed_authors
 
 
 # --- Review classification -------------------------------------------------
@@ -510,11 +623,14 @@ def main():
     elif args.lgtm_bound == "no":
         lgtm_bound = False
     else:
-        lgtm_bound = detect_lgtm_bound(owner, repo)
+        lgtm_bound = detect_lgtm_bound(
+            owner, repo, (pr.get("author") or {}).get("login")
+        )
 
     print(f"Monitoring PR #{pr_num}: {pr['url']}")
     print(f"  {pr['baseRefName']} <- {pr['headRefName']}")
-    print(f"  lgtm-bound: {lgtm_bound}")
+    pr_author = (pr.get("author") or {}).get("login") or "unknown"
+    print(f"  lgtm-bound: {lgtm_bound}  (author: {pr_author})")
     print(f"  budget: {args.budget_seconds}s @ {args.interval}s intervals")
 
     deadline = time.monotonic() + args.budget_seconds
