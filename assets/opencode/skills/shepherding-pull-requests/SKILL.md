@@ -189,34 +189,35 @@ On non-lgtm-bound repos (this workstation repo, personal projects, OSS), there i
 
 `~/projects/lgtm` runs an AI review daemon on a configured set of repos. If this PR is in scope, you MUST wait for a non-bot reviewer (lgtm dispatches under a real human GitHub identity) to APPROVE before exiting -- CI green + comments resolved is necessary but not sufficient. lgtm typically dispatches within ~10 min of CI going green.
 
-**Two conditions, and repo presence is only the first.** A PR is lgtm-bound iff the repo is listed AND the PR's **author** appears in one of the author allowlists:
+**Two conditions, and repo presence is only the first.** A PR is lgtm-bound iff the repo is listed AND the PR's **author** is admitted. The effective allowlist is `authors ∪ reviewers ∪ repos[R].authors` (plus `onRequestAuthors`, which is admitted only when an lgtm reviewer is explicitly requested). **`reviewers` is in that union** — lgtm treats its reviewer pool as implicitly-trusted authors, since they are already trusted enough to review as. Source of truth is `filterByAuthors` in `lgtm/src/discover.ts`; `monitor-pr.py` implements it, including the back-compat rule that no author config at all means no filtering.
 
 ```bash
 REPO=<owner>/<repo>; AUTHOR=$(gh pr view <n> --json author --jq .author.login)
-
-# 1. Is the repo in scope? Matches "  <owner>/<repo>:" (two-space indent).
 grep -qE "^  ${REPO}:" ~/projects/lgtm/lgtm.yml || echo "NOT lgtm-bound (repo not listed)"
-
-# 2. Is the AUTHOR allowed? Global `authors:`, `onRequestAuthors:`, or the
-#    repo's own `authors:`. Cheap approximation; monitor-pr.py parses properly.
+# Author admitted? Any of authors / reviewers / repo authors / onRequestAuthors.
+# Crude; prefer monitor-pr.py, which parses the sections properly.
 grep -qE "^  - ${AUTHOR}$|^      - ${AUTHOR}$" ~/projects/lgtm/lgtm.yml \
-  || echo "NOT lgtm-bound (author not in any author allowlist)"
+  || echo "NOT lgtm-bound (author in no allowlist)"
 ```
 
-If `~/projects/lgtm/lgtm.yml` doesn't exist on this machine (e.g. devbox), treat the PR as **not lgtm-bound** and proceed with the simpler exit condition.
+If `~/projects/lgtm/lgtm.yml` doesn't exist on this machine (e.g. devbox), treat the PR as **not lgtm-bound**.
 
-> ⚠ **THE AUTHOR CHECK IS NOT OPTIONAL, AND THIS SECTION USED TO SAY IT WAS.** The old text read *"Repo presence is sufficient -- don't try to replicate lgtm's `paths:` sub-filter; if lgtm ends up skipping the PR you'll just be over-waiting, which the user can short-circuit."* That argument is sound for `paths:` and **collapses for the author gate**, and the difference is bounded versus unbounded:
+> ⚠ **DO NOT INFER LGTM-BOUNDNESS FROM CONFIG SHAPE — READ `discover.ts`, OR JUST WAIT LONGER.** This warning exists because the author of this very section got it wrong in the expensive direction and nearly shipped the error.
 >
-> | filter | if you get it wrong | cost |
+> The reasoning went: *"my login appears in `lgtm.yml` only under `reviewers:`, never in an author list, and lgtm is my own daemon so it won't review my own PRs — therefore this PR can never be dispatched and polling is futile."* Structurally plausible, internally consistent, and **false**. `reviewers` is part of the author union, and the daemon dispatched **7 minutes after polling stopped**. The correct action had been to keep waiting; the "finding" was a false positive produced by reading config layout instead of the dispatch code.
+>
+> **The generalisable trap: a config file tells you what is configured, not what the program does with it.** `reviewers:` and `authors:` look like disjoint roles and are unioned one function call away. If you need to know whether a daemon will act, read the code that decides, or observe it — do not derive it from key names.
+>
+> **What survives, and is why the author check is still here:** for an author in *none* of those lists, repo-presence alone is genuinely wrong, and the failure is asymmetric —
+>
+> | filter wrong | consequence | cost |
 > |---|---|---|
-> | `paths:` | the gate opens for other PRs; you over-wait on this one | **bounded** — the user short-circuits |
-> | **`authors:`** | the gate **never** opens for this author | **unbounded** — the loop waits for an approval that cannot arrive |
+> | `paths:` | gate opens for other PRs; you over-wait on this one | **bounded** — user short-circuits |
+> | **`authors:`** | gate **never** opens for this author | **unbounded** — waits for an approval that cannot arrive |
 >
-> Under an unbounded wait the loop either polls forever or the agent quietly invents a reason to stop, and the second is worse than the first because it looks like a decision.
+> A safety argument that holds for a bounded delay and gets silently reused for an unbounded one is its own defect class — which is why the check is worth having even though the case that prompted it turned out not to be an instance.
 >
-> **`reviewers:` and `authors:` are different roles, and only the latter gates dispatch.** Observed 2026-08-07 on `food-truck/mono#4143`: the author appeared in `lgtm.yml` under `reviewers:` and `ownerReviewers:` and in **none** of the three author lists. That is correct by design — lgtm is that user's own review daemon and does not review PRs they authored — but repo-presence alone reported the PR as lgtm-bound, and the monitor sat waiting for a daemon that was never going to dispatch. **Presence in the config is not coverage.** Anyone reading the file casually sees their login all over it and assumes otherwise.
->
-> Fail toward **not**-lgtm-bound when the author is unknown: a false negative costs an early exit the user can correct, a false positive costs a silent unbounded wait.
+> **Fail toward lgtm-bound (keep waiting) when unsure.** Over-waiting is visible and interruptible; a wrong early exit looks like a decision and silently drops the PR. Note this is the opposite of what an earlier draft of this section said.
 
 Cache the answer in a shell var (e.g. `LGTM_BOUND=yes`) for the loop.
 

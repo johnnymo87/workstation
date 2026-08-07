@@ -276,6 +276,8 @@ def _parse_lgtm_config(owner, repo):
     """
     repo_listed = False
     allowed = set()
+    global_authors = set()  # only `authors:`; needed for the back-compat rule below
+    per_repo_any = False
 
     section = None          # current col-0 key
     in_repos = False
@@ -310,12 +312,25 @@ def _parse_lgtm_config(owner, repo):
                 continue
             indent, value = len(m.group(1)), m.group(2)
 
-            # Global lists.
-            if not in_repos and indent == 2 and section in ("authors", "onRequestAuthors"):
+            # Global lists. `reviewers` is included because lgtm treats the reviewer
+            # pool as implicitly-trusted AUTHORS -- see filterByAuthors in
+            # lgtm/src/discover.ts: `new Set([...authors, ...reviewers])`.
+            if not in_repos and indent == 2 and section in ("authors", "reviewers", "onRequestAuthors"):
                 allowed.add(value)
-            # Repo-scoped authors, only for the repo we care about.
-            elif in_repos and indent == 6 and cur_repo == target and repo_sub == "authors":
-                allowed.add(value)
+                if section == "authors":
+                    global_authors.add(value)
+            # Repo-scoped authors. Track presence for the back-compat rule, but only
+            # admit the ones belonging to the repo we are asked about.
+            elif in_repos and indent == 6 and repo_sub == "authors":
+                per_repo_any = True
+                if cur_repo == target:
+                    allowed.add(value)
+
+    # Back-compat, mirroring filterByAuthors: with NO author config at all
+    # (`authors` empty AND every per-repo list empty) there is no author
+    # filtering and every PR passes.
+    if not global_authors and not per_repo_any:
+        return repo_listed, None
 
     return repo_listed, allowed
 
@@ -362,6 +377,8 @@ def detect_lgtm_bound(owner, repo, author_login=None):
     repo_listed, allowed_authors = _parse_lgtm_config(owner, repo)
     if not repo_listed:
         return False
+    if allowed_authors is None:
+        return True          # no author filtering configured; every author passes
     if not author_login:
         return False
     return author_login in allowed_authors
