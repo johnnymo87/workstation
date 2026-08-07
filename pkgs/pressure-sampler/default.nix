@@ -66,6 +66,15 @@
 # hurt", utilisation says "how much of what we pay for was used". Measured while
 # writing this: load 30.11 on 16 cores with cpu some avg10=35%.
 #
+# WHY `kernel` IS RECORDED, not just anon+file: memory.current = anon + file +
+# kernel exactly (verified on a live serve cgroup), and the residual is not small.
+# On 2026-08-06 :4098 read 14.00G with anon 1.40G and file 6.82G -- leaving ~5.78G
+# that the first schema simply could not name, on a cgroup whose whole cap is 14G.
+# A third of a serve's footprint being unattributable defeats the point. `slab`,
+# `pagetables` and `shmem` are a breakdown OF kernel (not additional to it) and are
+# recorded for diagnosis: heavy build IO inflates dentry/inode slab, and that is
+# charged to whichever cgroup faulted it in.
+#
 # io.stat IS ABSENT UNDER user@1000: its cgroup.subtree_control is `cpu memory
 # pids`, with no `io` delegated, so bazel scopes report no IO bytes and those
 # columns stay empty for them. They populate for the host and the system.slice
@@ -88,11 +97,11 @@ writeShellApplication {
 
     mkdir -p "$OUT_DIR"
     TS=$(date -u +%s)
-    OUT="$OUT_DIR/pressure-v1-$(date -u -d "@$TS" +%Y-%m-%d).tsv"
+    OUT="$OUT_DIR/pressure-v2-$(date -u -d "@$TS" +%Y-%m-%d).tsv"
 
     # Schema version is in the FILENAME, not just here: samples.tsv/-v2/-v3 taught
     # us that a series whose shape changed silently becomes unreadable later.
-    COLS="ts	subject	detail	mem_current	mem_peak	mem_max	anon	file	swap	ev_max	ev_oom_kill	ev_max_local	ev_oom_local	cpu_usage_us	cpu_some_us	cpu_full_us	mem_some_us	mem_full_us	io_some_us	io_full_us	io_rbytes	io_wbytes"
+    COLS="ts	subject	detail	mem_current	mem_peak	mem_max	anon	file	kernel	slab	pagetables	shmem	swap	ev_max	ev_oom_kill	ev_max_local	ev_oom_local	cpu_usage_us	cpu_some_us	cpu_full_us	mem_some_us	mem_full_us	io_some_us	io_full_us	io_rbytes	io_wbytes"
     if [ ! -f "$OUT" ]; then
       printf '%s\n' "$COLS" > "$OUT"
     fi
@@ -133,13 +142,17 @@ writeShellApplication {
     emit_cgroup() { # <subject> <detail> <cgroup path>
       local subj="$1" detail="$2" cg="$3"
       [ -d "$cg" ] || return 0
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$TS" "$subj" "$detail" \
         "$(cgfield "$cg/memory.current")" \
         "$(cgfield "$cg/memory.peak")" \
         "$(cgfield "$cg/memory.max")" \
         "$(statfield "$cg/memory.stat" anon)" \
         "$(statfield "$cg/memory.stat" file)" \
+        "$(statfield "$cg/memory.stat" kernel)" \
+        "$(statfield "$cg/memory.stat" slab)" \
+        "$(statfield "$cg/memory.stat" pagetables)" \
+        "$(statfield "$cg/memory.stat" shmem)" \
         "$(cgfield "$cg/memory.swap.current")" \
         "$(evfield "$cg/memory.events" max)" \
         "$(evfield "$cg/memory.events" oom_kill)" \
@@ -168,9 +181,9 @@ writeShellApplication {
       # idle+iowait, scaled by USER_HZ (100 on this kernel). Same units as a
       # cgroup's cpu.stat usage_usec, so host and cgroup rows are comparable.
       cpu_busy_us=$(awk '/^cpu /{idle=$5+$6; tot=0; for(i=2;i<=NF;i++) tot+=$i; printf "%d", (tot-idle)*10000; exit}' "$PROC_ROOT/stat")
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$TS" "host" "-" \
-        "$(( mem_total - mem_avail ))" "" "$mem_total" "" "" "$swap_used" "" "" "" "" \
+        "$(( mem_total - mem_avail ))" "" "$mem_total" "" "" "" "" "" "" "$swap_used" "" "" "" "" \
         "$cpu_busy_us" \
         "$(psi_total "$PROC_ROOT/pressure/cpu" some)" \
         "$(psi_total "$PROC_ROOT/pressure/cpu" full)" \
