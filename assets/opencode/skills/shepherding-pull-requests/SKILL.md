@@ -155,7 +155,7 @@ Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate --
 | `2` | Unrecoverable error (could not query GitHub) | Surface to user; don't silently retry. |
 | `3` | Budget elapsed, still idle-waiting (CI pending or lgtm-bound waiting on APPROVAL) | Re-invoke immediately. |
 
-`--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness, so the manual grep in "Once, before the loop" can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
+`--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness -- checking both that the repo is listed AND that the PR's author is in an author allowlist (see "Once, before the loop" for why the second half is load-bearing) -- so the manual grep there can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
 
 **What the script does NOT do:** step 5 (the fix step -- investigating failed CI, replying to inline threads, calling `resolveReviewThread`, pushing fixes, re-requesting review). Those stay yours. The script just tells you what to fix and lets you back in to do it.
 
@@ -189,13 +189,34 @@ On non-lgtm-bound repos (this workstation repo, personal projects, OSS), there i
 
 `~/projects/lgtm` runs an AI review daemon on a configured set of repos. If this PR is in scope, you MUST wait for a non-bot reviewer (lgtm dispatches under a real human GitHub identity) to APPROVE before exiting -- CI green + comments resolved is necessary but not sufficient. lgtm typically dispatches within ~10 min of CI going green.
 
+**Two conditions, and repo presence is only the first.** A PR is lgtm-bound iff the repo is listed AND the PR's **author** appears in one of the author allowlists:
+
 ```bash
-# Grep the repo key out of the YAML. Matches lines like "  <owner>/<repo>:"
-# (two-space indent, repo key, trailing colon). Avoids a yq dependency.
-grep -qE "^  <owner>/<repo>:" ~/projects/lgtm/lgtm.yml && echo lgtm-bound
+REPO=<owner>/<repo>; AUTHOR=$(gh pr view <n> --json author --jq .author.login)
+
+# 1. Is the repo in scope? Matches "  <owner>/<repo>:" (two-space indent).
+grep -qE "^  ${REPO}:" ~/projects/lgtm/lgtm.yml || echo "NOT lgtm-bound (repo not listed)"
+
+# 2. Is the AUTHOR allowed? Global `authors:`, `onRequestAuthors:`, or the
+#    repo's own `authors:`. Cheap approximation; monitor-pr.py parses properly.
+grep -qE "^  - ${AUTHOR}$|^      - ${AUTHOR}$" ~/projects/lgtm/lgtm.yml \
+  || echo "NOT lgtm-bound (author not in any author allowlist)"
 ```
 
-If `~/projects/lgtm/lgtm.yml` doesn't exist on this machine (e.g. devbox), treat the PR as **not lgtm-bound** and proceed with the simpler exit condition. Repo presence is sufficient -- don't try to replicate lgtm's `paths:` sub-filter; if lgtm ends up skipping the PR you'll just be over-waiting, which the user can short-circuit.
+If `~/projects/lgtm/lgtm.yml` doesn't exist on this machine (e.g. devbox), treat the PR as **not lgtm-bound** and proceed with the simpler exit condition.
+
+> ⚠ **THE AUTHOR CHECK IS NOT OPTIONAL, AND THIS SECTION USED TO SAY IT WAS.** The old text read *"Repo presence is sufficient -- don't try to replicate lgtm's `paths:` sub-filter; if lgtm ends up skipping the PR you'll just be over-waiting, which the user can short-circuit."* That argument is sound for `paths:` and **collapses for the author gate**, and the difference is bounded versus unbounded:
+>
+> | filter | if you get it wrong | cost |
+> |---|---|---|
+> | `paths:` | the gate opens for other PRs; you over-wait on this one | **bounded** — the user short-circuits |
+> | **`authors:`** | the gate **never** opens for this author | **unbounded** — the loop waits for an approval that cannot arrive |
+>
+> Under an unbounded wait the loop either polls forever or the agent quietly invents a reason to stop, and the second is worse than the first because it looks like a decision.
+>
+> **`reviewers:` and `authors:` are different roles, and only the latter gates dispatch.** Observed 2026-08-07 on `food-truck/mono#4143`: the author appeared in `lgtm.yml` under `reviewers:` and `ownerReviewers:` and in **none** of the three author lists. That is correct by design — lgtm is that user's own review daemon and does not review PRs they authored — but repo-presence alone reported the PR as lgtm-bound, and the monitor sat waiting for a daemon that was never going to dispatch. **Presence in the config is not coverage.** Anyone reading the file casually sees their login all over it and assumes otherwise.
+>
+> Fail toward **not**-lgtm-bound when the author is unknown: a false negative costs an early exit the user can correct, a false positive costs a silent unbounded wait.
 
 Cache the answer in a shell var (e.g. `LGTM_BOUND=yes`) for the loop.
 
