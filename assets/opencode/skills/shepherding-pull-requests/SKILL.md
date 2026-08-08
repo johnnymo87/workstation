@@ -157,6 +157,8 @@ Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate --
 
 `--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness -- checking both that the repo is listed AND that the PR's author is in an author allowlist (see "Once, before the loop" for why the second half is load-bearing) -- so the manual grep there can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
 
+**Prefer `auto`, and treat an override as a claim you owe evidence for.** The detector re-reads `lgtm.yml` on every run, so `auto` tracks config changes; a hardcoded `--lgtm-bound no` does not, and outlives whatever justified it. When you do override, the script now runs the detector anyway and labels the printed value `OVERRIDE ...` — warning on stderr when the two disagree. **A line reading `lgtm-bound: False` under an override is your own flag echoed back, never a confirmation of it.** If you are putting an override in a resumption prompt, quote the auto value beside it, because the post-compaction session cannot see how you derived it.
+
 **What the script does NOT do:** step 5 (the fix step -- investigating failed CI, replying to inline threads, calling `resolveReviewThread`, pushing fixes, re-requesting review). Those stay yours. The script just tells you what to fix and lets you back in to do it.
 
 The text loop body below documents the same logic by hand. Read it to understand what the script is doing -- and use it directly when working in an environment that doesn't have the script deployed.
@@ -205,6 +207,10 @@ If `~/projects/lgtm/lgtm.yml` doesn't exist on this machine (e.g. devbox), treat
 > ⚠ **DO NOT INFER LGTM-BOUNDNESS FROM CONFIG SHAPE — READ `discover.ts`, OR JUST WAIT LONGER.** This warning exists because the author of this very section got it wrong in the expensive direction and nearly shipped the error.
 >
 > The reasoning went: *"my login appears in `lgtm.yml` only under `reviewers:`, never in an author list, and lgtm is my own daemon so it won't review my own PRs — therefore this PR can never be dispatched and polling is futile."* Structurally plausible, internally consistent, and **false**. `reviewers` is part of the author union, and the daemon dispatched **7 minutes after polling stopped**. The correct action had been to keep waiting; the "finding" was a false positive produced by reading config layout instead of the dispatch code.
+>
+> **This has now happened twice, and the second time this box was already deployed and was cited by the session that then made the error.** On 2026-08-08 a session loaded this skill at 00:14:47Z, wrote *"this is precisely the trap the skill documents"*, and ten seconds later concluded **not** lgtm-bound for `johnnymo87` on `food-truck/mono#4165` — reading the trap as the finding. The daemon had in fact reviewed that PR at 00:19:57Z, **3m42s after creation and ~7 minutes before the session declared such a review impossible.** A warning that names the wrong conclusion can be absorbed as evidence *for* it, so check the value instead of recognising the shape: run the detector, or read `discover.ts`.
+>
+> **It then confirmed the error against itself.** Having passed `--lgtm-bound no`, it read the script's `lgtm-bound: False` back as *"the script independently confirms"* — its own input, reflected. Any override that silently replaces a detection manufactures exactly this: a control that cannot disagree with you. (Fixed: overrides are now labelled and warn on disagreement.)
 >
 > **The generalisable trap: a config file tells you what is configured, not what the program does with it.** `reviewers:` and `authors:` look like disjoint roles and are unioned one function call away. If you need to know whether a daemon will act, read the code that decides, or observe it — do not derive it from key names.
 >

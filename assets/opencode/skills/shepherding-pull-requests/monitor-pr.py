@@ -342,8 +342,10 @@ def detect_lgtm_bound(owner, repo, author_login=None):
     having grown past a grep:
 
       1. owner/repo is listed under `repos:` in ~/projects/lgtm/lgtm.yml, and
-      2. the PR's AUTHOR appears in one of the author allowlists -- global
-         `authors:`, `onRequestAuthors:`, or the repo's own `authors:`.
+      2. the PR's AUTHOR appears in the effective allowlist, which is
+         `authors: U reviewers: U repos[R].authors:` (plus `onRequestAuthors:`).
+         `reviewers:` IS in that union -- see `filterByAuthors` in
+         lgtm/src/discover.ts: `new Set([...authors, ...reviewers])`.
 
     Returns False if the config is absent (devbox/personal hosts treat all PRs
     as not lgtm-bound), and False if the author is unknown to the caller, which
@@ -360,13 +362,25 @@ def detect_lgtm_bound(owner, repo, author_login=None):
         waits for an approval that cannot arrive, so it either polls forever or
         the agent invents a reason to stop -- which is worse than either.
 
-    Observed 2026-08-07 on food-truck/mono#4143: the author appears in lgtm.yml
-    only under `reviewers:` (and `ownerReviewers:`), never in any author list.
-    That is correct by design -- lgtm is that user's own review daemon and does
-    not review PRs they authored -- but repo-presence alone reported the PR as
-    lgtm-bound and the monitor waited on an approval no daemon would ever post.
-    Presence in the config is not coverage; `reviewers:` and `authors:` are
-    different roles and only the latter gates dispatch.
+    DO NOT RE-DERIVE THIS FUNCTION'S ANSWER BY EYE FROM lgtm.yml. The motivating
+    case for the author check was itself a false positive, and the retracted
+    reasoning is seductive enough that it has now been reproduced twice by
+    different sessions reading the same config:
+
+        "my login appears only under `reviewers:`/`ownerReviewers:`, never in an
+         author list, and lgtm is my own daemon so it will not review my own PRs
+         -- therefore no approval can arrive and polling is futile."
+
+    Structurally plausible, internally consistent, and FALSE. `reviewers` is
+    unioned into the author allowlist one function call away in discover.ts.
+    Measured on food-truck/mono#4165 (author johnnymo87): the daemon dispatched
+    a review 3m42s after PR creation -- roughly seven minutes BEFORE the session
+    concluded that such a review could never arrive. A config file tells you what
+    is configured, not what the program does with it.
+
+    What survives, and is why the author check exists at all: for an author in
+    NONE of those lists, repo-presence alone is genuinely wrong, and the failure
+    is unbounded rather than bounded.
 
     Fails toward NOT-lgtm-bound when the author is unavailable: a false negative
     costs an early exit the user can correct, a false positive costs an
@@ -618,19 +632,46 @@ def main():
     pr_num = pr["number"]
     owner, repo = parse_repo_from_url(pr["url"])
 
-    if args.lgtm_bound == "yes":
-        lgtm_bound = True
-    elif args.lgtm_bound == "no":
-        lgtm_bound = False
-    else:
-        lgtm_bound = detect_lgtm_bound(
+    pr_author = (pr.get("author") or {}).get("login") or "unknown"
+
+    # Always run the detector, even when overridden. An override that silently
+    # replaces the detection reads back as though it were the detection: a
+    # session that passed `--lgtm-bound no` reported "script independently
+    # confirms lgtm-bound: False" and treated its own input as corroboration.
+    # A control that cannot disagree with you is not a control, so compute the
+    # auto value regardless and SAY where the printed number came from.
+    try:
+        detected = detect_lgtm_bound(
             owner, repo, (pr.get("author") or {}).get("login")
         )
+    except OSError:
+        detected = None
+
+    if args.lgtm_bound == "yes":
+        lgtm_bound, overridden = True, True
+    elif args.lgtm_bound == "no":
+        lgtm_bound, overridden = False, True
+    else:
+        lgtm_bound, overridden = detected, False
 
     print(f"Monitoring PR #{pr_num}: {pr['url']}")
     print(f"  {pr['baseRefName']} <- {pr['headRefName']}")
-    pr_author = (pr.get("author") or {}).get("login") or "unknown"
-    print(f"  lgtm-bound: {lgtm_bound}  (author: {pr_author})")
+    if not overridden:
+        print(f"  lgtm-bound: {lgtm_bound}  (author: {pr_author}, auto-detected)")
+    elif detected is None:
+        print(f"  lgtm-bound: {lgtm_bound}  (author: {pr_author}, "
+              f"OVERRIDE --lgtm-bound {args.lgtm_bound}; auto-detection unavailable)")
+    elif detected == lgtm_bound:
+        print(f"  lgtm-bound: {lgtm_bound}  (author: {pr_author}, "
+              f"OVERRIDE --lgtm-bound {args.lgtm_bound}; auto-detection agrees)")
+    else:
+        print(f"  lgtm-bound: {lgtm_bound}  (author: {pr_author}, "
+              f"OVERRIDE --lgtm-bound {args.lgtm_bound})")
+        print(f"  WARNING: auto-detection says {detected} for this author and you "
+              f"passed {lgtm_bound}. This output is your own flag echoed back, NOT "
+              f"a confirmation. Re-read lgtm/src/discover.ts before trusting the "
+              f"override -- `reviewers:` is unioned into the author allowlist.",
+              file=sys.stderr)
     print(f"  budget: {args.budget_seconds}s @ {args.interval}s intervals")
 
     deadline = time.monotonic() + args.budget_seconds
