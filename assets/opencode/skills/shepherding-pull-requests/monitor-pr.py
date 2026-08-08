@@ -362,21 +362,18 @@ def detect_lgtm_bound(owner, repo, author_login=None):
         waits for an approval that cannot arrive, so it either polls forever or
         the agent invents a reason to stop -- which is worse than either.
 
-    DO NOT RE-DERIVE THIS FUNCTION'S ANSWER BY EYE FROM lgtm.yml. The motivating
-    case for the author check was itself a false positive, and the retracted
-    reasoning is seductive enough that it has now been reproduced twice by
-    different sessions reading the same config:
+    DO NOT RE-DERIVE THIS ANSWER BY EYE FROM lgtm.yml. This reasoning is wrong
+    and recurs:
 
         "my login appears only under `reviewers:`/`ownerReviewers:`, never in an
          author list, and lgtm is my own daemon so it will not review my own PRs
          -- therefore no approval can arrive and polling is futile."
 
-    Structurally plausible, internally consistent, and FALSE. `reviewers` is
-    unioned into the author allowlist one function call away in discover.ts.
-    Measured on food-truck/mono#4165 (author johnnymo87): the daemon dispatched
-    a review 3m42s after PR creation -- roughly seven minutes BEFORE the session
-    concluded that such a review could never arrive. A config file tells you what
-    is configured, not what the program does with it.
+    `reviewers` is unioned into the author allowlist one function call away in
+    discover.ts, and the daemon does review PRs authored by members of its own
+    reviewer pool -- measured at under four minutes from PR creation. Call this
+    function or read `filterByAuthors`; a config file tells you what is
+    configured, not what the program does with it.
 
     What survives, and is why the author check exists at all: for an author in
     NONE of those lists, repo-presence alone is genuinely wrong, and the failure
