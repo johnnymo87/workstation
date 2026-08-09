@@ -423,7 +423,7 @@ never-reaped fleet, measured.
 never evicted. That is the standing-memory defect behind both the burst headroom
 and the duplicate-MCP accumulation. Not fixed here; S1 was scoped to attribution.
 
-### S2 — The 7-day report on the memory posture · `workstation-h1y6`
+### S2 — The 7-day report on the memory posture · `workstation-h1y6` · **CLOSED 2026-08-09 — OUTCOME 2**
 
 Wakes fire **2026-08-09 23:00 UTC** (primary) and **2026-08-10 00:30 UTC**
 (backstop), moved 2026-08-03 from 14:00/15:30: the window starts when the kernel
@@ -491,6 +491,94 @@ procedure lives in the bead's notes, so any session can execute it.
   `SessionProcessor.cleanup`, so it strands a `time.completed=NULL` row that
   shimmers until the sweeper cutoff. `<sweeper> --dry-run` reports the count and
   takes no write lock.
+
+
+#### The 7-day report — **OUTCOME 2, closed 2026-08-09**
+
+Window `2026-08-02 22:37:12Z .. 2026-08-09 22:37Z`, reported against the four
+pre-declared outcomes in step 2 of the predecessor roadmap. Criteria not improvised.
+
+**Outcome 2 — a member was killed at the cap.** Not outcome 3. Six kill events
+occurred, so the kill path is *tested*, and the mechanism behaved as designed every
+time: a matching `journalctl -k` memcg-OOM entry, a systemd restart, the member back
+in seconds. But the fix is confirmed only narrowly — see the adjustment rule below.
+
+**(1) Daily max demand (`anon`+`swap`) per member.** 151,372 in-window samples,
+parsed by header name across `samples.tsv` (22 col) / `-v2` (23) / `-v3` (22).
+`memory.current` is shown only for contrast and is never the criterion.
+
+| day | :4096 dem/cur | :4097 dem/cur | :4098 dem/cur | :4099 dem/cur |
+|---|---|---|---|---|
+| 08-02 | 2.75 / 4.76 | 0.10 / 0.11 | 0.09 / 0.11 | 0.55 / 0.55 |
+| 08-03 | 8.51 / 14.00 | 5.20 / 6.69 | 10.49 / 14.00 | 8.80 / 14.00 |
+| 08-04 | 9.03 / 14.00 | 4.80 / 5.44 | **13.79** / 14.00 | 11.33 / 14.00 |
+| 08-05 | 8.36 / 14.00 | 8.11 / 11.80 | 7.48 / 13.76 | 4.27 / 10.09 |
+| 08-06 | 6.30 / 8.05 | 5.58 / 13.95 | 7.23 / 14.00 | 5.93 / 7.92 |
+| 08-07 | 3.28 / 4.68 | 2.61 / 5.16 | 2.47 / 3.66 | 3.77 / 6.58 |
+| 08-08 | 3.09 / 5.15 | 4.20 / 9.89 | 2.96 / 3.78 | 2.66 / 8.49 |
+| 08-09 | 2.49 / 3.49 | **13.00** / 14.00 | 2.83 / 7.08 | 2.12 / 8.15 |
+
+Bold = demand within 1 G of the cap; those two member-days are exactly the kill days.
+This confirms the pre-declared warning in the sharpest possible way: `memory.current`
+touches 14.00 G on **eight** member-days where demand is 6–9 G lower. A report counting
+cap-touches on `memory.current` would have overstated the problem roughly fourfold.
+
+**(2) The kills.** All six carry a memcg-OOM line and a restart (08-09 16:52:24Z kill →
+restart scheduled +12 s, new process resident at +21 s). On *health restored within
+60 s* the evidence is partial and is recorded as such: the canary's first post-kill
+probe was at **+102 s** and passed — it restarts wedged serves and restarted nothing —
+so there is no affirmative probe inside the 60 s window. Consistent with the criterion,
+not a demonstration of it.
+
+**(4) Kill frequency pool-wide:** 08-03 → 1, 08-04 → 3, 08-05…08-08 → 0, 08-09 → 2
+events. Peak **3/day**, below the pre-declared `> 5/day` threshold, so the
+raise-the-cap-for-churn rule does not fire.
+
+**(5) Orphaned phantom rows, tagged by kill-adjacency.** Counted with the sweeper's
+`--dry-run` (no write lock). It runs every 5 minutes — 2022 runs in window, 13 non-zero.
+The sweep *immediately after every kill* finalized **0**, because its cutoff is the
+oldest active serve start, so a kill's orphans only become candidates once that cutoff
+advances at the nightly restart. Reading that 0 as "kills cost nothing" would be wrong.
+
+| sweep (EDT) | orphans | kills since previous sweep | tag |
+|---|---|---|---|
+| 08-04 03:05 | **15** | four (08-03 17:56…23:25) | kill-adjacent |
+| 08-06 14:25 | **12** | none | **no kill** |
+| 08-06 03:05 / 13:55 | 3 / 2 | none | **no kill** |
+| 08-05 03:05, 05:30; 08-06 09:05, 09:35; 08-07 03:05; 08-08 03:05, 03:40 | 1 each | none | **no kill** |
+| 08-09 03:05 | 1 | one (08-08 20:36) | kill-adjacent |
+
+**16 kill-adjacent, 24 with no kill nearby.** N is not zero, and the majority are *not*
+from kills — direct evidence for the peer's SQLite lock-contention path. Lumping them
+together would have both overstated the cap's cost and hidden that separate defect. The
+14 orphans of 08-06 13:55+14:25 follow the 13:54 EDT **scheduled** restart in which
+`:4097` exited non-zero — a non-OOM event. Per-kill cost is highly variable: ~14 excess
+over baseline for the four 08-03/04 kills (~3.5 each) but ~0 excess for the 08-08 kill,
+so orphan production tracks whether sessions were **mid-turn**, not the kill itself.
+
+#### The adjustment rule is not applied, because its premise is violated
+
+The rule branches on whether the killed episode was door-clean up to death (⇒ cap too
+low, raise to 16 G) or already degraded (⇒ confirmed, leave it). Both branches assume
+the demand approaching the cap is **opencode's**. In all six kills it was not:
+
+- the four 08-03/04 kills of `:4098` were **bazel** (7.61 G of a 9.04 G cgroup, 35 s pre-kill)
+- the two 08-09 kills of `:4097` were **vitest** (`task=node (vitest 8)`, `(vitest 2)`)
+
+opencode's own steady demand across the whole window is 2.5–9 G; the cap is approached
+only during foreign bursts. And both `:4097` ramps were near-vertical — anon
+2.51 → 13.29 G in **33 seconds**, page cache evicted 4.06 → 0.01 G, swap saturated — so
+a 16 G cap buys roughly four extra seconds before an identical kill.
+
+**Recommendation: do not raise the cap.** Fix the class instead: `workstation-mqp3`
+moved *bazel* out of the serve cgroup and that held, but the defect was never
+bazel-specific — the agent's bash tool spawns work as children of `opencode serve`, so
+whatever it runs next is charged there. Filed as `workstation-yt0p`. This also blocks
+`workstation-8rou`: shrinking 14 G → 10 G while foreign workloads can still land in the
+cgroup would make these kills *more* frequent, not less.
+
+The 28.50 G episode of 08-02 19:52–20:05 is pre-regime (`mem_high` was still 7 G) and
+appears nowhere above; the series starts at 22:37:12Z.
 
 ### S3 — Attach the aggregate slice cap · `workstation-le0a`
 
