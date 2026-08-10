@@ -144,6 +144,42 @@ aggregate backstop is `user-1000.slice` `MemoryHigh=20G`
 the SIGTERM handler, so the old default (90s) only stalled the nightly
 reset; healthy stops take 1–2s.
 
+## Agent commands no longer live in the serve cgroup (cloudbox, 2026-08-10)
+
+Before diagnosing a serve kill as "the serve ballooned", check **whose** memory it
+was. On cloudbox the `agent-scope` plugin
+(`assets/opencode/plugins/agent-scope.ts`, bead `workstation-yt0p`) rewrites every
+bash-tool command to run in its own transient scope:
+
+```
+/user.slice/user-1000.slice/user@1000.service/oc.slice/oc-agent.slice/oc-agent-*.scope
+```
+
+not `system-opencode\x2dserve.slice/opencode-serve@<port>.service`. Practical
+consequences when reading an incident:
+
+- **`MemoryMax=10G` per command**, aggregate `oc-agent.slice` `MemoryMax=20G`. A
+  command killed at its own cap reports **exit 137** and the serve is untouched —
+  `NRestarts` does not move. Do not read a 137 as host memory exhaustion.
+- **Commands mentioning `git` are deliberately NOT wrapped**, so that the
+  `git …` deny rules in the review agents still match. They run in the serve
+  cgroup exactly as before.
+- **Backgrounded jobs now survive a serve restart**, because they are no longer in
+  the serve's cgroup. That is usually welcome, but it means `oc-agent.slice` can
+  retain work the pool restart did not clear (bead `workstation-2dwe`).
+- Historically, *every* serve OOM kill in the S2 window (`workstation-h1y6`, six
+  kills) was caused by a foreign workload inside the serve cgroup — bazel, then
+  vitest — never by opencode's own demand, which ran 2.5–9 G against a 14 G cap.
+  Post-`yt0p` that class should be gone; a *new* serve kill therefore means
+  something genuinely different and deserves attribution rather than assumption.
+
+> **Cap figures below are devbox's.** On cloudbox the serve units are
+> `MemoryMax=14G` / `MemorySwapMax=1G`, `OOMPolicy=stop`, `Restart=always`, in
+> `system-opencode\x2dserve.slice`. Always print `LoadState` in the same
+> `systemctl show` as the property you are trusting: the serves are **system**
+> units, and `systemctl --user show opencode-serve@4099` cheerfully returns
+> `MemoryMax=infinity` for a unit that does not exist.
+
 ## Known gaps / follow-ups
 
 - Cloudbox runs the same architecture (K=4, system units,

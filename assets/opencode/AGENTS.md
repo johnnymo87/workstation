@@ -269,6 +269,31 @@ committing to it, and degrade rather than hard-exit.
 serve pool it may itself be running inside); copy its shape rather than
 reinventing it.
 
+Two `systemd-run` traps, both found the hard way in `workstation-yt0p`, and both
+of which fail **silently** rather than loudly:
+
+- **systemd EXPANDS the command you hand it.** `$$` collapses to a single `$`,
+  and `${VAR}` is substituted or errors, before your shell ever sees it:
+
+  ```bash
+  $ systemd-run --user --scope -q -- printf '%s\n' 'both=$$ and ${FOO}'
+  both=$ and                 # <- silently corrupted
+  $ systemd-run --user --scope -q --expand-environment=no -- printf '%s\n' 'both=$$ and ${FOO}'
+  both=$$ and ${FOO}         # <- correct
+  ```
+
+  Pass **`--expand-environment=no`** whenever the payload is not yours to mangle.
+  This had been quietly corrupting bazel arguments for as long as the bazel shim
+  had shipped, and was found by review rather than by any symptom.
+
+- **The auto unit name is PID-derived, so nested scopes collide.** `--scope`
+  execs the payload *in place*, and `bash -c` exec-optimizes a final simple
+  command, so a `systemd-run` running inside another scope can inherit the very
+  PID that named the outer scope and die with `Unit run-pNNN.scope was already
+  loaded or has a fragment file`. If anything you launch might itself re-scope
+  (bazel does, via its shim), give the OUTER scope an explicit non-PID-derived
+  name: `--unit=myjob-$RANDOM`.
+
 One `pkill` footgun, hit twice while verifying the above: `pkill -f <pattern>`
 matches **your own** command line, so `pkill -f 'job scope'` issued from a shell
 whose argv contains that string kills the shell — and the surrounding command

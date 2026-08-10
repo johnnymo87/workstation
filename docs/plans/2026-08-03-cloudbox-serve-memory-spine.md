@@ -651,7 +651,44 @@ reader after that date cannot otherwise tell slipped from landed. Their one hard
 restart between their VACUUM snapshot and their `mv`**. Verify on cgroupfs at
 the new path afterwards.
 
-### S4 — Bound the cost of a kill · `workstation-63wo` · **WORKED 2026-08-03 — FIX REJECTED, DEFERRED TO S2**
+### S4 — Bound the cost of a kill · `workstation-63wo` · **RULE FIRED 2026-08-10 → BUILD**
+
+> **2026-08-10, the pre-committed rule was executed.** S4's decision rule (set on
+> 08-03, *before* the data existed, so it could not be rationalised afterwards)
+> asked one question: did the S2 window record ≥1 kernel OOM kill of a pool serve?
+> It did — `h1y6` recorded **six**, memcg-OOM logged each time, and an independent
+> journal check over the *measured* window (`2026-08-02T18:22:44-04:00` → now,
+> ~7.8 d visible) shows `Memory cgroup out of memory` naming both
+> `opencode-serve@4097` and `@4098`. So: **build the write-time provenance stamp**
+> (section 3 of the bead notes). Not the per-owner routing gate (unsound), not the
+> kill-time capture (struck).
+>
+> **New constraint, measured the same day, and it resizes the job:** the stamp
+> cannot be done from a plugin. `@opencode-ai/plugin`'s `chat.message` hook exposes
+> only `message: UserMessage`; nothing mutates the *assistant* row at creation. It
+> therefore needs a patch in the `opencode-patched` fork, a release, and a hash
+> bump — cross-repo, not a one-file edit. Section 3's door-log alternative was
+> rejected *on cost, not soundness*, back when the stamp was assumed cheap; that
+> comparison deserves re-reading with the true costs before anyone starts.
+>
+> **`yt0p` (shipped 08-10) does not unfire this**, and is not the main
+> justification anyway: `h1y6` measured 40 orphaned rows of which **24 had no kill
+> nearby**, so most phantom rows come from something other than OOM kills, and the
+> stamp covers all of them.
+>
+> **Section 9 is still unverified** — is a phantom row cosmetic, or does it *block*
+> new turns? Two attempts failed (written up in the bead). It gates a *close*, not
+> this build; but if phantom rows block turns, this stops being tidiness and
+> becomes session-availability.
+
+> **Trap, cost one confused minute on 08-10.** S4's load-bearing assumption is
+> "a nightly whole-pool bounce still exists". It does — but the unit is
+> **`nightly-restart-background.timer`**, a *system* timer, **not** named
+> `reset-workspace`. `systemctl --user list-timers | grep reset` returns nothing
+> and looks exactly like the backstop was removed. Check
+> `systemctl list-timers | grep nightly-restart` instead.
+
+### S4 (original, 2026-08-03) — **FIX REJECTED, DEFERRED TO S2**
 
 **The sweeper ships unchanged.** The bead's own fix direction — a per-owner gate
 via the routing DB — is unsound, and the measured harm does not yet buy even a
@@ -1194,7 +1231,7 @@ fails with *"already loaded"*, silently losing its budget and its slice. Agent
 scopes use an explicit `oc-agent-<nonce>` name, and bazel-scope's now-false
 "unique by construction" comment is corrected.
 
-## Open work, as of 2026-08-10
+## Open work, as of 2026-08-10 (post-`yt0p`)
 
 Every open bead in this spine, so the roadmap and the tracker cannot silently diverge.
 Steps S0–S2 and S6–S8 are closed; their sections above are the record.
@@ -1208,6 +1245,8 @@ Steps S0–S2 and S6–S8 are closed; their sections above are the record.
 | `workstation-0svg` | P2 | the main opencode process alone holds 1.5–2.8 G and climbs (32.7% of RSS) | uncharacterised |
 | `workstation-qyxn` | P2 | `io` controller is not delegated to `user@1000`, so bazel scopes report no IO bytes — and IO is this box's dominant stall | needs a system-level `Delegate=` change |
 | `workstation-daa0` | P3 | `bb` (BuildBuddy bazel) bypasses the scope shim | largely mooted by `yt0p` — `bb` is now scoped as a generic agent command, though it still misses `bazel.slice`'s dedicated budget |
+| `workstation-63wo` | P2 | phantom-busy sweeper defers intraday orphans up to 24 h (min-over-pool cutoff) | **decision rule fired 2026-08-10 → BUILD** the write-time provenance stamp; see S4. Blocked on nothing, but it needs a fork patch (below) |
+| `workstation-yvxh.6` | P3 | correlate historical canary-wedge forensics against sweeper run timestamps | not started |
 | `workstation-2dwe` | P2 | `reset-workspace` never reaps `oc-agent.slice` scopes, so a backgrounded survivor holds slice budget indefinitely | new, from the `yt0p` review |
 | `workstation-lwde` | P3 | `child-capture`'s 5-minute clock can miss the *composition* of a short spike; trigger on pressure instead | downgraded after measuring |
 
