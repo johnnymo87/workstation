@@ -890,8 +890,7 @@ lib.mkIf isCloudbox {
   # The ordering is the whole point: OpenCode snapshots skill content at SESSION
   # START, so refreshing the tree mid-session does nothing for sessions already
   # running. Landing the fast-forward before the 03:00 turnover is what makes
-  # every session created afterwards -- including the morning recommendation
-  # session that reset-workspace spawns -- read fresh skills.
+  # every session created afterwards read fresh skills.
   #
   # Daily rather than every-N-hours for the same reason: a mid-day run would
   # mutate a shared working tree that live sessions are reading, and would only

@@ -315,11 +315,9 @@ in
   # users/dev/home.devbox.nix. Linger (users.users.dev.linger below) keeps
   # user@1000.service up at boot so the pool starts without a login.
 
-  # Daily 3 AM workspace reset (cloudbox parity). reset-workspace snapshots
-  # live opencode TUIs in the `main` tmux session, SIGKILLs all nvims,
-  # restarts the opencode-serve-pool.target (each serve leaks ~350 MB -> 8-13 GB
-  # over days), and spawns a headless recommendation session that Telegrams
-  # which sessions to reopen.
+  # Daily 3 AM workspace reset (cloudbox parity). reset-workspace SIGKILLs all
+  # nvims and restarts the opencode-serve-pool.target (each serve leaks
+  # ~350 MB -> 8-13 GB over days). No TUI is captured or reopened.
   # devbox nvim is disposable (an opencode-tab host only), so the SIGKILL is
   # safe. Every opencode TUI is hosted under nvim (directly or via an nvim
   # :terminal bash), so the SIGKILL reaps them all via PTY hangup; this is the
@@ -329,10 +327,10 @@ in
   # Runs as User=dev so reset-workspace's `systemd-run --user --scope` re-exec
   # and `systemctl --user restart opencode-serve-pool.target` work (the pool is
   # a USER target on devbox; linger keeps user@1000 up). pigeon-daemon (a SYSTEM unit) is
-  # restarted FIRST via passwordless sudo so the recommendation session, spawned
-  # last inside reset-workspace, registers with a fresh daemon.
+  # restarted FIRST via passwordless sudo so every session created after the
+  # reset registers with a fresh daemon.
   systemd.services.nightly-restart-background = {
-    description = "Nightly workspace reset (kill nvims, restart opencode-serve-pool, recommend)";
+    description = "Nightly workspace reset (kill nvims, restart opencode-serve-pool)";
     serviceConfig = {
       Type = "oneshot";
       User = "dev";
@@ -341,8 +339,8 @@ in
         "TMUX_TMPDIR=/tmp"
         "PATH=/run/current-system/sw/bin:/home/dev/.nix-profile/bin"
         # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
-        # sessionVariables for rationale). reset-workspace spawns a headless
-        # recommendation opencode session that must hit the same DB.
+        # sessionVariables for rationale). The restarted serve pool must hit
+        # the same DB the interactive sessions use.
         "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
         "OPENCODE_DISABLE_CHANNEL_DB=1"
         # This oneshot already runs in its own system-slice cgroup, so it does

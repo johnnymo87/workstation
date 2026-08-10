@@ -23,7 +23,7 @@
 #
 # Alerting for v1 is journald (WARNING on drift, INFO when clean) plus a
 # machine-readable status file at ~/.local/state/em-drift/status.json that a
-# consumer (e.g. the morning workspace agent) can surface. Escalation to
+# consumer can surface. Escalation to
 # Telegram/pigeon is a deliberate follow-up, not wired here.
 { config, pkgs, lib, isDevbox, ... }:
 

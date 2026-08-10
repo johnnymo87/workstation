@@ -246,11 +246,11 @@ assert_eq "$HOME/projects/workstation" "$(project_key "$HOME/projects/workstatio
 assert_eq "/tmp/foo"                   "$(project_key "/tmp/foo")"                                                 "project_key: non-project path"
 assert_eq "$HOME"                      "$(project_key "$HOME")"                                                    "project_key: bare home"
 
-# 2026-07-16: the morning reset agent launches in $HOME/morning (not a ~/projects
-# path), so project_key stays verbatim and window_name is its basename `morning`.
-# This is the derivation the non-headless-morning-agent fix relies on.
-assert_eq "$HOME/morning" "$(project_key "$HOME/morning")" "project_key: morning marker dir stays verbatim"
-assert_eq "morning"       "$(window_name "$HOME/morning")" "window_name: morning marker dir -> morning"
+# A dir directly under $HOME (not a ~/projects path) must stay verbatim, so
+# window_name is just its basename. Any caller that launches into such a dir
+# depends on this; `$HOME/morning` is the historical example.
+assert_eq "$HOME/morning" "$(project_key "$HOME/morning")" "project_key: bare \$HOME/<dir> stays verbatim"
+assert_eq "morning"       "$(window_name "$HOME/morning")" "window_name: bare \$HOME/<dir> -> basename"
 # Lock the window_name mirror against the /projects branch too, so the mirror
 # itself is trustworthy (matches project_key's own cases above).
 assert_eq "pigeon"      "$(window_name "$HOME/projects/pigeon")"             "window_name: project root -> project name"
@@ -671,10 +671,10 @@ if [ -f "$default_nix" ]; then
   else
     pass 'source /session probe no longer swallows the http status (curl -sf)'
   fi
-  # The morning-agent fix relies on oc-auto-attach deriving window_name from the
-  # session dir basename for non-~/projects paths (so $HOME/morning -> `morning`),
-  # and NOT collapsing non-project dirs. Guard the production derivation so a
-  # source-side refactor trips here instead of silently breaking the morning window.
+  # oc-auto-attach must derive window_name from the session dir basename for
+  # non-~/projects paths (so $HOME/foo -> `foo`) and must NOT collapse
+  # non-project dirs. Guard the production derivation so a source-side refactor
+  # trips here instead of silently renaming every such window.
   if grep -qF '/projects/"([^/]+)(/.*)?$' "$default_nix"; then
     pass 'source derives project via ~/projects/<P> regex'
   else
