@@ -284,6 +284,24 @@ Loop exits only when **all** of the following are true in the same iteration:
 - **Bundling sleep with the follow-up `gh` calls in one bash invocation.** Long chained one-liners that include `sleep` are a known hang risk in this environment (see AGENTS.md). Run `sleep 60` as its own tool call, then run the checks.
 - **Replying to inline comments without resolving them.** GitHub tracks thread resolution separately from the reply chain. A thread with five replies and no resolve still reads as unresolved in the diff UI. After every reply, call `resolveReviewThread`. See `reviewing-github-prs` §"Resolving review threads".
 - **Cherry-picking the easy comments.** Addressing the agreeable comments and quietly dropping the hard or controversial ones leaves threads looking abandoned and isn't actually finishing the review. Every thread gets accept / push back / escalate — see `receiving-code-review` §"Address Every Item". Use the unresolved-threads filter query (in `reviewing-github-prs`) before claiming exit conditions met.
+- **Trusting a command's output instead of checking the resulting state.** `git push -q ... | tail -3` has swallowed a *failed* push and printed a success-looking line. Measured 2026-08-09 on #4179: the branch was already checked out in another worktree, so `git checkout -b <branch> origin/<branch>` failed with `fatal: a branch named '...' already exists`; the commit then landed on a **detached HEAD**, and `git push origin <branch>` had no local branch of that name to push. The `-q`-plus-`tail` pipeline hid all of it. The reply-and-resolve round that followed would have cited a commit that was never on the remote.
+
+  **Verify the resulting state, not the command's exit.** The same discipline catches a queued-vs-passed CI check, a re-review request sent to a login that 404s, and a "resolved" thread count taken from the REST comments endpoint instead of `reviewThreads.isResolved`.
+
+  After any push you intend to cite, compare the three values that must agree:
+
+  ```bash
+  git rev-parse HEAD                                               # what you built
+  git fetch -q origin "$BRANCH" && git rev-parse "origin/$BRANCH"  # what the remote has
+  gh pr view "$PR" --json headRefOid -q .headRefOid                # what the PR will merge
+  ```
+
+  If they disagree, push explicitly from the detached HEAD rather than re-running the same command —
+  and drop `-q` / `| tail` so failures are visible:
+
+  ```bash
+  git push origin HEAD:refs/heads/<branch>
+  ```
 
 ## Beyond merge: confirming the rollout
 
