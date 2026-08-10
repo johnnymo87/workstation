@@ -12,6 +12,7 @@ pkgs.writeShellApplication {
     findutils      # find (ShaDa temp reap)
     gnugrep        # grep (ShaDa parse check)
     systemd        # systemd-run for cgroup re-exec
+    inotify-tools  # inotifywait (self-verifying ShaDa concurrency report)
   ];
   text = ''
     # reset-workspace [--yes]
@@ -207,6 +208,9 @@ pkgs.writeShellApplication {
 
     cleanup_trap() {
       local rc=$?
+      # Reap the ShaDa watcher first (workstation-y3fq); it is a background child
+      # and an un-reaped one keeps a manual --scope run alive after the script.
+      if declare -F shada_watch_cleanup >/dev/null 2>&1; then shada_watch_cleanup; fi
       if [ "''${OWNS_SENTINEL:-0}" -eq 1 ] && [ "$FINISHED" -ne 1 ] && [ "$rc" -ne 0 ]; then
         local ts
         ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
@@ -729,6 +733,85 @@ EOF
     # ---- ShaDa helpers (used by Step 3's pre-walk guard and by Step 3.5) ----
     SHADA_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/nvim/shada"
     SHADA_MAIN="$SHADA_DIR/main.shada"
+
+    # ---- Self-verifying ShaDa concurrency report (workstation-y3fq) ----
+    # The corruption this script caused came from two ShaDa writers overlapping,
+    # and the ONLY reason we can say it stopped is an inotify watch that was
+    # started by hand and lives in /run -- it dies at the next reboot, silently.
+    # So the reset now measures its own invariant, every night, on both hosts.
+    #
+    # Why in-band and not a permanent daemon: `inotifywait -m` goes DEAF when its
+    # watched directory is replaced (verified 2026-08-09 -- the process stays
+    # ALIVE and healthy-looking, so Restart=, is-active and the unit's
+    # main-pid checks all pass while it sees nothing). A daemon like that cannot be calibrated. This
+    # can: the walk knows how many writers it exited, and every graceful exit must
+    # produce at least one temp. Exits with zero observed events therefore means
+    # the instrument is dead, and we say UNKNOWN loudly instead of reporting a
+    # reassuring "max 1".
+    #
+    # It starts here -- inside the destructive tail, i.e. AFTER the setsid/scope
+    # re-exec -- deliberately. Started any earlier, a manual run launched from a
+    # serve cgroup would lose its watcher to the pool restart mid-reset and
+    # under-report its own concurrency, which is worse than not measuring.
+    SHADA_WATCH_LOG=""
+    SHADA_WATCH_PID=""
+    shada_watch_start() {
+      command -v inotifywait >/dev/null 2>&1 || { log "ShaDa watch: inotifywait unavailable; concurrency will be UNKNOWN"; return 0; }
+      mkdir -p "$SHADA_DIR" 2>/dev/null || true
+      SHADA_WATCH_LOG="$(mktemp -t reset-shada-watch.XXXXXX 2>/dev/null || true)"
+      [ -n "$SHADA_WATCH_LOG" ] || { log "ShaDa watch: could not create log; concurrency will be UNKNOWN"; return 0; }
+      inotifywait -m -q --format '%T %e %f' --timefmt '%H:%M:%S' \
+        -e create,delete,moved_from "$SHADA_DIR" > "$SHADA_WATCH_LOG" 2>/dev/null &
+      SHADA_WATCH_PID=$!
+      # inotifywait needs a moment to establish, and a watch that starts after the
+      # first writer is an under-reporting instrument.
+      sleep 0.3
+      kill -0 "$SHADA_WATCH_PID" 2>/dev/null || { SHADA_WATCH_PID=""; log "ShaDa watch: watcher died immediately; concurrency will be UNKNOWN"; }
+    }
+    # Stop the watcher and report. `expected_writers` is the walk's own count of
+    # graceful exits -- the positive control that makes silence meaningful.
+    shada_watch_report() {
+      local expected_writers="$1" mx=0 temps=0
+      [ -n "$SHADA_WATCH_PID" ] || { log "  shada concurrency: unknown (no watcher)"; return 0; }
+      sleep 0.5   # let the last rename land before we stop listening
+      kill "$SHADA_WATCH_PID" 2>/dev/null || true
+      wait "$SHADA_WATCH_PID" 2>/dev/null || true
+      SHADA_WATCH_PID=""
+      if [ ! -s "$SHADA_WATCH_LOG" ] && [ "$expected_writers" -gt 0 ]; then
+        # The calibration that a standalone daemon can never do.
+        log "  shada concurrency: unknown -- $expected_writers writer(s) exited but the watch saw NOTHING (instrument is dead, not a quiet night)"
+        rm -f "$SHADA_WATCH_LOG" 2>/dev/null || true
+        return 0
+      fi
+      # max concurrent = running count of temps created but not yet renamed away
+      read -r mx temps < <(awk '
+        /main\.shada\.tmp/ {
+          if ($2 ~ /CREATE/)                 { if (!($3 in live)) { live[$3]=1; n++; t++; if (n>mx) mx=n } }
+          else if ($2 ~ /MOVED_FROM|DELETE/) { if ($3 in live)    { delete live[$3]; n-- } }
+        }
+        END { print mx+0, t+0 }
+      ' "$SHADA_WATCH_LOG" 2>/dev/null || echo "0 0")
+      if [ "''${mx:-0}" -le 1 ]; then
+        log "  max concurrent shada writers: ''${mx:-0} (invariant holds; $temps temp(s), $expected_writers writer(s) exited)"
+      else
+        # This is the corruption precondition, live. Say so in the strongest terms
+        # the log has: two writers overlapping is how the file was spliced.
+        log "  WARNING: max concurrent shada writers: $mx -- the serialization invariant is BROKEN"
+        log "           ($temps temp(s) from $expected_writers writer(s); this is the state that corrupted main.shada on 2026-08-01)"
+        log "           raw events follow:"
+        while IFS= read -r ev; do log "             $ev"; done < "$SHADA_WATCH_LOG"
+      fi
+      rm -f "$SHADA_WATCH_LOG" 2>/dev/null || true
+    }
+    # Never leak the watcher: a manual run in a --scope would keep the scope alive
+    # waiting on it. This hooks the EXISTING cleanup_trap (line ~209) rather than
+    # installing a second EXIT trap -- bash keeps only the last one per signal, so
+    # `trap ... EXIT` here would silently disable the sentinel's failure reporting.
+    shada_watch_cleanup() {
+      [ -n "''${SHADA_WATCH_PID:-}" ] || return 0
+      kill "$SHADA_WATCH_PID" 2>/dev/null || true
+      rm -f "$SHADA_WATCH_LOG" 2>/dev/null || true
+    }
     # Verdict for one file: prints `healthy`, `corrupt`, or `unknown`.
     #
     # This asks nvim the question we actually care about -- "would you refuse to
@@ -894,6 +977,10 @@ EOF3
       ! nvim_writer_live "$pid" "$start"
     }
 
+    # Start measuring BEFORE the first act that can make an nvim write. Nothing
+    # above this line touches a pane; everything below it does.
+    shada_watch_start
+
     # Pre-walk ShaDa guard. If main.shada is ALREADY corrupt entering the walk,
     # every serialized writer would fail its rename (E136) and strand a temp
     # holding only its own history, and the Step 3.5 repair afterwards would
@@ -1052,6 +1139,17 @@ EOF6
       rm -f "$sock" 2>/dev/null && sock_reaped=$(( sock_reaped + 1 )) || true
     done
     [ "$sock_reaped" -eq 0 ] || log "  reaped $sock_reaped orphaned pane socket(s)"
+
+    # Everything that can trigger a ShaDa write has now happened: the walk, the
+    # sweep, the drain and the teardown. (The socket reap above only unlinks dead
+    # sockets.) Stop listening and report the invariant. `nvim_exited` is the
+    # positive control -- if it is nonzero and the watch saw nothing, the report
+    # says the instrument is dead rather than a reassuring "max 1".
+    #
+    # Placed after the socket reap, not before, so it stays OUTSIDE the region
+    # test-lgtm-teardown.sh extracts and executes -- that harness has no
+    # `nvim_exited` and would die on it under `set -u`.
+    shada_watch_report "$nvim_exited"
 
     # ---- Step 3.5: Repair a corrupt ShaDa file, then reap its temps ----
     # nvim persists ShaDa by writing `main.shada.tmp.<a-z>` and renaming it over
