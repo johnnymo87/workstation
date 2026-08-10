@@ -215,6 +215,58 @@ that clone belong to other work; leave them alone.
   build comparison bounds in UTC explicitly. And `memory.current` **includes
   page cache**, so judge demand on `anon`+`swap`, never `MemoryCurrent`.
 
+### Reading the memory series — three traps that have each already caught someone
+
+These live here rather than in a transcript because all three produced a wrong answer
+at least once during this spine, and each is invisible to someone who just opens the
+files.
+
+**1. Parse BY HEADER NAME. Never by column position.** The series is spread over files
+with different shapes, and two of them share a column count while differing in meaning:
+
+| file | columns | note |
+|---|---|---|
+| `samples.tsv` | 22 | v1 |
+| `samples-v2.tsv` | 23 | `main_swap_kb` **inserted at position 8**, shifting everything after it |
+| `samples-v3.tsv` | 22 | same count as v1, **different meaning** — `lease_live` replaced `assign_active_*` |
+| `~/metrics/pressure-v1-*.tsv` | 17 | separate instrument (PSI), long format |
+| `~/metrics/pressure-v2-*.tsv` | 22 | adds `kernel`/`slab`/`pagetables`/`shmem` |
+
+A positional parser silently reads the wrong column on v2 and *looks fine* on v1 vs v3.
+The schema version is in the pressure files' names for exactly this reason.
+
+**2. Judge demand on `anon` + `swap`. Never on `memory.current`.** `memory.current`
+includes reclaimable page cache, and on this box the gap is enormous, not marginal: in
+the 7-day window `memory.current` touched the 14 G cap on **eight member-days** where
+`anon+swap` was 6–9 G lower. A report counting cap-touches would have overstated
+roughly fourfold. Concretely, `:4098` at 14.00 G on 08-06 was `anon` 1.40 G with `file`
+6.82 G and `oom_kill=0` — the cgroup filling its allowance with cache, not dying.
+The inverse also occurs (`:4099` was once 90% anon), so the ratio must be *read*, never
+assumed in either direction.
+
+**3. Counters are per cgroup INSTANCE, and slice counters are lifetime.**
+`memory.peak`, `memory.events` and PSI totals all reset when a cgroup is destroyed and
+recreated — which happens on every serve restart and every nightly reset. Two failures
+follow, both observed:
+
+- **A peak can be erased.** `:4098` reached exactly 14.00 G at 2026-08-06 15:18:13Z; by
+  19:41Z its live `memory.peak` read 2.81 G because the serve had restarted. Only the
+  sampled series retained the event. **Never build a peak claim from a cgroup file read
+  at report time** — read it from the series.
+- **A slice reports its dead children's history.** The serve slice read
+  `peak=42.14 G, oom_kill=4` while all four live leaves read `0`, on a box up 86 days.
+  Those kills were from cgroups destroyed days earlier. Sizing an aggregate cap from
+  that number would be sizing against a regime that no longer exists. `pressure-sampler`
+  records `memory.events.local` alongside the hierarchical counter precisely so the two
+  can be separated.
+
+**Window boundary:** the S2 regime starts **2026-08-02 22:37:12Z** — when the kernel
+got the limits, not when the config shipped (deploy was 18:57Z; the live cgroup did not
+change until 22:37:12Z, visible as `mem_high` going `7516192768 → max` with the pid
+unchanged). The **28.50 G episode of 08-02 19:52–20:05 is pre-regime** and must not
+appear in any post-fix table — `mem_high` was still 7 G, so it compares across the very
+change being measured.
+
 ### The verification rule, and the two traps that apply to THIS spine
 
 **Verify against the built artifact and the kernel, not the config.** Every
@@ -1085,6 +1137,27 @@ Two things for whoever soaks it:
 Follow-ups split out: `workstation-8rou` (post-soak: serve `MemoryMax` 14→10 G,
 `OOMPolicy` stop→continue, plus the swap cap above) and `workstation-daa0`
 (`bb`, the BuildBuddy bazel, bypasses the shim).
+
+## Open work, as of 2026-08-09
+
+Every open bead in this spine, so the roadmap and the tracker cannot silently diverge.
+Steps S0–S2 and S6–S8 are closed; their sections above are the record.
+
+| bead | P | what it is | state |
+|---|---|---|---|
+| `workstation-yt0p` | **P1** | **agent-spawned subprocesses still OOM-kill serves** — `mqp3` fixed bazel only, not the class; vitest killed `:4097` twice on 08-09 | **next** |
+| `workstation-le0a` | P2 | attach the `opencode-serve.slice` aggregate cap — still `MemoryMax=infinity` with 4 × 14 G on a 62 G box | needs a pool restart in the same deploy |
+| `workstation-rdsq.1` | P2 | S7, no idle reaper in serve mode; LSP/MCP fleets pinned for process life (~29% of RSS) | **designed, not built** (PR #285) |
+| `workstation-8rou` | P2 | shrink serve `MemoryMax` 14 G → 10 G, flip `OOMPolicy` | **blocked by `yt0p`** — shrinking now would increase kills |
+| `workstation-0svg` | P2 | the main opencode process alone holds 1.5–2.8 G and climbs (32.7% of RSS) | uncharacterised |
+| `workstation-qyxn` | P2 | `io` controller is not delegated to `user@1000`, so bazel scopes report no IO bytes — and IO is this box's dominant stall | needs a system-level `Delegate=` change |
+| `workstation-daa0` | P3 | `bb` (BuildBuddy bazel) bypasses the scope shim | — |
+| `workstation-lwde` | P3 | `child-capture`'s 5-minute clock can miss the *composition* of a short spike; trigger on pressure instead | downgraded after measuring |
+
+Standing instruments: `~/s3-sampling/` (S2 series, transient timers, its window is now
+closed) and `pressure-sampler` (durable home-manager timer, 15 s, memory + PSI + CPU
+time for host / serves / serve-slice / `bazel.slice` / each bazel scope). Read the trap
+section above before using either.
 
 ## Deliberately NOT doing
 

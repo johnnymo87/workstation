@@ -512,7 +512,7 @@ to land next.
 
 ---
 
-## Step 2 — Max-only memory, bounded swap, tighter stop · **DEPLOYED 2026-08-02** (slice backstop deferred)
+## Step 2 — Max-only memory, bounded swap, tighter stop · **DEPLOYED 2026-08-02; OBSERVED AND REPORTED 2026-08-09 — see the verdict at the end of this step**
 
 **Bead:** `workstation-h1y6` (filed **2026-07-03**) · **Prefers** step 1 first.
 
@@ -758,6 +758,56 @@ No cap adjustment. The pre-declared rule keys off *kills*, and there were none.
   the config commit and rebuild; the pre-change band is a known, survivable
   state. `RestartSec=10` is well inside systemd's start-limit, so systemd will
   not give up on its own — you must notice.
+
+
+### The 7-day observation reported — **OUTCOME 2, 2026-08-09**. The cap is not the variable.
+
+Full report in the spine doc (`docs/plans/2026-08-03-cloudbox-serve-memory-spine.md`,
+S2) and in `workstation-h1y6`'s notes. The part that belongs *here*, next to the
+pre-declared criteria, is the verdict and the fate of the adjustment rule.
+
+**Outcome 2 — a member was killed at the cap**, six times, so the kill path is tested
+rather than untriggered. The mechanism behaved correctly every time: a matching
+`journalctl -k` memcg-OOM entry, a systemd restart, the member back in seconds. Peak
+**3 kills/day** pool-wide, below the pre-declared `> 5/day` threshold, so the
+raise-the-cap-for-churn branch does not fire either.
+
+**The pre-declared adjustment rule was NOT applied, because its premise is false.**
+This is the finding most likely to be lost, and the one a future reader will otherwise
+re-derive wrongly from the same data. Both branches of the rule — *door-clean up to
+death ⇒ cap too low, raise to 16 G* and *already degraded ⇒ confirmed, leave it* —
+assume the demand approaching the cap is **opencode's**. In all six kills it was not:
+
+- the four 08-03/04 kills of `:4098` were **bazel** (7.61 G of a 9.04 G cgroup, measured 35 s pre-kill)
+- the two 08-09 kills of `:4097` name **vitest** as the victim (`task=node (vitest 8)`, `task=node (vitest 2)`)
+
+opencode's own demand ran **2.5–9 G across the entire window** against a 14 G cap. The
+cap was approached only during foreign-workload bursts.
+
+**Why a bigger cap would not have helped — the number that makes this a measurement
+rather than an opinion.** Both `:4097` kills were near-vertical anon ramps, captured at
+15 s resolution:
+
+| | 00:36:08Z | 00:36:25Z | 00:36:41Z |
+|---|---|---|---|
+| `anon` | 2.51 G | 8.91 G | **13.29 G** |
+| `file` | 4.06 G | 4.07 G | 0.01 G |
+| `swap` | 0 | 0 | 1.00 G |
+
+**anon 2.51 → 13.29 G in 33 seconds**, with page cache evicted on the way up and swap
+saturated at the top. At ~10 G per 33 s, a 16 G cap buys roughly **four extra seconds**
+before an identical kill. Raising the cap does not change the outcome; it changes when.
+
+**Therefore: do not raise the cap. Fix the class.** `workstation-mqp3` moved *bazel* out
+of the serve cgroup and that held — zero bazel-caused kills after 08-05 — but the defect
+was never bazel-specific. The agent's bash tool spawns work as children of
+`opencode serve`, so whatever it runs next is charged to that cgroup; vitest was simply
+the next tool through the door. Tracked as **`workstation-yt0p`**.
+
+**This blocks `workstation-8rou`** (shrink serve `MemoryMax` 14 G → 10 G, flip
+`OOMPolicy`). Shrinking the cap while foreign workloads can still land in the serve
+cgroup makes these kills *more* frequent, not less. A real `bd` dependency edge exists
+(`8rou` depends on `yt0p`); this paragraph is the prose half of it, not the mechanism.
 
 ## Step 3 — Why does one member reach 7.35 G? · **ANSWERED 2026-08-02**
 
