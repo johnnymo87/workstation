@@ -1138,20 +1138,77 @@ Follow-ups split out: `workstation-8rou` (post-soak: serve `MemoryMax` 14→10 G
 `OOMPolicy` stop→continue, plus the swap cap above) and `workstation-daa0`
 (`bb`, the BuildBuddy bazel, bypasses the shim).
 
-## Open work, as of 2026-08-09
+## S9 — the class, not the binary (`workstation-yt0p`, PR #337)
+
+S8 moved *bazel* out of the serve cgroup and that held: zero bazel-caused kills
+after 08-05. But the defect was never about bazel. The bash tool spawns every
+command as a direct child of `opencode serve`, so anything can OOM the serve.
+vitest proved it on 08-09 — twice.
+
+**The obvious next step did not exist.** Shimming `vitest` the way we shimmed
+`bazel` has no reachable target: `vitest` is not on PATH (the chain is
+`npm test` → `npm run --workspaces test` → 3 × `vitest run`, each with an
+`nproc`-sized worker pool), and a shim could not win regardless, because npm
+*prepends* `node_modules/.bin` ahead of the inherited PATH. Verified with a
+fixture: `WINNER=node_modules_bin`. Shimming launchers instead is unbounded —
+across 130,091 historical agent commands the memory-capable tail runs from bazel
+and python3 down to `./run-tests.sh`, and **the killers arrive via launchers
+whose first token does not name the hog.**
+
+So the wrap moved from the PATH boundary to the *tool* boundary: a plugin
+rewrites the bash command to run under `systemd-run --user --scope` in a capped
+`oc-agent.slice`. Wrap-everything, no memory selector — a selector's wrong guess
+is fail-open into the serve cgroup, which is the bug. Cost is 9.0 ms/command
+against 0.11 ms bare.
+
+Verified on the box, not just in tests:
+
+| check | result |
+|---|---|
+| wrapped command's cgroup | `user@1000.service/oc.slice/oc-agent.slice/oc-agent-*.scope` |
+| unwrapped, for contrast | `system-opencode\x2dserve.slice/opencode-serve@4099.service` |
+| hog under the scope cap | exits **137**; serve stays `ActiveState=active`, `NRestarts=0` |
+| `git --version` vs `echo hello` | git runs **bare**, echo runs **wrapped**, same session |
+| bazel shim nested in an agent scope | still lands in `bazel.slice` |
+
+### Three traps, each of which would have shipped a silent defect
+
+**systemd expands the command it is handed.** `$$` collapses to `$`, `${VAR}`
+substitutes or errors. `--expand-environment=no` turns it off. *The same flag was
+missing from `pkgs/bazel-scope`*, where it is a live bug — every bazel argument
+containing `$$` or `${...}` has been mangled since that shim shipped. Found by
+review of this change, not by symptom.
+
+**Permissions are evaluated after this hook.** `ShellTool.ask` parses the command
+text *inside* the tool's execute, so a wrapped command parses as `systemd-run …`
+and `"git reset*": deny` stops matching while `"*": allow` matches everything.
+That is the structural guard AGENTS.md leans on, and it exists because a review
+subagent once destroyed a peer's uncommitted data. Commands mentioning `git` are
+therefore never wrapped — matched anywhere, so `echo hi && git stash` cannot be
+laundered — with a test asserting the skip list covers every deny rule shipped.
+
+**Nested scopes collide.** `systemd-run`'s auto name is PID-derived, `--scope`
+execs in place, and `bash -c` exec-optimizes a final simple command — so the
+bazel shim inside an agent scope inherits the PID that named the outer scope and
+fails with *"already loaded"*, silently losing its budget and its slice. Agent
+scopes use an explicit `oc-agent-<nonce>` name, and bazel-scope's now-false
+"unique by construction" comment is corrected.
+
+## Open work, as of 2026-08-10
 
 Every open bead in this spine, so the roadmap and the tracker cannot silently diverge.
 Steps S0–S2 and S6–S8 are closed; their sections above are the record.
 
 | bead | P | what it is | state |
 |---|---|---|---|
-| `workstation-yt0p` | **P1** | **agent-spawned subprocesses still OOM-kill serves** — `mqp3` fixed bazel only, not the class; vitest killed `:4097` twice on 08-09 | **next** |
+| ~~`workstation-yt0p`~~ | P1 | agent-spawned subprocesses OOM-killing serves — the *class*, not just bazel | **DONE** (PR #337): every bash-tool command now runs in its own capped scope in `oc-agent.slice`. Verified on the box: hog exits 137, serve stays `NRestarts=0` |
 | `workstation-le0a` | P2 | attach the `opencode-serve.slice` aggregate cap — still `MemoryMax=infinity` with 4 × 14 G on a 62 G box | needs a pool restart in the same deploy |
 | `workstation-rdsq.1` | P2 | S7, no idle reaper in serve mode; LSP/MCP fleets pinned for process life (~29% of RSS) | **designed, not built** (PR #285) |
-| `workstation-8rou` | P2 | shrink serve `MemoryMax` 14 G → 10 G, flip `OOMPolicy` | **blocked by `yt0p`** — shrinking now would increase kills |
+| `workstation-8rou` | P2 | shrink serve `MemoryMax` 14 G → 10 G, flip `OOMPolicy` | **UNBLOCKED** by `yt0p` — foreign workloads no longer land in the serve cgroup, so the premise for shrinking now holds |
 | `workstation-0svg` | P2 | the main opencode process alone holds 1.5–2.8 G and climbs (32.7% of RSS) | uncharacterised |
 | `workstation-qyxn` | P2 | `io` controller is not delegated to `user@1000`, so bazel scopes report no IO bytes — and IO is this box's dominant stall | needs a system-level `Delegate=` change |
-| `workstation-daa0` | P3 | `bb` (BuildBuddy bazel) bypasses the scope shim | — |
+| `workstation-daa0` | P3 | `bb` (BuildBuddy bazel) bypasses the scope shim | largely mooted by `yt0p` — `bb` is now scoped as a generic agent command, though it still misses `bazel.slice`'s dedicated budget |
+| `workstation-2dwe` | P2 | `reset-workspace` never reaps `oc-agent.slice` scopes, so a backgrounded survivor holds slice budget indefinitely | new, from the `yt0p` review |
 | `workstation-lwde` | P3 | `child-capture`'s 5-minute clock can miss the *composition* of a short spike; trigger on pressure instead | downgraded after measuring |
 
 Standing instruments: `~/s3-sampling/` (S2 series, transient timers, its window is now
