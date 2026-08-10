@@ -681,6 +681,61 @@ the new path afterwards.
 > this build; but if phantom rows block turns, this stops being tidiness and
 > becomes session-availability.
 
+> **2026-08-10, later: the door-log comparison was re-run, and the bead's stated
+> reason for rejecting it is WRONG.** The bead says "rejected on COST, not
+> soundness. Say cost, not soundness." Measured: cost is a non-issue — a full 24 h
+> door scan is 344,267 lines in **689 ms**, and filtered to POSTs it is 209 lines
+> in 1.1 s, on runs that have candidates at all (rare). What actually disqualifies
+> it is **coverage**: over 24 h, 166 sessions produced 8,054 assistant rows and the
+> door saw a turn-start for only **75** of them. **91 sessions / 3,558 rows (44%)
+> are invisible to it** — 60 are subagent *child* sessions (created in-process,
+> they never traverse the door) and 31 are root sessions pigeon injected directly.
+> That is a ceiling, not a price. Reject the door on **coverage**; do not cite the
+> cost sentence.
+
+> **Write side BUILT and reviewed, 2026-08-10 — `opencode-patched` PR #40.**
+> Stamps `{serveId, invocationId, port, pid}` onto assistant rows in
+> `messageData()`, the single upsert path for creation *and* every later update, so
+> it covers every assistant row the sweeper can sweep and always names the **last
+> writer** (which is what the sweeper needs: a writer is alive when it writes, so a
+> stamp naming a dead invocation proves nothing has touched the row since). Keyed
+> on systemd's `INVOCATION_ID` — *not* pid (the unit's MainPID is a wrapper script,
+> so `process.pid != MainPID`) and *not* a start timestamp (`Date.now()` never
+> equals `ActiveEnterTimestamp`); either comparison would judge **live** rows dead.
+>
+> **The review found a blocker, and it is the lesson worth keeping.** The gate
+> originally required `OPENCODE_SERVE_ID` + `INVOCATION_ID` — both *environment
+> variables*, which establish **ancestry** ("descended from a serve") when the
+> stamp needs **fate-sharing** ("dies with that serve"). `yt0p`, shipped *hours
+> earlier the same day*, is what split those populations: every agent tool
+> subprocess now runs in its own scope under `oc-agent.slice`, so it **outlives a
+> serve restart** while inheriting the serve's whole environment. Measured on a
+> live tool call: `OPENCODE_SERVE_ID=serve-3` with the *scope's*
+> `INVOCATION_ID=21efa50c…` while its serve was `8b8f626a…`. Any `opencode run`
+> from there would have stamped an invocation the sweeper can never find — one that
+> always looks dead — onto rows that are alive, and the sweeper would have aborted
+> a **running turn**. Today's min-cutoff gate handles that case *correctly*, so v1
+> was not "strictly additive"; it would have made a real case worse. The gate now
+> also requires `/proc/self/cgroup` to name `opencode-serve@<port>.service`: with
+> `KillMode=control-group`, "invocation dead ⇒ writer dead" then holds by systemd
+> *mechanics* rather than env hygiene.
+>
+> Generalise it: **an env var tells you what a process descended from, never what
+> it will die with.** And a change landed the same day can invalidate the
+> assumption the next change is about to rest on.
+>
+> Also fixed: the gate-fail branch now *strips* a foreign stamp (the field is
+> declared, so it survives decode/re-publish, and carrying it forward would break
+> the last-writer invariant). Replay was checked, not assumed — projector handlers
+> run only inside the transaction that first persists an event, and the replay path
+> dedupes at `event.ts:282`, so no re-stamping of dead rows.
+>
+> **Read side NOT built.** Next: merge #40, cut fork revision 9, bump the four
+> platform hashes in `users/dev/home.base.nix`, confirm stamps land on ~100% of new
+> pool rows and 0% of standalone rows, *then* teach the sweeper the stamped gate —
+> log-only first. Keep `time.created < CUTOFF` as a belt-and-suspenders floor even
+> for stamped-dead rows, to cap the blast radius of any stamp lie not yet imagined.
+
 > **Trap, cost one confused minute on 08-10.** S4's load-bearing assumption is
 > "a nightly whole-pool bounce still exists". It does — but the unit is
 > **`nightly-restart-background.timer`**, a *system* timer, **not** named
