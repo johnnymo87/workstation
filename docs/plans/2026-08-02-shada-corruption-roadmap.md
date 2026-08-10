@@ -617,6 +617,75 @@ The drain reported all three as late writers and every history survived, so this
 also exercises the `lgtm-run`-collision path — the one the adversarial review
 insisted on and the one production has never hit.
 
+### S4 — The reset verifies its own invariant · `workstation-y3fq` · P1 · done 2026-08-09
+
+Every verification in this epic came from one `inotifywait` started by hand on
+2026-08-02 and living in `/run/user/1000/systemd/transient/`. It survived only
+because the host had not rebooted in seven days. On the next reboot it would have
+vanished, and **its absence looks exactly like a clean night** — an empty log is
+what success is supposed to look like.
+
+The obvious fix — declare it as a real unit — was investigated and **rejected on
+evidence**. `inotifywait -m` goes deaf when its watched directory is replaced:
+measured 2026-08-09 on the same binary the watch runs, the process **stays alive
+and healthy-looking**, prints `DELETE_SELF`, never re-watches, and never sees
+another event. `Restart=`, `is-active` and the unit's main-pid all keep passing.
+That is an instrument which cannot be calibrated, shipped into an epic whose
+entire history is instruments lying.
+
+So the reset measures itself instead, and the measurement **has a positive
+control**: the walk already counts how many writers it exited, and every graceful
+exit must produce at least one temp. Writers exited plus zero observed events
+therefore means the instrument is dead, and the report says so loudly instead of
+reporting a reassuring `max 1`. A standalone daemon can never do this — on an
+idle day it has no expected event count to compare against.
+
+Three placement constraints, each of which was nearly got wrong:
+
+- It starts **inside the destructive tail**, after the setsid/scope re-exec. Any
+  earlier and a manual run launched from a serve cgroup loses its watcher to the
+  pool restart mid-reset and under-reports its own concurrency — a false PASS.
+- It reports **after the socket reap**, which is outside the region
+  `test-lgtm-teardown.sh` extracts and executes; inside it, that harness dies on
+  an unbound `nvim_exited`. The boundary is now pinned by a guard in the harness.
+- It hooks the **existing** `cleanup_trap` rather than installing its own EXIT
+  trap. Bash keeps only the last trap per signal, so a second one would have
+  silently disabled the sentinel's failure reporting.
+
+A host-scope premise was also wrong and worth recording: this was scoped
+"cloudbox only, where the nightly reset runs". **Devbox runs the identical
+nightly reset** (`hosts/devbox/configuration.nix`). Living in the shared package
+covers both hosts; a cloudbox-only daemon would have left devbox armed with the
+same storm mechanism and no instrumentation at all.
+
+`test-shada-report.sh` calibrates the counter against event streams whose answer
+is known by construction — a 3-writer burst reads 3 and is flagged BROKEN, the
+same six events interleaved read 1, writers-with-no-events reads UNKNOWN, and a
+genuinely quiet run does not cry wolf. It deliberately does **not** race real
+nvims: that was measured and rejected, because three lab nvims serialize by luck
+more often than not, so a race-based test would be flaky in the direction that
+matters — passing when it should fail.
+
+#### Baseline the retired watch leaves behind
+
+Final aggregate from `~/.local/state/shada-watch.log` before retirement, the only
+record of the corruption era:
+
+| night | temps | max concurrent | |
+|---|---|---|---|
+| 2026-08-03 | 3 | **2** | pre-S2 |
+| 2026-08-04 | 15 | **3** | S2 walk clean; the lgtm teardown burst |
+| 2026-08-05 | 9 | 1 | |
+| 2026-08-06 | 15 | 1 | |
+| 2026-08-07 | 12 | 1 | |
+| 2026-08-08 | 9 | 1 | |
+| 2026-08-09 | 8 | 1 | |
+
+Five consecutive clean nights, 8–15 writers each. **Caveat that must travel with
+this table:** none of those nights exercised the S2b teardown — no lgtm session
+existed at 03:00 on any of them — so the improvement from 08-04 to 08-05 belongs
+to the walk, not to S2b. S2b's evidence is the lab, not this table.
+
 ### S3 — Upstream report to neovim · `workstation-z9i3` · P3 · optional, last
 
 Two upstream defects: the unnecessary `os_remove(to)` before `os_rename`
@@ -650,5 +719,6 @@ master; check for an existing issue first.
 | 2026-08-04 03:00 | **S2 verified, and incomplete.** Walk invariant holds in production: **max concurrent writers = 1** across 7 writers, "7 exited gracefully, 0 SIGKILLed". History accumulated (44138 → 44486 bytes). But a **3-writer burst at 03:00:03**, two seconds earlier, from Step 1.5's `tmux kill-session -t =lgtm` — same mechanism, outside S2's scope. `zv0l` closed, **`n0yh.1` (S2b) opened** |
 | 2026-08-04 11:00 | **S2b fixed.** lgtm teardown moved from the interactive head to **Step 3.4** in the destructive tail, after the walk + sweep. Manifest-leak worry disproved (allowlist is `=main`-only). Added a **serialized drain** before it, because `lgtm-run.timer` (`*:0/10`) fires at 03:00:00 and dispatches fresh nvims mid-reset — measured starting 03:00:03.461, 113ms before the teardown. Abort now leaves lgtm alive (destruction moved behind the `[y/N]` gate). Harness bug found the hard way: it executed the extracted Step 3.4 against the **real** tmux server and killed the live lgtm session; extraction boundary + a no-`tmux` guard added. 156 static assertions, walk harness green. Awaiting the 03:00 readout |
 | 2026-08-05 03:00 | **S2b readout: clean, but a NULL TEST.** Whole-window max concurrent = **1** (9 temps, all `.tmp.a`, 9/9 graceful) — but **no lgtm session existed** at 03:00 (`lgtm-run`: "Nothing to review"), so the teardown never ran and the old code would have looked identical. Re-confirms S2, proves nothing about S2b. Evidence supplied instead by a new lab harness `test-lgtm-teardown.sh` (real Step 3.4, private `tmux -L` server): teardown causes **3 writes old vs 0 new**, drain exercised, histories accumulated. `n0yh.1` closed |
+| 2026-08-09 22:40 | **S4: the instrument moves in-band.** The hand-started inotify watch was one reboot from vanishing, and a declared daemon was rejected on evidence — `inotifywait -m` goes **deaf on dir replace while staying alive and healthy-looking**, so no `Restart=`/liveness check can catch it. The reset now measures its own max-concurrent every night on **both hosts** (devbox runs the same reset — the cloudbox-only premise was wrong), with the walk's exit count as a positive control so a dead instrument reports UNKNOWN instead of `max 1`. Calibrated by `test-shada-report.sh`. Transient watch retired, 5-night baseline preserved above |
 | 2026-08-03 16:34 | **S2 shipped** — `#268` merged and deployed (`.#cloudbox`; `~/.nix-profile/bin/reset-workspace` verified to contain the walk). SIGTERM by pid, not the planned socket walk — measurement killed that plan. Discovered **merge-at-write**, so S2 also *restores* the history the burst destroyed. Test suite 133 → 150, plus a behavioural test that runs the extracted walk. **Verification still owed: one observed night** |
 | 2026-08-03 09:00 | **S0 read out, `t032` closed.** No direct writers (0 `CREATE`/`MODIFY` on `main.shada` in 326 events). Storm confirmed: **3 concurrent writers, 3 unlink windows in one second**. S2 proceeds per the pre-registered rule |

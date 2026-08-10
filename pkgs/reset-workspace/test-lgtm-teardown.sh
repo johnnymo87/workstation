@@ -75,6 +75,10 @@ teardown="$(awk '
 printf '%s\n' "$teardown" | grep -q "kill-session -t '=lgtm'" || { echo "FAIL: extracted teardown lacks the kill-session"; exit 1; }
 printf '%s\n' "$teardown" | grep -q 'kill -TERM'              || { echo "FAIL: extracted teardown lacks the serialized drain"; exit 1; }
 printf '%s\n' "$teardown" | grep -q 'sock_reaped'             && { echo "FAIL: extraction reached the real-/tmp socket reap"; exit 1; }
+# The concurrency report lives past the reap and consumes the walk's own counter,
+# which does not exist in this lab. If it drifts back inside the extraction the
+# harness dies on an unbound variable -- fail with the reason instead.
+printf '%s\n' "$teardown" | grep -q 'nvim_exited'             && { echo "FAIL: extraction reached shada_watch_report (needs the walk's counter)"; exit 1; }
 echo "ok: extracted Step 3.4 (drain + teardown) from $src"
 
 # ---- Lab -------------------------------------------------------------------

@@ -636,6 +636,42 @@ if [ -f "$default_nix" ]; then
   else
     echo "FAIL: a serialized drain must precede the lgtm teardown (drain at ${drain_line:-?}, teardown at ${lgtm_kill_line:-?})"; fail=1
   fi
+  # workstation-y3fq: the reset asserts its OWN invariant every night. The
+  # external inotify watch that verified S0-S2b was a hand-started transient unit
+  # that dies on reboot -- and worse, `inotifywait -m` goes DEAF when its watched
+  # directory is replaced (verified: the process stays alive and healthy-looking,
+  # so no Restart= and no liveness probe can catch it). A permanent daemon is
+  # therefore an instrument that cannot be calibrated. Self-reporting can be
+  # calibrated, because the walk already knows how many writers it exited: if it
+  # exited some and the watcher saw nothing, the instrument is dead and must say
+  # UNKNOWN loudly rather than report a clean max of 1.
+  want_grep "the reset measures its own writer concurrency" 'max concurrent shada writers'
+  want_grep "a dead instrument reports unknown, not clean"  'shada concurrency: unknown'
+  want_grep "inotify is a declared dependency"              'inotify-tools'
+  # The watcher has to be running BEFORE the first thing that can make an nvim
+  # write, and must not stop until after the last one (the Step 3.4 teardown).
+  wstart_line=$(grep -n 'shada_watch_start' "$default_nix" | head -1 | cut -d: -f1 || true)
+  wstop_line=$(grep -n 'shada_watch_report' "$default_nix" | tail -1 | cut -d: -f1 || true)
+  first_term_line2=$(grep -n 'kill -TERM "$w_pid"' "$default_nix" | head -1 | cut -d: -f1 || true)
+  if [ -n "$wstart_line" ] && [ -n "$first_term_line2" ] && [ "$wstart_line" -lt "$first_term_line2" ]; then
+    echo "ok: the watcher starts before the first nvim exit"
+  else
+    echo "FAIL: watcher must start before the walk (start at ${wstart_line:-?}, first TERM at ${first_term_line2:-?})"; fail=1
+  fi
+  if [ -n "$wstop_line" ] && [ -n "$lgtm_kill_line" ] && [ "$wstop_line" -gt "$lgtm_kill_line" ]; then
+    echo "ok: the watcher is still running through the lgtm teardown"
+  else
+    echo "FAIL: watcher must outlast the teardown (report at ${wstop_line:-?}, teardown at ${lgtm_kill_line:-?})"; fail=1
+  fi
+  # It must start AFTER the re-exec dance, or a manual run started from a serve
+  # cgroup loses its watcher to the pool restart mid-reset and under-reports.
+  tail_line=$(grep -n '^    # ---- Destructive Tail Phase' "$default_nix" | head -1 | cut -d: -f1 || true)
+  if [ -n "$wstart_line" ] && [ -n "$tail_line" ] && [ "$wstart_line" -gt "$tail_line" ]; then
+    echo "ok: the watcher starts inside the destructive tail (survives the re-exec)"
+  else
+    echo "FAIL: watcher must start after the re-exec (start at ${wstart_line:-?}, tail at ${tail_line:-?})"; fail=1
+  fi
+
   # Exact-match target: `lgtm-foo` is somebody else's session, not ours.
   if [ "$(grep -c "kill-session -t '=lgtm'" "$default_nix" || true)" -eq 1 ]; then
     echo "ok: exactly one exact-match lgtm kill-session"
