@@ -185,6 +185,10 @@ check "scope is GC'd when it empties"           "--collect"         "$argv"
 check "lands in the aggregate-capped slice"     "--slice=bazel"     "$argv"
 check "scope carries an EXPLICIT MemoryMax"     "-p MemoryMax="     "$argv"
 check "scope sets OOMPolicy explicitly"         "-p OOMPolicy="     "$argv"
+# Without this, systemd EXPANDS the argv it is handed and silently corrupts any
+# bazel argument containing `$$` or `${...}`. Measured before the fix:
+#   systemd-run --user --scope -q -- printf '%s\n' 'both=$$'   ->   both=$
+check "systemd env expansion is disabled"       "--expand-environment=no" "$argv"
 check "invokes the real bazel by abs path"      "$WORK/stub-bazel"  "$argv"
 check "user args pass through verbatim"         "build //foo:bar --config=remote" "$argv"
 

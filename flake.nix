@@ -328,6 +328,43 @@
         touch $out
       '';
 
+      # Same guard as bazel-slice-wiring, for the agent-scope plugin.
+      #
+      # Worth restating why this needs its own check rather than review: the
+      # plugin's SLICE_NAME is a TypeScript constant and the slice unit is a Nix
+      # attribute, so nothing in either language can see the other. A rename on
+      # either side leaves every command still scoped, still green, still passing
+      # the plugin's own unit tests -- and silently unbounded in aggregate,
+      # because systemd-run invents an uncapped transient slice rather than
+      # failing. The symptom would be a host OOM, weeks later.
+      agent-slice-wiring = devboxPkgs.runCommand "agent-slice-wiring-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.gnused ];
+        gen = self.homeConfigurations.cloudbox.activationPackage;
+      } ''
+        plugin="$gen/home-files/.config/opencode/plugins/agent-scope.ts"
+        [ -e "$plugin" ] || { echo "FAIL: agent-scope.ts does not ship in the cloudbox generation"; exit 1; }
+
+        slice=$(sed -n 's/^const SLICE_NAME = "\(.*\)"$/\1/p' "$plugin")
+        [ -n "$slice" ] || { echo "FAIL: could not read SLICE_NAME from agent-scope.ts"; exit 1; }
+
+        unit="$gen/home-files/.config/systemd/user/$slice.slice"
+        if [ ! -e "$unit" ]; then
+          echo "FAIL: agent-scope targets --slice=$slice but no $slice.slice unit ships."
+          echo "      systemd-run would create it transiently with NO MemoryMax, so the"
+          echo "      aggregate cap would silently not exist. See workstation-yt0p."
+          exit 1
+        fi
+
+        grep -q '^MemoryMax=' "$unit" || {
+          echo "FAIL: $slice.slice ships without a MemoryMax; the aggregate cap is the"
+          echo "      entire reason the slice exists."
+          exit 1
+        }
+
+        echo "ALL PASS (agent slice wiring: plugin --slice=$slice matches a capped $slice.slice)"
+        touch $out
+      '';
+
       # Headless-Lua unit tests for assets/nvim/lua/user/session_switcher/.
       #
       # Registered here rather than bolted onto pkgs/oc-auto-attach's

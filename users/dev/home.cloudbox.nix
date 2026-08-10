@@ -21,6 +21,15 @@ let
   # change exists to eliminate, so the name is bound once here rather than
   # written as a literal in two places.
   bazelSliceName = "bazel";
+
+  # Slice for agent-spawned bash-tool commands. The OTHER side of this name is
+  # the `SLICE_NAME` constant in assets/opencode/plugins/agent-scope.ts, which
+  # cannot import Nix. They are tied together by the `agent-slice-wiring` check
+  # in flake.nix rather than by convention, for exactly the reason spelled out
+  # on bazel-slice-wiring: `systemd-run --slice=NAME` does NOT fail on a slice
+  # that was never declared. It creates a transient one with no limits, so a
+  # rename on either side stays green and silently unbounded until the host OOMs.
+  agentSliceName = "oc-agent";
   bazelScope = pkgs.callPackage ../../pkgs/bazel-scope {
     sliceName = bazelSliceName;
   };
@@ -646,6 +655,32 @@ lib.mkIf isCloudbox {
     Slice = {
       MemoryMax = "16G";
       MemorySwapMax = "2G";
+    };
+  };
+
+  # Every OTHER agent-spawned subprocess, held outside the serve cgroup.
+  #
+  # bazel.slice above fixed one binary. This one fixes the class: the bash tool
+  # spawns each command as a direct child of `opencode serve`, so ANY of them can
+  # OOM-kill it (the unit is OOMPolicy=stop). vitest did exactly that twice on
+  # 2026-08-09 -- and unlike bazel it could not be shimmed at all, because vitest
+  # is not on PATH and npm prepends node_modules/.bin ahead of anything we could
+  # put there. assets/opencode/plugins/agent-scope.ts therefore wraps commands at
+  # the tool boundary instead of the PATH boundary. See bead workstation-yt0p and
+  # docs/plans/2026-08-10-agent-subprocess-scope.md.
+  #
+  # The aggregate cap is the point of the slice: the per-command MemoryMax=10G
+  # bounds ONE command, and nothing else bounds N of them running concurrently
+  # across four serves. 20G lets two heavy commands run without letting the whole
+  # population reach the 62G host.
+  systemd.user.slices.${agentSliceName} = {
+    Unit = {
+      Description = "opencode agent bash-tool commands, capped and held outside the serve cgroup";
+      Documentation = [ "https://github.com/johnnymo87/workstation/blob/main/docs/plans/2026-08-10-agent-subprocess-scope.md" ];
+    };
+    Slice = {
+      MemoryMax = "20G";
+      MemorySwapMax = "4G";
     };
   };
 

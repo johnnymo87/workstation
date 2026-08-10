@@ -200,6 +200,24 @@ This matters constantly here, because an opencode bash tool call runs inside
 `opencode-serve@<port>.service`. Anything that restarts the serve pool — or any
 unit your session lives in — kills your "detached" job mid-flight.
 
+**On cloudbox this is no longer true, and the difference matters in both
+directions.** The `agent-scope` plugin now runs every bash-tool command in its
+own transient scope under `oc-agent.slice` (bead `workstation-yt0p`), so:
+
+- Your command's cgroup is `…/user@1000.service/oc-agent.slice/oc-agent-*.scope`,
+  **not** the serve's. A `setsid nohup` job therefore *survives* a serve restart
+  here. `systemd-run --user --unit=…` is still the right tool for anything
+  genuinely durable — an `oc-agent` scope is per-command and unnamed.
+- Your command has a **10 G memory cap**. A process killed at that cap reports
+  **exit 137**; that is the scope cap, not the host running out of memory, and
+  retrying unchanged will fail identically. Reduce the workload's parallelism
+  instead (for vitest, `--maxWorkers`; for a build, its job count).
+- Commands mentioning `git` are deliberately NOT scoped, so that the `git …`
+  deny rules in the review agents keep matching. They behave exactly as
+  described above.
+
+Check with `cat /proc/self/cgroup` rather than assuming which case you are in.
+
 **Verified on cloudbox 2026-08-01** with a throwaway user unit: three children
 were started from inside the unit's cgroup, then the unit was restarted.
 
