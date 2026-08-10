@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-9crSrtX5ujXtLuPvmiIPRwq5sKePrl4rCcDsCEbS1DU=";
+      hash = "sha256-x92vYKBdSIGC9K1/q9H3yTmhgIFF/v0ajcYVRAagC1M=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-7tbfPROGYkXtyJDPV2C4W60Tv5xfnMQwTbLvEhzNApI=";
+      hash = "sha256-MNmIbjCrMDHbvwfh+iFqOJub+UCNqfBrY9I8H76A2A8=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-HStc/Tm2pdCmnNDLp7wtM/t8va5+LWjDAo9Ef0fFcYQ=";
+      hash = "sha256-K6gtQGqoPGMyJdl4z97xK9Gxjp14X05cOVs9PYkwmgc=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-GWk+P4witQpstQS5WdCL9CTaumyBmG1GNMoXFiBXgxQ=";
+      hash = "sha256-Mf5unboDDXRx01wHAqKcEFVsJXYvfTwdscobX/jfQw8=";
       isZip = true;
     };
   };
@@ -250,7 +250,11 @@ let
     # serve self-heartbeat OFF the agent event loop onto a worker_threads Worker so a
     # CPU-heavy turn can't starve it -> no false dead-serve / "session lease lost
     # mid-run"; Fix D (bead workstation-oqa1) re-acquires on a benign owner_generation
-    # bump instead of dying. Both live inside serve-lease.patch. The 12-patch set is:
+    # bump instead of dying. Both live inside serve-lease.patch.
+    # THE SET IS NOW 28 PATCHES, and `patches/apply.sh` in the fork (its numbered
+    # header block + the PATCHES=() array) is the SOURCE OF TRUTH for what is in a
+    # build. This comment stopped enumerating at #12 and had silently gone stale;
+    # do not treat the list below as current. The first twelve were:
     # gemini-empty-parts, tool-fix, cache-thinking-skip, retry-cap, vim,
     # sqlite-foreign-key-wrap, event-session-scope (#7, x8wi), createnext-readback
     # (#8, mn9r M3), serve-lease (#9, mn9r M4), attach-route-resolve (#10, mn9r M7,
@@ -266,12 +270,23 @@ let
     # owning serve via pigeon GET /route + reconnect on SSE drop); it only activates
     # for `attach --session`, so default-TUI behavior is unchanged.
     # instance-state-partition.patch remains DROPPED (fixed upstream by 87c33b3).
+    # patched.9 adds message-serve-provenance (#28, bead workstation-63wo): each
+    # serve stamps {serveId, invocationId, port, pid} onto the assistant rows it
+    # writes, so the phantom-busy sweeper can finalize an orphan as soon as its
+    # creating invocation is gone instead of waiting for the nightly bounce to move
+    # its min-over-pool cutoff (a deferral of up to ~24h). Purely additive: an
+    # unstamped row falls back to that old cutoff, so nothing regresses if the stamp
+    # never appears. The gate requires the writer to be INSIDE the serve's own
+    # cgroup, not merely to have inherited its environment -- since workstation-yt0p
+    # every agent subprocess inherits OPENCODE_SERVE_ID and INVOCATION_ID while
+    # living in oc-agent.slice, where it OUTLIVES a serve restart, and stamping
+    # those would have let the sweeper abort live turns.
     # NOTE: cloudbox is ~15-way multi-writer on the shared opencode.db, so a switch
     # that swaps the opencode binary should stop ALL opencode processes at once (serve
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
     upstreamVersion = "1.17.13";
-    patchedRevision = "8";  # ".N" suffix — drop to "" on next upstream version bump
+    patchedRevision = "9";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
