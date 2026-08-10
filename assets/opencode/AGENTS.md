@@ -293,6 +293,24 @@ of which fail **silently** rather than loudly:
   (bazel does, via its shim), give the OUTER scope an explicit non-PID-derived
   name: `--unit=myjob-$RANDOM`.
 
+**Never inline multi-line prose into a double-quoted shell argument.** Write it to
+a file and pass `"$(cat /path/to/file)"`. Command substitution of a file's
+*content* does not re-evaluate that content, so backticks and `$(...)` inside the
+file are inert — but backticks typed directly inside `"..."` are **executed**.
+
+This is not hypothetical: a `bd note` whose prose contained
+`` `nix run home-manager -- switch --flake .#cloudbox` `` as an *example of a
+command not to run* caused bash to run it. The sentence explaining the caution
+performed the thing it was cautioning against, and the activation log was
+substituted into the note in place of the text. It happened to be harmless
+(a Home Manager switch only repoints a symlink; running processes keep the store
+path they already exec'd, verified `NRestarts=0` on all four serves) — but the
+same bug with a destructive command in the backticks, on a host whose sqlite DB
+has ~15 concurrent writers, would not have been.
+
+Prose that merely *mentions* a dangerous command is not safe just because it is
+"only documentation".
+
 One `pkill` footgun, hit twice while verifying the above: `pkill -f <pattern>`
 matches **your own** command line, so `pkill -f 'job scope'` issued from a shell
 whose argv contains that string kills the shell — and the surrounding command
