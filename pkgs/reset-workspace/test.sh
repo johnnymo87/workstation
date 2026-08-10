@@ -663,6 +663,18 @@ if [ -f "$default_nix" ]; then
   else
     echo "FAIL: watcher must outlast the teardown (report at ${wstop_line:-?}, teardown at ${lgtm_kill_line:-?})"; fail=1
   fi
+  # The claim is "max concurrent == 1 across the WHOLE reset", so the measurement
+  # has to cover the whole reset. It did not at first: the report closed right
+  # after the walk, and on 2026-08-10 the retiring external watch caught a write
+  # at 03:00:57 -- during the prune/restart steps, 53s past the report -- that the
+  # in-band instrument could not see. A measurement that stops before the run does
+  # cannot substantiate a claim about the run.
+  restart_line2=$(grep -n 'restart_pool_target "$POOL_SCOPE"' "$default_nix" | head -1 | cut -d: -f1 || true)
+  if [ -n "$wstop_line" ] && [ -n "$restart_line2" ] && [ "$wstop_line" -gt "$restart_line2" ]; then
+    echo "ok: the measurement window covers the pool restart too"
+  else
+    echo "FAIL: the report must outlast the pool restart (report at ${wstop_line:-?}, restart at ${restart_line2:-?})"; fail=1
+  fi
   # It must start AFTER the re-exec dance, or a manual run started from a serve
   # cgroup loses its watcher to the pool restart mid-reset and under-reports.
   tail_line=$(grep -n '^    # ---- Destructive Tail Phase' "$default_nix" | head -1 | cut -d: -f1 || true)

@@ -1140,17 +1140,6 @@ EOF6
     done
     [ "$sock_reaped" -eq 0 ] || log "  reaped $sock_reaped orphaned pane socket(s)"
 
-    # Everything that can trigger a ShaDa write has now happened: the walk, the
-    # sweep, the drain and the teardown. (The socket reap above only unlinks dead
-    # sockets.) Stop listening and report the invariant. `nvim_exited` is the
-    # positive control -- if it is nonzero and the watch saw nothing, the report
-    # says the instrument is dead rather than a reassuring "max 1".
-    #
-    # Placed after the socket reap, not before, so it stays OUTSIDE the region
-    # test-lgtm-teardown.sh extracts and executes -- that harness has no
-    # `nvim_exited` and would die on it under `set -u`.
-    shada_watch_report "$nvim_exited"
-
     # ---- Step 3.5: Repair a corrupt ShaDa file, then reap its temps ----
     # nvim persists ShaDa by writing `main.shada.tmp.<a-z>` and renaming it over
     # `main.shada` -- but only after checking that the CURRENT `main.shada`
@@ -1494,6 +1483,20 @@ PROMPT
         log "WARNING: opencode-launch failed (non-zero exit); recommendation session not started"
       fi
     fi
+
+    # Stop measuring and report. This sits at the very END of the run, not right
+    # after the walk, because the invariant is "max concurrent == 1 across the
+    # WHOLE reset" and Steps 4-6 are part of the reset. Measured 2026-08-10: the
+    # first night of in-band reporting agreed with the retiring external watch on
+    # the walk window (7 temps, max 1) but MISSED an 8th write at 03:00:57 -- 53
+    # seconds after the old report closed, during the prune/restart steps. A
+    # measurement that stops before the run does cannot substantiate a claim
+    # about the run.
+    #
+    # `nvim_exited` is the positive control: nonzero exits with zero observed
+    # events means the instrument is dead, and the report says so rather than
+    # reporting a reassuring "max 1".
+    shada_watch_report "$nvim_exited"
 
     FINISHED=1
     update_sentinel "ok"

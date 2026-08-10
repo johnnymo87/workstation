@@ -132,11 +132,30 @@ echo "ok: lab tmux server is isolated (own socket '$TMUX_SOCK')"
 
 # Populate the lab `lgtm` session with real nvims, one per pane.
 spawn_lab_session() {
-  local i sock pid
-  command tmux -L "$TMUX_SOCK" kill-session -t '=lgtm' 2>/dev/null || true
+  local i sock pid tries=0
+  # Tear down the whole lab SERVER, not just the session. `lgtm` is its only
+  # session, so killing the session kills the server, and the new-session that
+  # immediately follows then races that shutdown -- "server exited unexpectedly",
+  # which surfaced as the misleading "lab nvim 1 never listened". Kill
+  # deliberately, wait for it to be gone, then retry the create. This harness
+  # passed twice before hitting it; a flaky test is worse than no test.
+  command tmux -L "$TMUX_SOCK" kill-server 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    command tmux -L "$TMUX_SOCK" has-session -t '=lgtm' 2>/dev/null || break
+    sleep 0.1
+  done
   LAB_PIDS=""
   MARKERS=()
-  command tmux -L "$TMUX_SOCK" new-session -d -s lgtm -x 80 -y 24 "sleep 600"
+  until command tmux -L "$TMUX_SOCK" new-session -d -s lgtm -x 80 -y 24 "sleep 600" 2>/dev/null; do
+    tries=$((tries+1))
+    [ "$tries" -ge 15 ] && { echo "FAIL: lab tmux server would not start after $tries tries"; return 1; }
+    sleep 0.3
+  done
+  # Re-assert isolation on every (re)start: a fresh server must still be blind to
+  # the user's sessions before this test is allowed to kill anything.
+  if command tmux -L "$TMUX_SOCK" has-session -t '=main' 2>/dev/null; then
+    echo "FAIL: lab tmux server can see the user's 'main' session"; return 1
+  fi
   for i in $(seq 1 "$NVIM_COUNT"); do
     sock="$LAB/nvim-$i-$RANDOM.sock"
     # Each pane hosts a real nvim. Killing the pane SIGHUPs it, and it writes
