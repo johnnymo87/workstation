@@ -18,6 +18,42 @@ bd ready --json
 
 Report to user: number of ready items, top priorities, any blockers worth noting.
 
+## Claim Before You Start — And Check for a Branch
+
+`bd ready` showing an item as unclaimed does **not** mean nobody is building it.
+Two sessions on the same machine can hold the same bead in different checkouts,
+and neither one's worktree is visible to the other.
+
+This has already cost a full duplicate build. Two sessions independently
+implemented the same bead (`pigeon-8cz`, 2026-08-03/04) — same three files, same
+non-obvious design choices — because the first started without claiming and the
+second checked only `bd ready`. One branch was merged; the other was deleted
+whole.
+
+Both halves are required, because each covers a different collision order:
+
+```bash
+# 1. Before starting, claim it — even for a "quick fix".
+bd update <id> --claim
+bd update <id> --notes "claimed by session <ses_id>, worktree <abs path>"
+
+# 2. Before starting, look for a branch someone else already has open.
+git branch -a --sort=-committerdate | head -20
+git branch -a | grep -i <keyword>     # e.g. the bead's subject
+git worktree list                     # local checkouts on this machine
+```
+
+- **Claiming** stops `bd ready` advertising the item to a session that starts
+  *after* you. It does nothing about work already in flight.
+- **Checking branches** catches the reverse case — a peer already mid-flight,
+  uncommitted, holding no claim. `bd` cannot see that; git can.
+- **Put the worktree path in the claim.** The bead ID alone doesn't say which
+  checkout holds it, and that is the fact a colliding session needs.
+
+Skipping the claim because the fix is small is exactly how this happens: the
+five-hour gap between "started" and "would have claimed on first commit" is the
+window a peer picks the item up in.
+
 ## When to Use bd vs TodoWrite
 
 | Use bd when | Use TodoWrite when |
