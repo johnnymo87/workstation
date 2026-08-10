@@ -280,6 +280,52 @@ Check disk usage:
 ssh <host> 'df -h /'
 ```
 
+### `nix flake check` fails with `path '/nix/store/...-assets' is not valid`
+
+Symptom (seen on cloudbox 2026-08-10):
+
+```
+error: path '/nix/store/hbk8xyh7dm7i3mg761zmmf07b2qysir4-assets' is not valid
+… while evaluating checks.aarch64-linux.home-dev
+… home.activation.mergeOpencode.data (users/dev/opencode-config.nix)
+```
+
+**This is a full root filesystem, not a broken flake and not a stale cache.**
+`assetsPath = ./assets` in `flake.nix` is coerced to a string, so Nix copies
+`assets/` into the store as its own `…-assets` path *during evaluation*. On a
+full disk that copy cannot be materialised, and eval reports the resulting
+path as invalid. The hash differs per checkout only because it is the content
+hash of that checkout's `assets/`.
+
+Recognise it by these three tells together:
+
+- `df -h /` is at or near 100% (the 2026-08-10 incident: 245 MB free), or the
+  journal shows `ENOSPC` around the failure
+  (`journalctl --since today | grep -i "no space left"`).
+- Only `nix flake check` fails; `nix build .#homeConfigurations.<host>.activationPackage`
+  and `nix run home-manager -- switch` succeed, because they need no new copy.
+- CI on the same commit is green.
+
+Fix: reclaim space, then re-run.
+
+```bash
+systemctl --user start disk-cleanup.service   # cloudbox: reclaimed ~98G
+df -h /
+nix flake check
+```
+
+What it is **not** — all ruled out by experiment on nix 2.31.5:
+
+- Not the flake eval cache. Warming the eval cache, deleting the `…-assets`
+  path out from under it, and re-running `nix flake check` does **not**
+  reproduce; Nix re-copies and exits 0. `--no-eval-cache` and clearing
+  `~/.cache/nix/eval-cache-v6` change nothing.
+- Not the fetcher cache (`~/.cache/nix/fetcher-cache-v4.sqlite` holds no
+  `…-assets` rows at all).
+- Not a GC'd path per se. The weekly `nix-gc.timer` does delete un-rooted
+  `…-assets` copies (they are eval-only sources with no GC root), and that is
+  harmless — the next eval re-creates them.
+
 ## Systemd User Timers
 
 Both NixOS hosts run several user-level timers for automation.
