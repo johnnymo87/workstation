@@ -140,10 +140,18 @@ let
       if "$SYSTEMD_RUN" --user --scope --collect --quiet -- true 2>/dev/null; then
         # --collect: GC the scope once it empties. The scope outlives this client
         #   by design -- the server JVM stays in it until --max_idle_secs (900s).
-        # No --unit=: the auto-generated run-pNNN.scope name is unique by
-        #   construction. A stable per-workspace name would COLLIDE with the
-        #   still-alive scope of the resident server on the very next build, and
-        #   systemd-run cannot join an existing scope.
+        # No --unit=: the auto-generated run-pNNN.scope name is unique ENOUGH
+        #   here. A stable per-workspace name would COLLIDE with the still-alive
+        #   scope of the resident server on the very next build, and systemd-run
+        #   cannot join an existing scope.
+        #   CAVEAT, learned in workstation-yt0p: "unique by construction" is
+        #   false once this shim runs INSIDE another scope. The auto name is
+        #   derived from systemd-run's own PID, and because --scope execs in
+        #   place (and `bash -c` exec-optimizes a final simple command) the inner
+        #   systemd-run can inherit the very PID that named the outer scope,
+        #   failing with "Unit run-pNNN.scope was already loaded". The agent-scope
+        #   plugin therefore names ITS scopes `oc-agent-*` so this one still
+        #   works; do not "simplify" that back to an auto name.
         # -p MemoryMax: MANDATORY. The JVM is container-aware, so an uncapped
         #   scope would size its heap against the host's 62G instead of the cgroup
         #   -- strictly worse than no shim at all.
@@ -153,7 +161,15 @@ let
         #   included -- when one sandboxed action is OOM-killed. With continue,
         #   bazel just reports that action as failed, which is a far better
         #   diagnostic and keeps the server warm for the next build.
+        # --expand-environment=no: systemd otherwise EXPANDS the argv it is
+        #   handed, which CORRUPTS bazel arguments. Measured:
+        #     systemd-run --user --scope -q -- printf '%s\n' 'both=$$ and ''${FOO}'
+        #     both=$ and
+        #   i.e. `$$` collapses to `$` and `''${...}` is substituted or errors.
+        #   Any bazel flag or target pattern containing those was silently
+        #   mangled before this flag was added (workstation-yt0p).
         exec "$SYSTEMD_RUN" --user --scope --collect --quiet \
+          --expand-environment=no \
           --slice="$SLICE_NAME" \
           -p MemoryMax="$SCOPE_MEMORY_MAX" \
           -p OOMPolicy=continue \
