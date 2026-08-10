@@ -157,8 +157,8 @@ launder an unchecked inference into the future.
 
 - `swarm-messaging` — the envelope, kinds, priority, and the message economy a
   wake is a special case of.
-- `understanding-workspace-reset` — what the nightly 03:00 reset does to
-  sessions and worktrees, which is what a wake has to survive.
+- `resetting-workspace` (workstation repo-local) — what the nightly 03:00 reset
+  does to sessions and worktrees, which is what a wake has to survive.
 - `attributing-causes` — for the inference-forwarding hazard above: what an
   instrument actually measures, and confirming a conclusion is aimed at the
   question you are asking before you carry it forward.

@@ -4,7 +4,6 @@ pkgs.writeShellApplication {
   name = "reset-workspace";
   runtimeInputs = with pkgs; [
     curl
-    jq
     tmux
     procps         # pkill, pgrep
     util-linux     # flock
@@ -28,7 +27,6 @@ pkgs.writeShellApplication {
     serve_auth_load
 
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
-    FRONTDOOR_URL="''${FRONTDOOR_URL:-http://127.0.0.1:4700}"
     YES=0
 
     # Save original args for the flock re-exec below.
@@ -42,19 +40,6 @@ pkgs.writeShellApplication {
     die() {
       log "FATAL: $*"
       exit 1
-    }
-
-    # Print a pid and all of its descendant pids, one per line. Used to
-    # build the `main` tmux session allowlist (Step 1.6): a captured
-    # `opencode attach` TUI is restored only if its pid is a descendant of a
-    # `main` pane (snapshot the tree while it's intact -- after the nvim kill
-    # children reparent to init and become unattributable).
-    collect_subtree() {
-      local root="$1" child
-      printf '%s\n' "$root"
-      for child in $(pgrep -P "$root" 2>/dev/null || true); do
-        collect_subtree "$child"
-      done
     }
 
     # pool_health_urls_from_wants <wants-string> <fallback-url>: parse a systemd
@@ -102,7 +87,8 @@ pkgs.writeShellApplication {
     # host (devbox), else "system" (cloudbox, where the pool is a system
     # target).
     # Single source of truth for which systemctl scope owns
-    # opencode-serve-pool.target, so capture and restart can never disagree.
+    # opencode-serve-pool.target, so the restart and the readiness poll can
+    # never disagree.
     # `systemctl --user` needs XDG_RUNTIME_DIR; the detach re-exec above
     # guarantees it. If the detach fell back to in-place, misdetecting "system"
     # on devbox dies at restart exactly as the old inline detection did.
@@ -178,17 +164,6 @@ pkgs.writeShellApplication {
     CURRENT_PHASE="init"
     FINISHED=0
     OWNS_SENTINEL=0
-
-    # count_manifest_sids <file>: count non-empty lines in manifest file.
-    # Returns 0 if file is missing, unreadable, empty, or blank-only. Pure helper.
-    count_manifest_sids() {
-      local file="''${1:-}"
-      if [ -f "$file" ]; then
-        grep -c . "$file" 2>/dev/null || true
-      else
-        echo 0
-      fi
-    }
 
     # update_sentinel <status> [phase]: write sentinel status atomically via mktemp + mv -f.
     # Only executes if OWNS_SENTINEL=1.
@@ -406,7 +381,7 @@ EOF
 
 
 
-    # ---- Interactive Head Phase (Steps 1.5 - 2.5) ----
+    # ---- Interactive Head Phase (Steps 1.5 - 2) ----
     # When RESET_WORKSPACE_DESTRUCTIVE_DETACHED is set (re-exec'd under setsid),
     # skip the interactive head and jump straight to the destructive gauntlet.
     if [ "''${RESET_WORKSPACE_DESTRUCTIVE_DETACHED:-}" != "1" ]; then
@@ -416,247 +391,13 @@ EOF
       # from every pane it tears down and doing that here produced a burst of
       # concurrent writers BEFORE the walk that exists to serialize them
       # (workstation-n0yh.1). Nothing in the head phase depends on lgtm being
-      # gone: the recommendation manifest excludes it structurally via the
-      # `main` allowlist below, not by killing it first.
-
-      # ---- Step 1.6: Build the `main` tmux session allowlist ----
-      # The user's interactive opencode TUIs all live in the `main` tmux
-      # session: oc-auto-attach with no --tmux-session creates windows in the
-      # current/default session (which is `main`), whereas lgtm passes
-      # --tmux-session lgtm. We capture the whole process subtree of every
-      # `main` pane while the tree is intact, then capture a TUI's sid below
-      # ONLY if its pid is in this set. This allowlist is robust where the old
-      # lgtm denylist was leaky: orphaned attach clients (pane gone, process
-      # reparented to init) belong to no pane subtree and so are correctly
-      # dropped. `=main` is an exact match. If `main` is absent the allowlist
-      # stays empty and the manifest ends up empty -- intentional: with no
-      # main session there is nothing the user wants restored.
-      MAIN_PIDS=" "
-      if tmux has-session -t '=main' 2>/dev/null; then
-        while read -r pane_pid; do
-          [ -n "$pane_pid" ] || continue
-          while read -r d; do
-            MAIN_PIDS="''${MAIN_PIDS}''${d} "
-          done < <(collect_subtree "$pane_pid")
-        done < <(tmux list-panes -s -t '=main' -F '#{pane_pid}' 2>/dev/null || true)
-        log "main-session allowlist pids:$MAIN_PIDS"
-      else
-        log "WARNING: no 'main' tmux session found; nothing to restore (manifest will be empty)"
-      fi
-
-      # Determine the pool's systemd scope ONCE (workstation-3smg). Reused by the
-      # pool-aware capture probe below and the restart + readiness poll later, so
-      # capture and restart can't drift onto different scopes.
-      POOL_SCOPE="$(pool_scope)"
-      log "pool scope: $POOL_SCOPE"
-
-      # ---- Step 2: Snapshot live opencode attach clients ----
-      # Restoration scope: ONLY opencode TUIs in the `main` tmux session
-      # (allowlist built in Step 1.6). The strict loop matches TUIs launched
-      # via Telegram /launch or `opencode-launch` CLI, whose cmdline is of the
-      # form `<binary>/opencode attach <url> --session ses_xxx [--dir <path>]`
-      # -- the sid is reliably in argv. The bare loop resolves `:te opencode`
-      # TUIs (no --session) by cwd. In BOTH loops a TUI is captured only if
-      # its pid is a descendant of a `main` pane, so lgtm review TUIs (a
-      # different tmux session) and orphaned attach clients (pane torn down ->
-      # reparented to init -> no session) are excluded. See
-      # docs/plans/2026-04-27-reset-workspace-snapshot-fix-design.md and
-      # docs/plans/2026-06-04-reset-workspace-exclude-lgtm-plan.md.
-      #
-      # Pool-aware capture health (workstation-3smg, narrowing workstation-7sbo).
-      # The bare-TUI sid resolution below queries a serve over HTTP; a wedged
-      # serve (event loop blocked, kernel still completing TCP handshakes)
-      # accepts the connection and then blocks the read forever -- and this
-      # capture runs *before* the Step-5 restart that clears the wedge, so it
-      # must never hang on a possibly-wedged serve. Any healthy pool member can
-      # resolve cwd->sid (all serves share one opencode.db), so probe the WHOLE
-      # pool -- not just serve-0 -- with a hard per-probe timeout, and use the
-      # first healthy member as CAPTURE_URL for the bare-resolve loop.
-      # SERVE_HEALTHY now gates ONLY that loop; the strict-attach loop reads
-      # sids from /proc and runs unconditionally (it needs no serve). Worst case
-      # all K members are wedged-but-accepting: K x 3s, bounded, then straight
-      # to the restart. The --max-time on the resolution curl is the belt; this
-      # probe is the suspenders. See
-      # docs/investigations/2026-06-17-opencode-1.17.7-orphan-session-wedge.md Q3.
-      SERVE_HEALTHY=0
-      CAPTURE_URL="$FRONTDOOR_URL"
-      # CAPTURE_FALLBACK: the first directly-healthy pool member (fable M2 #3). The
-      # bare-resolve READ goes through the front door (data-plane), but the door
-      # forwards this global read to the anchor with NO failover -- so a wedged
-      # anchor 503s even when another member is healthy, which would silently drop
-      # that TUI from the morning manifest. We keep the healthy member the gate
-      # below already finds and retry the read against it if the door read fails,
-      # preserving manifest integrity while still trying the door first. (The
-      # strict-attach capture reads sids from /proc and is unaffected either way.)
-      CAPTURE_FALLBACK=""
-      mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")
-      for u in "''${capture_pool_urls[@]}"; do
-        # frontdoor-exempt(C5): per-serve liveness; the door deliberately hides WHICH member answered
-        if curl -sf --max-time 3 --connect-timeout 3 \
-          ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
-          "$u/global/health" >/dev/null 2>&1; then
-          SERVE_HEALTHY=1
-          [ -z "$CAPTURE_FALLBACK" ] && CAPTURE_FALLBACK="$u"
-          log "capture: bare-TUI sids via the front door ($FRONTDOOR_URL); direct fallback $u"
-          break
-        fi
-      done
-      if [ "$SERVE_HEALTHY" -eq 0 ]; then
-        log "WARNING: no healthy opencode-serve in pool (''${capture_pool_urls[*]}); strict-attach capture will still run, bare-resolve capture skipped"
-      fi
-
-      log "snapshotting live opencode attach clients..."
-
-      OPENCODE_MANIFEST=""
-      OPENCODE_STRICT_RAW=0     # strict-attach pgrep matches (raw, before dedupe)
-      OPENCODE_BARE_RESOLVED=0  # bare TUIs whose cwd resolved to a sid via opencode-serve
-      OPENCODE_BARE_SKIPPED=0   # bare TUIs whose cwd had no resolvable sid (or unreadable cwd)
-
-      # Loose pgrep + strict per-pid validation. Strict regex anchors on the
-      # binary path prefix, the literal `attach` subcommand, an http(s) url,
-      # and a syntactically valid sid -- false positives are essentially
-      # impossible.
-      #
-      # Note: the cmdline may have additional argv after the sid (notably
-      # `--dir <path>`, which oc-auto-attach has been emitting since
-      # 2026-04-28; see assets/nvim/lua/user/oc_auto_attach.lua). The match
-      # therefore does NOT anchor with $ at the end -- it just requires that
-      # `--session ses_xxx` appears somewhere after the url, with either a
-      # space or end-of-string after the sid (so we don't capture a partial
-      # token).
-      # workstation-3smg: strict-attach capture reads sids straight from
-      # /proc/<pid>/cmdline and touches NO serve, so it runs unconditionally --
-      # even when every pool serve is wedged. (Previously gated on SERVE_HEALTHY,
-      # which discarded the entire manifest when serve-0 alone was unhealthy, e.g.
-      # devbox 2026-07-03.)
-      OC_ATTACH_PIDS=$(pgrep -u dev -f 'opencode attach' 2>/dev/null || true)
-      for pid in $OC_ATTACH_PIDS; do
-        # Authoritative exe filter: skip non-opencode processes that pgrep
-        # over-matched (e.g. a transient `grep "opencode attach"` running
-        # alongside reset). Without this, those processes trigger misleading
-        # "no --session in argv" WARNINGs that pollute the journal. Run before
-        # the allowlist check so pgrep false-matches don't generate skip noise.
-        exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
-        exe_base=$(basename "$exe")
-        if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
-          continue
-        fi
-        # main-session allowlist: capture only TUIs whose pid is a descendant
-        # of a `main` pane (excludes lgtm review TUIs and orphaned attach
-        # clients, which live in a different tmux session or none).
-        case "$MAIN_PIDS" in *" $pid "*) ;; *) log "  skipping pid=$pid (not in main tmux session)"; continue ;; esac
-
-        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//' || true)
-        [ -n "$cmdline" ] || continue
-
-        if [[ "$cmdline" =~ ^[^[:space:]]+/opencode[[:space:]]+attach[[:space:]]+https?://[^[:space:]]+([[:space:]]+.*)?[[:space:]]+--session[[:space:]]+(ses_[A-Za-z0-9]+)([[:space:]]|$) ]]; then
-          sid="''${BASH_REMATCH[2]}"
-          cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
-          log "  pid=$pid sid=$sid cwd=$cwd"
-          OPENCODE_STRICT_RAW=$((OPENCODE_STRICT_RAW + 1))
-          OPENCODE_MANIFEST="''${OPENCODE_MANIFEST}''${sid}"$'\n'
-        else
-          log "  WARNING: skipping pid=$pid (no --session in argv) cmdline=$cmdline"
-        fi
-      done
-
-      # Resolve bare opencode TUIs to sids via opencode-serve.
-      # For each bare TUI alive, look up the most-recent root session for its
-      # cwd; if found, restore it as an attach client by appending the sid to
-      # OPENCODE_MANIFEST. opencode-serve is running at this point (we restart it
-      # later in step 5), but "running" is not "responsive": a wedged serve can
-      # accept TCP and then block forever (workstation-7sbo). The SERVE_HEALTHY
-      # gate skips this loop when /global/health failed, and the resolution curl
-      # below carries a hard --max-time as a second line of defense.
-      # SERVE_HEALTHY gate (workstation-3smg): this loop resolves cwd->sid over
-      # HTTP, so it runs only when at least one pool member answered
-      # /global/health (CAPTURE_URL points at it). An empty pid list makes the
-      # loop no-op.
-      if [ "$SERVE_HEALTHY" -eq 1 ]; then
-        OC_ALL_PIDS=$(pgrep -u dev -f opencode 2>/dev/null || true)
-      else
-        OC_ALL_PIDS=""
-      fi
-      for pid in $OC_ALL_PIDS; do
-        exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
-        exe_base=$(basename "$exe")
-        if ! printf '%s' "$exe_base" | grep -qxE '\.?opencode(-wrapped)?'; then
-          continue
-        fi
-        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//' || true)
-        [ -n "$cmdline" ] || continue
-        arg2=$(printf '%s' "$cmdline" | awk '{print $2}')
-        # Skip serve (we restart it, not restore it) and attach clients
-        # (already enumerated in the strict loop above).
-        [ "$arg2" = "serve" ] && continue
-        [ "$arg2" = "attach" ] && continue
-        # main-session allowlist: capture only bare TUIs in the `main` tmux
-        # session. Placed after the serve/attach/exe filters so background
-        # daemons (opencode-serve, headless workers) don't generate skip-log
-        # noise on every run.
-        case "$MAIN_PIDS" in *" $pid "*) ;; *) log "  skipping bare TUI pid=$pid (not in main tmux session)"; continue ;; esac
-
-        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
-        if [ -z "$cwd" ]; then
-          log "  WARNING: bare opencode TUI pid=$pid has no readable cwd; skipping"
-          OPENCODE_BARE_SKIPPED=$((OPENCODE_BARE_SKIPPED + 1))
-          continue
-        fi
-
-        # --max-time 5 --connect-timeout 3 (workstation-7sbo): a wedged-but-TCP-
-        # accepting serve would otherwise hang this read forever, before the
-        # Step-5 restart that clears the wedge. Mirrors the health-poll pattern
-        # below. The trailing 2>/dev/null||true catches only error *exits*, not a
-        # hang, so the timeout is what actually bounds it. This is belt to the
-        # SERVE_HEALTHY suspenders above (covers a serve that wedges between the
-        # probe and here, or one whose /global/health answers but /session hangs).
-        resolved_sid=$(curl -fsS --max-time 5 --connect-timeout 3 --get "$CAPTURE_URL/session" \
-          --data-urlencode "directory=$cwd" \
-          --data-urlencode "roots=true" \
-          --data-urlencode "limit=1" 2>/dev/null \
-          | jq -r '.[0].id // empty' 2>/dev/null || true)
-
-        # fable M2 #3: if the door read failed (e.g. a wedged anchor 503 with no
-        # door-side failover), retry the read directly against the healthy pool
-        # member the gate found, so a partial-pool wedge can't silently drop this
-        # sid from the morning manifest.
-        if [ -z "$resolved_sid" ] && [ -n "$CAPTURE_FALLBACK" ] && [ "$CAPTURE_FALLBACK" != "$CAPTURE_URL" ]; then
-          resolved_sid=$(curl -fsS --max-time 5 --connect-timeout 3 \
-            ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
-            --get "$CAPTURE_FALLBACK/session" \
-            --data-urlencode "directory=$cwd" \
-            --data-urlencode "roots=true" \
-            --data-urlencode "limit=1" 2>/dev/null \
-            | jq -r '.[0].id // empty' 2>/dev/null || true)
-          [ -n "$resolved_sid" ] && log "  (door read failed; recovered via direct member $CAPTURE_FALLBACK)"
-        fi
-
-        if [ -n "$resolved_sid" ] && printf '%s' "$resolved_sid" | grep -qxE 'ses_[A-Za-z0-9]+'; then
-          log "  pid=$pid (bare-resolved) sid=$resolved_sid cwd=$cwd"
-          OPENCODE_MANIFEST="''${OPENCODE_MANIFEST}''${resolved_sid}"$'\n'
-          OPENCODE_BARE_RESOLVED=$((OPENCODE_BARE_RESOLVED + 1))
-        else
-          log "  WARNING: bare opencode TUI pid=$pid cwd=$cwd has no resolvable session in DB; skipping restoration"
-          OPENCODE_BARE_SKIPPED=$((OPENCODE_BARE_SKIPPED + 1))
-        fi
-      done
-
-      # Dedupe captured sids.
-      OPENCODE_MANIFEST=$(printf '%s' "$OPENCODE_MANIFEST" | awk 'NF && !seen[$0]++')
-      if [ -z "$OPENCODE_MANIFEST" ]; then
-        OPENCODE_COUNT=0
-      else
-        OPENCODE_COUNT=$(printf '%s\n' "$OPENCODE_MANIFEST" | wc -l)
-      fi
-
-      log "  captured $OPENCODE_COUNT restorable session(s) (raw: $OPENCODE_STRICT_RAW strict-attach + $OPENCODE_BARE_RESOLVED bare-resolved; dedupe may collapse); $OPENCODE_BARE_SKIPPED bare TUI(s) skipped"
+      # gone.
 
       # ---- Step 2: Confirm with user ----
       log ""
       log "About to:"
       log "  1. Exit all dev-owned nvim processes one at a time (SIGKILL only stragglers)"
       log "  2. Restart opencode-serve-pool.target (this Claude session's TUI will reconnect)"
-      log "  3. Launch recommendation session referencing $OPENCODE_COUNT captured sid(s)"
       log ""
 
       if [ "$YES" -ne 1 ]; then
@@ -668,21 +409,6 @@ EOF
         esac
       else
         log "(--yes: skipping confirmation)"
-      fi
-
-      # ---- Step 2.5: Persist the manifest (workstation-3smg) ----
-      # Write the manifest BEFORE the kill/restart gauntlet: the restart branch
-      # and the post-restart health poll both die on failure, and a die there
-      # must not discard a successful capture (the manifest is the whole point
-      # of the morning-recommendation flow). After the [y/N] confirm so an
-      # aborted run doesn't clobber the previous reset's manifest.
-      MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"
-      if [ -n "''$OPENCODE_MANIFEST" ]; then
-        printf '%s\n' "''$OPENCODE_MANIFEST" > "''$MANIFEST_PATH"
-        log "wrote ''$OPENCODE_COUNT sid(s) to ''$MANIFEST_PATH"
-      else
-        : > "''$MANIFEST_PATH"
-        log "wrote empty ''$MANIFEST_PATH (no captured sids)"
       fi
 
       # ---- Detach destructive phase unless RESET_WORKSPACE_NO_DETACH=1 ----
@@ -727,8 +453,6 @@ EOF
     # ---- Destructive Tail Phase ----
     OWNS_SENTINEL=1
     POOL_SCOPE="$(pool_scope)"
-    MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"
-    OPENCODE_COUNT="$(count_manifest_sids "$MANIFEST_PATH")"
 
     # ---- ShaDa helpers (used by Step 3's pre-walk guard and by Step 3.5) ----
     SHADA_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/nvim/shada"
@@ -1093,10 +817,6 @@ EOF5
     # and BEFORE Step 3.5 (so any write that does slip through still lands where
     # the repair can see it).
     #
-    # Its exclusion from the recommendation manifest never depended on this
-    # teardown: the `main` allowlist (Step 1.6) is built from `=main` panes only,
-    # so lgtm panes are out of scope whether they are alive or dead.
-    #
     # The drain below is not paranoia. The lgtm-run timer is OnCalendar=*:0/10,
     # so it fires at 03:00:00 -- the same second this reset starts (measured:
     # lgtm-run began 03:00:03.461, 113ms BEFORE this teardown logged at
@@ -1272,7 +992,7 @@ EOF2
     # needed. v1 scope: the mono primary root, where the read-only-main guard
     # lives and churn matters. Best-effort: a failure here never fails the reset.
     # Moved before Step 5 so a pool-death restart/health failure cannot skip it.
-    # (`work` is found on the inherited PATH, same as opencode-launch below.)
+    # (`work` is found on the inherited PATH, not runtimeInputs.)
     update_sentinel "started" "prune"
     MONO_ROOT="''${HOME}/projects/mono"
     if command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]; then
@@ -1291,8 +1011,9 @@ EOF2
     # old `opencode-serve.service` unit no longer exists, which broke the nightly
     # reset (03:00: "Unit opencode-serve.service not found"). Restart the target.
     #
-    # Host-aware restart. Scope was computed ONCE as POOL_SCOPE before capture
-    # (see pool_scope), so capture and restart cannot disagree. The pool target
+    # Host-aware restart. Scope was computed ONCE as POOL_SCOPE at the top of
+    # the destructive tail (see pool_scope), so the restart and the readiness
+    # poll below cannot disagree. The pool target
     # runs as a USER target on devbox (~/.config/systemd/user/; restart via
     # `systemctl --user`, no sudo) and as a SYSTEM target on cloudbox
     # (hosts/cloudbox/configuration.nix; restart via passwordless sudo). The
@@ -1426,67 +1147,9 @@ EOF2
       log "WARNING: could not discover pool instances; restart postcondition NOT verified"
     fi
 
-    # ---- Step 6: Launch recommendation session ----
-    # The manifest was already written (Step 2.5, before the kill/restart
-    # gauntlet). The recommendation session reads it, enriches each sid via
-    # opencode-serve, messages the user via Telegram with conversational
-    # recommendations, and re-opens only the chosen sessions on reply.
-    # Design: docs/plans/2026-05-16-recommendation-driven-reset-design.md
-    update_sentinel "started" "launch"
-    if [ "''$OPENCODE_COUNT" -eq 0 ]; then
-      log "no sessions to recommend; skipping recommendation session launch"
-    elif ! command -v opencode-launch >/dev/null 2>&1; then
-      log "WARNING: opencode-launch not on PATH; cannot spawn recommendation session"
-    else
-      # Land the morning agent in a dedicated dir so oc-auto-attach gives it a
-      # recognizable `morning` tmux window (basename of the dir) instead of a
-      # generic `dev` window / a hijacked ~ shell pane. cwd=~ has no clean home
-      # for it; see docs/plans/2026-07-16-morning-agent-dedicated-window-design.md.
-      # mkdir is best-effort: a failure must not abort the (already best-effort)
-      # launch — opencode/tmux fall back to a default cwd.
-      MORNING_DIR="$HOME/morning"
-      mkdir -p "$MORNING_DIR" || log "WARNING: could not create $MORNING_DIR; launching anyway"
-      log "launching recommendation session in $MORNING_DIR ..."
-      # The prompt is intentionally loose/judgmental. The recommendation
-      # session does its own enrichment via the opencode-serve HTTP API.
-      # See design doc for the rationale.
-      RECOMMENDATION_PROMPT=''$(cat <<'PROMPT'
-You're the morning workspace agent. The user has just gone through a nightly reset of their workspace. Your job has two phases: first recommend and reopen sessions, then stay on as swarm coordinator for what you reopened.
-
-Phase 1 -- recommend and reopen.
-
-Read the file at /tmp/reset-workspace-last-manifest.txt -- it contains one opencode session id per line, representing sessions that had a live TUI at reset time. If the manifest file is missing or empty, message the user "Nightly reset complete, no sessions to recommend." and exit. You are the successor to yesterday's morning agent, so skip any manifest sid whose session directory is your `$HOME/morning` marker directory -- resolve `$HOME` yourself (the session metadata reports directories as absolute paths like `/home/dev/morning`) -- that is a previous morning agent, not a user session. If you need scratch files, write them under /tmp, never in `$HOME/morning`, so that directory stays uninhabited and your own tab can never clobber a user pane.
-
-For each sid, fetch its metadata from GET http://127.0.0.1:4700/session/<sid> and look at the title, directory, and last update time. If useful, also fetch recent messages from GET http://127.0.0.1:4700/session/<sid>/message. Read enough to understand what each session IS (project, goal, finished vs mid-flight) -- you will be coordinating these sessions afterward -- but do not absorb full transcripts; keep your context light.
-
-Build a short, conversational Telegram message that gives a brief description of each session in your view -- what it IS (project, goal, finished vs mid-flight). Group by project. Be opinionated about state: if something looks finished (a PR landed, a question got resolved), say so; if something looks mid-flight, say that too. Number the sessions so the user can refer to them by number.
-
-Do NOT use the question tool and do NOT pose the user a question. The user typically replies with detailed, in-depth instructions that don't fit a simple multiple-choice prompt. Just send the descriptive message, then wait for their free-form reply.
-
-When the user replies, act on their instructions. Their reply will usually say which sessions to reopen (free-form: "1,3,5", "all", "none", or grouped like "just the ones in project X") and may include detailed direction for each. For every session they want reopened, run `oc-auto-attach --tmux-session main <sid>` in a bash tool, sequentially. ALWAYS pass `--tmux-session main` -- `oc-auto-attach` defaults to `main`, but pass it explicitly so a reopened tab never silently depends on that default and always lands in the user's `main` session. Report a brief summary of what was opened.
-
-Phase 2 -- swarm coordinator.
-
-After reopening, you are deputized as swarm coordinator for those sessions. The user will direct priorities through their replies; expect an ongoing conversation, not a one-shot task. Ground rules:
-
-- Operate at project-manager altitude. Track each session's goal, state, and blockers. Delegate detail work to the sessions themselves; do not do it yourself and do not read full transcripts. Keeping your context light is what lets you stay useful all day.
-- Communicate with sessions via pigeon: load the swarm-messaging skill before your first send, then use the swarm_send / swarm_read / swarm_list tools.
-- Follow that skill's message-economy section strictly: message a session only when it changes what that session will do next (task assignment, blocking question, needed answer). No acks, no heartbeats, no status-check pings. Batch related points into one message. A quiet worker is a healthy worker.
-- When the user asks how a session is doing, prefer pulling (GET http://127.0.0.1:4700/session/<sid>/message, or your own notes) over messaging the session.
-- Relay crisply: turn the user's directions into precise task.assign messages, and surface results and blockers back to the user in short summaries.
-PROMPT
-)
-      # opencode-launch first arg is directory, second is the prompt.
-      # Reset SIGPIPE disposition to default (trap - PIPE) so the long-lived morning agent and its children
-      # do not inherit SIG_IGN (which is preserved across exec and irreversible in POSIX child shells).
-      if ! ( trap - PIPE; exec opencode-launch "$MORNING_DIR" "$RECOMMENDATION_PROMPT" ) 2>&1 | while IFS= read -r line; do log "  ''$line"; done; then
-        log "WARNING: opencode-launch failed (non-zero exit); recommendation session not started"
-      fi
-    fi
-
     # Stop measuring and report. This sits at the very END of the run, not right
     # after the walk, because the invariant is "max concurrent == 1 across the
-    # WHOLE reset" and Steps 4-6 are part of the reset. Measured 2026-08-10: the
+    # WHOLE reset" and Steps 4-5 are part of the reset. Measured 2026-08-10: the
     # first night of in-band reporting agreed with the retiring external watch on
     # the walk window (7 temps, max 1) but MISSED an 8th write at 03:00:57 -- 53
     # seconds after the old report closed, during the prune/restart steps. A

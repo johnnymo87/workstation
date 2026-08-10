@@ -22,7 +22,7 @@ repo but not deployed to any machine yet.
 | Skill | Scope | Purpose |
 |-------|-------|---------|
 | [opencode-launch](skills/opencode-launch/SKILL.md) | cross | Spawn a headless opencode session in a given dir with an initial prompt. The basic primitive for swarm spin-up. Also covers `oc-mcp-enable`, which grants an MCP server (slack, atlassian, …) to an ALREADY-RUNNING session — no relaunch, no lost context. |
-| [swarm-messaging](skills/swarm-messaging/SKILL.md) | cross | Sender + receiver protocol: the `swarm_send`/`swarm_read`/`swarm_list` tools, the `<swarm_message>` envelope, message kinds, priority, threading via `reply_to`, replay via `swarm_read`. |
+| [swarm-messaging](skills/swarm-messaging/SKILL.md) | cross | **Message economy first** (fewer messages, not shorter; no acks; batch and hold; never restate a swarm message to a human who can see it), the coordinator role (one brief upward, retract your own relays, don't assign from a stale board, silence reads as endorsement), then the protocol: `swarm_send`/`swarm_read`/`swarm_list`, the `<swarm_message>` envelope, kinds, priority, threading, replay. |
 | [scheduling-wakes](skills/scheduling-wakes/SKILL.md) | cross | Waking yourself at a future time with `swarm_schedule`/`swarm_scheduled`. Durable across the nightly reset. Payload rules, what `delivered_late_ms` doesn't measure, the silent pruned-worktree failure, why a trigger on the dependent does not cover the dependency, and cancel-and-reschedule (inverting a retracted claim, not deleting it). |
 | [swarm-shaped-work](skills/swarm-shaped-work/SKILL.md) | cross | When to swarm vs. iterate sequentially. Coordinator + workers topology. Spin-up sequence (`opencode-launch` × N → tell coordinator the worker ids → kick off). |
 
@@ -44,7 +44,6 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 | [beads](skills/beads/SKILL.md) | cross | Activate `bd` issue tracking when work spans multiple sessions or has complex dependencies. |
 | [migrating-beads-schema](skills/migrating-beads-schema/SKILL.md) | cross | Resolve a bd cross-clone schema-migration block (#4259): single-migrator discipline, DoltHub-vs-git split-remote trap, adopt-vs-migrate, embedded-clone graft fallback, 0037 stripped-UUID-default repair (Error 1105), fresh-clone verification. |
 | [reviewing-github-prs](skills/reviewing-github-prs/SKILL.md) | cross | Choosing the right response shape (threaded inline reply vs fresh review vs top-level issue comment) when posting on a PR, plus the `gh` CLI mechanics for each. |
-| [understanding-workspace-reset](skills/understanding-workspace-reset/SKILL.md) | cross | Consumer-side facts for the morning recommendation agent (dedicated `morning` tmux window; Telegram-reachable): the manifest == live `main`-tmux TUIs, why a session may be missing, and reopen via `oc-auto-attach --tmux-session main`. Companion to the repo-local `resetting-workspace`. |
 
 ### External Services
 

@@ -110,7 +110,7 @@ same commit as this file.
 | A1 | `pkgs/oc-pool-attach/default.nix:67,86,92,97,108,136` | Interactive attach: health, create, session read, `attach $FRONTDOOR_URL` | guarded by `pkgs/oc-pool-attach/test.sh:193-208,235` |
 | A2 | `pkgs/oc-auto-attach/default.nix:29,327,331,521` | Auto-attach: session probe + attach URL handed to nvim | guarded by `pkgs/oc-auto-attach/test-project-key.sh:488-497` |
 | A3 | `pkgs/opencode-launch/default.nix:235,253,342,410,448` | health, `/config/providers`, create, `prompt_async`, kill hint | guarded by `pkgs/opencode-launch/test.sh:179-228` |
-| A4 | `pkgs/reset-workspace/default.nix:478,493` | `CAPTURE_URL="$FRONTDOOR_URL"` — manifest capture | guarded by `pkgs/reset-workspace/test.sh:396,409` |
+| ~~A4~~ | ~~`pkgs/reset-workspace/default.nix`~~ | ~~`CAPTURE_URL="$FRONTDOOR_URL"` — manifest capture~~ | **retired**: the session-restore/recommendation flow was removed from `reset-workspace`, taking this call site with it. |
 | A5 | `users/dev/home.base.nix:1199,1250` | `lgtm-sessions` health check + session list | guarded by `users/dev/test-pool-route-clients.sh:80-84` |
 
 ## B. Data plane — was direct-to-serve; **all three repointed 2026-07-26** (`e270598`)

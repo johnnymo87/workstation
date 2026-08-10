@@ -3270,8 +3270,8 @@ EOF
         "TMUX_TMPDIR=/tmp"
         "PATH=/run/current-system/sw/bin:/home/dev/.nix-profile/bin"
         # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
-        # sessionVariables for rationale). reset-workspace spawns a headless
-        # recommendation opencode session that must hit the same DB.
+        # sessionVariables for rationale). The restarted serve pool must hit
+        # the same DB the interactive sessions use.
         "OPENCODE_DB=/home/dev/.local/share/opencode/opencode.db"
         "OPENCODE_DISABLE_CHANNEL_DB=1"
         # This oneshot already runs in its own system-slice cgroup, so it does
@@ -3284,8 +3284,8 @@ EOF
       ];
     };
     script = ''
-      # Restart pigeon-daemon (system unit) FIRST so the recommendation
-      # session spawned inside reset-workspace registers with a fresh daemon.
+      # Restart pigeon-daemon (system unit) FIRST so every session created
+      # after the reset registers with a fresh daemon.
       # Symmetric with devbox (hosts/devbox/configuration.nix).
       /run/wrappers/bin/sudo systemctl restart pigeon-daemon.service
       /home/dev/.nix-profile/bin/reset-workspace --yes

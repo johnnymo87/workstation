@@ -148,44 +148,6 @@ format_sentinel() {
   fi
 }
 
-count_manifest_sids() {
-  local file="${1:-}"
-  if [ -f "$file" ]; then
-    grep -c . "$file" 2>/dev/null || true
-  else
-    echo 0
-  fi
-}
-
-tmp_dir="$(mktemp -d)"
-cleanup_tmp() { rm -rf "$tmp_dir"; }
-trap cleanup_tmp EXIT
-
-empty_manifest="$tmp_dir/empty.txt"
-: > "$empty_manifest"
-check "count_manifest_sids: empty file -> 0" "0" "$(count_manifest_sids "$empty_manifest")"
-
-lines_manifest="$tmp_dir/three_sids.txt"
-printf 'ses_1\nses_2\nses_3\n' > "$lines_manifest"
-check "count_manifest_sids: 3 sids -> 3" "3" "$(count_manifest_sids "$lines_manifest")"
-
-blanks_manifest="$tmp_dir/blanks.txt"
-printf 'ses_1\n\nses_2\n\n' > "$blanks_manifest"
-check "count_manifest_sids: 2 sids + blanks -> 2" "2" "$(count_manifest_sids "$blanks_manifest")"
-
-only_blanks_manifest="$tmp_dir/only_blanks.txt"
-printf '\n\n\n' > "$only_blanks_manifest"
-v="$(count_manifest_sids "$only_blanks_manifest")"
-check "count_manifest_sids: blank-lines-only file -> 0" "0" "$v"
-if [ "$v" -eq 0 ] 2>/dev/null; then
-  echo "ok: count_manifest_sids blank-lines result is integer usable"
-else
-  echo "FAIL: count_manifest_sids blank-lines result [$v] is not integer usable"; fail=1
-fi
-
-missing_manifest="$tmp_dir/missing.txt"
-check "count_manifest_sids: missing file -> 0" "0" "$(count_manifest_sids "$missing_manifest")"
-
 check "detach decision: NO_DETACH unset -> detach" \
   "0" "$(should_detach_destructive 0 && echo 0 || echo 1)"
 check "detach decision: NO_DETACH=1 -> suppress" \
@@ -394,30 +356,9 @@ if [ -f "$default_nix" ]; then
   want_grep "atomic sentinel write via mktemp and mv"     'mktemp "/tmp/reset-workspace-status.XXXXXX"'
   want_grep "source defines pool_ports_from_wants"       'pool_ports_from_wants() {'
   want_grep "source defines get_pool_wants"               'get_pool_wants() {'
-  want_grep "source defines FRONTDOOR_URL"                 'FRONTDOOR_URL="'
   want_grep "source defines pool_health_urls_from_wants" 'pool_health_urls_from_wants() {'
   want_grep "source reads the pool target Wants="         'show -p Wants --value opencode-serve-pool.target'
   want_grep "source polls each discovered serve URL"      'serve_health_urls'
-  # workstation-7sbo: the manifest-capture path must never hang against a
-  # wedged-but-TCP-accepting serve (it runs before the Step-5 restart that
-  # clears the wedge). Two layers: a hard timeout on the bare-TUI resolution
-  # curl (minimal belt) + a /global/health probe that skips capture entirely
-  # and falls straight through to the restart when the serve is unhealthy
-  # (defense-in-depth suspenders). See investigation 2026-06-17 Q3.
-  want_grep "bare-resolution curl has a hard max-time"     '--max-time 5'
-  want_grep "bare-resolution curl has a connect-timeout"   '--connect-timeout 3'
-  want_grep "capture discovers the whole pool"             'mapfile -t capture_pool_urls < <(discover_pool_urls "$POOL_SCOPE")'
-  want_grep "capture uses FRONTDOOR_URL as CAPTURE_URL"    'CAPTURE_URL="$FRONTDOOR_URL"'
-  # fable M2 #3: door-first, but keep a direct healthy-member fallback so a
-  # partial-pool wedge can't silently drop a sid from the morning manifest.
-  want_grep "capture records a direct healthy-member fallback"   'CAPTURE_FALLBACK="$u"'
-  want_grep "capture retries the read against the direct member" '"$CAPTURE_FALLBACK/session"'
-  want_grep "no-healthy-pool still runs strict-attach"      'strict-attach capture will still run'
-  want_grep "source sets an unhealthy-serve flag"          'SERVE_HEALTHY=0'
-  # workstation-3smg: the 2026-07-03 empty-manifest bug WAS this gate. The
-  # strict-attach loop reads /proc only and must never be re-gated on serve
-  # health.
-  refuse_grep "strict-attach capture is ungated" 'OC_ATTACH_PIDS=""'
   want_grep "source defines pool_scope"                    'pool_scope() {'
   want_grep "source defines discover_pool_urls"            'discover_pool_urls() {'
   want_grep "pool discovery reads Wants unprivileged first" 'wants="$(systemctl show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"'
@@ -425,9 +366,7 @@ if [ -f "$default_nix" ]; then
   want_grep "pool_scope checks the user pool target"       'systemctl --user is-active --quiet opencode-serve-pool.target'
   want_grep "pool discovery user-scope read"               'wants="$(systemctl --user show -p Wants --value opencode-serve-pool.target 2>/dev/null || true)"'
   want_grep "pool discovery parses via the pure helper"    'pool_health_urls_from_wants "$wants" "$OPENCODE_URL"'
-  want_grep "capture computes the pool scope once" 'POOL_SCOPE="$(pool_scope)"'
-  want_grep "bare-resolution uses the healthy capture url" '"$CAPTURE_URL/session"'
-  want_grep "bare-resolve loop still serve-gated"          'OC_ALL_PIDS=""'
+  want_grep "source computes the pool scope once" 'POOL_SCOPE="$(pool_scope)"'
   want_grep "restart reuses the precomputed scope"        'restart_pool_target "$POOL_SCOPE"'
   want_grep "post-restart poll reuses discover_pool_urls" 'serve_health_urls < <(discover_pool_urls "$POOL_SCOPE")'
   refuse_grep "no non-pausing read in health poll"        '< <(:)'
@@ -447,8 +386,6 @@ if [ -f "$default_nix" ]; then
   want_grep "sentinel status path is defined"            '/tmp/reset-workspace-last-status.txt'
   want_grep "uses ExecMainStartTimestampMonotonic"       'ExecMainStartTimestampMonotonic'
   refuse_grep "PID-based restart comparison not used"     'MainPID'
-  want_grep "source defines count_manifest_sids"        'count_manifest_sids() {'
-  want_grep "source counts sids via count_manifest_sids" 'OPENCODE_COUNT="$(count_manifest_sids "$MANIFEST_PATH")"'
   want_grep_func_content "cleanup_trap checks OWNS_SENTINEL" "cleanup_trap" "OWNS_SENTINEL"
   want_grep_func_content "update_sentinel checks OWNS_SENTINEL" "update_sentinel" "OWNS_SENTINEL"
   want_grep "source defines evaluate_restart_outcome"     'evaluate_restart_outcome() {'
@@ -691,15 +628,6 @@ if [ -f "$default_nix" ]; then
     echo "FAIL: expected exactly one \`kill-session -t '=lgtm'\`"; fail=1
   fi
 
-  # workstation-3smg: the manifest write must precede the pool restart, so a
-  # restart/health-poll die can't discard a successful capture.
-  manifest_line=$(grep -n 'MANIFEST_PATH="/tmp/reset-workspace-last-manifest.txt"' "$default_nix" | head -1 | cut -d: -f1)
-  restart_line=$(grep -n 'restart_pool_target "$POOL_SCOPE"' "$default_nix" | head -1 | cut -d: -f1)
-  if [ -n "$manifest_line" ] && [ -n "$restart_line" ] && [ "$manifest_line" -lt "$restart_line" ]; then
-    echo "ok: manifest is written before the pool restart"
-  else
-    echo "FAIL: manifest write must precede the pool restart (manifest at ${manifest_line:-?}, restart at ${restart_line:-?})"; fail=1
-  fi
   # Phase 3.5 (workstation-v03j.5): reset-workspace is the pruning owner (M1c)
   # for opencode-launch --worktree leftovers. It must sweep merged worktrees in
   # the mono root via `work --prune-merged`, guarded by command -v work, and it
@@ -709,44 +637,15 @@ if [ -f "$default_nix" ]; then
   want_grep "prune targets the mono primary root"        '/projects/mono'
   want_grep "prune is guarded by command -v work"        'command -v work >/dev/null 2>&1 && [ -e "$MONO_ROOT/.git" ]'
   want_grep "prune failure is non-fatal to the reset"    'work --prune-merged failed (non-fatal)'
-  # F3: The prune must run before the pool restart and recommendation launch (so a pool failure
-  # cannot skip worktree pruning).
+  # F3: The prune must run before the pool restart, so a pool failure cannot
+  # skip worktree pruning.
   prune_line=$(grep -n 'work --prune-merged' "$default_nix" | head -1 | cut -d: -f1)
   restart_line=$(grep -n 'restart_pool_target "$POOL_SCOPE"' "$default_nix" | head -1 | cut -d: -f1)
-  rec_line=$(grep -n '# ---- Step 6: Launch recommendation session ----' "$default_nix" | head -1 | cut -d: -f1)
   if [ -n "$prune_line" ] && [ -n "$restart_line" ] && [ "$prune_line" -lt "$restart_line" ]; then
     echo "ok: worktree prune runs before the pool restart"
   else
     echo "FAIL: prune must precede pool restart (prune at ${prune_line:-?}, restart at ${restart_line:-?})"; fail=1
   fi
-  if [ -n "$prune_line" ] && [ -n "$rec_line" ] && [ "$prune_line" -lt "$rec_line" ]; then
-    echo "ok: worktree prune runs before the recommendation launch"
-  else
-    echo "FAIL: prune must precede recommendation launch (prune at ${prune_line:-?}, rec at ${rec_line:-?})"; fail=1
-  fi
-  # 2026-07-16: morning agent lands in a dedicated $HOME/morning window
-  # (not headless/cwd=~). See docs/plans/2026-07-16-morning-agent-dedicated-window-design.md
-  want_grep "morning agent dir is defined"          'MORNING_DIR="$HOME/morning"'
-  want_grep "morning agent dir is created"          'mkdir -p "$MORNING_DIR"'
-  want_grep "launch targets the morning dir"        'opencode-launch "$MORNING_DIR" "$RECOMMENDATION_PROMPT"'
-  want_grep "opencode-launch resets SIGPIPE disposition" '( trap - PIPE; exec opencode-launch'
-  # The old cwd=~ launch must be gone. This substring matches current source
-  # (opencode-launch '~' "''${RECOMMENDATION_PROMPT}") and disappears after the change.
-  refuse_grep "no legacy tilde launch"              "opencode-launch '~'"
-  # 2026-07-16 Task 2: prompt rationale corrected, self-skip added.
-  # The reopen instruction (with --tmux-session main) must remain.
-  want_grep "reopen still forces --tmux-session main" 'oc-auto-attach --tmux-session main <sid>'
-  # The stale "headless" self-description must be gone.
-  refuse_grep "prompt no longer calls itself headless" 'you are a headless session not attached to tmux'
-  # The self-skip directive must be present. NOTE: do NOT grep for '$HOME/morning'
-  # here -- that string already exists at default.nix's MORNING_DIR assignment
-  # (Task 1), so it would match vacuously. Grep for a phrase unique to the directive.
-  want_grep "prompt self-skips predecessor morning sessions" 'skip any manifest sid whose session directory is'
-  # The scratch-dir guidance must be independently guarded.
-  want_grep "prompt keeps scratch out of morning dir" 'write them under /tmp, never in'
-  # 2026-07-22 Phase 7.7: Front door routing
-  want_grep "recommendation prompt reads via the front door" 'http://127.0.0.1:4700/session/'
-  refuse_grep "recommendation prompt no longer hardcodes anchor for reads" 'http://127.0.0.1:4096/session/'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi

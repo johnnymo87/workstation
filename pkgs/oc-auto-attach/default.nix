@@ -229,7 +229,7 @@ ${builtins.readFile ./canonical-path.sh}
     # The default is `main`: with no flag, launches land deterministically in
     # the user's primary session instead of whatever session tmux happens to
     # consider "current" -- which was nondeterministic for headless callers
-    # (systemd, the pigeon daemon, the recommendation session) not attached to
+    # (systemd, the pigeon daemon) not attached to
     # tmux. An empty --tmux-session= is coerced back to `main` below.
     target_session="main"
     retry_count="''${OC_AA_RETRIES:-0}"
