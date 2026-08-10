@@ -686,6 +686,29 @@ this table:** none of those nights exercised the S2b teardown — no lgtm sessio
 existed at 03:00 on any of them — so the improvement from 08-04 to 08-05 belongs
 to the walk, not to S2b. S2b's evidence is the lab, not this table.
 
+#### First in-band readout, 2026-08-10 - and the blind spot it exposed
+
+The self-report worked on its first night: `max concurrent shada writers: 1
+(invariant holds; 7 temp(s), 7 writer(s) exited)`, with the positive control
+satisfied (writers exited *and* events observed, so not `unknown`).
+
+The one-night overlap with the retiring external watch is what made this readout
+worth doing. The two instruments agreed exactly on the walk window - 7 temps, max
+1 - **but the old watch saw an 8th temp at 03:00:57**, 53 seconds after the
+in-band report had closed, during the prune/restart steps.
+
+That is not a wiring bug; it is a scope bug in the measurement. The claim being
+made is "max concurrent == 1 across the **whole** reset", and Steps 4-6 were
+outside the window. A measurement that stops before the run does cannot
+substantiate a claim about the run. The report now runs at the very end, just
+before `FINISHED=1`, so the prune, the pool restart and the session launch are
+all inside it.
+
+Had the old watch been retired on schedule - as the plan said - this gap would
+have shipped invisibly, and the nightly line would have kept saying "invariant
+holds" about two thirds of the reset. Keeping the outgoing instrument alive for
+one night of overlap is what caught it.
+
 ### S3 — Upstream report to neovim · `workstation-z9i3` · P3 · optional, last
 
 Two upstream defects: the unnecessary `os_remove(to)` before `os_rename`
@@ -720,5 +743,6 @@ master; check for an existing issue first.
 | 2026-08-04 11:00 | **S2b fixed.** lgtm teardown moved from the interactive head to **Step 3.4** in the destructive tail, after the walk + sweep. Manifest-leak worry disproved (allowlist is `=main`-only). Added a **serialized drain** before it, because `lgtm-run.timer` (`*:0/10`) fires at 03:00:00 and dispatches fresh nvims mid-reset — measured starting 03:00:03.461, 113ms before the teardown. Abort now leaves lgtm alive (destruction moved behind the `[y/N]` gate). Harness bug found the hard way: it executed the extracted Step 3.4 against the **real** tmux server and killed the live lgtm session; extraction boundary + a no-`tmux` guard added. 156 static assertions, walk harness green. Awaiting the 03:00 readout |
 | 2026-08-05 03:00 | **S2b readout: clean, but a NULL TEST.** Whole-window max concurrent = **1** (9 temps, all `.tmp.a`, 9/9 graceful) — but **no lgtm session existed** at 03:00 (`lgtm-run`: "Nothing to review"), so the teardown never ran and the old code would have looked identical. Re-confirms S2, proves nothing about S2b. Evidence supplied instead by a new lab harness `test-lgtm-teardown.sh` (real Step 3.4, private `tmux -L` server): teardown causes **3 writes old vs 0 new**, drain exercised, histories accumulated. `n0yh.1` closed |
 | 2026-08-09 22:40 | **S4: the instrument moves in-band.** The hand-started inotify watch was one reboot from vanishing, and a declared daemon was rejected on evidence — `inotifywait -m` goes **deaf on dir replace while staying alive and healthy-looking**, so no `Restart=`/liveness check can catch it. The reset now measures its own max-concurrent every night on **both hosts** (devbox runs the same reset — the cloudbox-only premise was wrong), with the walk's exit count as a positive control so a dead instrument reports UNKNOWN instead of `max 1`. Calibrated by `test-shada-report.sh`. Transient watch retired, 5-night baseline preserved above |
+| 2026-08-10 03:20 | **First in-band readout + measurement-window fix.** Report worked: max concurrent 1 (7 temps, 7 writers). Cross-check against the retiring watch agreed on the walk window but revealed an 8th write at **03:00:57**, past the report's close - Steps 4-6 were unmeasured. Report moved to end-of-run; a guard now pins it past the pool restart. Old watch **not** retired: it earned another night. Also fixed a latent flake in test-lgtm-teardown.sh (killing the lab tmux server's only session races its shutdown) |
 | 2026-08-03 16:34 | **S2 shipped** — `#268` merged and deployed (`.#cloudbox`; `~/.nix-profile/bin/reset-workspace` verified to contain the walk). SIGTERM by pid, not the planned socket walk — measurement killed that plan. Discovered **merge-at-write**, so S2 also *restores* the history the burst destroyed. Test suite 133 → 150, plus a behavioural test that runs the extracted walk. **Verification still owed: one observed night** |
 | 2026-08-03 09:00 | **S0 read out, `t032` closed.** No direct writers (0 `CREATE`/`MODIFY` on `main.shada` in 326 events). Storm confirmed: **3 concurrent writers, 3 unlink windows in one second**. S2 proceeds per the pre-registered rule |
