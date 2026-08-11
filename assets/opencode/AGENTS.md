@@ -211,8 +211,14 @@ own transient scope under `oc-agent.slice` (beads `workstation-yt0p` and `workst
   **exit 137**; that is the scope cap, not the host running out of memory, and
   retrying unchanged will fail identically. Reduce the workload's parallelism
   instead (for vitest, `--maxWorkers`; for a build, its job count).
-- ALL bash-tool commands are scoped, because the wrap now happens at spawn
-  time via the `shell` config and therefore no longer interferes with permission parsing.
+- Every bash-tool command is scoped, including ones that mention or invoke
+  `git`. The wrap happens at spawn time (opencode's `shell` config points at
+  `oc-scoped-shell`) rather than by rewriting the command text, so it no longer
+  interferes with permission parsing and the `git …` deny rules keep matching.
+  The one exception is the degrade path: if `systemd-run --user` is unusable,
+  the wrapper prints a `WARNING: ... running UNSCOPED` line and runs the command
+  in the serve cgroup. Seeing that line in your output means the memory
+  protection is off, not that your command failed.
 
 Check with `cat /proc/self/cgroup` rather than assuming which case you are in.
 

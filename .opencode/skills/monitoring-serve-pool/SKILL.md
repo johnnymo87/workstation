@@ -161,8 +161,31 @@ consequences when reading an incident:
 - **`MemoryMax=10G` per command**, aggregate `oc-agent.slice` `MemoryMax=20G`. A
   command killed at its own cap reports **exit 137** and the serve is untouched —
   `NRestarts` does not move. Do not read a 137 as host memory exhaustion.
-- **ALL bash-tool commands are scoped**, because the wrap now happens at spawn
-  time via the `shell` config and no longer interferes with permission parsing.
+- **Every bash-tool command is scoped**, including ones that mention or invoke
+  `git`, because the wrap now happens at spawn time via the `shell` config and no
+  longer interferes with permission parsing. (Until `workstation-rdsq.4`, any
+  command whose *text* contained the word `git` ran unscoped — 22.9% of all
+  historical commands, enough that a trailing `# after git pull` comment was
+  sufficient to put a test runner in the serve cgroup.)
+- **Two ways this protection can silently switch itself off.** Both leave the
+  cgroup line as your only witness, so when attributing a serve kill, verify
+  rather than assume:
+  1. *Degrade path.* If `systemd-run --user` is unusable (wedged or full
+     `/run/user/1000`, no user manager), the wrapper prints
+     `oc-scoped-shell: WARNING: ... running UNSCOPED` and runs the command in the
+     serve cgroup. opencode merges stderr into tool output, so during an outage
+     that line is prepended to **every** command's output and will break callers
+     that parse it (`jq`, JSON) — expect that confusion to arrive *with* the
+     underlying problem, not instead of it.
+  2. *Garbage-collected store path.* The `shell` value is an absolute Nix store
+     path baked into the generated config. A running serve holds the config it
+     started with, so a home-manager switch followed by `nix-collect-garbage -d`
+     (see the cleaning-disk skill) can leave that path missing. opencode does
+     **not** error on a missing shell — it silently falls back to `bash` on
+     `PATH`, and every command quietly returns to the serve cgroup with no
+     warning at all. The nightly reset bounds the exposure, but after any GC,
+     confirm with a throwaway command that `/proc/self/cgroup` still shows
+     `oc-agent.slice`.
 - **Backgrounded jobs now survive a serve restart**, because they are no longer in
   the serve's cgroup. That is usually welcome, but it means `oc-agent.slice` can
   retain work the pool restart did not clear (bead `workstation-2dwe`).

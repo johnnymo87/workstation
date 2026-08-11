@@ -121,6 +121,23 @@ check "systemd-run flags: --slice=oc-agent" "--slice=oc-agent" "$log_content"
 check "systemd-run scope unit starts with oc-agent-" "--unit=oc-agent-" "$log_content"
 refute "emitted unit name does NOT match run-p*" "run-p" "$log_content"
 
+# A2. The checks above are substrings over a log holding BOTH invocations (probe
+# and real run), so they would still pass if every resource flag were moved onto
+# the probe and dropped from the run that actually carries the payload. They also
+# would pass if a flag landed AFTER `--`, where it is payload argv rather than a
+# systemd-run option. Pin both properties to the real run's option section.
+run_line="$(grep '^SDRUN: ' "$log_file" | grep -v -- 'oc-scoped-shell-probe-' | tail -1)"
+run_opts="${run_line%% -- *}"
+if [ "$run_line" = "$run_opts" ]; then
+  bad "real systemd-run invocation has no '--' separator: $run_line"
+else
+  ok "real systemd-run invocation separates options from payload with --"
+fi
+for flag in "--expand-environment=no" "-p MemoryMax=10G" "-p MemorySwapMax=2G" \
+            "-p OOMPolicy=continue" "--slice=oc-agent" "--unit=oc-agent-"; do
+  check "real run carries '$flag' BEFORE the -- separator" "$flag" "$run_opts"
+done
+
 # B. Single execution guarantee on non-zero exit (probe success)
 count_file="$tmp_dir/exec_count.txt"
 rc=0

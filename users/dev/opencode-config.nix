@@ -581,9 +581,6 @@ in
       source = "${assetsPath}/opencode/plugins/session-header.ts";
     };
 
- 
-
-
     # self-compact deployed as a Nix-built self-contained JS bundle.
     # See docs/plans/2026-04-21-self-compact-bundle-design.md.
     # The bundle inlines @opencode-ai/plugin and zod, so no node_modules

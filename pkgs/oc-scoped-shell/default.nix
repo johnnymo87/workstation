@@ -32,11 +32,24 @@ let
         export XDG_RUNTIME_DIR
       fi
 
-      # Probe scope creation first, bounded (~2s). Probe BEFORE exec so the payload
-      # still runs EXACTLY ONCE — a shell-level `systemd-run ... || bash ...` cannot
-      # distinguish "scope failed to start" from "payload exited non-zero" and would run
-      # a failing command twice. That single-execution property is load-bearing.
-      if "$SYSTEMD_RUN" --user --scope --collect --quiet --unit="oc-scoped-shell-probe-$$-$RANDOM" -- true 2>/dev/null; then
+      # Probe scope creation first. Probe BEFORE exec so the payload still runs
+      # EXACTLY ONCE — a shell-level `systemd-run ... || bash ...` cannot distinguish
+      # "scope failed to start" from "payload exited non-zero" and would run a failing
+      # command twice. That single-execution property is load-bearing.
+      #
+      # The probe MUST be externally bounded. `systemd-run` blocks on an sd-bus method
+      # reply whose default timeout is 25s, and "alive but frozen" is a documented
+      # failure mode of this box (see the monitoring-serve-pool skill). Unbounded, a
+      # wedged user bus would stall EVERY bash tool call for ~25s -- and unlike the
+      # plugin this replaced, there is no cross-command cache to amortise it, so the
+      # stall would repeat per command until the bus recovered. Tool calls with short
+      # timeouts would fail outright with no output. 3s is far above the measured 9ms
+      # cost of a healthy scope creation.
+      #
+      # `timeout` is an absolute store path on purpose: runtimeInputs is deliberately
+      # empty so the payload sees an unmodified PATH, and this must not depend on it.
+      if ${pkgs.coreutils}/bin/timeout -k 1 3 \
+        "$SYSTEMD_RUN" --user --scope --collect --quiet --unit="oc-scoped-shell-probe-$$-$RANDOM" -- true 2>/dev/null; then
         # On probe success: exec into systemd-run.
         # - --unit=: explicit unit name that can never match `run-p*`, because --scope execs
         #   in place and a NESTED systemd-run (the bazel shim) can otherwise inherit
@@ -59,10 +72,16 @@ let
           -- "$REAL_BASH" "$@"
       fi
 
-      # On probe failure: warn on stderr that command is running UNSCOPED inside serve cgroup,
-      # then exec <bash> "$@" (fail open — refusing would brick every agent).
-      echo "oc-scoped-shell: WARNING: systemd-run --user is unusable (full ''${XDG_RUNTIME_DIR}, or no user manager)." >&2
-      echo "oc-scoped-shell: WARNING: running command UNSCOPED inside serve cgroup." >&2
+      # On probe failure: warn, then exec <bash> "$@" (fail open — refusing would brick
+      # every agent on the host to avoid a risk serve-canary already backstops).
+      #
+      # ONE line, deliberately. opencode merges the tool's stdout and stderr into a
+      # single output string, so anything emitted here is prepended to EVERY command's
+      # output for as long as the degrade lasts -- which breaks callers that parse
+      # command output (jq, JSON) at exactly the moment the host is already sick.
+      # Staying loud is still right (the plugin's failure was logging where no session
+      # could see it), but the noise is kept to the minimum that names the condition.
+      echo "oc-scoped-shell: WARNING: systemd-run --user unusable (wedged/full ''${XDG_RUNTIME_DIR}, or no user manager); running UNSCOPED in the serve cgroup" >&2
 
       exec "$REAL_BASH" "$@"
     '';
