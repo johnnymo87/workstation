@@ -311,11 +311,17 @@ in
       # 90 days is ~230 MB.
       #
       # !! ERGONOMIC BREAK, READ THIS !!
-      #   journalctl -u pigeon-daemon.service                       <- returns NOTHING
+      #   journalctl -u pigeon-daemon.service                       <- NO APP OUTPUT
       #   journalctl --namespace=pigeon -u pigeon-daemon.service    <- correct
-      # It does NOT error; it silently returns zero entries, which is the exact
-      # false-negative-instrument shape that has already misled investigations
-      # here (a query that could never match, read as evidence of absence).
+      # It does NOT error, and it is worse than empty. PID 1 is not namespaced, so
+      # systemd's OWN lifecycle lines (Started/Stopped/Consumed ... CPU time) still
+      # land in the DEFAULT journal while every application line goes to the
+      # namespace. Measured at the 2026-08-11 cutover: 5 systemd lines in the
+      # default journal, 0 in the namespace, and 0 application lines in the default
+      # journal afterwards. A query returning a few plausible lines is far more
+      # convincing than one returning none, so "running but logging nothing, must
+      # be wedged" is an easy wrong call -- the exact false-negative-instrument
+      # shape that has already misled investigations here.
       # Audited before landing: no automated consumer in this repo reads
       # pigeon's journal -- the six `journalctl` sites in deployable Nix all
       # target other units -- so nothing AUTOMATED silently goes blind.
