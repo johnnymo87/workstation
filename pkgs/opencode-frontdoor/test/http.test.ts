@@ -1,4 +1,3 @@
-// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import * as fs from "node:fs";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { boundedFetch, boundedPigeonFetch, resolveDaemonToken, invalidateDaemonToken, stripTrailingSlashes, isAbsoluteHttpUrl } from "../src/http.js";

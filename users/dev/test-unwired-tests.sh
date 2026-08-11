@@ -263,6 +263,52 @@ if [ -d "$PLUGIN_TEST_DIR" ]; then
   fi
 fi
 
+# pkgs/opencode-frontdoor/test/*.test.ts, same channel, same tripwire shape
+# (bead workstation-5m47). Run by `checks.frontdoor-vitest`, which invokes
+# vitest against the directory.
+#
+# WHY A SECOND HARDCODED ENTRY IS NOT THE CENTRAL LIST THIS REPO REJECTED.
+# That argument was litigated for DEBT declarations, and it turns on decay
+# DIRECTION. A stale exemption keeps excusing a file: it decays silently, in
+# the dangerous direction, which is why those live as markers in the file. A
+# stale entry HERE decays loudly and safely -- rename or move the directory and
+# the glob stops matching, so its files report as unwired and CI goes red;
+# delete it and the `[ -d ]` test makes the entry inert.
+#
+# The inverse design -- a `.glob-covered-by` dotfile in the test directory
+# naming its check -- was considered and REJECTED for the same reason. That
+# marker would assert "I AM covered", and this script cannot evaluate nix to
+# falsify it, so a wrong one fails SILENTLY: exactly the direction section 3
+# above refuses to accept, and a self-service channel for laundering any
+# directory into "covered" by naming any attribute that happens to exist.
+# Editing this guard is deliberately higher ceremony than dropping a dotfile;
+# a coverage claim should be reviewed in the most sceptical file in the repo.
+#
+# NOTE the scope is *.test.ts ONLY, unlike the plugin entry above, and that is
+# deliberate rather than an omission: it mirrors EXACTLY what that check's own
+# on-disk-vs-actually-ran set diff enforces (`find test -name '*.test.ts'`). A
+# stray test/foo.spec.ts is NOT run by that check, so certifying it here would
+# rebuild the dmat defect inside the fix for it -- covered on paper, executed
+# by nothing. Widen this glob only in the same breath as the check's find(1).
+FRONTDOOR_TEST_DIR="pkgs/opencode-frontdoor/test"
+if [ -d "$FRONTDOOR_TEST_DIR" ]; then
+  # One attribute, where the plugin entry above demands three. Weaker than that
+  # precedent, and worth naming: the plugins have a dependency-free bash
+  # sibling (plugin-test-coverage) that independently audits the runner claims,
+  # and the frontdoor has no equivalent. What backs this entry instead is
+  # INSIDE the check -- a skip census and a set diff of on-disk vs executed
+  # files -- which this script cannot see and cannot enforce.
+  if grep -qE '^[[:space:]]*frontdoor-vitest[[:space:]]*=' flake.nix; then
+    for f in "$FRONTDOOR_TEST_DIR"/*.test.ts; do
+      [ -f "$f" ] && reached["$f"]=1
+    done
+  else
+    bad "the frontdoor-vitest check that makes $FRONTDOOR_TEST_DIR/ reachable is"
+    printf '      gone from flake.nix. Either restore it or stop treating that\n' >&2
+    printf '      directory as glob-covered here.\n' >&2
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 5. Adjudicate every candidate, in both directions.
 # ---------------------------------------------------------------------------

@@ -133,6 +133,26 @@
         version = "0.1.0";
       };
     };
+
+    frontdoorSrc = ./pkgs/opencode-frontdoor;
+
+    # node_modules INCLUDING devDependencies, for the frontdoor vitest check.
+    #
+    # pkgs/opencode-frontdoor/default.nix builds the SHIPPED artifact with
+    # buildNpmPackage + a pinned npmDepsHash; this is a separate deps stage for
+    # the same reason the plugin one above is separate from the bundle's. It
+    # also uses importNpmLock rather than a second npmDepsHash on purpose: a
+    # hash is a thing to maintain and to get wrong, and the lockfile's own SRI
+    # integrity already pins every dep.
+    frontdoorTestNodeModules = devboxPkgs.importNpmLock.buildNodeModules {
+      package = devboxPkgs.lib.importJSON (frontdoorSrc + "/package.json");
+      packageLock = devboxPkgs.lib.importJSON (frontdoorSrc + "/package-lock.json");
+      nodejs = devboxPkgs.nodejs_22;
+      derivationArgs = {
+        pname = "opencode-frontdoor-node-modules-dev";
+        version = "1.0.0";
+      };
+    };
   in {
     # Expose local packages for nix-update and nix build.
     # Filter out packages whose meta.platforms excludes the target system
@@ -190,6 +210,92 @@
       home-dev = self.homeConfigurations.dev.activationPackage;
       home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;
       nixos-devbox = self.nixosConfigurations.devbox.config.system.build.toplevel;
+
+      # ---- pkgs/opencode-frontdoor vitest suite (bead workstation-5m47) ----
+      #
+      # WHY THIS EXISTS: 25 test files and 496 assertions covering the routing
+      # layer every consumer is required to go through -- the repo's largest
+      # untested surface -- ran NOWHERE. The suite was believed un-runnable as a
+      # nix check because it binds loopback sockets; that belief was wrong, and
+      # the counter-example was already in the tree (pkgs/opencode-frontdoor/
+      # route-gate.nix boots a real opencode serve on 127.0.0.1 inside the
+      # sandbox, and depends on the sandbox's private network namespace to make
+      # a FIXED port safe). Only the `npm ci` half was a real obstacle, and
+      # importNpmLock removes it.
+      #
+      # Two properties worth knowing before editing:
+      #
+      #   - This lives under checks.${devboxSystem}, so it is evaluated for
+      #     aarch64-linux only and darwin never sees it. The loopback tests
+      #     lean on the Linux sandbox's private network namespace; if a darwin
+      #     checks leg is ever added, do not assume this one travels.
+      #   - It copies the whole ${self} (see below), so it REBUILDS on any
+      #     change anywhere in the repo, and 25 socket-driven integration
+      #     files now gate every PR. That is the deliberate trade for
+      #     hermeticity, but it does promote any flakiness in this suite into
+      #     a repo-wide blocker. If one turns out flaky, fix or delete it --
+      #     do not skip it, which the skip census below refuses anyway.
+      frontdoor-vitest = devboxPkgs.runCommand "frontdoor-vitest-tests" {
+        nativeBuildInputs = [ devboxPkgs.nodejs_22 devboxPkgs.diffutils ];
+      } ''
+        # Copies the whole ${self}, not just the frontdoor directory, for the
+        # same reason plugin-vitest does: test/wire-text.test.ts:160 resolves
+        # `../../..` to the repo root to assert the operator runbook it points
+        # at exists. Measured: with only the package directory, that one case
+        # fails ENOENT while the other 495 pass.
+        cp -r --no-preserve=mode,ownership ${self} ./repo
+        cd ./repo/pkgs/opencode-frontdoor
+
+        # A symlink FARM, not a symlink to the store directory. vitest writes a
+        # results cache to node_modules/.vite, and with `ln -s` that resolves
+        # into the read-only store: EACCES, raised as an unhandled error that
+        # fails the run AFTER every test has already passed. `cp -rs` gives real
+        # (writable) directories whose leaves are symlinks into the store, so
+        # the cache write lands in the build dir. Version-independent, unlike
+        # pinning vitest's cacheDir flag.
+        cp -rs ${frontdoorTestNodeModules}/node_modules ./node_modules
+        # cp copies the SOURCE's mode, and store directories are r-x: without
+        # this the farm is as unwritable as the symlink was, and the EACCES
+        # comes back at the same place.
+        chmod -R u+w ./node_modules
+        export HOME="$TMPDIR/home"
+        mkdir -p "$HOME"
+
+        # Typecheck FIRST, and note it is not redundant with the package build.
+        # default.nix compiles tsconfig.build.json, which excludes test/ -- so
+        # the type-correctness of 25 test files was checked by nothing in CI
+        # either. `npm run typecheck` is tsconfig.json, which includes them.
+        node_modules/.bin/tsc --noEmit
+
+        node_modules/.bin/vitest run \
+          --reporter=default \
+          --reporter=json --outputFile.json="$TMPDIR/vitest.json"
+
+        # Same two assertions as plugin-vitest below, for the same reasons: a
+        # green runner is not evidence that anything ran. (1) nothing was
+        # skipped -- vitest exits 0 over a `describe.skip` and leaves the file
+        # in testResults, so a skip is invisible to both the exit code and the
+        # file-set check. (2) the set of files vitest EXECUTED equals the
+        # *.test.ts files on disk -- a set and not a count, because the failure
+        # being defended against is whole-file exclusion by the include
+        # pattern, which a count cannot see and which invites a reviewer to
+        # "fix" it by bumping the number.
+        node -e 'const fs=require("fs"),path=require("path");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!(j.numTotalTests>0)){console.error("GATE FAILURE: vitest reported 0 tests.");process.exit(1)}if(j.numPendingTests>0||j.numTodoTests>0){console.error("GATE FAILURE: "+j.numPendingTests+" skipped and "+j.numTodoTests+" todo test(s). A skipped test is not a passing one; un-skip it or delete it.");process.exit(1)}console.log(j.testResults.map(function(r){return path.relative(process.cwd(),r.name)}).sort().join("\n"))' \
+          "$TMPDIR/vitest.json" > "$TMPDIR/ran.txt"
+
+        find test -name '*.test.ts' -type f | sort > "$TMPDIR/ondisk.txt"
+
+        if ! diff -u --label "on disk" --label "actually ran" "$TMPDIR/ondisk.txt" "$TMPDIR/ran.txt"; then
+          echo "" >&2
+          echo "GATE FAILURE: the *.test.ts files on disk are not the files vitest ran." >&2
+          echo "  A '-' line is a file that EXISTS but was NOT RUN -- silently excluded" >&2
+          echo "    by vitest's include pattern. That is the defect this check ends." >&2
+          echo "  A '+' line is a file vitest ran that this check did not expect --" >&2
+          echo "    most likely the on-disk glob above needs widening." >&2
+          exit 1
+        fi
+        touch $out
+      '';
 
       # Phase 9.2 opacity guard. Bash-only, so it adds seconds to the ARM leg that
       # already spends ~3 min realising the three configurations above.

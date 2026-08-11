@@ -1,22 +1,31 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
-# The frontdoor vitest suite runs OUTSIDE the nix build sandbox: the integration
-# tests bind loopback sockets and drive undici/fake-timers against 127.0.0.1,
-# which a hermetic sandbox forbids. Hence default.nix sets doCheck=false and the
-# suite is run here (manually or in CI).
+# unwired-test(workstation-dimz): needs the PINNED opencode binary from the live
+# profile, which no CI runner has; the assertion itself runs hermetically in
+# checks/route-gate.nix, so what remains here is a developer mirror of it.
 #
-# NOTE: the /doc route gate below does NOT have that limitation — booting the
-# pinned opencode and binding loopback was verified to work inside the nix build
-# sandbox. The authoritative gate is therefore the nix check derivation
-# (route-gate.nix, wired into the home-manager closure); this script is the
-# pre-deploy developer signal for the same check.
+# THIS SCRIPT NO LONGER RUNS THE VITEST SUITE, and the belief that it had to is
+# what kept 25 test files and 496 assertions out of CI for months. The header
+# used to claim the suite "runs OUTSIDE the nix build sandbox" because the
+# integration tests bind loopback sockets "which a hermetic sandbox forbids".
+# That was false, and the counter-example was six lines further down this very
+# comment: route-gate.nix boots a real opencode serve on 127.0.0.1 inside the
+# sandbox and DEPENDS on the sandbox's private network namespace. Only `npm ci`
+# was a genuine obstacle, and importNpmLock removes it. The suite now runs as
+# `checks.frontdoor-vitest` (flake.nix), which also typechecks the test files.
+#
+#   Run it locally with: nix build .#checks.aarch64-linux.frontdoor-vitest -L
+#
+# What is left here is the /doc route gate, which needs the pinned opencode
+# binary. The AUTHORITATIVE copy of that is the nix check derivation
+# (route-gate.nix, wired into the cloudbox home-manager closure via
+# users/dev/home.base.nix); this script is the pre-deploy developer signal for
+# the same check, and the only place the hijack regression below can fire at
+# all -- inside the sandbox there is no live routing DB to hijack.
 set -euo pipefail
 cd "$(dirname "$0")"
-npm ci
-npm run typecheck
-npm test
 
 echo "--- Running Route Classification Gate (Check A) ---"
+npm ci
 npm run build
 
 # Resolve the opencode binary WITHOUT hardcoding a store path. A checked-in

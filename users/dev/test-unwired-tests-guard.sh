@@ -224,5 +224,47 @@ r="$(mkrepo '      pluginVitestRenamed = runCommand "f" {} "true";' \
 grep -q 'are gone from flake.nix' "$r/out.txt" || oops "glob tripwire failed for the wrong reason"
 ok "the runner-glob tripwire fires when the checks behind it are renamed away"
 
+# ---------------------------------------------------------------------------
+# 13. The frontdoor glob channel is honoured while its check is defined.
+#
+# checks.frontdoor-vitest points vitest at pkgs/opencode-frontdoor/test, so no
+# individual path is ever named and the execution-shaped matcher cannot see
+# those 25 files. Measured before this existed: deleting their markers made the
+# guard report all 25 as executed by nothing -- a false positive on code that
+# genuinely runs on every PR.
+# ---------------------------------------------------------------------------
+r="$(mkrepo '      frontdoor-vitest = runCommand "f" {} "vitest run";' \
+      'pkgs/opencode-frontdoor/test/a.test.ts:::// nothing')"
+[ "$(run_guard "$r")" = "0" ] || { cat "$r/out.txt"; oops "a glob-covered frontdoor test was flagged unwired"; }
+ok "the frontdoor test dir is covered while checks.frontdoor-vitest is defined"
+
+# ---------------------------------------------------------------------------
+# 14. ...and its tripwire fires when that check is renamed away.
+# ---------------------------------------------------------------------------
+r="$(mkrepo '      frontdoorVitestRenamed = runCommand "f" {} "vitest run";' \
+      'pkgs/opencode-frontdoor/test/a.test.ts:::// nothing')"
+[ "$(run_guard "$r")" = "1" ] || oops "the frontdoor glob tripwire did not fire when its check vanished"
+grep -q 'frontdoor-vitest check that makes' "$r/out.txt" \
+  || oops "frontdoor glob tripwire failed for the wrong reason"
+ok "the frontdoor glob tripwire fires when checks.frontdoor-vitest is renamed away"
+
+# ---------------------------------------------------------------------------
+# 15. SILENT DIRECTION: the frontdoor glob must NOT cover a *.spec.ts.
+#
+# The plugin entry covers *.test.ts AND *.spec.ts because two runners there
+# split on that suffix. checks.frontdoor-vitest runs neither bun nor a .spec
+# glob -- its own set diff enumerates `find test -name '*.test.ts'` -- so a
+# stray .spec.ts in that directory is executed by NOTHING. Copying the plugin
+# entry verbatim would certify it as covered and rebuild the dmat defect inside
+# the fix for it. This case exists to make that copy fail.
+# ---------------------------------------------------------------------------
+r="$(mkrepo '      frontdoor-vitest = runCommand "f" {} "vitest run";' \
+      'pkgs/opencode-frontdoor/test/a.test.ts:::// covered' \
+      'pkgs/opencode-frontdoor/test/stray.spec.ts:::// run by nothing')"
+[ "$(run_guard "$r")" = "1" ] || oops "a .spec.ts in the frontdoor dir was laundered into covered"
+grep -q 'stray.spec.ts is a test file' "$r/out.txt" \
+  || oops "the stray .spec.ts case failed for the wrong reason"
+ok "a *.spec.ts in the frontdoor test dir is NOT covered by the .test.ts glob"
+
 echo ""
 echo "ALL PASS (test-unwired-tests guard meta-test, $pass_n cases)"

@@ -1,4 +1,3 @@
-// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import { describe, expect, test, vi } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
