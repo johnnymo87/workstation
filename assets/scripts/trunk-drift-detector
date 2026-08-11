@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# trunk-drift-detector -- report every PRIMARY git root under ~/projects that is
+# holding work nobody else can see. Bead workstation-v03j.9.
+#
+# WHY: survey of every primary clone under ~/projects on 2026-08-11 --
+#
+#   repo             dirty-at-root  unpushed-on-trunk   guarded?
+#   mono             11             0                   pre-commit hook
+#   workstation      0              1  (same day)       no
+#   meridian         0              1  (17 days)        no
+#   opencode-cached  0              1  (17 days)        no
+#   k8s-gitops       0              1  (140 DAYS)       no
+#   pigeon           0              0  (post-rescue)    no
+#
+# Four roots were sitting on stranded commits at once, one for 140 days, one of
+# them workstation itself. Nobody had noticed any of them. The pigeon commit
+# (300304d, committed straight onto local main in a tree whose working copy IS
+# the deployed daemon) was found within hours only because a third session
+# happened to need a pull. THE ABSENCE OF A DETECTOR IS THE ONLY REASON THIS
+# LOOKS RARE, and this script is that detector.
+#
+# It is also the only layer in the worktree-guard family that covers the ~35
+# clones that will never be enrolled in the pre-commit hook, and the only one
+# that says anything at all about uncommitted work (the hook blocks commits, not
+# edits).
+#
+# CONTRACT -- READ BEFORE EDITING
+#
+# 1. REPORT ONLY. This script never resets, stashes, cleans, checks out,
+#    quarantines, or fetches. It walks ~40 SHARED working trees that hold peer
+#    sessions' uncommitted data; a "cleanup" in a shared tree has already
+#    destroyed one session's uncommitted database. Even `git status` is run with
+#    --no-optional-locks so it cannot rewrite the index's stat cache. The only
+#    files this script writes are its own under $TDD_STATE_DIR.
+#
+# 2. NO FETCH, and no `behind` count. Staleness is ff-mono-root's job (mono) and
+#    em-drift-detector's job (eternal-machinery). Ahead-of-all-remotes needs no
+#    fetch: any push from this clone or from one of its linked worktrees updates
+#    the local remote-tracking ref. Dropping the fetch removes the GH_TOKEN
+#    plumbing, ~40 network calls per run, and every "fetch failed" pseudo-state,
+#    and is what lets invariant 1 above say "zero mutation" without an asterisk.
+#
+# 3. THE AHEAD TEST IS `HEAD --not --remotes`, NOT `@{u}..HEAD`.
+#    `git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0` -- the obvious
+#    formulation, and the one this bead was filed with -- returns 0 when the
+#    branch has NO upstream. That is precisely the pigeon incident's shape (a
+#    commit on a local branch that was never pushed and has no tracking ref), so
+#    the obvious version is blind to the incident it was written for, and blind
+#    in the fail-toward-silence direction. `HEAD --not --remotes` asks the
+#    question that actually matters: are there commits here that exist on NO
+#    remote-tracking ref? It also does NOT fire for a root parked on an
+#    already-pushed feature branch, which `origin/<trunk>..HEAD` would.
+#    Test 2 pins this; mutating the check back to the @{u} form must go red.
+#
+# 4. NO REPO ALLOWLIST -- filter by CLASS OF DIRT instead. mono is permanently
+#    dirty (untracked droppings plus a modified submodule pointer) and
+#    salmon-of-knowledge showed 46 dirty files, so an unfiltered dirty count
+#    trains the reader to ignore the channel. But an allowlist that silences
+#    mono silences the repo this whole epic is about. So: dirt counts only if it
+#    is TRACKED (staged or modified), with submodule pointers ignored. mono's
+#    permanent noise scores 0; a real tracked edit at the mono root still fires.
+#    Untracked files are still counted and recorded -- just not alerted on.
+#    TDD_IGNORE_REPOS exists as an escape hatch and ships EMPTY.
+#
+# 5. DELIVERY IS TELEGRAM, NOT THE JOURNAL. Signalling only through journald or
+#    systemd failure state assumes something looks (bead workstation-yb4b, still
+#    open); ff-mono-root's own adversarial review flagged that, and a detector
+#    nobody reads is indistinguishable from no detector. The bead originally said
+#    to route this to the daily morning recommendation agent -- that agent was
+#    DELETED on 2026-08-10 (commit 678ae2f), so delivery goes through
+#    pkgs/opencode-drift-alert -> pigeon POST /alert instead, which already
+#    carries dedup, exponential backoff and severity escalation.
+#
+# 6. FAIL TOWARD THE ALERT. Scanning zero repos means a broken glob or a missing
+#    ~/projects, not a healthy fleet, so it alerts and exits non-zero. A repo
+#    whose git commands error out is reported as an error, never silently
+#    counted as clean.
+#
+# Test seams (used by test-trunk-drift-detector.sh):
+#   TDD_PROJECTS_DIR   directory whose depth-1 children are scanned
+#                                                 (default ~/projects)
+#   TDD_STATE_DIR      state/history/status dir   (default ~/.local/state/trunk-drift)
+#   TDD_ALERT_CMD      alert helper to invoke     (default: opencode-drift-alert on PATH)
+#   TDD_IGNORE_REPOS   space/comma-separated repo names to skip   (default empty)
+#   TDD_ALERT_INITIAL  seconds before the 1st repeat alert         (default 86400)
+#   TDD_ALERT_MAX      cap on the repeat interval                  (default 604800)
+#   TDD_HISTORY_MAX    lines kept in history.ndjson                (default 20000)
+#   TDD_GIT_TIMEOUT    per-git-command timeout in seconds          (default 10)
+#
+# Exit codes: 0 = ran (whether or not drift was found; drift is reported, not an
+# error). 1 = the detector itself is broken (nothing scanned, or state dir
+# unusable). A drifting fleet must not wedge a timer chain; a blind detector
+# must not look healthy.
+
+set -o errexit -o nounset -o pipefail
+
+PROJECTS_DIR="${TDD_PROJECTS_DIR:-$HOME/projects}"
+STATE_DIR="${TDD_STATE_DIR:-$HOME/.local/state/trunk-drift}"
+ALERT_CMD="${TDD_ALERT_CMD:-}"
+IGNORE_REPOS="${TDD_IGNORE_REPOS:-}"
+ALERT_INITIAL="${TDD_ALERT_INITIAL:-86400}"
+ALERT_MAX="${TDD_ALERT_MAX:-604800}"
+HISTORY_MAX="${TDD_HISTORY_MAX:-20000}"
+GIT_TIMEOUT="${TDD_GIT_TIMEOUT:-10}"
+
+STATUS_FILE="$STATE_DIR/status.json"
+HISTORY_FILE="$STATE_DIR/history.ndjson"
+
+# A headless timer must never sit at a credential prompt. (We do not talk to a
+# remote at all, but a misconfigured hook or alternate could.)
+export GIT_TERMINAL_PROMPT=0
+
+log() { echo "trunk-drift: $*"; }
+
+if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+  log "FATAL: cannot create state dir $STATE_DIR"
+  exit 1
+fi
+
+# Serialize against a concurrent timer firing and a human running it by hand.
+lock="$STATE_DIR/lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$lock"
+  flock -n 9 || { log "already running; skipping"; exit 0; }
+fi
+
+if [ -z "$ALERT_CMD" ] && command -v opencode-drift-alert >/dev/null 2>&1; then
+  ALERT_CMD="$(command -v opencode-drift-alert)"
+fi
+
+# git wrapper: bounded, and --no-optional-locks so a status call cannot write to
+# a peer's index. Returns git's exit status; callers decide what a failure means.
+g() { # g <repo> <git args...>
+  local repo="$1"; shift
+  timeout "$GIT_TIMEOUT" git --no-optional-locks -C "$repo" "$@"
+}
+
+sanitize() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+
+json_escape() { # minimal: backslash then double-quote then strip control chars
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s" | tr -d '\000-\037'
+}
+
+# alert <state-suffix> <signature> <text>
+alert() {
+  local suffix="$1" signature="$2" text="$3"
+  if [ -z "$ALERT_CMD" ]; then
+    # Loud, because "no alert channel" is the yb4b failure this script exists to
+    # avoid -- it must not look like a quiet healthy run.
+    log "WARNING: no alert command configured (TDD_ALERT_CMD unset and opencode-drift-alert not on PATH); alert NOT delivered: $signature"
+    return 0
+  fi
+  # An alert helper that cannot run must not look like a quiet, healthy pass --
+  # that is the whole failure mode this detector exists to end, reproduced one
+  # level down. It still must not abort the run (the journal line and status
+  # file are worth keeping), so: report, continue.
+  if ! "$ALERT_CMD" "$STATE_DIR/alert.$suffix.state" "$signature" "$text" \
+      "$ALERT_INITIAL" "$ALERT_MAX"; then
+    log "WARNING: alert command '$ALERT_CMD' failed (rc=$?); alert NOT delivered: $signature"
+  fi
+}
+
+is_ignored() { # is_ignored <repo-name>
+  local name="$1" item
+  for item in ${IGNORE_REPOS//,/ }; do
+    [ "$item" = "$name" ] && return 0
+  done
+  return 1
+}
+
+scanned=0
+drift_repos=()
+wip_repos=()
+error_repos=()
+history_lines=()
+status_entries=()
+now_epoch="$(date +%s)"
+now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+for path in "$PROJECTS_DIR"/*; do
+  [ -d "$path" ] || continue
+  name="$(basename "$path")"
+
+  # A PRIMARY root has .git as a DIRECTORY. A linked worktree's .git is a FILE
+  # pointing at the common dir -- those are exactly where work is SUPPOSED to
+  # happen, so they must not be reported. (~/projects/.worktrees, if it ever
+  # exists, is dot-hidden and never matched by this glob.)
+  [ -d "$path/.git" ] || continue
+
+  if is_ignored "$name"; then
+    log "SKIP $name: in TDD_IGNORE_REPOS"
+    continue
+  fi
+
+  scanned=$((scanned + 1))
+
+  if ! g "$path" rev-parse --git-dir >/dev/null 2>&1; then
+    log "ERROR $name: not a usable git repo"
+    error_repos+=("$name: not a usable git repo")
+    status_entries+=("$name||0|0|0|error")
+    history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"error\"}")
+    continue
+  fi
+
+  branch="$(g "$path" symbolic-ref --short -q HEAD || true)"
+  [ -n "$branch" ] || branch="(detached)"
+
+  # Unborn HEAD (fresh clone/init with no commits): nothing can be stranded.
+  if ! g "$path" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    log "OK $name: no commits yet (unborn HEAD)"
+    status_entries+=("$name|$branch|0|0|0|empty")
+    history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"empty\"}")
+    continue
+  fi
+
+  # GUARD, and the sharpest edge in this script: with no remote-tracking refs at
+  # all, `--not --remotes` excludes nothing and EVERY commit reads as stranded --
+  # a purely local repo would page once per commit in its history. Skip instead.
+  if [ -z "$(g "$path" for-each-ref --count=1 --format='%(refname)' refs/remotes 2>/dev/null || true)" ]; then
+    log "SKIP $name: no remote-tracking refs (purely local repo)"
+    status_entries+=("$name|$branch|0|0|0|no-remote")
+    history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"no-remote\"}")
+    continue
+  fi
+
+  if ! ahead="$(g "$path" rev-list --count HEAD --not --remotes 2>/dev/null)"; then
+    log "ERROR $name: rev-list failed; cannot determine stranded commits"
+    error_repos+=("$name: rev-list failed")
+    status_entries+=("$name|$branch|0|0|0|error")
+    history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"error\"}")
+    continue
+  fi
+  case "$ahead" in ''|*[!0-9]*) ahead=0 ;; esac
+
+  stranded_tip="none"
+  if [ "$ahead" -gt 0 ]; then
+    stranded_tip="$(g "$path" rev-list -1 HEAD --not --remotes 2>/dev/null || echo unknown)"
+    stranded_tip="${stranded_tip:0:12}"
+  fi
+
+  if ! porcelain="$(g "$path" status --porcelain --ignore-submodules=all 2>/dev/null)"; then
+    log "ERROR $name: status failed; cannot determine dirt"
+    error_repos+=("$name: status failed")
+    status_entries+=("$name|$branch|$ahead|0|0|error")
+    history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":$ahead,\"dirty\":0,\"untracked\":0,\"state\":\"error\"}")
+    continue
+  fi
+  # See contract 4: TRACKED dirt only. Untracked is recorded, never alerted.
+  dirty="$(printf '%s' "$porcelain" | grep -cve '^??' -e '^$' || true)"
+  untracked="$(printf '%s' "$porcelain" | grep -c '^??' || true)"
+  case "$dirty" in ''|*[!0-9]*) dirty=0 ;; esac
+  case "$untracked" in ''|*[!0-9]*) untracked=0 ;; esac
+
+  trunk="$(g "$path" symbolic-ref --short -q refs/remotes/origin/HEAD || true)"
+  trunk="${trunk#origin/}"
+  if [ -z "$trunk" ]; then
+    case "$branch" in
+      main|master) trunk="$branch" ;;
+      *) trunk="main" ;;
+    esac
+  fi
+
+  # PAGE vs NOTE. Measured on the real fleet before shipping: 65 primary roots,
+  # of which 15 held commits that exist on no remote -- but 11 of those were
+  # ordinary work-in-progress on a NAMED feature branch at the root (e.g. 11
+  # commits on cops-6369-fbm-recipe-card-upload). Paging all 15 on the first run
+  # would have made this channel wallpaper within a day, which is the failure
+  # this bead was explicit about avoiding. So detection stays broad (everything
+  # lands in the journal, status.json and history, which is what v03j.11's churn
+  # baseline needs) and only the invisible classes page:
+  #
+  #   - stranded on TRUNK       -- the pigeon incident exactly, and every row in
+  #                                the 2026-08-11 survey. Nobody is tracking it.
+  #   - stranded on a DETACHED  -- the worst case: no ref points at that commit
+  #     HEAD                       at all, so it is reflog-only and a gc away
+  #                                from gone.
+  #   - tracked dirt on trunk   -- writable work in the shared root.
+  #
+  # Stranded commits on a named feature branch are NOTED, not paged: the branch
+  # names them, the author knows they exist, and `git branch` finds them again.
+  reasons=()
+  notes=()
+  if [ "$ahead" -gt 0 ]; then
+    if [ "$branch" = "$trunk" ]; then
+      reasons+=("$ahead commit(s) on trunk '$branch' exist on no remote (tip $stranded_tip) -- stranded in this clone, and no branch marks them as work-in-progress")
+    elif [ "$branch" = "(detached)" ]; then
+      reasons+=("$ahead commit(s) on a DETACHED HEAD exist on no remote (tip $stranded_tip) -- no ref points at them; they are reflog-only and a gc away from gone")
+    else
+      notes+=("$ahead commit(s) on feature branch '$branch' exist on no remote (tip $stranded_tip) -- unpushed work-in-progress, not paged")
+    fi
+  fi
+  if [ "$branch" = "$trunk" ] && [ "$dirty" -gt 0 ]; then
+    reasons+=("$dirty tracked file(s) modified/staged while parked on trunk '$trunk' -- writable work in a shared root")
+  fi
+
+  state=ok
+  if [ "${#reasons[@]}" -eq 0 ] && [ "${#notes[@]}" -gt 0 ]; then
+    state=wip
+    wip_repos+=("$name")
+    log "WIP $name (branch '$branch', ahead=$ahead dirty=$dirty untracked=$untracked)"
+    for r in "${notes[@]}"; do log "  - $r"; done
+  fi
+  if [ "${#reasons[@]}" -gt 0 ]; then
+    state=drift
+    drift_repos+=("$name")
+    log "DRIFT $name (branch '$branch', ahead=$ahead dirty=$dirty untracked=$untracked)"
+    for r in "${reasons[@]}"; do log "  - $r"; done
+
+    # Signature: repo + the stranded tip + a dirty BOOLEAN. The boolean matters --
+    # a count would mint a fresh signature on every save of a live editing
+    # session and page through the backoff.
+    dirty_flag=clean
+    [ "$dirty" -gt 0 ] && dirty_flag=dirty
+    signature="$name:$stranded_tip:$dirty_flag"
+
+    text="Trunk drift in the PRIMARY root $PROJECTS_DIR/$name (branch '$branch'):"
+    for r in "${reasons[@]}"; do text="$(printf '%s\n  - %s' "$text" "$r")"; done
+    text="$(printf '%s\n\n%s' "$text" "Fix by MOVING the work, not by discarding it: 'work <slug>' then cherry-pick the stranded commits / copy the diff forward ('git -C <root> diff HEAD --binary'). NEVER reset, stash or clean this root -- peer sessions keep uncommitted work here.")"
+
+    alert "$(sanitize "$name")" "$signature" "$text"
+  elif [ "$state" = "ok" ]; then
+    log "OK $name (branch '$branch', ahead=$ahead dirty=$dirty untracked=$untracked)"
+  fi
+
+  status_entries+=("$name|$branch|$ahead|$dirty|$untracked|$state")
+  history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":$ahead,\"dirty\":$dirty,\"untracked\":$untracked,\"state\":\"$state\"}")
+done
+
+# History: one line per repo per run. v03j.11 ("default writable sessions into a
+# worktree") is blocked on this script for a CHURN BASELINE, and a last-run
+# snapshot cannot answer "how often does a session actually strand a commit or
+# dirty a root". Six lines now beats a storage redesign later.
+if [ "${#history_lines[@]}" -gt 0 ]; then
+  printf '%s\n' "${history_lines[@]}" >> "$HISTORY_FILE"
+  hlen="$(wc -l < "$HISTORY_FILE" 2>/dev/null || echo 0)"
+  if [ "$hlen" -gt "$HISTORY_MAX" ]; then
+    tail -n "$HISTORY_MAX" "$HISTORY_FILE" > "$HISTORY_FILE.tmp" && mv "$HISTORY_FILE.tmp" "$HISTORY_FILE"
+  fi
+fi
+
+{
+  printf '{\n'
+  printf '  "timestamp": "%s",\n' "$now_iso"
+  printf '  "epoch": %s,\n' "$now_epoch"
+  printf '  "projects_dir": "%s",\n' "$(json_escape "$PROJECTS_DIR")"
+  printf '  "scanned": %s,\n' "$scanned"
+  printf '  "drift_count": %s,\n' "${#drift_repos[@]}"
+  printf '  "wip_count": %s,\n' "${#wip_repos[@]}"
+  printf '  "error_count": %s,\n' "${#error_repos[@]}"
+  printf '  "repos": [\n'
+  sep=""
+  for entry in ${status_entries[@]+"${status_entries[@]}"}; do
+    IFS='|' read -r e_name e_branch e_ahead e_dirty e_untracked e_state <<< "$entry"
+    printf '%s    {"repo": "%s", "branch": "%s", "ahead": %s, "dirty": %s, "untracked": %s, "state": "%s"}' \
+      "$sep" "$(json_escape "$e_name")" "$(json_escape "$e_branch")" "$e_ahead" "$e_dirty" "$e_untracked" "$e_state"
+    sep=$',\n'
+  done
+  printf '\n  ]\n}\n'
+} > "$STATUS_FILE"
+
+# Errors get their own page. Rolling them into the drift alert would mean a run
+# with broken git and no drift says nothing at all.
+if [ "${#error_repos[@]}" -gt 0 ]; then
+  err_sig="__errors:$(printf '%s;' "${error_repos[@]}")"
+  err_text="trunk-drift-detector could not inspect $(printf '%s' "${#error_repos[@]}") primary root(s); their drift state is UNKNOWN, not clean:"
+  for e in "${error_repos[@]}"; do err_text="$(printf '%s\n  - %s' "$err_text" "$e")"; done
+  alert "__errors" "$err_sig" "$err_text"
+fi
+
+# Vacuity tripwire. A detector that scanned nothing prints a perfectly healthy
+# "0 drifting" line, which is the exact shape of failure this epic keeps paying
+# for (a control that never runs looks identical to no control).
+if [ "$scanned" -eq 0 ]; then
+  log "ALERT: scanned 0 primary roots under $PROJECTS_DIR -- the detector is blind, not the fleet clean"
+  alert "__vacuous" "__vacuous:$PROJECTS_DIR" \
+    "trunk-drift-detector scanned 0 primary git roots under $PROJECTS_DIR. That is a broken detector (missing directory or bad glob), not a clean fleet. It is reporting nothing about any repo until this is fixed."
+  exit 1
+fi
+
+log "scanned $scanned primary root(s): ${#drift_repos[@]} drifting${drift_repos[0]+ (${drift_repos[*]})}, ${#wip_repos[@]} with unpushed WIP on a feature branch (not paged), ${#error_repos[@]} error(s)"
+exit 0
