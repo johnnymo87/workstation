@@ -86,6 +86,7 @@
 #   TDD_ALERT_MAX      cap on the repeat interval                  (default 604800)
 #   TDD_HISTORY_MAX    lines kept in history.ndjson                (default 20000)
 #   TDD_GIT_TIMEOUT    per-git-command timeout in seconds          (default 10)
+#   TDD_GIT_BIN        git binary to call                          (default git)
 #
 # Exit codes: 0 = ran (whether or not drift was found; drift is reported, not an
 # error). 1 = the detector itself is broken (nothing scanned, or state dir
@@ -130,12 +131,26 @@ fi
 
 # git wrapper: bounded, and --no-optional-locks so a status call cannot write to
 # a peer's index. Returns git's exit status; callers decide what a failure means.
+# GIT_BIN is a test seam. The error branches below (a git call that FAILS rather
+# than reporting a clean repo) are the ones that decide between "reported as
+# unknown" and "silently counted as fine", and they cannot be reached with a
+# real git and a well-formed fixture -- so they would ship unexercised, which is
+# this epic's recurring failure. TDD_GIT_BIN lets the suite inject a git that
+# fails one subcommand.
+GIT_BIN="${TDD_GIT_BIN:-git}"
 g() { # g <repo> <git args...>
   local repo="$1"; shift
-  timeout "$GIT_TIMEOUT" git --no-optional-locks -C "$repo" "$@"
+  timeout "$GIT_TIMEOUT" "$GIT_BIN" --no-optional-locks -C "$repo" "$@"
 }
 
 sanitize() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+
+# Per-repo records are joined with ASCII US (0x1f) rather than a printable
+# character. `|` is a legal character in a git branch name, and a branch
+# containing one would shift every field to its right -- emitting corrupt JSON
+# from the one file v03j.11 is going to consume.
+SEP=$'\037'
+mk_entry() { local IFS="$SEP"; printf '%s' "$*"; }
 
 json_escape() { # minimal: backslash then double-quote then strip control chars
   local s="$1"
@@ -153,13 +168,20 @@ alert() {
     log "WARNING: no alert command configured (TDD_ALERT_CMD unset and opencode-drift-alert not on PATH); alert NOT delivered: $signature"
     return 0
   fi
-  # An alert helper that cannot run must not look like a quiet, healthy pass --
-  # that is the whole failure mode this detector exists to end, reproduced one
-  # level down. It still must not abort the run (the journal line and status
-  # file are worth keeping), so: report, continue.
-  if ! "$ALERT_CMD" "$STATE_DIR/alert.$suffix.state" "$signature" "$text" \
-      "$ALERT_INITIAL" "$ALERT_MAX"; then
-    log "WARNING: alert command '$ALERT_CMD' failed (rc=$?); alert NOT delivered: $signature"
+  # SCOPE OF THIS CHECK, stated honestly because the obvious reading is wrong:
+  # opencode-drift-alert never exits non-zero BY CONTRACT (safety invariant 2 in
+  # pkgs/opencode-drift-alert/default.nix -- it must never abort a caller), and
+  # that includes a pigeon outage and a 401. So this catches only the helper
+  # being missing or non-executable (rc 126/127). A DELIVERY failure surfaces as
+  # the helper's own WARNING/ERROR on stderr, which lands in the journal and
+  # therefore inherits workstation-yb4b: nothing watches. A dead-man's switch for
+  # the alert channel itself is bead workstation-xucb and belongs in the shared
+  # helper, not here -- do not read this `if` as covering it.
+  rc=0
+  "$ALERT_CMD" "$STATE_DIR/alert.$suffix.state" "$signature" "$text" \
+    "$ALERT_INITIAL" "$ALERT_MAX" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "WARNING: alert command '$ALERT_CMD' could not be run (rc=$rc); alert NOT delivered: $signature"
   fi
 }
 
@@ -200,7 +222,7 @@ for path in "$PROJECTS_DIR"/*; do
   if ! g "$path" rev-parse --git-dir >/dev/null 2>&1; then
     log "ERROR $name: not a usable git repo"
     error_repos+=("$name: not a usable git repo")
-    status_entries+=("$name||0|0|0|error")
+    status_entries+=("$(mk_entry "$name" "" 0 0 0 error)")
     history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"error\"}")
     continue
   fi
@@ -211,7 +233,7 @@ for path in "$PROJECTS_DIR"/*; do
   # Unborn HEAD (fresh clone/init with no commits): nothing can be stranded.
   if ! g "$path" rev-parse --verify -q HEAD >/dev/null 2>&1; then
     log "OK $name: no commits yet (unborn HEAD)"
-    status_entries+=("$name|$branch|0|0|0|empty")
+    status_entries+=("$(mk_entry "$name" "$branch" 0 0 0 empty)")
     history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"empty\"}")
     continue
   fi
@@ -219,9 +241,22 @@ for path in "$PROJECTS_DIR"/*; do
   # GUARD, and the sharpest edge in this script: with no remote-tracking refs at
   # all, `--not --remotes` excludes nothing and EVERY commit reads as stranded --
   # a purely local repo would page once per commit in its history. Skip instead.
-  if [ -z "$(g "$path" for-each-ref --count=1 --format='%(refname)' refs/remotes 2>/dev/null || true)" ]; then
+  # Failure and absence must not look alike here: `|| true` on the command
+  # substitution would turn a timeout into "purely local repo, skipping" and
+  # skip that root silently forever, in the very guard this comment calls the
+  # sharpest edge in the script.
+  refs_rc=0
+  remote_refs="$(g "$path" for-each-ref --count=1 --format='%(refname)' refs/remotes 2>/dev/null)" || refs_rc=$?
+  if [ "$refs_rc" -ne 0 ]; then
+    log "ERROR $name: could not list remote-tracking refs (rc=$refs_rc)"
+    error_repos+=("$name: for-each-ref failed (rc=$refs_rc)")
+    status_entries+=("$(mk_entry "$name" "$branch" 0 0 0 error)")
+    history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"error\"}")
+    continue
+  fi
+  if [ -z "$remote_refs" ]; then
     log "SKIP $name: no remote-tracking refs (purely local repo)"
-    status_entries+=("$name|$branch|0|0|0|no-remote")
+    status_entries+=("$(mk_entry "$name" "$branch" 0 0 0 no-remote)")
     history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"no-remote\"}")
     continue
   fi
@@ -229,7 +264,7 @@ for path in "$PROJECTS_DIR"/*; do
   if ! ahead="$(g "$path" rev-list --count HEAD --not --remotes 2>/dev/null)"; then
     log "ERROR $name: rev-list failed; cannot determine stranded commits"
     error_repos+=("$name: rev-list failed")
-    status_entries+=("$name|$branch|0|0|0|error")
+    status_entries+=("$(mk_entry "$name" "$branch" 0 0 0 error)")
     history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":0,\"dirty\":0,\"untracked\":0,\"state\":\"error\"}")
     continue
   fi
@@ -244,7 +279,7 @@ for path in "$PROJECTS_DIR"/*; do
   if ! porcelain="$(g "$path" status --porcelain --ignore-submodules=all 2>/dev/null)"; then
     log "ERROR $name: status failed; cannot determine dirt"
     error_repos+=("$name: status failed")
-    status_entries+=("$name|$branch|$ahead|0|0|error")
+    status_entries+=("$(mk_entry "$name" "$branch" "$ahead" 0 0 error)")
     history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":$ahead,\"dirty\":0,\"untracked\":0,\"state\":\"error\"}")
     continue
   fi
@@ -281,19 +316,39 @@ for path in "$PROJECTS_DIR"/*; do
   #
   # Stranded commits on a named feature branch are NOTED, not paged: the branch
   # names them, the author knows they exist, and `git branch` finds them again.
+  # Is this HEAD one that nobody is tracking? Three cases, and they must be kept
+  # together -- adversarial review found the script paging stranded commits on a
+  # detached HEAD while calling tracked EDITS on that same detached HEAD "OK",
+  # and salmon-of-knowledge was in exactly that state on the fleet at the time.
+  #
+  #   trunk         -- the pigeon incident and every row of the 2026-08-11 survey
+  #   main/master   -- trunk by any other name. `origin/HEAD` can be unset or
+  #                    point elsewhere; nobody does feature work on a branch
+  #                    called `master`, so treating it as a feature branch would
+  #                    demote the incident class to an unpaged note.
+  #   detached      -- the worst of the three: no ref points at the work at all.
+  anonymous_head=no
+  case "$branch" in
+    "$trunk"|main|master|"(detached)") anonymous_head=yes ;;
+  esac
+
   reasons=()
   notes=()
   if [ "$ahead" -gt 0 ]; then
-    if [ "$branch" = "$trunk" ]; then
-      reasons+=("$ahead commit(s) on trunk '$branch' exist on no remote (tip $stranded_tip) -- stranded in this clone, and no branch marks them as work-in-progress")
-    elif [ "$branch" = "(detached)" ]; then
+    if [ "$branch" = "(detached)" ]; then
       reasons+=("$ahead commit(s) on a DETACHED HEAD exist on no remote (tip $stranded_tip) -- no ref points at them; they are reflog-only and a gc away from gone")
+    elif [ "$anonymous_head" = yes ]; then
+      reasons+=("$ahead commit(s) on trunk '$branch' exist on no remote (tip $stranded_tip) -- stranded in this clone, and no branch marks them as work-in-progress")
     else
       notes+=("$ahead commit(s) on feature branch '$branch' exist on no remote (tip $stranded_tip) -- unpushed work-in-progress, not paged")
     fi
   fi
-  if [ "$branch" = "$trunk" ] && [ "$dirty" -gt 0 ]; then
-    reasons+=("$dirty tracked file(s) modified/staged while parked on trunk '$trunk' -- writable work in a shared root")
+  if [ "$dirty" -gt 0 ] && [ "$anonymous_head" = yes ]; then
+    if [ "$branch" = "(detached)" ]; then
+      reasons+=("$dirty tracked file(s) modified/staged at a root parked on a DETACHED HEAD -- writable work in a shared tree, on a HEAD no branch names")
+    else
+      reasons+=("$dirty tracked file(s) modified/staged while parked on trunk '$branch' -- writable work in a shared root")
+    fi
   fi
 
   state=ok
@@ -325,7 +380,7 @@ for path in "$PROJECTS_DIR"/*; do
     log "OK $name (branch '$branch', ahead=$ahead dirty=$dirty untracked=$untracked)"
   fi
 
-  status_entries+=("$name|$branch|$ahead|$dirty|$untracked|$state")
+  status_entries+=("$(mk_entry "$name" "$branch" "$ahead" "$dirty" "$untracked" "$state")")
   history_lines+=("{\"ts\":\"$now_iso\",\"repo\":\"$(json_escape "$name")\",\"branch\":\"$(json_escape "$branch")\",\"ahead\":$ahead,\"dirty\":$dirty,\"untracked\":$untracked,\"state\":\"$state\"}")
 done
 
@@ -352,14 +407,21 @@ fi
   printf '  "error_count": %s,\n' "${#error_repos[@]}"
   printf '  "repos": [\n'
   sep=""
-  for entry in ${status_entries[@]+"${status_entries[@]}"}; do
-    IFS='|' read -r e_name e_branch e_ahead e_dirty e_untracked e_state <<< "$entry"
-    printf '%s    {"repo": "%s", "branch": "%s", "ahead": %s, "dirty": %s, "untracked": %s, "state": "%s"}' \
-      "$sep" "$(json_escape "$e_name")" "$(json_escape "$e_branch")" "$e_ahead" "$e_dirty" "$e_untracked" "$e_state"
-    sep=$',\n'
-  done
+  # Quoted expansion, guarded by a length test: the `${a[@]+"${a[@]}"}` idiom
+  # used elsewhere for `set -u` safety would word-split a branch name here.
+  if [ "${#status_entries[@]}" -gt 0 ]; then
+    for entry in "${status_entries[@]}"; do
+      IFS="$SEP" read -r e_name e_branch e_ahead e_dirty e_untracked e_state <<< "$entry"
+      printf '%s    {"repo": "%s", "branch": "%s", "ahead": %s, "dirty": %s, "untracked": %s, "state": "%s"}' \
+        "$sep" "$(json_escape "$e_name")" "$(json_escape "$e_branch")" "$e_ahead" "$e_dirty" "$e_untracked" "$e_state"
+      sep=$',\n'
+    done
+  fi
   printf '\n  ]\n}\n'
-} > "$STATUS_FILE"
+# Written via tmp+rename: a consumer polling this file (v03j.11 will) must never
+# read a half-written JSON document.
+} > "$STATUS_FILE.tmp"
+mv "$STATUS_FILE.tmp" "$STATUS_FILE"
 
 # Errors get their own page. Rolling them into the drift alert would mean a run
 # with broken git and no drift says nothing at all.

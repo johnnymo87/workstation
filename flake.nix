@@ -563,8 +563,8 @@
       # blocks, so its failure mode is silence -- exactly the failure this epic
       # has shipped before (a guard plugin that never loaded on any process, and
       # a suite that set fail=1 in a subshell and so could never go red). The
-      # suite is therefore mutation-checked: 12 mutants of the detector were run
-      # against it and all 12 were killed, including the two that matter most --
+      # suite is therefore mutation-checked: 19 mutants of the detector were run
+      # against it and all 19 were killed, including the two that matter most --
       # rewriting the ahead test as `@{u}..HEAD` (blind to a commit on a branch
       # with no upstream, i.e. the incident this was built for) and dropping
       # `--no-optional-locks` (which lets a read-only walk rewrite a peer's

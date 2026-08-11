@@ -955,7 +955,7 @@ lib.mkIf isCloudbox {
   # units"), and a detector nobody reads is worth about as much as no detector.
   #
   # Pinned by assets/scripts/test-trunk-drift-detector.sh, wired into
-  # `nix flake check`, and mutation-checked (12 mutants, all killed).
+  # `nix flake check`, and mutation-checked (19 mutants, all killed).
   # ---------------------------------------------------------------------------
   home.file.".local/bin/trunk-drift-detector" = {
     source = "${assetsPath}/scripts/trunk-drift-detector";

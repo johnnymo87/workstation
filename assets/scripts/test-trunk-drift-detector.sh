@@ -252,6 +252,37 @@ mk_repo "$p" epsilon
 run_detector "$p" "$s"
 check "7: dirty leg is trunk-only by design" "0" "$(count_matching "$RUN_OUT" 'DRIFT epsilon')"
 
+# --- 7b. tracked dirt on a DETACHED HEAD ------------------------------------
+# Found by adversarial review, live on the fleet: the dirty leg keyed on
+# `branch = trunk`, so a root parked on a detached HEAD with tracked edits was
+# printed as "OK". salmon-of-knowledge was in exactly that state (5 tracked
+# files). "Writable work in a shared root" is the failure mode this detector is
+# the ONLY layer covering, so a silent hole in it is the whole bug.
+
+p="$(new_projects_dir t7b)"; s="$TMP_ROOT/t7b/state"
+mk_repo "$p" detdirty
+( cd "$p/detdirty"; git checkout -q --detach; echo edited >> tracked.txt )
+run_detector "$p" "$s"
+check "7b: tracked dirt on a detached HEAD is reported" "1" \
+  "$(count_matching "$RUN_OUT" '^trunk-drift: DRIFT detdirty ')"
+check "7b: and named as work on a HEAD no branch points at" "1" \
+  "$(count_matching "$RUN_OUT" 'on a HEAD no branch names')"
+check "7b: and pages" "1" "$(count_matching "$(alerts_for "$s")" '^alert\.detdirty\.state')"
+
+# --- 7c. trunk by another name ----------------------------------------------
+# If origin/HEAD is unset or points elsewhere, a root sitting on `master` with
+# stranded commits must not be demoted to unpaged feature-branch WIP. Nobody
+# does feature work on a branch called master; this is the incident class
+# wearing a renamed-default-branch hat.
+
+p="$(new_projects_dir t7c)"; s="$TMP_ROOT/t7c/state"
+mk_repo "$p" renamed
+( cd "$p/renamed"; git checkout -q -b master; git remote set-head origin main >/dev/null 2>&1 )
+commit_local "$p/renamed" stranded-on-master
+run_detector "$p" "$s"
+check "7c: stranded on 'master' pages even when origin/HEAD says 'main'" "1" \
+  "$(count_matching "$RUN_OUT" '^trunk-drift: DRIFT renamed ')"
+
 # --- 8. linked worktrees are not scanned ------------------------------------
 
 p="$(new_projects_dir t8)"; s="$TMP_ROOT/t8/state"
@@ -431,6 +462,47 @@ check "17: the alert says UNKNOWN, not clean" "1" \
 check "17: the healthy repo is still scanned in the same run" "1" \
   "$(count_matching "$RUN_OUT" '^trunk-drift: OK healthy ')"
 
+# --- 17b. a git call that FAILS is not a clean repo -------------------------
+# The guard that matters most here is the no-remote skip: `--not --remotes`
+# excludes nothing in a repo with no remote-tracking refs, so the script skips
+# those. If a FAILED `for-each-ref` were read as "no refs", a repo would be
+# skipped silently and forever -- fail-toward-silence in the one place the
+# script calls its sharpest edge. Reachable only with an injected git.
+
+mk_failing_git() { # mk_failing_git <path> <subcommand-to-fail>
+  {
+    printf '#!%s\n' "$(command -v bash)"
+    printf 'for a in "$@"; do [ "$a" = "%s" ] && exit 3; done\n' "$2"
+    printf 'exec %s "$@"\n' "$(command -v git)"
+  } > "$1"
+  chmod +x "$1"
+}
+
+p="$(new_projects_dir t17b)"; s="$TMP_ROOT/t17b/state"
+mk_repo "$p" reffail
+mk_failing_git "$TMP_ROOT/git-no-refs" for-each-ref
+run_detector "$p" "$s" TDD_GIT_BIN="$TMP_ROOT/git-no-refs"
+check "17b: a failing for-each-ref is an ERROR, not 'purely local repo'" "1" \
+  "$(count_matching "$RUN_OUT" '^trunk-drift: ERROR reffail: could not list remote-tracking refs')"
+check "17b: it is NOT silently skipped" "0" \
+  "$(count_matching "$RUN_OUT" 'SKIP reffail')"
+check "17b: and it pages" "1" "$(count_matching "$(alerts_for "$s")" '^alert\.__errors\.state')"
+
+p="$(new_projects_dir t17c)"; s="$TMP_ROOT/t17c/state"
+mk_repo "$p" statusfail
+mk_failing_git "$TMP_ROOT/git-no-status" status
+run_detector "$p" "$s" TDD_GIT_BIN="$TMP_ROOT/git-no-status"
+check "17c: a failing status is an ERROR, not 'clean'" "1" \
+  "$(count_matching "$RUN_OUT" '^trunk-drift: ERROR statusfail: status failed')"
+check "17c: and not reported OK" "0" "$(count_matching "$RUN_OUT" 'OK statusfail')"
+
+p="$(new_projects_dir t17d)"; s="$TMP_ROOT/t17d/state"
+mk_repo "$p" revlistfail
+mk_failing_git "$TMP_ROOT/git-no-revlist" rev-list
+run_detector "$p" "$s" TDD_GIT_BIN="$TMP_ROOT/git-no-revlist"
+check "17d: a failing rev-list is an ERROR, not 'ahead=0'" "1" \
+  "$(count_matching "$RUN_OUT" '^trunk-drift: ERROR revlistfail: rev-list failed')"
+
 # --- status.json + history --------------------------------------------------
 
 p="$(new_projects_dir t18)"; s="$TMP_ROOT/t18/state"
@@ -444,6 +516,22 @@ check "18: history is append-only, one line per repo per run" "2" \
   "$(wc -l < "$s/history.ndjson" | tr -d ' ')"
 check "18: history carries the untracked count for the .11 churn baseline" "2" \
   "$(count_matching "$(cat "$s/history.ndjson")" '"untracked":')"
+check "18: no partial status file is left behind (tmp+rename)" "0" \
+  "$( [ -e "$s/status.json.tmp" ] && echo 1 || echo 0 )"
+
+# --- 19. a branch name containing the record delimiter ----------------------
+# '|' is legal in a git ref name. Records are joined with ASCII US precisely so
+# such a branch cannot shift every field to its right and emit corrupt JSON
+# from the one file v03j.11 is going to consume.
+
+p="$(new_projects_dir t19)"; s="$TMP_ROOT/t19/state"
+mk_repo "$p" pipey
+( cd "$p/pipey"; git checkout -q -b 'weird|branch'; git push -q -u origin 'weird|branch' 2>/dev/null )
+run_detector "$p" "$s"
+check "19: a '|' in a branch name does not corrupt status.json" "1" \
+  "$(count_matching "$(cat "$s/status.json")" '"branch": "weird|branch"')"
+check "19: and the record still has exactly one repo entry" "1" \
+  "$(count_matching "$(cat "$s/status.json")" '"repo": "pipey"')"
 
 if [ "$fail" -ne 0 ]; then
   echo "trunk-drift-detector: FAILURES"
