@@ -961,18 +961,28 @@ ${serveIdCase}
       # AFTERWARDS, VERIFY ON CGROUPFS, NEVER `systemctl show`: the failure mode
       # is a MISSING FILE, and systemctl show cannot see a missing file -- it
       # will happily print the configured value for a limit that is not being
-      # enforced. Check that
-      #   /sys/fs/cgroup/system.slice/opencode-serve.slice/opencode-serve@<port>.service/memory.max
-      # exists and holds the expected value for all four ports, and that `memory`
-      # appears in the slice's cgroup.subtree_control.
-      Slice = "opencode-serve.slice";
+      # enforced. Run ./hosts/cloudbox/verify-serve-slice.sh, which checks exactly
+      # that and nothing else.
+      #
+      # CURRENTLY COMMENTED OUT ON PURPOSE. Uncommenting it is a DEPLOY ACTION,
+      # not an edit: the moment it is on `main`, the next `nixos-rebuild switch`
+      # by anyone, for any unrelated reason, lands it WITHOUT the bounce and
+      # silently unbounds the pool. It was merged in that state on 2026-08-11 and
+      # taken back out within the hour for exactly that reason -- the trap is
+      # aimed at whoever deploys next, not at whoever wrote it.
+      #
+      # So uncomment it ONLY in the same operation that bounces the pool, i.e.
+      # when you are already at a keyboard running the coupled command above. Do
+      # not merge it "ready for later".
+      # Slice = "opencode-serve.slice";
     };
   };
 
-  # h1y6 step 2: aggregate backstop for the serve pool. ATTACHED as of
-  # workstation-le0a -- the serve units now carry `Slice = "opencode-serve.slice"`
-  # (see the deploy-order warning on the unit above, which still applies to any
-  # future change of that line).
+  # h1y6 step 2: aggregate backstop for the serve pool. The slice is DEFINED here
+  # and the attachment on the serve units is written but commented out (see the
+  # deploy-order warning there). Defining an unused slice is harmless -- systemd
+  # only materializes a slice cgroup when a unit joins it -- so this half can sit
+  # on main safely while the attachment waits for a restart window.
   #
   # Per-instance MemoryMax is 14G and there are four of them, so an unbounded
   # parent would permit 56G on a 62 GiB box. This caps the whole pool at 32G
