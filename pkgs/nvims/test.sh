@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-3g4j): named there as wanting the same treatment as reset-workspace/test.sh; read that bead first, it records an attempt that was backed out.
 # Unit + source-guard tests for nvims' RPC-server launch decision.
 #
 # workstation-8iqt: `nvims` keys its --listen socket on $TMUX_PANE

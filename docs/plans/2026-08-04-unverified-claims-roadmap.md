@@ -108,7 +108,7 @@ artifact, which the test already reads.
 
 ---
 
-## Step 2 — `oeyv`: the meta-guard · **DONE** (PR pending)
+## Step 2 — `oeyv`: the meta-guard · **DONE** (PR #310)
 
 **Bead:** `workstation-oeyv` (P2)
 
@@ -267,6 +267,15 @@ cut from a *newer* main than the incoming tree does lose published commits and
 still refuses, where a naive "is the deployed tip published?" test would fail
 open.
 
+**The same trap caught a later status check of mine.** On 2026-08-11, asked
+whether the fix was deployed, I ran `merge-base --is-ancestor` against the fix's
+*branch* commit and reported "still v1" — while the fix was plainly present in
+the live activation script. That branch commit had been squash-merged to a
+different sha, exactly as above. Sha ancestry is not content identity in a
+squash-merge repo, and having just fixed that bug did not stop me reaching for
+the wrong instrument again. Check deployed *content*, or the merge commit on
+`main` — never the branch sha.
+
 Worth recording as its own lesson: the blast-radius reasoning in this step was
 right in the abstract and still under-imagined the *shape* of the false
 positive. A gate on a shared deploy path needs its benign cases enumerated from
@@ -350,6 +359,49 @@ without `nvim` SKIPs honestly; removing `neovim` from the `nvim-lua` check's
 `nativeBuildInputs` still hard-fails. Both verified by doing them.
 
 ---
+
+## Debt registry — every bead this roadmap spawned or adopted
+
+Kept here so nothing is loose. Counts are `unwired-test(<bead>)` markers on
+`main` as of 2026-08-11, and they are the guard's own bookkeeping: wiring a file
+and leaving its marker behind FAILS the build, so these only go down by real work.
+
+| Bead | P | Marked files | Owns |
+|---|---|---|---|
+| `workstation-5m47` | P1 | 26 | The opencode-frontdoor vitest suite. Needs a `.github/workflows` step, not a nix check — `npm ci` plus loopback sockets cannot be hermetic. **May be RED; run it before wiring.** |
+| `workstation-k7t4` | P2 | 13 | Suites that probe live host state (systemd/tmux/sockets); need fixture injection to become hermetic. |
+| `workstation-dad9` | P2 | 7 | Suites that look cheaply wirable — "add a checks entry and grep the final PASS line". The best starting point. |
+| `workstation-3g4j` | P2 | 3 | `reset-workspace/test.sh`, plus `nvims` and `opencode-launch`. **Adopted, not spawned** — it predates the census. |
+| `workstation-m98t` | P3 | 3 | The plugin-bundle family, which runs `nix build` on itself. |
+| `workstation-4ze8` | P1 | — | Step 3's second layer: a drift canary in a different deploy channel. Owns every `warn:` path the gate cannot close itself. |
+
+### The audit that produced this table found a real defect
+
+`workstation-3g4j` was filed 2026-08-03, one day *before* the census, and already
+owned `pkgs/reset-workspace/test.sh` — with a better diagnosis than the marker I
+later put on it. Mine said "probes live host state; needs fixture injection".
+3g4j records that registering it was **tried and backed out**: two SIGPIPE
+assertions pass outside the nix sandbox and fail inside, and a `trap - PIPE` in
+the derivation did **not** fix it. Anyone working from my reason would have
+repeated an experiment already known to fail. Those three markers now point at
+3g4j and carry its finding.
+
+**This is the guard's known blind spot, now demonstrated rather than theorised.**
+A marker's bead id is not mechanically verified — there is no `bd` in the build
+sandbox — so a marker can cite a bead that is wrong, superseded, or nonexistent
+and still pass. Splitting one file's ownership across two beads is precisely what
+that permits. Options if it recurs: cross-check marker ids against this table in
+the guard (cheap, needs no `bd`, but reintroduces a central list), or accept it
+and re-audit periodically. Deliberately undecided — the case for the central
+list strengthens each time an id drifts.
+
+### Adjacent spines that touch these files but do NOT own the wiring
+
+Recorded so a later reader does not mistake a mention for a claim.
+`workstation-km5f` and `workstation-q1tu` both touch
+`pkgs/opencode-frontdoor/test.sh`; `workstation-yvxh.10` and `workstation-yvxh.11`
+both touch the phantom-busy-sweeper tests. None of them claims responsibility for
+getting those suites into CI — that stays with `5m47` and `k7t4`.
 
 ## Not in this roadmap
 
