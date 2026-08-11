@@ -1,3 +1,5 @@
+import { DEFAULT_LOG_SAMPLE_N, DEFAULT_LOG_SUMMARY_INTERVAL_MS } from "./log.js";
+
 export interface Config {
   port: number;
   /*
@@ -36,6 +38,18 @@ export interface Config {
   driftCheckMs: number; // owner-drift re-resolve interval (mirrors the deployed TUI's 5s)
   wedgeProbeIntervalMs: number;
   mintTimeoutMs: number;
+  /*
+   * Request-log sampling (workstation-9f7a). Log 1 in every N plain 200 GETs on
+   * the two high-volume read classes; everything else is always logged. The door
+   * was emitting ~400k lines/day -- 57% of ALL journal volume on cloudbox -- and
+   * evicting every other unit's history down to a ~6 day window.
+   *
+   * Set to 1 to log everything. That is the mid-incident escape hatch and needs
+   * only an env change plus a restart, no rebuild.
+   */
+  logSampleN: number;
+  /* How often the door emits its aggregate request_summary line. */
+  logSummaryIntervalMs: number;
 }
 
 function parsePositiveInteger(envName: string, value: string | undefined, defaultValue: number): number {
@@ -97,6 +111,8 @@ export function loadConfig(): Config {
   const driftCheckMs = parsePositiveInteger('FRONTDOOR_DRIFT_CHECK_MS', process.env.FRONTDOOR_DRIFT_CHECK_MS, 5000);
   const wedgeProbeIntervalMs = parsePositiveInteger('FRONTDOOR_WEDGE_PROBE_INTERVAL_MS', process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS, 5000);
   const mintTimeoutMs = parsePositiveInteger('FRONTDOOR_MINT_TIMEOUT_MS', process.env.FRONTDOOR_MINT_TIMEOUT_MS, 60000);
+  const logSampleN = parsePositiveInteger('FRONTDOOR_LOG_SAMPLE_N', process.env.FRONTDOOR_LOG_SAMPLE_N, DEFAULT_LOG_SAMPLE_N);
+  const logSummaryIntervalMs = parsePositiveInteger('FRONTDOOR_LOG_SUMMARY_INTERVAL_MS', process.env.FRONTDOOR_LOG_SUMMARY_INTERVAL_MS, DEFAULT_LOG_SUMMARY_INTERVAL_MS);
 
   const pigeonUrl = process.env.PIGEON_DAEMON_URL || 'http://127.0.0.1:4731';
   const anchorUrl = process.env.OPENCODE_ANCHOR_URL || 'http://127.0.0.1:4096';
@@ -126,5 +142,7 @@ export function loadConfig(): Config {
     driftCheckMs,
     wedgeProbeIntervalMs,
     mintTimeoutMs,
+    logSampleN,
+    logSummaryIntervalMs,
   };
 }

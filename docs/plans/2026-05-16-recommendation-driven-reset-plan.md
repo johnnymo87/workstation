@@ -502,7 +502,8 @@ This step requires your active participation: check Telegram for a message from 
 
 If it does NOT arrive within ~2 minutes:
 - Check `journalctl -u opencode-serve --since "$TRIGGER_TS" --no-pager | tail -50` for errors from the recommendation session.
-- Check `journalctl -t pigeon-daemon --since "$TRIGGER_TS" --no-pager | tail -50` for pigeon-side errors.
+- Check `journalctl --namespace=pigeon -t pigeon-daemon --since "$TRIGGER_TS" --no-pager | tail -50` for pigeon-side errors.
+  <!-- CORRECTION (2026-08-11, workstation-9f7a): `--namespace=pigeon` is now REQUIRED; without it this returns zero entries silently. The `-t` filter also never worked before today -- the unit had no SyslogIdentifier, so its identifier was a nix store hash that changed every rebuild. -->
 - Check the session's message log: `curl -s http://127.0.0.1:4096/session/ses_xxxxx/message | jq '.[] | .role, .content[0:200]'` — replace `ses_xxxxx` with the sid from Step 3.6.
 
 ### Step 3.8: Verify reply round-trip (interactive)

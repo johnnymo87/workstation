@@ -576,6 +576,70 @@ in
       ''}";
       Restart = "on-failure";
       RestartSec = 5;
+
+      # workstation-9f7a: pigeon's logs get their own journal, so its retention
+      # stops being decided by whichever unit on the box is noisiest.
+      #
+      # WHY: the 2026-07-14 pigeon outage went undiagnosed for 16+ days, and by
+      # then the evidence was gone. Not for want of persistence -- Storage was
+      # already persistent -- but because the SHARED journal sits at its 4G cap
+      # and evicts oldest-first, giving ~6 days. pigeon-daemon writes 2.6 MB/day;
+      # opencode-frontdoor was writing 203 MB/day (57% of the whole journal), so
+      # pigeon's forensics were collateral damage from a 78x noisier neighbour.
+      # The companion commit cuts the door's volume ~88%, but that only buys time
+      # until the next noisy unit. A namespace makes pigeon structurally immune:
+      # its own directory, its own cap, its own 90-day retention (see
+      # environment.etc."systemd/journald@pigeon.conf" below). At 2.6 MB/day,
+      # 90 days is ~230 MB.
+      #
+      # !! ERGONOMIC BREAK, READ THIS !!
+      #   journalctl -u pigeon-daemon.service                       <- returns NOTHING
+      #   journalctl --namespace=pigeon -u pigeon-daemon.service    <- correct
+      # It does NOT error; it silently returns zero entries, which is the exact
+      # false-negative-instrument shape that has already misled investigations
+      # here (a query that could never match, read as evidence of absence).
+      # Audited before landing: no automated consumer in this repo reads
+      # pigeon's journal -- the six `journalctl` sites in deployable Nix all
+      # target other units -- so nothing AUTOMATED silently goes blind.
+      #
+      # The consumers that DO break are agent-facing: this repo's
+      # troubleshooting-nixos-host skill (updated here) and the pigeon repo's
+      # daemon-operations / daemon-troubleshooting / swarm-operations /
+      # cross-device-deployment skills, which are updated in a companion PR
+      # there. Those skills are exactly what gets reached for during the kind of
+      # incident this change exists to make diagnosable, so they must land before
+      # or with this. Note the chromebook runs pigeon as a USER service and is
+      # NOT namespaced -- its recipes must stay as they are.
+      #
+      # NOTE this captures oc-auto-attach too, which pigeon spawns and which
+      # inherits the unit's stdio. Deliberate -- it is pigeon's story -- and the
+      # 2.6 MB/day figure already includes it, being measured per-unit. (The tmux
+      # PANES it opens are NOT affected: a pane's stdio is its pty, so pane output
+      # was never in the journal to begin with.)
+      #
+      # A subtler consequence: LogNamespace implies PrivateMounts=yes. If a tmux
+      # SERVER is ever started by oc-auto-attach before a human has one running,
+      # that server forks from this unit and inherits the namespace and the
+      # private mount namespace for its whole lifetime -- every pane in it would
+      # then log into pigeon's namespace and see host-invisible mounts. Today the
+      # tmux server is started from a login session, so this does not arise; if
+      # panes ever start behaving oddly, check which cgroup tmux is in.
+      #
+      # Existing history does NOT migrate: logs written before this change stay
+      # in the default journal. For ~6 days after deploy, old evidence is in one
+      # place and new evidence in the other.
+      #
+      # ROLLBACK: delete this line and rebuild; pigeon logs to the default journal
+      # again from its next restart. Note the namespace directory is then ORPHANED
+      # -- systemd-journald@pigeon never runs again, so MaxRetentionSec stops being
+      # enforced and the data sits there indefinitely. Remove it by hand:
+      #   sudo rm -rf /var/log/journal/$(cat /etc/machine-id).pigeon
+      LogNamespace = "pigeon";
+
+      # Without this the identifier is `<nix-store-hash>-pigeon-daemon-start`,
+      # which CHANGES ON EVERY REBUILD -- so `journalctl -t pigeon-daemon` has
+      # never worked, and no identifier-based filter could survive a deploy.
+      SyslogIdentifier = "pigeon-daemon";
     };
   };
 
@@ -584,6 +648,36 @@ in
     description = "Pigeon stack (cloudflared + daemon)";
     wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
   };
+  # workstation-9f7a: the `pigeon` journal namespace declared by
+  # systemd.services.pigeon-daemon (LogNamespace = "pigeon").
+  #
+  # systemd auto-starts systemd-journald@pigeon.service for any unit naming the
+  # namespace; NixOS ships the upstream systemd-journald@.service template
+  # (verified present at /etc/systemd/system/systemd-journald@.service), so no
+  # unit definition is needed here -- only its config.
+  #
+  # A namespace gets its OWN directory (/var/log/journal/<machine-id>.pigeon)
+  # and its OWN size accounting, so these limits are independent of the main
+  # journal's. Without a config file it would inherit the same default cap that
+  # caused the problem (min(10% of fs, 4G)) and, more importantly, would not be
+  # bounded by TIME at all.
+  #
+  # MaxRetentionSec is the limit that actually matters here. SystemMaxUse=2G is
+  # slack: at pigeon's measured 2.6 MB/day, 90 days is ~230 MB, so the size cap
+  # should never bind and the age limit is what expires entries. If pigeon ever
+  # becomes 20x noisier, the 2G cap stops it eating the disk -- retention then
+  # degrades gracefully instead of the disk filling.
+  environment.etc."systemd/journald@pigeon.conf".text = ''
+    [Journal]
+    Storage=persistent
+    SystemMaxUse=2G
+    MaxRetentionSec=90day
+    # 2G would otherwise imply a 256M SystemMaxFileSize, i.e. roughly ONE file
+    # for 90 days of data -- coarse rotation and a wide blast radius if a file
+    # is ever corrupted. 32M keeps rotation granular.
+    SystemMaxFileSize=32M
+  '';
+
 
   # LGTM v2 — context-aware AI PR review via OpenCode
   # Gated behind enableLgtm flag (default: false). Flip the let-binding
@@ -3066,6 +3160,23 @@ EOF
         # Builtins-only app (no framework reads NODE_ENV) — set for convention/
         # consistency with pigeon-daemon and to future-proof any added dependency.
         "NODE_ENV=production"
+        # workstation-9f7a: log 1 in 50 plain 200 GETs on the two high-volume read
+        # classes. Everything else — every non-200, every degradation, every
+        # mutation — is still logged unconditionally, and a `request_summary` line
+        # every 5 min reports the totals including what was sampled away.
+        #
+        # This value equals the code default; it is written out so the knob is
+        # discoverable from the unit rather than only from config.ts. Set it to 1
+        # and restart to log everything during an incident (no rebuild needed).
+        # Do NOT set it to 0 expecting "off": 0 fails config validation and the
+        # door then REFUSES TO START, taking the data plane down. 1 is the off
+        # switch.
+        #
+        # Why: the door emitted ~400k lines/day, 57% of ALL journal volume on this
+        # host, holding the shared journal at its 4G cap and evicting every other
+        # unit's history down to a ~6 day window. Measured over 6h, 90.2% of those
+        # lines were plain 200 GETs, against 19 degradations and 167 5xx.
+        "FRONTDOOR_LOG_SAMPLE_N=50"
       ];
       ExecStart = "${opencode-frontdoor}/bin/opencode-frontdoor";
       Restart = "always";

@@ -23,6 +23,8 @@ describe('loadConfig', () => {
     delete process.env.FRONTDOOR_DRIFT_CHECK_MS;
     delete process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS;
     delete process.env.FRONTDOOR_MINT_TIMEOUT_MS;
+    delete process.env.FRONTDOOR_LOG_SAMPLE_N;
+    delete process.env.FRONTDOOR_LOG_SUMMARY_INTERVAL_MS;
   });
 
   afterEach(() => {
@@ -53,6 +55,8 @@ describe('loadConfig', () => {
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 50,
+      logSummaryIntervalMs: 300000,
     });
   });
 
@@ -95,6 +99,8 @@ describe('loadConfig', () => {
     process.env.FRONTDOOR_DRIFT_CHECK_MS = '2000';
     process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS = '1000';
     process.env.FRONTDOOR_MINT_TIMEOUT_MS = '45000';
+    process.env.FRONTDOOR_LOG_SAMPLE_N = '20';
+    process.env.FRONTDOOR_LOG_SUMMARY_INTERVAL_MS = '60000';
 
     const config = loadConfig();
 
@@ -112,7 +118,41 @@ describe('loadConfig', () => {
       driftCheckMs: 2000,
       wedgeProbeIntervalMs: 1000,
       mintTimeoutMs: 45000,
+      logSampleN: 20,
+      logSummaryIntervalMs: 60000,
     });
+  });
+
+  describe('FRONTDOOR_LOG_SAMPLE_N', () => {
+    test('accepts 1, which is the "log everything" escape hatch', () => {
+      // This is the only value an operator reaches for mid-incident, and it is one
+      // off the boundary that parsePositiveInteger rejects. If a future tightening
+      // of that parser makes 1 invalid, the escape hatch dies silently at unit
+      // start; that is what this test exists to prevent.
+      process.env.FRONTDOOR_LOG_SAMPLE_N = '1';
+      expect(loadConfig().logSampleN).toBe(1);
+    });
+
+    test('rejects 0, which would otherwise suppress every sampleable request', () => {
+      process.env.FRONTDOOR_LOG_SAMPLE_N = '0';
+      expect(() => loadConfig()).toThrowError(
+        'Invalid FRONTDOOR_LOG_SAMPLE_N: "0". Must be a positive integer.',
+      );
+    });
+
+    test('rejects non-numeric values', () => {
+      process.env.FRONTDOOR_LOG_SAMPLE_N = 'off';
+      expect(() => loadConfig()).toThrowError(
+        'Invalid FRONTDOOR_LOG_SAMPLE_N: "off". Must be a positive integer.',
+      );
+    });
+  });
+
+  test('should throw a descriptive error for invalid FRONTDOOR_LOG_SUMMARY_INTERVAL_MS', () => {
+    process.env.FRONTDOOR_LOG_SUMMARY_INTERVAL_MS = 'invalid';
+    expect(() => loadConfig()).toThrowError(
+      'Invalid FRONTDOOR_LOG_SUMMARY_INTERVAL_MS: "invalid". Must be a positive integer.',
+    );
   });
 
   describe('FRONTDOOR_POOL_URLS', () => {

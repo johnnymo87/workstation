@@ -126,6 +126,38 @@ Check system journal for errors:
 ssh <host> 'journalctl -b --priority=err'
 ```
 
+### Journal namespaces: units that are invisible to every command above
+
+`pigeon-daemon` logs to the **`pigeon` journal namespace** (`LogNamespace = "pigeon"`,
+workstation-9f7a), and a namespaced unit does not appear in the default journal at
+all. Every `journalctl` on this page — including the unfiltered `-b --priority=err`
+sweep above and anything matching by `_UID=1000` — silently omits it.
+
+Silently is the word that matters. You do not get an error or a warning; you get
+zero entries, which is indistinguishable from "pigeon logged nothing" and reads as
+evidence of absence. This repo has already been misled more than once by a
+`journalctl` invocation that could never have matched.
+
+```bash
+journalctl --namespace=pigeon -u pigeon-daemon.service        # correct
+journalctl --namespace=pigeon -u pigeon-daemon.service -f     # follow
+journalctl --namespace=pigeon --since "2 hours ago"           # everything in it
+journalctl -u pigeon-daemon.service                           # WRONG: always empty
+```
+
+This also covers processes pigeon **spawns** (`oc-auto-attach` and the tmux panes it
+creates), since they inherit the unit's stdio. So a hunt for `[oc-auto-attach]` lines
+needs `--namespace=pigeon` too.
+
+Two consequences when reasoning about retention:
+
+- The namespace has its own directory (`/var/log/journal/<machine-id>.pigeon`) and
+  its own limits: 90-day retention, 2G cap. The **default** journal is still capped
+  at ~4G and turns over in roughly a week, so pigeon's history now reaches much
+  further back than everything else's.
+- `journalctl --disk-usage` reports the default journal only. Add
+  `--namespace=pigeon` to see the other one.
+
 ## nixos-anywhere Deployment Failed (devbox-only)
 
 If deployment fails mid-way, the server may be in an inconsistent state.

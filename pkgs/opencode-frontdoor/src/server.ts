@@ -9,7 +9,13 @@ import { StickyMap } from "./sticky.js";
 import { installCrashHandlers } from "./crash.js";
 
 export function createFrontDoor(config: Config, deps?: any): http.Server {
-  const logger = new RequestLogger(deps?.logger);
+  // Config supplies the sampling policy; deps?.logger still wins, so tests keep
+  // injecting a sink/clock (and may override the policy) exactly as before.
+  const logger = new RequestLogger({
+    sampleN: config.logSampleN,
+    summaryIntervalMs: config.logSummaryIntervalMs,
+    ...deps?.logger,
+  });
   const gate = deps?.gate ?? new PromotionGate(config.stickyTtlMs);
   const metrics = deps?.metrics ?? createMetrics();
   const sticky = deps?.sticky ?? new StickyMap(config.stickyTtlMs);

@@ -194,6 +194,7 @@ do NOT delete rows for live sessions.
 ## Verification protocol (any host)
 After deploy, watch `pigeon-daemon.db`: `max(owner_generation)` and
 `sum(owner_generation)` should be flat; `serve_instance` recovers to healthy
-after transient staleness; `journalctl -u pigeon-daemon | grep "lease lost"`
+after transient staleness; `journalctl --namespace=pigeon -u pigeon-daemon | grep "lease lost"`
+<!-- CORRECTION (2026-08-11, workstation-9f7a): `--namespace=pigeon` is now REQUIRED; without it this returns zero entries silently. Separately, "lease lost" appears only in code comments and is never emitted as a log line, so this grep could never have matched -- see the evidence-instruments memory. -->
 stays empty. A serve being briefly flagged unhealthy is now harmless (live-lease
 sessions are not evicted).
