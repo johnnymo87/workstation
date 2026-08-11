@@ -405,6 +405,61 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source disarms cleanup only on success (launch_ok=1)\n        not found in: %s\n' "$default_nix"; exit 1
   fi
+  # pigeon-w36w: the launch prompt must be recorded with the pigeon daemon so
+  # /mirror does not echo it into Telegram as if a human had typed it.
+  if grep -q 'PIGEON_DAEMON_URL/injected-prompts' "$default_nix"; then
+    printf 'PASS  source records the launch prompt with pigeon (w36w)\n'
+  else
+    printf 'FAIL  source records the launch prompt with pigeon (w36w)\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # The record must carry the daemon bearer token, or it 401s and silently no-ops.
+  if grep -A6 'PIGEON_DAEMON_URL/injected-prompts' "$default_nix" | grep -q 'pigeon_auth\[@\]' \
+     || grep -B6 'PIGEON_DAEMON_URL/injected-prompts' "$default_nix" | grep -q 'pigeon_auth\[@\]'; then
+    printf 'PASS  launch-prompt record sends pigeon auth (w36w)\n'
+  else
+    printf 'FAIL  launch-prompt record must send pigeon auth (w36w)\n'; exit 1
+  fi
+  # It must send the RAW prompt and let the daemon hash it: a hash computed here
+  # would have to match sha256 byte-for-byte, and a mismatch fails silently.
+  if grep -A6 'PIGEON_DAEMON_URL/injected-prompts' "$default_nix" | grep -q 'arg t "\$prompt"'; then
+    printf 'PASS  launch-prompt record sends the raw prompt text (w36w)\n'
+  else
+    printf 'FAIL  launch-prompt record must send the raw prompt text (w36w)\n'; exit 1
+  fi
+  # Ordering: resolve_pigeon_auth populates the array the record call reads.
+  # Under `set -u` an unset array expands to NOTHING rather than erroring, so a
+  # record call above resolve_pigeon_auth would drop the header and 401 silently.
+  auth_line="$(grep -n '^      resolve_pigeon_auth$' "$default_nix" | head -1 | cut -d: -f1)"
+  first_record_line="$(grep -n '^      record_launch_prompt$' "$default_nix" | head -1 | cut -d: -f1)"
+  if [ -n "$auth_line" ] && [ -n "$first_record_line" ] && [ "$auth_line" -lt "$first_record_line" ]; then
+    printf 'PASS  launch-prompt record runs after resolve_pigeon_auth (w36w)\n'
+  else
+    printf 'FAIL  record must run after resolve_pigeon_auth (auth@%s record@%s)\n' "$auth_line" "$first_record_line"; exit 1
+  fi
+  # Ordering: record BEFORE the injection. prompt_async is non-idempotent and a
+  # timeout may mean "processed", so a record after the response loses the race
+  # to the mirror event it exists to suppress.
+  prompt_line="$(grep -n 'FRONTDOOR_URL/session/\$session_id/prompt_async' "$default_nix" | head -1 | cut -d: -f1)"
+  if [ -n "$first_record_line" ] && [ -n "$prompt_line" ] && [ "$first_record_line" -lt "$prompt_line" ]; then
+    printf 'PASS  launch prompt is recorded before it is injected (w36w)\n'
+  else
+    printf 'FAIL  record must precede prompt_async (record@%s prompt@%s)\n' "$first_record_line" "$prompt_line"; exit 1
+  fi
+  # Both injection legs record: the retry leg is a second injection, and the
+  # counted table exists precisely so retry-after-timeout does not echo.
+  record_count="$(grep -c '^      record_launch_prompt$\|^        record_launch_prompt$' "$default_nix" || true)"
+  if [ "$record_count" -ge 2 ]; then
+    printf 'PASS  both prompt_async legs record the launch prompt (w36w)\n'
+  else
+    printf 'FAIL  retry leg must record too (found %s call sites, want 2)\n' "$record_count"; exit 1
+  fi
+  # Best-effort but not mute: a 404/401/400 is a real misconfiguration and must
+  # not be swallowed the way a daemon-down 000 legitimately is.
+  if grep -q 'may echo into Telegram' "$default_nix"; then
+    printf 'PASS  launch-prompt record warns on unexpected HTTP status (w36w)\n'
+  else
+    printf 'FAIL  launch-prompt record must warn on unexpected HTTP status (w36w)\n'; exit 1
+  fi
   # loud-fail: a work failure must abort, never silently launch at the root.
   if grep -q 'failed to create worktree' "$default_nix"; then
     printf 'PASS  source fails loudly on work failure (no silent root fallback)\n'

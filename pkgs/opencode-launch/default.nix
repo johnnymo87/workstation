@@ -69,6 +69,49 @@ pkgs.writeShellApplication {
         fi
       }
 
+      # record_launch_prompt
+      #
+      # Tell the pigeon daemon "I am about to inject this exact text into this
+      # session", so its /mirror route does not echo the launch prompt back into
+      # Telegram as `🧑 <label> <prompt>` -- which reads as though a human typed
+      # it. The daemon records sha256(text) in its injected_prompts table and
+      # consumes one count the next time an identical user message arrives for
+      # that session (pigeon-w36w).
+      #
+      # Reads caller-scoped `pigeon_auth`, so this MUST be called after
+      # resolve_pigeon_auth. Under `set -u` an unset array expands to nothing
+      # rather than erroring, so calling it too early would silently drop the
+      # Authorization header and 401 -- which is why the call sites sit next to
+      # prompt_async, well below the resolve_pigeon_auth at session-create time.
+      #
+      # We send the RAW TEXT and let the daemon hash it. Hashing here would mean
+      # reproducing sha256 byte-for-byte from bash (printf-vs-echo trailing
+      # newline, locale, jq's UTF-8 sanitisation), and a mismatch fails SILENTLY:
+      # the prompt just echoes, with nothing anywhere saying why. Passing the
+      # same "$prompt" string that goes into prompt_payload keeps one source of
+      # truth for the bytes.
+      #
+      # Best-effort -- it must never fail a launch -- but deliberately NOT mute.
+      # A 404 (daemon predates the route: the two repos deploy independently,
+      # per machine), a 401 (token file unreadable) or a 400 (payload bug) are
+      # real misconfigurations that are otherwise indistinguishable from success.
+      # Only a connection failure (code 000, daemon down) is the designed
+      # degrade, and only that stays quiet.
+      record_launch_prompt() {
+        local code
+        code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 3 \
+          ''${pigeon_auth[@]+"''${pigeon_auth[@]}"} \
+          -X POST "$PIGEON_DAEMON_URL/injected-prompts" \
+          -H "Content-Type: application/json" \
+          -d "$(jq -n --arg s "$session_id" --arg t "$prompt" '{sessionId: $s, text: $t}')" \
+          2>/dev/null || true)"
+        case "$code" in
+          200) ;;
+          000|"") ;;
+          *) echo "Note: pigeon launch-prompt record returned HTTP $code; the launch prompt may echo into Telegram" >&2 ;;
+        esac
+      }
+
       # resolve_model_id <catalog-json> <provider> <model-id>
       #
       # Resolve a (possibly bare) model id against a GET /config/providers
@@ -469,11 +512,27 @@ pkgs.writeShellApplication {
       # launcher indefinitely (reset-workspace documents a curl parked 6+ hours on
       # this exact failure). The retry leg needs it most -- it targets a serve that
       # just failed through the door, i.e. the one most likely to be wedged.
+      # Record BEFORE the injection, never after its response (pigeon-w36w).
+      # prompt_async is non-idempotent and a --max-time 30 timeout may mean the
+      # prompt WAS processed, so a record placed after the response would lose
+      # the race to the very mirror event it exists to suppress.
+      record_launch_prompt
       if ! curl -sf --max-time 30 -X POST "$FRONTDOOR_URL/session/$session_id/prompt_async" \
         -H "x-opencode-directory: $directory" \
         -H "Content-Type: application/json" \
         -d "$prompt_payload" >/dev/null; then
         echo "Note: prompt via front door failed; retrying directly against $serve_url" >&2
+        # Record again before the SECOND injection, matching the daemon's own
+        # rule that every injection gets its own count (injected_prompts is
+        # counted, not single-use, precisely because retry-after-timeout
+        # produces byte-identical re-injections). The door leg can time out
+        # having actually been processed, in which case both legs land and two
+        # counts are exactly right. If the door leg truly failed unprocessed we
+        # strand one count instead: it suppresses at most one identical human
+        # prompt in the same session within the 15-minute TTL, costing a single
+        # 🧑 mirror line. Erring the other way costs a spurious echo of a
+        # multi-KB launch prompt on every retry.
+        record_launch_prompt
         # frontdoor-exempt(C7): post-door-failure degrade ONLY; fires after the FRONTDOOR_URL prompt above fails
         curl -sf --max-time 30 \
           ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
