@@ -19,7 +19,18 @@ const execFileAsync = promisify(execFile)
  * That unit is MemoryMax=14G and OOMPolicy=stop, so ANY OOM anywhere in the
  * cgroup restarts the serve and destroys every agent session on it. bazel did
  * this until pkgs/bazel-scope shimmed it; vitest then did it twice on
- * 2026-08-09 (anon 2.51G -> 13.29G in 33 seconds).
+ * 2026-08-09 -- the slot's anon went 1.61G -> 13.00G in 48 seconds while its
+ * page cache was reclaimed out from under it (9.10G -> 0.39G), and it was dead
+ * ~30s later.
+ *
+ * Those figures were CORRECTED on 2026-08-11 (bead workstation-h1y6). This
+ * comment previously said "2.51G -> 13.29G in 33 seconds", which came from a
+ * positional read across sampler schema versions rather than a read by column
+ * name; 13.29G is the known-bogus output of that mistake and the spine document
+ * had already recorded it as such. A peer trying to reproduce the ramp is what
+ * surfaced it. The phenomenon is real -- re-derived by header name from
+ * samples-v3.tsv -- but do not quote the old numbers, and note the accompanying
+ * "swap saturated" claim was simply false: swap never moved.
  *
  * WHY NOT MORE PATH SHIMS. `vitest` is not on PATH -- the chain is `npm test`
  * -> `npm run --workspaces test` -> N x `vitest run`, each spawning an

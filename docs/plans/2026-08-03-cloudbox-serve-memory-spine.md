@@ -618,9 +618,34 @@ the demand approaching the cap is **opencode's**. In all six kills it was not:
 - the two 08-09 kills of `:4097` were **vitest** (`task=node (vitest 8)`, `(vitest 2)`)
 
 opencode's own steady demand across the whole window is 2.5–9 G; the cap is approached
-only during foreign bursts. And both `:4097` ramps were near-vertical — anon
-2.51 → 13.29 G in **33 seconds**, page cache evicted 4.06 → 0.01 G, swap saturated — so
-a 16 G cap buys roughly four extra seconds before an identical kill.
+only during foreign bursts. And both `:4097` ramps were near-vertical.
+
+> **Ramp figures re-derived 2026-08-11 — the originals were wrong, and this
+> document had already warned why.** The numbers first recorded here (anon
+> 2.51 → 13.29 G in 33 s, page cache 4.06 → 0.01 G, swap saturated) came from a
+> positional read across sampler schema versions — the exact hazard the "Reading
+> the sampler" section below documents, which names 13.29 G as its known-bogus
+> output. A peer (pigeon-80gy) could not reproduce the ramp and flagged it, which
+> is what prompted the recheck. Re-read **by header name** from `samples-v3.tsv`:
+>
+> | | recorded | measured |
+> |---|---|---|
+> | anon ramp | 2.51 → 13.29 G in 33 s | **1.61 → 13.00 G in 48 s** |
+> | page cache | 4.06 → 0.01 G | **9.10 → 0.39 G** |
+> | swap | "saturated" | **0.00 G throughout — it never moved** |
+>
+> The phenomenon is **real and survives**: `:4097` anon went 1.61 → 9.41 → 13.00 G
+> across 12:51:27–12:52:15 on 08-09 while page cache was reclaimed out from under
+> it, and the slot was dead by 12:52:47 (anon 0.29 G, threads 62 → 22). Only the
+> digits were wrong. The "swap saturated" clause was wrong outright, and mattered:
+> there was no swap thrash before this kill.
+>
+> **It was one slot, not the box.** At the peak second `:4097` held 13.00 G while
+> `:4096`/`:4098`/`:4099` held 1.41/1.18/1.09 G. That is evidence against
+> box-wide multi-tenant contention as the explanation, and for something local to
+> that cgroup.
+
+So a 16 G cap buys seconds, not minutes, before an identical kill.
 
 **Recommendation: do not raise the cap.** Fix the class instead: `workstation-mqp3`
 moved *bazel* out of the serve cgroup and that held, but the defect was never
