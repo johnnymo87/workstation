@@ -291,7 +291,7 @@ needs an expected-set reference and would otherwise grow a second list that rots
 
 ---
 
-## Step 3.5 — `5m47`: the biggest untested surface · **DONE** (PR #346)
+## Step 3.5 — `5m47`: the biggest untested surface · **DONE** (PR #347)
 
 Not a numbered step when this roadmap was written — it was spawned by the step-2
 census as the largest single block of debt: **25 test files, 496 assertions**
@@ -446,7 +446,7 @@ and leaving its marker behind FAILS the build, so these only go down by real wor
 
 | Bead | P | Marked files | Owns |
 |---|---|---|---|
-| `workstation-5m47` | P1 | 0 | ~~The opencode-frontdoor vitest suite.~~ **DONE, PR #346** — wired as `checks.frontdoor-vitest`. Both premises in the row it replaces were wrong: see below. |
+| `workstation-5m47` | P1 | 0 | ~~The opencode-frontdoor vitest suite.~~ **DONE, PR #347** — wired as `checks.frontdoor-vitest`. Both premises in the row it replaces were wrong: see below. |
 | `workstation-k7t4` | P2 | 13 | Suites that probe live host state (systemd/tmux/sockets); need fixture injection to become hermetic. |
 | `workstation-dad9` | P2 | 7 | Suites that look cheaply wirable — "add a checks entry and grep the final PASS line". The best starting point. |
 | `workstation-dimz` | P2 | 1 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. |
