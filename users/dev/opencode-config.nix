@@ -521,7 +521,7 @@ in
   # loaded on any process (see below), and its path heuristic flagged every
   # relative path as a hit, so it could only ever have produced noise. Commits
   # at a primary root are still blocked by the git pre-commit hook installed by
-  # `installMonoWorktreeGuardHook` in home.base.nix — that layer works and stays.
+  # `installWorktreeGuardHooks` in home.base.nix — that layer works and stays.
   # What is no longer enforced is blocking *edits* (as opposed to commits) at a
   # primary root; that is convention-only now.
 

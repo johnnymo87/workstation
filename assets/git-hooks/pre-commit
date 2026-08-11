@@ -1,5 +1,9 @@
 #!/bin/bash
-# Pre-commit hook to prevent commits in the primary worktree (mono root).
+# Pre-commit hook to prevent commits in a repository's primary worktree.
+# Repo-agnostic: it keys on primary-worktree identity (--git-common-dir vs
+# --show-toplevel), never on a branch name or a hard-coded path. Enrolment is
+# per-repo via core.hooksPath, set by home.activation.installWorktreeGuardHooks
+# in users/dev/home.base.nix.
 # Deployed by home-manager, NOT committed into target repositories.
 
 # Fail open (exit 0) if anything unexpected happens or if we are not in a git repo.
@@ -34,8 +38,36 @@ if [ -z "$here" ]; then
 fi
 
 if [ "$here" = "$primary" ]; then
-  echo "worktree-guard: refusing to commit in the primary root ($primary)." >&2
-  echo "Create a fresh worktree and commit there:  work <slug>" >&2
+  # The recovery path is spelled out on purpose: an agent blocked without an
+  # obvious escape hatch invents a worse one (usually a shared-root `git stash`,
+  # which has already destroyed a peer session's uncommitted work).
+  cat >&2 <<EOF
+worktree-guard: refusing to commit in the primary root ($primary).
+This root is shared with other sessions; committing here strands work on trunk.
+
+How to proceed, best option first:
+
+  1. No local changes yet -- just work somewhere else:
+         work <slug>
+     then make your commit inside the new worktree.
+
+  2. You already have uncommitted changes here -- copy them forward.
+     Do NOT run 'git stash' in this root: it moves every session's changes,
+     not just yours.
+         work <slug>
+         p=\$(mktemp /tmp/wg.XXXXXX.diff)
+         git -C "$primary" diff HEAD --binary > "\$p"   # staged AND unstaged
+         git -C <new-worktree> apply "\$p"
+     Untracked files are NOT in that diff. List them and copy them by hand:
+         git -C "$primary" status --porcelain | grep '^??'
+     This root is SHARED: that diff may contain another session's work as
+     well as yours. Check before you clean anything up here, and clean up
+     only once your worktree commit exists.
+
+  3. Genuine hotfix or deploy-time commit that must land here:
+         git commit --no-verify
+     This is SUPPORTED, not a transgression. Say why in the commit message.
+EOF
   exit 1
 fi
 
