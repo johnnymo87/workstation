@@ -258,12 +258,25 @@ reasoning about it:
 | `git commit --no-verify` | bypass — *this is the intended escape hatch* |
 | `git cherry-pick <sha>` | **bypass** — silently lands a commit on trunk |
 | `git merge --no-ff` | **bypass** — `pre-commit` does not run for merge commits |
-| `git revert` | blocked ✓ |
+| `git revert` | **bypass** — corrected 2026-08-11, see note below |
 | `git rebase` (replay onto trunk) | **bypass** — no `pre-commit` per replayed commit |
 | `git commit` in a linked worktree | allowed ✓ (`core.hooksPath` is inherited) |
 
+> **Correction (2026-08-11, while implementing `v03j.7`).** This table
+> originally recorded `git revert` as *blocked*. That was a measurement
+> artifact. The original probe reverted an `--allow-empty` commit, and `git
+> revert` fails on its own in that case with "nothing to commit" — an exit
+> status and a refusal that are indistinguishable from a hook block unless you
+> check whether the hook actually printed anything. Re-measured against a
+> non-empty HEAD: the commit lands and the string `worktree-guard` appears zero
+> times in the output. **`revert` is a fourth bypass, not a block.** It is now
+> pinned by test 6 in `assets/git-hooks/test-pre-commit.sh`, which asserts the
+> hook does *not* fire, so a future reader cannot re-derive the wrong answer.
+> The lesson generalizes: a control that "refused" is not evidence the control
+> ran.
+
 The `merge` bypass is **load-bearing, not a defect**: `git pull` at the root must
-keep working for deploys. The `cherry-pick` and `rebase` bypasses are genuine
+keep working for deploys. The `cherry-pick`, `revert` and `rebase` bypasses are genuine
 holes, and `cherry-pick` is precisely the verb a session would reach for when
 "rescuing" or "replaying" a commit — the same neighbourhood as the pigeon
 incident. A `pre-merge-commit` hook would close the merge case; it should

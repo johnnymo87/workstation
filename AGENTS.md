@@ -29,6 +29,51 @@ nix run home-manager -- switch --flake .#cloudbox      # cloudbox
 sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2      # System + user combined
 ```
 
+## Work in a Worktree, Not the Primary Root
+
+**Do not edit or commit in `~/projects/workstation` itself.** That checkout is
+shared by every concurrent session on the host; two agents editing it at once
+clobber each other, and a commit made there strands work on a local `main` that
+nobody is watching. This repo was itself found sitting on an unpushed `main`
+commit on 2026-08-11.
+
+Start work with:
+
+```bash
+work <slug>     # creates ~/projects/workstation/.worktrees/<slug> off origin/main
+```
+
+On **cloudbox**, a `pre-commit` hook refuses commits made at the primary root of
+`mono`, `pigeon` and `workstation` (enrolled in `users/dev/home.base.nix` via
+`worktreeGuardRepos`). On devbox and macOS the hook is not installed, so there
+the rule above is convention only — follow it anyway. If the hook blocks you:
+
+1. **No local changes yet** — just `work <slug>` and commit there.
+2. **You already have uncommitted changes at the root** — copy them forward.
+   **Never `git stash` in the root**; it moves every session's changes, not just
+   yours, and has already destroyed a peer session's uncommitted database.
+   ```bash
+   work <slug>
+   p=$(mktemp /tmp/wg.XXXXXX.diff)
+   # `diff HEAD` (not bare `diff`) so STAGED work is included; --binary so
+   # binary files survive the round trip.
+   git -C ~/projects/workstation diff HEAD --binary > "$p"
+   git -C ~/projects/workstation/.worktrees/<slug> apply "$p"
+   # Untracked files are NOT in that diff -- list and copy them by hand:
+   git -C ~/projects/workstation status --porcelain | grep '^??'
+   ```
+   The root is shared, so that diff may contain another session's work as well
+   as yours. Check before cleaning anything up there, and only once your
+   worktree commit exists.
+3. **Genuine hotfix that must land at the root** — `git commit --no-verify` is
+   supported, not a transgression. Say why in the commit message.
+
+The hook blocks *commits*, not *edits*, and `cherry-pick`/`revert`/`merge`/`rebase`
+all bypass it (the `merge` bypass is load-bearing — `git pull` at a deploy root
+depends on it). So the hook is a backstop, not a guarantee: the convention above
+is what actually keeps the root clean. See
+`docs/plans/2026-08-11-worktree-guard-generalization-design.md`.
+
 ## Managing Projects
 
 Projects are declared in `projects.nix` and auto-cloned per platform.

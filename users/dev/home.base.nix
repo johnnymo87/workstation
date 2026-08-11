@@ -516,6 +516,23 @@ let
         "$api/GetFile"
     '';
   };
+
+  # Repos whose primary root is protected by the worktree-guard pre-commit hook.
+  #
+  # Enrolment is EXPLICIT, not global. core.hooksPath is winner-take-all: a
+  # global setting would silently disable culinary-operations-server's 11
+  # overcommit hooks and lgtm's post-merge hook, and fight opencode's husky.
+  # See docs/plans/2026-08-11-worktree-guard-generalization-design.md section 3.1.
+  #
+  # Three repos cover the actual write traffic; the other ~35 clones under
+  # ~/projects are read-only reference or short-lived. Add a fourth when a
+  # fourth misbehaves -- drift on unenrolled repos is caught by the detector
+  # (workstation-v03j.9), not by this list.
+  worktreeGuardRepos = [
+    "mono" # work trunk; .agents/skills are served from the tree
+    "pigeon" # pigeon-daemon runs tsx against the working tree, so root == prod
+    "workstation" # this repo; was sitting on an unpushed main commit on 2026-08-11
+  ];
 in
 {
   # NOTE: home.username and home.homeDirectory are set per-host
@@ -848,25 +865,43 @@ home.activation.deployGclprKey = lib.mkIf (!isDarwin) (
     ''
   );
 
-home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
-    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      if [ ! -d "/home/dev/projects/mono/.git" ] && [ ! -f "/home/dev/projects/mono/.git" ]; then
-        echo "installMonoWorktreeGuardHook: /home/dev/projects/mono/.git is not a git repo, skipping"
-      else
-        if ! ${pkgs.git}/bin/git -C /home/dev/projects/mono rev-parse --git-dir >/dev/null 2>&1; then
-          echo "installMonoWorktreeGuardHook: /home/dev/projects/mono is not a git repo, skipping"
+home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
+    lib.hm.dag.entryAfter [ "writeBoundary" ] (
+      lib.concatMapStringsSep "\n" (repo: ''
+        repo_dir="${config.home.homeDirectory}/projects/${repo}"
+        if [ ! -d "$repo_dir/.git" ] && [ ! -f "$repo_dir/.git" ]; then
+          echo "installWorktreeGuardHooks: $repo_dir/.git is not a git repo, skipping"
         else
-          current_hooks_path="$(${pkgs.git}/bin/git -C /home/dev/projects/mono config --get core.hooksPath 2>/dev/null || true)"
-          managed_hooks_dir="$HOME/.config/git-hooks"
-          if [ -z "$current_hooks_path" ] || [ "$current_hooks_path" = "$managed_hooks_dir" ]; then
-            ${pkgs.git}/bin/git -C /home/dev/projects/mono config core.hooksPath "$managed_hooks_dir"
-            echo "installMonoWorktreeGuardHook: core.hooksPath set to $managed_hooks_dir"
+          if ! ${pkgs.git}/bin/git -C "$repo_dir" rev-parse --git-dir >/dev/null 2>&1; then
+            echo "installWorktreeGuardHooks: $repo_dir is not a git repo, skipping"
           else
-            echo "WARNING: installMonoWorktreeGuardHook: core.hooksPath is set to '$current_hooks_path', which differs from '$managed_hooks_dir'. Skipping installation to avoid clobbering."
+            current_hooks_path="$(${pkgs.git}/bin/git -C "$repo_dir" config --get core.hooksPath 2>/dev/null || true)"
+            managed_hooks_dir="$HOME/.config/git-hooks"
+            if [ -z "$current_hooks_path" ] || [ "$current_hooks_path" = "$managed_hooks_dir" ]; then
+              ${pkgs.git}/bin/git -C "$repo_dir" config core.hooksPath "$managed_hooks_dir"
+              echo "installWorktreeGuardHooks: ${repo} core.hooksPath set to $managed_hooks_dir"
+            else
+              echo "WARNING: installWorktreeGuardHooks: ${repo} core.hooksPath is set to '$current_hooks_path', which differs from '$managed_hooks_dir'. Skipping installation to avoid clobbering."
+            fi
+            # Enrolling a repo that already had real hooks is the
+            # culinary-operations-server footgun: core.hooksPath is
+            # winner-take-all, so those hooks silently stop running. Today
+            # nothing would tell you, hence this warning.
+            # Resolve via rev-parse rather than assuming "$repo_dir/.git/hooks":
+            # that literal path is wrong whenever .git is a FILE (linked worktree).
+            # Must be --git-common-dir, NOT --git-path hooks: --git-path HONOURS
+            # core.hooksPath, which we have just set, so it would return the
+            # managed directory and warn about this hook's own pre-commit file
+            # in every repo, every activation. (Observed doing exactly that.)
+            hooks_dir="$(${pkgs.git}/bin/git -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)/hooks"
+            real_hooks="$(ls -A "$hooks_dir" 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '\.sample$' || true)"
+            if [ -n "$real_hooks" ]; then
+              echo "WARNING: installWorktreeGuardHooks: ${repo} has real hooks in .git/hooks that core.hooksPath now bypasses."
+            fi
           fi
         fi
-      fi
-    ''
+      '') worktreeGuardRepos
+    )
   );
 
   # Install/update ba CLI from private GitHub release (work machines)
@@ -1041,7 +1076,7 @@ home.activation.installMonoWorktreeGuardHook = lib.mkIf isCloudbox (
   home.file.".config/git/allowed_signers".source = "${assetsPath}/git/allowed_signers";
 
   # Managed git hook for primary worktree protection (enforces committing in a
-  # linked worktree only). Scoped to cloudbox, matching installMonoWorktreeGuardHook
+  # linked worktree only). Scoped to cloudbox, matching installWorktreeGuardHooks
   # (which sets core.hooksPath). Since the worktree-guard opencode plugin was
   # removed 2026-07-25, this hook is the ONLY remaining enforcement of the
   # read-only-trunk rule — it blocks commits at a primary root, not edits.
