@@ -291,6 +291,84 @@ needs an expected-set reference and would otherwise grow a second list that rots
 
 ---
 
+## Step 3.5 — `5m47`: the biggest untested surface · **DONE** (PR #347)
+
+Not a numbered step when this roadmap was written — it was spawned by the step-2
+census as the largest single block of debt: **25 test files, 496 assertions**
+covering the routing layer every consumer is required to go through, executed by
+nothing.
+
+### The bead prescribed the wrong fix, for a reason that was already refuted in-tree
+
+`workstation-5m47` said the suite was "genuinely un-runnable AS A NIX CHECK"
+because it binds loopback sockets "which the hermetic nix sandbox forbids", and
+prescribed a `.github/workflows/ci.yml` step. `default.nix` carried the same
+claim as the justification for `doCheck = false`, and `test.sh`'s header stated
+it a third time.
+
+The claim is false, and **the counter-example was six lines below it in the same
+comment**: `route-gate.nix` boots a real `opencode serve` on `127.0.0.1` inside
+the sandbox and *depends* on the sandbox's private network namespace to make a
+fixed port safe. The header said so explicitly while the sentence above it said
+the opposite. Only `npm ci` was a real obstacle, and `importNpmLock` — already
+used by the plugin suites — removes it.
+
+Measured, in order: the suite is **green, not red** as the bead warned (496/496,
+4 seconds). First sandbox attempt **495/496** — the one failure was
+`wire-text.test.ts` resolving `../../..` to the repo root, exactly the hazard
+`plugin-vitest` documents and solves by copying all of `${self}`. Then an EACCES
+writing vitest's cache into the read-only store, which fired *after* all 496
+tests passed. Final: **496/496 in the sandbox**.
+
+The lesson is not "the bead was wrong". It is that a false claim had been copied
+into three files, and each copy made the other two look corroborated. Nobody had
+run the experiment; the refutation was sitting in the tree the whole time.
+
+### A guard cannot see a suite it does not name
+
+`checks.frontdoor-vitest` invokes `vitest run` against a directory, naming no
+file. The reachability guard's matcher is deliberately execution-shaped, so it
+saw none of the 25 files. Measured rather than assumed: deleting the markers
+made the guard report all 25 as executed by nothing — a false positive on code
+that now runs on every PR, which is precisely how a guard trains people to
+ignore it.
+
+The fix follows the existing runner-glob channel: honour the directory, but only
+while a tripwire confirms the check behind it still exists.
+
+**The rejected alternative is the interesting one.** A `.glob-covered-by`
+dotfile in the test directory would have travelled with the files and generalised
+the channel — marker-shaped, which is what this repo chose over central lists.
+It was rejected because that doctrine turns on **decay direction**, which the
+marker-vs-list framing hides:
+
+- An `unwired-test(...)` marker claims *"I am NOT covered"*. A false one fails
+  **loudly** — the guard checks it in both directions.
+- A `.glob-covered-by` file claims *"I AM covered"*, and the guard cannot
+  evaluate nix to falsify it. A false one fails **silently**, and it is a
+  self-service channel: any directory could launder itself into "covered" by
+  naming any attribute that happens to exist.
+
+A hardcoded entry decays in the safe direction instead — rename the directory
+and its files report unwired; delete it and the entry goes inert. The cost, that
+claiming coverage requires editing the guard itself, is the feature: a coverage
+claim should be reviewed in the most sceptical file in the repo.
+
+### What the adversarial review caught that I had not
+
+Pre-implementation review found a defect in the design as specified: the existing
+glob entry covers `*.test.ts` **and** `*.spec.ts`, because two runners there
+split on that suffix. `checks.frontdoor-vitest` runs no `.spec` glob, so copying
+that entry verbatim would have certified a stray `test/foo.spec.ts` as covered
+while nothing executed it — rebuilding the `dmat` defect *inside the fix for it*.
+The new entry covers `*.test.ts` only, mirroring exactly what the check's own
+set-diff enforces, and meta-test case 15 exists to make the verbatim copy fail.
+
+Three mutations, all caught: widening the glob to `.spec.ts` (case 15), removing
+the tripwire (case 14), removing the channel (case 13).
+
+Census: **31 → 56 files executed by CI, 52 → 27 declared unwired.**
+
 ## Step 4 — `dimz`: stop testing mirrors of the production helpers · **NOT STARTED**
 
 **Bead:** `workstation-dimz` (P2, spawned by step 1, 2026-08-04)
@@ -368,9 +446,10 @@ and leaving its marker behind FAILS the build, so these only go down by real wor
 
 | Bead | P | Marked files | Owns |
 |---|---|---|---|
-| `workstation-5m47` | P1 | 26 | The opencode-frontdoor vitest suite. Needs a `.github/workflows` step, not a nix check — `npm ci` plus loopback sockets cannot be hermetic. **May be RED; run it before wiring.** |
+| `workstation-5m47` | P1 | 0 | ~~The opencode-frontdoor vitest suite.~~ **DONE, PR #347** — wired as `checks.frontdoor-vitest`. Both premises in the row it replaces were wrong: see below. |
 | `workstation-k7t4` | P2 | 13 | Suites that probe live host state (systemd/tmux/sockets); need fixture injection to become hermetic. |
 | `workstation-dad9` | P2 | 7 | Suites that look cheaply wirable — "add a checks entry and grep the final PASS line". The best starting point. |
+| `workstation-dimz` | P2 | 1 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. |
 | `workstation-3g4j` | P2 | 3 | `reset-workspace/test.sh`, plus `nvims` and `opencode-launch`. **Adopted, not spawned** — it predates the census. |
 | `workstation-m98t` | P3 | 3 | The plugin-bundle family, which runs `nix build` on itself. |
 | `workstation-4ze8` | P1 | — | Step 3's second layer: a drift canary in a different deploy channel. Owns every `warn:` path the gate cannot close itself. |

@@ -1,4 +1,3 @@
-// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createWedgeProbe } from '../src/wedge.js';
 import type { Config } from '../src/config.js';

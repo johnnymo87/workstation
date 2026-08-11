@@ -1,4 +1,3 @@
-// unwired-test(workstation-5m47): unhermetic (npm ci + loopback sockets); belongs in a ci.yml step, not a nix check
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { placeSession, isPromotingRequest, isStatePinningRequest, gateKeyFor, PromotionGate, maybePromote } from '../src/place.js';
 import { invalidateDaemonToken } from '../src/http.js';
