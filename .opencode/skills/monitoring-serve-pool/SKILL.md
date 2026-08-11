@@ -147,9 +147,9 @@ reset; healthy stops take 1–2s.
 ## Agent commands no longer live in the serve cgroup (cloudbox, 2026-08-10)
 
 Before diagnosing a serve kill as "the serve ballooned", check **whose** memory it
-was. On cloudbox the `agent-scope` plugin
-(`assets/opencode/plugins/agent-scope.ts`, bead `workstation-yt0p`) rewrites every
-bash-tool command to run in its own transient scope:
+was. On cloudbox the `oc-scoped-shell` wrapper
+(`pkgs/oc-scoped-shell/default.nix`, beads `workstation-yt0p` and `workstation-rdsq.4`) runs every
+bash-tool command in its own transient scope:
 
 ```
 /user.slice/user-1000.slice/user@1000.service/oc.slice/oc-agent.slice/oc-agent-*.scope
@@ -161,9 +161,8 @@ consequences when reading an incident:
 - **`MemoryMax=10G` per command**, aggregate `oc-agent.slice` `MemoryMax=20G`. A
   command killed at its own cap reports **exit 137** and the serve is untouched —
   `NRestarts` does not move. Do not read a 137 as host memory exhaustion.
-- **Commands mentioning `git` are deliberately NOT wrapped**, so that the
-  `git …` deny rules in the review agents still match. They run in the serve
-  cgroup exactly as before.
+- **ALL bash-tool commands are scoped**, because the wrap now happens at spawn
+  time via the `shell` config and no longer interferes with permission parsing.
 - **Backgrounded jobs now survive a serve restart**, because they are no longer in
   the serve's cgroup. That is usually welcome, but it means `oc-agent.slice` can
   retain work the pool restart did not clear (bead `workstation-2dwe`).

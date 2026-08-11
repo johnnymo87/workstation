@@ -23,12 +23,12 @@ let
   bazelSliceName = "bazel";
 
   # Slice for agent-spawned bash-tool commands. The OTHER side of this name is
-  # the `SLICE_NAME` constant in assets/opencode/plugins/agent-scope.ts, which
-  # cannot import Nix. They are tied together by the `agent-slice-wiring` check
-  # in flake.nix rather than by convention, for exactly the reason spelled out
-  # on bazel-slice-wiring: `systemd-run --slice=NAME` does NOT fail on a slice
-  # that was never declared. It creates a transient one with no limits, so a
-  # rename on either side stays green and silently unbounded until the host OOMs.
+  # the `sliceName` passed to `pkgs/oc-scoped-shell` (configured via opencode's `shell`
+  # config key in users/dev/opencode-config.nix), which cannot import Nix. They are tied
+  # together by the `agent-slice-wiring` check in flake.nix rather than by convention,
+  # for exactly the reason spelled out on bazel-slice-wiring: `systemd-run --slice=NAME`
+  # does NOT fail on a slice that was never declared. It creates a transient one with no
+  # limits, so a rename on either side stays green and silently unbounded until the host OOMs.
   agentSliceName = "oc-agent";
   bazelScope = pkgs.callPackage ../../pkgs/bazel-scope {
     sliceName = bazelSliceName;
@@ -665,9 +665,9 @@ lib.mkIf isCloudbox {
   # OOM-kill it (the unit is OOMPolicy=stop). vitest did exactly that twice on
   # 2026-08-09 -- and unlike bazel it could not be shimmed at all, because vitest
   # is not on PATH and npm prepends node_modules/.bin ahead of anything we could
-  # put there. assets/opencode/plugins/agent-scope.ts therefore wraps commands at
-  # the tool boundary instead of the PATH boundary. See bead workstation-yt0p and
-  # docs/plans/2026-08-10-agent-subprocess-scope.md.
+  # put there. pkgs/oc-scoped-shell therefore wraps commands at spawn time
+  # via opencode's `shell` config key. See beads workstation-yt0p and workstation-rdsq.4
+  # and docs/plans/2026-08-10-agent-subprocess-scope.md.
   #
   # The aggregate cap is the point of the slice: the per-command MemoryMax=10G
   # bounds ONE command, and nothing else bounds N of them running concurrently

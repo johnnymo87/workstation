@@ -75,6 +75,7 @@
       oc-search = p.callPackage ./pkgs/oc-search { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
       oc-mcp-enable = p.callPackage ./pkgs/oc-mcp-enable { };
+      oc-scoped-shell = p.callPackage ./pkgs/oc-scoped-shell { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
       # NOTE: `opencode-frontdoor-route-gate` is deliberately NOT exposed here.
@@ -434,28 +435,31 @@
         touch $out
       '';
 
-      # Same guard as bazel-slice-wiring, for the agent-scope plugin.
+      # Same guard as bazel-slice-wiring, for the oc-scoped-shell wrapper.
       #
       # Worth restating why this needs its own check rather than review: the
-      # plugin's SLICE_NAME is a TypeScript constant and the slice unit is a Nix
+      # wrapper's SLICE_NAME is in the shell script and the slice unit is a Nix
       # attribute, so nothing in either language can see the other. A rename on
       # either side leaves every command still scoped, still green, still passing
-      # the plugin's own unit tests -- and silently unbounded in aggregate,
+      # the wrapper's own unit tests -- and silently unbounded in aggregate,
       # because systemd-run invents an uncapped transient slice rather than
       # failing. The symptom would be a host OOM, weeks later.
       agent-slice-wiring = devboxPkgs.runCommand "agent-slice-wiring-guard" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.gnused ];
         gen = self.homeConfigurations.cloudbox.activationPackage;
       } ''
-        plugin="$gen/home-files/.config/opencode/plugins/agent-scope.ts"
-        [ -e "$plugin" ] || { echo "FAIL: agent-scope.ts does not ship in the cloudbox generation"; exit 1; }
+        managed="$gen/home-files/.config/opencode/opencode.managed.json"
+        [ -e "$managed" ] || { echo "FAIL: opencode.managed.json does not ship in the cloudbox generation"; exit 1; }
 
-        slice=$(sed -n 's/^const SLICE_NAME = "\(.*\)"$/\1/p' "$plugin")
-        [ -n "$slice" ] || { echo "FAIL: could not read SLICE_NAME from agent-scope.ts"; exit 1; }
+        shell_bin=$(grep -oP '"shell":\s*"\K[^"]+' "$managed" || true)
+        [ -n "$shell_bin" ] || { echo "FAIL: opencode.managed.json does not set shell for cloudbox"; exit 1; }
+
+        slice=$(grep -oP 'SLICE_NAME="\K[^"]+' "$shell_bin" || grep -oP '--slice=\K[a-zA-Z0-9_-]+' "$shell_bin" | head -n1 || true)
+        [ -n "$slice" ] || { echo "FAIL: could not read SLICE_NAME from $shell_bin"; exit 1; }
 
         unit="$gen/home-files/.config/systemd/user/$slice.slice"
         if [ ! -e "$unit" ]; then
-          echo "FAIL: agent-scope targets --slice=$slice but no $slice.slice unit ships."
+          echo "FAIL: oc-scoped-shell targets --slice=$slice but no $slice.slice unit ships."
           echo "      systemd-run would create it transiently with NO MemoryMax, so the"
           echo "      aggregate cap would silently not exist. See workstation-yt0p."
           exit 1
@@ -467,7 +471,15 @@
           exit 1
         }
 
-        echo "ALL PASS (agent slice wiring: plugin --slice=$slice matches a capped $slice.slice)"
+        echo "ALL PASS (agent slice wiring: wrapper --slice=$slice matches a capped $slice.slice)"
+        touch $out
+      '';
+
+      oc-scoped-shell = devboxPkgs.runCommand "oc-scoped-shell-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils ];
+        WRAPPER_BIN = "${(localPkgsFor devboxSystem).oc-scoped-shell}/bin/oc-scoped-shell";
+      } ''
+        bash ${self}/pkgs/oc-scoped-shell/test.sh
         touch $out
       '';
 

@@ -137,6 +137,8 @@ unicode, command substitution, backticks, ANSI-C quoting, `awk '{print $2}'`, a
 
 ### Permission-guarded commands are NOT wrapped
 
+> **SUPERSEDED (bead workstation-rdsq.4)**: Spawn-time wrapping via opencode's `shell` config key (`pkgs/oc-scoped-shell`) replaces the command-text rewrite. Because the wrapper shell runs at spawn time, opencode's permission parser sees the untouched original command, so permission-guarded commands (`git ...`) are now fully scoped without bypassing deny rules. Re-measurement showed 43,751 of 190,684 distinct historical commands (22.9%) were running unscoped under the previous text-rewrite approach, 2,811 of them memory-capable.
+
 The one place where wrapping is actively unsafe, and it has nothing to do with
 memory. opencode evaluates bash permissions **inside** the tool's execute — i.e.
 *after* `tool.execute.before` has rewritten the command. In the shipped binary

@@ -200,8 +200,8 @@ This matters constantly here, because an opencode bash tool call runs inside
 unit your session lives in — kills your "detached" job mid-flight.
 
 **On cloudbox this is no longer true, and the difference matters in both
-directions.** The `agent-scope` plugin now runs every bash-tool command in its
-own transient scope under `oc-agent.slice` (bead `workstation-yt0p`), so:
+directions.** The `oc-scoped-shell` wrapper now runs every bash-tool command in its
+own transient scope under `oc-agent.slice` (beads `workstation-yt0p` and `workstation-rdsq.4`), so:
 
 - Your command's cgroup is `…/user@1000.service/oc-agent.slice/oc-agent-*.scope`,
   **not** the serve's. A `setsid nohup` job therefore *survives* a serve restart
@@ -211,9 +211,8 @@ own transient scope under `oc-agent.slice` (bead `workstation-yt0p`), so:
   **exit 137**; that is the scope cap, not the host running out of memory, and
   retrying unchanged will fail identically. Reduce the workload's parallelism
   instead (for vitest, `--maxWorkers`; for a build, its job count).
-- Commands mentioning `git` are deliberately NOT scoped, so that the `git …`
-  deny rules in the review agents keep matching. They behave exactly as
-  described above.
+- ALL bash-tool commands are scoped, because the wrap now happens at spawn
+  time via the `shell` config and therefore no longer interferes with permission parsing.
 
 Check with `cat /proc/self/cgroup` rather than assuming which case you are in.
 
