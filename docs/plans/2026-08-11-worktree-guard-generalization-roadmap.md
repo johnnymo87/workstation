@@ -63,11 +63,31 @@ against the working tree, so that root is production.
 
 ## Shipped
 
-Nothing from this roadmap. Prior art from the same epic that this builds on:
+- **Step 1 — `v03j.7` + workstation half of `.10`** — PR #350, 2026-08-11.
+  `worktreeGuardRepos = [ "mono" "pigeon" "workstation" ]` in
+  `users/dev/home.base.nix`; refusal message now ranks three escape hatches;
+  `AGENTS.md` states the rule. Verified live against the *deployed* hook (not
+  just switched): real commit at the pigeon root refused with HEAD unmoved,
+  commit in `pigeon/.worktrees/*` allowed.
+  - Three defects caught by the adversarial pass, all in the "control that does
+    not actually control" family: the copy-forward recipe used bare `git diff`
+    and so silently dropped **staged** work; the new real-hooks warning used
+    `rev-parse --git-path hooks`, which honours the `core.hooksPath` we had just
+    set, and false-positived on every repo every activation; and the test suite
+    set `fail=1` inside subshells, so it could never exit non-zero. The suite is
+    now mutation-checked — neutering the hook to `exit 0` must produce failures.
+  - **Correction to the design doc:** `git revert` was recorded as *blocked*. It
+    is a **bypass**. The original measurement used an `--allow-empty` HEAD, where
+    `revert` fails on its own — indistinguishable from a hook refusal unless you
+    check whether the hook printed anything. Pinned by test 6.
+  - Still open from `.10`: `~/projects/pigeon/AGENTS.md` (other repo).
+
+Prior art from the same epic that this builds on:
 
 - **`work` helper** — `pkgs/git-work`. Repo-agnostic, on PATH on all hosts. `v03j` Phase 1.
 - **mono-only pre-commit hook** — `assets/git-hooks/pre-commit`, enrolled by
   `installMonoWorktreeGuardHook` in `users/dev/home.base.nix:850-870`. `v03j.4`, closed 2026-08-04.
+  Superseded by step 1's `installWorktreeGuardHooks`.
 - **`ff-mono-root`** staleness timer — PR #307. `v03j.6`.
 - **`opencode-launch --worktree`** — exists, opt-in, not default. Phase 3.5.
 
@@ -78,7 +98,7 @@ cadence below for every one of them.
 
 | # | Bead | P | What | Gate / blocked by |
 |---|---|---|---|---|
-| 1 | `workstation-v03j.7` + `.10` | 1 / 2 | Enroll `{mono, pigeon, workstation}` via a `worktreeGuardRepos` list; state the rule in workstation `AGENTS.md`; give the hook's block message a real escape hatch | ready. **Ship as one PR** — `.10` is what makes `.7`'s block survivable |
+| 1 | `workstation-v03j.7` + `.10` | 1 / 2 | Enroll `{mono, pigeon, workstation}` via a `worktreeGuardRepos` list; state the rule in workstation `AGENTS.md`; give the hook's block message a real escape hatch | **DONE** — PR #350. `.10` carries over only its pigeon `AGENTS.md` half |
 | 2 | `workstation-v03j.9` | 1 | Trunk-drift detector: report any primary root that is dirty-on-trunk or ahead of origin | ready. Independent of step 1 — could go first if step 1 stalls |
 | 3 | `workstation-v03j.11` | 2 | `opencode-launch` defaults writable sessions into a worktree | **blocked by `.9`** (needs churn baseline). Own design pass first |
 | 4 | `workstation-v03j.12` | 3 | Retire `reset-workspace`'s mono-only prune in favour of `disk-cleanup` | **blocked by `.7`** |
@@ -154,6 +174,26 @@ each step.
   That is `workstation-yb4b`, still open; `.9` must not inherit it.
 - **Assert which path ran, not just the exit code.** A stub `exit 0` satisfied
   seven tests in this epic before reason-string assertions were added.
+
+Added by step 1 (2026-08-11):
+
+- **A "refusal" is not evidence the control ran.** `git revert` was recorded as
+  blocked for a whole design doc because it was measured against an
+  `--allow-empty` HEAD, where revert refuses *on its own*. Same exit code, same
+  apparent behaviour, completely different cause. Grep the output for the
+  control's own name before believing it fired.
+- **A fixture that makes the operation fail anyway produces a vacuous test.**
+  The empty-HEAD `make_repo` above meant test 6 passed with the hook neutered.
+  Mutation-check every new assertion: break the control, watch the test go red.
+- **`git rev-parse --git-path hooks` honours `core.hooksPath`.** Use
+  `--git-common-dir` when you need the repo's *own* hooks directory, or you will
+  inspect the very directory you just installed into.
+- **Long steps race the fleet: re-check your base before you deploy.** During
+  this step a peer merged PR #348 and deployed #349. The `assertFreshDeploy`
+  guard correctly refused the switch (it would have un-deployed live commits),
+  and the branch had to be recreated off the new `origin/main` with
+  `work <slug>` + `cherry-pick`. That guard is load-bearing — do not reach for
+  `HM_ALLOW_STALE_DEPLOY=1` to get past it.
 
 ## What is deliberately NOT being done
 
