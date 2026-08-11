@@ -934,28 +934,45 @@ ${serveIdCase}
       # exits in well under a second, so this only ever shortens the SIGKILL
       # wait. Matches devbox.
       TimeoutStopSec = 15;
-      # NO `Slice=` here, deliberately -- see workstation-le0a / step 2 notes.
-      # Setting it is correct in principle (the implicit
-      # `system-opencode\x2dserve` slice has no unit file and can't be
-      # configured through `systemd.slices` without fighting the escaped name),
-      # but it CANNOT be deployed without simultaneously restarting the pool.
-      # Measured the hard way on 2026-08-02: `nixos-rebuild switch` with
-      # restartIfChanged=false left the processes in the OLD slice while
-      # systemd re-realized them as members of the new one, which dropped
-      # `memory` from the old slice's cgroup.subtree_control. The per-serve
-      # memory.max/high/swap.max files then vanished outright and the pool ran
-      # with NO memory limits at all until this was reverted. A silent removal
-      # of the very protection the change exists to add.
-      # Re-land it only as part of a deploy that bounces the pool in the same
-      # step, and verify on cgroupfs afterwards.
+      # Aggregate cap (workstation-le0a). The four per-serve MemoryMax values sum
+      # to more than the host has, so this slice is what stops the pool as a
+      # WHOLE from taking the machine down while each member individually looks
+      # well-behaved.
+      #
+      # THIS LINE IS DEPLOY-ORDER SENSITIVE AND HAS ALREADY CAUSED THE EXACT
+      # FAILURE IT EXISTS TO PREVENT. Read before touching it.
+      #
+      # The units carry restartIfChanged = false (above) so routine rebuilds do
+      # not kill live sessions. That makes deploying this a TWO-step operation,
+      # and the gap between the steps is the hazard: on 2026-08-02 a plain
+      # `nixos-rebuild switch` re-realized the units as members of the new slice
+      # while the PROCESSES stayed in the old one, which dropped `memory` from
+      # the old slice's cgroup.subtree_control. The per-serve
+      # memory.max/high/swap.max files then ceased to exist and all four serves
+      # ran with NO memory limit at all -- while `systemctl show` reported the
+      # new values perfectly, so every instrument said it had worked. Reverted in
+      # PR #264.
+      #
+      # So this may only ship in a deploy that bounces the pool IN THE SAME STEP:
+      #     nixos-rebuild switch ... && systemctl restart opencode-serve-pool.target
+      # (the target's PartOf, set above, is what propagates the restart to every
+      # instance -- a target restart without it is a no-op on the serves).
+      #
+      # AFTERWARDS, VERIFY ON CGROUPFS, NEVER `systemctl show`: the failure mode
+      # is a MISSING FILE, and systemctl show cannot see a missing file -- it
+      # will happily print the configured value for a limit that is not being
+      # enforced. Check that
+      #   /sys/fs/cgroup/system.slice/opencode-serve.slice/opencode-serve@<port>.service/memory.max
+      # exists and holds the expected value for all four ports, and that `memory`
+      # appears in the slice's cgroup.subtree_control.
+      Slice = "opencode-serve.slice";
     };
   };
 
-  # h1y6 step 2: aggregate backstop for the serve pool. Defined but NOT yet
-  # attached -- the serve units deliberately carry no `Slice=` (see the comment
-  # on the unit above; attaching it without restarting the pool strips the
-  # per-serve memory limits entirely). Kept here so re-landing it during a
-  # restart window is a one-line change.
+  # h1y6 step 2: aggregate backstop for the serve pool. ATTACHED as of
+  # workstation-le0a -- the serve units now carry `Slice = "opencode-serve.slice"`
+  # (see the deploy-order warning on the unit above, which still applies to any
+  # future change of that line).
   #
   # Per-instance MemoryMax is 14G and there are four of them, so an unbounded
   # parent would permit 56G on a 62 GiB box. This caps the whole pool at 32G
