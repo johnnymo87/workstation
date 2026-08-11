@@ -441,6 +441,9 @@ let
       # Cloudbox uses Vertex/ADC for Google models; hide the direct
       # Google Generative AI API provider to avoid selecting google/* by mistake.
       disabled_providers = [ "google" ];
+      # Spawn-time bash wrapper (cloudbox only): runs every bash-tool command inside
+      # its own transient systemd scope under `oc-agent.slice` (bead workstation-rdsq.4).
+      shell = "${localPkgs.oc-scoped-shell}/bin/oc-scoped-shell";
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
       # Default model differs by host:
@@ -577,27 +580,6 @@ in
     xdg.configFile."opencode/plugins/session-header.ts" = lib.mkIf isCloudbox {
       source = "${assetsPath}/opencode/plugins/session-header.ts";
     };
-
-    # agent-scope: runs every bash-tool command in its own systemd scope, so a
-    # runaway subprocess OOM-kills its own scope instead of the serve it was
-    # spawned from (bead workstation-yt0p).
-    #
-    # Cloudbox-only, and that is a real constraint rather than tidiness: the
-    # scopes are created against the *user* manager via `systemd-run --user`,
-    # and the whole point is to escape the opencode-serve@ system units, which
-    # exist only here. On a host without them the wrap would be pure overhead.
-    # It is safe by construction anyway -- the plugin probes for scope creation
-    # and fails open -- but there is no reason to ship it where it can only
-    # no-op.
-    #
-    # Single file on purpose. A sibling `-impl.ts` would either be loaded as a
-    # plugin in its own right ("Plugin export is not a function" every
-    # bootstrap) or, if not shipped, break the import at load and be swallowed
-    # silently. See the session-state comment below for the full account.
-    xdg.configFile."opencode/plugins/agent-scope.ts" = lib.mkIf isCloudbox {
-      source = "${assetsPath}/opencode/plugins/agent-scope.ts";
-    };
-
 
     # self-compact deployed as a Nix-built self-contained JS bundle.
     # See docs/plans/2026-04-21-self-compact-bundle-design.md.

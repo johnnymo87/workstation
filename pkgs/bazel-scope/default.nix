@@ -149,8 +149,8 @@ let
         #   derived from systemd-run's own PID, and because --scope execs in
         #   place (and `bash -c` exec-optimizes a final simple command) the inner
         #   systemd-run can inherit the very PID that named the outer scope,
-        #   failing with "Unit run-pNNN.scope was already loaded". The agent-scope
-        #   plugin therefore names ITS scopes `oc-agent-*` so this one still
+        #   failing with "Unit run-pNNN.scope was already loaded". The oc-scoped-shell
+        #   wrapper therefore names ITS scopes `oc-agent-*` so this one still
         #   works; do not "simplify" that back to an auto name.
         # -p MemoryMax: MANDATORY. The JVM is container-aware, so an uncapped
         #   scope would size its heap against the host's 62G instead of the cgroup
