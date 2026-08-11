@@ -88,6 +88,16 @@ export const SAMPLEABLE_CLASSES: ReadonlySet<string> = new Set([
 export const DEFAULT_LOG_SAMPLE_N = 50;
 export const DEFAULT_LOG_SUMMARY_INTERVAL_MS = 300_000;
 
+/**
+ * A 200 GET at or above this duration is always logged.
+ *
+ * Latency is the one property of an otherwise-boring request that carries
+ * signal, and it is invisible in the summary (which counts, it does not time).
+ * Without this fence a serve drifting from 5ms to 900ms produces no evidence
+ * anywhere. Measured cost: 179 of ~98k sampleable requests over 6h (0.18%).
+ */
+export const ALWAYS_LOG_SLOWER_THAN_MS = 1000;
+
 export interface LoggerDeps {
   sink?: (line: string) => void;
   now?: () => number;
@@ -103,10 +113,20 @@ export interface LoggerDeps {
 
 interface Window {
   startedAt: number;
+  firstEventAt: number | null;
+  lastEventAt: number | null;
   total: number;
   emitted: number;
   degraded: number;
   byStatus: Map<number, number>;
+  byClass: Map<string, number>;
+  byTarget: Map<string, number>;
+  /**
+   * Sids already logged this window, for the first-touch rule. Per-WINDOW rather
+   * than per-process so the memory is bounded by concurrent sessions, and so a
+   * long-lived session reappears in the log every interval instead of once ever.
+   */
+  seenSids: Set<string>;
 }
 
 export class RequestLogger {
@@ -133,7 +153,18 @@ export class RequestLogger {
   }
 
   private newWindow(startedAt: number): Window {
-    return { startedAt, total: 0, emitted: 0, degraded: 0, byStatus: new Map() };
+    return {
+      startedAt,
+      firstEventAt: null,
+      lastEventAt: null,
+      total: 0,
+      emitted: 0,
+      degraded: 0,
+      byStatus: new Map(),
+      byClass: new Map(),
+      byTarget: new Map(),
+      seenSids: new Set(),
+    };
   }
 
   /**
@@ -149,6 +180,7 @@ export class RequestLogger {
       entry.status !== 200 ||
       entry.degraded === true ||
       entry.method !== "GET" ||
+      entry.durationMs >= ALWAYS_LOG_SLOWER_THAN_MS ||
       !SAMPLEABLE_CLASSES.has(entry.class)
     );
   }
@@ -159,6 +191,8 @@ export class RequestLogger {
     if (this.window.total > 0) {
       const byStatus: Record<string, number> = {};
       for (const [status, count] of this.window.byStatus) byStatus[String(status)] = count;
+      const byClass = Object.fromEntries(this.window.byClass);
+      const byTarget = Object.fromEntries(this.window.byTarget);
       // Aggregates only. No sid, path, query or target may appear here: the summary
       // is emitted on a schedule rather than per-request, so anything leaked into it
       // would be leaked without the per-request allowlist above having any say.
@@ -166,15 +200,31 @@ export class RequestLogger {
         JSON.stringify({
           ts: new Date(at).toISOString(),
           type: "request_summary",
-          // The TRUE elapsed window, not the nominal interval. The summary is
-          // flushed lazily by the next request, so after an idle gap the window is
-          // longer than the interval, and a nominal value would misstate the rate.
+          // The TRUE elapsed window, not the nominal interval: the flush is lazy,
+          // so after an idle gap the window is longer than the interval.
+          //
+          // windowMs ALONE still cannot give you a rate, and it would be wrong to
+          // claim otherwise. The requests may all have happened at one end of the
+          // window, in which case total/windowMs understates the burst exactly as
+          // badly as a nominal interval would overstate a quiet stretch. So emit
+          // when the traffic actually happened and let the reader compute either.
           windowMs: elapsed,
+          firstTs: this.window.firstEventAt === null
+            ? null
+            : new Date(this.window.firstEventAt).toISOString(),
+          lastTs: this.window.lastEventAt === null
+            ? null
+            : new Date(this.window.lastEventAt).toISOString(),
           total: this.window.total,
           emitted: this.window.emitted,
           suppressed: this.window.total - this.window.emitted,
           degraded: this.window.degraded,
           byStatus,
+          // Sampling makes per-target counts unreliable to reconstruct from the
+          // surviving lines, and the door-log join used during incidents is
+          // per-target. These are exact and the cardinality is a handful.
+          byClass,
+          byTarget,
         }),
       );
     }
@@ -191,18 +241,34 @@ export class RequestLogger {
     // requests that were sampled away.
     this.totalRequests++;
     this.window.total++;
+    if (this.window.firstEventAt === null) this.window.firstEventAt = at;
+    this.window.lastEventAt = at;
     this.window.byStatus.set(entry.status, (this.window.byStatus.get(entry.status) ?? 0) + 1);
+    this.window.byClass.set(entry.class, (this.window.byClass.get(entry.class) ?? 0) + 1);
+    this.window.byTarget.set(entry.target, (this.window.byTarget.get(entry.target) ?? 0) + 1);
     if (entry.degraded === true) {
       this.degradedToAnchor++;
       this.window.degraded++;
     }
 
     if (!this.mustLog(entry)) {
+      // The counter advances for EVERY sampleable request, including first-touch
+      // ones. If first-touch skipped it, a burst of new sessions would silently
+      // re-phase the stride.
       const nth = this.sampleableSeen++;
-      // `sampleN <= 1` means "log everything", and also fences off a modulo by
-      // zero, which would evaluate to NaN and silently suppress EVERY sampleable
-      // request -- a config typo turning into total blindness.
-      if (this.sampleN > 1 && nth % this.sampleN !== 0) return;
+
+      // First request seen from a session this window is always logged. Without
+      // it, a plain global stride leaves 67% of sessions (measured over 6h) with
+      // no door line at all, and the summary is aggregates so it cannot answer
+      // "did session X reach the door, and via which serve?".
+      const firstTouch = entry.sid !== null && !this.window.seenSids.has(entry.sid);
+      if (entry.sid !== null) this.window.seenSids.add(entry.sid);
+
+      // `sampleN <= 1` means "log everything". It also fences off a modulo by
+      // zero, which evaluates to NaN and would suppress EVERY sampleable request.
+      // loadConfig rejects 0 before this can be reached from the environment, so
+      // this guards a directly-constructed logger, not a config typo.
+      if (!firstTouch && this.sampleN > 1 && nth % this.sampleN !== 0) return;
     }
     this.window.emitted++;
 

@@ -600,17 +600,40 @@ in
       # here (a query that could never match, read as evidence of absence).
       # Audited before landing: no automated consumer in this repo reads
       # pigeon's journal -- the six `journalctl` sites in deployable Nix all
-      # target other units -- so nothing silently goes blind. Docs and the pigeon
-      # repo's skills were updated in lockstep.
+      # target other units -- so nothing AUTOMATED silently goes blind.
       #
-      # NOTE this captures pigeon's CHILDREN too (oc-auto-attach, the tmux panes
-      # it spawns), since they inherit the unit's stdio. That is deliberate --
-      # they are pigeon's story -- and the 2.6 MB/day figure already includes
-      # them, being measured per-unit.
+      # The consumers that DO break are agent-facing: this repo's
+      # troubleshooting-nixos-host skill (updated here) and the pigeon repo's
+      # daemon-operations / daemon-troubleshooting / swarm-operations /
+      # cross-device-deployment skills, which are updated in a companion PR
+      # there. Those skills are exactly what gets reached for during the kind of
+      # incident this change exists to make diagnosable, so they must land before
+      # or with this. Note the chromebook runs pigeon as a USER service and is
+      # NOT namespaced -- its recipes must stay as they are.
+      #
+      # NOTE this captures oc-auto-attach too, which pigeon spawns and which
+      # inherits the unit's stdio. Deliberate -- it is pigeon's story -- and the
+      # 2.6 MB/day figure already includes it, being measured per-unit. (The tmux
+      # PANES it opens are NOT affected: a pane's stdio is its pty, so pane output
+      # was never in the journal to begin with.)
+      #
+      # A subtler consequence: LogNamespace implies PrivateMounts=yes. If a tmux
+      # SERVER is ever started by oc-auto-attach before a human has one running,
+      # that server forks from this unit and inherits the namespace and the
+      # private mount namespace for its whole lifetime -- every pane in it would
+      # then log into pigeon's namespace and see host-invisible mounts. Today the
+      # tmux server is started from a login session, so this does not arise; if
+      # panes ever start behaving oddly, check which cgroup tmux is in.
       #
       # Existing history does NOT migrate: logs written before this change stay
       # in the default journal. For ~6 days after deploy, old evidence is in one
       # place and new evidence in the other.
+      #
+      # ROLLBACK: delete this line and rebuild; pigeon logs to the default journal
+      # again from its next restart. Note the namespace directory is then ORPHANED
+      # -- systemd-journald@pigeon never runs again, so MaxRetentionSec stops being
+      # enforced and the data sits there indefinitely. Remove it by hand:
+      #   sudo rm -rf /var/log/journal/$(cat /etc/machine-id).pigeon
       LogNamespace = "pigeon";
 
       # Without this the identifier is `<nix-store-hash>-pigeon-daemon-start`,
@@ -649,6 +672,10 @@ in
     Storage=persistent
     SystemMaxUse=2G
     MaxRetentionSec=90day
+    # 2G would otherwise imply a 256M SystemMaxFileSize, i.e. roughly ONE file
+    # for 90 days of data -- coarse rotation and a wide blast radius if a file
+    # is ever corrupted. 32M keeps rotation granular.
+    SystemMaxFileSize=32M
   '';
 
 
@@ -3141,6 +3168,9 @@ EOF
         # This value equals the code default; it is written out so the knob is
         # discoverable from the unit rather than only from config.ts. Set it to 1
         # and restart to log everything during an incident (no rebuild needed).
+        # Do NOT set it to 0 expecting "off": 0 fails config validation and the
+        # door then REFUSES TO START, taking the data plane down. 1 is the off
+        # switch.
         #
         # Why: the door emitted ~400k lines/day, 57% of ALL journal volume on this
         # host, holding the shared journal at its 4G cap and evicting every other

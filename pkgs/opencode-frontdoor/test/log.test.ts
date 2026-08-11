@@ -289,6 +289,23 @@ describe('RequestLogger sampling', () => {
     expect(requests()).toHaveLength(20);
   });
 
+  test.each([
+    ['exactly at the threshold', 1000, true],
+    ['above the threshold', 30000, true],
+    ['just below the threshold', 999, false],
+  ])('slow 200 GETs escape sampling: %s', (_label, durationMs, expectAlwaysLogged) => {
+    // A GET that succeeded in 30s is not a boring request. Without this fence a
+    // serve drifting from 5ms to 900ms produces no signal in EITHER channel --
+    // sampled away from the per-request log, and the summary carries no latency.
+    // Cheap: only 179 of ~98k sampleable requests in 6h were >=1s (0.18%).
+    const { logger, requests } = collect({ sampleN: 50 });
+
+    // One sid throughout, so the first-touch rule below cannot confound this.
+    for (let i = 0; i < 20; i++) logger.log({ ...base, durationMs });
+
+    expect(requests()).toHaveLength(expectAlwaysLogged ? 20 : 1);
+  });
+
   test('sampleN=0 logs everything rather than modulo-by-zero into total silence', () => {
     // loadConfig rejects 0 (see config.test.ts), so this is the second line of
     // defence for a logger constructed directly. `nth % 0` is NaN, and NaN !== 0,
@@ -307,6 +324,71 @@ describe('RequestLogger sampling', () => {
     for (let i = 0; i < 150; i++) logger.log({ ...base, durationMs: i });
 
     expect(requests().map((r) => r.durationMs)).toEqual([0, 50, 100]);
+  });
+
+  test('always logs the first request of each session in a window', () => {
+    // Measured against 6h of real traffic: with a plain 1-in-50 global stride,
+    // 184 of 276 sessions (67%) emit NO door line at all -- "did session X reach
+    // the door, and via which serve?" becomes unanswerable for two thirds of
+    // them, and the summary cannot restore it because it is aggregates only.
+    // First-touch costs ~0.3% of volume.
+    const { logger, requests } = collect({ sampleN: 50 });
+
+    for (const sid of ['a', 'b', 'c']) {
+      for (let i = 0; i < 10; i++) logger.log({ ...base, sid, durationMs: i });
+    }
+
+    expect(requests().map((r) => [r.sid, r.durationMs])).toEqual([
+      ['a', 0],
+      ['b', 0],
+      ['c', 0],
+    ]);
+  });
+
+  test('first-touch does not disturb the 1-in-N stride', () => {
+    const { logger, requests } = collect({ sampleN: 5 });
+
+    // 'a' is first-touched at nth=0; 'b' at nth=1. The stride must keep counting
+    // every sampleable request, so nth=5 still lands regardless of which sid it
+    // belongs to -- otherwise first-touch would silently re-phase the sampling.
+    logger.log({ ...base, sid: 'a', durationMs: 0 });
+    for (let i = 1; i < 10; i++) logger.log({ ...base, sid: 'b', durationMs: i });
+
+    expect(requests().map((r) => [r.sid, r.durationMs])).toEqual([
+      ['a', 0],
+      ['b', 1],
+      ['b', 5],
+    ]);
+  });
+
+  test('first-touch re-arms each window, so a long-lived session reappears', () => {
+    const lines: string[] = [];
+    let t = 1710000000000;
+    const logger = new RequestLogger({
+      sink: (l) => lines.push(l),
+      now: () => t,
+      sampleN: 50,
+      summaryIntervalMs: 1000,
+    });
+
+    for (let i = 0; i < 10; i++) logger.log({ ...base, sid: 'a', durationMs: i });
+    t += 1000;
+    for (let i = 100; i < 110; i++) logger.log({ ...base, sid: 'a', durationMs: i });
+
+    const seen = lines
+      .map((l) => JSON.parse(l))
+      .filter((p) => p.type === 'request')
+      .map((r) => r.durationMs);
+    // Bounded memory: the sid set is per-window, not for the process lifetime.
+    expect(seen).toEqual([0, 100]);
+  });
+
+  test('a null sid does not first-touch, and does not crash', () => {
+    const { logger, requests } = collect({ sampleN: 50 });
+
+    for (let i = 0; i < 20; i++) logger.log({ ...base, class: 'global-ro', sid: null, durationMs: i });
+
+    expect(requests().map((r) => r.durationMs)).toEqual([0]);
   });
 
   test('counters count every request, including the ones sampled away', () => {
@@ -444,8 +526,74 @@ describe('RequestLogger summary line', () => {
     expect(raw).not.toContain('directory');
     const summary = JSON.parse(raw);
     expect(Object.keys(summary).sort()).toEqual(
-      ['byStatus', 'degraded', 'emitted', 'suppressed', 'total', 'ts', 'type', 'windowMs'].sort(),
+      [
+        'byClass',
+        'byStatus',
+        'byTarget',
+        'degraded',
+        'emitted',
+        'firstTs',
+        'lastTs',
+        'suppressed',
+        'total',
+        'ts',
+        'type',
+        'windowMs',
+      ].sort(),
     );
+  });
+
+  test('breaks the window down by class and target, so the per-target join survives', () => {
+    // Sampling makes a per-minute count of requests-per-target unreliable (a
+    // target gets ~1.4 samples/min). These aggregates are exact and cost nothing:
+    // cardinality is a handful of classes and pool members.
+    const clock = makeClock(1710000000000);
+    const lines: string[] = [];
+    const logger = new RequestLogger({
+      sink: (l) => lines.push(l),
+      now: clock.now,
+      sampleN: 50,
+      summaryIntervalMs: 1000,
+    });
+
+    for (let i = 0; i < 30; i++) logger.log({ ...base, target: 'http://127.0.0.1:4096' });
+    for (let i = 0; i < 7; i++) {
+      logger.log({ ...base, class: 'global-ro', target: 'http://127.0.0.1:4097' });
+    }
+    clock.advance(1000);
+    logger.log({ ...base });
+
+    const summary = lines.map((l) => JSON.parse(l)).find((p) => p.type === 'request_summary');
+    expect(summary.byClass).toEqual({ 'session-path': 30, 'global-ro': 7 });
+    expect(summary.byTarget).toEqual({
+      'http://127.0.0.1:4096': 30,
+      'http://127.0.0.1:4097': 7,
+    });
+  });
+
+  test('reports when the window\'s traffic actually happened, not just how long the window was', () => {
+    // windowMs alone cannot give a rate. After an idle gap the requests all
+    // happened at one end of the window, so total/windowMs UNDERSTATES the burst
+    // just as badly as a nominal interval would overstate a quiet stretch.
+    // Emitting the first and last event timestamps lets the reader compute either.
+    const clock = makeClock(1710000000000);
+    const lines: string[] = [];
+    const logger = new RequestLogger({
+      sink: (l) => lines.push(l),
+      now: clock.now,
+      summaryIntervalMs: 1000,
+    });
+
+    logger.log({ ...base, status: 500 });
+    clock.advance(50);
+    logger.log({ ...base, status: 500 });
+    clock.advance(3600000); // an hour of silence, then the flushing request
+    logger.log({ ...base, status: 500 });
+
+    const summary = lines.map((l) => JSON.parse(l)).find((p) => p.type === 'request_summary');
+    expect(summary.windowMs).toBe(3600050);
+    expect(summary.firstTs).toBe(new Date(1710000000000).toISOString());
+    expect(summary.lastTs).toBe(new Date(1710000000050).toISOString());
   });
 
   test('an idle window produces no summary at all', () => {
