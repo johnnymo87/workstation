@@ -221,6 +221,8 @@ describe("Ancillary Outbound Serve Calls", () => {
     driftCheckMs: 5000,
     wedgeProbeIntervalMs: 5000,
     mintTimeoutMs: 60000,
+    logSampleN: 1,
+    logSummaryIntervalMs: 300000,
   };
 
   test("checkSidExists sends serveAuthHeader in headers", async () => {

@@ -16,6 +16,8 @@ describe('Wedge Health Probe', () => {
     driftCheckMs: 5000,
     wedgeProbeIntervalMs: 50, // fast for testing
     mintTimeoutMs: 60000,
+    logSampleN: 1,
+    logSummaryIntervalMs: 300000,
   };
 
   beforeEach(() => {

@@ -20,6 +20,8 @@ describe('resolveOwner', () => {
     driftCheckMs: 5000,
     wedgeProbeIntervalMs: 5000,
     mintTimeoutMs: 60000,
+    logSampleN: 1,
+    logSummaryIntervalMs: 300000,
   };
 
   beforeEach(() => {

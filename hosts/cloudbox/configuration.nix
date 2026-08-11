@@ -3066,6 +3066,20 @@ EOF
         # Builtins-only app (no framework reads NODE_ENV) — set for convention/
         # consistency with pigeon-daemon and to future-proof any added dependency.
         "NODE_ENV=production"
+        # workstation-9f7a: log 1 in 50 plain 200 GETs on the two high-volume read
+        # classes. Everything else — every non-200, every degradation, every
+        # mutation — is still logged unconditionally, and a `request_summary` line
+        # every 5 min reports the totals including what was sampled away.
+        #
+        # This value equals the code default; it is written out so the knob is
+        # discoverable from the unit rather than only from config.ts. Set it to 1
+        # and restart to log everything during an incident (no rebuild needed).
+        #
+        # Why: the door emitted ~400k lines/day, 57% of ALL journal volume on this
+        # host, holding the shared journal at its 4G cap and evicting every other
+        # unit's history down to a ~6 day window. Measured over 6h, 90.2% of those
+        # lines were plain 200 GETs, against 19 degradations and 167 5xx.
+        "FRONTDOOR_LOG_SAMPLE_N=50"
       ];
       ExecStart = "${opencode-frontdoor}/bin/opencode-frontdoor";
       Restart = "always";

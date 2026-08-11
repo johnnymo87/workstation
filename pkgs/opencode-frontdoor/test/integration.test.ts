@@ -412,6 +412,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 1000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     testMetrics = createMetrics();
@@ -1012,6 +1014,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 40,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const fastDeps = {
@@ -1099,6 +1103,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 40,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const fastDeps = {
@@ -1192,6 +1198,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -1266,6 +1274,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -1331,6 +1341,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 10000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const timeoutFrontDoor = createFrontDoor(timeoutConfig, {
@@ -1426,6 +1438,8 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const frontDoor = createFrontDoor(testConfig, {
@@ -1501,6 +1515,8 @@ describe("FrontDoor Integration", () => {
       stickyTtlMs: 30000,
       driftCheckMs: 10000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const frontDoor = createFrontDoor(testConfig, {
@@ -1653,6 +1669,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 40,  // fast drift checks
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const fastDeps = {
@@ -2044,6 +2062,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const renewalDeps = {
@@ -2157,6 +2177,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 60000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
 
     const renewalSticky = new StickyMap(renewalConfig.stickyTtlMs);
@@ -2267,6 +2289,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 1000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
     const createFd = createFrontDoor(createConfig, {
       now: () => fakeTime,
@@ -2321,6 +2345,8 @@ describe("FrontDoor Integration", () => {
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
       mintTimeoutMs: 1000,
+      logSampleN: 1,
+      logSummaryIntervalMs: 300000,
     };
     const countedMetrics = createMetrics();
     const countingFrontDoor = createFrontDoor(countingConfig, {
@@ -2730,6 +2756,8 @@ describe("FrontDoor Integration", () => {
         driftCheckMs: 5000,
         wedgeProbeIntervalMs: 5000,
         mintTimeoutMs: 1000,
+        logSampleN: 1,
+        logSummaryIntervalMs: 300000,
       };
 
       fdMetrics = createMetrics();
@@ -2868,6 +2896,8 @@ describe("FrontDoor Integration", () => {
         driftCheckMs: 5000,
         wedgeProbeIntervalMs: 5000,
         mintTimeoutMs: 1000,
+        logSampleN: 1,
+        logSummaryIntervalMs: 300000,
       };
       const singleFd = createFrontDoor(singleFdConfig, { metrics: createMetrics() });
       await new Promise<void>((r) => singleFd.listen(0, "127.0.0.1", () => r()));

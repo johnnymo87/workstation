@@ -16,6 +16,8 @@ describe('probeServeHealth', () => {
     driftCheckMs: 5000,
     wedgeProbeIntervalMs: 5000,
     mintTimeoutMs: 60000,
+    logSampleN: 1,
+    logSummaryIntervalMs: 300000,
   };
 
   test('returns true for 200 response', async () => {
