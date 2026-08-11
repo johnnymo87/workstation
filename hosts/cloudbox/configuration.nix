@@ -1867,11 +1867,21 @@ Check:
         NOW=$(date +%s)
         ACTIVE=0
         OLDEST=""
+        # Comma-joined, pre-quoted SQL list of the InvocationIDs of every ACTIVE
+        # pool unit — the identities a stamped row may name and still be considered
+        # owned by a living process. Empty until the discovery loop fills it.
+        LIVE_IDS=""
         for u in $UNITS; do
-          state=$(systemctl show "$u" --timestamp=unix -p LoadState,ActiveState,ActiveEnterTimestamp)
+          state=$(systemctl show "$u" --timestamp=unix -p LoadState,ActiveState,ActiveEnterTimestamp,InvocationID)
           ls_=$(printf '%s\n' "$state" | awk -F= '/^LoadState=/{print $2}')
           as_=$(printf '%s\n' "$state" | awk -F= '/^ActiveState=/{print $2}')
           ts_=$(printf '%s\n' "$state" | awk -F= '/^ActiveEnterTimestamp=/{print $2}')
+          # NOTE the properties are extracted BY NAME, not positionally. `systemctl
+          # show --value -p A -p B` returns values in SYSTEMD's property order, not
+          # the order requested, so a positional read silently transposes fields —
+          # that mistake reported a 32-hex InvocationID as a pid while measuring
+          # this very feature. Name-keyed awk is immune.
+          iv_=$(printf '%s\n' "$state" | awk -F= '/^InvocationID=/{print $2}')
 
           # An EXPECTED unit that is not loaded means the template was renamed or
           # the pool definition drifted. Fail closed: a permissive sweep is the
@@ -1898,9 +1908,32 @@ Check:
               ;;
           esac
 
+          # Same fail-closed logic as the epoch, for the same reason. An ACTIVE unit
+          # with no usable InvocationID cannot be represented in LIVE_IDS, so a row
+          # stamped by it would look dead and the stamped gate would abort a live
+          # turn. systemd reports an empty InvocationID for INACTIVE units, which is
+          # why this sits after the `active` filter. Format is 32 lowercase hex; it
+          # is validated here rather than at interpolation time because this is the
+          # only place that knows which unit produced it.
+          case "$iv_" in
+            "" | *[!0-9a-f]* )
+              echo "sweeper: $u is active but InvocationID=''${iv_:-<empty>} — refusing to run"
+              exit 1
+              ;;
+          esac
+          if [ ''${#iv_} -ne 32 ]; then
+            echo "sweeper: $u InvocationID=$iv_ is not 32 hex chars — refusing to run"
+            exit 1
+          fi
+
           ACTIVE=$(( ACTIVE + 1 ))
           [ -n "$OLDEST" ] && [ "$OLDEST" -le "$epoch" ] || OLDEST=$epoch
-          [ "$DRY" = 1 ] && echo "sweeper: $u active since $epoch"
+          # Pre-quoted and comma-joined for direct interpolation into SQL, the same
+          # shape the candidate chunker builds. Safe to interpolate because the
+          # validation above proves each id is 32 chars of [0-9a-f] — it cannot
+          # contain a quote, a comma or a newline.
+          LIVE_IDS="''${LIVE_IDS:+$LIVE_IDS,}'$iv_'"
+          [ "$DRY" = 1 ] && echo "sweeper: $u active since $epoch invocation $iv_"
         done
 
         # No live pool serve -> no live-owner risk at all (a drained pool is the
@@ -1975,6 +2008,48 @@ Check:
         fi
 
         N=$(printf '%s\n' "$CANDIDATES" | awk 'NF' | wc -l)
+
+        # STAMPED-GATE SHADOW COUNT — REPORTING ONLY, CHANGES NOTHING (bead
+        # workstation-63wo).
+        #
+        # Since opencode-patched 1.17.13.9 a pool serve stamps its systemd
+        # InvocationID into every assistant row it writes. That makes a precise
+        # question answerable for the first time: is the process that CREATED this
+        # row still alive? If its stamped invocation is not among the live ones, the
+        # creator is provably gone and the row is provably an orphan — regardless of
+        # the min-over-pool CUTOFF, which is what currently defers a fresh
+        # single-member orphan until the nightly bounce moves it (up to ~24h).
+        #
+        # This block only COUNTS what the stamped gate would additionally finalize.
+        # The finalizing predicates below are untouched, so behaviour is identical
+        # to before this change; the number is here so the gate can be watched
+        # against real traffic before it is given the power to abort anything. The
+        # 30-minute silence requirement is deliberately kept — it is the blast-radius
+        # cap, and a stamp is not a licence to skip it.
+        #
+        # Fails CLOSED in every uncertain direction: no live ids (a drained pool
+        # already sweeps everything stale via CUTOFF=NOW), an unreadable count, or a
+        # non-numeric result all report 0 rather than guessing upward. A COUNT(*)
+        # is used rather than an id list precisely because phase 1's single-bare-id
+        # output format is load-bearing for the validation above.
+        SHADOW=0
+        if [ -n "$LIVE_IDS" ]; then
+          if ! SHADOW=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "file:$DB?mode=ro" "
+            SELECT COUNT(*) FROM message
+            WHERE json_extract(data, '\$.role') = 'assistant'
+              AND json_extract(data, '\$.time.completed') IS NULL
+              AND json_extract(data, '\$.error') IS NULL
+              AND time_updated < (strftime('%s','now') - 1800) * 1000
+              AND json_extract(data, '\$.time.created') >= $CUTOFF * 1000
+              AND json_extract(data, '\$.serve.invocationId') IS NOT NULL
+              AND json_extract(data, '\$.serve.invocationId') NOT IN ($LIVE_IDS);
+          "); then
+            echo "sweeper: stamped-gate shadow count failed — reporting 0 (no behaviour change)"
+            SHADOW=0
+          fi
+          case "$SHADOW" in ""|*[!0-9]*) SHADOW=0 ;; esac
+        fi
+        echo "sweeper: stamped-gate shadow: $SHADOW additional row(s) would be finalized (live invocations: ''${LIVE_IDS:-<none>})"
 
         if [ "$DRY" = 1 ]; then
           echo "sweeper: would finalize $N orphaned message(s) (cutoff=$CUTOFF)"

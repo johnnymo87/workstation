@@ -158,6 +158,82 @@ check "exit 1"          "$RC" 1
 check "names the arg"   "$(printf '%s' "$OUT" | grep -c 'unknown argument')" 1
 check "row NOT written" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_typo';")" 1
 
+# --- stamped-gate shadow count (bead workstation-63wo) ------------------------
+# Since opencode-patched 1.17.13.9 a pool serve stamps its systemd InvocationID
+# into every assistant row it writes. The sweeper reports how many rows the
+# stamped gate WOULD additionally finalize, and — for now — does nothing with
+# that number. These cases pin both halves of it: the count must be right, and
+# the sweeper must still not touch the rows.
+#
+# The live id is scraped from systemd at test time rather than invented. There
+# is no seam for unit state (the sweeper reads systemd directly), so a made-up
+# id can only ever exercise the "not live -> sweepable" branch; proving the
+# "live -> protected" branch requires an id that really is live right now.
+LIVE_IV=$(systemctl list-units 'opencode-serve@*.service' --no-legend --plain --state=active |
+  awk '{print $1}' |
+  while read -r u; do
+    [ -n "$u" ] || continue
+    systemctl show "$u" -p InvocationID | awk -F= '/^InvocationID=/{ if ($2 != "") print $2 }'
+  done | head -1)
+[ -n "$LIVE_IV" ] || { echo "could not read a live InvocationID; is the pool up?"; exit 1; }
+DEAD_IV="ffffffffffffffffffffffffffffffff"   # 32 hex, cannot be a live invocation
+
+# stamprow <db> <id> <created_ms> <updated_ms> <invocation_id>
+# addrow() is positional and cannot carry extra JSON keys, so stamped fixtures
+# are inserted directly, in the shape the projector actually writes.
+stamprow() {
+  "$SQLITE" "$1" "
+    INSERT INTO message VALUES('$2','ses_test',$3,$4,
+      json_object('role','assistant',
+                  'time', json_object('created',$3),
+                  'serve', json_object('serveId','serve-9','invocationId','$5',
+                                       'port','4099','pid',1234)));"
+}
+
+echo "== T8c: row stamped by a DEAD invocation is COUNTED but NOT finalized =="
+# NEWER than CUTOFF, so today's min-over-pool gate cannot see it at all -- this is
+# exactly the fresh single-member orphan that currently waits for the 03:00 bounce.
+DB="$LAB/t8c.db"; mkdb "$DB"
+stamprow "$DB" msg_dead "$NOW_MS" "$STALE_UPD" "$DEAD_IV"
+run "$DB"
+check "exit 0"                    "$RC" 0
+check "shadow counts it"          "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 1 additional')" 1
+check "still finalizes 0"         "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
+check "row NOT touched (log-only)" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_dead';")" 1
+
+echo "== T8d: row stamped by a LIVE invocation is NOT counted =="
+DB="$LAB/t8d.db"; mkdb "$DB"
+stamprow "$DB" msg_live "$NOW_MS" "$STALE_UPD" "$LIVE_IV"
+run "$DB"
+check "exit 0"           "$RC" 0
+check "shadow counts 0"  "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+check "row untouched"    "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_live';")" 1
+
+echo "== T8e: an UNSTAMPED fresh row is still invisible (no accidental widening) =="
+DB="$LAB/t8e.db"; mkdb "$DB"
+addrow "$DB" msg_fresh_unstamped "$NOW_MS" "$STALE_UPD" NULL NULL
+run "$DB"
+check "shadow counts 0" "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+check "finalizes 0"     "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
+check "row untouched"   "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_fresh_unstamped';")" 1
+
+echo "== T8f: a stamped row that is NOT yet 30min silent is not counted =="
+# The staleness gate is the blast-radius cap; a stamp is not a licence to skip it.
+DB="$LAB/t8f.db"; mkdb "$DB"
+stamprow "$DB" msg_recent "$NOW_MS" "$FRESH_UPD" "$DEAD_IV"
+run "$DB"
+check "shadow counts 0" "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+check "row untouched"   "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_recent';")" 1
+
+echo "== T8g: an OLD stamped-dead row is finalized by the EXISTING gate, counted once =="
+# Created before CUTOFF, so the old path already catches it. It must NOT also
+# appear in the shadow count, or the number double-counts and overstates the gain.
+DB="$LAB/t8g.db"; mkdb "$DB"
+stamprow "$DB" msg_old_dead "$OLD" "$STALE_UPD" "$DEAD_IV"
+run "$DB"
+check "finalized by old gate" "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
+check "not double-counted"    "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+
 echo "== T9: REGRESSION -- a zero-candidate sweep must not block a concurrent writer =="
 # Fixture: all rows already completed, so 0 candidates -- exactly production,
 # where 173/173 runs matched nothing -- but large enough that a full scan is far
