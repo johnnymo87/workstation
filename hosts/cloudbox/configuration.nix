@@ -2032,7 +2032,13 @@ Check:
         # non-numeric result all report 0 rather than guessing upward. A COUNT(*)
         # is used rather than an id list precisely because phase 1's single-bare-id
         # output format is load-bearing for the validation above.
+        # A count that silently reports 0 when it is BROKEN is worse than no count,
+        # because this number exists to decide whether the gate is safe to arm. Two
+        # weeks of zeros because nothing was orphaned and two weeks of zeros because
+        # the query stopped parsing look identical to any monitoring that greps the
+        # shadow line — so failure is reported IN that line, not merely beside it.
         SHADOW=0
+        SHADOW_OK=1
         if [ -n "$LIVE_IDS" ]; then
           if ! SHADOW=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "file:$DB?mode=ro" "
             SELECT COUNT(*) FROM message
@@ -2044,12 +2050,17 @@ Check:
               AND json_extract(data, '\$.serve.invocationId') IS NOT NULL
               AND json_extract(data, '\$.serve.invocationId') NOT IN ($LIVE_IDS);
           "); then
-            echo "sweeper: stamped-gate shadow count failed — reporting 0 (no behaviour change)"
-            SHADOW=0
+            SHADOW_OK=0
           fi
-          case "$SHADOW" in ""|*[!0-9]*) SHADOW=0 ;; esac
+          # Non-numeric output is its own failure, and used to be swallowed with no
+          # log line at all — the most invisible variant of the problem above.
+          case "$SHADOW" in ""|*[!0-9]*) SHADOW_OK=0 ;; esac
         fi
-        echo "sweeper: stamped-gate shadow: $SHADOW additional row(s) would be finalized (live invocations: ''${LIVE_IDS:-<none>})"
+        if [ "$SHADOW_OK" = 1 ]; then
+          echo "sweeper: stamped-gate shadow: $SHADOW additional row(s) would be finalized (live invocations: ''${LIVE_IDS:-<none>})"
+        else
+          echo "sweeper: stamped-gate shadow: FAILED — count unavailable, do NOT read this run as a zero (no behaviour change)"
+        fi
 
         if [ "$DRY" = 1 ]; then
           echo "sweeper: would finalize $N orphaned message(s) (cutoff=$CUTOFF)"

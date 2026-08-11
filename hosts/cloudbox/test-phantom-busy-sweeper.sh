@@ -234,6 +234,28 @@ run "$DB"
 check "finalized by old gate" "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
 check "not double-counted"    "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
 
+echo "== T8h: the CUTOFF boundary itself -- created == CUTOFF is shadow, not old-gate =="
+# The no-double-counting claim in T8g rests on the two gates partitioning rows
+# exactly at CUTOFF (old gate is created < CUTOFF, shadow is created >= CUTOFF).
+# Without a fixture sitting ON the boundary, flipping >= to > survives the whole
+# suite while silently dropping one row from every count.
+DB="$LAB/t8h.db"; mkdb "$DB"
+stamprow "$DB" msg_boundary "$(( CUTOFF * 1000 ))" "$STALE_UPD" "$DEAD_IV"
+run "$DB"
+check "counted by shadow"     "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 1 additional')" 1
+check "not by the old gate"   "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
+
+echo "== T8i: an already-finished stamped row is never counted =="
+# Pins the completed/error predicates in the shadow query, which otherwise no
+# stamped fixture exercises -- dropping either survived the mutation pass.
+DB="$LAB/t8i.db"; mkdb "$DB"
+stamprow "$DB" msg_stamped_done "$NOW_MS" "$STALE_UPD" "$DEAD_IV"
+"$SQLITE" "$DB" "UPDATE message SET data=json_set(data,'\$.time.completed',$NOW_MS) WHERE id='msg_stamped_done';"
+stamprow "$DB" msg_stamped_err "$NOW_MS" "$STALE_UPD" "$DEAD_IV"
+"$SQLITE" "$DB" "UPDATE message SET data=json_set(data,'\$.error',json('{\"name\":\"X\"}')) WHERE id='msg_stamped_err';"
+run "$DB"
+check "shadow counts 0" "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+
 echo "== T9: REGRESSION -- a zero-candidate sweep must not block a concurrent writer =="
 # Fixture: all rows already completed, so 0 candidates -- exactly production,
 # where 173/173 runs matched nothing -- but large enough that a full scan is far
