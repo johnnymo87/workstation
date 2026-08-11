@@ -558,6 +558,34 @@
         touch $out
       '';
 
+      # The primary-root trunk-drift detector (bead workstation-v03j.9). It is
+      # the only layer in the worktree-guard family that WATCHES rather than
+      # blocks, so its failure mode is silence -- exactly the failure this epic
+      # has shipped before (a guard plugin that never loaded on any process, and
+      # a suite that set fail=1 in a subshell and so could never go red). The
+      # suite is therefore mutation-checked: 19 mutants of the detector were run
+      # against it and all 19 were killed, including the two that matter most --
+      # rewriting the ahead test as `@{u}..HEAD` (blind to a commit on a branch
+      # with no upstream, i.e. the incident this was built for) and dropping
+      # `--no-optional-locks` (which lets a read-only walk rewrite a peer's
+      # index).
+      trunk-drift-detector = devboxPkgs.runCommand "trunk-drift-detector-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils
+          devboxPkgs.gnugrep devboxPkgs.findutils devboxPkgs.util-linux
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash assets/scripts/test-trunk-drift-detector.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        # Assert the assertions RAN, not merely that bash exited 0.
+        grep -q '^trunk-drift-detector: ALL PASS$' "$TMPDIR/out.txt"
+        touch $out
+      '';
+
       # Stale-deploy gate (bead workstation-h0mp). The gate aborts a
       # `home-manager switch` that would drop live commits, so its logic can
       # only be exercised by a real switch -- which on this box means either

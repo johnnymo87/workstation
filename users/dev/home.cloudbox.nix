@@ -38,6 +38,11 @@ let
   # comment in pkgs/pressure-sampler/default.nix.
   pressureSampler = pkgs.callPackage ../../pkgs/pressure-sampler { };
 
+  # Shared alert helper (dedup by signature, exponential backoff, warning->error
+  # escalation, POST to pigeon's /alert). Same package the cloudbox canaries and
+  # devbox's frontdoor canary use -- do not fork it.
+  driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+
   servePool = (import ./serve-pool.nix).forHost.cloudbox;
   anchorUrl = builtins.head servePool.endpoints;
   allEndpoints = builtins.concatStringsSep " " servePool.endpoints;
@@ -918,6 +923,82 @@ lib.mkIf isCloudbox {
     Timer = {
       OnCalendar = "*-*-* 02:45:00";
       RandomizedDelaySec = "2min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # ---------------------------------------------------------------------------
+  # trunk-drift-detector: notice when a PRIMARY root is holding work nobody else
+  # can see. Bead workstation-v03j.9.
+  #
+  # On 2026-08-11 four primary clones under ~/projects were sitting on commits
+  # that existed nowhere but this disk -- workstation (that same day), meridian
+  # (17d), opencode-cached (17d) and k8s-gitops (140 DAYS) -- and nobody knew
+  # about any of them. The pigeon one was found only because a third session
+  # needed to pull for a deploy. This is the layer that looks.
+  #
+  # It complements rather than duplicates its neighbours: ff-mono-root asks "is
+  # mono BEHIND", em-drift-detector asks the same of eternal-machinery on devbox,
+  # and this asks "is anything AHEAD or dirty" across every primary root here.
+  # It never fetches and never writes to a repo (contract at the top of the
+  # script), so it is safe to run against ~40 trees that peer sessions are using.
+  #
+  # Cloudbox-only for now: this is where the swarm runs and where the incidents
+  # happened. A devbox rollout would double-report eternal-machinery against
+  # em-drift-detector and needs that overlap resolved first.
+  #
+  # Delivery is TELEGRAM, deliberately. The bead asked for the daily morning
+  # recommendation agent, which was deleted on 2026-08-10 (678ae2f); routing to
+  # journald alone would inherit workstation-yb4b ("nothing watches failed user
+  # units"), and a detector nobody reads is worth about as much as no detector.
+  #
+  # Pinned by assets/scripts/test-trunk-drift-detector.sh, wired into
+  # `nix flake check`, and mutation-checked (19 mutants, all killed).
+  # ---------------------------------------------------------------------------
+  home.file.".local/bin/trunk-drift-detector" = {
+    source = "${assetsPath}/scripts/trunk-drift-detector";
+    executable = true;
+  };
+
+  systemd.user.services.trunk-drift-detector = {
+    Unit = {
+      Description = "Report primary git roots under ~/projects holding stranded commits or uncommitted work (read-only)";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "%h/.local/bin/trunk-drift-detector";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      # Bounded for the same reason ff-mono-root is: a oneshot stuck in
+      # "activating" is never re-fired by its timer, and that failure records
+      # nothing at all. Each git call is individually bounded too
+      # (TDD_GIT_TIMEOUT), so this ceiling should be unreachable.
+      TimeoutStartSec = "10min";
+      Environment = [
+        "HOME=%h"
+        "TDD_ALERT_CMD=${driftAlert}"
+        "PATH=${pkgs.git}/bin:${pkgs.util-linux}/bin:${pkgs.coreutils}/bin:${pkgs.gnugrep}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+      ];
+    };
+  };
+
+  # Every 30 minutes, like em-drift-detector. Frequency is cheap (no network,
+  # ~40 local git calls) and it is what makes the alert arrive while the session
+  # that stranded the commit is still around to fix it. Persistent so a reboot
+  # does not skip a window -- unlike ff-mono-root, a catch-up run here mutates
+  # nothing, so there is no mid-day hazard to avoid.
+  systemd.user.timers.trunk-drift-detector = {
+    Unit = {
+      Description = "Timer for the primary-root trunk-drift detector";
+    };
+    Timer = {
+      OnCalendar = "*:0/30";
+      Persistent = true;
+      RandomizedDelaySec = "3min";
     };
     Install = {
       WantedBy = [ "timers.target" ];

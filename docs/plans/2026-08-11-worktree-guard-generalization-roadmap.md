@@ -82,6 +82,35 @@ against the working tree, so that root is production.
     check whether the hook printed anything. Pinned by test 6.
   - Still open from `.10`: `~/projects/pigeon/AGENTS.md` (other repo).
 
+- **Step 2 — `v03j.9`** — PR #351, 2026-08-11. `assets/scripts/trunk-drift-detector`
+  + a 30-minute cloudbox user timer, delivering through `opencode-drift-alert`
+  → pigeon `/alert` → Telegram. Read-only and fetch-free by contract; the
+  no-mutation claim is pinned by a test comparing `.git/index` bytes across a
+  full run.
+  - **Three deviations from the bead, each forced by measurement.** (a) The
+    bead's own ahead check, `rev-list --count '@{u}..HEAD' || echo 0`, returns
+    **0** for a branch with no upstream — the pigeon shape exactly — so it was
+    blind, toward silence, to the incident it was written for. Now
+    `rev-list --count HEAD --not --remotes`. (b) No allowlist: an allowlist that
+    silences mono silences the protagonist, so the filter is on the *class* of
+    dirt (tracked only, submodules ignored) and mono scores 0 while a real
+    tracked edit there still fires. (c) The prescribed delivery target, the
+    daily morning recommendation agent, **was deleted on 2026-08-10** (`678ae2f`).
+  - **The fleet changed the design mid-step.** 65 primary roots, 15 holding
+    unpushed commits — but 11 were ordinary WIP on a named feature branch.
+    Paging all 15 would have been wallpaper on day one. Detection stayed broad;
+    only trunk / detached-HEAD / dirt-on-those page. 7 page today.
+  - Adversarial pass found the split leaking, **live, and already miscounted as
+    evidence**: `salmon-of-knowledge` was cited as "silent, so the untracked
+    filter works" when in fact it has 5 *tracked* dirty files on a detached HEAD
+    and the dirty leg only looked at trunk. Also: `master` demoted to WIP when
+    `origin/HEAD` says `main`; `alert()`'s rc line printing `rc=0` always; a
+    failed `for-each-ref` reading as "no remotes" and skipping forever.
+  - Suite: 58 assertions, 19 mutants, 0 survivors.
+  - New: `workstation-xucb` (the alert channel has no dead-man's switch — shared
+    by all 7 canaries), `workstation-cod2` (chronic feature-branch WIP never
+    escalates).
+
 Prior art from the same epic that this builds on:
 
 - **`work` helper** — `pkgs/git-work`. Repo-agnostic, on PATH on all hosts. `v03j` Phase 1.
@@ -99,8 +128,8 @@ cadence below for every one of them.
 | # | Bead | P | What | Gate / blocked by |
 |---|---|---|---|---|
 | 1 | `workstation-v03j.7` + `.10` | 1 / 2 | Enroll `{mono, pigeon, workstation}` via a `worktreeGuardRepos` list; state the rule in workstation `AGENTS.md`; give the hook's block message a real escape hatch | **DONE** — PR #350. `.10` carries over only its pigeon `AGENTS.md` half |
-| 2 | `workstation-v03j.9` | 1 | Trunk-drift detector: report any primary root that is dirty-on-trunk or ahead of origin | ready. Independent of step 1 — could go first if step 1 stalls |
-| 3 | `workstation-v03j.11` | 2 | `opencode-launch` defaults writable sessions into a worktree | **blocked by `.9`** (needs churn baseline). Own design pass first |
+| 2 | `workstation-v03j.9` | 1 | Trunk-drift detector: report any primary root that is dirty-on-trunk or ahead of origin | **DONE** — PR #351 |
+| 3 | `workstation-v03j.11` | 2 | `opencode-launch` defaults writable sessions into a worktree | **blocked by `.9`** (needs churn baseline — now accumulating in `~/.local/state/trunk-drift/history.ndjson`). Own design pass first |
 | 4 | `workstation-v03j.12` | 3 | Retire `reset-workspace`'s mono-only prune in favour of `disk-cleanup` | **blocked by `.7`** |
 
 `.10`'s pigeon half lands in **another repo** (`~/projects/pigeon/AGENTS.md`) and
@@ -194,6 +223,36 @@ Added by step 1 (2026-08-11):
   and the branch had to be recreated off the new `origin/main` with
   `work <slug>` + `cherry-pick`. That guard is load-bearing — do not reach for
   `HM_ALLOW_STALE_DEPLOY=1` to get past it.
+
+Added by step 2 (2026-08-11):
+
+- **A "silent" repo is only evidence once you know WHY it was silent.**
+  `salmon-of-knowledge` was reported as proof the untracked-dirt filter worked.
+  It was silent because of a *different* bug — the dirty leg ignored detached
+  HEADs entirely. Right answer, wrong mechanism, and it would have shipped as a
+  hole in the only layer that covers dirty roots. Before citing a quiet repo as
+  a pass, name the branch it is on and the numbers behind the silence.
+- **Design against the real fleet before you fix the alert policy.** The bead
+  anticipated noise on the dirty leg (mono) and prescribed an allowlist. The
+  actual noise was 11 unpushed feature branches on the *ahead* leg, which no
+  allowlist would have touched. One run against `~/projects` with the alerter
+  stubbed changed the design; reasoning would not have.
+- **Error branches need an injected dependency or they ship unexercised.** The
+  paths that decide "reported as unknown" vs "silently counted as fine" cannot
+  be reached with a real `git` and a well-formed fixture. `TDD_GIT_BIN` exists
+  solely so a stub git can fail one subcommand; three such branches are now
+  pinned, and one of them (`for-each-ref`) was genuinely wrong.
+- **`$?` after `if ! cmd` is the NEGATED status.** The one forensic line you
+  would read mid-incident printed `rc=0` unconditionally. Capture with
+  `rc=0; cmd || rc=$?`.
+- **A helper that "never fails" cannot be error-checked.** `opencode-drift-alert`
+  returns 0 by contract, including on a pigeon outage. Wrapping it in `if !`
+  catches only exec failure. Do not let such a wrapper stand in for delivery
+  assurance (`workstation-xucb`).
+- **A fixture can be too fast to be a fixture.** The read-only test was vacuous
+  because a `touch` in the same second as the index write makes files "racily
+  clean", so git declines to rewrite the index and the missing
+  `--no-optional-locks` survived. A `sleep 1.1` is load-bearing.
 
 ## What is deliberately NOT being done
 
