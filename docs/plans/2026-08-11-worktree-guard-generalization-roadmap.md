@@ -80,7 +80,17 @@ against the working tree, so that root is production.
     is a **bypass**. The original measurement used an `--allow-empty` HEAD, where
     `revert` fails on its own — indistinguishable from a hook refusal unless you
     check whether the hook printed anything. Pinned by test 6.
-  - Still open from `.10`: `~/projects/pigeon/AGENTS.md` (other repo).
+  - The `.10` carry-over (`~/projects/pigeon/AGENTS.md`, tracked as `.13`) landed
+    the same day as **pigeon PR #96** (`7c77d17`), leading with the argument that
+    makes the rule stick there: the daemon runs `tsx` against the working tree,
+    so that root is production. `.10` and `.13` are both closed.
+    - That PR also corrected a *stale* rule in the same file: pigeon's
+      AGENTS.md still said a bash command containing a bare `git` token runs
+      **unscoped** in the serve's cgroup. PR #349 moved the wrap to spawn time,
+      so everything is scoped now, `git` included (verified on the host:
+      `git --version >/dev/null; cat /proc/self/cgroup` reports an
+      `oc-agent.slice` scope). A doc teaching the wrong failure model is worse
+      than one that says nothing.
 
 - **Step 2 — `v03j.9`** — PR #351, 2026-08-11. `assets/scripts/trunk-drift-detector`
   + a 30-minute cloudbox user timer, delivering through `opencode-drift-alert`
@@ -127,7 +137,7 @@ cadence below for every one of them.
 
 | # | Bead | P | What | Gate / blocked by |
 |---|---|---|---|---|
-| 1 | `workstation-v03j.7` + `.10` | 1 / 2 | Enroll `{mono, pigeon, workstation}` via a `worktreeGuardRepos` list; state the rule in workstation `AGENTS.md`; give the hook's block message a real escape hatch | **DONE** — PR #350. `.10` carries over only its pigeon `AGENTS.md` half |
+| 1 | `workstation-v03j.7` + `.10` | 1 / 2 | Enroll `{mono, pigeon, workstation}` via a `worktreeGuardRepos` list; state the rule in workstation `AGENTS.md`; give the hook's block message a real escape hatch | **DONE** — PR #350, plus pigeon PR #96 for `.10`'s pigeon half (`.13`) |
 | 2 | `workstation-v03j.9` | 1 | Trunk-drift detector: report any primary root that is dirty-on-trunk or ahead of origin | **DONE** — PR #351 |
 | 3 | `workstation-v03j.11` | 2 | `opencode-launch` defaults writable sessions into a worktree | **blocked by `.9`** (needs churn baseline — now accumulating in `~/.local/state/trunk-drift/history.ndjson`). Own design pass first |
 | 4 | `workstation-v03j.12` | 3 | Retire `reset-workspace`'s mono-only prune in favour of `disk-cleanup` | **blocked by `.7`** |
@@ -179,8 +189,15 @@ the right thing on the host:
   `/home/dev/.config/git-hooks`, **and** a real `git commit` attempt at the
   pigeon root is refused, **and** a commit in `pigeon/.worktrees/*` still
   succeeds. Do not accept "home-manager switched" as evidence.
-- **`.9`** — the detector, run by hand, names `k8s-gitops` (140 days ahead) or
-  whatever has replaced it, and does **not** name mono's permanent dirt.
+- **`.9`** — **satisfied 2026-08-11.** `systemctl --user start trunk-drift-detector`
+  → `scanned 65 primary root(s): 7 drifting (dd-trace-java dependabot-core
+  k8s-gitops meridian opencode opencode-cached salmon-of-knowledge), 9 with
+  unpushed WIP on a feature branch (not paged), 0 error(s)`. `k8s-gitops` named;
+  mono silent *and its line says why* (`untracked=10 dirty=0`). All 7
+  `~/.local/state/trunk-drift/alert.*.state` files exist, and
+  `opencode-drift-alert` writes those only after an HTTP 2xx — so
+  timer → helper → pigeon → Telegram is confirmed end to end, which no amount of
+  stubbed hand-running would have shown.
 - **`.11`** — a writable `opencode-launch` with no flags lands in
   `.worktrees/<slug>`; a read-only one still lands at the root.
 
