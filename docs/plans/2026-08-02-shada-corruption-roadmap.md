@@ -709,6 +709,45 @@ have shipped invisibly, and the nightly line would have kept saying "invariant
 holds" about two thirds of the reset. Keeping the outgoing instrument alive for
 one night of overlap is what caught it.
 
+#### The external watch is retired, 2026-08-11
+
+Full-window agreement, which is what the previous night failed to produce:
+
+| instrument | temps | max concurrent |
+|---|---|---|
+| in-band report (`reset-workspace`) | 13 | 1 |
+| external watch (02:58-03:12) | 13 | 1 |
+
+Both numbers match now that the measurement covers the whole run, so the
+in-band report is calibrated against the instrument that recorded the corruption
+era, and the external watch has nothing left to add.
+
+- **Instrument end date:** 2026-08-11, after 9 days (started 2026-08-02 17:56:14,
+  `ExecMainPID` 225669, never restarted).
+- **Archive:** `~/.local/state/shada-watch-archive-through-2026-08-11.log`
+  (594 KB). This is the only record of the corruption era - the 2026-08-03 max=2
+  and 2026-08-04 max=3 bursts live here and nowhere else.
+- **Replacement:** the nightly `max concurrent shada writers: N` line, on both
+  hosts, with the walk's exit count as its positive control.
+
+Worth stating plainly, because it is the whole reason the handover took two
+nights instead of one: the first attempt at this cross-check *looked* like a
+pass. The walk window agreed exactly, and stopping there would have retired the
+old instrument and shipped a report that silently described two thirds of the
+reset. The disagreement only appeared in the part of the window that was
+inconvenient to compare.
+
+#### Postscript: the unwired-test hazard, demonstrated
+
+While this was in flight, #339 removed the morning session-restore flow and
+~330 lines of `reset-workspace` with it. `test.sh` - which holds every ordering
+guard protecting the ShaDa invariant - **runs nowhere in CI** (`workstation-k7t4`),
+so nothing would have reported it if that refactor had moved the watcher relative
+to the walk. It was checked by hand here and all six watcher guards still hold
+(the suite drops from 163 to 130 assertions purely because the removed flow took
+its own assertions with it). That check was luck, not process: it happened only
+because the line numbers in a wake-up message no longer matched.
+
 ### S3 — Upstream report to neovim · `workstation-z9i3` · P3 · optional, last
 
 Two upstream defects: the unnecessary `os_remove(to)` before `os_rename`
@@ -744,5 +783,6 @@ master; check for an existing issue first.
 | 2026-08-05 03:00 | **S2b readout: clean, but a NULL TEST.** Whole-window max concurrent = **1** (9 temps, all `.tmp.a`, 9/9 graceful) — but **no lgtm session existed** at 03:00 (`lgtm-run`: "Nothing to review"), so the teardown never ran and the old code would have looked identical. Re-confirms S2, proves nothing about S2b. Evidence supplied instead by a new lab harness `test-lgtm-teardown.sh` (real Step 3.4, private `tmux -L` server): teardown causes **3 writes old vs 0 new**, drain exercised, histories accumulated. `n0yh.1` closed |
 | 2026-08-09 22:40 | **S4: the instrument moves in-band.** The hand-started inotify watch was one reboot from vanishing, and a declared daemon was rejected on evidence — `inotifywait -m` goes **deaf on dir replace while staying alive and healthy-looking**, so no `Restart=`/liveness check can catch it. The reset now measures its own max-concurrent every night on **both hosts** (devbox runs the same reset — the cloudbox-only premise was wrong), with the walk's exit count as a positive control so a dead instrument reports UNKNOWN instead of `max 1`. Calibrated by `test-shada-report.sh`. Transient watch retired, 5-night baseline preserved above |
 | 2026-08-10 03:20 | **First in-band readout + measurement-window fix.** Report worked: max concurrent 1 (7 temps, 7 writers). Cross-check against the retiring watch agreed on the walk window but revealed an 8th write at **03:00:57**, past the report's close - Steps 4-6 were unmeasured. Report moved to end-of-run; a guard now pins it past the pool restart. Old watch **not** retired: it earned another night. Also fixed a latent flake in test-lgtm-teardown.sh (killing the lab tmux server's only session races its shutdown) |
+| 2026-08-11 03:15 | **External watch RETIRED; `y3fq` closed.** Full-window cross-check agreed exactly - in-band 13 temps / max 1, external 13 temps / max 1 - so the in-band report is calibrated against the instrument that recorded the corruption era. Log archived to `~/.local/state/shada-watch-archive-through-2026-08-11.log` (594 KB, the only record of the 08-03 max=2 and 08-04 max=3 bursts). Instrument ran 2026-08-02..2026-08-11, PID 225669, never restarted. Separately confirmed by hand that #339's removal of the morning flow did not disturb the six watcher guards - `test.sh` runs nowhere in CI (`k7t4`), so nothing would have said so |
 | 2026-08-03 16:34 | **S2 shipped** — `#268` merged and deployed (`.#cloudbox`; `~/.nix-profile/bin/reset-workspace` verified to contain the walk). SIGTERM by pid, not the planned socket walk — measurement killed that plan. Discovered **merge-at-write**, so S2 also *restores* the history the burst destroyed. Test suite 133 → 150, plus a behavioural test that runs the extracted walk. **Verification still owed: one observed night** |
 | 2026-08-03 09:00 | **S0 read out, `t032` closed.** No direct writers (0 `CREATE`/`MODIFY` on `main.shada` in 326 events). Storm confirmed: **3 concurrent writers, 3 unlink windows in one second**. S2 proceeds per the pre-registered rule |
