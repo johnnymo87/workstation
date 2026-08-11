@@ -133,10 +133,19 @@ workstation-9f7a), and a namespaced unit does not appear in the default journal 
 all. Every `journalctl` on this page — including the unfiltered `-b --priority=err`
 sweep above and anything matching by `_UID=1000` — silently omits it.
 
-Silently is the word that matters. You do not get an error or a warning; you get
-zero entries, which is indistinguishable from "pigeon logged nothing" and reads as
-evidence of absence. This repo has already been misled more than once by a
-`journalctl` invocation that could never have matched.
+Silently is the word that matters. You do not get an error or a warning, and it is
+worse than simply empty. **`systemd`'s own lifecycle lines for the unit still go to
+the DEFAULT journal**, because PID 1 is not namespaced — so after a restart
+`journalctl -u pigeon-daemon.service` shows `Started`/`Stopped`/`Consumed … CPU
+time` and nothing else. Measured at the 2026-08-11 cutover: 5 systemd lines in the
+default journal, 0 in the namespace, and 0 application lines in the default journal
+afterwards.
+
+A command that returns a handful of plausible lines is far more convincing than one
+returning nothing, so the wrong conclusion — "the daemon is running but logged
+nothing, so it must be wedged" — is easy to reach and hard to doubt. This repo has
+already been misled more than once by a `journalctl` invocation that could never
+have matched.
 
 ```bash
 journalctl --namespace=pigeon -u pigeon-daemon.service        # correct
