@@ -310,7 +310,9 @@ Only the door restart is *urgent* — that one is a live 503.
 
 ```bash
 bash users/dev/test-pigeon-auth-canary.sh              # must go GREEN; RED today by design
-journalctl -u pigeon-daemon -n 20 | grep 'auth:'       # expect "auth: enabled"
+# CORRECTION (2026-08-11, workstation-9f7a): --namespace=pigeon is now REQUIRED.
+# Without it this prints nothing, which looks exactly like "auth is not enabled".
+journalctl --namespace=pigeon -u pigeon-daemon -n 20 | grep 'auth:'   # expect "auth: enabled"
 ```
 
 Then walk the Verification list below, with particular attention to #4

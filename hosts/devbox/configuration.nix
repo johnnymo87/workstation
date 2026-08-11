@@ -294,8 +294,75 @@ in
       ''}";
       Restart = "on-failure";
       RestartSec = 5;
+
+      # workstation-9f7a: pigeon's logs get their own journal, so its retention
+      # stops being decided by whichever unit on the box is noisiest.
+      #
+      # WHY: the 2026-07-14 pigeon outage went undiagnosed for 16+ days, and by
+      # then the evidence was gone. Not for want of persistence -- Storage was
+      # already persistent -- but because the SHARED journal sits at its 4G cap
+      # and evicts oldest-first, giving ~6 days. pigeon-daemon writes 2.6 MB/day;
+      # opencode-frontdoor was writing 203 MB/day (57% of the whole journal), so
+      # pigeon's forensics were collateral damage from a 78x noisier neighbour.
+      # The companion commit cuts the door's volume ~88%, but that only buys time
+      # until the next noisy unit. A namespace makes pigeon structurally immune:
+      # its own directory, its own cap, its own 90-day retention (see
+      # environment.etc."systemd/journald@pigeon.conf" below). At 2.6 MB/day,
+      # 90 days is ~230 MB.
+      #
+      # !! ERGONOMIC BREAK, READ THIS !!
+      #   journalctl -u pigeon-daemon.service                       <- returns NOTHING
+      #   journalctl --namespace=pigeon -u pigeon-daemon.service    <- correct
+      # It does NOT error; it silently returns zero entries, which is the exact
+      # false-negative-instrument shape that has already misled investigations
+      # here (a query that could never match, read as evidence of absence).
+      # Audited before landing: no automated consumer in this repo reads
+      # pigeon's journal -- the six `journalctl` sites in deployable Nix all
+      # target other units -- so nothing silently goes blind. Docs and the pigeon
+      # repo's skills were updated in lockstep.
+      #
+      # NOTE this captures pigeon's CHILDREN too (oc-auto-attach, the tmux panes
+      # it spawns), since they inherit the unit's stdio. That is deliberate --
+      # they are pigeon's story -- and the 2.6 MB/day figure already includes
+      # them, being measured per-unit.
+      #
+      # Existing history does NOT migrate: logs written before this change stay
+      # in the default journal. For ~6 days after deploy, old evidence is in one
+      # place and new evidence in the other.
+      LogNamespace = "pigeon";
+
+      # Without this the identifier is `<nix-store-hash>-pigeon-daemon-start`,
+      # which CHANGES ON EVERY REBUILD -- so `journalctl -t pigeon-daemon` has
+      # never worked, and no identifier-based filter could survive a deploy.
+      SyslogIdentifier = "pigeon-daemon";
     };
   };
+
+  # workstation-9f7a: the `pigeon` journal namespace declared by
+  # systemd.services.pigeon-daemon (LogNamespace = "pigeon").
+  #
+  # systemd auto-starts systemd-journald@pigeon.service for any unit naming the
+  # namespace; NixOS ships the upstream systemd-journald@.service template
+  # (verified present at /etc/systemd/system/systemd-journald@.service), so no
+  # unit definition is needed here -- only its config.
+  #
+  # A namespace gets its OWN directory (/var/log/journal/<machine-id>.pigeon)
+  # and its OWN size accounting, so these limits are independent of the main
+  # journal's. Without a config file it would inherit the same default cap that
+  # caused the problem (min(10% of fs, 4G)) and, more importantly, would not be
+  # bounded by TIME at all.
+  #
+  # MaxRetentionSec is the limit that actually matters here. SystemMaxUse=2G is
+  # slack: at pigeon's measured 2.6 MB/day, 90 days is ~230 MB, so the size cap
+  # should never bind and the age limit is what expires entries. If pigeon ever
+  # becomes 20x noisier, the 2G cap stops it eating the disk -- retention then
+  # degrades gracefully instead of the disk filling.
+  environment.etc."systemd/journald@pigeon.conf".text = ''
+    [Journal]
+    Storage=persistent
+    SystemMaxUse=2G
+    MaxRetentionSec=90day
+  '';
 
   # Optional: Stack target to start/stop both together
   systemd.targets.pigeon = {
