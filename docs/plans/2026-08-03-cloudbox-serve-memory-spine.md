@@ -730,11 +730,50 @@ the new path afterwards.
 > run only inside the transaction that first persists an event, and the replay path
 > dedupes at `event.ts:282`, so no re-stamping of dead rows.
 >
-> **Read side NOT built.** Next: merge #40, cut fork revision 9, bump the four
-> platform hashes in `users/dev/home.base.nix`, confirm stamps land on ~100% of new
-> pool rows and 0% of standalone rows, *then* teach the sweeper the stamped gate —
-> log-only first. Keep `time.created < CUTOFF` as a belt-and-suspenders floor even
-> for stamped-dead rows, to cap the blast radius of any stamp lie not yet imagined.
+> **Write side SHIPPED AND VERIFIED IN PRODUCTION, 2026-08-11.** Fork PR #40 merged,
+> release `v1.17.13-patched.9`, hashes bumped (`749cf17`), and the 03:00 bounce
+> carried it — all four serves came up on `.9` at 03:01. Every cell of the matrix
+> measured: pool rows stamped with invocations matching their units **4/4**;
+> **child/subagent sessions stamped** (the claim that justified the projector choke
+> point, previously argued but never observed); a non-pool `opencode run` correctly
+> **unstamped**; and a clean split at the deploy boundary — 8,905 rows before
+> unstamped, 126 after stamped, zero leakage either way.
+>
+> That leak test is F1 reproduced live and then defeated: the standalone process
+> carried **all three** env gate inputs (`serve-3`, port `4099`, an
+> `INVOCATION_ID` matching no unit) and still wrote an unstamped row, because it
+> failed the cgroup check. An env-only gate would have aborted a running turn.
+>
+> **Read side, phase 1 (reporting only) — PR #343.** The sweeper collects each
+> active unit's `InvocationID` and logs how many rows the stamped gate *would*
+> finalize. It finalizes nothing new. 46 assertions (was 29), non-vacuous by four
+> mutations. Review verified against the running host that inactive/activating/
+> failed/stray instances report an empty `InvocationID` and are filtered before the
+> new fatal path, and measured the extra query at 1.9 s `mode=ro`, no write lock.
+>
+> **The earlier advice in this section was wrong and is retracted.** Keeping
+> `time.created < CUTOFF` as a floor for stamped-dead rows does not "cap the blast
+> radius" — it defeats the feature entirely, since the whole point is rows *newer*
+> than CUTOFF. Worse, the disjunctive form it implies (`old OR stamp-dead`) would
+> finalize a row whose stamp says its writer is **alive** whenever that row also
+> predates CUTOFF — reachable through clock skew between the serve's `Date.now()`
+> and systemd's epoch, or through a restored DB. The correct gate is:
+>
+> ```
+> stale AND ( (NOT stamped AND created < CUTOFF)
+>             OR (stamped AND invocation not live) )
+> ```
+>
+> For a stamped row the stamp is the stronger evidence in both directions, so CUTOFF
+> should govern only rows without one. The real blast-radius cap is the 30-minute
+> silence requirement, which is kept. The shadow count is identical under either
+> formulation, so the number being collected now validates the corrected shape.
+>
+> **Before the gate gets teeth:** the phase-2 UPDATE re-check must gain the stamped
+> predicate (it is the race protection and currently re-checks only the old gate),
+> and arming requires *evidence*, not just quiet — no `shadow: FAILED` lines across
+> the window **and** at least one nonzero observation, manufactured by killing a
+> member if traffic won't produce one. Zeros alone validate nothing.
 
 > **Trap, cost one confused minute on 08-10.** S4's load-bearing assumption is
 > "a nightly whole-pool bounce still exists". It does — but the unit is
