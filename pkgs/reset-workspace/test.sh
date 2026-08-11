@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-3g4j): 150 assertions, incl. two LINE-ORDER invariants S2 rests on. Registering it was TRIED AND BACKED OUT: two SIGPIPE assertions pass outside the nix sandbox and fail inside (rc 141 / disposition), and a `trap - PIPE` in the derivation did NOT fix it -- suspected process-substitution or /dev/fd behaviour. See 3g4j before retrying.
 # Unit + source-guard tests for reset-workspace's pool-aware health poll.
 #
 # mn9r M7: after restarting opencode-serve-pool.target, readiness must be

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-3g4j): named there as wanting the same treatment as reset-workspace/test.sh; read that bead first, it records an attempt that was backed out.
 # Unit tests for opencode-launch helper functions + pool-aware source guards.
 # Mirror the helpers from default.nix and exercise them directly.
 # Run: bash test.sh
