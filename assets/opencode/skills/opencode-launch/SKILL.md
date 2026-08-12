@@ -102,7 +102,7 @@ Key caveats:
 ## Granting MCP to an Already-Running Session (`oc-mcp-enable`)
 
 `opencode-launch --mcp` only works at launch. When a session is **already
-running** — the classic case: a coordinator decides mid-swarm that a worker
+running** — the classic case: mid-swarm you decide that a peer worker
 needs to post to Slack — use `oc-mcp-enable` instead of killing and relaunching
 the worker (which would throw away its context):
 
@@ -115,7 +115,7 @@ oc-mcp-enable --revoke <session-id> slack    # take it away again
 ```
 
 **The grant takes effect on that session's NEXT prompt.** Tools are resolved per
-message, so the sequence for a swarm coordinator is: `oc-mcp-enable <worker>
+message, so the sequence is: `oc-mcp-enable <worker>
 slack` → then `swarm_send` the actual instruction. Verified end to end on
 cloudbox 2026-08-05: a running session that answered "NONE" to "what slack tools
 do you have?" gained the full `slack-ro_*` set and successfully executed

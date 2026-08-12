@@ -1,6 +1,6 @@
 ---
 name: swarm-messaging
-description: Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, when acting as (or reporting to) a swarm coordinator, or when deciding whether a message is worth sending at all. For scheduling a message to the future, see the scheduling-wakes skill.
+description: Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
 ---
 
 # Swarm Messaging
@@ -70,7 +70,7 @@ Otherwise, don't.
 
 ### Examples
 
-Reporting four findings to a coordinator.
+Reporting four findings to a peer.
 
 ```
 ✗ four sends:
@@ -96,36 +96,62 @@ Summarizing for a human who is watching the swarm.
    message for the detail."
 ```
 
-## The coordinator role
+## The coordinator role is BANNED
 
-A **coordinator** is a session that routes work between workers and holds the
-single upward channel to the human. It is a first-class role, not a worker with
-extra chores.
+**Do not appoint a coordinator. Do not accept the role. Do not launch a session
+whose job is to route messages between other sessions.**
 
-A coordinator:
+A coordinator is a session that holds shared context, turns direction into
+`task.assign` messages, aggregates worker reports, and owns the upward channel
+to the human. It sounds like a manager. It behaves like a message bus, and the
+message *is* the cost.
 
-- **Routes and arbitrates.** Turns the human's direction into precise
-  `task.assign` messages; resolves conflicts between workers.
-- **Owns the upward channel.** It is the one session that briefs the human on
-  its topic.
-- **Keeps durable state in beads**, not in its own context.
-- **Does not do the work.** Delegating detail work — and refusing to read full
-  transcripts — is what keeps its context light enough to stay useful all day.
+Why it is banned, mechanically:
 
-### One brief, not two
+- **It at least doubles the message count.** Every fact travels twice — worker
+  to coordinator, coordinator to human — and every instruction travels twice
+  the other way. Nothing new is learned on the second hop.
+- **Its whole job is sending messages.** A worker sends when it has a
+  deliverable. A coordinator with no work of its own fills its turns with
+  routing, status-chasing, and re-briefing. The role is a standing incentive to
+  violate every rule in "Message economy" above.
+- **It invites round-trips.** Assign → ack → question → answer → status →
+  re-assign is four unnecessary turns, and the coordinator is the party that
+  starts each one.
+- **It amplifies errors.** A relayed number acquires authority it did not earn
+  (see "The relay is part of the failure surface" below).
 
-Exactly one session reports to the human on a given topic. Workers do **not**
-brief upward in parallel; the human should never receive the same finding from
-two directions and have to reconcile them.
+### What to do instead
 
-This is not implicit. **Say it explicitly when you assign work:** "Report to me,
-not to the human — I hold the brief on this."
+| Instead of the coordinator… | Do this |
+|---|---|
+| Holding shared context in a session | Put it in **beads** / a plan file. Every session reads the same durable board. State does not need a courier. |
+| Assigning work at runtime | Decompose **up front** and put each slice in the worker's **launch prompt**. A slice that was fully specified at launch needs zero assignment messages. |
+| Aggregating worker reports | Each worker reports its own deliverable **directly to the human**, once, when done. |
+| Asking a worker how it's going | **Pull, don't ask.** Read its beads, its branch, its PR, or its session transcript. Costs the worker nothing. |
+| Brokering worker-to-worker handoffs | Workers message **each other directly** at the handoff point. Give every worker the others' session ids at launch. |
+| Being "single point of contact for the human" | The human already sees the swarm. They are the integration point, and they cost nothing to read. |
+
+**The human is the coordinator.** That role is filled. If a decision is needed
+that only a human can make, the session that needs it asks the human directly —
+one message, no relay.
+
+### If a swarm genuinely needs shared arbitration
+
+It probably doesn't. If you are certain it does, the arbitration belongs in a
+**written artifact** (a plan file with the integration order and the handoff
+conditions), not in a session's context. A document is read on demand, by
+everyone, for zero messages. A coordinator has to be asked.
 
 ### The relay is part of the failure surface
 
-A number acquires authority purely by being repeated by a coordinator. When you
-pass a worker's claim upward, it stops being "a worker said" and becomes "the
-coordinator reports." You have amplified it, and the amplification is yours.
+You may still find yourself repeating someone else's claim — quoting a peer's
+number to the human, or summarizing a finding. The relay hazard applies to
+anyone who does that, coordinator or not.
+
+A number acquires authority purely by being repeated. When you pass a peer's
+claim on, it stops being "C said" and becomes "I report." You have amplified
+it, and the amplification is yours.
 
 Two consequences, both mandatory:
 
@@ -136,31 +162,34 @@ Two consequences, both mandatory:
   that you repeated it without checking, not that they said it.
 
 ```
-✗ "Correction — worker C's 40% number was wrong, it's 4%."
-✓ "Correction: the 40% I relayed was wrong; it's 4%. I passed it up
+✗ "Correction — peer C's 40% number was wrong, it's 4%."
+✓ "Correction: the 40% I relayed was wrong; it's 4%. I passed it on
    without checking C's source."
 ```
 
-### Check state immediately before you assign
+The cheapest way to avoid this: **point instead of relay.** "C measured the
+cache hit rate — see its last message" costs one sentence and carries no
+authority you have not earned.
 
-Do not assign or propose work from a stale board. Re-read the current state
+### Check state immediately before you propose work
+
+Do not propose or pick up work from a stale board. Re-read the current state
 **immediately before** the proposal — not at the start of the reasoning that
-led to it. A long chain of reasoning is exactly the window in which a worker
-finished the thing you are about to assign.
+led to it. A long chain of reasoning is exactly the window in which a peer
+finished the thing you are about to start.
 
 ### Quote notes, not bead headers, for anything time-sensitive
 
 A bead's header (title, status, assignee) lags reality; the notes are where the
 current situation is written. For any claim about *what is true right now*,
-quote the notes. Never build an upward brief on a header.
+quote the notes. Never build a brief on a header.
 
 ### Silence reads as endorsement
 
-If a worker states a premise you do not agree with, say so. Saying nothing —
-especially while continuing to assign work on top of that premise — is read by
-the worker as agreement, and it will build on it. This is the one case where a
-message with no new instruction is still worth sending: disagreement is new
-information.
+If a peer states a premise you do not agree with, say so. Saying nothing —
+especially while continuing to build on that premise — is read as agreement,
+and they will build on it too. This is the one case where a message with no new
+instruction is still worth sending: disagreement is new information.
 
 ## Sending
 
@@ -181,8 +210,8 @@ Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, 
 ### Message kinds
 
 - `chat` (default) — informal back-and-forth
-- `task.assign` — coordinator asks a worker to do something
-- `status.update` — rare; only at a checkpoint that changes the coordinator's plan, never a heartbeat
+- `task.assign` — rare; work is normally specified in a session's launch prompt, not assigned at runtime
+- `status.update` — rare; only at a checkpoint that changes someone else's plan, never a heartbeat
 - `result` — a finished deliverable / report
 - `clarification.request` — needs an answer to proceed
 - `clarification.reply` — answers a `request`
@@ -216,7 +245,14 @@ When a swarm message arrives, you'll see a user-message turn whose text is the e
                msg_id="msg_..." priority="normal">
 The actual payload here.
 </swarm_message>
+
+[pigeon] Message economy — the unit of cost is the message, not the word. ...
 ```
+
+The `[pigeon]` line **after** the close tag is appended by the daemon, not by
+the sender — it is the message-economy warning restated at the point of cost.
+It appears on every message from another session, and is omitted on
+self-addressed scheduled wakes. Don't reply to it, and don't quote it back.
 
 Steps:
 
@@ -239,7 +275,7 @@ To see more, paginate with cursors — each value is a `msg_id`:
 
 Messages always come back in chronological (oldest-first) order regardless of paging direction. When more exist beyond the page you got, `swarm_read`'s output ends with a hint telling you exactly which cursor to pass next.
 
-Prefer **pulling** over asking. `swarm_read` shows your *own* inbox, so a coordinator wondering how a worker is doing reads the worker's session directly rather than pinging it:
+Prefer **pulling** over asking. `swarm_read` shows your *own* inbox, so a session wondering how a peer is doing reads that peer's session directly rather than pinging it — this is what replaces a coordinator's status-chasing:
 
 ```bash
 curl -sf "http://127.0.0.1:4700/session/$SID/message?limit=3" | jq '.[].info.role'
@@ -284,7 +320,7 @@ On terminal failure the daemon sends a `delivery.failed` message **back to you**
 - **Don't** ack, heartbeat, or ping. If a message carries no decision, no new evidence and no changed instruction, it shouldn't exist.
 - **Don't** split one report into several sends to keep each one short. Count is the cost, not length.
 - **Don't** paraphrase a swarm message to a human who can already see it — point at it in one sentence.
-- **Don't** brief the human when a coordinator holds the brief on that topic.
+- **Don't** appoint, accept, or route through a coordinator. Report your own work to the human yourself, once, when it is done.
 - **Don't** POST to `opencode serve`'s `/session/<id>/prompt_async` directly for cross-session messaging. That route races (concurrent calls from different `x-opencode-directory` headers bypass the per-session busy guard, producing 400 "does not support assistant message prefill" from Anthropic). Always use `swarm_send`.
 - **Don't** write the `<swarm_message>` envelope into your `message` — pigeon adds it. Pre-wrapping is rejected (the close tag is forbidden in payloads) and double-wraps confuse receivers. Send only the raw payload.
 - **Don't** paste a received envelope back verbatim as your reply — send only the new payload.
