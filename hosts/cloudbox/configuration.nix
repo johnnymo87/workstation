@@ -1074,7 +1074,7 @@ ${serveIdCase}
       # So uncomment it ONLY in the same operation that bounces the pool, i.e.
       # when you are already at a keyboard running the coupled command above. Do
       # not merge it "ready for later".
-      # Slice = "opencode-serve.slice";
+      Slice = "opencode-serve.slice";
     };
   };
 
