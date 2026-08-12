@@ -799,6 +799,45 @@ the new path afterwards.
 > and arming requires *evidence*, not just quiet — no `shadow: FAILED` lines across
 > the window **and** at least one nonzero observation, manufactured by killing a
 > member if traffic won't produce one. Zeros alone validate nothing.
+>
+> **Read side, phase 2 (ARMED) — PR #358, 2026-08-12.** Both conditions were met:
+> zero `FAILED` across ~58 runs, and a deliberate SIGKILL of a single member
+> produced the predicted `0 -> 1` transition in the exact 5-minute window. The gate
+> shipped in the corrected conjunctive shape above, built once and interpolated into
+> **both** phases. 60 assertions (was 46); 13 fail against pre-arming, 3 more
+> against pre-hardening.
+>
+> Three things worth carrying forward:
+>
+> **The conjunctive form fixed a hazard that already existed.** `T8j` — a
+> live-stamped row older than CUTOFF — fails against the *pre-change* sweeper,
+> because the old CUTOFF-only gate is literally the first disjunct. This was not
+> merely a wrong shape avoided; the old gate would abort that live turn today.
+>
+> **Rigor was on the wrong side (found by adversarial review, fixed pre-deploy).**
+> The gate validated the *live* ids to 32 lowercase hex but trusted the *row's*
+> stamp absolutely, so any unrecognisable value — empty string, dashed UUID,
+> uppercase — matched nothing live and read as proof of death. The unhardened build
+> finalizes 4 of 5 malformed-stamp fixtures whose writers are alive. This matters
+> because the stamp is a **cross-repo contract** produced by opencode-patched, which
+> auto-updates every 8 hours: a version rendering the id differently would make every
+> live row stop matching at once. The gate now requires a well-formed stamp before
+> treating it as evidence of death, and malformed ones fall back to the CUTOFF rule
+> rather than being stranded unsweepable. Generalise it: validate the input you do
+> **not** control, not the one you do.
+>
+> **A silent dependency, now commented.** The monotonic-death argument that lets
+> phase 2 reuse the discovery-time snapshot holds only because `Type=simple` and
+> `TimeoutStopSec=15` keep the running-but-not-`active` window far below the
+> 30-minute silence gate. Nothing linked those sites; the serve template now says so.
+>
+> **Monitoring break:** the log line is now `stamped-gate ARMED: N row(s)`, not
+> `stamped-gate shadow: N additional`. Anything grepping the old string reads zero
+> forever. Renamed deliberately in the same change — a line saying "would be
+> finalized" while rows are being finalized is an instrument that lies.
+>
+> First armed sweep finalized exactly the one known orphan (dead stamp, 65 min
+> silent) and left six live turns across four sessions untouched.
 
 > **Trap, cost one confused minute on 08-10.** S4's load-bearing assumption is
 > "a nightly whole-pool bounce still exists". It does — but the unit is
