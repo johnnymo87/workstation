@@ -158,12 +158,21 @@ check "exit 1"          "$RC" 1
 check "names the arg"   "$(printf '%s' "$OUT" | grep -c 'unknown argument')" 1
 check "row NOT written" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_typo';")" 1
 
-# --- stamped-gate shadow count (bead workstation-63wo) ------------------------
+# --- stamped gate, ARMED (bead workstation-63wo) ------------------------------
 # Since opencode-patched 1.17.13.9 a pool serve stamps its systemd InvocationID
-# into every assistant row it writes. The sweeper reports how many rows the
-# stamped gate WOULD additionally finalize, and — for now — does nothing with
-# that number. These cases pin both halves of it: the count must be right, and
-# the sweeper must still not touch the rows.
+# into every assistant row it writes, so "is the process that CREATED this row
+# still alive?" is answerable directly instead of being approximated by the
+# min-over-pool CUTOFF. The gate ran in shadow (count-only) from 2026-08-11 and
+# was armed on 2026-08-12 after a deliberate single-member SIGKILL produced the
+# predicted 0->1 transition with zero FAILED counts across ~58 runs.
+#
+# The gate is CONJUNCTIVE per branch, and that is the whole safety argument:
+#     stale AND ( (NOT stamped AND created < CUTOFF)
+#              OR (stamped     AND invocation not live) )
+# A stamped row is judged ONLY by its stamp. It is never finalized merely for
+# being old (T8j), because "old" is a proxy for "owner is gone" and the stamp is
+# the real thing — under clock skew or a restored DB the proxy is simply wrong,
+# and the cost of being wrong is aborting a live turn.
 #
 # The live id is scraped from systemd at test time rather than invented. There
 # is no seam for unit state (the sweeper reads systemd directly), so a made-up
@@ -190,30 +199,56 @@ stamprow() {
                                        'port','4099','pid',1234)));"
 }
 
-echo "== T8c: row stamped by a DEAD invocation is COUNTED but NOT finalized =="
-# NEWER than CUTOFF, so today's min-over-pool gate cannot see it at all -- this is
-# exactly the fresh single-member orphan that currently waits for the 03:00 bounce.
+echo "== T8c: row stamped by a DEAD invocation IS finalized (the point of arming) =="
+# NEWER than CUTOFF, so the min-over-pool gate alone cannot see it at all -- this
+# is exactly the fresh single-member orphan that used to wait for the 03:00
+# bounce (measured: ~18h on 2026-08-12).
+#
+# This case pins ONE phase-2 drift shape and no more: leaving the OLD cutoff
+# predicate in the phase 2 UPDATE while phase 1 moves to the new gate makes this
+# run report "1 candidate(s)" and then finalize 0. It does NOT pin phase 2's
+# re-check in general -- deleting `AND $GATE` from the UPDATE outright survives
+# this test and the whole suite, because phase 1 has already filtered the ids.
+# The genuine between-phase race (a serve finishing a row after phase 1 read it)
+# is timing-dependent and stays untested; T3 covers only the completed-row half.
 DB="$LAB/t8c.db"; mkdb "$DB"
 stamprow "$DB" msg_dead "$NOW_MS" "$STALE_UPD" "$DEAD_IV"
 run "$DB"
-check "exit 0"                    "$RC" 0
-check "shadow counts it"          "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 1 additional')" 1
-check "still finalizes 0"         "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
-check "row NOT touched (log-only)" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_dead';")" 1
+check "exit 0"                 "$RC" 0
+check "finalizes it"           "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
+check "attributed to the stamp" "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 1 row')" 1
+check "completed set"          "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NOT NULL FROM message WHERE id='msg_dead';")" 1
+check "error name"             "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.error.name') FROM message WHERE id='msg_dead';")" MessageAbortedError
 
-echo "== T8d: row stamped by a LIVE invocation is NOT counted =="
+echo "== T8d: row stamped by a LIVE invocation is protected =="
 DB="$LAB/t8d.db"; mkdb "$DB"
 stamprow "$DB" msg_live "$NOW_MS" "$STALE_UPD" "$LIVE_IV"
 run "$DB"
 check "exit 0"           "$RC" 0
-check "shadow counts 0"  "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+check "finalizes 0"      "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
+check "attribution 0"    "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 0 row')" 1
 check "row untouched"    "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_live';")" 1
+
+echo "== T8j: a LIVE-stamped row OLDER than CUTOFF is protected (conjunctive gate) =="
+# THE test that separates the shipped gate from the disjunctive form
+#     (created < CUTOFF) OR (stamped AND not live)
+# which every other case in this file passes identically. Here the row predates
+# CUTOFF *and* its stamp says the writer is alive; the disjunctive form finalizes
+# it on the first clause alone, aborting a live turn. Reachable in production
+# through clock skew or a restored/copied DB -- rare, but the failure is the
+# worst one this script can produce, and it is invisible to every other test.
+DB="$LAB/t8j.db"; mkdb "$DB"
+stamprow "$DB" msg_live_old "$OLD" "$STALE_UPD" "$LIVE_IV"
+run "$DB"
+check "exit 0"        "$RC" 0
+check "finalizes 0"   "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
+check "row untouched" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_live_old';")" 1
 
 echo "== T8e: an UNSTAMPED fresh row is still invisible (no accidental widening) =="
 DB="$LAB/t8e.db"; mkdb "$DB"
 addrow "$DB" msg_fresh_unstamped "$NOW_MS" "$STALE_UPD" NULL NULL
 run "$DB"
-check "shadow counts 0" "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+check "attribution 0"   "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 0 row')" 1
 check "finalizes 0"     "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
 check "row untouched"   "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_fresh_unstamped';")" 1
 
@@ -222,39 +257,85 @@ echo "== T8f: a stamped row that is NOT yet 30min silent is not counted =="
 DB="$LAB/t8f.db"; mkdb "$DB"
 stamprow "$DB" msg_recent "$NOW_MS" "$FRESH_UPD" "$DEAD_IV"
 run "$DB"
-check "shadow counts 0" "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+check "attribution 0"   "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 0 row')" 1
+check "finalizes 0"     "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
 check "row untouched"   "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_recent';")" 1
 
-echo "== T8g: an OLD stamped-dead row is finalized by the EXISTING gate, counted once =="
-# Created before CUTOFF, so the old path already catches it. It must NOT also
-# appear in the shadow count, or the number double-counts and overstates the gain.
+echo "== T8g: an OLD stamped-dead row is finalized, but is NOT attributed to the stamp =="
+# Finalized via the stamped branch (a stamped row is judged only by its stamp),
+# yet the OLD gate would have caught it too, so it is not part of the marginal
+# gain. Attributing it would overstate what arming bought.
 DB="$LAB/t8g.db"; mkdb "$DB"
 stamprow "$DB" msg_old_dead "$OLD" "$STALE_UPD" "$DEAD_IV"
 run "$DB"
-check "finalized by old gate" "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
-check "not double-counted"    "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+check "finalized"          "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
+check "not attributed"     "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 0 row')" 1
 
-echo "== T8h: the CUTOFF boundary itself -- created == CUTOFF is shadow, not old-gate =="
-# The no-double-counting claim in T8g rests on the two gates partitioning rows
-# exactly at CUTOFF (old gate is created < CUTOFF, shadow is created >= CUTOFF).
-# Without a fixture sitting ON the boundary, flipping >= to > survives the whole
-# suite while silently dropping one row from every count.
+echo "== T8h: the CUTOFF boundary itself -- created == CUTOFF is attributable =="
+# The no-double-counting claim in T8g rests on the attribution counter splitting
+# rows exactly at CUTOFF (the old gate was created < CUTOFF, attribution is
+# created >= CUTOFF). Without a fixture sitting ON the boundary, flipping >= to >
+# survives the whole suite while silently dropping one row from every count.
 DB="$LAB/t8h.db"; mkdb "$DB"
 stamprow "$DB" msg_boundary "$(( CUTOFF * 1000 ))" "$STALE_UPD" "$DEAD_IV"
 run "$DB"
-check "counted by shadow"     "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 1 additional')" 1
-check "not by the old gate"   "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
+check "finalized"     "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
+check "attributed"    "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 1 row')" 1
 
-echo "== T8i: an already-finished stamped row is never counted =="
-# Pins the completed/error predicates in the shadow query, which otherwise no
-# stamped fixture exercises -- dropping either survived the mutation pass.
+echo "== T8k: a MALFORMED stamp is not evidence of death =="
+# The gate compares a row's stamp against the live set and sweeps on no-match.
+# The live side is validated to 32 lowercase hex or the run aborts; without the
+# matching shape check on the ROW side, every unrecognisable value would
+# "not match" and so read as proof the writer died.
+#
+# This is the format-drift blast radius, and the reason it is worth a test: the
+# stamp is written by opencode-patched, a DIFFERENT repo that auto-updates every
+# 8 hours. A future version rendering the id as a dashed UUID would make every
+# LIVE row stop matching at once, and every turn silent for 30 minutes would be
+# aborted. With the shape check those rows fall back to the old CUTOFF rule.
+# All four fixtures are NEWER than CUTOFF, so a sweep here can only come from
+# the stamped branch trusting a value it should not.
+DB="$LAB/t8k.db"; mkdb "$DB"
+stamprow "$DB" msg_garbage_empty  "$NOW_MS" "$STALE_UPD" ""
+stamprow "$DB" msg_garbage_short  "$NOW_MS" "$STALE_UPD" "zz"
+stamprow "$DB" msg_garbage_dashed "$NOW_MS" "$STALE_UPD" "5ebd8272-a9b5-4422-99ae-128c8f5ae5f8"
+stamprow "$DB" msg_garbage_upper  "$NOW_MS" "$STALE_UPD" "5EBD8272A9B5442299AE128C8F5AE5F8"
+"$SQLITE" "$DB" "INSERT INTO message VALUES('msg_jsonnull','ses_test',$NOW_MS,$STALE_UPD,
+  json_object('role','assistant','time',json_object('created',$NOW_MS),
+              'serve', json_object('serveId','serve-9','invocationId',json('null'))));"
+run "$DB"
+check "exit 0"          "$RC" 0
+check "finalizes 0"     "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
+check "attribution 0"   "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 0 row')" 1
+check "none touched"    "$("$SQLITE" "$DB" "SELECT count(*) FROM message WHERE json_extract(data,'\$.time.completed') IS NOT NULL;")" 0
+
+echo "== T8l: a malformed stamp still falls through to the OLD cutoff rule =="
+# The other half of T8k: rows the stamped branch declines to judge must land on
+# the unstamped branch, not vanish between the two. Same fixtures, but created
+# before CUTOFF, so the old rule applies and every one of them is swept. Without
+# this, a shape check that made malformed stamps permanently unsweepable -- a
+# slow leak of rows nothing ever finalizes -- would pass T8k happily.
+DB="$LAB/t8l.db"; mkdb "$DB"
+stamprow "$DB" msg_old_dashed "$OLD" "$STALE_UPD" "5ebd8272-a9b5-4422-99ae-128c8f5ae5f8"
+stamprow "$DB" msg_old_empty  "$OLD" "$STALE_UPD" ""
+run "$DB"
+check "both swept by the old rule" "$(printf '%s' "$OUT" | grep -c 'finalized 2 orphaned message(s)')" 1
+check "not attributed to the stamp" "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 0 row')" 1
+
+echo "== T8i: an already-finished stamped row is never touched or counted =="
+# Pins the completed/error predicates on BOTH the finalization gate and the
+# attribution counter -- dropping either survived the mutation pass. The error
+# fixture also guards the re-abort case: a row someone else already aborted must
+# not have its error overwritten with ours.
 DB="$LAB/t8i.db"; mkdb "$DB"
 stamprow "$DB" msg_stamped_done "$NOW_MS" "$STALE_UPD" "$DEAD_IV"
 "$SQLITE" "$DB" "UPDATE message SET data=json_set(data,'\$.time.completed',$NOW_MS) WHERE id='msg_stamped_done';"
 stamprow "$DB" msg_stamped_err "$NOW_MS" "$STALE_UPD" "$DEAD_IV"
 "$SQLITE" "$DB" "UPDATE message SET data=json_set(data,'\$.error',json('{\"name\":\"X\"}')) WHERE id='msg_stamped_err';"
 run "$DB"
-check "shadow counts 0" "$(printf '%s' "$OUT" | grep -c 'stamped-gate shadow: 0 additional')" 1
+check "attribution 0"   "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 0 row')" 1
+check "finalizes 0"     "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
+check "foreign error kept" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.error.name') FROM message WHERE id='msg_stamped_err';")" X
 
 echo "== T9: REGRESSION -- a zero-candidate sweep must not block a concurrent writer =="
 # Fixture: all rows already completed, so 0 candidates -- exactly production,

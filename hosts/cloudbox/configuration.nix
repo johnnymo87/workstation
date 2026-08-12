@@ -1033,6 +1033,17 @@ ${serveIdCase}
       # wedged serve -- including inside the nightly reset. A healthy serve
       # exits in well under a second, so this only ever shortens the SIGKILL
       # wait. Matches devbox.
+      #
+      # LOAD-BEARING FOR THE PHANTOM-BUSY SWEEPER, which is not obvious from here.
+      # That sweeper's stamped gate collects live InvocationIDs from units whose
+      # ActiveState is exactly "active", and treats a stamp it does not find as
+      # proof the writer is dead. A serve that is running but NOT "active" —
+      # stopping, or starting — is therefore invisible to it. That is only safe
+      # because both windows are tiny next to the sweeper's 30-minute silence
+      # requirement: stopping is bounded by this TimeoutStopSec, and starting is
+      # ~instant because Type is "simple" above. Raising this past 30 minutes, or
+      # moving to Type=notify with slow readiness, would let the sweeper abort a
+      # LIVE turn. Adjust the sweeper's discovery filter first if either changes.
       TimeoutStopSec = 15;
       # Aggregate cap (workstation-le0a). The four per-serve MemoryMax values sum
       # to more than the host has, so this slice is what stops the pool as a
@@ -2073,6 +2084,75 @@ Check:
         fi
         echo "sweeper: db=$DB active=$ACTIVE cutoff=$CUTOFF now=$NOW dry=$DRY"
 
+        # THE FINALIZATION GATE (bead workstation-63wo), built once here and
+        # interpolated verbatim into BOTH phases so they cannot drift apart —
+        # phase 2's copy is the race protection, and a gate that lived in only one
+        # of them would either finalize rows phase 2 rejects (silently doing
+        # nothing, the harmless direction) or, far worse, write rows phase 1 never
+        # vetted.
+        #
+        # Since opencode-patched 1.17.13.9 a pool serve stamps its systemd
+        # InvocationID into every assistant row it writes, so the question that
+        # actually matters — is the process that CREATED this row still alive? — is
+        # answerable directly. CUTOFF is only ever a proxy for it.
+        #
+        # Each branch is CONJUNCTIVE, and the shape is load-bearing:
+        #
+        #   stamped rows are judged ONLY by the stamp. Never finalized for merely
+        #   being older than CUTOFF. The disjunctive form (created < CUTOFF OR
+        #   stamp-dead) reads identically on every normal row and differs on
+        #   exactly one: a row whose stamp says its writer is ALIVE that also
+        #   predates CUTOFF. Normally unreachable — a live serve's rows postdate
+        #   its own start — but clock skew or a restored/copied DB produces it, and
+        #   the disjunctive form aborts that live turn. Test T8j.
+        #
+        #   unstamped rows keep the old min-over-pool behaviour unchanged. These
+        #   are rows written by something that is NOT a pool serve (the write side
+        #   stamps only inside an opencode-serve@<port>.service cgroup, so a
+        #   hand-started `opencode serve` writes none) plus everything from before
+        #   1.17.13.9. Absence of a stamp is therefore not evidence of death, and
+        #   must not be treated as such.
+        #
+        # A STAMP IS ONLY EVIDENCE OF DEATH IF IT IS SHAPED LIKE AN InvocationID.
+        # The live side of the comparison is validated hard (32 lowercase hex, or
+        # the run aborts); without this the ROW side would be trusted absolutely,
+        # and "not string-equal to any live id" would silently include every
+        # malformed value — empty string, JSON null rendered as text, a dashed
+        # UUID. Those are not evidence that anything died.
+        #
+        # This matters because the stamp's format is a CROSS-REPO CONTRACT: it is
+        # produced by opencode-patched, which auto-updates every 8 hours. A patch
+        # that fails to apply degrades safely (no stamp at all -> conservative
+        # branch), but one that applies while rendering the id differently — dashed
+        # UUIDs, a restructured $.serve — would make every LIVE row stop matching,
+        # and every turn quiet for 30 minutes would be aborted. That is the one
+        # mass-casualty failure this script can produce. A shape check turns it
+        # into a silent fallback to the old CUTOFF behaviour instead.
+        IV="json_extract(data, '\$.serve.invocationId')"
+        STAMPED="($IV IS NOT NULL AND length($IV) = 32 AND $IV NOT GLOB '*[^0-9a-f]*')"
+
+        # NOT $STAMPED is a safe negation: `IS NOT NULL` yields 0/1 and never NULL,
+        # so the AND-chain is 0 rather than NULL for an absent stamp and the two
+        # branches stay exhaustive AND disjoint. Every row is judged by exactly one
+        # of them — an unrecognisable stamp is swept by the old CUTOFF rule, not
+        # stranded forever between the two.
+        #
+        # LIVE_IDS empty means no active pool serve at all, where CUTOFF was
+        # already set to NOW and sweeping everything stale is maximally correct.
+        # It also cannot be interpolated: `NOT IN ()` is a SQL syntax error, which
+        # would fail the run closed but noisily, every five minutes, precisely when
+        # the pool is down. The pool is up in every test environment, so this
+        # branch is unreachable from the harness and is kept trivially simple.
+        if [ -n "$LIVE_IDS" ]; then
+          GATE="(
+                 (NOT $STAMPED
+                  AND json_extract(data, '\$.time.created') < $CUTOFF * 1000)
+              OR ($STAMPED AND $IV NOT IN ($LIVE_IDS))
+               )"
+        else
+          GATE="(json_extract(data, '\$.time.created') < $CUTOFF * 1000)"
+        fi
+
         # PHASE 1 — find candidates on a READ-ONLY connection.
         #
         # The scan itself was never the problem; holding the WAL write lock
@@ -2116,7 +2196,7 @@ Check:
             AND json_extract(data, '\$.time.completed') IS NULL
             AND json_extract(data, '\$.error') IS NULL
             AND time_updated < (strftime('%s','now') - 1800) * 1000
-            AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
+            AND $GATE;
         "); then
           # A failed probe must never be indistinguishable from "nothing to do".
           echo "sweeper: candidate query failed — refusing to run"
@@ -2136,57 +2216,61 @@ Check:
 
         N=$(printf '%s\n' "$CANDIDATES" | awk 'NF' | wc -l)
 
-        # STAMPED-GATE SHADOW COUNT — REPORTING ONLY, CHANGES NOTHING (bead
-        # workstation-63wo).
+        # MARGINAL-GAIN ATTRIBUTION — REPORTING ONLY (bead workstation-63wo).
         #
-        # Since opencode-patched 1.17.13.9 a pool serve stamps its systemd
-        # InvocationID into every assistant row it writes. That makes a precise
-        # question answerable for the first time: is the process that CREATED this
-        # row still alive? If its stamped invocation is not among the live ones, the
-        # creator is provably gone and the row is provably an orphan — regardless of
-        # the min-over-pool CUTOFF, which is what currently defers a fresh
-        # single-member orphan until the nightly bounce moves it (up to ~24h).
+        # The gate above is now ARMED, so this no longer counts hypothetical rows;
+        # it counts how many of the candidates just found would NOT have been found
+        # by the old min-over-pool gate alone. That is `created >= CUTOFF AND
+        # stamped AND not live` — a strict subset of the gate's stamped branch, the
+        # part that only arming can reach. Stamped-dead rows OLDER than CUTOFF are
+        # excluded on purpose: the old gate caught those already, and counting them
+        # would overstate the gain (test T8g).
         #
-        # This block only COUNTS what the stamped gate would additionally finalize.
-        # The finalizing predicates below are untouched, so behaviour is identical
-        # to before this change; the number is here so the gate can be watched
-        # against real traffic before it is given the power to abort anything. The
-        # 30-minute silence requirement is deliberately kept — it is the blast-radius
-        # cap, and a stamp is not a licence to skip it.
+        # Kept because it is the only number that says what arming actually does,
+        # and it costs nothing new — this query already ran every five minutes
+        # throughout the shadow period. Renamed from "shadow" in the same change
+        # that armed the gate: a line still reading "would be finalized" after the
+        # rows are genuinely being finalized is an instrument that lies, which is a
+        # worse failure than having no instrument.
         #
-        # Fails CLOSED in every uncertain direction: no live ids (a drained pool
-        # already sweeps everything stale via CUTOFF=NOW), an unreadable count, or a
-        # non-numeric result all report 0 rather than guessing upward. A COUNT(*)
-        # is used rather than an id list precisely because phase 1's single-bare-id
-        # output format is load-bearing for the validation above.
-        # A count that silently reports 0 when it is BROKEN is worse than no count,
-        # because this number exists to decide whether the gate is safe to arm. Two
-        # weeks of zeros because nothing was orphaned and two weeks of zeros because
-        # the query stopped parsing look identical to any monitoring that greps the
-        # shadow line — so failure is reported IN that line, not merely beside it.
-        SHADOW=0
-        SHADOW_OK=1
+        # The 30-minute silence requirement is deliberately kept in the gate — it is
+        # the blast-radius cap, and a stamp is not a licence to skip it.
+        #
+        # This is now purely descriptive: it reports on a decision already made by
+        # the gate above and can no longer change what gets written. Its failure is
+        # therefore NOT fatal — the sweep proceeds — but it is still reported IN the
+        # line rather than beside it, because zeros-because-nothing-happened and
+        # zeros-because-the-query-broke look identical to anything grepping for it.
+        # A COUNT(*) is used rather than an id list precisely because phase 1's
+        # single-bare-id output format is load-bearing for the validation above.
+        ATTRIB=0
+        ATTRIB_OK=1
         if [ -n "$LIVE_IDS" ]; then
-          if ! SHADOW=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "file:$DB?mode=ro" "
+          if ! ATTRIB=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "file:$DB?mode=ro" "
             SELECT COUNT(*) FROM message
             WHERE json_extract(data, '\$.role') = 'assistant'
               AND json_extract(data, '\$.time.completed') IS NULL
               AND json_extract(data, '\$.error') IS NULL
               AND time_updated < (strftime('%s','now') - 1800) * 1000
               AND json_extract(data, '\$.time.created') >= $CUTOFF * 1000
-              AND json_extract(data, '\$.serve.invocationId') IS NOT NULL
-              AND json_extract(data, '\$.serve.invocationId') NOT IN ($LIVE_IDS);
+              AND $STAMPED AND $IV NOT IN ($LIVE_IDS);
           "); then
-            SHADOW_OK=0
+            ATTRIB_OK=0
           fi
           # Non-numeric output is its own failure, and used to be swallowed with no
           # log line at all — the most invisible variant of the problem above.
-          case "$SHADOW" in ""|*[!0-9]*) SHADOW_OK=0 ;; esac
+          case "$ATTRIB" in ""|*[!0-9]*) ATTRIB_OK=0 ;; esac
         fi
-        if [ "$SHADOW_OK" = 1 ]; then
-          echo "sweeper: stamped-gate shadow: $SHADOW additional row(s) would be finalized (live invocations: ''${LIVE_IDS:-<none>})"
+        if [ -z "$LIVE_IDS" ]; then
+          # Distinct wording on purpose: with no active serve there is nothing to
+          # compare stamps against, so the gate fell back to CUTOFF-only. Printing
+          # the usual "0 row(s)" here would read as a measurement of zero rather
+          # than as a skipped comparison.
+          echo "sweeper: stamped-gate ARMED: no active pool serve — stamp comparison skipped, CUTOFF-only sweep (not a zero measurement)"
+        elif [ "$ATTRIB_OK" = 1 ]; then
+          echo "sweeper: stamped-gate ARMED: $ATTRIB row(s) in this sweep are reachable only via the stamp (live invocations: $LIVE_IDS)"
         else
-          echo "sweeper: stamped-gate shadow: FAILED — count unavailable, do NOT read this run as a zero (no behaviour change)"
+          echo "sweeper: stamped-gate ARMED: attribution count FAILED — do NOT read this run as a zero (finalization is unaffected)"
         fi
 
         if [ "$DRY" = 1 ]; then
@@ -2218,9 +2302,18 @@ Check:
         # depth / bound-variable count, and a drained-pool backlog sweep can
         # legitimately produce thousands of ids.
         #
-        # Every predicate is RE-CHECKED inside the UPDATE: a serve may
-        # legitimately finish one of these rows between phase 1 and phase 2, and
+        # Every predicate is RE-CHECKED inside the UPDATE, $GATE included: a serve
+        # may legitimately finish one of these rows between phase 1 and phase 2, and
         # a row that completed on its own must not be overwritten with an abort.
+        #
+        # $GATE re-checks against the LIVE_IDS snapshot taken at discovery, not a
+        # fresh reading, and that is safe in the only direction that matters:
+        # invocation death is MONOTONIC. A systemd InvocationID is unique per start,
+        # so an id absent from the snapshot can never become live again, and an id
+        # present in it can only have died since — which makes the stale snapshot
+        # strictly more conservative than a fresh one (we decline to finalize, and
+        # the next run five minutes later picks it up). Re-reading systemd here
+        # could only ever finalize MORE, never less.
         CHUNKS=$(printf '%s\n' "$CANDIDATES" | awk -v q="'" '
           NF          { buf = buf sep q $0 q; sep = ","; n++ }
           n == 500    { print buf; buf = ""; sep = ""; n = 0 }
@@ -2241,13 +2334,13 @@ Check:
           if got=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "$DB" "
             UPDATE message SET data = json_set(data,
                 '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
-                '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: in-flight row predates all live serves, silent >30min)\"}}'))
+                '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: owning serve is gone — stamped invocation dead, or row predates all live serves — silent >30min)\"}}'))
             WHERE id IN ($chunk)
               AND json_extract(data, '\$.role') = 'assistant'
               AND json_extract(data, '\$.time.completed') IS NULL
               AND json_extract(data, '\$.error') IS NULL
               AND time_updated < (strftime('%s','now') - 1800) * 1000
-              AND json_extract(data, '\$.time.created') < $CUTOFF * 1000;
+              AND $GATE;
             SELECT changes();
           "); then
             TOTAL=$(( TOTAL + got ))
