@@ -16,21 +16,21 @@ let
   # devbox). Carries its own medium thinking effort from opencode.base.json's
   # google-vertex-anthropic model options, so no variant override is needed.
   vertexOpusModel = "google-vertex-anthropic/claude-opus-5@default";
-  geminiModel = "google-vertex/gemini-3.6-flash";
+  geminiModel = "google-vertex/gemini-3.7-flash";
   geminiVariant = "high";
-  gemini36FlashModel = {
-    id = "gemini-3.6-flash";
-    name = "Gemini 3.6 Flash";
+  gemini37FlashModel = {
+    id = "gemini-3.7-flash";
+    name = "Gemini 3.7 Flash";
     family = "gemini-flash";
-    release_date = "2026-05-19";
+    release_date = "2026-08-13";
     attachment = true;
     reasoning = true;
     temperature = true;
     tool_call = true;
     cost = {
-      input = 1.5;
-      output = 7.5;
-      cache_read = 0.15;
+      input = 0.75;
+      output = 3.75;
+      cache_read = 0.075;
     };
     limit = {
       context = 1048576;
@@ -45,7 +45,7 @@ let
   # Patch agent model pins so each host resolves to a model it can actually
   # reach. Two independent, order-independent rewrites:
   #
-  #   1. sonnet-5 -> Gemini 3.6 Flash on the Gemini-for-agents hosts (macOS +
+  #   1. sonnet-5 -> Gemini 3.7 Flash on the Gemini-for-agents hosts (macOS +
   #      cloudbox). These are the cheap plan-execution / research subagents;
   #      Gemini uses Gemini-native thinking levels, so add `variant: high`.
   #
@@ -364,7 +364,7 @@ let
   #   do not depend on the OpenAI API key.
   # - cloudbox defaults to Vertex Opus 5 (interactive primary model), while
   #   keeping compaction + the plan-execution subagents on cheap Gemini Flash.
-  # - macOS defaults to Vertex Gemini 3.6 Flash on high thinking.
+  # - macOS defaults to Vertex Gemini 3.7 Flash on high thinking.
   # - macOS + cloudbox get Atlassian MCP wiring.
   # OpenAI GPT-5.5 remains in opencode.base.json as a runtime fallback; its
   # provider options stay there because OpenCode defaults GPT-5.x to medium
@@ -409,7 +409,7 @@ let
       # isCloudbox-only), so any turn on google-vertex-anthropic/* or
       # google-vertex/* falls through to the stock @ai-sdk/google-vertex ADC path
       # and dies on the first turn with "Could not load the default credentials".
-      # The picker listed the Vertex "Claude Opus 5" (and "Gemini 3.6 Flash")
+      # The picker listed the Vertex "Claude Opus 5" (and "Gemini 3.7 Flash")
       # entries right next to the working first-party anthropic/google ones; a
       # mis-pick persisted into ~/.local/state/opencode/model.json poisoned every
       # subsequently-opened session (3 crashes 2026-06..07). Disabling removes the
@@ -418,14 +418,14 @@ let
       # the cloudbox branch below is a separate host, so there is no union/collision).
       disabled_providers = [ "google-vertex" "google-vertex-anthropic" ];
       # vision-qa (deployed below on devbox only) uses the direct
-      # Google Generative AI API here (google/gemini-3.6-flash,
+      # Google Generative AI API here (google/gemini-3.7-flash,
       # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY auth — no Vertex).
       # Inject the same cost/limit catalog entry used for the Vertex flavor
       # below so cost tracking (oc-cost/aigateway) stays accurate.
       provider = {
         google = (opencodeBase.provider.google or {}) // {
           models = ((opencodeBase.provider.google or {}).models or {}) // {
-            "gemini-3.6-flash" = gemini36FlashModel;
+            "gemini-3.7-flash" = gemini37FlashModel;
           };
         };
       } // lib.optionalAttrs isDevbox {
@@ -449,10 +449,10 @@ let
       # Default model differs by host:
       #   - cloudbox -> Vertex Opus 5 (interactive primary model). The plan-
       #     execution subagents + compaction stay on cheap Gemini Flash below.
-      #   - macOS    -> Gemini 3.6 Flash with high thinking (unchanged).
+      #   - macOS    -> Gemini 3.7 Flash with high thinking (unchanged).
       model = if isCloudbox then vertexOpusModel else geminiModel;
       agent = {
-        # Route the built-in `compaction` agent to Gemini 3.6 Flash. This is the
+        # Route the built-in `compaction` agent to Gemini 3.7 Flash. This is the
         # cheap fix for compaction cost on Opus-heavy sessions: Opus pays
         # ~$2.50 per compaction call AND writes 200-400k cache tokens that no
         # subsequent call ever reads (compaction is one-shot summarization),
@@ -478,7 +478,7 @@ let
       provider = (opencodeBase.provider or {}) // {
         "google-vertex" = (opencodeBase.provider."google-vertex" or {}) // {
           models = ((opencodeBase.provider."google-vertex" or {}).models or {}) // {
-            "gemini-3.6-flash" = gemini36FlashModel;
+            "gemini-3.7-flash" = gemini37FlashModel;
           };
         };
       } // lib.optionalAttrs isCloudbox {
@@ -553,7 +553,7 @@ in
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
    # vision-qa is API-key-only by design (no Vertex): its base pin is
-   # google/gemini-3.6-flash (Google Generative AI API, authed via
+   # google/gemini-3.7-flash (Google Generative AI API, authed via
    # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY from sops). Deploy it only
    # on the hosts where that auth path exists — devbox. macOS has
    # no Gemini API key (Vertex ADC only) and cloudbox deliberately disables
@@ -1406,11 +1406,11 @@ in
   # at the local Docker gateway, with the project baked into the path.
   # Otherwise: strip the overrides so opencode falls back to direct Vertex.
   #
-  # NOTE: Gemini (`google-vertex/gemini-3.6-flash`) is the GLOBAL DEFAULT
+  # NOTE: Gemini (`google-vertex/gemini-3.7-flash`) is the GLOBAL DEFAULT
   # model on cloudbox, so routing it through the gateway means every
   # session (interactive + opencode-serve/pigeon/Telegram) depends on the
   # gateway being up. The gateway parses Gemini `usageMetadata` and prices
-  # `gemini-3.6-flash`; unpriced Gemini models still ledger tokens (NULL
+  # `gemini-3.7-flash`; unpriced Gemini models still ledger tokens (NULL
   # dollars). Verified live 2026-06-05 — see investigation report
   # docs/investigations/2026-06-05-vertex-gemini-surge/aigateway-cost-fix.md.
   #

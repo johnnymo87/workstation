@@ -1,7 +1,7 @@
 ---
 description: Visual QA analyst — analyzes screenshots and UI renders, returns structured verdicts. No tools, just interpretation.
 mode: subagent
-model: google/gemini-3.6-flash
+model: google/gemini-3.7-flash
 variant: high
 permission:
   "*": deny
