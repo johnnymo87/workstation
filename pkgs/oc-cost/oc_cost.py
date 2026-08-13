@@ -18,7 +18,20 @@ from typing import Optional
 # wrongly tiers current-gen Vertex Claude). "tier" is optional; when present
 # it is a WHOLE-REQUEST long-context tier applied to all token categories once
 # context (input + cache.read + cache.write) >= threshold.
-RATES: dict[tuple[str, str], dict] = {
+#
+# A value may instead be a PHASE LIST: rate dicts each carrying a "from"
+# ISO date (inclusive), oldest first, for models whose published price changes
+# on a known date (e.g. the Gemini Flash introductory discount ending
+# 2027-01-01). Rows are priced against the day they were recorded, so a report
+# spanning the change prices each side correctly instead of applying today's
+# rate to last year's traffic.
+# Shared 3.6/3.7 Flash timeline (see the entries below for the source).
+GEMINI_FLASH_PHASES: list[dict] = [
+    {"from": "0001-01-01", "input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0},
+    {"from": "2027-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 0},
+]
+
+RATES: dict[tuple[str, str], object] = {
     # --- Anthropic Claude: FLAT across full context (Anthropic + Vertex + Bedrock,
     #     current gen). models.dev's >200K Vertex tier is a parsing artifact. ---
     ("anthropic", "claude-opus-4-7"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
@@ -54,9 +67,19 @@ RATES: dict[tuple[str, str], dict] = {
     ("google-vertex-anthropic", "claude-fable-5"):    {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5},
     # --- Google Gemini (Vertex) ---
     ("google-vertex", "gemini-3.5-flash"):  {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5},
-    ("google-vertex", "gemini-3.6-flash"):  {"input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 1.5},
-    # gemini-3.7-flash (released 2026-08-13): half the 3.6 list price.
-    ("google-vertex", "gemini-3.7-flash"):  {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.75},
+    # gemini-3.6-flash and gemini-3.7-flash (released 2026-08-13) are priced
+    # IDENTICALLY, and both carry Google's dated introductory discount:
+    #   through 2026-12-31: 0.75 / 3.75 / cache_read 0.075
+    #   from   2027-01-01 : 1.50 / 7.50 / cache_read 0.15
+    # Source: https://cloud.google.com/vertex-ai/generative-ai/pricing —
+    # "Gemini 3.7 Flash and Gemini 3.6 Flash are offered with introductory
+    # pricing of $0.75 / $3.75 per 1M tokens input / output through December
+    # 31, 2026." The 3.6 entry previously hardcoded the post-intro 1.50/7.50,
+    # which overstated every Gemini estimate by 2x. Gemini bills cache creation
+    # as separate storage and never reports per-request cache-write tokens, so
+    # cache_write is 0.
+    ("google-vertex", "gemini-3.6-flash"): GEMINI_FLASH_PHASES,
+    ("google-vertex", "gemini-3.7-flash"): GEMINI_FLASH_PHASES,
     # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
     # pricing (whole-request selection above 200K input tokens).
     ("google-vertex", "gemini-3.1-pro-preview"): {
@@ -71,31 +94,56 @@ RATES: dict[tuple[str, str], dict] = {
 }
 
 
-def rate_for(provider: Optional[str], model_id: Optional[str]) -> Optional[dict]:
+def _phase_for(entry: object, day: Optional[str]) -> dict:
+    """Resolve a rate-book value to the rate dict in force on `day` (an ISO
+    'YYYY-MM-DD' string, as produced by query_message_rows). A plain dict is
+    time-invariant and returned as-is. A phase list is scanned oldest-first for
+    the last phase whose "from" date is <= day; day=None means today."""
+    if isinstance(entry, dict):
+        return entry
+    phases: list[dict] = entry  # type: ignore[assignment]
+    on = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    chosen = phases[0]
+    for phase in phases:
+        if phase["from"] <= on:
+            chosen = phase
+    return chosen
+
+
+def rate_for(
+    provider: Optional[str], model_id: Optional[str], day: Optional[str] = None
+) -> Optional[dict]:
     """Look up a rate-book entry for (provider, model). Strips @suffix, tries
     exact match, then longest-prefix match on the model component within the
     same provider. Returns None if unknown or if either id is missing (a real
-    DB can contain assistant rows with a null providerID/modelID)."""
+    DB can contain assistant rows with a null providerID/modelID).
+
+    `day` selects among dated price phases (see GEMINI_FLASH_PHASES); it is
+    the day the request was recorded, NOT today, so historical rows keep the
+    price that was actually in force."""
     if not provider or not model_id:
         return None
     base = model_id.split("@", 1)[0]
     if (provider, base) in RATES:
-        return RATES[(provider, base)]
+        return _phase_for(RATES[(provider, base)], day)
     best: Optional[tuple[str, str]] = None
     for (prov, key) in RATES:
         if prov == provider and base.startswith(key):
             if best is None or len(key) > len(best[1]):
                 best = (prov, key)
-    return RATES[best] if best else None
+    return _phase_for(RATES[best], day) if best else None
 
 
 def cost_for_message(
-    provider: Optional[str], model_id: Optional[str], tokens: dict
+    provider: Optional[str], model_id: Optional[str], tokens: dict,
+    day: Optional[str] = None,
 ) -> tuple[Optional[float], str]:
     """Return (cost_usd, tier_label) for one request. tier_label is one of
     'base' | 'long_context' | 'unpriced'. cost is None when unpriced.
-    Whole-request tier selection: context = input + cache.read + cache.write."""
-    entry = rate_for(provider, model_id)
+    Whole-request tier selection: context = input + cache.read + cache.write.
+    `day` is the request's own ISO date, used to pick among dated price
+    phases (see rate_for); it defaults to today."""
+    entry = rate_for(provider, model_id, day)
     if entry is None:
         return None, "unpriced"
     inp = tokens.get("input", 0) or 0
@@ -350,10 +398,13 @@ def estimate(rows: list[dict]) -> dict:
             }
         }
 
-        cost_usd, tier_label = cost_for_message(provider, model, tokens)
+        # Price each row against the day it was recorded, not today, so a
+        # window spanning a dated price change prices both sides correctly.
+        day = row.get("day")
+        cost_usd, tier_label = cost_for_message(provider, model, tokens, day)
 
         if key not in by_model_map:
-            rate_entry = rate_for(provider, model)
+            rate_entry = rate_for(provider, model, day)
             priced = rate_entry is not None
 
             by_model_map[key] = {

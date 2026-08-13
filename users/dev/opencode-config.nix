@@ -27,6 +27,14 @@ let
     reasoning = true;
     temperature = true;
     tool_call = true;
+    # Google's INTRODUCTORY rate, in force through 2026-12-31. From
+    # 2027-01-01 the standard rate applies and these three numbers double
+    # (1.50 / 7.50 / 0.15). Unlike the aigateway PriceTable and oc-cost's
+    # rate book — both of which now select a rate phase by request date —
+    # opencode.json is a static catalog, so this one must be edited by hand
+    # when the discount lapses. It only feeds opencode's own cost display;
+    # the gateway ledger stays authoritative either way.
+    # Source: https://cloud.google.com/vertex-ai/generative-ai/pricing
     cost = {
       input = 0.75;
       output = 3.75;
