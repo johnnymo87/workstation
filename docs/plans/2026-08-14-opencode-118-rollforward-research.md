@@ -680,6 +680,78 @@ unsupported: THINKING_LEVEL_MINIMAL` for the small `agent=title` model on
 `google-vertex/gemini-3.7-flash`. It did not affect any main turn. Not a
 roll-forward regression; noted only so the next person does not re-debug it.
 
+## W3 RESULTS (2026-08-14, bead workstation-uslc) — GATE PASSED, release PR #43
+
+### Headline
+
+The tree `apply.sh` builds is **byte-identical to the tree W2's validated binary
+came from**, including file modes. W2's green therefore transfers to the release.
+Stack goes 28 -> 26 patches. PR: opencode-patched #43, branch `w3-release-1818`.
+
+### The equivalence gate, proven twice by independent methods
+
+W2 validated a binary built by a *manual* fail-fast apply. W3 cuts through
+`apply.sh`. `git apply` is atomic per patch, so a stale patch contributes **zero
+hunks silently** while the build still succeeds — the green transfers only
+through equivalence. Reference tree: `/tmp/w1r-stack-12410-IAHWcb` (survives;
+expires ~2026-08-24), both trees at upstream HEAD `31406ccc51`.
+
+| Method | Result |
+|---|---|
+| sha256 manifest, 6534 files | 0 content differences, 0 files only in the release tree |
+| `git diff HEAD --binary` diff-of-diffs | identical apart from index-line hash width; **covers modes/exec bits**, which the sha walk does not; untracked source lists identical |
+
+The 20 files present only in the validated tree are install/build/run artifacts:
+17 `.husky/_/` hooks (prepare-hook output), gitignored `.opencode/package*.json`
+(runtime plugin bootstrap, never read by `script/build.ts`), and a
+`tsbuildinfo`. Review confirmed `bun.lock` is sha-identical in both trees and no
+patch changes a dependency, so skipping it hid nothing.
+
+**The control that makes the null result mean something.** Rebuilding with
+`vim.patch` omitted yields exactly 3 content diffs + 8 missing files, which
+decomposes correctly against that patch's 11 touched files (3 modified, 8
+created). Without this, "0 differences" would have been indistinguishable from a
+broken comparison — the exact failure that produced two false greens in W2.
+
+### Bookkeeping decisions
+
+- **Tombstones, not renumbering.** Drops keep their number (the convention
+  already in use at #15, a `tui-follow-owner` tombstone). So header numbers are a
+  stable identity that does NOT track apply order — now stated explicitly at the
+  top of `apply.sh` instead of left to be inferred.
+- `globalbus-maxlisteners` had been applied since the v1.17 line with **no header
+  entry at all** (workstation-dqng); it takes 29. PR #42 also claims 29 and must
+  renumber to 30.
+- **26, not 27.** PR #42 (`db-isolation-guard`) is held out deliberately so the
+  equivalence check stays a literal equality. It lands in a follow-up build.
+- **bun pinned 1.3.14**, was `latest`. Upstream v1.18.18 declares exactly that in
+  `packageManager`, so this aligns CI with upstream rather than diverging.
+
+### What the adversarial review caught that the gate did not
+
+1. **Clone-by-tag was a silent wrong-artifact hole.** CI clones `--branch
+   v<version>` at dispatch time, and this upstream *rewrites history*. Every gate
+   was measured against `31406ccc51`; a moved tag would have built different
+   sources with nothing noticing. Fixed with a new optional `expected_sha` input
+   that fails loudly. **The dry run and the real run are separate clones — the
+   assertion must be read in both.**
+2. **The release could cut itself.** `sync-upstream` cron dispatches a REAL
+   publish from main 3x/day; open issue #41 is the only circuit breaker. Closing
+   it "to tidy up" hands the cut to an unattended cron. Order is fixed in the
+   `workstation-uslc` bead: merge -> dry run -> manual dispatch -> *then* close #41.
+3. **Release notes advertised a patch this PR deletes** ("six patches", retry cap
+   MAX_RETRIES=8; upstream caps at 5). Now points at `apply.sh` as authoritative
+   rather than re-rotting a hand-written list.
+
+### What W3 does NOT cover
+
+Source equivalence is not binary equivalence: CI cross-compiles arm64 on an x64
+runner with a real version stamp. `workstation-efkq` re-runs W2's killer test on
+the **published** asset before the pool is committed. And darwin/TUI remains
+genuinely untested until `workstation-5cot` — CI's macOS smoke is roughly
+`--version` and never touches the opentui 0.4.5 renderer or the rewritten
+tree-sitter worker. Both block W4.
+
 ## ROADMAP AND BEAD INDEX (read this first after a compaction)
 
 Execution chain: W1 -> W2 -> W3 -> W4 -> er3t closes.
@@ -690,7 +762,9 @@ just this table. `bd show <id>`.
 |---|---|---|---|
 | workstation-l60f | P1 | W1 stacked-build gate | **DONE — 0 regressions, see W1 RESULTS above** |
 | workstation-7duy | P1 | W2 DB-copy validation | **DONE — fix proven end-to-end, see W2 RESULTS above** |
-| workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release; apply.sh bookkeeping; DARWIN first exercised here | -- READY (W2 done) |
+| workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release | **equivalence gate PASSED; PR #43 open; release not yet dispatched** |
+| workstation-efkq | P1 | Re-run W2's killer test on the PUBLISHED binary | blocks W4 |
+| workstation-5cot | P1 | Manual TUI acceptance on the published darwin-arm64 zip | blocks W4 |
 | workstation-pel5 | P1 | W4 cloudbox cutover per the 2026-06-11 runbook | W3 |
 | workstation-er3t | P0 | the incident itself; closes when the 3 mute sessions answer | W4 |
 
