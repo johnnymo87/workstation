@@ -106,8 +106,20 @@ done
 #    Deliberately NOT keyed on `opencode serve`: pkgs/opencode-frontdoor's route-gate
 #    launches a serve with no OPENCODE_SERVE_ID / OPENCODE_ROUTING_DB, so it joins no
 #    pool, claims no registry slot, and is legitimately out of scope.
+#    A file that only SCRUBS the variable (`env -u OPENCODE_SERVE_EXPECTED_PORT`)
+#    is the opposite of a pool wrapper: it is making sure a throwaway process
+#    does NOT inherit a pool identity (pkgs/oc-throwaway-serve). Counting it as
+#    an undeclared wrapper would push us to either declare a non-wrapper -- which
+#    makes the manifest lie -- or to drop the scrub, which reintroduces the
+#    2026-07-25 slot-hijack hazard. So scrub-only occurrences are stripped before
+#    the match, and a file that both scrubs AND sets the variable is still found.
 echo "== serve PID fence: wrapper manifest =="
-found=$(grep -rl 'OPENCODE_SERVE_EXPECTED_PORT' --include='*.nix' . 2>/dev/null | sed 's|^\./||' | sort)
+found=$(
+  grep -rl 'OPENCODE_SERVE_EXPECTED_PORT' --include='*.nix' . 2>/dev/null \
+    | sed 's|^\./||' | sort | while read -r f; do
+        grep 'OPENCODE_SERVE_EXPECTED_PORT' "$f" | grep -qv -- '-u OPENCODE_SERVE_EXPECTED_PORT' && echo "$f"
+      done
+)
 declared=$(printf '%s\n' "${WRAPPERS[@]}" | sort)
 if [[ "$found" != "$declared" ]]; then
   bad "WRAPPERS is stale. Files exporting OPENCODE_SERVE_EXPECTED_PORT != the declared list."
