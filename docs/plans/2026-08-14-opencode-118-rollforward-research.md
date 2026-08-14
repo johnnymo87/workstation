@@ -431,3 +431,58 @@ globalbus-maxlisteners (bead workstation-qjk4); update the "TARGET UPSTREAM" lin
 Note `build-release.yml`'s Phase-8 step runs `test/util/route.test.ts`, so the
 future deletion of attach-route-resolve must edit that workflow too -- one more
 reason to keep that consolidation OUT of this bump.
+
+## ROADMAP AND BEAD INDEX (read this first after a compaction)
+
+Execution chain: W1 -> W2 -> W3 -> W4 -> er3t closes.
+Each W bead carries a SELF-CONTAINED note with its own traps; read the bead, not
+just this table. `bd show <id>`.
+
+| Bead | Pri | Step | Blocked by |
+|---|---|---|---|
+| workstation-l60f | P1 | W1 stacked-build gate (26 patches + 3 re-cuts, typecheck all pkgs, full suites, boot linux-arm64 binary) | -- READY |
+| workstation-7duy | P1 | W2 DB-copy validation: prompt a mute session on a COPY, prove the loop runs; pigeon plugin smoke | W1 |
+| workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release; apply.sh bookkeeping; DARWIN first exercised here | W2 |
+| workstation-pel5 | P1 | W4 cloudbox cutover per the 2026-06-11 runbook | W3 |
+| workstation-er3t | P0 | the incident itself; closes when the 3 mute sessions answer | W4 |
+
+Follow-ups (NOT blocking the cutover, do not do them during the bump):
+
+| Bead | Pri | What |
+|---|---|---|
+| workstation-vmm7 | P2 | Add a typecheck step to opencode-patched build-release.yml. CI has NEVER typechecked; that is why a type-broken patch shipped since 1.17. Do AFTER W3. |
+| workstation-dxuu | P2 | No host-level detector for "session accepts a prompt but never replies". Every existing net missed the incident BY CONSTRUCTION. Alert-only. |
+| workstation-zvki | P3 | Verify whether GET /api/session/:id/history is wired -- the unproven premise of event-log-gate. Not a roll-forward regression. |
+| workstation-6e3d | P3 | Two raw-ID-ordering consumers SURVIVE at v1.18.18: tui/routes/session/index.tsx:211 (children sort) and :659 (redo). Not mute-class. |
+| workstation-2fxs | P3 | id.ts is unchanged upstream -> the 48-bit wrap RECURS ~Oct 2028. Long fuse; nobody will remember. |
+| workstation-vcnz | P3 | Fold attach-route-resolve into tui-door-attach (route.ts has zero production consumers); must also edit build-release.yml Phase-8. |
+| workstation-dqng | P3 | apply.sh is missing header entry #15 for globalbus-maxlisteners (bead workstation-qjk4). |
+| pigeon-0k8m | P2 | (pigeon repo) post-ack verification tripwire; reason the incident was SILENT, not its cause. |
+
+### Facts that must not be re-derived (all verified by content, not inference)
+
+- Wrap boundary: 1786706395136 ms = 2026-08-14 07:19:55 EDT. Period 2^36 ms = 795.36 days.
+- Fix commit: db581e47a3 (#40990). PRESENT AT v1.18.18 BY CONTENT: `isAfter` exists,
+  `latest()` uses it, prompt.ts:1115 is `lastAssistant.parentID === lastUser.id`,
+  and ZERO occurrences of `lastUser.id < lastAssistant.id`.
+- `git tag --contains` IS UNRELIABLE on this repo (history rewritten; v1.17.9 and
+  v1.17.13 mutually diverge 14188/428 commits). Verify by content at the tag.
+- DB migrations between v1.17.13 and v1.18.18 are EMPTY (migration dir +
+  packages/schema zero diff; 0 new sqlite migrations in 713 commits).
+- The 3 mute sessions / regression fixtures: ses_00a083d40ffeDV54M31SzaOETO,
+  ses_01680e0d8ffegZb7b2WNsZTHAU, ses_02db91d4affeb6bkqSgQixN4zN.
+- Discriminator query for muteness is in the workstation-er3t bead description.
+- Upstream retry cap is 5 (stricter than our 8, which was a cap where upstream
+  had none). ACCEPTED -- do not re-litigate.
+- v1.18.18 is the right target, NOT the minimum v1.18.15: retry-cap only becomes
+  droppable at v1.18.17, so minimum-version means MORE patches.
+- opencode's real log is ~/.local/share/opencode/log/opencode.log, NOT journald.
+  pigeon-daemon uses LogNamespace=pigeon, so `journalctl --namespace=pigeon -u pigeon-daemon`.
+
+### Working conventions for the execution phase
+
+- Work in a worktree, never at the primary root. This branch: `idwrap-roadmap`.
+- Give every scratch worktree a $RANDOM/mktemp-suffixed path; parallel agents
+  previously collided on shared /tmp paths and one applied patches into another's tree.
+- These repos are shared with live sessions: no reset/stash/clean/checkout/rebase
+  at any primary root.
