@@ -626,6 +626,36 @@ Consequences for later steps:
 - **W2 must build its own binary or use `/tmp/w1r-stack-*/packages/opencode/dist/opencode-linux-arm64/bin/opencode`** (built 19:40, from the correct 26-patch tree). The earlier `/tmp/w1-stack2-*` binary is contaminated — do not use it.
 - Any `/tmp/w1-*` (single-r) tree may carry uncommitted regen output. Prefer the `/tmp/w1r-*` trees.
 
+### W1 artifact inventory (EXPIRES ~2026-08-24)
+
+Everything W1 built lives in `/tmp`, which systemd-tmpfiles cleans on a **10-day
+age rule** with a daily timer. After that date these are gone and W2/W3 must
+rebuild from the git branch.
+
+| Artifact | Path |
+|---|---|
+| **W1 binary** (use this one) | `/tmp/w1r-stack-12410-IAHWcb/packages/opencode/dist/opencode-linux-arm64/bin/opencode` — `0.0.0--202608141940` |
+| stacked tree (v1.18.18 + 26) | `/tmp/w1r-stack-12410-IAHWcb` |
+| baseline tree (v1.17.13 + 28) | `/tmp/w1r-base-589-s8dLH7` |
+| bun 1.3.14 (nix bun 1.3.3 cannot build) | `/tmp/bun-dl/bun-linux-aarch64/bun` |
+| re-cut patches | `/tmp/w1-patches` — also, durably, on branch `w1-1818-recuts` |
+
+**Do not use any `/tmp/w1-stack2-*` binary** — that is the contaminated
+24-patch build. The single-`r` `/tmp/w1-*` trees may also carry uncommitted
+regen output; prefer `/tmp/w1r-*`.
+
+The only durable artifact is the git branch. If `/tmp` has been swept: fresh
+worktree at v1.18.18, apply the 26 patches from `w1-1818-recuts`, then
+`bun run script/build.ts --single` with bun >= 1.3.14.
+
+### Note for W2: the DB is now 7.4 GB
+
+`~/.local/share/opencode/opencode.db` measured **7.4 GB** on 2026-08-14 — up
+from the 4.3 GB figure quoted in `event-log-gate`'s own DB-bloat rationale.
+Budget the space and the time for the online `.backup`. It is also a data point
+for `workstation-zvki` (whether the gate is doing what it claims); do NOT act on
+it during the bump.
+
 ### New beads from W1
 
 | Bead | Pri | What |
