@@ -539,6 +539,138 @@ test files. Second type error the stack has carried (see `createnext-readback`).
   fail-fast run in apply.sh order from pristine.
 - Every scratch tree used a `$RANDOM`/mktemp path (7 worktrees, no collisions).
 
+## W2 RESULTS (2026-08-14, bead workstation-7duy) — GATE PASSED, fix proven end-to-end
+
+### Headline
+
+**A session that had been mute for the entire incident answered, on the real
+production model, under the new binary — and the deployed v1.17.13 binary failed
+on that same session minutes earlier, on the same database, through the same
+endpoint.** That differential is the whole point of W2 and it is now evidence
+rather than argument.
+
+| Gate | v1.17.13 (deployed) | v1.18.18 + 26 patches |
+|---|---|---|
+| Mute session `ses_00a083d40ffe`, `prompt_async` | user row materialized, **0 assistant rows**; log `loop step=0` -> `exiting loop` in 16 ms | **assistant row**, `parentID` = new user msg; log `step=0` -> **`step=1`** -> exit |
+| Same, on `claude-opus-5@default` (the real model) | — | `finish=stop`, no error, `time.completed` set, text = `PONG` |
+| Fresh control session (proves the harness runs turns at all) | answers, `finish=stop` | answers, `finish=stop`, text `PONG` |
+| `?session_ids=` filtering, REAL session ids | — | scoped **6 watched / 0 unwatched**; unscoped control **6 / 6** |
+| pigeon plugin `/session-start` registration | — | received: `backend_kind=opencode-plugin-direct`, protocol v1, endpoint, pid, cwd |
+| swarm tool present | — | yes (session answered `YES`) |
+| `prompt_async` | 204 | 204 |
+
+The assertion was deliberately split, because "an assistant row exists" is NOT
+sufficient — `prompt.ts:1185` writes the assistant row **before** the LLM stream,
+so an errored or empty turn also produces one:
+
+- **A (wrap fix):** assistant row exists AND `parentID` == the new user message.
+- **B (turn healthy):** no `error`, `finish` set and != `tool-calls`,
+  `time.completed` set, non-empty text part.
+
+Both pass. A on the mute session under both models; B cleanly on the control and
+on the opus run of the mute session.
+
+### The isolation method in the runbook DOES NOT WORK, and it wrote to production
+
+This is the most important thing W2 learned, and it is now bead `workstation-dkcs`.
+
+The documented method (2026-06-11 runbook, inherited by this plan) is to point
+`XDG_DATA_HOME` at a copy of the live DB. On this host that is **silently
+insufficient**: `home.base.nix:1020` exports `OPENCODE_DB` globally, and
+`packages/core/src/database/database.ts` `path()` consults `Flag.OPENCODE_DB`
+**first**, returning it verbatim when absolute. The throwaway serve therefore
+opened the **live production database**.
+
+It was verified by measurement, not inference: `/proc/<pid>/fd` held handles only
+on `~/.local/share/opencode/opencode.db{,-wal,-shm}`, and the copy had no
+`-wal`/`-shm` and an mtime that never moved off the VACUUM time.
+
+Two live artifacts were created on the real session `ses_00a083d40ffe` (a model
+switch and a queued prompt, 4 rows total). All were removed and live was verified
+identical to the pre-test snapshot. It stayed cheap **only because that session
+was mute** — the turn never ran. Had it run, an opus turn with tool access would
+have executed a real backlog against a real project directory.
+
+Why it fooled the first two attempts: the **log path DOES honor
+`XDG_DATA_HOME`**, so a scratch logfile appeared exactly where expected and the
+isolation looked correct. Assertions against the copy then returned "0 assistant
+rows", which reads as a clean PASS — a false green, because the copy had never
+received the request.
+
+Note the asymmetry: `cli/cmd/serve.ts` **already guards** the analogous
+routing-slot hazard (`OPENCODE_SERVE_ID` + `OPENCODE_ROUTING_DB` inherited from a
+parent session), and that guard fired correctly during this same session and
+prevented a serve-0 hijack. The database hazard — the more dangerous of the two —
+has no guard at all.
+
+**Mandatory gate, adopted for every boot after the incident and held every time:**
+
+```bash
+OPENCODE_DB=<copy> ...   # explicit, not inherited
+ls -l /proc/<pid>/fd | grep -q '/home/dev/.local/share/opencode/opencode.db' && ABORT
+```
+
+### Three harness traps that each produced an uninterpretable result
+
+Each of these returned something that LOOKED like a clean answer:
+
+- **`/api/session/{id}/prompt` admits input but does not run a turn.** It queues
+  into `session_input`/`session_message` (`delivery` is only `steer`|`queue`) and
+  returns 200 with an `admittedSeq`. No loop, no turn. The route that actually
+  runs a turn — and the one pigeon uses in production, so the right one for this
+  incident — is the un-prefixed **`POST /session/{id}/prompt_async`**.
+- **No control = no interpretation.** With the queueing endpoint, the mute
+  session produced no assistant row and that was recorded as "muteness
+  reproduced". It was not: a **fresh session on the same binary and DB also
+  produced nothing**, so the null was the harness, not the bug. The control is
+  what converted a null result into a real one. Run it BEFORE trusting any
+  negative.
+- **`PATCH /api/session/{id}` returns 200 `text/html`** from the static asset
+  handler (the real route is `PATCH /session/{id}`, un-prefixed). Three "200 OK"
+  responses changed nothing, and the SSE assertion that depended on them came
+  back empty on both the scoped AND unscoped streams — which first looked like
+  the `session_ids` filter was broken. It is not. Bead `workstation-s4lz`.
+
+### Method notes worth keeping
+
+- **`VACUUM INTO`, not the backup API, for the snapshot.** The sqlite backup API
+  restarts when the source is written, and this DB has ~15 concurrent writers, so
+  a naive `.backup` can spin indefinitely. `VACUUM INTO` takes a read-transaction
+  snapshot immune to concurrent writes: 7.43 GB in 52 s, `integrity_check ok`.
+- **Isolation needs FOUR env vars, not one:** `OPENCODE_DB` (the DB),
+  `XDG_DATA_HOME` (logs/snapshots), `XDG_CONFIG_HOME` (config+plugins), and
+  `OPENCODE_SESSION_STATE_DIR` (`session-state.js` hardcodes
+  `~/.local/share/opencode/session-state.d` off `homedir()`, ignoring XDG).
+  Plus scrubbing `OPENCODE_SERVE_ID`/`OPENCODE_ROUTING_DB`.
+- **The scratch config must be at `$XDG_CONFIG_HOME/opencode/opencode.json`**,
+  not `$XDG_CONFIG_HOME/opencode.json`. Written to the wrong path it is silently
+  ignored — which meant the deny-all tool permissions were NOT in effect for the
+  first runs. Confirm by the `message=loading path=...` lines in the serve log.
+- **The resumed agent does try to execute the backlog.** On the mute session the
+  model ignored "do not act on prior instructions", called tools, and blocked on
+  an `external_directory` permission **ask** for a real project path (headless =
+  blocks forever). Deny-all containment is not optional, and the deny list must
+  include `external_directory` and the read tools, not just bash/edit/write.
+- `auth.json`/`account.json` live under `XDG_DATA_HOME`, so an isolated data dir
+  has NO credentials unless copied. The `github-copilot` entry was stripped from
+  the copy: it is an oauth entry with a refresh token, and a refresh in the
+  throwaway would invalidate the live credential.
+- Vertex ADC resolves via `HOME`, not `XDG_CONFIG_HOME`, so it survives isolation.
+
+### What W2 does NOT cover
+
+The W1 blind spots it was meant to cover, it covers only partly. Exercised for
+real: the prompt/turn loop, provider auth, `session_ids` SSE filtering, the
+plugin surface incl. pigeon registration, tool-permission evaluation, snapshot
+tracking. **Still unexercised:** PTY, the TUI itself (W3's darwin check is the
+first real exercise), Vertex REP endpoints, and the SessionV2 durable-replay
+cluster beyond the queueing path incidentally touched here.
+
+One observation deliberately not chased: a `stream error ... Thinking level is
+unsupported: THINKING_LEVEL_MINIMAL` for the small `agent=title` model on
+`google-vertex/gemini-3.7-flash`. It did not affect any main turn. Not a
+roll-forward regression; noted only so the next person does not re-debug it.
+
 ## ROADMAP AND BEAD INDEX (read this first after a compaction)
 
 Execution chain: W1 -> W2 -> W3 -> W4 -> er3t closes.
@@ -548,8 +680,8 @@ just this table. `bd show <id>`.
 | Bead | Pri | Step | Blocked by |
 |---|---|---|---|
 | workstation-l60f | P1 | W1 stacked-build gate | **DONE — 0 regressions, see W1 RESULTS above** |
-| workstation-7duy | P1 | W2 DB-copy validation: prompt a mute session on a COPY, prove the loop runs; pigeon plugin smoke | -- READY (W1 done) |
-| workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release; apply.sh bookkeeping; DARWIN first exercised here | W2 |
+| workstation-7duy | P1 | W2 DB-copy validation | **DONE — fix proven end-to-end, see W2 RESULTS above** |
+| workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release; apply.sh bookkeeping; DARWIN first exercised here | -- READY (W2 done) |
 | workstation-pel5 | P1 | W4 cloudbox cutover per the 2026-06-11 runbook | W3 |
 | workstation-er3t | P0 | the incident itself; closes when the 3 mute sessions answer | W4 |
 
@@ -564,6 +696,8 @@ Follow-ups (NOT blocking the cutover, do not do them during the bump):
 | workstation-2fxs | P3 | id.ts is unchanged upstream -> the 48-bit wrap RECURS ~Oct 2028. Long fuse; nobody will remember. |
 | workstation-vcnz | P3 | Fold attach-route-resolve into tui-door-attach (route.ts has zero production consumers); must also edit build-release.yml Phase-8. |
 | workstation-dqng | P3 | apply.sh is missing header entry #15 for globalbus-maxlisteners (bead workstation-qjk4). |
+| workstation-dkcs | P1 | **OPENCODE_DB silently defeats XDG_DATA_HOME isolation — a throwaway serve writes to the PRODUCTION db. Hit for real in W2. Fix in flight in worktree `opencode-db-guard`. The 2026-06-11 runbook's isolation method is WRONG and is being followed.** |
+| workstation-s4lz | P3 | `PATCH /api/session/{id}` returns 200 text/html from the static handler instead of 404/405, silently swallowing API calls. Not a bump regression. |
 | pigeon-0k8m | P2 | (pigeon repo) post-ack verification tripwire; reason the incident was SILENT, not its cause. |
 
 ### Facts that must not be re-derived (all verified by content, not inference)
