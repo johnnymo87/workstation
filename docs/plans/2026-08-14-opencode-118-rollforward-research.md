@@ -743,14 +743,27 @@ broken comparison — the exact failure that produced two false greens in W2.
    MAX_RETRIES=8; upstream caps at 5). Now points at `apply.sh` as authoritative
    rather than re-rotting a hand-written list.
 
+### Release cut: DONE
+
+`v1.18.18-patched` is published (run 31850297000 from main, PR #43 merged as
+4d374af). The upstream-sha assertion was read as OUTPUT in **both** the dry run
+and the real run — they are separate clones, so one reading does not cover the
+other. 26/26 patches applied in each. Darwin arm64 is ad-hoc codesigned
+(`Signature=adhoc`), launches, prints 1.18.18, no SIGKILL. Issue #41 was closed
+**after** the manual dispatch, so the `sync-upstream` cron never got the chance
+to publish unattended. darwin-x64's smoke skipped ("Rosetta unavailable") — that
+platform ships unexercised, accepted.
+
 ### What W3 does NOT cover
 
 Source equivalence is not binary equivalence: CI cross-compiles arm64 on an x64
 runner with a real version stamp. `workstation-efkq` re-runs W2's killer test on
-the **published** asset before the pool is committed. And darwin/TUI remains
-genuinely untested until `workstation-5cot` — CI's macOS smoke is roughly
-`--version` and never touches the opentui 0.4.5 renderer or the rewritten
-tree-sitter worker. Both block W4.
+the **published** asset before the pool is committed. Darwin/TUI remains genuinely untested at runtime
+(`workstation-5cot`), but that is now **deferred by decision and no longer
+blocks W4**: the cloudbox pool is headless, so no serve constructs a TUI and
+none of the opentui 0.4.5 renderer, tree-sitter worker, or vim re-cut is on the
+cutover's path. The risk lands on the next *Mac rebuild* instead, after W4 moves
+`opencodePatchedHold` to 1.18.18. Only `workstation-efkq` blocks W4.
 
 ## ROADMAP AND BEAD INDEX (read this first after a compaction)
 
@@ -764,7 +777,7 @@ just this table. `bd show <id>`.
 | workstation-7duy | P1 | W2 DB-copy validation | **DONE — fix proven end-to-end, see W2 RESULTS above** |
 | workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release | **equivalence gate PASSED; PR #43 open; release not yet dispatched** |
 | workstation-efkq | P1 | Re-run W2's killer test on the PUBLISHED binary | blocks W4 |
-| workstation-5cot | P1 | Manual TUI acceptance on the published darwin-arm64 zip | blocks W4 |
+| workstation-5cot | P1 | Manual TUI acceptance on the published darwin-arm64 zip | **DEFERRED by decision — no longer blocks W4; do before the next Mac rebuild** |
 | workstation-pel5 | P1 | W4 cloudbox cutover per the 2026-06-11 runbook | W3 |
 | workstation-er3t | P0 | the incident itself; closes when the 3 mute sessions answer | W4 |
 
