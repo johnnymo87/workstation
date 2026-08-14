@@ -432,6 +432,90 @@ Note `build-release.yml`'s Phase-8 step runs `test/util/route.test.ts`, so the
 future deletion of attach-route-resolve must edit that workflow too -- one more
 reason to keep that consolidation OUT of this bump.
 
+## W1 RESULTS (2026-08-14, bead workstation-l60f) — GATE PASSED, 0 REGRESSIONS
+
+Deliverable branch: `opencode-patched` @ `w1-1818-recuts` (commit a789f4f), pushed.
+Re-cut patches live there; `apply.sh` bookkeeping deliberately left to W3.
+
+### Headline
+
+v1.18.18 + our 26 kept patches introduces **ZERO test regressions** against the
+true production baseline (v1.17.13 + all 28 shipped patches), measured under
+**bun 1.3.14 — the version CI actually uses**.
+
+The right comparator is patched-vs-patched, not patched-vs-pristine. Upstream
+v1.18.18 has 19 failures of its own in `packages/opencode` in this sandbox, and
+the patch stack has more still; only the DELTA between the two patched trees is
+evidence about the roll-forward.
+
+| Gate | Result |
+|---|---|
+| 26 patches, apply.sh order, plain `git apply`, fail-fast | ALL CLEAN |
+| Typecheck (8 packages) | PASS — opencode, core, schema, tui, sdk/js, llm, plugin, protocol |
+| `packages/opencode` full suite | 3340 tests; delta vs baseline = **0** |
+| `packages/tui` full suite | 291 pass / 0 fail |
+| `packages/llm` full suite | 299 pass / 0 fail |
+| `packages/core` full suite | 0 introduced; **1 pre-existing failure FIXED** |
+| SDK regen | +533 lines — but IDENTICAL at baseline (see below) |
+| linux-arm64 build + boot | builds; `--version`, `--help`, `serve` + `/global/health` + live SSE all OK |
+
+### A FOURTH patch needed re-cutting, and only typecheck found it
+
+The research pass predicted three re-cuts. There were **four**.
+`event-log-gate` no longer compiled: upstream v1.18 moved the durable sequence
+from `event.seq` to `event.durable.seq`, so the patch's own test broke. It
+`git apply`s perfectly and its runtime behavior is unchanged — `committed` still
+populates `durable` regardless of the flag, only the `EventTable` insert and its
+dup-check SELECT are gated. Nothing short of `tsgo` across every package would
+have caught it, and CI has no typecheck step. This is the second type error the
+stack has carried (see `createnext-readback`), and it retroactively justifies
+the whole gate.
+
+`packages/llm` was NOT in the bead's typecheck list but IS patched by
+`gemini-empty-parts`. The correct list is eight packages.
+
+### Three "failures" that are not failures — each needed a baseline to see
+
+- **`?session_ids=` 400 (4 red tests).** Looked at first like a live production
+  outage of the pool's per-session SSE. It is not. The real built binary returns
+  **200 and streams** for every variant tried; only the *test harness* 400s, and
+  only once `session-door-routes` DECLARES the field. Bead `workstation-64da`.
+- **SDK regen is not empty (+533).** Pristine upstream regen IS empty, so it is
+  ours — but the baseline produces the identical +533, so it is pre-existing.
+  The research's "assert an empty diff" criterion is simply wrong for a patched
+  tree; the correct gate is PARITY with the previous release. Bead `workstation-n2o8`.
+- **The lease-deadline test.** Appeared as the single regression of the entire
+  gate on one run, then did not reproduce on a second run of the same tree, and
+  passes at file level in both trees. Load/order-dependent timing. Bead
+  `workstation-ibw0`. A one-shot suite run is not evidence for a deadline test.
+
+### Traps from the research pass, resolved
+
+- **cacheControl (trap #2): RESOLVED, patch is LIVE.** Upstream's
+  `usesAnthropicAutomaticCaching` gate only fires when `options.cacheControl` is
+  set. Across `packages/opencode/src`, `packages/core/src` and `packages/llm/src`
+  the ONLY occurrence of `options.cacheControl` is the gate's own test — nothing
+  ever sets it. So `applyCaching` still runs for our traffic and
+  `cache-thinking-skip` is not bypassed. 411 transform tests pass.
+- **vim under @opentui 0.4.5: compiles AND passes.** tui typecheck clean, 291/291.
+  The semantic cursor fix is in the re-cut.
+- **`event-log-gate` premise: CONTRADICTED.** Applying it alone to pristine
+  v1.18.18 turns 15 core tests red — SessionV2 replay/projection, migration
+  restart, durable progress all read the log. Parity with production, so not a
+  blocker, but the rationale needs re-weighing. Evidence in bead `workstation-zvki`.
+
+### Method notes worth keeping
+
+- **Build requires bun ^1.3.14; the nix bun is 1.3.3.** `script/build.ts`
+  hard-refuses. Worse, `bun test` still RUNS on 1.3.3, so results can quietly be
+  produced on the wrong bun — the failure count moved (25 -> 19/20) when W1
+  re-ran everything on 1.3.14. Bead `workstation-2srm`.
+- `git apply` is atomic per patch, so a patch whose LAST hunk is stale
+  contributes NO hunks. An early diagnostic run that continues past failures
+  therefore produces a tree that is not the real stack; the gate must be a
+  fail-fast run in apply.sh order from pristine.
+- Every scratch tree used a `$RANDOM`/mktemp path (7 worktrees, no collisions).
+
 ## ROADMAP AND BEAD INDEX (read this first after a compaction)
 
 Execution chain: W1 -> W2 -> W3 -> W4 -> er3t closes.
@@ -440,8 +524,8 @@ just this table. `bd show <id>`.
 
 | Bead | Pri | Step | Blocked by |
 |---|---|---|---|
-| workstation-l60f | P1 | W1 stacked-build gate (26 patches + 3 re-cuts, typecheck all pkgs, full suites, boot linux-arm64 binary) | -- READY |
-| workstation-7duy | P1 | W2 DB-copy validation: prompt a mute session on a COPY, prove the loop runs; pigeon plugin smoke | W1 |
+| workstation-l60f | P1 | W1 stacked-build gate | **DONE — 0 regressions, see W1 RESULTS above** |
+| workstation-7duy | P1 | W2 DB-copy validation: prompt a mute session on a COPY, prove the loop runs; pigeon plugin smoke | -- READY (W1 done) |
 | workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release; apply.sh bookkeeping; DARWIN first exercised here | W2 |
 | workstation-pel5 | P1 | W4 cloudbox cutover per the 2026-06-11 runbook | W3 |
 | workstation-er3t | P0 | the incident itself; closes when the 3 mute sessions answer | W4 |
@@ -486,3 +570,12 @@ Follow-ups (NOT blocking the cutover, do not do them during the bump):
   previously collided on shared /tmp paths and one applied patches into another's tree.
 - These repos are shared with live sessions: no reset/stash/clean/checkout/rebase
   at any primary root.
+
+### New beads from W1
+
+| Bead | Pri | What |
+|---|---|---|
+| workstation-64da | P2 | `?session_ids=` 400s in the TEST HARNESS only; the real binary returns 200. 4 permanently-red tests, feature actually works. |
+| workstation-n2o8 | P2 | Patched SDK gen is incomplete (+533 on regen): our own SessionMcp*/SessionQuestion*/session_ids routes are unreachable via the generated client. |
+| workstation-2srm | P3 | nix bun 1.3.3 < required ^1.3.14; build refuses, and tests silently run on the wrong bun. |
+| workstation-ibw0 | P3 | lease-deadline test is load/order-flaky in the full suite. |
