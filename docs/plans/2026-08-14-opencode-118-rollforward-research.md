@@ -850,6 +850,15 @@ Acted on during W2:
 
 ### What must still gate W3
 
+0. **26 PATCHES OR 27?** opencode-patched PR #42 (`db-isolation-guard`, the fix
+   for the footgun W2 hit) adds a 27th patch and its own `apply.sh` bookkeeping,
+   branched off `main` — while `w1-1818-recuts` also edits `patches/`. Two
+   divergent `apply.sh` edits must be reconciled by hand. Shipping 26 keeps the
+   released tree equal to the tree W2 actually proved; shipping 27 puts an
+   unexercised patch in the cutover artifact and weakens gate 1 below.
+   Recommendation: ship 26, land the guard in a follow-up build. **Ask before
+   deciding.** Detail in bead `workstation-uslc`.
+
 1. **ARTIFACT EQUIVALENCE — the only finding that can invalidate W2's GREEN.**
    W2 validated the binary W1 built by a manual fail-fast apply of
    `w1-1818-recuts`. W3 cuts the release through `apply.sh`, whose bookkeeping
