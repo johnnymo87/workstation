@@ -698,6 +698,7 @@ Follow-ups (NOT blocking the cutover, do not do them during the bump):
 
 | Bead | Pri | What |
 |---|---|---|
+| workstation-266p | P2 | **40 tests are RED AT BASELINE (19 opencode + 21 core), so W1's "0 regressions" is blind over Server.listen, PTY, llm.stream payloads, Vertex REP, event scoping, CLI help, SessionV2 replay.** Umbrella for triaging them; blocked by vmm7. Do AFTER W4. |
 | workstation-vmm7 | P2 | Add a typecheck step to opencode-patched build-release.yml. CI has NEVER typechecked; that is why a type-broken patch shipped since 1.17. Do AFTER W3. |
 | workstation-dxuu | P2 | No host-level detector for "session accepts a prompt but never replies". Every existing net missed the incident BY CONSTRUCTION. Alert-only. |
 | workstation-zvki | P3 | Verify whether GET /api/session/:id/history is wired -- the unproven premise of event-log-gate. Not a roll-forward regression. |
@@ -856,8 +857,11 @@ Acted on during W2:
    divergent `apply.sh` edits must be reconciled by hand. Shipping 26 keeps the
    released tree equal to the tree W2 actually proved; shipping 27 puts an
    unexercised patch in the cutover artifact and weakens gate 1 below.
-   Recommendation: ship 26, land the guard in a follow-up build. **Ask before
-   deciding.** Detail in bead `workstation-uslc`.
+   **DECIDED 2026-08-14 (Jonathan): ship 26.** Hold PR #42 for a follow-up
+   build so the equivalence check below stays a literal equality. Also decided:
+   **pin CI's bun to 1.3.14** (the version W1 validated) rather than `latest`.
+   Note the branches do not actually conflict today — `w1-1818-recuts` never
+   touches `apply.sh`, so this is only a choice of base, not a merge.
 
 1. **ARTIFACT EQUIVALENCE — the only finding that can invalidate W2's GREEN.**
    W2 validated the binary W1 built by a manual fail-fast apply of
