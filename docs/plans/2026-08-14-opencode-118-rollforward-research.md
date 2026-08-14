@@ -439,9 +439,17 @@ Re-cut patches live there; `apply.sh` bookkeeping deliberately left to W3.
 
 ### Headline
 
-v1.18.18 + our 26 kept patches introduces **ZERO test regressions** against the
-true production baseline (v1.17.13 + all 28 shipped patches), measured under
-**bun 1.3.14 — the version CI actually uses**.
+v1.18.18 + our 26 kept patches introduces **zero test regressions among tests
+that are green at baseline**, against the true production baseline (v1.17.13 +
+all 28 shipped patches), measured under **bun 1.3.14**.
+
+Read that qualifier literally. 19 `packages/opencode` tests and 21
+`packages/core` tests are red on BOTH trees, so the delta is blind over
+everything they cover: `Server.listen` (7), PTY (3), `session.llm.stream`
+payload composition (3), Vertex REP endpoints (3), event session-scoping (4),
+CLI help-text, and the SessionV2 durable-replay cluster. A 1.18 change that
+broke any of those would also produce a zero delta. W2's runtime gates are the
+mitigation and must stay mandatory; "0 regressions" does not soften them.
 
 The right comparator is patched-vs-patched, not patched-vs-pristine. Upstream
 v1.18.18 has 19 failures of its own in `packages/opencode` in this sandbox, and
@@ -462,14 +470,20 @@ evidence about the roll-forward.
 ### A FOURTH patch needed re-cutting, and only typecheck found it
 
 The research pass predicted three re-cuts. There were **four**.
-`event-log-gate` no longer compiled: upstream v1.18 moved the durable sequence
-from `event.seq` to `event.durable.seq`, so the patch's own test broke. It
-`git apply`s perfectly and its runtime behavior is unchanged — `committed` still
-populates `durable` regardless of the flag, only the `EventTable` insert and its
-dup-check SELECT are gated. Nothing short of `tsgo` across every package would
-have caught it, and CI has no typecheck step. This is the second type error the
-stack has carried (see `createnext-readback`), and it retroactively justifies
-the whole gate.
+`event-log-gate` did not compile against v1.18.18.
+
+An earlier draft of this section said upstream had moved the durable sequence
+from `event.seq` to `event.durable.seq`. **That was wrong** (caught in
+adversarial review). `packages/core/src/event.ts` is the IDENTICAL BLOB at both
+tags (`c92ac0ac2c`), and `packages/schema/src/event.ts` has zero top-level `seq`
+at either tag. Nothing moved: `expect(event.seq).toBe(0)` was wrong when it was
+written and never compiled against either tag.
+
+The real finding is worse for CI than a rebase would have been: this patch's own
+regression test has been RED in the shipped stack the whole time — it fails in
+the v1.17.13 production baseline too — and nothing noticed, because
+`build-release.yml` runs neither a typecheck nor the full core suite, only named
+test files. Second type error the stack has carried (see `createnext-readback`).
 
 `packages/llm` was NOT in the bead's typecheck list but IS patched by
 `gemini-empty-parts`. The correct list is eight packages.
@@ -477,26 +491,35 @@ the whole gate.
 ### Three "failures" that are not failures — each needed a baseline to see
 
 - **`?session_ids=` 400 (4 red tests).** Looked at first like a live production
-  outage of the pool's per-session SSE. It is not. The real built binary returns
-  **200 and streams** for every variant tried; only the *test harness* 400s, and
-  only once `session-door-routes` DECLARES the field. Bead `workstation-64da`.
+  outage of the pool's per-session SSE. It is not. Connectivity was not enough
+  evidence, so filtering was proved directly against the built binary: two
+  sessions A and B in one directory, a subscriber scoped to `?session_ids=A` and
+  an unscoped control, three title updates each. **Scoped stream: 3 A events, 0
+  B events. Unscoped control: 3 and 3.** Positive and negative both hold, so the
+  feature is correct end-to-end and the tests are the thing that is wrong. Only
+  the *test harness* 400s, and only once `session-door-routes` DECLARES the
+  field. The harness mechanism is still un-root-caused. Bead `workstation-64da`.
 - **SDK regen is not empty (+533).** Pristine upstream regen IS empty, so it is
   ours — but the baseline produces the identical +533, so it is pre-existing.
   The research's "assert an empty diff" criterion is simply wrong for a patched
   tree; the correct gate is PARITY with the previous release. Bead `workstation-n2o8`.
 - **The lease-deadline test.** Appeared as the single regression of the entire
-  gate on one run, then did not reproduce on a second run of the same tree, and
-  passes at file level in both trees. Load/order-dependent timing. Bead
-  `workstation-ibw0`. A one-shot suite run is not evidence for a deadline test.
+  gate on one run, then did not reproduce on two later stacked full-suite runs
+  (1 failure in 3), and passes at file level in both trees. Load/order-dependent
+  timing. Bead `workstation-ibw0`. A one-shot suite run is not evidence for a
+  deadline test — and neither is a two-shot one, which is why the clean re-run
+  below matters.
 
 ### Traps from the research pass, resolved
 
-- **cacheControl (trap #2): RESOLVED, patch is LIVE.** Upstream's
+- **cacheControl (trap #2): no setter found in source; patch is LIVE.** Upstream's
   `usesAnthropicAutomaticCaching` gate only fires when `options.cacheControl` is
   set. Across `packages/opencode/src`, `packages/core/src` and `packages/llm/src`
-  the ONLY occurrence of `options.cacheControl` is the gate's own test — nothing
-  ever sets it. So `applyCaching` still runs for our traffic and
-  `cache-thinking-skip` is not bypassed. 411 transform tests pass.
+  the ONLY occurrence of `options.cacheControl` is the gate's own check — nothing
+  in source ever sets it. So `applyCaching` still runs for our traffic and
+  `cache-thinking-skip` is not bypassed. 411 transform tests pass. Residual,
+  accepted: model options also arrive from the models.dev catalog and from
+  user/provider config, which were NOT audited.
 - **vim under @opentui 0.4.5: compiles AND passes.** tui typecheck clean, 291/291.
   The semantic cursor fix is in the re-cut.
 - **`event-log-gate` premise: CONTRADICTED.** Applying it alone to pristine
@@ -570,6 +593,38 @@ Follow-ups (NOT blocking the cutover, do not do them during the bump):
   previously collided on shared /tmp paths and one applied patches into another's tree.
 - These repos are shared with live sessions: no reset/stash/clean/checkout/rebase
   at any primary root.
+
+### The gate had to be run TWICE: `git checkout` silently un-applied two patches
+
+Adversarial review (`adversarial-reviewer-fable`) found that the first pass was
+measured on a tree that was **no longer the 26-patch stack**.
+
+`session-door-routes` and `session-mcp-routes` both patch
+`packages/sdk/js/src/v2/gen/{sdk.gen.ts,types.gen.ts}`. The SDK-regen gate
+overwrote those files, and the cleanup — `git checkout -- packages/sdk/js/src/v2/gen`
+— restored them to **HEAD, i.e. pristine v1.18.18**, silently discarding the two
+patches' hunks along with the regen output. Everything measured after that point
+(the built binary, both full-suite runs) came from an effectively 24-patch tree
+whose bundled TUI was missing the client half of both patches.
+
+Verified after the fact: `grep -c SessionMcpConnect .../types.gen.ts` returned
+**0** in that tree.
+
+This is the same failure class this repo already warns about for shared
+worktrees — a destructive git op removing more than intended — and it landed
+anyway, because "throwaway worktree, safe from other sessions" was confused with
+"safe for my own result". Isolation protects your PEERS; it does nothing for
+CORRECTNESS.
+
+**The whole gate was re-run from scratch** in two fresh trees with no regen ever
+executed inside them (`/tmp/w1r-stack-*`, `/tmp/w1r-base-*`), gen hunks verified
+present on both sides before and after. Every number in the table above is from
+that clean re-run. The SDK-regen check now belongs in a disposable copy, never
+in the tree under test.
+
+Consequences for later steps:
+- **W2 must build its own binary or use `/tmp/w1r-stack-*/packages/opencode/dist/opencode-linux-arm64/bin/opencode`** (built 19:40, from the correct 26-patch tree). The earlier `/tmp/w1-stack2-*` binary is contaminated — do not use it.
+- Any `/tmp/w1-*` (single-r) tree may carry uncommitted regen output. Prefer the `/tmp/w1r-*` trees.
 
 ### New beads from W1
 
