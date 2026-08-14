@@ -539,7 +539,14 @@ test files. Second type error the stack has carried (see `createnext-readback`).
   fail-fast run in apply.sh order from pristine.
 - Every scratch tree used a `$RANDOM`/mktemp path (7 worktrees, no collisions).
 
-## W2 RESULTS (2026-08-14, bead workstation-7duy) — GATE PASSED, fix proven end-to-end
+## W2 RESULTS (2026-08-14, bead workstation-7duy) — GATE PASSED
+
+**Scope of the claim, stated precisely** (the first draft said "fix proven
+end-to-end", which over-claims): the wrap-fix mechanism is proven on production
+data, on **all 3** mute sessions, under a sandboxed config, with a recording-stub
+pigeon daemon. TUI, PTY, Vertex REP and the SessionV2 replay cluster remain
+untested. **The tested artifact is W1's hand-applied tree, NOT the release W3
+will cut** — see "What must still gate W3".
 
 ### Headline
 
@@ -551,8 +558,10 @@ rather than argument.
 
 | Gate | v1.17.13 (deployed) | v1.18.18 + 26 patches |
 |---|---|---|
-| Mute session `ses_00a083d40ffe`, `prompt_async` | user row materialized, **0 assistant rows**; log `loop step=0` -> `exiting loop` in 16 ms | **assistant row**, `parentID` = new user msg; log `step=0` -> **`step=1`** -> exit |
+| **All 3** mute sessions, `prompt_async` (`00a083d4`, `01680e0d`, `02db91d4`) | user row materialized, **0 assistant rows**; log `loop step=0` -> `exiting loop` in 16 ms | **assistant row**, `parentID` = new user msg; log `step=0` -> **`step=1`** -> exit |
 | Same, on `claude-opus-5@default` (the real model) | — | `finish=stop`, no error, `time.completed` set, text = `PONG` |
+| Other two mute sessions (gemini-flash) | — | both `finish=stop`, no error, completed, text `PONG`, `parentID` correct |
+| Daemon->opencode endpoints (pigeon's `opencode-client.ts`) | — | `GET /session/{id}` 200 with **both** `id`+`directory`; `/session` 200; `/abort` 200; `/message` 200; nonexistent session **404** (the daemon's "deleted" signal) |
 | Fresh control session (proves the harness runs turns at all) | answers, `finish=stop` | answers, `finish=stop`, text `PONG` |
 | `?session_ids=` filtering, REAL session ids | — | scoped **6 watched / 0 unwatched**; unscoped control **6 / 6** |
 | pigeon plugin `/session-start` registration | — | received: `backend_kind=opencode-plugin-direct`, protocol v1, endpoint, pid, cwd |
@@ -798,3 +807,61 @@ it during the bump.
 | workstation-n2o8 | P2 | Patched SDK gen is incomplete (+533 on regen): our own SessionMcp*/SessionQuestion*/session_ids routes are unreachable via the generated client. |
 | workstation-2srm | P3 | nix bun 1.3.3 < required ^1.3.14; build refuses, and tests silently run on the wrong bun. |
 | workstation-ibw0 | P3 | lease-deadline test is load/order-flaky in the full suite. |
+
+### W2 addendum: adversarial review findings (adversarial-reviewer-fable)
+
+The review confirmed the differential is sound at source level — both broken
+paths are present at baseline (`prompt.ts:1148` raw-ID exit AND `message-v2.ts`
+`latest()` picking `lastUser` by max ID) and both are gone in the tested tree —
+and confirmed that running the two arms **sequentially on one copy is not a
+confound but an improvement**: arm 1 leaves an orphan user row, which makes arm
+2's input state *more* production-like (live mute sessions hold 18 such rows),
+and Assert A pins `parentID` to arm 2's own new user message, so arm 2 cannot
+have been answering arm 1's leftover.
+
+Acted on during W2:
+
+- **All 3 mute sessions tested**, not 1. All answer cleanly.
+- **Daemon->opencode direction smoke-tested** (the stub only covered
+  opencode->daemon). This mattered because the bump demonstrably moved route
+  behavior. All endpoints pigeon's `opencode-client.ts` calls behave correctly,
+  including 404 for a nonexistent session — a wrong answer there cascades into
+  reaper/routing unregistration.
+- **`event_sequence` correction.** The cleanup write-up said live was restored
+  identical. That is not literally true: `SessionInput.admit` dies unless a
+  durable event commits, and `event_sequence` is maintained unconditionally even
+  though `event-log-gate` skips the `event` row. Live's counter for
+  `ses_00a083d40ffe` sits at **2709 where pristine was 2707**. Deliberately NOT
+  reset: a monotonic counter running ahead is benign (it only means the next
+  event takes 2710), whereas resetting it risks reissuing a used sequence.
+  Verified no rows remain at 2707-2709 and the `event` table is empty. The
+  accurate claim is "row counts and every field of the session row match the
+  pre-test snapshot", not "byte-identical".
+- **Live `session_input` sweep** (a stranded queued row fires on the first turn
+  that runs post-cutover): **8 stranded rows exist, all ~2026-07-27, on 8
+  unrelated sessions, and ZERO on the 3 mute sessions.** Pre-existing, not from
+  this work. W4 should decide whether to clear them.
+- Pigeon routing tables checked for residue pointing at the throwaway
+  endpoint/pid: none (apparent hits were substring matches inside hex ids and
+  message text). The serve pool is a fixed seeded list, so a throwaway port
+  cannot join it.
+- Live `github-copilot` oauth intact; it was stripped from the scratch
+  `auth.json` before any boot, so no refresh could have rotated it.
+
+### What must still gate W3
+
+1. **ARTIFACT EQUIVALENCE — the only finding that can invalidate W2's GREEN.**
+   W2 validated the binary W1 built by a manual fail-fast apply of
+   `w1-1818-recuts`. W3 cuts the release through `apply.sh`, whose bookkeeping
+   was deliberately deferred and is known stale (2 deletions pending, missing
+   header #15, `build-release.yml` Phase-8 coupling). `git apply` is atomic per
+   patch, so a stale patch contributes **nothing** silently. W3 must diff the
+   release-built tree against `w1-1818-recuts` (or hash-compare applied sources)
+   before W4. The GREEN transfers only through that equivalence.
+2. **First-contact plan for the 3 mute sessions (W4).** Un-muting is not the end
+   of the incident, it is the start of backlog execution. W2 observed this
+   directly: the resumed model ignored "do not act on prior instructions",
+   called tools, and blocked on an `external_directory` permission ask. Post
+   cutover there is no deny-all: the first prompt to each session shows the model
+   6+ stale human messages which it may act on with full permissions, or hang
+   headless on an ask. Plan per-session first contact deliberately.
