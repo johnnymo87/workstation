@@ -77,6 +77,7 @@
       oc-mcp-enable = p.callPackage ./pkgs/oc-mcp-enable { };
       oc-scoped-shell = p.callPackage ./pkgs/oc-scoped-shell { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
+      oc-throwaway-serve = p.callPackage ./pkgs/oc-throwaway-serve { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
       # NOTE: `opencode-frontdoor-route-gate` is deliberately NOT exposed here.
       # It needs the PINNED opencode, and that pin lives in
@@ -645,6 +646,29 @@
         # Assert the assertions RAN: a suite that exits 0 having executed
         # nothing (e.g. jq missing, helper renamed) is green and worthless.
         grep -q '^all oc-mcp-enable helper tests passed$' "$TMPDIR/out.txt"
+        touch $out
+      '';
+
+      # oc-throwaway-serve's suite. The wrapper's job is to make a throwaway
+      # serve provably unable to touch the production database (incident
+      # 2026-08-14, where the hand-rolled XDG_DATA_HOME recipe silently did the
+      # opposite). Its behavioural half runs the real /proc/<pid>/fd measurement
+      # against real processes holding real fds -- including a -wal-only handle,
+      # which a naive check misses -- plus the negative control, so a check that
+      # always fires cannot pass. The source guards pin each env var that must be
+      # set or scrubbed; dropping one is silent, which is exactly how OPENCODE_DB
+      # was missed in the first place.
+      oc-throwaway-serve-tests = devboxPkgs.runCommand "oc-throwaway-serve-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash pkgs/oc-throwaway-serve/test.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        # Assert the assertions RAN: a suite that exits 0 having executed nothing
+        # is green and worthless.
+        grep -q '^all oc-throwaway-serve tests passed' "$TMPDIR/out.txt"
         touch $out
       '';
 

@@ -604,6 +604,13 @@ in
     # OpenCode session list CLI
     localPkgs.oc-session-list
 
+    # Boot a PROVABLY isolated throwaway `opencode serve` (verifies via
+    # /proc/<pid>/fd that it holds no handle on the production DB). The
+    # hand-rolled XDG_DATA_HOME recipe does NOT isolate the database, because
+    # the OPENCODE_DB pinned below wins in opencode's resolver -- see the
+    # incident note there and pkgs/oc-throwaway-serve/default.nix.
+    localPkgs.oc-throwaway-serve
+
     # Mobile shell (survives sleep/wake, network changes)
     pkgs.mosh
 
@@ -1017,6 +1024,27 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
     # hosts/{devbox,cloudbox}/configuration.nix and home.{devbox,darwin}.nix.
     # Path matches Global.Path.data = xdgData/opencode (xdg-basedir falls back
     # to ~/.local/share on every platform incl. macOS absent $XDG_DATA_HOME).
+    #
+    # KNOWN FOOTGUN OF THIS PIN (incident 2026-08-14, and the reason
+    # oc-throwaway-serve exists): because this is a SESSION variable, every
+    # shell and every child process inherits it, and opencode's resolver takes
+    # OPENCODE_DB in preference to XDG_DATA_HOME. So the "validate a build on a
+    # COPY of the DB" recipe --
+    #     XDG_DATA_HOME=$(mktemp -d) opencode serve --port <scratch>
+    # -- redirects logs, config, state and storage to the scratch dir while
+    # reads and WRITES still go to the production database. It fails silently:
+    # the scratch logfile lands exactly where you expect, so it looks isolated.
+    # A throwaway serve mutated live session rows this way on 2026-08-14, and
+    # the verification query, run against the never-opened copy, returned a
+    # clean "0 rows" FALSE GREEN.
+    # Do NOT unpin this to fix that -- the split-brain above is worse. Use
+    # `oc-throwaway-serve` (sets OPENCODE_DB under the scratch XDG *and* proves
+    # it from /proc/<pid>/fd), and note that opencode itself now refuses the
+    # broken configuration (db-isolation-guard.patch in opencode-patched: with
+    # XDG_DATA_HOME set and OPENCODE_DB resolving outside it, it exits 22 before
+    # opening anything). The guard is UNARMED whenever XDG_DATA_HOME is unset,
+    # which is how every pool member and every interactive shell runs -- so this
+    # pin keeps working exactly as before.
     OPENCODE_DB = "${config.home.homeDirectory}/.local/share/opencode/opencode.db";
     OPENCODE_DISABLE_CHANNEL_DB = "1";
   } // lib.optionalAttrs (isDarwin || isCloudbox) {
