@@ -765,6 +765,92 @@ none of the opentui 0.4.5 renderer, tree-sitter worker, or vim re-cut is on the
 cutover's path. The risk lands on the next *Mac rebuild* instead, after W4 moves
 `opencodePatchedHold` to 1.18.18. Only `workstation-efkq` blocks W4.
 
+## EFKQ RESULTS (2026-08-14, bead workstation-efkq) — GATE PASSED
+
+### Headline
+
+**The published artifact — not a hand-built tree — un-mutes real production
+sessions**, and the deployed v1.17.13 binary reproduces muteness on the *same
+session, same DB copy, same endpoint* minutes earlier. Confirmed twice over:
+statically in the shipped binary, and at runtime.
+
+### The claim, narrowed (the first draft over-claimed)
+
+The published **linux-arm64** binary (asset digest
+`sha256:39fed79a…`, `updatedAt` == publish time, so never re-uploaded) un-mutes
+**2 of the 3** mute sessions. darwin and x64 assets from the same release are
+untested. **"Un-mutes" means new prompts get answered — user messages stranded
+during the mute window are NOT retroactively processed** and must be re-sent.
+
+### Static evidence, at the identical code site in each binary
+
+| Binary | Loop-exit guard |
+|---|---|
+| deployed 1.17.13 | `!so && J.id < j.id` — the raw-ID compare, **the bug** |
+| published 1.18.18 | `!ie && A.parentID === J.id` — **the fix** |
+
+### Runtime evidence (one 7.43 GB `VACUUM INTO` copy throughout)
+
+| Arm | Binary | Result |
+|---|---|---|
+| Control, fresh session | published | assistant row, `parentID` == user msg, `finish=stop`, text `PONG` — proves the harness runs turns |
+| Killer test, `ses_00a083d40ffe` | published | 2 new rows; assistant `parentID` == the NEW user row; `finish=stop`, text `PONG`, **zero tool calls**; `step=0 -> step=1` |
+| Differential arm 1, `ses_01680e0d` | **deployed 1.17.13** | 1 new row (user), **ZERO assistant**; `step=0 -> exiting loop` in **9 ms**, no stream lines |
+| Differential arm 2, same session | published | 2 new rows; assistant parented to **arm 2's own** user row, not arm 1's orphan; `step=0 -> step=1`, ~10 s, real `stream providerID=…` line |
+
+The wrap premise was verified **still active** at test time (`max(id)` in that
+session is `msg_ffb6cbf5a…`, far above any new `msg_002b…`), so the negative arm
+is not vacuously passing.
+
+**The arm-2 refusal is signal, not noise.** Opus declined the "ignore all prior
+instructions" framing instead of saying `PONG`. A refusal *requires* an LLM call,
+and the failure mode under test is the **absence** of any call. Nothing produces
+model-generated refusal text while masking the wrap bug.
+
+### Isolation held, and live was re-measured afterward
+
+Explicit `OPENCODE_DB` per boot + `XDG_DATA_HOME`/`XDG_CONFIG_HOME`/
+`OPENCODE_SESSION_STATE_DIR` + `env -u OPENCODE_SERVE_ID -u OPENCODE_ROUTING_DB`.
+The fd gate ran before **every** request and showed only the copy's handles. Live
+verified read-only afterward, twice independently: both sessions unchanged at
+198 / 1339 rows, all 5 test message ids absent, control session absent. **No
+repeat of the W2 incident.**
+
+### Bonus, and it de-risks W4's rollback
+
+v1.18.18 adds **zero** migrations (`__drizzle_migrations`=21, `migration`=38 in
+both live and a 1.18.18-touched copy), and arm 1 **dynamically demonstrated**
+1.17.13 running against a DB already written by 1.18.18 turns. Rollback is real,
+not theoretical. Keep store path
+`/nix/store/9qk1nd4k3jmpjqw17pw1yyi120nwxjq7-opencode-patched-1.17.13.9`.
+
+### Static-verification recipe for the NEXT roll-forward (three traps, all hit)
+
+Grepping a bun-compiled binary works, but only if you grep the right thing:
+
+1. **Local variable names are minified** (`lastAssistant` -> `J`/`A`/`j`).
+   Grepping source text like `lastUser.id < lastAssistant.id` returns 0 in
+   **both** binaries and is **vacuous**. I nearly banked that meaningless 0/0.
+2. **Property names and log strings survive.** Anchor on a nearby literal
+   (`loop exit with orphaned interrupted tool`) and match on properties
+   (`\.parentID===\w{1,4}\.id`).
+3. **The nix-installed `bin/opencode` is a 647-byte wrapper script.** Grep
+   `bin/.opencode-wrapped` or every count is 0 and looks like real absence.
+   This trap caught both me and the reviewer.
+4. **A decisive-looking differential can be coincidence.** `isAfter` appeared 8x
+   in the new binary and 0x in the old — all 8 were `isAfterExtendsOrImplements`,
+   a syntax-highlighter field. Extract match **context** before believing a count.
+
+### What EFKQ does NOT cover — W4 is the first exercise of these
+
+The test ran with `plugin:[]`, `mcp:{}`, copilot stripped, no `OPENCODE_SERVE_ID`,
+vertex via plain ADC, and no TUI. **Production runs all of**: the npm
+`opencode-anthropic-auth` plugin (loaded at *runtime*, so W1's typecheck covers
+none of it), aigateway routing, serve-ID provenance stamping, the front-door
+registry patches, TUI attach, systemd memory caps, ~15 concurrent writers.
+"W4 may proceed" is **not** "W4 is de-risked" — see the conditions on
+`workstation-pel5`.
+
 ## ROADMAP AND BEAD INDEX (read this first after a compaction)
 
 Execution chain: W1 -> W2 -> W3 -> W4 -> er3t closes.
@@ -775,10 +861,10 @@ just this table. `bd show <id>`.
 |---|---|---|---|
 | workstation-l60f | P1 | W1 stacked-build gate | **DONE — 0 regressions, see W1 RESULTS above** |
 | workstation-7duy | P1 | W2 DB-copy validation | **DONE — fix proven end-to-end, see W2 RESULTS above** |
-| workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release | **equivalence gate PASSED; PR #43 open; release not yet dispatched** |
-| workstation-efkq | P1 | Re-run W2's killer test on the PUBLISHED binary | blocks W4 |
+| workstation-uslc | P1 | W3 cut opencode-patched v1.18.18 release | **DONE — v1.18.18-patched PUBLISHED, see W3 RESULTS** |
+| workstation-efkq | P1 | Re-run W2's killer test on the PUBLISHED binary | **DONE — PASSED, see EFKQ RESULTS below** |
 | workstation-5cot | P1 | Manual TUI acceptance on the published darwin-arm64 zip | **DEFERRED by decision — no longer blocks W4; do before the next Mac rebuild** |
-| workstation-pel5 | P1 | W4 cloudbox cutover per the 2026-06-11 runbook | W3 |
+| workstation-pel5 | P1 | W4 cloudbox cutover per the 2026-06-11 runbook | **READY — nothing blocks it. Run from a BARE SSH SHELL.** |
 | workstation-er3t | P0 | the incident itself; closes when the 3 mute sessions answer | W4 |
 
 Follow-ups (NOT blocking the cutover, do not do them during the bump):
