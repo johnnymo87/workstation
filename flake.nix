@@ -558,6 +558,23 @@
         touch $out
       '';
 
+      # The lane dead-man watcher. Checked here because its whole job is to be the thing that
+      # still speaks when the subject has gone quiet, and every one of its interesting cases is
+      # a DATE case that cannot be exercised by waiting: the Monday false-positive (a Friday
+      # success is 3 calendar days old but only ONE missed weekday slot), the UTC-stamp vs
+      # local-slot mismatch, and the DST week. It needs no network and no credentials, which is
+      # exactly what lets it be checked here with no mocks beyond a recorder for the alerter.
+      lane-deadman-watch = devboxPkgs.runCommand "lane-deadman-watch-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash assets/scripts/test-lane-deadman-watch.sh
+        touch $out
+      '';
+
       # The primary-root trunk-drift detector (bead workstation-v03j.9). It is
       # the only layer in the worktree-guard family that WATCHES rather than
       # blocks, so its failure mode is silence -- exactly the failure this epic

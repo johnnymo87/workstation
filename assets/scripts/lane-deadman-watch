@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# lane-deadman-watch: alarm when a scheduled autonomous lane STOPS RUNNING QUIETLY.
+#
+# THE FAILURE THIS EXISTS FOR: exit 0 is not health. A lane that polls successfully, matches
+# nothing because its upstream changed a label or a branch prefix, and reports "nothing to do"
+# every day looks IDENTICAL to a healthy idle lane -- to systemd, to the journal, and to any
+# OnFailure= hook. Work piles up and nothing ever fires. More alarms cannot fix that; only an
+# observer outside the lane can, which is why this lives here rather than inside it.
+#
+# CONTRACT: read-only. It never takes the lane's lock, never writes lane state, and never runs
+# the lane. Its only inputs are two file paths and the clock.
+#
+# WHY THIS IS DELIBERATELY GENERIC: it is deployed declaratively (home-manager) while the lane it
+# watches is installed imperatively. That asymmetry IS the point -- a host rebuild restores this
+# watcher while the lane stays gone, so the dead-man file goes missing-while-expected and this
+# rings. A watchdog co-located with its subject cannot report its subject's absence.
+#
+# TWO GATES, AND THEY ARE NOT THE SAME FLAG (this distinction is load-bearing):
+#   EXPECT file  -- "a lane is supposed to be alive here". Declarative, managed by home-manager,
+#                   safe to deploy automatically because it only enables WATCHING.
+#   The lane's own arming flag -- permission to RUN and to land. Imperative and attended.
+#                   NEVER gate on that one: this host auto-applies home-manager on a timer, so a
+#                   declaratively-managed arming flag would arm a landing-capable agent at an
+#                   arbitrary unattended moment.
+# Gating on EXPECT rather than on arming also means that if someone deletes the arming flag, the
+# lane silently skips (a skip is not a failure, so nothing pages) while this still expects it --
+# and rings. One flag for both jobs would have let a single `rm` silence subject and observer.
+#
+# FAILS TOWARD THE ALARM. Missing, unreadable, unparseable and FUTURE-DATED timestamps all alarm.
+# Future-dated matters: clock skew or a manual `touch` would otherwise compute zero missed slots
+# and go permanently quiet, which is the exact silence this is built to prevent.
+#
+# WEEKDAY SLOTS, NOT ELAPSED SECONDS. The lane runs weekdays only, so `now - mtime > 3 days`
+# false-positives every Monday (a Friday success is legitimately 3 calendar days old) and is
+# DST-fragile. This counts missed 16:00 slots instead, stepping day by day through local midnight
+# so DST transitions cannot introduce an off-by-one.
+#
+# Env seams (all optional; the unit supplies them):
+#   LANE_DEADMAN_FILE  timestamp file the lane rewrites on real success   (required)
+#   LANE_EXPECT_FILE   expectation gate; absent -> silent exit 0          (required)
+#   LANE_STALE_SLOTS   missed slots before alarming        (default 3)
+#   LANE_SLOT_HOUR     hour of the lane's daily run, local (default 16)
+#   LANE_LABEL         name used in the alert text         (default "lane")
+#   LANE_HINT          actionable hint appended to alerts  (default "")
+#   LANE_ALERT_CMD     alert helper; receives STATE SIG TEXT INITIAL MAX
+#   LANE_ALERT_STATE   dedup/backoff state file for the helper
+#   WATCHDOG_NOW       ISO instant to treat as "now"  -- TEST SEAM ONLY
+set -uo pipefail
+
+DEADMAN_FILE="${LANE_DEADMAN_FILE:-}"
+EXPECT_FILE="${LANE_EXPECT_FILE:-}"
+STALE_SLOTS="${LANE_STALE_SLOTS:-3}"
+SLOT_HOUR="${LANE_SLOT_HOUR:-16}"
+LABEL="${LANE_LABEL:-lane}"
+HINT="${LANE_HINT:-}"
+ALERT_CMD="${LANE_ALERT_CMD:-}"
+ALERT_STATE="${LANE_ALERT_STATE:-$HOME/.local/state/lane-deadman-watch.alert}"
+
+log() { echo "[lane-deadman-watch] $*"; }
+
+if [ -z "$DEADMAN_FILE" ] || [ -z "$EXPECT_FILE" ]; then
+  log "ERROR: LANE_DEADMAN_FILE and LANE_EXPECT_FILE are both required."
+  exit 2
+fi
+
+# GATE. No expectation -> the lane is not supposed to be running yet (or any more), so silence is
+# correct and this must not page. Before cutover this is the normal state.
+if [ ! -e "$EXPECT_FILE" ]; then
+  log "No expectation flag at $EXPECT_FILE; nothing is supposed to be running. Silent."
+  exit 0
+fi
+
+if [ -n "${WATCHDOG_NOW:-}" ]; then
+  NOW_EPOCH="$(date -d "$WATCHDOG_NOW" +%s 2>/dev/null)" || NOW_EPOCH=""
+  if [ -z "$NOW_EPOCH" ]; then log "ERROR: WATCHDOG_NOW unparseable: $WATCHDOG_NOW"; exit 2; fi
+else
+  NOW_EPOCH="$(date +%s)"
+fi
+
+# Emit an alarm through the shared helper, which owns dedup, exponential backoff and the
+# warning->error escalation. NOTE its contract: it never exits non-zero, so a delivery failure
+# is NOT observable here. That is an accepted risk recorded in the design -- the exit code of
+# this script is not an alarm channel.
+alarm() {
+  local text="$1"
+  [ -n "$HINT" ] && text="$text
+$HINT"
+  log "ALARM: $text"
+  if [ -n "$ALERT_CMD" ]; then
+    # Signature is a CONSTANT string on purpose. Embedding the slot count or the date would make
+    # every pass a new episode, so dedup would never match, backoff would never engage, and this
+    # would degrade into a flat daily nag that never escalates severity -- the precise failure
+    # the shared helper was rewritten to eliminate.
+    "$ALERT_CMD" "$ALERT_STATE" "deadman-${LABEL}" "$text" 900 14400
+  fi
+}
+
+# A healthy pass clears the episode so the NEXT outage starts a fresh backoff rather than
+# inheriting a stale count and mtime (which would suppress its first pages).
+healthy() {
+  log "$1"
+  [ -n "$ALERT_STATE" ] && rm -f "$ALERT_STATE"
+  exit 0
+}
+
+if [ ! -e "$DEADMAN_FILE" ]; then
+  alarm "$LABEL has NEVER reported success: no file at $DEADMAN_FILE, yet a lane is expected to be running here. Either it was never deployed, or it was removed."
+  exit 1
+fi
+
+RAW=""
+read -r RAW < "$DEADMAN_FILE" 2>/dev/null || true
+LAST_EPOCH=""
+if [ -n "$RAW" ]; then
+  LAST_EPOCH="$(date -d "$RAW" +%s 2>/dev/null)" || LAST_EPOCH=""
+fi
+if [ -z "$LAST_EPOCH" ]; then
+  alarm "$LABEL wrote an unreadable success timestamp (\"$RAW\") to $DEADMAN_FILE. Cannot tell whether it is running, so treating as failed."
+  exit 1
+fi
+
+if [ "$LAST_EPOCH" -gt "$NOW_EPOCH" ]; then
+  alarm "$LABEL reports a success in the FUTURE ($RAW). Clock skew, or the file was touched by hand. Treating as failed rather than trusting it, because a future timestamp would otherwise silence this check indefinitely."
+  exit 1
+fi
+
+# Count missed run slots: weekdays after the last success whose local run hour has already
+# passed. Stepping via local calendar dates (not +86400) is what keeps DST honest.
+missed=0
+cursor="$(date -d "@$LAST_EPOCH" +%F 2>/dev/null)"
+guard=0
+while :; do
+  guard=$((guard + 1))
+  if [ "$guard" -gt 400 ]; then
+    alarm "$LABEL slot arithmetic exceeded 400 iterations from $RAW; refusing to loop. Treating as failed."
+    exit 1
+  fi
+  cursor="$(date -d "$cursor + 1 day" +%F 2>/dev/null)"
+  slot_epoch="$(date -d "$cursor $SLOT_HOUR:00:00" +%s 2>/dev/null)"
+  [ -z "$slot_epoch" ] && break
+  [ "$slot_epoch" -gt "$NOW_EPOCH" ] && break
+  dow="$(date -d "$cursor" +%u)"
+  [ "$dow" -le 5 ] && missed=$((missed + 1))
+done
+
+if [ "$missed" -ge "$STALE_SLOTS" ]; then
+  alarm "$LABEL has missed $missed consecutive weekday runs (threshold $STALE_SLOTS). Last success: $RAW. It is not failing -- it is not running, or it is running and quietly matching nothing, which no failure hook can see."
+  exit 1
+fi
+
+healthy "OK: $LABEL last succeeded $RAW ($missed missed weekday slot(s), threshold $STALE_SLOTS)."
