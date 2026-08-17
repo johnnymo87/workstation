@@ -1081,8 +1081,14 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
   # (which sets core.hooksPath). Since the worktree-guard opencode plugin was
   # removed 2026-07-25, this hook is the ONLY remaining enforcement of the
   # read-only-trunk rule — it blocks commits at a primary root, not edits.
+  # Deployed from the PACKAGE, not the raw asset, so the interpreter is a store
+  # path. The asset's `#!/bin/bash` resolved only because /bin/bash exists on
+  # cloudbox as an undeclared hand-made symlink into this user's profile --
+  # nothing in this repo creates it, so a reprovisioned host would have deployed
+  # a hook that cannot exec, silently losing the only enforcement of the
+  # read-only-trunk rule. See pkgs/worktree-guard-hook/default.nix.
   home.file.".config/git-hooks/pre-commit" = lib.mkIf isCloudbox {
-    source = "${assetsPath}/git-hooks/pre-commit";
+    source = "${localPkgs.worktree-guard-hook}/pre-commit";
     executable = true;
   };
 

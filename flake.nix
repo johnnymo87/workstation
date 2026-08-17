@@ -66,6 +66,7 @@
       dvc = p.callPackage ./pkgs/dvc { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
+      worktree-guard-hook = p.callPackage ./pkgs/worktree-guard-hook { };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
@@ -324,6 +325,45 @@
       # useful artifact is not the wiring, it is the reason the estimate was
       # wrong.
       # ---------------------------------------------------------------------
+
+      # The worktree-guard pre-commit hook: 7 cases over the only remaining
+      # enforcement of the read-only-trunk rule, including the LOAD-BEARING
+      # bypasses (merge must still work, or `git pull` at a deploy root breaks).
+      #
+      # It could not be a check while it pointed at the raw asset, whose shebang
+      # is #!/bin/bash: a nix sandbox has only /bin/sh (measured). Rather than
+      # patch a copy for the sandbox's benefit, the hook is now a package whose
+      # interpreter is a store path, home-manager deploys THAT, and this check
+      # runs the suite against the same artifact -- so a green check here is a
+      # statement about the deployed hook, not about a sandbox-only variant.
+      #
+      # That package also closed a live hazard: /bin/bash is declared nowhere in
+      # this repo and exists on cloudbox only as an undeclared hand-made symlink,
+      # so a reprovisioned host would have deployed an unexecutable hook.
+      worktree-guard-hook-tests = devboxPkgs.runCommand "worktree-guard-hook-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        WORKTREE_GUARD_HOOK_DIR = "${(localPkgsFor devboxSystem).worktree-guard-hook}";
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash assets/git-hooks/test-pre-commit.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^=== All tests PASSED ===' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: hook suite did not reach its final PASSED line." >&2
+          exit 1
+        }
+        # This suite was, until PR #350, incapable of failing: it assigned fail=1
+        # inside ( ... ) subshells, so every failure was discarded and it always
+        # exited 0. Assert the case COUNT as well as the banner, so a suite that
+        # silently stops adjudicating cannot present as green again.
+        [ "$(grep -c '^ok: ' "$TMPDIR/out.txt")" = 19 ] || {
+          echo "GATE FAILURE: expected 19 'ok:' lines, got" \
+               "$(grep -c '^ok: ' "$TMPDIR/out.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
 
       # oc-cost: 101 tests over the cost model, sqlite in-memory, hermetic.
       #
