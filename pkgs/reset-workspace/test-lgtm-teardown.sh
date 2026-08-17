@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): spawns real nvims and a real tmux server, and builds the package under test; needs fixture injection to be hermetic
+# unwired-test(workstation-oo4q): spawns real nvims and a real tmux server, and the suite itself builds the package under test (`nix build`, :53) -- the nested nix is the harder blocker; needs a ${self}-path seam. SKIPs-exit-0 without nvim (:46)
 # Behavioural test for Step 3.4 -- the lgtm junk-drawer teardown (workstation-n0yh.1).
 #
 # WHY THIS EXISTS. `tmux kill-session` tears down every pane at once, and each

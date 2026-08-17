@@ -501,6 +501,99 @@ right one.
 
 Census: **56 → 64 files executed by CI, 27 → 21 declared unwired.**
 
+## Step 3.7 — `k7t4`: the bead's own diagnosis was wrong · **PARTIAL** (#375, #376)
+
+**Bead:** `workstation-k7t4` (P2, spawned by step 2, 2026-08-04) — 13 files, all
+marked with the *same* reason: *"probes live host state (systemd/tmux/sockets);
+needs fixture injection to be hermetic."* The bead added that each was
+*"individually a pscu-sized project. Do these one at a time. Do NOT batch."*
+
+I ran all 13 before designing anything. **The shared reason was false for 10 of
+them, and false in four distinct ways.** The dominant blocker in a bead named for
+live host state turned out to have nothing to do with systemd, tmux, or sockets.
+
+| Class | Files | Real blocker |
+|---|---:|---|
+| A — **nested nix** | 7 | The *suite itself* runs `nix eval` / `nix build`. No daemon socket, network off, recursive-nix off. Two also use `git+file:$repo_root`, needing a `.git` the store copy does not have. |
+| B — mirror tautology | 1 | Redefines the helper and asserts against its own copy. |
+| C — hermetic already, timing-bound | 1 | Fully fixture-injected; several assertions bound wall-clock time. |
+| D — genuinely live host state | 2 | Curls the running front door. |
+| — wired here | 2 | #375, #376. |
+
+Class A got its own bead, `workstation-oo4q`, because a bead whose title
+misdescribes 7 of its 13 files will keep mis-routing work. Class B went to
+`dimz`, where the mirrors live. `k7t4` keeps C and D, and its title is finally
+true of its contents.
+
+### An estimate can be wrong in the generous direction too
+
+`dad9` taught that "cheaply wirable" was optimistic. `k7t4` is the mirror image:
+*"each is individually a pscu-sized project"* was **pessimistic**, and pessimism
+hid cheap wins for two weeks. Two files needed no fixture injection at all —
+they were pure source-greps over production, already green in a real sandbox.
+The lesson is not "estimates are optimistic"; it is **"unmeasured estimates are
+unmeasured"**, in whichever direction is convenient.
+
+### Wiring a suite is not the same as making it able to fail
+
+Both files wired here would have gone green while adjudicating nothing:
+
+- `test-pool-route-clients.sh:34-38` printed its own gate token (`ALL PASS`) and
+  exited 0 when `home.base.nix` was not beside it; `:77-79` silently skipped the
+  four control-plane exemption assertions.
+- `oc-pool-attach/test.sh:311` printed `SKIP` for a missing `default.nix` — the
+  file's *only* production-facing assertions — then fell through to its
+  `all ... tests passed` banner. `:145` dropped 9 more when `jq` was absent.
+
+That is the `oc-cost` failure mode (101 tests, 0 run, exit 0) reached by a
+different route, and it is **latent in at least 5 more of these files**. The
+policy now: never print the gate token from a skip path, make a missing
+dependency fatal, and pin the assertion count *in the check* by counting emitted
+lines rather than trusting a total the suite prints about itself.
+
+### A third channel was considered and rejected
+
+Class D suites fit neither channel: the sandbox has no front door, and a GitHub
+runner has none either — so a workflow step would take a skip path and go green
+having asserted nothing, which is *worse* than the honest marker they carry now.
+The tempting fix is a third channel: a host systemd timer that runs them for
+real.
+
+Rejected, and the reason generalises. The guard's evidence must be checkable
+*from inside the sandbox*. A host-timer channel is an **"I am covered"** claim
+the sandbox cannot falsify — the same shape as the `.glob-covered-by` dotfile
+this roadmap already rejected, with a systemd unit attached. The existing marker
+claims the opposite direction, **"I am NOT covered"**, and a false one of those
+fails loudly. So the canary work belongs to `4ze8` as *alerting*, and the marker
+stays as the *coverage* claim. Two claims, two mechanisms, never merged.
+
+### Mutation results
+
+`pool-route-clients` — 5/5 caught: the attach hint reverted to direct-to-serve,
+pigeon repointed at the front door, the door degrading to itself, an assertion
+deleted (the count pin trips), and `home.base.nix` deleted outright, which is
+what actually proves the vacuous green is gone rather than merely commented on.
+
+`oc-pool-attach` — 4 caught, and **1 survivor predicted in advance**: inverting
+the production `classify` body is invisible to ~70 of its 87 assertions, because
+they run a copy. Predicting the survivor before measuring is the difference
+between evidence for `dimz` and an embarrassment; the check is therefore named
+`oc-pool-attach-mirror-tests`, so its green cannot be read as "production is
+covered."
+
+### Two corrections to my own claims, both caught by review
+
+I wrote that two files were "cheap after a `/tmp/opencode` fix". I had only
+measured that they *died* at `mktemp`; both in fact run `nix eval` a few lines
+later and are class A. And I repeated a test file's own header — *"mirrors
+`build_mcp_tools_json` from `home.base.nix`"* — as a finding. That function does
+not exist in `home.base.nix`; production is
+`pkgs/opencode-launch/default.nix:177`. A stale comment is not a measurement,
+and the second-order lesson is that *reading in order to classify* reproduces
+exactly the error this bead already demonstrates.
+
+Census: **65 → 67 files executed by CI, 21 → 19 declared unwired.**
+
 ## Step 4 — `dimz`: stop testing mirrors of the production helpers · **NOT STARTED**
 
 **Bead:** `workstation-dimz` (P2, spawned by step 1, 2026-08-04)
@@ -579,9 +672,10 @@ and leaving its marker behind FAILS the build, so these only go down by real wor
 | Bead | P | Marked files | Owns |
 |---|---|---|---|
 | `workstation-5m47` | P1 | 0 | ~~The opencode-frontdoor vitest suite.~~ **DONE, PR #347** — wired as `checks.frontdoor-vitest`. Both premises in the row it replaces were wrong: see below. |
-| `workstation-k7t4` | P2 | 13 | Suites that probe live host state (systemd/tmux/sockets); need fixture injection to become hermetic. |
+| `workstation-k7t4` | P2 | 3 | ~~13 suites that probe live host state.~~ **PARTIAL, PRs #375 / #376** — measured, and the shared reason was false for 10 of 13. Keeps only what its title actually describes: the live front-door canary (+ its harness), and `lockprobe`, which is hermetic already but timing-bound. See Step 3.7. |
+| `workstation-oo4q` | P2 | 7 | **Spawned by step 3.7** — the suites whose *own body* runs `nix eval`/`nix build`, which is the real and dominant blocker inside `k7t4`. Fix is a `${self}`-path injection seam, not a host canary; both sweepers already have one (`SWEEPER_OVERRIDE`). |
 | `workstation-dad9` | P2 | 0 | ~~Suites that look cheaply wirable.~~ **DONE, PRs #370 / #371 / #372** — the "cheaply wirable" estimate held for 2 of 7. One of them could not fail; one hid a production hazard. See below. |
-| `workstation-dimz` | P2 | 2 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. Also owns `pkgs/lgtm-gh/test.sh` since #370, whose check is named `lgtm-gh-mirror-tests` to stop its green being misread; the bead carries the recipe for killing that mirror. |
+| `workstation-dimz` | P2 | 3 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. Also owns `pkgs/lgtm-gh/test.sh` since #370, whose check is named `lgtm-gh-mirror-tests` to stop its green being misread; the bead carries the recipe for killing that mirror. |
 | `workstation-3g4j` | P2 | 3 | `reset-workspace/test.sh`, plus `nvims` and `opencode-launch`. **Adopted, not spawned** — it predates the census. |
 | `workstation-m98t` | P3 | 3 | The plugin-bundle family, which runs `nix build` on itself. |
 | `workstation-4ze8` | P1 | — | Step 3's second layer: a drift canary in a different deploy channel. Owns every `warn:` path the gate cannot close itself. |

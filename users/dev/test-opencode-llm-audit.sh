@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-oo4q): the suite itself runs `nix eval` of homeConfigurations (:50), impossible in a build sandbox; needs a ${self}-path seam
 # Tests for the opencode-llm-audit follower's pool fan-out (workstation-ofma).
 #
 # WHY: under the mn9r M5 serve pool (cloudbox K=4) the follower must capture the

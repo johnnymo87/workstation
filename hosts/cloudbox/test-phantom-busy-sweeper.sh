@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-oo4q): the suite itself runs `nix eval` + `nix-store -r` (:36-37) to locate the unit's ExecStart; a SWEEPER_OVERRIDE seam already exists (:33) so this is likely the cheapest of that bead's seven
 # Tests for systemd.services.opencode-phantom-busy-sweeper (configuration.nix).
 #
 # Runs the SHIPPED artifact — the nix-built ExecStart script — against scratch
