@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Source-guard tests for the front-door disposition of the lgtm-sessions inline
 # home.base.nix client, plus the Phase 7.8 infra/control-plane exemptions.
 #
@@ -32,9 +31,15 @@ deny_grep() { # deny_grep <desc> <fixed-string> <file>
 # ---- source guards (home.base.nix) ------------------------------------------
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 hb="$script_dir/home.base.nix"
+# FATAL, not SKIP. This block used to print the gate token ("ALL PASS") and
+# exit 0 when home.base.nix was absent, which made every assertion below
+# optional: a check greping for that token would have been satisfied by a run
+# that adjudicated NOTHING. `script_dir` is derived from BASH_SOURCE, so the
+# sibling is found from any cwd -- if it is missing the checkout is broken,
+# which is not a workflow worth degrading gracefully for.
 if [ ! -f "$hb" ]; then
-  echo "SKIP: source guards (home.base.nix not next to test)"
-  [ "$fail" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "SOME TESTS FAILED"; exit 1; }
+  echo "FATAL: home.base.nix not next to test (looked in $script_dir)" >&2
+  exit 1
 fi
 
 # lgtm-sessions attach hint: through the FRONT DOOR (Phase 9, mlve.4).
@@ -74,8 +79,12 @@ deny_grep "lgtm-sessions no longer lists via the anchor"   '"$OPENCODE_URL/sessi
 # canaries must diagnose the door/pool directly. Guard the cloudbox system
 # config so a future edit that "helpfully" repoints pigeon at :4700 trips here.
 cfg="$script_dir/../../hosts/cloudbox/configuration.nix"
+# FATAL for the same reason as home.base.nix above: these four assertions are
+# the ONLY enforcement that pigeon and the door's watchdogs keep the raw
+# anchor, and silently skipping them left that enforcement optional.
 if [ ! -f "$cfg" ]; then
-  echo "SKIP: infra-plane exemption guards (configuration.nix not found at $cfg)"
+  echo "FATAL: hosts/cloudbox/configuration.nix not found at $cfg" >&2
+  exit 1
 else
   want_grep "pigeon-daemon keeps the raw anchor (control-plane exemption)" 'export OPENCODE_URL="http://127.0.0.1:4096"' "$cfg"
   deny_grep "pigeon-daemon is NOT repointed at the front door"             'export OPENCODE_URL="http://127.0.0.1:4700"' "$cfg"

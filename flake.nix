@@ -340,6 +340,44 @@
       # That package also closed a live hazard: /bin/bash is declared nowhere in
       # this repo and exists on cloudbox only as an undeclared hand-made symlink,
       # so a reprovisioned host would have deployed an unexecutable hook.
+      # pool-route-clients: 14 source-guard assertions over PRODUCTION files --
+      # users/dev/home.base.nix and hosts/cloudbox/configuration.nix. It is a
+      # tripwire rather than a unit test, and that is the point: the same class
+      # as checks.frontdoor-opacity.
+      #
+      # Why this file earns a check rather than deletion. Its own HISTORY block
+      # (test-pool-route-clients.sh:42-48) records that it once asserted the
+      # OPPOSITE of the current behaviour -- it required the lgtm-sessions attach
+      # hint to resolve a serve URL via pigeon /route -- and because it pinned
+      # the stale behaviour as correct while running NOWHERE, it protected the
+      # last direct-to-serve data-plane call site from being fixed for two
+      # phases. A guard that runs is what keeps that fix fixed.
+      #
+      # Two vacuous-green paths were fixed in the same commit as this wiring.
+      # The suite printed its gate token ("ALL PASS") and exited 0 when
+      # home.base.nix was not beside it, and silently skipped the four
+      # control-plane exemption assertions when configuration.nix was absent.
+      # Either one would have let this check pass having adjudicated nothing, so
+      # both are now fatal. The count below is the second half of that fix:
+      # pin it, and update it in the same commit that adds an assertion.
+      pool-route-clients-guards = devboxPkgs.runCommand "pool-route-clients-guards" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-pool-route-clients.sh 2>&1 | tee "$TMPDIR/prc.txt"
+        grep -q '^ALL PASS' "$TMPDIR/prc.txt" || {
+          echo "GATE FAILURE: pool-route-clients did not reach ALL PASS." >&2
+          exit 1
+        }
+        [ "$(grep -c '^ok: ' "$TMPDIR/prc.txt")" = 14 ] || {
+          echo "GATE FAILURE: expected 14 'ok: ' lines, got" \
+               "$(grep -c '^ok: ' "$TMPDIR/prc.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       worktree-guard-hook-tests = devboxPkgs.runCommand "worktree-guard-hook-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils devboxPkgs.gnugrep
