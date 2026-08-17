@@ -669,13 +669,20 @@ Kept here so nothing is loose. Counts are `unwired-test(<bead>)` markers on
 `main` as of 2026-08-11, and they are the guard's own bookkeeping: wiring a file
 and leaving its marker behind FAILS the build, so these only go down by real work.
 
+**Re-derive these counts; never increment them.** The `dimz` row read `2` from
+2026-08-11, when the marked set was `opencode-frontdoor` and `lgtm-gh`. PR #370
+wired `lgtm-gh` and deleted its marker without decrementing the row, so `2` went
+stale at `1`. Adding a file in #377 I then incremented the stale number to `3`
+rather than measuring, and the post-merge census caught it. One `git grep -c` is
+cheaper than the wrong number, and this table is the census's only prose mirror.
+
 | Bead | P | Marked files | Owns |
 |---|---|---|---|
 | `workstation-5m47` | P1 | 0 | ~~The opencode-frontdoor vitest suite.~~ **DONE, PR #347** — wired as `checks.frontdoor-vitest`. Both premises in the row it replaces were wrong: see below. |
 | `workstation-k7t4` | P2 | 3 | ~~13 suites that probe live host state.~~ **PARTIAL, PRs #375 / #376** — measured, and the shared reason was false for 10 of 13. Keeps only what its title actually describes: the live front-door canary (+ its harness), and `lockprobe`, which is hermetic already but timing-bound. See Step 3.7. |
 | `workstation-oo4q` | P2 | 7 | **Spawned by step 3.7** — the suites whose *own body* runs `nix eval`/`nix build`, which is the real and dominant blocker inside `k7t4`. Fix is a `${self}`-path injection seam, not a host canary; both sweepers already have one (`SWEEPER_OVERRIDE`). |
 | `workstation-dad9` | P2 | 0 | ~~Suites that look cheaply wirable.~~ **DONE, PRs #370 / #371 / #372** — the "cheaply wirable" estimate held for 2 of 7. One of them could not fail; one hid a production hazard. See below. |
-| `workstation-dimz` | P2 | 3 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. Also owns `pkgs/lgtm-gh/test.sh` since #370, whose check is named `lgtm-gh-mirror-tests` to stop its green being misread; the bead carries the recipe for killing that mirror. |
+| `workstation-dimz` | P2 | 2 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. Also owns `pkgs/lgtm-gh/test.sh` since #370, whose check is named `lgtm-gh-mirror-tests` to stop its green being misread; the bead carries the recipe for killing that mirror. |
 | `workstation-3g4j` | P2 | 3 | `reset-workspace/test.sh`, plus `nvims` and `opencode-launch`. **Adopted, not spawned** — it predates the census. |
 | `workstation-m98t` | P3 | 3 | The plugin-bundle family, which runs `nix build` on itself. |
 | `workstation-4ze8` | P1 | — | Step 3's second layer: a drift canary in a different deploy channel. Owns every `warn:` path the gate cannot close itself. |
