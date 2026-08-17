@@ -33,7 +33,7 @@ in
 rec {
   # DM5-3 pool sizing; DM5-4 numbering (base 4096 = serve-0).
   portsByHost = {
-    cloudbox = [ 4096 4097 4098 4099 ]; # K=4 (40G cap -> ~9G/serve)
+    cloudbox = [ 4096 4097 4098 4099 ]; # K=4 (14G/serve, 32G opencode-serve.slice aggregate)
     devbox = [ 4096 4097 ]; # K=2 (10G cap -> ~4.5G/serve)
     darwin = [ 4096 4097 ]; # K=2
   };

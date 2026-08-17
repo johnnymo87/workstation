@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 # Unit and integration tests for the `work` git-worktree helper.
 #
 # Run: bash test.sh
@@ -9,14 +8,32 @@ set -o errexit -o nounset -o pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "$script_dir/../.." && pwd)"
 
-echo "Building package to test the real, built binary..."
-(cd "$project_root" && nix build .#git-work)
+# WORK_BIN lets a caller supply the already-built script, which is what makes
+# this suite runnable as a nix check: `nix build` cannot run inside the build
+# sandbox. Unset (the developer path) it builds the package itself, exactly as
+# before. Both paths test the SAME artifact -- the real built `work` -- so the
+# two cannot silently diverge.
+work_script="${WORK_BIN:-}"
+if [ -n "$work_script" ]; then
+  # A stale WORK_BIN exported in a developer's shell would silently test an old
+  # binary, so this is fatal rather than a fallback to the nix-build path.
+  if [ ! -x "$work_script" ]; then
+    echo "FAIL: WORK_BIN=$work_script is not an executable file" >&2
+    exit 1
+  fi
+else
+  echo "Building package to test the real, built binary..."
+  (cd "$project_root" && nix build .#git-work)
+  work_script="$project_root/result/bin/work"
+fi
 
-work_script="$project_root/result/bin/work"
 if [ ! -f "$work_script" ]; then
   echo "FAIL: Built script not found at $work_script"
   exit 1
 fi
+# Printed unconditionally: when this suite passes, the reader needs to know
+# WHICH binary passed.
+echo "Testing: $work_script"
 
 # Source the real production script to load helper functions without executing main()
 source "$work_script"
@@ -55,13 +72,34 @@ check "resolve_primary_root: project worktree subdir" \
 export HOME="$ORIG_HOME"
 
 # ---- Integration/End-to-End Tests -------------------------------------------
-# Setup scratch temp directory under /tmp (which is pre-approved for temp work)
-tmpdir="$(mktemp -d "/tmp/git-work-test-XXXXXX")"
+# Scratch dir. Honours TMPDIR so this works inside a nix build sandbox, where
+# the writable scratch is $TMPDIR; falls back to /tmp (pre-approved for temp
+# work) for developer runs.
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/git-work-test-XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT
+
+# Hermetic git config.
+#
+# init.defaultBranch is PINNED because every fixture below pushes to `main` by
+# name. Measured inside the nix sandbox: with no global config `git init`
+# defaults to `master`, so the first `git push origin main` dies with "src
+# refspec main does not match any" and errexit kills the whole suite. This
+# passed on developer machines only because their global config happens to set
+# init.defaultBranch=main -- i.e. the suite was reading the invoking user's
+# config, which is exactly what a test must not do.
+#
+# The same file neutralises the rest of the user's global config (a global
+# commit.gpgsign would hang or fail these commits) and supplies identity, so
+# the suite no longer depends on the ambient environment at all.
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_GLOBAL="$tmpdir/gitconfig"
+git config --file "$GIT_CONFIG_GLOBAL" init.defaultBranch main
+git config --file "$GIT_CONFIG_GLOBAL" user.name "Test User"
+git config --file "$GIT_CONFIG_GLOBAL" user.email "test@example.com"
 
 # Set up fake remote (bare repo) and clone it
 bare_repo="$tmpdir/origin.git"
-git init --bare "$bare_repo"
+git init --bare -b main "$bare_repo"
 
 clone_dir="$tmpdir/my-repo"
 git clone "$bare_repo" "$clone_dir"
@@ -239,7 +277,7 @@ fi
 # These use a FRESH bare+clone so they don't inherit the mutated state above
 # (origin/HEAD was deleted by Test 6).
 fresh_bare="$tmpdir/origin2.git"
-git init --bare "$fresh_bare"
+git init --bare -b main "$fresh_bare"
 fresh_clone="$tmpdir/repo2"
 git clone "$fresh_bare" "$fresh_clone"
 cd "$fresh_clone"
