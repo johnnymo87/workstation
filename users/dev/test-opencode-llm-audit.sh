@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-oo4q): the suite itself runs `nix eval` of homeConfigurations (:50), impossible in a build sandbox; needs a ${self}-path seam
 # Tests for the opencode-llm-audit follower's pool fan-out (workstation-ofma).
 #
 # WHY: under the mn9r M5 serve pool (cloudbox K=4) the follower must capture the
@@ -47,13 +46,20 @@ deny_grep() { # deny_grep <desc> <fixed-string> <file>
 
 # ---- extract the REAL follower script + its testable helpers ----------------
 script_src="$tmpdir/opencode-llm-audit"
-nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
-  eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/opencode-llm-audit\".text" \
-  > "$script_src" 2>"$tmpdir/nix.err" || {
-    echo "FAIL: could not nix-eval the opencode-llm-audit script text"
-    cat "$tmpdir/nix.err" >&2
-    exit 1
-  }
+# Seam: a check passes home-manager's OWN deployed store path, so the suite
+# never invokes nix (impossible in a build sandbox). Falls back to eval.
+if [ -n "${OPENCODE_LLM_AUDIT_SRC:-}" ]; then
+  cp "$OPENCODE_LLM_AUDIT_SRC" "$script_src"
+else
+  nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
+    eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/opencode-llm-audit\".text" \
+    > "$script_src" 2>"$tmpdir/nix.err" || {
+      echo "FAIL: could not nix-eval the opencode-llm-audit script text"
+      cat "$tmpdir/nix.err" >&2
+      exit 1
+    }
+fi
+[ -s "$script_src" ] || { echo "FAIL: empty opencode-llm-audit source"; exit 1; }
 
 # Slice the sentinel-delimited helper block and source it, so we test the actual
 # deployed code rather than a copy.

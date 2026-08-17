@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-oo4q): the suite itself runs `nix eval` of homeConfigurations (:44), impossible in a build sandbox; needs a ${self}-path seam
 # Regression tests for disk-cleanup worktree pruning decisions.
 # Run: bash users/dev/test-disk-cleanup-worktrees.sh
 
@@ -41,11 +40,20 @@ assert_remove_not_logged() {
 script_src="$tmpdir/disk-cleanup"
 harness="$tmpdir/worktree-harness"
 
-nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
-  eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/disk-cleanup\".text" \
-  > "$script_src"
+# Seam: a check passes home-manager's OWN deployed store path for this file,
+# so the suite never invokes nix (impossible in a build sandbox). Note the
+# fallback needs dynamic-derivations to read .text via the CLI, which is why
+# the seam passes .source -- the identical bytes, without the feature gate.
+if [ -n "${DISK_CLEANUP_SRC:-}" ]; then
+  cp "$DISK_CLEANUP_SRC" "$script_src"
+else
+  nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
+    eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/disk-cleanup\".text" \
+    > "$script_src"
+fi
+[ -s "$script_src" ] || { echo "FAIL: empty disk-cleanup source"; exit 1; }
 
-python3 - "$script_src" "$harness" <<'PY'
+python3 - "$script_src" "$harness" "$(command -v bash)" <<'PY'
 import pathlib
 import sys
 
@@ -57,7 +65,7 @@ end = src.index("\n# --- 3. Bazel cache purge ---", start)
 cleanup_worktrees = src[start:end]
 
 pathlib.Path(sys.argv[2]).write_text(
-    "#!/usr/bin/env bash\n"
+    f"#!{sys.argv[3]}\n"
     "set -euo pipefail\n"
     "PROJECTS=\"$HOME/projects\"\n"
     "WORKTREE_MAX_AGE_DAYS=14\n"
@@ -108,8 +116,8 @@ remove_log="$tmpdir/remove.log"
 mkdir -p "$fakebin"
 : > "$remove_log"
 
-cat > "$fakebin/git" <<'SH'
-#!/usr/bin/env bash
+printf '#!%s\n' "$(command -v bash)" > "$fakebin/git"
+cat >> "$fakebin/git" <<'SH'
 set -euo pipefail
 if [ "$#" -ge 5 ] && [ "$1" = "-C" ] && [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then
   target="$5"

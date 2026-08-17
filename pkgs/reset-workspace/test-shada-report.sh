@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-oo4q): extracts bash out of the BUILT script, so the suite itself runs `nix build .#reset-workspace` (:27), impossible in a build sandbox; needs a ${self}-path seam. Also needs a real nvim, and SKIPs-exit-0 without one (:46)
 #
 # Tests the reset's self-verifying ShaDa concurrency report (workstation-y3fq).
 #
@@ -24,9 +23,17 @@ trap cleanup EXIT
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-built="$(nix build --no-link --print-out-paths "$repo_root#reset-workspace" 2>/dev/null | tail -1)"
-[ -n "$built" ] || { echo "FAIL: could not build reset-workspace"; exit 1; }
-src="$built/bin/reset-workspace"
+# Seam: a check passes the ALREADY-BUILT artifact so this suite never invokes
+# nix itself (impossible in a build sandbox). Falls back to building, so a
+# local run with no seam set behaves exactly as before.
+if [ -n "${RESET_WORKSPACE_BIN:-}" ]; then
+  src="$RESET_WORKSPACE_BIN"
+else
+  built="$(nix build --no-link --print-out-paths "$repo_root#reset-workspace" 2>/dev/null | tail -1)"
+  [ -n "$built" ] || { echo "FAIL: could not build reset-workspace"; exit 1; }
+  src="$built/bin/reset-workspace"
+fi
+[ -r "$src" ] || { echo "FAIL: reset-workspace not readable: $src"; exit 1; }
 
 # Extract shada_watch_report verbatim.
 report_fn="$(awk '
@@ -124,11 +131,17 @@ want "a missing watcher reports unknown" 'unknown'
 # ---- 6. DELETE closes a window too. nvim unlinks main.shada between temps, and
 #         an implementation that only handled MOVED_FROM would leak the count
 #         upward and cry wolf on a clean night.
+# The second window MUST use a different temp name. With the same name twice,
+# an implementation that ignores DELETE still reports 1 -- the second CREATE
+# finds the name already live and does not re-count -- so this case passed
+# even with the DELETE branch deleted from production. Measured, not supposed:
+# mutating `$2 ~ /MOVED_FROM|DELETE/` to `$2 ~ /MOVED_FROM/` left all 12
+# assertions green. Distinct names make the leak observable as max=2.
 run_case delete_close 2 \
   '03:00:05 CREATE main.shada.tmp.a' \
   '03:00:05 DELETE main.shada.tmp.a' \
-  '03:00:05 CREATE main.shada.tmp.a' \
-  '03:00:05 DELETE main.shada.tmp.a'
+  '03:00:05 CREATE main.shada.tmp.b' \
+  '03:00:05 DELETE main.shada.tmp.b'
 want "DELETE closes a writer window as well as MOVED_FROM" 'max concurrent shada writers: 1'
 
 # ---- 7. NOISE IMMUNITY. Events for the real file and for unrelated names must
