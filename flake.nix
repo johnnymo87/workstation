@@ -315,6 +315,167 @@
         touch $out
       '';
 
+      # ---------------------------------------------------------------------
+      # workstation-dad9: five suites that existed and ran nowhere.
+      #
+      # The bead estimated all of these as "add a checks entry and grep the
+      # final PASS line". Running them first showed that was true of two. What
+      # the other three needed is recorded on each check below, because the
+      # useful artifact is not the wiring, it is the reason the estimate was
+      # wrong.
+      # ---------------------------------------------------------------------
+
+      # oc-cost: 101 tests over the cost model, sqlite in-memory, hermetic.
+      #
+      # Read the gate below before changing the invocation. This file had NO
+      # `if __name__ == "__main__"` block, so `python3 test_oc_cost.py` imported
+      # it, defined all 101 tests, ran NONE, printed nothing, and exited 0
+      # (measured). Wiring it the obvious way would have added a check that
+      # could never fail -- the oc-session-list `--help` checkPhase again, in
+      # python. Its own header said to run it via `python3 -m unittest <file>`,
+      # which the reachability guard cannot match (`-m` does not end in `.py`),
+      # so the file was made directly runnable instead of teaching the guard a
+      # new shape.
+      oc-cost-tests = devboxPkgs.runCommand "oc-cost-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 pkgs/oc-cost/test_oc_cost.py 2>&1 | tee "$TMPDIR/out.txt"
+
+        # The count is PINNED, following checks.oc-auto-attach. "OK" alone is
+        # also what a suite that silently stopped collecting tests prints.
+        grep -q '^Ran 101 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 101 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: oc-cost suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # opencode-serve-auth.sh: the serve pool's password/curl-args resolver.
+      # `source`s the real production file (pkgs/opencode-serve-auth-sh's
+      # default.nix is writeText of that same file), so this is production, not
+      # a mirror. Deliberately bash-builtins-only, hence the bare input list.
+      opencode-serve-auth-sh-tests = devboxPkgs.runCommand "opencode-serve-auth-sh-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnused devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/opencode-serve-auth-sh/test.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^all opencode-serve-auth-sh tests passed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: serve-auth suite did not reach its final pass line." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # caveman's compaction exemption, driven against the SHIPPED plugin.js.
+      #
+      # This one already ran in CI, via pkgs/caveman/default.nix's
+      # installCheckPhase inside the home closures -- so its unwired-test marker
+      # was a false "not covered" claim. The guard rejects checkPhase as
+      # evidence anyway (oc-session-list), and prescribes exactly this remedy:
+      # "add a thin checks.* entry that runs the same script". Both now run. The
+      # duplication is deliberate: the installCheckPhase gates `nix build
+      # .#caveman`, home switches and the auto-bump PRs at artifact-build time,
+      # while this makes the coverage legible to the guard and to a reader.
+      caveman-exemption = devboxPkgs.runCommand "caveman-exemption-tests" {
+        nativeBuildInputs = [ devboxPkgs.nodejs_22 ];
+      } ''
+        cd ${self}
+        # Load-bearing, and copied from the installCheckPhase: unset, the test
+        # falls back to `process.cwd()/exemption-scratch`, and with `cd ${self}`
+        # that is the read-only store -- EACCES before a single assertion runs.
+        export TEST_SCRATCH="$TMPDIR/caveman-exemption-scratch"
+        export HOME="$TMPDIR"
+        node pkgs/caveman/exemption-test.js \
+          ${(localPkgsFor devboxSystem).caveman}/plugin/plugin.js 2>&1 \
+          | tee "$TMPDIR/out.txt"
+        grep -q '^OK: compaction exemption verified' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: caveman exemption test did not reach its OK line." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # lgtm-gh. NAMED "-mirror-" on purpose: 9 of its 15 assertions drive a
+      # COPY of the resolution logic that lives in pkgs/lgtm-gh/default.nix,
+      # not the shipped wrapper, so a green result here is NOT behavioural
+      # coverage of production. Do not read it as such.
+      #
+      # It is wired anyway because the remaining 6 assertions grep the real
+      # default.nix and are the only live tripwire on it, and because the
+      # alternative (leave it unwired until the mirror is gone) runs those 6
+      # nowhere at all. The mirror exists because production cannot currently
+      # be intercepted -- writeShellApplication prepends its runtimeInputs to
+      # PATH, so a fake `gh` fixture loses to the pinned real one. Removing the
+      # mirror means overriding that input with a stub package and driving the
+      # real binary; that is workstation-dimz's job and its bead records this.
+      lgtm-gh-mirror-tests = devboxPkgs.runCommand "lgtm-gh-mirror-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/lgtm-gh/test.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^all lgtm-gh tests passed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: lgtm-gh suite did not reach its final pass line." >&2
+          exit 1
+        }
+        # Pinned like oc-cost: the 6 production-source greps are the only part
+        # of this suite that touches production, and a silent drop to 9 would
+        # leave a green check testing nothing but the mirror.
+        grep -q '^15 passed, 0 failed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected '15 passed, 0 failed' (9 mirror + 6" >&2
+          echo "production-source greps). Update deliberately, in the same commit." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # git-work: the `work` worktree helper, sourced from its BUILT script.
+      #
+      # Two things had to change before this could be a check, neither of them
+      # in the "grep the PASS line" shape the bead predicted. It ran `nix build
+      # .#git-work` itself, which cannot happen inside a build sandbox (and
+      # left a `result` symlink in the repo root); it now accepts WORK_BIN,
+      # which this check supplies. And it inherited the invoking user's git
+      # config: `git init --bare` + `git push origin main` passes only where
+      # init.defaultBranch is already `main`, and in the sandbox it is
+      # `master` (measured), so the suite now pins its own config file.
+      git-work-tests = devboxPkgs.runCommand "git-work-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils
+          devboxPkgs.gnugrep devboxPkgs.gnused
+        ];
+        # The built script under test. Also proves the derivation still exposes
+        # bin/work, which the suite would otherwise discover only at runtime.
+        WORK_BIN = "${(localPkgsFor devboxSystem).git-work}/bin/work";
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/git-work/test.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^ALL PASS' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: git-work suite did not reach its ALL PASS line." >&2
+          exit 1
+        }
+        # Sourcing a writeShellApplication also prepends ITS runtimeInputs to
+        # PATH, which would mask a tool this check forgot to declare. Assert the
+        # suite reported the binary we handed it rather than one it built.
+        grep -q "^Testing: $WORK_BIN\$" "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: suite did not test the WORK_BIN we supplied." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # Repo-wide test reachability (bead workstation-oeyv).
       #
       # Five times a test file was added here and executed by nothing, each one

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
