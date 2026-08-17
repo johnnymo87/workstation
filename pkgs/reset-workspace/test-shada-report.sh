@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): extracts bash out of the BUILT script, so it needs a nix build; needs fixture injection to be hermetic
+# unwired-test(workstation-oo4q): extracts bash out of the BUILT script, so the suite itself runs `nix build .#reset-workspace` (:27), impossible in a build sandbox; needs a ${self}-path seam. Also needs a real nvim, and SKIPs-exit-0 without one (:46)
 #
 # Tests the reset's self-verifying ShaDa concurrency report (workstation-y3fq).
 #

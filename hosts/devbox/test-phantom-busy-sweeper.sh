@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-oo4q): the suite itself runs `nix eval` + `nix-store -r` (:59-60); a SWEEPER_OVERRIDE seam already exists (:56), but see the :52 caveat that the override escapes HOME-pinning
 # Tests for systemd.user.services.opencode-phantom-busy-sweeper
 # (users/dev/home.devbox.nix — the DEVBOX sweeper, a systemd USER unit).
 #

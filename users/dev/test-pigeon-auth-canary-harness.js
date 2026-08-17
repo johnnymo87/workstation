@@ -1,4 +1,4 @@
-// unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+// unwired-test(workstation-k7t4): harness for test-pigeon-auth-canary.sh, which needs the live front door; same disposition as that file
 import { spawn, execSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-k7t4): NOT live state -- fully fixture-injected (LOCKPROBE_LOCKS/WCHAN_FMT/SHM_INO, :38-47) and hermetic in 29s, but several assertions bound wall-clock timing (:89 and :115 assert 800<d<1300, :271 asserts max_gap<200ms) and would flake on a loaded CI runner. See the bead note: lower bounds are load-safe, upper bounds are assertions about the environment
 # Tests for hosts/cloudbox/opencode-lockprobe.py (W2d, bead workstation-yvxh.12).
 #
 # The sampler's whole job is to be believed about a distribution nobody can

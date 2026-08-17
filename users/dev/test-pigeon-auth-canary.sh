@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-k7t4): genuinely live host state -- curls the running front door on 127.0.0.1 and asserts it is not degraded. A GitHub-runner step would be worse than nothing here: no door there either, so it would go green having asserted nothing. Belongs to workstation-4ze8 as ALERTING, keeping this marker as the coverage claim
 # Runtime regression guard for Pigeon Auth & Frontdoor Aggregate Degrade Detection (dx8p Stage 1, Task 8)
 #
 # Asserts two live-service properties:

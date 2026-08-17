@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-oo4q): the suite itself runs `nix eval` of homeConfigurations (:44), impossible in a build sandbox; needs a ${self}-path seam
 # Regression tests for disk-cleanup worktree pruning decisions.
 # Run: bash users/dev/test-disk-cleanup-worktrees.sh
 
