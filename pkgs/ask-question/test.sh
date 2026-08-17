@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 # Durability + reproducibility tests for the ask-question deps stage.
 #
 # workstation-g9fe: the node_modules deps stage must be content-addressed by the
@@ -25,6 +24,10 @@ cd "$REPO_ROOT"
 # here. No-op on the real linux targets where it is natively supported.
 export NIXPKGS_ALLOW_UNSUPPORTED_SYSTEM=1
 
+# jq comes from THIS repo's locked nixpkgs (--inputs-from), not the ambient
+# flake registry. Unpinned, every CI run would resolve and download whatever
+# nixpkgs-unstable the registry points at that day: a nondeterministic input to
+# a test whose entire purpose is asserting determinism.
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
@@ -44,14 +47,14 @@ echo "  nodeModules drv: $NMDRV"
 DRVJSON="$(nix derivation show "$NMDRV")"
 
 echo "== invariant 1: no bun in the deps stage build inputs =="
-if printf '%s' "$DRVJSON" | nix run nixpkgs#jq -- -e \
+if printf '%s' "$DRVJSON" | nix run --inputs-from "$REPO_ROOT" nixpkgs#jq -- -e \
      '[.[].inputDrvs | keys[]] | map(select(test("-bun-[0-9]"))) | length > 0' >/dev/null; then
   fail "bun is a build input of the deps derivation (FOD-over-bun-tree regression)"
 fi
 pass "no bun in deps stage"
 
 echo "== invariant 2: deps derivation is NOT a fixed-output (no outputHash) =="
-if printf '%s' "$DRVJSON" | nix run nixpkgs#jq -- -e \
+if printf '%s' "$DRVJSON" | nix run --inputs-from "$REPO_ROOT" nixpkgs#jq -- -e \
      '[.[].outputs.out | (has("hash") or has("hashAlgo"))] | any' >/dev/null; then
   fail "deps derivation has a fixed-output hash (recursive-FOD regression)"
 fi

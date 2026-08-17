@@ -126,6 +126,31 @@ jobs:
       - name: Run nix flake check
         run: nix flake check --print-build-logs --keep-going
 
+      # The ONE suite in this repo that cannot be a nix check, and the reason
+      # channel (b) exists in users/dev/test-unwired-tests.sh.
+      #
+      # pkgs/ask-question/test.sh asserts properties OF A DERIVATION: that the
+      # deps stage has no bun in its inputDrvs, that it is not a fixed-output
+      # derivation, that drvPath is stable across two SEPARATE evaluations, and
+      # that the built CLI vendors undici. It therefore runs `nix eval`, `nix
+      # derivation show` and `nix build` itself, none of which work inside a
+      # build sandbox -- so it is wired here instead, which the guard blesses.
+      #
+      # Rewriting it into eval-time assertions inside flake.nix was considered
+      # and rejected: an assert on `nativeBuildInputs` is strictly WEAKER than
+      # jq over the real drv's inputDrvs (bun can re-enter through any attr or
+      # wrapper and the drv-level check still sees it), and the two-process
+      # drvPath comparison cannot be expressed inside a single evaluation at
+      # all. That trade would have deleted one invariant and quietly weakened
+      # another while claiming the same coverage.
+      #
+      # `if: always()` mirrors --keep-going above: when both this and the flake
+      # check are broken, one run should report both rather than hiding this
+      # behind the first failure.
+      - name: Run the ask-question derivation-invariant suite (cannot be hermetic)
+        if: always()
+        run: bash pkgs/ask-question/test.sh
+
       # Root the checked configurations before the cache step runs.
       #
       # Without this the cache is real but useless, which is worse than no cache

@@ -1058,7 +1058,12 @@ which reads exactly like "the timer is gone". It cost a detour here. Use:
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user list-timers
 ```
 
-### S7 — Reap idle instances in serve mode · `workstation-rdsq.1` · **DESIGNED 2026-08-04, NOT YET BUILT**
+### S7 — Reap idle instances in serve mode · `workstation-rdsq.1` · **DESIGNED 2026-08-04, NOT BUILT — DEFERRED 2026-08-17**
+
+> Deferred in the wind-down, not closed. The design below and the six review
+> defects under it are still the spec if this is ever picked up; the numbers that
+> motivated it are not. See the close-out table for the revisit triggers, and note
+> that `~29% of RSS` now means ~29% of ~1.2 G, not of 9.5–10.2 G.
 
 Worked against upstream **v1.17.13** (`10c894bdee`) in `/home/dev/projects/opencode`,
 which is the exact version the pool runs as `opencode-patched-1.17.13.7`. Newer tags
@@ -1482,8 +1487,8 @@ is tuning against a number nothing approaches.
 | `63wo` | P2 | **CLOSED — done.** Stamped gate armed and soaked; see below on what the soak actually proved |
 | `8rou` | P2 | **CLOSED — no-longer-motivated**, not done. 14 G → 10 G is a distinction between two numbers both ~10× above anything observed, and the 32 G aggregate cap already provides the protection. Reopen if per-serve peaks return to the multi-GB range |
 | `ixw7` | P2 | **CLOSED** by PR #368 |
-| `rdsq.1` (S7 idle reaper) | P2 | **PENDING DISPOSITION.** Same demotivation applies — 29% of ~1.2 G is not worth a reaper — but it is a real upstream-shaped defect with a design already in PR #285, so it is not being closed unilaterally as part of a wind-down |
-| `yvxh.6` | P3 | stays with the `yvxh` epic, not this one |
+| `rdsq.1` (S7 idle reaper) | P2 | **DEFERRED** 2026-08-17, not closed. The defect is real and the design in PR #285 survives; what went away is the pressure to act on it. 29% of ~1.2 G is a few hundred MB. **Revisit if** per-serve resident returns to the multi-GB range and stays there across a day, **or** a kernel OOM kill lands on a serve again, **or** the child fleet is implicated in something other than memory (fd exhaustion, CPU, startup latency) — which the memory measurement says nothing about |
+| `yvxh.6` | P3 | stays with the `yvxh` epic, not this one. It had been wired as an explicit parent-child dependency of **this** epic while its own description named `yvxh` as its spine; that redundant edge was removed on close. Worth noting as a tracker-hygiene trap — a stray cross-epic edge made a P3 in someone else's spine look like a blocker for closing this one |
 | `0svg`, `qyxn`, `daa0`, `2dwe`, `lwde` | P2/P3 | unchanged; none are memory-pressure-gated any more |
 | `wmrt` | P2 | **NEW.** `database is locked` first-start race; 4 events in 5.5 days, self-heals in 10 s |
 | `rl3k` | P3 | **NEW.** Post-restart readiness must compare `InvocationID`, not `is-active` |
