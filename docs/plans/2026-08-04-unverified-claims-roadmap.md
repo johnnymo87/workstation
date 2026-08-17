@@ -369,6 +369,138 @@ the tripwire (case 14), removing the channel (case 13).
 
 Census: **31 → 56 files executed by CI, 52 → 27 declared unwired.**
 
+## Step 3.6 — `dad9`: the cheap ones, which were not · **DONE** (#370, #371, #372)
+
+Seven files the step-2 census flagged as *"roughly 'add a checks entry and grep
+the final PASS line'"*. The bead attached its own caveat — *"'cheap' is an
+estimate from reading them, NOT a measurement"* — and that caveat was the most
+valuable line in it. **I ran all seven before designing anything. The estimate
+held for two.**
+
+### One of them could not fail, and I nearly certified it
+
+`pkgs/oc-cost/test_oc_cost.py` has no `if __name__ == "__main__"` block:
+
+```
+$ python3 pkgs/oc-cost/test_oc_cost.py ; echo "EXIT: $?"
+EXIT: 0                      # zero bytes of output
+```
+
+101 tests defined, **none executed**. The obvious check — run the file, assert
+exit 0 — would have been permanently green over nothing: instance #5 of this
+roadmap's own list (oc-session-list's `doCheck = true` with a `--help`
+checkPhase), reproduced in Python, **inside the PR whose subject is that failure
+mode**.
+
+Its header said to run it via `python3 -m unittest <file>`, which the guard's
+runner regex cannot match, because `-m` does not end in `.py`. So both routes
+were wrong in opposite directions: one runs the tests and reports unwired, the
+other reports wired and runs nothing. The file was made directly runnable rather
+than the guard taught a looser shape, and the check pins `Ran 101 tests` so a
+suite that silently stops collecting cannot present as green.
+
+This is the strongest argument yet for the "measure, don't read" rule. Reading
+that file tells you it has 101 tests. Only running it tells you it has none.
+
+### One of them was a production hazard wearing a test's clothes
+
+`assets/git-hooks/test-pre-commit.sh` could not run in a sandbox because the
+hook it tests shebangs `#!/bin/bash` — and **`/bin/bash` is declared nowhere in
+this repo.** On cloudbox it exists only as a root-owned symlink into dev's nix
+profile, made by hand and recorded in no config. Every other script here uses a
+bash store path.
+
+Nothing recreates that symlink. A reprovisioned host would deploy a hook that
+cannot exec — and since the drift detector was removed on 2026-07-25, this hook
+is the only remaining enforcement of the read-only-trunk rule across `mono`,
+`pigeon` and `workstation`. Measured, because the direction matters: git reports
+`fatal: cannot exec ...` and **aborts the commit**, so it fails closed and loud
+(every commit in three repos breaks) rather than silently letting commits
+through. My first draft of that comment said "silently"; the measurement
+corrected it before it shipped.
+
+The fix serves both problems: package the hook with a store-path interpreter,
+deploy *that*, and point the check at the same derivation. The rejected
+alternative — have the check copy and patch the asset in `$TMPDIR` — would have
+left **CI testing a sandbox-only variant while cloudbox ran an unpatched
+original**, which is the mirror defect of Step 4 arriving through the back door.
+
+### What the sandbox actually lacks
+
+Three suites were green on the host and would have been red in CI. Probed rather
+than reasoned about:
+
+| probe | result | who it broke |
+|---|---|---|
+| `/bin` contents | `sh` only — **no `bash`** | the pre-commit hook |
+| `/usr/bin/env` | **missing** | lgtm-gh's fake `gh` stub shebang |
+| `git init --bare` default branch | **`refs/heads/master`** | git-work's `push origin main` |
+
+The last one is the instructive one: git-work passed on developer machines
+*because their global config sets `init.defaultBranch=main`*. A test reading the
+invoking user's configuration is not hermetic even when it is green, and nothing
+would have told us.
+
+### `nix build` inside `nix build`
+
+Two suites ran nix themselves. They are not the same case and did not get the
+same treatment:
+
+- **git-work** built the thing it tests. That is incidental — it now accepts
+  `WORK_BIN`, the check supplies the derivation, the developer path is unchanged,
+  and it stops leaving a `result` symlink in the repo root as a side effect.
+- **ask-question** *is* about the derivation: no bun in the deps stage's
+  `inputDrvs`, no `outputHash`, `drvPath` stable across two separate
+  evaluations, undici vendored. Wired via **channel (b)**, the workflow step the
+  guard blesses for exactly this.
+
+The eval-time rewrite of ask-question was tempting and would have been a
+mistake. Proven, not asserted: re-adding bun lands it in
+`derivationArgs.nativeBuildInputs`, **nested inside**
+`importNpmLock.buildNodeModules`, where an assert on the package's own
+`nativeBuildInputs` cannot see it — but jq over the real drv's `inputDrvs` does,
+and did. Invariant 3 cannot be expressed inside one evaluation at all. The
+"hermetic" version would have deleted one invariant and weakened another while
+claiming the same coverage.
+
+That suite also had a real bug: `nix run nixpkgs#jq` resolved the **ambient
+flake registry**, making a nondeterministic input to a determinism test. Now
+pinned via `--inputs-from`.
+
+### A marker that was lying in the safe direction
+
+`pkgs/caveman/exemption-test.js` was *already* executed in CI, by its
+`installCheckPhase` inside the home closures. Its `unwired-test` marker was a
+false **"not covered"** claim — which is the direction this scheme is designed to
+fail in, and the reason the marker convention was chosen over a
+coverage-claiming dotfile in #347. A false "I am not covered" costs a redundant
+check; a false "I am covered" costs the coverage itself.
+
+### Mutation results
+
+Eight mutations against production code, every one caught, each read by failure
+**text**: a changed constant, a silently-dropped test, a no-op'd trim, a
+compaction leak, production/mirror drift, a weakened slug sanitiser, a
+fixed-output regression, and bun re-entering the deps stage. Plus two premise
+mutations: removing the packaged hook (`fatal: cannot exec`) and inserting
+`exit 0` into the hook (7 failures).
+
+**Two of my own harness bugs were caught by asserts rather than shipping as
+false "caught!" results** — a mutation string that did not exist in the target
+(`exec gh`; production says `exec env GH_TOKEN=`), and a `python` replace that
+silently no-op'd. A mutation harness needs its own positive control, for the
+same reason everything else here does.
+
+### Cost, correctly attributed
+
+#371's CI run took 13m42s against a ~4 min baseline, and the obvious suspect was
+the new workflow step. It was not: the step took **3 seconds**. The 11m33s was
+`nix flake check` rebuilding after the merge of #370 rotated the cache key. The
+memorable new thing was the wrong answer; measuring the step timings gave the
+right one.
+
+Census: **56 → 64 files executed by CI, 27 → 21 declared unwired.**
+
 ## Step 4 — `dimz`: stop testing mirrors of the production helpers · **NOT STARTED**
 
 **Bead:** `workstation-dimz` (P2, spawned by step 1, 2026-08-04)
@@ -448,8 +580,8 @@ and leaving its marker behind FAILS the build, so these only go down by real wor
 |---|---|---|---|
 | `workstation-5m47` | P1 | 0 | ~~The opencode-frontdoor vitest suite.~~ **DONE, PR #347** — wired as `checks.frontdoor-vitest`. Both premises in the row it replaces were wrong: see below. |
 | `workstation-k7t4` | P2 | 13 | Suites that probe live host state (systemd/tmux/sockets); need fixture injection to become hermetic. |
-| `workstation-dad9` | P2 | 7 | Suites that look cheaply wirable — "add a checks entry and grep the final PASS line". The best starting point. |
-| `workstation-dimz` | P2 | 1 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. |
+| `workstation-dad9` | P2 | 0 | ~~Suites that look cheaply wirable.~~ **DONE, PRs #370 / #371 / #372** — the "cheaply wirable" estimate held for 2 of 7. One of them could not fail; one hid a production hazard. See below. |
+| `workstation-dimz` | P2 | 2 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. Also owns `pkgs/lgtm-gh/test.sh` since #370, whose check is named `lgtm-gh-mirror-tests` to stop its green being misread; the bead carries the recipe for killing that mirror. |
 | `workstation-3g4j` | P2 | 3 | `reset-workspace/test.sh`, plus `nvims` and `opencode-launch`. **Adopted, not spawned** — it predates the census. |
 | `workstation-m98t` | P3 | 3 | The plugin-bundle family, which runs `nix build` on itself. |
 | `workstation-4ze8` | P1 | — | Step 3's second layer: a drift canary in a different deploy channel. Owns every `warn:` path the gate cannot close itself. |
