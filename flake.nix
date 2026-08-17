@@ -378,6 +378,47 @@
         touch $out
       '';
 
+      # oc-pool-attach: 87 assertions, and the name says "mirror" on purpose.
+      #
+      # ~70 of those assertions exercise helpers REDEFINED inside test.sh
+      # (classify_oc_invocation, parse_serve_url, resolve_pigeon_auth), so they
+      # cannot fail when pkgs/oc-pool-attach/default.nix drifts -- measured: a
+      # logic mutation in the production classify body survives all of them. The
+      # honest half is the ~17 source-greps over default.nix, which are real
+      # regression tripwires (the IFS tab-split read anti-pattern, the POST
+      # /place fallback, and FRONTDOOR_URL/session vs the stale anchor).
+      #
+      # Wired anyway, following the precedent set for lgtm-gh-mirror-tests in
+      # PR #370: leaving the file unwired ran the honest greps NOWHERE AT ALL.
+      # Execution and fidelity are orthogonal problems, and the *-mirror-tests
+      # suffix exists so a green here cannot be misread as "production is
+      # covered". Killing the mirror is tracked in workstation-dimz, which now
+      # owns this file too.
+      #
+      # Three vacuous-green paths were closed in the same commit as the wiring:
+      # a missing default.nix printed SKIP and fell through to the final banner
+      # (so the only non-tautological half was optional), jq absent silently
+      # dropped 9 assertions the same way, and the count below pins both shut.
+      oc-pool-attach-mirror-tests = devboxPkgs.runCommand "oc-pool-attach-mirror-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.jq devboxPkgs.gnugrep devboxPkgs.coreutils
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/oc-pool-attach/test.sh 2>&1 | tee "$TMPDIR/opa.txt"
+        grep -q '^all oc-pool-attach tests passed' "$TMPDIR/opa.txt" || {
+          echo "GATE FAILURE: oc-pool-attach suite did not reach its final banner." >&2
+          exit 1
+        }
+        [ "$(grep -c '^PASS' "$TMPDIR/opa.txt")" = 87 ] || {
+          echo "GATE FAILURE: expected 87 'PASS' lines, got" \
+               "$(grep -c '^PASS' "$TMPDIR/opa.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       worktree-guard-hook-tests = devboxPkgs.runCommand "worktree-guard-hook-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils devboxPkgs.gnugrep
