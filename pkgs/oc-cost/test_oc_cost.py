@@ -1,4 +1,3 @@
-# unwired-test(workstation-dad9): wirable as a hermetic pytest check, not yet done
 """Tests for oc-cost. Run: python3 -m unittest pkgs/oc-cost/test_oc_cost.py"""
 
 from __future__ import annotations
@@ -1289,4 +1288,16 @@ class TestMainIntegration(unittest.TestCase):
             self.assertIn("Reconciliation", out)
         finally:
             _os.unlink(path)
+
+
+# Without this, `python3 test_oc_cost.py` imports the module, defines all 101
+# test methods, runs NONE of them, prints nothing, and exits 0 -- measured.
+# That is the oc-session-list artifact (a checkPhase that ran `--help`) in
+# python form, and it is what this file would have contributed to CI had the
+# check been written the obvious way. The suite was reachable only via
+# `python3 -m unittest <file>`, which the reachability guard's runner regex
+# cannot match (`-m` does not end in `.py`), so the honest fix is to make the
+# file directly runnable rather than to teach the guard a new shape.
+if __name__ == "__main__":
+    unittest.main()
 

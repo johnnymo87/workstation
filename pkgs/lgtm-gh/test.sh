@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 # Unit tests for the lgtm-gh wrapper. Mirrors the resolution logic from
 # default.nix and exercises it directly against fixtures (with a fake `gh` on
 # PATH so no real GitHub call happens), plus a source-grep guard so the mirror
@@ -67,8 +66,13 @@ mkdir -p "$HOME/.config/lgtm/tokens"
 fakebin="$sandbox/bin"
 mkdir -p "$fakebin"
 gh_record="$sandbox/gh-record"
+# The shebang is the RUNNING bash, not `/usr/bin/env bash`: a nix build sandbox
+# has no /usr/bin/env (measured -- only /bin/sh exists), so the hardcoded form
+# made every behavioural case here die with "env: 'gh': No such file or
+# directory" once this suite was wired as a check. A shebang is an absolute
+# path, so no amount of PATH in the check can fix it from outside.
 cat > "$fakebin/gh" <<EOF
-#!/usr/bin/env bash
+#!$BASH
 { echo "GH_TOKEN=\$GH_TOKEN"; echo "ARGS=\$*"; } > "$gh_record"
 EOF
 chmod +x "$fakebin/gh"
