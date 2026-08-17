@@ -419,6 +419,92 @@
         touch $out
       '';
 
+      # ---- workstation-oo4q: suites that used to shell out to nix themselves --
+      #
+      # Each of these three extracted its subject by running `nix eval` or
+      # `nix build` INSIDE the test, which a build sandbox cannot do (no daemon
+      # socket, no network, recursive-nix off). Each now takes the artifact
+      # through a seam instead, so the CHECK's dependency graph does the
+      # building and the suite only ever reads a path. Same shape as
+      # WORKTREE_GUARD_HOOK_DIR below: the check points at the artifact
+      # home-manager actually deploys, not a sandbox-only rebuild.
+      #
+      # Two sandbox facts these preambles work around, both measured:
+      #   - /usr/bin/env does not exist, so the disk-cleanup suite now writes
+      #     its generated harness with an absolute bash shebang.
+      #   - /tmp/opencode does not exist, and two of these mktemp into it.
+      disk-cleanup-worktree-tests = devboxPkgs.runCommand "disk-cleanup-worktree-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        DISK_CLEANUP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/disk-cleanup".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        mkdir -p /tmp/opencode
+        export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid
+        export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid
+        bash users/dev/test-disk-cleanup-worktrees.sh 2>&1 | tee "$TMPDIR/dc.txt"
+        grep -q '^all disk-cleanup worktree tests passed' "$TMPDIR/dc.txt" || {
+          echo "GATE FAILURE: disk-cleanup suite did not reach its final banner." >&2
+          exit 1
+        }
+        # Pinned, following checks.oc-auto-attach: a suite that stops
+        # adjudicating must not be able to present as green.
+        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 3 ] || {
+          echo "GATE FAILURE: expected 3 'PASS ' lines, got" \
+               "$(grep -c '^PASS ' "$TMPDIR/dc.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      opencode-llm-audit-tests = devboxPkgs.runCommand "opencode-llm-audit-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        OPENCODE_LLM_AUDIT_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/opencode-llm-audit".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        mkdir -p /tmp/opencode
+        bash users/dev/test-opencode-llm-audit.sh 2>&1 | tee "$TMPDIR/la.txt"
+        grep -q '^ALL PASS' "$TMPDIR/la.txt" || {
+          echo "GATE FAILURE: llm-audit suite did not reach ALL PASS." >&2
+          exit 1
+        }
+        [ "$(grep -c '^ok: ' "$TMPDIR/la.txt")" = 30 ] || {
+          echo "GATE FAILURE: expected 30 'ok:' lines, got" \
+               "$(grep -c '^ok: ' "$TMPDIR/la.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      reset-workspace-shada-report-tests = devboxPkgs.runCommand "reset-workspace-shada-report-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.gawk devboxPkgs.gnused
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        RESET_WORKSPACE_BIN = "${(localPkgsFor devboxSystem).reset-workspace}/bin/reset-workspace";
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/reset-workspace/test-shada-report.sh 2>&1 | tee "$TMPDIR/sr.txt"
+        grep -q '^ALL PASS' "$TMPDIR/sr.txt" || {
+          echo "GATE FAILURE: shada-report suite did not reach ALL PASS." >&2
+          exit 1
+        }
+        [ "$(grep -c '^ok: ' "$TMPDIR/sr.txt")" = 12 ] || {
+          echo "GATE FAILURE: expected 12 'ok:' lines, got" \
+               "$(grep -c '^ok: ' "$TMPDIR/sr.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       worktree-guard-hook-tests = devboxPkgs.runCommand "worktree-guard-hook-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils devboxPkgs.gnugrep
