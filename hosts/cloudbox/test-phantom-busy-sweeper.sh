@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-oo4q): the suite itself runs `nix eval` + `nix-store -r` (:36-37) to locate the unit's ExecStart; a SWEEPER_OVERRIDE seam already exists (:33) so this is likely the cheapest of that bead's seven
+# unwired-test(workstation-oo4q): MEASURED 2026-08-17 -- nested nix (:36) is NOT the first blocker. This suite hard-exits at :52 without a LIVE opencode-serve pool to derive CUTOFF from, which a build sandbox can never provide, and its header (:9-11) says exclusion is deliberate (live pool + a ~600MB T9 fixture). Wiring it means rewriting the CUTOFF discovery, which fixture eligibility depends on -- strictly harder than the devbox sibling, which was designed for the no-pool path. An earlier version of this marker called it "likely the cheapest of the seven"; that was first-blocker-only reasoning and was wrong.
 # Tests for systemd.services.opencode-phantom-busy-sweeper (configuration.nix).
 #
 # Runs the SHIPPED artifact — the nix-built ExecStart script — against scratch

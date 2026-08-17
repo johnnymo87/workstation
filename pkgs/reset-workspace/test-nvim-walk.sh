@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-oo4q): the suite itself runs `nix build .#reset-workspace` (:50); needs a ${self}-path seam. Also spawns real headless nvims, and SKIPs-exit-0 without one
+# unwired-test(workstation-oo4q): the suite itself runs `nix build .#reset-workspace` (:50); needs a path seam. MEASURED 2026-08-17: on a host without inotifywait it never reaches that line -- it exits 0 after ONE line at the :44 inotifywait gate. Three SKIP-exit-0 gates (nvim :43, inotifywait :44, plus a wedge-detect SKIP at :296) must be made fatal before wiring, or the check goes green having asserted nothing.
 # Behavioural acceptance test for Step 3's serialized nvim exit walk.
 #
 # The static suite (test.sh) greps the source; this one RUNS it. It extracts the
