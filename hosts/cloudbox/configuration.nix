@@ -98,6 +98,16 @@ let
   # repeated this host's 2026-07-24 incident on 2026-07-29/30. The full incident history
   # and the backoff/severity rationale now live in that package's header comment.
   driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+
+  # Drift canary (workstation-4ze8), layer 2 for the stale-deploy gate. The
+  # library holds the predicates; the runner is a FILE rather than shell inside
+  # this module so pkgs/hm-deploy-canary-sh/test-behaviour.sh can drive it
+  # as-shipped. Layer 1 failed exactly once in the glue, and only a behavioural
+  # test could see it.
+  hmCanaryLib = pkgs.callPackage ../../pkgs/hm-deploy-canary-sh { };
+  hmGateLib = pkgs.callPackage ../../pkgs/hm-deploy-gate-sh { };
+  hmCanaryRunner = pkgs.writeShellScript "hm-deploy-canary"
+    (builtins.readFile ../../pkgs/hm-deploy-canary-sh/canary.sh);
 in
 {
   # Guard: abort activation if applying the wrong host's config.
@@ -1890,6 +1900,118 @@ Check:
   systemctl status opencode-plugin-canary.service --no-pager
   journalctl -u opencode-plugin-canary.service -n 50 --no-pager" \
           3600 21600
+      ''}";
+    };
+  };
+
+  # =====================================================================
+  # Home-manager drift canary (bead workstation-4ze8).
+  #
+  # LAYER 2 FOR workstation-h0mp. The stale-deploy gate refuses a switch that
+  # would drop live commits, but it is deployed BY the thing it guards: every
+  # `warn:` path in hm_gate_verdict, the HM_ALLOW_STALE_DEPLOY escape hatch, and
+  # a gate that is itself un-deployed by the last-writer-wins race it exists to
+  # prevent are all holes it cannot close. This unit is a NixOS SYSTEM unit
+  # precisely because `home-manager switch` cannot remove one -- different
+  # profile, different switch command. The alert path is out-of-channel for the
+  # same reason: pigeon-daemon is a system unit too, so a bad home-manager
+  # switch cannot silence the pager.
+  #
+  # WHAT IT DOES NOT DO, so nobody has to rediscover it:
+  #   * It does not alert on "behind origin/main". There is no auto-switch on
+  #     this host, so that is the permanent steady state; measured 2026-08-18,
+  #     the originally-proposed path-glob predicate matched a commit that
+  #     touched only flake.nix's checks and a devbox test file. That predicate
+  #     was cut, not tuned.
+  #   * It cannot see an ancestor-stale deploy that happened while it was not
+  #     running. The transition detector is what sees that shape, and only live.
+  #   * It does not check that declared files are still on disk (a hand-deleted
+  #     plugin, a dangling mkOutOfStoreSymlink). That needs a different
+  #     observable and is filed separately.
+  #
+  # NOT EVIDENCE OF TEST COVERAGE. The `nix flake check` entries prove the
+  # predicates and the runner's glue against local fixtures. The existence of
+  # this timer proves neither, and must never be cited as coverage for anything.
+  # =====================================================================
+  systemd.services.hm-deploy-canary = {
+    description = "home-manager stale-deploy drift canary (detect-only; alerts via pigeon)";
+    onFailure = [ "hm-deploy-canary-failure.service" ];
+    path = [ pkgs.git pkgs.coreutils pkgs.gnugrep pkgs.gnused ];
+    serviceConfig = {
+      Type = "oneshot";
+      # ROOT, deliberately, and this is the one place the choice is not
+      # cosmetic. /home/dev is 0700 (verified), so a dedicated canary user
+      # cannot stat the beacon at all -- it would report "beacon absent" on
+      # every pass forever, and the reflex fix for that is to skip when
+      # unreadable, which is the fail-open posture of em-drift-detector.nix that
+      # this bead exists to avoid. User=dev is also wrong: StateDirectory is
+      # chowned to User, so the transition history would become writable by the
+      # very agents the canary polices.
+      User = "root";
+      StateDirectory = "hm-deploy-canary";
+      StateDirectoryMode = "0700";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      # The mirror is the canary's OWN clone. It must never fetch into
+      # /home/dev/projects/workstation: that checkout is shared by ~15 agent
+      # sessions, and a canary that mutates the thing it observes is a hazard,
+      # not a detector.
+      ExecStartPre = "${pkgs.writeShellScript "hm-deploy-canary-init" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.git ]}
+        REPO=/var/lib/hm-deploy-canary/repo
+        if [ ! -e "$REPO/HEAD" ]; then
+          git init --quiet --bare "$REPO"
+          git -C "$REPO" remote add origin https://github.com/johnnymo87/workstation.git
+        fi
+      ''}";
+      ExecStart = "${hmCanaryRunner}";
+      Environment = [
+        "HM_CANARY_GATE_LIB=${hmGateLib}"
+        "HM_CANARY_LIB=${hmCanaryLib}"
+        "HM_CANARY_ALERT=${driftAlert}"
+      ];
+    };
+  };
+
+  systemd.timers.hm-deploy-canary = {
+    description = "Drift canary for the home-manager deploy beacon";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      # 10 minutes, not the plugin canary's minutely. Measured deploy cadence on
+      # 2026-08-18: 5 switches across ~17h, minimum gap 23 minutes. Minutely
+      # would be pure waste; hourly would be a one-hour blind window on a
+      # fleet-wide regression. The network fetch is throttled separately inside
+      # the runner (default hourly), so a 10-minute pass is nearly free.
+      OnBootSec = "3min";
+      OnUnitActiveSec = "10min";
+      AccuracySec = "1min";
+      RandomizedDelaySec = "30s";
+    };
+  };
+
+  # The canary dying is itself a silent failure -- the same "nothing watches the
+  # watcher" shape as the plugin canary's failure unit.
+  systemd.services.hm-deploy-canary-failure = {
+    description = "Alert that the home-manager drift canary itself failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "hm-deploy-canary-failure";
+      ExecStart = "${pkgs.writeShellScript "hm-deploy-canary-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq ]}
+        ${driftAlert} /var/lib/hm-deploy-canary-failure/alert-canary-crashed           "hm-canary:canary-crashed"           "The home-manager drift canary FAILED TO RUN.
+
+hm-deploy-canary.service exited non-zero, so the second layer of the stale-deploy
+guard is down. While it is down, a switch that drops live configuration is
+detected only by the activation gate -- which is exactly the layer that cannot
+cover its own holes.
+
+Check:
+  systemctl status hm-deploy-canary.service --no-pager
+  journalctl -u hm-deploy-canary.service -n 50 --no-pager"           3600 21600
       ''}";
     };
   };

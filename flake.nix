@@ -69,6 +69,7 @@
       worktree-guard-hook = p.callPackage ./pkgs/worktree-guard-hook { };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
+      hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
       lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
@@ -1051,6 +1052,58 @@
         # Assert the assertions RAN. A suite that exits 0 having executed
         # nothing is the failure mode this whole roadmap is about.
         grep -q '^hm-deploy-gate: ALL PASS$' "$TMPDIR/out.txt"
+        touch $out
+      '';
+
+      # Drift canary (bead workstation-4ze8), layer 2 for the stale-deploy gate
+      # above. The gate is deployed BY the thing it guards, so it cannot close
+      # its own holes; this library is the detector that runs from a NixOS
+      # system unit instead. Only the pure decision logic runs here -- the unit
+      # itself needs a live profile, a real clone and a network fetch, none of
+      # which exist in the sandbox.
+      #
+      # NOT COVERAGE EVIDENCE FOR THE TIMER. This roadmap already rejected a
+      # host-timer channel as a sandbox-checkable coverage claim; the check
+      # below proves the predicates and nothing about whether the unit fires.
+      hm-deploy-canary = devboxPkgs.runCommand "hm-deploy-canary-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash pkgs/hm-deploy-canary-sh/test.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        grep -q '^hm-deploy-canary: ALL PASS$' "$TMPDIR/out.txt"
+        # Pin the count. ALL PASS is also what a suite that executed nothing
+        # prints, and every sibling check in this file stops at the banner.
+        n="$(grep -c '^  PASS: ' "$TMPDIR/out.txt")"
+        if [ "$n" -ne 36 ]; then
+          echo "expected 36 assertions, ran $n" >&2; exit 1
+        fi
+        touch $out
+      '';
+
+      # Behavioural half of the drift canary: runs the SHIPPED runner
+      # (pkgs/hm-deploy-canary-sh/canary.sh) end to end through its seams,
+      # against scratch state and a stub alert sink. The library check above
+      # proves the predicates; it cannot see a canary whose glue never reaches
+      # the alert sink. That is not hypothetical -- the sibling gate silently
+      # ALLOWED every deploy when its library failed to source, and only its
+      # behavioural suite caught it.
+      hm-deploy-canary-behaviour = devboxPkgs.runCommand "hm-deploy-canary-behaviour" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils ];
+      } ''
+        export HOME="$TMPDIR/home"; mkdir -p "$HOME"
+        cd ${self}
+        bash pkgs/hm-deploy-canary-sh/test-behaviour.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        grep -q '^hm-deploy-canary-behaviour: ALL PASS$' "$TMPDIR/out.txt"
+        n="$(grep -c '^  PASS: ' "$TMPDIR/out.txt")"
+        if [ "$n" -ne 19 ]; then
+          echo "expected 19 assertions, ran $n" >&2; exit 1
+        fi
         touch $out
       '';
 
