@@ -76,13 +76,42 @@ Any consumer must scope to the current process, by either:
 **Scratch serves must scrub routing env AND redirect their data dir.** The first
 or our own routing guard kills them; the second because a scratch serve otherwise
 writes real `ERROR` lines into the very log the production canary reads — the
-negative control poisons the detector:
+negative control poisons the detector.
+
+**CORRECTED 2026-08-14 — the recipe that used to be printed here was WRONG and
+silently opened the production database.** `XDG_DATA_HOME` does not redirect the
+database: opencode's `Database.path()` returns an absolute `$OPENCODE_DB`
+verbatim *before* it consults `Global.Path.data`, and `OPENCODE_DB` is a session
+variable (`users/dev/home.base.nix`) that every child process inherits. So the
+scratch serve wrote logs/config/state to `/tmp` — making the isolation *look*
+like it worked — while reading and writing live session rows. That is not
+hypothetical: it happened on 2026-08-14, and the verification query, run against
+the untouched copy, returned a clean-looking "0 rows" false green.
+
+Use the wrapper, which builds the environment correctly and then PROVES it from
+`/proc/<pid>/fd` before handing you a URL:
 
 ```bash
-env -u OPENCODE_SERVE_ID -u OPENCODE_ROUTING_DB \
-    XDG_DATA_HOME="$(mktemp -d)" XDG_CONFIG_HOME="$scratch/config" \
-    opencode serve --port <scratch-port>
+oc-throwaway-serve                 # empty scratch DB
+oc-throwaway-serve --copy-db       # seeded from a consistent snapshot of the live DB
+OC_THROWAWAY_SERVE_BIN=/path/to/candidate/opencode oc-throwaway-serve   # validate a build
 ```
+
+By hand, `OPENCODE_DB` must be scrubbed or repointed explicitly — never left to
+inheritance:
+
+```bash
+env -u OPENCODE_SERVE_ID -u OPENCODE_ROUTING_DB -u OPENCODE_DB \
+    XDG_DATA_HOME="$scratch/data" XDG_CONFIG_HOME="$scratch/config" \
+    opencode serve --port <scratch-port>
+# then VERIFY, do not assume:
+ls -l /proc/<pid>/fd | grep '\.db'    # must show NO ~/.local/share/opencode/opencode.db
+```
+
+opencode itself now refuses the broken shape (`db-isolation-guard.patch` in
+opencode-patched: `XDG_DATA_HOME` set + `OPENCODE_DB` resolving outside it ⇒
+FATAL, exit 22, before any handle is opened), but the guard ships with a build —
+verify by measurement anyway, which is the actual lesson.
 
 **Deploy ordering.** `git pull` **before** `home-manager switch`. Doing it the
 other way round silently deploys the pre-merge tree — this cost a full day on
