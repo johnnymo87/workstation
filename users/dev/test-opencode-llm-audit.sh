@@ -132,6 +132,19 @@ export LOGDIR
 sleep 120 9>>"$a" & ha=$!; holders+=("$ha")
 sleep 120 9>>"$b" & hb=$!; holders+=("$hb")
 
+# Wait for the FIXTURE, then assert once. The shell applies `9>>` in the child
+# after forking, so a read of /proc/$pid/fd immediately after `&` can
+# legitimately find nothing -- the child may not have been scheduled yet. This
+# raced green on an idle machine and went red on a loaded CI runner
+# (run 32142902278: "expected /proc/57/fd/9, actual []").
+#
+# This waits on SETUP and does not retry the ASSERTION: if the fd never appears,
+# the loop simply expires and the check below fails exactly as loudly as before.
+for _ in $(seq 1 500); do
+  [ -e "/proc/$ha/fd/9" ] && [ -e "/proc/$hb/fd/9" ] && break
+  sleep 0.01
+done
+
 fd_a="$(find_log_fd "$ha" || true)"
 check "find_log_fd locates the held log fd" "/proc/$ha/fd/9" "$fd_a"
 

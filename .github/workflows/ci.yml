@@ -151,6 +151,29 @@ jobs:
         if: always()
         run: bash pkgs/ask-question/test.sh
 
+      # The plugin-bundle family, for the same reason as ask-question above:
+      # these assert properties OF A DERIVATION -- no bun in the deps stage's
+      # inputDrvs, deps stage is not a fixed-output derivation, drvPath stable
+      # across two SEPARATE evaluations -- so they run `nix eval`, `nix
+      # derivation show` and `nix build` themselves and cannot nest in a build
+      # sandbox. workstation-m98t's own description prescribed injecting the
+      # built artifact via an env var, the seam used for the oo4q suites; that
+      # was wrong here, because it covers only the three artifact-level
+      # invariants and deletes the three derivation-level ones the bead exists
+      # for. Note the package DOES have doCheck=true and a real checkPhase that
+      # runs in CI inside the home closures, but that checkPhase is a bun-load
+      # smoke test and does not run test.sh -- the oc-session-list trap, and why
+      # the reachability guard refuses checkPhase as evidence.
+      #
+      # Only the two shims are named. The shared runner they exec is credited by
+      # the guard's transitive closure, which as of this commit can finally parse
+      # their `$(dirname "${BASH_SOURCE[0]}")` delegation (meta-test case 7b).
+      - name: Run the plugin-bundle derivation-invariant suites (cannot be hermetic)
+        if: always()
+        run: |
+          bash pkgs/session-state-plugin/test.sh
+          bash pkgs/self-compact-plugin/test.sh
+
       # Root the checked configurations before the cache step runs.
       #
       # Without this the cache is real but useless, which is worse than no cache
