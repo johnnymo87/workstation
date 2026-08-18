@@ -69,6 +69,39 @@ DEADMAN="$TMP/last-success"
 EXPECT="$TMP/expect"
 touch "$EXPECT"
 
+# Mock `systemctl` for the cadence assertion. Same seam discipline as the alert mock: the suite
+# drives the script as deployed and never sources its internals, so the real branch logic (rather
+# than a reimplementation of it) is what gets exercised. The state is read from a file the tests
+# rewrite, so one mock covers enabled / disabled / not-found / missing-binary.
+CADENCE_STATE_FILE="$TMP/cadence-state"
+CADENCE_CMD="$TMP/mock-systemctl"
+cat > "$CADENCE_CMD" <<EOF
+#!$BASH
+# Args arrive as: --user <is-enabled|is-active> <unit>. The state file holds BOTH answers as
+# "<enabled-answer> <active-answer>", because a timer can be enabled on disk and not running --
+# which is the whole point of case 21 and is invisible to a mock that models only one verb.
+read -r want_enabled want_active < "$CADENCE_STATE_FILE" 2>/dev/null
+[ -z "\$want_active" ] && want_active=active
+case "\$2" in
+  is-active)
+    case "\$want_active" in
+      active)  echo active;   exit 0 ;;
+      silent)  exit 127 ;;
+      *)       echo "\$want_active"; exit 3 ;;
+    esac ;;
+  *)
+    case "\$want_enabled" in
+      enabled)   echo enabled;   exit 0 ;;
+      disabled)  echo disabled;  exit 1 ;;
+      not-found) echo not-found; exit 4 ;;
+      silent)    exit 127 ;;
+      *)         echo "\$want_enabled"; exit 1 ;;
+    esac ;;
+esac
+EOF
+chmod +x "$CADENCE_CMD"
+echo "enabled active" > "$CADENCE_STATE_FILE"
+
 run_watch() {
   local now="$1"
   : > "$ALERT_LOG"
@@ -77,10 +110,19 @@ run_watch() {
   LANE_ALERT_CMD="$ALERT_CMD" \
   LANE_ALERT_STATE="$TMP/alert.state" \
   LANE_LABEL="testlane" \
+  LANE_CADENCE_UNIT="${CADENCE_UNIT_OVERRIDE-testlane.timer}" \
+  LANE_CADENCE_QUERY_CMD="$CADENCE_CMD" \
+  LANE_CADENCE_ALERT_STATE="$TMP/alert.state.cadence" \
   WATCHDOG_NOW="$now" \
   bash "$WATCH" > "$TMP/out.log" 2>&1
   return $?
 }
+
+# Verdicts that distinguish WHICH assertion spoke. `verdict` alone cannot: it only asks whether
+# the log is non-empty, so a cadence alarm would read as a staleness alarm and every pre-existing
+# quiet-case assertion would silently become untrustworthy the moment cadence could fire.
+cadence_verdict() { if grep -q "sig=cadence-" "$ALERT_LOG" 2>/dev/null; then echo alarm; else echo quiet; fi; }
+stale_verdict()   { if grep -q "sig=deadman-" "$ALERT_LOG" 2>/dev/null; then echo alarm; else echo quiet; fi; }
 
 check() {
   local name="$1" want="$2" got="$3"      # want/got: alarm|quiet
@@ -162,4 +204,111 @@ else
 fi
 
 echo
+
+# ---------------------------------------------------------------------------------------------
+# CADENCE ASSERTION (W1: the fifth fake-health bug -- a follow-up chain masking a dead timer).
+#
+# Case 12 is the one that matters and the reason this block exists. Everything else here is a
+# guard against it becoming a nuisance alarm, since a watcher that cries wolf gets muted and
+# then protects nothing -- which would take the staleness check down with it.
+# ---------------------------------------------------------------------------------------------
+
+# 12. THE REGRESSION TEST FOR W1. Dead-man is PERFECTLY FRESH -- exactly what a self-scheduled
+#     follow-up chain produces -- but the cadence timer has been disabled. Before this assertion
+#     the pass was silent and the lane's guaranteed floor was gone with nothing to say so.
+echo "2026-08-17T20:05:00Z" > "$DEADMAN"          # Mon 16:05 EDT, i.e. a healthy recent success
+echo "disabled inactive" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"; rc=$?
+check "W1: fresh dead-man + DISABLED timer still alarms" alarm "$(cadence_verdict)"
+check "W1: ...and it is the cadence episode, not a staleness alarm" quiet "$(stale_verdict)"
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: W1 cadence failure must exit non-zero even when the dead-man is fresh"; failures=$((failures + 1))
+else
+  echo "PASS: W1 cadence failure exits non-zero on an otherwise-healthy pass"
+fi
+
+# 13. Unit removed entirely (the reprovision case: home-manager restores this watcher, the
+#     imperatively-installed lane unit stays gone).
+echo "not-found inactive" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"; check "cadence unit not-found alarms" alarm "$(cadence_verdict)"
+grep -q "DOES NOT EXIST" "$TMP/out.log" || { echo "FAIL: not-found must be distinguishable from disabled in the text"; failures=$((failures + 1)); }
+
+# 14. Cannot check at all (systemctl missing / no output). Must FAIL TOWARD THE ALARM, like
+#     every other unparseable input in this file.
+echo "silent silent" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"; check "unqueryable cadence state alarms rather than assuming health" alarm "$(cadence_verdict)"
+
+# 15. Enabled timer + fresh dead-man -> completely quiet, exit 0. The false-positive guard: if
+#     this fires, the whole watcher gets muted and case 12 protects nothing.
+echo "enabled active" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"; rc=$?
+check "enabled timer + fresh success stays quiet" quiet "$(verdict)"
+[ "$rc" -eq 0 ] || { echo "FAIL: healthy pass must exit 0"; failures=$((failures + 1)); }
+
+# 16. Expectation gate outranks cadence. Before cutover the timer is legitimately disabled, so a
+#     cadence alarm here would page continuously from the day this deploys -- the precise
+#     failure that case 8 exists to prevent for the staleness half.
+echo "disabled inactive" > "$CADENCE_STATE_FILE"
+rm -f "$EXPECT"
+run_watch "2026-08-17T21:00:00-04:00"; check "no expectation flag: cadence check stays silent too" quiet "$(verdict)"
+touch "$EXPECT"
+
+# 17. Cadence check is OPTIONAL, and its skip is audible. An unset unit must not alarm, but must
+#     say it skipped -- a silently skipped assertion looks identical to a passing one.
+echo "disabled inactive" > "$CADENCE_STATE_FILE"
+CADENCE_UNIT_OVERRIDE="" run_watch "2026-08-17T21:00:00-04:00"
+check "unset LANE_CADENCE_UNIT skips without alarming" quiet "$(verdict)"
+grep -q "SKIPPED" "$TMP/out.log" || { echo "FAIL: a skipped cadence check must say so in the log"; failures=$((failures + 1)); }
+
+# 18. Both broken: the two alarms are SEPARATE episodes with distinct signatures, so neither
+#     dedups the other away. One root cause hiding a second is how a two-fault outage reads as
+#     one-fault and gets half-fixed.
+echo "2026-07-01T20:05:00Z" > "$DEADMAN"          # ancient
+echo "disabled inactive" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"
+check "dead lane + dead timer: cadence alarm present" alarm "$(cadence_verdict)"
+check "dead lane + dead timer: staleness alarm ALSO present" alarm "$(stale_verdict)"
+
+# 19. Constant cadence signature across passes, mirroring case 11's reasoning: a signature that
+#     varied per pass would defeat dedup and decay into a nag that never escalates.
+echo "2026-08-17T20:05:00Z" > "$DEADMAN"
+echo "disabled inactive" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"; sig1="$(head -n1 "$ALERT_LOG" | cut -d' ' -f1)"
+run_watch "2026-08-18T21:00:00-04:00"; sig2="$(head -n1 "$ALERT_LOG" | cut -d' ' -f1)"
+if [ -n "$sig1" ] && [ "$sig1" = "$sig2" ]; then
+  echo "PASS: cadence signature is constant across passes ($sig1)"
+else
+  echo "FAIL: cadence signature varies across passes ('$sig1' vs '$sig2')"; failures=$((failures + 1))
+fi
+
+# 20. A healthy cadence pass CLEARS its own episode file, so the next outage pages immediately
+#     rather than inheriting a suppressed backoff count (case 9's reasoning, cadence half).
+echo "enabled active" > "$CADENCE_STATE_FILE"
+: > "$TMP/alert.state.cadence"
+run_watch "2026-08-17T21:00:00-04:00"
+[ -e "$TMP/alert.state.cadence" ] && { echo "FAIL: healthy cadence pass must clear its alert state"; failures=$((failures + 1)); } || echo "PASS: healthy cadence pass clears its own alert episode"
+
+# 21. THE SIXTH FAKE-HEALTH BUG. A timer that is ENABLED on disk but STOPPED. `is-enabled`
+#     answers "enabled" and rc 0; the timer has no next elapse and will not fire again until the
+#     user manager restarts. This evades case 12's fix by one word -- `stop` instead of
+#     `disable` -- and it is the MORE likely of the two, because stopping is what a careful human
+#     does to pause something temporarily. Dead-man stays fresh via follow-ups; without this
+#     assertion the watcher reports everything fine while the floor is gone.
+echo "2026-08-17T20:05:00Z" > "$DEADMAN"
+echo "enabled inactive" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"; rc=$?
+check "W1b: enabled-but-STOPPED timer alarms" alarm "$(cadence_verdict)"
+check "W1b: ...and not as a staleness alarm" quiet "$(stale_verdict)"
+[ "$rc" -ne 0 ] || { echo "FAIL: stopped-timer failure must exit non-zero"; failures=$((failures + 1)); }
+grep -q "NOT RUNNING" "$TMP/out.log" || { echo "FAIL: text must distinguish stopped from disabled"; failures=$((failures + 1)); }
+
+# 22. is-active unqueryable -> alarm, same fail-toward-alarm rule as every other branch.
+echo "enabled silent" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"; check "unqueryable is-active alarms" alarm "$(cadence_verdict)"
+
+# 23. The healthy shape is BOTH: enabled AND active. Guards against the fix in 21 being
+#     satisfied by anything less.
+echo "enabled active" > "$CADENCE_STATE_FILE"
+run_watch "2026-08-17T21:00:00-04:00"; check "enabled AND active stays quiet" quiet "$(verdict)"
+
 if [ "$failures" -eq 0 ]; then echo "All lane-deadman-watch tests passed."; else echo "$failures test(s) FAILED."; exit 1; fi
