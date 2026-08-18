@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): spawns real nvims and a real tmux server, and builds the package under test; needs fixture injection to be hermetic
+# unwired-test(workstation-oo4q): the suite itself runs `nix build` (:53); needs a path seam. MEASURED 2026-08-17: it never reaches that line on a host without inotifywait -- it exits 0 after ONE line at the :48 gate, not the :46 nvim gate this marker used to cite. Three SKIP-exit-0 gates (nvim :46, tmux :47, inotifywait :48) must be made fatal before wiring.
 # Behavioural test for Step 3.4 -- the lgtm junk-drawer teardown (workstation-n0yh.1).
 #
 # WHY THIS EXISTS. `tmux kill-session` tears down every pane at once, and each

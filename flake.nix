@@ -66,8 +66,10 @@
       dvc = p.callPackage ./pkgs/dvc { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
+      worktree-guard-hook = p.callPackage ./pkgs/worktree-guard-hook { };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
+      hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
       lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
@@ -316,6 +318,436 @@
         touch $out
       '';
 
+      # ---------------------------------------------------------------------
+      # workstation-dad9: five suites that existed and ran nowhere.
+      #
+      # The bead estimated all of these as "add a checks entry and grep the
+      # final PASS line". Running them first showed that was true of two. What
+      # the other three needed is recorded on each check below, because the
+      # useful artifact is not the wiring, it is the reason the estimate was
+      # wrong.
+      # ---------------------------------------------------------------------
+
+      # The worktree-guard pre-commit hook: 7 cases over the only remaining
+      # enforcement of the read-only-trunk rule, including the LOAD-BEARING
+      # bypasses (merge must still work, or `git pull` at a deploy root breaks).
+      #
+      # It could not be a check while it pointed at the raw asset, whose shebang
+      # is #!/bin/bash: a nix sandbox has only /bin/sh (measured). Rather than
+      # patch a copy for the sandbox's benefit, the hook is now a package whose
+      # interpreter is a store path, home-manager deploys THAT, and this check
+      # runs the suite against the same artifact -- so a green check here is a
+      # statement about the deployed hook, not about a sandbox-only variant.
+      #
+      # That package also closed a live hazard: /bin/bash is declared nowhere in
+      # this repo and exists on cloudbox only as an undeclared hand-made symlink,
+      # so a reprovisioned host would have deployed an unexecutable hook.
+      # pool-route-clients: 14 source-guard assertions over PRODUCTION files --
+      # users/dev/home.base.nix and hosts/cloudbox/configuration.nix. It is a
+      # tripwire rather than a unit test, and that is the point: the same class
+      # as checks.frontdoor-opacity.
+      #
+      # Why this file earns a check rather than deletion. Its own HISTORY block
+      # (test-pool-route-clients.sh:42-48) records that it once asserted the
+      # OPPOSITE of the current behaviour -- it required the lgtm-sessions attach
+      # hint to resolve a serve URL via pigeon /route -- and because it pinned
+      # the stale behaviour as correct while running NOWHERE, it protected the
+      # last direct-to-serve data-plane call site from being fixed for two
+      # phases. A guard that runs is what keeps that fix fixed.
+      #
+      # Two vacuous-green paths were fixed in the same commit as this wiring.
+      # The suite printed its gate token ("ALL PASS") and exited 0 when
+      # home.base.nix was not beside it, and silently skipped the four
+      # control-plane exemption assertions when configuration.nix was absent.
+      # Either one would have let this check pass having adjudicated nothing, so
+      # both are now fatal. The count below is the second half of that fix:
+      # pin it, and update it in the same commit that adds an assertion.
+      pool-route-clients-guards = devboxPkgs.runCommand "pool-route-clients-guards" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-pool-route-clients.sh 2>&1 | tee "$TMPDIR/prc.txt"
+        grep -q '^ALL PASS' "$TMPDIR/prc.txt" || {
+          echo "GATE FAILURE: pool-route-clients did not reach ALL PASS." >&2
+          exit 1
+        }
+        [ "$(grep -c '^ok: ' "$TMPDIR/prc.txt")" = 14 ] || {
+          echo "GATE FAILURE: expected 14 'ok: ' lines, got" \
+               "$(grep -c '^ok: ' "$TMPDIR/prc.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # oc-pool-attach: 87 assertions, and the name says "mirror" on purpose.
+      #
+      # ~70 of those assertions exercise helpers REDEFINED inside test.sh
+      # (classify_oc_invocation, parse_serve_url, resolve_pigeon_auth), so they
+      # cannot fail when pkgs/oc-pool-attach/default.nix drifts -- measured: a
+      # logic mutation in the production classify body survives all of them. The
+      # honest half is the ~17 source-greps over default.nix, which are real
+      # regression tripwires (the IFS tab-split read anti-pattern, the POST
+      # /place fallback, and FRONTDOOR_URL/session vs the stale anchor).
+      #
+      # Wired anyway, following the precedent set for lgtm-gh-mirror-tests in
+      # PR #370: leaving the file unwired ran the honest greps NOWHERE AT ALL.
+      # Execution and fidelity are orthogonal problems, and the *-mirror-tests
+      # suffix exists so a green here cannot be misread as "production is
+      # covered". Killing the mirror is tracked in workstation-dimz, which now
+      # owns this file too.
+      #
+      # Three vacuous-green paths were closed in the same commit as the wiring:
+      # a missing default.nix printed SKIP and fell through to the final banner
+      # (so the only non-tautological half was optional), jq absent silently
+      # dropped 9 assertions the same way, and the count below pins both shut.
+      oc-pool-attach-mirror-tests = devboxPkgs.runCommand "oc-pool-attach-mirror-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.jq devboxPkgs.gnugrep devboxPkgs.coreutils
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/oc-pool-attach/test.sh 2>&1 | tee "$TMPDIR/opa.txt"
+        grep -q '^all oc-pool-attach tests passed' "$TMPDIR/opa.txt" || {
+          echo "GATE FAILURE: oc-pool-attach suite did not reach its final banner." >&2
+          exit 1
+        }
+        [ "$(grep -c '^PASS' "$TMPDIR/opa.txt")" = 87 ] || {
+          echo "GATE FAILURE: expected 87 'PASS' lines, got" \
+               "$(grep -c '^PASS' "$TMPDIR/opa.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # ---- workstation-oo4q: suites that used to shell out to nix themselves --
+      #
+      # Each of these three extracted its subject by running `nix eval` or
+      # `nix build` INSIDE the test, which a build sandbox cannot do (no daemon
+      # socket, no network, recursive-nix off). Each now takes the artifact
+      # through a seam instead, so the CHECK's dependency graph does the
+      # building and the suite only ever reads a path. Same shape as
+      # WORKTREE_GUARD_HOOK_DIR below: the check points at the artifact
+      # home-manager actually deploys, not a sandbox-only rebuild.
+      #
+      # Two sandbox facts these preambles work around, both measured:
+      #   - /usr/bin/env does not exist, so the disk-cleanup suite now writes
+      #     its generated harness with an absolute bash shebang.
+      #   - /tmp/opencode does not exist, and two of these mktemp into it.
+      disk-cleanup-worktree-tests = devboxPkgs.runCommand "disk-cleanup-worktree-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        DISK_CLEANUP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/disk-cleanup".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        mkdir -p /tmp/opencode
+        export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid
+        export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid
+        bash users/dev/test-disk-cleanup-worktrees.sh 2>&1 | tee "$TMPDIR/dc.txt"
+        grep -q '^all disk-cleanup worktree tests passed' "$TMPDIR/dc.txt" || {
+          echo "GATE FAILURE: disk-cleanup suite did not reach its final banner." >&2
+          exit 1
+        }
+        # Pinned, following checks.oc-auto-attach: a suite that stops
+        # adjudicating must not be able to present as green.
+        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 3 ] || {
+          echo "GATE FAILURE: expected 3 'PASS ' lines, got" \
+               "$(grep -c '^PASS ' "$TMPDIR/dc.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      opencode-llm-audit-tests = devboxPkgs.runCommand "opencode-llm-audit-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        OPENCODE_LLM_AUDIT_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/opencode-llm-audit".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        mkdir -p /tmp/opencode
+        bash users/dev/test-opencode-llm-audit.sh 2>&1 | tee "$TMPDIR/la.txt"
+        grep -q '^ALL PASS' "$TMPDIR/la.txt" || {
+          echo "GATE FAILURE: llm-audit suite did not reach ALL PASS." >&2
+          exit 1
+        }
+        [ "$(grep -c '^ok: ' "$TMPDIR/la.txt")" = 30 ] || {
+          echo "GATE FAILURE: expected 30 'ok:' lines, got" \
+               "$(grep -c '^ok: ' "$TMPDIR/la.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      reset-workspace-shada-report-tests = devboxPkgs.runCommand "reset-workspace-shada-report-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.gawk devboxPkgs.gnused
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        RESET_WORKSPACE_BIN = "${(localPkgsFor devboxSystem).reset-workspace}/bin/reset-workspace";
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/reset-workspace/test-shada-report.sh 2>&1 | tee "$TMPDIR/sr.txt"
+        grep -q '^ALL PASS' "$TMPDIR/sr.txt" || {
+          echo "GATE FAILURE: shada-report suite did not reach ALL PASS." >&2
+          exit 1
+        }
+        [ "$(grep -c '^ok: ' "$TMPDIR/sr.txt")" = 12 ] || {
+          echo "GATE FAILURE: expected 12 'ok:' lines, got" \
+               "$(grep -c '^ok: ' "$TMPDIR/sr.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # hosts/devbox/test-phantom-busy-sweeper.sh drives the SHIPPED ExecStart
+      # artifact of the devbox sweeper against scratch WAL databases. It used to
+      # build its own subject with `nix eval` + `nix-store -r`, which a build
+      # sandbox cannot do; SWEEPER_OVERRIDE hands it the same store path the
+      # systemd user unit runs, so the check's dependency graph does the building.
+      #
+      # WHY THIS RUNS AT ALL OFF-DEVBOX: the sandbox has no systemctl, so the
+      # suite's discovery block finds no serves and CUTOFF collapses to now. The
+      # file is written for that path (see its header) and every assertion holds
+      # under it. Note this bakes in a property of the DEVBOX discovery block --
+      # that it fails OPEN when systemctl is missing. Its cloudbox sibling fails
+      # CLOSED and would exit 1 here. If the two discovery blocks are ever
+      # converged (workstation-yvxh.10), this check needs a systemctl shim or a
+      # discovery seam, or it will go permanently red for a non-obvious reason.
+      devbox-phantom-busy-sweeper-tests = devboxPkgs.runCommand "devbox-phantom-busy-sweeper-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.sqlite devboxPkgs.coreutils
+          devboxPkgs.gnugrep devboxPkgs.gawk devboxPkgs.procps
+        ];
+        SWEEPER_OVERRIDE = builtins.head
+          self.homeConfigurations.dev.config.systemd.user.services.opencode-phantom-busy-sweeper.Service.ExecStart;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+
+        # The devbox and cloudbox sweepers are different derivations with the SAME
+        # derivation name, so a cross-wired path is invisible in a build log.
+        # `systemctl --user` is the devbox discovery block and appears nowhere in
+        # the cloudbox artifact. This gate is fail-fast ergonomics rather than a
+        # safety barrier -- a cross-wired cloudbox artifact would already fail ~40
+        # assertions -- but it turns a confusing red into a named one.
+        grep -q 'systemctl --user' "$SWEEPER_OVERRIDE" || {
+          echo "GATE FAILURE: SWEEPER_OVERRIDE is not the devbox sweeper" >&2
+          echo "  (no 'systemctl --user' discovery block in $SWEEPER_OVERRIDE)" >&2
+          exit 1
+        }
+
+        # The suite's own safety note: SWEEPER_OVERRIDE escapes its HOME-pinning
+        # guarantee, so the artifact MUST honour the OPENCODE_SWEEPER_DB seam.
+        # Unlike the gate above this asserts the safety property itself, and so
+        # also covers a future pre-seam artifact or wrapper.
+        grep -q 'OPENCODE_SWEEPER_DB' "$SWEEPER_OVERRIDE" || {
+          echo "GATE FAILURE: artifact does not honour the OPENCODE_SWEEPER_DB seam" >&2
+          exit 1
+        }
+
+        bash hosts/devbox/test-phantom-busy-sweeper.sh 2>&1 | tee "$TMPDIR/sweeper.txt"
+
+        # Both gates below pin the same number, deliberately: the banner proves the
+        # suite adjudicated and reached its end, the count proves it adjudicated
+        # THIS MANY things. T10 emits one assertion per command in a 7-element
+        # loop, so editing that list moves the count -- which is exactly when a
+        # human should re-read this.
+        grep -q '^==== 45 passed, 0 failed ====$' "$TMPDIR/sweeper.txt" || {
+          echo "GATE FAILURE: sweeper suite did not reach its 45-passed banner." >&2
+          exit 1
+        }
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/sweeper.txt")" = 45 ] || {
+          echo "GATE FAILURE: expected 45 '  PASS: ' lines, got" \
+               "$(grep -c '^  PASS: ' "$TMPDIR/sweeper.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      worktree-guard-hook-tests = devboxPkgs.runCommand "worktree-guard-hook-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        WORKTREE_GUARD_HOOK_DIR = "${(localPkgsFor devboxSystem).worktree-guard-hook}";
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash assets/git-hooks/test-pre-commit.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^=== All tests PASSED ===' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: hook suite did not reach its final PASSED line." >&2
+          exit 1
+        }
+        # This suite was, until PR #350, incapable of failing: it assigned fail=1
+        # inside ( ... ) subshells, so every failure was discarded and it always
+        # exited 0. Assert the case COUNT as well as the banner, so a suite that
+        # silently stops adjudicating cannot present as green again.
+        [ "$(grep -c '^ok: ' "$TMPDIR/out.txt")" = 19 ] || {
+          echo "GATE FAILURE: expected 19 'ok:' lines, got" \
+               "$(grep -c '^ok: ' "$TMPDIR/out.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # oc-cost: 101 tests over the cost model, sqlite in-memory, hermetic.
+      #
+      # Read the gate below before changing the invocation. This file had NO
+      # `if __name__ == "__main__"` block, so `python3 test_oc_cost.py` imported
+      # it, defined all 101 tests, ran NONE, printed nothing, and exited 0
+      # (measured). Wiring it the obvious way would have added a check that
+      # could never fail -- the oc-session-list `--help` checkPhase again, in
+      # python. Its own header said to run it via `python3 -m unittest <file>`,
+      # which the reachability guard cannot match (`-m` does not end in `.py`),
+      # so the file was made directly runnable instead of teaching the guard a
+      # new shape.
+      oc-cost-tests = devboxPkgs.runCommand "oc-cost-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 pkgs/oc-cost/test_oc_cost.py 2>&1 | tee "$TMPDIR/out.txt"
+
+        # The count is PINNED, following checks.oc-auto-attach. "OK" alone is
+        # also what a suite that silently stopped collecting tests prints.
+        grep -q '^Ran 101 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 101 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: oc-cost suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # opencode-serve-auth.sh: the serve pool's password/curl-args resolver.
+      # `source`s the real production file (pkgs/opencode-serve-auth-sh's
+      # default.nix is writeText of that same file), so this is production, not
+      # a mirror. Deliberately bash-builtins-only, hence the bare input list.
+      opencode-serve-auth-sh-tests = devboxPkgs.runCommand "opencode-serve-auth-sh-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnused devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/opencode-serve-auth-sh/test.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^all opencode-serve-auth-sh tests passed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: serve-auth suite did not reach its final pass line." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # caveman's compaction exemption, driven against the SHIPPED plugin.js.
+      #
+      # This one already ran in CI, via pkgs/caveman/default.nix's
+      # installCheckPhase inside the home closures -- so its unwired-test marker
+      # was a false "not covered" claim. The guard rejects checkPhase as
+      # evidence anyway (oc-session-list), and prescribes exactly this remedy:
+      # "add a thin checks.* entry that runs the same script". Both now run. The
+      # duplication is deliberate: the installCheckPhase gates `nix build
+      # .#caveman`, home switches and the auto-bump PRs at artifact-build time,
+      # while this makes the coverage legible to the guard and to a reader.
+      caveman-exemption = devboxPkgs.runCommand "caveman-exemption-tests" {
+        nativeBuildInputs = [ devboxPkgs.nodejs_22 ];
+      } ''
+        cd ${self}
+        # Load-bearing, and copied from the installCheckPhase: unset, the test
+        # falls back to `process.cwd()/exemption-scratch`, and with `cd ${self}`
+        # that is the read-only store -- EACCES before a single assertion runs.
+        export TEST_SCRATCH="$TMPDIR/caveman-exemption-scratch"
+        export HOME="$TMPDIR"
+        node pkgs/caveman/exemption-test.js \
+          ${(localPkgsFor devboxSystem).caveman}/plugin/plugin.js 2>&1 \
+          | tee "$TMPDIR/out.txt"
+        grep -q '^OK: compaction exemption verified' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: caveman exemption test did not reach its OK line." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # lgtm-gh. NAMED "-mirror-" on purpose: 9 of its 15 assertions drive a
+      # COPY of the resolution logic that lives in pkgs/lgtm-gh/default.nix,
+      # not the shipped wrapper, so a green result here is NOT behavioural
+      # coverage of production. Do not read it as such.
+      #
+      # It is wired anyway because the remaining 6 assertions grep the real
+      # default.nix and are the only live tripwire on it, and because the
+      # alternative (leave it unwired until the mirror is gone) runs those 6
+      # nowhere at all. The mirror exists because production cannot currently
+      # be intercepted -- writeShellApplication prepends its runtimeInputs to
+      # PATH, so a fake `gh` fixture loses to the pinned real one. Removing the
+      # mirror means overriding that input with a stub package and driving the
+      # real binary; that is workstation-dimz's job and its bead records this.
+      lgtm-gh-mirror-tests = devboxPkgs.runCommand "lgtm-gh-mirror-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/lgtm-gh/test.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^all lgtm-gh tests passed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: lgtm-gh suite did not reach its final pass line." >&2
+          exit 1
+        }
+        # Pinned like oc-cost: the 6 production-source greps are the only part
+        # of this suite that touches production, and a silent drop to 9 would
+        # leave a green check testing nothing but the mirror.
+        grep -q '^15 passed, 0 failed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected '15 passed, 0 failed' (9 mirror + 6" >&2
+          echo "production-source greps). Update deliberately, in the same commit." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # git-work: the `work` worktree helper, sourced from its BUILT script.
+      #
+      # Two things had to change before this could be a check, neither of them
+      # in the "grep the PASS line" shape the bead predicted. It ran `nix build
+      # .#git-work` itself, which cannot happen inside a build sandbox (and
+      # left a `result` symlink in the repo root); it now accepts WORK_BIN,
+      # which this check supplies. And it inherited the invoking user's git
+      # config: `git init --bare` + `git push origin main` passes only where
+      # init.defaultBranch is already `main`, and in the sandbox it is
+      # `master` (measured), so the suite now pins its own config file.
+      git-work-tests = devboxPkgs.runCommand "git-work-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils
+          devboxPkgs.gnugrep devboxPkgs.gnused
+        ];
+        # The built script under test. Also proves the derivation still exposes
+        # bin/work, which the suite would otherwise discover only at runtime.
+        WORK_BIN = "${(localPkgsFor devboxSystem).git-work}/bin/work";
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/git-work/test.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^ALL PASS' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: git-work suite did not reach its ALL PASS line." >&2
+          exit 1
+        }
+        # Sourcing a writeShellApplication also prepends ITS runtimeInputs to
+        # PATH, which would mask a tool this check forgot to declare. Assert the
+        # suite reported the binary we handed it rather than one it built.
+        grep -q "^Testing: $WORK_BIN\$" "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: suite did not test the WORK_BIN we supplied." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # Repo-wide test reachability (bead workstation-oeyv).
       #
       # Five times a test file was added here and executed by nothing, each one
@@ -559,6 +991,23 @@
         touch $out
       '';
 
+      # The lane dead-man watcher. Checked here because its whole job is to be the thing that
+      # still speaks when the subject has gone quiet, and every one of its interesting cases is
+      # a DATE case that cannot be exercised by waiting: the Monday false-positive (a Friday
+      # success is 3 calendar days old but only ONE missed weekday slot), the UTC-stamp vs
+      # local-slot mismatch, and the DST week. It needs no network and no credentials, which is
+      # exactly what lets it be checked here with no mocks beyond a recorder for the alerter.
+      lane-deadman-watch = devboxPkgs.runCommand "lane-deadman-watch-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash assets/scripts/test-lane-deadman-watch.sh
+        touch $out
+      '';
+
       # The primary-root trunk-drift detector (bead workstation-v03j.9). It is
       # the only layer in the worktree-guard family that WATCHES rather than
       # blocks, so its failure mode is silence -- exactly the failure this epic
@@ -604,6 +1053,58 @@
         # Assert the assertions RAN. A suite that exits 0 having executed
         # nothing is the failure mode this whole roadmap is about.
         grep -q '^hm-deploy-gate: ALL PASS$' "$TMPDIR/out.txt"
+        touch $out
+      '';
+
+      # Drift canary (bead workstation-4ze8), layer 2 for the stale-deploy gate
+      # above. The gate is deployed BY the thing it guards, so it cannot close
+      # its own holes; this library is the detector that runs from a NixOS
+      # system unit instead. Only the pure decision logic runs here -- the unit
+      # itself needs a live profile, a real clone and a network fetch, none of
+      # which exist in the sandbox.
+      #
+      # NOT COVERAGE EVIDENCE FOR THE TIMER. This roadmap already rejected a
+      # host-timer channel as a sandbox-checkable coverage claim; the check
+      # below proves the predicates and nothing about whether the unit fires.
+      hm-deploy-canary = devboxPkgs.runCommand "hm-deploy-canary-test" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash pkgs/hm-deploy-canary-sh/test.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        grep -q '^hm-deploy-canary: ALL PASS$' "$TMPDIR/out.txt"
+        # Pin the count. ALL PASS is also what a suite that executed nothing
+        # prints, and every sibling check in this file stops at the banner.
+        n="$(grep -c '^  PASS: ' "$TMPDIR/out.txt")"
+        if [ "$n" -ne 36 ]; then
+          echo "expected 36 assertions, ran $n" >&2; exit 1
+        fi
+        touch $out
+      '';
+
+      # Behavioural half of the drift canary: runs the SHIPPED runner
+      # (pkgs/hm-deploy-canary-sh/canary.sh) end to end through its seams,
+      # against scratch state and a stub alert sink. The library check above
+      # proves the predicates; it cannot see a canary whose glue never reaches
+      # the alert sink. That is not hypothetical -- the sibling gate silently
+      # ALLOWED every deploy when its library failed to source, and only its
+      # behavioural suite caught it.
+      hm-deploy-canary-behaviour = devboxPkgs.runCommand "hm-deploy-canary-behaviour" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils ];
+      } ''
+        export HOME="$TMPDIR/home"; mkdir -p "$HOME"
+        cd ${self}
+        bash pkgs/hm-deploy-canary-sh/test-behaviour.sh > "$TMPDIR/out.txt" || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        grep -q '^hm-deploy-canary-behaviour: ALL PASS$' "$TMPDIR/out.txt"
+        n="$(grep -c '^  PASS: ' "$TMPDIR/out.txt")"
+        if [ "$n" -ne 19 ]; then
+          echo "expected 19 assertions, ran $n" >&2; exit 1
+        fi
         touch $out
       '';
 

@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# lane-deadman-watch: alarm when a scheduled autonomous lane STOPS RUNNING QUIETLY.
+#
+# THE FAILURE THIS EXISTS FOR: exit 0 is not health. A lane that polls successfully, matches
+# nothing because its upstream changed a label or a branch prefix, and reports "nothing to do"
+# every day looks IDENTICAL to a healthy idle lane -- to systemd, to the journal, and to any
+# OnFailure= hook. Work piles up and nothing ever fires. More alarms cannot fix that; only an
+# observer outside the lane can, which is why this lives here rather than inside it.
+#
+# CONTRACT: read-only. It never takes the lane's lock, never writes lane state, and never runs
+# the lane. Its only inputs are two file paths and the clock.
+#
+# WHY THIS IS DELIBERATELY GENERIC: it is deployed declaratively (home-manager) while the lane it
+# watches is installed imperatively. That asymmetry IS the point -- a host rebuild restores this
+# watcher while the lane stays gone, so the dead-man file goes missing-while-expected and this
+# rings. A watchdog co-located with its subject cannot report its subject's absence.
+#
+# TWO GATES, AND THEY ARE NOT THE SAME FLAG (this distinction is load-bearing):
+#   EXPECT file  -- "a lane is supposed to be alive here". Declarative, managed by home-manager,
+#                   safe to deploy automatically because it only enables WATCHING.
+#   The lane's own arming flag -- permission to RUN and to land. Imperative and attended.
+#                   NEVER gate on that one: this host auto-applies home-manager on a timer, so a
+#                   declaratively-managed arming flag would arm a landing-capable agent at an
+#                   arbitrary unattended moment.
+# Gating on EXPECT rather than on arming also means that if someone deletes the arming flag, the
+# lane silently skips (a skip is not a failure, so nothing pages) while this still expects it --
+# and rings. One flag for both jobs would have let a single `rm` silence subject and observer.
+#
+# FAILS TOWARD THE ALARM. Missing, unreadable, unparseable and FUTURE-DATED timestamps all alarm.
+# Future-dated matters: clock skew or a manual `touch` would otherwise compute zero missed slots
+# and go permanently quiet, which is the exact silence this is built to prevent.
+#
+# WEEKDAY SLOTS, NOT ELAPSED SECONDS. The lane runs weekdays only, so `now - mtime > 3 days`
+# false-positives every Monday (a Friday success is legitimately 3 calendar days old) and is
+# DST-fragile. This counts missed 16:00 slots instead, stepping day by day through local midnight
+# so DST transitions cannot introduce an off-by-one.
+#
+# Env seams (all optional; the unit supplies them):
+#   LANE_DEADMAN_FILE  timestamp file the lane rewrites on real success   (required)
+#   LANE_EXPECT_FILE   expectation gate; absent -> silent exit 0          (required)
+#   LANE_STALE_SLOTS   missed slots before alarming        (default 3)
+#   LANE_SLOT_HOUR     hour of the lane's daily run, local (default 16)
+#   LANE_LABEL         name used in the alert text         (default "lane")
+#   LANE_HINT          actionable hint appended to alerts  (default "")
+#   LANE_ALERT_CMD     alert helper; receives STATE SIG TEXT INITIAL MAX
+#   LANE_ALERT_STATE   dedup/backoff state file for the helper
+#   LANE_CADENCE_UNIT  systemd --user unit that MUST be enabled; empty -> check skipped
+#   LANE_CADENCE_QUERY_CMD    binary used to query unit state    (default systemctl)
+#   LANE_CADENCE_ALERT_STATE  separate dedup state for the cadence episode
+#   WATCHDOG_NOW       ISO instant to treat as "now"  -- TEST SEAM ONLY
+#
+# TWO INDEPENDENT ASSERTIONS, and the second is not redundant with the first:
+#   staleness -- "has the lane succeeded recently?"     (evidence produced BY the lane)
+#   cadence   -- "will the timer that runs it FIRE?"    (evidence produced ABOUT the lane)
+# The cadence half asks BOTH is-enabled AND is-active, because the first alone only proves a
+# symlink exists: a stopped-but-enabled timer answers "enabled" and never fires again.
+# Once a lane can schedule its own follow-ups, the first stops implying the second: the lane can
+# keep proving it is alive while the thing guaranteeing it runs tomorrow is gone. See the cadence
+# block for the full failure.
+set -uo pipefail
+
+DEADMAN_FILE="${LANE_DEADMAN_FILE:-}"
+EXPECT_FILE="${LANE_EXPECT_FILE:-}"
+STALE_SLOTS="${LANE_STALE_SLOTS:-3}"
+SLOT_HOUR="${LANE_SLOT_HOUR:-16}"
+LABEL="${LANE_LABEL:-lane}"
+HINT="${LANE_HINT:-}"
+ALERT_CMD="${LANE_ALERT_CMD:-}"
+ALERT_STATE="${LANE_ALERT_STATE:-$HOME/.local/state/lane-deadman-watch.alert}"
+
+log() { echo "[lane-deadman-watch] $*"; }
+
+if [ -z "$DEADMAN_FILE" ] || [ -z "$EXPECT_FILE" ]; then
+  log "ERROR: LANE_DEADMAN_FILE and LANE_EXPECT_FILE are both required."
+  exit 2
+fi
+
+# GATE. No expectation -> the lane is not supposed to be running yet (or any more), so silence is
+# correct and this must not page. Before cutover this is the normal state.
+if [ ! -e "$EXPECT_FILE" ]; then
+  log "No expectation flag at $EXPECT_FILE; nothing is supposed to be running. Silent."
+  exit 0
+fi
+
+if [ -n "${WATCHDOG_NOW:-}" ]; then
+  NOW_EPOCH="$(date -d "$WATCHDOG_NOW" +%s 2>/dev/null)" || NOW_EPOCH=""
+  if [ -z "$NOW_EPOCH" ]; then log "ERROR: WATCHDOG_NOW unparseable: $WATCHDOG_NOW"; exit 2; fi
+else
+  NOW_EPOCH="$(date +%s)"
+fi
+
+# Emit an alarm through the shared helper, which owns dedup, exponential backoff and the
+# warning->error escalation. NOTE its contract: it never exits non-zero, so a delivery failure
+# is NOT observable here. That is an accepted risk recorded in the design -- the exit code of
+# this script is not an alarm channel.
+alarm() {
+  local text="$1"
+  [ -n "$HINT" ] && text="$text
+$HINT"
+  log "ALARM: $text"
+  if [ -n "$ALERT_CMD" ]; then
+    # Signature is a CONSTANT string on purpose. Embedding the slot count or the date would make
+    # every pass a new episode, so dedup would never match, backoff would never engage, and this
+    # would degrade into a flat daily nag that never escalates severity -- the precise failure
+    # the shared helper was rewritten to eliminate.
+    "$ALERT_CMD" "$ALERT_STATE" "deadman-${LABEL}" "$text" 900 14400
+  fi
+}
+
+# A healthy pass clears the episode so the NEXT outage starts a fresh backoff rather than
+# inheriting a stale count and mtime (which would suppress its first pages).
+#
+# Exits with OVERALL_RC, not a hardcoded 0: the CADENCE check below can fail on a pass where the
+# dead-man is perfectly fresh, and that is not an edge case -- it is the single most important
+# case this watcher now handles. See the cadence block.
+healthy() {
+  log "$1"
+  [ -n "$ALERT_STATE" ] && rm -f "$ALERT_STATE"
+  exit "$OVERALL_RC"
+}
+
+# ---------------------------------------------------------------------------------------------
+# CADENCE ASSERTION -- "is the thing that is SUPPOSED to run it still armed to run it?"
+#
+# THE BUG THIS EXISTS FOR (the fifth of its kind in this system, and the subtlest, because the
+# lane keeps working the entire time):
+#
+# The dead-man measures exactly one thing: that a successful run happened recently. It cannot see
+# WHAT caused the run. Once a lane can schedule its own follow-up checks, a follow-up-driven run
+# refreshes the timestamp identically to a timer-driven one. So if the cadence timer is lost --
+# a host reprovision that does not restore an imperatively-installed unit, or a single
+# `systemctl --user disable` -- the follow-up chain keeps invoking the lane, keeps refreshing
+# this file, and THIS WATCHER STAYS QUIET. The guaranteed floor is gone; nothing rings; the lane
+# now runs only as long as an explicitly non-load-bearing, capped, transient mechanism happens to
+# keep chaining. The alarm clock only starts whenever that chain finally breaks, which under a
+# steady stream of work may be weeks.
+#
+# The claim this replaces, written in the design doc and false: "more frequent proof of life
+# cannot hide an absence". It hides the absence of the TIMER, not of the lane.
+#
+# So this asserts the SCHEDULER's existence directly, independently of any evidence produced by
+# the thing being scheduled. It is the same principle that put this whole script outside the lane:
+# a subject cannot report its own absence, and here the subject's liveness is precisely what
+# masks the failure.
+#
+# INDEPENDENT ALARM EPISODE. It uses its own signature and its own state file, so a quiet-timer
+# alarm and a stale-lane alarm dedup and back off separately. Sharing one episode would let
+# whichever fired first suppress the other, which is how one root cause hides a second.
+#
+# DELIBERATELY NOT FATAL TO THE REST OF THE PASS. It records OVERALL_RC and falls through to the
+# staleness check, because "timer disabled" and "lane also stale" are different facts and an
+# operator wants both. In total-death both fire on one pass; that is one extra line of diagnosis,
+# not noise, and the case this was built for (fresh dead-man, dead timer) fires only this one.
+#
+# OPTIONAL BY DESIGN. This script is generic and deployed for whatever lane a host declares, so
+# an unset LANE_CADENCE_UNIT skips the check -- but says so out loud, because a silently skipped
+# assertion is indistinguishable from a passing one.
+CADENCE_UNIT="${LANE_CADENCE_UNIT:-}"
+CADENCE_QUERY="${LANE_CADENCE_QUERY_CMD:-systemctl}"
+CADENCE_ALERT_STATE="${LANE_CADENCE_ALERT_STATE:-${ALERT_STATE}.cadence}"
+OVERALL_RC=0
+
+cadence_alarm() {
+  local text="$1"
+  [ -n "$HINT" ] && text="$text
+$HINT"
+  log "ALARM(cadence): $text"
+  if [ -n "$ALERT_CMD" ]; then
+    "$ALERT_CMD" "$CADENCE_ALERT_STATE" "cadence-${LABEL}" "$text" 900 14400
+  fi
+  OVERALL_RC=1
+}
+
+if [ -z "$CADENCE_UNIT" ]; then
+  log "No LANE_CADENCE_UNIT set; cadence assertion SKIPPED (dead-man staleness only)."
+else
+  # rc is not enough on its own: `disabled` exits 1 and `not-found` exits 4, but a missing
+  # systemctl would also exit non-zero, and those must not be conflated in the alert text.
+  # Measured on cloudbox 2026-08-17: enabled -> rc 0 "enabled"; disabled -> rc 1 "disabled";
+  # absent unit -> rc 4 "not-found". A user unit inherits XDG_RUNTIME_DIR and
+  # DBUS_SESSION_BUS_ADDRESS from the user manager, so this works under the unit's pinned PATH.
+  cadence_state="$("$CADENCE_QUERY" --user is-enabled "$CADENCE_UNIT" 2>&1)" || true
+  cadence_state="$(printf '%s' "$cadence_state" | tr -d '\r' | head -n1)"
+
+  # AND IS IT ACTUALLY LOADED AND WAITING? `is-enabled` reads INSTALL SYMLINKS ONLY. It answers
+  # "would this start at boot", not "will this ever fire". A single `systemctl --user stop` on an
+  # enabled timer leaves is-enabled saying `enabled` while is-active says `inactive` and
+  # list-timers shows no next elapse -- the timer will not fire again until the user manager
+  # restarts, which on a long-lived host can be weeks. Measured 2026-08-17 on this host.
+  #
+  # That is the SIXTH bug of the fake-health family here, and it evades the fix for the fifth by
+  # one word: `stop` rather than `disable`. It is also the MORE likely of the two, because `stop`
+  # is what a careful human reaches for when pausing something temporarily -- it feels reversible.
+  # The lane then keeps running on self-scheduled follow-ups, keeps refreshing the dead-man, and
+  # a check that only asked is-enabled would report everything fine while the floor was gone.
+  #
+  # Asking both is the difference between "a symlink exists" and "something will fire".
+  cadence_active="$("$CADENCE_QUERY" --user is-active "$CADENCE_UNIT" 2>&1)" || true
+  cadence_active="$(printf '%s' "$cadence_active" | tr -d '\r' | head -n1)"
+
+  case "$cadence_state" in
+    enabled|enabled-runtime)
+      if [ "$cadence_active" = "active" ]; then
+        log "OK: cadence unit $CADENCE_UNIT is $cadence_state and $cadence_active."
+        [ -n "$CADENCE_ALERT_STATE" ] && rm -f "$CADENCE_ALERT_STATE"
+      else
+        cadence_alarm "$LABEL is expected to be running here. Its cadence unit $CADENCE_UNIT is $cadence_state on disk but NOT RUNNING (systemctl is-active reported: \"${cadence_active:-<no output>}\"). A stopped timer has no next elapse and will not fire again until the user manager restarts. Self-scheduled follow-ups can keep the lane alive and keep this watcher quiet while the guaranteed daily floor no longer exists."
+      fi
+      ;;
+    not-found)
+      cadence_alarm "$LABEL is expected to be running here, but its cadence unit $CADENCE_UNIT DOES NOT EXIST. The lane may still be running via self-scheduled follow-ups -- which refresh the success timestamp and keep the staleness check quiet -- but its guaranteed floor is GONE, and it will stop for good as soon as that chain breaks."
+      ;;
+    *)
+      # Everything else -- disabled, masked, static, linked, an error string, or empty because
+      # systemctl was not on PATH -- lands here on purpose. FAILS TOWARD THE ALARM, like every
+      # other branch in this file: an unrecognised answer means the assertion could not be made,
+      # and treating "I could not check" as "it is fine" is the exact silence this file exists
+      # to prevent.
+      cadence_alarm "$LABEL is expected to be running here, but its cadence unit $CADENCE_UNIT is not enabled (systemctl reported: \"${cadence_state:-<no output>}\"). Self-scheduled follow-ups can keep the lane alive and keep this watcher quiet while the guaranteed daily floor no longer exists."
+      ;;
+  esac
+fi
+
+if [ ! -e "$DEADMAN_FILE" ]; then
+  alarm "$LABEL has NEVER reported success: no file at $DEADMAN_FILE, yet a lane is expected to be running here. Either it was never deployed, or it was removed."
+  exit 1
+fi
+
+RAW=""
+read -r RAW < "$DEADMAN_FILE" 2>/dev/null || true
+LAST_EPOCH=""
+if [ -n "$RAW" ]; then
+  LAST_EPOCH="$(date -d "$RAW" +%s 2>/dev/null)" || LAST_EPOCH=""
+fi
+if [ -z "$LAST_EPOCH" ]; then
+  alarm "$LABEL wrote an unreadable success timestamp (\"$RAW\") to $DEADMAN_FILE. Cannot tell whether it is running, so treating as failed."
+  exit 1
+fi
+
+if [ "$LAST_EPOCH" -gt "$NOW_EPOCH" ]; then
+  alarm "$LABEL reports a success in the FUTURE ($RAW). Clock skew, or the file was touched by hand. Treating as failed rather than trusting it, because a future timestamp would otherwise silence this check indefinitely."
+  exit 1
+fi
+
+# Count missed run slots: weekdays after the last success whose local run hour has already
+# passed. Stepping via local calendar dates (not +86400) is what keeps DST honest.
+missed=0
+cursor="$(date -d "@$LAST_EPOCH" +%F 2>/dev/null)"
+guard=0
+while :; do
+  guard=$((guard + 1))
+  if [ "$guard" -gt 400 ]; then
+    alarm "$LABEL slot arithmetic exceeded 400 iterations from $RAW; refusing to loop. Treating as failed."
+    exit 1
+  fi
+  cursor="$(date -d "$cursor + 1 day" +%F 2>/dev/null)"
+  slot_epoch="$(date -d "$cursor $SLOT_HOUR:00:00" +%s 2>/dev/null)"
+  [ -z "$slot_epoch" ] && break
+  [ "$slot_epoch" -gt "$NOW_EPOCH" ] && break
+  dow="$(date -d "$cursor" +%u)"
+  [ "$dow" -le 5 ] && missed=$((missed + 1))
+done
+
+if [ "$missed" -ge "$STALE_SLOTS" ]; then
+  alarm "$LABEL has missed $missed consecutive weekday runs (threshold $STALE_SLOTS). Last success: $RAW. It is not failing -- it is not running, or it is running and quietly matching nothing, which no failure hook can see."
+  exit 1
+fi
+
+healthy "OK: $LABEL last succeeded $RAW ($missed missed weekday slot(s), threshold $STALE_SLOTS)."

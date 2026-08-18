@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
+# unwired-test(workstation-dimz): tautology, not live state -- it REDEFINES build_mcp_tools_json (:11-14) and asserts against its own copy, so wiring it would add a check that cannot fail. Production is pkgs/opencode-launch/default.nix:177-180, whose call site pkgs/opencode-launch/test.sh:346 already greps
 # Unit tests for opencode-launch --mcp tools-JSON builder.
-# Mirrors build_mcp_tools_json from users/dev/home.base.nix.
+# Mirrors build_mcp_tools_json from pkgs/opencode-launch/default.nix:177-180.
+# (This header used to name users/dev/home.base.nix, which contains no such
+# function -- the claim was repeated as fact during the k7t4 audit before being
+# checked. See the marker above: this file is a tautology and belongs to dimz.)
 # Run: bash users/dev/test-opencode-launch-mcp.sh
 set -o errexit -o nounset -o pipefail
 

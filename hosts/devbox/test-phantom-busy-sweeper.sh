@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Tests for systemd.user.services.opencode-phantom-busy-sweeper
 # (users/dev/home.devbox.nix — the DEVBOX sweeper, a systemd USER unit).
 #
@@ -23,8 +22,11 @@
 #
 #   ./hosts/devbox/test-phantom-busy-sweeper.sh
 #
-# NOT part of `nix flake check`: it builds a large fixture for T9 and shells out
-# to systemd.
+# RUNS IN `nix flake check`, as checks.devbox-phantom-busy-sweeper-tests, which
+# passes the unit's own ExecStart store path in SWEEPER_OVERRIDE so this file
+# never has to build its own subject. The check pins the assertion COUNT as well
+# as the final banner, so a suite that stops adjudicating cannot present as
+# green. T9's ~600MB fixture is built inside the sandbox and costs a few seconds.
 #
 # SAFETY, and this is not optional. Every invocation of the sweeper here runs
 # with HOME pinned into the scratch lab, NOT just with OPENCODE_SWEEPER_DB set.
@@ -50,9 +52,12 @@ SQLITE=$(command -v sqlite3 || true)
 # ExecStart string's context and realise it. home-manager renders ExecStart as a
 # list, unlike the NixOS module's plain string — hence the isList branch.
 # SWEEPER_OVERRIDE escapes the HOME-pinning guarantee below — point it only at a
-# script that honours OPENCODE_SWEEPER_DB. Aimed at a pre-seam artifact (e.g. the
-# cloudbox sweeper, which hardcodes an absolute production path), these tests
-# would drive that script's writes into the real database on this machine.
+# script that honours OPENCODE_SWEEPER_DB. Aimed at a PRE-SEAM artifact, these
+# tests would drive that script's writes into the real database on this machine.
+# This once cited the cloudbox sweeper as that example; that is no longer true —
+# it reads OPENCODE_SWEEPER_DB with the production path only as a default, so the
+# hazard is now hypothetical rather than one store path away. checks.devbox-
+# phantom-busy-sweeper-tests greps the artifact for the seam before running.
 SWEEPER="${SWEEPER_OVERRIDE:-}"
 if [ -z "$SWEEPER" ]; then
   echo "building devbox sweeper from $REPO ..."
@@ -162,6 +167,11 @@ echo "== T3: idempotence -- a second sweep does not re-touch a finalized row =="
 # only an always-TRUE corruption (e.g. AND -> OR) would slip through; an
 # always-FALSE one fails T2 and T6 loudly. Closing it properly needs a seam
 # that completes a row between the phases; tracked in workstation-yvxh.11.
+# THE MIRROR, measured while wiring this suite: deleting the gates from PHASE 1
+# was ALSO invisible, because phase 2 re-checks them. The two copies covered for
+# each other in both directions, so this suite verified their conjunction while
+# being unable to localise either. T4/T5 now assert the no-write-lock path, which
+# closes the phase-1 direction; the phase-2 direction above remains open.
 DB="$LAB/t3.db"; mkdb "$DB"
 addrow "$DB" msg_race "$OLD" "$STALE_UPD" NULL NULL
 run "$DB"
@@ -176,6 +186,15 @@ addrow "$DB" msg_fresh "$OLD" "$FRESH_UPD" NULL NULL
 run "$DB"
 check "reports 0 finalized" "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned')" 1
 check "row untouched"       "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_fresh';")" 1
+# "finalized 0" is NOT sufficient, and this line is why. MEASURED: delete the
+# >30min gate from PHASE 1 and both assertions above still pass -- phase 2's
+# re-check declines the write, so the row survives and the count stays 0. What
+# actually changed is that the row BECAME A CANDIDATE and a write chunk ran
+# against it ("1 candidate(s), 1 chunk(s)"), i.e. the sweeper took a write lock
+# on a row it should never have selected. That is the phantom-busy regression
+# this unit exists to prevent, and it was invisible here. Assert the no-write-
+# lock path explicitly, so phase 1's gate cannot be deleted silently.
+check "never became a candidate" "$(printf '%s' "$OUT" | grep -c 'no candidates')" 1
 
 echo "== T5: row created after CUTOFF is protected (live-owner gate) =="
 # created deliberately AHEAD of cutoff so this stays meaningful on cloudbox,
@@ -185,6 +204,10 @@ addrow "$DB" msg_new "$(( (CUTOFF + 3600) * 1000 ))" "$STALE_UPD" NULL NULL
 run "$DB"
 check "reports 0 finalized" "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned')" 1
 check "row untouched"       "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_new';")" 1
+# Same reasoning as T4: without this, deleting the live-owner gate from phase 1
+# is invisible because phase 2 re-checks it. MEASURED as a survivor before this
+# line existed.
+check "never became a candidate" "$(printf '%s' "$OUT" | grep -c 'no candidates')" 1
 
 echo "== T6: >500 candidates -> chunked, all finalized =="
 DB="$LAB/t6.db"; mkdb "$DB"

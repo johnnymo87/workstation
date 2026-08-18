@@ -187,8 +187,24 @@ RUNNERS='(bash|sh|source|\.|exec bash|node|bun|npx|python3?|pytest|lua|nvim( +--
 
 refs_in_text() {
   # stdin: file text. stdout: repo-relative paths that the text EXECUTES.
+  #
+  # The self-directory idiom is rewritten to `.` BEFORE matching. The delegation
+  # shape this repo actually uses --
+  #   exec bash "$(dirname "${BASH_SOURCE[0]}")/../opencode-plugin-bundle/test.sh"
+  # -- otherwise yields nothing at all, because the path class below excludes
+  # `(`, `)` and `"`. resolve_ref has always known how to RESOLVE that shape and
+  # its comment names these very shims, but the reference was never extracted in
+  # the first place, so that half was unreachable code. Covered by case 7b.
+  #
+  # It rewrites ONLY `$(dirname "${BASH_SOURCE[0]}")` / `$(dirname "$0")`, not
+  # command substitutions in general. Stripping `$(...)` wholesale looks simpler
+  # and is wrong: assets/nvim/test-session-switcher.sh runs its two .lua units as
+  #   disc_out="$(nvim --clean -l assets/nvim/test-session-switcher-discovery.lua)"
+  # so a general strip DELETES THE EXECUTION and un-covers two wired files.
+  # Measured: it took the census from 70 executed to 68.
   strip_comments |
-    grep -oE "${RUNNERS}[[:space:]]+[\"']?[A-Za-z0-9_./\$\{\}-]+\.(sh|lua|ts|js|py)" |
+    sed -E 's#"?\$\(dirname "?(\$\{BASH_SOURCE\[0\]\}|\$0)"?\)"?#.#g' |
+    grep -oE "${RUNNERS}[[:space:]]+[A-Za-z0-9_./\$\{\}-]+\.(sh|lua|ts|js|py)" |
     grep -oE "[A-Za-z0-9_./\$\{\}-]+\.(sh|lua|ts|js|py)$" |
     sed 's|^\./||' || true
 }

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-m98t): delegates to the plugin-bundle runner, which runs 'nix build' on itself
 # Durability tests for the self-compact bundle. All assertions (and the
 # reasoning) live in the shared runner, which every bundled plugin uses.
 #

@@ -75,7 +75,7 @@ import * as path from "node:path"
  * rots silently -- the replica keeps passing while mirroring a loader that no
  * longer exists. That is precisely how no-function-exports.test.ts failed.
  */
-const LOADER_VERSION = "1.17.13"
+const LOADER_VERSION = "1.18.18"
 
 const PLUGIN_DIR = path.join(__dirname, "..")
 const NIX_CONFIG = path.join(PLUGIN_DIR, "../../../users/dev/opencode-config.nix")

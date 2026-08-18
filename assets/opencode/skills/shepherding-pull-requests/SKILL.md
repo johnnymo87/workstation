@@ -1,11 +1,24 @@
 ---
 name: shepherding-pull-requests
-description: Use when opening a pull request OR when an open PR you authored needs attention -- waiting on CI, reviewer comments, or anything between "PR created" and "PR landed". The PR is your responsibility until it lands; this skill covers the whole arc, not just the create step.
+description: Use when you are about to run `gh pr create`, immediately after it returns, when you are about to hand a PR URL back to the user and stop, and at every point a PR you authored is still open -- CI running or failed, a review just landed, inline comments unanswered, reviewer has not approved. Triggers on an ordinary healthy PR, not only a stuck or broken one.
 ---
 
 # Shepherding Pull Requests
 
 A PR being open is not the end of the work — it's the middle of it. Opening the PR creates a coordination cost on the reviewer's plate; walking away mid-flight pushes the rest of that cost (chasing CI, addressing comments, re-requesting review) back onto the user. The job is to land the PR or hand it off with an honest, current status. Everything in this skill is in service of that disposition.
+
+## The standing expectation
+
+**None of this has to be requested.** A user who tells you to reply to the comments and re-request the reviewer is repeating a default you already owed them. Treat the moment `gh pr create` returns as the start of the obligation, not the discharge of it — and treat a clean, green, uncommented PR as still owed, because it is.
+
+From that moment, without being asked:
+
+- **Hold the PR.** Stay in the loop until it lands, or until there is a genuine human decision only the user can make. → §"Post-PR Monitoring"
+- **When a review lands, reply to every inline comment in its own thread, and mark each thread resolved.** Both, every thread, bot and human alike. → §"Loop body" step 4
+- **Act on the substance with judgment** — accept, push back, or escalate. Nothing gets silently dropped. → `receiving-code-review`
+- **If the gating reviewer has not APPROVED, re-request them** after pushing fixes. If they already approved, do not. → §"Re-requesting review from the lgtm reviewer"
+
+Reporting a PR URL and treating the task as finished is the specific failure this skill exists to prevent.
 
 ## PR Lifecycle
 

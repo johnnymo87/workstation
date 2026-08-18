@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Tests for the opencode-llm-audit follower's pool fan-out (workstation-ofma).
 #
 # WHY: under the mn9r M5 serve pool (cloudbox K=4) the follower must capture the
@@ -47,13 +46,20 @@ deny_grep() { # deny_grep <desc> <fixed-string> <file>
 
 # ---- extract the REAL follower script + its testable helpers ----------------
 script_src="$tmpdir/opencode-llm-audit"
-nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
-  eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/opencode-llm-audit\".text" \
-  > "$script_src" 2>"$tmpdir/nix.err" || {
-    echo "FAIL: could not nix-eval the opencode-llm-audit script text"
-    cat "$tmpdir/nix.err" >&2
-    exit 1
-  }
+# Seam: a check passes home-manager's OWN deployed store path, so the suite
+# never invokes nix (impossible in a build sandbox). Falls back to eval.
+if [ -n "${OPENCODE_LLM_AUDIT_SRC:-}" ]; then
+  cp "$OPENCODE_LLM_AUDIT_SRC" "$script_src"
+else
+  nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
+    eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/opencode-llm-audit\".text" \
+    > "$script_src" 2>"$tmpdir/nix.err" || {
+      echo "FAIL: could not nix-eval the opencode-llm-audit script text"
+      cat "$tmpdir/nix.err" >&2
+      exit 1
+    }
+fi
+[ -s "$script_src" ] || { echo "FAIL: empty opencode-llm-audit source"; exit 1; }
 
 # Slice the sentinel-delimited helper block and source it, so we test the actual
 # deployed code rather than a copy.
@@ -125,6 +131,19 @@ export LOGDIR
 # serves writing to per-process logs).
 sleep 120 9>>"$a" & ha=$!; holders+=("$ha")
 sleep 120 9>>"$b" & hb=$!; holders+=("$hb")
+
+# Wait for the FIXTURE, then assert once. The shell applies `9>>` in the child
+# after forking, so a read of /proc/$pid/fd immediately after `&` can
+# legitimately find nothing -- the child may not have been scheduled yet. This
+# raced green on an idle machine and went red on a loaded CI runner
+# (run 32142902278: "expected /proc/57/fd/9, actual []").
+#
+# This waits on SETUP and does not retry the ASSERTION: if the fd never appears,
+# the loop simply expires and the check below fails exactly as loudly as before.
+for _ in $(seq 1 500); do
+  [ -e "/proc/$ha/fd/9" ] && [ -e "/proc/$hb/fd/9" ] && break
+  sleep 0.01
+done
 
 fd_a="$(find_log_fd "$ha" || true)"
 check "find_log_fd locates the held log fd" "/proc/$ha/fd/9" "$fd_a"

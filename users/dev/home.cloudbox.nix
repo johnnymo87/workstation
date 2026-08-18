@@ -42,6 +42,32 @@ let
   # escalation, POST to pigeon's /alert). Same package the cloudbox canaries and
   # devbox's frontdoor canary use -- do not fork it.
   driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+  # Does this host EXPECT a scheduled autonomous lane to be alive? Consumed ONLY by
+  # lane-deadman-watch (far below), which stays completely silent while this is false.
+  #
+  # THIS IS NOT THE LANE'S ARMING FLAG, and the distinction is the whole design. Arming grants
+  # permission to RUN and to land commits, and stays imperative and attended precisely because
+  # pull-workstation.timer auto-applies home-manager on this host every few hours -- a
+  # declaratively-managed arming flag would arm a landing-capable agent at an arbitrary moment
+  # with nobody watching. THIS flag only enables WATCHING, so deploying it automatically is safe.
+  #
+  # Splitting the two is also what makes the watcher useful rather than decorative:
+  #   * a host rebuild restores this expectation while the imperatively-installed lane stays
+  #     gone, so the dead-man file reads missing-while-expected and the watcher RINGS;
+  #   * deleting the arming flag makes the lane ConditionPathExists-SKIP, which is a skip and not
+  #     a failure, so no OnFailure hook fires -- but this still expects it, and RINGS.
+  # One flag serving both purposes would have let a single `rm` silence subject and observer.
+  #
+  # Flip to true at cutover step 4, AFTER the first attended real run has written a genuine
+  # success -- flipping it earlier pages about a lane that has simply not run yet.
+  # FLIPPED TRUE at cutover step 5, 2026-08-18, after the lane's first attended real run wrote a
+  # genuine success (~/.local/state/lane-maven-renovate.last-success, 2026-08-18T14:10:12Z) and
+  # after `systemctl --user enable --now maven-renovate.timer`. Order matters and it was followed:
+  # flipping this before a real success pages about a lane that has simply not run yet, and
+  # flipping it before the cadence assertion was DEPLOYED (PR #381, applied here 09:54 EDT) would
+  # have armed a watcher whose central check was not present -- a watchdog that looks armed and
+  # asserts nothing, which is this project's signature failure rather than a hypothetical one.
+  laneWatchExpected = true;
 
   servePool = (import ./serve-pool.nix).forHost.cloudbox;
   anchorUrl = builtins.head servePool.endpoints;
@@ -999,6 +1025,89 @@ lib.mkIf isCloudbox {
       OnCalendar = "*:0/30";
       Persistent = true;
       RandomizedDelaySec = "3min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # ---- lane-deadman-watch: notice when a scheduled lane goes QUIET ----------
+  #
+  # Watches a lane that lives OUTSIDE this repo and is installed imperatively. The failure it
+  # exists for is silence, not noise: a lane whose upstream renames a label polls successfully,
+  # matches nothing, reports "nothing to do" daily and is indistinguishable from a healthy idle
+  # lane -- to systemd, to the journal, and to every OnFailure hook. Its own escalation path
+  # cannot report this, because from its point of view nothing went wrong.
+  #
+  # Deployed here, declaratively, ON PURPOSE. A watchdog co-located with its subject shares its
+  # fate and cannot report its subject's absence; this one survives a rebuild that removes the
+  # lane entirely, which is exactly when the lane can no longer speak for itself.
+  home.file.".local/bin/lane-deadman-watch" = {
+    source = "${assetsPath}/scripts/lane-deadman-watch";
+    executable = true;
+  };
+
+  home.file.".config/lanes/expect-maven-renovate" = lib.mkIf laneWatchExpected {
+    text = ''
+      A scheduled lane is expected to be alive on this host.
+      Managed by home-manager (users/dev/home.cloudbox.nix, laneWatchExpected).
+      Consumed by lane-deadman-watch. This is NOT the lane's arming flag.
+    '';
+  };
+
+  systemd.user.services.lane-deadman-watch = {
+    Unit = {
+      Description = "Alarm if a scheduled autonomous lane has quietly stopped running";
+    };
+    Service = {
+      Type = "oneshot";
+      # The interpreter is supplied EXPLICITLY. A user unit's PATH contains only systemd's own
+      # bin directory, so the script's `#!/usr/bin/env bash` cannot resolve there and the unit
+      # would die before line 1 with "env: bash: No such file or directory". That resolution
+      # happens before any in-script PATH fix could run, so it has to be handled out here.
+      ExecStart = "${pkgs.bash}/bin/bash %h/.local/bin/lane-deadman-watch";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      # Type=oneshot defaults TimeoutStartSec to infinity. A hung pass would leave the unit
+      # "activating" forever, and a timer never re-fires a unit that is still activating -- so
+      # every later check would be skipped with no failure recorded. A watchdog failing that way
+      # is worse than none, because its silence reads as good news.
+      TimeoutStartSec = "2min";
+      Environment = [
+        "HOME=%h"
+        "LANE_DEADMAN_FILE=%h/.local/state/lane-maven-renovate.last-success"
+        "LANE_EXPECT_FILE=%h/.config/lanes/expect-maven-renovate"
+        "LANE_ALERT_STATE=%h/.local/state/lane-deadman-watch.alert"
+        "LANE_ALERT_CMD=${driftAlert}"
+        "LANE_LABEL=maven-renovate"
+        "LANE_SLOT_HOUR=16"
+        # CADENCE ASSERTION. Without this the watcher can only ask "did the lane succeed
+        # recently", and once the lane can schedule its own follow-up checks that question stops
+        # implying "the lane will still run tomorrow": a follow-up chain refreshes the success
+        # file exactly like the timer does, so losing the timer leaves this watcher QUIET while
+        # the guaranteed floor is gone. Asserting the scheduler directly is the only way to see
+        # it, because the evidence the lane produces is precisely what masks it.
+        "LANE_CADENCE_UNIT=maven-renovate.timer"
+        "LANE_STALE_SLOTS=3"
+        "LANE_HINT=Check: systemctl --user status maven-renovate.timer && journalctl --user -u maven-renovate.service -n 100"
+        "PATH=${pkgs.coreutils}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+      ];
+    };
+  };
+
+  # 09:00 on weekdays, deliberately OUTSIDE the watched lane's 16:00 window and the timeout that
+  # follows it. A check running while a run is still in flight would count that day's slot as
+  # missed and fire a full slot early, every time a run took a while.
+  systemd.user.timers.lane-deadman-watch = {
+    Unit = {
+      Description = "Timer for the lane dead-man staleness check";
+    };
+    Timer = {
+      OnCalendar = "Mon..Fri 09:00";
+      Persistent = true;
+      RandomizedDelaySec = "5min";
     };
     Install = {
       WantedBy = [ "timers.target" ];
