@@ -44,7 +44,17 @@
 #   LANE_HINT          actionable hint appended to alerts  (default "")
 #   LANE_ALERT_CMD     alert helper; receives STATE SIG TEXT INITIAL MAX
 #   LANE_ALERT_STATE   dedup/backoff state file for the helper
+#   LANE_CADENCE_UNIT  systemd --user unit that MUST be enabled; empty -> check skipped
+#   LANE_CADENCE_QUERY_CMD    binary used to query unit state    (default systemctl)
+#   LANE_CADENCE_ALERT_STATE  separate dedup state for the cadence episode
 #   WATCHDOG_NOW       ISO instant to treat as "now"  -- TEST SEAM ONLY
+#
+# TWO INDEPENDENT ASSERTIONS, and the second is not redundant with the first:
+#   staleness -- "has the lane succeeded recently?"   (evidence produced BY the lane)
+#   cadence   -- "is the timer that runs it enabled?" (evidence produced ABOUT the lane)
+# Once a lane can schedule its own follow-ups, the first stops implying the second: the lane can
+# keep proving it is alive while the thing guaranteeing it runs tomorrow is gone. See the cadence
+# block for the full failure.
 set -uo pipefail
 
 DEADMAN_FILE="${LANE_DEADMAN_FILE:-}"
@@ -97,11 +107,97 @@ $HINT"
 
 # A healthy pass clears the episode so the NEXT outage starts a fresh backoff rather than
 # inheriting a stale count and mtime (which would suppress its first pages).
+#
+# Exits with OVERALL_RC, not a hardcoded 0: the CADENCE check below can fail on a pass where the
+# dead-man is perfectly fresh, and that is not an edge case -- it is the single most important
+# case this watcher now handles. See the cadence block.
 healthy() {
   log "$1"
   [ -n "$ALERT_STATE" ] && rm -f "$ALERT_STATE"
-  exit 0
+  exit "$OVERALL_RC"
 }
+
+# ---------------------------------------------------------------------------------------------
+# CADENCE ASSERTION -- "is the thing that is SUPPOSED to run it still armed to run it?"
+#
+# THE BUG THIS EXISTS FOR (the fifth of its kind in this system, and the subtlest, because the
+# lane keeps working the entire time):
+#
+# The dead-man measures exactly one thing: that a successful run happened recently. It cannot see
+# WHAT caused the run. Once a lane can schedule its own follow-up checks, a follow-up-driven run
+# refreshes the timestamp identically to a timer-driven one. So if the cadence timer is lost --
+# a host reprovision that does not restore an imperatively-installed unit, or a single
+# `systemctl --user disable` -- the follow-up chain keeps invoking the lane, keeps refreshing
+# this file, and THIS WATCHER STAYS QUIET. The guaranteed floor is gone; nothing rings; the lane
+# now runs only as long as an explicitly non-load-bearing, capped, transient mechanism happens to
+# keep chaining. The alarm clock only starts whenever that chain finally breaks, which under a
+# steady stream of work may be weeks.
+#
+# The claim this replaces, written in the design doc and false: "more frequent proof of life
+# cannot hide an absence". It hides the absence of the TIMER, not of the lane.
+#
+# So this asserts the SCHEDULER's existence directly, independently of any evidence produced by
+# the thing being scheduled. It is the same principle that put this whole script outside the lane:
+# a subject cannot report its own absence, and here the subject's liveness is precisely what
+# masks the failure.
+#
+# INDEPENDENT ALARM EPISODE. It uses its own signature and its own state file, so a quiet-timer
+# alarm and a stale-lane alarm dedup and back off separately. Sharing one episode would let
+# whichever fired first suppress the other, which is how one root cause hides a second.
+#
+# DELIBERATELY NOT FATAL TO THE REST OF THE PASS. It records OVERALL_RC and falls through to the
+# staleness check, because "timer disabled" and "lane also stale" are different facts and an
+# operator wants both. In total-death both fire on one pass; that is one extra line of diagnosis,
+# not noise, and the case this was built for (fresh dead-man, dead timer) fires only this one.
+#
+# OPTIONAL BY DESIGN. This script is generic and deployed for whatever lane a host declares, so
+# an unset LANE_CADENCE_UNIT skips the check -- but says so out loud, because a silently skipped
+# assertion is indistinguishable from a passing one.
+CADENCE_UNIT="${LANE_CADENCE_UNIT:-}"
+CADENCE_QUERY="${LANE_CADENCE_QUERY_CMD:-systemctl}"
+CADENCE_ALERT_STATE="${LANE_CADENCE_ALERT_STATE:-${ALERT_STATE}.cadence}"
+OVERALL_RC=0
+
+cadence_alarm() {
+  local text="$1"
+  [ -n "$HINT" ] && text="$text
+$HINT"
+  log "ALARM(cadence): $text"
+  if [ -n "$ALERT_CMD" ]; then
+    "$ALERT_CMD" "$CADENCE_ALERT_STATE" "cadence-${LABEL}" "$text" 900 14400
+  fi
+  OVERALL_RC=1
+}
+
+if [ -z "$CADENCE_UNIT" ]; then
+  log "No LANE_CADENCE_UNIT set; cadence assertion SKIPPED (dead-man staleness only)."
+else
+  # rc is not enough on its own: `disabled` exits 1 and `not-found` exits 4, but a missing
+  # systemctl would also exit non-zero, and those must not be conflated in the alert text.
+  # Measured on cloudbox 2026-08-17: enabled -> rc 0 "enabled"; disabled -> rc 1 "disabled";
+  # absent unit -> rc 4 "not-found". A user unit inherits XDG_RUNTIME_DIR and
+  # DBUS_SESSION_BUS_ADDRESS from the user manager, so this works under the unit's pinned PATH.
+  cadence_state="$("$CADENCE_QUERY" --user is-enabled "$CADENCE_UNIT" 2>&1)" || true
+  cadence_state="$(printf '%s' "$cadence_state" | tr -d '\r' | head -n1)"
+
+  case "$cadence_state" in
+    enabled|enabled-runtime)
+      log "OK: cadence unit $CADENCE_UNIT is $cadence_state."
+      [ -n "$CADENCE_ALERT_STATE" ] && rm -f "$CADENCE_ALERT_STATE"
+      ;;
+    not-found)
+      cadence_alarm "$LABEL is expected to be running here, but its cadence unit $CADENCE_UNIT DOES NOT EXIST. The lane may still be running via self-scheduled follow-ups -- which refresh the success timestamp and keep the staleness check quiet -- but its guaranteed floor is GONE, and it will stop for good as soon as that chain breaks."
+      ;;
+    *)
+      # Everything else -- disabled, masked, static, linked, an error string, or empty because
+      # systemctl was not on PATH -- lands here on purpose. FAILS TOWARD THE ALARM, like every
+      # other branch in this file: an unrecognised answer means the assertion could not be made,
+      # and treating "I could not check" as "it is fine" is the exact silence this file exists
+      # to prevent.
+      cadence_alarm "$LABEL is expected to be running here, but its cadence unit $CADENCE_UNIT is not enabled (systemctl reported: \"${cadence_state:-<no output>}\"). Self-scheduled follow-ups can keep the lane alive and keep this watcher quiet while the guaranteed daily floor no longer exists."
+      ;;
+  esac
+fi
 
 if [ ! -e "$DEADMAN_FILE" ]; then
   alarm "$LABEL has NEVER reported success: no file at $DEADMAN_FILE, yet a lane is expected to be running here. Either it was never deployed, or it was removed."

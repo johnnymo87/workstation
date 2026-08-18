@@ -1076,6 +1076,13 @@ lib.mkIf isCloudbox {
         "LANE_ALERT_CMD=${driftAlert}"
         "LANE_LABEL=maven-renovate"
         "LANE_SLOT_HOUR=16"
+        # CADENCE ASSERTION. Without this the watcher can only ask "did the lane succeed
+        # recently", and once the lane can schedule its own follow-up checks that question stops
+        # implying "the lane will still run tomorrow": a follow-up chain refreshes the success
+        # file exactly like the timer does, so losing the timer leaves this watcher QUIET while
+        # the guaranteed floor is gone. Asserting the scheduler directly is the only way to see
+        # it, because the evidence the lane produces is precisely what masks it.
+        "LANE_CADENCE_UNIT=maven-renovate.timer"
         "LANE_STALE_SLOTS=3"
         "LANE_HINT=Check: systemctl --user status maven-renovate.timer && journalctl --user -u maven-renovate.service -n 100"
         "PATH=${pkgs.coreutils}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
