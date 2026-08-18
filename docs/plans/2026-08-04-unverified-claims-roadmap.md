@@ -688,6 +688,67 @@ CI load) was falsified by the real runner — `blocked=0`, 164 attempts, control
 blocked 8. Two of seven mutation predictions were wrong, and both wrong ones were
 the finding.
 
+## Step 3.10 — `4ze8`: the canary, and two predicates that had to be cut · **PARTIAL** (#387)
+
+The gate from Step 3 is deployed *by the thing it guards*. This is the second
+layer, in a channel a `home-manager switch` cannot reach. The work that mattered
+was not writing it — it was **falsifying the two predicates that looked obvious**,
+both before a line of it existed.
+
+**The bead's own prescribed predicate was a day-one false positive.** "Deployed
+rev behind `origin/main` **and** the delta touches `users/|assets/|pkgs/|flake.*`".
+There is no auto-switch on this host, so *behind-main is the permanent steady
+state*; and the single commit matching the globs was #382, which touched
+`flake.nix`'s `checks` and a devbox test script and cannot change cloudbox's
+closure. **Cut, not tuned** — the same correction Step 3.7 recorded about
+enumerating benign cases from the repo's actual workflow rather than from the
+incident.
+
+**The obvious replacement was poisoned by Step 3 itself.** Comparing the
+deployed closure against main's is 100% noise, because the beacon is
+`home.file.<p>.text = "${self.rev}"` — so the closure changes on *every* commit,
+docs-only included. Verified by diffing the derivations down to the single
+offending input. **Layer 1 taxes every detector built on top of it**, which is
+worth knowing independently of this bead.
+
+That confound is **removable, and exactly so**: with the beacon and the gate's
+activation entry forced to constants, the deployed rev and `main` produce the
+*identical* derivation. That is a glob-free, eval-only answer to "is the deployed
+config semantically what main prescribes" — filed as `workstation-w45y` rather
+than smuggled into this PR, because it costs ~15 s of eval per side and couples
+to layer 1's internal attribute names.
+
+**What the oracle got right and wrong.** It supplied the load-bearing insight —
+watch the *transition*, not the value, because the post-incident state and
+today's benign state are the same snapshot. Its highest-rated concrete
+suggestion (compare beacon mtime against the profile's) was **wrong**, and the
+adversarial reviewer and I independently killed it: a gateless config would
+*remove* the beacon, so the absent-beacon leg already covers it, and the beacon
+is a symlink **into the store**, where `stat -L` reads 1970. But its *instinct*
+was right, and survives in a better form — the **provenance** leg, comparing
+`readlink -f` on both sides. That leg catches the one state nobody else can see:
+a beacon replaced by a regular file is well-formed, produces no transition, and
+**layer 1 trusts it**.
+
+**The reviewer found a blocker I would have hit on first run:** `/home/dev` is
+`0700`, so the "dedicated non-root user" the plan assumed cannot stat the beacon
+at all — and `User=dev` would put the transition history under the control of
+the very agents the canary polices. It runs as root, and the PR says why.
+
+**Method notes.** Mutation testing was 8/8 with one predicted survivor, and the
+survivor was the useful one: `readlink -f` → `readlink` survived because the
+fixture had both sides sharing a first hop, which production does not. The
+sandbox also caught a **vacuous green** the host could not — the stub alert sink
+used `#!/usr/bin/env bash`, absent in the sandbox, so every "raises no alert"
+assertion had been passing for the wrong reason. Census 88 → 90 candidates,
+74 → 76 executed.
+
+**Residual, stated rather than overclaimed:** an ancestor-stale deploy that
+happens while the canary is not running remains invisible. Whether the
+2026-08-01 incident had that shape is **unrecoverable** — the beacon post-dates
+it and generations are pruned to ~3 — so the design covers both shapes instead
+of betting on one.
+
 ## Step 4 — `dimz`: stop testing mirrors of the production helpers · **NOT STARTED**
 
 **Bead:** `workstation-dimz` (P2, spawned by step 1, 2026-08-04)
@@ -779,7 +840,7 @@ cheaper than the wrong number, and this table is the census's only prose mirror.
 | `workstation-dimz` | P2 | 2 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. Also owns `pkgs/lgtm-gh/test.sh` since #370, whose check is named `lgtm-gh-mirror-tests` to stop its green being misread; the bead carries the recipe for killing that mirror. |
 | `workstation-3g4j` | P2 | 3 | `reset-workspace/test.sh`, plus `nvims` and `opencode-launch`. **Adopted, not spawned** — it predates the census. |
 | `workstation-m98t` | P3 | 0 | ~~The plugin-bundle family, which runs `nix build` on itself.~~ **DONE, PR #383** — wired via channel (b), mirroring `ask-question`. Its own prescribed fix (artifact injection) was wrong: invariants 1-3 are derivation-level and do not survive it. Wiring found the suite had been RED since #288. See Step 3.9. |
-| `workstation-4ze8` | P1 | — | Step 3's second layer: a drift canary in a different deploy channel. Owns every `warn:` path the gate cannot close itself. |
+| `workstation-4ze8` | P1 | — | ~~Step 3's second layer.~~ **PARTIAL, PR #387** — ships in a NixOS system unit. Both predicates the bead prescribed were **cut by measurement** before implementation; see Step 3.10. Spawned `workstation-w45y` (the exact ancestor-stale predicate) and `workstation-hm97` (drift with no switch). |
 
 ### The audit that produced this table found a real defect
 
