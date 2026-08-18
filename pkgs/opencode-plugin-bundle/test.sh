@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-m98t): runs 'nix build' on itself; cannot nest inside a build sandbox
 # Durability + reproducibility tests for a bundled opencode plugin, shared by
 # every caller of pkgs/opencode-plugin-bundle.
 #
@@ -36,7 +35,7 @@ echo "== invariant 1: no bun in the deps stage build inputs =="
 # A bun version bump must be unable to move the deps derivation. If bun is a
 # build input, its layout/version can change the result -> the exact fragility
 # this bead eliminates.
-if printf '%s' "$DRVJSON" | nix run nixpkgs#jq -- -e \
+if printf '%s' "$DRVJSON" | nix run --inputs-from "$REPO_ROOT" nixpkgs#jq -- -e \
      '[.[].inputDrvs | keys[]] | map(select(test("-bun-[0-9]"))) | length > 0' >/dev/null; then
   fail "bun is a build input of the deps derivation (FOD-over-bun-tree regression)"
 fi
@@ -45,26 +44,56 @@ pass "no bun in deps stage"
 echo "== invariant 2: deps derivation is NOT a fixed-output (no outputHash) =="
 # Content-addressing must come from the lockfile's per-package integrity, not a
 # recursive output hash over node_modules. A normal derivation has no out.hash.
-if printf '%s' "$DRVJSON" | nix run nixpkgs#jq -- -e \
+if printf '%s' "$DRVJSON" | nix run --inputs-from "$REPO_ROOT" nixpkgs#jq -- -e \
      '[.[].outputs.out | (has("hash") or has("hashAlgo"))] | any' >/dev/null; then
   fail "deps derivation has a fixed-output hash (recursive-FOD regression)"
 fi
 pass "deps derivation has no outputHash"
 
 echo "== invariant 3: reproducible (two instantiations -> identical drv) =="
-D1="$(nix eval --raw "${PKG}.drvPath")"
-D2="$(nix eval --raw "${PKG}.drvPath")"
+# Deliberately NOT `nix eval "${PKG}.drvPath"`. That is a pure flake evaluation
+# of a locked tree, so two of them can differ only if Nix itself is
+# nondeterministic -- and the flake eval cache can serve the second from the
+# first, making it a comparison of a cached value with itself. The ask-question
+# suite, which this file otherwise mirrors, uses an --impure getFlake eval for
+# exactly this reason: impurity is what gives the repetition something to catch.
+pkg_eval() { # <attr-suffix>
+  nix eval --impure --raw --expr "
+    let flake = builtins.getFlake (toString ${REPO_ROOT});
+    in (flake.packages.\${builtins.currentSystem}.${ATTR})$1"
+}
+D1="$(pkg_eval '.drvPath')"
+D2="$(pkg_eval '.drvPath')"
 [ "$D1" = "$D2" ] || fail "drvPath not stable across evals: $D1 != $D2"
 pass "bundle drvPath stable: $D1"
 
-echo "== invariant 4: built bundle loads under bun --no-install =="
+echo "== invariant 4: built bundle loads under bun, with the v1 plugin shape =="
+# This asserted `typeof m.default === 'function'` until 2026-08-18, which is the
+# v0 plugin shape. Commit 424d590 (#288) deliberately moved every plugin to the
+# v1 shape -- `export default { id, server }` -- and this assertion was not
+# updated, because nothing ran it: the suite was unwired (workstation-m98t), so
+# it just quietly stopped being true. It has been RED on main since #288. That
+# is the exact decay the reachability guard exists to prevent, found the moment
+# the file was wired.
+#
+# The replacement is also stronger than the original. Loading proves the bundle
+# resolves; checking `id` proves THIS bundle is the plugin it claims to be,
+# which is what makes a mixed-up entry point visible.
 OUT="$(nix build --no-link --print-out-paths "${PKG}")"
 [ -f "$OUT/${ENTRY}.js" ] || fail "no ${ENTRY}.js in $OUT"
-bun --no-install -e "
-  const m = await import('$OUT/${ENTRY}.js');
-  if (typeof m.default !== 'function') { console.error('bad default export:', typeof m.default); process.exit(1); }
-" || fail "deployed bundle did not load under bun --no-install"
-pass "bundle loads; default export is a function"
+nix run --inputs-from "$REPO_ROOT" nixpkgs#bun -- --no-install -e "
+  const d = (await import('$OUT/${ENTRY}.js')).default;
+  if (typeof d !== 'object' || d === null) {
+    console.error('default export is not the v1 plugin object:', typeof d); process.exit(1);
+  }
+  if (d.id !== '${ENTRY}') {
+    console.error('plugin id mismatch: expected ${ENTRY}, got', JSON.stringify(d.id)); process.exit(1);
+  }
+  if (typeof d.server !== 'function') {
+    console.error('plugin.server is not a function:', typeof d.server); process.exit(1);
+  }
+" || fail "deployed bundle did not load with the v1 plugin shape"
+pass "bundle loads; default export is the v1 { id, server } shape"
 
 echo "== invariant 5: bundle is self-contained (no relative specifiers) =="
 # The reason this package exists: a relative specifier surviving into the
