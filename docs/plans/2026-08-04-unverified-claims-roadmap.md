@@ -594,6 +594,44 @@ exactly the error this bead already demonstrates.
 
 Census: **65 → 67 files executed by CI, 21 → 19 declared unwired.**
 
+## Step 3.8 — `oo4q`: the seam works, and it found a false assertion · **PARTIAL** (#379)
+
+Three of the seven wired: `test-disk-cleanup-worktrees.sh`, `test-opencode-llm-audit.sh`,
+`test-shada-report.sh`. Census 67 → 70 executed, 19 → 16 unwired.
+
+**The seam.** Each suite ran `nix eval`/`nix build` *inside itself*, impossible in a build
+sandbox. Each now takes the artifact by path, so the check's dependency graph does the
+building. The two `home.file` cases take `.source` — home-manager's own deployed store path —
+rather than `.text`: it is the artifact that actually ships (the `WORKTREE_GUARD_HOOK_DIR`
+shape), and reading `.text` through the CLI needs the `dynamic-derivations` experimental
+feature that nothing in CI enables.
+
+**What it found.** Mutating production's `$2 ~ /MOVED_FROM|DELETE/` to `$2 ~ /MOVED_FROM/`
+left all 12 shada assertions green — including the one named *"DELETE closes a writer window
+as well as MOVED_FROM"*. The fixture reused one temp name, and the counter refuses to
+double-count a live name, so the leak it described could not move the maximum. Fixed with
+distinct names; verified green-when-correct and red-when-mutated.
+
+**Two survivors, both recorded rather than smoothed over.** `WORKTREE_MAX_AGE_DAYS` survives
+because the generated harness supplies its own copy — a real extracted-slice boundary, and one
+I failed to predict. A first-match `break` survives because its guard is a `deny_grep` on a
+*comment* string, making it a restore-the-old-code tripwire rather than a behavioural
+assertion.
+
+**Method note, because it is the reusable part.** All seven files were run — but on the *host*,
+which is not the environment the design targets. Adversarial review pointed out that not one
+measurement had been taken inside a `runCommand`, then took them and found breakage in minutes:
+no `/usr/bin/env`, no `/tmp/opencode`. Two further corrections came from the same review:
+`test-shada-report.sh` was misfiled as hard (it needs no nvim at all, so it moved *into* this
+PR), and the cloudbox sweeper was misfiled as cheap — its first blocker is not nested nix but a
+hard exit without a live serve pool, which no sandbox can supply. *Measuring the wrong
+environment is still measuring the wrong thing.*
+
+**Deferred with corrected markers, not deleted:** the cloudbox sweeper (live-pool exit),
+`test-nvim-walk.sh` and `test-lgtm-teardown.sh` (each exits 0 after one line at an
+`inotifywait` gate — three SKIP-exit-0 gates apiece to make fatal first). The devbox sweeper
+remains the wirable half of the pair.
+
 ## Step 4 — `dimz`: stop testing mirrors of the production helpers · **NOT STARTED**
 
 **Bead:** `workstation-dimz` (P2, spawned by step 1, 2026-08-04)
@@ -680,7 +718,7 @@ cheaper than the wrong number, and this table is the census's only prose mirror.
 |---|---|---|---|
 | `workstation-5m47` | P1 | 0 | ~~The opencode-frontdoor vitest suite.~~ **DONE, PR #347** — wired as `checks.frontdoor-vitest`. Both premises in the row it replaces were wrong: see below. |
 | `workstation-k7t4` | P2 | 3 | ~~13 suites that probe live host state.~~ **PARTIAL, PRs #375 / #376** — measured, and the shared reason was false for 10 of 13. Keeps only what its title actually describes: the live front-door canary (+ its harness), and `lockprobe`, which is hermetic already but timing-bound. See Step 3.7. |
-| `workstation-oo4q` | P2 | 7 | **Spawned by step 3.7** — the suites whose *own body* runs `nix eval`/`nix build`, which is the real and dominant blocker inside `k7t4`. Fix is a `${self}`-path injection seam, not a host canary; both sweepers already have one (`SWEEPER_OVERRIDE`). |
+| `workstation-oo4q` | P2 | 4 | **Spawned by step 3.7** — the suites whose *own body* runs `nix eval`/`nix build`, which is the real and dominant blocker inside `k7t4`. Fix is a `${self}`-path injection seam, not a host canary; both sweepers already have one (`SWEEPER_OVERRIDE`). |
 | `workstation-dad9` | P2 | 0 | ~~Suites that look cheaply wirable.~~ **DONE, PRs #370 / #371 / #372** — the "cheaply wirable" estimate held for 2 of 7. One of them could not fail; one hid a production hazard. See below. |
 | `workstation-dimz` | P2 | 2 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. Also owns `pkgs/lgtm-gh/test.sh` since #370, whose check is named `lgtm-gh-mirror-tests` to stop its green being misread; the bead carries the recipe for killing that mirror. |
 | `workstation-3g4j` | P2 | 3 | `reset-workspace/test.sh`, plus `nvims` and `opencode-launch`. **Adopted, not spawned** — it predates the census. |

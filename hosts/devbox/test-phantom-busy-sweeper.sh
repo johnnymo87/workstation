@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-oo4q): the suite itself runs `nix eval` + `nix-store -r` (:59-60); a SWEEPER_OVERRIDE seam already exists (:56), but see the :52 caveat that the override escapes HOME-pinning
+# unwired-test(workstation-oo4q): the suite itself runs `nix eval` + `nix-store -r` (:59-60); a SWEEPER_OVERRIDE seam already exists (:56). MEASURED 2026-08-17: the first blocker is actually sqlite3 (fatal exit 1, the correct pattern), and unlike the cloudbox sibling this file was DESIGNED for the no-live-pool path (CUTOFF=now, :69-72), so it is the wirable one of the pair. The :52 caveat stands -- the override escapes HOME-pinning -- but its hazard needs a reachable production DB, which a sandbox cannot have.
 # Tests for systemd.user.services.opencode-phantom-busy-sweeper
 # (users/dev/home.devbox.nix — the DEVBOX sweeper, a systemd USER unit).
 #
