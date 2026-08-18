@@ -632,6 +632,62 @@ environment is still measuring the wrong thing.*
 `inotifywait` gate — three SKIP-exit-0 gates apiece to make fatal first). The devbox sweeper
 remains the wirable half of the pair.
 
+## Step 3.9 — `oo4q` + `m98t`: two suites that had quietly stopped being true · **PARTIAL** (#382, #383, #384)
+
+Census 70 → 74 executed, 16 → 12 unwired. `oo4q` 4 → 3; **`m98t` 3 → 0, closed.**
+
+**The devbox sweeper (#382).** Wired through the `SWEEPER_OVERRIDE` seam that
+already existed, needing zero source changes to run in a sandbox. Mutation
+testing then found the two phases were *covering for each other*: the suite
+documented that deleting the phase-2 re-checks still passes, but the mirror was
+undocumented — deleting the same gates from **phase 1** was also invisible,
+because phase 2's re-check declines the write, so the row survives and the count
+stays 0. What changes is that the row becomes a candidate and a write chunk runs
+against it: a write lock taken on a row that should never have been selected,
+which is the phantom-busy regression the unit exists to prevent. The suite
+verified the conjunction while being unable to localise either copy. T4/T5 now
+assert the no-write-lock path, turning both mutations from survivors into
+catches. 5 caught / 2 survived; `mode=ro` is an equivalent mutant (measured: T9
+still reports `blocked=0`, because a SELECT on a read-write WAL connection takes
+no write lock).
+
+**The plugin bundles (#383) — red on main since #288, and nothing noticed.** The
+suite asserted `typeof m.default === 'function'`, the v0 plugin shape. Commit
+`424d590` deliberately moved every plugin to `export default { id, server }` and
+this assertion was never updated, because nothing ran it. Confirmed pre-existing
+by running the unmodified suite from `origin/main`. This is the entire thesis of
+the reachability guard, demonstrated the moment the file was wired.
+
+`m98t`'s own description prescribed the `oo4q` seam, and a note of mine called
+the two beads "the same bug class, one fix shape". **Both wrong.** Invariants 1-3
+are derivation-level — `inputDrvs`, fixed-output-ness, `drvPath` across two
+*separate* evaluations — and none survive artifact injection; the third cannot
+be expressed inside a single evaluation. `ask-question` was already wired via
+channel (b) with a comment rejecting eval-time assertions as strictly weaker.
+
+**A guard defect fell out of it.** `resolve_ref` had always handled the
+`$(dirname "${BASH_SOURCE[0]}")` delegation shape — its comment names the very
+shims — but `refs_in_text` never extracted the reference, because its path class
+excludes parens and quotes. The resolver was unreachable code for the shape it
+was written for; meta-test case 7 only covered a clean literal path. Case 7b now
+covers it, written red first. **The obvious fix is wrong**: stripping `$(...)`
+wholesale deletes `disc_out="$(nvim --clean -l ...lua)"` and un-covers two wired
+files (measured: census 70 → 68). The targeted rewrite leaves it unchanged.
+
+**And a flake I had shipped myself (#384).** `opencode-llm-audit-tests`, added in
+#379, went red on a PR that does not touch it while main was green either side:
+the test read `/proc/$pid/fd` immediately after `&`, before the child could be
+scheduled. Fixed by waiting on the *fixture*, not retrying the assertion. Worth
+recording as a cost of this spine — wiring a suite into CI makes its latent
+timing assumptions everyone's problem.
+
+**Method note.** Every measurement this cycle was taken inside a `runCommand`
+before any design work, which was last cycle's correction and it paid: the suite
+needed no adaptation at all, and the prediction that mattered (T9 flaking under
+CI load) was falsified by the real runner — `blocked=0`, 164 attempts, control
+blocked 8. Two of seven mutation predictions were wrong, and both wrong ones were
+the finding.
+
 ## Step 4 — `dimz`: stop testing mirrors of the production helpers · **NOT STARTED**
 
 **Bead:** `workstation-dimz` (P2, spawned by step 1, 2026-08-04)
@@ -718,11 +774,11 @@ cheaper than the wrong number, and this table is the census's only prose mirror.
 |---|---|---|---|
 | `workstation-5m47` | P1 | 0 | ~~The opencode-frontdoor vitest suite.~~ **DONE, PR #347** — wired as `checks.frontdoor-vitest`. Both premises in the row it replaces were wrong: see below. |
 | `workstation-k7t4` | P2 | 3 | ~~13 suites that probe live host state.~~ **PARTIAL, PRs #375 / #376** — measured, and the shared reason was false for 10 of 13. Keeps only what its title actually describes: the live front-door canary (+ its harness), and `lockprobe`, which is hermetic already but timing-bound. See Step 3.7. |
-| `workstation-oo4q` | P2 | 4 | **Spawned by step 3.7** — the suites whose *own body* runs `nix eval`/`nix build`, which is the real and dominant blocker inside `k7t4`. Fix is a `${self}`-path injection seam, not a host canary; both sweepers already have one (`SWEEPER_OVERRIDE`). |
+| `workstation-oo4q` | P2 | 3 | **Spawned by step 3.7** — the suites whose *own body* runs `nix eval`/`nix build`, which is the real and dominant blocker inside `k7t4`. Fix is a `${self}`-path injection seam, not a host canary; both sweepers already have one (`SWEEPER_OVERRIDE`). |
 | `workstation-dad9` | P2 | 0 | ~~Suites that look cheaply wirable.~~ **DONE, PRs #370 / #371 / #372** — the "cheaply wirable" estimate held for 2 of 7. One of them could not fail; one hid a production hazard. See below. |
 | `workstation-dimz` | P2 | 2 | Step 4's bead, which now also owns `pkgs/opencode-frontdoor/test.sh` — what is left of it after the vitest half moved into CI is a developer mirror of `route-gate.nix` needing the pinned opencode binary. Also owns `pkgs/lgtm-gh/test.sh` since #370, whose check is named `lgtm-gh-mirror-tests` to stop its green being misread; the bead carries the recipe for killing that mirror. |
 | `workstation-3g4j` | P2 | 3 | `reset-workspace/test.sh`, plus `nvims` and `opencode-launch`. **Adopted, not spawned** — it predates the census. |
-| `workstation-m98t` | P3 | 3 | The plugin-bundle family, which runs `nix build` on itself. |
+| `workstation-m98t` | P3 | 0 | ~~The plugin-bundle family, which runs `nix build` on itself.~~ **DONE, PR #383** — wired via channel (b), mirroring `ask-question`. Its own prescribed fix (artifact injection) was wrong: invariants 1-3 are derivation-level and do not survive it. Wiring found the suite had been RED since #288. See Step 3.9. |
 | `workstation-4ze8` | P1 | — | Step 3's second layer: a drift canary in a different deploy channel. Owns every `warn:` path the gate cannot close itself. |
 
 ### The audit that produced this table found a real defect
