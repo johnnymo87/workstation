@@ -64,14 +64,16 @@ stdenvNoCC.mkDerivation rec {
     #   + feat/weekly-balanced-routing-v1113 (the opt-in `balanced` strategy;
     #     claude-failover-proxy bead cto.3, verdict GO on 2026-08-10)
     #   + obs/refresh-token-fields (logs the FIELD NAMES of a token-refresh
-    #     response, once per shape, never values — the only chance we have of
-    #     ever observing the ~30d grant TTL that kills accounts without warning;
-    #     bead xyq)
+    #     response, once per shape, plus the refresh token's own remaining TTL
+    #     on EVERY refresh. The first captured response proved the endpoint
+    #     does report `refresh_token_expires_in` and teamclaude was discarding
+    #     it, so the ~30d grant lifetime that kills accounts without warning is
+    #     measurable after all; bead xyq)
     # 558/558 tests green on this rev. Not upstreamed, so this cannot be a tag.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "a207e33aec903bf49af887608476a81782d1d593"; # obs/refresh-token-fields-v1113
-    hash = "sha256-icl//dTDp9Gm6XbXjYqPvzZ899oPJ6z+E4jx2KcRjxk=";
+    rev = "d643bb52eb89cf0a39f720dce348f07a7fedef7b"; # obs/refresh-token-fields-v1113
+    hash = "sha256-FBOVmEuw8DG2nL+/74n49r58KAP6PmAX9u8i06bs65I=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
