@@ -505,6 +505,71 @@
         touch $out
       '';
 
+      # hosts/devbox/test-phantom-busy-sweeper.sh drives the SHIPPED ExecStart
+      # artifact of the devbox sweeper against scratch WAL databases. It used to
+      # build its own subject with `nix eval` + `nix-store -r`, which a build
+      # sandbox cannot do; SWEEPER_OVERRIDE hands it the same store path the
+      # systemd user unit runs, so the check's dependency graph does the building.
+      #
+      # WHY THIS RUNS AT ALL OFF-DEVBOX: the sandbox has no systemctl, so the
+      # suite's discovery block finds no serves and CUTOFF collapses to now. The
+      # file is written for that path (see its header) and every assertion holds
+      # under it. Note this bakes in a property of the DEVBOX discovery block --
+      # that it fails OPEN when systemctl is missing. Its cloudbox sibling fails
+      # CLOSED and would exit 1 here. If the two discovery blocks are ever
+      # converged (workstation-yvxh.10), this check needs a systemctl shim or a
+      # discovery seam, or it will go permanently red for a non-obvious reason.
+      devbox-phantom-busy-sweeper-tests = devboxPkgs.runCommand "devbox-phantom-busy-sweeper-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.sqlite devboxPkgs.coreutils
+          devboxPkgs.gnugrep devboxPkgs.gawk devboxPkgs.procps
+        ];
+        SWEEPER_OVERRIDE = builtins.head
+          self.homeConfigurations.dev.config.systemd.user.services.opencode-phantom-busy-sweeper.Service.ExecStart;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+
+        # The devbox and cloudbox sweepers are different derivations with the SAME
+        # derivation name, so a cross-wired path is invisible in a build log.
+        # `systemctl --user` is the devbox discovery block and appears nowhere in
+        # the cloudbox artifact. This gate is fail-fast ergonomics rather than a
+        # safety barrier -- a cross-wired cloudbox artifact would already fail ~40
+        # assertions -- but it turns a confusing red into a named one.
+        grep -q 'systemctl --user' "$SWEEPER_OVERRIDE" || {
+          echo "GATE FAILURE: SWEEPER_OVERRIDE is not the devbox sweeper" >&2
+          echo "  (no 'systemctl --user' discovery block in $SWEEPER_OVERRIDE)" >&2
+          exit 1
+        }
+
+        # The suite's own safety note: SWEEPER_OVERRIDE escapes its HOME-pinning
+        # guarantee, so the artifact MUST honour the OPENCODE_SWEEPER_DB seam.
+        # Unlike the gate above this asserts the safety property itself, and so
+        # also covers a future pre-seam artifact or wrapper.
+        grep -q 'OPENCODE_SWEEPER_DB' "$SWEEPER_OVERRIDE" || {
+          echo "GATE FAILURE: artifact does not honour the OPENCODE_SWEEPER_DB seam" >&2
+          exit 1
+        }
+
+        bash hosts/devbox/test-phantom-busy-sweeper.sh 2>&1 | tee "$TMPDIR/sweeper.txt"
+
+        # Both gates below pin the same number, deliberately: the banner proves the
+        # suite adjudicated and reached its end, the count proves it adjudicated
+        # THIS MANY things. T10 emits one assertion per command in a 7-element
+        # loop, so editing that list moves the count -- which is exactly when a
+        # human should re-read this.
+        grep -q '^==== 45 passed, 0 failed ====$' "$TMPDIR/sweeper.txt" || {
+          echo "GATE FAILURE: sweeper suite did not reach its 45-passed banner." >&2
+          exit 1
+        }
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/sweeper.txt")" = 45 ] || {
+          echo "GATE FAILURE: expected 45 '  PASS: ' lines, got" \
+               "$(grep -c '^  PASS: ' "$TMPDIR/sweeper.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       worktree-guard-hook-tests = devboxPkgs.runCommand "worktree-guard-hook-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils devboxPkgs.gnugrep
