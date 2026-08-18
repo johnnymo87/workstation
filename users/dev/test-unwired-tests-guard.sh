@@ -151,6 +151,29 @@ nvim --clean -l pkgs/foo/test-unit.lua' \
 ok "a file executed BY another executed file is covered (transitive)"
 
 # ---------------------------------------------------------------------------
+# 7b. Transitive reachability THROUGH A dirname-DELEGATION SHIM.
+#
+# Case 7 covers a clean literal path. The delegation shape actually used in this
+# repo is not literal:
+#
+#   exec bash "$(dirname "${BASH_SOURCE[0]}")/../opencode-plugin-bundle/test.sh"
+#
+# resolve_ref has always handled the RESOLUTION half of this (its comment names
+# these very shims), but refs_in_text never extracted the reference in the first
+# place -- its path character class excludes `(`, `)` and `"`, so the line
+# yielded nothing and the closure never reached the shared runner. The resolver
+# was dead code for the shape it named. Found while wiring workstation-m98t,
+# whose two shims are exactly this.
+# ---------------------------------------------------------------------------
+r="$(mkrepo '      foo = runCommand "f" {} "bash pkgs/shim/test.sh";' \
+      'pkgs/shim/test.sh:::#!/usr/bin/env bash
+exec bash "$(dirname "${BASH_SOURCE[0]}")/../runner/test.sh" some-arg' \
+      'pkgs/runner/test.sh:::#!/usr/bin/env bash
+echo hi')"
+[ "$(run_guard "$r")" = "0" ] || { cat "$r/out.txt"; oops "a file reached through a dirname-delegation shim was flagged"; }
+ok "a file executed through a \$(dirname ...) delegation shim is covered"
+
+# ---------------------------------------------------------------------------
 # 8. A workflow step counts, for suites that cannot be hermetic.
 # ---------------------------------------------------------------------------
 r="$(mkrepo '      foo = runCommand "f" {} "true";' \

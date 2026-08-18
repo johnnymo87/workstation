@@ -7,9 +7,18 @@
 `workstation-yvxh.4`. That roadmap fixed the **consequence** of the memory
 bursts. This one is about the **cause**, plus the residuals it left open.
 
-**Status:** S0 done · S1 done · S4 worked (fix **rejected**, deferred to S2) ·
-S6 done (pigeon PR #56 + sampler v3) · **nothing unblocked; every remaining step
-is time- or peer-gated**
+> **WOUND DOWN 2026-08-17.** This spine is closed. Its founding problem — the
+> 28 GiB burst — is not recurring: per-serve daily peak is now ~1.2 G against a
+> 14 G cap, where on 08-12 it was 9.5–10.2 G resident. The controls that matter
+> landed (aggregate slice cap, stamped sweeper gate, agent-scope isolation) and
+> stay. **Read [Close-out (2026-08-17)](#close-out-2026-08-17) at the bottom
+> first** — it supersedes the status block and the open-work table below, both of
+> which are preserved as the historical record of how this looked while it was
+> live.
+
+**Status (historical, 2026-08-10):** S0 done · S1 done · S4 worked (fix
+**rejected**, deferred to S2) · S6 done (pigeon PR #56 + sampler v3) ·
+**nothing unblocked; every remaining step is time- or peer-gated**
 
 - **S2** is time-blocked: 7-day window ends **2026-08-09 22:37 Z**. It is **no
   longer a zero-event window** — the first kernel **OOM kill landed 2026-08-03
@@ -1049,7 +1058,12 @@ which reads exactly like "the timer is gone". It cost a detour here. Use:
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user list-timers
 ```
 
-### S7 — Reap idle instances in serve mode · `workstation-rdsq.1` · **DESIGNED 2026-08-04, NOT YET BUILT**
+### S7 — Reap idle instances in serve mode · `workstation-rdsq.1` · **DESIGNED 2026-08-04, NOT BUILT — DEFERRED 2026-08-17**
+
+> Deferred in the wind-down, not closed. The design below and the six review
+> defects under it are still the spec if this is ever picked up; the numbers that
+> motivated it are not. See the close-out table for the revisit triggers, and note
+> that `~29% of RSS` now means ~29% of ~1.2 G, not of 9.5–10.2 G.
 
 Worked against upstream **v1.17.13** (`10c894bdee`) in `/home/dev/projects/opencode`,
 which is the exact version the pool runs as `opencode-patched-1.17.13.7`. Newer tags
@@ -1391,6 +1405,9 @@ scopes use an explicit `oc-agent-<nonce>` name, and bazel-scope's now-false
 
 ## Open work, as of 2026-08-10 (post-`yt0p`)
 
+> **SUPERSEDED** by [Close-out (2026-08-17)](#close-out-2026-08-17). Kept as the
+> 08-10 snapshot; do not read the states below as current.
+
 Every open bead in this spine, so the roadmap and the tracker cannot silently diverge.
 Steps S0–S2 and S6–S8 are closed; their sections above are the record.
 
@@ -1421,3 +1438,109 @@ section above before using either.
 - **A reproduction harness or heap profiler for S1 before the cheap test.**
 - **Anything about `workstation-nv5l`** (the second wedge class, 979 session-path
   503s at 10:47 on 08-01). Still unexplained, still not claimed here.
+
+---
+
+## Close-out (2026-08-17)
+
+This supersedes the status block at the top and the 08-10 open-work table. Written
+after a 5-day soak of the last two controls to land (`le0a`, `63wo`).
+
+### The measurement that decides it
+
+The spine exists to attribute a 28 GiB burst and land the memory residuals. Measured
+with the pool ~10.6 h warm (bounced 03:00 that morning):
+
+| | 08-08 → 08-12 | 08-17 |
+|---|---|---|
+| per-serve peak | 13 G ramp; 9.5–10.2 G resident | **1.0–1.3 G** |
+| slice aggregate | — | 4.2 G of the 32 G cap |
+| host | — | 50 G of 60 G available |
+| OOM kills | 4 (S8 episode) | **0 in 5 days** |
+
+Whole-day peaks from the units' own `Consumed … memory peak` accounting on stop agree
+(1.1 G on 08-14, 1019 M on 08-16). That is a ~10× margin against the 14 G per-serve cap,
+where five days earlier it was under 1.5×. The 08-08/09 vitest ramp and the 08-12
+resident figures have not recurred.
+
+**This is not a claim that the burst was imaginary.** S1 attributed it, S8 fixed four real
+OOM kills, and `yt0p` removed the mechanism (agent subprocesses landing in the serve
+cgroup). The peak is low *because those landed*. The claim is narrower: with the mechanism
+gone, there is no live memory problem left to spend on, and the remaining per-serve tuning
+is tuning against a number nothing approaches.
+
+### What landed and stays
+
+| control | bead | state |
+|---|---|---|
+| `oc-agent.slice` per-command scopes (10 G cap, `OOMPolicy=continue`) | `yt0p` | deployed, PR #337 — the mechanism fix |
+| bazel scope shim | `mqp3` | deployed, PR #312 |
+| `opencode-serve.slice` 32 G aggregate cap | `le0a` | deployed + verified. **This is the control that actually protects the host** and it should outlive every per-serve number in this document |
+| phantom-busy sweeper stamped dead-owner gate | `63wo` | armed 08-12, PR #358; 1440 sweeps, 0 FAILED, 0 refusals |
+| `verify-serve-slice.sh` declared membership + settle-wait | `ixw7` | PR #368 |
+
+### Final bead disposition
+
+| bead | P | disposition |
+|---|---|---|
+| `le0a` | P2 | **CLOSED — done.** Aggregate cap deployed and verified |
+| `63wo` | P2 | **CLOSED — done.** Stamped gate armed and soaked; see below on what the soak actually proved |
+| `8rou` | P2 | **CLOSED — no-longer-motivated**, not done. 14 G → 10 G is a distinction between two numbers both ~10× above anything observed, and the 32 G aggregate cap already provides the protection. Reopen if per-serve peaks return to the multi-GB range |
+| `ixw7` | P2 | **CLOSED** by PR #368 |
+| `rdsq.1` (S7 idle reaper) | P2 | **DEFERRED** 2026-08-17, not closed. The defect is real and the design in PR #285 survives; what went away is the pressure to act on it. 29% of ~1.2 G is a few hundred MB. **Revisit if** per-serve resident returns to the multi-GB range and stays there across a day, **or** a kernel OOM kill lands on a serve again, **or** the child fleet is implicated in something other than memory (fd exhaustion, CPU, startup latency) — which the memory measurement says nothing about |
+| `yvxh.6` | P3 | stays with the `yvxh` epic, not this one. It had been wired as an explicit parent-child dependency of **this** epic while its own description named `yvxh` as its spine; that redundant edge was removed on close. Worth noting as a tracker-hygiene trap — a stray cross-epic edge made a P3 in someone else's spine look like a blocker for closing this one |
+| `0svg`, `qyxn`, `daa0`, `2dwe`, `lwde` | P2/P3 | unchanged; none are memory-pressure-gated any more |
+| `wmrt` | P2 | **NEW.** `database is locked` first-start race; 4 events in 5.5 days, self-heals in 10 s |
+| `rl3k` | P3 | **NEW.** Post-restart readiness must compare `InvocationID`, not `is-active` |
+| `ezbo` | P3 | **NEW.** Derive `verify-serve-slice` membership at build time from `serve-pool.nix` |
+
+### What the 63wo soak actually proved, stated honestly
+
+1440 sweeps, every one `ARMED: 0`. That reading is **ambiguous by construction**: the
+shape check added in pre-deploy hardening turns write-side format drift into a *silent*
+fallback to the old CUTOFF rule, so "0 forever" could equally mean the stamp stopped being
+recognisable — and five days is roughly fifteen `opencode-patched` auto-update cycles, so
+that was the live risk. Checked the write side directly rather than trusting the log line:
+508 of 508 assistant rows well-formed, every stamp matching the live serve on its own
+port, stamped ports exactly 4096–4099.
+
+So the zeros are real. But: **the stamped branch fired zero times in five days**, while
+the insured event — a single-member death — occurred three times (08-13 on 4099, 08-14 and
+08-16 on 4097) and produced no orphans at all. Cumulatively it has fired once ever, on an
+orphan manufactured by killing a serve. That is consistent with S9's finding that phantom
+rows are cosmetic. It is thin tail insurance, correctly built and not worth extending.
+
+Optional polish, deliberately not scheduled: adding stamp coverage to the log line
+("N of M recent rows stamped") would make that ambiguous zero self-diagnosing and turn the
+soak check into a grep. Only worth it if the pool runs unattended for weeks.
+
+### Three lessons this spine kept re-teaching
+
+**An instrument aimed at the wrong entity produces plausible output.** Five instances now,
+none caught by checking the instrument's own output: the hardcoded `system.slice` cgroup
+path that could never exist (would have reverted correct deploys); a wrong-directory probe
+that nearly had a PR #264 incident declared that was not happening; `systemctl show`
+reporting configured values while the kernel enforced nothing (the whole reason
+`verify-serve-slice.sh` reads cgroupfs); a journal `grep` that counted **its own command
+lines** because systemd logs every `systemd-run` scope's argv, manufacturing a convincing
+rising trend from a flat one; and `verify-serve-slice.sh` itself, which could not express a
+missing pool member and reported "9 passed, 0 failed" over a 75%-strength pool.
+
+**Re-measure; never inherit a count.** `8rou` carried "must land on a cold pool, serves sit
+at 9.5–10.2 G" for five days after it stopped being true, and that stale constraint was
+faithfully copied forward into a scheduled wake where a later session would have read it as
+current fact. A measurement is a sample in a series, not a property of the system.
+
+**A false FAIL can cost more than a false PASS.** The naive form of the `ixw7` fix —
+"member not active is a failure" — would have been worse than the bug. The `wmrt` lock race
+is concentrated at the pool bounce, i.e. the deploy step immediately before the verifier
+runs, and the runbook says revert on failure, and a revert is another bounce that kills
+every live session. Which direction is more expensive is a property of what consumes the
+signal, not of the check.
+
+### Successors
+
+Nothing inherits this spine. `workstation-yvxh` (opencode.db phantom-busy sweeper + DB
+maintenance) continues independently and owns `yvxh.6`. The reliability questions that
+outlived this work — pool wedging, stall protection, frontdoor opacity — live in
+`workstation-xci9`, `workstation-nv5l`, and `workstation-mlve`.

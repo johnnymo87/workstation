@@ -174,7 +174,7 @@ let
       # Arrays are excluded because upstream's isRecord does; `typeof === object`
       # alone would admit one.
       #
-      # LOADER_SEMANTICS_PIN: 1.17.13
+      # LOADER_SEMANTICS_PIN: 1.18.18
       #
       # THIS IS THE THIRD COPY of loader semantics in the repo. The marker above
       # couples it to the other two. The other two -- the vendored fixtures under

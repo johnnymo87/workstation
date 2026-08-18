@@ -31,22 +31,22 @@ let
   opencode-platforms = {
     aarch64-linux = {
       asset = "opencode-linux-arm64.tar.gz";
-      hash = "sha256-x92vYKBdSIGC9K1/q9H3yTmhgIFF/v0ajcYVRAagC1M=";
+      hash = "sha256-Of7XmvrIwyirehc159hjjgL7jZkG9aS6tm7Jn9UiZ/c=";
       isZip = false;
     };
     aarch64-darwin = {
       asset = "opencode-darwin-arm64.zip";
-      hash = "sha256-MNmIbjCrMDHbvwfh+iFqOJub+UCNqfBrY9I8H76A2A8=";
+      hash = "sha256-yBw1TtpXFNUd/j5xxNfPjG07UYib1mt3cmeccUzYgm8=";
       isZip = true;
     };
     x86_64-linux = {
       asset = "opencode-linux-x64.tar.gz";
-      hash = "sha256-K6gtQGqoPGMyJdl4z97xK9Gxjp14X05cOVs9PYkwmgc=";
+      hash = "sha256-hD6oXUq8A+FxxBHNcthk8cZDosnNdjaYDuTy5mVt16k=";
       isZip = false;
     };
     x86_64-darwin = {
       asset = "opencode-darwin-x64.zip";
-      hash = "sha256-Mf5unboDDXRx01wHAqKcEFVsJXYvfTwdscobX/jfQw8=";
+      hash = "sha256-3+xu9LgaPsLQXejhUy+odQdDs43WFPOY3uu0qAyIuNs=";
       isZip = true;
     };
   };
@@ -285,18 +285,19 @@ let
     # that swaps the opencode binary should stop ALL opencode processes at once (serve
     # + every standalone TUI) from a plain SSH shell. Doing the switch from inside an
     # opencode session will kill that session mid-switch.
-    upstreamVersion = "1.17.13";
-    patchedRevision = "9";  # ".N" suffix — drop to "" on next upstream version bump
+    upstreamVersion = "1.18.18";
+    patchedRevision = "";  # ".N" suffix — drop to "" on next upstream version bump
     tagSuffix = if patchedRevision == "" then "" else ".${patchedRevision}";
     releaseTag = "v${upstreamVersion}-patched${tagSuffix}";
     version = if patchedRevision == "" then upstreamVersion else "${upstreamVersion}.${patchedRevision}";
     # Cron hold: while non-empty, update-opencode-patched.yml tracks the highest
     # "v${opencodePatchedHold}-patched.N" release instead of releases/latest, so an
-    # auto-bump can never carry us onto a new upstream line. Held at 1.17.7 to stay on
-    # the current upstream line (the old 1.15 V2 DB-corruption hold is history; see the
-    # cutover runbook). Set to "" to resume tracking the newest release. Greppable
+    # auto-bump can never carry us onto a new upstream line. Held at 1.18.18: that is the
+    # line validated by the 2026-08-14 roll-forward (message-ID wrap incident), and the
+    # cron must not carry us off it unattended. Set to "" to resume tracking the newest
+    # release. Greppable
     # marker only — it does not feed the derivation.
-    opencodePatchedHold = "1.17.13";
+    opencodePatchedHold = "1.18.18";
     platformInfo = opencode-platforms.${pkgs.stdenv.hostPlatform.system};
   in pkgs.stdenv.mkDerivation {
     pname = "opencode-patched";
@@ -1080,8 +1081,14 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
   # (which sets core.hooksPath). Since the worktree-guard opencode plugin was
   # removed 2026-07-25, this hook is the ONLY remaining enforcement of the
   # read-only-trunk rule — it blocks commits at a primary root, not edits.
+  # Deployed from the PACKAGE, not the raw asset, so the interpreter is a store
+  # path. The asset's `#!/bin/bash` resolved only because /bin/bash exists on
+  # cloudbox as an undeclared hand-made symlink into this user's profile --
+  # nothing in this repo creates it, so a reprovisioned host would have deployed
+  # a hook that cannot exec, silently losing the only enforcement of the
+  # read-only-trunk rule. See pkgs/worktree-guard-hook/default.nix.
   home.file.".config/git-hooks/pre-commit" = lib.mkIf isCloudbox {
-    source = "${assetsPath}/git-hooks/pre-commit";
+    source = "${localPkgs.worktree-guard-hook}/pre-commit";
     executable = true;
   };
 

@@ -14,7 +14,7 @@
 # Consumers: hosts/cloudbox/configuration.nix (systemd.services.opencode-plugin-canary).
 #
 # ---------------------------------------------------------------------------
-# LOADER_SEMANTICS_PIN: 1.17.13
+# LOADER_SEMANTICS_PIN: 1.18.18
 #
 # The pattern in plugin_canary_load_pattern and the `path=file://...` field that
 # plugin_canary_plugin_key parses are opencode's LOADER INTERNALS, not our own

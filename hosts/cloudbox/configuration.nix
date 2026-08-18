@@ -98,6 +98,16 @@ let
   # repeated this host's 2026-07-24 incident on 2026-07-29/30. The full incident history
   # and the backoff/severity rationale now live in that package's header comment.
   driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+
+  # Drift canary (workstation-4ze8), layer 2 for the stale-deploy gate. The
+  # library holds the predicates; the runner is a FILE rather than shell inside
+  # this module so pkgs/hm-deploy-canary-sh/test-behaviour.sh can drive it
+  # as-shipped. Layer 1 failed exactly once in the glue, and only a behavioural
+  # test could see it.
+  hmCanaryLib = pkgs.callPackage ../../pkgs/hm-deploy-canary-sh { };
+  hmGateLib = pkgs.callPackage ../../pkgs/hm-deploy-gate-sh { };
+  hmCanaryRunner = pkgs.writeShellScript "hm-deploy-canary"
+    (builtins.readFile ../../pkgs/hm-deploy-canary-sh/canary.sh);
 in
 {
   # Guard: abort activation if applying the wrong host's config.
@@ -1894,6 +1904,118 @@ Check:
     };
   };
 
+  # =====================================================================
+  # Home-manager drift canary (bead workstation-4ze8).
+  #
+  # LAYER 2 FOR workstation-h0mp. The stale-deploy gate refuses a switch that
+  # would drop live commits, but it is deployed BY the thing it guards: every
+  # `warn:` path in hm_gate_verdict, the HM_ALLOW_STALE_DEPLOY escape hatch, and
+  # a gate that is itself un-deployed by the last-writer-wins race it exists to
+  # prevent are all holes it cannot close. This unit is a NixOS SYSTEM unit
+  # precisely because `home-manager switch` cannot remove one -- different
+  # profile, different switch command. The alert path is out-of-channel for the
+  # same reason: pigeon-daemon is a system unit too, so a bad home-manager
+  # switch cannot silence the pager.
+  #
+  # WHAT IT DOES NOT DO, so nobody has to rediscover it:
+  #   * It does not alert on "behind origin/main". There is no auto-switch on
+  #     this host, so that is the permanent steady state; measured 2026-08-18,
+  #     the originally-proposed path-glob predicate matched a commit that
+  #     touched only flake.nix's checks and a devbox test file. That predicate
+  #     was cut, not tuned.
+  #   * It cannot see an ancestor-stale deploy that happened while it was not
+  #     running. The transition detector is what sees that shape, and only live.
+  #   * It does not check that declared files are still on disk (a hand-deleted
+  #     plugin, a dangling mkOutOfStoreSymlink). That needs a different
+  #     observable and is filed separately.
+  #
+  # NOT EVIDENCE OF TEST COVERAGE. The `nix flake check` entries prove the
+  # predicates and the runner's glue against local fixtures. The existence of
+  # this timer proves neither, and must never be cited as coverage for anything.
+  # =====================================================================
+  systemd.services.hm-deploy-canary = {
+    description = "home-manager stale-deploy drift canary (detect-only; alerts via pigeon)";
+    onFailure = [ "hm-deploy-canary-failure.service" ];
+    path = [ pkgs.git pkgs.coreutils pkgs.gnugrep pkgs.gnused ];
+    serviceConfig = {
+      Type = "oneshot";
+      # ROOT, deliberately, and this is the one place the choice is not
+      # cosmetic. /home/dev is 0700 (verified), so a dedicated canary user
+      # cannot stat the beacon at all -- it would report "beacon absent" on
+      # every pass forever, and the reflex fix for that is to skip when
+      # unreadable, which is the fail-open posture of em-drift-detector.nix that
+      # this bead exists to avoid. User=dev is also wrong: StateDirectory is
+      # chowned to User, so the transition history would become writable by the
+      # very agents the canary polices.
+      User = "root";
+      StateDirectory = "hm-deploy-canary";
+      StateDirectoryMode = "0700";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      # The mirror is the canary's OWN clone. It must never fetch into
+      # /home/dev/projects/workstation: that checkout is shared by ~15 agent
+      # sessions, and a canary that mutates the thing it observes is a hazard,
+      # not a detector.
+      ExecStartPre = "${pkgs.writeShellScript "hm-deploy-canary-init" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.git ]}
+        REPO=/var/lib/hm-deploy-canary/repo
+        if [ ! -e "$REPO/HEAD" ]; then
+          git init --quiet --bare "$REPO"
+          git -C "$REPO" remote add origin https://github.com/johnnymo87/workstation.git
+        fi
+      ''}";
+      ExecStart = "${hmCanaryRunner}";
+      Environment = [
+        "HM_CANARY_GATE_LIB=${hmGateLib}"
+        "HM_CANARY_LIB=${hmCanaryLib}"
+        "HM_CANARY_ALERT=${driftAlert}"
+      ];
+    };
+  };
+
+  systemd.timers.hm-deploy-canary = {
+    description = "Drift canary for the home-manager deploy beacon";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      # 10 minutes, not the plugin canary's minutely. Measured deploy cadence on
+      # 2026-08-18: 5 switches across ~17h, minimum gap 23 minutes. Minutely
+      # would be pure waste; hourly would be a one-hour blind window on a
+      # fleet-wide regression. The network fetch is throttled separately inside
+      # the runner (default hourly), so a 10-minute pass is nearly free.
+      OnBootSec = "3min";
+      OnUnitActiveSec = "10min";
+      AccuracySec = "1min";
+      RandomizedDelaySec = "30s";
+    };
+  };
+
+  # The canary dying is itself a silent failure -- the same "nothing watches the
+  # watcher" shape as the plugin canary's failure unit.
+  systemd.services.hm-deploy-canary-failure = {
+    description = "Alert that the home-manager drift canary itself failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "hm-deploy-canary-failure";
+      ExecStart = "${pkgs.writeShellScript "hm-deploy-canary-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq ]}
+        ${driftAlert} /var/lib/hm-deploy-canary-failure/alert-canary-crashed           "hm-canary:canary-crashed"           "The home-manager drift canary FAILED TO RUN.
+
+hm-deploy-canary.service exited non-zero, so the second layer of the stale-deploy
+guard is down. While it is down, a switch that drops live configuration is
+detected only by the activation gate -- which is exactly the layer that cannot
+cover its own holes.
+
+Check:
+  systemctl status hm-deploy-canary.service --no-pager
+  journalctl -u hm-deploy-canary.service -n 50 --no-pager"           3600 21600
+      ''}";
+    };
+  };
+
   # Phantom-busy sweeper (workstation-s5gl; step 1 of
   # docs/plans/2026-08-01-cloudbox-serve-reliability-roadmap.md). Ported from
   # devbox (users/dev/home.devbox.nix:1312-1358, workstation-utnw).
@@ -2529,24 +2651,40 @@ Check:
       ExecStart = "${pkgs.writeShellScript "teamclaude-pool-canary" ''
         set -u
         # System-service PATH is minimal — be explicit.
-        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.curl pkgs.jq ]}
+        # gzip is here for the quota-sample archive-on-trim below.
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.curl pkgs.jq pkgs.gzip ]}
         STATE=/var/lib/teamclaude-pool-canary
         PENDING="$STATE/degraded-pending"
         # Persisted so the reminder below can quote the live roster, and so a
         # post-mortem has the last body the canary actually saw.
         BODY="$STATE/last-status.json"
 
-        # DECLARED pool size: how many accounts SHOULD be serving. Alerting on
-        # `healthy < roster length` is wrong, and would have paged daily forever:
-        # an account the operator deliberately leaves un-logged-in stays in the
-        # roster with status "error" and disabled=false, so the roster length
-        # never shrinks to match intent. BUMP THIS when the pool composition
-        # changes — the twice-monthly reminder below reports actual-vs-expected so
-        # a stale value surfaces on its own rather than silently under-alerting.
-        # 2026-07-26: briefly 2 (johnnymo87 removed as a sizing experiment), then
-        # back to 3 — the experiment is answered from the quota series below
-        # instead, which does not require running the pool short.
-        EXPECTED_HEALTHY=3
+        # EXPECTED pool size, learned rather than declared.
+        #
+        # Alerting on `healthy < roster length` is wrong and would page daily
+        # forever: an account the operator deliberately leaves un-logged-in
+        # stays in the roster with status "error" and disabled=false, so roster
+        # length never shrinks to match intent.
+        #
+        # The previous fix was a hardcoded EXPECTED_HEALTHY, and it went stale
+        # exactly as its own comment feared. The pool grew 3 -> 5 on 2026-08-12
+        # and the constant stayed at 3, so 5->4 and 5->3 became SILENT — the
+        # canary would have watched two paid accounts die without a word. Worse,
+        # the accounts added on 08-12 carry their own ~30-day refresh-token
+        # cohort (~09-11), whose death lands the pool on exactly 3 and would
+        # never have paged at all.
+        #
+        # So: track a HIGH-WATER MARK of the healthy count and alert on any
+        # DECREASE from it. Growth raises the mark automatically, so adding an
+        # account needs no nix edit and cannot silently go unmonitored.
+        #
+        # A deliberate SHRINK needs an operator ack, because otherwise a real
+        # loss and an intentional downsize are indistinguishable:
+        #     echo 3 > /var/lib/teamclaude-pool-canary/expected-healthy-ack
+        # The ack is CONSUMED once applied, so it lowers the mark exactly once
+        # and cannot mask a later real death.
+        MARK="$STATE/healthy-high-water"
+        ACK="$STATE/expected-healthy-ack"
 
         # Only police a unit that is supposed to be up (mirrors the frontdoor
         # canary). An intentional stop must not page.
@@ -2604,24 +2742,82 @@ Check:
                 u7dF: ((.quota // {}).unified7dFable)
               }]
             }' "$BODY" >> "$SAMPLES" 2>/dev/null; then
-          # Trim to roughly the last 30 days of 5-minutely samples. Checked only
-          # past a slack margin so we are not rewriting the file every pass.
+          # Keep the WORKING file to roughly the last 30 days of 5-minutely
+          # samples, but ARCHIVE what falls off rather than deleting it.
+          #
+          # The trim used to discard. It had never fired (the series began
+          # 2026-07-26) and was due to fire ~2026-08-28, at which point it would
+          # have started eating the 07-26..08-02 drain baseline that every
+          # cross-era comparison in the balanced-routing work is measured
+          # against — while every plan on record said "let history accumulate".
+          # A destructive retention policy on the only copy of a baseline is a
+          # silent, scheduled data loss.
+          #
+          # Cost of keeping everything is negligible: ~72KB/day raw, and the
+          # first 22 days compressed to 47KB total.
           if [ "$(wc -l < "$SAMPLES" 2>/dev/null || echo 0)" -gt 9500 ]; then
-            tail -n 8640 "$SAMPLES" > "$SAMPLES.tmp" 2>/dev/null \
-              && mv -f "$SAMPLES.tmp" "$SAMPLES"
+            ARCHIVE="$STATE/archive"
+            mkdir -p "$ARCHIVE"
+            STAMP=$(date +%Y%m%dT%H%M%S)
+            # head -n -N drops the last N lines, leaving exactly what the trim
+            # would have destroyed. Archive FIRST, and only trim if it worked.
+            if head -n -8640 "$SAMPLES" | gzip -c > "$ARCHIVE/quota-samples-until-$STAMP.jsonl.gz" 2>/dev/null; then
+              tail -n 8640 "$SAMPLES" > "$SAMPLES.tmp" 2>/dev/null \
+                && mv -f "$SAMPLES.tmp" "$SAMPLES" \
+                && echo "NOTE: archived aged quota samples to $ARCHIVE/quota-samples-until-$STAMP.jsonl.gz"
+            else
+              echo "WARNING: quota-sample archive failed; NOT trimming (keeping history)"
+            fi
           fi
         else
           # Never fatal: a lost sample must not cost us the health alert.
           echo "WARNING: quota sample append failed (non-fatal)"
         fi
 
+        # Seed the high-water mark on first run. A fresh mark must never alert:
+        # the canary has no idea yet what "normal" is, and the UNKNOWN rule
+        # applies to its own state as much as to the probe.
+        EXPECTED_HEALTHY=$(cat "$MARK" 2>/dev/null || echo "")
+        case "$EXPECTED_HEALTHY" in
+          ""|*[!0-9]*)
+            EXPECTED_HEALTHY="$HEALTHY"
+            echo "$EXPECTED_HEALTHY" > "$MARK"
+            echo "NOTE: seeded healthy high-water mark at $EXPECTED_HEALTHY"
+            ;;
+        esac
+
+        # Operator ack: a DELIBERATE downsize. Consumed on use so it lowers the
+        # mark exactly once and cannot mask a later real death. Only honoured
+        # when the pool already satisfies it, so an ack cannot pre-authorise a
+        # loss that has not happened yet.
+        if [ -f "$ACK" ]; then
+          WANT=$(cat "$ACK" 2>/dev/null || echo "")
+          case "$WANT" in
+            ""|*[!0-9]*)
+              echo "WARNING: $ACK is not a number; ignoring"
+              ;;
+            *)
+              if [ "$WANT" -le "$HEALTHY" ]; then
+                EXPECTED_HEALTHY="$WANT"
+                echo "$EXPECTED_HEALTHY" > "$MARK"
+                rm -f "$ACK"
+                echo "NOTE: operator ack accepted; high-water mark now $EXPECTED_HEALTHY"
+              else
+                echo "NOTE: ack of $WANT held; pool is at $HEALTHY and must reach $WANT first"
+              fi
+              ;;
+          esac
+        fi
+
         if [ "$HEALTHY" -ge "$EXPECTED_HEALTHY" ]; then
           # Clear throttle + dampening ONLY on confirmed recovery.
           rm -f "$PENDING" "$STATE/degraded-alerted"
-          # More healthy accounts than declared means EXPECTED_HEALTHY is stale.
-          # Log only — an operator ADDING capacity is not an incident.
+          # Growth raises the mark automatically. Adding an account is not an
+          # incident, and requiring a nix edit to monitor it is exactly how the
+          # old hardcoded constant went stale and blinded the canary.
           if [ "$HEALTHY" -gt "$EXPECTED_HEALTHY" ]; then
-            echo "NOTE: $HEALTHY healthy accounts but EXPECTED_HEALTHY=$EXPECTED_HEALTHY; bump the canary's declared pool size"
+            echo "$HEALTHY" > "$MARK"
+            echo "NOTE: pool grew $EXPECTED_HEALTHY -> $HEALTHY; high-water mark raised"
           fi
           exit 0
         fi
@@ -2634,7 +2830,7 @@ Check:
         ROSTER=$(jq -r '(.accounts // [])[] | "  - \(.name // "?"): \(.status // "?")"' "$BODY" 2>/dev/null || echo "  (roster unavailable)")
 
         DEGRADED_TEXT=$(cat <<EOF
-TeamClaude Max pool DEGRADED: $HEALTHY healthy, expected $EXPECTED_HEALTHY.
+TeamClaude Max pool DEGRADED: $HEALTHY healthy, down from $EXPECTED_HEALTHY.
 
 Roster ($TOTAL accounts; some may be intentionally left off):
 $ROSTER
@@ -2648,6 +2844,9 @@ for auth-dead accounts too and is misleading.
 
 To fix (interactive, on cloudbox):
   teamclaude login
+
+If the smaller pool is DELIBERATE, ack it once and this stops:
+  echo $HEALTHY > /var/lib/teamclaude-pool-canary/expected-healthy-ack
 
 Confirm: curl -s localhost:3456/teamclaude/status | jq '[.accounts[].status]'
 EOF
@@ -2693,21 +2892,34 @@ EOF
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.jq ]}
         STATE=/var/lib/teamclaude-pool-canary
         BODY="$STATE/last-status.json"
-        # Keep in sync with EXPECTED_HEALTHY in teamclaude-pool-canary above.
-        EXPECTED_HEALTHY=3
+        # Read the canary's learned high-water mark rather than carrying a
+        # second copy of the number. The old duplicate constant is precisely how
+        # the pair drifted out of sync when the pool grew 3 -> 5.
+        EXPECTED_HEALTHY=$(cat "$STATE/healthy-high-water" 2>/dev/null || echo "")
+        case "$EXPECTED_HEALTHY" in ""|*[!0-9]*) EXPECTED_HEALTHY="(not yet learned)" ;; esac
 
         ROSTER="  (no recent status sample)"
         DRIFT=""
         if [ -f "$BODY" ]; then
           ROSTER=$(jq -r '(.accounts // [])[] | "  - \(.name // "?"): \(.status // "?")"' "$BODY" 2>/dev/null || echo "  (roster unavailable)")
           HEALTHY=$(jq -r '[(.accounts // [])[] | select(.disabled != true and .status == "active")] | length' "$BODY" 2>/dev/null || echo "")
-          case "$HEALTHY" in
-            ""|*[!0-9]*) : ;;
+          # BOTH sides must be known before comparing. Concatenating them into
+          # one glob would let an empty operand through on the digits of the
+          # other, and `[ "" -ne 5 ]` is a runtime error, not a false.
+          if [ -z "$HEALTHY" ] || [ -z "$EXPECTED_HEALTHY" ]; then
+            KNOWN=no
+          else
+            case "$HEALTHY" in *[!0-9]*) KNOWN=no ;; *) KNOWN=yes ;; esac
+            case "$EXPECTED_HEALTHY" in *[!0-9]*) KNOWN=no ;; esac
+          fi
+          case "$KNOWN" in
+            no) : ;;
             *) if [ "$HEALTHY" -ne "$EXPECTED_HEALTHY" ]; then
                  DRIFT="
-NOTE: $HEALTHY accounts healthy but the canary expects $EXPECTED_HEALTHY. Either
-re-login the missing account(s), or update EXPECTED_HEALTHY in
-hosts/cloudbox/configuration.nix so the canary matches reality."
+NOTE: $HEALTHY accounts healthy but the canary's high-water mark is
+$EXPECTED_HEALTHY. Either re-login the missing account(s), or — if the smaller
+pool is deliberate — ack it once:
+  echo $HEALTHY > /var/lib/teamclaude-pool-canary/expected-healthy-ack"
                fi ;;
           esac
         fi

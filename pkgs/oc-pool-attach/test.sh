@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-k7t4): probes live host state (systemd/tmux/sockets); needs fixture injection to be hermetic
 # Unit tests for oc-pool-attach classify_oc_invocation pure helper.
 # Run: bash test.sh
 
@@ -142,7 +141,10 @@ if command -v jq >/dev/null 2>&1; then
   assert_eq "$fallback_url" "$(parse_serve_url '{"apiBase":""}' "$fallback_url")" \
     "parse_serve_url: apiBase empty string -> fallback"
 else
-  printf 'SKIP  parse_serve_url tests (jq not on PATH)\n'
+  # FATAL, not SKIP: jq absent silently dropped 9 assertions while the final
+  # banner still printed. The check declares jq in nativeBuildInputs.
+  printf 'FATAL  parse_serve_url tests: jq not on PATH\n' >&2
+  exit 1
 fi
 
 # ---- resolve_pigeon_auth tests ----------------------------------------------
@@ -309,7 +311,12 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source uses original_args fallbacks\n        not found in: %s\n' "$default_nix"; exit 1
   fi
 else
-  printf 'SKIP  production-source check (default.nix not next to test)\n'
+  # FATAL, not SKIP. Everything above this block tests helpers REDEFINED in this
+  # file; the greps inside it are the only assertions about production source.
+  # Skipping them while still printing the "all ... tests passed" banner below
+  # meant the one half that can catch a production regression was optional.
+  printf 'FATAL  production-source check: default.nix not next to test (%s)\n' "$default_nix" >&2
+  exit 1
 fi
 
 echo "all oc-pool-attach tests passed"

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-dad9): wirable as a hermetic check, not yet done
 # Unit/integration tests for the git worktree-guard pre-commit hook.
 #
 # Asserts, against a throwaway repo (never against a real one):
@@ -18,7 +17,20 @@
 set -o errexit -o nounset -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-HOOK_FILE="$SCRIPT_DIR/pre-commit"
+
+# WORKTREE_GUARD_HOOK_DIR points at a directory containing `pre-commit`. It
+# exists so this suite can run as a nix check, and it is a DIRECTORY rather than
+# a file because git's core.hooksPath (set per-fixture below) takes one.
+#
+# Unset, the suite tests the asset sitting next to it, exactly as before. The
+# check sets it to pkgs/worktree-guard-hook, which is the same artifact
+# home-manager deploys to cloudbox -- so CI exercises the deployed hook rather
+# than a copy adapted for the sandbox. That distinction matters here: the raw
+# asset shebangs /bin/bash, which does not exist in a nix sandbox (nor,
+# declaredly, anywhere in this repo), so a suite pointed at the asset cannot run
+# as a check at all.
+HOOK_DIR="${WORKTREE_GUARD_HOOK_DIR:-$SCRIPT_DIR}"
+HOOK_FILE="$HOOK_DIR/pre-commit"
 
 # Hermetic: ignore the invoking user's global/system git config. Without this a
 # global core.hooksPath, commit.gpgsign or hook manager silently changes results.
@@ -89,7 +101,7 @@ make_repo() {
   git -C "$r" commit -q -m "main advances"
 
   # Guard goes live only now, so the fixtures above are not themselves blocked.
-  git -C "$r" config core.hooksPath "$SCRIPT_DIR"
+  git -C "$r" config core.hooksPath "$HOOK_DIR"
   echo "$r"
 }
 
