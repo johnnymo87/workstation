@@ -50,8 +50,10 @@
 #   WATCHDOG_NOW       ISO instant to treat as "now"  -- TEST SEAM ONLY
 #
 # TWO INDEPENDENT ASSERTIONS, and the second is not redundant with the first:
-#   staleness -- "has the lane succeeded recently?"   (evidence produced BY the lane)
-#   cadence   -- "is the timer that runs it enabled?" (evidence produced ABOUT the lane)
+#   staleness -- "has the lane succeeded recently?"     (evidence produced BY the lane)
+#   cadence   -- "will the timer that runs it FIRE?"    (evidence produced ABOUT the lane)
+# The cadence half asks BOTH is-enabled AND is-active, because the first alone only proves a
+# symlink exists: a stopped-but-enabled timer answers "enabled" and never fires again.
 # Once a lane can schedule its own follow-ups, the first stops implying the second: the lane can
 # keep proving it is alive while the thing guaranteeing it runs tomorrow is gone. See the cadence
 # block for the full failure.
@@ -180,10 +182,30 @@ else
   cadence_state="$("$CADENCE_QUERY" --user is-enabled "$CADENCE_UNIT" 2>&1)" || true
   cadence_state="$(printf '%s' "$cadence_state" | tr -d '\r' | head -n1)"
 
+  # AND IS IT ACTUALLY LOADED AND WAITING? `is-enabled` reads INSTALL SYMLINKS ONLY. It answers
+  # "would this start at boot", not "will this ever fire". A single `systemctl --user stop` on an
+  # enabled timer leaves is-enabled saying `enabled` while is-active says `inactive` and
+  # list-timers shows no next elapse -- the timer will not fire again until the user manager
+  # restarts, which on a long-lived host can be weeks. Measured 2026-08-17 on this host.
+  #
+  # That is the SIXTH bug of the fake-health family here, and it evades the fix for the fifth by
+  # one word: `stop` rather than `disable`. It is also the MORE likely of the two, because `stop`
+  # is what a careful human reaches for when pausing something temporarily -- it feels reversible.
+  # The lane then keeps running on self-scheduled follow-ups, keeps refreshing the dead-man, and
+  # a check that only asked is-enabled would report everything fine while the floor was gone.
+  #
+  # Asking both is the difference between "a symlink exists" and "something will fire".
+  cadence_active="$("$CADENCE_QUERY" --user is-active "$CADENCE_UNIT" 2>&1)" || true
+  cadence_active="$(printf '%s' "$cadence_active" | tr -d '\r' | head -n1)"
+
   case "$cadence_state" in
     enabled|enabled-runtime)
-      log "OK: cadence unit $CADENCE_UNIT is $cadence_state."
-      [ -n "$CADENCE_ALERT_STATE" ] && rm -f "$CADENCE_ALERT_STATE"
+      if [ "$cadence_active" = "active" ]; then
+        log "OK: cadence unit $CADENCE_UNIT is $cadence_state and $cadence_active."
+        [ -n "$CADENCE_ALERT_STATE" ] && rm -f "$CADENCE_ALERT_STATE"
+      else
+        cadence_alarm "$LABEL is expected to be running here. Its cadence unit $CADENCE_UNIT is $cadence_state on disk but NOT RUNNING (systemctl is-active reported: \"${cadence_active:-<no output>}\"). A stopped timer has no next elapse and will not fire again until the user manager restarts. Self-scheduled follow-ups can keep the lane alive and keep this watcher quiet while the guaranteed daily floor no longer exists."
+      fi
       ;;
     not-found)
       cadence_alarm "$LABEL is expected to be running here, but its cadence unit $CADENCE_UNIT DOES NOT EXIST. The lane may still be running via self-scheduled follow-ups -- which refresh the success timestamp and keep the staleness check quiet -- but its guaranteed floor is GONE, and it will stop for good as soon as that chain breaks."
