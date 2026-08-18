@@ -60,7 +60,14 @@ let
   #
   # Flip to true at cutover step 4, AFTER the first attended real run has written a genuine
   # success -- flipping it earlier pages about a lane that has simply not run yet.
-  laneWatchExpected = false;
+  # FLIPPED TRUE at cutover step 5, 2026-08-18, after the lane's first attended real run wrote a
+  # genuine success (~/.local/state/lane-maven-renovate.last-success, 2026-08-18T14:10:12Z) and
+  # after `systemctl --user enable --now maven-renovate.timer`. Order matters and it was followed:
+  # flipping this before a real success pages about a lane that has simply not run yet, and
+  # flipping it before the cadence assertion was DEPLOYED (PR #381, applied here 09:54 EDT) would
+  # have armed a watcher whose central check was not present -- a watchdog that looks armed and
+  # asserts nothing, which is this project's signature failure rather than a hypothetical one.
+  laneWatchExpected = true;
 
   servePool = (import ./serve-pool.nix).forHost.cloudbox;
   anchorUrl = builtins.head servePool.endpoints;
