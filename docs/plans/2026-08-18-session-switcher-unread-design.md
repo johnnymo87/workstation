@@ -1,9 +1,13 @@
 # Session switcher: unread counts and Telegram-shaped ordering — design
 
 **Date:** 2026-08-18
-**Status:** Design — approved section by section, ready for implementation planning.
-**Repos touched:** `pigeon` (daemon: watermark table + two endpoints), `workstation`
-(`pkgs/oc-session-list`, `assets/nvim/lua/user/session_switcher/`)
+**Status:** **Revision 3** (2026-08-19) — substrate reversed after adversarial
+review 1, then revision 2 reviewed again and corrected. Revision 1 (PR #393) is
+superseded; see "What review 1 killed" and "What review 2 corrected".
+**Repos touched:** `pigeon` (daemon: event ledger + watermark + one endpoint),
+`workstation` (`assets/opencode/plugins/oc-session-list{,-fold}.ts`,
+`assets/nvim/lua/user/session_switcher/`; `pkgs/oc-session-list/` holds only the
+derivation and its test)
 **Bead:** extends `workstation-7w9z` (S7 / Task 9, the Telescope picker)
 
 ## Motivation
@@ -12,209 +16,345 @@
 as a **navigator**: find a session by semantic state, jump to its pane or attach
 a TUI. Everything through S6 (PR #295) implements that.
 
-Daily use of the Telegram forum-topic view produced a different opinion about
-what the surface should feel like. Telegram is not a navigator — it is a list
-you live in, sorted by recency, where a per-conversation **unread count** tells
-you where to look. At ~15 concurrent sessions that badge is the thing that makes
-the list usable, and the switcher has no equivalent.
+Daily use of the Telegram forum-topic view produced a different opinion. Telegram
+is not a navigator — it is a list you live in, sorted by recency, where a
+per-conversation **unread count** tells you where to look. At ~15 concurrent
+sessions that badge is what makes the list usable, and the switcher has no
+equivalent.
 
-This design adds the two Telegram properties to the picker that is already the
-epic's next task, and nothing else:
+This adds two Telegram properties to the picker that is already the epic's next
+task, and nothing else:
 
 1. **Unread counts** per session.
 2. **Recency ordering**, with sessions that need you pinned above it.
 
-It is deliberately *not* a rewrite toward a chat client. The picker stays a
-picker; you still jump. Only what it shows and how it sorts changes.
+The picker stays a picker; you still jump. Only what it shows and how it sorts
+changes.
 
-## Scope decisions, and the ones that were rejected
+## What review 1 killed
 
-| Decision | Chosen | Rejected alternative |
-|---|---|---|
-| Surface | The planned nvim Telescope picker (`workstation-7w9z`) | A standalone always-on TUI; a tmux sidebar. Both are new surfaces; the picker already exists and is next in line. |
-| What the badge counts | The event set Telegram already shows | Every assistant message (a long autonomous run inflates it to noise); completed turns only; needs-you only. |
-| Ordering | Needs-you pinned on top, then `updated_at` desc | Pure recency (a blocked session sinks); unread as primary sort (a chatty session permanently outranks a quiet one that needs you). |
-| Read state | Watermark in pigeon's DB, cleared by a picker jump **or** a Telegram reply | Purely local nvim state; explicit mark-read only. |
-| Unread source | Pigeon daemon over HTTP | Reading pigeon's SQLite directly from `oc-session-list` — a cross-repo schema coupling with no contract to catch a migration. |
+Revision 1 computed unread by counting rows in pigeon's `outbox` above a
+watermark. **That cannot work, and the failure is silent in the worst direction.**
 
-## Two assumptions that were checked and turned out to be false
+```
+OUTBOX_RETENTION_MS = 60 * 60 * 1000;   // schema.ts:8
+DELETE FROM outbox WHERE (state = 'sent' AND updated_at < ?) ...
+```
 
-Both were load-bearing, and both were caught before implementation.
+The outbox is a **delivery queue, not a message store**: sent rows are deleted
+after an hour. Counting from it means the badge decays to zero, so the single
+most important case — returning in the morning to 15 sessions — reports *nothing
+unread anywhere*, which is indistinguishable from "you have read everything." A
+zero that asserts "nothing happened" is worse than no badge at all, and it is the
+exact failure mode this document lectures about for the `?` glyph.
 
-**1. "Reading in Telegram can clear the CLI badge, and vice versa."** This was
-the originally-chosen behaviour. It is not implementable. Pigeon talks to
-`api.telegram.org/bot${botToken}/…` — the **Bot API**, which exposes no read
-receipts: a bot cannot learn that a human read a message, and cannot clear a
-chat's unread badge on the user's behalf. Read-state sync across clients is an
-MTProto (user-account) capability.
+Telegram's badge persists because **Telegram** stores the messages. Revision 1
+borrowed the badge semantics without the storage underneath.
 
-What a bot *can* observe is an action taken in a topic. So the design keeps the
-useful half: **a Telegram reply advances the same watermark**, because replying
-proves you read it. Telegram's own badge and ours remain independent, and that
-is a property of the platform, not a shortcut.
+Two further corrections from the same review:
 
-**2. "Outbox rows have a monotonic id to use as the watermark."** They do not.
-`outbox.notification_id` is a `TEXT PRIMARY KEY`. SQLite's implicit `rowid` is
-monotonic but **`VACUUM` can renumber rowids** on a table whose primary key is
-not `INTEGER` — which would silently corrupt every badge, occasionally, in a way
-that would take days to attribute.
+- **`outbox` has no `cancelled` state.** Its states are `queued`, `sending`,
+  `sent`, `failed` (`outbox-repo.ts`). Revision 1 cited "6% cancelled" as an
+  outbox fact; that figure is from `swarm_messages`, a different table. It was a
+  fabricated fact in a document whose stated purpose is recording falsified
+  assumptions.
+- **`created_at` is the wrong clock.** Delivery lags creation: the outbox
+  governor holds bursts and `markRetry` does not touch `created_at`. A burst
+  created at t0 but *delivered* after a clear at t1 would sort below the
+  watermark and never be counted — permanently invisible, on the common path
+  rather than an edge.
 
-The watermark is therefore a **composite** `(created_at, notification_id)`
-compared lexicographically. No migration to a live high-volume table, exact
-tie-breaking, and no dependency on a rowid that can move.
+## What review 2 corrected
 
-## Architecture
+Revision 2 survived a second adversarial review with no design-killer, but four
+things needed fixing and one of them was the same class of bug as review 1's:
 
-Three components, each owning exactly one thing.
+1. **The silent zero could return.** Revision 2 never said where session
+   *presence* was derived from. If it came from `session_reads`, a session whose
+   ledger had fully aged out but whose watermark survived would report
+   `unread: 0` — "read, nothing new" — which is revision 1's exact failure at a
+   30-day horizon. Presence is now pinned to `EXISTS` in `session_events`.
+2. **The concurrency claim was false**, and withdrawn; the reads move to the
+   direct DB access `oc-session-list` already has.
+3. **The "all turns" work had already merged**, which forces the unit-of-unread
+   statement and invalidates the retention sizing.
+4. **Sort ownership was left implicit**, inviting a picker-side sort that would
+   violate the inherited S6 contract.
 
-**Pigeon daemon — owns unread truth.** It already owns `outbox`, which *is* the
-set of events Telegram shows (stop notifications, questions, swarm messages,
-typed prompts), and it is the only writer to that DB. Gains one table and two
-endpoints.
+It also verified every file/line citation in revision 2 and found no fresh
+fabrications, and confirmed the `AUTOINCREMENT` reasoning, the `markSent` write
+point, the `·`/`?` split, and that pigeon should remain the owner.
 
-**`oc-session-list` — owns ordering and merging.** Unchanged contract from S6:
-the CLI orders, `model.build` preserves, and the picker never re-sorts. Gains a
-`--with-unread` flag, the pigeon fetch, and the grouping rule.
+## Substrate: a durable event ledger
 
-**The picker — owns rendering and the jump.** Renders the badge, and triggers
-the read write on jump.
-
-### Data model
+Pigeon gains a table that records what was **actually delivered to a topic**,
+written at the moment of delivery.
 
 ```sql
+CREATE TABLE IF NOT EXISTS session_events (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id      TEXT    NOT NULL,
+  notification_id TEXT    NOT NULL,
+  kind            TEXT    NOT NULL,
+  sent_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, id);
+
 CREATE TABLE IF NOT EXISTS session_reads (
-  session_id               TEXT PRIMARY KEY,
-  last_read_at             INTEGER NOT NULL,  -- outbox.created_at
-  last_read_notification_id TEXT NOT NULL,    -- tie-break within the same ms
-  updated_at               INTEGER NOT NULL
+  session_id   TEXT PRIMARY KEY,
+  last_read_id INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
 );
 ```
 
-Unread for a session is the count of `outbox` rows where
+Three properties fall out of owning the table, and each removes complexity that
+revision 1 needed:
 
+- **`AUTOINCREMENT` gives a genuinely monotonic, never-reused id.** The composite
+  `(created_at, notification_id)` watermark is gone; the watermark is one
+  integer. `AUTOINCREMENT` rather than a bare `INTEGER PRIMARY KEY` specifically
+  so that pruning old rows can never let a later row reuse an id below a stale
+  watermark.
+- **"Delivered" is true by construction.** The row exists only because delivery
+  succeeded, so there is no `state` predicate to get wrong and no coupling to
+  outbox states at all.
+- **`sent_at` is the delivery clock**, not the creation clock, which is what the
+  governor/retry interleaving requires.
+
+**Write point.** In the same transaction as `markSent` (`outbox-repo.ts:137`),
+which is a synchronous better-sqlite3 `UPDATE` on the same database — so the
+ledger row and the state transition are atomic together, with no new failure
+mode between them.
+
+**Guard the write.** `markSent` is currently unguarded
+(`UPDATE outbox SET state = 'sent' … WHERE notification_id = ?`,
+`outbox-repo.ts:137-143`) and is safe today only by call-site discipline: one
+caller (`outbox-sender.ts:617`), reached only when every chunk succeeded, inside
+a reentrancy-guarded loop. Add `AND state != 'sent'` and insert the ledger row
+only when `changes > 0`, so a future second caller cannot silently inflate every
+count.
+
+**Honest limit.** `markSent` runs *after* the Telegram API accepts. A crash
+between acceptance and `markSent` loses the ledger row for a message that is
+visible in the topic. That is the outbox's pre-existing at-least-once seam, not a
+new one — the same crash already risks a duplicate send on retry. Named rather
+than hidden.
+
+**Retention.** The ledger stores metadata only — no payload — so rows are tiny.
+It must outlive pigeon's `SESSION_TTL_MS` (7d), or the chronic-`?` problem below
+simply moves. Proposed 30 days, pruned by session, with the size re-measured
+before the number is fixed.
+
+**Why pigeon still owns it.** Revision 1's reason ("it already has the data") is
+gone, so this was re-decided rather than inherited. Two reasons survive: the
+clear path is inherently pigeon's (opencode's DB can see a reply, because an
+injected prompt becomes a user message, but it **cannot** see a callback answer
+on a question card — the most common clear of all), and the thing being counted
+is *what was delivered to a topic*, which opencode's message DB does not know.
+
+**The honest consequence, so nobody mistakes this for a general facility:** this
+badge is defined as "what Telegram was shown." If Telegram stops being the way
+these sessions are read, this feature *should* die with it rather than be
+retargeted.
+
+## What counts as unread
+
+**The unit is a delivered event — a turn — not a Telegram message.** Since
+`#114` (below) a turn's narration is batched into one outbox entry that Telegram
+renders as several messages, and the ledger writes **one row per entry**. So this
+badge will read *lower* than Telegram's own unread badge for the same session.
+That is intended, and stating it is what stops the number being distrusted on day
+one.
+
+`unread(session) = count(session_events WHERE session_id = ? AND id > last_read_id)`,
+minus one read-time exclusion:
+
+- **Your own messages do not count.** Typed prompts are mirrored into the topic
+  as `kind='mirror'` (`app.ts:890`); in Telegram your own message never makes a
+  chat unread. Telegram replies never enter the outbox at all (inbound, echo
+  suppressed via `injectedPrompts.consume`), so they need no exclusion.
+- **Swarm messages do count** (`kind='swarm'`, including retractions). They are
+  genuinely new information and the reason a topic can show work with no visible
+  cause.
+- **Unknown kinds count.** The default is "topic-visible," so a kind added later
+  is loud rather than silently invisible. (`kind='card'` is vestigial — nothing
+  inserts it — but the rule is what matters.)
+
+The exclusion is applied at **read** time, not write time: the ledger records
+everything delivered, so a change of policy re-reads history instead of losing
+it.
+
+## Reads are a direct DB read; only the write is an endpoint
+
+Revision 2 specified `GET /sessions/unread` and worried about running it
+concurrently with the CLI's own walk. Both were wrong.
+
+**`oc-session-list` already opens pigeon's daemon DB directly** — `routingDbPath`
+from `OPENCODE_ROUTING_DB`, with the comment "pigeon's unified daemon DB is the
+same file the serves open" (`assets/opencode/plugins/oc-session-list.ts:21-26`).
+The cross-repo coupling that revision 1 rejected as *new* already exists and is
+documented. So the counts are read in the same synchronous walk the CLI already
+does:
+
+```sql
+SELECT e.session_id,
+       COUNT(*) FILTER (WHERE e.id > COALESCE(r.last_read_id, 0)
+                          AND e.kind <> 'mirror') AS unread,
+       MAX(e.id)      AS last_event_id,
+       MAX(e.sent_at) AS last_event_at
+FROM session_events e
+LEFT JOIN session_reads r USING (session_id)
+GROUP BY e.session_id;
 ```
-(created_at, notification_id) > (last_read_at, last_read_notification_id)
-```
 
-subject to three exclusions, each load-bearing:
+This deletes the HTTP GET, the 250 ms timeout, and the concurrency question
+entirely. Revision 2 claimed the fetch would run "concurrently" with the walk;
+`oc-session-list` is single-threaded Bun over a **synchronous** `bun:sqlite`, so a
+fetch could not have progressed during the walk and the claim would have
+degraded silently to serial. It is withdrawn rather than fixed.
 
-1. **Only rows actually delivered to Telegram.** The outbox has failed and
-   cancelled states (the 2026-08-10 visibility design measured 6% cancelled).
-   The badge must mirror what is *visible in the topic*, or it promises a
-   message that cannot be found.
-2. **Not your own messages.** Typed prompts and Telegram replies appear in the
-   topic, but in Telegram your own message never makes a chat unread.
-3. **Swarm messages do count.** They are genuinely new information, and they are
-   the reason a topic can show work with no visible cause.
+**Presence is `EXISTS` in `session_events`, never in `session_reads`.** The query
+above groups over the ledger, so a session with no surviving ledger rows produces
+no row at all and renders `·`. Deriving presence from `session_reads` (or from
+`sessions`) would return `unread: 0` for a session whose ledger has been fully
+pruned — reintroducing revision 1's silent zero at a 30-day horizon instead of a
+one-hour one. This is the single most important sentence in the document.
 
-A session with no rows at all — pigeon has never seen it — is **not** zero. See
-rendering.
+**Writes stay an endpoint**, because the daemon owns its DB:
 
-### Endpoints
+- `POST /sessions/{id}/read` with `{ last_event_id }` → advances the watermark to
+  `max(current, incoming)` in one UPSERT with the comparison in SQL, atomic across
+  restarts and safe for a session with no row yet.
 
-- `GET /sessions/unread` → `{ session_id: { unread: int, last_event_at: int } }`
-  for all known sessions.
-- `POST /sessions/{id}/read` with `{ at, notification_id }` → advances the
-  watermark to the **lexicographic max** of current and incoming.
-
-Monotonic advance is what makes two writers safe: the picker jump and the
-Telegram reply path may race, arrive out of order, or retry, and the result is
-identical.
+`?` therefore means "the routing DB is unreadable," which is an outage state the
+CLI already understands, rather than a bespoke fetch failure.
 
 ## Ordering and rendering
 
-**Groups.** Needs-you pinned on top, then everything else, each ordered by
-`updated_at` descending.
+**Groups.** Needs-you pinned on top, then everything else, each by recency
+descending.
 
-The needs-you signal comes from the switcher's **existing overlay**, which
-already holds authoritative permission/question state — *not* from pigeon's
-`pending_questions`. Two sources for one signal would eventually disagree, and
-the resulting bug would be invisible.
+**The CLI emits the final order** — S6 contract 1, "the CLI OWNS ORDERING… the
+picker must not re-sort." The grouping is computed CLI-side, where severity and
+the unread data both already are. `model.lua` keeps only its pierce/render role;
+the `M.ATTENTION` reference below names the *set*, not the place it is applied.
+Citing a Lua table is how an implementation ends up sorting in the picker and
+violating the contract.
 
-**Recency key** is the session's own `time_updated`, which `oc-session-list`
-already has. Last-outbox-event time is more literally Telegram-faithful, but
-sessions pigeon has never seen would then have no sort key and need
-special-casing; session time tracks the same reality for every row.
+**Needs-you** comes from the switcher's **existing overlay**, not pigeon's
+`pending_questions` — two sources for one signal would eventually disagree
+invisibly, and `pending_questions` has a 4h TTL with no error states. It is the
+whole `M.ATTENTION` set (`model.lua:50`), i.e. **blocked *and* error**, not
+questions only: an error row already pierces facets, so pinning a narrower set
+would let pierce and pin disagree.
 
-**Three visually distinct states**, and the third is the one that gets lost:
+**Recency key** is the fold's existing tree-max `lastActivity`
+(`oc-session-list-fold.ts:176-180`), *not* the session's own `time_updated`.
+Revision 1 said `time_updated` and would have regressed a deliberate behaviour:
+"a root silent for a day while its subagent worked five seconds ago is a
+recently-active tree."
+
+**Four render states**, and the split between the last two is the point:
 
 | Render | Meaning |
 |---|---|
 | `(3)` | three unread |
 | *(no badge)* | read, nothing new |
-| `?` | pigeon has no data for this session |
+| `·` | pigeon has no ledger for this session (aged out, or never registered) |
+| `?` + warning | the pigeon fetch itself failed — badges are unknown fleet-wide |
 
-`?` inherits an existing contract from S6: render `nodata` at least as loudly as
-idle. Folding it into a blank cell makes an outage quieter than the bug it
-exists to catch — a dead pigeon daemon must not look like a quiet fleet. It is
-also the same "absence is not proof" rule the switcher already applies to
-sessions that are undiscoverable because they are in a non-tmux or nested nvim
-(`workstation-095u`).
+Revision 1 collapsed the last two into `?`. That would have made `?` chronic —
+pigeon expires sessions at 7d, so every older session would show it permanently —
+which trains the eye to ignore the glyph that exists to signal an outage. Outage
+is detectable at the *fetch*, not per row, so the two are genuinely different
+observations and must look different. The S6 "render `nodata` as loudly as idle"
+contract attaches to the outage case.
 
-### Clearing the badge
+## Clearing the badge
 
-Two events, and only two:
+Two paths, both advancing to a specific id rather than to "now":
 
-1. **A picker jump** advances the watermark to the highest `(created_at,
-   notification_id)` the picker **actually displayed** — not to "now". If three
-   messages arrive between render and keypress, clearing to now would silently
-   mark as read three messages that were never seen. Clearing to the displayed
-   mark leaves them unread, which is correct and self-healing.
-2. **A Telegram reply** in the topic advances the same watermark in-process.
+1. **A picker jump** advances to the `last_event_id` from the snapshot the picker
+   **actually displayed**. Messages that arrive between render and keypress stay
+   unread. A stale generation's mark is merely *older*, so `max()` absorbs it and
+   the error direction is always "under-clear," which self-heals.
+2. **Any inbound user action on the topic** — a reply, a slash command, or a
+   **swipe/callback answer on a question card** — advances to that session's
+   current max ledger id. Revision 1 said "a reply," which would have missed the
+   most common interaction of all: answering a question card is a callback, not a
+   reply, so the needs-you pin would clear from the overlay while the badge
+   stubbornly contradicted it.
 
-Attaching and focusing a tab deliberately do **not** clear it, which keeps the
-write path to exactly two well-defined events.
+Attaching or focusing a tab deliberately does not clear, keeping the write path
+to exactly these two events. A `dir_missing` row is read-only (S6 contract 6), so
+a refused selection must not fire a clear.
 
 ## Failure modes
 
 | Condition | Behaviour |
 |---|---|
-| Pigeon daemon down | Picker works exactly as today — unread is strictly additive. Badges render `?`; the condition surfaces through the existing warnings channel. ~250 ms timeout on the fetch, degrade rather than hang. The picker owns the generation token because `cli.fetch` has no cancellation. |
-| Watermark write fails | The jump happens anyway; never block navigation on a bookkeeping write. Badge stays until the next successful clear. No retry queue — monotonic advance makes a lost write self-healing. |
-| Pigeon knows sessions opencode does not | The merge stays a left join on the opencode base list. (The 2026-08-10 measurement found 12 of 185 swarm targets had no local session row.) Ignored rather than rendered as ghosts. |
-| Session never registered with pigeon | Renders `?`, not `0`. |
+| Pigeon daemon down / fetch times out | Picker works exactly as today — unread is strictly additive, and **ordering never depends on the pigeon fetch** (needs-you comes from the overlay, recency from the local fold). Badges render `?` with a warning. ~250 ms timeout, and the fetch runs **concurrently** with the existing CLI walk, which already costs 120-250 ms; serially it would double picker latency. |
+| Watermark write fails | The jump happens anyway — never block navigation on bookkeeping. Self-heals at the next clear **for a session you touch again**; a session you never open again keeps a stale badge. Stated plainly rather than claimed as fully self-healing. |
+| Ledger row lost (crash between Telegram accept and `markSent`) | That message is never counted. Pre-existing outbox seam; not introduced here. |
+| Day one / no backfill | Historical rows are already deleted by the 1h prune, so no backfill is possible. Sessions with no ledger rows render `·`, **not** `0`, and self-heal as events accrue. |
+| Ledger fully pruned, watermark survives | Renders `·`. Guaranteed by grouping over `session_events` rather than `session_reads` — see above. This is the path by which revision 1's silent zero could return. |
+| Ledger partially pruned below a stale watermark | **Undercount, never a false zero**: surviving rows below the watermark are excluded correctly, and any newer event still counts. Acceptable; recorded so it is not rediscovered as a bug. |
+| A session becomes active again long after its ledger aged out | Correct by construction — `AUTOINCREMENT` means new ids are above any stale watermark. |
+| Pigeon knows sessions opencode does not | Merge stays a left join on the opencode base list (12 of 185 swarm targets had no local session row). Ignored, not rendered as ghosts. |
 
 ## Testing
 
-The new logic is pure and table-driven, which is where the weight goes.
+Ownership follows the code, which revision 1 got wrong in a way this repo has
+been actively fighting all week: it put the exclusion and watermark tests in
+`pkgs/oc-session-list/test.sh`, but that logic is **pigeon SQL**. Testing it
+CLI-side would have exercised a fixture reimplementation while the daemon's real
+query drifted free — the mirror-drift defect `workstation-dimz` exists to kill.
 
-`pkgs/oc-session-list/test.sh` (extends):
+- **pigeon daemon suite**, against real sqlite: the read-time exclusion, the
+  monotonic `max()` advance (out-of-order, duplicate, missing-row), ledger write
+  atomicity with `markSent`, and — the one that matters most — **a fully-pruned
+  ledger with a surviving watermark must render `·`, not `0`**.
+  Revision 2's test list instead guarded "pruning never lowers an id below a live
+  watermark," which `AUTOINCREMENT` makes impossible; it was a test aimed at a
+  non-threat while the real one went uncovered.
+- **`pkgs/oc-session-list/test.sh`**: merge against the base list, grouping and
+  order, degrade to `?` + warning, and the `·` vs `?` distinction.
+- **`assets/nvim/test-session-switcher-model.lua`**: the four render states and
+  the two groups; the `SEVERITY`/`M.STATES` mirror guard (`model.lua:39-45`) must
+  survive the reordering.
 
-- the three exclusions — undelivered rows do not count, own messages do not
-  count, swarm messages do
-- lexicographic watermark: ties in `created_at`, out-of-order writes, duplicate
-  writes, and that advance is `max`, never backward
-- clear-to-displayed-mark: a message arriving between render and jump stays
-  unread
-- degrade: daemon down → `?` plus a warning, and the jump still works
+Anything needing a live daemon stays out of the nix sandbox (no network) and is
+injected as a fixture. **Any new test file must be wired into a `checks.*` entry
+or an explicit workflow step**, or `checks.test-reachability` fails CI;
+`checkPhase` is not an accepted channel.
 
-`assets/nvim/test-session-switcher-model.lua` (extends): grouping and the three
-render states.
+## The "all turns" change already shipped — this is downstream of it
 
-Anything touching a live daemon stays out of the nix sandbox — there is no
-network there — so the daemon is injected as a fixture. **Any new test file must
-be wired into a `checks.*` entry or an explicit workflow step**, or
-`checks.test-reachability` fails CI; `checkPhase` is not an accepted channel.
+Revision 2 described this as a parallel experiment that "may" ship. It **shipped
+first**: pigeon `545e65f`, "Show all of a turn's agent narration in Telegram, not
+just the final step" (#114, branch `telegram-all-turns`), merged 2026-08-19
+10:11 -0400 — from the session launched to explore it.
 
-## Interaction with the "all completed turns" experiment
+Two consequences, neither optional:
 
-A parallel experiment (pigeon session `ses_fe9733ef1ffelsSIiXde56blyy`) is
-looking at showing **every** completed agent turn in a topic rather than only the
-final stop message, because intermediate turns are currently invisible and get
-missed.
-
-That changes what lands in `outbox`, and therefore changes these unread counts
-directly. This is coherent — both features read the same "what did I miss" set —
-but it means the badge numbers will jump when that experiment ships, and the two
-should land in a known order. The volume question belongs to that experiment: the
-2026-08-10 design measured swarm traffic alone saturating the outbox governor's
-per-minute window budget in bursts, and more rows per turn compounds it.
+1. **Multi-chunk entries are now the common case**, which is what forces the
+   unit-of-unread statement above.
+2. **The 30-day retention figure was reasoned against pre-#114 traffic and is
+   therefore unfounded.** Re-measure ledger growth against post-#114 volume
+   before fixing it. Rows are metadata-only so growth is unlikely to be the
+   binding constraint — the outbox governor's per-minute send budget still is —
+   but the number should come from a measurement, not from this sentence.
 
 ## Out of scope
 
 - Reading or replying to a session from inside the picker. The picker stays a
-  picker; this is the chat-client design, and it is not this.
-- A standalone always-on TUI or tmux sidebar.
-- True bidirectional read sync with Telegram (needs MTProto; see above).
-- Any change to the semantic-state model itself — attention, blocked/working/idle
-  are consumed as they are.
+  picker.
+- A standalone always-on TUI or tmux sidebar. If persistent glance-ability is
+  missed later, the cheapest right thing is a tmux status-line aggregate
+  (`N unread / M need-you`) off the same endpoint — an addition, not a rehost.
+- True bidirectional read sync with Telegram. Pigeon uses the **Bot API**, which
+  exposes no read receipts and cannot clear a chat's unread badge; that is an
+  MTProto (user-account) capability. The implementable half is kept: an inbound
+  action advances our watermark. The two badges remain independent, and that is a
+  property of the platform, not a shortcut.
+- Any change to the semantic-state model itself.
