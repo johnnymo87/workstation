@@ -42,6 +42,10 @@ digraph pr_lifecycle {
     "lgtm-bound?" [shape=diamond];
     "Re-request lgtm reviewer" [shape=box];
     "Exit conditions met?" [shape=diamond];
+    "Waiting only on reviewer?" [shape=diamond];
+    "Schedule wake + END TURN" [shape=box, style=filled, fillcolor=lightblue];
+    "Wake fires (15m/45m/2h/4h)" [shape=box];
+    "Cancel pending wake" [shape=box, style=filled, fillcolor=lightblue];
     "Done" [shape=doublecircle];
 
     "Pre-PR checks" -> "Conflicts?";
@@ -64,8 +68,13 @@ digraph pr_lifecycle {
     "lgtm-bound?" -> "Re-request lgtm reviewer" [label="yes, latest non-bot\nreview is non-APPROVED"];
     "lgtm-bound?" -> "Sleep 60s" [label="no, or latest non-bot\nreview was APPROVED"];
     "Re-request lgtm reviewer" -> "Sleep 60s";
-    "Exit conditions met?" -> "Done" [label="CI green +\ncomments resolved +\n(if lgtm-bound: non-bot\nAPPROVAL on record)"];
-    "Exit conditions met?" -> "Sleep 60s" [label="no (still waiting\non CI or reviewer)"];
+    "Exit conditions met?" -> "Cancel pending wake" [label="CI green +\ncomments resolved +\n(if lgtm-bound: non-bot\nAPPROVAL on record)"];
+    "Cancel pending wake" -> "Done";
+    "Exit conditions met?" -> "Waiting only on reviewer?" [label="no"];
+    "Waiting only on reviewer?" -> "Sleep 60s" [label="no (CI still running,\nor work to do)"];
+    "Waiting only on reviewer?" -> "Schedule wake + END TURN" [label="yes (CI green,\nnothing to fix)"];
+    "Schedule wake + END TURN" -> "Wake fires (15m/45m/2h/4h)";
+    "Wake fires (15m/45m/2h/4h)" -> "Check CI + fetch reviews + comments";
 }
 ```
 
@@ -149,7 +158,9 @@ This is where most of the actual shepherding happens, and where it's easiest to 
 
 The right framing: you're holding the PR until it's merged or until there's a real human decision the user has to make. Polling every 60 seconds is cheap; bailing and making the user pick up the thread is expensive.
 
-After creating the PR, enter the monitoring loop. No maximum iterations -- loop until exit conditions (below) are all met in the same iteration.
+After creating the PR, enter the monitoring loop. There is no maximum number of iterations and no point at which an unmerged PR stops being yours.
+
+**But watching is not the same as polling.** The tight 60-second loop is the right instrument only while something is actively changing — CI running, threads to answer, a push in flight. Once CI is green and the only thing left is a reviewer who hasn't looked yet, the loop is burning turns to re-read a page that nobody has edited. At that point hand off to the watchdog (below): schedule a wake, end the turn, come back when there is plausibly something to see. What changes at CI-green is the *mechanism*, never the obligation.
 
 ### Tooling: monitor-pr.py
 
@@ -159,14 +170,16 @@ A companion script bundled with this skill does steps 1-4 of the loop body (slee
 python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py [PR]
 ```
 
-Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate -- Anthropic's prompt-cache TTL is 5 minutes, and a single bash call that blocks the model longer than that expires the warm cache. **You are expected to re-invoke the script in a loop**; the script owns the within-60s pacing, you own the loop and the fix step.
+Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate -- Anthropic's prompt-cache TTL is 5 minutes, and a single bash call that blocks the model longer than that expires the warm cache. **While CI is still moving you are expected to re-invoke the script in a loop**; the script owns the within-60s pacing, you own the loop and the fix step. Once CI is green and only the reviewer is outstanding, stop looping and hand off to the watchdog.
 
 | Exit code | Meaning | What to do |
 |---|---|---|
 | `0` | All exit conditions met | Done. PR is landable. |
 | `1` | Action needed (CI failed / unresolved threads / non-APPROVED review predates HEAD) | Read stdout for the specific action, do it (step 5 below), then re-invoke. |
 | `2` | Unrecoverable error (could not query GitHub) | Surface to user; don't silently retry. |
-| `3` | Budget elapsed, still idle-waiting (CI pending or lgtm-bound waiting on APPROVAL) | Re-invoke immediately. |
+| `3` | Budget elapsed, still idle-waiting (CI pending or lgtm-bound waiting on APPROVAL) | Re-invoke immediately **if CI is still moving**. If CI is green and you are only waiting on a reviewer, schedule a wake and end the turn — see "The watchdog" below. |
+
+`--once` runs exactly one evaluation pass and never sleeps. Use it for watchdog wakes, where the session is awake only long enough to check state and then either act or reschedule. (It is equivalent to `--budget-seconds 0`, which already behaved this way; the flag exists to say so out loud and to print the right follow-up instruction.)
 
 `--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness -- checking both that the repo is listed AND that the PR's author is in an author allowlist (see "Once, before the loop" for why the second half is load-bearing) -- so the manual grep there can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
 
@@ -267,7 +280,7 @@ Cache the answer in a shell var (e.g. `LGTM_BOUND=yes`) for the loop.
    - **If lgtm-bound AND the most recent non-bot review exists AND its `state != "APPROVED"`** (i.e. `CHANGES_REQUESTED` or `COMMENTED` -- they asked for changes, you addressed them, now they need to look again), re-request review from that reviewer's login (see below). This puts the PR back on lgtm's tier-0 reawaken track so the same dispatched session resumes.
    - **If the most recent non-bot review was already `APPROVED`**, do NOT re-request -- they signed off; you're just mopping up leftover inline threads. The approval stays valid; pushing fixes for inline-only feedback does not invalidate sign-off.
     - Go back to the 60-second sleep (step 1).
-6. **Otherwise** (nothing to fix this iteration), evaluate exit conditions.
+6. **Otherwise** (nothing to fix this iteration), evaluate exit conditions. If they are unmet and the only thing outstanding is a reviewer who hasn't looked yet, leave the loop and hand off to the watchdog instead of sleeping again.
 
 ### Re-requesting review from the lgtm reviewer
 
@@ -287,13 +300,85 @@ Loop exits only when **all** of the following are true in the same iteration:
 - **If lgtm-bound**: the most recent review from a non-bot reviewer has `state == "APPROVED"`. An earlier-than-last-push approval still counts -- once they've signed off, fixes for inline-only feedback do not invalidate it. (If a reviewer wanted you to re-prove correctness, they would have left `CHANGES_REQUESTED` instead of `APPROVED`.)
 - **If not lgtm-bound**: no *positive* review-state requirement (you don't need an APPROVED). But an outstanding `CHANGES_REQUESTED` or `COMMENTED` from a non-bot reviewer on the current HEAD still blocks exit -- if a human asked for changes you don't ship over them. Only stale non-APPROVED reviews (commit predates HEAD) call for a re-request; non-APPROVED reviews on the current HEAD are an idle-wait until the reviewer updates their verdict.
 
+### The watchdog: what to do when the only thing left is waiting
+
+Exit conditions unmet, CI green, nothing to fix, no reviewer yet. Do **not** keep the 60-second loop running for hours. Schedule a wake, end the turn, and let the wake bring you back.
+
+**Why the cutover happens exactly at CI-green.** A poll costs roughly a prompt-cache read per minute; a cold wake costs roughly a full cache write. Break-even is around twelve minutes. A wait you expect to measure in a minute or two (CI finishing, a push settling) should be polled through — the cache is warm and re-reading is nearly free. A wait measured in tens of minutes or hours (a human reviewer's queue) should be slept through, because polling it re-pays the read a hundred times to learn nothing.
+
+**Backoff schedule.** Each successive wake for the same PR waits longer, then caps:
+
+| Wake | Delay |
+|---|---|
+| 1st | 15m |
+| 2nd | 45m |
+| 3rd | 2h |
+| 4th and after | 4h (cap) |
+
+**On each wake, run one pass and branch on the exit code:**
+
+```bash
+python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py --once <PR>
+```
+
+| Exit | Meaning | Action |
+|---|---|---|
+| `0` | Exit conditions met | The PR is *landable*, which is not the same as landed — confirm with `gh pr view <n> --json state,mergedAt`. Once it is genuinely terminal, **cancel any pending wake** (see below) and report. If it is approved but not yet merged, that is still an open PR: keep the watchdog running until it actually lands. |
+| `1` | Action needed | Do step 5 — fix, reply and resolve every thread, push, re-request if the latest non-bot review is non-APPROVED. Then **return to the tight 60-second loop, and reset the backoff to step 1.** Your push restarted CI, so something is moving again and the loop is the right instrument; re-enter the watchdog when CI is green and you are idle once more. |
+| `2` | Unrecoverable error | Surface to the user. Do **not** silently reschedule — a wake that quietly retries a broken query turns a visible failure into an invisible one. |
+| `3` | Still idle | Reschedule at the **next** backoff step. |
+
+**Keep exactly one wake outstanding per PR: cancel before you reschedule.** Rescheduling without cancelling leaves the old wake queued too, and the duplicates compound every cycle until a single PR is waking you on four different timers with four different backoff steps in their payloads, each disagreeing about which step is current. One wake per PR means the most recently scheduled one is always authoritative.
+
+**Handle the wake idempotently: verify, then act or no-op.** A duplicate can still reach you — a peer session may be shepherding the same branch, or a cancel may have raced a delivery. Always re-read current state before acting; never act on what the payload asserts. An agent that trusts the payload instead of checking will re-request a reviewer who already approved, which is exactly the noise the "don't re-request after APPROVED" rule exists to prevent.
+
+**Cancel the wake on any terminal state. This is correctness, not tidiness.** When the PR merges, the branch's worktree becomes a cleanup target — the nightly reset prunes merged worktrees. A wake still queued against that session then fires into a working directory that no longer exists, and delivery fails rather than doing anything useful. Cancel before you consider the PR finished:
+
+```
+swarm_scheduled(action: "list")     # match on ref: "pr:<owner>/<repo>#<n>"
+swarm_scheduled(action: "cancel", msg_id: "<id>")
+```
+
+Match on the `ref` you set when scheduling — that is what makes this unambiguous when several PRs are in flight at once, and it is why the `ref` is worth setting. Cancel *every* match, not just the first. An empty list is a success, not a missed step: the wake that woke you is already delivered and needs no cancelling.
+
+Terminal means merged, closed, or handed back to the user — not merely "approved."
+
+**Refresh a PR that is going stale.** The clock that matters is the PR's own `updatedAt`, not how long you have been waiting — read it, don't estimate it:
+
+```bash
+gh pr view <n> --json updatedAt -q .updatedAt
+```
+
+If that timestamp is roughly 20 hours old and there is **no review at all**, re-request the reviewer to bump it. The review funnel drops PRs idle beyond 24 hours, permanently and silently: nothing errors, no component reports unhealthy, the PR simply stops being a candidate and waits forever. A single re-request resets the clock. Skip this once any non-bot review exists — then you are waiting on a verdict, not on discovery.
+
+**Give up out loud, not quietly.** If you reach the 4h cap with no state change at all, post a top-level comment on the PR summarising what is outstanding and hand back to the user. Silent indefinite rescheduling is the same failure as abandoning the PR, just harder to notice.
+
+**Make the wake payload self-contained** — per the `scheduling-wakes` skill, the session that receives it may have compacted away everything about why it exists. Include the PR URL, the repo, the branch, the worktree path, which backoff step you are on, and the instruction to run `--once`:
+
+```
+swarm_schedule(
+  after: "15m",
+  ref: "pr:<owner>/<repo>#<n>",
+  message: "Resume shepherding <owner>/<repo>#<n> — <url>. Worktree <abs path>, branch <branch>.
+            Run: monitor-pr.py --once <n>. Backoff step 1 of 4 (next: 45m).
+            Exit 0 -> cancel pending wake and report. Exit 1 -> fix, reply+resolve
+            every thread, push, re-request if latest non-bot review is non-APPROVED,
+            reschedule at 15m. Exit 3 -> reschedule at 45m. Exit 2 -> tell the user.
+            CI was green with no review as of <timestamp>; lgtm-bound: <auto value>."
+)
+```
+
 ### Common mistakes
 
 - **Mistaking Gemini's review for the gating review.** Gemini fires early and looks like a reviewer has shown up, which makes it tempting to declare done as soon as its threads are resolved. On lgtm-bound repos, the gating review is the lgtm-dispatched one (`type: "User"`), which arrives ~10 min *after* CI goes green and is what you're actually waiting for. Address Gemini's threads, but don't exit on Gemini's signal.
 - **Re-requesting review from a bot login.** Bots aren't on the lgtm reawaken loop; the request is wasted. Filter on `user.type != "Bot"` before re-requesting.
 - **Re-requesting review after an APPROVED.** If the latest non-bot review is already `APPROVED`, don't re-request when you push fixes for leftover inline threads. The reviewer signed off; pinging them again to re-confirm is noise. Re-request only when the latest non-bot review is `CHANGES_REQUESTED` or `COMMENTED`.
 - **Re-requesting from the wrong login.** lgtm's reviewer pool rotates, but on re-review it pins to the prior reviewer. Always use the exact login from the most recent non-bot review, not a hardcoded default.
-- **Using `sleep 300` while polling.** A 5-minute idle gap can expire Anthropic's prompt cache and force the next turn to re-send the full prompt. Use `sleep 60` for monitoring loops.
+- **Using `sleep 300` while polling.** A 5-minute idle gap can expire Anthropic's prompt cache and force the next turn to re-send the full prompt. Use `sleep 60` for monitoring loops. (This is an argument against *medium* sleeps specifically. Once you've decided to wait tens of minutes, the cache is lost either way and the watchdog's scheduled wake is strictly cheaper than continuing to poll.)
+- **Ending the turn without scheduling a wake.** Stopping is only legitimate if something will bring you back. Nothing runs between your turns — no timer, no hook, no notification. An unscheduled stop is indistinguishable from abandoning the PR, and it is the failure this skill exists to prevent, reached by a more comfortable route.
+- **Leaving a wake scheduled after the PR lands.** The merged branch's worktree gets pruned, and the orphaned wake fires into a directory that no longer exists. Cancel on every terminal state — merged, closed, or handed back.
+- **Re-invoking `--once` in a loop.** That is the 60-second poll with extra ceremony and a cold cache on every pass — strictly worse than either real option. If you are awake and still idle, reschedule and stop. If you expect an answer within a minute or two, use the normal loop.
+- **Treating a wake payload as trustworthy state.** It records what was true when it was scheduled, possibly hours ago. Re-read CI, reviews, and threads before acting on any of it.
 - **Bundling sleep with the follow-up `gh` calls in one bash invocation.** Long chained one-liners that include `sleep` are a known hang risk in this environment (see AGENTS.md). Run `sleep 60` as its own tool call, then run the checks.
 - **Replying to inline comments without resolving them.** GitHub tracks thread resolution separately from the reply chain. A thread with five replies and no resolve still reads as unresolved in the diff UI. After every reply, call `resolveReviewThread`. See `reviewing-github-prs` §"Resolving review threads".
 - **Cherry-picking the easy comments.** Addressing the agreeable comments and quietly dropping the hard or controversial ones leaves threads looking abandoned and isn't actually finishing the review. Every thread gets accept / push back / escalate — see `receiving-code-review` §"Address Every Item". Use the unresolved-threads filter query (in `reviewing-github-prs`) before claiming exit conditions met.
