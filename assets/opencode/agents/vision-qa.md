@@ -6,6 +6,14 @@ variant: high
 permission:
   "*": deny
   read: allow
+# Gemini validates function declarations strictly and rejects the WHOLE request
+# (HTTP 400) if any tool's JSON schema is non-conforming; datadog_* (anyOf with
+# sibling keys) and pagerduty_* (a parameter with no type) both trip it. A
+# `permission` deny is NOT enough — the breakage is in the tool DECLARATION sent
+# to the model, which happens before any permission check. See mono-2l1rq.
+tools:
+  datadog*: false
+  pagerduty*: false
 ---
 
 # Vision QA — Screenshot & UI Analyst

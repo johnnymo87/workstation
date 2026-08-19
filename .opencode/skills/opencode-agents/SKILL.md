@@ -70,6 +70,72 @@ When adding an opus-pinned agent, pin it to `anthropic/claude-opus-5` in the
 source file and let `patchAgent` handle cloudbox — do **not** hardcode the
 Vertex id, or you regress devbox/macOS.
 
+A sonnet-pinned agent lands on Gemini on macOS/cloudbox, so it also inherits the
+MCP tool-schema hazard in the next section — copy the `tools:` denylist when you
+add one.
+
+## Gemini rejects some MCP tool schemas (silent empty subagents)
+
+**Symptom.** A subagent on the Gemini tier (implementer, spec-reviewer,
+code-reviewer, librarian, vision-qa) returns `state="completed"` with an **empty
+`task_result`** and does no work, while `general` and the fable/opus agents in
+the same session work fine. Diagnosed 2026-08-19 as `mono-2l1rq`.
+
+**Cause.** Vertex Gemini validates every `functionDeclaration` and rejects the
+**entire request** with HTTP 400 if any tool's JSON schema is non-conforming.
+Two shipped MCP servers fail that validation:
+
+| Server | Offending tool | Vertex complaint |
+|---|---|---|
+| `datadog` | `datadog_analyze_cloud_network_monitoring` | `parameters.queries` sets other fields alongside `any_of` |
+| `pagerduty` | `pagerduty_get_incident` | `parameters.query_model` has no `type` |
+
+Anthropic-on-Vertex and OpenAI accept both, which is why only the Gemini tier
+dies. Both servers ship `enabled: false`, so this only bites once a session
+connects one (`opencode-launch --mcp datadog`, `oc-mcp-enable <ses> pagerduty`)
+— and then it bites *every* Gemini turn in that directory, subagent or primary.
+
+**Why it is silent.** opencode stores the provider error on the subagent's
+assistant message (`message.info.error`, verifiable in `opencode.db`), but
+`TaskTool`'s `runTask` returns
+`result.parts.findLast((item) => item.type === "text")?.text ?? ""`
+(`packages/opencode/src/tool/task.ts`) and only fails the tool when the
+*background job* status is `error` — an assistant-message-level error is not
+that. So a hard 400 renders as a successful, empty task. Worth an upstream
+issue; nothing in this repo can fix it.
+
+**Our fix.** The Gemini-tier agents deny both tool families in frontmatter
+(`assets/opencode/agents/{implementer,spec-reviewer,code-reviewer,librarian,vision-qa}.md`):
+
+```yaml
+tools:
+  datadog*: false
+  pagerduty*: false
+```
+
+A `permission:` deny is **not** a substitute — the breakage is in the tool
+*declaration* sent to the model, which happens before any permission check.
+This is deliberately a denylist of the two known-bad servers, not a blanket MCP
+ban: atlassian, slack, notion, rollbar, devcycle, playwright and chrome-devtools
+were all tested against Gemini and pass.
+
+**Caching caveat.** Agent definitions are memoized per **directory** in
+opencode's `InstanceState` (`packages/opencode/src/agent/agent.ts`), so a
+home-manager switch does **not** un-break a directory a running serve has
+already served. A fresh directory picks the fix up immediately; an existing one
+needs the serve pool restarted (the nightly `reset-workspace` does this).
+
+**Testing a new MCP server against Gemini** (one command, no session needed):
+
+```bash
+d=$(mktemp -d); jq --arg m "<server>" '{mcp: {($m): (.mcp[$m] + {enabled: true})}}' \
+  ~/.config/opencode/opencode.json > "$d/opencode.json"
+cd "$d" && opencode run --model google-vertex/gemini-3.7-flash "Reply with exactly the word: ALIVE"
+```
+
+`ALIVE` = compatible. An `Unable to submit request because ...
+functionDeclaration ...` error = add that server to the denylist above.
+
 ## Agents We Removed (and Why)
 
 In Feb 2025 we inherited 6 agents from "Oh My OpenCode" (OMO) and cut them all:

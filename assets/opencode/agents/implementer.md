@@ -2,6 +2,18 @@
 description: Implementation subagent for plan execution — implements a single task from a plan with TDD, self-review, and commit
 mode: subagent
 model: anthropic/claude-sonnet-5
+# Vertex Gemini validates function declarations strictly and rejects the WHOLE
+# request (HTTP 400) if any tool's JSON schema is non-conforming. Two shipped
+# MCP servers trip it: datadog_* (anyOf with sibling keys) and pagerduty_*
+# (a parameter with no type). On cloudbox this agent's model is rewritten to
+# google-vertex/gemini-3.7-flash (users/dev/opencode-config.nix, patchAgent),
+# so ANY session with either MCP connected made every dispatch of this agent
+# fail — reported by opencode as a completed task with an empty result. See
+# mono-2l1rq and .opencode/skills/opencode-agents/SKILL.md. This agent needs
+# neither server, so denying the tools is free.
+tools:
+  datadog*: false
+  pagerduty*: false
 ---
 
 # Implementer
