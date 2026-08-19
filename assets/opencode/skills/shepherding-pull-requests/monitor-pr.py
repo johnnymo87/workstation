@@ -10,13 +10,18 @@ in the loop for fix-as-you-go work AND keeps the cache warm.
 
 Exit codes:
   0  All exit conditions met -- PR is landable (CI green, all inline threads
-     resolved, and -- if lgtm-bound -- latest non-bot review is APPROVED).
+     resolved, and -- if lgtm-bound -- latest non-bot review is APPROVED),
+     or PR is already merged.
   1  Action needed by Claude. CI failed, unresolved threads, or the latest
      non-bot review is CHANGES_REQUESTED/COMMENTED on a commit older than
      HEAD (re-request needed). Stdout explains the specific action.
-  2  Unrecoverable error (could not query GitHub, malformed responses).
+  2  Unrecoverable error (could not query GitHub, malformed responses,
+     or PR closed without merging).
   3  Budget elapsed with the PR still in a legitimate idle-wait state
-     (CI pending, or lgtm-bound waiting on non-bot APPROVAL). Re-invoke.
+     with CI green (e.g. lgtm-bound waiting on non-bot APPROVAL, or waiting on
+     reviewer post-HEAD review). Re-invoke / sleep long.
+  4  Budget elapsed with CI still moving / not yet settled (pending/queued/
+     in-progress checks). Re-invoke / keep polling.
 
 Usage in the SKILL.md loop body:
     while true; do
@@ -25,7 +30,8 @@ Usage in the SKILL.md loop body:
         0) break ;;                # done
         1) <fix per stdout> ;;     # then re-invoke
         2) <surface to user>; exit ;;
-        3) ;;                      # idle-wait elapsed, just re-invoke
+        3) ;;                      # idle-wait (CI green, waiting on review), sleep long
+        4) ;;                      # idle-wait (CI pending), keep polling tightly
       esac
     done
 """
@@ -63,6 +69,7 @@ EXIT_ALL_MET = 0
 EXIT_ACTION_NEEDED = 1
 EXIT_ERROR = 2
 EXIT_STILL_WAITING = 3
+EXIT_CI_MOVING = 4
 
 
 # --- gh wrappers -----------------------------------------------------------
@@ -450,6 +457,18 @@ def evaluate_iteration(pr_num, owner, repo, lgtm_bound):
     pr = get_pr_info(pr_num)
     head_sha = pr.get("headRefOid")
     author_login = (pr.get("author") or {}).get("login")
+    pr_state = (pr.get("state") or "").strip().upper()
+
+    if pr_state == "MERGED":
+        return {
+            "exit_code": EXIT_ALL_MET,
+            "message": "PR is merged; monitoring complete.",
+        }
+    if pr_state == "CLOSED":
+        return {
+            "exit_code": EXIT_ERROR,
+            "message": "PR was closed without merging; needs human attention.",
+        }
 
     ci_status, ci_msg = check_ci(pr_num)
     try:
@@ -576,17 +595,26 @@ def evaluate_iteration(pr_num, owner, repo, lgtm_bound):
         return {
             "exit_code": None,
             "message": f"waiting on non-bot reviewer(s) post-HEAD review ({states})",
+            "ci_status": ci_status,
         }
 
     # No outstanding non-APPROVED reviews. Check the positive gate for
     # lgtm-bound repos.
     if lgtm_bound and not any_approval:
         # Waiting on lgtm dispatch (typically ~10 min after CI green).
-        return {"exit_code": None, "message": "lgtm-bound: waiting on non-bot APPROVAL"}
+        return {
+            "exit_code": None,
+            "message": "lgtm-bound: waiting on non-bot APPROVAL",
+            "ci_status": ci_status,
+        }
 
     # CI still resolving -- idle-poll.
     if ci_status == "pending":
-        return {"exit_code": None, "message": f"CI still running: {ci_msg}"}
+        return {
+            "exit_code": None,
+            "message": f"CI still running: {ci_msg}",
+            "ci_status": ci_status,
+        }
 
     # All gates pass.
     return {"exit_code": EXIT_ALL_MET, "message": "All exit conditions met"}
@@ -683,12 +711,14 @@ def main():
     deadline = time.monotonic() + args.budget_seconds
     iteration = 0
     last_message = "no observations yet"
+    last_ci_status = None
 
     while True:
         iteration += 1
         print(f"\n--- iteration {iteration} ---")
         result = evaluate_iteration(pr_num, owner, repo, lgtm_bound)
         last_message = result["message"]
+        last_ci_status = result.get("ci_status")
 
         if result["exit_code"] is not None:
             # Definitive verdict (done, action needed, or error). Return now.
@@ -707,7 +737,8 @@ def main():
                       "wake and END THE TURN -- do not re-invoke in a loop.")
             else:
                 print("Re-invoke this script to keep polling.")
-            sys.exit(EXIT_STILL_WAITING)
+            exit_code = EXIT_CI_MOVING if last_ci_status == "pending" else EXIT_STILL_WAITING
+            sys.exit(exit_code)
 
         print(f"  ...idle; sleeping {args.interval}s ({last_message})")
         time.sleep(args.interval)
