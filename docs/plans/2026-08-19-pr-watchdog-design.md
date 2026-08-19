@@ -78,11 +78,18 @@ the timer.
 
 Not hygiene — a correctness requirement. Without it: the PR merges, the nightly
 reset prunes the now-merged worktree, and the orphaned wake fires into a working
-directory that no longer exists. The message bus refuses delivery when the target
-session's cwd is missing, burns its retry budget, and marks the message failed.
+directory that no longer exists.
 
-That is the one delivery failure mode with production evidence behind it, and this
-design would otherwise trigger it on *every successful PR*.
+**Correction (found in adversarial review):** an earlier draft of this section said
+the bus refuses delivery, burns its retry budget, and marks the message failed.
+That is wrong, and wrong in the more dangerous direction. Per `scheduling-wakes`
+(`pigeon-s9d`), a wake into a session whose directory was deleted is *accepted* by
+the daemon, recorded as delivered, and injected into the transcript — and then the
+turn produces nothing at all: no output, no tool call, no error, and no alert.
+
+The conclusion survives and gets stronger. A loud failure would at least be
+diagnosable; this one is invisible, and this design would otherwise trigger it on
+*every successful PR*.
 
 ### Stale refresh
 

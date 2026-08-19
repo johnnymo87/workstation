@@ -315,7 +315,11 @@ Exit conditions unmet, CI green, nothing to fix, no reviewer yet. Do **not** kee
 | 3rd | 2h |
 | 4th and after | 4h (cap) |
 
-**On each wake, run one pass and branch on the exit code:**
+**Before you act on a wake, make sure another one is already queued.** The wake that woke you is spent — it is marked delivered the moment it lands, and nothing redelivers it. So from the instant you begin working, the PR is protected by nothing at all, and a context death or a serve restart mid-fix abandons it silently. That mid-response stall is the *original* failure this watchdog exists to prevent; a watchdog that guards only the idle state and not the working state has fixed the easy half.
+
+So the order on every wake is: **schedule the next wake first, then do the work, then cancel-and-replace when you know the outcome.** A safety net you have to survive the fall to deploy is not a safety net.
+
+**Then run one pass and branch on the exit code:**
 
 ```bash
 python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py --once <PR>
@@ -324,15 +328,16 @@ python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py --once 
 | Exit | Meaning | Action |
 |---|---|---|
 | `0` | Exit conditions met | The PR is *landable*, which is not the same as landed — confirm with `gh pr view <n> --json state,mergedAt`. Once it is genuinely terminal, **cancel any pending wake** (see below) and report. If it is approved but not yet merged, that is still an open PR: keep the watchdog running until it actually lands. |
-| `1` | Action needed | Do step 5 — fix, reply and resolve every thread, push, re-request if the latest non-bot review is non-APPROVED. Then **return to the tight 60-second loop, and reset the backoff to step 1.** Your push restarted CI, so something is moving again and the loop is the right instrument; re-enter the watchdog when CI is green and you are idle once more. |
-| `2` | Unrecoverable error | Surface to the user. Do **not** silently reschedule — a wake that quietly retries a broken query turns a visible failure into an invisible one. |
-| `3` | Still idle | Reschedule at the **next** backoff step. |
+| `1` | Action needed | Do step 5 — fix, reply and resolve every thread, push, re-request if the latest non-bot review is non-APPROVED. Then **return to the tight 60-second loop and reset the backoff to step 1.** Your push restarted CI, so something is moving again and the loop is the right instrument; re-enter the watchdog when CI is green and you are idle once more. |
+| `2` | Unrecoverable error, **or the PR was closed without merging** | Tell the user — this is not something to retry your way out of. Keep the safety-net wake queued unless the cause is terminal: a closed PR is terminal (cancel), but a `gh` timeout or a rate limit at hour six is not, and cancelling on it converts a transient blip into a silently abandoned PR. |
+| `3` | Idle, CI settled — genuinely waiting on a reviewer | Reschedule at the **next** backoff step. |
+| `4` | Idle, but CI is still moving | Do **not** back off. Return to the tight 60-second loop; CI churn resolves in minutes, and the warm cache is what pays for watching it. |
 
 **Keep exactly one wake outstanding per PR: cancel before you reschedule.** Rescheduling without cancelling leaves the old wake queued too, and the duplicates compound every cycle until a single PR is waking you on four different timers with four different backoff steps in their payloads, each disagreeing about which step is current. One wake per PR means the most recently scheduled one is always authoritative.
 
 **Handle the wake idempotently: verify, then act or no-op.** A duplicate can still reach you — a peer session may be shepherding the same branch, or a cancel may have raced a delivery. Always re-read current state before acting; never act on what the payload asserts. An agent that trusts the payload instead of checking will re-request a reviewer who already approved, which is exactly the noise the "don't re-request after APPROVED" rule exists to prevent.
 
-**Cancel the wake on any terminal state. This is correctness, not tidiness.** When the PR merges, the branch's worktree becomes a cleanup target — the nightly reset prunes merged worktrees. A wake still queued against that session then fires into a working directory that no longer exists, and delivery fails rather than doing anything useful. Cancel before you consider the PR finished:
+**Cancel the wake on any terminal state. This is correctness, not tidiness.** When the PR merges, the branch's worktree becomes a cleanup target — the nightly reset prunes merged worktrees. A wake still queued against that session then fires into a working directory that no longer exists, and **that failure is silent**: the daemon accepts the message, records it as delivered, injects it into the transcript, and the turn then produces nothing at all — no output, no tool call, no error, and nobody is alerted (`pigeon-s9d` in `scheduling-wakes`). You do not find out. Cancel before you consider the PR finished:
 
 ```
 swarm_scheduled(action: "list")     # match on ref: "pr:<owner>/<repo>#<n>"
@@ -341,7 +346,7 @@ swarm_scheduled(action: "cancel", msg_id: "<id>")
 
 Match on the `ref` you set when scheduling — that is what makes this unambiguous when several PRs are in flight at once, and it is why the `ref` is worth setting. Cancel *every* match, not just the first. An empty list is a success, not a missed step: the wake that woke you is already delivered and needs no cancelling.
 
-Terminal means merged, closed, or handed back to the user — not merely "approved."
+Terminal means merged, closed, or the user explicitly telling you to stop. It does **not** mean "approved", and it does not mean you escalated to the user — reporting that a PR is stuck leaves it your problem until it lands.
 
 **Refresh a PR that is going stale.** The clock that matters is the PR's own `updatedAt`, not how long you have been waiting — read it, don't estimate it:
 
@@ -349,24 +354,32 @@ Terminal means merged, closed, or handed back to the user — not merely "approv
 gh pr view <n> --json updatedAt -q .updatedAt
 ```
 
-If that timestamp is roughly 20 hours old and there is **no review at all**, re-request the reviewer to bump it. The review funnel drops PRs idle beyond 24 hours, permanently and silently: nothing errors, no component reports unhealthy, the PR simply stops being a candidate and waits forever. A single re-request resets the clock. Skip this once any non-bot review exists — then you are waiting on a verdict, not on discovery.
+If that timestamp is roughly 20 hours old and there is **no review at all**, re-request the reviewer to bump it. This applies to lgtm-bound PRs specifically — it exists to beat the dispatcher's staleness cutoff, and on a repo with no such dispatcher it is just an unexplained 20-hour ping at a human. The review funnel drops PRs idle beyond 24 hours, permanently and silently: nothing errors, no component reports unhealthy, the PR simply stops being a candidate and waits forever. A single re-request resets the clock. Skip this once any non-bot review exists — then you are waiting on a verdict, not on discovery.
 
-**Give up out loud, not quietly.** If you reach the 4h cap with no state change at all, post a top-level comment on the PR summarising what is outstanding and hand back to the user. Silent indefinite rescheduling is the same failure as abandoning the PR, just harder to notice.
+**Escalate out loud at the cap — but do not stop watching.** The steps are cumulative, so reaching the 4h cap means roughly seven hours of waiting have already passed. At that point post a top-level comment on the PR summarising what is outstanding, and tell the user. Then **keep waking at the 4h cadence.**
 
-**Make the wake payload self-contained** — per the `scheduling-wakes` skill, the session that receives it may have compacted away everything about why it exists. Include the PR URL, the repo, the branch, the worktree path, which backoff step you are on, and the instruction to run `--once`:
+The escalation is the *report*, not the stopping. Handing the PR back silently and letting the timer lapse is the abandonment this skill exists to prevent; a reviewer who is simply asleep is the ordinary case, not an error, and a PR opened in the evening will routinely sit longer than seven hours through no fault of anyone. Only a terminal state, or the user telling you to stop, ends the watchdog.
+
+**Make the wake payload self-contained, but carry facts in it rather than procedure.** Per the `scheduling-wakes` skill, the session that receives it may have compacted away everything about why it exists, so it needs the PR URL, repo, branch, worktree path, backoff step, and a timestamp. It does *not* need the branch table — that is on disk at a stable path, and restating it means maintaining it in two places where the copies drift. That is exactly how an earlier draft of this section ended up telling the agent to sleep on exit 1 in the payload while the table said to keep polling.
+
+Name the worktree, but do not let the payload *depend* on it: give the repo root and branch too, so a woken session whose worktree was pruned can still re-establish where it is.
 
 ```
 swarm_schedule(
   after: "15m",
   ref: "pr:<owner>/<repo>#<n>",
-  message: "Resume shepherding <owner>/<repo>#<n> — <url>. Worktree <abs path>, branch <branch>.
-            Run: monitor-pr.py --once <n>. Backoff step 1 of 4 (next: 45m).
-            Exit 0 -> cancel pending wake and report. Exit 1 -> fix, reply+resolve
-            every thread, push, re-request if latest non-bot review is non-APPROVED,
-            reschedule at 15m. Exit 3 -> reschedule at 45m. Exit 2 -> tell the user.
-            CI was green with no review as of <timestamp>; lgtm-bound: <auto value>."
+  expires_in: "24h",
+  message: "Resume shepherding <owner>/<repo>#<n> — <url>.
+            Worktree <abs path> (if pruned: repo root <repo path>, branch <branch>).
+            Follow the `shepherding-pull-requests` skill, section 'The watchdog';
+            start by running monitor-pr.py --once <n> and branch on the exit code.
+            Backoff step 1 of 4 (next step: 45m).
+            State when scheduled (<timestamp>, verify before trusting):
+            CI green, no reviews of any kind, lgtm-bound <auto value>."
 )
 ```
+
+Set `expires_in` generously. A wake defaults to expiring six hours after its delivery time, and a serve that is wedged for longer than that drops it with nothing left queued — the cap cadence alone can exceed the default.
 
 ### Common mistakes
 
@@ -376,7 +389,8 @@ swarm_schedule(
 - **Re-requesting from the wrong login.** lgtm's reviewer pool rotates, but on re-review it pins to the prior reviewer. Always use the exact login from the most recent non-bot review, not a hardcoded default.
 - **Using `sleep 300` while polling.** A 5-minute idle gap can expire Anthropic's prompt cache and force the next turn to re-send the full prompt. Use `sleep 60` for monitoring loops. (This is an argument against *medium* sleeps specifically. Once you've decided to wait tens of minutes, the cache is lost either way and the watchdog's scheduled wake is strictly cheaper than continuing to poll.)
 - **Ending the turn without scheduling a wake.** Stopping is only legitimate if something will bring you back. Nothing runs between your turns — no timer, no hook, no notification. An unscheduled stop is indistinguishable from abandoning the PR, and it is the failure this skill exists to prevent, reached by a more comfortable route.
-- **Leaving a wake scheduled after the PR lands.** The merged branch's worktree gets pruned, and the orphaned wake fires into a directory that no longer exists. Cancel on every terminal state — merged, closed, or handed back.
+- **Leaving a wake scheduled after the PR lands.** The merged branch's worktree gets pruned, and the orphaned wake fires into a directory that no longer exists — where it is accepted, marked delivered, and then does nothing at all, silently. Cancel on every terminal state.
+- **Doing the work with nothing queued behind you.** The wake that woke you is already spent. If you start fixing threads without having scheduled the next wake first, a context death mid-fix abandons the PR exactly as if there had been no watchdog — which is the failure the watchdog was built for. Schedule, then act, then cancel-and-replace.
 - **Re-invoking `--once` in a loop.** That is the 60-second poll with extra ceremony and a cold cache on every pass — strictly worse than either real option. If you are awake and still idle, reschedule and stop. If you expect an answer within a minute or two, use the normal loop.
 - **Treating a wake payload as trustworthy state.** It records what was true when it was scheduled, possibly hours ago. Re-read CI, reviews, and threads before acting on any of it.
 - **Bundling sleep with the follow-up `gh` calls in one bash invocation.** Long chained one-liners that include `sleep` are a known hang risk in this environment (see AGENTS.md). Run `sleep 60` as its own tool call, then run the checks.
