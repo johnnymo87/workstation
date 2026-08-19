@@ -618,7 +618,16 @@ def main():
         help=f"Seconds between polls within a single invocation "
              f"(default: {DEFAULT_INTERVAL_SEC}).",
     )
+    parser.add_argument(
+        "--once", action="store_true",
+        help="Run exactly one evaluation pass and exit; never sleep. For the "
+             "watchdog wake in the skill, where the session is awake only long "
+             "enough to check state and either act or reschedule.",
+    )
     args = parser.parse_args()
+
+    if args.once:
+        args.budget_seconds = 0
 
     try:
         pr = get_pr_info(args.pr_num)
@@ -693,7 +702,11 @@ def main():
         if remaining <= args.interval:
             print(f"\nBudget elapsed (~{args.budget_seconds}s); still idle: "
                   f"{last_message}")
-            print("Re-invoke this script to keep polling.")
+            if args.once:
+                print("Single pass complete; still idle. Reschedule the next "
+                      "wake and END THE TURN -- do not re-invoke in a loop.")
+            else:
+                print("Re-invoke this script to keep polling.")
             sys.exit(EXIT_STILL_WAITING)
 
         print(f"  ...idle; sleeping {args.interval}s ({last_message})")

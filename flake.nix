@@ -1282,6 +1282,14 @@
         touch $out
       '';
 
+      monitor-pr-once = devboxPkgs.runCommand "monitor-pr-once-guard" {
+        nativeBuildInputs = with devboxPkgs; [ bash python3 coreutils gnugrep ];
+      } ''
+        cd ${self}
+        bash users/dev/test-monitor-pr-once.sh
+        touch $out
+      '';
+
       # ---- assets/opencode/plugins TypeScript suites (bead workstation-dmat) ----
       #
       # WHY THESE EXIST: this directory held THREE test harnesses and CI ran
