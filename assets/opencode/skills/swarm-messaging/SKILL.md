@@ -178,6 +178,54 @@ Do not propose or pick up work from a stale board. Re-read the current state
 led to it. A long chain of reasoning is exactly the window in which a peer
 finished the thing you are about to start.
 
+### Never assert a checkable fact you did not fetch
+
+The rule above guards against a check that went stale. This one guards against
+the worse case: no check at all.
+
+**If you tell a peer that work exists, the assertion must be derived from a
+command you actually ran, and you must quote its output.** Not "there are
+unresolved review comments" — `unresolved=3 of 12`, with the query beside it. A
+bare assertion cannot be audited by the recipient; it can only be obeyed.
+
+Measured incident. A session dispatched seven `task.assign` messages telling
+peers that specific PRs "have inline review comments Jonathan wants answered."
+Its only query was:
+
+```
+gh pr view <n> --repo <r> --json number,title,headRefName,state,mergeStateStatus,reviewDecision,autoMergeRequest
+```
+
+No comments field, no `reviewThreads`, and across the entire 654-part session
+not one `gh api ... comments` call. It never queried comment state at all. It
+asserted a premise it had never fetched — and its own reasoning had flagged the
+doubt before proceeding anyway ("...may not apply unless there are unresolved
+review threads I should check").
+
+**Why this survived: it was right five times out of seven, by coincidence.**
+Most PRs that have been reviewed do have comments, so the base rate hid the
+defect and it read as a working feature. Two recipients were sent to answer
+comments that did not exist. One of those was batched with a PR that had 18
+real comments, so that session would find genuine work and might never notice
+the other half was empty. **A high hit rate against a base rate is not
+evidence that you measured anything.**
+
+Worse, all seven targets had *zero* unresolved threads. Even the five
+"correct" dispatches were asking for work that was, by the only
+machine-checkable measure, already done.
+
+The recipient-side reciprocal is what actually contained this:
+
+**Verify the premise before acting on it. A message that is confident,
+well-formed, and correct in every checkable detail is evidence of nothing about
+the one claim that matters.** That dispatch had the right PR number, branch,
+bead id, authoring session id, and merge state — every detail correct except
+the one it was asking someone to act on. The session that received it spent
+fifteen minutes proving the premise false instead of minutes obeying it, and
+that is the outcome to imitate. An agent told to answer comments that do not
+exist has two obedient paths — fabricate them, or report success having done
+nothing — and both are worse than the false alarm.
+
 ### Quote notes, not bead headers, for anything time-sensitive
 
 A bead's header (title, status, assignee) lags reality; the notes are where the
