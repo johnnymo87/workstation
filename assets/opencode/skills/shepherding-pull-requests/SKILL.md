@@ -364,6 +364,12 @@ The escalation is the *report*, not the stopping. Handing the PR back silently a
 
 Name the worktree, but do not let the payload *depend* on it: give the repo root and branch too, so a woken session whose worktree was pruned can still re-establish where it is.
 
+**State the facts as counts with the query that produced them, never as a bare assertion.** "Unresolved threads exist" is unfalsifiable on arrival; `unresolved=0 of 0` plus the command that measured it can be checked in a single call, and — the part that matters — a zero cannot be quietly narrated as a non-zero. This is the difference between a payload the woken session can audit and one it can only obey.
+
+**That applies with more force to any message you send another session**, where the requirement is not a format but a prohibition: **do not assert that work exists unless you ran a command that says so, and quote it.** A wake is a note to yourself and its worst case is wasted effort; a `task.assign` telling a *peer* that a PR has unanswered comments commits someone else to acting on your claim.
+
+This is measured, not hypothetical. A session dispatched seven such messages while querying only `--json number,title,headRefName,state,mergeStateStatus,reviewDecision,autoMergeRequest` — no comments field, no `reviewThreads`, and not one `gh api ... comments` call in the whole session. Two of the seven PRs had never received a single review comment. It went undetected because it was right five times out of seven **by base rate** — most reviewed PRs do have comments — so it read as a working feature rather than an unfetched guess. All seven had zero unresolved threads, so even the "correct" dispatches asked for work already discharged. See `swarm-messaging` §"Never assert a checkable fact you did not fetch".
+
 ```
 swarm_schedule(
   after: "15m",
@@ -375,7 +381,8 @@ swarm_schedule(
             start by running monitor-pr.py --once <n> and branch on the exit code.
             Backoff step 1 of 4 (next step: 45m).
             State when scheduled (<timestamp>, verify before trusting):
-            CI green, no reviews of any kind, lgtm-bound <auto value>."
+            CI green; reviewThreads unresolved=0 of 0; reviews=0; lgtm-bound <auto value>.
+            Premise check: gh pr view <n> --json state,reviewDecision,statusCheckRollup"
 )
 ```
 
