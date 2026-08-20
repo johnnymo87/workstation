@@ -364,6 +364,10 @@ The escalation is the *report*, not the stopping. Handing the PR back silently a
 
 Name the worktree, but do not let the payload *depend* on it: give the repo root and branch too, so a woken session whose worktree was pruned can still re-establish where it is.
 
+**State the facts as counts with the query that produced them, never as a bare assertion.** "Unresolved threads exist" is unfalsifiable on arrival; `unresolved=0 of 0` plus the command that measured it can be checked in a single call, and — the part that matters — a zero cannot be quietly narrated as a non-zero. This is the difference between a payload the woken session can audit and one it can only obey.
+
+**That applies with more force to any message you send another session.** A wake is a note to yourself and its worst case is wasted effort; a `task.assign` telling a *peer* that work exists commits someone else to acting on your claim. If you assert that a PR has unanswered review comments, carry the thread ids or the count and the query. An agent told to "reply to the inline comments" on a PR that has none has two obedient paths available — fabricate replies, or report success having done nothing — and both are worse than the false alarm that caused them. This is not hypothetical: it happened, cost a session fifteen minutes of verification against a PR that had never received a single review comment, and was caught only because that session distrusted the premise.
+
 ```
 swarm_schedule(
   after: "15m",
@@ -375,7 +379,8 @@ swarm_schedule(
             start by running monitor-pr.py --once <n> and branch on the exit code.
             Backoff step 1 of 4 (next step: 45m).
             State when scheduled (<timestamp>, verify before trusting):
-            CI green, no reviews of any kind, lgtm-bound <auto value>."
+            CI green; reviewThreads unresolved=0 of 0; reviews=0; lgtm-bound <auto value>.
+            Premise check: gh pr view <n> --json state,reviewDecision,statusCheckRollup"
 )
 ```
 
