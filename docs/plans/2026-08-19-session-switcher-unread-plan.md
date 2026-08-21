@@ -502,7 +502,46 @@ cutoff`.
 
 ---
 
-## Task 6: `POST /sessions/{id}/read`
+## Tasks 6-7: **DONE** — pigeon PR #125 (merged 2026-08-21)
+
+**The plan's premise for Task 7 was wrong, and the correction matters.** It located
+the clear in `app.ts`, in "the inbound paths (reply, slash command, and the
+callback/swipe answer on a question card)". Inbound user actions **never pass through
+`app.ts` at all**. Every one of them — typed reply, question-card callback, `/kill`,
+`/interrupt`, `/compact`, `/mcp`, `/model` — is enqueued by the Cloudflare worker and
+arrives at `Poller.dispatch()`. So there is exactly **one** boundary, not three, and
+the clear lives there as an optional `onInboundForSession` callback wired to
+`markAllRead` in `index.ts`.
+
+That happens to serve the design's rationale better than the plan did: the reason for
+"any inbound action" rather than "reply" is that answering a question card is a
+*callback*, and at the dispatch boundary it is indistinguishable from a reply — both
+are `execute` commands — so it cannot be forgotten.
+
+**Two things not to undo:**
+
+1. **Clear only for a command the daemon can dispatch.** An unrecognised
+   `commandType` warns and returns *without acking*, so the worker redelivers it for
+   24h. With the clear ahead of the type check, every retry re-cleared. Version skew
+   (worker deploying a new type first) produces exactly that loop.
+2. **The clear runs before dispatch**, because the user has already acted — a handler
+   that fails and leaves the command to retry must not also leave the session unread.
+
+**A known over-clear, accepted and documented in the code:** `markAllRead` advances to
+the max event id *at call time*, so it is monotone but **not idempotent across time**.
+A persistently failing handler re-clears at a later mark on each retry. Bounded by the
+24h cleanup; the exact fix (clamp to the command's `created_at`, which the worker
+already stores but does not send) is `workstation-ur4s`.
+
+**Gate before Task 11:** `workstation-cqit`. The route accepts any non-negative
+integer and the upsert is `MAX()`, so nothing can lower a watermark. Task 11's picker
+holds both `lastEventId` and `lastEventAt` from the same query — sending the
+*timestamp* by field confusion would permanently hide every future event for that
+session, silently and unrecoverably.
+
+---
+
+## Task 6: `POST /sessions/{id}/read` — DONE
 
 **Files:** `packages/daemon/src/app.ts` (beside the existing session routes), test in
 `packages/daemon/test/app.test.ts`.
@@ -521,7 +560,7 @@ the daemon's loopback surface today; do not invent one here.
 
 ---
 
-## Task 7: Clear on any inbound user action
+## Task 7: Clear on any inbound user action — DONE
 
 **Files:** `packages/daemon/src/app.ts` — the inbound paths (reply, slash command, and
 the **callback/swipe answer on a question card**).
@@ -600,6 +639,11 @@ a timeout, or any concurrency machinery — the walk is synchronous `bun:sqlite`
 
 **Step 3: Implement.** Run the query from the design against the existing connection,
 join onto the base list, and emit `unread`, `lastEventId`, and a presence flag.
+
+**Re-verify `COUNT(*) FILTER` here.** It was confirmed working against
+better-sqlite3 11.10.0 / SQLite 3.49.2 for the daemon, but this reader is
+`bun:sqlite` — a *different* SQLite build. Inheriting that result is exactly the kind
+of assumption this plan keeps catching.
 
 **Step 4:** Green (`bun test test/oc-session-list.spec.ts`), commit.
 
