@@ -73,7 +73,9 @@ things needed fixing and one of them was the same class of bug as review 1's:
    *presence* was derived from. If it came from `session_reads`, a session whose
    ledger had fully aged out but whose watermark survived would report
    `unread: 0` — "read, nothing new" — which is revision 1's exact failure at a
-   30-day horizon. Presence is now pinned to `EXISTS` in `session_events`.
+   30-day horizon (the retention proposed at the time; now 14d — the horizon
+   moved, the failure mode did not). Presence is now pinned to `EXISTS` in
+   `session_events`.
 2. **The concurrency claim was false**, and withdrawn; the reads move to the
    direct DB access `oc-session-list` already has.
 3. **The "all turns" work had already merged**, which forces the unit-of-unread
@@ -140,10 +142,41 @@ visible in the topic. That is the outbox's pre-existing at-least-once seam, not 
 new one — the same crash already risks a duplicate send on retry. Named rather
 than hidden.
 
-**Retention.** The ledger stores metadata only — no payload — so rows are tiny.
-It must outlive pigeon's `SESSION_TTL_MS` (7d), or the chronic-`?` problem below
-simply moves. Proposed 30 days, pruned by session, with the size re-measured
-before the number is fixed.
+**Retention: `2 * SESSION_TTL_MS` (14 days) — a margin, not a derivation.** The
+ledger stores metadata only — no payload — so rows are tiny. Writing it as a
+multiple of the TTL rather than as `14 * 24 * ...` keeps the two numbers moving
+together if the TTL changes; that is bookkeeping hygiene, and it is *not* the
+same as guaranteeing the property below.
+
+**Be precise about what this does and does not guarantee, because an earlier
+draft of this section overclaimed it.** Retention ≥ `SESSION_TTL_MS` secures the
+invariant only for a session whose last activity *was* a delivery: its final
+event is at `t`, the reaper removes it by `t + 7d`, so any retention past 7d
+outlives it. The `2 *` is margin for that plus the hourly prune granularity.
+
+It does **not** cover a session that stays alive while delivering nothing.
+`touch` refreshes the TTL on paths that produce no Telegram message at all —
+the mirror path, and the stop path when `!session.notify` — so a session can
+live indefinitely, emit nothing for 14 days, and have its ledger age out from
+under it. It then renders `·`. **No finite retention constant fixes this**; only
+anchoring the prune to session liveness would, and that was considered and
+rejected (below). The consequence is bounded and already legitimate: `·` means
+"no ledger for this session", which is exactly true here, and presence is keyed
+on `EXISTS` in `session_events`, so the silent zero cannot come back through
+this door.
+
+**Why the prune is by age alone, and not by session.** An earlier draft said
+"pruned by session", and a session-scoped predicate
+(`... AND session_id NOT IN (SELECT session_id FROM sessions)`) really would
+hold the invariant exactly for live sessions. It was dropped deliberately: it
+makes retention unbounded for a long-lived chatty session, and it fails
+catastrophically in the one case nobody tests — if `sessions` is ever empty or
+mid-migration, the subquery matches every row and deletes the entire ledger. A
+bare `sent_at < cutoff` cannot do that. The bounded, boring failure was
+preferred to the exact-but-sharp one.
+
+Sized against measurement (see "The measured cost", below), not estimate: at the
+busiest day observed in a 10-day window, 14 days of ledger is **2.2 MB**.
 
 **Why pigeon still owns it.** Revision 1's reason ("it already has the data") is
 gone, so this was re-decided rather than inherited. Two reasons survive: the
@@ -217,7 +250,7 @@ degraded silently to serial. It is withdrawn rather than fixed.
 above groups over the ledger, so a session with no surviving ledger rows produces
 no row at all and renders `·`. Deriving presence from `session_reads` (or from
 `sessions`) would return `unread: 0` for a session whose ledger has been fully
-pruned — reintroducing revision 1's silent zero at a 30-day horizon instead of a
+pruned — reintroducing revision 1's silent zero at a 14-day horizon instead of a
 one-hour one. This is the single most important sentence in the document.
 
 **Writes stay an endpoint**, because the daemon owns its DB:
@@ -335,15 +368,90 @@ first**: pigeon `545e65f`, "Show all of a turn's agent narration in Telegram, no
 just the final step" (#114, branch `telegram-all-turns`), merged 2026-08-19
 10:11 -0400 — from the session launched to explore it.
 
-Two consequences, neither optional:
+Revision 3 asserted two consequences. **Both have now been measured, and the
+first was wrong.** Corrected below rather than quietly edited, because the point
+of this document is to record which assumptions failed.
 
-1. **Multi-chunk entries are now the common case**, which is what forces the
-   unit-of-unread statement above.
-2. **The 30-day retention figure was reasoned against pre-#114 traffic and is
-   therefore unfounded.** Re-measure ledger growth against post-#114 volume
-   before fixing it. Rows are metadata-only so growth is unlikely to be the
-   binding constraint — the outbox governor's per-minute send budget still is —
-   but the number should come from a measurement, not from this sentence.
+1. ~~**Multi-chunk entries are now the common case.**~~ **False.** Post-#114,
+   **88% of delivered entries are still single-chunk.** The multi-chunk *share*
+   did roughly double — 6.4% → 12.0% — and mean chunks-per-entry rose 1.07 →
+   1.14, so the direction of the claim was right and its magnitude was not. The
+   unit-of-unread statement above survives anyway, because it never depended on
+   multi-chunk being *common* — only on it being *possible*, which it is (a
+   6-chunk entry appears post-#114). The claim was rhetorical support for a
+   conclusion that stands without it.
+2. **The 30-day retention figure was unfounded — and re-measuring did not
+   justify shrinking it for the reason expected.** See below: #114 did not
+   detectably raise the *entry* rate at all. 30 days was replaced by
+   `2 * SESSION_TTL_MS` on a coherence argument, not a cost one.
+
+### The measured cost
+
+**Instrument.** The daemon logs `outbox entry sent` exactly once per delivered
+entry, in the `allOk` branch — 1:1 with a future ledger row, so it is the
+feature's own unit rather than a proxy. It is **not** in the default journal:
+the unit sets `LogNamespace=pigeon`, so it needs
+`journalctl --namespace=pigeon`. Querying the default namespace returns only
+systemd's lifecycle lines and makes the daemon look silent since 12 Aug, which
+is when the namespace was introduced. Two proxies were rejected first:
+`outbox` itself keeps sent rows for one hour, and `swarm_messages` is a
+different population entirely — the same confusion that produced revision 1's
+fabricated "6% cancelled".
+
+**#114 went live 19 Aug 10:14** (checkout pulled `545e65f` at 10:13:37, daemon
+restarted 10:14:00) — not at merge time, since the daemon runs `tsx` against a
+working tree.
+
+**#114 did not detectably increase entry volume — and "not detectably" is doing
+real work in that sentence.** Daily totals ranged 23–940 *before* the deploy and
+411–469 after; the busiest day in the window is pre-#114. Because raw totals
+track how many agents were running, they were normalised per session:
+entries/session/day was 2.6–17.1 pre (mean ≈ 9.0) and 7.6 on the first full day
+post.
+
+**That is one post-change day against a pre-range spanning 6.6×, so it is not
+evidence of no change.** It is consistent with no change and has no power to
+detect anything short of roughly a doubling. What actually predicts the result
+is the *mechanism*: #114 batches a turn's narration into an entry that already
+existed, so entry count per turn is unchanged by construction, and the ledger
+writes one row per entry. The measurement is consistent with the mechanism;
+neither on its own is proof, and the honest statement is the conjunction.
+
+One caveat on the control: "distinct sessions/day" counts sessions with at least
+one delivery that day, which is endogenous. A change that made previously silent
+sessions start delivering would inflate the denominator and mask a real rate
+increase. #114's mechanism does not do that, but the control assumes it.
+
+**Task 8 is the well-powered re-measurement**, and it is free: it already
+queries the live `session_events` table, so it should check the observed daily
+rate against the ~290/day median here. If it comes in far above that, this
+section is what to revisit — though even a sustained 940/day was already priced
+in below.
+
+| Quantity | Measured |
+|---|---|
+| Bytes per row, incl. index | **168.6**, packed (not the ~100 previously assumed) |
+| Median day | ~290 entries |
+| Busiest day in window | 940 entries |
+| 14 days at the busiest rate | **2.2 MB** |
+| 30 days at the busiest rate | 4.5 MB |
+
+That row size is measured on a freshly bulk-loaded table, so it is the *packed*
+figure; a live table churning under an hourly prune carries free pages, plausibly
+1.5–2x. Likewise, anything journald dropped biases the counts *down*, so "940" is
+a floor rather than a ceiling. Neither matters: at 2x on both, 14 days is still
+under 9 MB, and cost never discriminated between the options anyway — both are
+noise against a 16 MB database. The retention number is settled by the coherence argument
+above (the ledger must outlive the session it describes), not by size.
+
+**The prune tick is real, and was verified rather than assumed.** The hourly
+`setInterval` in `index.ts` is the only thing that would run the ledger prune,
+and the daemon restarts often enough to be worth checking: 18% of runs are
+shorter than an hour and therefore never tick at all. Across 14 days it still
+fired ~22.5×/day against a ceiling of 24. Independently, the sibling
+`swarm_messages` cleanup is demonstrably working — every non-exempt row is
+under its 7-day retention, and the only older rows are `queued`, which its
+`WHERE` clause deliberately spares.
 
 ## Out of scope
 
