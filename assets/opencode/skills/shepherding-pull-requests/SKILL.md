@@ -5,24 +5,31 @@ description: Use when you are about to run `gh pr create`, immediately after it 
 
 # Shepherding Pull Requests
 
-> ## ⛔ THE WATCHDOG IS DISABLED (2026-08-20)
+> ## ⛔ DO NOT SCHEDULE WAKES FOR A PR — A DAEMON WATCHES NOW (2026-08-21)
 >
 > **Do not call `swarm_schedule` for a PR. Not once, not with a long delay, not "just one to be safe."**
-> Scheduled wakes ran unbounded overnight and burned tokens on PRs nobody was going to look at
-> until morning. The mechanism is off while it is redesigned (work-hours window, flat cadence,
-> stall cap, terminal-on-awaiting-merge).
+> Self-scheduled wakes backed off 15m → 45m → 2h → 4h and ran all night, paying a cold turn per
+> check to nearly always learn nothing had changed. They are gone for good, not pending redesign.
 >
-> **What replaces it:** when the tight loop has nothing left to do — CI green, threads resolved,
-> and the only thing outstanding is a reviewer or your own merge — **report the current state to
-> the user in plain text and end the turn.** Say explicitly that nobody is watching the PR anymore
-> and what the next step is. That is a legitimate stop *only because* this banner says so; it is
-> not the agent deciding the PR stopped being its problem.
+> **What watches instead:** `lgtm-shepherd`, a systemd timer on cloudbox that sweeps open PRs every
+> 20 minutes and sends the *human* one Telegram line when a PR has conflicts, is ready to merge, or
+> has gone quiet. It costs nothing when nothing is happening. (Design and rationale live in the
+> lgtm repo: `docs/plans/2026-08-21-author-side-shepherd-design.md`.)
+>
+> **So when the tight loop has nothing left to do** — CI green, threads resolved, and the only thing
+> outstanding is a reviewer or the user's own merge — **report the current state in plain text and
+> end the turn.** Ending the turn is correct here; it is not you deciding the PR stopped being your
+> problem.
+>
+> **Be accurate about what happens next, because it is not you.** The shepherd notifies the *user*,
+> not this session; nothing will wake you. So hand off deliberately: say what state the PR is in,
+> what you would do next, and that the shepherd will flag it if it stalls. Do not tell the user a
+> daemon will pick the work up — it will not, it will only tell them about it.
 >
 > Everything else in this skill still binds: pre-PR checks, replying to and resolving every thread,
 > re-requesting a non-APPROVED gating reviewer, and the tight 60-second loop while something is
-> actually moving. Sections below that describe scheduling wakes, backoff (15m/45m/2h/4h),
-> cancel-and-reschedule, or the 20-hour staleness refresh are **suspended** — read them as history
-> until this banner is removed.
+> actually moving. Sections below that describe scheduling wakes, backoff, cancel-and-reschedule,
+> or the 20-hour staleness refresh are **retired** — read them as history.
 
 A PR being open is not the end of the work — it's the middle of it. Opening the PR creates a coordination cost on the reviewer's plate; walking away mid-flight pushes the rest of that cost (chasing CI, addressing comments, re-requesting review) back onto the user. The job is to land the PR or hand it off with an honest, current status. Everything in this skill is in service of that disposition.
 
@@ -321,10 +328,10 @@ Loop exits only when **all** of the following are true in the same iteration:
 
 ### The watchdog: what to do when the only thing left is waiting
 
-> **⛔ SUSPENDED — see the banner at the top of this file.** Do not schedule wakes. Exit conditions
-> unmet, CI green, nothing to fix, no reviewer yet → **report state to the user and end the turn**,
-> saying plainly that the PR is now unwatched. The rest of this section is retained for the
-> redesign and does not describe current behaviour.
+> **⛔ RETIRED — see the banner at the top of this file.** Do not schedule wakes. Exit conditions
+> unmet, CI green, nothing to fix, no reviewer yet → **report state to the user and end the turn.**
+> The `lgtm-shepherd` timer watches the PR from there and tells the user if it stalls; it does not
+> wake you. The rest of this section is kept as history and does not describe current behaviour.
 
 Exit conditions unmet, CI green, nothing to fix, no reviewer yet. Do **not** keep the 60-second loop running for hours. Schedule a wake, end the turn, and let the wake bring you back.
 
@@ -419,7 +426,7 @@ Set `expires_in` generously. A wake defaults to expiring six hours after its del
 - **Re-requesting review after an APPROVED.** If the latest non-bot review is already `APPROVED`, don't re-request when you push fixes for leftover inline threads. The reviewer signed off; pinging them again to re-confirm is noise. Re-request only when the latest non-bot review is `CHANGES_REQUESTED` or `COMMENTED`.
 - **Re-requesting from the wrong login.** lgtm's reviewer pool rotates, but on re-review it pins to the prior reviewer. Always use the exact login from the most recent non-bot review, not a hardcoded default.
 - **Using `sleep 300` while polling.** A 5-minute idle gap can expire Anthropic's prompt cache and force the next turn to re-send the full prompt. Use `sleep 60` for monitoring loops. (This is an argument against *medium* sleeps specifically. Once you've decided to wait tens of minutes, the cache is lost either way and the watchdog's scheduled wake is strictly cheaper than continuing to poll.)
-- **Ending the turn without scheduling a wake.** *(Suspended while the watchdog is disabled — ending the turn with an explicit "this PR is now unwatched, here is its state" report is the current expected behaviour.)* Stopping is only legitimate if something will bring you back. Nothing runs between your turns — no timer, no hook, no notification. An unscheduled stop is indistinguishable from abandoning the PR, and it is the failure this skill exists to prevent, reached by a more comfortable route.
+- **Ending the turn without scheduling a wake.** *(Retired. Ending the turn with an explicit state report is now correct: `lgtm-shepherd` watches the PR and tells the user if it stalls. The failure to avoid is no longer stopping — it is stopping **silently**, or implying something will resume the work automatically when only a notification is coming.)* Stopping used to be legitimate only if something would bring you back. Nothing runs between your turns — no timer, no hook, no notification. An unscheduled stop is indistinguishable from abandoning the PR, and it is the failure this skill exists to prevent, reached by a more comfortable route.
 - **Leaving a wake scheduled after the PR lands.** The merged branch's worktree gets pruned, and the orphaned wake fires into a directory that no longer exists — where it is accepted, marked delivered, and then does nothing at all, silently. Cancel on every terminal state.
 - **Doing the work with nothing queued behind you.** The wake that woke you is already spent. If you start fixing threads without having scheduled the next wake first, a context death mid-fix abandons the PR exactly as if there had been no watchdog — which is the failure the watchdog was built for. Schedule, then act, then cancel-and-replace.
 - **Re-invoking `--once` in a loop.** That is the 60-second poll with extra ceremony and a cold cache on every pass — strictly worse than either real option. If you are awake and still idle, reschedule and stop. If you expect an answer within a minute or two, use the normal loop.
