@@ -40,46 +40,42 @@ that does not exist. Tasks 1-8 are pigeon; 9-12 are workstation.
 
 ---
 
-## Task 0: Measure post-#114 volume
+## Task 0: Measure post-#114 volume — **DONE**
 
-This is the design's riskiest unknown and it gates Task 5's retention number. Do not
-skip it and do not guess.
+Completed 2026-08-21; results are in the design doc under "The measured cost". Read
+that section before Task 5 — the retention number and its justification both live
+there. Summary, so this task is not re-run:
 
-**Why:** pigeon `545e65f` (#114, merged 2026-08-19) put every turn's narration into
-Telegram. The design's "30 days" was reasoned against *pre*-#114 traffic.
+- **#114 did not detectably raise the entry rate** — mechanism (it batches narration
+  into an entry that already existed) plus one consistent post-change day.
+  Entries/session/day: 2.6–17.1 pre (mean ≈ 9.0), 7.6 on the first full day post. That
+  single day cannot rule out a change smaller than ~2x, so **Task 8 re-measures it**
+  against the live table.
+- **88% of entries are still single-chunk.** The design's "multi-chunk is now the
+  common case" was **false** and is struck through there.
+- **168.6 bytes/row** including the index — not the ~100 this plan originally assumed.
+- Median ~290 entries/day, busiest 940/day.
+- **Retention is now `2 * SESSION_TTL_MS` (14d)** — written as a multiple so the two
+  numbers move together, which is hygiene, *not* a guarantee. It secures "the ledger
+  outlives the session" only for a session whose last activity was a delivery; an
+  alive-but-silent session still ages out and renders `·`. No finite constant fixes
+  that, and the session-scoped prune that would was rejected (see the design doc — it
+  deletes the whole ledger if `sessions` is ever empty). Cost 2.2 MB at the busiest
+  rate; 30d would have been 4.5 MB, so cost never discriminated.
 
-**Step 1:** Find the daemon DB.
+Three things the original version of this task got wrong, recorded because each would
+have silently produced a wrong number:
 
-```bash
-ls -la /home/dev/.local/share/pigeon/*.db 2>/dev/null || echo "$OPENCODE_ROUTING_DB"
-```
-
-**Step 2:** Measure delivered entries per day, before and after the merge.
-
-```bash
-sqlite3 "file:$DB?mode=ro" "
-  SELECT date(created_at/1000,'unixepoch') AS day, kind, COUNT(*)
-  FROM outbox GROUP BY day, kind ORDER BY day DESC LIMIT 40;"
-```
-
-Outbox only keeps sent rows 1h, so this undercounts. Cross-check against a source with
-real retention:
-
-```bash
-sqlite3 "file:$DB?mode=ro" "
-  SELECT date(created_at/1000,'unixepoch') AS day, COUNT(*)
-  FROM swarm_messages GROUP BY day ORDER BY day DESC LIMIT 14;"
-```
-
-**Step 3:** Record the numbers in the design doc, replacing the "30 days, to be
-re-measured" sentence with a measured figure and the arithmetic behind it. A ledger row
-is roughly 100 bytes; state rows/day, bytes/day, and the retention you chose.
-
-**Step 4:** Commit.
-
-```bash
-git commit -am "docs: size the unread ledger retention against post-#114 volume"
-```
+1. **There is no `sqlite3` on this host.** Use `bun` with `bun:sqlite` in readonly mode
+   (`new Database(path, { readonly: true })`) — the live daemon is writing to that file.
+2. **`swarm_messages` is not a proxy for Telegram deliveries.** It is a different
+   population; using it is the same mistake that produced revision 1's fabricated
+   "6% cancelled".
+3. **The right instrument is the daemon's own log line** `outbox entry sent`, which
+   fires once per delivered entry in the `allOk` branch — 1:1 with a future ledger row.
+   It lives in a **separate journal namespace**: `journalctl --namespace=pigeon`.
+   Without that flag the daemon appears to have stopped logging on 12 Aug, which is
+   merely when `LogNamespace=pigeon` was added to the unit.
 
 ---
 
@@ -143,9 +139,16 @@ Expected: FAIL — cannot resolve `session-events-schema`.
 
 ```ts
 import type BetterSqlite3 from "better-sqlite3";
+import { SESSION_TTL_MS } from "./schema";
 
-// Retention is set by Task 0's measurement, not by guesswork.
-export const SESSION_EVENTS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * Derived from SESSION_TTL_MS, not chosen independently: the ledger must OUTLIVE the
+ * session it describes, or a session that is still alive renders as unknown merely
+ * because its events aged out. Deriving it keeps that invariant true if the TTL
+ * changes. Sized by measurement (design doc, "The measured cost"): 2.2 MB at the
+ * busiest day observed.
+ */
+export const SESSION_EVENTS_RETENTION_MS = 2 * SESSION_TTL_MS; // 14 days
 
 export function initSessionEventsSchema(db: BetterSqlite3.Database): void {
   db.exec(`
@@ -417,9 +420,15 @@ if (allOk) {
         kind: entry.kind,
         sentAt: now,
       });
+      // Log INSIDE the guard, not after the block. This log line is the only
+      // instrument that measures delivery volume (Task 0 used it, Task 8 will).
+      // Leaving it unconditional while the append is guarded would make the two
+      // diverge in exactly the scenario the guard exists for -- a second
+      // markSent caller -- and the instrument would silently stop being 1:1
+      // with the ledger at the moment it started mattering most.
+      this.log("outbox entry sent", { /* ...existing fields... */ });
     }
   });
-  // ...existing logging...
 }
 ```
 
@@ -442,8 +451,14 @@ test in `packages/daemon/test/session-events-repo.test.ts`.
 **Step 1: Failing test** — rows older than the cutoff go; newer stay; a surviving
 watermark does not resurrect them.
 
-**Step 2-4:** Call `pruneOlderThan(now - SESSION_EVENTS_RETENTION_MS)` on the same cron
-that calls `cleanupOlderThan`. Use the figure Task 0 measured. Commit.
+**Step 2-4:** Call `pruneOlderThan(now - SESSION_EVENTS_RETENTION_MS)` on the same
+hourly `setInterval` in `index.ts` that calls `cleanupOlderThan`. The constant is
+`2 * SESSION_TTL_MS` from Task 1 — do not re-derive or inline a literal here. Commit.
+
+That tick was verified to actually fire (~22.5x/day against a ceiling of 24; 18% of
+daemon runs are too short to ever tick). Unlike the swarm cleanup, which spares
+`queued` rows, every ledger row is prunable, so the predicate is a bare `sent_at <
+cutoff`.
 
 ---
 
@@ -491,12 +506,30 @@ Commit, open the pigeon PR, and **land it before starting Task 8.**
 Not a code task. After the pigeon PR merges and the daemon restarts:
 
 ```bash
-sqlite3 "file:$DB?mode=ro" "SELECT COUNT(*), MAX(sent_at) FROM session_events;"
+# No sqlite3 on this host, and the daemon is writing to this file -- read-only.
+bun -e 'import{Database}from"bun:sqlite";
+  const db=new Database(process.env.OPENCODE_ROUTING_DB,{readonly:true});
+  console.log(db.query("SELECT COUNT(*) n, MAX(sent_at) newest FROM session_events").get());'
 ```
 
 Expected: a growing count. If it is zero after ten minutes of fleet activity, stop —
 Task 4 is not reaching its write point, and everything downstream would be built on an
 empty table.
+
+**Then do the re-measurement Task 0 could not.** Task 0's "#114 did not raise the entry
+rate" rests on a single post-change day against a pre-range spanning 6.6× — consistent
+with the mechanism, but underpowered on its own. This table is the well-powered version
+and it costs one query:
+
+```bash
+bun -e 'import{Database}from"bun:sqlite";
+  const db=new Database(process.env.OPENCODE_ROUTING_DB,{readonly:true});
+  console.log(db.query("SELECT date(sent_at/1000,\"unixepoch\") d, COUNT(*) n FROM session_events GROUP BY d ORDER BY d DESC LIMIT 14").all());'
+```
+
+Compare against Task 0's median of ~290/day and busiest 940/day. Sustained rates far
+above that mean the retention sizing in the design should be revisited — though 940/day
+sustained was already priced in at 2.2 MB.
 
 ---
 
@@ -610,4 +643,6 @@ Commit, open the workstation PR, and shepherd it (`shepherding-pull-requests`).
 - Jumping clears; answering a question card in Telegram clears.
 - A fully-pruned ledger renders `·`, never `0` — there is a named test for this.
 - `nix flake check` passes with updated pinned counts.
-- The design doc's retention figure is a measured number, not "to be re-measured".
+- The design doc's retention figure is a measured number expressed as a multiple of the
+  TTL (`2 * SESSION_TTL_MS`), not "to be re-measured", and the doc is explicit about
+  what that does and does not guarantee. **(Done — Task 0.)**
