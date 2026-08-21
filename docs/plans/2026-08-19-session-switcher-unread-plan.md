@@ -79,7 +79,43 @@ have silently produced a wrong number:
 
 ---
 
-## Task 1: `session_events` + `session_reads` schema
+## Tasks 1-5: **DONE** — pigeon PR #124 (merged 2026-08-21)
+
+Shipped together, and Task 5 was pulled forward deliberately: its tests and its
+retention constant were already in the branch and its hookup is one line beside the
+existing outbox/alert/swarm cleanups, so shipping those while deferring the call
+would have left the table growing with nothing to trim it and tests that passed
+either way.
+
+What landed: `session-events-schema.ts`, `session-events-repo.ts`, wiring in
+`database.ts`, the guarded `markSent` (now returning `boolean`, mirroring
+`AlertRepository.markSent`), `commitDelivery()` in `outbox-sender.ts`, and the prune
+on the hourly tick in `index.ts`. Full daemon suite green (1549), `tsc` clean.
+
+**Three things worth carrying forward:**
+
+1. **`commitDelivery` is extracted, not inline.** The property worth protecting is the
+   *coupling* between the guard and the append, and inline that coupling is unreachable
+   from any test — exercising it needs a second `markSent` caller and there is exactly
+   one. Mutation testing proved the gap: decoupling the append from the guard survived
+   the whole suite. Do not re-inline it.
+2. **The delivery log line now lives inside the guard.** It is the only instrument that
+   measures delivery volume (it sized retention; Task 8 re-measures with it), so
+   unconditional it would drift from the ledger in exactly the second-caller scenario
+   the guard anticipates.
+3. **Two mutation survivors are deliberate**: dropping the `sent_at` index
+   (performance only) and dropping the `db.transaction` wrapper (better-sqlite3 is
+   synchronous, so its value is crash-atomicity — unreachable in-process). Do not
+   "fix" either with a test that cannot fail.
+
+Also: `COUNT(*) FILTER` was verified against the actual pinned binary
+(better-sqlite3 11.10.0 / SQLite 3.49.2), and `idx_session_events_session` verified in
+use via `EXPLAIN QUERY PLAN`. **Task 9's reader is `bun:sqlite`, a different SQLite
+build — re-verify `FILTER` there rather than inheriting this result.**
+
+---
+
+## Task 1: `session_events` + `session_reads` schema — DONE
 
 **Files:**
 - Create: `packages/daemon/src/storage/session-events-schema.ts`
@@ -184,7 +220,7 @@ git commit -m "feat(unread): session_events ledger and session_reads watermark s
 
 ---
 
-## Task 2: Repo — append, count, advance
+## Task 2: Repo — append, count, advance — DONE
 
 **Files:**
 - Create: `packages/daemon/src/storage/session-events-repo.ts`
@@ -226,10 +262,14 @@ it("advanceRead is monotonic and absorbs out-of-order and duplicate writes", () 
   repo.append({ sessionId: "s1", notificationId: "n1", kind: "stop", sentAt: 1 });
   repo.append({ sessionId: "s1", notificationId: "n2", kind: "stop", sentAt: 2 });
   repo.advanceRead("s1", 2, 100);
+  // Assert IMMEDIATELY after the stale write. An earlier version of this test
+  // replayed the current value first and only then asserted, so the replay repaired
+  // the regression before anything looked at it and a NON-MONOTONIC implementation
+  // passed. Mutation testing caught that; the ordering IS the test.
   repo.advanceRead("s1", 1, 101); // stale generation
+  expect(repo.lastReadId("s1")).toBe(2);
   repo.advanceRead("s1", 2, 102); // duplicate
   expect(repo.unreadBySession().get("s1")?.unread).toBe(0);
-  expect(repo.lastReadId("s1")).toBe(2);
 });
 
 it("advanceRead works for a session with no row yet", () => {
@@ -344,7 +384,7 @@ export class SessionEventsRepo {
 
 ---
 
-## Task 3: Wire into storage
+## Task 3: Wire into storage — DONE
 
 **Files:** `packages/daemon/src/storage/repos.ts`, `packages/daemon/src/storage/database.ts`
 
@@ -356,7 +396,7 @@ Call `initSessionEventsSchema(db)` where the other `init*Schema` calls happen, a
 
 ---
 
-## Task 4: Write the ledger row at the moment of delivery
+## Task 4: Write the ledger row at the moment of delivery — DONE
 
 **Files:**
 - Modify: `packages/daemon/src/storage/outbox-repo.ts:137-143`
@@ -443,7 +483,7 @@ outbox's pre-existing at-least-once behaviour.
 
 ---
 
-## Task 5: Retention
+## Task 5: Retention — DONE (shipped with 1-4)
 
 **Files:** `packages/daemon/src/index.ts` (beside the existing outbox cleanup call),
 test in `packages/daemon/test/session-events-repo.test.ts`.
@@ -502,6 +542,11 @@ Commit, open the pigeon PR, and **land it before starting Task 8.**
 ---
 
 ## Task 8: Verify the deployed daemon actually writes rows
+
+**Tracked as bead `workstation-njgr`.** Blocked until the daemon restarts on a commit
+containing PR #124 — it runs `tsx` against the shared checkout and restarts nightly at
+03:00 plus ad hoc, so *merged is not deployed*. Confirm the running code contains the
+merge before concluding anything from an empty table.
 
 Not a code task. After the pigeon PR merges and the daemon restarts:
 
