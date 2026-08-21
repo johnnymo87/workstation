@@ -16,6 +16,12 @@
 let
   enableLgtm = true;  # AI-powered PR review daemon (flip to true to activate)
 
+  # Author-side PR shepherd (see systemd.services.lgtm-shepherd below). A
+  # separate flag from enableLgtm on purpose: the shepherd watches PRs *I*
+  # authored and is a different blast radius from the reviewer that handles
+  # work PRs, so each must be switchable without the other.
+  enableLgtmShepherd = true;
+
   # oc-auto-attach is a self-packaged shell tool (pkgs/oc-auto-attach) that the
   # pigeon daemon shells out to after a `/launch` telegram command, to open the
   # new session in the right tmux+nvim window. We pin its absolute path here
@@ -794,6 +800,71 @@ in
     timerConfig = {
       OnCalendar = "*:0/10";
       Persistent = true;
+    };
+  };
+
+  # Author-side PR shepherd (lgtm-afm). Watches MY open PRs and sends one
+  # Telegram line when one needs attention: merge conflicts, ready-to-merge, or
+  # gone quiet. It replaces the agent-side watchdog that workstation#398
+  # disabled, where the authoring agent woke ITSELF on a backoff schedule all
+  # night — a cold LLM turn per check, almost always to learn nothing had
+  # changed. Doing the same watching in a program costs nothing, so the model
+  # is only involved when there is something to say.
+  #
+  # Deliberately a SEPARATE unit from lgtm-run rather than another phase inside
+  # it: a bug in the author-side lane must not stop work PRs being reviewed.
+  # It shares the lgtm checkout only as a library.
+  #
+  # Sends no session wakes and merges nothing — Stage 0 routes everything to
+  # the human. See lgtm's docs/plans/2026-08-21-author-side-shepherd-design.md.
+  systemd.services.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
+    description = "LGTM author-side PR shepherd sweep";
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.curl pkgs.coreutils pkgs.bash ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/lgtm";
+      Environment = [
+        "HOME=/home/dev"
+        "LGTM_PROJECTS_DIR=/home/dev/projects"
+        # The kill switch. Flipping this (or enableLgtmShepherd) off is the
+        # whole rollback story: nothing else reads shepherd state.
+        "LGTM_ENABLE_SHEPHERD=1"
+      ];
+      ExecStart = "${pkgs.writeShellScript "lgtm-shepherd" ''
+        set -euo pipefail
+        export PATH="/home/dev/.nix-profile/bin:/home/dev/.local/bin:$PATH"
+        # `gh pr list --author @me` resolves @me from this token, so the PRs
+        # swept are exactly the ones this identity authored.
+        export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        if [ ! -d /home/dev/projects/lgtm/node_modules ]; then
+          cd /home/dev/projects/lgtm
+          ${pkgs.nodejs}/bin/npm install
+        fi
+        exec ${pkgs.nodejs}/bin/node \
+          /home/dev/projects/lgtm/node_modules/tsx/dist/cli.mjs \
+          /home/dev/projects/lgtm/src/shepherdMain.ts
+      ''}";
+    };
+  };
+
+  # Every 20 minutes, around the clock. Evaluation is free and must keep
+  # running overnight so a state change is observed when it happens; the
+  # 09:00–21:00 America/New_York quiet window lives in the code and gates
+  # DELIVERY only.
+  #
+  # Persistent=false on purpose, unlike lgtm-run: a sweep missed while the host
+  # was down is worthless, because the next tick re-derives everything from
+  # live GitHub state. Replaying it would only risk a catch-up burst.
+  systemd.timers.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*:0/20";
+      Persistent = false;
+      RandomizedDelaySec = 60;
     };
   };
 
