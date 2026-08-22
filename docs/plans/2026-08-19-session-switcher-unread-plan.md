@@ -580,7 +580,38 @@ Commit, open the pigeon PR, and **land it before starting Task 8.**
 
 ---
 
-## Task 8: Verify the deployed daemon actually writes rows
+## Task 8: **DONE** — verified green on the live daemon 2026-08-22
+
+**The pigeon half is complete.** Five checks, all passing:
+
+1. **Deployed, confirmed not assumed.** Reflog shows only fast-forwards; the daemon
+   restarted 03:00. (It was actually live from ~18:42 the previous evening.)
+2. **The write path is exactly 1:1** — 66 ledger rows against 66 `outbox entry sent`
+   log lines over the same window. Not approximately; equal. This is only checkable
+   *because* the log line was moved inside the guard in Task 4.
+3. **Retention sizing holds.** 2026-08-21 saw 306 delivered entries, sitting on Task
+   0's ~290/day median, 940/day still the worst case. This is the well-powered
+   re-measurement Task 0 could not do, and it *agrees* with the mechanism argument
+   rather than merely being consistent with it. No change to the 14-day figure.
+4. **Task 7 fired in production, unprompted** — a real session's watermark advanced
+   at 01:48Z because someone acted in Telegram.
+5. **The hourly prune tick is alive**, evidenced by its siblings logging every hour;
+   the prune itself logs nothing because the oldest row is ~17h old against a
+   14-day retention. Correct behaviour, not silence.
+
+Unread arithmetic checked exactly: 66 total − 1 mirror − 6 below watermark = 59, and
+`unreadBySession` returns 59 across 14 sessions. Live kinds are `stop`, `swarm`,
+`mirror` — so the mirror exclusion has real input and is not dead code.
+
+**Two instrument mistakes worth inheriting**, both the shape Task 0 kept hitting:
+`journalctl --since 'today 03:00'` returned nothing and I briefly concluded the
+cleanup tick was dead — the query was wrong, not the system. And comparing 66 rows
+over an overnight window against a 290/day median is apples-to-oranges; the fix was
+to use the *same* instrument over full days.
+
+---
+
+### Original instructions
 
 **Tracked as bead `workstation-njgr`.** Blocked until the daemon restarts on a commit
 containing PR #124 — it runs `tsx` against the shared checkout and restarts nightly at
