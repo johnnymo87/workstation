@@ -8,6 +8,7 @@ import { parseCliArgs } from "../oc-session-list.js";
 import {
   attentionCandidates,
   buildOwnersMap,
+  buildUnreadMap,
   queryWithState,
   runOrphanGc,
   type SessionWithStateRow,
@@ -858,6 +859,9 @@ describe("S6: effective_state and the child fold", () => {
     pendingQuestions: [],
     lastActivity: 1000,
     updatedAt: 1000,
+    unread: null,
+    unread_state: "absent",
+    last_event_id: null,
     ...o,
   });
   // Only "/gone" is missing, so a fixture opts INTO the dir-missing path.
@@ -1277,6 +1281,309 @@ describe("S6: the union lands BEFORE ownership is resolved", () => {
       expect(outside!.activity).toBe("working"); // owner won; Rule 2 would say "retry"
     } finally {
       db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("buildUnreadMap & unread counts (Task 9)", () => {
+  const baseRows = [
+    { id: "root_1", title: "Root 1", parent_id: null, directory: "/p", time_updated: 1000, root_id: "root_1" },
+    { id: "child_1", title: "Child 1", parent_id: "root_1", directory: "/p", time_updated: 1000, root_id: "root_1" },
+    { id: "root_2", title: "Root 2", parent_id: null, directory: "/p", time_updated: 2000, root_id: "root_2" },
+  ];
+
+  function createTestRoutingDb(path: string): Database {
+    const db = new Database(path);
+    db.exec(`
+      CREATE TABLE session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE TABLE session_reads (
+        session_id TEXT PRIMARY KEY,
+        last_read_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    return db;
+  }
+
+  it("a session with events above the watermark reports that count", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100),
+          (2, 'root_1', 'swarm', 200),
+          (3, 'root_1', 'stop', 300);
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 1, 150);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      const entry = unreadMap!.get("root_1");
+      expect(entry).toBeDefined();
+      expect(entry!.unread).toBe(2);
+      expect(entry!.last_event_id).toBe(3);
+      expect(entry!.last_event_at).toBe(300);
+      expect(warnings).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("kind='mirror' rows are excluded from the count", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'swarm', 100),
+          (2, 'root_1', 'mirror', 200),
+          (3, 'root_1', 'mirror', 250),
+          (4, 'root_1', 'stop', 300);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows);
+      expect(unreadMap).not.toBeNull();
+      const entry = unreadMap!.get("root_1");
+      expect(entry).toBeDefined();
+      expect(entry!.unread).toBe(2); // events 1 and 4 only, 2 & 3 excluded
+      expect(entry!.last_event_id).toBe(4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("absent session yields unread_state 'absent' and unread null, NOT 0 (prevents silent-zero regression)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      // Only root_1 has events in ledger; root_2 is completely absent
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows);
+      expect(unreadMap).not.toBeNull();
+      expect(unreadMap!.has("root_2")).toBe(false);
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+      });
+
+      const root2 = rows.find((r) => r.id === "root_2");
+      expect(root2).toBeDefined();
+      expect(root2!.unread_state).toBe("absent");
+      expect(root2!.unread).toBeNull();
+      expect(root2!.unread).not.toBe(0);
+      expect(root2!.last_event_id).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a session whose ledger rows are ALL at or below the watermark reports unread: 0 with unread_state: 'counted'", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100),
+          (2, 'root_1', 'swarm', 200);
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 2, 250);
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+      });
+
+      const root1 = rows.find((r) => r.id === "root_1");
+      expect(root1).toBeDefined();
+      expect(root1!.unread_state).toBe("counted");
+      expect(root1!.unread).toBe(0);
+      expect(root1!.last_event_id).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an unreadable/missing routing DB yields unread_state: 'unavailable' for every row, emits a warning, and STILL returns base list", () => {
+    const warnings: string[] = [];
+    const missingPath = "/definitely/not/a/real/routing.db";
+
+    const unreadMap = buildUnreadMap(missingPath, baseRows, (m) => warnings.push(m));
+    expect(unreadMap).toBeNull();
+    expect(warnings.length).toBeGreaterThanOrEqual(1);
+    expect(warnings.some((w) => w.includes("routing db not found") || w.includes("unavailable"))).toBe(true);
+
+    const rows = queryWithState(baseRows, {
+      routingDbPath: missingPath,
+      onWarn: (m) => warnings.push(m),
+    });
+
+    expect(rows.length).toBe(baseRows.length);
+    for (const r of rows) {
+      expect(r.unread_state).toBe("unavailable");
+      expect(r.unread).toBeNull();
+      expect(r.last_event_id).toBeNull();
+    }
+  });
+
+  it("a routing DB lacking the session_events table yields unread_state: 'unavailable', emits warning, and returns base list", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = new Database(p);
+      db.exec(`CREATE TABLE some_other_table (id INTEGER PRIMARY KEY)`);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).toBeNull();
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("no session_events table");
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+        onWarn: (m) => warnings.push(m),
+      });
+
+      expect(rows.length).toBe(baseRows.length);
+      for (const r of rows) {
+        expect(r.unread_state).toBe("unavailable");
+        expect(r.unread).toBeNull();
+        expect(r.last_event_id).toBeNull();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("last_event_id is emitted and equals MAX(id) for that session", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (2, 'root_1', 'stop', 100),
+          (7, 'root_1', 'swarm', 200),
+          (15, 'root_1', 'stop', 300);
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+      });
+
+      const root1 = rows.find((r) => r.id === "root_1");
+      expect(root1).toBeDefined();
+      expect(root1!.last_event_id).toBe(15);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a CHILD row carrying unread events triggers a warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'child_1', 'swarm', 100),
+          (2, 'child_1', 'stop', 200);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("child session child_1 carries 2 unread event(s)");
+      expect(warnings[0]).toContain("root-only");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a ledger session_id absent from baseRows does NOT trigger the child warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'outside_child', 'swarm', 100),
+          (2, 'outside_child', 'stop', 200);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      expect(warnings).toEqual([]); // No warnings for sessions not in baseRows
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("event with id 0 is not counted when watermark is unread / COALESCE(r.last_read_id, 0)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (0, 'root_1', 'stop', 100);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows);
+      expect(unreadMap).not.toBeNull();
+      const entry = unreadMap!.get("root_1");
+      expect(entry).toBeDefined();
+      // id 0 is <= 0, so COUNT(*) FILTER (WHERE e.id > COALESCE(r.last_read_id, 0)) gives 0
+      expect(entry!.unread).toBe(0);
+      expect(entry!.last_event_id).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays SILENT on the healthy path (no unexpected warnings)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      expect(warnings).toEqual([]);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
