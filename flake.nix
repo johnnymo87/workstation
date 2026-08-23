@@ -938,8 +938,8 @@
           echo "GATE FAILURE: session_switcher lua suite did not reach its final pass line." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 4 ] || {
-          echo "GATE FAILURE: expected 4 'PASS  ' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 5 ] || {
+          echo "GATE FAILURE: expected 5 'PASS  ' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/out.txt")." >&2
           exit 1
         }
@@ -1340,6 +1340,35 @@
         touch $out
       '';
 
+      # Typecheck the plugins directory.
+      #
+      # Added because its absence let a defect ship in the very PR that added
+      # this check: four test fixtures used `unread_state: "present"`, a value
+      # that is not in the `"counted" | "absent" | "unavailable"` union. `bun
+      # test` transpiles without typechecking and `bun build` does not check
+      # either, so the suite was green and the literal was meaningless. tsc
+      # reported exactly those four errors and nothing else -- the tree is
+      # otherwise clean, so this gate costs nothing to keep green.
+      #
+      # The frontdoor tsc run above covers a different directory; this one is
+      # the plugins' own tsconfig (strict, noEmit, isolatedModules).
+      plugin-tsc = devboxPkgs.runCommand "plugin-tsc-typecheck" {
+        nativeBuildInputs = [ devboxPkgs.nodejs ];
+      } ''
+        cp -r --no-preserve=mode,ownership ${self} ./repo
+        cd ./repo/assets/opencode/plugins
+        ln -s ${pluginTestNodeModules}/node_modules ./node_modules
+        export HOME="$TMPDIR/home"
+        mkdir -p "$HOME"
+
+        node_modules/.bin/tsc --noEmit 2>&1 | tee "$TMPDIR/tsc.txt"
+        if [ -s "$TMPDIR/tsc.txt" ]; then
+          echo "GATE FAILURE: tsc reported errors in assets/opencode/plugins." >&2
+          exit 1
+        fi
+        touch $out
+      '';
+
       # The vitest half (test/**/*.test.ts).
       #
       # Copies the whole ${self} rather than just the plugins directory because
@@ -1443,8 +1472,18 @@
           # early-returned would still pass the pass/fail/skip gate above.
           expects=$(sed -nE 's/^ *([0-9]+) expect\(\) calls.*/\1/p' "$TMPDIR/bun-out.txt" | head -1)
           expects=''${expects:-0}
-          if [ "$expects" -ne 240 ]; then
-            echo "GATE FAILURE: $f reported $expects expect() call(s); exactly 240 is expected." >&2
+          case "$f" in
+            test/oc-session-list.spec.ts)
+              expected_expects=262
+              ;;
+            *)
+              echo "GATE FAILURE: unrecognised spec file $f has no pinned expect() count in flake.nix." >&2
+              echo "Register it in the case block with its measured expect() call count." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$expects" -ne "$expected_expects" ]; then
+            echo "GATE FAILURE: $f reported $expects expect() call(s); exactly $expected_expects is expected." >&2
             echo "If you added or removed assertions, update this pin with the measured count." >&2
             exit 1
           fi

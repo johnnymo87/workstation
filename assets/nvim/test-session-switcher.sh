@@ -238,12 +238,13 @@ printf 'PASS  session_switcher.model unit tests (%s assertions via nvim -l)\n' "
 # --- Cross-language contract: the state vocabulary must not DRIFT. -----------
 #
 # oc-session-list-fold.ts owns `effective_state`; model.lua mirrors the list in
-# M.STATES and keys its pierce off two of them. Nothing else binds the two
-# sides: the bun tests build TS fixtures and the Lua tests build Lua fixtures,
-# each using its OWN copy of the literals, so renaming a state CLI-side would
-# leave the pierce matching nothing while both suites stayed green. That is the
-# drift this repo keeps getting bitten by, so it is checked mechanically rather
-# than by convention.
+# M.STATES and keys its pierce off two of them. oc-session-list-state.ts owns
+# `unread_state`; model.lua branches on each member in M.unread_badge.
+# Nothing else binds the two sides: the bun tests build TS fixtures and the
+# Lua tests build Lua fixtures, each using its OWN copy of the literals, so
+# renaming a state CLI-side would leave the Lua side mis-rendering while both
+# suites stayed green. That is the drift this repo keeps getting bitten by,
+# so it is checked mechanically rather than by convention.
 ts_states="$(sed -n '/^const SEVERITY: Record<EffectiveState, number> = {/,/^};/p' \
   assets/opencode/plugins/oc-session-list-fold.ts \
   | sed -n 's/^  \([a-z]*\):.*/\1/p' | sort | tr '\n' ' ')"
@@ -263,5 +264,24 @@ if [ "$ts_states" != "$lua_states" ]; then
   exit 1
 fi
 printf 'PASS  effective_state vocabulary matches across CLI and model.lua (%s)\n' "$ts_states"
+
+ts_unread="$(sed -n '/^export interface SessionWithStateRow/,/^}/p' \
+  assets/opencode/plugins/oc-session-list-state.ts \
+  | sed -n 's/^[[:space:]]*unread_state:[[:space:]]*\(.*\);/\1/p' \
+  | tr '|' '\n' | tr -d '" ' | sort | tr '\n' ' ')"
+lua_unread="$(sed -n '/^function M\.unread_badge/,/^end/p' \
+  assets/nvim/lua/user/session_switcher/model.lua \
+  | sed -n 's/.*state == "\([^"]*\)".*/\1/p' | sort | tr '\n' ' ')"
+
+if [ -z "$ts_unread" ] || [ -z "$lua_unread" ]; then
+  printf 'FAIL  could not extract the unread_state vocabulary (ts=%s lua=%s)\n' "$ts_unread" "$lua_unread"
+  exit 1
+fi
+if [ "$ts_unread" != "$lua_unread" ]; then
+  printf 'FAIL  unread_state vocabulary DRIFTED between CLI and model.lua\n'
+  printf '        oc-session-list-state.ts: %s\n        model.lua unread_badge:   %s\n' "$ts_unread" "$lua_unread"
+  exit 1
+fi
+printf 'PASS  unread_state vocabulary matches across CLI and model.lua (%s)\n' "$ts_unread"
 
 printf 'all session_switcher lua tests passed\n'

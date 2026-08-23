@@ -687,28 +687,114 @@ describe("S3: nodata (no reporter) vs authoritative idle", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("warns on a total outage, so it is loud even to a consumer that ignores the field", () => {
-    const dir = mkdir("aggregate");
+  it("warns on a total outage when no live writer is reporting for any session", () => {
+    const dir = mkdir("total-outage");
     try {
       const warnings: string[] = [];
-      queryWithState([row("s1"), row("s2")], {
+      const result = queryWithState([row("s1"), row("s2")], {
         overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
-        owners: { s1: "serve-1", s2: "serve-1" }, onWarn: (m) => warnings.push(m),
+        owners: { s1: "serve-1", s2: "serve-2" }, onWarn: (m) => warnings.push(m),
       });
-      expect(warnings.some((w) => /no live writer/i.test(w))).toBe(true);
+      // Preconditions: both rows merged to nodata because no live writer exists
+      expect(result.length).toBe(2);
+      expect(result[0].activity).toBe("nodata");
+      expect(result[1].activity).toBe("nodata");
+      // Total outage warning fires with exact message
+      expect(warnings).toContain(
+        "no live writer is reporting for any of the 2 session(s) -- the writer fleet may be down; state below is not trustworthy",
+      );
+      // Partial outage warning does not fire
+      expect(warnings.some((w) => w.includes("own session(s) but are not writing"))).toBe(false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("stays silent about nodata on the healthy path (a warning that always fires is noise)", () => {
-    const dir = mkdir("healthy");
+  it("warns on a partial outage naming silent owning serves via session_assignment", () => {
+    const dir = mkdir("partial-outage");
+    const routingPath = join(dir, "routing.db");
+    const routing = new Database(routingPath);
+    routing.exec(`
+      CREATE TABLE session_assignment (
+        session_id TEXT PRIMARY KEY,
+        desired_serve_id TEXT
+      );
+      CREATE TABLE session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE TABLE session_reads (
+        session_id TEXT PRIMARY KEY,
+        last_read_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    routing.exec(`INSERT INTO session_assignment VALUES ('s1', 'serve-1'), ('s2', 'serve-2')`);
+    routing.close();
+
     try {
+      // serve-1 is live and reporting; serve-2 is silent (no overlay file).
       overlay(dir, "serve-1-a", { serveId: "serve-1", directory: "/a", sessions: {} });
-      const warnings2: string[] = [];
-      queryWithState([row("s1")], {
-        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
-        owners: { s1: "serve-1" }, onWarn: (m) => warnings2.push(m),
+      const warnings: string[] = [];
+      const result = queryWithState([row("s1"), row("s2")], {
+        overlayDir: dir, routingDbPath: routingPath, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        onWarn: (m) => warnings.push(m),
       });
-      expect(warnings2.some((w) => /no live writer/i.test(w))).toBe(false);
+      // Preconditions: s1 is idle (served by live serve-1), s2 is nodata (owned by silent serve-2)
+      expect(result.find((r) => r.id === "s1")?.activity).toBe("idle");
+      expect(result.find((r) => r.id === "s2")?.activity).toBe("nodata");
+      // Total outage warning does NOT fire (fleet is partially reporting)
+      expect(warnings.some((w) => w.includes("the writer fleet may be down"))).toBe(false);
+      // Partial outage warning fires and specifically names silent serve-2
+      const partialWarn = warnings.find((w) => w.includes("own session(s) but are not writing any live state"));
+      expect(partialWarn).toBeDefined();
+      expect(partialWarn).toContain("serve-2");
+      expect(partialWarn).toBe(
+        "serve-2 own session(s) but are not writing any live state -- their writers may be down (1 row(s) reported nodata)",
+      );
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("stays silent regarding outage warnings on the healthy path where all owner serves report", () => {
+    const dir = mkdir("healthy");
+    const routingPath = join(dir, "routing.db");
+    const routing = new Database(routingPath);
+    routing.exec(`
+      CREATE TABLE session_assignment (
+        session_id TEXT PRIMARY KEY,
+        desired_serve_id TEXT
+      );
+      CREATE TABLE session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE TABLE session_reads (
+        session_id TEXT PRIMARY KEY,
+        last_read_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    routing.exec(`INSERT INTO session_assignment VALUES ('s1', 'serve-1'), ('s2', 'serve-2')`);
+    routing.close();
+
+    try {
+      // Both serve-1 and serve-2 are live and reporting
+      overlay(dir, "serve-1-a", { serveId: "serve-1", directory: "/a", sessions: {} });
+      overlay(dir, "serve-2-a", { serveId: "serve-2", directory: "/a", sessions: {} });
+      const warnings: string[] = [];
+      const result = queryWithState([row("s1"), row("s2")], {
+        overlayDir: dir, routingDbPath: routingPath, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        onWarn: (m) => warnings.push(m),
+      });
+      // Preconditions: both merged to idle
+      expect(result.find((r) => r.id === "s1")?.activity).toBe("idle");
+      expect(result.find((r) => r.id === "s2")?.activity).toBe("idle");
+      // Neither warning fires
+      expect(warnings.some((w) => w.includes("the writer fleet may be down"))).toBe(false);
+      expect(warnings.some((w) => w.includes("own session(s) but are not writing any live state"))).toBe(false);
+      expect(warnings).toEqual([]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
@@ -1022,6 +1108,24 @@ describe("S6: effective_state and the child fold", () => {
     expect(out.map((r) => r.id)).toEqual(["real", "gone"]);
   });
 
+  it("keeps a dir-gone ERROR row's state TRUTHFUL but demotes it so error is NOT in the attention group", () => {
+    const out = fold([
+      srow({ id: "gone_err", error: true, directory: "/gone", lastActivity: 9999 }),
+      srow({ id: "real_err", error: true, directory: "/live", lastActivity: 1 }),
+    ]);
+
+    const gone = out.find((r) => r.id === "gone_err")!;
+    const real = out.find((r) => r.id === "real_err")!;
+    expect(gone.dir_missing).toBe(true);
+    expect(gone.effective_state).toBe("error");
+    expect(gone.attention).toBe(false);
+    expect(real.dir_missing).toBe(false);
+    expect(real.effective_state).toBe("error");
+    expect(real.attention).toBe(true);
+    // Real error row is in attention group, so it sorts before gone despite older lastActivity
+    expect(out.map((r) => r.id)).toEqual(["real_err", "gone_err"]);
+  });
+
   it("does not let a dir-gone CHILD lift its parent into the attention group either", () => {
     const out = fold([
       srow({ id: "p1" }),
@@ -1068,15 +1172,15 @@ describe("S6: effective_state and the child fold", () => {
   it("does not allow unread count to alter ordering within attention or non-attention groups", () => {
     // In non-attention group: recent idle with 0 unread beats older idle with 99 unread
     const nonAttention = fold([
-      srow({ id: "older_with_unread", lastActivity: 1000, unread: 99, unread_state: "present" }),
-      srow({ id: "newer_read", lastActivity: 2000, unread: 0, unread_state: "present" }),
+      srow({ id: "older_with_unread", lastActivity: 1000, unread: 99, unread_state: "counted" }),
+      srow({ id: "newer_read", lastActivity: 2000, unread: 0, unread_state: "counted" }),
     ]);
     expect(nonAttention.map((r) => r.id)).toEqual(["newer_read", "older_with_unread"]);
 
     // In attention group: recent error with 0 unread beats older error with 99 unread
     const attention = fold([
-      srow({ id: "older_err_unread", error: true, lastActivity: 1000, unread: 99, unread_state: "present" }),
-      srow({ id: "newer_err_read", error: true, lastActivity: 2000, unread: 0, unread_state: "present" }),
+      srow({ id: "older_err_unread", error: true, lastActivity: 1000, unread: 99, unread_state: "counted" }),
+      srow({ id: "newer_err_read", error: true, lastActivity: 2000, unread: 0, unread_state: "counted" }),
     ]);
     expect(attention.map((r) => r.id)).toEqual(["newer_err_read", "older_err_unread"]);
   });
@@ -1325,120 +1429,6 @@ describe("S6: --fold CLI flag", () => {
     expect(opts.withState).toBe(true);
     expect(parseCliArgs(["--with-state"]).fold).toBe(false);
   });
-
-  it("emits an outage tripwire warning on stderr when folded output contains nodata rows", () => {
-    const dir = mkdtempSync(join(tmpdir(), "s6-nodata-warn-"));
-    const dbPath = join(dir, "test.db");
-    const db = new Database(dbPath);
-    db.exec(`
-      CREATE TABLE session (
-        id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
-        parent_id TEXT,
-        slug TEXT NOT NULL,
-        directory TEXT NOT NULL,
-        title TEXT NOT NULL,
-        version TEXT NOT NULL,
-        time_created INTEGER NOT NULL,
-        time_updated INTEGER NOT NULL,
-        time_archived INTEGER
-      )
-    `);
-    db.exec(
-      `INSERT INTO session VALUES ('s_nodata','p',NULL,'s_nodata','/w','s_nodata','1.0',1,1000,NULL)`
-    );
-    db.close();
-
-    const routingPath = join(dir, "routing.db");
-    const routing = new Database(routingPath);
-    routing.exec(`CREATE TABLE session_assignment (session_id TEXT PRIMARY KEY, desired_serve_id TEXT)`);
-    routing.close();
-
-    const origError = console.error;
-    const origLog = console.log;
-    const errors: string[] = [];
-    console.error = (...args: any[]) => errors.push(args.join(" "));
-    console.log = () => {};
-
-    try {
-      main([
-        "--db", dbPath,
-        "--routing-db", routingPath,
-        "--overlay-dir", dir,
-        "--fold",
-      ]);
-      const tripwire = errors.find((e) => e.includes("outage tripwire"));
-      expect(tripwire).toBeDefined();
-      expect(tripwire).toContain("1 session(s) had no live writer in a position to report, so the reader may be untrustworthy");
-    } finally {
-      console.error = origError;
-      console.log = origLog;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("stays silent regarding outage tripwire when no nodata rows exist in folded output", () => {
-    const dir = mkdtempSync(join(tmpdir(), "s6-nodata-silent-"));
-    const dbPath = join(dir, "test.db");
-    const db = new Database(dbPath);
-    db.exec(`
-      CREATE TABLE session (
-        id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
-        parent_id TEXT,
-        slug TEXT NOT NULL,
-        directory TEXT NOT NULL,
-        title TEXT NOT NULL,
-        version TEXT NOT NULL,
-        time_created INTEGER NOT NULL,
-        time_updated INTEGER NOT NULL,
-        time_archived INTEGER
-      )
-    `);
-    db.exec(
-      `INSERT INTO session VALUES ('s_live','p',NULL,'s_live','/w','s_live','1.0',1,1000,NULL)`
-    );
-    db.close();
-
-    const routingPath = join(dir, "routing.db");
-    const routing = new Database(routingPath);
-    routing.exec(`CREATE TABLE session_assignment (session_id TEXT PRIMARY KEY, desired_serve_id TEXT)`);
-    routing.close();
-
-    writeFileSync(
-      join(dir, "serve-1.json"),
-      JSON.stringify({
-        version: OVERLAY_VERSION,
-        instanceStamp: 1,
-        pid: process.pid,
-        serveId: "serve-1",
-        directory: "/w",
-        heartbeat: Date.now(),
-        sessions: { s_live: { activity: "idle", lastActivity: 1000, updatedAt: 1000, error: false, pendingPermissions: [], pendingQuestions: [] } },
-      })
-    );
-
-    const origError = console.error;
-    const origLog = console.log;
-    const errors: string[] = [];
-    console.error = (...args: any[]) => errors.push(args.join(" "));
-    console.log = () => {};
-
-    try {
-      main([
-        "--db", dbPath,
-        "--routing-db", routingPath,
-        "--overlay-dir", dir,
-        "--fold",
-      ]);
-      const tripwire = errors.find((e) => e.includes("outage tripwire"));
-      expect(tripwire).toBeUndefined();
-    } finally {
-      console.error = origError;
-      console.log = origLog;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
 });
 
 describe("S6: the union lands BEFORE ownership is resolved", () => {
@@ -1631,6 +1621,35 @@ describe("buildUnreadMap & unread counts (Task 9)", () => {
     }
   });
 
+  it("a session whose ledger rows are ALL kind='mirror' reports unread: 0 with unread_state: 'counted' and non-null last_event_id", () => {
+    // Deliberate judgement: mirror events are the session's own outbound messages mirrored
+    // back into the ledger and are never unread-worthy. The session is counted and up to date
+    // (rendering empty badge rather than '?'), with a valid last_event_id pointing to the mirror event.
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'mirror', 100),
+          (2, 'root_1', 'mirror', 200);
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+      });
+
+      const root1 = rows.find((r) => r.id === "root_1");
+      expect(root1).toBeDefined();
+      expect(root1!.unread_state).toBe("counted");
+      expect(root1!.unread).toBe(0);
+      expect(root1!.last_event_id).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("an unreadable/missing routing DB yields unread_state: 'unavailable' for every row, emits a warning, and STILL returns base list", () => {
     const warnings: string[] = [];
     const missingPath = "/definitely/not/a/real/routing.db";
@@ -1753,6 +1772,10 @@ describe("buildUnreadMap & unread counts (Task 9)", () => {
   });
 
   it("event with id 0 is not counted when watermark is unread / COALESCE(r.last_read_id, 0)", () => {
+    // Note: unreachable in production because the ledger's id column is INTEGER PRIMARY KEY
+    // AUTOINCREMENT and therefore starts at 1. COALESCE(r.last_read_id, 0) treating 0 as the
+    // "unread / no watermark" sentinel is safe here, but do not copy this pattern to schemas
+    // where rowid/id 0 can legitimately occur.
     const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
     try {
       const p = join(dir, "routing.db");

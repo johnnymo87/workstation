@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { queryBaseList, queryTreesForSessions } from "./oc-session-list-base.js";
 import { queryWithState, runOrphanGc } from "./oc-session-list-state.js";
-import { foldRows, type FoldedRow } from "./oc-session-list-fold.js";
+import { foldRows } from "./oc-session-list-fold.js";
 
 export interface CliOptions {
   limit: number;
@@ -124,14 +124,6 @@ export function main(args: string[] = process.argv.slice(2)): void {
         ...(options.fold ? { unionLookup: (sids: string[]) => queryTreesForSessions(db, sids) } : {}),
       });
       const out = options.fold ? foldRows(rowsWithState) : rowsWithState;
-      if (options.fold) {
-        const nodataCount = (out as FoldedRow[]).filter((r) => r.effective_state === "nodata").length;
-        if (nodataCount > 0) {
-          console.error(
-            `oc-session-list: outage tripwire: ${nodataCount} session(s) had no live writer in a position to report, so the reader may be untrustworthy`,
-          );
-        }
-      }
       console.log(JSON.stringify(out, null, 2));
     } else {
       console.log(JSON.stringify(baseRows, null, 2));

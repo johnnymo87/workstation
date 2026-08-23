@@ -27,8 +27,12 @@ export type EffectiveState =
  * The "render nodata at least as loudly as idle" contract from
  * oc-session-list-state.ts is still honoured: (i) ordering now treats `nodata`
  * and `idle` symmetrically by recency rather than ranking one below the other,
- * (ii) `nodata` keeps its own distinct glyph, and (iii) a fleet-level warning
- * fires when nodata rows are present.
+ * (ii) `nodata` keeps its own distinct glyph, and (iii) the outage signal lives
+ * in `queryWithState`'s two-tier warning in `oc-session-list-state.ts`
+ * (total-outage when no live writer reports, and attributable partial-outage
+ * naming silent owner serves), which emits through `onWarn` for both roots and
+ * children because it runs pre-fold, triggered deliberately by "no live
+ * writer" rather than a count of nodata rows.
  *
  * A permanent ordering pin for `nodata` was rejected: a stale `nodata` row
  * pinned above every idle row forever is a chronic pin, which trains the eye
@@ -95,7 +99,10 @@ export interface FoldedRow extends SessionWithStateRow {
   sort_rank: number;
   /**
    * Render-only boolean indicating whether the row belongs to the pinned
-   * attention group (sort_rank <= SEVERITY.blocked).
+   * attention group (sort_rank <= SEVERITY.blocked). Note that `attention` keys
+   * off the demoted rank while `model.lua`'s facet-pierce keys off
+   * `effective_state`/`child_state` and ignores `dir_missing` -- so a dir-gone
+   * blocked root pierces the facet but is not pinned (this combination is intended).
    */
   attention: boolean;
 }
