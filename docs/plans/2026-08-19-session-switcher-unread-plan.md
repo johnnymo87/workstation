@@ -648,7 +648,25 @@ sustained was already priced in at 2.2 MB.
 
 ---
 
-## Task 9: `oc-session-list` reads the ledger
+## Task 9: **DONE** — `oc-session-list` reads the ledger
+
+`buildUnreadMap` sits alongside `buildOwnersMap` and follows its loudness
+discipline. `COUNT(*) FILTER` was re-verified against `bun:sqlite` (SQLite 3.51.0)
+rather than inherited from the daemon's better-sqlite3 build.
+
+**Three states, not two.** `cli.lua` decodes with `luanil`, so a JSON `null`
+arrives as an absent Lua key — meaning "no ledger for this session" and "the
+ledger could not be read" would have been indistinguishable, collapsing `·` into
+`?` exactly as review forbade. Hence an explicit `unread_state` discriminator:
+`counted` / `absent` / `unavailable`.
+
+**Root-only, by measurement and self-monitoring.** All 22 sessions carrying ledger
+events are roots (pigeon's topics are per-root-tree). Tree aggregation was
+rejected: it would force clear-on-jump to fan out one watermark POST per
+contributing session, turning a self-healing under-clear into N independent
+failure modes. Instead a child found carrying unread events *warns*.
+
+### Original instructions
 
 **Files:**
 - Modify: `assets/opencode/plugins/oc-session-list.ts`
@@ -680,7 +698,22 @@ of assumption this plan keeps catching.
 
 ---
 
-## Task 10: Ordering, CLI-side
+## Task 10: **DONE** — ordering, CLI-side
+
+Group membership reuses the existing `sort_rank`, which is already
+`min(own, child)` with `dir_missing` demotion applied — so the blocked-child lift
+and the dir-gone demotion both fall out for free, and ordering stays consistent
+with `model.lua`'s facet-pierce rule.
+
+**This cost `nodata` its ordering privilege**, and the `SEVERITY` docblock that
+justified that privilege was rewritten in the same commit rather than left
+contradicting the code. A permanent pin was rejected as a chronic pin; during a
+real outage those sessions were recently active and float up on their own. The
+outage signal itself already lives in `queryWithState`'s two-tier warning — a
+duplicate one added during this cycle was removed again, because its
+count-of-nodata-rows trigger is the one that comment explicitly rejects.
+
+### Original instructions
 
 **Files:** `assets/opencode/plugins/oc-session-list-fold.ts`, same spec file.
 
@@ -701,7 +734,21 @@ contract 1 says the CLI owns ordering and the picker must never re-sort. The des
 
 ---
 
-## Task 11: The picker
+## Task 11: **PARTIALLY DONE** — rendering shipped, clear-on-jump deferred
+
+`M.unread_badge` renders the four states, and unknown reader states degrade
+*loud* (`?`) rather than silent, because "we cannot say" must never display as
+"you have read everything".
+
+**Clear-on-jump is deferred to `workstation-7w9z`, deliberately.** The Telescope
+picker does not exist yet, so there is no selection handler to attach the
+watermark write to. Nothing renders these badges this cycle either, so the
+dangerous intermediate state — a visible badge that jumping never clears — cannot
+ship: visibility and clearing both arrive with the picker. `last_event_id` is
+threaded through and asserted to survive `M.build`, so the deferred work cannot
+reach for "current max" instead.
+
+### Original instructions
 
 **Files:**
 - Modify: `assets/nvim/lua/user/session_switcher/model.lua`,
@@ -733,7 +780,24 @@ The write must be fire-and-forget: never block the jump on it.
 
 ---
 
-## Task 12: Wire the tests into CI
+## Task 12: **DONE** — and the pins did not previously exist
+
+This was meant to be "bump the numbers". The numbers turned out to be fiction:
+the runner printed a **hardcoded** "(14 assertions)" for one stage and no count
+at all for another, and adding ten test cases changed its output not at all.
+Both Lua harnesses signalled success with a bare `LUA_TEST_OK`, so deleting half
+the assertions still printed success.
+
+The harnesses now count, the runner fails if the token arrives without a number,
+and `flake.nix` pins each stage separately. The bun pin is measured **in the
+sandbox**: locally this suite reports ~908 expects and drifted to 913 between two
+runs minutes apart, because a live-DB test runs here and is skipped in CI. A
+locally-taken pin would have been both wrong and permanently flaky.
+
+A `plugin-tsc` check was also added, because its absence let an invalid
+`unread_state` literal ship inside this very PR.
+
+### Original instructions
 
 **Files:** `flake.nix`
 
