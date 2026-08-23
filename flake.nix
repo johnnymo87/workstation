@@ -926,10 +926,35 @@
       # would have repeated the frontdoor-opacity mistake documented directly
       # above -- a guard nothing runs is documentation with a shebang.
       nvim-lua = devboxPkgs.runCommand "nvim-lua-tests" {
-        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.neovim ];
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.neovim devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.coreutils
+        ];
       } ''
         cd ${self}
-        bash assets/nvim/test-session-switcher.sh
+        export HOME="$TMPDIR"
+        bash assets/nvim/test-session-switcher.sh 2>&1 | tee "$TMPDIR/out.txt"
+
+        grep -q '^all session_switcher lua tests passed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher lua suite did not reach its final pass line." >&2
+          exit 1
+        }
+        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 4 ] || {
+          echo "GATE FAILURE: expected 4 'PASS  ' lines, got" \
+               "$(grep -c '^PASS  ' "$TMPDIR/out.txt")." >&2
+          exit 1
+        }
+        grep -q '^PASS  session_switcher\.cli unit tests (31 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.cli did not report expected 31 assertions." >&2
+          exit 1
+        }
+        grep -q '^PASS  session_switcher\.discovery + \.rpc unit tests (69 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.discovery + .rpc did not report expected 69 assertions." >&2
+          exit 1
+        }
+        grep -q '^PASS  session_switcher\.model unit tests (87 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.model did not report expected 87 assertions." >&2
+          exit 1
+        }
         touch $out
       '';
 
@@ -1382,7 +1407,7 @@
       # under it (measured: 43 failures, 4 errors). Globbing is also what makes
       # a newly added *.spec.ts run automatically -- execution is enumeration.
       plugin-bun = devboxPkgs.runCommand "plugin-bun-tests" {
-        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.bun devboxPkgs.gnugrep ];
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.bun devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.coreutils ];
       } ''
         cp -r --no-preserve=mode,ownership ${self} ./repo
         cd ./repo/assets/opencode/plugins
@@ -1413,6 +1438,16 @@
             || { echo "GATE FAILURE: $f reported no passing tests." >&2; exit 1; }
           grep -qE '^ *0 fail' "$TMPDIR/bun-out.txt" \
             || { echo "GATE FAILURE: $f reported failures." >&2; exit 1; }
+
+          # Assertion count is pinned: a suite whose assertions are deleted or
+          # early-returned would still pass the pass/fail/skip gate above.
+          expects=$(sed -nE 's/^ *([0-9]+) expect\(\) calls.*/\1/p' "$TMPDIR/bun-out.txt" | head -1)
+          expects=''${expects:-0}
+          if [ "$expects" -ne 240 ]; then
+            echo "GATE FAILURE: $f reported $expects expect() call(s); exactly 240 is expected." >&2
+            echo "If you added or removed assertions, update this pin with the measured count." >&2
+            exit 1
+          fi
 
           # Skips are counted, not ignored -- same reasoning as the vitest gate.
           # EXACTLY ONE is expected and it is a known, reviewed degradation: the
