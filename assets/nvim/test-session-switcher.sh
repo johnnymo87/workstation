@@ -37,6 +37,9 @@ trap 'rm -rf "$HOME"' EXIT
 
 lua_file="$HOME/session_switcher_test.lua"
 cat >"$lua_file" <<'LUA'
+  local N = 0
+  local function check(cond, msg) N = N + 1; assert(cond, msg) end
+
   local cli = loadfile("assets/nvim/lua/user/session_switcher/cli.lua")()
 
   local function collect(opts)
@@ -88,42 +91,42 @@ cat >"$lua_file" <<'LUA'
 
   -- 1. Happy path: rows parsed and returned.
   local res, err = collect({ system = fake(0, ROWS) })
-  assert(err == nil, "happy path -> no error")
-  assert(#res.rows == 2, "happy path -> 2 rows, got " .. tostring(res and #res.rows))
+  check(err == nil, "happy path -> no error")
+  check(#res.rows == 2, "happy path -> 2 rows, got " .. tostring(res and #res.rows))
 
   -- 2. S3 CONTRACT: `activity = "nodata"` survives the caller untouched.
   --    A thin caller that normalised/dropped the 4th union member would
   --    silently undo S3's outage tripwire.
-  assert(res.rows[1].activity == "nodata", "nodata activity passes through verbatim")
+  check(res.rows[1].activity == "nodata", "nodata activity passes through verbatim")
 
   -- 3. S3 CONTRACT: exit 0 + NON-EMPTY stderr is SUCCESS WITH WARNINGS,
   --    not a failure. The degraded-path warnings ARE the tripwire; treating
   --    them as an error would blank the picker on a partial outage, and
   --    discarding them would hide the outage entirely.
   res, err = collect({ system = fake(0, ROWS, "oc-session-list: no live writer is reporting\n") })
-  assert(err == nil, "stderr with exit 0 is NOT an error")
-  assert(#res.rows == 2, "stderr with exit 0 still yields rows")
-  assert(res.warnings and res.warnings:find("no live writer"), "warnings surfaced to caller")
+  check(err == nil, "stderr with exit 0 is NOT an error")
+  check(#res.rows == 2, "stderr with exit 0 still yields rows")
+  check(res.warnings and res.warnings:find("no live writer"), "warnings surfaced to caller")
 
   -- 4. Non-zero exit -> error, NOT an empty row list.
   res, err = collect({ system = fake(1, "", "Error querying database\n") })
-  assert(err ~= nil, "non-zero exit -> error surfaces")
-  assert(err.kind == "exit", "non-zero exit -> kind=exit, got " .. tostring(err.kind))
-  assert(err.code == 1, "non-zero exit -> code preserved")
-  assert(err.stderr:find("Error querying"), "non-zero exit -> stderr preserved for the user")
-  assert(res == nil, "error -> no result (must not masquerade as an empty picker)")
+  check(err ~= nil, "non-zero exit -> error surfaces")
+  check(err.kind == "exit", "non-zero exit -> kind=exit, got " .. tostring(err.kind))
+  check(err.code == 1, "non-zero exit -> code preserved")
+  check(err.stderr:find("Error querying"), "non-zero exit -> stderr preserved for the user")
+  check(res == nil, "error -> no result (must not masquerade as an empty picker)")
 
   -- 5. Unparseable stdout -> decode error, not a silent empty picker.
   res, err = collect({ system = fake(0, "this is not json") })
-  assert(err ~= nil and err.kind == "decode", "bad json -> kind=decode, got " .. tostring(err and err.kind))
-  assert(res == nil, "decode failure -> no result")
+  check(err ~= nil and err.kind == "decode", "bad json -> kind=decode, got " .. tostring(err and err.kind))
+  check(res == nil, "decode failure -> no result")
 
   -- 6. CLI MISSING: vim.system raises (ENOENT) rather than calling back.
   --    Must become an error through the callback, not an uncaught exception
   --    that kills the picker.
   res, err = collect({ system = function() error("ENOENT: no such file or directory") end })
-  assert(err ~= nil and err.kind == "spawn", "missing binary -> kind=spawn, got " .. tostring(err and err.kind))
-  assert(res == nil, "spawn failure -> no result")
+  check(err ~= nil and err.kind == "spawn", "missing binary -> kind=spawn, got " .. tostring(err and err.kind))
+  check(res == nil, "spawn failure -> no result")
 
   -- 7. TIMEOUT: a CLI that never calls back must still resolve, exactly once.
   local calls = 0
@@ -133,9 +136,9 @@ cat >"$lua_file" <<'LUA'
     system = function() return { pid = 1, kill = function() end } end,
   }, function(_, e) calls = calls + 1; done = (e ~= nil) end)
   vim.wait(2000, function() return done end)
-  assert(done, "hung CLI -> callback still fires (timeout)")
+  check(done, "hung CLI -> callback still fires (timeout)")
   vim.wait(300)
-  assert(calls == 1, "timeout fires callback EXACTLY once, got " .. calls)
+  check(calls == 1, "timeout fires callback EXACTLY once, got " .. calls)
 
   -- 8. A late reply after a timeout must not double-invoke the callback.
   local late_on_exit
@@ -147,15 +150,15 @@ cat >"$lua_file" <<'LUA'
   vim.wait(400, function() return calls > 0 end)
   late_on_exit({ code = 0, signal = 0, stdout = ROWS, stderr = "" })
   vim.wait(200)
-  assert(calls == 1, "late reply after timeout does NOT re-invoke callback, got " .. calls)
+  check(calls == 1, "late reply after timeout does NOT re-invoke callback, got " .. calls)
 
   -- 9. ASYNC: fetch must return before the callback runs. A synchronous
   --    implementation is the documented deadlock hazard.
   local ran = false
   cli.fetch({ system = fake_sync(0, ROWS) }, function() ran = true end)
-  assert(ran == false, "fetch is ASYNC (callback must not run before fetch returns)")
+  check(ran == false, "fetch is ASYNC (callback must not run before fetch returns)")
   vim.wait(500, function() return ran end)
-  assert(ran, "sync-fake callback DOES eventually fire (not merely deferred into the void)")
+  check(ran, "sync-fake callback DOES eventually fire (not merely deferred into the void)")
 
   -- 10. The command actually invoked is oc-session-list --with-state.
   local got_cmd
@@ -164,16 +167,16 @@ cat >"$lua_file" <<'LUA'
     vim.schedule(function() on_exit({ code = 0, signal = 0, stdout = ROWS, stderr = "" }) end)
     return { pid = 1, kill = function() end }
   end })
-  assert(got_cmd[1] == "oc-session-list", "argv[1] is oc-session-list, got " .. tostring(got_cmd[1]))
-  assert(vim.tbl_contains(got_cmd, "--with-state"), "argv contains --with-state")
+  check(got_cmd[1] == "oc-session-list", "argv[1] is oc-session-list, got " .. tostring(got_cmd[1]))
+  check(vim.tbl_contains(got_cmd, "--with-state"), "argv contains --with-state")
 
   -- 10b. S6: `--fold` is OPT-IN. Both directions asserted, because a
   --      build_argv that always appended it, or never did, would each pass a
   --      one-sided check -- and the flag silently changes the CLI's output
   --      shape from a flat list to one row per root.
   local folded = cli.build_argv({ fold = true })
-  assert(vim.tbl_contains(folded, "--fold"), "fold=true -> argv contains --fold")
-  assert(not vim.tbl_contains(cli.build_argv({}), "--fold"), "fold unset -> argv omits --fold")
+  check(vim.tbl_contains(folded, "--fold"), "fold=true -> argv contains --fold")
+  check(not vim.tbl_contains(cli.build_argv({}), "--fold"), "fold unset -> argv omits --fold")
 
   -- 11. Callback runs on the main loop, where vim API calls are legal.
   --     vim.system's on_exit fires in a fast event context; forgetting
@@ -185,60 +188,63 @@ cat >"$lua_file" <<'LUA'
     done2 = true
   end)
   vim.wait(2000, function() return done2 end)
-  assert(api_ok, "callback runs on main loop (vim.schedule), API calls must be legal")
+  check(api_ok, "callback runs on main loop (vim.schedule), API calls must be legal")
 
   -- 12. The other half of the founding distinction: a legitimately EMPTY
   --     fleet is a SUCCESS with zero rows, not an error. Without this, an
   --     over-eager array check could blank every healthy-but-empty fleet and
   --     nothing would notice.
   res, err = collect({ system = fake(0, "[]") })
-  assert(err == nil, "empty array -> success, not error")
-  assert(#res.rows == 0, "empty array -> zero rows")
+  check(err == nil, "empty array -> success, not error")
+  check(#res.rows == 0, "empty array -> zero rows")
 
   -- 13. A top-level JSON OBJECT is NOT a row list. It is also a Lua table, so
   --     a type() check would accept it and render as an empty picker.
   res, err = collect({ system = fake(0, '{"error":"database locked"}') })
-  assert(err ~= nil and err.kind == "decode", "json object -> decode error, got " .. tostring(err and err.kind))
-  assert(res == nil, "json object -> no result (never a silent empty picker)")
+  check(err ~= nil and err.kind == "decode", "json object -> decode error, got " .. tostring(err and err.kind))
+  check(res == nil, "json object -> no result (never a silent empty picker)")
 
   -- 14. JSON null maps to Lua nil, not the TRUTHY vim.NIL userdata.
   res, err = collect({ system = fake(0, '[{"id":"a","activity":null}]') })
-  assert(err == nil, "null field -> still success")
-  assert(res.rows[1].activity == nil, "json null -> Lua nil (vim.NIL is truthy and would misroute consumers)")
+  check(err == nil, "null field -> still success")
+  check(res.rows[1].activity == nil, "json null -> Lua nil (vim.NIL is truthy and would misroute consumers)")
 
-  print("LUA_TEST_OK")
+  print("LUA_TEST_OK " .. N)
 LUA
 
-lua_out="$(nvim --clean -l "$lua_file" 2>&1 || true)"
+parse_lua_ok() {
+  local out="$1" stage="$2"
+  local count
+  count="$(printf '%s\n' "$out" | tr -d '\r' | sed -nE 's/^LUA_TEST_OK[[:space:]]+([0-9]+)$/\1/p' | tail -n1)"
+  if [ -z "$count" ]; then
+    printf 'FAIL  %s (missing or unnumbered LUA_TEST_OK token)\n        out: %s\n' "$stage" "$out" >&2
+    return 1
+  fi
+  printf '%s' "$count"
+}
 
-case "$lua_out" in
-  *LUA_TEST_OK*) printf 'PASS  session_switcher.cli unit tests (14 assertions via nvim -l)\n' ;;
-  *) printf 'FAIL  session_switcher.cli unit tests\n        out: %s\n' "$lua_out"; exit 1 ;;
-esac
+lua_out="$(nvim --clean -l "$lua_file" 2>&1 || true)"
+cli_count="$(parse_lua_ok "$lua_out" "session_switcher.cli unit tests")" || exit 1
+printf 'PASS  session_switcher.cli unit tests (%s assertions via nvim -l)\n' "$cli_count"
 
 disc_out="$(nvim --clean -l assets/nvim/test-session-switcher-discovery.lua 2>&1 || true)"
-
-case "$disc_out" in
-  *LUA_TEST_OK*) printf 'PASS  session_switcher.discovery + .rpc unit tests (nvim -l)\n' ;;
-  *) printf 'FAIL  session_switcher.discovery + .rpc unit tests\n        out: %s\n' "$disc_out"; exit 1 ;;
-esac
+disc_count="$(parse_lua_ok "$disc_out" "session_switcher.discovery + .rpc unit tests")" || exit 1
+printf 'PASS  session_switcher.discovery + .rpc unit tests (%s assertions via nvim -l)\n' "$disc_count"
 
 model_out="$(nvim --clean -l assets/nvim/test-session-switcher-model.lua 2>&1 || true)"
-
-case "$model_out" in
-  *LUA_TEST_OK*) printf 'PASS  session_switcher.model unit tests (nvim -l)\n' ;;
-  *) printf 'FAIL  session_switcher.model unit tests\n        out: %s\n' "$model_out"; exit 1 ;;
-esac
+model_count="$(parse_lua_ok "$model_out" "session_switcher.model unit tests")" || exit 1
+printf 'PASS  session_switcher.model unit tests (%s assertions via nvim -l)\n' "$model_count"
 
 # --- Cross-language contract: the state vocabulary must not DRIFT. -----------
 #
 # oc-session-list-fold.ts owns `effective_state`; model.lua mirrors the list in
-# M.STATES and keys its pierce off two of them. Nothing else binds the two
-# sides: the bun tests build TS fixtures and the Lua tests build Lua fixtures,
-# each using its OWN copy of the literals, so renaming a state CLI-side would
-# leave the pierce matching nothing while both suites stayed green. That is the
-# drift this repo keeps getting bitten by, so it is checked mechanically rather
-# than by convention.
+# M.STATES and keys its pierce off two of them. oc-session-list-state.ts owns
+# `unread_state`; model.lua branches on each member in M.unread_badge.
+# Nothing else binds the two sides: the bun tests build TS fixtures and the
+# Lua tests build Lua fixtures, each using its OWN copy of the literals, so
+# renaming a state CLI-side would leave the Lua side mis-rendering while both
+# suites stayed green. That is the drift this repo keeps getting bitten by,
+# so it is checked mechanically rather than by convention.
 ts_states="$(sed -n '/^const SEVERITY: Record<EffectiveState, number> = {/,/^};/p' \
   assets/opencode/plugins/oc-session-list-fold.ts \
   | sed -n 's/^  \([a-z]*\):.*/\1/p' | sort | tr '\n' ' ')"
@@ -258,5 +264,24 @@ if [ "$ts_states" != "$lua_states" ]; then
   exit 1
 fi
 printf 'PASS  effective_state vocabulary matches across CLI and model.lua (%s)\n' "$ts_states"
+
+ts_unread="$(sed -n '/^export interface SessionWithStateRow/,/^}/p' \
+  assets/opencode/plugins/oc-session-list-state.ts \
+  | sed -n 's/^[[:space:]]*unread_state:[[:space:]]*\(.*\);/\1/p' \
+  | tr '|' '\n' | tr -d '" ' | sort | tr '\n' ' ')"
+lua_unread="$(sed -n '/^function M\.unread_badge/,/^end/p' \
+  assets/nvim/lua/user/session_switcher/model.lua \
+  | sed -n 's/.*state == "\([^"]*\)".*/\1/p' | sort | tr '\n' ' ')"
+
+if [ -z "$ts_unread" ] || [ -z "$lua_unread" ]; then
+  printf 'FAIL  could not extract the unread_state vocabulary (ts=%s lua=%s)\n' "$ts_unread" "$lua_unread"
+  exit 1
+fi
+if [ "$ts_unread" != "$lua_unread" ]; then
+  printf 'FAIL  unread_state vocabulary DRIFTED between CLI and model.lua\n'
+  printf '        oc-session-list-state.ts: %s\n        model.lua unread_badge:   %s\n' "$ts_unread" "$lua_unread"
+  exit 1
+fi
+printf 'PASS  unread_state vocabulary matches across CLI and model.lua (%s)\n' "$ts_unread"
 
 printf 'all session_switcher lua tests passed\n'

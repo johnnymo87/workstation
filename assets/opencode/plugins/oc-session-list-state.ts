@@ -25,7 +25,18 @@ export interface SessionWithStateRow extends SessionRow {
   lastActivity: number;
   updatedAt: number;
   unknown?: boolean;
+  unread: number | null;
+  unread_state: "counted" | "absent" | "unavailable";
+  last_event_id: number | null;
 }
+
+export interface UnreadEntry {
+  unread: number;
+  last_event_id: number | null;
+  last_event_at?: number | null;
+}
+
+export type UnreadMap = Map<string, UnreadEntry>;
 
 export interface QueryWithStateOptions {
   overlayDir?: string;
@@ -123,6 +134,99 @@ export function buildOwnersMap(
     );
   }
   return owners;
+}
+
+/**
+ * Build `unreadMap[sid] = { unread, last_event_id, last_event_at }` from pigeon's
+ * session_events and session_reads tables in the routing DB.
+ *
+ * LOUDNESS IS LOAD-BEARING. Missing DB, missing table, or read failure yields
+ * null and reports via onWarn so consumers can distinguish fleet-wide failure
+ * (unread_state: "unavailable") from individual sessions having no ledger events
+ * (unread_state: "absent").
+ *
+ * SELF-MONITORING INVARIANT: unread badges in the picker are root-only. Pigeon's
+ * topics are per-root-tree, so unread events are expected to be on root sessions.
+ * If any child session in baseRows has unread > 0, onWarn is called to alert that
+ * child unread events are not surfaced.
+ */
+export function buildUnreadMap(
+  routingDbPath: string,
+  baseRows: SessionRow[],
+  onWarn?: (msg: string) => void,
+): UnreadMap | null {
+  if (!routingDbPath || !existsSync(routingDbPath)) {
+    onWarn?.(
+      `routing db not found at ${routingDbPath || "<unset>"} -- unread counts unavailable, ` +
+        `badges will show unknown (set --routing-db or OPENCODE_ROUTING_DB)`,
+    );
+    return null;
+  }
+  let db: Database | undefined;
+  try {
+    db = new Database(routingDbPath, { readonly: true });
+    const tableExists = db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_events'`).get();
+    if (!tableExists) {
+      db.close();
+      onWarn?.(
+        `routing db ${routingDbPath} has no session_events table -- unread counts ` +
+          `unavailable, badges will show unknown`,
+      );
+      return null;
+    }
+    const query = `
+      SELECT e.session_id,
+             COUNT(*) FILTER (WHERE e.id > COALESCE(r.last_read_id, 0)
+                                AND e.kind <> 'mirror') AS unread,
+             MAX(e.id)      AS last_event_id,
+             MAX(e.sent_at) AS last_event_at
+      FROM session_events e
+      LEFT JOIN session_reads r USING (session_id)
+      GROUP BY e.session_id;
+    `;
+    const rows = db.query<{
+      session_id: string;
+      unread: number;
+      last_event_id: number | null;
+      last_event_at: number | null;
+    }, []>(query).all();
+    db.close();
+
+    const unreadMap: UnreadMap = new Map();
+    for (const r of rows) {
+      if (r.session_id) {
+        unreadMap.set(r.session_id, {
+          unread: Number(r.unread),
+          last_event_id: r.last_event_id !== null ? Number(r.last_event_id) : null,
+          last_event_at: r.last_event_at !== null ? Number(r.last_event_at) : null,
+        });
+      }
+    }
+
+    // Invariant: unread is root-only. Warn if a child row in baseRows carries unread events.
+    for (const row of baseRows) {
+      if (row.id !== row.root_id) {
+        const entry = unreadMap.get(row.id);
+        if (entry && entry.unread > 0) {
+          onWarn?.(
+            `child session ${row.id} carries ${entry.unread} unread event(s), but ` +
+              `unread badges are root-only and do not surface child events`,
+          );
+        }
+      }
+    }
+
+    return unreadMap;
+  } catch (err) {
+    try {
+      db?.close();
+    } catch {}
+    onWarn?.(
+      `failed to read unread counts from ${routingDbPath} (${String(err)}) -- ` +
+        `unread counts unavailable, badges will show unknown`,
+    );
+    return null;
+  }
 }
 
 export function loadOverlayFiles(
@@ -351,6 +455,11 @@ export function queryWithState(
   // it warns on <unset>, whereas skipping it was the one degraded path that
   // stayed silent.
   const owners = options.owners ?? buildOwnersMap(options.routingDbPath ?? "", baseRows, options.onWarn);
+  // No injection seam here, deliberately, unlike `owners` above. An unused test
+  // seam is untested surface that is free to drift from the real path -- the
+  // exact failure mode model.lua documents for its duplicated is_live copy.
+  // Every unread test drives the real builder against a real temp SQLite DB.
+  const unreadMap = buildUnreadMap(options.routingDbPath ?? "", baseRows, options.onWarn);
   const mergedStateMap = mergeOverlays(overlayFiles, {
     now, staleMs, isAlive, owners, prepared: preparedFiles,
   });
@@ -389,6 +498,23 @@ export function queryWithState(
 
   let nodataCount = 0;
   const rows = baseRows.map((row): SessionWithStateRow => {
+    let unread: number | null = null;
+    let unread_state: "counted" | "absent" | "unavailable";
+    let last_event_id: number | null = null;
+
+    if (unreadMap === null) {
+      unread_state = "unavailable";
+    } else {
+      const entry = unreadMap.get(row.id);
+      if (entry !== undefined) {
+        unread = entry.unread;
+        unread_state = "counted";
+        last_event_id = entry.last_event_id;
+      } else {
+        unread_state = "absent";
+      }
+    }
+
     const st = mergedStateMap[row.id];
     if (st) {
       return {
@@ -399,6 +525,9 @@ export function queryWithState(
         pendingQuestions: st.pendingQuestions ?? [],
         lastActivity: st.lastActivity,
         updatedAt: st.updatedAt,
+        unread,
+        unread_state,
+        last_event_id,
         ...(st.retry ? { retry: st.retry } : {}),
         ...(st.unknown ? { unknown: st.unknown } : {}),
       };
@@ -431,6 +560,9 @@ export function queryWithState(
         // Preserved even for nodata so anything sorting by recency stays stable.
         lastActivity: row.time_updated,
         updatedAt: row.time_updated,
+        unread,
+        unread_state,
+        last_event_id,
       };
     }
   });

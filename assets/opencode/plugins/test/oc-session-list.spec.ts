@@ -4,10 +4,11 @@ import { existsSync, readdirSync, mkdirSync, mkdtempSync, writeFileSync, rmSync 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { queryBaseList, queryTreesForSessions } from "../oc-session-list-base.js";
-import { parseCliArgs } from "../oc-session-list.js";
+import { main, parseCliArgs } from "../oc-session-list.js";
 import {
   attentionCandidates,
   buildOwnersMap,
+  buildUnreadMap,
   queryWithState,
   runOrphanGc,
   type SessionWithStateRow,
@@ -686,28 +687,114 @@ describe("S3: nodata (no reporter) vs authoritative idle", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("warns on a total outage, so it is loud even to a consumer that ignores the field", () => {
-    const dir = mkdir("aggregate");
+  it("warns on a total outage when no live writer is reporting for any session", () => {
+    const dir = mkdir("total-outage");
     try {
       const warnings: string[] = [];
-      queryWithState([row("s1"), row("s2")], {
+      const result = queryWithState([row("s1"), row("s2")], {
         overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
-        owners: { s1: "serve-1", s2: "serve-1" }, onWarn: (m) => warnings.push(m),
+        owners: { s1: "serve-1", s2: "serve-2" }, onWarn: (m) => warnings.push(m),
       });
-      expect(warnings.some((w) => /no live writer/i.test(w))).toBe(true);
+      // Preconditions: both rows merged to nodata because no live writer exists
+      expect(result.length).toBe(2);
+      expect(result[0].activity).toBe("nodata");
+      expect(result[1].activity).toBe("nodata");
+      // Total outage warning fires with exact message
+      expect(warnings).toContain(
+        "no live writer is reporting for any of the 2 session(s) -- the writer fleet may be down; state below is not trustworthy",
+      );
+      // Partial outage warning does not fire
+      expect(warnings.some((w) => w.includes("own session(s) but are not writing"))).toBe(false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("stays silent about nodata on the healthy path (a warning that always fires is noise)", () => {
-    const dir = mkdir("healthy");
+  it("warns on a partial outage naming silent owning serves via session_assignment", () => {
+    const dir = mkdir("partial-outage");
+    const routingPath = join(dir, "routing.db");
+    const routing = new Database(routingPath);
+    routing.exec(`
+      CREATE TABLE session_assignment (
+        session_id TEXT PRIMARY KEY,
+        desired_serve_id TEXT
+      );
+      CREATE TABLE session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE TABLE session_reads (
+        session_id TEXT PRIMARY KEY,
+        last_read_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    routing.exec(`INSERT INTO session_assignment VALUES ('s1', 'serve-1'), ('s2', 'serve-2')`);
+    routing.close();
+
     try {
+      // serve-1 is live and reporting; serve-2 is silent (no overlay file).
       overlay(dir, "serve-1-a", { serveId: "serve-1", directory: "/a", sessions: {} });
-      const warnings2: string[] = [];
-      queryWithState([row("s1")], {
-        overlayDir: dir, now: Date.now(), staleMs: 45000, isAlive: () => true,
-        owners: { s1: "serve-1" }, onWarn: (m) => warnings2.push(m),
+      const warnings: string[] = [];
+      const result = queryWithState([row("s1"), row("s2")], {
+        overlayDir: dir, routingDbPath: routingPath, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        onWarn: (m) => warnings.push(m),
       });
-      expect(warnings2.some((w) => /no live writer/i.test(w))).toBe(false);
+      // Preconditions: s1 is idle (served by live serve-1), s2 is nodata (owned by silent serve-2)
+      expect(result.find((r) => r.id === "s1")?.activity).toBe("idle");
+      expect(result.find((r) => r.id === "s2")?.activity).toBe("nodata");
+      // Total outage warning does NOT fire (fleet is partially reporting)
+      expect(warnings.some((w) => w.includes("the writer fleet may be down"))).toBe(false);
+      // Partial outage warning fires and specifically names silent serve-2
+      const partialWarn = warnings.find((w) => w.includes("own session(s) but are not writing any live state"));
+      expect(partialWarn).toBeDefined();
+      expect(partialWarn).toContain("serve-2");
+      expect(partialWarn).toBe(
+        "serve-2 own session(s) but are not writing any live state -- their writers may be down (1 row(s) reported nodata)",
+      );
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("stays silent regarding outage warnings on the healthy path where all owner serves report", () => {
+    const dir = mkdir("healthy");
+    const routingPath = join(dir, "routing.db");
+    const routing = new Database(routingPath);
+    routing.exec(`
+      CREATE TABLE session_assignment (
+        session_id TEXT PRIMARY KEY,
+        desired_serve_id TEXT
+      );
+      CREATE TABLE session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE TABLE session_reads (
+        session_id TEXT PRIMARY KEY,
+        last_read_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    routing.exec(`INSERT INTO session_assignment VALUES ('s1', 'serve-1'), ('s2', 'serve-2')`);
+    routing.close();
+
+    try {
+      // Both serve-1 and serve-2 are live and reporting
+      overlay(dir, "serve-1-a", { serveId: "serve-1", directory: "/a", sessions: {} });
+      overlay(dir, "serve-2-a", { serveId: "serve-2", directory: "/a", sessions: {} });
+      const warnings: string[] = [];
+      const result = queryWithState([row("s1"), row("s2")], {
+        overlayDir: dir, routingDbPath: routingPath, now: Date.now(), staleMs: 45000, isAlive: () => true,
+        onWarn: (m) => warnings.push(m),
+      });
+      // Preconditions: both merged to idle
+      expect(result.find((r) => r.id === "s1")?.activity).toBe("idle");
+      expect(result.find((r) => r.id === "s2")?.activity).toBe("idle");
+      // Neither warning fires
+      expect(warnings.some((w) => w.includes("the writer fleet may be down"))).toBe(false);
+      expect(warnings.some((w) => w.includes("own session(s) but are not writing any live state"))).toBe(false);
+      expect(warnings).toEqual([]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
@@ -858,6 +945,9 @@ describe("S6: effective_state and the child fold", () => {
     pendingQuestions: [],
     lastActivity: 1000,
     updatedAt: 1000,
+    unread: null,
+    unread_state: "absent",
+    last_event_id: null,
     ...o,
   });
   // Only "/gone" is missing, so a fixture opts INTO the dir-missing path.
@@ -937,51 +1027,162 @@ describe("S6: effective_state and the child fold", () => {
     expect(seen(srow({ id: "i" }))).toBe("idle");
   });
 
-  it("sorts nodata ABOVE idle and unknown (S3's tripwire must not be buried)", () => {
+  it("sorts an error row above a non-attention row that is far more recent", () => {
     const out = fold([
-      srow({ id: "idle1" }),
-      srow({ id: "unk", unknown: true }),
-      srow({ id: "nod", activity: "nodata" }),
+      srow({ id: "busy_recent", activity: "working", lastActivity: 9999 }),
+      srow({ id: "err_stale", error: true, lastActivity: 100 }),
     ]);
-    expect(out.map((r) => r.id)).toEqual(["nod", "unk", "idle1"]);
+    expect(out.map((r) => r.id)).toEqual(["err_stale", "busy_recent"]);
+    expect(out[0].attention).toBe(true);
+    expect(out[1].attention).toBe(false);
   });
 
-  it("keeps a dir-gone row's state TRUTHFUL but refuses to let it sort as working", () => {
+  it("sorts a blocked row above a non-attention row that is far more recent", () => {
     const out = fold([
-      srow({ id: "gone", activity: "working", directory: "/gone", lastActivity: 9999 }),
-      srow({ id: "real", activity: "working", directory: "/live", lastActivity: 1 }),
+      srow({ id: "idle_recent", lastActivity: 9999 }),
+      srow({ id: "blocked_stale", pendingQuestions: ["approve?"], lastActivity: 100 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["blocked_stale", "idle_recent"]);
+    expect(out[0].attention).toBe(true);
+    expect(out[1].attention).toBe(false);
+  });
+
+  it("orders within the attention group by descending tree-max lastActivity", () => {
+    const out = fold([
+      srow({ id: "err_older", error: true, lastActivity: 500 }),
+      srow({ id: "blocked_newer", pendingPermissions: ["run"], lastActivity: 1000 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["blocked_newer", "err_older"]);
+    expect(out[0].attention).toBe(true);
+    expect(out[1].attention).toBe(true);
+  });
+
+  it("orders within the non-attention group by descending tree-max lastActivity (recent idle beats stale working)", () => {
+    const out = fold([
+      srow({ id: "stale_working", activity: "working", lastActivity: 100 }),
+      srow({ id: "recent_idle", activity: "idle", lastActivity: 5000 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["recent_idle", "stale_working"]);
+    expect(out[0].attention).toBe(false);
+    expect(out[1].attention).toBe(false);
+  });
+
+  it("sorts a stale nodata row BELOW a recent idle row (deliberate regression of old privilege)", () => {
+    const out = fold([
+      srow({ id: "stale_nodata", activity: "nodata", lastActivity: 100 }),
+      srow({ id: "recent_idle", activity: "idle", lastActivity: 5000 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["recent_idle", "stale_nodata"]);
+    expect(out[0].attention).toBe(false);
+    expect(out[1].attention).toBe(false);
+  });
+
+  it("lifts an idle parent into the attention group when its child is blocked, sorting above recent non-attention roots", () => {
+    const out = fold([
+      srow({ id: "recent_working", activity: "working", lastActivity: 9999 }),
+      srow({ id: "idle_parent", activity: "idle", lastActivity: 100 }),
+      srow({ id: "blocked_child", parent_id: "idle_parent", root_id: "idle_parent", pendingQuestions: ["q?"], lastActivity: 100 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["idle_parent", "recent_working"]);
+    expect(out[0].attention).toBe(true);
+    expect(out[0].effective_state).toBe("idle");
+    expect(out[0].child_state).toBe("blocked");
+    expect(out[1].attention).toBe(false);
+  });
+
+  it("keeps a dir-gone row's state TRUTHFUL but demotes it so blocked is NOT in the attention group", () => {
+    const out = fold([
+      srow({ id: "gone", pendingQuestions: ["q?"], directory: "/gone", lastActivity: 9999 }),
+      srow({ id: "real", pendingQuestions: ["q?"], directory: "/live", lastActivity: 1 }),
     ]);
 
     const gone = out.find((r) => r.id === "gone")!;
+    const real = out.find((r) => r.id === "real")!;
     expect(gone.dir_missing).toBe(true);
-    // Still truthful -- the session really is working; it simply cannot progress.
-    expect(gone.effective_state).toBe("working");
-    // ...but it must not pin itself to the top forever (Task 0 finding), even
-    // though its lastActivity is far newer than the healthy row's.
+    expect(gone.effective_state).toBe("blocked");
+    expect(gone.attention).toBe(false);
+    expect(real.dir_missing).toBe(false);
+    expect(real.effective_state).toBe("blocked");
+    expect(real.attention).toBe(true);
+    // Real blocked row is in attention group, so it sorts before gone despite older lastActivity
     expect(out.map((r) => r.id)).toEqual(["real", "gone"]);
-    expect(out.find((r) => r.id === "real")!.dir_missing).toBe(false);
   });
 
-  it("does not let a dir-gone CHILD pin its parent to the top either", () => {
+  it("keeps a dir-gone ERROR row's state TRUTHFUL but demotes it so error is NOT in the attention group", () => {
+    const out = fold([
+      srow({ id: "gone_err", error: true, directory: "/gone", lastActivity: 9999 }),
+      srow({ id: "real_err", error: true, directory: "/live", lastActivity: 1 }),
+    ]);
+
+    const gone = out.find((r) => r.id === "gone_err")!;
+    const real = out.find((r) => r.id === "real_err")!;
+    expect(gone.dir_missing).toBe(true);
+    expect(gone.effective_state).toBe("error");
+    expect(gone.attention).toBe(false);
+    expect(real.dir_missing).toBe(false);
+    expect(real.effective_state).toBe("error");
+    expect(real.attention).toBe(true);
+    // Real error row is in attention group, so it sorts before gone despite older lastActivity
+    expect(out.map((r) => r.id)).toEqual(["real_err", "gone_err"]);
+  });
+
+  it("does not let a dir-gone CHILD lift its parent into the attention group either", () => {
     const out = fold([
       srow({ id: "p1" }),
-      srow({ id: "k1", parent_id: "p1", root_id: "p1", activity: "working", directory: "/gone" }),
-      srow({ id: "p2", activity: "working" }),
+      srow({ id: "k1", parent_id: "p1", root_id: "p1", pendingQuestions: ["q?"], directory: "/gone" }),
+      srow({ id: "p2", pendingQuestions: ["q?"] }),
     ]);
-    // p2 is genuinely working; p1's only "working" child can never progress.
+    // p2 is genuinely blocked; p1's only blocked child is dir_missing so demoted.
     expect(out.map((r) => r.id)).toEqual(["p2", "p1"]);
-    // The child's state is still REPORTED, just not allowed to drive the sort.
-    expect(out.find((r) => r.id === "p1")!.child_state).toBe("working");
+    expect(out.find((r) => r.id === "p1")!.child_state).toBe("blocked");
+    expect(out.find((r) => r.id === "p1")!.attention).toBe(false);
+    expect(out.find((r) => r.id === "p2")!.attention).toBe(true);
   });
 
-  it("dates a root by its whole TREE, so a working subagent does not sink its silent parent", () => {
+  it("dates a root by its whole TREE, so a working subagent does not sink its silent parent (tree-max lastActivity, NOT root's own time_updated)", () => {
     const out = fold([
-      srow({ id: "old", lastActivity: 100 }),
-      srow({ id: "kid", parent_id: "old", root_id: "old", lastActivity: 5000 }),
-      srow({ id: "recent", lastActivity: 900 }),
+      srow({ id: "old", time_updated: 100, lastActivity: 100 }),
+      srow({ id: "kid", parent_id: "old", root_id: "old", time_updated: 5000, lastActivity: 5000 }),
+      srow({ id: "recent", time_updated: 900, lastActivity: 900 }),
     ]);
     expect(out.find((r) => r.id === "old")!.lastActivity).toBe(5000);
     expect(out.map((r) => r.id)).toEqual(["old", "recent"]);
+  });
+
+  it("emits the attention boolean matching group membership across all states", () => {
+    const out = fold([
+      srow({ id: "err", error: true }),
+      srow({ id: "blk", pendingQuestions: ["?"] }),
+      srow({ id: "ret", activity: "retry" }),
+      srow({ id: "wrk", activity: "working" }),
+      srow({ id: "nod", activity: "nodata" }),
+      srow({ id: "unk", unknown: true }),
+      srow({ id: "idl" }),
+    ]);
+    const byId = new Map(out.map((r) => [r.id, r]));
+    expect(byId.get("err")!.attention).toBe(true);
+    expect(byId.get("blk")!.attention).toBe(true);
+    expect(byId.get("ret")!.attention).toBe(false);
+    expect(byId.get("wrk")!.attention).toBe(false);
+    expect(byId.get("nod")!.attention).toBe(false);
+    expect(byId.get("unk")!.attention).toBe(false);
+    expect(byId.get("idl")!.attention).toBe(false);
+  });
+
+  it("does not allow unread count to alter ordering within attention or non-attention groups", () => {
+    // In non-attention group: recent idle with 0 unread beats older idle with 99 unread
+    const nonAttention = fold([
+      srow({ id: "older_with_unread", lastActivity: 1000, unread: 99, unread_state: "counted" }),
+      srow({ id: "newer_read", lastActivity: 2000, unread: 0, unread_state: "counted" }),
+    ]);
+    expect(nonAttention.map((r) => r.id)).toEqual(["newer_read", "older_with_unread"]);
+
+    // In attention group: recent error with 0 unread beats older error with 99 unread
+    const attention = fold([
+      srow({ id: "older_err_unread", error: true, lastActivity: 1000, unread: 99, unread_state: "counted" }),
+      srow({ id: "newer_err_read", error: true, lastActivity: 2000, unread: 0, unread_state: "counted" }),
+    ]);
+    expect(attention.map((r) => r.id)).toEqual(["newer_err_read", "older_err_unread"]);
   });
 
   it("stats each distinct directory once, however many rows share it", () => {
@@ -1277,6 +1478,342 @@ describe("S6: the union lands BEFORE ownership is resolved", () => {
       expect(outside!.activity).toBe("working"); // owner won; Rule 2 would say "retry"
     } finally {
       db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("buildUnreadMap & unread counts (Task 9)", () => {
+  const baseRows = [
+    { id: "root_1", title: "Root 1", parent_id: null, directory: "/p", time_updated: 1000, root_id: "root_1" },
+    { id: "child_1", title: "Child 1", parent_id: "root_1", directory: "/p", time_updated: 1000, root_id: "root_1" },
+    { id: "root_2", title: "Root 2", parent_id: null, directory: "/p", time_updated: 2000, root_id: "root_2" },
+  ];
+
+  function createTestRoutingDb(path: string): Database {
+    const db = new Database(path);
+    db.exec(`
+      CREATE TABLE session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sent_at INTEGER NOT NULL
+      );
+      CREATE TABLE session_reads (
+        session_id TEXT PRIMARY KEY,
+        last_read_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    return db;
+  }
+
+  it("a session with events above the watermark reports that count", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100),
+          (2, 'root_1', 'swarm', 200),
+          (3, 'root_1', 'stop', 300);
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 1, 150);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      const entry = unreadMap!.get("root_1");
+      expect(entry).toBeDefined();
+      expect(entry!.unread).toBe(2);
+      expect(entry!.last_event_id).toBe(3);
+      expect(entry!.last_event_at).toBe(300);
+      expect(warnings).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("kind='mirror' rows are excluded from the count", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'swarm', 100),
+          (2, 'root_1', 'mirror', 200),
+          (3, 'root_1', 'mirror', 250),
+          (4, 'root_1', 'stop', 300);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows);
+      expect(unreadMap).not.toBeNull();
+      const entry = unreadMap!.get("root_1");
+      expect(entry).toBeDefined();
+      expect(entry!.unread).toBe(2); // events 1 and 4 only, 2 & 3 excluded
+      expect(entry!.last_event_id).toBe(4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("absent session yields unread_state 'absent' and unread null, NOT 0 (prevents silent-zero regression)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      // Only root_1 has events in ledger; root_2 is completely absent
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows);
+      expect(unreadMap).not.toBeNull();
+      expect(unreadMap!.has("root_2")).toBe(false);
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+      });
+
+      const root2 = rows.find((r) => r.id === "root_2");
+      expect(root2).toBeDefined();
+      expect(root2!.unread_state).toBe("absent");
+      expect(root2!.unread).toBeNull();
+      expect(root2!.unread).not.toBe(0);
+      expect(root2!.last_event_id).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a session whose ledger rows are ALL at or below the watermark reports unread: 0 with unread_state: 'counted'", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100),
+          (2, 'root_1', 'swarm', 200);
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 2, 250);
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+      });
+
+      const root1 = rows.find((r) => r.id === "root_1");
+      expect(root1).toBeDefined();
+      expect(root1!.unread_state).toBe("counted");
+      expect(root1!.unread).toBe(0);
+      expect(root1!.last_event_id).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a session whose ledger rows are ALL kind='mirror' reports unread: 0 with unread_state: 'counted' and non-null last_event_id", () => {
+    // Deliberate judgement: mirror events are the session's own outbound messages mirrored
+    // back into the ledger and are never unread-worthy. The session is counted and up to date
+    // (rendering empty badge rather than '?'), with a valid last_event_id pointing to the mirror event.
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'mirror', 100),
+          (2, 'root_1', 'mirror', 200);
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+      });
+
+      const root1 = rows.find((r) => r.id === "root_1");
+      expect(root1).toBeDefined();
+      expect(root1!.unread_state).toBe("counted");
+      expect(root1!.unread).toBe(0);
+      expect(root1!.last_event_id).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an unreadable/missing routing DB yields unread_state: 'unavailable' for every row, emits a warning, and STILL returns base list", () => {
+    const warnings: string[] = [];
+    const missingPath = "/definitely/not/a/real/routing.db";
+
+    const unreadMap = buildUnreadMap(missingPath, baseRows, (m) => warnings.push(m));
+    expect(unreadMap).toBeNull();
+    expect(warnings.length).toBeGreaterThanOrEqual(1);
+    expect(warnings.some((w) => w.includes("routing db not found") || w.includes("unavailable"))).toBe(true);
+
+    const rows = queryWithState(baseRows, {
+      routingDbPath: missingPath,
+      onWarn: (m) => warnings.push(m),
+    });
+
+    expect(rows.length).toBe(baseRows.length);
+    for (const r of rows) {
+      expect(r.unread_state).toBe("unavailable");
+      expect(r.unread).toBeNull();
+      expect(r.last_event_id).toBeNull();
+    }
+  });
+
+  it("a routing DB lacking the session_events table yields unread_state: 'unavailable', emits warning, and returns base list", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = new Database(p);
+      db.exec(`CREATE TABLE some_other_table (id INTEGER PRIMARY KEY)`);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).toBeNull();
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("no session_events table");
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+        onWarn: (m) => warnings.push(m),
+      });
+
+      expect(rows.length).toBe(baseRows.length);
+      for (const r of rows) {
+        expect(r.unread_state).toBe("unavailable");
+        expect(r.unread).toBeNull();
+        expect(r.last_event_id).toBeNull();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("last_event_id is emitted and equals MAX(id) for that session", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (2, 'root_1', 'stop', 100),
+          (7, 'root_1', 'swarm', 200),
+          (15, 'root_1', 'stop', 300);
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, {
+        routingDbPath: p,
+      });
+
+      const root1 = rows.find((r) => r.id === "root_1");
+      expect(root1).toBeDefined();
+      expect(root1!.last_event_id).toBe(15);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a CHILD row carrying unread events triggers a warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'child_1', 'swarm', 100),
+          (2, 'child_1', 'stop', 200);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("child session child_1 carries 2 unread event(s)");
+      expect(warnings[0]).toContain("root-only");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a ledger session_id absent from baseRows does NOT trigger the child warning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'outside_child', 'swarm', 100),
+          (2, 'outside_child', 'stop', 200);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      expect(warnings).toEqual([]); // No warnings for sessions not in baseRows
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("event with id 0 is not counted when watermark is unread / COALESCE(r.last_read_id, 0)", () => {
+    // Note: unreachable in production because the ledger's id column is INTEGER PRIMARY KEY
+    // AUTOINCREMENT and therefore starts at 1. COALESCE(r.last_read_id, 0) treating 0 as the
+    // "unread / no watermark" sentinel is safe here, but do not copy this pattern to schemas
+    // where rowid/id 0 can legitimately occur.
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (0, 'root_1', 'stop', 100);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows);
+      expect(unreadMap).not.toBeNull();
+      const entry = unreadMap!.get("root_1");
+      expect(entry).toBeDefined();
+      // id 0 is <= 0, so COUNT(*) FILTER (WHERE e.id > COALESCE(r.last_read_id, 0)) gives 0
+      expect(entry!.unread).toBe(0);
+      expect(entry!.last_event_id).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays SILENT on the healthy path (no unexpected warnings)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      expect(warnings).toEqual([]);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

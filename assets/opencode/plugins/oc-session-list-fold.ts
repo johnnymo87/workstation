@@ -20,15 +20,25 @@ export type EffectiveState =
   | "idle";
 
 /**
- * Attention order, most urgent first. This is the ONE place the ordering of
- * states is written down; both the sort and the child fold read it, so they
- * cannot disagree.
+ * Attention order, most urgent first. SEVERITY now governs the child-fold
+ * worst-of aggregation and rendering, not the primary sort order (which is
+ * two-group: attention set on top, then purely by recency).
  *
- * `nodata` sits ABOVE `unknown` and `idle` on purpose. It is the S3 outage
- * tripwire meaning "no live writer was in a position to report", and
- * oc-session-list-state.ts requires consumers to render it at least as loudly
- * as idle. Sorting it below idle would bury exactly the rows that indicate the
- * reader cannot be trusted.
+ * The "render nodata at least as loudly as idle" contract from
+ * oc-session-list-state.ts is still honoured: (i) ordering now treats `nodata`
+ * and `idle` symmetrically by recency rather than ranking one below the other,
+ * (ii) `nodata` keeps its own distinct glyph, and (iii) the outage signal lives
+ * in `queryWithState`'s two-tier warning in `oc-session-list-state.ts`
+ * (total-outage when no live writer reports, and attributable partial-outage
+ * naming silent owner serves), which emits through `onWarn` for both roots and
+ * children because it runs pre-fold, triggered deliberately by "no live
+ * writer" rather than a count of nodata rows.
+ *
+ * A permanent ordering pin for `nodata` was rejected: a stale `nodata` row
+ * pinned above every idle row forever is a chronic pin, which trains the eye
+ * to ignore it. During an actual outage the affected sessions were recently
+ * active, so their tree-max `lastActivity` is fresh and they float to the top
+ * of the recency group on their own, exactly when it matters.
  */
 const SEVERITY: Record<EffectiveState, number> = {
   error: 0,
@@ -87,6 +97,14 @@ export interface FoldedRow extends SessionWithStateRow {
   child_count: number;
   /** Attention tier actually used for ordering; 0 is most urgent. */
   sort_rank: number;
+  /**
+   * Render-only boolean indicating whether the row belongs to the pinned
+   * attention group (sort_rank <= SEVERITY.blocked). Note that `attention` keys
+   * off the demoted rank while `model.lua`'s facet-pierce keys off
+   * `effective_state`/`child_state` and ignores `dir_missing` -- so a dir-gone
+   * blocked root pierces the facet but is not pinned (this combination is intended).
+   */
+  attention: boolean;
 }
 
 export interface FoldOptions {
@@ -206,6 +224,8 @@ export function foldRows(rows: SessionWithStateRow[], options: FoldOptions = {})
     // under whatever its parent happened to be doing. Hiding it is what the fold
     // must not do.
     const rank = Math.min(a.rank, childRank);
+    const sortRank = Number.isFinite(rank) ? rank : IDLE_RANK;
+    const attention = sortRank <= SEVERITY.blocked;
 
     folded.push({
       ...a.row,
@@ -213,14 +233,16 @@ export function foldRows(rows: SessionWithStateRow[], options: FoldOptions = {})
       dir_missing: a.dirMissing,
       child_state: agg?.childState ?? null,
       child_count: agg?.childCount ?? 0,
-      sort_rank: Number.isFinite(rank) ? rank : IDLE_RANK,
+      sort_rank: sortRank,
+      attention,
       lastActivity: agg && Number.isFinite(agg.maxActivity) ? agg.maxActivity : a.row.lastActivity,
     });
   }
 
   folded.sort((x, y) => {
-    if (x.sort_rank !== y.sort_rank) return x.sort_rank - y.sort_rank;
-    // Then ascending idle-age, i.e. most recently active first.
+    // Two-group sort: attention group (error or blocked) pinned on top.
+    if (x.attention !== y.attention) return x.attention ? -1 : 1;
+    // Within each group, sort by descending tree-max lastActivity (most recently active first).
     if (y.lastActivity !== x.lastActivity) return y.lastActivity - x.lastActivity;
     // Total order, so the output is reproducible rather than readdir-dependent.
     return x.id < y.id ? -1 : x.id > y.id ? 1 : 0;

@@ -129,4 +129,52 @@ function M.build(rows, hits, opts)
   return out
 end
 
+--- Render the unread badge string for a session row.
+---
+--- Four states:
+---   "counted" + unread > 0  => "(N)" (e.g. "(3)")
+---   "counted" + unread <= 0 => "" (empty string: read, nothing new)
+---   "absent"                => "·" (pigeon has no ledger for this session)
+---   "unavailable"           => "?" (routing DB is unreadable, unknown fleet-wide)
+---
+--- Robustness / Defensive rendering:
+---   - A row from an old CLI has no unread fields (`unread_state` is nil). Missing,
+---     nil, vim.NIL, non-string, or unrecognised `unread_state` degrades to "?"
+---     (safe loud direction: "we cannot say").
+---   - vim.NIL is userdata and truthy. We explicitly check for vim.NIL and types
+---     to avoid misbranching.
+---   - "counted" with a non-number or invalid `unread` (e.g. nil, vim.NIL, string)
+---     degrades to "?" rather than producing "(nil)" or throwing.
+---
+--- @param row table|nil
+--- @return string
+function M.unread_badge(row)
+  if type(row) ~= "table" then
+    return "?"
+  end
+
+  local state = row.unread_state
+  if state == nil or state == vim.NIL or type(state) ~= "string" then
+    return "?"
+  end
+
+  if state == "counted" then
+    local unread = row.unread
+    if unread == nil or unread == vim.NIL or type(unread) ~= "number" then
+      return "?"
+    end
+    if unread > 0 then
+      return string.format("(%d)", math.floor(unread))
+    else
+      return ""
+    end
+  elseif state == "absent" then
+    return "·"
+  elseif state == "unavailable" then
+    return "?"
+  else
+    return "?"
+  end
+end
+
 return M
