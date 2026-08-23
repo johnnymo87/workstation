@@ -4,7 +4,7 @@ import { existsSync, readdirSync, mkdirSync, mkdtempSync, writeFileSync, rmSync 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { queryBaseList, queryTreesForSessions } from "../oc-session-list-base.js";
-import { parseCliArgs } from "../oc-session-list.js";
+import { main, parseCliArgs } from "../oc-session-list.js";
 import {
   attentionCandidates,
   buildOwnersMap,
@@ -941,51 +941,144 @@ describe("S6: effective_state and the child fold", () => {
     expect(seen(srow({ id: "i" }))).toBe("idle");
   });
 
-  it("sorts nodata ABOVE idle and unknown (S3's tripwire must not be buried)", () => {
+  it("sorts an error row above a non-attention row that is far more recent", () => {
     const out = fold([
-      srow({ id: "idle1" }),
-      srow({ id: "unk", unknown: true }),
-      srow({ id: "nod", activity: "nodata" }),
+      srow({ id: "busy_recent", activity: "working", lastActivity: 9999 }),
+      srow({ id: "err_stale", error: true, lastActivity: 100 }),
     ]);
-    expect(out.map((r) => r.id)).toEqual(["nod", "unk", "idle1"]);
+    expect(out.map((r) => r.id)).toEqual(["err_stale", "busy_recent"]);
+    expect(out[0].attention).toBe(true);
+    expect(out[1].attention).toBe(false);
   });
 
-  it("keeps a dir-gone row's state TRUTHFUL but refuses to let it sort as working", () => {
+  it("sorts a blocked row above a non-attention row that is far more recent", () => {
     const out = fold([
-      srow({ id: "gone", activity: "working", directory: "/gone", lastActivity: 9999 }),
-      srow({ id: "real", activity: "working", directory: "/live", lastActivity: 1 }),
+      srow({ id: "idle_recent", lastActivity: 9999 }),
+      srow({ id: "blocked_stale", pendingQuestions: ["approve?"], lastActivity: 100 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["blocked_stale", "idle_recent"]);
+    expect(out[0].attention).toBe(true);
+    expect(out[1].attention).toBe(false);
+  });
+
+  it("orders within the attention group by descending tree-max lastActivity", () => {
+    const out = fold([
+      srow({ id: "err_older", error: true, lastActivity: 500 }),
+      srow({ id: "blocked_newer", pendingPermissions: ["run"], lastActivity: 1000 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["blocked_newer", "err_older"]);
+    expect(out[0].attention).toBe(true);
+    expect(out[1].attention).toBe(true);
+  });
+
+  it("orders within the non-attention group by descending tree-max lastActivity (recent idle beats stale working)", () => {
+    const out = fold([
+      srow({ id: "stale_working", activity: "working", lastActivity: 100 }),
+      srow({ id: "recent_idle", activity: "idle", lastActivity: 5000 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["recent_idle", "stale_working"]);
+    expect(out[0].attention).toBe(false);
+    expect(out[1].attention).toBe(false);
+  });
+
+  it("sorts a stale nodata row BELOW a recent idle row (deliberate regression of old privilege)", () => {
+    const out = fold([
+      srow({ id: "stale_nodata", activity: "nodata", lastActivity: 100 }),
+      srow({ id: "recent_idle", activity: "idle", lastActivity: 5000 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["recent_idle", "stale_nodata"]);
+    expect(out[0].attention).toBe(false);
+    expect(out[1].attention).toBe(false);
+  });
+
+  it("lifts an idle parent into the attention group when its child is blocked, sorting above recent non-attention roots", () => {
+    const out = fold([
+      srow({ id: "recent_working", activity: "working", lastActivity: 9999 }),
+      srow({ id: "idle_parent", activity: "idle", lastActivity: 100 }),
+      srow({ id: "blocked_child", parent_id: "idle_parent", root_id: "idle_parent", pendingQuestions: ["q?"], lastActivity: 100 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["idle_parent", "recent_working"]);
+    expect(out[0].attention).toBe(true);
+    expect(out[0].effective_state).toBe("idle");
+    expect(out[0].child_state).toBe("blocked");
+    expect(out[1].attention).toBe(false);
+  });
+
+  it("keeps a dir-gone row's state TRUTHFUL but demotes it so blocked is NOT in the attention group", () => {
+    const out = fold([
+      srow({ id: "gone", pendingQuestions: ["q?"], directory: "/gone", lastActivity: 9999 }),
+      srow({ id: "real", pendingQuestions: ["q?"], directory: "/live", lastActivity: 1 }),
     ]);
 
     const gone = out.find((r) => r.id === "gone")!;
+    const real = out.find((r) => r.id === "real")!;
     expect(gone.dir_missing).toBe(true);
-    // Still truthful -- the session really is working; it simply cannot progress.
-    expect(gone.effective_state).toBe("working");
-    // ...but it must not pin itself to the top forever (Task 0 finding), even
-    // though its lastActivity is far newer than the healthy row's.
+    expect(gone.effective_state).toBe("blocked");
+    expect(gone.attention).toBe(false);
+    expect(real.dir_missing).toBe(false);
+    expect(real.effective_state).toBe("blocked");
+    expect(real.attention).toBe(true);
+    // Real blocked row is in attention group, so it sorts before gone despite older lastActivity
     expect(out.map((r) => r.id)).toEqual(["real", "gone"]);
-    expect(out.find((r) => r.id === "real")!.dir_missing).toBe(false);
   });
 
-  it("does not let a dir-gone CHILD pin its parent to the top either", () => {
+  it("does not let a dir-gone CHILD lift its parent into the attention group either", () => {
     const out = fold([
       srow({ id: "p1" }),
-      srow({ id: "k1", parent_id: "p1", root_id: "p1", activity: "working", directory: "/gone" }),
-      srow({ id: "p2", activity: "working" }),
+      srow({ id: "k1", parent_id: "p1", root_id: "p1", pendingQuestions: ["q?"], directory: "/gone" }),
+      srow({ id: "p2", pendingQuestions: ["q?"] }),
     ]);
-    // p2 is genuinely working; p1's only "working" child can never progress.
+    // p2 is genuinely blocked; p1's only blocked child is dir_missing so demoted.
     expect(out.map((r) => r.id)).toEqual(["p2", "p1"]);
-    // The child's state is still REPORTED, just not allowed to drive the sort.
-    expect(out.find((r) => r.id === "p1")!.child_state).toBe("working");
+    expect(out.find((r) => r.id === "p1")!.child_state).toBe("blocked");
+    expect(out.find((r) => r.id === "p1")!.attention).toBe(false);
+    expect(out.find((r) => r.id === "p2")!.attention).toBe(true);
   });
 
-  it("dates a root by its whole TREE, so a working subagent does not sink its silent parent", () => {
+  it("dates a root by its whole TREE, so a working subagent does not sink its silent parent (tree-max lastActivity, NOT root's own time_updated)", () => {
     const out = fold([
-      srow({ id: "old", lastActivity: 100 }),
-      srow({ id: "kid", parent_id: "old", root_id: "old", lastActivity: 5000 }),
-      srow({ id: "recent", lastActivity: 900 }),
+      srow({ id: "old", time_updated: 100, lastActivity: 100 }),
+      srow({ id: "kid", parent_id: "old", root_id: "old", time_updated: 5000, lastActivity: 5000 }),
+      srow({ id: "recent", time_updated: 900, lastActivity: 900 }),
     ]);
     expect(out.find((r) => r.id === "old")!.lastActivity).toBe(5000);
     expect(out.map((r) => r.id)).toEqual(["old", "recent"]);
+  });
+
+  it("emits the attention boolean matching group membership across all states", () => {
+    const out = fold([
+      srow({ id: "err", error: true }),
+      srow({ id: "blk", pendingQuestions: ["?"] }),
+      srow({ id: "ret", activity: "retry" }),
+      srow({ id: "wrk", activity: "working" }),
+      srow({ id: "nod", activity: "nodata" }),
+      srow({ id: "unk", unknown: true }),
+      srow({ id: "idl" }),
+    ]);
+    const byId = new Map(out.map((r) => [r.id, r]));
+    expect(byId.get("err")!.attention).toBe(true);
+    expect(byId.get("blk")!.attention).toBe(true);
+    expect(byId.get("ret")!.attention).toBe(false);
+    expect(byId.get("wrk")!.attention).toBe(false);
+    expect(byId.get("nod")!.attention).toBe(false);
+    expect(byId.get("unk")!.attention).toBe(false);
+    expect(byId.get("idl")!.attention).toBe(false);
+  });
+
+  it("does not allow unread count to alter ordering within attention or non-attention groups", () => {
+    // In non-attention group: recent idle with 0 unread beats older idle with 99 unread
+    const nonAttention = fold([
+      srow({ id: "older_with_unread", lastActivity: 1000, unread: 99, unread_state: "present" }),
+      srow({ id: "newer_read", lastActivity: 2000, unread: 0, unread_state: "present" }),
+    ]);
+    expect(nonAttention.map((r) => r.id)).toEqual(["newer_read", "older_with_unread"]);
+
+    // In attention group: recent error with 0 unread beats older error with 99 unread
+    const attention = fold([
+      srow({ id: "older_err_unread", error: true, lastActivity: 1000, unread: 99, unread_state: "present" }),
+      srow({ id: "newer_err_read", error: true, lastActivity: 2000, unread: 0, unread_state: "present" }),
+    ]);
+    expect(attention.map((r) => r.id)).toEqual(["newer_err_read", "older_err_unread"]);
   });
 
   it("stats each distinct directory once, however many rows share it", () => {
@@ -1231,6 +1324,120 @@ describe("S6: --fold CLI flag", () => {
     expect(opts.fold).toBe(true);
     expect(opts.withState).toBe(true);
     expect(parseCliArgs(["--with-state"]).fold).toBe(false);
+  });
+
+  it("emits an outage tripwire warning on stderr when folded output contains nodata rows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "s6-nodata-warn-"));
+    const dbPath = join(dir, "test.db");
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE session (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        parent_id TEXT,
+        slug TEXT NOT NULL,
+        directory TEXT NOT NULL,
+        title TEXT NOT NULL,
+        version TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL,
+        time_archived INTEGER
+      )
+    `);
+    db.exec(
+      `INSERT INTO session VALUES ('s_nodata','p',NULL,'s_nodata','/w','s_nodata','1.0',1,1000,NULL)`
+    );
+    db.close();
+
+    const routingPath = join(dir, "routing.db");
+    const routing = new Database(routingPath);
+    routing.exec(`CREATE TABLE session_assignment (session_id TEXT PRIMARY KEY, desired_serve_id TEXT)`);
+    routing.close();
+
+    const origError = console.error;
+    const origLog = console.log;
+    const errors: string[] = [];
+    console.error = (...args: any[]) => errors.push(args.join(" "));
+    console.log = () => {};
+
+    try {
+      main([
+        "--db", dbPath,
+        "--routing-db", routingPath,
+        "--overlay-dir", dir,
+        "--fold",
+      ]);
+      const tripwire = errors.find((e) => e.includes("outage tripwire"));
+      expect(tripwire).toBeDefined();
+      expect(tripwire).toContain("1 session(s) had no live writer in a position to report, so the reader may be untrustworthy");
+    } finally {
+      console.error = origError;
+      console.log = origLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays silent regarding outage tripwire when no nodata rows exist in folded output", () => {
+    const dir = mkdtempSync(join(tmpdir(), "s6-nodata-silent-"));
+    const dbPath = join(dir, "test.db");
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE session (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        parent_id TEXT,
+        slug TEXT NOT NULL,
+        directory TEXT NOT NULL,
+        title TEXT NOT NULL,
+        version TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL,
+        time_archived INTEGER
+      )
+    `);
+    db.exec(
+      `INSERT INTO session VALUES ('s_live','p',NULL,'s_live','/w','s_live','1.0',1,1000,NULL)`
+    );
+    db.close();
+
+    const routingPath = join(dir, "routing.db");
+    const routing = new Database(routingPath);
+    routing.exec(`CREATE TABLE session_assignment (session_id TEXT PRIMARY KEY, desired_serve_id TEXT)`);
+    routing.close();
+
+    writeFileSync(
+      join(dir, "serve-1.json"),
+      JSON.stringify({
+        version: OVERLAY_VERSION,
+        instanceStamp: 1,
+        pid: process.pid,
+        serveId: "serve-1",
+        directory: "/w",
+        heartbeat: Date.now(),
+        sessions: { s_live: { activity: "idle", lastActivity: 1000, updatedAt: 1000, error: false, pendingPermissions: [], pendingQuestions: [] } },
+      })
+    );
+
+    const origError = console.error;
+    const origLog = console.log;
+    const errors: string[] = [];
+    console.error = (...args: any[]) => errors.push(args.join(" "));
+    console.log = () => {};
+
+    try {
+      main([
+        "--db", dbPath,
+        "--routing-db", routingPath,
+        "--overlay-dir", dir,
+        "--fold",
+      ]);
+      const tripwire = errors.find((e) => e.includes("outage tripwire"));
+      expect(tripwire).toBeUndefined();
+    } finally {
+      console.error = origError;
+      console.log = origLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

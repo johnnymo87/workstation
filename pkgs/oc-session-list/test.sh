@@ -158,6 +158,8 @@ echo "$JSON_FOLD_OUT" | grep -q '"effective_state"' \
   || fail "--fold emitted no effective_state"
 echo "$JSON_FOLD_OUT" | grep -q '"sort_rank"' \
   || fail "--fold emitted no sort_rank"
+echo "$JSON_FOLD_OUT" | grep -q '"attention"' \
+  || fail "--fold emitted no attention"
 
 # And --fold must not have leaked into the plain shape.
 echo "$JSON_LIVE_OUT" | grep -q '"effective_state"' \
