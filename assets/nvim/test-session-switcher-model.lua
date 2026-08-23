@@ -268,4 +268,132 @@ do
   assert(out[2].pierced == false, "an ordinary attached row is NOT marked pierced")
 end
 
+-- 16. unread_badge: "counted" with positive count renders "(N)".
+do
+  local row = { unread_state = "counted", unread = 3 }
+  local badge = model.unread_badge(row)
+  assert(badge == "(3)", "counted with positive unread renders '(3)', got " .. tostring(badge))
+
+  local row_large = { unread_state = "counted", unread = 42 }
+  assert(model.unread_badge(row_large) == "(42)", "counted with 42 unread renders '(42)'")
+end
+
+-- 17. unread_badge: "counted" with 0 renders empty string (no badge).
+do
+  local row = { unread_state = "counted", unread = 0 }
+  local badge = model.unread_badge(row)
+  assert(badge == "", "counted with unread=0 renders empty string (no badge), got " .. tostring(badge))
+end
+
+-- 18. unread_badge: "absent" renders "·" (and NOT "?", and NOT "(0)").
+do
+  local row = { unread_state = "absent", unread = nil }
+  local badge = model.unread_badge(row)
+  assert(badge == "·", "absent renders '·', got " .. tostring(badge))
+  assert(badge ~= "?", "absent must NOT render '?'")
+  assert(badge ~= "(0)", "absent must NOT render '(0)'")
+  assert(badge ~= "", "absent must NOT render empty string")
+end
+
+-- 19. unread_badge: "unavailable" renders "?" (and NOT "·").
+do
+  local row = { unread_state = "unavailable", unread = nil }
+  local badge = model.unread_badge(row)
+  assert(badge == "?", "unavailable renders '?', got " .. tostring(badge))
+  assert(badge ~= "·", "unavailable must NOT render '·'")
+end
+
+-- 20. Glyph distinctness: "·" and "?" are strictly different strings.
+-- Explicit review invariant: per-session absence is chronic; outage is noisy.
+do
+  local absent_row = { unread_state = "absent" }
+  local unavail_row = { unread_state = "unavailable" }
+  local absent_badge = model.unread_badge(absent_row)
+  local unavail_badge = model.unread_badge(unavail_row)
+  assert(absent_badge ~= unavail_badge, "absent glyph and unavailable glyph MUST be distinguishable")
+  assert(absent_badge == "·" and unavail_badge == "?", "glyphs match expected constants")
+end
+
+-- 21. Robustness: row from old CLI (no unread fields, unread_state is nil) degrades to "?" without error.
+do
+  local old_row = make_row("ses_old", "idle")
+  assert(rawget(old_row, "unread_state") == nil, "fixture row unread_state is nil")
+  local ok, badge = pcall(model.unread_badge, old_row)
+  assert(ok, "unread_badge does not throw on old CLI row")
+  assert(badge == "?", "old CLI row (missing unread_state) renders '?', got " .. tostring(badge))
+
+  local nil_row_ok, nil_badge = pcall(model.unread_badge, nil)
+  assert(nil_row_ok and nil_badge == "?", "nil row degrades to '?' without error")
+
+  local empty_row_badge = model.unread_badge({})
+  assert(empty_row_badge == "?", "empty table degrades to '?'")
+
+  local unknown_state_badge = model.unread_badge({ unread_state = "corrupted_state" })
+  assert(unknown_state_badge == "?", "unrecognised unread_state degrades to '?'")
+end
+
+-- 22. Robustness: vim.NIL in unread_state or unread does not take wrong branches.
+do
+  local row_vim_nil_state = { unread_state = vim.NIL, unread = 5 }
+  local badge1 = model.unread_badge(row_vim_nil_state)
+  assert(badge1 == "?", "vim.NIL unread_state degrades to '?', got " .. tostring(badge1))
+
+  local row_vim_nil_unread = { unread_state = "counted", unread = vim.NIL }
+  local badge2 = model.unread_badge(row_vim_nil_unread)
+  assert(badge2 == "?", "counted with vim.NIL unread degrades to '?', got " .. tostring(badge2))
+end
+
+-- 23. Robustness: "counted" with non-number unread does not render "(nil)" or error.
+do
+  local test_cases = {
+    { unread_state = "counted", unread = nil },
+    { unread_state = "counted", unread = "three" },
+    { unread_state = "counted", unread = {} },
+    { unread_state = "counted", unread = true },
+  }
+  for i, tc in ipairs(test_cases) do
+    local ok, badge = pcall(model.unread_badge, tc)
+    assert(ok, "counted with non-number unread does not throw (case " .. i .. ")")
+    assert(badge ~= "(nil)", "counted with non-number unread must NOT render '(nil)' (case " .. i .. ")")
+    assert(badge == "?", "counted with non-number unread degrades to '?' (case " .. i .. ")")
+  end
+end
+
+-- 24. M.build carries last_event_id, unread, unread_state, and attention through to output rows.
+do
+  local row = make_row("ses_fields", "idle")
+  row.unread = 7
+  row.unread_state = "counted"
+  row.last_event_id = 142
+  row.attention = true
+
+  local out = model.build({ row }, {})
+  assert(#out == 1, "build returns 1 row")
+  assert(out[1].last_event_id == 142, "last_event_id preserved on output row")
+  assert(out[1].unread == 7, "unread count preserved on output row")
+  assert(out[1].unread_state == "counted", "unread_state preserved on output row")
+  assert(out[1].attention == true, "attention preserved on output row")
+end
+
+-- 25. Order preservation: unread count does NOT alter CLI row ordering.
+do
+  local rows = {
+    make_row("ses_first", "idle"),
+    make_row("ses_second", "idle"),
+    make_row("ses_third", "idle"),
+  }
+  rows[1].unread = 0
+  rows[1].unread_state = "counted"
+  rows[2].unread = 999
+  rows[2].unread_state = "counted"
+  rows[3].unread = nil
+  rows[3].unread_state = "absent"
+
+  local out = model.build(rows, {})
+  assert(#out == 3, "count matches")
+  assert(out[1].id == "ses_first", "first row kept in 1st place despite unread=0")
+  assert(out[2].id == "ses_second", "second row kept in 2nd place despite unread=999")
+  assert(out[3].id == "ses_third", "third row kept in 3rd place despite unread=nil")
+end
+
 print("LUA_TEST_OK")
