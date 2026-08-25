@@ -14,7 +14,12 @@ local function check(cond, msg) N = N + 1; assert(cond, msg) end
 local model = loadfile("assets/nvim/lua/user/session_switcher/model.lua")()
 package.preload["user.session_switcher.model"] = function() return model end
 
+local discovery = loadfile("assets/nvim/lua/user/session_switcher/discovery.lua")()
+package.preload["user.session_switcher.discovery"] = function() return discovery end
+
 local spec = loadfile("assets/nvim/lua/user/session_switcher/spec.lua")()
+local act = loadfile("assets/nvim/lua/user/session_switcher/act.lua")()
+package.preload["user.session_switcher.act"] = function() return act end
 
 -- 1. ORDERING CONTROLS: picker_opts returns explicit sorting_strategy and order-preserving tiebreak.
 -- Prevents a telescope default change silently inverting the list, and prevents score ties reordering rows.
@@ -291,6 +296,278 @@ do
   check(t_warn:find("all", 1, true) ~= nil, "prompt_title with warnings still includes facet")
   check(t_warn:find("⚠", 1, true) ~= nil, "prompt_title visibly indicates warnings with ⚠")
   check(t_warn:find("2", 1, true) ~= nil, "prompt_title indicates warning count (2)")
+end
+
+-- =========================================================================
+-- ACT.LUA TESTS (Pure decision module - S7 Task 2)
+-- =========================================================================
+
+-- 15. DECIDE: focus_here on live hit in current editor (own == true).
+-- Prevents unnecessary tmux pane switches when session is already open here.
+do
+  local row = { id = "ses_here", directory = "/path/here" }
+  local hit = { sid = "ses_here", attach_status = "running", own = true, buffer = 12, tabpage = 2 }
+  local desc = act.decide(row, hit)
+  check(type(desc) == "table", "decide returns a table for focus_here")
+  check(desc.kind == "focus_here", "kind is 'focus_here'")
+  check(desc.buffer == 12, "desc.buffer matches hit.buffer (12)")
+  check(desc.tabpage == 2, "desc.tabpage matches hit.tabpage (2)")
+end
+
+-- 16. DECIDE: switch_pane on live hit in another pane/editor (own ~= true).
+-- Prevents attaching a new session when one is already running elsewhere in tmux.
+do
+  local row = { id = "ses_there", directory = "/path/there" }
+  local hit = {
+    sid = "ses_there",
+    attach_status = "running",
+    own = false,
+    pane = "%5",
+    sock = "/tmp/nvim-5.sock",
+    buffer = 8,
+    tabpage = 1,
+  }
+  local desc = act.decide(row, hit)
+  check(type(desc) == "table", "decide returns a table for switch_pane")
+  check(desc.kind == "switch_pane", "kind is 'switch_pane'")
+  check(desc.pane == "%5", "desc.pane matches hit.pane ('%5')")
+  check(desc.sock == "/tmp/nvim-5.sock", "desc.sock matches hit.sock")
+  check(desc.buffer == 8, "desc.buffer matches hit.buffer (8)")
+end
+
+-- 17. DECIDE: switch_pane carries FRESH hit's pane/sock, NEVER stale displayed row (TOCTOU guard).
+-- Prevents jumping to an outdated pane if a session was moved between render and keypress.
+do
+  local stale_row = {
+    id = "ses_moved",
+    directory = "/path/moved",
+    pane = "%99",
+    sock = "/tmp/nvim-99.sock",
+    buffer = 1,
+  }
+  local fresh_hit = {
+    sid = "ses_moved",
+    attach_status = "running",
+    own = false,
+    pane = "%42",
+    sock = "/tmp/nvim-42.sock",
+    buffer = 17,
+  }
+  local desc = act.decide(stale_row, fresh_hit)
+  check(desc.kind == "switch_pane", "kind is switch_pane")
+  check(desc.pane == "%42", "desc.pane carries FRESH hit's pane (%42), NOT stale row's pane (%99)")
+  check(desc.sock == "/tmp/nvim-42.sock", "desc.sock carries FRESH hit's sock, NOT stale row's sock")
+  check(desc.buffer == 17, "desc.buffer carries FRESH hit's buffer (17), NOT stale row's buffer (1)")
+end
+
+-- 18. DECIDE: attach when no hit is present (hit == nil).
+-- Opens fresh session attach when none exists.
+do
+  local row = { id = "ses_new", directory = "/path/new" }
+  local desc = act.decide(row, nil)
+  check(type(desc) == "table", "decide returns a table for attach")
+  check(desc.kind == "attach", "kind is 'attach'")
+  check(desc.sid == "ses_new", "desc.sid matches row.id ('ses_new')")
+end
+
+-- 19. DECIDE: CORPSE-JUMP GUARD 1 (hit exists but attach_status = 'failed').
+-- Prevents jumping into a dead terminal buffer whose session has crashed.
+do
+  local row = { id = "ses_dead", directory = "/path/dead" }
+  local dead_hit = {
+    sid = "ses_dead",
+    attach_status = "failed",
+    own = false,
+    pane = "%3",
+    sock = "/tmp/nvim-3.sock",
+    buffer = 4,
+  }
+  local desc = act.decide(row, dead_hit)
+  check(desc.kind == "attach", "dead hit (attach_status='failed') yields 'attach', NOT 'switch_pane' (corpse-jump guard)")
+  check(desc.sid == "ses_dead", "attach descriptor carries sid")
+  check(desc.pane == nil, "attach descriptor does not carry dead pane")
+end
+
+-- 20. DECIDE: CORPSE-JUMP GUARD 2 (hit exists with job_dead = true even if attach_status = 'running').
+-- Prevents resurrecting an old corpse buffer in an nvim where another session re-marked status running.
+do
+  local row = { id = "ses_job_dead", directory = "/path/job_dead" }
+  local corpse_hit = {
+    sid = "ses_job_dead",
+    attach_status = "running",
+    job_dead = true,
+    own = true,
+    buffer = 9,
+  }
+  local desc = act.decide(row, corpse_hit)
+  check(desc.kind == "attach", "job_dead=true hit yields 'attach', NOT 'focus_here' (corpse-jump guard)")
+  check(desc.sid == "ses_job_dead", "attach descriptor carries sid")
+end
+
+-- 21. DECIDE: CONTRACT 2 / NIL-DEREF GUARD (pierced, detached, pane-less row yields attach, never switch_pane).
+-- Prevents nil dereference or jump into void when an errored/blocked session survives an 'attached' facet filter.
+do
+  local pierced_row = {
+    id = "ses_blocked",
+    directory = "/path/blocked",
+    effective_state = "blocked",
+    pierced = true,
+    attached = false,
+    pane = nil,
+    sock = nil,
+    buffer = nil,
+  }
+  -- No fresh hit since the session is detached
+  local desc = act.decide(pierced_row, nil)
+  check(desc.kind == "attach", "pierced detached pane-less row yields 'attach', NEVER 'switch_pane' (nil-deref guard)")
+  check(desc.sid == "ses_blocked", "desc.sid matches pierced row.id")
+  check(desc.pane == nil, "desc has no pane")
+end
+
+-- 22. DECIDE: DIR_MISSING BEATS ATTACHMENT (ordering is the point).
+-- A row whose target directory is gone must refuse BEFORE inspecting attachment status.
+do
+  local missing_row = {
+    id = "ses_orphan",
+    directory = "/deleted/workspace",
+    dir_missing = true,
+    attached = true,
+    pane = "%1",
+  }
+  -- Even if a live hit is actively reported:
+  local live_hit = {
+    sid = "ses_orphan",
+    attach_status = "running",
+    own = true,
+    buffer = 2,
+    tabpage = 1,
+  }
+  local desc = act.decide(missing_row, live_hit)
+  check(desc.kind == "refuse_dir_missing", "dir_missing=true yields 'refuse_dir_missing' even when attached/live (ordering is the point)")
+  check(desc.directory == "/deleted/workspace", "descriptor carries directory field matching row.directory")
+end
+
+-- 23. DECIDE: PINNED FIELD NAME IS 'directory' (not 'dir' or 'path').
+-- Pin the field name so consumers cannot silently drift.
+do
+  local row = {
+    id = "ses_pin_dir",
+    directory = "/canonical/path/name",
+    dir_missing = true,
+  }
+  local desc = act.decide(row, nil)
+  check(desc.kind == "refuse_dir_missing", "kind is refuse_dir_missing")
+  check(desc.directory == "/canonical/path/name", "field name is strictly 'directory'")
+  check(desc.dir == nil, "field 'dir' is NOT present")
+  check(desc.path == nil, "field 'path' is NOT present")
+end
+
+-- 24. DECIDE: Robustness with nil/missing row and hit (never throws).
+do
+  local ok, desc = pcall(act.decide, nil, nil)
+  check(ok, "decide(nil, nil) does not throw")
+  check(type(desc) == "table", "decide(nil, nil) returns a table")
+  check(desc.kind == "attach", "decide(nil, nil) safely returns attach")
+
+  local ok2, desc2 = pcall(act.decide, {}, nil)
+  check(ok2, "decide({}, nil) does not throw")
+  check(desc2.kind == "attach", "decide({}, nil) safely returns attach")
+end
+
+-- 25. DECIDE: Injected is_live seam works.
+do
+  local row = { id = "ses_custom" }
+  local hit = { sid = "ses_custom" }
+  local custom_called = false
+  local desc = act.decide(row, hit, {
+    is_live = function(h)
+      custom_called = true
+      return h == hit
+    end,
+  })
+  check(custom_called, "custom opts.is_live was invoked")
+  check(desc.kind == "switch_pane", "custom is_live returning true yields switch_pane")
+end
+
+-- 26. WATERMARK: refuse_dir_missing returns nil (Contract 6: read-only row fires NO write).
+do
+  local row = { id = "ses_ro", last_event_id = 42, dir_missing = true }
+  local desc = { kind = "refuse_dir_missing", directory = "/gone" }
+  local wm = act.watermark(row, desc)
+  check(wm == nil, "watermark for refuse_dir_missing MUST be nil (contract 6: read-only row fires no write)")
+end
+
+-- 27. WATERMARK: nil last_event_id returns nil for BOTH absent and unavailable (Contract 11).
+-- Explicitly test both unread_state == 'absent' and 'unavailable' where last_event_id is nil.
+do
+  -- Case A: absent (pigeon has no ledger)
+  local row_absent = { id = "ses_absent", unread_state = "absent", last_event_id = nil }
+  local desc = { kind = "attach", sid = "ses_absent" }
+  check(act.watermark(row_absent, desc) == nil, "watermark is nil when last_event_id is nil (unread_state='absent')")
+
+  -- Case B: unavailable (routing DB unreadable)
+  local row_unavail = { id = "ses_unavail", unread_state = "unavailable", last_event_id = nil }
+  check(act.watermark(row_unavail, desc) == nil, "watermark is nil when last_event_id is nil (unread_state='unavailable')")
+
+  -- Case C: vim.NIL userdata
+  local row_vim_nil = { id = "ses_vim_nil", last_event_id = vim.NIL }
+  check(act.watermark(row_vim_nil, desc) == nil, "watermark is nil when last_event_id is vim.NIL")
+
+  -- Case D: non-number (e.g. string)
+  local row_str = { id = "ses_str", last_event_id = "123" }
+  check(act.watermark(row_str, desc) == nil, "watermark is nil when last_event_id is string")
+end
+
+-- 28. WATERMARK: missing or invalid row.id returns nil.
+do
+  local desc = { kind = "attach", sid = "ses_x" }
+  check(act.watermark({ last_event_id = 10 }, desc) == nil, "watermark is nil when row.id is nil")
+  check(act.watermark({ id = "", last_event_id = 10 }, desc) == nil, "watermark is nil when row.id is empty string")
+  check(act.watermark({ id = vim.NIL, last_event_id = 10 }, desc) == nil, "watermark is nil when row.id is vim.NIL")
+  check(act.watermark(nil, desc) == nil, "watermark is nil when row is nil")
+  check(act.watermark({ id = "ses_1", last_event_id = 10 }, nil) == nil, "watermark is nil when desc is nil")
+end
+
+-- 29. WATERMARK: REJECTS IMPLAUSIBLY LARGE VALUES (>= 1e12 is a timestamp, not an event id).
+-- Prevents catastrophic mix-up with lastActivity timestamp (~1.7e12) which would permanently hide future events.
+do
+  local row_ts = {
+    id = "ses_ts",
+    last_event_id = 1724500000000, -- epoch ms timestamp mistakenly in last_event_id
+    lastActivity = 1724500000000,
+  }
+  local desc = { kind = "attach", sid = "ses_ts" }
+  check(act.watermark(row_ts, desc) == nil, "watermark REJECTS timestamp-magnitude last_event_id >= 1e12 (defensive guard)")
+end
+
+-- 30. WATERMARK: produces correct payload for attach, switch_pane, and focus_here.
+-- focusing an already-open unread row MUST still produce a watermark payload (viewing = seen).
+do
+  -- attach
+  local row_att = { id = "ses_att", last_event_id = 15 }
+  local desc_att = { kind = "attach", sid = "ses_att" }
+  local wm_att = act.watermark(row_att, desc_att)
+  check(type(wm_att) == "table", "watermark returns table for attach")
+  check(wm_att.sid == "ses_att", "wm_att.sid equals row.id ('ses_att')")
+  check(wm_att.last_event_id == 15, "wm_att.last_event_id equals row.last_event_id (15)")
+
+  -- switch_pane
+  local row_sw = { id = "ses_sw", last_event_id = 200 }
+  local desc_sw = { kind = "switch_pane", pane = "%2", sock = "/tmp/a.sock" }
+  local wm_sw = act.watermark(row_sw, desc_sw)
+  check(type(wm_sw) == "table", "watermark returns table for switch_pane")
+  check(wm_sw.sid == "ses_sw", "wm_sw.sid equals row.id ('ses_sw')")
+  check(wm_sw.last_event_id == 200, "wm_sw.last_event_id equals row.last_event_id (200)")
+
+  -- focus_here on unread row
+  local row_foc = { id = "ses_foc", last_event_id = 77, unread_state = "counted", unread = 5 }
+  local desc_foc = { kind = "focus_here", buffer = 3, tabpage = 1 }
+  local wm_foc = act.watermark(row_foc, desc_foc)
+  check(type(wm_foc) == "table", "watermark returns table for focus_here on unread row")
+  check(wm_foc.sid == "ses_foc", "wm_foc.sid equals row.id ('ses_foc')")
+  check(wm_foc.last_event_id == 77, "wm_foc.last_event_id equals row.last_event_id (77)")
+  -- Proven exact equality
+  check(wm_foc.last_event_id == row_foc.last_event_id, "wm.last_event_id is exactly row.last_event_id")
 end
 
 print("LUA_TEST_OK " .. N)
