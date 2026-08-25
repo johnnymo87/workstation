@@ -833,6 +833,22 @@ in
         # The kill switch. Flipping this (or enableLgtmShepherd) off is the
         # whole rollback story: nothing else reads shepherd state.
         "LGTM_ENABLE_SHEPHERD=1"
+        # Wakes the session that WROTE a PR when review threads are waiting on
+        # a reply, instead of texting the human to go chase that session. This
+        # is the only signal that talks to an agent; everything else still goes
+        # to Telegram.
+        #
+        # Its own switch, separate from the one above, because the failure modes
+        # differ in kind: the shepherd going wrong costs a noisy Telegram, this
+        # going wrong costs tokens. Turning it off leaves the shepherd running
+        # and every needs_reply signal falls back to the human, which is simply
+        # the behaviour of the previous release.
+        #
+        # Bounded by design (lgtm src/agentRouting.ts): 3 wakes per PR for its
+        # lifetime, 2 per sweep, one per session per sweep, a 4h floor between
+        # wakes, never while lgtm is mid-review, never a session that is busy or
+        # more than 72h stale.
+        "LGTM_ENABLE_AGENT_ROUTING=1"
       ];
       ExecStart = "${pkgs.writeShellScript "lgtm-shepherd" ''
         set -euo pipefail
