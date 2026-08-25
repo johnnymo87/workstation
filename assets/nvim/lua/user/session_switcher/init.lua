@@ -67,14 +67,33 @@ function M.open(opts)
     exec.notify_warnings(warning_lines)
     local prompt_title = spec.prompt_title(current_facet, warning_lines)
 
+    -- ONE clock read for the whole render, not one per row. spec.format falls
+    -- back to its own os.time() when `now` is absent, which would let rows
+    -- formatted either side of a second boundary report ages computed against
+    -- different "now"s -- two sessions last active at the same instant could
+    -- render "59s" and "1m". Cosmetic, but the fix is a single line and it also
+    -- makes the whole render reproducible from one injected value.
+    local fmt_opts = vim.tbl_extend("force", opts, { now = os.time() * 1000 })
+
     local picker_opts = vim.tbl_extend("force", spec.picker_opts(), {
       prompt_title = prompt_title,
-      finder = make_finder(rows or {}, opts),
+      finder = make_finder(rows or {}, fmt_opts),
       sorter = conf.generic_sorter(opts),
       attach_mappings = function(prompt_bufnr, map)
         actions.select_default:replace(function()
-          actions.close(prompt_bufnr)
+          -- READ THE SELECTION BEFORE CLOSING, NOT AFTER.
+          --
+          -- `action_state.get_selected_entry()` reads a GLOBAL key
+          -- (telescope/state.lua `get_global_key "selected_entry"`), and
+          -- `actions.close` only clears the per-prompt status, so reading after
+          -- close happens to work today. It works by accident: it depends on a
+          -- global surviving teardown, and that global is shared by every
+          -- picker in the session. Reading first makes the jump depend on our
+          -- own control flow instead of on telescope's teardown order, so a
+          -- future telescope that clears the key on close cannot turn Enter
+          -- into a silent no-op. The stub test pins this ordering.
           local entry = action_state.get_selected_entry()
+          actions.close(prompt_bufnr)
           if not entry then
             return
           end
@@ -108,7 +127,8 @@ function M.open(opts)
               if current_picker.prompt_border and current_picker.prompt_border.change_title then
                 current_picker.prompt_border:change_title(new_title)
               end
-              current_picker:refresh(make_finder(new_rows or {}, opts), { reset_prompt = false })
+              local new_fmt_opts = vim.tbl_extend("force", opts, { now = os.time() * 1000 })
+              current_picker:refresh(make_finder(new_rows or {}, new_fmt_opts), { reset_prompt = false })
             end
           end)
           return true

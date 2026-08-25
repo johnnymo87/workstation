@@ -47,11 +47,15 @@ local recorded_select_default = nil
 local recorded_keymaps = {}
 local selected_entry_stub = nil
 local current_picker_stub = nil
+-- Records the ORDER of teardown-sensitive calls, so the test can prove the
+-- selection is read before the picker is closed rather than after it.
+local call_order = {}
 
 local stub_actions = {
   close = setmetatable({ calls = {} }, {
     __call = function(t, bufnr)
       table.insert(t.calls, bufnr)
+      table.insert(call_order, "close")
     end,
   }),
   select_default = {
@@ -63,6 +67,7 @@ local stub_actions = {
 
 local stub_action_state = {
   get_selected_entry = function()
+    table.insert(call_order, "get_selected_entry")
     return selected_entry_stub
   end,
   get_current_picker = function(bufnr)
@@ -1186,6 +1191,7 @@ do
   recorded_pickers_new = {}
   recorded_select_default = nil
   stub_actions.close.calls = {}
+  call_order = {}
 
   local executed_action = nil
   local orig_switch = exec.switch_pane
@@ -1221,6 +1227,21 @@ do
   check(executed_action ~= nil, "exec action was dispatched")
   check(executed_action.kind == "switch_pane", "dispatched switch_pane")
   check(executed_action.desc.pane == "%4", "pane matches re-resolved hit")
+
+  -- ORDERING: the selection must be read BEFORE the picker is closed.
+  -- get_selected_entry() reads a telescope GLOBAL, and actions.close only
+  -- clears per-prompt status, so reading after close works today purely by
+  -- accident of teardown order -- and that global is shared across pickers.
+  -- Pin the order so a future edit (or a telescope that clears the key on
+  -- close) cannot turn Enter into a silent no-op that no unit test notices.
+  local idx_entry, idx_close
+  for i, name in ipairs(call_order) do
+    if name == "get_selected_entry" and not idx_entry then idx_entry = i end
+    if name == "close" and not idx_close then idx_close = i end
+  end
+  check(idx_entry ~= nil, "get_selected_entry was called during accept")
+  check(idx_close ~= nil, "actions.close was called during accept")
+  check(idx_entry < idx_close, "selection is read BEFORE actions.close, not after it")
 
   exec.switch_pane = orig_switch
 end
