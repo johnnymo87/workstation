@@ -103,18 +103,36 @@ function M.open(opts)
             if not desc or type(desc) ~= "table" then
               return
             end
+            -- ONLY CLEAR THE BADGE IF THE JUMP ACTUALLY HAPPENED.
+            --
+            -- Every exec.* function returns a success boolean. Discarding them
+            -- and clearing unconditionally marks events read that the user
+            -- never saw -- the mirror image of the state this feature exists to
+            -- prevent, and worse, because unread data loss is not recoverable
+            -- by looking harder. The realistic trigger is not exotic: the
+            -- keymap guard checks `oc-session-list` only, so a host with
+            -- oc-auto-attach missing takes exec.attach's failure path, and
+            -- switch_pane fails whenever the picker is driven outside tmux.
+            --
+            -- refuse_dir_missing returns TRUE (it refused successfully) but
+            -- act.watermark already withholds its payload, so the read-only
+            -- contract still holds through the pure layer rather than through
+            -- this branch.
+            local acted = false
             if desc.kind == "focus_here" then
-              exec.focus_here(desc)
+              acted = exec.focus_here(desc)
             elseif desc.kind == "switch_pane" then
-              exec.switch_pane(desc, client)
+              acted = exec.switch_pane(desc, client)
             elseif desc.kind == "attach" then
-              exec.attach(desc)
+              acted = exec.attach(desc)
             elseif desc.kind == "refuse_dir_missing" then
-              exec.refuse_dir_missing(desc)
+              acted = exec.refuse_dir_missing(desc)
             end
 
-            local wm = act.watermark(row, desc)
-            exec.clear_unread(wm, opts)
+            if acted then
+              local wm = act.watermark(row, desc)
+              exec.clear_unread(wm, opts)
+            end
           end)
         end)
 

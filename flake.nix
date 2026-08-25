@@ -955,8 +955,8 @@
           echo "GATE FAILURE: session_switcher.model did not report expected 87 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (395 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 395 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (407 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 407 assertions." >&2
           exit 1
         }
         touch $out

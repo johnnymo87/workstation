@@ -2,6 +2,18 @@
 -- Driven via `nvim --clean -l assets/nvim/test-session-switcher-spec.lua`.
 
 local N = 0
+
+-- Search an argv for a value rather than indexing it. Positional assertions on
+-- curl's argv broke the moment a flag (--max-time) was inserted ahead of the
+-- URL, which is a test-maintenance failure rather than a real defect; searching
+-- expresses what we actually mean ("this argument is present").
+local function argv_has(argv, want)
+  for _, a in ipairs(argv or {}) do
+    if a == want then return true end
+  end
+  return false
+end
+
 local function check(cond, msg) N = N + 1; assert(cond, msg) end
 
 -- INJECT THE REAL model MODULE INTO package.preload BEFORE LOADING spec.lua.
@@ -248,8 +260,24 @@ do
 
   local formatted = spec.format(row, { now = now })
   check(type(formatted) == "table", "format returns a table")
-  check(formatted.display == "○ (3) Work Session · workstation · 1m",
+  check(formatted.display == "○ (3) Work Session │ workstation │ 1m",
     "display contains glyph + badge + title + basename + age; got: " .. tostring(formatted.display))
+
+  -- THE SEPARATOR MUST NOT BE THE BADGE CHARACTER.
+  -- model.unread_badge renders "·" for `absent`, the chronic majority case. When
+  -- the separator was also "·", an absent row read `○ · Title · dir · age` and
+  -- the badge was indistinguishable from punctuation -- contract 5 defeated in
+  -- practice while every glyph-distinctness test still passed, because those
+  -- compare glyphs against badges and never against the separator.
+  local absent_row = { id = "s", title = "T", directory = "/a/b", effective_state = "idle",
+    unread_state = "absent", lastActivity = now }
+  local absent_display = spec.format(absent_row, { now = now }).display
+  local badge_char = model.unread_badge(absent_row)
+  check(badge_char == "·", "absent rows badge as '·' (pinning the character this test reasons about)")
+  local _, sep_count = absent_display:gsub("│", "")
+  check(sep_count == 2, "display uses a separator distinct from the badge, so the badge stays visible")
+  local _, dot_count = absent_display:gsub("·", "")
+  check(dot_count == 1, "the only '·' in an absent row is the BADGE, not a separator; got: " .. absent_display)
   check(formatted.ordinal == "Work Session workstation",
     "ordinal contains title and basename only; got: " .. tostring(formatted.ordinal))
 
@@ -274,7 +302,7 @@ do
   }
 
   local formatted = spec.format(row, { now = now })
-  check(formatted.display == "● Clean Session · repo · 5s",
+  check(formatted.display == "● Clean Session │ repo │ 5s",
     "empty badge produces single space, no double space; got: " .. tostring(formatted.display))
   check(not formatted.display:find("  "), "display contains no double spaces")
   check(formatted.ordinal == "Clean Session repo", "ordinal is clean")
@@ -296,7 +324,7 @@ do
   local formatted = spec.format(row, { now = now })
   check(formatted.display:find("%[dir gone%]$") ~= nil,
     "dir_missing row display ends with [dir gone]; got: " .. tostring(formatted.display))
-  check(formatted.display == "■ · Orphan Session · deleted_dir · 10s [dir gone]",
+  check(formatted.display == "■ · Orphan Session │ deleted_dir │ 10s [dir gone]",
     "exact dir_missing display format matches; got: " .. tostring(formatted.display))
   -- Ordinal still excludes the mark
   check(not formatted.ordinal:find("%[dir gone%]"), "ordinal does not contain [dir gone]")
@@ -1560,7 +1588,7 @@ do
   sys_calls = {}
   exec.clear_unread(payload, { system = fake_sys })
   check(#sys_calls == 1, "invoked default")
-  check(sys_calls[1].cmd[5] == "http://127.0.0.1:4731/sessions/ses_port/read" or sys_calls[1].cmd[4] == "http://127.0.0.1:4731/sessions/ses_port/read", "default port is 4731")
+  check(argv_has(sys_calls[1].cmd, "http://127.0.0.1:4731/sessions/ses_port/read"), "default port is 4731")
 
   -- PIGEON_DAEMON_PORT env var
   vim.env.PIGEON_DAEMON_PORT = "5555"
@@ -1651,7 +1679,29 @@ do
   })
 
   recorded_pickers_new = {}
-  init_mod.open({ flow = fake_ctrl })
+  -- INJECT A FAKE SYSTEM. Without it this test calls through to the real
+  -- clear_unread with a real payload, which resolves the real bearer token
+  -- from /run/secrets and fires a real authenticated POST at the live pigeon
+  -- daemon on 4731 -- on every local run of the unit suite. It was harmless
+  -- only because the daemon-side clamp rejects an unknown sid, i.e. a unit
+  -- test whose safety depended on a server-side guard in a different repo.
+  local real_system_calls = {}
+  -- STUB exec.attach TOO. It is not covered by the `system` seam above:
+  -- exec.attach calls vim.system directly, and oc-auto-attach IS installed on
+  -- this host (/home/dev/.nix-profile/bin/oc-auto-attach), so an unstubbed run
+  -- spawns a real attach for a fabricated session id every time anyone runs
+  -- the unit suite. A unit test must not launch the production binary it is
+  -- reasoning about.
+  local orig_attach = exec.attach
+  local attach_calls = {}
+  exec.attach = function(desc)
+    table.insert(attach_calls, desc)
+    return true
+  end
+  init_mod.open({ flow = fake_ctrl, system = function(argv, o)
+    table.insert(real_system_calls, argv)
+    return { pid = 1, kill = function() end }
+  end })
   local picker_inst = recorded_pickers_new[1]
   picker_inst.defaults.attach_mappings(404, function() end)
 
@@ -1662,8 +1712,48 @@ do
   check(clear_calls[1].payload ~= nil, "clear_unread received non-nil payload")
   check(clear_calls[1].payload.sid == "ses_ok_int", "payload sid matches")
   check(clear_calls[1].payload.last_event_id == 88, "payload last_event_id matches")
+  check(#attach_calls == 1, "exec.attach was dispatched (stubbed, so no real oc-auto-attach was spawned)")
 
   exec.clear_unread = orig_clear
+  exec.attach = orig_attach
+end
+
+-- 65. THE JUMP MUST SUCCEED BEFORE THE BADGE IS CLEARED.
+-- A failed jump that still clears unread marks events read that the user never
+-- saw. That is unrecoverable -- unlike a badge that fails to clear, which the
+-- next jump fixes. The realistic trigger is mundane: the keymap guard checks
+-- only `oc-session-list`, so a host without oc-auto-attach takes exec.attach's
+-- failure path, and switch_pane fails whenever the picker runs outside tmux.
+do
+  local clear_calls = {}
+  local orig_clear = exec.clear_unread
+  local orig_attach = exec.attach
+  exec.clear_unread = function(payload) table.insert(clear_calls, payload); return true end
+  exec.attach = function() return false end -- simulate oc-auto-attach missing
+
+  local fake_ctrl = flow.new({
+    fetch = function(o, cb) cb({ rows = { { id = "ses_failjump", directory = "/tmp/f", last_event_id = 42 } } }, nil) end,
+    locate = function(o, cb) cb({}) end,
+  })
+
+  recorded_pickers_new = {}
+  init_mod.open({ flow = fake_ctrl })
+  recorded_pickers_new[1].defaults.attach_mappings(505, function() end)
+  selected_entry_stub = { value = { id = "ses_failjump", directory = "/tmp/f", last_event_id = 42 } }
+  recorded_select_default()
+
+  check(#clear_calls == 0, "a FAILED jump fires NO watermark write (unread must not be marked read)")
+
+  -- And the positive control, so this cannot pass by simply never writing.
+  exec.attach = function() return true end
+  recorded_pickers_new = {}
+  init_mod.open({ flow = fake_ctrl })
+  recorded_pickers_new[1].defaults.attach_mappings(506, function() end)
+  recorded_select_default()
+  check(#clear_calls == 1, "a SUCCESSFUL jump does fire the watermark write")
+
+  exec.clear_unread = orig_clear
+  exec.attach = orig_attach
 end
 
 print("LUA_TEST_OK " .. N)

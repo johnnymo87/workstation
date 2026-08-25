@@ -52,8 +52,16 @@ Controller.__index = Controller
 --- GENERATION CHECKING (THE TWO RACES PREVENTED):
 --- 1. Post-fetch: A generation token is bumped at the START of refresh.
 ---    When `fetch` returns, we re-check `self.generation == gen`. If a user
----    toggled facets or reopened the picker while fetch was in-flight, the stale
----    reply is silently dropped without invoking cb.
+---    toggled facets while fetch was in-flight, the stale reply is silently
+---    dropped without invoking cb.
+---
+---    SCOPE, stated precisely because the obvious reading is wrong: this token
+---    is per-CONTROLLER, and init.lua builds a fresh controller on every open.
+---    It therefore does NOT cover reopening the picker -- two opens are two
+---    controllers with independent counters, and the one that renders is the
+---    LAST TO COMPLETE, not the last to open. That is benign today (same facet,
+---    same data, and each open builds its own picker), but do not cite this
+---    token as the reason reopening is safe.
 --- 2. Post-locate: `discovery.locate` is ALSO async (1s deadline) with no
 ---    staleness guard of its own. When locate returns, we re-check
 ---    `self.generation == gen` AGAIN. A facet toggle landing mid-locate must

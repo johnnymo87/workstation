@@ -242,6 +242,11 @@ function M.clear_unread(payload, opts)
   local argv = {
     "curl",
     "-s",
+    -- Bound the request. This is fire-and-forget and nothing ever reaps the
+    -- handle, so an accepting-but-wedged daemon would leak one curl per jump
+    -- for the lifetime of the editor.
+    "--max-time",
+    "5",
     "-X",
     "POST",
     url,

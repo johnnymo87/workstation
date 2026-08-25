@@ -139,14 +139,25 @@ function M.format(row, opts)
   local basename = get_basename(safe_row.directory)
   local age = M.idle_age(safe_row.lastActivity, now_ms)
 
+  -- THE SEPARATOR MUST NOT BE THE BADGE CHARACTER.
+  --
+  -- model.unread_badge renders "·" for `absent` (pigeon has no ledger for this
+  -- session, the chronic majority case). Using "·" as the field separator too
+  -- made the row read `○ · Title · dir · age`, where the badge is
+  -- indistinguishable from punctuation -- so the one state that says "we have
+  -- no unread data at all" rendered as invisible noise. That defeats contract
+  -- 5 in practice while passing every glyph-distinctness test, because those
+  -- compare glyphs against badges and never against the separator.
+  local SEP = "│"
+
   local parts = { glyph }
   if badge ~= "" then
     table.insert(parts, badge)
   end
   table.insert(parts, title)
-  table.insert(parts, "·")
+  table.insert(parts, SEP)
   table.insert(parts, basename)
-  table.insert(parts, "·")
+  table.insert(parts, SEP)
   table.insert(parts, age)
 
   if safe_row.dir_missing == true then
