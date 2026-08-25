@@ -1,8 +1,9 @@
 -- session_switcher/exec.lua
 --
--- Side-effect execution layer for the session switcher (S7 / Task 3).
+-- Side-effect execution layer for the session switcher (S7 / Tasks 3 & 4).
 --
--- Performs navigation, focus switching, process execution, and notifications.
+-- Performs navigation, focus switching, process execution, notifications,
+-- and watermark clear-on-jump writes to the pigeon daemon.
 -- One side effect per function, no branching beyond guards.
 --
 -- ERROR SURFACING:
@@ -13,6 +14,52 @@
 -- Must NOT require telescope.* or plenary.* at any level.
 
 local M = {}
+
+local function trim(s)
+  if type(s) ~= "string" then
+    return nil
+  end
+  local trimmed = s:match("^%s*(.-)%s*$")
+  return (trimmed ~= "") and trimmed or nil
+end
+
+local function url_encode(str)
+  if type(str) ~= "string" then
+    return ""
+  end
+  return (str:gsub("[^%w%-_%.~]", function(c)
+    return string.format("%%%02X", string.byte(c))
+  end))
+end
+
+local function resolve_token(opts)
+  opts = (type(opts) == "table") and opts or {}
+  -- 1. opts.token or PIGEON_DAEMON_AUTH_TOKEN
+  local env_token = trim(opts.token) or trim(vim.env.PIGEON_DAEMON_AUTH_TOKEN)
+  if env_token then
+    return env_token
+  end
+
+  -- 2. Secret file: opts.token_file or PIGEON_DAEMON_AUTH_TOKEN_FILE or /run/secrets/pigeon_daemon_auth_token
+  local token_file = opts.token_file or vim.env.PIGEON_DAEMON_AUTH_TOKEN_FILE or "/run/secrets/pigeon_daemon_auth_token"
+  local ok, content = pcall(function()
+    local f = io.open(token_file, "r")
+    if not f then
+      return nil
+    end
+    local c = f:read("*a")
+    f:close()
+    return c
+  end)
+  if ok and type(content) == "string" then
+    local file_token = trim(content)
+    if file_token then
+      return file_token
+    end
+  end
+
+  return nil
+end
 
 --- Get the current tmux client name.
 ---
@@ -151,6 +198,71 @@ function M.notify_warnings(lines)
     end
   end
   return true
+end
+
+--- Clear unread badge by POSTing a watermark to the pigeon daemon (S7 / Task 4).
+---
+--- Fire-and-forget side effect. Handed nil, does nothing and returns false.
+---
+--- POST http://127.0.0.1:<port>/sessions/<url-encoded sid>/read
+--- Body: {"last_event_id": N}
+---
+--- CONTRACTS & GUARDS:
+--- - Nil or invalid payload does nothing and returns false.
+--- - Port defaults to 4731 or $PIGEON_DAEMON_PORT, overridable via opts.port.
+--- - Authorization: Bearer <token> is sent if resolved from opts.token, $PIGEON_DAEMON_AUTH_TOKEN,
+---   opts.token_file, $PIGEON_DAEMON_AUTH_TOKEN_FILE, or /run/secrets/pigeon_daemon_auth_token.
+---   Missing/unreadable token file never throws. If no token resolved, no Authorization header is sent.
+--- - Never awaited, stdin = false, pcall'd to guard against missing curl binary.
+--- - Returns boolean indicator: true if request was spawned, false otherwise.
+---
+--- @param payload table|nil { sid: string, last_event_id: number } from act.watermark
+--- @param opts table|nil Options:
+---   port?: integer|string
+---   token?: string
+---   token_file?: string
+---   system?: fun(cmd: table, opts: table): table
+--- @return boolean True if request was spawned, false otherwise
+function M.clear_unread(payload, opts)
+  if type(payload) ~= "table"
+    or type(payload.sid) ~= "string"
+    or payload.sid == ""
+    or type(payload.last_event_id) ~= "number"
+  then
+    return false
+  end
+
+  opts = (type(opts) == "table") and opts or {}
+
+  local port = opts.port or (vim.env.PIGEON_DAEMON_PORT and tonumber(vim.env.PIGEON_DAEMON_PORT)) or 4731
+  local token = resolve_token(opts)
+  local url = string.format("http://127.0.0.1:%s/sessions/%s/read", tostring(port), url_encode(payload.sid))
+  local body = vim.json.encode({ last_event_id = payload.last_event_id })
+
+  local argv = {
+    "curl",
+    "-s",
+    "-X",
+    "POST",
+    url,
+    "-H",
+    "content-type: application/json",
+  }
+
+  if token then
+    table.insert(argv, "-H")
+    table.insert(argv, "Authorization: Bearer " .. token)
+  end
+
+  table.insert(argv, "--data")
+  table.insert(argv, body)
+
+  local ok, _ = pcall(function()
+    local sys = opts.system or vim.system
+    return sys(argv, { stdin = false })
+  end)
+
+  return ok
 end
 
 return M

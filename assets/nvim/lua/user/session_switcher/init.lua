@@ -19,6 +19,7 @@ local action_state = require("telescope.actions.state")
 local spec = require("user.session_switcher.spec")
 local flow = require("user.session_switcher.flow")
 local exec = require("user.session_switcher.exec")
+local act = require("user.session_switcher.act")
 
 local M = {}
 
@@ -111,6 +112,9 @@ function M.open(opts)
             elseif desc.kind == "refuse_dir_missing" then
               exec.refuse_dir_missing(desc)
             end
+
+            local wm = act.watermark(row, desc)
+            exec.clear_unread(wm, opts)
           end)
         end)
 

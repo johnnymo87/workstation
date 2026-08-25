@@ -651,23 +651,25 @@ end
 -- focusing an already-open unread row MUST still produce a watermark payload (viewing = seen).
 do
   -- attach
-  local row_att = { id = "ses_att", last_event_id = 15 }
+  local row_att = { id = "ses_att", last_event_id = 15, lastActivity = 1724500000000 }
   local desc_att = { kind = "attach", sid = "ses_att" }
   local wm_att = act.watermark(row_att, desc_att)
   check(type(wm_att) == "table", "watermark returns table for attach")
   check(wm_att.sid == "ses_att", "wm_att.sid equals row.id ('ses_att')")
   check(wm_att.last_event_id == 15, "wm_att.last_event_id equals row.last_event_id (15)")
+  check(wm_att.last_event_id ~= row_att.lastActivity, "wm_att.last_event_id is NOT lastActivity")
 
   -- switch_pane
-  local row_sw = { id = "ses_sw", last_event_id = 200 }
+  local row_sw = { id = "ses_sw", last_event_id = 200, lastActivity = 1724500000000 }
   local desc_sw = { kind = "switch_pane", pane = "%2", sock = "/tmp/a.sock" }
   local wm_sw = act.watermark(row_sw, desc_sw)
   check(type(wm_sw) == "table", "watermark returns table for switch_pane")
   check(wm_sw.sid == "ses_sw", "wm_sw.sid equals row.id ('ses_sw')")
   check(wm_sw.last_event_id == 200, "wm_sw.last_event_id equals row.last_event_id (200)")
+  check(wm_sw.last_event_id ~= row_sw.lastActivity, "wm_sw.last_event_id is NOT lastActivity")
 
   -- focus_here on unread row
-  local row_foc = { id = "ses_foc", last_event_id = 77, unread_state = "counted", unread = 5 }
+  local row_foc = { id = "ses_foc", last_event_id = 77, unread_state = "counted", unread = 5, lastActivity = 1724500000000 }
   local desc_foc = { kind = "focus_here", buffer = 3, tabpage = 1 }
   local wm_foc = act.watermark(row_foc, desc_foc)
   check(type(wm_foc) == "table", "watermark returns table for focus_here on unread row")
@@ -675,6 +677,7 @@ do
   check(wm_foc.last_event_id == 77, "wm_foc.last_event_id equals row.last_event_id (77)")
   -- Proven exact equality
   check(wm_foc.last_event_id == row_foc.last_event_id, "wm.last_event_id is exactly row.last_event_id")
+  check(wm_foc.last_event_id ~= row_foc.lastActivity, "wm.last_event_id is NOT lastActivity")
 end
 
 -- =========================================================================
@@ -1321,6 +1324,346 @@ do
   check(notified_warnings[1]:find("outage alert", 1, true) ~= nil, "warning text preserved")
 
   exec.notify_warnings = orig_notify
+end
+
+-- =========================================================================
+-- EXEC.LUA CLEAR_UNREAD TESTS (Clear-on-Jump Side Effect - S7 Task 4)
+-- =========================================================================
+
+-- 54. CLEAR_UNREAD: nil or invalid payload does nothing and returns false (fake system never called).
+-- Prevents spurious HTTP requests or runtime errors when no watermark is due.
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  check(exec.clear_unread(nil, { system = fake_sys }) == false, "clear_unread(nil) returns false")
+  check(#sys_calls == 0, "fake system never called for nil payload")
+
+  check(exec.clear_unread({}, { system = fake_sys }) == false, "clear_unread({}) returns false")
+  check(#sys_calls == 0, "fake system never called for empty table payload")
+
+  check(exec.clear_unread({ sid = "" }, { system = fake_sys }) == false, "clear_unread({sid=''}) returns false")
+  check(#sys_calls == 0, "fake system never called for empty sid")
+
+  check(exec.clear_unread({ sid = "ses_1" }, { system = fake_sys }) == false, "clear_unread without last_event_id returns false")
+  check(#sys_calls == 0, "fake system never called when last_event_id is missing")
+
+  check(exec.clear_unread({ sid = "ses_1", last_event_id = "not_a_num" }, { system = fake_sys }) == false, "clear_unread with non-number last_event_id returns false")
+  check(#sys_calls == 0, "fake system never called when last_event_id is not a number")
+end
+
+-- 55. CLEAR_UNREAD: real payload invokes curl with correct URL, path, method, and stdin=false.
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  local payload = { sid = "ses_basic", last_event_id = 12 }
+  local res = exec.clear_unread(payload, { system = fake_sys, port = 4731 })
+  check(res == true, "clear_unread returns true when request spawned")
+  check(#sys_calls == 1, "system invoked exactly once")
+
+  local call = sys_calls[1]
+  check(call.opts ~= nil and call.opts.stdin == false, "invoked with stdin = false")
+  check(call.cmd[1] == "curl", "cmd[1] is curl")
+  check(vim.tbl_contains(call.cmd, "-X"), "cmd contains -X flag")
+  check(vim.tbl_contains(call.cmd, "POST"), "cmd contains POST method")
+
+  -- Find URL in argv
+  local url = nil
+  for _, arg in ipairs(call.cmd) do
+    if arg:find("^http://") then
+      url = arg
+      break
+    end
+  end
+  check(url ~= nil, "URL found in argv")
+  check(url == "http://127.0.0.1:4731/sessions/ses_basic/read", "URL matches http://127.0.0.1:4731/sessions/ses_basic/read, got: " .. tostring(url))
+  check(vim.tbl_contains(call.cmd, "content-type: application/json"), "contains content-type: application/json header")
+end
+
+-- 56. CLEAR_UNREAD: body contains exact last_event_id and nothing resembling a timestamp.
+-- Prevents catastrophic watermark corruption where epoch ms timestamp (~1.7e12) hides future events.
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  local payload = { sid = "ses_exact", last_event_id = 99 }
+  exec.clear_unread(payload, { system = fake_sys })
+  check(#sys_calls == 1, "system invoked")
+
+  local body = nil
+  for i, arg in ipairs(sys_calls[1].cmd) do
+    if arg == "--data" then
+      body = sys_calls[1].cmd[i + 1]
+      break
+    end
+  end
+  check(body ~= nil, "--data argument present")
+  local decoded = vim.json.decode(body)
+  check(type(decoded) == "table", "body is valid JSON")
+  check(decoded.last_event_id == 99, "body contains exact last_event_id = 99")
+  check(decoded.last_event_id < 1e12, "last_event_id does not resemble a timestamp (< 1e12)")
+end
+
+-- 57. CLEAR_UNREAD: URL-encodes session ID in path.
+-- Prevents malformed HTTP paths when session ID contains special characters or spaces.
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  local payload = { sid = "ses/with spaces&special?100%", last_event_id = 5 }
+  exec.clear_unread(payload, { system = fake_sys })
+  check(#sys_calls == 1, "system invoked")
+
+  local url = nil
+  for _, arg in ipairs(sys_calls[1].cmd) do
+    if arg:find("^http://") then
+      url = arg
+      break
+    end
+  end
+  check(url ~= nil, "URL present")
+  check(url:find("ses%2Fwith%20spaces%26special%3F100%25", 1, true) ~= nil, "URL has properly percent-encoded sid; got: " .. tostring(url))
+  check(not url:find(" "), "URL contains no unencoded spaces")
+  check(not url:find("ses/with"), "URL contains no unencoded slashes in sid")
+end
+
+-- 58. CLEAR_UNREAD: Authorization: Bearer <token> header present when token resolved.
+-- PREVENTS 401-SILENTLY-NEVER-CLEARS: Missing auth returns HTTP 401, which is fire-and-forget silent and leaves unread badge permanently stuck.
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  local payload = { sid = "ses_auth", last_event_id = 7 }
+  exec.clear_unread(payload, { system = fake_sys, token = "test-secret-bearer-token-123" })
+  check(#sys_calls == 1, "system invoked")
+
+  local auth_header = nil
+  for _, arg in ipairs(sys_calls[1].cmd) do
+    if arg:find("^Authorization:%s*Bearer") then
+      auth_header = arg
+      break
+    end
+  end
+  check(auth_header ~= nil, "Authorization: Bearer header present (prevents silent 401 unread badge never clears)")
+  check(auth_header == "Authorization: Bearer test-secret-bearer-token-123", "Authorization header contains exact token")
+end
+
+-- 59. CLEAR_UNREAD: NO Authorization header when no token can be resolved.
+-- Ensures no 'Bearer ' header with empty value is sent when auth is disabled.
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  local saved_env_tok = vim.env.PIGEON_DAEMON_AUTH_TOKEN
+  local saved_env_file = vim.env.PIGEON_DAEMON_AUTH_TOKEN_FILE
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN = nil
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN_FILE = "/nonexistent/token/path"
+
+  local payload = { sid = "ses_no_auth", last_event_id = 8 }
+  exec.clear_unread(payload, { system = fake_sys, token = nil, token_file = "/nonexistent/token/path" })
+  check(#sys_calls == 1, "system invoked")
+
+  for _, arg in ipairs(sys_calls[1].cmd) do
+    check(not arg:find("Bearer", 1, true), "argv contains no 'Bearer' when no token resolved; found: " .. tostring(arg))
+    check(not arg:find("Authorization", 1, true), "argv contains no 'Authorization' header when no token resolved")
+  end
+
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN = saved_env_tok
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN_FILE = saved_env_file
+end
+
+-- 60. CLEAR_UNREAD: token resolution precedence (opts.token/env beats file; file read trimmed; missing file safe).
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  -- Create a temporary token file
+  local tmp_token_file = os.tmpname()
+  local f = io.open(tmp_token_file, "w")
+  assert(f, "could not create tmp token file")
+  f:write("  file-token-456\n\n")
+  f:close()
+
+  local payload = { sid = "ses_prec", last_event_id = 1 }
+
+  -- Case A: opts.token takes precedence over file
+  sys_calls = {}
+  exec.clear_unread(payload, { system = fake_sys, token = "override-token", token_file = tmp_token_file })
+  check(#sys_calls == 1, "system invoked")
+  check(vim.tbl_contains(sys_calls[1].cmd, "Authorization: Bearer override-token"), "opts.token beats token_file")
+
+  -- Case B: env var beats file
+  local saved_tok = vim.env.PIGEON_DAEMON_AUTH_TOKEN
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN = "env-token-789"
+  sys_calls = {}
+  exec.clear_unread(payload, { system = fake_sys, token_file = tmp_token_file })
+  check(#sys_calls == 1, "system invoked")
+  check(vim.tbl_contains(sys_calls[1].cmd, "Authorization: Bearer env-token-789"), "env var beats token_file")
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN = saved_tok
+
+  -- Case C: fallback to trimmed file token when env var absent
+  local saved_file = vim.env.PIGEON_DAEMON_AUTH_TOKEN_FILE
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN = nil
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN_FILE = nil
+  sys_calls = {}
+  exec.clear_unread(payload, { system = fake_sys, token_file = tmp_token_file })
+  check(#sys_calls == 1, "system invoked")
+  check(vim.tbl_contains(sys_calls[1].cmd, "Authorization: Bearer file-token-456"), "file token read and trimmed")
+  vim.env.PIGEON_DAEMON_AUTH_TOKEN_FILE = saved_file
+
+  -- Case D: missing token file does not throw
+  sys_calls = {}
+  local ok, res = pcall(exec.clear_unread, payload, { system = fake_sys, token_file = "/nonexistent/unreadable/file" })
+  check(ok, "missing token file does not throw")
+  check(res == true, "clear_unread succeeds without token")
+  for _, arg in ipairs(sys_calls[1].cmd) do
+    check(not arg:find("Bearer", 1, true), "missing token file yields no Bearer header")
+  end
+
+  os.remove(tmp_token_file)
+end
+
+-- 61. CLEAR_UNREAD: port resolution ($PIGEON_DAEMON_PORT honoured, opts.port override, default 4731).
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+  local payload = { sid = "ses_port", last_event_id = 10 }
+
+  -- Default port is 4731
+  local saved_port = vim.env.PIGEON_DAEMON_PORT
+  vim.env.PIGEON_DAEMON_PORT = nil
+  sys_calls = {}
+  exec.clear_unread(payload, { system = fake_sys })
+  check(#sys_calls == 1, "invoked default")
+  check(sys_calls[1].cmd[5] == "http://127.0.0.1:4731/sessions/ses_port/read" or sys_calls[1].cmd[4] == "http://127.0.0.1:4731/sessions/ses_port/read", "default port is 4731")
+
+  -- PIGEON_DAEMON_PORT env var
+  vim.env.PIGEON_DAEMON_PORT = "5555"
+  sys_calls = {}
+  exec.clear_unread(payload, { system = fake_sys })
+  check(#sys_calls == 1, "invoked env port")
+  local url_env = nil
+  for _, a in ipairs(sys_calls[1].cmd) do if a:find("^http://") then url_env = a break end end
+  check(url_env == "http://127.0.0.1:5555/sessions/ses_port/read", "env var PIGEON_DAEMON_PORT honoured; got: " .. tostring(url_env))
+
+  -- opts.port override beats env var
+  sys_calls = {}
+  exec.clear_unread(payload, { system = fake_sys, port = 8080 })
+  check(#sys_calls == 1, "invoked opts.port")
+  local url_opts = nil
+  for _, a in ipairs(sys_calls[1].cmd) do if a:find("^http://") then url_opts = a break end end
+  check(url_opts == "http://127.0.0.1:8080/sessions/ses_port/read", "opts.port beats env var; got: " .. tostring(url_opts))
+
+  vim.env.PIGEON_DAEMON_PORT = saved_port
+end
+
+-- 62. CLEAR_UNREAD: vim.system error (missing binary / exception) is pcall'd, does not throw, returns false.
+do
+  local payload = { sid = "ses_err", last_event_id = 3 }
+  local fake_sys_raise = function(cmd, opts)
+    error("ENOENT: curl not found")
+  end
+
+  local ok, res = pcall(exec.clear_unread, payload, { system = fake_sys_raise })
+  check(ok, "clear_unread does not throw when vim.system raises")
+  check(res == false, "clear_unread returns false when system raises")
+end
+
+-- 63. INTEGRATION: refuse_dir_missing descriptor yields NO write through dispatch.
+-- Proves pure layer (act.watermark) withholds the write for read-only / dir_missing sessions.
+do
+  recorded_pickers_new = {}
+  recorded_select_default = nil
+  stub_actions.close.calls = {}
+
+  local clear_calls = {}
+  local orig_clear = exec.clear_unread
+  exec.clear_unread = function(payload, opts)
+    table.insert(clear_calls, { payload = payload, opts = opts })
+    return orig_clear(payload, opts)
+  end
+
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = { { id = "ses_ro_int", directory = "/tmp/nonexistent", dir_missing = true, last_event_id = 50 } } }, nil)
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+  })
+
+  init_mod.open({ flow = fake_ctrl })
+
+  local picker_inst = recorded_pickers_new[1]
+  picker_inst.defaults.attach_mappings(303, function() end)
+
+  -- Select the dir_missing row
+  selected_entry_stub = { value = { id = "ses_ro_int", directory = "/tmp/nonexistent", dir_missing = true, last_event_id = 50 } }
+  recorded_select_default()
+
+  check(#clear_calls == 1, "exec.clear_unread was called in dispatch")
+  check(clear_calls[1].payload == nil, "clear_unread was handed nil payload because act.watermark withheld it (contract 6)")
+
+  exec.clear_unread = orig_clear
+end
+
+-- 64. INTEGRATION: attach, switch_pane, focus_here DO pass watermark payload to exec.clear_unread.
+do
+  local clear_calls = {}
+  local orig_clear = exec.clear_unread
+  exec.clear_unread = function(payload, opts)
+    table.insert(clear_calls, { payload = payload, opts = opts })
+    return orig_clear(payload, opts)
+  end
+
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = { { id = "ses_ok_int", directory = "/tmp/ok", last_event_id = 88 } } }, nil)
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+  })
+
+  recorded_pickers_new = {}
+  init_mod.open({ flow = fake_ctrl })
+  local picker_inst = recorded_pickers_new[1]
+  picker_inst.defaults.attach_mappings(404, function() end)
+
+  selected_entry_stub = { value = { id = "ses_ok_int", directory = "/tmp/ok", last_event_id = 88 } }
+  recorded_select_default()
+
+  check(#clear_calls == 1, "exec.clear_unread was called for attach")
+  check(clear_calls[1].payload ~= nil, "clear_unread received non-nil payload")
+  check(clear_calls[1].payload.sid == "ses_ok_int", "payload sid matches")
+  check(clear_calls[1].payload.last_event_id == 88, "payload last_event_id matches")
+
+  exec.clear_unread = orig_clear
 end
 
 print("LUA_TEST_OK " .. N)
