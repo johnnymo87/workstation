@@ -28,13 +28,23 @@ do
   check(opts.tiebreak({}, {}) == false, "tiebreak(e1, e2) returns false when called with arguments")
 end
 
--- 2. GLYPHS: all 7 states present in GLYPHS and pairwise distinct.
+-- 2. GLYPHS: every state in model.STATES has a distinct glyph.
 -- Prevents missing state mappings and collision between states.
+--
+-- DRIVEN FROM model.STATES, NOT A LOCAL COPY OF THE LITERALS. This is the same
+-- drift the cross-language vocabulary check in test-session-switcher.sh exists
+-- to prevent, one seam further along the chain: CLI SEVERITY -> model.STATES ->
+-- spec.GLYPHS. A hardcoded list here would let an 8th state be added CLI-side
+-- and mirrored into model.STATES (both of which the .sh check would happily
+-- confirm agree) while spec.GLYPHS had no entry for it -- and glyph_of would
+-- silently render every such row as `~` unknown, asserting something false
+-- about the session rather than failing loudly. Iterating the real table is
+-- what makes that a test failure instead of a quiet mis-render.
 do
   check(type(spec.GLYPHS) == "table", "GLYPHS table exists")
-  local expected_states = { "error", "blocked", "retry", "working", "nodata", "unknown", "idle" }
+  check(vim.islist(model.STATES) and #model.STATES > 0, "model.STATES is a non-empty list to drive this check")
   local seen_glyphs = {}
-  for _, st in ipairs(expected_states) do
+  for _, st in ipairs(model.STATES) do
     local g = spec.GLYPHS[st]
     check(type(g) == "string" and g ~= "", "GLYPHS[" .. st .. "] is a non-empty string, got " .. tostring(g))
     check(seen_glyphs[g] == nil, "glyph for state '" .. st .. "' (" .. g .. ") is distinct from other states")
