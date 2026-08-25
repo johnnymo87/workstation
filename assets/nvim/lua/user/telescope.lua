@@ -33,5 +33,12 @@ vim.keymap.set("n", "<leader>fg", builtin.live_grep, { desc = "Live grep" })
 vim.keymap.set("n", "<leader>fG", builtin.grep_string, { desc = "Grep string under cursor" })
 vim.keymap.set("n", "<leader>fb", builtin.buffers, { desc = "Buffers" })
 vim.keymap.set("n", "<leader>fh", builtin.help_tags, { desc = "Help tags" })
+vim.keymap.set("n", "<leader>fs", function()
+  if vim.fn.executable("oc-session-list") == 0 then
+    vim.notify("session switcher unavailable on this host", vim.log.levels.WARN)
+    return
+  end
+  require("user.session_switcher").open()
+end, { desc = "OC sessions" })
 
 require("telescope").load_extension("fzy_native")

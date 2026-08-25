@@ -235,6 +235,10 @@ model_out="$(nvim --clean -l assets/nvim/test-session-switcher-model.lua 2>&1 ||
 model_count="$(parse_lua_ok "$model_out" "session_switcher.model unit tests")" || exit 1
 printf 'PASS  session_switcher.model unit tests (%s assertions via nvim -l)\n' "$model_count"
 
+spec_out="$(nvim --clean -l assets/nvim/test-session-switcher-spec.lua 2>&1 || true)"
+spec_count="$(parse_lua_ok "$spec_out" "session_switcher.spec unit tests")" || exit 1
+printf 'PASS  session_switcher.spec unit tests (%s assertions via nvim -l)\n' "$spec_count"
+
 # --- Cross-language contract: the state vocabulary must not DRIFT. -----------
 #
 # oc-session-list-fold.ts owns `effective_state`; model.lua mirrors the list in
