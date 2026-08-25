@@ -472,6 +472,14 @@ do
   local ok2, desc2 = pcall(act.decide, {}, nil)
   check(ok2, "decide({}, nil) does not throw")
   check(desc2.kind == "attach", "decide({}, nil) safely returns attach")
+
+  -- "No hit means no jump" must hold STRUCTURALLY, not because is_live happens
+  -- to return false for nil. An is_live that returned true for a nil hit would
+  -- nil-deref on hit.own rather than merely misroute -- which is exactly how
+  -- this surfaced, as a crash under mutation rather than a wrong descriptor.
+  local ok3, desc3 = pcall(act.decide, { id = "ses_x" }, nil, { is_live = function() return true end })
+  check(ok3, "decide(row, nil) does not throw even when is_live lies and returns true for nil")
+  check(desc3.kind == "attach", "a nil hit yields attach regardless of what is_live says")
 end
 
 -- 25. DECIDE: Injected is_live seam works.

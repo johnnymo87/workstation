@@ -70,7 +70,14 @@ function M.decide(row, hit, opts)
 
   -- 2 & 3. Attachment branches based on fresh hit liveness
   local hit_table = (type(hit) == "table") and hit or nil
-  if is_live(hit_table) then
+  -- `hit_table and` is not redundant with is_live's nil handling. It makes "no
+  -- hit means no jump" STRUCTURAL rather than a contract we inherit from
+  -- another module: without it, decide() depends on is_live(nil) returning
+  -- false, and an is_live that ever returned true for nil would not merely
+  -- misroute -- it would nil-deref on hit_table.own one line later. Found by
+  -- mutation testing, where sabotaging discovery.is_live to `return true`
+  -- crashed here instead of producing the wrong descriptor.
+  if hit_table and is_live(hit_table) then
     if hit_table.own == true then
       return {
         kind = "focus_here",
