@@ -18,8 +18,102 @@ local discovery = loadfile("assets/nvim/lua/user/session_switcher/discovery.lua"
 package.preload["user.session_switcher.discovery"] = function() return discovery end
 
 local spec = loadfile("assets/nvim/lua/user/session_switcher/spec.lua")()
+package.preload["user.session_switcher.spec"] = function() return spec end
 local act = loadfile("assets/nvim/lua/user/session_switcher/act.lua")()
 package.preload["user.session_switcher.act"] = function() return act end
+
+local flow_chunk = loadfile("assets/nvim/lua/user/session_switcher/flow.lua")
+local flow = flow_chunk and flow_chunk()
+package.preload["user.session_switcher.flow"] = function() return flow end
+
+local exec_chunk = loadfile("assets/nvim/lua/user/session_switcher/exec.lua")
+local exec = exec_chunk and exec_chunk()
+package.preload["user.session_switcher.exec"] = function() return exec end
+
+-- =========================================================================
+-- TELESCOPE STUBS FOR CI LOADABILITY AND MERGE VERIFICATION
+-- =========================================================================
+-- WHAT THIS TEST DOES AND DOES NOT PROVE:
+-- This test validates the glue wiring in init.lua against OUR MODEL of telescope's API.
+-- It proves that spec.picker_opts() (sorting_strategy, tiebreak), generic_sorter,
+-- finder, and attach_mappings are not dropped or misplaced in the table merge
+-- handed to pickers.new. It closes the gap where a correct spec.lua still yields
+-- a broken picker (e.g. missing sorter causing search to fail silently).
+-- It CANNOT catch telescope changing its own internal API contracts.
+-- Real telescope compatibility is verified via nvim -l on host and manual test.
+local recorded_pickers_new = {}
+local recorded_finders = {}
+local recorded_select_default = nil
+local recorded_keymaps = {}
+local selected_entry_stub = nil
+local current_picker_stub = nil
+
+local stub_actions = {
+  close = setmetatable({ calls = {} }, {
+    __call = function(t, bufnr)
+      table.insert(t.calls, bufnr)
+    end,
+  }),
+  select_default = {
+    replace = function(self, fn)
+      recorded_select_default = fn
+    end,
+  },
+}
+
+local stub_action_state = {
+  get_selected_entry = function()
+    return selected_entry_stub
+  end,
+  get_current_picker = function(bufnr)
+    return current_picker_stub
+  end,
+}
+
+local stub_config = {
+  values = {
+    generic_sorter = function(opts)
+      return { id = "generic_sorter_stub", opts = opts }
+    end,
+  },
+}
+
+local stub_finders = {
+  new_table = function(opts)
+    table.insert(recorded_finders, opts)
+    return { type = "finder_stub", opts = opts }
+  end,
+}
+
+local stub_pickers = {
+  new = function(opts, defaults)
+    local p = {
+      opts = opts,
+      defaults = defaults,
+      prompt_title = defaults and defaults.prompt_title,
+      find_called = false,
+      find = function(self)
+        self.find_called = true
+      end,
+      refresh = function(self, finder, r_opts)
+        self.refreshed_finder = finder
+        self.refreshed_opts = r_opts
+      end,
+    }
+    table.insert(recorded_pickers_new, p)
+    return p
+  end,
+}
+
+package.preload["telescope.pickers"] = function() return stub_pickers end
+package.preload["telescope.finders"] = function() return stub_finders end
+package.preload["telescope.config"] = function() return stub_config end
+package.preload["telescope.actions"] = function() return stub_actions end
+package.preload["telescope.actions.state"] = function() return stub_action_state end
+
+local init_chunk = loadfile("assets/nvim/lua/user/session_switcher/init.lua")
+local init_mod = init_chunk and init_chunk()
+package.preload["user.session_switcher"] = function() return init_mod end
 
 -- 1. ORDERING CONTROLS: picker_opts returns explicit sorting_strategy and order-preserving tiebreak.
 -- Prevents a telescope default change silently inverting the list, and prevents score ties reordering rows.
@@ -576,6 +670,636 @@ do
   check(wm_foc.last_event_id == 77, "wm_foc.last_event_id equals row.last_event_id (77)")
   -- Proven exact equality
   check(wm_foc.last_event_id == row_foc.last_event_id, "wm.last_event_id is exactly row.last_event_id")
+end
+
+-- =========================================================================
+-- FLOW.LUA TESTS (Concurrency & Async Controller - S7 Task 3)
+-- =========================================================================
+
+-- 31. FLOW: new controller instantiation and injected seams.
+do
+  check(flow ~= nil, "flow module loaded")
+  local ctrl = flow.new()
+  check(type(ctrl) == "table", "flow.new returns a table")
+  check(type(ctrl.refresh) == "function", "controller has refresh method")
+  check(type(ctrl.accept) == "function", "controller has accept method")
+end
+
+-- 32. FLOW: refresh pipeline (fetch -> locate -> build -> cb).
+do
+  local fetch_called = false
+  local locate_called = false
+  local build_called = false
+  local cb_called = false
+
+  local fake_rows = { { id = "ses_1", title = "T1" } }
+  local fake_hits = { ses_1 = { sid = "ses_1", attach_status = "running", own = true } }
+
+  local ctrl = flow.new({
+    fetch = function(opts, cb)
+      fetch_called = true
+      cb({ rows = fake_rows, warnings = nil }, nil)
+    end,
+    locate = function(opts, cb)
+      locate_called = true
+      cb(fake_hits)
+    end,
+    build = function(rows, hits, opts)
+      build_called = true
+      check(opts.facet == "all", "facet passed through to build")
+      return { { id = "ses_1", title = "T1", attached = true } }
+    end,
+  })
+
+  ctrl:refresh("all", function(rows, result, err)
+    cb_called = true
+    check(err == nil, "refresh happy path err is nil")
+    check(type(rows) == "table" and #rows == 1, "refresh yields built rows")
+    check(rows[1].attached == true, "built row has attached=true")
+    check(result ~= nil and result.rows == fake_rows, "refresh passes through result")
+  end)
+
+  check(fetch_called, "fetch was called")
+  check(locate_called, "locate was called")
+  check(build_called, "build was called")
+  check(cb_called, "refresh callback was invoked")
+end
+
+-- 33. FLOW RACE 1: Stale FETCH generation is dropped (cb NOT called).
+-- Prevents race where a slow fetch from an earlier facet toggle arrives late and clobbers newer state.
+do
+  local pending_fetch_cbs = {}
+  local cb_calls = 0
+
+  local ctrl = flow.new({
+    fetch = function(opts, cb)
+      table.insert(pending_fetch_cbs, cb)
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+    build = function(rows, hits, opts)
+      return rows
+    end,
+  })
+
+  -- Refresh 1: generation 1
+  ctrl:refresh("all", function(rows, result, err)
+    cb_calls = cb_calls + 1
+  end)
+
+  -- Refresh 2: generation 2 (user toggled facet before fetch 1 returned)
+  ctrl:refresh("attached", function(rows, result, err)
+    cb_calls = cb_calls + 1
+  end)
+
+  check(#pending_fetch_cbs == 2, "both fetches were dispatched")
+
+  -- Now fetch 1 (stale) completes
+  pending_fetch_cbs[1]({ rows = { { id = "ses_stale" } } }, nil)
+  check(cb_calls == 0, "stale fetch generation 1 completion does NOT invoke callback")
+
+  -- Now fetch 2 (current) completes
+  pending_fetch_cbs[2]({ rows = { { id = "ses_fresh" } } }, nil)
+  check(cb_calls == 1, "current fetch generation 2 completion DOES invoke callback")
+end
+
+-- 34. FLOW RACE 2: Stale LOCATE generation is dropped (cb NOT called).
+-- Revision 1 missed this: discovery.locate is also async (1s deadline) and has no staleness guard.
+-- A facet toggle landing mid-locate must NOT clobber finder with stale-facet rows.
+do
+  local pending_locate_cbs = {}
+  local cb_calls = 0
+
+  local ctrl = flow.new({
+    fetch = function(opts, cb)
+      -- fetch completes synchronously
+      cb({ rows = { { id = "ses_1" } } }, nil)
+    end,
+    locate = function(opts, cb)
+      table.insert(pending_locate_cbs, cb)
+    end,
+    build = function(rows, hits, opts)
+      return rows
+    end,
+  })
+
+  -- Refresh 1: fetch completes, locate is pending (gen 1)
+  ctrl:refresh("all", function(rows, result, err)
+    cb_calls = cb_calls + 1
+  end)
+
+  check(#pending_locate_cbs == 1, "first locate is pending")
+
+  -- Refresh 2: user toggled facet mid-locate (gen 2)
+  ctrl:refresh("attached", function(rows, result, err)
+    cb_calls = cb_calls + 1
+  end)
+
+  check(#pending_locate_cbs == 2, "second locate is pending")
+
+  -- Locate 1 (stale) completes
+  pending_locate_cbs[1]({})
+  check(cb_calls == 0, "stale locate generation 1 completion does NOT invoke callback (post-locate check)")
+
+  -- Locate 2 (current) completes
+  pending_locate_cbs[2]({})
+  check(cb_calls == 1, "current locate generation 2 completion DOES invoke callback")
+end
+
+-- 35. FLOW: Fetch error still calls cb with err so warnings surface.
+-- Prevents fetch errors leaving the picker silently empty (Contract 4).
+do
+  local cb_called = false
+  local received_err = nil
+
+  local ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb(nil, { kind = "exit", code = 1, message = "CLI crashed", stderr = "DB locked" })
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+  })
+
+  ctrl:refresh("all", function(rows, result, err)
+    cb_called = true
+    received_err = err
+  end)
+
+  check(cb_called, "cb was called on fetch error")
+  check(received_err ~= nil and received_err.kind == "exit", "cb received err object")
+  check(received_err.message == "CLI crashed", "err message preserved")
+end
+
+-- 36. FLOW: Stale fetch error generation is dropped.
+do
+  local pending_fetch_cbs = {}
+  local cb_calls = 0
+
+  local ctrl = flow.new({
+    fetch = function(opts, cb)
+      table.insert(pending_fetch_cbs, cb)
+    end,
+  })
+
+  ctrl:refresh("all", function(rows, result, err)
+    cb_calls = cb_calls + 1
+  end)
+  ctrl:refresh("attached", function(rows, result, err)
+    cb_calls = cb_calls + 1
+  end)
+
+  -- Error from stale fetch 1
+  pending_fetch_cbs[1](nil, { kind = "timeout", message = "timed out" })
+  check(cb_calls == 0, "error on stale fetch does not fire callback")
+end
+
+-- 37. FLOW: Accept pipeline (re-resolves via locate, calls decide, then cb).
+do
+  local locate_called = false
+  local decide_called = false
+  local cb_desc = nil
+
+  local row = { id = "ses_jump", directory = "/tmp/proj" }
+  local fresh_hit = { sid = "ses_jump", attach_status = "running", own = true, buffer = 5, tabpage = 1 }
+
+  local ctrl = flow.new({
+    locate = function(opts, cb)
+      locate_called = true
+      cb({ ses_jump = fresh_hit })
+    end,
+    decide = function(r, h)
+      decide_called = true
+      check(r == row, "decide received row")
+      check(h == fresh_hit, "decide received FRESH hit from locate")
+      return { kind = "focus_here", buffer = 5, tabpage = 1 }
+    end,
+  })
+
+  ctrl:accept(row, function(desc)
+    cb_desc = desc
+  end)
+
+  check(locate_called, "accept called locate to re-resolve (contract 8 TOCTOU)")
+  check(decide_called, "accept called decide")
+  check(cb_desc ~= nil and cb_desc.kind == "focus_here", "accept cb received descriptor")
+end
+
+-- 38. FLOW: Accept does NOT share render generation token (does not get cancelled if render generation moves).
+-- Decided explicitly: reopening picker mid-accept must not silently swallow jump.
+do
+  local pending_locate_cbs = {}
+  local accept_desc = nil
+
+  local ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = {} }, nil)
+    end,
+    locate = function(opts, cb)
+      table.insert(pending_locate_cbs, cb)
+    end,
+    decide = function(r, h)
+      return { kind = "attach", sid = r.id }
+    end,
+  })
+
+  -- Start accept (locate pending)
+  local row = { id = "ses_target" }
+  ctrl:accept(row, function(desc)
+    accept_desc = desc
+  end)
+
+  check(#pending_locate_cbs == 1, "accept locate is pending")
+
+  -- Now user reopens/refreshes the picker, bumping render generation
+  ctrl:refresh("all", function() end)
+
+  -- Now the accept-time locate completes
+  pending_locate_cbs[1]({})
+
+  check(accept_desc ~= nil, "accept callback STILL completes even when render generation moved (token NOT shared)")
+  check(accept_desc.kind == "attach", "accept descriptor is correct")
+  check(accept_desc.sid == "ses_target", "accept descriptor sid is correct")
+end
+
+-- =========================================================================
+-- EXEC.LUA TESTS (Side-Effect Layer - S7 Task 3)
+-- =========================================================================
+
+-- 39. EXEC: module loaded and exposes all required functions.
+do
+  check(exec ~= nil, "exec module loaded")
+  check(type(exec.tmux_client) == "function", "exec.tmux_client is a function")
+  check(type(exec.focus_here) == "function", "exec.focus_here is a function")
+  check(type(exec.switch_pane) == "function", "exec.switch_pane is a function")
+  check(type(exec.attach) == "function", "exec.attach is a function")
+  check(type(exec.refuse_dir_missing) == "function", "exec.refuse_dir_missing is a function")
+  check(type(exec.notify_warnings) == "function", "exec.notify_warnings is a function")
+end
+
+-- 40. EXEC: tmux_client degrades to nil when outside tmux or on failure (never throws).
+do
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = nil
+  local ok, res = pcall(exec.tmux_client)
+  check(ok, "tmux_client() does not throw when TMUX is unset")
+  check(res == nil, "tmux_client() returns nil outside tmux")
+  vim.env.TMUX = saved_tmux
+end
+
+-- 41. EXEC: focus_here sets buffer/tabpage and never throws.
+do
+  local ok, res = pcall(exec.focus_here, nil)
+  check(ok, "focus_here(nil) does not throw")
+  check(res == false, "focus_here(nil) returns false")
+
+  local ok2, res2 = pcall(exec.focus_here, { buffer = -999, tabpage = -999 })
+  check(ok2, "focus_here with invalid IDs does not throw")
+  check(type(res2) == "boolean", "focus_here returns boolean")
+end
+
+-- 42. EXEC: switch_pane degrades gracefully with notification when client is nil.
+do
+  local notifications = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level)
+    table.insert(notifications, { msg = msg, level = level })
+  end
+
+  local ok, res = pcall(exec.switch_pane, { pane = "%2", sock = "/tmp/a.sock", buffer = 1 }, nil)
+  check(ok, "switch_pane does not throw when client is nil")
+  check(res == false, "switch_pane returns false when client is nil")
+  check(#notifications > 0, "notification emitted explaining tmux client missing")
+  check(notifications[1].level == vim.log.levels.WARN, "notification is WARN level")
+
+  vim.notify = orig_notify
+end
+
+-- 43. EXEC: switch_pane runs tmux switch-client and nvim --remote-expr.
+do
+  local system_calls = {}
+  local orig_system = vim.system
+  vim.system = function(cmd, opts, on_exit)
+    table.insert(system_calls, { cmd = cmd, opts = opts })
+    return { pid = 1, wait = function() return { code = 0, stdout = "" } end }
+  end
+
+  local desc = { pane = "3", sock = "/tmp/nvim-3.sock", buffer = 7 }
+  local ok, res = pcall(exec.switch_pane, desc, "client_0")
+  check(ok, "switch_pane with client succeeds without throwing")
+  check(res == true, "switch_pane returns true on success")
+  check(#system_calls == 2, "switch_pane made 2 system calls (tmux switch-client + nvim remote-expr)")
+
+  -- Check tmux command
+  local tmux_cmd = system_calls[1].cmd
+  check(tmux_cmd[1] == "tmux" and tmux_cmd[2] == "switch-client", "first cmd is tmux switch-client")
+  check(tmux_cmd[4] == "client_0", "tmux client matches captured client")
+  check(tmux_cmd[6] == "%3", "tmux target pane has % prefix (%3)")
+  check(system_calls[1].opts.stdin == false, "tmux call has stdin=false")
+
+  -- Check nvim --remote-expr command
+  local nvim_cmd = system_calls[2].cmd
+  check(nvim_cmd[1] == "nvim" and nvim_cmd[2] == "--server" and nvim_cmd[3] == "/tmp/nvim-3.sock", "second cmd is nvim --server")
+  check(nvim_cmd[4] == "--remote-expr", "second cmd uses --remote-expr")
+  check(nvim_cmd[5]:find("nvim_set_current_buf") ~= nil, "remote-expr calls nvim_set_current_buf")
+  check(nvim_cmd[5]:find("7") ~= nil, "remote-expr passes buffer 7")
+  check(system_calls[2].opts.stdin == false, "nvim call has stdin=false")
+
+  vim.system = orig_system
+end
+
+-- 44. EXEC: attach shells out to oc-auto-attach binary with stdin=false (Contract 10).
+do
+  local system_calls = {}
+  local orig_system = vim.system
+  vim.system = function(cmd, opts, on_exit)
+    table.insert(system_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  local ok, res = pcall(exec.attach, { sid = "ses_attach_test" })
+  check(ok, "attach does not throw")
+  check(res == true, "attach returns true on success")
+  check(#system_calls == 1, "attach spawned 1 process")
+  check(system_calls[1].cmd[1] == "oc-auto-attach", "spawned oc-auto-attach binary (contract 10)")
+  check(system_calls[1].cmd[2] == "ses_attach_test", "passed session id argument")
+  check(system_calls[1].opts.stdin == false, "spawned with stdin=false")
+
+  vim.system = orig_system
+end
+
+-- 45. EXEC: attach handles missing binary (vim.system error) with notification without throwing.
+do
+  local notifications = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level)
+    table.insert(notifications, { msg = msg, level = level })
+  end
+  local orig_system = vim.system
+  vim.system = function(cmd, opts, on_exit)
+    error("ENOENT: oc-auto-attach not found")
+  end
+
+  local ok, res = pcall(exec.attach, { sid = "ses_missing_bin" })
+  check(ok, "attach does not throw even when vim.system raises ENOENT")
+  check(res == false, "attach returns false when binary fails to spawn")
+  check(#notifications > 0, "notification emitted for missing binary")
+  check(notifications[1].msg:find("oc-auto-attach", 1, true) ~= nil, "notification mentions oc-auto-attach")
+
+  vim.system = orig_system
+  vim.notify = orig_notify
+end
+
+-- 46. EXEC: refuse_dir_missing notifies warning naming directory and saying read-only.
+do
+  local notifications = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level)
+    table.insert(notifications, { msg = msg, level = level })
+  end
+
+  local ok, res = pcall(exec.refuse_dir_missing, { directory = "/tmp/deleted_worktree" })
+  check(ok, "refuse_dir_missing does not throw")
+  check(res == true, "refuse_dir_missing returns true")
+  check(#notifications == 1, "emitted 1 notification")
+  check(notifications[1].level == vim.log.levels.WARN, "notification is WARN level")
+  check(notifications[1].msg:find("/tmp/deleted_worktree", 1, true) ~= nil, "notification names directory")
+  check(notifications[1].msg:find("read%-only") ~= nil or notifications[1].msg:find("read-only") ~= nil, "notification states session is read-only")
+
+  vim.notify = orig_notify
+end
+
+-- 47. EXEC: notify_warnings surfaces all lines visibly.
+do
+  local notifications = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level)
+    table.insert(notifications, { msg = msg, level = level })
+  end
+
+  local ok, res = pcall(exec.notify_warnings, { "warning line 1", "warning line 2" })
+  check(ok, "notify_warnings does not throw")
+  check(res == true, "notify_warnings returns true")
+  check(#notifications == 2, "emitted 2 notifications")
+  check(notifications[1].msg == "warning line 1", "first line notified")
+  check(notifications[2].msg == "warning line 2", "second line notified")
+
+  -- Empty / nil lines table is safe no-op
+  check(exec.notify_warnings(nil) == true, "notify_warnings(nil) is safe")
+  check(exec.notify_warnings({}) == true, "notify_warnings({}) is safe")
+
+  vim.notify = orig_notify
+end
+
+-- =========================================================================
+-- INIT.LUA MERGE TESTS (Telescope Glue Verification - S7 Task 3)
+-- =========================================================================
+
+-- 48. INIT: init module loaded and exposes open().
+do
+  check(init_mod ~= nil, "init module loaded successfully")
+  check(type(init_mod.open) == "function", "init module exposes open function")
+end
+
+-- 49. INIT MERGE: pickers.new receives the merged spec.picker_opts() table.
+-- THIS IS THE POINT OF TASK 3:
+-- Proves that tiebreak, sorting_strategy, sorter, finder, and attach_mappings
+-- all reach pickers.new in the correct argument position and are not dropped.
+do
+  recorded_pickers_new = {}
+  recorded_finders = {}
+
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = { { id = "ses_alpha", title = "Alpha", directory = "/tmp/a" } }, warnings = nil }, nil)
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+  })
+
+  init_mod.open({
+    flow = fake_ctrl,
+    custom_user_opt = "preserved",
+  })
+
+  check(#recorded_pickers_new == 1, "pickers.new was invoked exactly once")
+  local picker_inst = recorded_pickers_new[1]
+  check(picker_inst.find_called == true, "picker:find() was invoked")
+
+  local merged = picker_inst.defaults
+  check(type(merged) == "table", "pickers.new defaults argument is a table")
+
+  -- 1. TIEBREAK from spec: MUST BE PRESENT AND RETURN FALSE (Insurance)
+  check(type(merged.tiebreak) == "function", "tiebreak is present in merged table")
+  check(merged.tiebreak() == false, "tiebreak() explicitly called and returns false")
+  check(merged.tiebreak({}, {}) == false, "tiebreak(e1, e2) returns false")
+
+  -- 2. SORTING_STRATEGY from spec: MUST BE "descending"
+  check(merged.sorting_strategy == "descending", "sorting_strategy in merged table is 'descending'")
+
+  -- 3. SORTER: MUST BE NON-NIL (LIVE HAZARD: omitting sorter causes silent non-filtering finder)
+  check(merged.sorter ~= nil, "sorter is present and non-nil in merged table")
+  check(type(merged.sorter) == "table" and merged.sorter.id == "generic_sorter_stub", "sorter is generic_sorter from conf")
+
+  -- 4. FINDER: MUST BE PRESENT
+  check(merged.finder ~= nil, "finder is present in merged table")
+  check(merged.finder.type == "finder_stub", "finder was built via finders.new_table")
+  check(#recorded_finders > 0, "finders.new_table was called")
+
+  -- 5. ATTACH_MAPPINGS: MUST BE PRESENT AND CALLABLE
+  check(type(merged.attach_mappings) == "function", "attach_mappings is a function in merged table")
+
+  -- 6. PROMPT_TITLE: reflects facet
+  check(type(merged.prompt_title) == "string", "prompt_title is present")
+  check(merged.prompt_title:find("all", 1, true) ~= nil, "prompt_title contains facet 'all'")
+
+  -- 7. User opts passed through in first argument
+  check(picker_inst.opts.custom_user_opt == "preserved", "user opts passed through to pickers.new")
+end
+
+-- 50. INIT: entry_maker formats row with spec.format.
+do
+  check(#recorded_finders > 0, "finders recorded")
+  local finder_opts = recorded_finders[#recorded_finders]
+  check(type(finder_opts.entry_maker) == "function", "finder has entry_maker")
+
+  local row = {
+    id = "ses_entry_test",
+    title = "Test Entry",
+    directory = "/tmp/test_dir",
+    effective_state = "working",
+    unread_state = "counted",
+    unread = 2,
+    lastActivity = os.time() * 1000 - 5000,
+  }
+  local entry = finder_opts.entry_maker(row)
+  check(type(entry) == "table", "entry_maker returns a table")
+  check(entry.value == row, "entry.value holds raw row")
+  check(entry.display ~= nil and entry.display:find("Test Entry") ~= nil, "entry.display contains title")
+  check(entry.ordinal == "Test Entry test_dir", "entry.ordinal matches spec format")
+end
+
+-- 51. INIT: attach_mappings default select dispatches accept through exec.
+do
+  recorded_pickers_new = {}
+  recorded_select_default = nil
+  stub_actions.close.calls = {}
+
+  local executed_action = nil
+  local orig_switch = exec.switch_pane
+  exec.switch_pane = function(desc, client)
+    executed_action = { kind = "switch_pane", desc = desc, client = client }
+    return true
+  end
+
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = { { id = "ses_mapped", directory = "/tmp/mapped" } } }, nil)
+    end,
+    locate = function(opts, cb)
+      cb({ ses_mapped = { sid = "ses_mapped", attach_status = "running", own = false, pane = "%4", sock = "/tmp/n.sock", buffer = 3 } })
+    end,
+  })
+
+  init_mod.open({ flow = fake_ctrl })
+
+  local picker_inst = recorded_pickers_new[1]
+  local map_fn = function(mode, key, fn) end
+  picker_inst.defaults.attach_mappings(101, map_fn)
+
+  check(type(recorded_select_default) == "function", "select_default:replace registered a callback")
+
+  -- Set selected entry stub
+  selected_entry_stub = { value = { id = "ses_mapped", directory = "/tmp/mapped" } }
+
+  -- Fire select_default
+  recorded_select_default()
+
+  check(#stub_actions.close.calls == 1 and stub_actions.close.calls[1] == 101, "actions.close was invoked on prompt buffer 101")
+  check(executed_action ~= nil, "exec action was dispatched")
+  check(executed_action.kind == "switch_pane", "dispatched switch_pane")
+  check(executed_action.desc.pane == "%4", "pane matches re-resolved hit")
+
+  exec.switch_pane = orig_switch
+end
+
+-- 52. INIT: <C-f> keymap cycles facet and refreshes current picker.
+do
+  recorded_pickers_new = {}
+  local registered_maps = {}
+
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = { { id = "ses_cycle" } } }, nil)
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+    build = function(rows, hits, opts)
+      return { { id = "ses_cycle", facet = opts.facet } }
+    end,
+  })
+
+  init_mod.open({ flow = fake_ctrl })
+
+  local picker_inst = recorded_pickers_new[1]
+  local map_fn = function(modes, key, fn)
+    table.insert(registered_maps, { modes = modes, key = key, fn = fn })
+  end
+
+  picker_inst.defaults.attach_mappings(202, map_fn)
+
+  -- Find <C-f> mapping
+  local cf_map = nil
+  for _, m in ipairs(registered_maps) do
+    if m.key == "<C-f>" then
+      cf_map = m
+      break
+    end
+  end
+
+  check(cf_map ~= nil, "<C-f> keymap was registered")
+
+  -- Set up current_picker stub
+  current_picker_stub = picker_inst
+
+  -- Trigger <C-f> (cycle from "all" to "attached")
+  cf_map.fn()
+
+  check(picker_inst.refreshed_finder ~= nil, "current_picker:refresh was invoked")
+  check(picker_inst.prompt_title:find("attached", 1, true) ~= nil, "prompt_title updated to 'attached'")
+  check(picker_inst.refreshed_opts.reset_prompt == false, "refresh passed reset_prompt=false")
+end
+
+-- 53. INIT: warnings are surfaced in prompt_title and via exec.notify_warnings.
+do
+  recorded_pickers_new = {}
+  local notified_warnings = nil
+  local orig_notify = exec.notify_warnings
+  exec.notify_warnings = function(lines)
+    notified_warnings = lines
+    return true
+  end
+
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = { { id = "ses_w" } }, warnings = "outage alert: no live writer" }, nil)
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+  })
+
+  init_mod.open({ flow = fake_ctrl })
+
+  local picker_inst = recorded_pickers_new[1]
+  check(picker_inst.prompt_title:find("⚠", 1, true) ~= nil, "prompt_title includes warning indicator ⚠")
+  check(notified_warnings ~= nil and #notified_warnings > 0, "exec.notify_warnings was called with warning lines")
+  check(notified_warnings[1]:find("outage alert", 1, true) ~= nil, "warning text preserved")
+
+  exec.notify_warnings = orig_notify
 end
 
 print("LUA_TEST_OK " .. N)
