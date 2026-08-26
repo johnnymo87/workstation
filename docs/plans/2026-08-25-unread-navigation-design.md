@@ -1,8 +1,19 @@
-# Unread navigation: land where the new work starts, clear only what you chose to
+# Unread navigation: land where the new work starts, clear on evidence of presence
 
-**Status:** design, approved. **Supersedes:** the auto-clear-on-jump wiring
+**Status:** design, approved. **Revision 2** — the anchor rule and the clearing
+policy both changed; revision 1's reasoning is corrected in place rather than
+deleted, in two marked passages. **Supersedes:** the auto-clear-on-jump wiring
 shipped in workstation PR #411 (S7 Task 4). **Spans three repos:**
 `workstation`, `pigeon`, `opencode-patched`.
+
+**What changed in revision 2, and why it matters:** revision 1 concluded "never
+auto-clear", on the strength of an asymmetry that turned out to be overstated —
+it treated a cleared badge as *unrecoverable* when in fact no content is lost,
+only the boundary marking where you had stopped. The narrower and more useful
+rule is that **asking a follow-up question is itself evidence you read what came
+before it.** That single observation both fixes the anchor (which revision 1 had
+corrected in the wrong direction) and restores an automatic clearing path that
+revision 1 had deferred.
 
 Two user-stated requirements:
 
@@ -147,11 +158,11 @@ test short of driving a real TUI would catch it.
 **The anchor is therefore a USER message id** — and *which* user message is the
 subtlety that design review caught, because the obvious choice is also wrong.
 
-### The anchor is the SPAN-START user turn, not the latest one
+### The anchor is the most recent HUMAN-AUTHORED user turn
 
-"Last user message at notification time" fails on traffic that is routine on
-this host. **Swarm peer messages and scheduled wakes arrive as user-role
-turns.** So:
+The first revision of this document said "span-start user turn", to avoid a
+failure it had correctly identified: **swarm peer messages and scheduled wakes
+arrive as user-role turns.** So
 
 ```
 U1 (human asks)  →  agent works ...  →  U2 (swarm peer / scheduled wake
@@ -159,28 +170,53 @@ U1 (human asks)  →  agent works ...  →  U2 (swarm peer / scheduled wake
                  →  agent keeps working ...  →  session.idle → one `stop`
 ```
 
-Notifications fire on idle, so that entire span produces **one** notification
-covering `U1 → end`. An anchor captured at notification time is `U2`, and
-jumping there lands the reader *past* the `U1..U2` agent work they have never
-seen — above the landing point, with no marker and no error. That is the
-silent-invisible-content class this whole feature exists to eliminate,
-reintroduced by the feature itself.
+produces **one** notification covering `U1 → end`, and anchoring at `U2` would
+land the reader *past* `U1..U2` agent work they never saw — content above the
+landing point, no marker, no error.
 
-**The anchor must be the user turn that STARTED the unread span**: the first
-user message since the previous notification, captured when the session
-transitions idle → working, not when the notification enqueues. The plugin
-already observes the role transitions this requires
-(`message-tail.ts:170-187`).
+**But "span-start" is the wrong correction, and it is wrong in the opposite
+direction.** If `U2` was authored by *the human*, they were present: they saw
+the output of `U1`'s turn and replied to it. Anchoring at `U1` then drags them
+back through material they have already read, and the notification predating
+`U2` was arguably never unread at all.
 
-**Verification required before implementing:** confirm that for a prompt queued
-mid-run, `message.updated` with `role: "user"` fires *before* the terminating
-`session.idle`. The span-start capture depends on it, and the failure is
-invisible if the assumption is wrong.
+The discriminator is not position in the span. It is **authorship**:
 
-Note also that `currentMessageId` points at whichever assistant message happened
-to be in flight when the notification fired, whereas a user turn is a stable
-boundary matching how `session.timeline` and `messages_last_user` already
-behave.
+| U2's author | what it proves | correct anchor |
+|---|---|---|
+| the human | they were present and read up to here | `U2` |
+| swarm peer / scheduled wake | nothing | the last human turn at or before the span |
+
+**So the anchor is the most recent HUMAN-AUTHORED user turn at or before the
+unread span.** Injected turns are skipped for anchoring purposes entirely.
+
+`currentMessageId` remains wrong for the separate reason given above — it points
+at whichever assistant message happened to be in flight — whereas a human user
+turn is a stable boundary matching how `session.timeline` and
+`messages_last_user` already behave.
+
+### Telling a human turn from an injected one
+
+Swarm and wake payloads are delivered through
+`POST /session/:id/prompt_async` (`daemon/src/opencode-client.ts:330`), which
+produces a user message structurally **identical** to a human typing — there is
+no `origin` or `source` field on the message schema to key off.
+
+What distinguishes them is the text: pigeon wraps every swarm payload in
+`<swarm_message …>` … `</swarm_message>` (`daemon/src/swarm/envelope.ts:122`),
+and `payloadHasCloseTag` (`envelope.ts:75`) **rejects any payload containing a
+close tag** at both the enqueue validator and the renderer. The envelope
+boundary therefore cannot be forged by payload content, which is what makes
+text-based detection trustworthy rather than merely convenient.
+
+**Residual risk, accepted and stated.** The test *excludes* enveloped turns; it
+does not *positively* identify a human. An unenveloped injection — an
+`opencode run` invocation, or future automation that prompts a session directly
+— would read as human presence and clear notifications predating it. This is
+bounded (only notifications older than the injection are affected) and it costs
+a bookmark rather than content, but it is a genuine false-clear path and it does
+not self-heal. Telegram replies land on the correct side of this line: they are
+plain text and they genuinely are the human.
 
 ### "Oldest uncleared" must skip uncounted kinds
 
@@ -193,18 +229,44 @@ and the drill-down will disagree with the badge the user is looking at.
 
 ## Design
 
-### 1. Clearing becomes explicit
+### 1. Clearing follows presence, not navigation
 
 Remove the auto-fire of the watermark write from the accept path in
 `session_switcher/init.lua`. `exec.clear_unread` survives unchanged as the
 mechanism — its guards, auth handling and payload validation are exactly what
-the new gesture needs — but jumping no longer triggers it.
+the replacements need — but **jumping** no longer triggers it.
 
-The decision rule is the asymmetry that already governs this feature: a badge
-that fails to clear self-heals on the next gesture, whereas cleared-but-unread
-is unrecoverable. Any automatic clear must therefore have a ~zero false-positive
-rate, and "the user jumped" does not meet that bar when the user's stated
-purpose is to peek.
+**A correction to this document's own earlier reasoning.** Revision 1 justified
+"never auto-clear" with an asymmetry: a badge that fails to clear self-heals,
+whereas cleared-but-unread is *unrecoverable*. The second half was overstated,
+and it was carrying more argumentative weight than the facts support. Clearing
+destroys no content — every message remains in the transcript. What it destroys
+is the **boundary**: the record of where you had stopped. Losing a bookmark is a
+real cost and worth designing against, but it is not data loss, and treating it
+as such pushed this design to a blunter rule than the evidence justified.
+
+The honest rule is narrower: **do not clear on a signal that does not imply the
+human was present.** Sorted by what each signal actually proves:
+
+| signal | implies the human read it | behaviour |
+|---|---|---|
+| jumping to the session | **no** — the stated purpose is often to peek | scroll; clear nothing |
+| **the human authors a turn** | **yes, up to that point** | advance the watermark past notifications predating it |
+| a swarm peer or wake arrives | no | ignore entirely |
+| the human reads but never types | yes, but unobservably | explicit gesture |
+
+Asking a follow-up question *is* evidence of having read what came before it —
+close to proof, not a heuristic. That is why it clears and why jumping does not.
+
+Authorship is determined by the envelope test described above, with the residual
+risk recorded there.
+
+### 1b. The explicit gesture, for the unobservable case
+
+Reading a session and then closing it without typing leaves no trace, so the
+drill-down and its "mark read through here" remain necessary — but as the
+**cover for a case the automatic path cannot see**, not as the only way to clear
+anything.
 
 ### 2. A drill-down that makes prefix-clearing selectable
 
@@ -222,7 +284,7 @@ recoverable afterwards:
 
 | column | purpose |
 |---|---|
-| `anchor_msg_id` | **span-start** user message id (see above); the scroll target |
+| `anchor_msg_id` | most recent **human-authored** user message id (see above); the scroll target |
 | `excerpt` | first ~150 chars of **pre-format plain text**, so the drill-down is readable |
 
 A drill-down of bare timestamps is nearly useless, which is what makes `excerpt`
@@ -311,26 +373,34 @@ missing anchor must not become a broken jump.
 
 ## Landing order, and the window it protects
 
-This spans three repos, and the naive order breaks the feature on a live
-machine. **Removing auto-clear before the explicit gesture exists leaves badges
-unclearable by any path**, and the gesture is itself blocked on pigeon: the
-drill-down needs a **per-notification list endpoint that does not exist today**
-(the daemon exposes only the aggregate `unreadBySession`). PR #411 already
-shipped auto-clear to a running machine, so this is a live regression risk, not
-a hypothetical.
+This spans three repos. Revision 1 identified a hard ordering constraint —
+removing auto-clear before the drill-down exists would leave badges unclearable,
+and the drill-down is blocked on a **per-notification list endpoint that does
+not exist today** (the daemon exposes only the aggregate `unreadBySession`).
+PR #411 already shipped auto-clear to a running machine, so the regression risk
+was live rather than hypothetical.
+
+**Clear-on-human-turn substantially relaxes that constraint**, because it lives
+in pigeon and the plugin rather than in the picker. Once it ships, badges keep
+clearing through the common path with no picker UI involved at all, so the
+drill-down stops being the only escape hatch and becomes the convenience it
+should have been.
 
 Required order:
 
-1. **pigeon** — two columns, span-start anchor capture in the plugin, and the
-   per-notification list endpoint.
+1. **pigeon** — two columns, human-turn detection (envelope test), the
+   watermark advance on a human-authored turn, and anchor capture in the plugin.
+   **After this step alone, badges already clear correctly for the common case.**
 2. **opencode-patched** — the scroll route, so a patched serve exists to talk
    to.
-3. **workstation** — remove auto-clear, add the drill-down, add the scroll call.
+3. **workstation** — remove auto-clear-on-jump, add the scroll call.
+4. **Later, and now genuinely optional:** the per-notification list endpoint and
+   the drill-down, covering only the read-but-never-typed case.
 
-**Cheap insurance, to be shipped in step 3 regardless:** a session-level
-"mark all read" gesture. It needs only the `lastEventId` the picker already
-holds, so it cannot be blocked by anything upstream, and it guarantees the
-badges are clearable in every intermediate state.
+**Cheap insurance, still worth shipping in step 3:** a session-level "mark all
+read" gesture. It needs only the `lastEventId` the picker already holds, so
+nothing upstream can block it, and it covers the read-silently case until step 4
+exists.
 
 **Plugin changes reach long-running serves only at restart** (the nightly
 reset), so for roughly a day after step 1, existing sessions keep producing
@@ -370,19 +440,24 @@ whose blast radius is the entire session.
   mis-scrolling.
 - **Time-based auto-clear** ("attached for N seconds"). Attach duration is
   uncorrelated with reading; fails the zero-false-clear bar.
-- **Clear-on-reply**, for now. It is a genuinely strong commitment signal and
-  observable without TUI telemetry, but swarm peer messages arrive as
-  **user-role turns**, so it would false-clear notifications a human never saw —
-  the unrecoverable direction. Viable later only with a `<swarm_message>`
-  envelope filter, and only as an accelerator on top of the explicit gesture.
+- ~~**Clear-on-reply.**~~ **Promoted into the design in revision 2** — it is now
+  the primary clearing path, not a deferred accelerator. Revision 1 deferred it
+  on the grounds that swarm peers arrive as user-role turns and would false-clear
+  notifications a human never saw. That objection was correct but soluble: the
+  `<swarm_message>` envelope is unforgeable (`payloadHasCloseTag`), so injected
+  turns can be excluded. See "Clearing follows presence, not navigation".
 
 ---
 
 ## Open questions for the implementation plan
 
-1. **Does a mid-run queued prompt emit `message.updated` (role user) before
-   `session.idle`?** The span-start anchor depends on it, and the failure mode
-   is invisible. Verify first — it can invalidate the anchor design.
+1. **When can a user turn be classified as human vs injected?** The envelope
+   test needs the message *text*, which arrives as parts and is debounced
+   (`userBuffers`, `message-tail.ts:312`). Confirm the full first text part is
+   available before the turn must be classified, and decide the behaviour for a
+   turn classified after the watermark decision would otherwise have been made.
+   Default must be "treat as injected" — the direction that fails toward keeping
+   something unread rather than clearing it.
 2. **Attach/scroll race.** The TUI must have rendered the message before the
    event lands, or `find()` hits nothing. Needs a settle strategy, and it must
    fail toward "no scroll" rather than "retry forever".
