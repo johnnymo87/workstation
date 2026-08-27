@@ -3,7 +3,8 @@
 -- Pure decision module for session switcher actions and watermark payloads (S7 / Task 2).
 --
 -- Maps a displayed row and a fresh discovery hit to an action descriptor, and determines
--- whether a jump fires a watermark clear payload to pigeon daemon.
+-- and the payload for an explicit mark-read write to the pigeon daemon.
+-- (Jumping no longer fires a watermark write; see init.lua.)
 --
 -- PURE: MUST NOT reference telescope.* or plenary.* at any level.
 -- CI runs bare nixpkgs neovim where `require("telescope")` FAILS.

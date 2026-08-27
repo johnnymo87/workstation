@@ -1741,7 +1741,8 @@ do
   exec.clear_unread = orig_clear
 end
 
--- 64. INTEGRATION: attach, switch_pane, focus_here DO pass watermark payload to exec.clear_unread.
+-- 64. INTEGRATION: attach, switch_pane and focus_here pass NO watermark payload.
+-- INVERTED from the original assertion, which read "DO pass watermark payload".
 do
   local clear_calls = {}
   local orig_clear = exec.clear_unread
@@ -1845,10 +1846,12 @@ do
   -- unpinned. Each kind is dispatched through the real init.lua branch here.
   local orig_focus, orig_switch = exec.focus_here, exec.switch_pane
   for _, kind in ipairs({ "focus_here", "switch_pane", "attach" }) do
-    local dispatched = 0
-    exec.focus_here = function() dispatched = dispatched + 1; return true end
-    exec.switch_pane = function() dispatched = dispatched + 1; return true end
-    exec.attach = function() dispatched = dispatched + 1; return true end
+    -- Distinct counters per exec, not one shared tally: a shared counter proves only
+    -- that SOME branch ran, so a dispatch that routed every kind to attach would pass.
+    local calls = { focus_here = 0, switch_pane = 0, attach = 0 }
+    exec.focus_here = function() calls.focus_here = calls.focus_here + 1; return true end
+    exec.switch_pane = function() calls.switch_pane = calls.switch_pane + 1; return true end
+    exec.attach = function() calls.attach = calls.attach + 1; return true end
 
     local row_k = { id = "ses_" .. kind, directory = "/tmp/k", last_event_id = 7 }
     local ctrl_k = flow.new({
@@ -1864,7 +1867,10 @@ do
     selected_entry_stub = { value = row_k }
     recorded_select_default()
 
-    check(dispatched == 1, kind .. " was dispatched through init.lua")
+    check(calls[kind] == 1, kind .. " was dispatched through init.lua's own branch")
+    local others = 0
+    for k, v in pairs(calls) do if k ~= kind then others = others + v end end
+    check(others == 0, kind .. " dispatched ONLY its own exec (no cross-routing)")
     check(#clear_calls == 0, kind .. " fires NO watermark write")
   end
   exec.focus_here, exec.switch_pane = orig_focus, orig_switch
@@ -1885,17 +1891,44 @@ do
   end)
   local cr = nil
   for _, m in ipairs(registered) do
-    if m.key == "<C-r>" then cr = m break end
+    if m.key == "<M-r>" then cr = m break end
   end
-  check(cr ~= nil, "<C-r> mark-read keymap was registered")
+  check(cr ~= nil, "<M-r> mark-read keymap was registered")
+
+  -- <C-r> must NOT be taken: telescope maps <C-r><C-w>/<C-a>/<C-f>/<C-l> in insert
+  -- mode and plain <C-r>{reg} is vim's register paste, so binding it would let a
+  -- paste gesture fire an irreversible mark-read on the highlighted row.
+  local ctrl_r = nil
+  for _, m in ipairs(registered) do
+    if m.key == "<C-r>" then ctrl_r = m break end
+  end
+  check(ctrl_r == nil, "<C-r> is NOT mapped (it shadows telescope's register-paste prefix)")
 
   current_picker_stub = recorded_pickers_new[1]
+  current_picker_stub.refreshed_finder = nil
   selected_entry_stub = { value = { id = "ses_failjump", directory = "/tmp/f", last_event_id = 42 } }
   cr.fn()
 
-  check(#clear_calls == 1, "<C-r> DOES fire the watermark write (positive control: the harness can see a write)")
-  check(clear_calls[1] ~= nil and clear_calls[1].sid == "ses_failjump", "<C-r> payload sid is the highlighted row")
-  check(clear_calls[1].last_event_id == 42, "<C-r> payload carries the row's last_event_id, not a clock")
+  check(#clear_calls == 1, "<M-r> DOES fire the watermark write (positive control: the harness can see a write)")
+  check(clear_calls[1] ~= nil and clear_calls[1].sid == "ses_failjump", "<M-r> payload sid is the highlighted row")
+  check(clear_calls[1].last_event_id == 42, "<M-r> payload carries the row's last_event_id, not a clock")
+  check(current_picker_stub.refreshed_finder ~= nil, "<M-r> refreshes the picker in place after a successful write")
+
+  -- FAILURE PATH: clear_unread returning false must not throw and must not refresh.
+  -- Discarding that boolean is exactly the mistake the deleted auto-clear warned about.
+  exec.clear_unread = function() return false end
+  current_picker_stub.refreshed_finder = nil
+  local ok_fail = pcall(cr.fn)
+  check(ok_fail, "<M-r> does not throw when the write fails")
+  check(current_picker_stub.refreshed_finder == nil, "<M-r> does NOT refresh when the write failed")
+
+  -- NO-LEDGER ROW: nil payload, no write attempted, no throw.
+  exec.clear_unread = function(payload) table.insert(clear_calls, payload); return true end
+  clear_calls = {}
+  selected_entry_stub = { value = { id = "ses_noledger", directory = "/tmp/f" } }
+  local ok_nil = pcall(cr.fn)
+  check(ok_nil, "<M-r> does not throw on a row with no ledger")
+  check(#clear_calls == 0, "<M-r> attempts NO write for a row with no last_event_id")
 
   exec.clear_unread = orig_clear
   exec.attach = orig_attach

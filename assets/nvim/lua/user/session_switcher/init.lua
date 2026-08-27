@@ -148,8 +148,12 @@ function M.open(opts)
           end)
         end)
 
-        local function cycle_facet()
-          current_facet = next_facet(current_facet)
+        -- ONE refresh implementation, used by every in-place update.
+        --
+        -- This was briefly duplicated for the mark-read gesture and the copies had
+        -- ALREADY drifted in the first commit -- one called exec.notify_warnings and
+        -- the other did not, with nothing recording whether that was deliberate.
+        local function refresh_in_place()
           controller:refresh(current_facet, function(new_rows, new_result, new_err, new_hidden)
             local new_warnings = spec.warning_lines(new_result, new_err)
             exec.notify_warnings(new_warnings)
@@ -165,6 +169,11 @@ function M.open(opts)
               current_picker:refresh(make_finder(new_rows or {}, new_fmt_opts), { reset_prompt = false })
             end
           end)
+        end
+
+        local function cycle_facet()
+          current_facet = next_facet(current_facet)
+          refresh_in_place()
           return true
         end
 
@@ -189,27 +198,42 @@ function M.open(opts)
             vim.notify("session-switcher: nothing to mark read for this row", vim.log.levels.INFO)
             return true
           end
-          exec.clear_unread(wm, opts)
-          -- Refresh so the badge updates in place, rather than leaving the user looking
-          -- at a count they just cleared.
-          controller:refresh(current_facet, function(new_rows, new_result, new_err, new_hidden)
-            local new_warnings = spec.warning_lines(new_result, new_err)
-            local new_title = spec.prompt_title(current_facet, new_warnings, new_hidden)
-            local current_picker = action_state.get_current_picker(prompt_bufnr)
-            if current_picker then
-              current_picker.prompt_title = new_title
-              if current_picker.prompt_border and current_picker.prompt_border.change_title then
-                current_picker.prompt_border:change_title(new_title)
-              end
-              local new_fmt_opts = vim.tbl_extend("force", opts, { now = os.time() * 1000 })
-              current_picker:refresh(make_finder(new_rows or {}, new_fmt_opts), { reset_prompt = false })
-            end
-          end)
+
+          -- CHECK THE RETURN VALUE. exec.clear_unread returns false when curl is
+          -- missing or vim.system raises, and that boolean is the only signal there
+          -- is. The code this change deleted carried a long comment about not
+          -- discarding exec success booleans; dropping it here would repeat the
+          -- mistake in the one place that writes irreversibly.
+          if not exec.clear_unread(wm, opts) then
+            vim.notify("session-switcher: failed to mark " .. wm.sid .. " read", vim.log.levels.WARN)
+            return true
+          end
+
+          -- ANNOUNCE SUCCESS, and name the session.
+          --
+          -- The write cannot be undone (the daemon's watermark is a MAX() upsert), so
+          -- the next best thing to a confirmation prompt is making the action visible
+          -- after the fact -- if this fires on the wrong row, the user finds out now
+          -- rather than by noticing a missing badge days later. It also disambiguates
+          -- success from the refresh below racing the write and redrawing a stale
+          -- count, which would otherwise look identical to failure.
+          vim.notify("session-switcher: marked " .. wm.sid .. " read", vim.log.levels.INFO)
+          refresh_in_place()
           return true
         end
 
         map({ "i", "n" }, "<C-f>", cycle_facet)
-        map({ "i", "n" }, "<C-r>", mark_read)
+        -- <M-r>, NOT <C-r>.
+        --
+        -- Telescope maps <C-r><C-w>, <C-r><C-a>, <C-r><C-f> and <C-r><C-l> in INSERT
+        -- mode, and plain insert-mode <C-r>{reg} is vim's paste-a-register -- including
+        -- <C-r>+ to paste a session id into the filter, which is exactly what this
+        -- picker invites. Mapping <C-r> shadows that prefix, so a paste gesture would
+        -- fire an IRREVERSIBLE mark-read on whatever row happened to be highlighted.
+        -- Normal-mode-only is not an escape either: telescope binds <esc> to close.
+        -- <M-r> is unmapped, and telescope ships <M-f>/<M-k>/<M-q> defaults, so Alt is
+        -- known to work in this environment.
+        map({ "i", "n" }, "<M-r>", mark_read)
 
         return true
       end,

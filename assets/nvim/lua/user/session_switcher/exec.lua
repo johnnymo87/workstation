@@ -3,7 +3,9 @@
 -- Side-effect execution layer for the session switcher (S7 / Tasks 3 & 4).
 --
 -- Performs navigation, focus switching, process execution, notifications,
--- and watermark clear-on-jump writes to the pigeon daemon.
+-- and the explicit mark-read watermark write to the pigeon daemon. (Jumping no
+-- longer writes a watermark at all; clearing follows evidence of presence and
+-- lives in the daemon. See init.lua.)
 -- One side effect per function, no branching beyond guards.
 --
 -- ERROR SURFACING:
