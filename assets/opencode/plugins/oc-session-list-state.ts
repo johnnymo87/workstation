@@ -266,6 +266,24 @@ export function isAutomatedOrigin(origin: string | null | undefined): boolean {
 }
 
 /**
+ * Filter distinct origin values that are in neither HIDDEN_ORIGINS nor
+ * KNOWN_VISIBLE_ORIGINS, returned in deterministic sorted order.
+ */
+export function unacknowledgedOrigins(
+  origins: Iterable<string>,
+  hidden: ReadonlySet<string>,
+  visible: ReadonlySet<string>,
+): string[] {
+  const unack = new Set<string>();
+  for (const origin of origins) {
+    if (origin && !hidden.has(origin) && !visible.has(origin)) {
+      unack.add(origin);
+    }
+  }
+  return [...unack].sort();
+}
+
+/**
  * Build `originMap[sid] = origin` from pigeon's session_origin table in the routing DB.
  *
  * LOUDNESS IS LOAD-BEARING. Missing DB, missing table, or read failure yields
@@ -279,7 +297,8 @@ export function isAutomatedOrigin(origin: string | null | undefined): boolean {
  */
 export function buildOriginMap(
   routingDbPath: string,
-  baseRows: SessionRow[],
+  // `_baseRows` exists for call-site parity with sibling builders (buildOwnersMap, buildUnreadMap) and is deliberately unused.
+  _baseRows: SessionRow[],
   onWarn?: (msg: string) => void,
 ): OriginMap | null {
   if (!routingDbPath || !existsSync(routingDbPath)) {
@@ -306,16 +325,15 @@ export function buildOriginMap(
     db.close();
 
     const originMap: OriginMap = new Map();
-    const unknownOrigins = new Set<string>();
+    const origins: string[] = [];
     for (const r of rows) {
       if (r.session_id && r.origin) {
         originMap.set(r.session_id, r.origin);
-        if (!HIDDEN_ORIGINS.has(r.origin) && !KNOWN_VISIBLE_ORIGINS.has(r.origin)) {
-          unknownOrigins.add(r.origin);
-        }
+        origins.push(r.origin);
       }
     }
 
+    const unknownOrigins = unacknowledgedOrigins(origins, HIDDEN_ORIGINS, KNOWN_VISIBLE_ORIGINS);
     for (const origin of unknownOrigins) {
       onWarn?.(
         `unknown session origin '${origin}' is not hidden -- add to HIDDEN_ORIGINS or KNOWN_VISIBLE_ORIGINS in oc-session-list-state.ts`,
@@ -626,6 +644,9 @@ export function queryWithState(
       }
     }
 
+    const rootOrigin = originMap?.get(row.root_id) ?? null;
+    const automated = isAutomatedOrigin(rootOrigin);
+
     const st = mergedStateMap[row.id];
     if (st) {
       return {
@@ -639,8 +660,8 @@ export function queryWithState(
         unread,
         unread_state,
         last_event_id,
-        origin: originMap?.get(row.root_id) ?? null,
-        automated: isAutomatedOrigin(originMap?.get(row.root_id)),
+        origin: rootOrigin,
+        automated,
         ...(st.retry ? { retry: st.retry } : {}),
         ...(st.unknown ? { unknown: st.unknown } : {}),
       };
@@ -676,8 +697,8 @@ export function queryWithState(
         unread,
         unread_state,
         last_event_id,
-        origin: originMap?.get(row.root_id) ?? null,
-        automated: isAutomatedOrigin(originMap?.get(row.root_id)),
+        origin: rootOrigin,
+        automated,
       };
     }
   });

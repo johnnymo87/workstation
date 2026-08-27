@@ -16,6 +16,7 @@ import {
   queryWithState,
   runOrphanGc,
   type SessionWithStateRow,
+  unacknowledgedOrigins,
 } from "../oc-session-list-state.js";
 import { foldRows } from "../oc-session-list-fold.js";
 import { OVERLAY_VERSION } from "../session-state-impl.js";
@@ -43,6 +44,19 @@ function createTestDb(): Database {
       time_created INTEGER NOT NULL,
       time_updated INTEGER NOT NULL,
       time_archived INTEGER
+    );
+  `);
+  return db;
+}
+
+function createTestOriginDb(path: string): Database {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE session_origin (
+      session_id TEXT PRIMARY KEY,
+      origin TEXT NOT NULL,
+      notify_policy TEXT NOT NULL DEFAULT 'all',
+      declared_at INTEGER NOT NULL DEFAULT 0
     );
   `);
   return db;
@@ -1840,19 +1854,6 @@ describe("buildOriginMap & automated origins (Task 1)", () => {
     { id: "root_2", title: "Root 2", parent_id: null, directory: "/p", time_updated: 2000, root_id: "root_2" },
   ];
 
-  function createTestOriginDb(path: string): Database {
-    const db = new Database(path);
-    db.exec(`
-      CREATE TABLE session_origin (
-        session_id TEXT PRIMARY KEY,
-        origin TEXT NOT NULL,
-        notify_policy TEXT NOT NULL DEFAULT 'all',
-        declared_at INTEGER NOT NULL DEFAULT 0
-      );
-    `);
-    return db;
-  }
-
   it("maps lgtm origin and classifies it as automated", () => {
     const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
     try {
@@ -1979,25 +1980,36 @@ describe("buildOriginMap & automated origins (Task 1)", () => {
   });
 });
 
+describe("unacknowledgedOrigins pure helper & KNOWN_VISIBLE_ORIGINS", () => {
+  it("an origin in visible set produces no tripwire warning (omitted from unacknowledged list)", () => {
+    const hidden = new Set(["lgtm"]);
+    const visible = new Set(["custom-visible-bot", "my-pipeline"]);
+    const origins = ["custom-visible-bot", "lgtm", "unrecognized-tool", "custom-visible-bot"];
+    const unack = unacknowledgedOrigins(origins, hidden, visible);
+    expect(unack).toEqual(["unrecognized-tool"]);
+  });
+
+  it("an origin in neither set is returned, and duplicates collapse to a single entry in deterministic sorted order", () => {
+    const hidden = new Set(["lgtm"]);
+    const visible = new Set(["acknowledged"]);
+    const origins = ["zeta-bot", "alpha-bot", "zeta-bot", "alpha-bot", "acknowledged", "lgtm", ""];
+    const unack = unacknowledgedOrigins(origins, hidden, visible);
+    expect(unack).toEqual(["alpha-bot", "zeta-bot"]);
+  });
+
+  it("an origin in visible set remains automated: false (acknowledged-visible does NOT mean hidden)", () => {
+    const visibleOrigin = "custom-visible-bot";
+    // Even when an origin is acknowledged in KNOWN_VISIBLE_ORIGINS, isAutomatedOrigin returns false
+    expect(isAutomatedOrigin(visibleOrigin)).toBe(false);
+  });
+});
+
 describe("annotate rows with origin and automated (Task 2)", () => {
   const baseRows = [
     { id: "root_1", title: "Root 1", parent_id: null, directory: "/p", time_updated: 1000, root_id: "root_1" },
     { id: "child_1", title: "Child 1", parent_id: "root_1", directory: "/p", time_updated: 1000, root_id: "root_1" },
     { id: "root_2", title: "Root 2", parent_id: null, directory: "/p", time_updated: 2000, root_id: "root_2" },
   ];
-
-  function createTestOriginDb(path: string): Database {
-    const db = new Database(path);
-    db.exec(`
-      CREATE TABLE session_origin (
-        session_id TEXT PRIMARY KEY,
-        origin TEXT NOT NULL,
-        notify_policy TEXT NOT NULL DEFAULT 'all',
-        declared_at INTEGER NOT NULL DEFAULT 0
-      );
-    `);
-    return db;
-  }
 
   it("rows get origin and automated fields, and row with no origin gets null/false", () => {
     const dir = mkdtempSync(join(tmpdir(), "oc-annotate-"));
