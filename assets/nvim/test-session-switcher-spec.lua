@@ -410,6 +410,28 @@ do
   check(type(healthy_lines) == "table" and #healthy_lines == 0, "healthy fleet produces {} warning lines")
 end
 
+-- 13b. WARNING_LINES + PROMPT_TITLE: all-automated empty window behaviour.
+-- 200 fetched, all automated: empty picker, count explains why, and NOT the
+-- "no sessions" message (which would be a lie -- there are sessions, they are
+-- hidden). spec.warning_lines receives the raw pre-filter result.
+do
+  local all_automated_rows = {}
+  for i = 1, 200 do
+    table.insert(all_automated_rows, { id = "ses_auto_" .. i, automated = true })
+  end
+  local result = { rows = all_automated_rows }
+  local built, hidden = model.build(result.rows, {}, {})
+  check(#built == 0, "all-automated window yields 0 built rows")
+  check(hidden == 200, "all 200 rows counted as hidden")
+
+  local warnings = spec.warning_lines(result, nil)
+  check(#warnings == 0, "raw result is non-empty, so no 'No open sessions found' warning line")
+  check(
+    spec.prompt_title("all", warnings, hidden) == "Sessions (all) · 200 hidden",
+    "prompt_title explains why window is empty with '200 hidden'"
+  )
+end
+
 -- 14. PROMPT_TITLE: reflects facet and visibly indicates warnings when non-empty.
 do
   local t_all = spec.prompt_title("all", {})
