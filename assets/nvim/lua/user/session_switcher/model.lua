@@ -58,9 +58,10 @@ M.ATTENTION = { error = true, blocked = true }
 ---   blocked_pierces?: boolean (default true)
 ---   is_live?: fun(hit): boolean  -- injection seam; defaults to discovery.is_live
 --- @return table[] Array of annotated row shallow copies
+--- @return integer Count of automated rows dropped from the fetched window
 function M.build(rows, hits, opts)
   if type(rows) ~= "table" or not vim.islist(rows) then
-    return {}
+    return {}, 0
   end
 
   local safe_hits = type(hits) == "table" and hits or {}
@@ -74,59 +75,73 @@ function M.build(rows, hits, opts)
   end
 
   local out = {}
+  local hidden = 0
 
   for _, row in ipairs(rows) do
     if type(row) == "table" and type(row.id) == "string" and row.id ~= "" then
-      local hit = safe_hits[row.id]
-      local hit_table = type(hit) == "table" and hit or nil
-
-      local copy = {}
-      for k, v in pairs(row) do
-        copy[k] = v
-      end
-
-      copy.attached = is_live(hit_table)
-
-      if hit_table then
-        copy.pane = hit_table.pane
-        copy.sock = hit_table.sock
-        copy.buffer = hit_table.buffer
-        copy.tabpage = hit_table.tabpage
-        copy.own = hit_table.own
-      end
-
-      local is_blocked = (
-        M.ATTENTION[row.effective_state] == true
-        or M.ATTENTION[row.child_state] == true
-      )
-
-      local pierces = blocked_pierces and is_blocked == true
-
-      -- Why this row survived. A pierced row is in the list DESPITE the facet,
-      -- so it can be detached (and pane-less) while facet == "attached". Task 9
-      -- must branch on `attached`, not on the facet it asked for, or it will try
-      -- to jump to a pane that is not there. Marked explicitly rather than left
-      -- for the picker to reverse-engineer.
-      copy.pierced = pierces
-
-      local keep = false
-      if pierces then
-        keep = true
-      elseif facet == "attached" then
-        keep = (copy.attached == true)
-      elseif facet == "detached" then
-        keep = (copy.attached == false)
+      -- ABOVE THE PIERCE, DELIBERATELY.
+      --
+      -- The keep-chain below starts with `if pierces then keep = true`, so an
+      -- errored automated row placed after it would be resurrected into the
+      -- list. The user chose hard exclusion with NO exception for errored or
+      -- blocked sessions; this ordering is what enforces that choice.
+      --
+      -- Only `automated == true` drops. A missing or false field keeps the row,
+      -- so an unreadable session_origin shows everything rather than hiding it.
+      if row.automated == true then
+        hidden = hidden + 1
       else
-        keep = true
-      end
+        local hit = safe_hits[row.id]
+        local hit_table = type(hit) == "table" and hit or nil
 
-      if keep then
-        table.insert(out, copy)
+        local copy = {}
+        for k, v in pairs(row) do
+          copy[k] = v
+        end
+
+        copy.attached = is_live(hit_table)
+
+        if hit_table then
+          copy.pane = hit_table.pane
+          copy.sock = hit_table.sock
+          copy.buffer = hit_table.buffer
+          copy.tabpage = hit_table.tabpage
+          copy.own = hit_table.own
+        end
+
+        local is_blocked = (
+          M.ATTENTION[row.effective_state] == true
+          or M.ATTENTION[row.child_state] == true
+        )
+
+        local pierces = blocked_pierces and is_blocked == true
+
+        -- Why this row survived. A pierced row is in the list DESPITE the facet,
+        -- so it can be detached (and pane-less) while facet == "attached". Task 9
+        -- must branch on `attached`, not on the facet it asked for, or it will try
+        -- to jump to a pane that is not there. Marked explicitly rather than left
+        -- for the picker to reverse-engineer.
+        copy.pierced = pierces
+
+        local keep = false
+        if pierces then
+          keep = true
+        elseif facet == "attached" then
+          keep = (copy.attached == true)
+        elseif facet == "detached" then
+          keep = (copy.attached == false)
+        else
+          keep = true
+        end
+
+        if keep then
+          table.insert(out, copy)
+        end
       end
     end
   end
 
-  return out
+  return out, hidden
 end
 
 --- Render the unread badge string for a session row.
