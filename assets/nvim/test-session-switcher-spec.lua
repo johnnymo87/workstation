@@ -1836,6 +1836,39 @@ do
   recorded_select_default()
   check(#clear_calls == 0, "a SUCCESSFUL jump ALSO fires no watermark write")
 
+  -- EVERY jump kind, not just attach.
+  --
+  -- Mutation testing caught this gap: re-adding exec.clear_unread to the focus_here
+  -- branch of dispatch passed the entire suite, because every assertion above drives
+  -- the ATTACH path. focus_here is the common case for a session already open in this
+  -- Neovim -- exactly the one you peek at most -- so it was the worst path to leave
+  -- unpinned. Each kind is dispatched through the real init.lua branch here.
+  local orig_focus, orig_switch = exec.focus_here, exec.switch_pane
+  for _, kind in ipairs({ "focus_here", "switch_pane", "attach" }) do
+    local dispatched = 0
+    exec.focus_here = function() dispatched = dispatched + 1; return true end
+    exec.switch_pane = function() dispatched = dispatched + 1; return true end
+    exec.attach = function() dispatched = dispatched + 1; return true end
+
+    local row_k = { id = "ses_" .. kind, directory = "/tmp/k", last_event_id = 7 }
+    local ctrl_k = flow.new({
+      fetch = function(o, cb) cb({ rows = { row_k } }, nil) end,
+      locate = function(o, cb) cb({}) end,
+      decide = function() return { kind = kind, buffer = 1, tabpage = 1, pane = "%1", sock = "/tmp/s" } end,
+    })
+
+    clear_calls = {}
+    recorded_pickers_new = {}
+    init_mod.open({ flow = ctrl_k })
+    recorded_pickers_new[1].defaults.attach_mappings(508, function() end)
+    selected_entry_stub = { value = row_k }
+    recorded_select_default()
+
+    check(dispatched == 1, kind .. " was dispatched through init.lua")
+    check(#clear_calls == 0, kind .. " fires NO watermark write")
+  end
+  exec.focus_here, exec.switch_pane = orig_focus, orig_switch
+
   -- POSITIVE CONTROL, and it has to be a real one.
   --
   -- The two assertions above are now both "nothing happened", so on their own they
