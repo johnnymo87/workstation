@@ -28,6 +28,16 @@ export interface SessionWithStateRow extends SessionRow {
   unread: number | null;
   unread_state: "counted" | "absent" | "unavailable";
   last_event_id: number | null;
+  /**
+   * Provenance string from session_origin (e.g. "lgtm"), carried purely for
+   * debuggability. Hiding is invisible by nature, so this allows answering
+   * "why isn't X in my list" without manual SQL.
+   */
+  origin: string | null;
+  /**
+   * True iff origin is in HIDDEN_ORIGINS allowlist (e.g. "lgtm").
+   */
+  automated: boolean;
 }
 
 export interface UnreadEntry {
@@ -224,6 +234,102 @@ export function buildUnreadMap(
     onWarn?.(
       `failed to read unread counts from ${routingDbPath} (${String(err)}) -- ` +
         `unread counts unavailable, badges will show unknown`,
+    );
+    return null;
+  }
+}
+
+// Debugging "why isn't session X in my picker?": check the `origin` field in
+// `oc-session-list --fold` output, or GET /session-origin?session_id=<sid>
+// against the pigeon daemon. To un-hide a session you have adopted, delete its
+// provenance: DELETE /session-origin?session_id=<sid>.
+//
+// NOTE: The literal "lgtm" is written by /home/dev/projects/lgtm/src/dispatch.ts
+// and renaming it there silently un-hides every review session (the tripwire will fire).
+//
+// Why an allowlist rather than "any row in session_origin":
+// `origin` is free-form TEXT in pigeon with no enum, and `notify_policy: "all"` is a
+// legal value meaning "show every event". The picker has NO reveal mechanism, so a
+// false hide is unrecoverable while a false show is noise that announces itself via
+// the tripwire. Predicate does NOT depend on `notify_policy` at all.
+//
+// Why two sets and not one:
+// With a single set, the first new automation that someone decides should stay visible
+// would warn on every picker open forever, training the eye to ignore warnings.
+// `KNOWN_VISIBLE_ORIGINS` is the explicit acknowledgement channel.
+export const HIDDEN_ORIGINS: ReadonlySet<string> = new Set(["lgtm"]);
+export const KNOWN_VISIBLE_ORIGINS: ReadonlySet<string> = new Set([]);
+export type OriginMap = Map<string, string>;
+
+export function isAutomatedOrigin(origin: string | null | undefined): boolean {
+  return typeof origin === "string" && HIDDEN_ORIGINS.has(origin);
+}
+
+/**
+ * Build `originMap[sid] = origin` from pigeon's session_origin table in the routing DB.
+ *
+ * LOUDNESS IS LOAD-BEARING. Missing DB, missing table, or read failure yields
+ * null and reports via onWarn so consumers fall back to showing all sessions
+ * (automated: false). Hiding is invisible by nature, so any failure must fail open
+ * (show everything) rather than silently hide.
+ *
+ * TRIPWIRE: Collects distinct origin values in neither HIDDEN_ORIGINS nor
+ * KNOWN_VISIBLE_ORIGINS and warns once per distinct origin value to prevent
+ * unacknowledged automations from silently passing without explicit categorization.
+ */
+export function buildOriginMap(
+  routingDbPath: string,
+  baseRows: SessionRow[],
+  onWarn?: (msg: string) => void,
+): OriginMap | null {
+  if (!routingDbPath || !existsSync(routingDbPath)) {
+    onWarn?.(
+      `routing db not found at ${routingDbPath || "<unset>"} -- origin mapping unavailable, ` +
+        `automated sessions will not be hidden (set --routing-db or OPENCODE_ROUTING_DB)`,
+    );
+    return null;
+  }
+  let db: Database | undefined;
+  try {
+    db = new Database(routingDbPath, { readonly: true });
+    const tableExists = db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_origin'`).get();
+    if (!tableExists) {
+      db.close();
+      onWarn?.(
+        `routing db ${routingDbPath} has no session_origin table -- origin mapping ` +
+          `unavailable, automated sessions will not be hidden`,
+      );
+      return null;
+    }
+    const query = `SELECT session_id, origin FROM session_origin;`;
+    const rows = db.query<{ session_id: string; origin: string }, []>(query).all();
+    db.close();
+
+    const originMap: OriginMap = new Map();
+    const unknownOrigins = new Set<string>();
+    for (const r of rows) {
+      if (r.session_id && r.origin) {
+        originMap.set(r.session_id, r.origin);
+        if (!HIDDEN_ORIGINS.has(r.origin) && !KNOWN_VISIBLE_ORIGINS.has(r.origin)) {
+          unknownOrigins.add(r.origin);
+        }
+      }
+    }
+
+    for (const origin of unknownOrigins) {
+      onWarn?.(
+        `unknown session origin '${origin}' is not hidden -- add to HIDDEN_ORIGINS or KNOWN_VISIBLE_ORIGINS in oc-session-list-state.ts`,
+      );
+    }
+
+    return originMap;
+  } catch (err) {
+    try {
+      db?.close();
+    } catch {}
+    onWarn?.(
+      `failed to read session origins from ${routingDbPath} (${String(err)}) -- ` +
+        `origin mapping unavailable, automated sessions will not be hidden`,
     );
     return null;
   }
@@ -460,6 +566,11 @@ export function queryWithState(
   // exact failure mode model.lua documents for its duplicated is_live copy.
   // Every unread test drives the real builder against a real temp SQLite DB.
   const unreadMap = buildUnreadMap(options.routingDbPath ?? "", baseRows, options.onWarn);
+  // PLACEMENT IS LOAD-BEARING: Must run after the union block above over post-union
+  // baseRows. If computed earlier, unioned attention rows would arrive unannotated,
+  // automated would be undefined/false, and the picker would keep them -- producing
+  // a silent under-hide in exactly the path that matters most.
+  const originMap = buildOriginMap(options.routingDbPath ?? "", baseRows, options.onWarn);
   const mergedStateMap = mergeOverlays(overlayFiles, {
     now, staleMs, isAlive, owners, prepared: preparedFiles,
   });
@@ -528,6 +639,8 @@ export function queryWithState(
         unread,
         unread_state,
         last_event_id,
+        origin: originMap?.get(row.root_id) ?? null,
+        automated: isAutomatedOrigin(originMap?.get(row.root_id)),
         ...(st.retry ? { retry: st.retry } : {}),
         ...(st.unknown ? { unknown: st.unknown } : {}),
       };
@@ -563,6 +676,8 @@ export function queryWithState(
         unread,
         unread_state,
         last_event_id,
+        origin: originMap?.get(row.root_id) ?? null,
+        automated: isAutomatedOrigin(originMap?.get(row.root_id)),
       };
     }
   });
