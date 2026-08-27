@@ -3,7 +3,9 @@
 -- Side-effect execution layer for the session switcher (S7 / Tasks 3 & 4).
 --
 -- Performs navigation, focus switching, process execution, notifications,
--- and watermark clear-on-jump writes to the pigeon daemon.
+-- and the explicit mark-read watermark write to the pigeon daemon. (Jumping no
+-- longer writes a watermark at all; clearing follows evidence of presence and
+-- lives in the daemon. See init.lua.)
 -- One side effect per function, no branching beyond guards.
 --
 -- ERROR SURFACING:
@@ -216,7 +218,7 @@ end
 --- - Never awaited, stdin = false, pcall'd to guard against missing curl binary.
 --- - Returns boolean indicator: true if request was spawned, false otherwise.
 ---
---- @param payload table|nil { sid: string, last_event_id: number } from act.watermark
+--- @param payload table|nil { sid: string, last_event_id: number } from act.mark_read_watermark
 --- @param opts table|nil Options:
 ---   port?: integer|string
 ---   token?: string
