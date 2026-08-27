@@ -61,12 +61,21 @@ function M.open(opts)
   local client = exec.tmux_client()
 
   local current_facet = opts.facet or "all"
-  local controller = opts.flow or flow.new(opts)
+  -- Deeper window than the CLI default of 50, because the automated filter runs
+  -- AFTER the limit: at ~62% automated, 50 fetched leaves ~19 rows, and the
+  -- longest consecutive run of automated roots is already 14 -- a batch filling
+  -- the window would render an empty picker. Cost is flat (123ms at 50, 123ms at
+  -- 200), and scoping it here rather than to the CLI default leaves ad-hoc CLI
+  -- use unchanged.
+  local flow_opts = vim.tbl_extend("force", opts, {
+    fetch_opts = vim.tbl_extend("force", { limit = 200 }, opts.fetch_opts or {}),
+  })
+  local controller = opts.flow or flow.new(flow_opts)
 
-  controller:refresh(current_facet, function(rows, result, err)
+  controller:refresh(current_facet, function(rows, result, err, hidden)
     local warning_lines = spec.warning_lines(result, err)
     exec.notify_warnings(warning_lines)
-    local prompt_title = spec.prompt_title(current_facet, warning_lines)
+    local prompt_title = spec.prompt_title(current_facet, warning_lines, hidden)
 
     -- ONE clock read for the whole render, not one per row. spec.format falls
     -- back to its own os.time() when `now` is absent, which would let rows
@@ -138,10 +147,10 @@ function M.open(opts)
 
         local function cycle_facet()
           current_facet = next_facet(current_facet)
-          controller:refresh(current_facet, function(new_rows, new_result, new_err)
+          controller:refresh(current_facet, function(new_rows, new_result, new_err, new_hidden)
             local new_warnings = spec.warning_lines(new_result, new_err)
             exec.notify_warnings(new_warnings)
-            local new_title = spec.prompt_title(current_facet, new_warnings)
+            local new_title = spec.prompt_title(current_facet, new_warnings, new_hidden)
 
             local current_picker = action_state.get_current_picker(prompt_bufnr)
             if current_picker then

@@ -951,12 +951,12 @@
           echo "GATE FAILURE: session_switcher.discovery + .rpc did not report expected 69 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.model unit tests (87 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.model did not report expected 87 assertions." >&2
+        grep -q '^PASS  session_switcher\.model unit tests (103 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.model did not report expected 103 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (407 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 407 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (429 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 429 assertions." >&2
           exit 1
         }
         touch $out
@@ -1478,7 +1478,7 @@
           expects=''${expects:-0}
           case "$f" in
             test/oc-session-list.spec.ts)
-              expected_expects=262
+              expected_expects=319
               ;;
             *)
               echo "GATE FAILURE: unrecognised spec file $f has no pinned expect() count in flake.nix." >&2

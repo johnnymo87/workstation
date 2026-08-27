@@ -31,7 +31,7 @@ local function default_build(rows, hits, opts)
   if ok and type(model) == "table" and type(model.build) == "function" then
     return model.build(rows, hits, opts)
   end
-  return {}
+  return {}, 0
 end
 
 local function default_decide(row, hit)
@@ -47,7 +47,13 @@ Controller.__index = Controller
 
 --- Refresh session rows and attachment status.
 ---
---- Pipeline: `fetch -> locate -> build -> cb(rows, result, err)`.
+--- Pipeline: `fetch -> locate -> build -> cb(rows, result, err, hidden)`.
+---
+--- `hidden` is build's second return: how many rows it dropped for being
+--- automated. It rides as a FOURTH ARGUMENT rather than as a field on `rows`
+--- deliberately -- a non-integer key would flip `vim.islist(rows)` false and
+--- trip the top-level-list guard in cli.lua. The error path calls
+--- `cb(nil, nil, err)`, so `hidden` is nil there, which prompt_title accepts.
 ---
 --- GENERATION CHECKING (THE TWO RACES PREVENTED):
 --- 1. Post-fetch: A generation token is bumped at the START of refresh.
@@ -71,7 +77,7 @@ Controller.__index = Controller
 --- `(nil, nil, err)` so warnings and error banners surface (Contract 4).
 ---
 --- @param facet string "all" | "attached" | "detached"
---- @param cb fun(rows: table[]|nil, result: table|nil, err: table|nil)
+--- @param cb fun(rows: table[]|nil, result: table|nil, err: table|nil, hidden: integer|nil)
 function Controller:refresh(facet, cb)
   if type(cb) ~= "function" then
     return
@@ -101,8 +107,8 @@ function Controller:refresh(facet, cb)
         return
       end
 
-      local built_rows = self.build(rows, hits, { facet = facet })
-      cb(built_rows, result, nil)
+      local built_rows, hidden = self.build(rows, hits, { facet = facet })
+      cb(built_rows, result, nil, hidden)
     end)
   end)
 end
@@ -148,7 +154,7 @@ local M = {}
 --- @param opts table|nil Injected seams:
 ---   fetch?: fun(opts, cb)
 ---   locate?: fun(opts, cb)
----   build?: fun(rows, hits, opts): table[]
+---   build?: fun(rows, hits, opts): table[], integer
 ---   decide?: fun(row, hit): table
 ---   fetch_opts?: table
 ---   locate_opts?: table

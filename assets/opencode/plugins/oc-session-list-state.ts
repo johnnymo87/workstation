@@ -28,6 +28,16 @@ export interface SessionWithStateRow extends SessionRow {
   unread: number | null;
   unread_state: "counted" | "absent" | "unavailable";
   last_event_id: number | null;
+  /**
+   * Provenance string from session_origin (e.g. "lgtm"), carried purely for
+   * debuggability. Hiding is invisible by nature, so this allows answering
+   * "why isn't X in my list" without manual SQL.
+   */
+  origin: string | null;
+  /**
+   * True iff origin is in HIDDEN_ORIGINS allowlist (e.g. "lgtm").
+   */
+  automated: boolean;
 }
 
 export interface UnreadEntry {
@@ -224,6 +234,131 @@ export function buildUnreadMap(
     onWarn?.(
       `failed to read unread counts from ${routingDbPath} (${String(err)}) -- ` +
         `unread counts unavailable, badges will show unknown`,
+    );
+    return null;
+  }
+}
+
+// Debugging "why isn't session X in my picker?": check the `origin` field in
+// `oc-session-list --fold` output, or GET /session-origin?session_id=<sid>
+// against the pigeon daemon. To un-hide a session you have adopted, delete its
+// provenance: DELETE /session-origin?session_id=<sid>.
+//
+// NOTE: The literal "lgtm" is written by /home/dev/projects/lgtm/src/dispatch.ts
+// and renaming it there silently un-hides every review session (the tripwire will fire).
+//
+// Why an allowlist rather than "any row in session_origin":
+// `origin` is free-form TEXT in pigeon with no enum, and `notify_policy: "all"` is a
+// legal value meaning "show every event". The picker has NO reveal mechanism, so a
+// false hide is unrecoverable while a false show is noise that announces itself via
+// the tripwire. Predicate does NOT depend on `notify_policy` at all.
+//
+// Why two sets and not one:
+// With a single set, the first new automation that someone decides should stay visible
+// would warn on every picker open forever, training the eye to ignore warnings.
+// `KNOWN_VISIBLE_ORIGINS` is the explicit acknowledgement channel.
+export const HIDDEN_ORIGINS: ReadonlySet<string> = new Set(["lgtm"]);
+export const KNOWN_VISIBLE_ORIGINS: ReadonlySet<string> = new Set([]);
+export type OriginMap = Map<string, string>;
+
+export function isAutomatedOrigin(origin: string | null | undefined): boolean {
+  return typeof origin === "string" && HIDDEN_ORIGINS.has(origin);
+}
+
+/**
+ * Filter distinct origin values that are in neither HIDDEN_ORIGINS nor
+ * KNOWN_VISIBLE_ORIGINS, returned in deterministic sorted order.
+ */
+export function unacknowledgedOrigins(
+  origins: Iterable<string>,
+  hidden: ReadonlySet<string>,
+  visible: ReadonlySet<string>,
+): string[] {
+  const unack = new Set<string>();
+  for (const origin of origins) {
+    if (origin && !hidden.has(origin) && !visible.has(origin)) {
+      unack.add(origin);
+    }
+  }
+  return [...unack].sort();
+}
+
+/**
+ * Build `originMap[sid] = origin` from pigeon's session_origin table in the routing DB.
+ *
+ * LOUDNESS IS LOAD-BEARING. Missing DB, missing table, or read failure yields
+ * null and reports via onWarn so consumers fall back to showing all sessions
+ * (automated: false). Hiding is invisible by nature, so any failure must fail open
+ * (show everything) rather than silently hide.
+ *
+ * TRIPWIRE: Collects distinct origin values in neither HIDDEN_ORIGINS nor
+ * KNOWN_VISIBLE_ORIGINS and warns once per distinct origin value to prevent
+ * unacknowledged automations from silently passing without explicit categorization.
+ */
+export function buildOriginMap(
+  routingDbPath: string,
+  // `_baseRows` exists for call-site parity with sibling builders (buildOwnersMap, buildUnreadMap) and is deliberately unused.
+  _baseRows: SessionRow[],
+  onWarn?: (msg: string) => void,
+): OriginMap | null {
+  if (!routingDbPath || !existsSync(routingDbPath)) {
+    onWarn?.(
+      `routing db not found at ${routingDbPath || "<unset>"} -- origin mapping unavailable, ` +
+        `automated sessions will not be hidden (set --routing-db or OPENCODE_ROUTING_DB)`,
+    );
+    return null;
+  }
+  let db: Database | undefined;
+  try {
+    db = new Database(routingDbPath, { readonly: true });
+    const tableExists = db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_origin'`).get();
+    if (!tableExists) {
+      db.close();
+      onWarn?.(
+        `routing db ${routingDbPath} has no session_origin table -- origin mapping ` +
+          `unavailable, automated sessions will not be hidden`,
+      );
+      return null;
+    }
+    const query = `SELECT session_id, origin FROM session_origin;`;
+    const rows = db.query<{ session_id: string; origin: string }, []>(query).all();
+    db.close();
+
+    const originMap: OriginMap = new Map();
+    const origins: string[] = [];
+    for (const r of rows) {
+      if (r.session_id && r.origin) {
+        // Coerce rather than trust the column type. SQLite is dynamically
+        // typed and `origin` is free-form TEXT with no CHECK constraint, so a
+        // writer can land a number here -- which would otherwise flow into a
+        // Map<string,string> and out through `origin: string | null` as a JSON
+        // number, making both declared types quietly false. Coercing keeps the
+        // types honest AND keeps the tripwire firing on the odd value, which is
+        // exactly the case worth being told about.
+        const origin = String(r.origin);
+        originMap.set(r.session_id, origin);
+        origins.push(origin);
+      }
+    }
+
+    const unknownOrigins = unacknowledgedOrigins(origins, HIDDEN_ORIGINS, KNOWN_VISIBLE_ORIGINS);
+    for (const origin of unknownOrigins) {
+      onWarn?.(
+        `unknown session origin '${origin}' is not hidden -- add it to HIDDEN_ORIGINS ` +
+          `or KNOWN_VISIBLE_ORIGINS in oc-session-list-state.ts, then redeploy ` +
+          `(home-manager switch) -- editing the repo alone will not silence this, ` +
+          `because the running oc-session-list is a nix-built artifact`,
+      );
+    }
+
+    return originMap;
+  } catch (err) {
+    try {
+      db?.close();
+    } catch {}
+    onWarn?.(
+      `failed to read session origins from ${routingDbPath} (${String(err)}) -- ` +
+        `origin mapping unavailable, automated sessions will not be hidden`,
     );
     return null;
   }
@@ -460,6 +595,24 @@ export function queryWithState(
   // exact failure mode model.lua documents for its duplicated is_live copy.
   // Every unread test drives the real builder against a real temp SQLite DB.
   const unreadMap = buildUnreadMap(options.routingDbPath ?? "", baseRows, options.onWarn);
+  // PLACEMENT IS NOT LOAD-BEARING TODAY, AND THAT IS WORTH SAYING OUT LOUD.
+  //
+  // The design called this call site load-bearing -- "must run after the union
+  // block, or unioned attention rows arrive unannotated". Mutation testing
+  // disproved it: moving this line above the union block breaks no test, because
+  // unlike its two siblings this builder never reads `baseRows`. It loads the
+  // whole session_origin table and is keyed by session_id, so the row set it is
+  // handed cannot change its result. What actually guarantees unioned rows get
+  // annotated is that the merge loop below iterates post-union baseRows.
+  //
+  // The constraint becomes REAL the moment someone scopes the query to the rows
+  // in hand -- an obvious-looking optimisation, since we read ~700 rows to
+  // annotate ~200. If you do that, this call MUST stay after the union block or
+  // unioned attention rows will silently keep their default `automated: false`.
+  // Reading the whole table is also deliberate for the tripwire: an unrecognised
+  // origin is worth warning about even when none of its sessions are currently
+  // in the window.
+  const originMap = buildOriginMap(options.routingDbPath ?? "", baseRows, options.onWarn);
   const mergedStateMap = mergeOverlays(overlayFiles, {
     now, staleMs, isAlive, owners, prepared: preparedFiles,
   });
@@ -515,6 +668,9 @@ export function queryWithState(
       }
     }
 
+    const rootOrigin = originMap?.get(row.root_id) ?? null;
+    const automated = isAutomatedOrigin(rootOrigin);
+
     const st = mergedStateMap[row.id];
     if (st) {
       return {
@@ -528,6 +684,8 @@ export function queryWithState(
         unread,
         unread_state,
         last_event_id,
+        origin: rootOrigin,
+        automated,
         ...(st.retry ? { retry: st.retry } : {}),
         ...(st.unknown ? { unknown: st.unknown } : {}),
       };
@@ -563,6 +721,8 @@ export function queryWithState(
         unread,
         unread_state,
         last_event_id,
+        origin: rootOrigin,
+        automated,
       };
     }
   });

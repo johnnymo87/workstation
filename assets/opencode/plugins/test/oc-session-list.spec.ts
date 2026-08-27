@@ -7,11 +7,16 @@ import { queryBaseList, queryTreesForSessions } from "../oc-session-list-base.js
 import { main, parseCliArgs } from "../oc-session-list.js";
 import {
   attentionCandidates,
+  buildOriginMap,
   buildOwnersMap,
   buildUnreadMap,
+  HIDDEN_ORIGINS,
+  isAutomatedOrigin,
+  KNOWN_VISIBLE_ORIGINS,
   queryWithState,
   runOrphanGc,
   type SessionWithStateRow,
+  unacknowledgedOrigins,
 } from "../oc-session-list-state.js";
 import { foldRows } from "../oc-session-list-fold.js";
 import { OVERLAY_VERSION } from "../session-state-impl.js";
@@ -39,6 +44,19 @@ function createTestDb(): Database {
       time_created INTEGER NOT NULL,
       time_updated INTEGER NOT NULL,
       time_archived INTEGER
+    );
+  `);
+  return db;
+}
+
+function createTestOriginDb(path: string): Database {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE session_origin (
+      session_id TEXT PRIMARY KEY,
+      origin TEXT NOT NULL,
+      notify_policy TEXT NOT NULL DEFAULT 'all',
+      declared_at INTEGER NOT NULL DEFAULT 0
     );
   `);
   return db;
@@ -728,6 +746,10 @@ describe("S3: nodata (no reporter) vs authoritative idle", () => {
         last_read_id INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE session_origin (
+        session_id TEXT PRIMARY KEY,
+        origin TEXT NOT NULL
+      );
     `);
     routing.exec(`INSERT INTO session_assignment VALUES ('s1', 'serve-1'), ('s2', 'serve-2')`);
     routing.close();
@@ -774,6 +796,10 @@ describe("S3: nodata (no reporter) vs authoritative idle", () => {
         session_id TEXT PRIMARY KEY,
         last_read_id INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE session_origin (
+        session_id TEXT PRIMARY KEY,
+        origin TEXT NOT NULL
       );
     `);
     routing.exec(`INSERT INTO session_assignment VALUES ('s1', 'serve-1'), ('s2', 'serve-2')`);
@@ -948,6 +974,8 @@ describe("S6: effective_state and the child fold", () => {
     unread: null,
     unread_state: "absent",
     last_event_id: null,
+    origin: null,
+    automated: false,
     ...o,
   });
   // Only "/gone" is missing, so a fixture opts INTO the dir-missing path.
@@ -1815,6 +1843,323 @@ describe("buildUnreadMap & unread counts (Task 9)", () => {
       expect(warnings).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("buildOriginMap & automated origins (Task 1)", () => {
+  const baseRows = [
+    { id: "root_1", title: "Root 1", parent_id: null, directory: "/p", time_updated: 1000, root_id: "root_1" },
+    { id: "child_1", title: "Child 1", parent_id: "root_1", directory: "/p", time_updated: 1000, root_id: "root_1" },
+    { id: "root_2", title: "Root 2", parent_id: null, directory: "/p", time_updated: 2000, root_id: "root_2" },
+  ];
+
+  it("maps lgtm origin and classifies it as automated", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestOriginDb(p);
+      db.exec(`
+        INSERT INTO session_origin (session_id, origin, notify_policy, declared_at) VALUES
+          ('root_1', 'lgtm', 'errors-only', 1000);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const originMap = buildOriginMap(p, baseRows, (m) => warnings.push(m));
+      expect(originMap).not.toBeNull();
+      expect(originMap!.get("root_1")).toBe("lgtm");
+      expect(isAutomatedOrigin(originMap!.get("root_1"))).toBe(true);
+      expect(warnings).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("coerces a non-string origin to string, keeping OriginMap's declared type honest", () => {
+    // SQLite is dynamically typed and `origin` is free-form TEXT with no CHECK
+    // constraint, so a writer CAN land a number here. Without coercion it flows
+    // into a Map<string,string> and out through `origin: string | null` as a
+    // JSON number -- both declared types quietly false. The odd value must
+    // still trip the tripwire, since it is exactly the case worth reporting.
+    const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestOriginDb(p);
+      db.exec(`
+        INSERT INTO session_origin (session_id, origin, notify_policy, declared_at) VALUES
+          ('root_num', 123, 'errors-only', 1000);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const originMap = buildOriginMap(p, baseRows, (m) => warnings.push(m));
+      expect(typeof originMap!.get("root_num")).toBe("string");
+      expect(originMap!.get("root_num")).toBe("123");
+      expect(isAutomatedOrigin(originMap!.get("root_num"))).toBe(false);
+      expect(warnings.filter((w) => w.includes("123")).length).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("maps unknown origin, marks isAutomatedOrigin false, and trips warning exactly once across three rows sharing that origin", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestOriginDb(p);
+      db.exec(`
+        INSERT INTO session_origin (session_id, origin, notify_policy, declared_at) VALUES
+          ('root_1', 'custom-pipeline', 'all', 1000),
+          ('root_2', 'custom-pipeline', 'none', 1000),
+          ('root_3', 'custom-pipeline', 'errors-only', 1000);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const originMap = buildOriginMap(p, baseRows, (m) => warnings.push(m));
+      expect(originMap).not.toBeNull();
+      expect(originMap!.get("root_1")).toBe("custom-pipeline");
+      expect(originMap!.get("root_2")).toBe("custom-pipeline");
+      expect(originMap!.get("root_3")).toBe("custom-pipeline");
+      expect(isAutomatedOrigin(originMap!.get("root_1"))).toBe(false);
+      expect(isAutomatedOrigin(originMap!.get("root_2"))).toBe(false);
+      expect(isAutomatedOrigin(originMap!.get("root_3"))).toBe(false);
+
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("custom-pipeline");
+      expect(warnings[0]).toContain("HIDDEN_ORIGINS");
+      expect(warnings[0]).toContain("KNOWN_VISIBLE_ORIGINS");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("notify_policy variations (all, errors-only, none) do NOT change the verdict", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestOriginDb(p);
+      db.exec(`
+        INSERT INTO session_origin (session_id, origin, notify_policy, declared_at) VALUES
+          ('s_all', 'lgtm', 'all', 1000),
+          ('s_err', 'lgtm', 'errors-only', 1000),
+          ('s_none', 'lgtm', 'none', 1000),
+          ('u_all', 'other-tool', 'all', 1000),
+          ('u_none', 'other-tool', 'none', 1000);
+      `);
+      db.close();
+
+      const originMap = buildOriginMap(p, baseRows);
+      expect(originMap).not.toBeNull();
+      expect(isAutomatedOrigin(originMap!.get("s_all"))).toBe(true);
+      expect(isAutomatedOrigin(originMap!.get("s_err"))).toBe(true);
+      expect(isAutomatedOrigin(originMap!.get("s_none"))).toBe(true);
+      expect(isAutomatedOrigin(originMap!.get("u_all"))).toBe(false);
+      expect(isAutomatedOrigin(originMap!.get("u_none"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null and emits a warning when routing DB does not exist", () => {
+    const warnings: string[] = [];
+    const missingPath = "/definitely/not/a/real/origin_routing.db";
+
+    const originMap = buildOriginMap(missingPath, baseRows, (m) => warnings.push(m));
+    expect(originMap).toBeNull();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("routing db not found");
+  });
+
+  it("returns null and emits a warning when routing DB lacks session_origin table", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = new Database(p);
+      db.exec(`CREATE TABLE unrelated_table (id INTEGER PRIMARY KEY);`);
+      db.close();
+
+      const warnings: string[] = [];
+      const originMap = buildOriginMap(p, baseRows, (m) => warnings.push(m));
+      expect(originMap).toBeNull();
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("no session_origin table");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null and emits a warning when reading routing DB throws", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
+    try {
+      const p = join(dir, "corrupt.db");
+      writeFileSync(p, "not a valid sqlite database file");
+
+      const warnings: string[] = [];
+      const originMap = buildOriginMap(p, baseRows, (m) => warnings.push(m));
+      expect(originMap).toBeNull();
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("failed to read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("unacknowledgedOrigins pure helper & KNOWN_VISIBLE_ORIGINS", () => {
+  it("an origin in visible set produces no tripwire warning (omitted from unacknowledged list)", () => {
+    const hidden = new Set(["lgtm"]);
+    const visible = new Set(["custom-visible-bot", "my-pipeline"]);
+    const origins = ["custom-visible-bot", "lgtm", "unrecognized-tool", "custom-visible-bot"];
+    const unack = unacknowledgedOrigins(origins, hidden, visible);
+    expect(unack).toEqual(["unrecognized-tool"]);
+  });
+
+  it("an origin in neither set is returned, and duplicates collapse to a single entry in deterministic sorted order", () => {
+    const hidden = new Set(["lgtm"]);
+    const visible = new Set(["acknowledged"]);
+    const origins = ["zeta-bot", "alpha-bot", "zeta-bot", "alpha-bot", "acknowledged", "lgtm", ""];
+    const unack = unacknowledgedOrigins(origins, hidden, visible);
+    expect(unack).toEqual(["alpha-bot", "zeta-bot"]);
+  });
+
+  it("an origin in visible set remains automated: false (acknowledged-visible does NOT mean hidden)", () => {
+    const visibleOrigin = "custom-visible-bot";
+    // Even when an origin is acknowledged in KNOWN_VISIBLE_ORIGINS, isAutomatedOrigin returns false
+    expect(isAutomatedOrigin(visibleOrigin)).toBe(false);
+  });
+});
+
+describe("annotate rows with origin and automated (Task 2)", () => {
+  const baseRows = [
+    { id: "root_1", title: "Root 1", parent_id: null, directory: "/p", time_updated: 1000, root_id: "root_1" },
+    { id: "child_1", title: "Child 1", parent_id: "root_1", directory: "/p", time_updated: 1000, root_id: "root_1" },
+    { id: "root_2", title: "Root 2", parent_id: null, directory: "/p", time_updated: 2000, root_id: "root_2" },
+  ];
+
+  it("rows get origin and automated fields, and row with no origin gets null/false", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-annotate-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestOriginDb(p);
+      db.exec(`
+        INSERT INTO session_origin (session_id, origin, notify_policy, declared_at) VALUES
+          ('root_1', 'lgtm', 'all', 1000);
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, { routingDbPath: p });
+      const root1 = rows.find((r) => r.id === "root_1");
+      const root2 = rows.find((r) => r.id === "root_2");
+
+      expect(root1).toBeDefined();
+      expect(root1!.origin).toBe("lgtm");
+      expect(root1!.automated).toBe(true);
+
+      expect(root2).toBeDefined();
+      expect(root2!.origin).toBeNull();
+      expect(root2!.automated).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a child whose root_id is an lgtm root is marked automated (keyed on root_id, not id)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-annotate-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestOriginDb(p);
+      // ONLY root_1 is in session_origin, child_1 is NOT in session_origin
+      db.exec(`
+        INSERT INTO session_origin (session_id, origin, notify_policy, declared_at) VALUES
+          ('root_1', 'lgtm', 'all', 1000);
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, { routingDbPath: p });
+      const child1 = rows.find((r) => r.id === "child_1");
+
+      expect(child1).toBeDefined();
+      expect(child1!.origin).toBe("lgtm");
+      expect(child1!.automated).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a row arriving via the UNION path is annotated with origin and automated", () => {
+    const db = createTestDb();
+    db.exec(`
+      INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated, time_archived) VALUES
+        ('recent', 'p', NULL, 'recent', '/w', 'recent', '1.0', 1, 9000, NULL),
+        ('outside_union', 'p', NULL, 'outside_union', '/w', 'outside_union', '1.0', 1, 10, NULL);
+    `);
+
+    const overlayDir = mkdtempSync(join(tmpdir(), "oc-union-overlay-"));
+    const originDir = mkdtempSync(join(tmpdir(), "oc-union-origin-"));
+    try {
+      // Write overlay for outside_union session
+      writeFileSync(
+        join(overlayDir, "s1.json"),
+        JSON.stringify({
+          version: OVERLAY_VERSION,
+          instanceStamp: 1,
+          pid: process.pid,
+          serveId: "serve-1",
+          heartbeat: Date.now(),
+          sessions: {
+            outside_union: {
+              activity: "working",
+              error: false,
+              pendingPermissions: [],
+              pendingQuestions: [],
+              lastActivity: 5000,
+              updatedAt: 5000,
+            },
+          },
+        }),
+      );
+
+      // Write session_origin for outside_union
+      const p = join(originDir, "routing.db");
+      const originDb = createTestOriginDb(p);
+      originDb.exec(`
+        INSERT INTO session_origin (session_id, origin, notify_policy, declared_at) VALUES
+          ('outside_union', 'lgtm', 'all', 1000);
+      `);
+      originDb.close();
+
+      const base = queryBaseList(db, { limit: 1 });
+      expect(base.map((r) => r.id)).toEqual(["recent"]); // outside_union is outside recency limit
+
+      const rows = queryWithState(base, {
+        overlayDir,
+        routingDbPath: p,
+        unionLookup: (sids) => queryTreesForSessions(db, sids),
+      });
+
+      const unionRow = rows.find((r) => r.id === "outside_union");
+      expect(unionRow).toBeDefined();
+      expect(unionRow!.origin).toBe("lgtm");
+      expect(unionRow!.automated).toBe(true);
+    } finally {
+      db.close();
+      rmSync(overlayDir, { recursive: true, force: true });
+      rmSync(originDir, { recursive: true, force: true });
+    }
+  });
+
+  it("when routing DB is unavailable, every row gets automated: false and origin: null (fails open)", () => {
+    const missingPath = "/definitely/not/a/real/routing.db";
+    const rows = queryWithState(baseRows, {
+      routingDbPath: missingPath,
+    });
+
+    expect(rows.length).toBe(baseRows.length);
+    for (const r of rows) {
+      expect(r.origin).toBeNull();
+      expect(r.automated).toBe(false);
     }
   });
 });

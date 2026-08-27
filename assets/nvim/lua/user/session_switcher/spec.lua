@@ -237,10 +237,17 @@ end
 ---
 --- @param facet string|nil
 --- @param warning_lines string[]|nil
+--- @param hidden integer|nil Count of automated rows dropped from the FETCHED
+---        WINDOW -- not a fleet-wide total. Its job is attribution: it explains
+---        why a short list is short, so an empty picker is never mistaken for a
+---        broken tool. Wording it as a total would make it a lie.
 --- @return string
-function M.prompt_title(facet, warning_lines)
+function M.prompt_title(facet, warning_lines, hidden)
   local f = (facet and facet ~= "" and facet ~= vim.NIL) and tostring(facet) or "all"
   local base = string.format("Sessions (%s)", f)
+  if type(hidden) == "number" and hidden > 0 then
+    base = string.format("%s · %d hidden", base, hidden)
+  end
   if type(warning_lines) == "table" and #warning_lines > 0 then
     return string.format("%s [⚠ %d]", base, #warning_lines)
   end

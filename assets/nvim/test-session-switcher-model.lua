@@ -399,4 +399,82 @@ do
   check(out[3].id == "ses_third", "third row kept in 3rd place despite unread=nil")
 end
 
+-- 26. Automated rows are dropped and hidden count is returned as second value.
+do
+  local rows = {
+    make_row("ses_auto", "idle"),
+    make_row("ses_human", "idle"),
+  }
+  rows[1].automated = true
+  rows[2].automated = false
+
+  local out, hidden = model.build(rows, {})
+  check(#out == 1, "automated row dropped: expected 1 survivor, got " .. #out)
+  check(out[1].id == "ses_human", "the human row survives")
+  check(hidden == 1, "hidden count reports the 1 dropped row, got " .. tostring(hidden))
+end
+
+-- 27. THE ORDERING TEST: an errored automated row must NOT pierce through.
+-- The keep-chain starts with `if pierces then keep = true`. An automated row
+-- must be dropped ABOVE that check, enforcing the user's explicit no-exception
+-- decision for errored/blocked automated sessions.
+do
+  local row_error = make_row("ses_auto_err", "error")
+  row_error.automated = true
+
+  local row_blocked = make_row("ses_auto_blocked", "blocked")
+  row_blocked.automated = true
+
+  local out, hidden = model.build({ row_error, row_blocked }, {}, { facet = "all" })
+  check(#out == 0, "automated+error and automated+blocked are dropped, NOT resurrected by pierce")
+  check(hidden == 2, "both count as hidden, got " .. tostring(hidden))
+end
+
+-- 28. Degraded path: absent or false automated field keeps the row (shows everything).
+do
+  local row_absent = make_row("ses_absent", "idle")
+  -- automated field not set (nil)
+  local out_absent, h_absent = model.build({ row_absent }, {})
+  check(#out_absent == 1, "missing automated field keeps row")
+  check(h_absent == 0, "missing automated field does not increment hidden count")
+
+  local row_false = make_row("ses_false", "idle")
+  row_false.automated = false
+  local out_false, h_false = model.build({ row_false }, {})
+  check(#out_false == 1, "automated=false keeps row")
+  check(h_false == 0, "automated=false does not increment hidden count")
+end
+
+-- 29. Hidden count is facet-independent (computed before facet branches).
+do
+  local mixed = {
+    make_row("ses_auto", "idle"),
+    make_row("ses_human", "idle"),
+  }
+  mixed[1].automated = true
+
+  local _, h_all = model.build(mixed, {}, { facet = "all" })
+  local _, h_att = model.build(mixed, {}, { facet = "attached" })
+  local _, h_det = model.build(mixed, {}, { facet = "detached" })
+  check(h_all == 1, "hidden count under facet=all is 1")
+  check(h_att == 1, "hidden count under facet=attached is 1")
+  check(h_det == 1, "hidden count under facet=detached is 1")
+  check(h_all == h_att and h_all == h_det, "hidden count identical across all facets")
+end
+
+-- 30. Order of survivors is strictly preserved when automated rows are filtered.
+do
+  local ordered = {
+    make_row("ses_x", "idle", nil, 10),
+    make_row("ses_auto_mid", "idle", nil, 5),
+    make_row("ses_y", "idle", nil, 1),
+  }
+  ordered[2].automated = true
+
+  local out = model.build(ordered, {})
+  check(#out == 2, "2 survivors from 3 input rows")
+  check(out[1].id == "ses_x", "first survivor is ses_x")
+  check(out[2].id == "ses_y", "second survivor is ses_y")
+end
+
 print("LUA_TEST_OK " .. N)
