@@ -661,93 +661,45 @@ do
   check(desc.kind == "switch_pane", "custom is_live returning true yields switch_pane")
 end
 
--- 26. WATERMARK: refuse_dir_missing returns nil (Contract 6: read-only row fires NO write).
+-- 28b. MARK-READ WATERMARK: the explicit gesture's payload builder.
+-- Jumping no longer clears (clearing follows evidence of PRESENCE, which the pigeon
+-- daemon now derives from a human authoring a turn or resolving a question). The
+-- picker's only remaining write is this deliberate keystroke, so it needs a payload
+-- built from a row ALONE -- there is no jump descriptor to hand it.
+--
+-- It MUST inherit every guard act.watermark has, especially the >= 1e12 timestamp
+-- rejection: this gesture is if anything MORE dangerous than the old auto-clear,
+-- because it is aimed at exactly one session on purpose and the watermark cannot
+-- move backwards.
 do
-  local row = { id = "ses_ro", last_event_id = 42, dir_missing = true }
-  local desc = { kind = "refuse_dir_missing", directory = "/gone" }
-  local wm = act.watermark(row, desc)
-  check(wm == nil, "watermark for refuse_dir_missing MUST be nil (contract 6: read-only row fires no write)")
+  check(act.mark_read_watermark({ id = "ses_1", last_event_id = 10 }).sid == "ses_1",
+    "mark_read_watermark returns sid from row.id")
+  check(act.mark_read_watermark({ id = "ses_1", last_event_id = 10 }).last_event_id == 10,
+    "mark_read_watermark returns last_event_id from row.last_event_id")
+
+  -- Same guards as act.watermark, asserted independently rather than assumed by
+  -- shared implementation: a refactor could silently unshare them.
+  check(act.mark_read_watermark(nil) == nil, "mark_read_watermark is nil when row is nil")
+  check(act.mark_read_watermark({ last_event_id = 10 }) == nil, "mark_read_watermark is nil when row.id is nil")
+  check(act.mark_read_watermark({ id = "", last_event_id = 10 }) == nil, "mark_read_watermark is nil when row.id is empty")
+  check(act.mark_read_watermark({ id = vim.NIL, last_event_id = 10 }) == nil, "mark_read_watermark is nil when row.id is vim.NIL")
+  check(act.mark_read_watermark({ id = "ses_1" }) == nil, "mark_read_watermark is nil when last_event_id is nil (no ledger)")
+  check(act.mark_read_watermark({ id = "ses_1", last_event_id = vim.NIL }) == nil,
+    "mark_read_watermark is nil when last_event_id is vim.NIL")
+  check(act.mark_read_watermark({ id = "ses_1", last_event_id = "10" }) == nil,
+    "mark_read_watermark is nil when last_event_id is a string")
+  check(act.mark_read_watermark({ id = "ses_1", last_event_id = 1724500000000 }) == nil,
+    "mark_read_watermark REJECTS timestamp-magnitude last_event_id >= 1e12 (defensive guard)")
+  check(act.mark_read_watermark({ id = "ses_1", last_event_id = -1 }) == nil,
+    "mark_read_watermark rejects negative last_event_id")
+
+  -- A dir-missing row is read-only for JUMPING, but marking it read is a pure
+  -- watermark write that touches nothing on disk, so it is allowed. This is the one
+  -- guard mark_read_watermark deliberately does NOT inherit.
+  local ro = act.mark_read_watermark({ id = "ses_ro", last_event_id = 4, dir_missing = true })
+  check(type(ro) == "table" and ro.last_event_id == 4,
+    "mark_read_watermark ALLOWS a dir-missing row (marking read touches no directory)")
 end
-
--- 27. WATERMARK: nil last_event_id returns nil for BOTH absent and unavailable (Contract 11).
--- Explicitly test both unread_state == 'absent' and 'unavailable' where last_event_id is nil.
-do
-  -- Case A: absent (pigeon has no ledger)
-  local row_absent = { id = "ses_absent", unread_state = "absent", last_event_id = nil }
-  local desc = { kind = "attach", sid = "ses_absent" }
-  check(act.watermark(row_absent, desc) == nil, "watermark is nil when last_event_id is nil (unread_state='absent')")
-
-  -- Case B: unavailable (routing DB unreadable)
-  local row_unavail = { id = "ses_unavail", unread_state = "unavailable", last_event_id = nil }
-  check(act.watermark(row_unavail, desc) == nil, "watermark is nil when last_event_id is nil (unread_state='unavailable')")
-
-  -- Case C: vim.NIL userdata
-  local row_vim_nil = { id = "ses_vim_nil", last_event_id = vim.NIL }
-  check(act.watermark(row_vim_nil, desc) == nil, "watermark is nil when last_event_id is vim.NIL")
-
-  -- Case D: non-number (e.g. string)
-  local row_str = { id = "ses_str", last_event_id = "123" }
-  check(act.watermark(row_str, desc) == nil, "watermark is nil when last_event_id is string")
-end
-
--- 28. WATERMARK: missing or invalid row.id returns nil.
-do
-  local desc = { kind = "attach", sid = "ses_x" }
-  check(act.watermark({ last_event_id = 10 }, desc) == nil, "watermark is nil when row.id is nil")
-  check(act.watermark({ id = "", last_event_id = 10 }, desc) == nil, "watermark is nil when row.id is empty string")
-  check(act.watermark({ id = vim.NIL, last_event_id = 10 }, desc) == nil, "watermark is nil when row.id is vim.NIL")
-  check(act.watermark(nil, desc) == nil, "watermark is nil when row is nil")
-  check(act.watermark({ id = "ses_1", last_event_id = 10 }, nil) == nil, "watermark is nil when desc is nil")
-end
-
--- 29. WATERMARK: REJECTS IMPLAUSIBLY LARGE VALUES (>= 1e12 is a timestamp, not an event id).
--- Prevents catastrophic mix-up with lastActivity timestamp (~1.7e12) which would permanently hide future events.
-do
-  local row_ts = {
-    id = "ses_ts",
-    last_event_id = 1724500000000, -- epoch ms timestamp mistakenly in last_event_id
-    lastActivity = 1724500000000,
-  }
-  local desc = { kind = "attach", sid = "ses_ts" }
-  check(act.watermark(row_ts, desc) == nil, "watermark REJECTS timestamp-magnitude last_event_id >= 1e12 (defensive guard)")
-end
-
--- 30. WATERMARK: produces correct payload for attach, switch_pane, and focus_here.
--- focusing an already-open unread row MUST still produce a watermark payload (viewing = seen).
-do
-  -- attach
-  local row_att = { id = "ses_att", last_event_id = 15, lastActivity = 1724500000000 }
-  local desc_att = { kind = "attach", sid = "ses_att" }
-  local wm_att = act.watermark(row_att, desc_att)
-  check(type(wm_att) == "table", "watermark returns table for attach")
-  check(wm_att.sid == "ses_att", "wm_att.sid equals row.id ('ses_att')")
-  check(wm_att.last_event_id == 15, "wm_att.last_event_id equals row.last_event_id (15)")
-  check(wm_att.last_event_id ~= row_att.lastActivity, "wm_att.last_event_id is NOT lastActivity")
-
-  -- switch_pane
-  local row_sw = { id = "ses_sw", last_event_id = 200, lastActivity = 1724500000000 }
-  local desc_sw = { kind = "switch_pane", pane = "%2", sock = "/tmp/a.sock" }
-  local wm_sw = act.watermark(row_sw, desc_sw)
-  check(type(wm_sw) == "table", "watermark returns table for switch_pane")
-  check(wm_sw.sid == "ses_sw", "wm_sw.sid equals row.id ('ses_sw')")
-  check(wm_sw.last_event_id == 200, "wm_sw.last_event_id equals row.last_event_id (200)")
-  check(wm_sw.last_event_id ~= row_sw.lastActivity, "wm_sw.last_event_id is NOT lastActivity")
-
-  -- focus_here on unread row
-  local row_foc = { id = "ses_foc", last_event_id = 77, unread_state = "counted", unread = 5, lastActivity = 1724500000000 }
-  local desc_foc = { kind = "focus_here", buffer = 3, tabpage = 1 }
-  local wm_foc = act.watermark(row_foc, desc_foc)
-  check(type(wm_foc) == "table", "watermark returns table for focus_here on unread row")
-  check(wm_foc.sid == "ses_foc", "wm_foc.sid equals row.id ('ses_foc')")
-  check(wm_foc.last_event_id == 77, "wm_foc.last_event_id equals row.last_event_id (77)")
-  -- Proven exact equality
-  check(wm_foc.last_event_id == row_foc.last_event_id, "wm.last_event_id is exactly row.last_event_id")
-  check(wm_foc.last_event_id ~= row_foc.lastActivity, "wm.last_event_id is NOT lastActivity")
-end
-
--- =========================================================================
--- FLOW.LUA TESTS (Concurrency & Async Controller - S7 Task 3)
--- =========================================================================
 
 -- 31. FLOW: new controller instantiation and injected seams.
 do
@@ -1746,8 +1698,14 @@ do
   check(res == false, "clear_unread returns false when system raises")
 end
 
--- 63. INTEGRATION: refuse_dir_missing descriptor yields NO write through dispatch.
--- Proves pure layer (act.watermark) withholds the write for read-only / dir_missing sessions.
+-- 63. INTEGRATION: JUMPING FIRES NO WATERMARK WRITE.
+--
+-- This assertion is INVERTED from what it used to be. It previously proved that the
+-- pure layer withheld the payload for a dir_missing row while still calling
+-- exec.clear_unread -- i.e. that the ONE read-only case did not write. Jumping now
+-- writes for NO case at all, so the interesting claim is the absence of the call
+-- itself, and it is asserted through the full dispatch path rather than by reading
+-- init.lua and believing it.
 do
   recorded_pickers_new = {}
   recorded_select_default = nil
@@ -1778,8 +1736,7 @@ do
   selected_entry_stub = { value = { id = "ses_ro_int", directory = "/tmp/nonexistent", dir_missing = true, last_event_id = 50 } }
   recorded_select_default()
 
-  check(#clear_calls == 1, "exec.clear_unread was called in dispatch")
-  check(clear_calls[1].payload == nil, "clear_unread was handed nil payload because act.watermark withheld it (contract 6)")
+  check(#clear_calls == 0, "jumping fires NO watermark write, for a dir_missing row or any other")
 
   exec.clear_unread = orig_clear
 end
@@ -1832,10 +1789,13 @@ do
   selected_entry_stub = { value = { id = "ses_ok_int", directory = "/tmp/ok", last_event_id = 88 } }
   recorded_select_default()
 
-  check(#clear_calls == 1, "exec.clear_unread was called for attach")
-  check(clear_calls[1].payload ~= nil, "clear_unread received non-nil payload")
-  check(clear_calls[1].payload.sid == "ses_ok_int", "payload sid matches")
-  check(clear_calls[1].payload.last_event_id == 88, "payload last_event_id matches")
+  -- THE CENTRAL BEHAVIOUR OF THIS CHANGE, asserted through the full dispatch path.
+  -- A successful attach to a session carrying unread events (last_event_id = 88) must
+  -- dispatch the jump and write NOTHING. Peeking is not reading. If this assertion is
+  -- ever flipped back, the user-visible symptom is a badge that vanishes when you
+  -- glance at a session and cannot be recovered, because the daemon's watermark is a
+  -- MAX() upsert.
+  check(#clear_calls == 0, "exec.clear_unread was NOT called for a successful attach (jumping never clears)")
   check(#attach_calls == 1, "exec.attach was dispatched (stubbed, so no real oc-auto-attach was spawned)")
 
   exec.clear_unread = orig_clear
@@ -1866,15 +1826,43 @@ do
   selected_entry_stub = { value = { id = "ses_failjump", directory = "/tmp/f", last_event_id = 42 } }
   recorded_select_default()
 
-  check(#clear_calls == 0, "a FAILED jump fires NO watermark write (unread must not be marked read)")
+  check(#clear_calls == 0, "a FAILED jump fires NO watermark write")
 
-  -- And the positive control, so this cannot pass by simply never writing.
+  -- Successful jump: also no write. Jump outcome is now irrelevant to clearing.
   exec.attach = function() return true end
   recorded_pickers_new = {}
   init_mod.open({ flow = fake_ctrl })
   recorded_pickers_new[1].defaults.attach_mappings(506, function() end)
   recorded_select_default()
-  check(#clear_calls == 1, "a SUCCESSFUL jump does fire the watermark write")
+  check(#clear_calls == 0, "a SUCCESSFUL jump ALSO fires no watermark write")
+
+  -- POSITIVE CONTROL, and it has to be a real one.
+  --
+  -- The two assertions above are now both "nothing happened", so on their own they
+  -- would pass just as happily if exec.clear_unread had been renamed, the stub never
+  -- installed, or dispatch silently broken. The old version of this block used a
+  -- successful jump as its control; that control is exactly what this change deleted.
+  -- <C-r> replaces it: the ONE path that must still write, proving the harness can
+  -- observe a write when one is supposed to occur.
+  local registered = {}
+  recorded_pickers_new = {}
+  init_mod.open({ flow = fake_ctrl })
+  recorded_pickers_new[1].defaults.attach_mappings(507, function(modes, key, fn)
+    table.insert(registered, { key = key, fn = fn })
+  end)
+  local cr = nil
+  for _, m in ipairs(registered) do
+    if m.key == "<C-r>" then cr = m break end
+  end
+  check(cr ~= nil, "<C-r> mark-read keymap was registered")
+
+  current_picker_stub = recorded_pickers_new[1]
+  selected_entry_stub = { value = { id = "ses_failjump", directory = "/tmp/f", last_event_id = 42 } }
+  cr.fn()
+
+  check(#clear_calls == 1, "<C-r> DOES fire the watermark write (positive control: the harness can see a write)")
+  check(clear_calls[1] ~= nil and clear_calls[1].sid == "ses_failjump", "<C-r> payload sid is the highlighted row")
+  check(clear_calls[1].last_event_id == 42, "<C-r> payload carries the row's last_event_id, not a clock")
 
   exec.clear_unread = orig_clear
   exec.attach = orig_attach

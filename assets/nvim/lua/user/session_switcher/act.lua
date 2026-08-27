@@ -101,7 +101,7 @@ function M.decide(row, hit, opts)
   }
 end
 
---- Determine the watermark clear payload for a session jump.
+--- Determine the watermark clear payload for a session row.
 ---
 --- THE VALUE MUST COME FROM THE DISPLAYED ROW, NEVER RECOMPUTED AND NEVER A CLOCK.
 ---
@@ -118,23 +118,22 @@ end
 --- Therefore:
 --- - Returns `{ sid = row.id, last_event_id = row.last_event_id }`
 --- - Returns `nil` when:
----   - `descriptor.kind == "refuse_dir_missing"` (contract 6: read-only row fires NO write)
 ---   - `row.last_event_id` is nil, vim.NIL, or not a number (true for BOTH `unread_state == "absent"`
 ---     and `unread_state == "unavailable"`)
 ---   - `row.id` is missing, nil, vim.NIL, or not a string
 ---   - Defensive guard: `row.last_event_id >= 1e12` (implausibly large value; timestamp rejected)
 ---     or `row.last_event_id < 0`
 ---
+--- SINGLE DEFINITION ON PURPOSE. The >= 1e12 guard is what stops a lastActivity
+--- timestamp being written as an event id, which would permanently hide every future
+--- event in that session. It existed once, for the jump path that no longer writes;
+--- the explicit mark-read gesture needs exactly the same protection, and a second copy
+--- is a second thing to forget to update.
+---
 --- @param row table|nil Displayed session row
---- @param descriptor table|nil Action descriptor from M.decide
 --- @return { sid: string, last_event_id: number }|nil Payload for POST /sessions/:sid/read, or nil
-function M.watermark(row, descriptor)
-  if type(row) ~= "table" or type(descriptor) ~= "table" then
-    return nil
-  end
-
-  -- Contract 6: read-only row fires NO write
-  if descriptor.kind == "refuse_dir_missing" then
+local function watermark_for_row(row)
+  if type(row) ~= "table" then
     return nil
   end
 
@@ -160,6 +159,25 @@ function M.watermark(row, descriptor)
     sid = sid,
     last_event_id = last_event_id,
   }
+end
+
+--- Watermark payload for the EXPLICIT "mark read" gesture.
+---
+--- Built from a row alone: there is no jump descriptor, because jumping no longer
+--- writes a watermark at all. Clearing now follows evidence of PRESENCE, which the
+--- pigeon daemon derives from a human authoring a turn or resolving a question
+--- (pigeon #131); this keystroke is the cover for the case that cannot observe --
+--- reading a session and never typing.
+---
+--- Deliberately does NOT inherit the refuse_dir_missing refusal. That guard exists
+--- because JUMPING into a vanished directory is the unsafe act; marking read is a
+--- watermark write that touches no directory, and a session whose cwd was deleted is
+--- exactly one you may want to silence.
+---
+--- @param row table
+--- @return table|nil payload { sid = string, last_event_id = number }, or nil
+function M.mark_read_watermark(row)
+  return watermark_for_row(row)
 end
 
 return M

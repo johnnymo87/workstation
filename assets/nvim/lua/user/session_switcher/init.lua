@@ -6,9 +6,16 @@
 -- - Captures tmux client at picker open (Contract 9).
 -- - Merges spec.picker_opts() (sorting_strategy, tiebreak) into pickers.new.
 -- - Provides conf.values.generic_sorter({}) to ensure fuzzy search filters.
--- - Wires attach_mappings for default accept (re-resolving via flow:accept)
---   and <C-f> for cycling facets (all -> attached -> detached).
+-- - Wires attach_mappings for default accept (re-resolving via flow:accept),
+--   <C-f> for cycling facets (all -> attached -> detached), and <C-r> to mark
+--   the highlighted session read.
 -- - Surfaces warnings in prompt_title and notifications.
+--
+-- ACCEPTING A ROW WRITES NOTHING. Jumping used to clear the session's unread
+-- badge; it no longer does, because the purpose of a jump is often to peek.
+-- Clearing follows evidence of PRESENCE and lives in the pigeon daemon
+-- (#131) -- a human authoring a turn or resolving a question. <C-r> is the
+-- picker's only remaining write, and it is deliberate.
 
 local pickers = require("telescope.pickers")
 local finders = require("telescope.finders")
@@ -112,35 +119,31 @@ function M.open(opts)
             if not desc or type(desc) ~= "table" then
               return
             end
-            -- ONLY CLEAR THE BADGE IF THE JUMP ACTUALLY HAPPENED.
+            -- JUMPING DELIBERATELY CLEARS NOTHING.
             --
-            -- Every exec.* function returns a success boolean. Discarding them
-            -- and clearing unconditionally marks events read that the user
-            -- never saw -- the mirror image of the state this feature exists to
-            -- prevent, and worse, because unread data loss is not recoverable
-            -- by looking harder. The realistic trigger is not exotic: the
-            -- keymap guard checks `oc-session-list` only, so a host with
-            -- oc-auto-attach missing takes exec.attach's failure path, and
-            -- switch_pane fails whenever the picker is driven outside tmux.
+            -- This used to fire a watermark write whenever a jump succeeded. It was
+            -- wrong for a reason no amount of care in THIS function could fix: the
+            -- stated purpose of a jump is often to PEEK -- to look at a session and
+            -- decide you are not ready to read it. Clearing on that destroys the
+            -- record of where you had stopped, and the watermark is a MAX() upsert,
+            -- so it cannot be moved back.
             --
-            -- refuse_dir_missing returns TRUE (it refused successfully) but
-            -- act.watermark already withholds its payload, so the read-only
-            -- contract still holds through the pure layer rather than through
-            -- this branch.
-            local acted = false
+            -- Clearing now follows evidence of PRESENCE instead, and lives in the
+            -- pigeon daemon where the evidence actually is (pigeon #131): a human
+            -- authoring a turn, or resolving a question, in either the TUI or
+            -- Telegram. Asking a follow-up question is close to proof you read what
+            -- came before it. Arriving somewhere is not.
+            --
+            -- The case neither signal can see -- reading a session and never typing --
+            -- is covered by the explicit <C-r> gesture below, not by guessing here.
             if desc.kind == "focus_here" then
-              acted = exec.focus_here(desc)
+              exec.focus_here(desc)
             elseif desc.kind == "switch_pane" then
-              acted = exec.switch_pane(desc, client)
+              exec.switch_pane(desc, client)
             elseif desc.kind == "attach" then
-              acted = exec.attach(desc)
+              exec.attach(desc)
             elseif desc.kind == "refuse_dir_missing" then
-              acted = exec.refuse_dir_missing(desc)
-            end
-
-            if acted then
-              local wm = act.watermark(row, desc)
-              exec.clear_unread(wm, opts)
+              exec.refuse_dir_missing(desc)
             end
           end)
         end)
@@ -165,7 +168,48 @@ function M.open(opts)
           return true
         end
 
+        -- MARK THE HIGHLIGHTED SESSION READ, without jumping to it.
+        --
+        -- The cover for the one case presence-detection cannot observe: reading a
+        -- session and never typing in it. That leaves no trace anywhere, so it needs a
+        -- deliberate keystroke rather than an inference.
+        --
+        -- IRREVERSIBLE BY CONSTRUCTION. The daemon's upsert is MAX(current, incoming),
+        -- which is what makes stale and retried writes safe and is not worth giving up
+        -- for an undo. So this is bound to an explicit key on a single highlighted row,
+        -- never to arriving somewhere.
+        local function mark_read()
+          local entry = action_state.get_selected_entry()
+          local row = entry and (entry.value or entry)
+          local wm = act.mark_read_watermark(row)
+          if not wm then
+            -- Nil means the row has no ledger to clear (no last_event_id) or failed a
+            -- guard. Say so: a keystroke that silently does nothing reads as a broken
+            -- keybinding, and the '·' badge for "no ledger" is easy to miss.
+            vim.notify("session-switcher: nothing to mark read for this row", vim.log.levels.INFO)
+            return true
+          end
+          exec.clear_unread(wm, opts)
+          -- Refresh so the badge updates in place, rather than leaving the user looking
+          -- at a count they just cleared.
+          controller:refresh(current_facet, function(new_rows, new_result, new_err, new_hidden)
+            local new_warnings = spec.warning_lines(new_result, new_err)
+            local new_title = spec.prompt_title(current_facet, new_warnings, new_hidden)
+            local current_picker = action_state.get_current_picker(prompt_bufnr)
+            if current_picker then
+              current_picker.prompt_title = new_title
+              if current_picker.prompt_border and current_picker.prompt_border.change_title then
+                current_picker.prompt_border:change_title(new_title)
+              end
+              local new_fmt_opts = vim.tbl_extend("force", opts, { now = os.time() * 1000 })
+              current_picker:refresh(make_finder(new_rows or {}, new_fmt_opts), { reset_prompt = false })
+            end
+          end)
+          return true
+        end
+
         map({ "i", "n" }, "<C-f>", cycle_facet)
+        map({ "i", "n" }, "<C-r>", mark_read)
 
         return true
       end,

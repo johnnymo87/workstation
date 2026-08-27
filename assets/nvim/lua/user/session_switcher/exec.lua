@@ -216,7 +216,7 @@ end
 --- - Never awaited, stdin = false, pcall'd to guard against missing curl binary.
 --- - Returns boolean indicator: true if request was spawned, false otherwise.
 ---
---- @param payload table|nil { sid: string, last_event_id: number } from act.watermark
+--- @param payload table|nil { sid: string, last_event_id: number } from act.mark_read_watermark
 --- @param opts table|nil Options:
 ---   port?: integer|string
 ---   token?: string
