@@ -47,7 +47,13 @@ Controller.__index = Controller
 
 --- Refresh session rows and attachment status.
 ---
---- Pipeline: `fetch -> locate -> build -> cb(rows, result, err)`.
+--- Pipeline: `fetch -> locate -> build -> cb(rows, result, err, hidden)`.
+---
+--- `hidden` is build's second return: how many rows it dropped for being
+--- automated. It rides as a FOURTH ARGUMENT rather than as a field on `rows`
+--- deliberately -- a non-integer key would flip `vim.islist(rows)` false and
+--- trip the top-level-list guard in cli.lua. The error path calls
+--- `cb(nil, nil, err)`, so `hidden` is nil there, which prompt_title accepts.
 ---
 --- GENERATION CHECKING (THE TWO RACES PREVENTED):
 --- 1. Post-fetch: A generation token is bumped at the START of refresh.
@@ -148,7 +154,7 @@ local M = {}
 --- @param opts table|nil Injected seams:
 ---   fetch?: fun(opts, cb)
 ---   locate?: fun(opts, cb)
----   build?: fun(rows, hits, opts): table[]
+---   build?: fun(rows, hits, opts): table[], integer
 ---   decide?: fun(row, hit): table
 ---   fetch_opts?: table
 ---   locate_opts?: table
