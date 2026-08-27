@@ -584,10 +584,23 @@ export function queryWithState(
   // exact failure mode model.lua documents for its duplicated is_live copy.
   // Every unread test drives the real builder against a real temp SQLite DB.
   const unreadMap = buildUnreadMap(options.routingDbPath ?? "", baseRows, options.onWarn);
-  // PLACEMENT IS LOAD-BEARING: Must run after the union block above over post-union
-  // baseRows. If computed earlier, unioned attention rows would arrive unannotated,
-  // automated would be undefined/false, and the picker would keep them -- producing
-  // a silent under-hide in exactly the path that matters most.
+  // PLACEMENT IS NOT LOAD-BEARING TODAY, AND THAT IS WORTH SAYING OUT LOUD.
+  //
+  // The design called this call site load-bearing -- "must run after the union
+  // block, or unioned attention rows arrive unannotated". Mutation testing
+  // disproved it: moving this line above the union block breaks no test, because
+  // unlike its two siblings this builder never reads `baseRows`. It loads the
+  // whole session_origin table and is keyed by session_id, so the row set it is
+  // handed cannot change its result. What actually guarantees unioned rows get
+  // annotated is that the merge loop below iterates post-union baseRows.
+  //
+  // The constraint becomes REAL the moment someone scopes the query to the rows
+  // in hand -- an obvious-looking optimisation, since we read ~700 rows to
+  // annotate ~200. If you do that, this call MUST stay after the union block or
+  // unioned attention rows will silently keep their default `automated: false`.
+  // Reading the whole table is also deliberate for the tripwire: an unrecognised
+  // origin is worth warning about even when none of its sessions are currently
+  // in the window.
   const originMap = buildOriginMap(options.routingDbPath ?? "", baseRows, options.onWarn);
   const mergedStateMap = mergeOverlays(overlayFiles, {
     now, staleMs, isAlive, owners, prepared: preparedFiles,
