@@ -1876,6 +1876,33 @@ describe("buildOriginMap & automated origins (Task 1)", () => {
     }
   });
 
+  it("coerces a non-string origin to string, keeping OriginMap's declared type honest", () => {
+    // SQLite is dynamically typed and `origin` is free-form TEXT with no CHECK
+    // constraint, so a writer CAN land a number here. Without coercion it flows
+    // into a Map<string,string> and out through `origin: string | null` as a
+    // JSON number -- both declared types quietly false. The odd value must
+    // still trip the tripwire, since it is exactly the case worth reporting.
+    const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestOriginDb(p);
+      db.exec(`
+        INSERT INTO session_origin (session_id, origin, notify_policy, declared_at) VALUES
+          ('root_num', 123, 'errors-only', 1000);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const originMap = buildOriginMap(p, baseRows, (m) => warnings.push(m));
+      expect(typeof originMap!.get("root_num")).toBe("string");
+      expect(originMap!.get("root_num")).toBe("123");
+      expect(isAutomatedOrigin(originMap!.get("root_num"))).toBe(false);
+      expect(warnings.filter((w) => w.includes("123")).length).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("maps unknown origin, marks isAutomatedOrigin false, and trips warning exactly once across three rows sharing that origin", () => {
     const dir = mkdtempSync(join(tmpdir(), "oc-origin-"));
     try {

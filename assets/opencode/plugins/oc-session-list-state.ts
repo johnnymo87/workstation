@@ -328,15 +328,26 @@ export function buildOriginMap(
     const origins: string[] = [];
     for (const r of rows) {
       if (r.session_id && r.origin) {
-        originMap.set(r.session_id, r.origin);
-        origins.push(r.origin);
+        // Coerce rather than trust the column type. SQLite is dynamically
+        // typed and `origin` is free-form TEXT with no CHECK constraint, so a
+        // writer can land a number here -- which would otherwise flow into a
+        // Map<string,string> and out through `origin: string | null` as a JSON
+        // number, making both declared types quietly false. Coercing keeps the
+        // types honest AND keeps the tripwire firing on the odd value, which is
+        // exactly the case worth being told about.
+        const origin = String(r.origin);
+        originMap.set(r.session_id, origin);
+        origins.push(origin);
       }
     }
 
     const unknownOrigins = unacknowledgedOrigins(origins, HIDDEN_ORIGINS, KNOWN_VISIBLE_ORIGINS);
     for (const origin of unknownOrigins) {
       onWarn?.(
-        `unknown session origin '${origin}' is not hidden -- add to HIDDEN_ORIGINS or KNOWN_VISIBLE_ORIGINS in oc-session-list-state.ts`,
+        `unknown session origin '${origin}' is not hidden -- add it to HIDDEN_ORIGINS ` +
+          `or KNOWN_VISIBLE_ORIGINS in oc-session-list-state.ts, then redeploy ` +
+          `(home-manager switch) -- editing the repo alone will not silence this, ` +
+          `because the running oc-session-list is a nix-built artifact`,
       );
     }
 
