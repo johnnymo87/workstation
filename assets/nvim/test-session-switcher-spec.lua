@@ -425,6 +425,21 @@ do
   check(t_warn:find("2", 1, true) ~= nil, "prompt_title indicates warning count (2)")
 end
 
+-- 14b. PROMPT_TITLE: hidden count rendering, ordering relative to warnings, and robustness.
+do
+  check(spec.prompt_title("all", {}, 0) == "Sessions (all)", "no suffix at zero hidden count")
+  check(spec.prompt_title("all", {}, 31) == "Sessions (all) · 31 hidden", "positive hidden count shown")
+  check(
+    spec.prompt_title("all", { "w", "x" }, 31) == "Sessions (all) · 31 hidden [⚠ 2]",
+    "hidden count precedes warning marker"
+  )
+  check(spec.prompt_title("all", {}, nil) == "Sessions (all)", "nil count is not an error")
+  check(spec.prompt_title("all", {}, "banana") == "Sessions (all)", "non-number count ignored")
+  check(spec.prompt_title("all", {}, -3) == "Sessions (all)", "negative count ignored")
+  check(spec.prompt_title("attached", {}, 5) == "Sessions (attached) · 5 hidden", "hidden count rendered with attached facet")
+  check(spec.prompt_title("detached", { "warn" }, 12) == "Sessions (detached) · 12 hidden [⚠ 1]", "hidden count + warning with detached facet")
+end
+
 -- =========================================================================
 -- ACT.LUA TESTS (Pure decision module - S7 Task 2)
 -- =========================================================================
