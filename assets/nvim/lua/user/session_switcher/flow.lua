@@ -31,7 +31,7 @@ local function default_build(rows, hits, opts)
   if ok and type(model) == "table" and type(model.build) == "function" then
     return model.build(rows, hits, opts)
   end
-  return {}
+  return {}, 0
 end
 
 local function default_decide(row, hit)
@@ -71,7 +71,7 @@ Controller.__index = Controller
 --- `(nil, nil, err)` so warnings and error banners surface (Contract 4).
 ---
 --- @param facet string "all" | "attached" | "detached"
---- @param cb fun(rows: table[]|nil, result: table|nil, err: table|nil)
+--- @param cb fun(rows: table[]|nil, result: table|nil, err: table|nil, hidden: integer|nil)
 function Controller:refresh(facet, cb)
   if type(cb) ~= "function" then
     return
@@ -101,8 +101,8 @@ function Controller:refresh(facet, cb)
         return
       end
 
-      local built_rows = self.build(rows, hits, { facet = facet })
-      cb(built_rows, result, nil)
+      local built_rows, hidden = self.build(rows, hits, { facet = facet })
+      cb(built_rows, result, nil, hidden)
     end)
   end)
 end

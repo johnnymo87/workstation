@@ -776,6 +776,33 @@ do
   check(cb_called, "refresh callback was invoked")
 end
 
+-- 32b. FLOW: threads hidden count as 4th callback argument and keeps rows table a list.
+do
+  local captured_hidden = nil
+  local captured_rows = nil
+
+  local ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = { { id = "a" } } }, nil)
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+    build = function(rows, hits, opts)
+      return { { id = "a" } }, 5
+    end,
+  })
+
+  ctrl:refresh("all", function(rows, result, err, hidden)
+    captured_rows = rows
+    captured_hidden = hidden
+  end)
+
+  check(captured_hidden == 5, "flow threads model.build hidden count as 4th arg, got " .. tostring(captured_hidden))
+  check(vim.islist(captured_rows), "rows table is still a list (cli.lua guard)")
+  check(type(captured_rows) == "table" and rawget(captured_rows, "hidden") == nil, "hidden count is NOT attached to rows table")
+end
+
 -- 33. FLOW RACE 1: Stale FETCH generation is dropped (cb NOT called).
 -- Prevents race where a slow fetch from an earlier facet toggle arrives late and clobbers newer state.
 do
@@ -1210,6 +1237,27 @@ do
   check(picker_inst.opts.custom_user_opt == "preserved", "user opts passed through to pickers.new")
 end
 
+-- 49b. INIT: fetch limit is 200 by default, without mutating caller's opts table.
+do
+  local caller_opts = { custom = "opt" }
+  local captured_flow_opts = nil
+
+  local saved_flow_new = flow.new
+  flow.new = function(opts)
+    captured_flow_opts = opts
+    return saved_flow_new(opts)
+  end
+
+  init_mod.open(caller_opts)
+
+  check(type(captured_flow_opts) == "table", "flow.new received options table")
+  check(type(captured_flow_opts.fetch_opts) == "table", "flow.new received fetch_opts")
+  check(captured_flow_opts.fetch_opts.limit == 200, "picker requests limit=200 by default (deeper window)")
+  check(caller_opts.fetch_opts == nil, "caller opts table was NOT mutated")
+
+  flow.new = saved_flow_new
+end
+
 -- 50. INIT: entry_maker formats row with spec.format.
 do
   check(#recorded_finders > 0, "finders recorded")
@@ -1338,6 +1386,45 @@ do
   check(picker_inst.refreshed_finder ~= nil, "current_picker:refresh was invoked")
   check(picker_inst.prompt_title:find("attached", 1, true) ~= nil, "prompt_title updated to 'attached'")
   check(picker_inst.refreshed_opts.reset_prompt == false, "refresh passed reset_prompt=false")
+end
+
+-- 52b. INIT: hidden count is rendered at picker open and remains accurate after <C-f> facet cycling.
+do
+  recorded_pickers_new = {}
+  local registered_maps = {}
+
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb)
+      cb({ rows = { { id = "ses_cycle" } } }, nil)
+    end,
+    locate = function(opts, cb)
+      cb({})
+    end,
+    build = function(rows, hits, opts)
+      return { { id = "ses_cycle", facet = opts.facet } }, 7
+    end,
+  })
+
+  init_mod.open({ flow = fake_ctrl })
+
+  local picker_inst = recorded_pickers_new[1]
+  check(picker_inst.prompt_title == "Sessions (all) · 7 hidden", "initial prompt_title includes hidden count at open")
+
+  local map_fn = function(modes, key, fn)
+    table.insert(registered_maps, { modes = modes, key = key, fn = fn })
+  end
+  picker_inst.defaults.attach_mappings(203, map_fn)
+
+  local cf_map = nil
+  for _, m in ipairs(registered_maps) do
+    if m.key == "<C-f>" then cf_map = m break end
+  end
+  check(cf_map ~= nil, "<C-f> keymap was registered")
+
+  current_picker_stub = picker_inst
+  cf_map.fn()
+
+  check(picker_inst.prompt_title == "Sessions (attached) · 7 hidden", "prompt_title still includes hidden count after facet cycling")
 end
 
 -- 53. INIT: warnings are surfaced in prompt_title and via exec.notify_warnings.
