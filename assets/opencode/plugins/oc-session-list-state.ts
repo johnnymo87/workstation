@@ -28,6 +28,7 @@ export interface SessionWithStateRow extends SessionRow {
   unread: number | null;
   unread_state: "counted" | "absent" | "unavailable";
   last_event_id: number | null;
+  anchor_msg_id: string | null;
   /**
    * Provenance string from session_origin (e.g. "lgtm"), carried purely for
    * debuggability. Hiding is invisible by nature, so this allows answering
@@ -44,6 +45,7 @@ export interface UnreadEntry {
   unread: number;
   last_event_id: number | null;
   last_event_at?: number | null;
+  anchor_msg_id: string | null;
 }
 
 export type UnreadMap = Map<string, UnreadEntry>;
@@ -184,12 +186,30 @@ export function buildUnreadMap(
       );
       return null;
     }
+    const columns = db.query<{ name: string }, []>(`PRAGMA table_info(session_events)`).all();
+    const hasAnchor = columns.some((c) => c.name === "anchor_msg_id");
+
+    // NOTE: kind <> 'mirror' duplicates pigeon's UNCOUNTED_KINDS
+    // (packages/daemon/src/storage/session-events-repo.ts:14) in another
+    // language/repo with nothing tying them together.
+    const anchorSubquery = hasAnchor
+      ? `(SELECT e2.anchor_msg_id
+            FROM session_events e2
+           WHERE e2.session_id = e.session_id
+             AND e2.id > COALESCE(r.last_read_id, 0)
+             AND e2.kind <> 'mirror'
+             AND e2.anchor_msg_id IS NOT NULL
+           ORDER BY e2.id ASC
+           LIMIT 1) AS anchor_msg_id`
+      : `NULL AS anchor_msg_id`;
+
     const query = `
       SELECT e.session_id,
              COUNT(*) FILTER (WHERE e.id > COALESCE(r.last_read_id, 0)
                                 AND e.kind <> 'mirror') AS unread,
              MAX(e.id)      AS last_event_id,
-             MAX(e.sent_at) AS last_event_at
+             MAX(e.sent_at) AS last_event_at,
+             ${anchorSubquery}
       FROM session_events e
       LEFT JOIN session_reads r USING (session_id)
       GROUP BY e.session_id;
@@ -199,6 +219,7 @@ export function buildUnreadMap(
       unread: number;
       last_event_id: number | null;
       last_event_at: number | null;
+      anchor_msg_id: string | null;
     }, []>(query).all();
     db.close();
 
@@ -209,6 +230,7 @@ export function buildUnreadMap(
           unread: Number(r.unread),
           last_event_id: r.last_event_id !== null ? Number(r.last_event_id) : null,
           last_event_at: r.last_event_at !== null ? Number(r.last_event_at) : null,
+          anchor_msg_id: r.anchor_msg_id !== null && r.anchor_msg_id !== undefined ? String(r.anchor_msg_id) : null,
         });
       }
     }
@@ -654,6 +676,7 @@ export function queryWithState(
     let unread: number | null = null;
     let unread_state: "counted" | "absent" | "unavailable";
     let last_event_id: number | null = null;
+    let anchor_msg_id: string | null = null;
 
     if (unreadMap === null) {
       unread_state = "unavailable";
@@ -663,6 +686,7 @@ export function queryWithState(
         unread = entry.unread;
         unread_state = "counted";
         last_event_id = entry.last_event_id;
+        anchor_msg_id = entry.anchor_msg_id;
       } else {
         unread_state = "absent";
       }
@@ -684,6 +708,7 @@ export function queryWithState(
         unread,
         unread_state,
         last_event_id,
+        anchor_msg_id,
         origin: rootOrigin,
         automated,
         ...(st.retry ? { retry: st.retry } : {}),
@@ -721,6 +746,7 @@ export function queryWithState(
         unread,
         unread_state,
         last_event_id,
+        anchor_msg_id,
         origin: rootOrigin,
         automated,
       };

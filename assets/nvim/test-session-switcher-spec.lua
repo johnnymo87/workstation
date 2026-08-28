@@ -1934,4 +1934,312 @@ do
   exec.attach = orig_attach
 end
 
+-- 66. SCROLL_TO_MESSAGE: payload validation (invalid payloads return false without invoking system).
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  -- Non-table payload
+  check(exec.scroll_to_message(nil, { system = fake_sys }) == false, "nil payload returns false")
+  check(exec.scroll_to_message("invalid", { system = fake_sys }) == false, "string payload returns false")
+
+  -- Missing or invalid sid
+  check(exec.scroll_to_message({ message_id = "msg_1" }, { system = fake_sys }) == false, "missing sid returns false")
+  check(exec.scroll_to_message({ sid = "", message_id = "msg_1" }, { system = fake_sys }) == false, "empty sid returns false")
+  check(exec.scroll_to_message({ sid = 123, message_id = "msg_1" }, { system = fake_sys }) == false, "non-string sid returns false")
+
+  -- Missing or invalid message_id
+  check(exec.scroll_to_message({ sid = "ses_1" }, { system = fake_sys }) == false, "missing message_id returns false")
+  check(exec.scroll_to_message({ sid = "ses_1", message_id = "" }, { system = fake_sys }) == false, "empty message_id returns false")
+  check(exec.scroll_to_message({ sid = "ses_1", message_id = 123 }, { system = fake_sys }) == false, "non-string message_id returns false")
+
+  check(#sys_calls == 0, "no system call spawned for invalid payloads")
+
+  -- Valid payload succeeds
+  check(exec.scroll_to_message({ sid = "ses_1", message_id = "msg_1" }, { system = fake_sys }) == true, "valid payload returns true")
+  check(#sys_calls == 1, "system invoked exactly once for valid payload")
+end
+
+-- 67. SCROLL_TO_MESSAGE: URL resolution (default 4700, opts.frontdoor_url, env var, targets 4700 not 4731, no auth).
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  local payload = { sid = "ses_url_test", message_id = "msg_100" }
+
+  -- Case A: Default URL targets front door (4700), NOT pigeon (4731)
+  local saved_env = vim.env.OPENCODE_FRONTDOOR_URL
+  vim.env.OPENCODE_FRONTDOOR_URL = nil
+  sys_calls = {}
+  exec.scroll_to_message(payload, { system = fake_sys })
+  check(#sys_calls == 1, "system invoked for default URL")
+  local default_url = nil
+  for _, a in ipairs(sys_calls[1].cmd) do if a:find("^http://") then default_url = a break end end
+  check(default_url == "http://127.0.0.1:4700/session/ses_url_test/scroll-to-message", "default URL targets 4700 at /session/ses_url_test/scroll-to-message; got: " .. tostring(default_url))
+  check(not default_url:find(":4731"), "does NOT target pigeon port 4731")
+
+  -- No auth header in argv
+  for _, a in ipairs(sys_calls[1].cmd) do
+    check(not a:find("Authorization", 1, true), "no Authorization header sent to front door")
+    check(not a:find("Bearer", 1, true), "no Bearer token sent to front door")
+  end
+
+  -- Case B: OPENCODE_FRONTDOOR_URL env var honoured
+  vim.env.OPENCODE_FRONTDOOR_URL = "http://127.0.0.1:9999"
+  sys_calls = {}
+  exec.scroll_to_message(payload, { system = fake_sys })
+  check(#sys_calls == 1, "system invoked for env URL")
+  local env_url = nil
+  for _, a in ipairs(sys_calls[1].cmd) do if a:find("^http://") then env_url = a break end end
+  check(env_url == "http://127.0.0.1:9999/session/ses_url_test/scroll-to-message", "env URL honoured; got: " .. tostring(env_url))
+
+  -- Case C: opts.frontdoor_url overrides env var, and trailing slash is trimmed
+  sys_calls = {}
+  exec.scroll_to_message(payload, { system = fake_sys, frontdoor_url = "http://localhost:8888/" })
+  check(#sys_calls == 1, "system invoked for opts.frontdoor_url")
+  local opts_url = nil
+  for _, a in ipairs(sys_calls[1].cmd) do if a:find("^http://") then opts_url = a break end end
+  check(opts_url == "http://localhost:8888/session/ses_url_test/scroll-to-message", "opts.frontdoor_url overrides env and trims trailing slash; got: " .. tostring(opts_url))
+
+  vim.env.OPENCODE_FRONTDOOR_URL = saved_env
+end
+
+-- 68. SCROLL_TO_MESSAGE: body shape and `force` parameter (true on attempt 0, false otherwise).
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  -- Case A: force = true
+  sys_calls = {}
+  exec.scroll_to_message({ sid = "ses_f_true", message_id = "msg_t1", force = true }, { system = fake_sys })
+  check(#sys_calls == 1, "system invoked")
+  local body_true = nil
+  for i, a in ipairs(sys_calls[1].cmd) do if a == "--data" then body_true = sys_calls[1].cmd[i + 1] break end end
+  check(body_true ~= nil, "--data argument present")
+  local dec_true = vim.json.decode(body_true)
+  check(dec_true.messageID == "msg_t1", "messageID is msg_t1")
+  check(dec_true.force == true, "force is boolean true")
+
+  -- Case B: force = false
+  sys_calls = {}
+  exec.scroll_to_message({ sid = "ses_f_false", message_id = "msg_t2", force = false }, { system = fake_sys })
+  check(#sys_calls == 1, "system invoked")
+  local body_false = nil
+  for i, a in ipairs(sys_calls[1].cmd) do if a == "--data" then body_false = sys_calls[1].cmd[i + 1] break end end
+  check(body_false ~= nil, "--data argument present")
+  local dec_false = vim.json.decode(body_false)
+  check(dec_false.messageID == "msg_t2", "messageID is msg_t2")
+  check(dec_false.force == false, "force is boolean false")
+
+  -- Case C: force omitted / nil defaults to false
+  sys_calls = {}
+  exec.scroll_to_message({ sid = "ses_f_nil", message_id = "msg_t3" }, { system = fake_sys })
+  check(#sys_calls == 1, "system invoked")
+  local body_nil = nil
+  for i, a in ipairs(sys_calls[1].cmd) do if a == "--data" then body_nil = sys_calls[1].cmd[i + 1] break end end
+  local dec_nil = vim.json.decode(body_nil)
+  check(dec_nil.force == false, "omitted force defaults to false")
+end
+
+-- 69. SCROLL_TO_MESSAGE: URL-encodes session ID in path and checks curl arguments.
+do
+  local sys_calls = {}
+  local fake_sys = function(cmd, opts)
+    table.insert(sys_calls, { cmd = cmd, opts = opts })
+    return { pid = 1 }
+  end
+
+  local payload = { sid = "ses/with spaces&special?100%", message_id = "msg_enc" }
+  exec.scroll_to_message(payload, { system = fake_sys })
+  check(#sys_calls == 1, "system invoked")
+
+  local url = nil
+  for _, a in ipairs(sys_calls[1].cmd) do if a:find("^http://") then url = a break end end
+  check(url ~= nil, "URL present")
+  check(url:find("ses%2Fwith%20spaces%26special%3F100%25", 1, true) ~= nil, "URL has properly percent-encoded sid; got: " .. tostring(url))
+  check(not url:find(" "), "URL contains no unencoded spaces")
+
+  -- Curl flags and opts
+  check(argv_has(sys_calls[1].cmd, "curl"), "argv has curl")
+  check(argv_has(sys_calls[1].cmd, "-s"), "argv has -s")
+  check(argv_has(sys_calls[1].cmd, "--max-time"), "argv has --max-time")
+  check(argv_has(sys_calls[1].cmd, "5"), "argv has 5s timeout")
+  check(argv_has(sys_calls[1].cmd, "-X"), "argv has -X")
+  check(argv_has(sys_calls[1].cmd, "POST"), "argv has POST")
+  check(argv_has(sys_calls[1].cmd, "content-type: application/json"), "argv has json content-type")
+  check(sys_calls[1].opts ~= nil and sys_calls[1].opts.stdin == false, "stdin is false in system opts")
+end
+
+-- 70. SCROLL_TO_MESSAGE: vim.system error (missing binary / exception) is pcall'd, does not throw, returns false.
+do
+  local payload = { sid = "ses_raise", message_id = "msg_err" }
+  local fake_sys_raise = function()
+    error("ENOENT: curl not found")
+  end
+
+  local ok, res = pcall(exec.scroll_to_message, payload, { system = fake_sys_raise })
+  check(ok, "scroll_to_message does not throw when vim.system raises")
+  check(res == false, "scroll_to_message returns false when system raises")
+end
+
+-- 71. INTEGRATION: jump on row with anchor schedules 4 attempts at 0 / 300 / 900 / 2000 ms with force=true on attempt 0 only.
+do
+  local deferred = {}
+  local orig_defer = vim.defer_fn
+  vim.defer_fn = function(fn, delay)
+    table.insert(deferred, { fn = fn, delay = delay })
+  end
+
+  local scroll_calls = {}
+  local orig_scroll = exec.scroll_to_message
+  exec.scroll_to_message = function(payload, opts)
+    table.insert(scroll_calls, { payload = payload, opts = opts })
+    return true
+  end
+
+  local orig_attach = exec.attach
+  exec.attach = function() return true end
+
+  local row = { id = "ses_scroll_1", directory = "/tmp/s1", anchor_msg_id = "msg_target_456" }
+  local fake_ctrl = flow.new({
+    fetch = function(o, cb) cb({ rows = { row } }, nil) end,
+    locate = function(o, cb) cb({}) end,
+  })
+
+  recorded_pickers_new = {}
+  init_mod.open({ flow = fake_ctrl })
+  recorded_pickers_new[1].defaults.attach_mappings(601, function() end)
+  selected_entry_stub = { value = row }
+  recorded_select_default()
+
+  check(#deferred == 4, "4 scroll attempts scheduled via vim.defer_fn")
+  check(deferred[1].delay == 0, "attempt 0 delay is 0 ms")
+  check(deferred[2].delay == 300, "attempt 1 delay is 300 ms")
+  check(deferred[3].delay == 900, "attempt 2 delay is 900 ms")
+  check(deferred[4].delay == 2000, "attempt 3 delay is 2000 ms")
+
+  -- Execute the scheduled callbacks
+  for _, item in ipairs(deferred) do
+    item.fn()
+  end
+
+  check(#scroll_calls == 4, "4 scroll_to_message calls executed")
+  check(scroll_calls[1].payload.sid == "ses_scroll_1", "attempt 0 target sid matches row.id")
+  check(scroll_calls[1].payload.message_id == "msg_target_456", "attempt 0 message_id matches anchor_msg_id")
+  check(scroll_calls[1].payload.force == true, "attempt 0 has force = true (user's explicit jump)")
+
+  check(scroll_calls[2].payload.force == false, "attempt 1 has force = false (speculative retry)")
+  check(scroll_calls[3].payload.force == false, "attempt 2 has force = false (speculative retry)")
+  check(scroll_calls[4].payload.force == false, "attempt 3 has force = false (speculative retry)")
+
+  vim.defer_fn = orig_defer
+  exec.scroll_to_message = orig_scroll
+  exec.attach = orig_attach
+end
+
+-- 72. INTEGRATION: jump on row without anchor (nil, vim.NIL, empty string) fires NO scroll attempts.
+do
+  local deferred = {}
+  local orig_defer = vim.defer_fn
+  vim.defer_fn = function(fn, delay)
+    table.insert(deferred, { fn = fn, delay = delay })
+  end
+  local orig_attach = exec.attach
+  exec.attach = function() return true end
+
+  for _, test_anchor in ipairs({ nil, vim.NIL, "" }) do
+    deferred = {}
+    local row = { id = "ses_no_anchor", directory = "/tmp/s2", anchor_msg_id = test_anchor }
+    local fake_ctrl = flow.new({
+      fetch = function(o, cb) cb({ rows = { row } }, nil) end,
+      locate = function(o, cb) cb({}) end,
+    })
+
+    recorded_pickers_new = {}
+    init_mod.open({ flow = fake_ctrl })
+    recorded_pickers_new[1].defaults.attach_mappings(602, function() end)
+    selected_entry_stub = { value = row }
+    recorded_select_default()
+
+    check(#deferred == 0, "no scroll attempts scheduled when anchor is " .. tostring(test_anchor))
+  end
+
+  vim.defer_fn = orig_defer
+  exec.attach = orig_attach
+end
+
+-- 73. INTEGRATION: refuse_dir_missing descriptor fires NO scroll attempts even if anchor is present.
+do
+  local deferred = {}
+  local orig_defer = vim.defer_fn
+  vim.defer_fn = function(fn, delay)
+    table.insert(deferred, { fn = fn, delay = delay })
+  end
+  local orig_refuse = exec.refuse_dir_missing
+  local refuse_calls = 0
+  exec.refuse_dir_missing = function() refuse_calls = refuse_calls + 1; return true end
+
+  local row = { id = "ses_dir_missing", directory = "/tmp/nonexistent", dir_missing = true, anchor_msg_id = "msg_anchor_dm" }
+  local fake_ctrl = flow.new({
+    fetch = function(o, cb) cb({ rows = { row } }, nil) end,
+    locate = function(o, cb) cb({}) end,
+    decide = function() return { kind = "refuse_dir_missing", directory = "/tmp/nonexistent" } end,
+  })
+
+  recorded_pickers_new = {}
+  init_mod.open({ flow = fake_ctrl })
+  recorded_pickers_new[1].defaults.attach_mappings(603, function() end)
+  selected_entry_stub = { value = row }
+  recorded_select_default()
+
+  check(refuse_calls == 1, "exec.refuse_dir_missing was called")
+  check(#deferred == 0, "no scroll attempts scheduled on refuse_dir_missing path")
+
+  vim.defer_fn = orig_defer
+  exec.refuse_dir_missing = orig_refuse
+end
+
+-- 74. INTEGRATION: navigating descriptors (focus_here, switch_pane, attach) all fire the scroll attempts.
+do
+  local orig_defer = vim.defer_fn
+  local orig_focus, orig_switch, orig_attach = exec.focus_here, exec.switch_pane, exec.attach
+
+  for _, kind in ipairs({ "focus_here", "switch_pane", "attach" }) do
+    local deferred = {}
+    vim.defer_fn = function(fn, delay)
+      table.insert(deferred, { fn = fn, delay = delay })
+    end
+    exec.focus_here = function() return true end
+    exec.switch_pane = function() return true end
+    exec.attach = function() return true end
+
+    local row = { id = "ses_nav_" .. kind, directory = "/tmp/nav", anchor_msg_id = "msg_nav_" .. kind }
+    local fake_ctrl = flow.new({
+      fetch = function(o, cb) cb({ rows = { row } }, nil) end,
+      locate = function(o, cb) cb({}) end,
+      decide = function() return { kind = kind, buffer = 1, tabpage = 1, pane = "%1", sock = "/tmp/s" } end,
+    })
+
+    recorded_pickers_new = {}
+    init_mod.open({ flow = fake_ctrl })
+    recorded_pickers_new[1].defaults.attach_mappings(604, function() end)
+    selected_entry_stub = { value = row }
+    recorded_select_default()
+
+    check(#deferred == 4, kind .. " schedules 4 scroll attempts")
+  end
+
+  vim.defer_fn = orig_defer
+  exec.focus_here, exec.switch_pane, exec.attach = orig_focus, orig_switch, orig_attach
+end
+
 print("LUA_TEST_OK " .. N)

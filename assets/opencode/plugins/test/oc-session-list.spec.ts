@@ -974,6 +974,7 @@ describe("S6: effective_state and the child fold", () => {
     unread: null,
     unread_state: "absent",
     last_event_id: null,
+    anchor_msg_id: null,
     origin: null,
     automated: false,
     ...o,
@@ -1536,6 +1537,25 @@ describe("buildUnreadMap & unread counts (Task 9)", () => {
     return db;
   }
 
+  function createTestRoutingDbWithAnchor(path: string): Database {
+    const db = new Database(path);
+    db.exec(`
+      CREATE TABLE session_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sent_at INTEGER NOT NULL,
+        anchor_msg_id TEXT
+      );
+      CREATE TABLE session_reads (
+        session_id TEXT PRIMARY KEY,
+        last_read_id INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    return db;
+  }
+
   it("a session with events above the watermark reports that count", () => {
     const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
     try {
@@ -1841,6 +1861,93 @@ describe("buildUnreadMap & unread counts (Task 9)", () => {
       const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
       expect(unreadMap).not.toBeNull();
       expect(warnings).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("extracts oldest uncleared non-mirror non-null anchor_msg_id", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, 'msg_old_cleared'),
+          (2, 'root_1', 'mirror', 200, 'msg_mirror'),
+          (3, 'root_1', 'stop', 300, NULL),
+          (4, 'root_1', 'stop', 400, 'msg_oldest_unread'),
+          (5, 'root_1', 'swarm', 500, 'msg_newer_unread');
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 1, 150);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows);
+      expect(unreadMap).not.toBeNull();
+      const entry = unreadMap!.get("root_1");
+      expect(entry).toBeDefined();
+      expect(entry!.unread).toBe(3); // events 3, 4, 5 (2 is mirror, 1 is cleared)
+      expect(entry!.anchor_msg_id).toBe("msg_oldest_unread"); // event 4 is oldest uncleared non-mirror with non-null anchor
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("missing anchor_msg_id column degrades to anchor_msg_id: null with unread counts intact", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDb(p); // has no anchor_msg_id column
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at) VALUES
+          (1, 'root_1', 'stop', 100),
+          (2, 'root_1', 'stop', 200);
+      `);
+      db.close();
+
+      const warnings: string[] = [];
+      const unreadMap = buildUnreadMap(p, baseRows, (m) => warnings.push(m));
+      expect(unreadMap).not.toBeNull();
+      const entry = unreadMap!.get("root_1");
+      expect(entry).toBeDefined();
+      expect(entry!.unread).toBe(2);
+      expect(entry!.anchor_msg_id).toBeNull();
+      expect(warnings).toEqual([]);
+
+      const rows = queryWithState(baseRows, { routingDbPath: p });
+      const root1 = rows.find((r) => r.id === "root_1");
+      expect(root1).toBeDefined();
+      expect(root1!.unread_state).toBe("counted");
+      expect(root1!.unread).toBe(2);
+      expect(root1!.anchor_msg_id).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("queryWithState threads anchor_msg_id onto SessionWithStateRow", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, 'msg_anchor_123');
+      `);
+      db.close();
+
+      const rows = queryWithState(baseRows, { routingDbPath: p });
+      const root1 = rows.find((r) => r.id === "root_1");
+      expect(root1).toBeDefined();
+      expect(root1!.unread_state).toBe("counted");
+      expect(root1!.unread).toBe(1);
+      expect(root1!.anchor_msg_id).toBe("msg_anchor_123");
+
+      const root2 = rows.find((r) => r.id === "root_2");
+      expect(root2).toBeDefined();
+      expect(root2!.unread_state).toBe("absent");
+      expect(root2!.anchor_msg_id).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
