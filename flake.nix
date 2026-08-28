@@ -722,7 +722,11 @@
 
       lgtm-gh-mirror-tests = devboxPkgs.runCommand "lgtm-gh-mirror-tests" {
         nativeBuildInputs = [
-          devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils
+          # jq: the ledger assertions read it back. Without it here the suite
+          # still passes on a dev box (jq is on the ambient PATH) and fails
+          # only in the sandbox -- green under the shell I ran it in, red in
+          # the one that counts.
+          devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils devboxPkgs.jq
         ];
       } ''
         cd ${self}
@@ -732,11 +736,17 @@
           echo "GATE FAILURE: lgtm-gh suite did not reach its final pass line." >&2
           exit 1
         }
-        # Pinned like oc-cost: the 6 production-source greps are the only part
-        # of this suite that touches production, and a silent drop to 9 would
-        # leave a green check testing nothing but the mirror.
-        grep -q '^15 passed, 0 failed' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected '15 passed, 0 failed' (9 mirror + 6" >&2
+        # Pinned like oc-cost: the 8 production-source greps are the only part
+        # of this suite that touches production, and a silent drop would leave
+        # a green check testing nothing but the mirror.
+        #
+        # 15 -> 31 deliberately: +12 mirror assertions and +2 source greps for
+        # the review-artifact ledger, +2 source greps carried from before.
+        # For real coverage of that ledger see lgtm-gh-real-tests, which drives
+        # the SHIPPED binary; these mirror assertions are a design record, not
+        # evidence.
+        grep -q '^31 passed, 0 failed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected '31 passed, 0 failed' (23 mirror + 8" >&2
           echo "production-source greps). Update deliberately, in the same commit." >&2
           exit 1
         }
