@@ -689,6 +689,37 @@
       # PATH, so a fake `gh` fixture loses to the pinned real one. Removing the
       # mirror means overriding that input with a stub package and driving the
       # real binary; that is workstation-dimz's job and its bead records this.
+      # lgtm-gh, REAL BINARY. Closes the gap the mirror suite documents below
+      # for the artifact-ledger behaviour: default.nix takes `{ pkgs }` and
+      # reads `pkgs.gh`, so overriding just that attribute yields the shipped
+      # wrapper with a stub CLI underneath it. The binary under test is the one
+      # that ships; only the `gh` it wraps is substituted, so unlike the mirror
+      # these assertions ARE production coverage.
+      lgtm-gh-real-tests =
+        let
+          stubGh = devboxPkgs.writeShellScriptBin "gh" ''
+            { echo "GH_TOKEN=$GH_TOKEN"; echo "ARGS=$*"; } > "$GH_RECORD"
+            if [ -n "''${FAKE_GH_BODY:-}" ]; then printf '%s' "$FAKE_GH_BODY"; fi
+            exit "''${FAKE_GH_RC:-0}"
+          '';
+          realWrapper = import ./pkgs/lgtm-gh {
+            pkgs = devboxPkgs // { gh = stubGh; };
+          };
+        in
+        devboxPkgs.runCommand "lgtm-gh-real-tests" {
+          nativeBuildInputs = [
+            devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils devboxPkgs.jq
+          ];
+        } ''
+          cd ${self}
+          bash pkgs/lgtm-gh/test-real.sh ${realWrapper}/bin/lgtm-gh 2>&1 | tee "$TMPDIR/out.txt"
+          grep -q '^all lgtm-gh real-binary tests passed' "$TMPDIR/out.txt" || {
+            echo "lgtm-gh real-binary tests did not report success" >&2
+            exit 1
+          }
+          touch $out
+        '';
+
       lgtm-gh-mirror-tests = devboxPkgs.runCommand "lgtm-gh-mirror-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils
