@@ -211,20 +211,33 @@ enforced by construction rather than by care.
 The TUI handler:
 
 ```tsx
+const [pendingScroll, setPendingScroll] = createSignal<string | undefined>()
+
 onCleanup(
   event.on("tui.message.scroll", (evt) => {
     if (evt.properties.sessionID !== route.sessionID) return
-    if (!scroll || scroll.isDestroyed) return
     // `force` is the user's own jump; everything else is a speculative retry
     // that must not move a viewport the user has taken over. See "the late scroll".
-    if (!evt.properties.force) {
-      const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
-      if (scroll.scrollTop < maxScrollTop - 1) return
-    }
-    scroll.scrollChildIntoView(evt.properties.messageID)
+    if (!evt.properties.force && scroll && !atBottom(scroll)) return
+    setPendingScroll(evt.properties.messageID)
   }),
 )
+
+// Reactivity is the readiness signal: fire as soon as the anchor exists, once.
+createEffect(() => {
+  const id = pendingScroll()
+  if (!id) return
+  if (!messages().some((m) => m.id === id)) return // not synced yet; re-runs when it is
+  if (!scroll || scroll.isDestroyed) return
+  scroll.scrollChildIntoView(id)
+  setPendingScroll(undefined)
+})
 ```
+
+The handler no longer scrolls; it records. The effect owns the scroll, so the
+render race is waited out rather than retried, and the at-bottom check moves to
+*receipt* time — the moment that reflects what the user was actually doing when
+they jumped.
 
 `isDestroyed` as well as `!scroll`, matching the neighbouring `toBottom`
 (`index.tsx:426`): `<Show when={session()}>` can destroy and recreate the
@@ -255,9 +268,40 @@ TUI has mounted the session route is dropped. Two jump cases differ materially:
   discards the return value, and test 65 already exists to acknowledge that
   "jump succeeded" is unknowable here.
 
-So the picker retries blind (below). Blind retry has an obvious hazard: **a
-scroll landing two seconds late yanks the viewport out from under a user who has
-already started reading.**
+There are in fact **two** races here, and the first draft of this plan used one
+blunt instrument for both. Separating them is what makes the design honest:
+
+- the **mount race** — the event is published before the TUI has subscribed and
+  mounted the session route, so it is dropped;
+- the **render race** — the event arrives, but the anchor message has not been
+  fetched or laid out yet, so `scrollChildIntoView` finds nothing.
+
+They have different shapes and want different answers. The mount race is a cheap
+handshake with a short window; the render race is an unbounded wait on a network
+fetch. Retrying the second one on a timer is guessing at something that is
+directly observable from inside the component.
+
+**So the TUI does not scroll on receipt. It remembers.** The event sets a pending
+target; a reactive effect scrolls when the anchor actually exists, once, and then
+clears it. Solid's reactivity *is* the readiness signal — no timer, no window,
+no polling. If the message arrives ten seconds later, the scroll still happens.
+
+That removes the render race from the retry's job entirely. The retries now cover
+only the mount handshake, and **one** delivered event is sufficient forever
+after, no matter how slowly the content loads.
+
+Two ordering hazards the effect must respect, both verified in v1.18.18:
+
+- `session/index.tsx:314` force-scrolls to the bottom (`scrollBy(100_000)`)
+  immediately after `sync.session.sync(sessionID)` resolves. Any scroll applied
+  before that line is clobbered. The pending target must **suppress** that
+  bottom-scroll rather than race it — suppression is explicit, ordering is
+  fragile.
+- The pending target must be cleared when `route.sessionID` changes, or a stale
+  target follows the user into the next session.
+
+Blind retry still has its hazard: **a scroll landing seconds late yanks the
+viewport out from under a user who has already started reading.**
 
 The at-bottom guard removes that hazard *by construction*. A freshly attached
 TUI sits at the bottom, so the guard passes and the scroll lands. If the user has
@@ -274,17 +318,58 @@ set on **attempt 0 only**: that attempt is the user's instruction and overrides
 the guard; attempts 1-3 are speculative and stay guarded. In the cold case
 `force` costs nothing, because a starting TUI is at the bottom anyway.
 
-The same guard makes the retries **self-limiting**, which is the property that
-makes blind retry acceptable engineering rather than spray:
+The same guard makes the retries **self-limiting**: once any attempt is
+delivered and the target is pending, later attempts set the same target and
+change nothing. The schedule therefore needs no cleverness and no feedback
+signal, which is fortunate, because none exists — the handler publishes to a bus
+and returns `true` whether or not any TUI is listening.
 
-- attempt lands *before* the message renders → `scrollChildIntoView` no-ops on
-  the missing child, viewport stays at the bottom, the **next attempt retries**;
-- attempt lands *after* render → it scrolls, the viewport leaves the bottom, and
-  **every later attempt drops itself**.
+### Why readiness cannot simply be observed, having looked
 
-The retry schedule therefore needs no cleverness and no feedback signal, which
-is fortunate, because none exists: the handler publishes to a bus and returns
-`true` whether or not any TUI is listening.
+Three candidates were checked in source before settling for retries on the
+handshake:
+
+- **The TUI control channel** (`server/shared/tui-control.ts`) is a genuine
+  request/*response* RPC whose queue even buffers when no consumer is waiting —
+  which would have been retention for free. It is **dead on both ends**:
+  `submitTuiRequest` has no callers, and nothing in `packages/tui/src` polls
+  `/tui/control/next`. Only the legacy generated SDK and the docs mention it.
+  Reviving it means building both ends of a vestigial mechanism whose queue is a
+  process-global, so with two TUIs on one serve either could steal the other's
+  request.
+- **`oc-auto-attach`'s existing readiness wait** verifies that the attach process
+  *stays alive*, and earlier that the session is visible over HTTP and nvim's RPC
+  is up. None of that means the session route is mounted.
+- **The server's SSE subscriber set** would show that *some* client connected —
+  not that this session's route is mounted, and certainly not that messages
+  rendered. There are three layers of readiness and the server can see only the
+  first.
+
+The only place all three facts are simultaneously true is inside the session
+component's reactive scope. That is exactly where the pending-target effect
+lives, so the part of the problem that is observable is now handled by
+observation, and only the unobservable handshake is retried.
+
+### The launch-time flag, considered and rejected
+
+Passing the target at startup — `opencode attach --session X --scroll-to msg_Y`,
+seeded like `route.prompt` — is the obvious way to make the cold case race-free
+by construction. It was rejected on two verified facts:
+
+- **`yargs` is `.strict()`** (`packages/opencode/src/index.ts:116`). An unknown
+  flag is a hard failure, so a picker passing `--scroll-to` to an older binary
+  breaks **attach entirely** — no TUI at all, rather than no scroll. Skew is
+  guaranteed in both directions: the picker's lua lives in long-running nvim
+  processes that do not restart with opencode, and any rollback of the patched
+  binary would break cold attach wholesale. The failure direction flips from
+  benign to breaking the feature's own host.
+- **The precedent does not exist.** `initialRoute` (`context/route.tsx:44-53`)
+  reconstructs a session route with **only** `sessionID` and strips everything
+  else, and `--session` does not ride `initialRoute` at all. The design would be
+  *creating* a CLI→route-payload path, not following one.
+
+If it is ever revisited, it should ride an environment variable rather than a
+flag, because an old binary ignores an unknown env var silently.
 
 Tolerance is `maxScrollTop - 1` rather than equality, matching opentui's own
 `isAtStickyReengagePoint`, so a streaming token arriving mid-jump does not
@@ -391,8 +476,19 @@ sunset path.
 
 **Q3 (compaction).** A compacted-away anchor means `findDescendantById` misses
 and `scrollChildIntoView` returns silently. The viewport stays at the bottom.
-Correct as-is; **no retry loop, no fallback target.** The retries will re-miss
-and stop.
+Correct as-is; **no retry loop, no fallback target.** The pending target simply
+never resolves.
+
+**The feature has a reach of roughly 100 messages, and this is not a design
+choice.** The TUI fetches `session.messages({ sessionID, limit: 100 })`
+(`context/sync.tsx:603`) and renders only what it fetched. An anchor older than
+the newest 100 messages is never in the store, never rendered, and cannot be
+scrolled to **by any mechanism** — launch parameter, retention, or event. It
+degrades correctly (no scroll, land at bottom), but it degrades *exactly in the
+case the feature is most wanted*: the session you left running overnight that
+accumulated many turns. Worth stating plainly rather than discovering as a bug
+report. Raising the limit is a separate change with its own cost, deliberately
+not bundled here.
 
 **Q7 (two TUIs on one session).** Both receive the event and both scroll, each
 subject to its own at-bottom guard — so a TUI whose user is already reading does
