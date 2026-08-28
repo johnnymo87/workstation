@@ -4,8 +4,11 @@
 **Status:** fix shipped for the recurring drop; proposal only for the one-turn delay
 **Source read:** opencode `v1.18.18` (the pinned `upstreamVersion` in
 `users/dev/home.base.nix`), checked out read-only at `/tmp/opencode/oc-1.18.18`.
-No fork patch touches any of the code paths below (`patches/serve-lease.patch`
-edits `session/prompt.ts` far from the lines cited here).
+One fork patch overlaps: `opencode-patched/patches/serve-lease.patch` inserts
+`checkLeaseDeadline(sessionID)` as the first statement of `runLoop`'s `while`
+loop, immediately after the `sessions.get` snapshot cited below. It changes none
+of the semantics here, but it lands on exactly the lines the proposed upstream
+fix would touch, so that patch must be authored against the fork, not vanilla.
 
 ## The two complaints
 
@@ -155,24 +158,70 @@ Properties, each covered by a test in `test/mcp-autoconnect.test.ts`:
 - **It never rejects.** `plugin.trigger` wraps hooks in `Effect.promise`, where
   a rejected promise is a *defect* that kills the turn. A reconnect that cannot
   happen must degrade to "no Slack this turn", never to "your prompt died".
-- **Fast path first.** `client.mcp.status()` is an in-process map read; if every
-  configured server is already connected the hook returns without even reading
-  the session row. That is the steady state on a warm serve.
+- **Only gated servers are eligible** — see "Blast radius" below. This is the
+  safety property of the whole design, not an optimisation.
+- **A resolved connect is not a successful connect.** `MCP.create` swallows a
+  failed handshake into a *status* (`mcp/index.ts` `create()`), the route returns
+  a bare `true` regardless (`handlers/mcp.ts:75-85`), and the hey-api SDK
+  defaults to `ThrowOnError=false` so even a 5xx resolves. The hook therefore
+  re-reads the status map after connecting and only counts `connected` as
+  success. Without that, the backoff below would be unreachable code and a
+  permanently broken server would respawn `npx` on every user message.
+- **Fast path.** If nothing eligible is disconnected the hook returns without
+  reading the session row; if the host has no gated server configured at all
+  (devbox has no slack) it returns after one call. Note this does *not* fire in
+  the cold case that matters — slack ships `enabled: false`, so on a fresh
+  instance it reads `disabled` and the session row *is* read. Honest steady-state
+  cost: two loopback HTTP calls per user message on a host with slack
+  configured, one on a host without.
 - **Bounded and backed off.** 5 s on the reads, 60 s on a connect (stdio servers
   shell out to `npx`/`uvx`), and a 60 s cooldown per server after a failure so a
   broken server is not retried on every message.
 - **One connect per directory.** Concurrent turns in the same directory share an
   in-flight promise rather than spawning two clients.
 
-### Blast radius
+### Blast radius, and why eligibility is gate-derived
 
-Unchanged from today. The plugin only ever calls `connect` for a server the
-session was *already* granted by a human running `oc-mcp-enable` (or
-`opencode-launch --mcp`); it invents no grants. It does inherit the existing
-per-directory property that connecting for one session connects for every
-session in that directory — but that is what `oc-mcp-enable` already did, and
-co-directory sessions without an allow rule still have the tools stripped by
-`resolveTools`.
+The plugin invents no grants — but "it only acts on existing grants" is *not*
+the same as "blast radius unchanged", and an earlier draft of this document said
+so wrongly. Grants never expire, and reconnecting is per-**directory**. So an
+unrestricted version of this plugin would re-activate every stale grant on the
+box: one message to a months-old session (a `swarm_schedule` wake is enough)
+would connect that server for its whole directory, and would keep doing so —
+defeating the serve restart, the `POST /config` dispose, *and* a human's
+explicit `disconnect`, which are today the only ways out.
+
+Measured on this box, read-only:
+
+```
+$ sqlite3 -readonly ~/.local/share/opencode/opencode.db \
+    "select count(*) from session where permission like '%datadog_%';
+     select count(*) from session where permission like '%pagerduty_%';
+     select count(distinct directory) from session
+       where permission like '%datadog_%' or permission like '%pagerduty_%';"
+85
+1
+22
+```
+
+`datadog_*` and `pagerduty_*` are **not** in the `tools` deny gate, and their
+tool schemas make Vertex Gemini 400 the *entire* request
+(`.opencode/skills/opencode-agents/SKILL.md`). Auto-reconnecting them would
+wedge every Gemini turn in 22 directories, permanently.
+
+Hence eligibility is derived from the global gate, not from the grant: a server
+may be auto-reconnected only if config denies `<name>_*` globally
+(`assets/opencode/opencode.base.json` → `tools`, or an equivalent `permission`
+deny). For a gated server, `resolveTools` strips the tools again from any
+co-directory session lacking its own allow rule, so exposure stays
+session-scoped and the reconnect is genuinely blast-radius-neutral. For an
+ungated server it is not, so the plugin refuses.
+
+Today that set is exactly `{slack, slack-ro}`. **Opting a server in is one edit:
+add `"<name>_*": false` to the `tools` map** — which is the same edit that makes
+its exposure session-scoped in the first place, so the two cannot drift apart.
+Atlassian is deliberately *not* eligible yet for that reason; gating it is a
+separate, independently reviewable change.
 
 ## What is left: complaint (1), the one-turn delay
 
@@ -232,18 +281,40 @@ npx tsc --noEmit
 node_modules/.bin/vitest run
 ```
 
-205 → 225 tests, 10 files, 0 skipped (18 new in
+205 → 237 tests, 10 files, 0 skipped (30 new in
 `test/mcp-autoconnect.test.ts`, plus 2 the loader-contract suite generates for
-the newly deployed file). `test/plugin-loader-contract.test.ts`
+the newly deployed file). The worktree ships no `node_modules`; `npm ci` in
+`assets/opencode/plugins` first, or run the `plugin-vitest` flake check, which
+supplies them. `test/plugin-loader-contract.test.ts`
 picks the new file up automatically (it discovers deployed plugins by grepping
 `xdg.configFile."opencode/plugins/..."` out of `users/dev/opencode-config.nix`)
 and asserts it survives a replica of opencode's v1.18.18 plugin loader — which
 is what makes the `internals` named export safe.
 
 Not verified live: reconnect-after-serve-restart. That needs a serve restart,
-and the pool is shared with other people's in-flight work. The next natural
-restart (the 8-hourly `update-opencode-patched` auto-merge, or the nightly
-reset) is the observation point: a session holding a `slack_*` grant should
-regain its tools on its next prompt with no manual step, and
-`~/.local/share/opencode/log/opencode.log` should carry
-`[mcp-autoconnect] reconnected MCP server "slack"`.
+and the pool is shared with other people's in-flight work.
+
+Two things to know before looking for evidence:
+
+- **Deploying the file is not enough.** opencode binds plugins to an app
+  *instance* at instance-creation time, so a `home-manager switch` that does not
+  restart the serves leaves this plugin inert for every directory a serve has
+  already touched (established by the S0 diagnosis in
+  `docs/plans/2026-07-12-opencode-session-switcher-plan.md:1061-1067`; same trap,
+  and the reason that plan records a standing "restart the pool when
+  `assets/opencode/plugins/**` changes" requirement).
+- **The log line does not land in `opencode.log`.** A plugin's `console.error`
+  goes to the serve's stderr, i.e. journald — the same S0 diagnosis records
+  that checking `opencode.log` alone is a false clear. Confirmed here: zero
+  `[session-state]` lines exist in `opencode.log` as real log records.
+
+So the observation point is the next natural restart (the 8-hourly
+`update-opencode-patched` auto-merge, or the nightly reset), and the command is:
+
+```bash
+journalctl --user -u 'opencode-serve@*' --since '-1h' | grep mcp-autoconnect
+```
+
+Expected: a session holding a `slack_*` grant regains its tools on its next
+prompt with no manual step, and the journal carries
+`[mcp-autoconnect] reconnected MCP server "slack" for ses_… in <dir>`.

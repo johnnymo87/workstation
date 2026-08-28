@@ -583,10 +583,20 @@ in
     # cloudbox carry up to six identical slack_* allow rules, one per re-run).
     # See docs/plans/2026-08-28-mcp-grant-liveness.md.
     #
+    # It reconnects ONLY servers this file's `tools` map gates off with a
+    # `<name>_*: false` deny (today: slack, slack-ro). That restriction is the
+    # safety property, not an optimisation: connecting is per-DIRECTORY, so
+    # auto-reconnecting an UNGATED server would push its tools into every
+    # co-directory session -- and for datadog/pagerduty that means every Vertex
+    # Gemini turn in the directory 400s on the tool schema, forever, since the
+    # plugin also defeats the serve restart that is today's only way out. There
+    # are 85 sessions on cloudbox carrying a stale datadog_* grant. To opt a
+    # server in, gate it in `tools` first.
+    #
     # Deployed on every host, deliberately: the connection is dropped by
     # instance disposal (a POST /config update is enough), which is not a
-    # cloudbox-only event, and the hook is inert for any session with no MCP
-    # grant.
+    # cloudbox-only event, and the hook is inert on a host with no gated server
+    # configured (devbox has no slack).
     xdg.configFile."opencode/plugins/mcp-autoconnect.ts".source =
       "${assetsPath}/opencode/plugins/mcp-autoconnect.ts";
     # Subagent routing overrides model selection for plan execution subagents

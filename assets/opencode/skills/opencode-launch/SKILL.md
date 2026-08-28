@@ -158,6 +158,13 @@ of every turn it reads the session's own permission ruleset and reconnects
 anything granted-but-not-connected, *before* the turn resolves its tools. So the
 reconnect costs nothing and needs no prompt of its own.
 
+**It only does this for servers the global `tools` map gates off** — today
+`slack` and `slack-ro`. That is deliberate: connect is directory-wide, so
+auto-reconnecting an *ungated* server would push its tools into every
+co-directory session (and for `datadog`/`pagerduty` that 400s every Vertex
+Gemini turn there). `atlassian` and the rest still need a manual `oc-mcp-enable`
+after a serve restart; gating one in `opencode.base.json` is what opts it in.
+
 What it does **not** do is remove the one-turn delay on the *first* grant: that
 is a stale `session.permission` snapshot taken once per turn in upstream's
 `runLoop`. Root cause, evidence and the one-line upstream patch are in

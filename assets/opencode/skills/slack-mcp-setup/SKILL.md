@@ -40,9 +40,11 @@ No browser cookie scraping -- tokens don't expire unless revoked.
 >    (`opencode-launch --mcp <server>` at launch, `oc-mcp-enable` after).
 >
 > The in-memory connect is still **lost on an opencode-serve restart** (or any
-> instance dispose), but that no longer means re-enabling by hand: the
-> `mcp-autoconnect` plugin reconnects any server the session holds a durable
-> `<name>_*` allow grant for, at the start of the next turn. See
+> instance dispose), but for Slack that no longer means re-enabling by hand: the
+> `mcp-autoconnect` plugin reconnects any *gated* server the session holds a
+> durable `<name>_*` allow grant for, at the start of the next turn. Slack is
+> gated (that is what the `tools` map above does), so it qualifies; an ungated
+> server such as `atlassian` does not. See
 > `docs/plans/2026-08-28-mcp-grant-liveness.md`. The permission grant itself is
 > persistent — `opencode-launch --mcp` and `oc-mcp-enable` both write it into
 > `session.permission`, which is a SQLite row, not per-turn state.
