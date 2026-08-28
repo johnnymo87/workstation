@@ -126,7 +126,7 @@ export const EXPECTED_NEEDS_MECHANISM_KEYS: string[] = [];
  * A pin bump or schema restructuring changing these (e.g. moving responses to $ref) is supposed to fail the gate and force a written decision — that is the mechanism, not a nuisance.
  */
 export const EXPECTED_MEDIA_TYPE_CENSUS: Record<string, number> = {
-  'application/json': 512,
+  'application/json': 515,
   'text/event-stream': 4,
   'text/x-diff; charset=utf-8': 1,
   'application/octet-stream': 1,

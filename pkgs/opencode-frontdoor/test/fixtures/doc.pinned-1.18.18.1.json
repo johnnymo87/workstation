@@ -1871,6 +1871,27 @@
     }
    }
   },
+  "/session/{sessionID}/scroll-to-message": {
+   "post": {
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "400": {
+      "content": {
+       "application/json": {}
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {}
+      }
+     }
+    }
+   }
+  },
   "/session/{sessionID}/mcp/{name}/connect": {
    "post": {
     "responses": {

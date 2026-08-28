@@ -145,6 +145,32 @@ function M.open(opts)
             elseif desc.kind == "refuse_dir_missing" then
               exec.refuse_dir_missing(desc)
             end
+
+            local anchor = row.anchor_msg_id
+            -- ALLOWLIST, not "anything but refuse_dir_missing". A future descriptor
+            -- kind should have to opt in to firing a scroll rather than inherit it
+            -- by default; refuse_dir_missing deliberately does not navigate.
+            local navigates = desc.kind == "focus_here" or desc.kind == "switch_pane" or desc.kind == "attach"
+            if anchor and anchor ~= vim.NIL and anchor ~= "" and navigates then
+              -- Ignore all responses deliberately: the door 503s when pigeon is
+              -- down and may route to a prospective serve; both mean "no scroll",
+              -- both are rescued by a later attempt, neither is worth a feedback loop.
+              local schedule = {
+                { delay = 0, force = true },
+                { delay = 300, force = false },
+                { delay = 900, force = false },
+                { delay = 2000, force = false },
+              }
+              for _, attempt in ipairs(schedule) do
+                vim.defer_fn(function()
+                  exec.scroll_to_message({
+                    sid = row.id,
+                    message_id = anchor,
+                    force = attempt.force,
+                  }, opts)
+                end, attempt.delay)
+              end
+            end
           end)
         end)
 

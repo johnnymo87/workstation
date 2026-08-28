@@ -272,4 +272,53 @@ function M.clear_unread(payload, opts)
   return ok
 end
 
+---
+--- @param payload table|nil { sid: string, message_id: string, force?: boolean }
+--- @param opts table|nil Options:
+---   frontdoor_url?: string
+---   system?: fun(cmd: table, opts: table): table
+--- @return boolean True if request was spawned, false otherwise
+function M.scroll_to_message(payload, opts)
+  if type(payload) ~= "table"
+    or type(payload.sid) ~= "string"
+    or payload.sid == ""
+    or type(payload.message_id) ~= "string"
+    or payload.message_id == ""
+  then
+    return false
+  end
+
+  opts = (type(opts) == "table") and opts or {}
+
+  local frontdoor_base = opts.frontdoor_url or vim.env.OPENCODE_FRONTDOOR_URL or "http://127.0.0.1:4700"
+  frontdoor_base = frontdoor_base:gsub("/+$", "")
+  local url = string.format("%s/session/%s/scroll-to-message", frontdoor_base, url_encode(payload.sid))
+  local body = vim.json.encode({
+    messageID = payload.message_id,
+    force = payload.force == true,
+  })
+
+  local argv = {
+    "curl",
+    "-s",
+    -- Bound the request. Fire-and-forget; bound prevents leaking handles.
+    "--max-time",
+    "5",
+    "-X",
+    "POST",
+    url,
+    "-H",
+    "content-type: application/json",
+    "--data",
+    body,
+  }
+
+  local ok, _ = pcall(function()
+    local sys = opts.system or vim.system
+    return sys(argv, { stdin = false })
+  end)
+
+  return ok
+end
+
 return M
