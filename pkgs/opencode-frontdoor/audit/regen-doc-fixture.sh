@@ -23,7 +23,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT="${1:-test/fixtures/doc.pinned-1.17.13.4.json}"
+OUT="${1:-test/fixtures/doc.pinned-1.18.18.1.json}"
 
 # Same resolution rule as test.sh: the profile symlink IS the pin. Never hardcode
 # a store path — it rots on the next bump or GC and would validate the wrong binary.

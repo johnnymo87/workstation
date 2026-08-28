@@ -177,7 +177,7 @@ describe('Route Classification Gate (Check A)', () => {
       // against a 1-route stub if the fixture went missing, which is the same
       // silent-no-op failure this suite already had (and that test.sh had).
       // A missing fixture must fail loudly.
-      const docFile = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docFile = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const exitCode = runRouteGateCli([docFile, '--min-routes', '100']);
       expect(exitCode).toBe(0);
     });
@@ -207,11 +207,11 @@ describe('Route Classification Gate (Check A)', () => {
 
 describe('Route Denial Disposition Gate (Check B)', () => {
   test('Positive: real table + real dispositions pass on the pinned /doc fixture', () => {
-    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
     const result = checkDocRoutes(doc);
     expect(result.passed).toBe(true);
-    expect(result.totalChecked).toBe(195);
+    expect(result.totalChecked).toBe(196);
     expect(result.denialCount).toBe(77);
     expect(result.unrecognized).toEqual([]);
     expect(result.invalidDispositions).toEqual([]);
@@ -362,7 +362,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
   });
 
   test('Mutation test: deleting exactly one real disposition names that route and fails', () => {
-    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
     const throwawayRouteDispositions = { ...ROUTE_DISPOSITIONS };
@@ -402,7 +402,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
   });
 
   test('F2: real dispositions produce zero orphans against real /doc', () => {
-    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
     const result = checkDocRoutes(doc);
     expect(result.orphanedDispositions).toEqual([]);
@@ -531,7 +531,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
   });
 
   test('needs-mechanism set equals exactly the 9 expected D4 routes', () => {
-    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
     const result = checkDocRoutes(doc);
 
@@ -539,7 +539,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
   });
 
   test('Census assertion on the pinned /doc fixture', () => {
-    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+    const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
     const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
     const result = checkDocRoutes(doc);
 
@@ -549,14 +549,14 @@ describe('Route Denial Disposition Gate (Check B)', () => {
 
   describe('Check C — Response Media-Type Poison Invariant', () => {
     test('Check C: passes on the real committed fixture and mediaTypeCensus matches expected', () => {
-      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
       const result = checkDocRoutes(doc);
 
       expect(result.passed).toBe(true);
       expect(result.htmlDeclaringRoutes).toEqual([]);
       expect(result.mediaTypeCensus).toEqual({
-        'application/json': 512,
+        'application/json': 515,
         'text/event-stream': 4,
         'text/x-diff; charset=utf-8': 1,
         'application/octet-stream': 1,
@@ -620,7 +620,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
 
   describe('Census Enforcement on Default Path', () => {
     test('DEFAULT path enforces census and fails on kind census mismatch', () => {
-      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
       // Perturb a bucket rather than asserting a literal count: 'needs-mechanism'
@@ -639,7 +639,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     });
 
     test('F2: fails on inflated expectedKindCensus (shrink/grow direction test)', () => {
-      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
       const result = checkDocRoutes(doc, {
@@ -654,7 +654,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     });
 
     test('DEFAULT path enforces the constraint census in both directions', () => {
-      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
       const shrunk = checkDocRoutes(doc, {
@@ -675,7 +675,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       // The failure mode the constraint census exists for: relabelling a row
       // from one bucket to another keeps the TOTAL identical, so any check that
       // only counted denials would stay green.
-      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
       const swapped = checkDocRoutes(doc, {
@@ -690,7 +690,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     });
 
     test('DEFAULT path enforces needs-mechanism keys and fails on key mismatch', () => {
-      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
       // D4 drove the real list to empty, so [] is no longer a mismatch. Assert
@@ -706,7 +706,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
     });
 
     test('F2: fails on expectedNeedsMechanismKeys containing extra key not in real table', () => {
-      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
 
       const result = checkDocRoutes(doc, {
@@ -730,13 +730,13 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       const result = checkDocRoutes(emptyDoc, { minRoutes: 1 });
       expect(result.passed).toBe(false);
       expect(result.error).toContain('Media-type census mismatch');
-      expect(result.error).toContain('application/json: expected 512, got 0');
+      expect(result.error).toContain('application/json: expected 515, got 0');
     });
   });
 
   describe('Check D — Octet-Stream Exemption Invariant', () => {
     test('Check D: passes on the real committed fixture', () => {
-      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.17.13.4.json');
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
       const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
       const result = checkDocRoutes(doc);
 
