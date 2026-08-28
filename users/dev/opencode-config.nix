@@ -574,8 +574,22 @@ in
 
      # Plugins (SRP: shell env injection, compaction context, subagent routing)
       xdg.configFile."opencode/plugins/shell-env.ts".source = "${assetsPath}/opencode/plugins/shell-env.ts";
-     xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
-   # Subagent routing overrides model selection for plan execution subagents
+      xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+    # mcp-autoconnect reconnects MCP servers a session already holds a durable
+    # `<name>_*` allow grant for. The grant lives in SQLite forever; the MCP
+    # CLIENT lives in per-directory process memory and dies with a serve
+    # restart or an instance dispose, so long sessions lost their Slack tools
+    # every few hours and had to be re-enabled by hand (measurably: sessions on
+    # cloudbox carry up to six identical slack_* allow rules, one per re-run).
+    # See docs/plans/2026-08-28-mcp-grant-liveness.md.
+    #
+    # Deployed on every host, deliberately: the connection is dropped by
+    # instance disposal (a POST /config update is enough), which is not a
+    # cloudbox-only event, and the hook is inert for any session with no MCP
+    # grant.
+    xdg.configFile."opencode/plugins/mcp-autoconnect.ts".source =
+      "${assetsPath}/opencode/plugins/mcp-autoconnect.ts";
+    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
     xdg.configFile."opencode/plugins/subagent-routing.ts" = lib.mkIf (isDarwin || isCloudbox) {

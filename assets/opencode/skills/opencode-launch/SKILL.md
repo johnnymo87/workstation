@@ -141,10 +141,27 @@ This asymmetry matters and is easy to get wrong:
   tells the front door which serve owns the session and supplies the directory.
   Connecting `slack` for session A therefore also connects it for **every other
   session in the same directory on that serve**. It does *not* reach a session in
-  a different directory, and it does not survive a serve restart.
+  a different directory, and it does not survive a serve restart — nor an
+  *instance dispose*, which a `POST /config` update or a worktree reload is
+  enough to cause.
 - **Tool authorization is per-session and persistent**, living in
   `session.permission`. `PATCH /session/<id>` **merges** (appends) rules, and the
   last matching rule wins — unlike the prompt `tools` map, which replaces.
+
+### You no longer have to re-enable after a serve restart
+
+That asymmetry used to mean a long-running session silently lost its Slack tools
+every few hours: the durable grant still said `slack_*: allow` while the client
+behind it was gone. The `mcp-autoconnect` plugin
+(`assets/opencode/plugins/mcp-autoconnect.ts`) now closes the gap — at the start
+of every turn it reads the session's own permission ruleset and reconnects
+anything granted-but-not-connected, *before* the turn resolves its tools. So the
+reconnect costs nothing and needs no prompt of its own.
+
+What it does **not** do is remove the one-turn delay on the *first* grant: that
+is a stale `session.permission` snapshot taken once per turn in upstream's
+`runLoop`. Root cause, evidence and the one-line upstream patch are in
+`docs/plans/2026-08-28-mcp-grant-liveness.md`.
 
 Consequence for `--revoke`: it appends a `deny` rule for `<server>_*` on that one
 session and deliberately does **not** disconnect the server, because the

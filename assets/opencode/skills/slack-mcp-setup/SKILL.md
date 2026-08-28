@@ -32,16 +32,20 @@ No browser cookie scraping -- tokens don't expire unless revoked.
 > registers **all read tools by default** regardless of this env var. So if a
 > session is missing the Slack *read* tools, that is **not** a server or
 > token-scope problem — it is an **opencode gating/connection** issue:
-> 1. the global `tools: {"slack_*": false, "slack-ro_*": false}` gate disables the
->    tools for every agent except the `slack` subagent, and
-> 2. `enabled: false` means the server is never auto-connected — a session only
->    gets Slack if something runs `POST /mcp/<server>/connect` (which is what
->    `opencode-launch --mcp <server>` does).
+> 1. the global `tools: {"slack_*": false, "slack-ro_*": false}` gate denies the
+>    tools for any session without a matching `slack_*` **allow** rule in its own
+>    `session.permission`, and
+> 2. `enabled: false` means the server is never auto-connected at instance boot —
+>    a session only gets Slack if something runs `POST /mcp/<server>/connect`
+>    (`opencode-launch --mcp <server>` at launch, `oc-mcp-enable` after).
 >
-> Note also that `--mcp` folds the tools into a **single prompt** (per-turn
-> scope), and the in-memory connect is **lost on an opencode-serve restart**
-> (no auto-reconnect while `enabled: false`). For durable interactive Slack use,
-> delegate to the `@slack` subagent rather than relying on a per-turn `--mcp` fold.
+> The in-memory connect is still **lost on an opencode-serve restart** (or any
+> instance dispose), but that no longer means re-enabling by hand: the
+> `mcp-autoconnect` plugin reconnects any server the session holds a durable
+> `<name>_*` allow grant for, at the start of the next turn. See
+> `docs/plans/2026-08-28-mcp-grant-liveness.md`. The permission grant itself is
+> persistent — `opencode-launch --mcp` and `oc-mcp-enable` both write it into
+> `session.permission`, which is a SQLite row, not per-turn state.
 
 ## Getting the xoxp Token
 
