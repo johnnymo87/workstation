@@ -3,6 +3,11 @@
 # prunes stale caches, and runs nix garbage collection.
 { config, pkgs, lib, isCloudbox, ... }:
 
+let
+  # Same shared alert helper the opencode canaries use, so disk pressure reaches
+  # the same place their drift does rather than inventing a second channel.
+  driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+in
 lib.mkIf isCloudbox {
   home.file.".local/bin/disk-cleanup" = {
     executable = true;
@@ -522,6 +527,145 @@ lib.mkIf isCloudbox {
       OnCalendar = "*-*-* 03:00:00";
       Persistent = true;
       RandomizedDelaySec = "30min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # --------------------------------------------------------------------------
+  # disk-watch: the alarm BETWEEN nightly cleanups.
+  #
+  # The cleanup above is not the problem -- when it runs it reclaims 80-90G in
+  # about fifteen minutes. The problem is that it runs once a day and nothing
+  # watches the other twenty-three hours. Twice in four days the volume filled
+  # in the evening and was rescued only because a human happened to look:
+  #
+  #   2026-08-25 20:18   362G used, 15G free,  97%
+  #   2026-08-28 18:46   373G used, 3.6G free, 100%   <- killed a running episode
+  #
+  # The second one exited an automation mid-flight with
+  # `echo: write error: No space left on device`, which is a failure mode that
+  # cannot even report itself: the notification path needed a write too.
+  #
+  # WHY 85%, from the nightly log series rather than taste. Post-cleanup baseline
+  # is 245-285G (65-76%). Ordinary pre-nightly peaks were 81%, 82%, 84%. The two
+  # incident days ran +117G and +112G instead of the usual +47..55G. 85% of 393G
+  # is 334G -- above the worst ordinary peak (314G), below both incidents.
+  # Replayed against 2026-08-28 it fires around 13:30, five hours before the box
+  # filled. So it is quiet on a normal day and early on a bad one, which is the
+  # only combination worth paging for.
+  #
+  # WHY IT ONLY WARNS, having deliberately dropped the auto-cleanup half:
+  #   1. disk-cleanup runs `cleanup_nix` FIRST (see "--- Main ---" above), and
+  #      the cleaning-disk skill documents that above ~90% a nix GC can generate
+  #      enough I/O pressure that socket-activated sshd stops answering, needing
+  #      a console reset. Triggering at 90% would launch the box-wedging step
+  #      exactly and only inside the danger zone.
+  #   2. It would not have helped anyway. The bazel purge SKIPS any output base
+  #      whose server PID is alive, and a spike like these is *caused* by three
+  #      live bazel servers holding 12-25G each. At the moment of peak pressure
+  #      almost everything worth reclaiming is exactly what gets skipped.
+  # Constant hazard, near-zero benefit. A human (or an agent reading the alert)
+  # can run the cleanup deliberately, which is what happened both times already.
+  home.file.".local/bin/disk-watch" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      # NOTE: `set -e` is deliberately absent. This script's whole job is to
+      # report a problem, and a nonzero exit would put disk-watch.service into
+      # `failed` -- a state nobody reads -- precisely when the disk is in
+      # trouble. Every step below either succeeds or degrades to a log line.
+      set -uo pipefail
+
+      TARGET="''${DISK_WATCH_TARGET:-/}"
+      STATE="''${DISK_WATCH_STATE:-''${XDG_STATE_HOME:-$HOME/.local/state}/disk-watch/alert}"
+      # Same override seam as the opencode plugin canary: the tests point this at
+      # a stub, the unit gets the real store path.
+      ALERT="''${DISK_WATCH_ALERT:-${driftAlert}}"
+
+      WARN_PCT=85
+      # Recovery floor. NOT 85: clearing the episode the moment we drop below the
+      # warn line means an 84<->86 sawtooth starts a brand-new episode on every
+      # crossing, and the helper dedupes per episode -- so it would alert on each
+      # one, resetting the backoff counter every time. That is the alert storm
+      # the helper exists to prevent. The gap between 80 and 85 is the dead band.
+      CLEAR_PCT=80
+
+      log() { printf '[disk-watch] %s\n' "$*" >&2; }
+
+      # `df -P` guarantees the one-line-per-filesystem POSIX format, so the data
+      # is on the LAST line; the first is the header, and parsing that yields the
+      # literal string "Capacity" where a number belongs.
+      LINE="$(df -P "$TARGET" 2>/dev/null | tail -1)"
+      # Fields: filesystem blocks used available capacity mountpoint.
+      PCT=""; AVAIL=""
+      read -r _ _ _ AVAIL PCT _ <<< "$LINE"
+      PCT="''${PCT%\%}"
+
+      case "$PCT" in
+        ""|*[!0-9]*)
+          log "could not read a usage percentage for $TARGET from: $LINE"
+          exit 0
+          ;;
+      esac
+
+      if [ "$PCT" -ge "$WARN_PCT" ]; then
+        case "$AVAIL" in ""|*[!0-9]*) AVAIL=0 ;; esac
+        AVAIL_G=$(( AVAIL / 1048576 ))
+        # NO $USER HERE. The unit sets only HOME and PATH, so $USER is unbound
+        # under `set -u` and the script would abort BEFORE alerting -- putting
+        # disk-watch.service into `failed` at exactly the moment the disk is
+        # full, which is the one thing this script must never do. Caught by
+        # running the suite under the unit's actual environment rather than an
+        # interactive shell's; a glob needs no variable anyway.
+        TEXT="Disk $TARGET is $PCT% full (''${AVAIL_G}G free) and the next scheduled cleanup is 03:00. Twice recently this went to 100% within hours and killed a running job. To reclaim now: systemctl --user start disk-cleanup.service (frees 80-90G, takes ~15min). If it reclaims little, the space is held by LIVE bazel servers, which the cleanup skips on purpose -- find them with: ls -d ~/.cache/bazel/_bazel_*/*/server"
+        mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
+        # 900s base, doubling, capped at 4h -- the house convention shared with
+        # the auth-drift and plugin canaries.
+        "$ALERT" "$STATE" "disk-warn" "$TEXT" 900 14400 \
+          || log "alert helper failed (rc=$?); disk is at $PCT%"
+      elif [ "$PCT" -lt "$CLEAR_PCT" ]; then
+        # Episode over. Drop the helper's state so the next one starts at alert
+        # #1 rather than inheriting a stale count and announcing itself as
+        # "STILL UNRESOLVED: alert #7, first reported 400h ago".
+        rm -f "$STATE" 2>/dev/null || true
+      fi
+
+      exit 0
+    '';
+  };
+
+  systemd.user.services.disk-watch = {
+    Unit = {
+      Description = "Disk usage threshold watch (warn only)";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "%h/.local/bin/disk-watch";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      Environment = [
+        "HOME=%h"
+        "PATH=/run/wrappers/bin:/run/current-system/sw/bin"
+      ];
+    };
+  };
+
+  systemd.user.timers.disk-watch = {
+    Unit = {
+      Description = "Disk usage threshold watch timer";
+    };
+    Timer = {
+      # OnUnitActiveSec alone would never fire: it is measured from the last
+      # activation, and a unit that has never run has none. OnStartupSec gives
+      # it the first one. Persistent= is omitted deliberately -- it only applies
+      # to OnCalendar timers, and replaying a missed disk poll is meaningless
+      # anyway since the reading is only ever about right now.
+      OnStartupSec = "5min";
+      OnUnitActiveSec = "15min";
     };
     Install = {
       WantedBy = [ "timers.target" ];
