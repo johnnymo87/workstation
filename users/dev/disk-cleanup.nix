@@ -29,21 +29,51 @@ lib.mkIf isCloudbox {
 
       log() { echo "[disk-cleanup] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
-      remove_worktree_if_clean() {
+      # Remove a worktree whose branch/PR is already merged or closed.
+      # Clean -> remove immediately. Dirty -> remove only once NOTHING anywhere
+      # in the tree has been modified for WORKTREE_MAX_AGE_DAYS; otherwise
+      # merged-but-dirty worktrees accumulate forever (30+ observed in the
+      # 2026-08-28 disk-full incident, see beads workstation-zspp).
+      #
+      # Freshness is a full-tree mtime scan (find -newermt), NOT a parse of
+      # `git status` paths. Porcelain quotes any path containing so much as a
+      # space, so a stat-per-dirty-path check silently skips quoted paths --
+      # a tree whose only FRESH dirt is "My Notes.md" would have been judged
+      # by its stale dirt and reaped (adversarial review of PR #426). The
+      # full-tree scan has no parsing to get wrong, and over-keeps by design:
+      # ANY fresh file (build output, log) keeps the tree, which is the safe
+      # direction on a box where ~15 concurrent sessions share these dirs.
+      # Checkout itself sets fresh mtimes, so a worktree younger than the
+      # window is never reaped. The removed HEAD sha is logged so unpushed
+      # commits on a detached HEAD (lgtm pr-N worktrees) stay recoverable
+      # from the journal within git's gc window.
+      remove_merged_worktree() {
         local repo_dir="$1" wt_dir="$2" repo_name="$3" wt_name="$4" label="$5"
-        local status_out
+        local status_out head_sha
 
         if ! status_out=$(git -C "$wt_dir" status --porcelain --untracked-files=all 2>/dev/null); then
           log "WARN: keeping $label because status failed: $repo_name/$wt_name"
           return 0
         fi
 
+        head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
+
         if [ -n "$status_out" ]; then
-          log "WARN: keeping $label with uncommitted changes: $repo_name/$wt_name"
+          local cutoff_epoch fresh_path
+          cutoff_epoch=$(( $(date +%s) - WORKTREE_MAX_AGE_DAYS * 86400 ))
+          fresh_path=$(find "$wt_dir" -xdev -newermt "@$cutoff_epoch" -print -quit 2>/dev/null || true)
+
+          if [ -n "$fresh_path" ]; then
+            log "WARN: keeping $label with uncommitted changes (tree touched within ''${WORKTREE_MAX_AGE_DAYS}d): $repo_name/$wt_name"
+            return 0
+          fi
+
+          log "Removing $label with stale uncommitted changes (untouched >=''${WORKTREE_MAX_AGE_DAYS}d, HEAD $head_sha): $repo_name/$wt_name"
+          git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
           return 0
         fi
 
-        log "Removing $label: $repo_name/$wt_name"
+        log "Removing $label (HEAD $head_sha): $repo_name/$wt_name"
         git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
       }
 
@@ -125,7 +155,7 @@ lib.mkIf isCloudbox {
               pr_state=$(gh pr view "$pr_num" --json state --repo "$repo_slug" 2>/dev/null \
                 | jq -r '.state // empty' 2>/dev/null || echo "")
               if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
-                remove_worktree_if_clean "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "lgtm pr-$pr_num worktree ($pr_state)"
+                remove_merged_worktree "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "lgtm pr-$pr_num worktree ($pr_state)"
                 continue
               fi
               # OPEN / unknown -> leave alone, fall through to generic checks
@@ -134,7 +164,7 @@ lib.mkIf isCloudbox {
             # Check if merged into origin/main
             head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null) || continue
             if git -C "$repo_dir" merge-base --is-ancestor "$head_sha" origin/main 2>/dev/null; then
-              remove_worktree_if_clean "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "merged worktree"
+              remove_merged_worktree "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "merged worktree"
               continue
             fi
 

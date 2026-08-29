@@ -438,7 +438,7 @@
       disk-cleanup-worktree-tests = devboxPkgs.runCommand "disk-cleanup-worktree-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
-          devboxPkgs.coreutils devboxPkgs.gnugrep
+          devboxPkgs.coreutils devboxPkgs.gnugrep devboxPkgs.findutils
         ];
         DISK_CLEANUP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/disk-cleanup".source;
       } ''
@@ -454,8 +454,8 @@
         }
         # Pinned, following checks.oc-auto-attach: a suite that stops
         # adjudicating must not be able to present as green.
-        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 3 ] || {
-          echo "GATE FAILURE: expected 3 'PASS ' lines, got" \
+        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 5 ] || {
+          echo "GATE FAILURE: expected 5 'PASS ' lines, got" \
                "$(grep -c '^PASS ' "$TMPDIR/dc.txt")." >&2
           exit 1
         }

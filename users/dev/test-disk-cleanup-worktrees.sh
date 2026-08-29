@@ -58,7 +58,7 @@ import pathlib
 import sys
 
 src = pathlib.Path(sys.argv[1]).read_text()
-start = src.find("remove_worktree_if_clean() {\n")
+start = src.find("remove_merged_worktree() {\n")
 if start == -1:
     start = src.index("cleanup_worktrees() {\n")
 end = src.index("\n# --- 3. Bazel cache purge ---", start)
@@ -100,11 +100,28 @@ mkdir -p "$repo/.worktrees"
 
 clean_wt="$repo/.worktrees/clean-merged"
 dirty_wt="$repo/.worktrees/dirty-merged"
+stale_dirty_wt="$repo/.worktrees/stale-dirty-merged"
+stale_mixed_wt="$repo/.worktrees/stale-mixed-merged"
 dirty_abandoned_wt="$repo/.worktrees/dirty-abandoned"
 git -C "$repo" worktree add -b clean-merged "$clean_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b dirty-merged "$dirty_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b stale-dirty-merged "$stale_dirty_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b stale-mixed-merged "$stale_mixed_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b dirty-abandoned "$dirty_abandoned_wt" origin/main >/dev/null
 printf 'uncommitted plan\n' >> "$dirty_wt/README.md"
+# Merged, dirty, and NOTHING in the tree touched within the window: the
+# age-out must reap it. Freshness is a full-tree mtime scan, so every path
+# (files, dirs, the .git gitfile) must be aged, not just the dirty one.
+printf 'stale uncommitted plan\n' >> "$stale_dirty_wt/README.md"
+find "$stale_dirty_wt" -exec touch -d '20 days ago' {} +
+# Regression for the porcelain-quoting hole (PR #426 adversarial review):
+# stale unquoted dirt PLUS fresh dirt whose name porcelain quotes (a space).
+# A stat-per-dirty-path check skips the quoted path and judges the tree by
+# its stale dirt -> reaped with day-old work inside. The full-tree scan must
+# keep it.
+printf 'stale uncommitted plan\n' >> "$stale_mixed_wt/README.md"
+find "$stale_mixed_wt" -exec touch -d '20 days ago' {} +
+printf 'fresh notes\n' > "$stale_mixed_wt/My Notes.md"
 printf 'old abandoned branch\n' > "$dirty_abandoned_wt/abandoned.md"
 git -C "$dirty_abandoned_wt" add abandoned.md
 GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
@@ -143,7 +160,9 @@ if [ "$harness_rc" -ne 0 ]; then
 fi
 
 assert_remove_logged "$clean_wt" "clean merged worktree is selected for removal"
-assert_remove_not_logged "$dirty_wt" "dirty merged worktree is not selected for removal"
+assert_remove_not_logged "$dirty_wt" "dirty merged worktree with fresh dirt is not selected for removal"
+assert_remove_logged "$stale_dirty_wt" "dirty merged worktree with stale dirt is selected for removal"
+assert_remove_not_logged "$stale_mixed_wt" "stale tree with fresh space-named dirt is not selected for removal"
 assert_remove_logged "$dirty_abandoned_wt" "dirty abandoned worktree is selected for removal"
 
 printf 'all disk-cleanup worktree tests passed\n'
