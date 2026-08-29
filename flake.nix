@@ -462,6 +462,36 @@
         touch $out
       '';
 
+      # Same seam and same reason as disk-cleanup-worktree-tests above: the suite
+      # would otherwise `nix eval` its own subject, which a build sandbox cannot
+      # do. DISK_WATCH_SRC hands it the exact file home-manager deploys, so the
+      # bytes under test are the bytes that ship and the CHECK's dependency graph
+      # does the building.
+      disk-watch-tests = devboxPkgs.runCommand "disk-watch-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        DISK_WATCH_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/disk-watch".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-disk-watch.sh 2>&1 | tee "$TMPDIR/dw.txt"
+        grep -q '^18 passed, 0 failed' "$TMPDIR/dw.txt" || {
+          echo "GATE FAILURE: disk-watch suite did not reach its 18/0 tally." >&2
+          exit 1
+        }
+        # Pinned, following checks.oc-auto-attach: a suite that stops
+        # adjudicating must not be able to present as green. The tally line
+        # alone is not enough -- it is printed by the suite itself, so a suite
+        # truncated to two assertions would still print a truthful "2 passed".
+        [ "$(grep -c '^PASS  ' "$TMPDIR/dw.txt")" = 18 ] || {
+          echo "GATE FAILURE: expected 18 'PASS' lines, got" \
+               "$(grep -c '^PASS  ' "$TMPDIR/dw.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       opencode-llm-audit-tests = devboxPkgs.runCommand "opencode-llm-audit-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.python3

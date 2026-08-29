@@ -59,8 +59,23 @@ chmod +x "$script_src"
 # parsing, which is the part most likely to be wrong.
 stub_bin="$tmpdir/bin"
 mkdir -p "$stub_bin"
-cat > "$stub_bin/df" <<'DFEOF'
-#!/usr/bin/env bash
+
+# Stubs get an ABSOLUTE bash shebang, resolved from the running interpreter. `#!/usr/bin/env bash`
+# does not work inside a nix build sandbox -- /usr/bin/env is not there -- and a stub that fails to
+# exec is invisible: `df` then resolves to the real one and the suite silently tests the host's disk
+# instead of the injected percentage. Same fix as test-disk-cleanup-worktrees.sh.
+bash_bin="$(command -v bash)"
+
+# The PATH the script under test is given. disk-watch.service sets
+# /run/wrappers/bin:/run/current-system/sw/bin, which does not exist inside a build sandbox, so the
+# coreutils it calls (tail, mkdir, rm) are picked up from the caller's PATH there. Appending rather
+# than replacing keeps the real unit's directories first when this is run on cloudbox. What is
+# load-bearing below is `env -i` -- that NOTHING other than HOME and PATH reaches the script -- not
+# which directories PATH happens to name.
+base_path="/run/current-system/sw/bin:/usr/bin:/bin:$PATH"
+
+printf '#!%s\n' "$bash_bin" > "$stub_bin/df"
+cat >> "$stub_bin/df" <<'DFEOF'
 # Mimics `df -P <path>`: a header line, then one data line. Percentage comes from DF_PCT.
 echo "Filesystem     1024-blocks      Used Available Capacity Mounted on"
 echo "/dev/nvme0n1p2   412114176 ${DF_USED:-300000000} ${DF_AVAIL:-80000000}     ${DF_PCT:-50}% /"
@@ -70,8 +85,8 @@ chmod +x "$stub_bin/df"
 # A stub alert helper recording exactly how it was called. The real one posts to pigeon; here we
 # only care that the contract is honoured.
 alert_log="$tmpdir/alert.log"
-cat > "$stub_bin/fake-alert" <<ALEOF
-#!/usr/bin/env bash
+printf '#!%s\n' "$bash_bin" > "$stub_bin/fake-alert"
+cat >> "$stub_bin/fake-alert" <<ALEOF
 {
   echo "CALL"
   echo "  state=\$1"
@@ -105,7 +120,7 @@ run_at() { # run_at <pct> [extra env assignments...]
   local pct="$1"; shift || true
   : > "$alert_log"
   env -i \
-      PATH="$stub_bin:/run/current-system/sw/bin:/usr/bin:/bin" \
+      PATH="$stub_bin:$base_path" \
       HOME="$tmpdir/home" \
       DF_PCT="$pct" \
       DISK_WATCH_ALERT="$stub_bin/fake-alert" \
@@ -148,8 +163,8 @@ alerted && ok "100% warns (the 2026-08-28 incident level)" \
 # `systemctl --user start disk-cleanup.service` as the remedy, so the source legitimately contains
 # both strings. Grepping a file for a string that the file is supposed to discuss proves nothing --
 # it is the same defect that let two mutations survive in a sibling repo's suite.
-cat > "$stub_bin/systemctl" <<SCEOF
-#!/usr/bin/env bash
+printf '#!%s\n' "$bash_bin" > "$stub_bin/systemctl"
+cat >> "$stub_bin/systemctl" <<SCEOF
 echo "systemctl \$*" >> "$tmpdir/systemctl.log"
 exit 0
 SCEOF
@@ -212,15 +227,15 @@ grep -q 'disk-cleanup' "$alert_log" \
 # The alert helper is explicitly documented as never aborting its caller; the watcher must be at
 # least as safe, including when the helper itself is broken or missing.
 
-cat > "$stub_bin/broken-alert" <<'BAEOF'
-#!/usr/bin/env bash
+printf '#!%s\n' "$bash_bin" > "$stub_bin/broken-alert"
+cat >> "$stub_bin/broken-alert" <<'BAEOF'
 echo "boom" >&2
 exit 3
 BAEOF
 chmod +x "$stub_bin/broken-alert"
 
 minimal_run() { # minimal_run <pct> <alert-cmd>  -- the unit's environment, nothing more
-  env -i PATH="$stub_bin:/run/current-system/sw/bin:/usr/bin:/bin" HOME="$tmpdir/home" \
+  env -i PATH="$stub_bin:$base_path" HOME="$tmpdir/home" \
       DF_PCT="$1" DISK_WATCH_ALERT="$2" DISK_WATCH_STATE="$state_file" \
       "$script_src"
 }
@@ -246,7 +261,7 @@ fi
 # paths they exercise. This asserts the property directly: with only HOME and PATH set -- exactly
 # what disk-cleanup.nix gives the service -- the script still completes and still alerts.
 rm -f "$state_file"
-if env -i PATH="$stub_bin:/run/current-system/sw/bin:/usr/bin:/bin" HOME="$tmpdir/home" \
+if env -i PATH="$stub_bin:$base_path" HOME="$tmpdir/home" \
        DF_PCT=95 DISK_WATCH_ALERT="$stub_bin/fake-alert" DISK_WATCH_STATE="$state_file" \
        "$script_src" >/dev/null 2>"$tmpdir/bare.txt"; then
   ok "runs under the unit's environment (HOME and PATH only)"
