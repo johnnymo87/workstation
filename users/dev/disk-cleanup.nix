@@ -246,9 +246,11 @@ lib.mkIf isCloudbox {
           done
         fi
 
-        # 3b. Shared --disk_cache (~/bazel-diskcache, configured in
-        # mono/.bazelrc:109 as --disk_cache=bazel-cache/diskcache/ ...).
-        # Bazel's own GC keeps this at <=10 GB. Removing the contents
+        # 3b. Shared --disk_cache (~/bazel-diskcache, configured by the
+        # home-manager-generated ~/.bazelrc in home.base.nix -- the HOME rc
+        # is read after the workspace rc, so it overrides mono/.bazelrc's
+        # relative --disk_cache path; mono builds write here too).
+        # Bazel's own GC keeps this at <=5 GB. Removing the contents
         # (not the dir) avoids "directory not found" errors on next build.
         # Leave tmp/ alone in case Bazel has in-flight writes there.
         local diskcache="$HOME/bazel-diskcache"
