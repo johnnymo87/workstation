@@ -29,7 +29,19 @@ lib.mkIf isCloudbox {
 
       log() { echo "[disk-cleanup] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
-      remove_worktree_if_clean() {
+      # Remove a worktree whose branch/PR is already merged or closed.
+      # Clean -> remove immediately. Dirty -> remove only once the dirt itself
+      # has gone untouched for WORKTREE_MAX_AGE_DAYS; otherwise merged-but-dirty
+      # worktrees accumulate forever (30+ observed in the 2026-08-28 disk-full
+      # incident, see beads workstation-zspp).
+      #
+      # Age is judged by the NEWEST mtime among the dirty paths themselves, NOT
+      # last-commit time: dirt is by definition newer than the commit, and a
+      # tree someone is actively editing must never be reaped. Paths that no
+      # longer stat (deletions, git-quoted unusual names) are skipped; if no
+      # dirty path stats at all, fall back to last-commit time rather than
+      # treating the tree as infinitely old.
+      remove_merged_worktree() {
         local repo_dir="$1" wt_dir="$2" repo_name="$3" wt_name="$4" label="$5"
         local status_out
 
@@ -39,7 +51,28 @@ lib.mkIf isCloudbox {
         fi
 
         if [ -n "$status_out" ]; then
-          log "WARN: keeping $label with uncommitted changes: $repo_name/$wt_name"
+          local now_epoch newest_epoch path mtime dirt_age_days
+          now_epoch=$(date +%s)
+          newest_epoch=0
+          while IFS= read -r line; do
+            path="''${line:3}"          # porcelain v1: XY + space + path
+            path="''${path#* -> }"      # rename lines: "R  old -> new"
+            mtime=$(stat -c %Y -- "$wt_dir/$path" 2>/dev/null) || continue
+            [ "$mtime" -gt "$newest_epoch" ] && newest_epoch=$mtime
+          done <<< "$status_out"
+
+          if [ "$newest_epoch" -eq 0 ]; then
+            newest_epoch=$(git -C "$wt_dir" log -1 --format=%ct 2>/dev/null || echo "$now_epoch")
+          fi
+          dirt_age_days=$(( (now_epoch - newest_epoch) / 86400 ))
+
+          if [ "$dirt_age_days" -lt "$WORKTREE_MAX_AGE_DAYS" ]; then
+            log "WARN: keeping $label with uncommitted changes (''${dirt_age_days}d old): $repo_name/$wt_name"
+            return 0
+          fi
+
+          log "Removing $label with stale uncommitted changes (''${dirt_age_days}d old): $repo_name/$wt_name"
+          git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
           return 0
         fi
 
@@ -125,7 +158,7 @@ lib.mkIf isCloudbox {
               pr_state=$(gh pr view "$pr_num" --json state --repo "$repo_slug" 2>/dev/null \
                 | jq -r '.state // empty' 2>/dev/null || echo "")
               if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
-                remove_worktree_if_clean "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "lgtm pr-$pr_num worktree ($pr_state)"
+                remove_merged_worktree "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "lgtm pr-$pr_num worktree ($pr_state)"
                 continue
               fi
               # OPEN / unknown -> leave alone, fall through to generic checks
@@ -134,7 +167,7 @@ lib.mkIf isCloudbox {
             # Check if merged into origin/main
             head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null) || continue
             if git -C "$repo_dir" merge-base --is-ancestor "$head_sha" origin/main 2>/dev/null; then
-              remove_worktree_if_clean "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "merged worktree"
+              remove_merged_worktree "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "merged worktree"
               continue
             fi
 
