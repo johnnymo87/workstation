@@ -30,53 +30,50 @@ lib.mkIf isCloudbox {
       log() { echo "[disk-cleanup] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
       # Remove a worktree whose branch/PR is already merged or closed.
-      # Clean -> remove immediately. Dirty -> remove only once the dirt itself
-      # has gone untouched for WORKTREE_MAX_AGE_DAYS; otherwise merged-but-dirty
-      # worktrees accumulate forever (30+ observed in the 2026-08-28 disk-full
-      # incident, see beads workstation-zspp).
+      # Clean -> remove immediately. Dirty -> remove only once NOTHING anywhere
+      # in the tree has been modified for WORKTREE_MAX_AGE_DAYS; otherwise
+      # merged-but-dirty worktrees accumulate forever (30+ observed in the
+      # 2026-08-28 disk-full incident, see beads workstation-zspp).
       #
-      # Age is judged by the NEWEST mtime among the dirty paths themselves, NOT
-      # last-commit time: dirt is by definition newer than the commit, and a
-      # tree someone is actively editing must never be reaped. Paths that no
-      # longer stat (deletions, git-quoted unusual names) are skipped; if no
-      # dirty path stats at all, fall back to last-commit time rather than
-      # treating the tree as infinitely old.
+      # Freshness is a full-tree mtime scan (find -newermt), NOT a parse of
+      # `git status` paths. Porcelain quotes any path containing so much as a
+      # space, so a stat-per-dirty-path check silently skips quoted paths --
+      # a tree whose only FRESH dirt is "My Notes.md" would have been judged
+      # by its stale dirt and reaped (adversarial review of PR #426). The
+      # full-tree scan has no parsing to get wrong, and over-keeps by design:
+      # ANY fresh file (build output, log) keeps the tree, which is the safe
+      # direction on a box where ~15 concurrent sessions share these dirs.
+      # Checkout itself sets fresh mtimes, so a worktree younger than the
+      # window is never reaped. The removed HEAD sha is logged so unpushed
+      # commits on a detached HEAD (lgtm pr-N worktrees) stay recoverable
+      # from the journal within git's gc window.
       remove_merged_worktree() {
         local repo_dir="$1" wt_dir="$2" repo_name="$3" wt_name="$4" label="$5"
-        local status_out
+        local status_out head_sha
 
         if ! status_out=$(git -C "$wt_dir" status --porcelain --untracked-files=all 2>/dev/null); then
           log "WARN: keeping $label because status failed: $repo_name/$wt_name"
           return 0
         fi
 
+        head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
+
         if [ -n "$status_out" ]; then
-          local now_epoch newest_epoch path mtime dirt_age_days
-          now_epoch=$(date +%s)
-          newest_epoch=0
-          while IFS= read -r line; do
-            path="''${line:3}"          # porcelain v1: XY + space + path
-            path="''${path#* -> }"      # rename lines: "R  old -> new"
-            mtime=$(stat -c %Y -- "$wt_dir/$path" 2>/dev/null) || continue
-            [ "$mtime" -gt "$newest_epoch" ] && newest_epoch=$mtime
-          done <<< "$status_out"
+          local cutoff_epoch fresh_path
+          cutoff_epoch=$(( $(date +%s) - WORKTREE_MAX_AGE_DAYS * 86400 ))
+          fresh_path=$(find "$wt_dir" -xdev -newermt "@$cutoff_epoch" -print -quit 2>/dev/null || true)
 
-          if [ "$newest_epoch" -eq 0 ]; then
-            newest_epoch=$(git -C "$wt_dir" log -1 --format=%ct 2>/dev/null || echo "$now_epoch")
-          fi
-          dirt_age_days=$(( (now_epoch - newest_epoch) / 86400 ))
-
-          if [ "$dirt_age_days" -lt "$WORKTREE_MAX_AGE_DAYS" ]; then
-            log "WARN: keeping $label with uncommitted changes (''${dirt_age_days}d old): $repo_name/$wt_name"
+          if [ -n "$fresh_path" ]; then
+            log "WARN: keeping $label with uncommitted changes (tree touched within ''${WORKTREE_MAX_AGE_DAYS}d): $repo_name/$wt_name"
             return 0
           fi
 
-          log "Removing $label with stale uncommitted changes (''${dirt_age_days}d old): $repo_name/$wt_name"
+          log "Removing $label with stale uncommitted changes (untouched >=''${WORKTREE_MAX_AGE_DAYS}d, HEAD $head_sha): $repo_name/$wt_name"
           git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
           return 0
         fi
 
-        log "Removing $label: $repo_name/$wt_name"
+        log "Removing $label (HEAD $head_sha): $repo_name/$wt_name"
         git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
       }
 
