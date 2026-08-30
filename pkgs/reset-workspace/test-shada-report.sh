@@ -42,7 +42,7 @@ report_fn="$(awk '
   on && /^    \}$/ && !/\(\) \{/ { exit }
 ' "$src")"
 [ -n "$report_fn" ] || { echo "FAIL: could not extract shada_watch_report -- source drifted"; exit 1; }
-printf '%s\n' "$report_fn" | grep -q 'main\\.shada\\.tmp' || { echo "FAIL: extracted report does not filter on shada temps"; exit 1; }
+grep -q 'main\\.shada\\.tmp' <<<"$report_fn" || { echo "FAIL: extracted report does not filter on shada temps"; exit 1; }
 echo "ok: extracted shada_watch_report from $src"
 
 # Harness scaffolding the extracted function expects.
@@ -67,16 +67,63 @@ run_case() {
   shada_watch_report "$expected"
   printf '%s' "$name" >/dev/null
 }
+# NOTE ON `grep -q ... <<<"$OUT"` RATHER THAN `printf ... | grep -q`.
+# `grep -q` exits the instant it matches. In a pipeline that closes the pipe
+# under the writer, so a `printf` still holding data gets EPIPE and returns
+# non-zero -- and `set -o pipefail` (above) then makes the WHOLE pipeline
+# non-zero even though the pattern was found. The assertion inverts: a match
+# is reported as a miss.
+#
+# MEASURED, because the size threshold is the whole story: driving the old form
+# 50 times per size, inversion happened 0/50 at <=16 KiB, 2/50 at 65 KiB, and
+# 50/50 at 200 KiB. The writer can only lose data it has not yet written, so
+# nothing under the pipe capacity (64 KiB by default) can race at all. Every
+# real OUT in this suite is a few hundred bytes and is therefore SAFE in either
+# form -- the calibration case below is the only one that can exercise this.
+#
+# The negative-sense assertions below (the `if ... then echo FAIL` ones) are
+# the more dangerous half: there the same failure yields a false PASS, silently
+# weakening the gate rather than tripping it. That asymmetry, not any observed
+# flake, is the reason to write assertions in a form that cannot do this.
+#
+# WHY THE HERE-STRING IS SAFE -- and not for the reason usually given. Bash
+# only spills a here-document to a temp file above ~64 KiB; below that it uses
+# an anonymous pipe (verified on bash 5.3: /proc/self/fd/0 is `pipe:[...]` for
+# a short string, /tmp/sh-thd.* for a 1.3 MB one). So "here-strings avoid
+# pipes" is false. What makes it safe is that bash writes the WHOLE document
+# before grep is exec'd: there is no concurrent writer left to receive EPIPE,
+# and no pipeline, so pipefail has nothing to observe. Regex semantics are
+# unchanged.
 want() {
   local what="$1" pat="$2"
-  if printf '%s' "$OUT" | grep -q "$pat"; then
+  if grep -q "$pat" <<<"$OUT"; then
     echo "ok: $what"
   else
     echo "FAIL: $what"
-    printf '%s' "$OUT" | sed 's/^/       got: /'
+    # Bounded: the calibration case below deliberately builds a multi-megabyte
+    # OUT, and an unbounded dump of it would bury the failure it is reporting.
+    printf '%s' "${OUT:0:2000}" | sed 's/^/       got: /'
+    [ "${#OUT}" -gt 2000 ] && echo "       got: ... (${#OUT} chars total, truncated)"
     fail=1
   fi
 }
+
+# ---- 0. THE ASSERTION MECHANISM ITSELF. Everything below trusts want() to
+#         report a present string as present. That is exactly what the
+#         printf-into-`grep -q` pipeline stopped doing under load (see the note
+#         on want() above), and when it broke it broke SILENTLY: positive
+#         assertions inverted, negative ones passed vacuously.
+#
+#         A here-string has no reader to exit early, so this is deterministic
+#         rather than a race: on the old form the match below is missed every
+#         time once OUT is far larger than the pipe buffer, because grep -q
+#         quits at line 1 while printf still has ~1.2 MB to write.
+#         This MUST go through want() itself. An inline `grep -q <<<` here
+#         would only re-test the fix's mechanism and would sit green through a
+#         revert of the very line it exists to protect.
+OUT="CALIBRATION_SENTINEL"$'\n'"$(seq 1 200000)"
+want "want() still matches when the haystack dwarfs a pipe buffer" 'CALIBRATION_SENTINEL'
+OUT=""
 
 # ---- 1. THE BURST. Three temps created before any is renamed away. This is the
 #         corruption precondition, and the number the whole epic turns on.
@@ -103,21 +150,21 @@ run_case serial 3 \
   '03:00:05 MOVED_FROM main.shada.tmp.a'
 want "serialized writes report max 1"          'max concurrent shada writers: 1'
 want "serialized writes are not flagged broken" 'invariant holds'
-if printf '%s' "$OUT" | grep -q 'BROKEN'; then echo "FAIL: serialized run was flagged BROKEN"; fail=1; fi
+if grep -q 'BROKEN' <<<"$OUT"; then echo "FAIL: serialized run was flagged BROKEN"; fail=1; fi
 
 # ---- 3. THE DEAD INSTRUMENT. Writers exited, watch saw nothing. This is the
 #         false-quiet trap that a standalone daemon cannot detect at all.
 run_case dead 7
 want "writers with no events reports UNKNOWN"   'unknown'
 want "the dead instrument is named as dead"     'instrument is dead'
-if printf '%s' "$OUT" | grep -q 'max concurrent shada writers: 0'; then
+if grep -q 'max concurrent shada writers: 0' <<<"$OUT"; then
   echo "FAIL: a dead watch reported a reassuring max of 0"; fail=1
 fi
 
 # ---- 4. THE LEGITIMATELY QUIET RUN. No writers exited, so no events is correct
 #         and must NOT raise the dead-instrument alarm.
 run_case quiet 0
-if printf '%s' "$OUT" | grep -q 'instrument is dead'; then
+if grep -q 'instrument is dead' <<<"$OUT"; then
   echo "FAIL: a legitimately quiet run was called a dead instrument"; fail=1
 else
   echo "ok: a quiet run with zero writers is not an alarm"
@@ -136,7 +183,7 @@ want "a missing watcher reports unknown" 'unknown'
 # finds the name already live and does not re-count -- so this case passed
 # even with the DELETE branch deleted from production. Measured, not supposed:
 # mutating `$2 ~ /MOVED_FROM|DELETE/` to `$2 ~ /MOVED_FROM/` left all 12
-# assertions green. Distinct names make the leak observable as max=2.
+# assertions green (12 as the suite then stood; it is 13 now). Distinct names make the leak observable as max=2.
 run_case delete_close 2 \
   '03:00:05 CREATE main.shada.tmp.a' \
   '03:00:05 DELETE main.shada.tmp.a' \

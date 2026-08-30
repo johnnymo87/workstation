@@ -529,8 +529,8 @@
           echo "GATE FAILURE: shada-report suite did not reach ALL PASS." >&2
           exit 1
         }
-        [ "$(grep -c '^ok: ' "$TMPDIR/sr.txt")" = 12 ] || {
-          echo "GATE FAILURE: expected 12 'ok:' lines, got" \
+        [ "$(grep -c '^ok: ' "$TMPDIR/sr.txt")" = 13 ] || {
+          echo "GATE FAILURE: expected 13 'ok:' lines, got" \
                "$(grep -c '^ok: ' "$TMPDIR/sr.txt")." >&2
           exit 1
         }
