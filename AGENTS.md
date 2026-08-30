@@ -189,6 +189,48 @@ See [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) for the
 4. Projects auto-clone during activation (to `~/Code/`)
 5. For devenv projects: `cd ~/Code/<project> && direnv allow`
 
+## Running `nix flake check` Locally
+
+Run it the way CI does:
+
+```bash
+nix flake check --keep-going
+```
+
+**Never add `--no-build`.** It looks like a cheap way to get an
+evaluation-only check. It is not, because at least one host's evaluation
+depends on import-from-derivation: nixpkgs'
+`nixos/modules/virtualisation/google-compute-config.nix` sets
+
+```nix
+boot.extraModprobeConfig = readFile "${pkgs.google-guest-configs}/etc/modprobe.d/gce-blacklist.conf";
+```
+
+so cloudbox cannot finish *evaluating* until `google-guest-configs` has
+actually been *built* — `readFile` has to read a file out of its output.
+`--no-build` forbids that build, and the failure surfaces as:
+
+```
+error: path '/nix/store/...-google-guest-configs-<ver>.drv' is not valid
+```
+
+That names a store path, so it reads like a garbage-collected or corrupt
+store and invites a pile of pointless `nix store repair` / GC work. It
+actually means "you told me not to build, and I needed to build."
+
+**How to recognise it rather than re-diagnose it.** Run the check once
+*without* `--no-build`. That realises the IFD dependency, after which
+`--no-build` passes on the identical tree with no source change. A result
+that flips on flags alone, with the tree held constant, is a fact about
+your command — not about the repo.
+
+Corollary worth internalising: comparing your branch against `main` proves
+nothing if you run *both* with the same broken flag. Identical failures are
+consistent with "pre-existing repo breakage" and with "my invocation is
+wrong," and only varying the invocation separates them. See
+[Attributing Causes](https://github.com/johnnymo87/workstation/blob/main/assets/opencode/skills/attributing-causes/SKILL.md)
+on interrogating the instrument.
+
 ## Front-Door Opacity Guard
 
 `nix flake check` runs `users/dev/test-frontdoor-opacity.sh`: no shipped consumer may address an individual serve (`127.0.0.1:4096-4099`) without an inline exemption.

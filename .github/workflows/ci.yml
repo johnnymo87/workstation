@@ -123,6 +123,23 @@ jobs:
       # writeShellApplication) is legible only in the build log.
       # --keep-going reports every broken configuration in one run instead of
       # stopping at the first.
+      #
+      # Do NOT add --no-build here, and do not reach for it locally either.
+      # nixpkgs' nixos/modules/virtualisation/google-compute-config.nix does
+      #   boot.extraModprobeConfig =
+      #     readFile "${pkgs.google-guest-configs}/etc/modprobe.d/gce-blacklist.conf";
+      # which is import-from-derivation: cloudbox cannot finish EVALUATING
+      # until google-guest-configs has actually been BUILT, because readFile
+      # has to read a file out of its output. --no-build forbids exactly that
+      # build, so nix cannot realise the path's context and aborts with
+      #   error: path '/nix/store/...-google-guest-configs-<ver>.drv' is not valid
+      # That message names a store path, so it reads like GC damage or a
+      # corrupt store. It is not. It means "you told me not to build, and I
+      # needed to build."
+      #
+      # The tell, if you ever see it: run the check again WITHOUT --no-build
+      # once. After that the IFD dependency is realised, and --no-build starts
+      # passing on the very same tree with no source change.
       - name: Run nix flake check
         run: nix flake check --print-build-logs --keep-going
 
