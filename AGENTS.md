@@ -231,6 +231,58 @@ wrong," and only varying the invocation separates them. See
 [Attributing Causes](https://github.com/johnnymo87/workstation/blob/main/assets/opencode/skills/attributing-causes/SKILL.md)
 on interrogating the instrument.
 
+## Pipefail Inversion Guard
+
+`nix flake check` runs `users/dev/test-pipefail-inversion.sh`: no `.sh` or
+`.nix` file may pipe a **`printf`/`echo` of a double-quoted string containing a
+variable** into an early-exiting `grep -q` / `grep --quiet`, on a single line.
+
+That scope is narrower than "don't pipe into grep -q", deliberately — see
+below. It is calibrated against history rather than guessed: the pattern
+matches exactly the 57 sites that PRs #431 and #432 removed by hand, and 0 at
+`main`. Those two fixed points are the regression oracle for editing it.
+Known gaps it does **not** catch: a pipeline split across lines, and a writer
+that is a command rather than a variable.
+
+```bash
+printf '%s\n' "$VAR" | grep -q PAT      # banned
+grep -q PAT <<<"$VAR"                   # the fix, always
+```
+
+**Why.** Under `set -o pipefail`, `grep -q` exits the instant it matches and
+closes the pipe; a writer still holding data takes EPIPE and returns non-zero;
+pipefail then makes the pipeline non-zero *even though the pattern was found*.
+A match reads as a miss. For a positive assertion that is a false red. For a
+negative one (`... | grep -q BAD && { echo FAIL; }`) it is a false **green** —
+the check stops checking and nothing goes red to say so.
+
+The here-string is safe because bash writes the whole document *before*
+exec'ing grep, so there is no concurrent writer to receive EPIPE. (The common
+claim that here-strings are temp-file backed is false below ~64 KiB; the
+pre-write is what matters, not the backing store.)
+
+**The guard does not try to prove `pipefail` is active**, and deliberately so.
+`pkgs.writeShellApplication` injects pipefail into shell embedded in `.nix` —
+which is how two production sites stayed invisible to a `*.sh`-only search,
+one of them able to `rm` a live nvim socket. Any snippet can also be sourced
+into a pipefail context later. So the shape is banned unconditionally: one
+mechanical edit to comply, versus unbounded reasoning to justify an exception.
+
+**Only the narrow shape is banned** — writer is `printf`/`echo` of a single
+quoted variable. `cmd | grep -q` is *not* flagged, because its mechanical fix
+is process substitution and `grep -q P < <(cmd)` discards the writer's failure,
+trading one silent-failure class for another. Those need `out=$(cmd)` first,
+which is a judgement call.
+
+If it blocks you, fix the line. If you genuinely cannot, add
+`pipefail-exempt: <reason>` on or within 3 lines above it **and** a per-file
+count in the guard's `EXPECTED_MANIFEST` (per-file, so concurrent PRs collide
+instead of merging consistent-but-wrong). The manifest is currently empty and
+that is the intended steady state.
+
+The suite self-tests its detector against planted fixtures before scanning, so
+a rotted regex fails loudly rather than reporting a reassuring "0 violations".
+
 ## Front-Door Opacity Guard
 
 `nix flake check` runs `users/dev/test-frontdoor-opacity.sh`: no shipped consumer may address an individual serve (`127.0.0.1:4096-4099`) without an inline exemption.

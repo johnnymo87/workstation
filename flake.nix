@@ -318,6 +318,28 @@
         touch $out
       '';
 
+      # Bans `printf|echo "$VAR" | grep -q PAT`, which `set -o pipefail` can
+      # invert into reporting a match as a miss -- and, for negative-sense
+      # assertions, into a silent false GREEN. #431 and #432 removed 57 of
+      # these, two of them in production shell embedded in .nix (one could
+      # `rm` a live nvim socket). This keeps number 58 from landing.
+      #
+      # The suite self-tests its own detector against planted fixtures before
+      # scanning, so a rotted regex fails loudly instead of reporting a
+      # reassuring "0 violations" over a repo full of them.
+      pipefail-inversion = devboxPkgs.runCommand "pipefail-inversion-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.gnused
+                              devboxPkgs.coreutils devboxPkgs.findutils devboxPkgs.gawk ];
+      } ''
+        cd ${self}
+        bash users/dev/test-pipefail-inversion.sh 2>&1 | tee "$TMPDIR/pi.txt"
+        grep -q '^ALL PASS' "$TMPDIR/pi.txt" || {
+          echo "GATE FAILURE: pipefail-inversion guard did not reach ALL PASS." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # ---------------------------------------------------------------------
       # workstation-dad9: five suites that existed and ran nowhere.
       #
