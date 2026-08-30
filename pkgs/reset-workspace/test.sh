@@ -344,7 +344,7 @@ if [ -f "$default_nix" ]; then
     local desc="$1" func="$2" pattern="$3"
     local body
     body=$(sed -n "/^    ${func}() {/,/^    }/p" "$default_nix")
-    if printf '%s' "$body" | grep -qF -- "$pattern"; then
+    if grep -qF -- "$pattern" <<<"$body"; then
       echo "ok: $desc"
     else
       echo "FAIL: $desc"; echo "  pattern '$pattern' not found in $func body"; fail=1

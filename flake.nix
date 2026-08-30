@@ -515,6 +515,24 @@
         touch $out
       '';
 
+      # Guards the sweep in "write string assertions so pipefail cannot invert
+      # them": asserts `printf|echo "$VAR" | grep ...` and `grep ... <<<"$VAR"`
+      # agree for every (flags, pattern) the three UNWIRED suites use. Those
+      # three carry unwired-test(workstation-oo4q) exemptions, so nothing else
+      # in this gate executes their assertions -- this is the only thing that
+      # would notice if the rewrite changed their meaning.
+      pipefail-herestring-equivalence = devboxPkgs.runCommand "pipefail-herestring-equivalence" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash users/dev/test-pipefail-herestring-equivalence.sh 2>&1 | tee "$TMPDIR/eq.txt"
+        grep -q '^EQUIVALENT' "$TMPDIR/eq.txt" || {
+          echo "GATE FAILURE: here-string/pipeline equivalence suite did not report EQUIVALENT." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       reset-workspace-shada-report-tests = devboxPkgs.runCommand "reset-workspace-shada-report-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.gawk devboxPkgs.gnused

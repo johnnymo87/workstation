@@ -36,7 +36,7 @@ classify_oc_invocation() {
   done
   [ "$positionals" -gt 1 ] && { printf 'PASSTHROUGH\t\t\n'; return 0; }
   if [ "$have_session" -eq 1 ]; then
-    printf '%s' "$sid" | grep -Eq '^ses_[A-Za-z0-9_-]+$' || { printf 'PASSTHROUGH\t\t\n'; return 0; }
+    grep -Eq '^ses_[A-Za-z0-9_-]+$' <<<"$sid" || { printf 'PASSTHROUGH\t\t\n'; return 0; }
     printf 'RESUME\t%s\t%s\n' "$sid" "$project"; return 0
   fi
   printf 'NEW\t\t%s\n' "$project"; return 0

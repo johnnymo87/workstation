@@ -40,7 +40,7 @@ fi
 
 echo "== 3. Testing --help output =="
 HELP_OUT="$("$BIN" --help)" || fail "--help exited non-zero"
-echo "$HELP_OUT" | grep -q "Usage: oc-session-list" || fail "--help missing usage text"
+grep -q "Usage: oc-session-list" <<<"$HELP_OUT" || fail "--help missing usage text"
 pass "--help works"
 
 echo "== 4. Testing binary against fixture DB =="
@@ -84,15 +84,15 @@ JSON_OUT="$("$BIN" --db "$TEST_DB" --limit 10)" || fail "oc-session-list failed 
 # row's "root_id" value -- so the built artifact could drop child_1's row
 # entirely and this file would stay green. This is the only test that exercises
 # the nix-built binary, so vacuity here is expensive.
-echo "$JSON_OUT" | grep -q '"id": "grandchild_1"' || fail "grandchild_1 missing from output"
-echo "$JSON_OUT" | grep -q '"id": "child_1"'      || fail "child_1 missing from output"
-echo "$JSON_OUT" | grep -q '"id": "root_1"'       || fail "root_1 missing from output"
+grep -q '"id": "grandchild_1"' <<<"$JSON_OUT" || fail "grandchild_1 missing from output"
+grep -q '"id": "child_1"' <<<"$JSON_OUT"      || fail "child_1 missing from output"
+grep -q '"id": "root_1"' <<<"$JSON_OUT"       || fail "root_1 missing from output"
 
 # And the walk must resolve the grandchild to the TRUE root, not the middle
 # session -- the defect the recursive CTE exists to prevent.
-echo "$JSON_OUT" | grep -q '"root_id": "child_1"' && fail "grandchild resolved to the MIDDLE session, not the true root"
+grep -q '"root_id": "child_1"' <<<"$JSON_OUT" && fail "grandchild resolved to the MIDDLE session, not the true root"
 
-if echo "$JSON_OUT" | grep -q '"id": "archived_1"'; then
+if grep -q '"id": "archived_1"' <<<"$JSON_OUT"; then
   fail "archived_1 was NOT excluded from query output"
 fi
 
@@ -112,9 +112,9 @@ JSON_STATE_OUT="$("$BIN" --db "$TEST_DB" --with-state --limit 10 \
 # `nodata`. This fixture is literally the shape of the 2026-08-01 outage (every
 # overlay file gone), and asserting `idle` here is what made that outage look
 # normal for ~9 hours -- the assertion was encoding the bug as the expectation.
-echo "$JSON_STATE_OUT" | grep -q '"activity": "nodata"' \
+grep -q '"activity": "nodata"' <<<"$JSON_STATE_OUT" \
   || fail "--with-state on an empty overlay dir must report nodata, not a confident status"
-echo "$JSON_STATE_OUT" | grep -q '"activity": "idle"' \
+grep -q '"activity": "idle"' <<<"$JSON_STATE_OUT" \
   && fail "--with-state claimed idle with no live writer -- that is the S3 regression"
 
 # And the converse, so the above cannot pass by simply never emitting idle: with
@@ -128,7 +128,7 @@ JSON
 JSON_LIVE_OUT="$("$BIN" --db "$TEST_DB" --with-state --limit 10 \
   --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
   || fail "oc-session-list --with-state failed with a live overlay"
-echo "$JSON_LIVE_OUT" | grep -q '"activity": "idle"' \
+grep -q '"activity": "idle"' <<<"$JSON_LIVE_OUT" \
   || fail "--with-state must report idle when a live writer is present and silent"
 pass "--with-state distinguishes nodata (no writer) from idle (live writer, silent)"
 
@@ -143,26 +143,26 @@ JSON_FOLD_OUT="$("$BIN" --db "$TEST_DB" --with-state --fold --limit 10 \
 
 # Roots only: the 3-level tree collapses to root_1, and its descendants are gone
 # as ROWS. Anchored on the "id" field for the reason stage 3 documents.
-echo "$JSON_FOLD_OUT" | grep -q '"id": "root_1"' \
+grep -q '"id": "root_1"' <<<"$JSON_FOLD_OUT" \
   || fail "--fold dropped the root itself"
-echo "$JSON_FOLD_OUT" | grep -q '"id": "grandchild_1"' \
+grep -q '"id": "grandchild_1"' <<<"$JSON_FOLD_OUT" \
   && fail "--fold emitted a DESCENDANT as its own row -- the fold did not happen"
-echo "$JSON_FOLD_OUT" | grep -q '"id": "child_1"' \
+grep -q '"id": "child_1"' <<<"$JSON_FOLD_OUT" \
   && fail "--fold emitted a DESCENDANT as its own row -- the fold did not happen"
 
 # Paired POSITIVE, so the two negatives above cannot pass by the command simply
 # failing or printing nothing: the fold must report the children it swallowed.
-echo "$JSON_FOLD_OUT" | grep -q '"child_count": 2' \
+grep -q '"child_count": 2' <<<"$JSON_FOLD_OUT" \
   || fail "--fold lost the child_count for the 3-level tree (empty output would pass the negatives above)"
-echo "$JSON_FOLD_OUT" | grep -q '"effective_state"' \
+grep -q '"effective_state"' <<<"$JSON_FOLD_OUT" \
   || fail "--fold emitted no effective_state"
-echo "$JSON_FOLD_OUT" | grep -q '"sort_rank"' \
+grep -q '"sort_rank"' <<<"$JSON_FOLD_OUT" \
   || fail "--fold emitted no sort_rank"
-echo "$JSON_FOLD_OUT" | grep -q '"attention"' \
+grep -q '"attention"' <<<"$JSON_FOLD_OUT" \
   || fail "--fold emitted no attention"
 
 # And --fold must not have leaked into the plain shape.
-echo "$JSON_LIVE_OUT" | grep -q '"effective_state"' \
+grep -q '"effective_state"' <<<"$JSON_LIVE_OUT" \
   && fail "--with-state alone emitted row-model fields -- the flag is not gating anything"
 pass "--fold folds descendants into one root row and leaves --with-state untouched"
 

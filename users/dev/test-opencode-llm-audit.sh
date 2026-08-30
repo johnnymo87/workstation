@@ -163,8 +163,8 @@ ino_b="$(stat -L -c '%i' "$b")"
 disc="$(printf '%s\n%s\n' "$ha" "$hb" | discover_serve_log_fds | dedupe_by_inode)"
 nlines="$(printf '%s\n' "$disc" | grep -c . || true)"
 check "discover+dedupe over 2 distinct logs -> 2 followers" "2" "$nlines"
-printf '%s\n' "$disc" | grep -q "^$ino_a " && echo "ok: inode A discovered" || { echo "FAIL: inode A not discovered"; fail=1; }
-printf '%s\n' "$disc" | grep -q "^$ino_b " && echo "ok: inode B discovered" || { echo "FAIL: inode B not discovered"; fail=1; }
+grep -q "^$ino_a " <<<"$disc" && echo "ok: inode A discovered" || { echo "FAIL: inode A not discovered"; fail=1; }
+grep -q "^$ino_b " <<<"$disc" && echo "ok: inode B discovered" || { echo "FAIL: inode B not discovered"; fail=1; }
 
 # Two holders on the SAME file (shared inode, the cloudbox 1.17.x reality):
 # discover+dedupe must collapse to ONE follower so lines are not duplicated.

@@ -855,7 +855,12 @@ EOF6
     sock_reaped=0
     for sock in /tmp/nvim-*.sock; do
       [ -S "$sock" ] || continue
-      printf '%s\n' "$sock_live" | grep -qxF "$sock" && continue
+      # Here-string, not `printf | grep -qxF`: writeShellApplication sets
+      # pipefail, and grep -q closing the pipe early can make a MATCH read as a
+      # non-match. Here that inversion would skip the `continue` and rm a LIVE
+      # nvim socket. Size-bounded today (socket paths are ~22 bytes), but this
+      # is the one site in the sweep whose failure mode destroys user state.
+      grep -qxF "$sock" <<<"$sock_live" && continue
       rm -f "$sock" 2>/dev/null && sock_reaped=$(( sock_reaped + 1 )) || true
     done
     [ "$sock_reaped" -eq 0 ] || log "  reaped $sock_reaped orphaned pane socket(s)"
