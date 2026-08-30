@@ -33,16 +33,27 @@ function readSecret(path: string): string | undefined {
 function loadSecretEnv(read: (path: string) => string | undefined): Record<string, string> {
   const env: Record<string, string> = {}
 
-  // Simple 1:1 secret-file -> env-var mappings. Each entry is
-  // [/run/secrets/<file>, ENV_VAR]. github_api_token intentionally maps to two
-  // names (gh CLI uses GH_TOKEN; the ba CLI uses GITHUB_API_TOKEN).
+  // Simple secret-file -> env-var mappings. Each entry is
+  // [/run/secrets/<file>, ENV_VAR]. A file may appear more than once when
+  // distinct consumers expect distinct names for the same value:
+  // github_api_token (gh CLI uses GH_TOKEN; the ba CLI uses GITHUB_API_TOKEN)
+  // and gemini_api_key (see below).
   const simple: ReadonlyArray<readonly [string, string]> = [
     ["github_api_token", "GH_TOKEN"],
     ["github_api_token", "GITHUB_API_TOKEN"],
     ["cloudflare_api_token", "CLOUDFLARE_API_TOKEN"],
     ["dolthub_api_token", "DOLTHUB_API_TOKEN"],
     ["claude_personal_oauth_token", "CLAUDE_CODE_OAUTH_TOKEN"],
+    // Same key, two names, two consumers: GOOGLE_GENERATIVE_AI_API_KEY is the
+    // Vercel AI SDK convention (what opencode's own @ai-sdk/google provider
+    // reads); GEMINI_API_KEY is what Google's google-genai Python SDK reads by
+    // default (it checks GEMINI_API_KEY, then GOOGLE_API_KEY). Same precedent
+    // as github_api_token above.
     ["gemini_api_key", "GOOGLE_GENERATIVE_AI_API_KEY"],
+    ["gemini_api_key", "GEMINI_API_KEY"],
+    // Lichess personal access token, for the Lichess Study API
+    // (~/projects/yt-to-lichess). devbox-only secret; absent elsewhere.
+    ["lichess_pat", "LICHESS_PAT"],
     ["atlassian_api_token", "ATLASSIAN_API_TOKEN"],
     ["atlassian_site", "ATLASSIAN_SITE"],
     ["atlassian_email", "ATLASSIAN_EMAIL"],

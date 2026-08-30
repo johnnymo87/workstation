@@ -351,9 +351,21 @@ lib.mkIf isDevbox {
       export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
     fi
 
-    # Gemini API key for OpenCode's @ai-sdk/google provider (direct API)
+    # Gemini API key, exported under both conventions from the one secret:
+    # GOOGLE_GENERATIVE_AI_API_KEY is what the Vercel AI SDK (and so OpenCode's
+    # @ai-sdk/google provider) reads; GEMINI_API_KEY is what Google's
+    # google-genai Python SDK reads by default. Mirrors the pair in
+    # assets/opencode/plugins/shell-env.ts so interactive shells and OpenCode
+    # bash tool calls agree.
     if [ -r /run/secrets/gemini_api_key ]; then
       export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
+      export GEMINI_API_KEY="$GOOGLE_GENERATIVE_AI_API_KEY"
+    fi
+
+    # Lichess personal access token, for the Lichess Study API
+    # (~/projects/yt-to-lichess).
+    if [ -r /run/secrets/lichess_pat ]; then
+      export LICHESS_PAT="$(cat /run/secrets/lichess_pat)"
     fi
 
     # OpenAI API key (for tec-codex embeddings via text-embedding-3-small)

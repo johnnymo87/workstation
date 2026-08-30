@@ -202,6 +202,12 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Lichess personal access token (full-access scope) for the Lichess API.
+      lichess_pat = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };
