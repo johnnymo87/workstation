@@ -104,10 +104,10 @@ if [ $RC -eq 0 ]; then ok "exit 0 on a healthy pool"; else
   bad "exit $RC on a HEALTHY pool — this is the 847ec73 trap (good deploy, wrongful revert)"
   printf '%s\n' "$OUT" | sed 's/^/      | /'
 fi
-printf '%s\n' "$OUT" | grep -q "expected members (3)" \
+grep -q "expected members (3)" <<<"$OUT" \
   && ok "declared membership read from the target (3)" \
   || bad "did not report 3 expected members"
-printf '%s\n' "$OUT" | grep -q "no stray active serve units" \
+grep -q "no stray active serve units" <<<"$OUT" \
   && ok "stray check ran and was clean" || bad "stray check did not run"
 echo
 
@@ -122,10 +122,10 @@ OUT=$(run_verifier 0); RC=$?
 if [ $RC -ne 0 ]; then ok "exit $RC (nonzero) with a member down"; else
   bad "exit 0 with a member DOWN — the verifier still cannot express a missing member"
 fi
-printf '%s\n' "$OUT" | grep -q "octest-serve@2.service" \
+grep -q "octest-serve@2.service" <<<"$OUT" \
   && ok "names the missing member" \
   || { bad "does not name octest-serve@2.service"; printf '%s\n' "$OUT" | sed 's/^/      | /'; }
-printf '%s\n' "$OUT" | grep -q "expected members (3)" \
+grep -q "expected members (3)" <<<"$OUT" \
   && ok "still expects 3 members while only 2 are active" \
   || bad "expected set shrank to what happens to be running — the original bug"
 echo
@@ -141,10 +141,10 @@ OUT=$(run_verifier 3); RC=$?
 ELAPSED=$(( $(date +%s) - T0 ))
 [ "$ELAPSED" -ge 1 ] && ok "waited ${ELAPSED}s before giving up (did not fail instantly)" \
   || bad "returned in ${ELAPSED}s — settle-wait did not engage"
-printf '%s\n' "$OUT" | grep -q "WAIT:" \
+grep -q "WAIT:" <<<"$OUT" \
   && ok "classifies a down member as WAIT (soft), not a hard failure" \
   || bad "no WAIT line — soft/hard classification is not working"
-printf '%s\n' "$OUT" | grep -q "still not up at the deadline" \
+grep -q "still not up at the deadline" <<<"$OUT" \
   && ok "emits the wmrt crash-loop hint at the deadline" || bad "no deadline hint"
 [ $RC -ne 0 ] && ok "still exits nonzero once the deadline expires" \
   || bad "exit 0 after the deadline with a member down"
@@ -166,7 +166,7 @@ OUT=$(VERIFY_SYSTEMCTL="systemctl --user" VERIFY_POOL_TARGET="octest-nope.target
   VERIFY_UNIT_GLOB='octest-serve@*.service' VERIFY_SETTLE_DEADLINE=0 \
   bash "$SCRIPT" "$SERVE_MAX" "$SLICE_MAX" "octest.slice" 2>&1); RC=$?
 [ $RC -ne 0 ] && ok "exit $RC on a missing target" || bad "exit 0 on a MISSING target — verified nothing, silently"
-printf '%s\n' "$OUT" | grep -qi "LoadState" \
+grep -qi "LoadState" <<<"$OUT" \
   && ok "reports the target's LoadState (systemctl show exits 0 for missing units)" \
   || bad "did not report LoadState — the exit code alone proves nothing here"
 echo
@@ -175,7 +175,7 @@ echo
 # A narrowed run must not be able to look like a full one in a pasted transcript.
 echo "### T6: non-default seams are disclosed in the summary"
 OUT=$(run_verifier 0)
-printf '%s\n' "$OUT" | grep -q "NON-DEFAULT SEAMS" \
+grep -q "NON-DEFAULT SEAMS" <<<"$OUT" \
   && ok "summary discloses the non-default seams" \
   || bad "a seam-narrowed run is indistinguishable from a full one"
 echo

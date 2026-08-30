@@ -31,7 +31,7 @@ assert_eq() {
 
 assert_contains() {
   local haystack="$1" needle="$2" msg="$3"
-  if printf '%s' "$haystack" | grep -qF "$needle"; then
+  if grep -qF "$needle" <<<"$haystack"; then
     printf 'PASS  %s\n' "$msg"; pass=$((pass + 1))
   else
     printf 'FAIL  %s\n        wanted substring: %s\n        in:               %s\n' "$msg" "$needle" "$haystack"

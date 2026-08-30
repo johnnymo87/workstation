@@ -41,13 +41,13 @@ REAL_LINE='timestamp=2026-08-01T15:40:54.070Z level=ERROR run=2d30b122 message="
 
 pat="$(plugin_canary_load_pattern)"
 
-printf '%s\n' "$REAL_LINE" | grep -qE "$pat"
+grep -qE "$pat" <<<"$REAL_LINE"
 eq "anchored pattern matches a real production failure line" "0" "$?"
 
 # THE false positive that has bitten this bead twice: an INFO permission-audit
 # line quoting the error string in the command text a session ran.
 AUDIT_LINE='timestamp=2026-08-04T10:00:00.000Z level=INFO message="evaluated permission" command="grep -E level=ERROR .*failed to load plugin /home/dev/.local/share/opencode/log/opencode.log"'
-if printf '%s\n' "$AUDIT_LINE" | grep -qE "$pat"; then
+if grep -qE "$pat" <<<"$AUDIT_LINE"; then
   no "anchored pattern rejects an INFO audit line quoting the error string" "no match" "matched"
 else
   ok "anchored pattern rejects an INFO audit line quoting the error string"
@@ -55,7 +55,7 @@ fi
 
 # And the naive pattern this replaces MUST match it -- otherwise the test above
 # proves nothing about the anchoring, only that the fixture happens not to match.
-if printf '%s\n' "$AUDIT_LINE" | grep -qE 'level=ERROR .*failed to load plugin'; then
+if grep -qE 'level=ERROR .*failed to load plugin' <<<"$AUDIT_LINE"; then
   ok "control: the unanchored pattern DOES match the audit line (so anchoring is what saves us)"
 else
   no "control: unanchored pattern should match the audit line" "match" "no match"
@@ -63,7 +63,7 @@ fi
 
 # A WARN-level line mentioning the same text must not match either.
 WARN_LINE='timestamp=2026-08-04T10:00:00.000Z level=WARN message="failed to load plugin" path=file:///x/plugins/a.ts'
-if printf '%s\n' "$WARN_LINE" | grep -qE "$pat"; then
+if grep -qE "$pat" <<<"$WARN_LINE"; then
   no "anchored pattern requires level=ERROR" "no match" "matched"
 else
   ok "anchored pattern requires level=ERROR"
@@ -368,7 +368,7 @@ for host_src in \
   # which is this bead family's signature defect. Found by asking why devbox
   # passed the mutation that cloudbox failed, rather than accepting that it did.
   canary_block="$(LC_ALL=C sed -n '/opencode-plugin-canary = /,/^  };$/p' "$host_src" | grep -v 'POOL_RESTART_HINT=')"
-  if printf '%s' "$canary_block" | grep -qE 'systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(restart|stop|kill)'; then
+  if grep -qE 'systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(restart|stop|kill)' <<<"$canary_block"; then
     no "$host_label canary never restarts a serve" "no systemctl restart/stop/kill" "found one"
   else
     ok "$host_label canary never restarts a serve"
@@ -419,9 +419,9 @@ if [ -f "$routes" ]; then
     ')"
     if [ -z "$row" ]; then
       no "probe route $r is present in the classification table" "a row" "none"
-    elif printf '%s' "$row" | grep -q 'poolSafe'; then
+    elif grep -q 'poolSafe' <<<"$row"; then
       no "probe route $r must NOT be poolSafe (see comment above)" "no poolSafe" "$row"
-    elif printf '%s' "$row" | grep -q 'global-ro'; then
+    elif grep -q 'global-ro' <<<"$row"; then
       ok "probe route $r is anchor-forwarded global-ro"
     else
       no "probe route $r must be global-ro" "global-ro" "$row"

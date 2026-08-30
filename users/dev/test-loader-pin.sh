@@ -410,7 +410,7 @@ assert_site 'function logPluginError('                          "the load-failur
 # Same shape as the two weaknesses already fixed above: a check answered by a
 # line other than the one it is actually about.
 helper_body="$(sed -n '/function logPluginError(/,/^ *}/p' "$patched_index")"
-if ! printf '%s' "$helper_body" | grep -qF "$canary_msg"; then
+if ! grep -qF "$canary_msg" <<<"$helper_body"; then
   fail \
     "the load-failure helper does not emit the message the canary greps for" \
     "" \

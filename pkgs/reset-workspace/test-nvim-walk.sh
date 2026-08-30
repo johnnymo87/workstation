@@ -78,14 +78,14 @@ for name in funcs walk; do
   eval "body=\$$name"
   [ -n "$body" ] || { echo "FAIL: extraction '$name' came back empty -- source drifted"; exit 1; }
 done
-printf '%s\n' "$funcs" | grep -q 'state" = Z' || { echo "FAIL: extracted funcs lack the zombie guard"; exit 1; }
-printf '%s\n' "$walk"  | grep -q 'kill -TERM' || { echo "FAIL: extracted walk lacks kill -TERM"; exit 1; }
-printf '%s\n' "$walk"  | grep -q 'pkill -9 -u dev -x nvim' || { echo "FAIL: extracted walk lacks the sweep"; exit 1; }
-printf '%s\n' "$walk"  | grep -q 'sock_reaped' && { echo "FAIL: extraction includes the real-/tmp socket reap"; exit 1; }
+grep -q 'state" = Z' <<<"$funcs" || { echo "FAIL: extracted funcs lack the zombie guard"; exit 1; }
+grep -q 'kill -TERM' <<<"$walk" || { echo "FAIL: extracted walk lacks kill -TERM"; exit 1; }
+grep -q 'pkill -9 -u dev -x nvim' <<<"$walk" || { echo "FAIL: extracted walk lacks the sweep"; exit 1; }
+grep -q 'sock_reaped' <<<"$walk" && { echo "FAIL: extraction includes the real-/tmp socket reap"; exit 1; }
 # tmux is NOT stubbed here, so any tmux call in the extracted body would hit the
 # user's real server. This guard is the one that was missing when Step 3.4 was
 # added; it cost a live lgtm session to learn.
-printf '%s\n' "$walk"  | grep -q 'tmux ' && { echo "FAIL: extraction includes a real tmux command"; exit 1; }
+grep -q 'tmux ' <<<"$walk" && { echo "FAIL: extraction includes a real tmux command"; exit 1; }
 echo "ok: extracted the real walk from $src"
 
 # ---- Lab -------------------------------------------------------------------

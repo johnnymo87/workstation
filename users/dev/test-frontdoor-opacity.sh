@@ -52,7 +52,7 @@ if [ "${#table_rows[@]}" -eq 0 ]; then
   bad "could not parse any row ids out of $table (format changed?)"
 fi
 row_exists() { local r="$1" x; for x in "${table_rows[@]}"; do [ "$x" = "$r" ] && return 0; done; return 1; }
-row_is_exemption() { printf '%s' "$1" | grep -qE "$LEGAL_ROW_RE"; }
+row_is_exemption() { grep -qE "$LEGAL_ROW_RE" <<<"$1"; }
 
 row_names_file() {
   local r="$1" f="$2" row_line paths tok pat
@@ -169,7 +169,7 @@ for f in "${files[@]}"; do
         # real call site. The old blanket skip took the whole line, so a mutating
         # `curl -X POST "${OPENCODE_URL:-http://127.0.0.1:4096}/session/$sid/kill"`
         # passed the marker check, the 1:1 count and the manifest simultaneously.
-        if printf '%s' "$line" | grep -qE '\}/|attach'; then
+        if grep -qE '\}/|attach' <<<"$line"; then
           :   # used -- fall through and treat as a site
         else
           continue
