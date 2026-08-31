@@ -262,13 +262,77 @@ def fetch_review_threads(owner, repo, pr_num):
     return threads
 
 
+AUTHOR_LIST_KEYS = ("authors", "reviewers", "onRequestAuthors")
+
+# Mirrors isBotAuthor in lgtm/src/bots.ts. Login-shaped only, exactly as there:
+# it is what `allAuthors: true` uses to admit humans and exclude bots.
+_BOT_LOGIN_RE = re.compile(r"(\[bot\]$)|(^(dependabot|renovate|snyk-bot)$)", re.I)
+
+
+def _is_bot_login(login):
+    return bool(_BOT_LOGIN_RE.search(login or ""))
+
+
+def _split_flow(body):
+    """Split a flow collection body on top-level commas, ignoring commas nested
+    inside `[]`/`{}`."""
+    parts, depth, cur = [], 0, ""
+    for ch in body:
+        if ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _flow_list(value):
+    """Parse a YAML flow sequence (`[a, b]`) into a list of scalars. Returns []
+    for anything that is not a complete flow sequence, including `{}`, plain
+    scalars, and a sequence continued on the next line (`[a,`) -- which this
+    line-based reader cannot see the rest of, and must not half-read.
+
+    lgtm.yml already writes flow style for `ownerReviewers`, so an author list
+    can plausibly be written that way too; reading only block style would drop
+    those logins silently."""
+    if not value or not value.startswith("[") or not value.endswith("]"):
+        return []
+    return [item.strip("'\"") for item in _split_flow(value[1:-1])]
+
+
+def _inline_map(value):
+    """Parse a YAML flow mapping (`{allAuthors: true}`) into {key: value}.
+    Returns {} for anything else, including `{}` itself.
+
+    This exists because the `{}` shape that motivated this whole fix is the
+    empty case of a form that can carry settings. A parser that reads `{}` but
+    silently drops `{allAuthors: true}` has fixed one instance of the bug and
+    left the next one armed."""
+    if not value or not value.startswith("{") or not value.endswith("}"):
+        return {}
+    out = {}
+    for part in _split_flow(value[1:-1]):
+        key, sep, val = part.partition(":")
+        if sep:
+            out[key.strip().strip("'\"")] = val.strip()
+    return out
+
+
 def _parse_lgtm_config(owner, repo):
-    """Minimal indentation-based reader for the two things lgtm-boundness needs
-    from lgtm.yml: whether owner/repo is listed under `repos:`, and the set of
-    logins allowed to AUTHOR a dispatched PR for it.
+    """Minimal indentation-based reader for the three things lgtm-boundness
+    needs from lgtm.yml: whether owner/repo is listed under `repos:`, the set
+    of logins allowed to AUTHOR a dispatched PR for it, and whether that repo
+    sets `allAuthors: true`.
 
     Deliberately stdlib-only and line-based, matching the rest of this file's
-    no-yq/no-PyYAML posture. Structure it understands:
+    no-yq/no-PyYAML posture -- the interpreter this script runs under has no
+    PyYAML, and home-manager deploys the file as-is rather than as a packaged
+    derivation that could carry a dependency. Structure it understands:
 
         authors:                 # col 0  -> global author allowlist
           - login                # col 2
@@ -278,13 +342,32 @@ def _parse_lgtm_config(owner, repo):
           owner/repo:            # col 2
             authors:             # col 4  -> repo-scoped author allowlist
               - login            # col 6
+            allAuthors: true     # col 4  -> admit every HUMAN author, this repo only
+          owner/repo: {}         # col 2  -> listed with no settings
 
-    Returns (repo_listed: bool, allowed_authors: set[str]).
+    THE INLINE FORMS ARE NOT DECORATION. `owner/repo: {}` is how two live repos
+    are configured (blueapron/culinary-operations-server and blueapron/bluechef),
+    and a key pattern that required the line to end after the colon classified
+    them as *not listed at all*. `detect_lgtm_bound` then returned False, the
+    loop dropped the lgtm APPROVAL from its exit conditions, and the session
+    declared a PR landable that lgtm was still going to review -- the wrong
+    verdict, arrived at silently, on the half of the config nobody had tested.
+    (On the cost model in detect_lgtm_bound's docstring this is the *cheaper*
+    of the two mistakes -- an early exit the user can correct, rather than a
+    wait for an approval that cannot arrive. Cheaper is not correct.)
+
+    That is why this reader now treats "key with an inline value" and "key with
+    children below it" as the same thing: a key that is present.
+
+    Returns (repo_listed: bool, allowed_authors: set[str] | None,
+             repo_all_authors: bool).
     """
     repo_listed = False
     allowed = set()
     global_authors = set()  # only `authors:`; needed for the back-compat rule below
     per_repo_any = False
+    any_all_authors = False  # any repo at all, for the back-compat rule
+    repo_all_authors = False  # the repo we were asked about
 
     section = None          # current col-0 key
     in_repos = False
@@ -292,26 +375,64 @@ def _parse_lgtm_config(owner, repo):
     repo_sub = None         # current col-4 key inside a repo block
 
     item_re = re.compile(r"^(\s*)-\s+(\S+)\s*$")
-    key_re = re.compile(r"^(\s*)([^\s#][^:]*):\s*$")
+    # A mapping key, with or without an inline value. The `(?![#-])` keeps list
+    # items out: `- foo: bar` is a sequence entry, not a key at this indent.
+    key_re = re.compile(r"^(\s*)(?![#-])([^\s#][^:]*?):(?:[ \t]+(\S.*?))?[ \t]*$")
+    comment_re = re.compile(r"\s+#.*$")
     target = f"{owner}/{repo}"
+
+    def repo_setting(key, value, repo_name):
+        """Apply one repo-scoped setting, from either the block form
+        (`allAuthors: true` at col 4) or the inline form
+        (`owner/repo: {allAuthors: true}`). Returns nothing; updates the
+        closed-over accumulators."""
+        nonlocal per_repo_any, any_all_authors, repo_all_authors
+        if key == "authors":
+            for login in _flow_list(value):
+                per_repo_any = True
+                if repo_name == target:
+                    allowed.add(login)
+        # js-yaml's core schema accepts True/TRUE as booleans, so an exact
+        # "true" compare would silently drop a spelling lgtm honours.
+        elif key == "allAuthors" and (value or "").lower() == "true":
+            any_all_authors = True
+            if repo_name == target:
+                repo_all_authors = True
 
     with open(LGTM_CONFIG_PATH) as f:
         for raw in f:
-            line = raw.rstrip("\n")
+            # \r too: a CRLF file would otherwise leave "true\r" as a value and
+            # strand the trailing-whitespace anchor in key_re.
+            line = raw.rstrip("\r\n")
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
 
             m = key_re.match(line)
             if m:
                 indent, key = len(m.group(1)), m.group(2).strip()
+                value = m.group(3)
+                if value is not None and not value.startswith(("'", '"')):
+                    value = comment_re.sub("", value).strip()
                 if indent == 0:
                     section, in_repos, cur_repo, repo_sub = key, key == "repos", None, None
+                    if section in AUTHOR_LIST_KEYS:
+                        for login in _flow_list(value):
+                            allowed.add(login)
+                            if section == "authors":
+                                global_authors.add(login)
                 elif in_repos and indent == 2:
+                    # Present at this indent == listed, whatever the value. `{}`,
+                    # `null`, and "children on the following lines" are all the
+                    # same fact for our purposes -- and for lgtm's, which pushes
+                    # a scope entry per key of `repos` (lgtm/src/config.ts:121).
                     cur_repo, repo_sub = key, None
                     if key == target:
                         repo_listed = True
+                    for sub_key, sub_value in _inline_map(value).items():
+                        repo_setting(sub_key, sub_value, key)
                 elif in_repos and indent == 4:
                     repo_sub = key
+                    repo_setting(key, value, cur_repo)
                 continue
 
             m = item_re.match(line)
@@ -322,7 +443,7 @@ def _parse_lgtm_config(owner, repo):
             # Global lists. `reviewers` is included because lgtm treats the reviewer
             # pool as implicitly-trusted AUTHORS -- see filterByAuthors in
             # lgtm/src/discover.ts: `new Set([...authors, ...reviewers])`.
-            if not in_repos and indent == 2 and section in ("authors", "reviewers", "onRequestAuthors"):
+            if not in_repos and indent == 2 and section in AUTHOR_LIST_KEYS:
                 allowed.add(value)
                 if section == "authors":
                     global_authors.add(value)
@@ -334,12 +455,14 @@ def _parse_lgtm_config(owner, repo):
                     allowed.add(value)
 
     # Back-compat, mirroring filterByAuthors: with NO author config at all
-    # (`authors` empty AND every per-repo list empty) there is no author
-    # filtering and every PR passes.
-    if not global_authors and not per_repo_any:
-        return repo_listed, None
+    # (`authors` empty AND every per-repo list empty AND no repo setting
+    # allAuthors) there is no author filtering and every PR passes.
+    if not global_authors and not per_repo_any and not any_all_authors:
+        # repo_all_authors is necessarily False here (it implies any_all_authors);
+        # returned for shape, not because it can carry information.
+        return repo_listed, None, repo_all_authors
 
-    return repo_listed, allowed
+    return repo_listed, allowed, repo_all_authors
 
 
 def detect_lgtm_bound(owner, repo, author_login=None):
@@ -392,14 +515,21 @@ def detect_lgtm_bound(owner, repo, author_login=None):
     """
     if not LGTM_CONFIG_PATH.is_file():
         return False
-    repo_listed, allowed_authors = _parse_lgtm_config(owner, repo)
+    repo_listed, allowed_authors, repo_all_authors = _parse_lgtm_config(owner, repo)
     if not repo_listed:
         return False
     if allowed_authors is None:
         return True          # no author filtering configured; every author passes
     if not author_login:
         return False
-    return author_login in allowed_authors
+    if author_login in allowed_authors:
+        return True
+    # `allAuthors: true` admits every remaining HUMAN author, in that one repo.
+    # Same ordering as filterByAuthors: the allowlist wins first, so a bot a
+    # repo deliberately names is still admitted above.
+    if repo_all_authors:
+        return not _is_bot_login(author_login)
+    return False
 
 
 # --- Review classification -------------------------------------------------
