@@ -54,7 +54,14 @@ authors:
   - no-space-before-hash #comment
   - "spaced # scalar"
 
-onRequestAuthors: [ratnikov, 'quoted-author']
+# Block style with an interleaved comment, matching how the real lgtm.yml
+# writes this list. The flow-style spelling is covered by the third fixture
+# below. (No TRAILING comments here: those are PR #435's subject, and a test
+# that depends on an unmerged branch reports the wrong thing on this one.)
+onRequestAuthors:
+  # Reviewed only when a review is requested; never proactively swept.
+  - ratnikov
+  - second-on-request-author
 
 repos:
   food-truck/mono:
@@ -185,17 +192,149 @@ check("inline-map-repo-authors-reject-stranger",
       d("food-truck", "inline-authors", "stranger"), False)
 
 # --- Flow sequences as author lists, at both indents. --------------------
-check("flow-list-global-author", d("food-truck", "mono", "ratnikov"), True)
-check("flow-list-global-quoted-author", d("food-truck", "mono", "quoted-author"), True)
+# (These two logins are onRequestAuthors, so they need the request -- see the
+# on-request section below for why.)
+check("block-list-on-request-author",
+      d("food-truck", "mono", "ratnikov", pool_engaged=True), True)
+check("block-list-second-on-request-author",
+      d("food-truck", "mono", "second-on-request-author", pool_engaged=True), True)
 check("flow-list-repo-author",
       d("blueapron", "internal-frontends", "flow-style-author"), True)
 check("flow-list-repo-author-does-not-leak",
       d("food-truck", "mono", "flow-style-author"), False)
 
+# --- onRequestAuthors bind only when a pool reviewer is engaged. ----------
+# lgtm admits these logins in the two review-REQUESTED lanes only (tier 0 and
+# tier 1, both keyed on `user-review-requested:`); the proactive tier-2 sweep
+# passes `config.authors` WITHOUT them (discover.ts:238). So on a PR nobody
+# requested a reviewer on, no dispatch can ever happen -- and reporting it
+# lgtm-bound makes the loop wait for an approval that cannot arrive, which is
+# the unbounded mistake, not the recoverable one.
+check("on-request-author-without-request",
+      d("food-truck", "mono", "ratnikov"), False)
+check("on-request-author-with-request",
+      d("food-truck", "mono", "ratnikov", pool_engaged=True), True)
+# An ordinary allowlisted author needs no request: the proactive sweep covers
+# them. Gating everyone on a request would be the opposite error.
+check("global-author-needs-no-request",
+      d("food-truck", "mono", "pfarina", pool_engaged=False), True)
+check("reviewer-as-author-needs-no-request",
+      d("food-truck", "mono", "Krosantos", pool_engaged=False), True)
+check("repo-scoped-author-needs-no-request",
+      d("food-truck", "mono", "camden-wonder", pool_engaged=False), True)
+# A request does not admit an author who is in no list at all.
+check("request-does-not-admit-stranger",
+      d("food-truck", "mono", "stranger", pool_engaged=True), False)
+# allAuthors still admits humans in its repo without any request.
+check("all-authors-needs-no-request",
+      d("food-truck", "salmon-of-knowledge", "stranger", pool_engaged=False), True)
+# ...including an on-request author, who is swept there like anybody else:
+# `allAuthors` is inside filterByAuthors, so it admits in EVERY lane. Gating
+# him on a request would be a false negative on a PR lgtm really does review.
+check("all-authors-beats-on-request-gate",
+      d("food-truck", "salmon-of-knowledge", "ratnikov", pool_engaged=False), True)
+# But a bot is still excluded there, request or not.
+check("all-authors-still-excludes-bot-with-request",
+      d("food-truck", "salmon-of-knowledge", "renovate", pool_engaged=True), False)
+
+# --- Engagement is computed from the PR payload, not guessed. -------------
+# The pool is lgtm's `reviewers:` list; a request for one of them, or a review
+# already submitted by one, means the request-only lane can fire.
+e = mod.pool_reviewer_engaged
+pool_pr = lambda requested, reviewed: {
+    "reviewRequests": [{"login": r} for r in requested],
+    "latestReviews": [{"author": {"login": r}} for r in reviewed],
+}
+check("engaged-nothing-requested", e(pool_pr([], []), {"johnnymo87"}), False)
+check("engaged-pool-requested", e(pool_pr(["johnnymo87"], []), {"johnnymo87"}), True)
+check("engaged-non-pool-requested",
+      e(pool_pr(["someone-else"], []), {"johnnymo87"}), False)
+# A pool member who already reviewed is proof the lane fired, even though the
+# request that triggered it has been consumed and is no longer listed.
+check("engaged-pool-already-reviewed",
+      e(pool_pr([], ["johnnymo87"]), {"johnnymo87"}), True)
+check("engaged-non-pool-reviewed",
+      e(pool_pr([], ["someone-else"]), {"johnnymo87"}), False)
+# Team review requests have no `login`; they must not crash or count.
+check("engaged-team-request-ignored",
+      e({"reviewRequests": [{"name": "some-team"}], "latestReviews": []},
+        {"johnnymo87"}), False)
+check("engaged-missing-fields", e({}, {"johnnymo87"}), False)
+
+# --- The pool must be EXTRACTED from the config, not assumed. -------------
+# Every assertion above hands `pool_engaged` or the pool in as a literal, so
+# none of them would go red if the `reviewers:` bucket rotted out of the
+# parser. The pool would come back empty, pool_reviewer_engaged would return
+# False forever, and the gate would look like it was working.
+check("reviewer-pool-extracted",
+      mod.lgtm_reviewer_pool("food-truck", "mono"), {"johnnymo87", "Krosantos"})
+missing_cfg, mod.LGTM_CONFIG_PATH = mod.LGTM_CONFIG_PATH, Path("/nonexistent/lgtm.yml")
+check("reviewer-pool-absent-config", mod.lgtm_reviewer_pool("x", "y"), set())
+check("absent-config-not-bound", d("food-truck", "mono", "pfarina"), False)
+mod.LGTM_CONFIG_PATH = missing_cfg
+
+# --- The main() wiring: which side of the trigger, and when. --------------
+# lgtm keys its request lanes on its OWN login, so a request for a different
+# pool member must NOT bind. This is the whole reason the daemon login is
+# resolved at all, and nothing above would notice if the wiring dropped it.
+calls = []
+def fake_daemon(cmd):
+    calls.append(cmd)
+    return "johnnymo87\n"
+real_run_cmd, mod.run_cmd = mod.run_cmd, fake_daemon
+pr_of = lambda author, requested, reviewed: {
+    "author": {"login": author},
+    "reviewRequests": [{"login": r} for r in requested],
+    "latestReviews": [{"author": {"login": r}} for r in reviewed],
+}
+b = lambda pr: mod.lgtm_bound_for_pr("food-truck", "mono", pr)
+check("wiring-on-request-no-request", b(pr_of("ratnikov", [], [])), False)
+check("wiring-on-request-daemon-requested",
+      b(pr_of("ratnikov", ["johnnymo87"], [])), True)
+check("wiring-on-request-other-pool-member-requested",
+      b(pr_of("ratnikov", ["Krosantos"], [])), False)
+# ...but a pool member who ALREADY REVIEWED binds whoever they are: lgtm
+# dispatches under a rotating pool identity, so the review that consumed the
+# request need not be the daemon's.
+check("wiring-on-request-other-pool-member-reviewed",
+      b(pr_of("ratnikov", [], ["Krosantos"])), True)
+# An ordinary author must not pay for a `gh api user` round-trip at all.
+calls.clear()
+check("wiring-ordinary-author-bound", b(pr_of("pfarina", [], [])), True)
+check("wiring-ordinary-author-skips-daemon-lookup", calls, [])
+mod.run_cmd = real_run_cmd
+
+# --- The fields the engagement test reads must actually be FETCHED. -------
+# A helper that reads a key `gh pr view --json` never asked for returns False
+# forever and looks like a working gate.
+requested_fields = []
+def fake_run_cmd(cmd):
+    requested_fields.append(cmd[cmd.index("--json") + 1])
+    return '{"number":1}'
+real_run_cmd, mod.run_cmd = mod.run_cmd, fake_run_cmd
+mod.get_pr_info(1)
+mod.run_cmd = real_run_cmd
+fields = requested_fields[0].split(",")
+check("pr-info-fetches-review-requests", "reviewRequests" in fields, True)
+check("pr-info-fetches-latest-reviews", "latestReviews" in fields, True)
+
 # --- Back-compat: no author config at all means no author filtering. ------
 mod.LGTM_CONFIG_PATH = Path(sys.argv[3])
 check("no-author-config-admits-anyone", d("blueapron", "bluechef", "stranger"), True)
 check("no-author-config-still-needs-repo", d("blueapron", "nope", "stranger"), False)
+
+# --- The same admissions, written in flow style. -------------------------
+# The main fixture writes the global lists block-style because the real
+# lgtm.yml does. Both spellings reach the same accumulators, and a fixture
+# only proves the shapes someone thought to write down.
+mod.LGTM_CONFIG_PATH = Path(sys.argv[4])
+check("flow-globals-author", d("food-truck", "mono", "pfarina"), True)
+check("flow-globals-reviewer-is-author", d("food-truck", "mono", "Krosantos"), True)
+check("flow-globals-pool-extracted",
+      mod.lgtm_reviewer_pool("food-truck", "mono"), {"johnnymo87", "Krosantos"})
+check("flow-globals-on-request-gated", d("food-truck", "mono", "ratnikov"), False)
+check("flow-globals-on-request-with-request",
+      d("food-truck", "mono", "ratnikov", pool_engaged=True), True)
 PY
 
 # Second fixture for the back-compat rule: repos, but zero author config.
@@ -210,7 +349,17 @@ repos:
       - wonder/blueapron
 YAML
 
-out=$(python3 "$tmp/drive.py" "$SCRIPT" "$tmp/lgtm.yml" "$tmp/lgtm-noauthors.yml")
+# Third fixture: the same global lists, spelled in flow style.
+cat > "$tmp/lgtm-flow.yml" <<'YAML'
+reviewers: [johnnymo87, 'Krosantos']
+authors: [pfarina, ELang7]
+onRequestAuthors: [ratnikov]
+
+repos:
+  food-truck/mono: {}
+YAML
+
+out=$(python3 "$tmp/drive.py" "$SCRIPT" "$tmp/lgtm.yml" "$tmp/lgtm-noauthors.yml" "$tmp/lgtm-flow.yml")
 echo "$out"
 
 fail=0
@@ -225,8 +374,8 @@ done <<<"$out"
 # because grep exits 1 on zero matches, and under errexit that would kill the
 # script before it could print the diagnostic explaining why.
 count=$(grep -c '=' <<<"$out" || true)
-if [ "$count" -lt 35 ]; then
-  echo "FAIL: expected >=35 assertions, got $count (driver did not run?)" >&2
+if [ "$count" -lt 67 ]; then
+  echo "FAIL: expected >=67 assertions, got $count (driver did not run?)" >&2
   fail=1
 fi
 
@@ -255,8 +404,7 @@ for line in text:
         if m:
             seen += 1
             owner, _, repo = m.group(1).partition("/")
-            listed, _allowed, _all = mod._parse_lgtm_config(owner, repo)
-            if not listed:
+            if not mod._parse_lgtm_config(owner, repo).repo_listed:
                 missing.append(m.group(1))
 if not seen:
     print("FAIL: real lgtm.yml has no repos: entries -- extractor is broken")
