@@ -36,6 +36,7 @@ Usage in the SKILL.md loop body:
     done
 """
 import argparse
+import collections
 import json
 import re
 import subprocess
@@ -91,6 +92,12 @@ def get_pr_info(pr_num=None):
     *summary* that does NOT include user.type. We re-fetch reviews via the
     REST API (get_reviews) when we need bot/human disambiguation.
 
+    `reviewRequests` and `latestReviews` are fetched for one narrow purpose:
+    deciding whether an lgtm pool reviewer is engaged, which is what admits an
+    `onRequestAuthors` author (see pool_reviewer_engaged). `latestReviews` is
+    the summary form and is NOT used for verdicts anywhere -- it carries no
+    `user.type`, so it cannot tell a bot from a human.
+
     `author.login` is used by latest_non_bot_review to exclude self-reviews
     -- GitHub auto-creates an empty `state=COMMENTED` review wrapper every
     time the PR author posts an inline reply to a comment thread, and those
@@ -100,7 +107,8 @@ def get_pr_info(pr_num=None):
         cmd.append(str(pr_num))
     cmd.extend([
         "--json",
-        "number,url,state,reviewDecision,headRefName,baseRefName,headRefOid,author",
+        "number,url,state,reviewDecision,headRefName,baseRefName,headRefOid,author,"
+        "reviewRequests,latestReviews",
     ])
     out = run_cmd(cmd)
     return json.loads(out)
@@ -264,6 +272,15 @@ def fetch_review_threads(owner, repo, pr_num):
 
 AUTHOR_LIST_KEYS = ("authors", "reviewers", "onRequestAuthors")
 
+# What one read of lgtm.yml tells us about one repo. A namedtuple rather than a
+# widening tuple: `on_request_authors` and `reviewer_pool` are answers to a
+# different question than `allowed_authors` (see detect_lgtm_bound), and
+# positional unpacking of five values is how they get silently transposed.
+LgtmScope = collections.namedtuple(
+    "LgtmScope",
+    "repo_listed allowed_authors repo_all_authors on_request_authors reviewer_pool",
+)
+
 # Mirrors isBotAuthor in lgtm/src/bots.ts. Login-shaped only, exactly as there:
 # it is what `allAuthors: true` uses to admit humans and exclude bots.
 _BOT_LOGIN_RE = re.compile(r"(\[bot\]$)|(^(dependabot|renovate|snyk-bot)$)", re.I)
@@ -359,11 +376,17 @@ def _parse_lgtm_config(owner, repo):
     That is why this reader now treats "key with an inline value" and "key with
     children below it" as the same thing: a key that is present.
 
-    Returns (repo_listed: bool, allowed_authors: set[str] | None,
-             repo_all_authors: bool).
+    `onRequestAuthors` is kept OUT of `allowed_authors` and returned separately:
+    lgtm admits those logins only in its two review-requested lanes, so they are
+    a conditional admission, not a member of the union (see detect_lgtm_bound).
+
+    Returns an LgtmScope. `allowed_authors is None` means no author filtering is
+    configured at all.
     """
     repo_listed = False
     allowed = set()
+    on_request = set()
+    reviewer_pool = set()
     global_authors = set()  # only `authors:`; needed for the back-compat rule below
     per_repo_any = False
     any_all_authors = False  # any repo at all, for the back-compat rule
@@ -396,6 +419,21 @@ def _parse_lgtm_config(owner, repo):
     key_re = re.compile(r"^(\s*)(?![#-])([^\s#][^:]*?):(?:[ \t]+(\S.*?))?[ \t]*$")
     comment_re = re.compile(r"\s+#.*$")
     target = f"{owner}/{repo}"
+
+    def add_global(section_key, login):
+        """File one entry from a top-level author list. `reviewers` joins the
+        allowlist because lgtm treats its reviewer pool as implicitly-trusted
+        AUTHORS -- see filterByAuthors in lgtm/src/discover.ts:
+        `new Set([...authors, ...reviewers])` -- and is ALSO remembered as the
+        pool, which is what an on-request admission is keyed on."""
+        if section_key == "onRequestAuthors":
+            on_request.add(login)
+            return
+        allowed.add(login)
+        if section_key == "authors":
+            global_authors.add(login)
+        elif section_key == "reviewers":
+            reviewer_pool.add(login)
 
     def repo_setting(key, value, repo_name):
         """Apply one repo-scoped setting, from either the block form
@@ -433,9 +471,7 @@ def _parse_lgtm_config(owner, repo):
                     section, in_repos, cur_repo, repo_sub = key, key == "repos", None, None
                     if section in AUTHOR_LIST_KEYS:
                         for login in _flow_list(value):
-                            allowed.add(login)
-                            if section == "authors":
-                                global_authors.add(login)
+                            add_global(section, login)
                 elif in_repos and indent == 2:
                     # Present at this indent == listed, whatever the value. `{}`,
                     # `null`, and "children on the following lines" are all the
@@ -462,13 +498,9 @@ def _parse_lgtm_config(owner, repo):
             value = m.group(2) if m.group(2) is not None else (
                 m.group(3) if m.group(3) is not None else m.group(4))
 
-            # Global lists. `reviewers` is included because lgtm treats the reviewer
-            # pool as implicitly-trusted AUTHORS -- see filterByAuthors in
-            # lgtm/src/discover.ts: `new Set([...authors, ...reviewers])`.
+            # Global lists; add_global decides which bucket each one lands in.
             if not in_repos and indent == 2 and section in AUTHOR_LIST_KEYS:
-                allowed.add(value)
-                if section == "authors":
-                    global_authors.add(value)
+                add_global(section, value)
             # Repo-scoped authors. Track presence for the back-compat rule, but only
             # admit the ones belonging to the repo we are asked about.
             elif in_repos and indent == 6 and repo_sub == "authors":
@@ -482,12 +514,12 @@ def _parse_lgtm_config(owner, repo):
     if not global_authors and not per_repo_any and not any_all_authors:
         # repo_all_authors is necessarily False here (it implies any_all_authors);
         # returned for shape, not because it can carry information.
-        return repo_listed, None, repo_all_authors
+        return LgtmScope(repo_listed, None, repo_all_authors, on_request, reviewer_pool)
 
-    return repo_listed, allowed, repo_all_authors
+    return LgtmScope(repo_listed, allowed, repo_all_authors, on_request, reviewer_pool)
 
 
-def detect_lgtm_bound(owner, repo, author_login=None):
+def detect_lgtm_bound(owner, repo, author_login=None, pool_engaged=False):
     """Whether the lgtm daemon will actually dispatch a review for THIS PR.
 
     Two conditions, and the second one is the whole point of this function
@@ -495,9 +527,16 @@ def detect_lgtm_bound(owner, repo, author_login=None):
 
       1. owner/repo is listed under `repos:` in ~/projects/lgtm/lgtm.yml, and
       2. the PR's AUTHOR appears in the effective allowlist, which is
-         `authors: U reviewers: U repos[R].authors:` (plus `onRequestAuthors:`).
-         `reviewers:` IS in that union -- see `filterByAuthors` in
-         lgtm/src/discover.ts: `new Set([...authors, ...reviewers])`.
+         `authors: U reviewers: U repos[R].authors:`. `reviewers:` IS in that
+         union -- see `filterByAuthors` in lgtm/src/discover.ts:
+         `new Set([...authors, ...reviewers])`.
+
+    `onRequestAuthors:` is NOT in that union unconditionally. Those logins are
+    admitted only when a pool reviewer is engaged on the PR -- pass
+    `pool_engaged=pool_reviewer_engaged(pr, lgtm_reviewer_pool(owner, repo))`.
+    Treating them as unconditional members is the unbounded mistake: lgtm's
+    proactive sweep will never dispatch for them, so the loop waits for an
+    approval that cannot arrive.
 
     Returns False if the config is absent (devbox/personal hosts treat all PRs
     as not lgtm-bound), and False if the author is unknown to the caller, which
@@ -534,24 +573,147 @@ def detect_lgtm_bound(owner, repo, author_login=None):
     Fails toward NOT-lgtm-bound when the author is unavailable: a false negative
     costs an early exit the user can correct, a false positive costs an
     unbounded wait nobody notices.
+
+    KNOWN REMAINING FALSE POSITIVES, so the next reader does not re-derive them.
+    All three make this return True on a PR lgtm cannot actually dispatch for,
+    and all three are about lanes rather than authors:
+
+      * food-truck/tempo + jvanbaalen: a repo-scoped author whose repo carries a
+        deliberately unmatchable `paths` sentinel, so the proactive sweep can
+        never fire and only the request lanes remain (lgtm-68r).
+      * food-truck/protos + mshahrawat, on files outside `paths`: per-repo
+        authors get no path bypass (discover.ts:577), so that PR too is
+        reachable only by request.
+      * Staleness: tiers 1 and 2 drop PRs idle beyond MAX_PR_AGE_HOURS, which
+        is what SKILL.md's 20-hour re-request refresh exists to beat.
+
+    Closing these needs the `paths`/staleness state this function does not
+    fetch. They are listed, not fixed.
     """
     if not LGTM_CONFIG_PATH.is_file():
         return False
-    repo_listed, allowed_authors, repo_all_authors = _parse_lgtm_config(owner, repo)
-    if not repo_listed:
+    scope = _parse_lgtm_config(owner, repo)
+    if not scope.repo_listed:
         return False
-    if allowed_authors is None:
+    if scope.allowed_authors is None:
         return True          # no author filtering configured; every author passes
     if not author_login:
         return False
-    if author_login in allowed_authors:
+    if author_login in scope.allowed_authors:
         return True
     # `allAuthors: true` admits every remaining HUMAN author, in that one repo.
     # Same ordering as filterByAuthors: the allowlist wins first, so a bot a
     # repo deliberately names is still admitted above.
-    if repo_all_authors:
-        return not _is_bot_login(author_login)
+    #
+    # This is checked BEFORE the on-request gate, and the order is load-bearing
+    # rather than stylistic: `allAuthors` lives inside `filterByAuthors`, so it
+    # admits in EVERY lane including the proactive sweep. An on-request author
+    # who also happens to write in an allAuthors repo is swept like anyone else
+    # and needs no request. Gating him would be a false negative on a PR lgtm
+    # really does review -- caught by a differential run against the real
+    # config, not by reading, because ratnikov is exactly that case.
+    if scope.repo_all_authors and not _is_bot_login(author_login):
+        return True
+    # `onRequestAuthors` are otherwise admitted ONLY in lgtm's two
+    # review-requested lanes (tier 0 re-review and tier 1 first-review, both
+    # keyed on `user-review-requested:`); the proactive tier-2 sweep passes
+    # `config.authors` without them (discover.ts:238). On a PR where nobody has
+    # requested a pool reviewer, no lane can fire, so calling it lgtm-bound
+    # makes the loop wait for an approval that cannot arrive.
+    # Bots never reach the author filter in those lanes -- `filterOutBots` runs
+    # first (discover.ts:115, :1762) -- so an engaged request cannot dispatch
+    # for one. Config-absurd today; one condition beats reasoning about it
+    # again later.
+    if author_login in scope.on_request_authors and not _is_bot_login(author_login):
+        return bool(pool_engaged)
     return False
+
+
+def lgtm_reviewer_pool(owner, repo):
+    """The `reviewers:` pool from lgtm.yml, or an empty set when the config is
+    absent. Exposed so callers can compute `pool_engaged` without re-reading
+    the file or hardcoding logins."""
+    if not LGTM_CONFIG_PATH.is_file():
+        return set()
+    return _parse_lgtm_config(owner, repo).reviewer_pool
+
+
+def resolve_daemon_login():
+    """lgtm's own GitHub login, the identity its request-only lanes key on.
+    Mirrors `resolveDaemonLogin` in lgtm/src/discover.ts, including its
+    failure posture: None on any error, and the caller degrades rather than
+    guessing."""
+    try:
+        return run_cmd(["gh", "api", "user", "-q", ".login"]).strip() or None
+    except (subprocess.CalledProcessError, OSError):
+        return None
+
+
+def pool_reviewer_engaged(pr, reviewer_pool, daemon_login=None):
+    """Whether lgtm's request-only lane can fire on this PR -- the trigger that
+    admits an `onRequestAuthors` login.
+
+    TWO SIDES, AND THEY ARE NOT SYMMETRIC.
+
+    Requested side: lgtm keys both request lanes on its OWN login -- tier 1
+    searches `user-review-requested:@me`, and tier 0 re-admits an on-request
+    author only when `reviewer === daemonLogin`. So when `daemon_login` is
+    known, only a request for THAT login counts. Accepting any pool member
+    here would call a PR bound that no lane will ever pick up (request goes to
+    a pool member who is not the daemon), and waiting for an approval that
+    cannot arrive is the unbounded mistake this whole gate exists to prevent.
+
+    Reviewed side: pool-wide, always, and this is not laziness. lgtm dispatches
+    under a rotating pool identity, so the review that consumes the request
+    lands as whichever member `pickReviewer` chose -- not necessarily the
+    daemon's own login. Restricting this side to the daemon would flip a PR
+    from bound to not-bound at the exact moment its dispatch happened.
+
+    The reviewed side is also why both sides exist: a request is CONSUMED when
+    the review lands, disappearing from `reviewRequests` and appearing in
+    `latestReviews`.
+
+    When `daemon_login` is None (the `gh api user` lookup failed) the requested
+    side degrades to pool-wide. That degradation errs toward over-waiting, so
+    it is announced on stderr rather than made silently.
+
+    Team review requests (`{"name": ...}` with no `login`) are ignored: lgtm
+    searches `user-review-requested:`, which team requests do not satisfy.
+    """
+    if not reviewer_pool:
+        return False
+    requested = {
+        (r or {}).get("login") for r in (pr.get("reviewRequests") or [])
+    }
+    reviewed = {
+        ((r or {}).get("author") or {}).get("login")
+        for r in (pr.get("latestReviews") or [])
+    }
+    request_matches = ({daemon_login} & requested) if daemon_login \
+        else (reviewer_pool & requested)
+    return bool(request_matches or (reviewer_pool & reviewed))
+
+
+def lgtm_bound_for_pr(owner, repo, pr):
+    """`detect_lgtm_bound` for a PR payload from `get_pr_info`, resolving the
+    on-request trigger for it. Exists so the wiring -- which fields are read,
+    when the daemon login is looked up -- is one testable function instead of
+    inline code in main() that only a live `gh` can exercise."""
+    author_login = (pr.get("author") or {}).get("login")
+    scope = _parse_lgtm_config(owner, repo) if LGTM_CONFIG_PATH.is_file() else None
+    pool_engaged = False
+    # The `gh api user` round-trip is only worth paying when the answer can
+    # change the verdict: the author is admitted by nothing except the
+    # on-request list.
+    if scope and author_login and author_login in scope.on_request_authors \
+            and author_login not in (scope.allowed_authors or set()):
+        daemon_login = resolve_daemon_login()
+        if daemon_login is None:
+            print("  note: could not resolve lgtm's login (`gh api user`); "
+                  "treating a request for any pool reviewer as the trigger, "
+                  "which errs toward waiting", file=sys.stderr)
+        pool_engaged = pool_reviewer_engaged(pr, scope.reviewer_pool, daemon_login)
+    return detect_lgtm_bound(owner, repo, author_login, pool_engaged=pool_engaged)
 
 
 # --- Review classification -------------------------------------------------
@@ -827,9 +989,7 @@ def main():
     # A control that cannot disagree with you is not a control, so compute the
     # auto value regardless and SAY where the printed number came from.
     try:
-        detected = detect_lgtm_bound(
-            owner, repo, (pr.get("author") or {}).get("login")
-        )
+        detected = lgtm_bound_for_pr(owner, repo, pr)
     except OSError:
         detected = None
 
