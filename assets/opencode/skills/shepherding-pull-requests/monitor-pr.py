@@ -374,7 +374,23 @@ def _parse_lgtm_config(owner, repo):
     cur_repo = None         # current "owner/repo" under repos:
     repo_sub = None         # current col-4 key inside a repo block
 
-    item_re = re.compile(r"^(\s*)-\s+(\S+)\s*$")
+    # A block sequence entry, with an optional trailing comment. YAML ends a
+    # plain scalar at ` #`, so `- login  # note` is the login `login` -- but
+    # `- foo#bar` is the whole token, because a `#` not preceded by whitespace
+    # starts no comment. Requiring the item to be the last thing on the line
+    # (the old `(\S+)\s*$`) dropped the login entirely, and a dropped login is
+    # a `lgtm-bound: False` on a PR lgtm reviews. The `authors:` block is
+    # exactly where a `- foo  # temporary` gets written.
+    #
+    # Quoted scalars are matched as a whole rather than left to `\S+`, and the
+    # plain form is forbidden from starting with a quote. Otherwise
+    # `- "word # rest"` would capture `"word`, treat ` # rest"` as a comment,
+    # and admit the login `word` -- inventing an author out of a config line
+    # that names nobody. That is the expensive direction: an invented author
+    # who matches the PR's makes the loop wait for an approval that cannot
+    # arrive, where merely dropping the line only ends the wait early.
+    item_re = re.compile(
+        r"""^(\s*)-[ \t]+(?:'([^']*)'|"([^"]*)"|([^\s'"]\S*))(?:[ \t]+\#.*)?[ \t]*$""")
     # A mapping key, with or without an inline value. The `(?![#-])` keeps list
     # items out: `- foo: bar` is a sequence entry, not a key at this indent.
     key_re = re.compile(r"^(\s*)(?![#-])([^\s#][^:]*?):(?:[ \t]+(\S.*?))?[ \t]*$")
@@ -438,7 +454,13 @@ def _parse_lgtm_config(owner, repo):
             m = item_re.match(line)
             if not m:
                 continue
-            indent, value = len(m.group(1)), m.group(2)
+            # Exactly one of the three scalar alternatives matched; quotes are
+            # consumed by the pattern rather than stripped afterwards, so
+            # `- login"` stays `login"` (which is what YAML says it is, and
+            # which no GitHub login can be) instead of becoming `login`.
+            indent = len(m.group(1))
+            value = m.group(2) if m.group(2) is not None else (
+                m.group(3) if m.group(3) is not None else m.group(4))
 
             # Global lists. `reviewers` is included because lgtm treats the reviewer
             # pool as implicitly-trusted AUTHORS -- see filterByAuthors in

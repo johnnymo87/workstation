@@ -48,6 +48,11 @@ authors:
   - pfarina
   # a comment: with a colon in it
   - ELang7
+  - commented-author  # temporarily allowlisted, remove after PROJ-1234
+  - 'quoted-block-author'
+  - hash#in#login
+  - no-space-before-hash #comment
+  - "spaced # scalar"
 
 onRequestAuthors: [ratnikov, 'quoted-author']
 
@@ -55,6 +60,7 @@ repos:
   food-truck/mono:
     authors:
       - camden-wonder
+      - repo-commented-author  # same shape, one level deeper
     paths:
       - wonder/blueapron
     ownerReviewers:
@@ -107,6 +113,36 @@ check("block-repo-global-author", d("food-truck", "mono", "pfarina"), True)
 check("block-repo-reviewer-is-author", d("food-truck", "mono", "Krosantos"), True)
 check("block-repo-scoped-author", d("food-truck", "mono", "camden-wonder"), True)
 check("block-repo-unknown-author", d("food-truck", "mono", "stranger"), False)
+
+# --- A block list item keeps its login when the line carries a comment. ---
+# YAML ends a scalar at ` #`, so these are the logins `commented-author` and
+# `repo-commented-author`. A reader that requires the item to be the last
+# thing on the line drops them silently, and silently dropping a login is a
+# `lgtm-bound: False` on a PR lgtm reviews.
+check("block-item-trailing-comment",
+      d("food-truck", "mono", "commented-author"), True)
+check("block-item-trailing-comment-repo-scoped",
+      d("food-truck", "mono", "repo-commented-author"), True)
+check("block-item-trailing-comment-repo-scoped-does-not-leak",
+      d("blueapron", "bluechef", "repo-commented-author"), False)
+check("block-item-quoted", d("food-truck", "mono", "quoted-block-author"), True)
+# `#` NOT preceded by whitespace does not start a YAML comment, so the login
+# is the whole token -- truncating at the first `#` would invent a login.
+check("block-item-hash-without-space", d("food-truck", "mono", "hash#in#login"), True)
+check("block-item-hash-not-truncated", d("food-truck", "mono", "hash"), False)
+# The comment text itself must not become a login.
+check("block-item-comment-text-not-an-author",
+      d("food-truck", "mono", "temporarily"), False)
+# One space before `#` is enough to start a YAML comment; none is required
+# after it.
+check("block-item-no-space-after-hash",
+      d("food-truck", "mono", "no-space-before-hash"), True)
+# A quoted scalar containing ` # ` is ONE scalar, not a login plus a comment.
+# Capturing the prefix would invent the login `spaced` out of a line that
+# names nobody -- and an invented login that happens to match the PR author
+# makes the loop wait for an approval that cannot arrive.
+check("quoted-scalar-with-hash-not-split",
+      d("food-truck", "mono", "spaced"), False)
 
 # A repo-scoped author must NOT leak to another repo (the union is
 # global ∪ reviewers ∪ repos[R].authors -- R, not every R).
@@ -189,8 +225,8 @@ done <<<"$out"
 # because grep exits 1 on zero matches, and under errexit that would kill the
 # script before it could print the diagnostic explaining why.
 count=$(grep -c '=' <<<"$out" || true)
-if [ "$count" -lt 26 ]; then
-  echo "FAIL: expected >=26 assertions, got $count (driver did not run?)" >&2
+if [ "$count" -lt 35 ]; then
+  echo "FAIL: expected >=35 assertions, got $count (driver did not run?)" >&2
   fail=1
 fi
 
