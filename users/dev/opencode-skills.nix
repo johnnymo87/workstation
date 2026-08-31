@@ -23,6 +23,7 @@ let
     "opencode-launch"
     "preparing-for-compaction"
     "reviewing-github-prs"
+    "reviving-worktree-orphaned-sessions"
     "scheduling-wakes"
     "searching-sessions"
     "swarm-messaging"
