@@ -1430,6 +1430,18 @@
         touch $out
       '';
 
+      # lgtm.yml reader guard. Separate check from monitor-pr-once above, on
+      # the same reasoning as the plugin suites below: two checks report two
+      # independent verdicts under `--keep-going`, and the check NAME says
+      # which half broke without opening a log.
+      monitor-pr-lgtm-config = devboxPkgs.runCommand "monitor-pr-lgtm-config-guard" {
+        nativeBuildInputs = with devboxPkgs; [ bash python3 coreutils gnugrep ];
+      } ''
+        cd ${self}
+        bash users/dev/test-monitor-pr-lgtm-config.sh
+        touch $out
+      '';
+
       # ---- assets/opencode/plugins TypeScript suites (bead workstation-dmat) ----
       #
       # WHY THESE EXIST: this directory held THREE test harnesses and CI ran
