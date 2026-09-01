@@ -96,6 +96,7 @@
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
       session-state-plugin = p.callPackage ./pkgs/session-state-plugin { };
+      slack-mcp-server = p.callPackage ./pkgs/slack-mcp-server { };
       teamclaude = p.callPackage ./pkgs/teamclaude { };
       vercel = p.callPackage ./pkgs/vercel { };
     } // nixpkgs.lib.optionalAttrs (system == devboxSystem || system == darwinSystem) {

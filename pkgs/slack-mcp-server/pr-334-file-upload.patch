@@ -1,0 +1,1075 @@
+From 9555f5901a5d3e738b836f2d1dde6675bf92d096 Mon Sep 17 00:00:00 2001
+From: "Max (macubuntu)" <mr.maksboi@gmail.com>
+Date: Tue, 28 Jul 2026 19:44:35 -0400
+Subject: [PATCH] feat: add file_upload tool
+
+Adds a file_upload tool covering the gap left by issues #247 and #88:
+the server could download attachments but never upload anything.
+
+Content comes from exactly one of three sources: file_path for a file on
+disk, content for UTF-8 text, content_base64 for binary data such as a
+screenshot taken in memory. Files are shared into a channel or thread via
+files.getUploadURLExternal -> upload -> files.completeUploadExternal
+(slack-go UploadFileContext), with initial_comment as the caption.
+
+Verified working with browser session tokens (xoxc/xoxd), not just OAuth
+and bot tokens. Earlier attempts assumed files.* rejects session tokens;
+a full round trip against a live workspace shows it does not.
+
+Security, addressing the reasons #121 and #285 were closed:
+- tool is unregistered unless SLACK_MCP_FILE_UPLOAD_TOOL is set, and that
+  variable doubles as a channel allowlist, same semantics as
+  SLACK_MCP_ADD_MESSAGE_TOOL
+- file_path is rejected entirely unless SLACK_MCP_FILE_UPLOAD_PATHS lists
+  the directories the server may read; paths are resolved through symlinks
+  and matched with filepath.Rel so a sibling sharing a name prefix cannot
+  slip through
+- the file is opened during validation with O_NOFOLLOW|O_NONBLOCK and every
+  later step works off that descriptor, closing the TOCTOU window between
+  the allowlist check and the read, and refusing FIFOs and devices
+- channel is resolved before the allowlist check, so #general cannot be
+  used to reach a channel the policy excludes
+- request params are not logged, they carry the file payload
+
+Uploads stream from the descriptor, so a 100MB cap does not mean 100MB of
+memory. Windows keeps building: the open flags live in build-tagged files.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ README.md                                 |  25 +-
+ docs/03-configuration-and-usage.md        |   6 +-
+ pkg/handler/file_upload.go                | 311 ++++++++++++++++
+ pkg/handler/file_upload_open_unix.go      |  10 +
+ pkg/handler/file_upload_open_unix_test.go |  56 +++
+ pkg/handler/file_upload_open_windows.go   |   7 +
+ pkg/handler/file_upload_test.go           | 424 ++++++++++++++++++++++
+ pkg/provider/api.go                       |   7 +
+ pkg/server/server.go                      |  41 +++
+ pkg/server/server_test.go                 |   1 +
+ 10 files changed, 884 insertions(+), 4 deletions(-)
+ create mode 100644 pkg/handler/file_upload.go
+ create mode 100644 pkg/handler/file_upload_open_unix.go
+ create mode 100644 pkg/handler/file_upload_open_unix_test.go
+ create mode 100644 pkg/handler/file_upload_open_windows.go
+ create mode 100644 pkg/handler/file_upload_test.go
+
+diff --git a/README.md b/README.md
+index 3a93a2c4..367dc796 100644
+--- a/README.md
++++ b/README.md
+@@ -236,6 +236,27 @@ Clear all completed saved items from the "Save for Later" panel. This is a bulk
+ 
+ - **Parameters:** None.
+ 
++### 19. file_upload
++Upload a file to a public channel, private channel, or direct message (DM, or IM) conversation, optionally into a thread. Covers screenshots and images, logs, CSV/JSON data and code snippets.
++
++> **Note:** Uploading is disabled by default for safety. To enable, set the `SLACK_MCP_FILE_UPLOAD_TOOL` environment variable. Uploading from `file_path` additionally requires `SLACK_MCP_FILE_UPLOAD_PATHS` to list the directories the server may read. See the Environment Variables section below for details.
++
++Provide the content in exactly one of three ways: `file_path`, `content` or `content_base64`.
++
++- **Parameters:**
++  - `channel_id` (string, required): ID of the channel in format `Cxxxxxxxxxx` or its name starting with `#...` or `@...` aka `#general` or `@username_dm`.
++  - `thread_ts` (string, optional): Unique identifier of a thread's parent message in format `1234567890.123456`. Optional, if not provided the file is posted to the channel itself. Never use a reply's ts, always the parent's.
++  - `file_path` (string, optional): Absolute path to a local file to upload, e.g. `/home/user/Pictures/screenshot.png`. Only paths inside `SLACK_MCP_FILE_UPLOAD_PATHS` are allowed; when that variable is unset this argument is rejected. The file is streamed from disk, not buffered in memory.
++  - `content` (string, optional): UTF-8 text to upload as a file, e.g. a log excerpt or a code snippet. Requires `filename`.
++  - `content_base64` (string, optional): Base64-encoded binary content, the way to upload a screenshot or an image without writing it to disk first. Requires `filename`.
++  - `filename` (string, optional): File name shown in Slack. Required for `content` and `content_base64`, defaults to the base name of `file_path`. Slack derives the mime type from the extension, so an image must keep its `.png` or `.jpg` suffix, otherwise it renders as a plain attachment with no preview.
++  - `title` (string, optional): Title of the file in Slack. Defaults to `filename`.
++  - `initial_comment` (string, optional): Message posted together with the file, this is the caption users see. Supports Slack mrkdwn.
++  - `alt_txt` (string, optional): Accessibility description of an image for screen readers, up to 1000 characters. Recommended for screenshots.
++  - `snippet_type` (string, optional): Syntax highlighting for text snippets, e.g. `python`, `go`, `yaml`.
++
++Maximum upload size is 100MB. Works in stealth mode (`xoxc`/`xoxd`) as well as with OAuth and bot tokens.
++
+ ## Resources
+ 
+ The Slack MCP Server exposes two special directory resources for easy access to workspace metadata:
+@@ -292,12 +313,14 @@ Fetches a CSV directory of all users in the workspace.
+ | `SLACK_MCP_ADD_MESSAGE_UNFURLING` | No        | `nil`                     | Enable to let Slack unfurl posted links or set comma-separated list of domains e.g. `github.com,slack.com` to whitelist unfurling only for them. If text contains whitelisted and unknown domain unfurling will be disabled for security reasons.                                         |
+ | `SLACK_MCP_REACTION_TOOL`        | No        | `nil`                     | Enable `reactions_add` and `reactions_remove` tools by setting to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tools are only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
+ | `SLACK_MCP_ATTACHMENT_TOOL`      | No        | `nil`                     | Enable the `attachment_get_data` tool by setting to `true`, `1`, or `yes`. Does not support channel-level restrictions. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
++| `SLACK_MCP_FILE_UPLOAD_TOOL`     | No        | `nil`                     | Enable the `file_upload` tool by setting it to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
++| `SLACK_MCP_FILE_UPLOAD_PATHS`    | No        | `nil`                     | Comma-separated list of directories the server may read when `file_upload` is called with `file_path`, e.g. `/home/user/Pictures,/tmp`. Paths are resolved through symlinks and must stay inside one of these roots. When unset, `file_path` is rejected entirely and only `content` / `content_base64` uploads work. Use `/` to allow any absolute path. |
+ | `SLACK_MCP_MARK_TOOL`             | No        | `nil`                     | Enable the `conversations_mark` tool by setting to `true` or `1`. Disabled by default to prevent accidental marking of messages as read.                                                                                                                                                  |
+ | `SLACK_MCP_USERS_CACHE`           | No        | `~/Library/Caches/slack-mcp-server/users_cache.json` (macOS)<br>`~/.cache/slack-mcp-server/users_cache.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/users_cache.json` (Windows) | Path to the users cache file. Used to cache Slack user information to avoid repeated API calls on startup. |
+ | `SLACK_MCP_CHANNELS_CACHE`        | No        | `~/Library/Caches/slack-mcp-server/channels_cache_v2.json` (macOS)<br>`~/.cache/slack-mcp-server/channels_cache_v2.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/channels_cache_v2.json` (Windows) | Path to the channels cache file. Used to cache Slack channel information to avoid repeated API calls on startup. |
+ | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |
+ | `SLACK_MCP_GOVSLACK`              | No        | `nil`                     | Set to `true` to enable [GovSlack](https://slack.com/solutions/govslack) mode. Routes API calls to `slack-gov.com` endpoints instead of `slack.com` for FedRAMP-compliant government workspaces.                                                                                          |
+-| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`) require their specific env var OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `channels_list`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`. |
++| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `file_upload`) require their specific env var OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `file_upload`, `conversations_search_messages`, `channels_list`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`. |
+ 
+ *You need one of: `xoxp` (user), `xoxb` (bot), or both `xoxc`/`xoxd` tokens for authentication.
+ 
+diff --git a/docs/03-configuration-and-usage.md b/docs/03-configuration-and-usage.md
+index 9b335dc0..43d6edae 100644
+--- a/docs/03-configuration-and-usage.md
++++ b/docs/03-configuration-and-usage.md
+@@ -251,7 +251,7 @@ docker-compose up -d
+ | Argument                    | Required ? | Description                                                                                                                                                                                                         |
+ |-----------------------------|------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+ | `--transport` or `-t`       | Yes        | Select transport for the MCP Server, possible values are: `stdio`, `sse`                                                                                                                                            |
+-| `--enabled-tools` or `-e`   | No         | Comma-separated list of tools to register. If not set, all tools are registered. Runtime permissions (e.g., `SLACK_MCP_ADD_MESSAGE_TOOL`) are still enforced. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `conversations_join`, `conversations_leave`, `conversations_unreads`, `conversations_mark`, `channels_list`, `channels_me`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`, `users_search`. |
++| `--enabled-tools` or `-e`   | No         | Comma-separated list of tools to register. If not set, all tools are registered. Runtime permissions (e.g., `SLACK_MCP_ADD_MESSAGE_TOOL`) are still enforced. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `file_upload`, `conversations_search_messages`, `conversations_join`, `conversations_leave`, `conversations_unreads`, `conversations_mark`, `channels_list`, `channels_me`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`, `users_search`. |
+ 
+ ### Environment Variables
+ 
+@@ -277,7 +277,7 @@ docker-compose up -d
+ | `SLACK_MCP_CACHE_TTL`             | No        | `24h`                     | Cache time-to-live. Supports duration format (`24h`, `30m`) or seconds (`3600`). Set to `0` to disable TTL (cache forever). When the cache expires, stale data is served immediately while a background refresh fetches fresh data.                                                       |
+ | `SLACK_MCP_MIN_REFRESH_INTERVAL`  | No        | `30s`                     | Minimum interval between forced cache refreshes. Prevents API abuse from repeated force-refresh requests. Supports duration format (`30s`, `1m`) or seconds (`60`). Set to `0` to disable rate limiting.                                                                                  |
+ | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |
+-| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`) require their specific env var to be set OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `conversations_join`, `conversations_leave`, `conversations_unreads`, `conversations_mark`, `channels_list`, `channels_me`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`, `users_search`. |
++| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `file_upload`) require their specific env var to be set OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `file_upload`, `conversations_search_messages`, `conversations_join`, `conversations_leave`, `conversations_unreads`, `conversations_mark`, `channels_list`, `channels_me`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`, `users_search`. |
+ 
+ ### Tool Registration and Permissions
+ 
+@@ -287,7 +287,7 @@ Tools are controlled at two levels:
+ - **Registration** (`SLACK_MCP_ENABLED_TOOLS`) — determines which tools are visible to MCP clients
+ - **Runtime permissions** (tool-specific env vars like `SLACK_MCP_ADD_MESSAGE_TOOL`) — channel restrictions for write tools
+ 
+-Write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`) are **not registered by default** to prevent accidental exposure. To enable them, you must either:
++Write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `file_upload`) are **not registered by default** to prevent accidental exposure. To enable them, you must either:
+ 1. Set their specific environment variable (e.g., `SLACK_MCP_ADD_MESSAGE_TOOL`), or
+ 2. Explicitly list them in `SLACK_MCP_ENABLED_TOOLS`
+ 
+diff --git a/pkg/handler/file_upload.go b/pkg/handler/file_upload.go
+new file mode 100644
+index 00000000..300a75e3
+--- /dev/null
++++ b/pkg/handler/file_upload.go
+@@ -0,0 +1,311 @@
++package handler
++
++import (
++	"bytes"
++	"context"
++	"encoding/base64"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/mark3labs/mcp-go/mcp"
++	"github.com/slack-go/slack"
++	"go.uber.org/zap"
++)
++
++// maxUploadFileSizeBytes caps a single upload. Slack itself allows 1GB, but an
++// agent-driven tool has no business shipping arbitrarily large payloads.
++const maxUploadFileSizeBytes = 100 * 1024 * 1024 // 100MB
++
++type fileUploadParams struct {
++	channel        string
++	threadTs       string
++	filename       string
++	title          string
++	initialComment string
++	altTxt         string
++	snippetType    string
++
++	// Exactly one of the two is populated: data holds inline content, file is
++	// an already-open descriptor for an on-disk upload. The caller owns file
++	// and must close it.
++	data     []byte
++	file     *os.File
++	filePath string
++	size     int64
++}
++
++// openUploadFile opens an already-validated path and re-checks it through the
++// descriptor. Validating a path and then reopening it by name is a TOCTOU hole:
++// the name can point at something else by the time we read it. Everything after
++// this call works off the descriptor, which cannot be swapped.
++func openUploadFile(resolved string) (*os.File, int64, error) {
++	f, err := os.OpenFile(resolved, os.O_RDONLY|openUploadExtraFlags, 0)
++	if err != nil {
++		return nil, 0, fmt.Errorf("cannot open %q: %w", resolved, err)
++	}
++
++	info, err := f.Stat()
++	if err != nil {
++		f.Close()
++		return nil, 0, fmt.Errorf("cannot stat %q: %w", resolved, err)
++	}
++	if !info.Mode().IsRegular() {
++		f.Close()
++		return nil, 0, fmt.Errorf("%q is not a regular file", resolved)
++	}
++	if info.Size() > maxUploadFileSizeBytes {
++		f.Close()
++		return nil, 0, fmt.Errorf("file size %d bytes exceeds maximum allowed size of %d bytes", info.Size(), maxUploadFileSizeBytes)
++	}
++	if info.Size() == 0 {
++		f.Close()
++		return nil, 0, fmt.Errorf("file %q is empty, Slack rejects zero-length uploads", resolved)
++	}
++
++	return f, info.Size(), nil
++}
++
++// parseUploadPathsEnv splits SLACK_MCP_FILE_UPLOAD_PATHS into directory roots.
++func parseUploadPathsEnv(raw string) []string {
++	var roots []string
++	for _, item := range strings.Split(raw, ",") {
++		if item = strings.TrimSpace(item); item != "" {
++			roots = append(roots, item)
++		}
++	}
++	return roots
++}
++
++// resolveUploadFilePath validates that path points at a regular file located
++// inside one of allowedRoots. Symlinks are resolved first, so a link sitting in
++// an allowed directory cannot smuggle a file out of an unallowed one.
++func resolveUploadFilePath(path string, allowedRoots []string) (string, error) {
++	if len(allowedRoots) == 0 {
++		return "", errors.New(
++			"uploading by file_path is disabled: set SLACK_MCP_FILE_UPLOAD_PATHS to a comma separated list " +
++				"of directories the server may read, e.g. 'SLACK_MCP_FILE_UPLOAD_PATHS=/home/user/Pictures,/tmp'",
++		)
++	}
++	if !filepath.IsAbs(path) {
++		return "", fmt.Errorf("file_path must be an absolute path, got %q", path)
++	}
++
++	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
++	if err != nil {
++		return "", fmt.Errorf("cannot access file_path %q: %w", path, err)
++	}
++
++	info, err := os.Stat(resolved)
++	if err != nil {
++		return "", fmt.Errorf("cannot stat file_path %q: %w", path, err)
++	}
++	if !info.Mode().IsRegular() {
++		return "", fmt.Errorf("file_path %q is not a regular file", path)
++	}
++
++	for _, root := range allowedRoots {
++		if !filepath.IsAbs(root) {
++			continue
++		}
++		// Roots may themselves be symlinks; ignore ones that cannot be resolved.
++		resolvedRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
++		if err != nil {
++			continue
++		}
++		rel, err := filepath.Rel(resolvedRoot, resolved)
++		if err != nil {
++			continue
++		}
++		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
++			return resolved, nil
++		}
++	}
++
++	return "", fmt.Errorf(
++		"file_path %q is not allowed, it resolves outside SLACK_MCP_FILE_UPLOAD_PATHS", path)
++}
++
++func (ch *ConversationsHandler) parseParamsToolFileUpload(ctx context.Context, request mcp.CallToolRequest) (*fileUploadParams, error) {
++	toolConfig := os.Getenv("SLACK_MCP_FILE_UPLOAD_TOOL")
++	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
++
++	if toolConfig == "" {
++		if !strings.Contains(enabledTools, "file_upload") {
++			ch.logger.Error("File-upload tool disabled by default")
++			return nil, errors.New(
++				"by default, the file_upload tool is disabled to guard Slack workspaces against accidental uploads. " +
++					"To enable it, set the SLACK_MCP_FILE_UPLOAD_TOOL environment variable to true, 1, or a comma separated list of channels " +
++					"to limit where the MCP can upload files, e.g. 'SLACK_MCP_FILE_UPLOAD_TOOL=C1234567890,D0987654321', " +
++					"'SLACK_MCP_FILE_UPLOAD_TOOL=!C1234567890' to enable all except one or 'SLACK_MCP_FILE_UPLOAD_TOOL=true' for all channels and DMs",
++			)
++		}
++		toolConfig = "true"
++	}
++
++	channel := request.GetString("channel_id", "")
++	if channel == "" {
++		ch.logger.Error("channel_id missing in file-upload params")
++		return nil, errors.New("channel_id must be a string")
++	}
++	channel, err := ch.resolveChannelID(ctx, channel)
++	if err != nil {
++		ch.logger.Error("Channel not found", zap.String("channel", channel), zap.Error(err))
++		return nil, err
++	}
++	if !isChannelAllowedForConfig(channel, toolConfig) {
++		ch.logger.Warn("File-upload tool not allowed for channel", zap.String("channel", channel), zap.String("policy", toolConfig))
++		return nil, fmt.Errorf("file_upload tool is not allowed for channel %q, applied policy: %s", channel, toolConfig)
++	}
++
++	threadTs := request.GetString("thread_ts", "")
++	if threadTs != "" && !strings.Contains(threadTs, ".") {
++		ch.logger.Error("Invalid thread_ts format", zap.String("thread_ts", threadTs))
++		return nil, errors.New("thread_ts must be a valid timestamp in format 1234567890.123456")
++	}
++
++	filePath := strings.TrimSpace(request.GetString("file_path", ""))
++	content := request.GetString("content", "")
++	contentB64 := strings.TrimSpace(request.GetString("content_base64", ""))
++
++	sources := 0
++	for _, present := range []bool{filePath != "", content != "", contentB64 != ""} {
++		if present {
++			sources++
++		}
++	}
++	if sources != 1 {
++		return nil, errors.New("exactly one of file_path, content or content_base64 must be provided")
++	}
++
++	params := &fileUploadParams{
++		channel:        channel,
++		threadTs:       threadTs,
++		title:          request.GetString("title", ""),
++		initialComment: request.GetString("initial_comment", ""),
++		altTxt:         request.GetString("alt_txt", ""),
++		snippetType:    request.GetString("snippet_type", ""),
++	}
++
++	// Slack shows whatever we send as the file name, so never let a path leak into it.
++	filename := strings.TrimSpace(request.GetString("filename", ""))
++	if filename != "" {
++		filename = filepath.Base(filepath.Clean(filename))
++	}
++
++	switch {
++	case filePath != "":
++		resolved, err := resolveUploadFilePath(filePath, parseUploadPathsEnv(os.Getenv("SLACK_MCP_FILE_UPLOAD_PATHS")))
++		if err != nil {
++			ch.logger.Warn("Rejected file_path", zap.String("file_path", filePath), zap.Error(err))
++			return nil, err
++		}
++		f, size, err := openUploadFile(resolved)
++		if err != nil {
++			ch.logger.Warn("Rejected file_path on open", zap.String("file_path", filePath), zap.Error(err))
++			return nil, err
++		}
++		if filename == "" {
++			filename = filepath.Base(resolved)
++		}
++		params.file = f
++		params.filePath = resolved
++		params.size = size
++
++	case contentB64 != "":
++		if filename == "" {
++			return nil, errors.New("filename is required when uploading content_base64")
++		}
++		if len(contentB64) > maxUploadFileSizeBytes {
++			return nil, fmt.Errorf("content_base64 length %d exceeds maximum allowed size of %d bytes", len(contentB64), maxUploadFileSizeBytes)
++		}
++		data, err := base64.StdEncoding.DecodeString(contentB64)
++		if err != nil {
++			return nil, fmt.Errorf("content_base64 is not valid base64: %w", err)
++		}
++		params.data = data
++		params.size = int64(len(data))
++
++	default:
++		if filename == "" {
++			return nil, errors.New("filename is required when uploading content")
++		}
++		if len(content) > maxUploadFileSizeBytes {
++			return nil, fmt.Errorf("content length %d exceeds maximum allowed size of %d bytes", len(content), maxUploadFileSizeBytes)
++		}
++		params.data = []byte(content)
++		params.size = int64(len(content))
++	}
++
++	params.filename = filename
++	if params.title == "" {
++		params.title = params.filename
++	}
++
++	return params, nil
++}
++
++// FileUploadHandler uploads a file to Slack and shares it into a channel or thread.
++func (ch *ConversationsHandler) FileUploadHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
++	// Deliberately not logging request.Params: for this tool they carry the
++	// file payload itself (content / content_base64).
++	ch.logger.Debug("FileUploadHandler called")
++
++	if ready, err := ch.apiProvider.IsReady(); !ready {
++		ch.logger.Error("API provider not ready", zap.Error(err))
++		return nil, err
++	}
++
++	params, err := ch.parseParamsToolFileUpload(ctx, request)
++	if err != nil {
++		ch.logger.Error("Failed to parse file_upload params", zap.Error(err))
++		return nil, err
++	}
++
++	uploadParams := slack.UploadFileParameters{
++		Filename:        params.filename,
++		FileSize:        int(params.size),
++		Title:           params.title,
++		InitialComment:  params.initialComment,
++		Channel:         params.channel,
++		ThreadTimestamp: params.threadTs,
++		AltTxt:          params.altTxt,
++		SnippetType:     params.snippetType,
++	}
++
++	if params.file != nil {
++		// Descriptor was opened and vetted during validation, so nothing can be
++		// swapped underneath us. Streaming it keeps the file out of memory.
++		defer params.file.Close()
++		uploadParams.Reader = params.file
++	} else {
++		uploadParams.Reader = bytes.NewReader(params.data)
++	}
++
++	ch.logger.Debug("Uploading file to Slack",
++		zap.String("channel", params.channel),
++		zap.String("thread_ts", params.threadTs),
++		zap.String("filename", params.filename),
++		zap.Int("size", uploadParams.FileSize),
++	)
++
++	summary, err := ch.apiProvider.Slack().UploadFileContext(ctx, uploadParams)
++	if err != nil {
++		ch.logger.Error("Slack UploadFileContext failed", zap.Error(err))
++		return nil, err
++	}
++
++	ch.logger.Debug("File uploaded", zap.String("file_id", summary.ID))
++
++	return mcp.NewToolResultText(fmt.Sprintf(
++		`{"file_id":"%s","filename":"%s","title":"%s","size":%d,"channel":"%s","thread_ts":"%s"}`,
++		escapeJSON(summary.ID),
++		escapeJSON(params.filename),
++		escapeJSON(summary.Title),
++		uploadParams.FileSize,
++		escapeJSON(params.channel),
++		escapeJSON(params.threadTs),
++	)), nil
++}
+diff --git a/pkg/handler/file_upload_open_unix.go b/pkg/handler/file_upload_open_unix.go
+new file mode 100644
+index 00000000..67f5ea2f
+--- /dev/null
++++ b/pkg/handler/file_upload_open_unix.go
+@@ -0,0 +1,10 @@
++//go:build !windows
++
++package handler
++
++import "syscall"
++
++// openUploadExtraFlags hardens the upload open() against a file swapped in
++// between validation and read: O_NOFOLLOW refuses a symlink in the final path
++// component, O_NONBLOCK keeps a FIFO from blocking the handler forever.
++const openUploadExtraFlags = syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+diff --git a/pkg/handler/file_upload_open_unix_test.go b/pkg/handler/file_upload_open_unix_test.go
+new file mode 100644
+index 00000000..aa916864
+--- /dev/null
++++ b/pkg/handler/file_upload_open_unix_test.go
+@@ -0,0 +1,56 @@
++//go:build !windows
++
++package handler
++
++import (
++	"os"
++	"path/filepath"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestUnitOpenUploadFileRefusesFifo(t *testing.T) {
++	dir := t.TempDir()
++	dir, err := filepath.EvalSymlinks(dir)
++	require.NoError(t, err)
++
++	fifo := filepath.Join(dir, "pipe")
++	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
++		t.Skipf("mkfifo unsupported: %v", err)
++	}
++
++	// Without O_NONBLOCK the open would hang forever waiting for a writer,
++	// which would wedge the tool call with no way to cancel it.
++	done := make(chan error, 1)
++	go func() {
++		f, _, err := openUploadFile(fifo)
++		if f != nil {
++			f.Close()
++		}
++		done <- err
++	}()
++
++	select {
++	case err := <-done:
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "not a regular file")
++	case <-time.After(5 * time.Second):
++		t.Fatal("openUploadFile blocked on a FIFO")
++	}
++}
++
++func TestUnitOpenUploadFileRefusesDevice(t *testing.T) {
++	if _, err := os.Stat("/dev/zero"); err != nil {
++		t.Skip("/dev/zero unavailable")
++	}
++	f, _, err := openUploadFile("/dev/zero")
++	if f != nil {
++		f.Close()
++	}
++	require.Error(t, err)
++	assert.Contains(t, err.Error(), "not a regular file")
++}
+diff --git a/pkg/handler/file_upload_open_windows.go b/pkg/handler/file_upload_open_windows.go
+new file mode 100644
+index 00000000..c45c975f
+--- /dev/null
++++ b/pkg/handler/file_upload_open_windows.go
+@@ -0,0 +1,7 @@
++//go:build windows
++
++package handler
++
++// Windows has no O_NOFOLLOW/O_NONBLOCK; the post-open IsRegular check still
++// rejects anything that is not a plain file.
++const openUploadExtraFlags = 0
+diff --git a/pkg/handler/file_upload_test.go b/pkg/handler/file_upload_test.go
+new file mode 100644
+index 00000000..1484ee32
+--- /dev/null
++++ b/pkg/handler/file_upload_test.go
+@@ -0,0 +1,424 @@
++package handler
++
++import (
++	"context"
++	"encoding/base64"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/mark3labs/mcp-go/mcp"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.uber.org/zap"
++)
++
++// setEnvUpload sets an env var and returns a cleanup func restoring the old value.
++func setEnvUpload(t *testing.T, key, value string) {
++	t.Helper()
++	old, had := os.LookupEnv(key)
++	require.NoError(t, os.Setenv(key, value))
++	t.Cleanup(func() {
++		if had {
++			_ = os.Setenv(key, old)
++		} else {
++			_ = os.Unsetenv(key)
++		}
++	})
++}
++
++func newUploadHandler() *ConversationsHandler {
++	return &ConversationsHandler{logger: zap.NewNop()}
++}
++
++// newUploadRequest builds a CallToolRequest with the given string arguments.
++func newUploadRequest(args map[string]any) mcp.CallToolRequest {
++	req := mcp.CallToolRequest{}
++	req.Params.Name = "file_upload"
++	req.Params.Arguments = args
++	return req
++}
++
++func TestUnitResolveUploadFilePath(t *testing.T) {
++	root := t.TempDir()
++	// Resolve the temp dir itself, macOS/CI may hand back a symlinked path.
++	root, err := filepath.EvalSymlinks(root)
++	require.NoError(t, err)
++
++	allowed := filepath.Join(root, "allowed")
++	require.NoError(t, os.MkdirAll(allowed, 0o755))
++	outside := filepath.Join(root, "outside")
++	require.NoError(t, os.MkdirAll(outside, 0o755))
++
++	goodFile := filepath.Join(allowed, "shot.png")
++	require.NoError(t, os.WriteFile(goodFile, []byte("png"), 0o644))
++
++	secretFile := filepath.Join(outside, "secret.txt")
++	require.NoError(t, os.WriteFile(secretFile, []byte("secret"), 0o644))
++
++	// A symlink that lives inside the allowlist but points outside of it.
++	escapingLink := filepath.Join(allowed, "escape.txt")
++	require.NoError(t, os.Symlink(secretFile, escapingLink))
++
++	t.Run("rejects when allowlist is empty", func(t *testing.T) {
++		_, err := resolveUploadFilePath(goodFile, nil)
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "SLACK_MCP_FILE_UPLOAD_PATHS")
++	})
++
++	t.Run("rejects relative path", func(t *testing.T) {
++		_, err := resolveUploadFilePath("relative/shot.png", []string{allowed})
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "absolute")
++	})
++
++	t.Run("accepts file inside allowed root", func(t *testing.T) {
++		got, err := resolveUploadFilePath(goodFile, []string{allowed})
++		require.NoError(t, err)
++		assert.Equal(t, goodFile, got)
++	})
++
++	t.Run("accepts file when one of several roots matches", func(t *testing.T) {
++		got, err := resolveUploadFilePath(goodFile, []string{"/nonexistent", allowed})
++		require.NoError(t, err)
++		assert.Equal(t, goodFile, got)
++	})
++
++	t.Run("rejects file outside allowed root", func(t *testing.T) {
++		_, err := resolveUploadFilePath(secretFile, []string{allowed})
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "not allowed")
++	})
++
++	t.Run("rejects path traversal escaping the root", func(t *testing.T) {
++		traversal := filepath.Join(allowed, "..", "outside", "secret.txt")
++		_, err := resolveUploadFilePath(traversal, []string{allowed})
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "not allowed")
++	})
++
++	t.Run("rejects symlink pointing outside the root", func(t *testing.T) {
++		_, err := resolveUploadFilePath(escapingLink, []string{allowed})
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "not allowed")
++	})
++
++	t.Run("rejects sibling directory sharing a name prefix", func(t *testing.T) {
++		// /tmp/x/allowed must not authorise /tmp/x/allowed-evil
++		evil := filepath.Join(root, "allowed-evil")
++		require.NoError(t, os.MkdirAll(evil, 0o755))
++		evilFile := filepath.Join(evil, "f.txt")
++		require.NoError(t, os.WriteFile(evilFile, []byte("x"), 0o644))
++
++		_, err := resolveUploadFilePath(evilFile, []string{allowed})
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "not allowed")
++	})
++
++	t.Run("rejects directory", func(t *testing.T) {
++		_, err := resolveUploadFilePath(allowed, []string{allowed})
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "regular file")
++	})
++
++	t.Run("rejects missing file", func(t *testing.T) {
++		_, err := resolveUploadFilePath(filepath.Join(allowed, "nope.txt"), []string{allowed})
++		require.Error(t, err)
++	})
++
++	t.Run("root slash allows any absolute path", func(t *testing.T) {
++		got, err := resolveUploadFilePath(secretFile, []string{"/"})
++		require.NoError(t, err)
++		assert.Equal(t, secretFile, got)
++	})
++}
++
++func TestUnitParseUploadPathsEnv(t *testing.T) {
++	t.Run("empty when unset", func(t *testing.T) {
++		assert.Empty(t, parseUploadPathsEnv(""))
++	})
++
++	t.Run("splits and trims csv", func(t *testing.T) {
++		assert.Equal(t, []string{"/tmp", "/home/max/Pictures"},
++			parseUploadPathsEnv(" /tmp , /home/max/Pictures "))
++	})
++
++	t.Run("drops empty entries", func(t *testing.T) {
++		assert.Equal(t, []string{"/tmp"}, parseUploadPathsEnv("/tmp,,  ,"))
++	})
++}
++
++func TestUnitParseParamsToolFileUpload(t *testing.T) {
++	ch := newUploadHandler()
++
++	t.Run("disabled by default", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "")
++		setEnvUpload(t, "SLACK_MCP_ENABLED_TOOLS", "")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"content":    "hello",
++			"filename":   "a.txt",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "SLACK_MCP_FILE_UPLOAD_TOOL")
++	})
++
++	t.Run("requires channel_id", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"content":  "hello",
++			"filename": "a.txt",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "channel_id")
++	})
++
++	t.Run("requires exactly one content source", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "exactly one")
++
++		_, err = ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"content":    "hello",
++			"file_path":  "/tmp/a.txt",
++			"filename":   "a.txt",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "exactly one")
++	})
++
++	t.Run("requires filename for inline content", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"content":    "hello",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "filename")
++	})
++
++	t.Run("accepts inline text content", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		params, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id":      "C123",
++			"content":         "log line",
++			"filename":        "build.log",
++			"initial_comment": "вот лог",
++			"thread_ts":       "1234567890.123456",
++		}))
++		require.NoError(t, err)
++		assert.Equal(t, "C123", params.channel)
++		assert.Equal(t, "build.log", params.filename)
++		assert.Equal(t, []byte("log line"), params.data)
++		assert.Equal(t, "вот лог", params.initialComment)
++		assert.Equal(t, "1234567890.123456", params.threadTs)
++	})
++
++	t.Run("decodes base64 content", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		raw := []byte{0x89, 'P', 'N', 'G'}
++		params, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id":     "C123",
++			"content_base64": base64.StdEncoding.EncodeToString(raw),
++			"filename":       "shot.png",
++		}))
++		require.NoError(t, err)
++		assert.Equal(t, raw, params.data)
++		assert.Equal(t, "shot.png", params.filename)
++	})
++
++	t.Run("rejects malformed base64", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id":     "C123",
++			"content_base64": "!!!not-base64!!!",
++			"filename":       "shot.png",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "base64")
++	})
++
++	t.Run("strips directories from filename", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		params, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"content":    "x",
++			"filename":   "../../etc/passwd",
++		}))
++		require.NoError(t, err)
++		assert.Equal(t, "passwd", params.filename)
++	})
++
++	t.Run("rejects content larger than the limit", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"content":    strings.Repeat("a", maxUploadFileSizeBytes+1),
++			"filename":   "big.txt",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "exceeds")
++	})
++
++	t.Run("honours channel allowlist in the env flag", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "C999")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"content":    "x",
++			"filename":   "a.txt",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "not allowed")
++
++		params, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C999",
++			"content":    "x",
++			"filename":   "a.txt",
++		}))
++		require.NoError(t, err)
++		assert.Equal(t, "C999", params.channel)
++	})
++
++	t.Run("reads file from an allowed path", func(t *testing.T) {
++		dir := t.TempDir()
++		dir, err := filepath.EvalSymlinks(dir)
++		require.NoError(t, err)
++		p := filepath.Join(dir, "report.csv")
++		require.NoError(t, os.WriteFile(p, []byte("a,b\n1,2\n"), 0o644))
++
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_PATHS", dir)
++
++		params, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"file_path":  p,
++		}))
++		require.NoError(t, err)
++		t.Cleanup(func() { params.file.Close() })
++		assert.Equal(t, "report.csv", params.filename, "filename defaults to the basename")
++		assert.Equal(t, p, params.filePath)
++		assert.Equal(t, int64(8), params.size)
++		require.NotNil(t, params.file, "file must be opened during validation, not later")
++	})
++
++	t.Run("rejects invalid thread_ts", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"thread_ts":  "not-a-timestamp",
++			"content":    "x",
++			"filename":   "a.txt",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "thread_ts")
++	})
++
++	t.Run("treats empty base64 as no source at all", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id":     "C123",
++			"content_base64": "",
++			"filename":       "empty.png",
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "exactly one")
++	})
++
++	t.Run("requires filename for base64 content", func(t *testing.T) {
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++
++		_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id":     "C123",
++			"content_base64": base64.StdEncoding.EncodeToString([]byte("x")),
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "filename")
++	})
++
++	t.Run("rejects an empty file on disk", func(t *testing.T) {
++		dir := t.TempDir()
++		dir, err := filepath.EvalSymlinks(dir)
++		require.NoError(t, err)
++		p := filepath.Join(dir, "empty.log")
++		require.NoError(t, os.WriteFile(p, nil, 0o644))
++
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++		setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_PATHS", dir)
++
++		_, err = ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++			"channel_id": "C123",
++			"file_path":  p,
++		}))
++		require.Error(t, err)
++		assert.Contains(t, err.Error(), "empty")
++	})
++}
++
++func TestUnitOpenUploadFile(t *testing.T) {
++	dir := t.TempDir()
++	dir, err := filepath.EvalSymlinks(dir)
++	require.NoError(t, err)
++
++	t.Run("opens a regular file and reports its size", func(t *testing.T) {
++		p := filepath.Join(dir, "ok.txt")
++		require.NoError(t, os.WriteFile(p, []byte("12345"), 0o644))
++
++		f, size, err := openUploadFile(p)
++		require.NoError(t, err)
++		defer f.Close()
++		assert.Equal(t, int64(5), size)
++	})
++
++	t.Run("refuses to follow a symlink", func(t *testing.T) {
++		// Guards the TOCTOU window: resolveUploadFilePath hands over a resolved
++		// path, so anything still a symlink at open time was swapped in.
++		target := filepath.Join(dir, "target.txt")
++		require.NoError(t, os.WriteFile(target, []byte("secret"), 0o644))
++		link := filepath.Join(dir, "swapped.txt")
++		require.NoError(t, os.Symlink(target, link))
++
++		_, _, err := openUploadFile(link)
++		require.Error(t, err)
++	})
++
++	t.Run("refuses a directory", func(t *testing.T) {
++		_, _, err := openUploadFile(dir)
++		require.Error(t, err)
++	})
++}
++
++func TestUnitParseParamsToolFileUploadRejectsPathOutsideAllowlist(t *testing.T) {
++	ch := newUploadHandler()
++
++	allowedDir := t.TempDir()
++	otherDir := t.TempDir()
++	p := filepath.Join(otherDir, "secret.env")
++	require.NoError(t, os.WriteFile(p, []byte("TOKEN=1"), 0o644))
++
++	setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_TOOL", "true")
++	setEnvUpload(t, "SLACK_MCP_FILE_UPLOAD_PATHS", allowedDir)
++
++	_, err := ch.parseParamsToolFileUpload(context.Background(), newUploadRequest(map[string]any{
++		"channel_id": "C123",
++		"file_path":  p,
++	}))
++	require.Error(t, err)
++	assert.Contains(t, err.Error(), "not allowed")
++}
+diff --git a/pkg/provider/api.go b/pkg/provider/api.go
+index e40a2b3f..47adfab6 100644
+--- a/pkg/provider/api.go
++++ b/pkg/provider/api.go
+@@ -231,6 +231,9 @@ type SlackAPI interface {
+ 	GetFileInfoContext(ctx context.Context, fileID string, count, page int) (*slack.File, []slack.Comment, *slack.Paging, error)
+ 	GetFileContext(ctx context.Context, downloadURL string, writer io.Writer) error
+ 
++	// Used to upload files
++	UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
++
+ 	// Used to get channel info (for unread counts with xoxp tokens)
+ 	GetConversationInfoContext(ctx context.Context, input *slack.GetConversationInfoInput) (*slack.Channel, error)
+ 
+@@ -549,6 +552,10 @@ func (c *MCPSlackClient) GetFileContext(ctx context.Context, downloadURL string,
+ 	return c.slackClient.GetFileContext(ctx, downloadURL, writer)
+ }
+ 
++func (c *MCPSlackClient) UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error) {
++	return c.slackClient.UploadFileContext(ctx, params)
++}
++
+ func (c *MCPSlackClient) GetConversationInfoContext(ctx context.Context, input *slack.GetConversationInfoInput) (*slack.Channel, error) {
+ 	return c.slackClient.GetConversationInfoContext(ctx, input)
+ }
+diff --git a/pkg/server/server.go b/pkg/server/server.go
+index d11ab846..153464fb 100644
+--- a/pkg/server/server.go
++++ b/pkg/server/server.go
+@@ -31,6 +31,7 @@ const (
+ 	ToolReactionsAdd                = "reactions_add"
+ 	ToolReactionsRemove             = "reactions_remove"
+ 	ToolAttachmentGetData           = "attachment_get_data"
++	ToolFileUpload                  = "file_upload"
+ 	ToolConversationsSearchMessages = "conversations_search_messages"
+ 	ToolConversationsUnreads        = "conversations_unreads"
+ 	ToolConversationsMark           = "conversations_mark"
+@@ -56,6 +57,7 @@ var ValidToolNames = []string{
+ 	ToolReactionsAdd,
+ 	ToolReactionsRemove,
+ 	ToolAttachmentGetData,
++	ToolFileUpload,
+ 	ToolConversationsSearchMessages,
+ 	ToolConversationsUnreads,
+ 	ToolConversationsMark,
+@@ -251,6 +253,45 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
+ 		), conversationsHandler.FilesGetHandler)
+ 	}
+ 
++	if shouldAddTool(ToolFileUpload, enabledTools, "SLACK_MCP_FILE_UPLOAD_TOOL") {
++		s.AddTool(mcp.NewTool(ToolFileUpload,
++			mcp.WithDescription("Upload a file to a public channel, private channel, or direct message (DM, or IM) conversation, optionally into a thread. Use it to share screenshots and images, logs, CSV/JSON data or code snippets. Provide the content in exactly one of three ways: file_path for a file on disk, content for UTF-8 text, or content_base64 for binary data such as a screenshot."),
++			mcp.WithTitleAnnotation("Upload File"),
++			mcp.WithDestructiveHintAnnotation(true),
++			mcp.WithString("channel_id",
++				mcp.Required(),
++				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... aka #general or @username_dm."),
++			),
++			mcp.WithString("thread_ts",
++				mcp.Description("Unique identifier of a thread's parent message in format 1234567890.123456. Optional, if not provided the file is posted to the channel itself. Never use a reply's ts, always the parent's."),
++			),
++			mcp.WithString("file_path",
++				mcp.Description("Absolute path to a local file to upload, e.g. /home/user/Pictures/screenshot.png. Only paths inside SLACK_MCP_FILE_UPLOAD_PATHS are allowed; when that variable is unset this argument is rejected."),
++			),
++			mcp.WithString("content",
++				mcp.Description("UTF-8 text to upload as a file, e.g. a log excerpt or a code snippet. Requires filename."),
++			),
++			mcp.WithString("content_base64",
++				mcp.Description("Base64-encoded binary content, the way to upload a screenshot or an image without writing it to disk first. Requires filename."),
++			),
++			mcp.WithString("filename",
++				mcp.Description("File name shown in Slack, e.g. 'screenshot.png' or 'build.log'. Required for content and content_base64, defaults to the base name of file_path. Slack derives the mime type from the extension, so an image must keep its .png or .jpg suffix, otherwise it renders as a plain attachment with no preview."),
++			),
++			mcp.WithString("title",
++				mcp.Description("Title of the file in Slack. Defaults to filename."),
++			),
++			mcp.WithString("initial_comment",
++				mcp.Description("Message posted together with the file, this is the caption users see. Supports Slack mrkdwn."),
++			),
++			mcp.WithString("alt_txt",
++				mcp.Description("Accessibility description of an image for screen readers, up to 1000 characters. Recommended for screenshots."),
++			),
++			mcp.WithString("snippet_type",
++				mcp.Description("Syntax highlighting for text snippets, e.g. 'python', 'go', 'yaml'."),
++			),
++		), conversationsHandler.FileUploadHandler)
++	}
++
+ 	conversationsSearchTool := mcp.NewTool(ToolConversationsSearchMessages,
+ 		mcp.WithDescription("Search messages in a public channel, private channel, or direct message (DM, or IM) conversation using filters. All filters are optional, if not provided then search_query is required."),
+ 		mcp.WithTitleAnnotation("Search Messages"),
+diff --git a/pkg/server/server_test.go b/pkg/server/server_test.go
+index 3ef5a157..b94ea33c 100644
+--- a/pkg/server/server_test.go
++++ b/pkg/server/server_test.go
+@@ -100,6 +100,7 @@ func TestValidToolNames(t *testing.T) {
+ 			ToolReactionsAdd:                true,
+ 			ToolReactionsRemove:             true,
+ 			ToolAttachmentGetData:           true,
++			ToolFileUpload:                  true,
+ 			ToolConversationsSearchMessages: true,
+ 			ToolConversationsUnreads:        true,
+ 			ToolConversationsMark:           true,
