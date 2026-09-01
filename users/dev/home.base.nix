@@ -1013,7 +1013,7 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
     # model has room to think and act across subagents and tool calls.
     # Starting at 64k tokens and tuning from there is a reasonable default."
     # Pairs with the adaptive thinking defaults we set in
-    # assets/opencode/opencode.base.json (opus 5 medium, claude-fable-5 high).
+    # assets/opencode/opencode.base.json (opus 5 medium, claude-fable-5-1 high).
     # This is a cap, not a forced allocation: models still emit only what they
     # want, but long thinking runs no longer get truncated at 32k. Other models are
     # unaffected (their own model.limit.output still wins via Math.min in
