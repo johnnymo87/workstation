@@ -118,6 +118,8 @@ mkdir -p "$repo/.worktrees"
 clean_wt="$repo/.worktrees/clean-merged"
 fresh_clean_wt="$repo/.worktrees/fresh-clean-merged"
 live_clean_wt="$repo/.worktrees/live-clean-merged"
+session_clean_wt="$repo/.worktrees/session-clean-merged"
+idle_session_wt="$repo/.worktrees/idle-session-merged"
 dirty_wt="$repo/.worktrees/dirty-merged"
 stale_dirty_wt="$repo/.worktrees/stale-dirty-merged"
 stale_mixed_wt="$repo/.worktrees/stale-mixed-merged"
@@ -126,6 +128,8 @@ live_abandoned_wt="$repo/.worktrees/live-abandoned"
 git -C "$repo" worktree add -b clean-merged "$clean_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b fresh-clean-merged "$fresh_clean_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b live-clean-merged "$live_clean_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b session-clean-merged "$session_clean_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b idle-session-merged "$idle_session_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b dirty-merged "$dirty_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b stale-dirty-merged "$stale_dirty_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b stale-mixed-merged "$stale_mixed_wt" origin/main >/dev/null
@@ -203,6 +207,39 @@ done
 [ "$ready" -eq "${#live_pids[@]}" ] || fail "test occupants never took a cwd" \
   "only $ready of ${#live_pids[@]} processes had a readable /proc cwd"
 
+# An opencode session's directory is a row in opencode.db, NOT any process's
+# cwd -- the serve that owns it runs elsewhere and holds no handle inside the
+# tree. So both of these are clean, merged, aged past the minimum-age floor
+# and have NO live process inside: /proc says nothing about them, and only the
+# session table can tell them apart. That is the exact shape of the worktree
+# this script destroyed on 2026-09-01.
+find "$session_clean_wt" -exec touch -d '20 days ago' {} +
+find "$idle_session_wt" -exec touch -d '20 days ago' {} +
+
+session_db="$home/.local/share/opencode/opencode.db"
+mkdir -p "$(dirname "$session_db")"
+python3 - "$session_db" "$(cd "$session_clean_wt" && pwd -P)" "$(cd "$idle_session_wt" && pwd -P)" <<'SESSION_DB_PY'
+import sqlite3, sys, time
+
+db, live_dir, idle_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+now_ms = int(time.time() * 1000)
+con = sqlite3.connect(db)
+con.execute(
+    "create table session (id text primary key, directory text not null, "
+    "time_updated integer not null)"
+)
+con.executemany(
+    "insert into session (id, directory, time_updated) values (?, ?, ?)",
+    [
+        # Alive but idle: parked on a scheduled wake, tree untouched for weeks.
+        ("ses_live", live_dir, now_ms - 3 * 86400 * 1000),
+        # Long gone. Must NOT protect: the real host carries 4456 stale rows,
+        # and honouring them all would pin every worktree they ever named.
+        ("ses_idle", idle_dir, now_ms - 30 * 86400 * 1000),
+    ],
+)
+con.commit()
+SESSION_DB_PY
 fakebin="$tmpdir/fakebin"
 remove_log="$tmpdir/remove.log"
 mkdir -p "$fakebin"
@@ -247,6 +284,10 @@ assert_remove_not_logged "$live_clean_wt" \
   "clean merged worktree with a live process inside is not selected for removal"
 assert_remove_not_logged "$live_abandoned_wt" \
   "abandoned worktree with a live process inside is not selected for removal"
+assert_remove_not_logged "$session_clean_wt" \
+  "aged clean worktree owned by a live opencode session is not selected for removal"
+assert_remove_logged "$idle_session_wt" \
+  "aged clean worktree whose session went idle weeks ago is still selected for removal"
 
 # Fail-safe: when the liveness probe cannot run at all, NOTHING is removed.
 # An empty answer from a probe that never ran is indistinguishable from

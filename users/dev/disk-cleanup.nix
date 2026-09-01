@@ -156,8 +156,83 @@ lib.mkIf isCloudbox {
 
         case "$verdict" in
           INUSE) return 0 ;;
-          FREE)  return 1 ;;
+          FREE)  session_owns_worktree "$path" ;;
           *)     return 2 ;;
+        esac
+      }
+
+      # GUARD 1b: the session table.
+      #
+      # paths_in_use() says an agent "always has it as cwd even when idle".
+      # That is true of a shell or an nvim, and FALSE of the thing this script
+      # actually killed. An opencode session's working directory is a row in
+      # opencode.db, not any process's cwd: the serve that owns the session
+      # runs from its own directory and holds no handle inside the worktree.
+      # Measured on cloudbox 2026-09-01 -- /proc showed nothing in
+      # eng-agent-platform/.worktrees/pigeon-goose-r2 while a live session was
+      # working there.
+      #
+      # The minimum-age floor covers the common case, because a session that
+      # ran today has touched files today. It does not cover a session that is
+      # alive but idle: parked on a scheduled wake, or waiting on a human who
+      # went away for a long weekend. Its tree ages past the floor while the
+      # session is still perfectly able to take a prompt -- and killing it is
+      # silent, because a session whose directory vanished answers every
+      # subsequent prompt with nothing at all and never errors.
+      #
+      # 0 = a recent session lives here, 1 = none does, 2 = could not tell.
+      # A MISSING db is not an error: no opencode, no sessions, so removal
+      # proceeds and this stays inert on hosts that never run it. An
+      # unreadable or locked one IS an error and keeps the tree.
+      #
+      # SESSION_ACTIVE_DAYS is deliberately far below the 4456 stale rows this
+      # host has accumulated. A session idle for a week is treated as gone;
+      # keeping a tree for every session that ever named one would re-create
+      # the disk-full incident this script exists to prevent.
+      SESSION_DB="$HOME/.local/share/opencode/opencode.db"
+      SESSION_ACTIVE_DAYS=7
+
+      session_owns_worktree() {
+        local path="$1" verdict=""
+
+        [ -f "$SESSION_DB" ] || return 1
+
+        verdict=$(python3 - "$SESSION_DB" "$path" "$SESSION_ACTIVE_DAYS" <<'PYEOF' 2>/dev/null
+      import os
+      import sqlite3
+      import sys
+      import time
+
+      db_path, wt_path, active_days = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      cutoff_ms = int((time.time() - active_days * 86400) * 1000)
+
+      candidates = {wt_path.rstrip("/") or "/"}
+      try:
+          candidates.add(os.path.realpath(wt_path))
+      except OSError:
+          pass
+
+      try:
+          # Read-only URI: a concurrent serve is writing this database and must
+          # never be disturbed by a cleanup probe.
+          con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=10)
+          placeholders = ",".join("?" for _ in candidates)
+          row = con.execute(
+              "select id from session where directory in (%s) and time_updated >= ? limit 1"
+              % placeholders,
+              (*sorted(candidates), cutoff_ms),
+          ).fetchone()
+      except Exception as exc:
+          print("PROBE-FAILED: %s" % exc)
+      else:
+          print("SESSION %s" % row[0] if row else "FREE")
+      PYEOF
+      ) || verdict=""
+
+        case "$verdict" in
+          SESSION\ *) return 0 ;;
+          FREE)       return 1 ;;
+          *)          return 2 ;;
         esac
       }
 
@@ -169,7 +244,7 @@ lib.mkIf isCloudbox {
         worktree_in_use "$wt_dir" || rc=$?
         case "$rc" in
           0)
-            log "WARN: keeping $label, a live process is inside it: $what"
+            log "WARN: keeping $label, a live process or session is inside it: $what"
             return 0
             ;;
           1) return 1 ;;
