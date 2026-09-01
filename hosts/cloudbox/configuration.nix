@@ -905,7 +905,7 @@ in
     };
   };
 
-  # Every 20 minutes, around the clock. Evaluation is free and must keep
+  # Every 10 minutes, around the clock. Evaluation is free and must keep
   # running overnight so a state change is observed when it happens; the
   # 09:00–21:00 America/New_York quiet window lives in the code and gates
   # DELIVERY only.
@@ -913,10 +913,18 @@ in
   # Persistent=false on purpose, unlike lgtm-run: a sweep missed while the host
   # was down is worthless, because the next tick re-derives everything from
   # live GitHub state. Replaying it would only risk a catch-up burst.
+  #
+  # 10 minutes rather than 20: measured over 10 real sweeps the median is 46s
+  # and the worst 50s, so the duty cycle is 8% -- and Type=oneshot means
+  # systemd will not start a second sweep while one is running, so a slow
+  # sweep degrades to the old cadence rather than overlapping. The gain is
+  # latency: a merge is noticed, and its rollout outcome reported, up to ten
+  # minutes sooner. Sweeps with nothing in flight cost nothing (39 of the
+  # first 44 were `tracked 0`), so the extra ticks are close to free.
   systemd.timers.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "*:0/20";
+      OnCalendar = "*:0/10";
       Persistent = false;
       RandomizedDelaySec = 60;
     };
