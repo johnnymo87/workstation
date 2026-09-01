@@ -821,7 +821,16 @@ in
     description = "LGTM author-side PR shepherd sweep";
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
-    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.curl pkgs.coreutils pkgs.bash ];
+    # kubectl/kubelogin/azure-cli/python3 are for the rollout watcher (below).
+    # They are ALSO on ~/.nix-profile/bin, which the ExecStart wrapper prepends
+    # -- so in practice the profile copies win. These are a declarative
+    # backstop: the profile is imperative state that a fresh machine, a failed
+    # home-manager switch, or a GC could leave without them, and the failure
+    # would otherwise be a feature that silently never wakes anyone.
+    path = [
+      pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.curl pkgs.coreutils pkgs.bash
+      pkgs.kubectl pkgs.kubelogin pkgs.azure-cli pkgs.python3
+    ];
     serviceConfig = {
       Type = "oneshot";
       User = "dev";
@@ -849,6 +858,35 @@ in
         # wakes, never while lgtm is mid-review, never a session that is busy or
         # more than 72h stale.
         "LGTM_ENABLE_AGENT_ROUTING=1"
+        # Post-merge rollout watching: after a merge, ask Kubernetes what the
+        # merge actually did, and wake an agent once with a self-contained
+        # payload.
+        #
+        # Replaces the check-run "settled" signal, which inferred from CI and
+        # was wrong 58% of the time -- on one PR it reported work still in
+        # flight while the code was deployed and healthy in both UAT and PROD.
+        #
+        # Its own switch, and the whole rollback story: unset this and the
+        # state files it wrote are inert. Note the shepherd's own kill switch
+        # above does NOT need touching to disable just this.
+        "LGTM_ENABLE_ROLLOUT=1"
+        # The watched targets: cluster contexts, namespaces and deployment
+        # names. Deliberately a path to a file OUTSIDE this repository, which
+        # is public -- that list is exactly the topology the Confluence-fetched
+        # INTERNAL.md exists to keep out of source control.
+        #
+        # Provisioned by hand on cloudbox, alongside the reviewer tokens in the
+        # same directory, and survives the nightly reset for the same reason
+        # they do: the reset clears sessions and editors, not ~/.config.
+        # An absent file disables the feature and logs loudly rather than
+        # silently watching nothing.
+        "LGTM_ROLLOUT_CONFIG=/home/dev/.config/lgtm/rollout.yml"
+        # kubectl resolves this from HOME by default; stated explicitly so the
+        # dependency is visible. The file itself is IMPERATIVE state, created
+        # by `az aks get-credentials`, and is not managed by nix -- if it is
+        # missing the watcher exits 2 on every merge, which surfaces as one
+        # BLIND alarm rather than silence.
+        "KUBECONFIG=/home/dev/.kube/config"
       ];
       ExecStart = "${pkgs.writeShellScript "lgtm-shepherd" ''
         set -euo pipefail
@@ -867,7 +905,7 @@ in
     };
   };
 
-  # Every 20 minutes, around the clock. Evaluation is free and must keep
+  # Every 10 minutes, around the clock. Evaluation is free and must keep
   # running overnight so a state change is observed when it happens; the
   # 09:00–21:00 America/New_York quiet window lives in the code and gates
   # DELIVERY only.
@@ -875,10 +913,18 @@ in
   # Persistent=false on purpose, unlike lgtm-run: a sweep missed while the host
   # was down is worthless, because the next tick re-derives everything from
   # live GitHub state. Replaying it would only risk a catch-up burst.
+  #
+  # 10 minutes rather than 20: measured over 10 real sweeps the median is 46s
+  # and the worst 50s, so the duty cycle is 8% -- and Type=oneshot means
+  # systemd will not start a second sweep while one is running, so a slow
+  # sweep degrades to the old cadence rather than overlapping. The gain is
+  # latency: a merge is noticed, and its rollout outcome reported, up to ten
+  # minutes sooner. Sweeps with nothing in flight cost nothing (39 of the
+  # first 44 were `tracked 0`), so the extra ticks are close to free.
   systemd.timers.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "*:0/20";
+      OnCalendar = "*:0/10";
       Persistent = false;
       RandomizedDelaySec = 60;
     };
