@@ -134,9 +134,8 @@ Do this instead:
   worktree works out of the box.
 
 **Structural enforcement:** the read-only review/advisor subagents
-(`code-reviewer`, `spec-reviewer`, `adversarial-reviewer-opus`,
-`adversarial-reviewer-fable`, `adversarial-reviewer-sol`, `oracle-opus`,
-`oracle-fable`, `oracle-sol`) have these git subcommands denied at the
+(`code-reviewer`, `spec-reviewer`, `adversarial-reviewer-fable`,
+`oracle-fable`) have these git subcommands denied at the
 permission layer (`assets/opencode/agents/*.md`),
 so the rule holds even if a subagent forgets it. That guard is a backstop, not
 a license — the convention above binds all sessions and subagents regardless of
