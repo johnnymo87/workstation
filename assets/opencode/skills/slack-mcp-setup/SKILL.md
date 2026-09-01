@@ -52,9 +52,27 @@ No browser cookie scraping -- tokens don't expire unless revoked.
 | `SLACK_MCP_ADD_MESSAGE_TOOL` | `conversations_add_message` (post) | yes | **no** |
 | `SLACK_MCP_FILE_UPLOAD_TOOL` | `file_upload` (upload) | yes | **no** |
 | `SLACK_MCP_ATTACHMENT_TOOL` | `attachment_get_data` (download) | yes | **yes** — download is a read |
+| `SLACK_MCP_LOG_LEVEL=warn` | (not a tool gate — see "Logging" below) | yes | yes |
 
 `slack-ro`'s read-only guarantee is exactly the **absence** of the two write
 gates. Adding a gate to `slack-ro` breaks lgtm's structural no-post property.
+
+**`SLACK_MCP_ENABLED_TOOLS` is a second door — never set it on `slack-ro`.**
+Naming a tool there enables it *regardless* of the per-tool env vars, so it
+bypasses the table above entirely.
+
+### Logging
+
+Both variants set `SLACK_MCP_LOG_LEVEL=warn`, and that is a security setting,
+not a preference. The server's logger middleware logs **every tool call's params
+at INFO** — which for `file_upload` is the file content and for
+`conversations_add_message` is the message text. The MCP process's stderr is
+inherited by `opencode-serve`, so at the default level everything you upload is
+also durably in the journal. At `warn`, failures still log tool name and error.
+
+(PR #334's description claims params are not logged for its tool. That is true
+of its own handler and false of the global middleware that wraps it. Measured,
+not assumed.)
 
 ## Files
 
@@ -83,20 +101,41 @@ Optional: `thread_ts`, `title`, `filename`, `initial_comment`, `snippet_type`, `
 
 ### Why a pinned build
 
-`pkgs/slack-mcp-server` builds the Go server from a pinned upstream rev with a
-vendored patch ([PR #334](https://github.com/korotovsky/slack-mcp-server/pull/334)),
-because:
+`pkgs/slack-mcp-server` builds the Go server from a pinned upstream rev with two
+vendored patches, because:
 
-1. Upstream has **no upload tool** — download only. #334 adds `file_upload`.
+1. Upstream has **no upload tool** — download only.
+   [PR #334](https://github.com/korotovsky/slack-mcp-server/pull/334) adds
+   `file_upload`; vendored as `pr-334-file-upload.patch`, audited at PR head
+   `9555f59`.
 2. `npx -y slack-mcp-server@latest` is an unpinned network fetch on every MCP
    start, for a process that holds a Slack **user** token.
 
-The patch is vendored in-tree rather than `fetchpatch`ed: a PR's `.patch`
+Patches are vendored in-tree rather than `fetchpatch`ed: a PR's `.patch`
 endpoint follows the branch and is therefore mutable.
 
-**Upgrading:** bump `rev`/`hash` in `pkgs/slack-mcp-server/default.nix`,
-re-download the patch, confirm `git apply --check` still passes. If #334 lands
-upstream, delete the patch instead of carrying a merged change twice.
+**`local-restrict-download-host.patch` is ours, and it closes a real hole.**
+Upstream takes `url_private` / `url_private_download` verbatim out of
+`files.info` and hands it to slack-go, whose `downloadFile` attaches
+`Authorization: Bearer <token>` to *whatever URL it is given* — no host check
+anywhere in the chain. A file whose `url_private` points off Slack therefore
+turns "download this attachment" into sending a **user** token to an attacker's
+host, and "fetch file F0XXX" is exactly the instruction that arrives inside the
+untrusted Slack content `slack-ro` exists to read. The patch requires https and
+a `slack.com` / `*.slack.com` host (checked on `Hostname()`, so
+`https://files.slack.com@evil.example/` is evaluated as `evil.example`), with a
+unit test.
+
+This is why `slack-ro` can keep the download tool at all. "Download is a read"
+is true of *workspace state* and false of *the token* — the guard is what makes
+the read-only variant actually safe to point at hostile input.
+
+**Upgrading:** bump `rev`/`hash` in `pkgs/slack-mcp-server/default.nix` and
+re-download the PR patch. `git apply --check` passing tells you **nothing about
+what the patch now contains** — the branch is mutable, so diff the fresh
+download against the vendored copy and re-review anything new (or fetch the
+immutable `.../commit/<sha>.patch` URL). If #334 lands upstream, delete that
+patch; keep the local one until upstream restricts the download host.
 
 ## Getting the xoxp Token
 
@@ -190,6 +229,7 @@ If you do need to refresh:
 | `missing_scope` | App needs additional scopes. Add them in app settings, reinstall. Check what the token actually has: `curl -s -D- -o /dev/null -X POST https://slack.com/api/auth.test -H "Authorization: Bearer $(cat /run/secrets/slack_mcp_xoxp_token)" \| grep -i x-oauth-scopes` |
 | `file_path is not allowed` on upload | Intentional — `SLACK_MCP_FILE_UPLOAD_PATHS` is unset. Use `content_base64`. |
 | `attachment_get_data tool is disabled` | `SLACK_MCP_ATTACHMENT_TOOL` missing; re-run the home-manager switch. |
+| `refusing to send credentials to non-Slack attachment host` | Working as intended — our host guard. The file's `url_private` points off Slack. Do **not** "fix" it by relaxing the guard; treat the file as hostile. |
 | `not_authed` | Token not injected. Check Keychain/sops storage, re-apply config. |
 | No Slack config after switch | macOS: `security find-generic-password -s slack-mcp-xoxp-token`. Cloudbox: `cat /run/secrets/slack_mcp_xoxp_token`. |
 

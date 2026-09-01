@@ -1043,6 +1043,17 @@ in
       # `content_base64` work. That costs nothing (an agent can base64 a file
       # itself) and avoids handing the MCP process its own ambient read
       # capability over a directory tree.
+      #
+      # SLACK_MCP_LOG_LEVEL=warn because the server's logger middleware logs
+      # every tool call's params at INFO -- which for file_upload is the file
+      # CONTENT, and for conversations_add_message is the message text. The MCP
+      # process's stderr is inherited by opencode-serve, so at the default level
+      # anything uploaded is also durably in the journal. `warn` still logs tool
+      # name and error on failures.
+      #
+      # Neither variant sets SLACK_MCP_ENABLED_TOOLS. Do not add it to slack-ro:
+      # the runtime gate treats a tool named there as enabled, so it is a second
+      # door into the write tools that bypasses the per-tool env vars above.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
@@ -1058,7 +1069,8 @@ in
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
               "SLACK_MCP_ATTACHMENT_TOOL": "true",
-              "SLACK_MCP_FILE_UPLOAD_TOOL": "true"
+              "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }
           | .mcp."slack-ro" = {
@@ -1067,7 +1079,8 @@ in
             "enabled": false,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
-              "SLACK_MCP_ATTACHMENT_TOOL": "true"
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }' "$runtime" > "$tmp"
 
@@ -1104,6 +1117,10 @@ in
       # downloading an attachment is a read. SLACK_MCP_FILE_UPLOAD_PATHS is
       # deliberately unset, so file_upload accepts only content/content_base64,
       # never a path off local disk.
+      # SLACK_MCP_LOG_LEVEL=warn keeps upload content and message text out of
+      # the journal: the logger middleware logs every call's params at INFO.
+      # Do not add SLACK_MCP_ENABLED_TOOLS to slack-ro -- naming a tool there
+      # enables it regardless of the per-tool gates.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
@@ -1119,7 +1136,8 @@ in
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
               "SLACK_MCP_ATTACHMENT_TOOL": "true",
-              "SLACK_MCP_FILE_UPLOAD_TOOL": "true"
+              "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }
           | .mcp."slack-ro" = {
@@ -1128,7 +1146,8 @@ in
             "enabled": false,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
-              "SLACK_MCP_ATTACHMENT_TOOL": "true"
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }' "$runtime" > "$tmp"
 
