@@ -7,6 +7,46 @@ let
   # Same shared alert helper the opencode canaries use, so disk pressure reaches
   # the same place their drift does rather than inventing a second channel.
   driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+
+  # ONE implementation of "is a live process inside this directory", shared by
+  # both sweepers (cleanup_tmp_scratch and cleanup_worktrees) rather than
+  # written twice and allowed to drift. Interpolated into each sweeper's
+  # python heredoc.
+  pathsInUsePy = ''
+    def paths_in_use(paths):
+        """The subset of `paths` that a live process is inside.
+
+        A path counts as in use when some process has it -- or anything under
+        it -- as its cwd or its exe, or holds an open fd within it. That is
+        the cheapest handle a working session is guaranteed to hold: an agent
+        sitting in a worktree always has it as cwd even when idle.
+
+        Raises OSError if /proc cannot be listed at all. Callers MUST treat
+        that as "cannot tell" and keep the path. An empty result from a probe
+        that never ran looks exactly like "nothing is using it", and acting on
+        that difference is unrecoverable.
+        """
+        paths = [p.rstrip("/") or "/" for p in paths]
+        inuse = set()
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            links = ["/proc/" + pid + "/cwd", "/proc/" + pid + "/exe"]
+            try:
+                links += ["/proc/" + pid + "/fd/" + f
+                          for f in os.listdir("/proc/" + pid + "/fd")]
+            except OSError:
+                pass
+            for link in links:
+                try:
+                    real = os.readlink(link)
+                except OSError:
+                    continue
+                for p in paths:
+                    if real == p or real.startswith(p + "/"):
+                        inuse.add(p)
+        return inuse
+  '';
 in
 lib.mkIf isCloudbox {
   home.file.".local/bin/disk-cleanup" = {
@@ -30,12 +70,132 @@ lib.mkIf isCloudbox {
       PROJECTS="$HOME/projects"
       BAZEL_BASE="$HOME/.cache/bazel/_bazel_$(whoami)"
       WORKTREE_MAX_AGE_DAYS=14
+      # Floor below which NO worktree is eligible for removal, merged and
+      # spotless or not. See "--- worktree removal guards ---" below for why
+      # this exists and why it is 2 rather than 0.
+      WORKTREE_MIN_AGE_DAYS=2
       NIX_KEEP_GENERATIONS=3
 
       log() { echo "[disk-cleanup] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
-      # Remove a worktree whose branch/PR is already merged or closed.
-      # Clean -> remove immediately. Dirty -> remove only once NOTHING anywhere
+      # --- worktree removal guards ---
+      #
+      # Two guards stand between "this worktree looks stale" and an
+      # irreversible `worktree remove --force`.
+      #
+      # GUARD 1, LIVENESS. On 2026-09-01 03:08 this sweeper removed
+      # eng-agent-platform/pigeon-goose-r2 -- about eight hours old, merged,
+      # and clean -- which was the working directory of a RUNNING opencode
+      # session. A session whose cwd disappears does not crash. Its turns
+      # begin completing instantly with no output and it looks healthy from
+      # outside; the only trace was a realPath ENOENT buried in a serve log,
+      # which is why the same thing had already happened once before to the
+      # same session under a different worktree name. See the
+      # reviving-worktree-orphaned-sessions skill.
+      #
+      # This check is not new reasoning. cleanup_tmp_scratch below has had it
+      # since it was written, and its header already states that this box is
+      # shared by a dozen concurrent agent sessions and that one of them
+      # deleting another's working tree is a real data-loss event. It was
+      # simply never applied here. Both sweepers now call the same shared
+      # paths_in_use() /proc walk, so there is one implementation to keep
+      # honest rather than two that can disagree.
+      #
+      # GUARD 2, MINIMUM AGE. The old heuristic was inverted with respect to
+      # good practice: protection required UNCOMMITTED CHANGES, so a session
+      # that committed and pushed diligently was indistinguishable from an
+      # abandoned worktree, while a session that left a mess was safe. In the
+      # very run that caused the data loss, two log lines earlier,
+      # eng-agent-platform/goose-v2-impact was KEPT "with uncommitted changes
+      # (tree touched within 14d)" while the tidy worktree beside it was
+      # destroyed. Nothing whose tree has been touched within
+      # WORKTREE_MIN_AGE_DAYS is eligible now, dirty or clean.
+      #
+      # WHY 2 DAYS. The sweep runs nightly, so any floor >=2d guarantees a
+      # worktree survives at least one sweep after the session that made it
+      # has gone quiet -- an overnight session, or one left over a weekend
+      # day, is never reaped out from under itself. It is also far below the
+      # 14d window that governs stale dirty trees, so the piles this script
+      # exists to reclaim (30+ merged worktrees in the 2026-08-28 disk-full
+      # incident, none of them touched for weeks) still go.
+      #
+      # BOTH FAIL SAFE. A probe that errors, or cannot run at all, keeps the
+      # worktree. A stale worktree costs disk, which this script runs again
+      # tomorrow to reclaim; a deleted one costs somebody's work, permanently.
+
+      # Verdict on a single path. 0 = a live process is inside it,
+      # 1 = demonstrably unused, 2 = could not tell.
+      worktree_in_use() {
+        local path="$1" verdict=""
+
+        verdict=$(python3 - "$path" <<'PYEOF' 2>/dev/null
+      import os
+      import sys
+
+      ${pathsInUsePy}
+
+      try:
+          targets = []
+          for arg in sys.argv[1:]:
+              arg = arg.rstrip("/") or "/"
+              targets.append(arg)
+              # /proc links are already resolved, so compare against the resolved
+              # form too -- a worktree reached through a symlinked parent would
+              # otherwise never match the cwd of the process sitting in it.
+              try:
+                  resolved = os.path.realpath(arg)
+              except OSError:
+                  resolved = arg
+              if resolved != arg:
+                  targets.append(resolved)
+          print("INUSE" if paths_in_use(targets) else "FREE")
+      except Exception as exc:
+          print("PROBE-FAILED: %s" % exc)
+      PYEOF
+      ) || verdict=""
+
+        case "$verdict" in
+          INUSE) return 0 ;;
+          FREE)  return 1 ;;
+          *)     return 2 ;;
+        esac
+      }
+
+      # Should removal be skipped? 0 = yes, skip (in use, or unknown).
+      # 1 = no, the tree is demonstrably unused. Logs its own reason.
+      worktree_removal_blocked() {
+        local wt_dir="$1" label="$2" what="$3" rc=0
+
+        worktree_in_use "$wt_dir" || rc=$?
+        case "$rc" in
+          0)
+            log "WARN: keeping $label, a live process is inside it: $what"
+            return 0
+            ;;
+          1) return 1 ;;
+          *)
+            log "WARN: keeping $label, liveness probe could not run: $what"
+            return 0
+            ;;
+        esac
+      }
+
+      # Has anything anywhere in the tree been modified within $2 days?
+      # 0 = yes, 1 = no, 2 = the scan failed (answer unknown).
+      tree_touched_since() {
+        local wt_dir="$1" days="$2" cutoff_epoch fresh_path
+        cutoff_epoch=$(( $(date +%s) - days * 86400 ))
+        # Non-zero from find means an incomplete answer (unreadable subtree,
+        # bad clock arithmetic). Report "unknown" rather than the empty
+        # result, which would read as "untouched" and reap the tree.
+        fresh_path=$(find "$wt_dir" -xdev -newermt "@$cutoff_epoch" -print -quit 2>/dev/null) || return 2
+        [ -n "$fresh_path" ]
+      }
+
+      # Remove a worktree whose branch/PR is already merged or closed, subject
+      # to the two guards above.
+      # Clean -> remove once nothing in the tree has been modified for
+      # WORKTREE_MIN_AGE_DAYS. Dirty -> remove only once NOTHING anywhere
       # in the tree has been modified for WORKTREE_MAX_AGE_DAYS; otherwise
       # merged-but-dirty worktrees accumulate forever (30+ observed in the
       # 2026-08-28 disk-full incident, see beads workstation-zspp).
@@ -54,7 +214,11 @@ lib.mkIf isCloudbox {
       # from the journal within git's gc window.
       remove_merged_worktree() {
         local repo_dir="$1" wt_dir="$2" repo_name="$3" wt_name="$4" label="$5"
-        local status_out head_sha
+        local status_out head_sha touched_rc=0
+
+        if worktree_removal_blocked "$wt_dir" "$label" "$repo_name/$wt_name"; then
+          return 0
+        fi
 
         if ! status_out=$(git -C "$wt_dir" status --porcelain --untracked-files=all 2>/dev/null); then
           log "WARN: keeping $label because status failed: $repo_name/$wt_name"
@@ -64,12 +228,14 @@ lib.mkIf isCloudbox {
         head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
 
         if [ -n "$status_out" ]; then
-          local cutoff_epoch fresh_path
-          cutoff_epoch=$(( $(date +%s) - WORKTREE_MAX_AGE_DAYS * 86400 ))
-          fresh_path=$(find "$wt_dir" -xdev -newermt "@$cutoff_epoch" -print -quit 2>/dev/null || true)
-
-          if [ -n "$fresh_path" ]; then
+          touched_rc=0
+          tree_touched_since "$wt_dir" "$WORKTREE_MAX_AGE_DAYS" || touched_rc=$?
+          if [ "$touched_rc" = 0 ]; then
             log "WARN: keeping $label with uncommitted changes (tree touched within ''${WORKTREE_MAX_AGE_DAYS}d): $repo_name/$wt_name"
+            return 0
+          fi
+          if [ "$touched_rc" != 1 ]; then
+            log "WARN: keeping $label with uncommitted changes, freshness scan failed: $repo_name/$wt_name"
             return 0
           fi
 
@@ -78,7 +244,22 @@ lib.mkIf isCloudbox {
           return 0
         fi
 
-        log "Removing $label (HEAD $head_sha): $repo_name/$wt_name"
+        # Clean tree. This is the path that used to remove outright, at any
+        # age, which is how an eight-hour-old live session's worktree was
+        # deleted. Checkout stamps fresh mtimes, so a freshly created worktree
+        # can never satisfy this even before anyone works in it.
+        touched_rc=0
+        tree_touched_since "$wt_dir" "$WORKTREE_MIN_AGE_DAYS" || touched_rc=$?
+        if [ "$touched_rc" = 0 ]; then
+          log "WARN: keeping $label (clean, but tree touched within ''${WORKTREE_MIN_AGE_DAYS}d): $repo_name/$wt_name"
+          return 0
+        fi
+        if [ "$touched_rc" != 1 ]; then
+          log "WARN: keeping $label (clean), freshness scan failed: $repo_name/$wt_name"
+          return 0
+        fi
+
+        log "Removing $label (untouched >=''${WORKTREE_MIN_AGE_DAYS}d, HEAD $head_sha): $repo_name/$wt_name"
         git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
       }
 
@@ -188,6 +369,12 @@ lib.mkIf isCloudbox {
               fi
 
               if [ "$has_remote" = "false" ]; then
+                # Same liveness guard: "last commit is old" says nothing about
+                # whether a session is sitting in the tree right now. A long
+                # investigation on an old base looks exactly like this.
+                if worktree_removal_blocked "$wt_dir" "abandoned worktree" "$repo_name/$wt_name"; then
+                  continue
+                fi
                 log "Removing abandoned worktree ($age_days days old): $repo_name/$wt_name"
                 git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
               fi
@@ -344,6 +531,7 @@ lib.mkIf isCloudbox {
       #
       #   1. older than TMP_SCRATCH_AGE_DAYS and at least TMP_SCRATCH_MIN_MB
       #   2. no live process has it as cwd/exe or holds an fd inside it
+      #      (paths_in_use, the same probe cleanup_worktrees now uses)
       #   3. if it is a git repo: skip when dirty OR carrying unpushed commits
       #
       # Guard 3 distinguishes a REAL repo from a gutted `.git` left behind by a
@@ -357,6 +545,8 @@ lib.mkIf isCloudbox {
         log "Sweeping stale /tmp scratch (>''${TMP_SCRATCH_AGE_DAYS}d, >=''${TMP_SCRATCH_MIN_MB}MB)..."
         python3 - "$TMP_SCRATCH_AGE_DAYS" "$TMP_SCRATCH_MIN_MB" <<'PYEOF' || log "WARN: /tmp scratch sweep failed"
       import os, shutil, subprocess, sys, time
+
+      ${pathsInUsePy}
 
       age_days, min_mb = int(sys.argv[1]), int(sys.argv[2])
       cutoff = time.time() - age_days * 86400
@@ -425,17 +615,7 @@ lib.mkIf isCloudbox {
                   continue
               if mb >= min_mb: cands.append((mb, p))
 
-      inuse = set()
-      for pid in os.listdir("/proc"):
-          if not pid.isdigit(): continue
-          links = [f"/proc/{pid}/cwd", f"/proc/{pid}/exe"]
-          try: links += [f"/proc/{pid}/fd/{f}" for f in os.listdir(f"/proc/{pid}/fd")]
-          except OSError: pass
-          for link in links:
-              try: real = os.readlink(link)
-              except OSError: continue
-              for _, p in cands:
-                  if real == p or real.startswith(p + "/"): inuse.add(p)
+      inuse = paths_in_use([p for _, p in cands])
 
       freed = 0
       for mb, p in sorted(cands, reverse=True):
