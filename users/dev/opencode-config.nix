@@ -88,18 +88,22 @@ let
           ''
         else
           afterSonnet;
-      # 3. fable-5 -> Vertex Anthropic on cloudbox ONLY, mirroring the opus
+      # 3. fable -> Vertex Anthropic on cloudbox ONLY, mirroring the opus
       #    rewrite above and for the same reason: cloudbox has no first-party
       #    `anthropic/` auth (it routes Anthropic through Vertex/ADC), so an
-      #    agent left pinned to `anthropic/claude-fable-5` reaches an unusable
+      #    agent left pinned to `anthropic/claude-fable-5-1` reaches an unusable
       #    provider and the model loop dies with an empty response. The Vertex
-      #    fable-5 entry (`google-vertex-anthropic/claude-fable-5@default`)
+      #    fable entry (`google-vertex-anthropic/claude-fable-5-1@default`)
       #    carries its own high `effort` from opencode.base.json, so no variant
-      #    override is added here. No-op on agents that don't pin fable-5.
+      #    override is added here. No-op on agents that don't pin fable.
+      #
+      #    The version is CAPTURED, not hardcoded — a literal `claude-fable-5`
+      #    match against the 5.1 pin yields `claude-fable-5@default-1`, a
+      #    provider/model pair that does not exist and fails at request time.
       afterFable =
         if isCloudbox then
           pkgs.runCommand "${name}-fable-vertex.md" {} ''
-            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-fable-5|model: google-vertex-anthropic/claude-fable-5\@default|' ${afterOpus} > $out
+            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-fable-([0-9]+(?:-[0-9]+)*)|model: google-vertex-anthropic/claude-fable-''${1}\@default|' ${afterOpus} > $out
           ''
         else
           afterOpus;
@@ -140,11 +144,11 @@ let
 
   # Per-model twin builders, parameterized by base agent name. Apply to any
   # `<base>-opus.md` source.
-  #   fable-5    (all hosts; cloudbox gets the Vertex rewrite via patchAgent)
+  #   fable-5-1  (all hosts; cloudbox gets the Vertex rewrite via patchAgent)
   #   gpt-5.6-sol (ChatGPT/Codex-subscription frontier model via codex-lb on
   #                127.0.0.1:2455; deployed on all hosts, reachable wherever
   #                codex-lb serves it; patchAgent is a pass-through for the pin)
-  mkFableVariant = base: mkAgentVariant { inherit base; slug = "fable"; modelPin = "anthropic/claude-fable-5"; modelTag = "fable-5"; };
+  mkFableVariant = base: mkAgentVariant { inherit base; slug = "fable"; modelPin = "anthropic/claude-fable-5-1"; modelTag = "fable-5-1"; };
   mkSolVariant   = base: mkAgentVariant { inherit base; slug = "sol";   modelPin = "openai/gpt-5.6-sol";      modelTag = "gpt-5.6-sol"; };
 
   # ---------------------------------------------------------------------------
@@ -540,7 +544,7 @@ in
    # site, all generated from each agent's `<base>-opus.md` source (single source
    # of truth for the prompt body, no drift):
    #   @<base>-opus   -> opus-5 (source of truth for the prompt)
-   #   @<base>-fable  -> claude-fable-5 (mkFableVariant; cloudbox gets the Vertex
+   #   @<base>-fable  -> claude-fable-5-1 (mkFableVariant; cloudbox gets the Vertex
    #                     rewrite via patchAgent)
    #   @<base>-sol    -> openai/gpt-5.6-sol (mkSolVariant; deployed on all hosts —
    #                     reachable wherever codex-lb serves gpt-5.6-sol; patchAgent
