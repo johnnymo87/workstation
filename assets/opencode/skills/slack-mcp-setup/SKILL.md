@@ -88,16 +88,35 @@ Content from exactly one of:
 
 - `content` — UTF-8 text (logs, snippets)
 - `content_base64` — binary (e.g. a screenshot)
-- `file_path` — **disabled here.** It requires `SLACK_MCP_FILE_UPLOAD_PATHS`,
-  which is deliberately unset, so the MCP process gets no ambient read
-  capability over local disk. Base64 the file yourself and use `content_base64`.
+- `file_path` — absolute path, allowed **only** under
+  `/tmp/opencode/slack-uploads`. That is the entire value of
+  `SLACK_MCP_FILE_UPLOAD_PATHS`. Stage the file first:
+
+  ```bash
+  mkdir -p /tmp/opencode/slack-uploads
+  cp outputs/chart-2026-09-02.png /tmp/opencode/slack-uploads/
+  ```
+
+  then `file_upload(channel_id=…, file_path="/tmp/opencode/slack-uploads/chart-2026-09-02.png")`.
 
 Optional: `thread_ts`, `title`, `filename`, `initial_comment`, `snippet_type`, `alt_txt`.
 
-> **The server logs tool arguments at info level, including `file_upload`
-> content.** Uploading a secret puts it in the MCP server's stderr as well as in
-> Slack. (The PR description claims params are not logged for this tool; the
-> shipped code logs them. Measured, not assumed.)
+**Prefer `file_path` for anything non-trivial.** Tool arguments are emitted by
+the model, so `content_base64` spends the file's base64 out of the context
+window — a 294 KB PNG is ~392 KB of base64, over 100k tokens. It does not fit.
+`file_path` streams from disk and costs a path.
+
+That difference is also why the allowlist is one staging directory and not, say,
+a project's `outputs/`: with `content_base64` the bytes have to cross the
+transcript, which is what makes bulk exfiltration infeasible, and `file_path`
+removes that limit. Keep the root to files staged in order to be sent. Do not
+widen it to `/tmp/opencode` itself — that is ~2 GB of scratch from every
+concurrent session, including repo checkouts and multi-MB data exports.
+
+> **The server logs tool arguments at info level.** With `file_path` the logged
+> param is the path; with `content` / `content_base64` it is the payload, so
+> uploading a secret that way puts it in the server's stderr as well as in
+> Slack. `SLACK_MCP_LOG_LEVEL=warn` is set for this reason.
 
 ### Why a pinned build
 
@@ -227,7 +246,8 @@ If you do need to refresh:
 |-------|----------|
 | `invalid_auth` | Token revoked or app uninstalled. Get new token from app OAuth page. |
 | `missing_scope` | App needs additional scopes. Add them in app settings, reinstall. Check what the token actually has: `curl -s -D- -o /dev/null -X POST https://slack.com/api/auth.test -H "Authorization: Bearer $(cat /run/secrets/slack_mcp_xoxp_token)" \| grep -i x-oauth-scopes` |
-| `file_path is not allowed` on upload | Intentional — `SLACK_MCP_FILE_UPLOAD_PATHS` is unset. Use `content_base64`. |
+| `file_path is not allowed` on upload | The path is outside `/tmp/opencode/slack-uploads`, **or** that directory does not exist — an unresolvable allowlist root is skipped silently and reports the same message. `mkdir -p /tmp/opencode/slack-uploads` and copy the file in. |
+| `file_path must be an absolute path` | Relative paths are rejected before any allowlist check. |
 | `attachment_get_data tool is disabled` | `SLACK_MCP_ATTACHMENT_TOOL` missing; re-run the home-manager switch. |
 | `refusing to send credentials to non-Slack attachment host` | Working as intended — our host guard. The file's `url_private` points off Slack. Do **not** "fix" it by relaxing the guard; treat the file as hostile. |
 | `not_authed` | Token not injected. Check Keychain/sops storage, re-apply config. |
