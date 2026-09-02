@@ -342,14 +342,12 @@ lib.mkIf isDevbox {
       export DOLTHUB_API_TOKEN="$(cat /run/secrets/dolthub_api_token)"
     fi
 
-    # Personal Anthropic subscription token. Consumed by the
-    # @ex-machina/opencode-anthropic-auth opencode plugin (in ad-hoc CLI
-    # opencode runs from this shell; opencode-serve gets its own copy in
-    # hosts/devbox/configuration.nix). Claude Code is not installed -- the
-    # env var name is what the plugin requires, not what consumes it.
-    if [ -r /run/secrets/claude_personal_oauth_token ]; then
-      export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
-    fi
+    # (CLAUDE_CODE_OAUTH_TOKEN was exported here until 2026-09-02. Removed: the
+    # comment claimed the anthropic-auth plugin consumed it, and it does not --
+    # zero references in the shipped dist, and on devbox the plugin runs in
+    # shape-only mode with a dummy credential while TeamClaude owns the real
+    # tokens. The one real consumer was an undeclared `npm i -g` Claude Code,
+    # now uninstalled.)
 
     # Gemini API key, exported under both conventions from the one secret:
     # GOOGLE_GENERATIVE_AI_API_KEY is what the Vercel AI SDK (and so OpenCode's
@@ -836,7 +834,6 @@ ${serveIdCase}
         export OPENCODE_SERVE_EXPECTED_PID=$$
         export GH_TOKEN="$(cat /run/secrets/github_api_token)"
         export CLOUDFLARE_API_TOKEN="$(cat /run/secrets/cloudflare_api_token)"
-        export CLAUDE_CODE_OAUTH_TOKEN="$(cat /run/secrets/claude_personal_oauth_token)"
         export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
         exec ${config.home.homeDirectory}/.nix-profile/bin/opencode serve --port "$PORT" --hostname 127.0.0.1
       ''} %i";
