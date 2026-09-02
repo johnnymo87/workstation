@@ -874,27 +874,29 @@ in
     # active sessions on every home-manager switch).
     ${lib.optionalString isDevbox ''
       if [ "$cache_invalidated" = "1" ]; then
-        # devbox: opencode-serve is a USER service (see home.devbox.nix), so
-        # restart it in the user manager — no sudo. Ensure XDG_RUNTIME_DIR is set
-        # so `systemctl --user` can reach the user bus even when this activation
-        # runs from a context that didn't export it. Use the absolute systemctl
-        # path (the activation PATH is minimal). Capture the exit code into a
-        # variable (the `cmd || rc=$?` pattern) to stay robust to home-manager's
-        # set -e / errexit-mask interactions.
-        export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$UID}"
-        restart_rc=0
-        /run/current-system/sw/bin/systemctl --user restart opencode-serve.service || restart_rc=$?
-        if [ "$restart_rc" -eq 0 ]; then
-          echo "installOpencodePlugins: restarted opencode-serve (user) after cache invalidation"
-        else
-          # Don't fail the whole activation — the service has Restart=always and
-          # the nightly timer restarts it too. Surface the failure clearly.
-          {
-            echo "installOpencodePlugins: WARNING — user opencode-serve restart failed (exit $restart_rc)."
-            echo "installOpencodePlugins: cache was invalidated but service still running stale plugin."
-            echo "installOpencodePlugins: run manually: systemctl --user restart opencode-serve"
-          } >&2
-        fi
+        # devbox does NOT auto-restart, deliberately. The pool here is a set of
+        # templated USER units (opencode-serve@4096, @4097) under
+        # opencode-serve-pool.target; there is no single "opencode-serve.service"
+        # to bounce. Restarting the target is the only correct whole-pool action,
+        # and it kills every live session on the box — including the session
+        # running this switch. That is why reset-workspace only does it nightly,
+        # behind a confirmation.
+        #
+        # This used to `systemctl --user restart opencode-serve.service`, which
+        # has not existed for some time: it failed with exit 5 on every switch and
+        # printed a warning telling you to run the same nonexistent unit by hand.
+        # The consequence was never staleness, only latency — the pool IS
+        # restarted nightly at 03:00 by nightly-restart-background.timer (a SYSTEM
+        # timer; `systemctl --user list-timers` does not show it), so a new plugin
+        # goes live within a day regardless.
+        #
+        # So: say what happened and what the options are, and let the human pick.
+        {
+          echo "installOpencodePlugins: plugin cache changed; the new version is on disk but NOT live."
+          echo "installOpencodePlugins: running serves keep the old plugin until the pool restarts."
+          echo "installOpencodePlugins:   automatic — nightly at 03:00 (nightly-restart-background.timer)"
+          echo "installOpencodePlugins:   now, disruptive — reset-workspace   (kills all live sessions)"
+        } >&2
       fi
     ''}
     ${lib.optionalString isCloudbox ''
@@ -1767,24 +1769,31 @@ in
       echo "teamclaude: anthropic -> ''${anthropic_url:-<direct Anthropic>} (teamclaude=$tc_state)" >&2
       new_hash="$(printf '%s' "$anthropic_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
 
-      # Restart opencode-serve (user service) when the effective URL changed OR the
-      # dummy credential was freshly seeded — the plugin's loader decides oauth-mode
-      # (shaping) at provider init, so a fresh seed needs a reload to take effect.
+      # The plugin's loader decides oauth-mode (shaping) at provider init, so a
+      # changed URL or a fresh dummy-cred seed only takes effect once a serve
+      # restarts. We do NOT restart here — same policy as injectCodexLbBaseUrl
+      # below, and for the same reason: devbox runs a serve POOL
+      # (opencode-serve@<port> under opencode-serve-pool.target), so there is no
+      # single unit to bounce and cycling the target kills every live session,
+      # including the one running this switch.
+      #
+      # This block used to `systemctl --user restart opencode-serve.service`.
+      # That unit has not existed here since the pool migration, so the restart
+      # was a guaranteed exit-5 no-op — and because the hash file was only
+      # written on restart SUCCESS, the failure path re-armed itself: every
+      # subsequent switch would re-detect "state changed", warn again, and again
+      # decline to persist the hash. Writing the hash unconditionally is what
+      # makes this converge.
       old_hash=""
       [ -r "$hash_file" ] && old_hash="$(cat "$hash_file")"
       if [[ "$new_hash" != "$old_hash" || "$seeded" == "1" ]]; then
-        echo "teamclaude: state changed (url hash $old_hash -> $new_hash, seeded=$seeded); restarting opencode-serve (user)" >&2
-        restart_rc=0
-        $sc --user restart opencode-serve.service || restart_rc=$?
-        if [ "$restart_rc" -eq 0 ]; then
-          echo "$new_hash" > "$hash_file"
-          echo "teamclaude: opencode-serve restarted; hash file updated" >&2
-        else
-          {
-            echo "teamclaude: WARNING — opencode-serve restart failed (exit $restart_rc)."
-            echo "teamclaude: hash file NOT updated; next switch will retry."
-          } >&2
-        fi
+        echo "$new_hash" > "$hash_file"
+        {
+          echo "teamclaude: state changed (url hash $old_hash -> $new_hash, seeded=$seeded)."
+          echo "teamclaude: config written — running serves keep the old provider init until they restart."
+          echo "teamclaude:   automatic — nightly at 03:00 (nightly-restart-background.timer)"
+          echo "teamclaude:   now, disruptive — reset-workspace   (kills all live sessions)"
+        } >&2
       fi
     '');
 
