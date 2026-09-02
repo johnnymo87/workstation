@@ -91,6 +91,12 @@ Only **verified** tiers are encoded; everything else is flat:
 - **`google-vertex/gemini-3.1-pro-preview`** — real 200K tier, verified against
   the official Google Vertex pricing page.
 
+Gemini Flash is priced under **two** provider ids from one shared definition:
+`google-vertex` (cloudbox, macOS) and `google` — the direct Developer API,
+which is the only Gemini route devbox has (no ADC, both Vertex providers
+disabled) and which `vision-qa` uses. Google lists the same per-1M token prices
+for both, so they share `GEMINI_FLASH_PHASES` / `GEMINI_35_FLASH`.
+
 ### Unpriced models
 
 Unknown `(provider, model)` pairs have no rate-book entry. Their tokens are

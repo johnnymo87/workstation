@@ -30,6 +30,8 @@ GEMINI_FLASH_PHASES: list[dict] = [
     {"from": "0001-01-01", "input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0},
     {"from": "2027-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 0},
 ]
+# Shared 3.5 Flash rate (undated: no introductory phase).
+GEMINI_35_FLASH: dict = {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5}
 
 RATES: dict[tuple[str, str], object] = {
     # --- Anthropic Claude: FLAT across full context (Anthropic + Vertex + Bedrock,
@@ -66,7 +68,7 @@ RATES: dict[tuple[str, str], object] = {
     # takes this route (claude-failover-proxy -> aigateway -> Vertex).
     ("google-vertex-anthropic", "claude-fable-5"):    {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5},
     # --- Google Gemini (Vertex) ---
-    ("google-vertex", "gemini-3.5-flash"):  {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5},
+    ("google-vertex", "gemini-3.5-flash"): GEMINI_35_FLASH,
     # gemini-3.6-flash, gemini-3.7-flash (released 2026-08-13) and
     # gemini-3.8-flash (released 2026-09-02) are priced IDENTICALLY, and all
     # three carry Google's dated introductory discount:
@@ -89,6 +91,24 @@ RATES: dict[tuple[str, str], object] = {
         "input": 2, "output": 12, "cache_read": 0.20, "cache_write": 2,
         "tier": {"threshold": 200000, "input": 4, "output": 18, "cache_read": 0.40, "cache_write": 4},
     },
+    # --- Google Gemini (direct Generative AI API, provider id `google`) ---
+    # devbox has no ADC and disables both Vertex providers, so its Gemini
+    # traffic — the `vision-qa` subagent (pinned google/gemini-3.8-flash) and
+    # anything picked by hand — is recorded with providerID "google", which had
+    # NO rate-book rows at all and therefore priced as "unpriced". Google lists
+    # the Developer API at the same per-1M prices as Vertex *global* for these
+    # models (3.8/3.7/3.6 Flash: $0.75/$3.75, cache read $0.075, rising to
+    # $1.50/$7.50/$0.15 on 2027-01-01; 3.5 Flash: $1.50/$9.00), so both routes
+    # share one definition rather than drifting apart.
+    # Source: https://ai.google.dev/gemini-api/docs/pricing.
+    # Caveat: only the *token* prices coincide. Vertex non-global regions add
+    # ~10%, and Developer API context caching bills hourly storage ($1.00 per
+    # 1M tokens/hour) that never appears as per-request cache-write tokens —
+    # same reason cache_write is 0 on the Vertex rows above.
+    ("google", "gemini-3.5-flash"): GEMINI_35_FLASH,
+    ("google", "gemini-3.6-flash"): GEMINI_FLASH_PHASES,
+    ("google", "gemini-3.7-flash"): GEMINI_FLASH_PHASES,
+    ("google", "gemini-3.8-flash"): GEMINI_FLASH_PHASES,
     # --- OpenAI ---
     ("openai", "gpt-5.5"): {
         "input": 5, "output": 30, "cache_read": 0.50, "cache_write": 0,

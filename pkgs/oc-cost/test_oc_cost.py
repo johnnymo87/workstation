@@ -468,20 +468,45 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
 
     def test_gemini_flash_uses_introductory_rate_before_2027(self):
         # Google's intro pricing for 3.6/3.7/3.8 Flash runs through 2026-12-31:
-        # 0.75 / 3.75 / cache_read 0.075 per 1M.
-        for model in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"):
-            e = oc_cost.rate_for("google-vertex", model, "2026-08-13")
-            self.assertEqual(e["input"], 0.75, model)
-            self.assertEqual(e["output"], 3.75, model)
-            self.assertEqual(e["cache_read"], 0.075, model)
+        # 0.75 / 3.75 / cache_read 0.075 per 1M. Both routes are priced: Vertex
+        # (cloudbox/macOS) and the direct Developer API (devbox vision-qa).
+        for provider in ("google-vertex", "google"):
+            for model in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"):
+                e = oc_cost.rate_for(provider, model, "2026-08-13")
+                self.assertEqual(e["input"], 0.75, (provider, model))
+                self.assertEqual(e["output"], 3.75, (provider, model))
+                self.assertEqual(e["cache_read"], 0.075, (provider, model))
 
     def test_gemini_flash_doubles_from_2027(self):
         # Standard pricing applies starting 2027-01-01 (boundary inclusive).
-        for model in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"):
-            e = oc_cost.rate_for("google-vertex", model, "2027-01-01")
-            self.assertEqual(e["input"], 1.5, model)
-            self.assertEqual(e["output"], 7.5, model)
-            self.assertEqual(e["cache_read"], 0.15, model)
+        for provider in ("google-vertex", "google"):
+            for model in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"):
+                e = oc_cost.rate_for(provider, model, "2027-01-01")
+                self.assertEqual(e["input"], 1.5, (provider, model))
+                self.assertEqual(e["output"], 7.5, (provider, model))
+                self.assertEqual(e["cache_read"], 0.15, (provider, model))
+
+    def test_direct_gemini_api_is_priced_not_unpriced(self):
+        # Regression: devbox records Gemini traffic under providerID "google"
+        # (no ADC, both Vertex providers disabled). Before these rows existed
+        # every such row fell through rate_for and reported tier "unpriced".
+        toks = {"input": 1_000_000, "output": 1_000_000, "reasoning": 0,
+                "cache": {"read": 0, "write": 0}}
+        cost, tier = oc_cost.cost_for_message(
+            "google", "gemini-3.8-flash", toks, "2026-09-02")
+        self.assertAlmostEqual(cost, 0.75 + 3.75, places=6)
+        self.assertEqual(tier, "base")
+
+    def test_direct_gemini_api_matches_vertex_rates(self):
+        # The two routes share one definition; if they ever diverge, this is
+        # the test that should force the split to be deliberate.
+        for model in ("gemini-3.5-flash", "gemini-3.6-flash",
+                      "gemini-3.7-flash", "gemini-3.8-flash"):
+            for day in ("2026-09-02", "2027-06-01"):
+                self.assertEqual(
+                    oc_cost.rate_for("google", model, day),
+                    oc_cost.rate_for("google-vertex", model, day),
+                    (model, day))
 
     def test_gemini_flash_last_intro_day_is_still_intro(self):
         e = oc_cost.rate_for("google-vertex", "gemini-3.8-flash", "2026-12-31")
