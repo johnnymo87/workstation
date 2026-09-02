@@ -4200,6 +4200,25 @@ EOF
   systemd.tmpfiles.rules = [
     "d /home/dev/.ssh 0700 dev dev -"
     "d /home/dev/projects 0755 dev dev -"
+    # Slack file_upload staging area. This is the ONLY directory named in
+    # SLACK_MCP_FILE_UPLOAD_PATHS (users/dev/opencode-config.nix), so an agent
+    # uploads a local artifact by copying it here first.
+    #
+    # The parent is listed on purpose, and is not redundant. tmpfiles creates
+    # missing parents as root:root 0755, so a leaf-only rule would silently
+    # take /tmp/opencode away from dev on any boot where it did not already
+    # exist -- breaking the scratch dir every agent session writes to. Naming
+    # it keeps it dev-owned. It also fixes what the allowlist root resolves to:
+    # the upload server runs EvalSymlinks on each root, so whoever creates
+    # /tmp/opencode first in a 1777 /tmp decides what that root means.
+    #
+    # Caveat, untested: the inherited `q /tmp 1777 root root 10d` rule ages out
+    # /tmp contents, and an explicit entry with no age may exempt this subtree
+    # from it. In practice that sweep is already not reaping /tmp/opencode
+    # (files weeks older than 10d survive it), and disk-cleanup.nix sweeps the
+    # large stale trees, so this should be inert either way.
+    "d /tmp/opencode 0755 dev dev -"
+    "d /tmp/opencode/slack-uploads 0755 dev dev -"
   ];
 
   # User account with stable UID/GID

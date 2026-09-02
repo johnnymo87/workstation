@@ -273,6 +273,18 @@ let
     then "{file:~/.config/opencode/secrets/${name}}"
     else "{file:/run/secrets/${name}}";
 
+  # The sole directory the Slack MCP server may read when file_upload is called
+  # with `file_path` (SLACK_MCP_FILE_UPLOAD_PATHS). Staging area only — nothing
+  # lives here except artifacts copied in to be sent. See the long rationale at
+  # the injectSlackMcpSecrets activation before widening it.
+  #
+  # Under /tmp because opencode.base.json pre-approves only
+  # `external_directory: {"/tmp/*": "allow"}`; a path elsewhere would make the
+  # `cp` into it prompt for permission, which stalls headless sessions.
+  # Same literal on both platforms: macOS resolves /tmp -> /private/tmp, and the
+  # server EvalSymlinks both the root and the candidate file before comparing.
+  slackUploadStagingDir = "/tmp/opencode/slack-uploads";
+
   # macOS only: mirror Keychain item `service` to the 0600 file that secretRef
   # will point at, and set shell variable `flag` to 1 on success.
   #
@@ -1128,11 +1140,40 @@ in
       # slack-ro is used by lgtm's read-only gather session
       # (`opencode-launch --mcp slack-ro`) so it structurally cannot post.
       #
-      # SLACK_MCP_FILE_UPLOAD_PATHS is deliberately NOT set: without it the
-      # tool's `file_path` source is rejected and only `content` /
-      # `content_base64` work. That costs nothing (an agent can base64 a file
-      # itself) and avoids handing the MCP process its own ambient read
-      # capability over a directory tree.
+      # SLACK_MCP_FILE_UPLOAD_PATHS names exactly ONE directory, and it is a
+      # staging area that exists for no other purpose. Everything about this
+      # value is deliberate; read before widening it.
+      #
+      # Why it is set at all: it was previously unset, on the reasoning that
+      # `content_base64` covers the same ground for free because "an agent can
+      # base64 a file itself". That is false. A tool argument is emitted by the
+      # MODEL, so the base64 has to pass through the context window -- a 294 KB
+      # chart PNG is ~392 KB of base64, well over 100k tokens. In practice the
+      # agent gave up and a human attached the file by hand.
+      #
+      # Why a staging dir and not the directory the artifact was born in: with
+      # `content_base64` the exfiltrated bytes must cross the transcript, which
+      # is what makes bulk exfiltration infeasible. `file_path` removes that
+      # limit -- the server reads bytes the model never saw. So the allowlist
+      # must contain only files that exist in order to be sent. That rules out
+      # the two obvious candidates. A project's outputs/ directory is a years-
+      # deep archive of data exports; /tmp/opencode itself is 2.1 GB and ~68k
+      # files of scratch from every concurrent session, including whole repo
+      # checkouts and multi-MB CSVs. Allowlisting either turns a prompt
+      # injection into a single tool call against files already on disk.
+      #
+      # This is defense in depth, not a wall: a session holding the write tools
+      # also holds bash, so `cp X <staging> && upload` is always available. What
+      # the narrow root buys is that the copy is an explicit bash command naming
+      # its source, visible in the transcript -- an injected instruction cannot
+      # be satisfied by a bare tool call against pre-existing scratch.
+      #
+      # The root must EXIST at call time: a root that fails EvalSymlinks is
+      # skipped, and an empty root list reports "not allowed", not "missing".
+      # cloudbox creates it via systemd.tmpfiles; on macOS `mkdir -p` it.
+      #
+      # Not set on slack-ro: without SLACK_MCP_FILE_UPLOAD_TOOL the upload tool
+      # is never registered there, so the variable would be inert.
       #
       # SLACK_MCP_LOG_LEVEL=warn because the server's logger middleware logs
       # every tool call's params at INFO -- which for file_upload is the file
@@ -1146,11 +1187,19 @@ in
       # door into the write tools that bypasses the per-tool env vars above.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
+        # The one allowlisted upload root. A root that cannot be resolved is
+        # skipped silently and the upload then fails as "not allowed", so
+        # create it here rather than debug that error later. Best effort: on
+        # cloudbox systemd.tmpfiles owns it, and /tmp is cleared out from under
+        # this eventually on either host, so an agent should still `mkdir -p`.
+        mkdir -p "${slackUploadStagingDir}" || true
+
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
           --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
           --arg bin "${localPkgs.slack-mcp-server}/bin/slack-mcp-server" \
+          --arg uploads "${slackUploadStagingDir}" \
           '.mcp.slack = {
             "type": "local",
             "command": [$bin, "--transport", "stdio"],
@@ -1160,6 +1209,7 @@ in
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
               "SLACK_MCP_ATTACHMENT_TOOL": "true",
               "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
+              "SLACK_MCP_FILE_UPLOAD_PATHS": $uploads,
               "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }
@@ -1204,20 +1254,44 @@ in
       # Read tools always register; each write tool is opt-in per env var, so
       # slack-ro's guarantee is the ABSENCE of SLACK_MCP_ADD_MESSAGE_TOOL and
       # SLACK_MCP_FILE_UPLOAD_TOOL. SLACK_MCP_ATTACHMENT_TOOL is set on both —
-      # downloading an attachment is a read. SLACK_MCP_FILE_UPLOAD_PATHS is
-      # deliberately unset, so file_upload accepts only content/content_base64,
-      # never a path off local disk.
+      # downloading an attachment is a read.
+      #
+      # SLACK_MCP_FILE_UPLOAD_PATHS names exactly one directory, a staging area
+      # that exists for no other purpose, and is set on `slack` only (on
+      # slack-ro the upload tool is never registered, so it would be inert).
+      # `content_base64` is not a substitute -- the model has to emit the blob
+      # as a tool argument, so a 294 KB PNG is ~100k tokens and does not fit.
+      # But that same limit is what makes bulk exfiltration infeasible, and
+      # `file_path` removes it: the server reads bytes the model never saw.
+      # Hence the root must hold only files staged in order to be sent. NOT a
+      # project outputs/ dir (years of data exports) and NOT /tmp/opencode
+      # itself (2.1 GB, ~68k files of scratch from every concurrent session,
+      # incl. repo checkouts and multi-MB CSVs) -- either would make a prompt
+      # injection a single tool call against files already on disk. The copy
+      # into the staging dir is a bash command naming its source, so it lands
+      # in the transcript. Full reasoning in the Darwin block above.
+      # The root must exist at call time (a root that fails EvalSymlinks is
+      # silently skipped and the error reads "not allowed"); cloudbox creates
+      # it via systemd.tmpfiles in hosts/cloudbox/configuration.nix.
       # SLACK_MCP_LOG_LEVEL=warn keeps upload content and message text out of
       # the journal: the logger middleware logs every call's params at INFO.
       # Do not add SLACK_MCP_ENABLED_TOOLS to slack-ro -- naming a tool there
       # enables it regardless of the per-tool gates.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
+        # The one allowlisted upload root. A root that cannot be resolved is
+        # skipped silently and the upload then fails as "not allowed", so
+        # create it here rather than debug that error later. Best effort: on
+        # cloudbox systemd.tmpfiles owns it, and /tmp is cleared out from under
+        # this eventually on either host, so an agent should still `mkdir -p`.
+        mkdir -p "${slackUploadStagingDir}" || true
+
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
           --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
           --arg bin "${localPkgs.slack-mcp-server}/bin/slack-mcp-server" \
+          --arg uploads "${slackUploadStagingDir}" \
           '.mcp.slack = {
             "type": "local",
             "command": [$bin, "--transport", "stdio"],
@@ -1227,6 +1301,7 @@ in
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
               "SLACK_MCP_ATTACHMENT_TOOL": "true",
               "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
+              "SLACK_MCP_FILE_UPLOAD_PATHS": $uploads,
               "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }

@@ -1,6 +1,6 @@
 ---
 name: slack-mcp-setup
-description: Set up Slack MCP server with xoxp User OAuth token. Use for initial setup or token rotation. Covers macOS (Keychain) and cloudbox (sops).
+description: Set up Slack MCP server with xoxp User OAuth token. Use for initial setup or token rotation, when a Slack tool is missing or disabled, or when a file upload is rejected with "file_path is not allowed" / "uploading by file_path is disabled". Covers macOS (Keychain) and cloudbox (sops), the per-tool env-var gates, and the file_path upload allowlist. For composing a message or attaching a file day-to-day, use formatting-slack-messages instead.
 ---
 
 # Slack MCP Setup
@@ -88,16 +88,35 @@ Content from exactly one of:
 
 - `content` — UTF-8 text (logs, snippets)
 - `content_base64` — binary (e.g. a screenshot)
-- `file_path` — **disabled here.** It requires `SLACK_MCP_FILE_UPLOAD_PATHS`,
-  which is deliberately unset, so the MCP process gets no ambient read
-  capability over local disk. Base64 the file yourself and use `content_base64`.
+- `file_path` — absolute path, allowed **only** under
+  `/tmp/opencode/slack-uploads`. That is the entire value of
+  `SLACK_MCP_FILE_UPLOAD_PATHS`. Stage the file first:
+
+  ```bash
+  mkdir -p /tmp/opencode/slack-uploads
+  cp outputs/chart-2026-09-02.png /tmp/opencode/slack-uploads/
+  ```
+
+  then `file_upload(channel_id=…, file_path="/tmp/opencode/slack-uploads/chart-2026-09-02.png")`.
 
 Optional: `thread_ts`, `title`, `filename`, `initial_comment`, `snippet_type`, `alt_txt`.
 
-> **The server logs tool arguments at info level, including `file_upload`
-> content.** Uploading a secret puts it in the MCP server's stderr as well as in
-> Slack. (The PR description claims params are not logged for this tool; the
-> shipped code logs them. Measured, not assumed.)
+**Prefer `file_path` for anything non-trivial.** Tool arguments are emitted by
+the model, so `content_base64` spends the file's base64 out of the context
+window — a 294 KB PNG is ~392 KB of base64, over 100k tokens. It does not fit.
+`file_path` streams from disk and costs a path.
+
+That difference is also why the allowlist is one staging directory and not, say,
+a project's `outputs/`: with `content_base64` the bytes have to cross the
+transcript, which is what makes bulk exfiltration infeasible, and `file_path`
+removes that limit. Keep the root to files staged in order to be sent. Do not
+widen it to `/tmp/opencode` itself — that is ~2 GB of scratch from every
+concurrent session, including repo checkouts and multi-MB data exports.
+
+> **The server logs tool arguments at info level.** With `file_path` the logged
+> param is the path; with `content` / `content_base64` it is the payload, so
+> uploading a secret that way puts it in the server's stderr as well as in
+> Slack. `SLACK_MCP_LOG_LEVEL=warn` is set for this reason.
 
 ### Why a pinned build
 
@@ -227,7 +246,8 @@ If you do need to refresh:
 |-------|----------|
 | `invalid_auth` | Token revoked or app uninstalled. Get new token from app OAuth page. |
 | `missing_scope` | App needs additional scopes. Add them in app settings, reinstall. Check what the token actually has: `curl -s -D- -o /dev/null -X POST https://slack.com/api/auth.test -H "Authorization: Bearer $(cat /run/secrets/slack_mcp_xoxp_token)" \| grep -i x-oauth-scopes` |
-| `file_path is not allowed` on upload | Intentional — `SLACK_MCP_FILE_UPLOAD_PATHS` is unset. Use `content_base64`. |
+| `file_path is not allowed` on upload | The path is outside `/tmp/opencode/slack-uploads`, **or** that directory does not exist — an unresolvable allowlist root is skipped silently and reports the same message. `mkdir -p /tmp/opencode/slack-uploads` and copy the file in. |
+| `file_path must be an absolute path` | Relative paths are rejected before any allowlist check. |
 | `attachment_get_data tool is disabled` | `SLACK_MCP_ATTACHMENT_TOOL` missing; re-run the home-manager switch. |
 | `refusing to send credentials to non-Slack attachment host` | Working as intended — our host guard. The file's `url_private` points off Slack. Do **not** "fix" it by relaxing the guard; treat the file as hostile. |
 | `not_authed` | Token not injected. Check Keychain/sops storage, re-apply config. |
@@ -244,9 +264,16 @@ jq '.mcp.slack.enabled = true' ~/.config/opencode/opencode.json > /tmp/oc.json &
 jq '.mcp.slack.enabled = false' ~/.config/opencode/opencode.json > /tmp/oc.json && mv /tmp/oc.json ~/.config/opencode/opencode.json
 ```
 
-### Option 2: Delegate to slack agent
+### Option 2: Grant the MCP to a session
 
-The slack agent enables the MCP automatically. Use it from OpenCode.
+There is no slack *agent* — an earlier version of this doc pointed at
+`assets/opencode/agents/slack.md`, which does not exist. Use one of:
+
+```bash
+oc-mcp-enable <session-id> slack      # grant to an ALREADY-RUNNING session
+opencode-launch --mcp slack ...       # launch a new session with it
+opencode-launch --mcp slack-ro ...    # read-only variant; cannot post or upload
+```
 
 **Available tools:**
 - `slack_channels_list` - List channels
@@ -255,7 +282,7 @@ The slack agent enables the MCP automatically. Use it from OpenCode.
 - `slack_conversations_search_messages` - Search messages with filters
 - `slack_conversations_add_message` - Post messages (use carefully)
 - `slack_attachment_get_data` - Download a file by ID (5 MB cap)
-- `slack_file_upload` - Upload a file (`content` / `content_base64`; see Files above)
+- `slack_file_upload` - Upload a file (`file_path` from the staging dir, or `content` / `content_base64`; see Files above)
 
 ## References
 
@@ -263,5 +290,6 @@ The slack agent enables the MCP automatically. Use it from OpenCode.
 - Auth docs: https://github.com/korotovsky/slack-mcp-server/blob/master/docs/01-authentication-setup.md#option-2-using-slack_mcp_xoxp_token-user-oauth
 - macOS activation: `users/dev/opencode-config.nix` (`injectSlackMcpSecrets`)
 - Cloudbox activation: `users/dev/opencode-config.nix` (`injectSlackMcpSecretsSops`)
-- Slack agent: `assets/opencode/agents/slack.md`
+- Composing messages and attaching files day-to-day: `formatting-slack-messages`
+- Granting the MCP to a session: `pkgs/oc-mcp-enable`, `pkgs/opencode-launch`
 - Pinned server build: `pkgs/slack-mcp-server/default.nix` (+ vendored `pr-334-file-upload.patch`)
