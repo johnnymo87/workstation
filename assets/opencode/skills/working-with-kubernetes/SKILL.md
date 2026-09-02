@@ -1,6 +1,6 @@
 ---
 name: working-with-kubernetes
-description: Generic kubectl patterns for pod interaction, file transfer, debugging distroless containers, and kubeconfig management. Works with any Kubernetes cluster. For environment-specific configurations, see the companion skill fetched from Confluence.
+description: Use when running any command in a company Kubernetes pod — kubectl exec, rake/rails tasks, scripts, DB queries — in production or staging, or when a pod or cluster seems unreachable with plain kubectl. Covers an internal `ba` CLI estate, an Azure AKS estate, and generic clusters (exec, kubectl cp, distroless debugging, kubeconfig management). Which CLI, kubeconfig, and namespace each repo uses lives in INTERNAL.md beside this SKILL.md — read it before concluding any pod is unreachable.
 ---
 
 # Working with Kubernetes (Generic Patterns)

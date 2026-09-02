@@ -63,7 +63,7 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 
 | Skill | Scope | Purpose |
 |-------|-------|---------|
-| [working-with-kubernetes](skills/working-with-kubernetes/SKILL.md) | work-only | Generic `kubectl` patterns: pod interaction, file transfer, distroless container debugging, kubeconfig management. |
+| [working-with-kubernetes](skills/working-with-kubernetes/SKILL.md) | work-only | Running commands in company pods: the internal `ba` CLI estate, the Azure AKS estate, and generic `kubectl` (pod interaction, file transfer, distroless debugging, kubeconfig). Which CLI/kubeconfig/namespace a given repo uses is in the skill's Confluence-fetched `INTERNAL.md` — check it before concluding a pod is unreachable. |
 | [using-gcloud-bq-cli](skills/using-gcloud-bq-cli/SKILL.md) | work-only | Gotchas for `gcloud` and `bq`: service-account auth, IAM permission checks, BigQuery access errors. |
 | [using-buildbuddy](skills/using-buildbuddy/SKILL.md) | work-only | Fetch raw, untruncated test logs from a BuildBuddy invocation by URL/ID via the `bb-test-log` helper or the enterprise API directly. |
 | [shepherding-pull-requests](skills/shepherding-pull-requests/SKILL.md) | work-only | The whole arc of a PR you authored: pre-PR checks, title/description, and the monitoring loop until it lands. PR creation is not a terminal state — invoke it the moment `gh pr create` returns, not only once something looks wrong. Replying and resolving every inline thread, and re-requesting a gating reviewer who hasn't approved, are standing defaults nobody should have to ask for. |
@@ -134,9 +134,8 @@ Do this instead:
   worktree works out of the box.
 
 **Structural enforcement:** the read-only review/advisor subagents
-(`code-reviewer`, `spec-reviewer`, `adversarial-reviewer-opus`,
-`adversarial-reviewer-fable`, `adversarial-reviewer-sol`, `oracle-opus`,
-`oracle-fable`, `oracle-sol`) have these git subcommands denied at the
+(`code-reviewer`, `spec-reviewer`, `adversarial-reviewer-fable`,
+`oracle-fable`) have these git subcommands denied at the
 permission layer (`assets/opencode/agents/*.md`),
 so the rule holds even if a subagent forgets it. That guard is a backstop, not
 a license — the convention above binds all sessions and subagents regardless of

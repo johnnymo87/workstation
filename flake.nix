@@ -96,6 +96,7 @@
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
       session-state-plugin = p.callPackage ./pkgs/session-state-plugin { };
+      slack-mcp-server = p.callPackage ./pkgs/slack-mcp-server { };
       teamclaude = p.callPackage ./pkgs/teamclaude { };
       vercel = p.callPackage ./pkgs/vercel { };
     } // nixpkgs.lib.optionalAttrs (system == devboxSystem || system == darwinSystem) {
@@ -476,8 +477,8 @@
         }
         # Pinned, following checks.oc-auto-attach: a suite that stops
         # adjudicating must not be able to present as green.
-        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 5 ] || {
-          echo "GATE FAILURE: expected 5 'PASS ' lines, got" \
+        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 9 ] || {
+          echo "GATE FAILURE: expected 9 'PASS ' lines, got" \
                "$(grep -c '^PASS ' "$TMPDIR/dc.txt")." >&2
           exit 1
         }

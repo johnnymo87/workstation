@@ -88,64 +88,53 @@ let
           ''
         else
           afterSonnet;
-      # 3. fable-5 -> Vertex Anthropic on cloudbox ONLY, mirroring the opus
+      # 3. fable -> Vertex Anthropic on cloudbox ONLY, mirroring the opus
       #    rewrite above and for the same reason: cloudbox has no first-party
       #    `anthropic/` auth (it routes Anthropic through Vertex/ADC), so an
-      #    agent left pinned to `anthropic/claude-fable-5` reaches an unusable
+      #    agent left pinned to `anthropic/claude-fable-5-1` reaches an unusable
       #    provider and the model loop dies with an empty response. The Vertex
-      #    fable-5 entry (`google-vertex-anthropic/claude-fable-5@default`)
+      #    fable entry (`google-vertex-anthropic/claude-fable-5-1@default`)
       #    carries its own high `effort` from opencode.base.json, so no variant
-      #    override is added here. No-op on agents that don't pin fable-5.
+      #    override is added here. No-op on agents that don't pin fable.
+      #
+      #    The version is CAPTURED, not hardcoded — a literal `claude-fable-5`
+      #    match against the 5.1 pin yields `claude-fable-5@default-1`, a
+      #    provider/model pair that does not exist and fails at request time.
       afterFable =
         if isCloudbox then
           pkgs.runCommand "${name}-fable-vertex.md" {} ''
-            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-fable-5|model: google-vertex-anthropic/claude-fable-5\@default|' ${afterOpus} > $out
+            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-fable-([0-9]+(?:-[0-9]+)*)|model: google-vertex-anthropic/claude-fable-''${1}\@default|' ${afterOpus} > $out
           ''
         else
           afterOpus;
     in
       afterFable;
 
-  # mkAgentVariant: build a model-pinned twin of a `<base>-opus` agent from the
-  # SAME source body at build time, so a shared prompt has a single source of
-  # truth (no hand-maintained copies to drift). Used for both adversarial-reviewer
-  # and oracle (any agent whose opus source pins anthropic/claude-opus-5 and
-  # carries an "(opus-5 model)" token in its description). It rewrites only:
-  #   - the model pin (opus-5 -> modelPin)
-  #   - the "(opus-5 model)" description token -> "(modelTag model)"
-  #   - appends an opt-in CAUTION so the orchestrator does NOT auto-select the
-  #     twin; `<base>-opus` stays the default.
-  # The result is fed through patchAgent for any host rewrites (e.g. the afterFable
-  # Vertex rewrite on cloudbox; a no-op for pins no branch matches, like
-  # openai/gpt-5.6-sol).
+  # NOTE ON THE REMOVED MODEL-TWIN MACHINERY (mkAgentVariant / mkFableVariant /
+  # mkSolVariant), deleted 2026-09-01. oracle and adversarial-reviewer used to
+  # ship as three model-pinned twins each (-opus / -fable / -sol) generated from
+  # one prompt source, with the non-default two carrying an opt-in CAUTION. Only
+  # -fable is wanted now, so the builders are gone rather than kept unused: an
+  # unevaluated nix builder gets no build coverage and rots silently, which is
+  # exactly how the literal `claude-fable-5` bug survived in the LIVE rewrite
+  # path. `git log -- users/dev/opencode-config.nix` has the full implementation
+  # if a twin is ever wanted again.
   #
-  # IMPORTANT: the appended text must NOT contain a colon-space (": "). opencode
+  # The deployed handles deliberately keep the `-fable` suffix even though there
+  # is nothing to disambiguate against today. That is the compat hook: re-adding
+  # a second model later is then additive and does not rename or break the
+  # handle everything already calls.
+  #
+  # One hard-won constraint to preserve if that machinery ever comes back: the
+  # generated `description:` must NOT contain a colon-space (": "). opencode
   # parses agent frontmatter with gray-matter/js-yaml (packages/opencode/src/
-  # config/markdown.ts), and a ": " inside an unquoted YAML scalar (the
-  # `description:` value) makes the primary `matter()` parse THROW, forcing the
-  # fragile fallbackSanitization double-parse path. That path is racy under the
-  # concurrent agent-load in loadAgent(): it nondeterministically fails, and a
-  # failed parse SKIPS the agent (config.ts:198-207), leaving a default stub
-  # (mode=all, model=null) that silently runs the caller's model (opus) instead
-  # of the pinned one. Colon-free descriptions (like the opus twin's) parse on the
-  # first try and are rock-solid, so we keep this value colon-free (em-dash).
-  mkAgentVariant = { base, slug, modelPin, modelTag }: src:
-    pkgs.runCommand "${base}-${slug}-src.md" {} ''
-      ${pkgs.perl}/bin/perl -0pe '
-        s|model: anthropic/claude-opus-5|model: ${modelPin}|;
-        s|\(opus-5 model\)|(${modelTag} model)|;
-        s|^(description: .*)$|$1. CAUTION — use this ${modelTag} variant ONLY when the user explicitly asks for it; otherwise default to ${base}-opus|m;
-      ' ${src} > $out
-    '';
-
-  # Per-model twin builders, parameterized by base agent name. Apply to any
-  # `<base>-opus.md` source.
-  #   fable-5    (all hosts; cloudbox gets the Vertex rewrite via patchAgent)
-  #   gpt-5.6-sol (ChatGPT/Codex-subscription frontier model via codex-lb on
-  #                127.0.0.1:2455; deployed on all hosts, reachable wherever
-  #                codex-lb serves it; patchAgent is a pass-through for the pin)
-  mkFableVariant = base: mkAgentVariant { inherit base; slug = "fable"; modelPin = "anthropic/claude-fable-5"; modelTag = "fable-5"; };
-  mkSolVariant   = base: mkAgentVariant { inherit base; slug = "sol";   modelPin = "openai/gpt-5.6-sol";      modelTag = "gpt-5.6-sol"; };
+  # config/markdown.ts), and a ": " inside an unquoted YAML scalar makes the
+  # primary matter() parse THROW, forcing the fragile fallbackSanitization
+  # double-parse path. That path is racy under the concurrent agent-load in
+  # loadAgent(): it nondeterministically fails, and a failed parse SKIPS the
+  # agent (config.ts:198-207), leaving a default stub (mode=all, model=null)
+  # that silently runs the CALLER's model instead of the pinned one. The
+  # em-dash in both descriptions is load-bearing for that reason.
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -536,27 +525,19 @@ in
    # Custom agents via OpenCode-native markdown format.
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
-   # Distinctly-named model-pinned twins so the model is unambiguous at the call
-   # site, all generated from each agent's `<base>-opus.md` source (single source
-   # of truth for the prompt body, no drift):
-   #   @<base>-opus   -> opus-5 (source of truth for the prompt)
-   #   @<base>-fable  -> claude-fable-5 (mkFableVariant; cloudbox gets the Vertex
-   #                     rewrite via patchAgent)
-   #   @<base>-sol    -> openai/gpt-5.6-sol (mkSolVariant; deployed on all hosts —
-   #                     reachable wherever codex-lb serves gpt-5.6-sol; patchAgent
-   #                     is a no-op for this pin)
-   # -fable and -sol carry an opt-in CAUTION in their description; -opus is the
-   # default the orchestrator should reach for.
-   xdg.configFile."opencode/agents/adversarial-reviewer-opus.md".source = patchAgent "adversarial-reviewer-opus" "${assetsPath}/opencode/agents/adversarial-reviewer-opus.md";
+   # oracle and adversarial-reviewer ship as a single model each, pinned to
+   # claude-fable-5-1 in their own source file. The deployed FILE keeps the
+   # `-fable` suffix while the SOURCE does not: the suffix is a compat hook for
+   # re-introducing a second model later (see the note above), and renaming the
+   # source to match the pin avoids a file called `-opus.md` that pins no opus.
+   #
+   # patchAgent still matters here: on cloudbox its afterFable branch rewrites
+   # the `anthropic/` pin to `google-vertex-anthropic/claude-fable-5-1@default`,
+   # because cloudbox has no first-party Anthropic auth.
    xdg.configFile."opencode/agents/adversarial-reviewer-fable.md".source =
-     patchAgent "adversarial-reviewer-fable" (mkFableVariant "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer-opus.md");
-   xdg.configFile."opencode/agents/adversarial-reviewer-sol.md".source =
-     patchAgent "adversarial-reviewer-sol" (mkSolVariant "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer-opus.md");
-   xdg.configFile."opencode/agents/oracle-opus.md".source = patchAgent "oracle-opus" "${assetsPath}/opencode/agents/oracle-opus.md";
+     patchAgent "adversarial-reviewer-fable" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
    xdg.configFile."opencode/agents/oracle-fable.md".source =
-     patchAgent "oracle-fable" (mkFableVariant "oracle" "${assetsPath}/opencode/agents/oracle-opus.md");
-   xdg.configFile."opencode/agents/oracle-sol.md".source =
-     patchAgent "oracle-sol" (mkSolVariant "oracle" "${assetsPath}/opencode/agents/oracle-opus.md");
+     patchAgent "oracle-fable" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
@@ -1042,31 +1023,64 @@ in
         echo "Slack MCP xoxp token not found in Keychain; removed mcp.slack + mcp.slack-ro from config" >&2
       # Token present: inject Slack MCP config with xoxp auth
       # MCP is disabled by default; enable manually or use dedicated slack agent when needed.
-      # Two variants: `slack` (read + write, SLACK_MCP_ADD_MESSAGE_TOOL=true) and
-      # `slack-ro` (read-only; omits SLACK_MCP_ADD_MESSAGE_TOOL so the korotovsky
-      # server registers read tools only). slack-ro is used by lgtm's read-only
-      # gather session (`opencode-launch --mcp slack-ro`) so it structurally cannot post.
+      # Two variants: `slack` (read + write) and `slack-ro` (read-only). Both run
+      # the PINNED localPkgs.slack-mcp-server build, not `npx -y ...@latest` —
+      # see pkgs/slack-mcp-server for why (file_upload patch + no unpinned
+      # network fetch for a process holding a Slack user token).
+      #
+      # The korotovsky server registers all READ tools unconditionally; each
+      # write/side-effecting tool is opt-in via its own env var. So the read-only
+      # guarantee of `slack-ro` is exactly "which gates are absent":
+      #   SLACK_MCP_ADD_MESSAGE_TOOL  -> conversations_add_message  (slack only)
+      #   SLACK_MCP_FILE_UPLOAD_TOOL  -> file_upload                (slack only)
+      #   SLACK_MCP_ATTACHMENT_TOOL   -> attachment_get_data        (BOTH: download
+      #                                  is read-only, so slack-ro keeps it)
+      # slack-ro is used by lgtm's read-only gather session
+      # (`opencode-launch --mcp slack-ro`) so it structurally cannot post.
+      #
+      # SLACK_MCP_FILE_UPLOAD_PATHS is deliberately NOT set: without it the
+      # tool's `file_path` source is rejected and only `content` /
+      # `content_base64` work. That costs nothing (an agent can base64 a file
+      # itself) and avoids handing the MCP process its own ambient read
+      # capability over a directory tree.
+      #
+      # SLACK_MCP_LOG_LEVEL=warn because the server's logger middleware logs
+      # every tool call's params at INFO -- which for file_upload is the file
+      # CONTENT, and for conversations_add_message is the message text. The MCP
+      # process's stderr is inherited by opencode-serve, so at the default level
+      # anything uploaded is also durably in the journal. `warn` still logs tool
+      # name and error on failures.
+      #
+      # Neither variant sets SLACK_MCP_ENABLED_TOOLS. Do not add it to slack-ro:
+      # the runtime gate treats a tool named there as enabled, so it is a second
+      # door into the write tools that bypasses the per-tool env vars above.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
           --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
+          --arg bin "${localPkgs.slack-mcp-server}/bin/slack-mcp-server" \
           '.mcp.slack = {
             "type": "local",
-            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "command": [$bin, "--transport", "stdio"],
             "enabled": false,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
-              "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
+              "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }
           | .mcp."slack-ro" = {
             "type": "local",
-            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "command": [$bin, "--transport", "stdio"],
             "enabled": false,
             "environment": {
-              "SLACK_MCP_XOXP_TOKEN": $xoxp
+              "SLACK_MCP_XOXP_TOKEN": $xoxp,
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }' "$runtime" > "$tmp"
 
@@ -1095,30 +1109,45 @@ in
         fi
         echo "Slack MCP xoxp token not found in sops; removed mcp.slack + mcp.slack-ro from config (secret absent -> reference would fail the whole config load)" >&2
       # Token present: inject Slack MCP config with xoxp auth.
-      # Two variants: `slack` (read + write) and `slack-ro` (read-only; omits
-      # SLACK_MCP_ADD_MESSAGE_TOOL so only read tools register). slack-ro is used
-      # by lgtm's read-only gather session so it structurally cannot post.
+      # Two variants: `slack` (read + write) and `slack-ro` (read-only). Both run
+      # the PINNED localPkgs.slack-mcp-server build (see pkgs/slack-mcp-server).
+      # Read tools always register; each write tool is opt-in per env var, so
+      # slack-ro's guarantee is the ABSENCE of SLACK_MCP_ADD_MESSAGE_TOOL and
+      # SLACK_MCP_FILE_UPLOAD_TOOL. SLACK_MCP_ATTACHMENT_TOOL is set on both —
+      # downloading an attachment is a read. SLACK_MCP_FILE_UPLOAD_PATHS is
+      # deliberately unset, so file_upload accepts only content/content_base64,
+      # never a path off local disk.
+      # SLACK_MCP_LOG_LEVEL=warn keeps upload content and message text out of
+      # the journal: the logger middleware logs every call's params at INFO.
+      # Do not add SLACK_MCP_ENABLED_TOOLS to slack-ro -- naming a tool there
+      # enables it regardless of the per-tool gates.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
           --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
+          --arg bin "${localPkgs.slack-mcp-server}/bin/slack-mcp-server" \
           '.mcp.slack = {
             "type": "local",
-            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "command": [$bin, "--transport", "stdio"],
             "enabled": false,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
-              "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
+              "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }
           | .mcp."slack-ro" = {
             "type": "local",
-            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "command": [$bin, "--transport", "stdio"],
             "enabled": false,
             "environment": {
-              "SLACK_MCP_XOXP_TOKEN": $xoxp
+              "SLACK_MCP_XOXP_TOKEN": $xoxp,
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }' "$runtime" > "$tmp"
 
