@@ -725,57 +725,32 @@ in
       # require; TeamClaude only swaps the token, it does NOT shape. Removing it
       # makes opus/sonnet 429 and TeamClaude retry-loop forever. See
       # injectTeamclaudeBaseUrl below for the full coexistence rationale.
-      "@ex-machina/opencode-anthropic-auth" = "1.8.0";
+      #
+      # >= 1.8.2 is REQUIRED, not merely preferred. Anthropic gates model access
+      # on the Claude Code version the client reports, SERVER-SIDE. Releases up
+      # to 1.8.1 hardcode 2.1.87, which newer models reject:
+      #
+      #   400 invalid_request_error / error_code: claude_code_version_too_old
+      #   "Claude Code 2.1.87 does not support this model; version 2.1.251 or
+      #    newer is required."
+      #
+      # opencode surfaces that as an EMPTY assistant turn with no visible error,
+      # so it presents as "the agent is down". It broke oracle-fable and
+      # adversarial-reviewer-fable the moment #443/#444 repinned them to
+      # claude-fable-5-1. 1.8.2 reports 2.1.258 and derives the user-agent from
+      # the same constant (upstream PR #223).
+      #
+      # This will recur whenever Anthropic gates a newer model than the bundled
+      # constant. Diagnose from the stored `error` on the assistant message in
+      # opencode.db before suspecting agent config; the fix is a pin bump here.
+      "@ex-machina/opencode-anthropic-auth" = "1.8.2";
       "opencode-beads" = "0.6.0";
     };
     pinJson = builtins.toJSON opencodePluginPins;
 
-    # Claude Code version that @ex-machina/opencode-anthropic-auth reports to
-    # Anthropic. The plugin hardcodes 2.1.87 (unchanged since before its last
-    # npm release, 1.8.1 / 2026-05-15); Anthropic gates model access on this
-    # value SERVER-SIDE, so a stale constant makes newer models unreachable:
-    #
-    #   400 invalid_request_error / error_code: claude_code_version_too_old
-    #   "Claude Code 2.1.87 does not support this model; version 2.1.251 or
-    #    newer is required."
-    #
-    # In opencode that surfaces as an EMPTY assistant turn, not an error the
-    # user sees — the agent just returns nothing. It broke oracle-fable and
-    # adversarial-reviewer-fable the moment #443/#444 repinned them to
-    # claude-fable-5-1 (gated at >= 2.1.251).
-    #
-    # Measured on devbox 2026-09-02, patching one constant at a time:
-    #
-    #   | patched                        | result                          |
-    #   |--------------------------------|---------------------------------|
-    #   | USER_AGENT only                | 400, still quoting 2.1.87       |
-    #   | USER_AGENT + CLAUDE_CODE_VERSION | 200, agents answer normally   |
-    #
-    # So BOTH must move together. The version reaches Anthropic by two
-    # independent paths — the `user-agent` header, and the `cc_version` field
-    # of the billing header the plugin injects as system[0] (built by
-    # buildBillingHeaderValue from CLAUDE_CODE_VERSION). The server prefers the
-    # billing header, which is why a user-agent-only patch changes nothing and
-    # why a rewrite at the TeamClaude proxy (which only sees headers) cannot
-    # fix this. buildBillingHeaderValue derives its hash suffix locally from
-    # CCH_SALT + version, so bumping the constant recomputes it correctly with
-    # no other coordination.
-    #
-    # UPSTREAM: https://github.com/ex-machina-co/opencode-anthropic-auth/pull/223
-    # bumps to 2.1.258 and derives USER_AGENT from the constant. It is open and
-    # unmerged (bots green, no human review). Do not wait on it — issue #175
-    # reported this same stale constant on 2026-07-02, was closed COMPLETED on
-    # 2026-07-25 with no code change, and nothing has been published to npm
-    # since 2026-05-15.
-    #
-    # REMOVE THIS PATCH when a release containing #223 (or later) ships: bump
-    # the pin above, confirm `CLAUDE_CODE_VERSION` in the published dist is
-    # >= 2.1.251, and delete the patchClaudeCodeVersion block below.
-    #
-    # This constant will go stale again whenever Anthropic gates a new model.
-    # The symptom is always the same empty turn; check the message's stored
-    # `error` in opencode.db before suspecting agent config.
-    claudeCodeVersion = "2.1.258";
+    # Minimum Claude Code version the pinned anthropic-auth plugin must report.
+    # Asserted at activation; see the assertion block below for why.
+    claudeCodeVersionFloor = "2.1.251";
   in lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     set -euo pipefail
     export PATH="${pkgs.nodejs}/bin:${pkgs.jq}/bin:${pkgs.coreutils}/bin:${pkgs.gnused}/bin:$PATH"
@@ -800,15 +775,31 @@ in
 
       # Find any cached copies of this package and purge those whose installed
       # version doesn't match the pin. The cache key is the version spec at
-      # first-fetch time (e.g. "@latest"), so we glob over <scope>/<name>@*.
+      # first-fetch time, so we cover BOTH shapes:
+      #
+      #   <name>@<spec>  what current opencode writes — a bare entry in the
+      #                  `plugin` array is normalised to "@latest"
+      #   <name>         bare directories left by older opencode builds
+      #
+      # Only the first shape is live today, and the pre-2026-09-02 "<name>@*"
+      # glob did cover it. The bare directories are stale: devbox had one at
+      # 1.8.1 that survived every pin check, while the loaded "@latest" copy
+      # tracked the pin correctly. Purging both is hygiene, not a bug fix —
+      # a stale copy is only inert until some future opencode resolves that
+      # spec shape again, and it makes "which copy is live?" a question you
+      # can answer by looking rather than by testing.
+      #
+      # (Verified after a purge: opencode recreated only "@latest".)
+      #
       # The cached package.json lives at:
-      #   <cache_dir>/<scope>/<name>@<spec>/node_modules/<scope>/<name>/package.json
+      #   <cache_dir>/node_modules/<scope>/<name>/package.json
       cache_root="$HOME/.cache/opencode/packages"
       [ -d "$cache_root" ] || continue
 
       # Resolve <scope>/<name> globs. Empty glob => no cached copies, skip.
       shopt -s nullglob
-      for cache_dir in "$cache_root/$pkg"@*; do
+      for cache_dir in "$cache_root/$pkg" "$cache_root/$pkg"@*; do
+        [ -d "$cache_dir" ] || continue
         cached_pkg_json="$cache_dir/node_modules/$pkg/package.json"
         if [ ! -f "$cached_pkg_json" ]; then
           # Malformed cache entry; nuke to be safe
@@ -827,64 +818,51 @@ in
       shopt -u nullglob
     done < <(echo "$pins" | jq -r 'to_entries | .[] | "\(.key)\t\(.value)"')
 
-    # Patch the anthropic-auth plugin's reported Claude Code version in every
-    # copy that opencode-serve might load. See claudeCodeVersion above for why
-    # this exists, the two-path evidence, and when to delete it.
+    # Assert the anthropic-auth plugin reports a Claude Code version Anthropic
+    # still accepts. Read-only: the pin above is what fixes this, and the purge
+    # loop is what enforces the pin. This only makes the failure legible.
     #
-    # Runs AFTER the purge loop so a freshly-installed copy gets patched too.
-    # Idempotent: re-running is a no-op, and it only flips cache_invalidated
-    # (which triggers the serve restart below) when a file actually changed —
-    # so a normal switch doesn't disrupt live sessions.
+    # Worth asserting rather than trusting the pin, because the symptom is an
+    # EMPTY assistant turn with no visible error (the 400 lands only in the
+    # stored message record in opencode.db). Every minute spent on that symptom
+    # is spent suspecting agent config. One line at switch time replaces it.
     #
-    # Both cache layouts are covered. Note the purge loop above globs
-    # "<pkg>@*", which matches ".../opencode-anthropic-auth@latest" but NOT the
-    # bare ".../opencode-anthropic-auth" directory, so that second copy is
-    # invisible to the pin check and can hold a different version (1.8.1 here
-    # vs the 1.8.0 pin). That gap is pre-existing and deliberately not fixed
-    # here: closing it would purge the directory, and opencode would refetch an
-    # unpatched copy at plugin load. Patching every copy sidesteps it.
-    cc_version='${claudeCodeVersion}'
-    cc_ua="claude-cli/$cc_version (external, cli)"
+    # The floor moves on Anthropic's schedule, not ours: it is whatever the
+    # newest model we pin an agent to demands. 2.1.251 is claude-fable-5-1's.
+    cc_floor='${claudeCodeVersionFloor}'
     auth_pkg="@ex-machina/opencode-anthropic-auth"
 
     shopt -s nullglob
     for constants in \
       "$HOME/.config/opencode/node_modules/$auth_pkg/dist/constants.js" \
-      "$HOME/.cache/opencode/packages/$auth_pkg"*/node_modules/"$auth_pkg"/dist/constants.js
+      "$HOME/.cache/opencode/packages/$auth_pkg" \
+      "$HOME/.cache/opencode/packages/$auth_pkg"@*
     do
-      [ -f "$constants" ] || continue
-
-      before="$(sha256sum "$constants" | cut -d' ' -f1)"
-      ctmp="$(mktemp "$constants.tmp.XXXXXX")"
-      sed -E \
-        -e "s#^(export const CLAUDE_CODE_VERSION = )'[^']*';#\1'$cc_version';#" \
-        -e "s#^(export const USER_AGENT = )'[^']*';#\1'$cc_ua';#" \
-        "$constants" > "$ctmp"
-      mv "$ctmp" "$constants"
-      after="$(sha256sum "$constants" | cut -d' ' -f1)"
-
-      if [ "$before" != "$after" ]; then
-        echo "installOpencodePlugins: patched reported Claude Code version -> $cc_version in $constants"
-        cache_invalidated=1
+      # Accept either a file (node_modules path) or a cache dir, and normalise.
+      if [ -d "$constants" ]; then
+        constants="$constants/node_modules/$auth_pkg/dist/constants.js"
       fi
-    done
-    shopt -u nullglob
-
-    # Fail loudly rather than silently shipping a half-applied patch: if a copy
-    # exists but didn't end up on the intended version, the plugin's internals
-    # have moved and the sed above no longer matches.
-    shopt -s nullglob
-    for constants in \
-      "$HOME/.config/opencode/node_modules/$auth_pkg/dist/constants.js" \
-      "$HOME/.cache/opencode/packages/$auth_pkg"*/node_modules/"$auth_pkg"/dist/constants.js
-    do
       [ -f "$constants" ] || continue
-      if ! grep -q "^export const CLAUDE_CODE_VERSION = '$cc_version';" "$constants" \
-        || ! grep -q "^export const USER_AGENT = 'claude-cli/$cc_version " "$constants"; then
+
+      reported="$(sed -nE "s/^export const CLAUDE_CODE_VERSION = '([^']*)'.*/\1/p" "$constants" | head -1)"
+
+      if [ -z "$reported" ]; then
         {
-          echo "installOpencodePlugins: WARNING — failed to patch Claude Code version in $constants."
-          echo "installOpencodePlugins: fable/newer models will return EMPTY turns (400 claude_code_version_too_old)."
-          echo "installOpencodePlugins: the plugin's constants.js shape probably changed; see claudeCodeVersion in opencode-config.nix."
+          echo "installOpencodePlugins: WARNING — could not read CLAUDE_CODE_VERSION from $constants."
+          echo "installOpencodePlugins: the plugin's constants.js shape changed; the version assertion below is now blind."
+        } >&2
+        continue
+      fi
+
+      # Version-sort both and check the floor didn't win. `sort -V` handles the
+      # dotted components; string compare would rank 2.1.87 above 2.1.258.
+      oldest="$(printf '%s\n%s\n' "$reported" "$cc_floor" | sort -V | head -1)"
+      if [ "$reported" != "$cc_floor" ] && [ "$oldest" = "$reported" ]; then
+        {
+          echo "installOpencodePlugins: WARNING — $auth_pkg reports Claude Code $reported, below the $cc_floor floor."
+          echo "installOpencodePlugins: gated models will return EMPTY assistant turns (400 claude_code_version_too_old)."
+          echo "installOpencodePlugins: bump the pin in opencode-config.nix to a release reporting >= $cc_floor."
+          echo "installOpencodePlugins: offending copy: $constants"
         } >&2
       fi
     done
@@ -896,27 +874,29 @@ in
     # active sessions on every home-manager switch).
     ${lib.optionalString isDevbox ''
       if [ "$cache_invalidated" = "1" ]; then
-        # devbox: opencode-serve is a USER service (see home.devbox.nix), so
-        # restart it in the user manager — no sudo. Ensure XDG_RUNTIME_DIR is set
-        # so `systemctl --user` can reach the user bus even when this activation
-        # runs from a context that didn't export it. Use the absolute systemctl
-        # path (the activation PATH is minimal). Capture the exit code into a
-        # variable (the `cmd || rc=$?` pattern) to stay robust to home-manager's
-        # set -e / errexit-mask interactions.
-        export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$UID}"
-        restart_rc=0
-        /run/current-system/sw/bin/systemctl --user restart opencode-serve.service || restart_rc=$?
-        if [ "$restart_rc" -eq 0 ]; then
-          echo "installOpencodePlugins: restarted opencode-serve (user) after cache invalidation"
-        else
-          # Don't fail the whole activation — the service has Restart=always and
-          # the nightly timer restarts it too. Surface the failure clearly.
-          {
-            echo "installOpencodePlugins: WARNING — user opencode-serve restart failed (exit $restart_rc)."
-            echo "installOpencodePlugins: cache was invalidated but service still running stale plugin."
-            echo "installOpencodePlugins: run manually: systemctl --user restart opencode-serve"
-          } >&2
-        fi
+        # devbox does NOT auto-restart, deliberately. The pool here is a set of
+        # templated USER units (opencode-serve@4096, @4097) under
+        # opencode-serve-pool.target; there is no single "opencode-serve.service"
+        # to bounce. Restarting the target is the only correct whole-pool action,
+        # and it kills every live session on the box — including the session
+        # running this switch. That is why reset-workspace only does it nightly,
+        # behind a confirmation.
+        #
+        # This used to `systemctl --user restart opencode-serve.service`, which
+        # has not existed for some time: it failed with exit 5 on every switch and
+        # printed a warning telling you to run the same nonexistent unit by hand.
+        # The consequence was never staleness, only latency — the pool IS
+        # restarted nightly at 03:00 by nightly-restart-background.timer (a SYSTEM
+        # timer; `systemctl --user list-timers` does not show it), so a new plugin
+        # goes live within a day regardless.
+        #
+        # So: say what happened and what the options are, and let the human pick.
+        {
+          echo "installOpencodePlugins: plugin cache changed; the new version is on disk but NOT live."
+          echo "installOpencodePlugins: running serves keep the old plugin until the pool restarts."
+          echo "installOpencodePlugins:   automatic — nightly at 03:00 (nightly-restart-background.timer)"
+          echo "installOpencodePlugins:   now, disruptive — reset-workspace   (kills all live sessions)"
+        } >&2
       fi
     ''}
     ${lib.optionalString isCloudbox ''
@@ -1789,24 +1769,31 @@ in
       echo "teamclaude: anthropic -> ''${anthropic_url:-<direct Anthropic>} (teamclaude=$tc_state)" >&2
       new_hash="$(printf '%s' "$anthropic_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
 
-      # Restart opencode-serve (user service) when the effective URL changed OR the
-      # dummy credential was freshly seeded — the plugin's loader decides oauth-mode
-      # (shaping) at provider init, so a fresh seed needs a reload to take effect.
+      # The plugin's loader decides oauth-mode (shaping) at provider init, so a
+      # changed URL or a fresh dummy-cred seed only takes effect once a serve
+      # restarts. We do NOT restart here — same policy as injectCodexLbBaseUrl
+      # below, and for the same reason: devbox runs a serve POOL
+      # (opencode-serve@<port> under opencode-serve-pool.target), so there is no
+      # single unit to bounce and cycling the target kills every live session,
+      # including the one running this switch.
+      #
+      # This block used to `systemctl --user restart opencode-serve.service`.
+      # That unit has not existed here since the pool migration, so the restart
+      # was a guaranteed exit-5 no-op — and because the hash file was only
+      # written on restart SUCCESS, the failure path re-armed itself: every
+      # subsequent switch would re-detect "state changed", warn again, and again
+      # decline to persist the hash. Writing the hash unconditionally is what
+      # makes this converge.
       old_hash=""
       [ -r "$hash_file" ] && old_hash="$(cat "$hash_file")"
       if [[ "$new_hash" != "$old_hash" || "$seeded" == "1" ]]; then
-        echo "teamclaude: state changed (url hash $old_hash -> $new_hash, seeded=$seeded); restarting opencode-serve (user)" >&2
-        restart_rc=0
-        $sc --user restart opencode-serve.service || restart_rc=$?
-        if [ "$restart_rc" -eq 0 ]; then
-          echo "$new_hash" > "$hash_file"
-          echo "teamclaude: opencode-serve restarted; hash file updated" >&2
-        else
-          {
-            echo "teamclaude: WARNING — opencode-serve restart failed (exit $restart_rc)."
-            echo "teamclaude: hash file NOT updated; next switch will retry."
-          } >&2
-        fi
+        echo "$new_hash" > "$hash_file"
+        {
+          echo "teamclaude: state changed (url hash $old_hash -> $new_hash, seeded=$seeded)."
+          echo "teamclaude: config written — running serves keep the old provider init until they restart."
+          echo "teamclaude:   automatic — nightly at 03:00 (nightly-restart-background.timer)"
+          echo "teamclaude:   now, disruptive — reset-workspace   (kills all live sessions)"
+        } >&2
       fi
     '');
 
