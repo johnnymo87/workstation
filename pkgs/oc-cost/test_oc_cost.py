@@ -467,9 +467,9 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
         self.assertEqual(tier, "unpriced")
 
     def test_gemini_flash_uses_introductory_rate_before_2027(self):
-        # Google's intro pricing for 3.6/3.7 Flash runs through 2026-12-31:
+        # Google's intro pricing for 3.6/3.7/3.8 Flash runs through 2026-12-31:
         # 0.75 / 3.75 / cache_read 0.075 per 1M.
-        for model in ("gemini-3.6-flash", "gemini-3.7-flash"):
+        for model in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"):
             e = oc_cost.rate_for("google-vertex", model, "2026-08-13")
             self.assertEqual(e["input"], 0.75, model)
             self.assertEqual(e["output"], 3.75, model)
@@ -477,25 +477,25 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
 
     def test_gemini_flash_doubles_from_2027(self):
         # Standard pricing applies starting 2027-01-01 (boundary inclusive).
-        for model in ("gemini-3.6-flash", "gemini-3.7-flash"):
+        for model in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"):
             e = oc_cost.rate_for("google-vertex", model, "2027-01-01")
             self.assertEqual(e["input"], 1.5, model)
             self.assertEqual(e["output"], 7.5, model)
             self.assertEqual(e["cache_read"], 0.15, model)
 
     def test_gemini_flash_last_intro_day_is_still_intro(self):
-        e = oc_cost.rate_for("google-vertex", "gemini-3.7-flash", "2026-12-31")
+        e = oc_cost.rate_for("google-vertex", "gemini-3.8-flash", "2026-12-31")
         self.assertEqual(e["input"], 0.75)
 
     def test_gemini_flash_cost_for_message_uses_row_day(self):
         toks = {"input": 1_000_000, "output": 1_000_000, "reasoning": 0,
                 "cache": {"read": 0, "write": 0}}
         intro, tier = oc_cost.cost_for_message(
-            "google-vertex", "gemini-3.7-flash", toks, "2026-08-13")
+            "google-vertex", "gemini-3.8-flash", toks, "2026-08-13")
         self.assertAlmostEqual(intro, 0.75 + 3.75, places=6)
         self.assertEqual(tier, "base")
         standard, _ = oc_cost.cost_for_message(
-            "google-vertex", "gemini-3.7-flash", toks, "2027-06-01")
+            "google-vertex", "gemini-3.8-flash", toks, "2027-06-01")
         self.assertAlmostEqual(standard, 1.5 + 7.5, places=6)
 
     def test_undated_model_ignores_day(self):
@@ -509,11 +509,11 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
         # A window spanning the cutoff must price each row at the rate in
         # force on ITS day, not today's rate for all of them.
         rows = [
-            {"provider": "google-vertex", "model": "gemini-3.7-flash",
+            {"provider": "google-vertex", "model": "gemini-3.8-flash",
              "day": "2026-12-31", "input": 1_000_000, "output": 0,
              "reasoning": 0, "cache_read": 0, "cache_write": 0,
              "recorded_cost": 0.0, "session_id": "s1"},
-            {"provider": "google-vertex", "model": "gemini-3.7-flash",
+            {"provider": "google-vertex", "model": "gemini-3.8-flash",
              "day": "2027-01-01", "input": 1_000_000, "output": 0,
              "reasoning": 0, "cache_read": 0, "cache_write": 0,
              "recorded_cost": 0.0, "session_id": "s1"},
