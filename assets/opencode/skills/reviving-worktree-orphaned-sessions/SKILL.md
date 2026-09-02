@@ -90,7 +90,19 @@ The path swap costs one session nothing; the restart costs every co-tenant a tur
 
 Committed work is safe — the branch ref outlives the worktree, so `git worktree add <path> <branch>` restores it. **Uncommitted and untracked files are gone**, including scratch DBs. Tell the revived session to verify HEAD and report what is missing rather than reconstruct from memory; it cannot tell the difference between "I did that" and "that got committed".
 
+## Who deletes these
+
+Measured on cloudbox, two deaths of the same session, two different causes — so identify the deleter rather than assuming:
+
+| Deleter | Evidence to check | Note |
+|---|---|---|
+| **The session itself** | `grep -a "worktree remove" ~/.local/share/opencode/log/opencode.log` — the `run=` id is the session's own | It ran `git worktree remove` on the tree it was sitting in. |
+| **`disk-cleanup.service`** | `journalctl --user -u disk-cleanup \| grep -i worktree` | Nightly, walks `<repo>/.worktrees/*/` in **every** repo under `~/projects`. Removes merged worktrees; until the live-session guard landed, being *clean* was what made you collectable. Never touches a primary checkout. |
+| **`reset-workspace`** (nightly) | its log lines name the repo | `work --prune-merged`, **`~/projects/mono` only**. Do not blame it for another repo — that hardcoded root is the fastest way to falsify the guess. |
+
 ## Prevention
+
+Sitting in a primary checkout instead of `<repo>/.worktrees/<slug>` sidesteps every sweeper above, at the cost of sharing the tree (no tree-wide destructive git there).
 
 Before `git worktree remove`/`prune` or any cleanup of `.worktrees/`, check whether a live session is sitting there:
 
