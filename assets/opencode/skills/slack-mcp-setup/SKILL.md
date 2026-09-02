@@ -1,6 +1,6 @@
 ---
 name: slack-mcp-setup
-description: Set up Slack MCP server with xoxp User OAuth token. Use for initial setup or token rotation. Covers macOS (Keychain) and cloudbox (sops).
+description: Set up Slack MCP server with xoxp User OAuth token. Use for initial setup or token rotation, when a Slack tool is missing or disabled, or when a file upload is rejected with "file_path is not allowed" / "uploading by file_path is disabled". Covers macOS (Keychain) and cloudbox (sops), the per-tool env-var gates, and the file_path upload allowlist. For composing a message or attaching a file day-to-day, use formatting-slack-messages instead.
 ---
 
 # Slack MCP Setup
@@ -264,9 +264,16 @@ jq '.mcp.slack.enabled = true' ~/.config/opencode/opencode.json > /tmp/oc.json &
 jq '.mcp.slack.enabled = false' ~/.config/opencode/opencode.json > /tmp/oc.json && mv /tmp/oc.json ~/.config/opencode/opencode.json
 ```
 
-### Option 2: Delegate to slack agent
+### Option 2: Grant the MCP to a session
 
-The slack agent enables the MCP automatically. Use it from OpenCode.
+There is no slack *agent* — an earlier version of this doc pointed at
+`assets/opencode/agents/slack.md`, which does not exist. Use one of:
+
+```bash
+oc-mcp-enable <session-id> slack      # grant to an ALREADY-RUNNING session
+opencode-launch --mcp slack ...       # launch a new session with it
+opencode-launch --mcp slack-ro ...    # read-only variant; cannot post or upload
+```
 
 **Available tools:**
 - `slack_channels_list` - List channels
@@ -275,7 +282,7 @@ The slack agent enables the MCP automatically. Use it from OpenCode.
 - `slack_conversations_search_messages` - Search messages with filters
 - `slack_conversations_add_message` - Post messages (use carefully)
 - `slack_attachment_get_data` - Download a file by ID (5 MB cap)
-- `slack_file_upload` - Upload a file (`content` / `content_base64`; see Files above)
+- `slack_file_upload` - Upload a file (`file_path` from the staging dir, or `content` / `content_base64`; see Files above)
 
 ## References
 
@@ -283,5 +290,6 @@ The slack agent enables the MCP automatically. Use it from OpenCode.
 - Auth docs: https://github.com/korotovsky/slack-mcp-server/blob/master/docs/01-authentication-setup.md#option-2-using-slack_mcp_xoxp_token-user-oauth
 - macOS activation: `users/dev/opencode-config.nix` (`injectSlackMcpSecrets`)
 - Cloudbox activation: `users/dev/opencode-config.nix` (`injectSlackMcpSecretsSops`)
-- Slack agent: `assets/opencode/agents/slack.md`
+- Composing messages and attaching files day-to-day: `formatting-slack-messages`
+- Granting the MCP to a session: `pkgs/oc-mcp-enable`, `pkgs/opencode-launch`
 - Pinned server build: `pkgs/slack-mcp-server/default.nix` (+ vendored `pr-334-file-upload.patch`)

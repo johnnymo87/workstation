@@ -1,6 +1,6 @@
 ---
 name: formatting-slack-messages
-description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API). Slack's mrkdwn dialect is similar to but NOT the same as CommonMark — bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting.
+description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), and when attaching a file, image, chart, or CSV to a Slack message. Slack's mrkdwn dialect is similar to but NOT the same as CommonMark — bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
 ---
 
 # Formatting Slack Messages
@@ -126,6 +126,43 @@ Before sending any non-trivial Slack message via the MCP:
 4. If using bullet lists with nesting beyond one level, flatten — Slack's nested-list rendering is inconsistent.
 5. Scan for `|` pipe-and-dash table syntax — convert to a column-aligned plaintext table inside a triple-backtick code block.
 6. Pass `content_type: "text/plain"` to the MCP.
+
+## Attaching a File: Use `file_path`, and Stage It First
+
+Do not base64 a file into `content_base64` unless it is genuinely tiny. Tool
+arguments are emitted by *you*, so the base64 crosses the context window — a
+294 KB chart PNG is ~392 KB of base64, over 100k tokens. It does not fit. A
+session hit exactly that, gave up, and a human attached the file by hand.
+
+`slack_file_upload` takes a `file_path` instead, which streams from disk and
+costs you a path. It is restricted to one directory:
+
+```bash
+mkdir -p /tmp/opencode/slack-uploads
+cp outputs/chart-2026-09-02.png /tmp/opencode/slack-uploads/
+```
+
+then `file_upload(channel_id=…, file_path="/tmp/opencode/slack-uploads/chart-2026-09-02.png")`.
+
+Better still, skip the copy: have whatever generates the artifact write into
+`/tmp/opencode/slack-uploads/` in the first place.
+
+**Errors and what they actually mean:**
+
+| Error | Cause |
+|---|---|
+| `file_path is not allowed, it resolves outside SLACK_MCP_FILE_UPLOAD_PATHS` | Path is outside the staging dir — **or the staging dir does not exist.** An unresolvable allowlist root is skipped silently and reports this same message. `mkdir -p` it. |
+| `file_path must be an absolute path` | Relative paths are rejected before the allowlist is even consulted. |
+| `uploading by file_path is disabled` | The allowlist is empty. This host has not had the config applied; fall back to `content_base64` for something small, and see `slack-mcp-setup`. |
+
+A symlink inside the staging dir pointing outside it will **not** work — both the
+file and the root are resolved through symlinks before comparison. Copy, don't link.
+
+**Why the restriction exists**, so you don't try to route around it: the upload
+cap is 100 MB per call, and `file_path` sends bytes that never appear in the
+transcript. A wide allowlist would let one tool call ship 100 MB anywhere with
+no record of what was in it. Staging makes the `cp` an explicit, logged step
+naming its source. Full reasoning in `slack-mcp-setup`.
 
 ## After-Send Verification: Don't Trust the Read APIs as Ground Truth
 

@@ -54,8 +54,8 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 | [using-chatgpt-relay](skills/using-chatgpt-relay/SKILL.md) | cross | Send ChatGPT queries from any remote NixOS host (devbox or cloudbox) via `ask-question` CLI. Setup + troubleshooting for the chatgpt-relay. |
 | [using-gws](skills/using-gws/SKILL.md) | cross | Google Workspace APIs (Gmail, Drive, Docs, Sheets, Calendar) via the `gws` CLI. Account switching, available services, common commands. |
 | [using-atlassian](skills/using-atlassian/SKILL.md) | work-only | Read/write Jira tickets, fetch Confluence pages, JQL search, comments, attachment downloads. |
-| [formatting-slack-messages](skills/formatting-slack-messages/SKILL.md) | cross | Slack mrkdwn dialect quirks (single-asterisk bold, underscore italic, no headers, angle-bracket links). |
-| [slack-mcp-setup](skills/slack-mcp-setup/SKILL.md) | work-only | Set up the Slack MCP server with an `xoxp` User OAuth token. macOS Keychain or cloudbox sops. |
+| [formatting-slack-messages](skills/formatting-slack-messages/SKILL.md) | cross | Slack mrkdwn dialect quirks (single-asterisk bold, underscore italic, no headers, angle-bracket links). Also attaching files: use `file_path` from the staging dir, never base64 a large file through the context window. |
+| [slack-mcp-setup](skills/slack-mcp-setup/SKILL.md) | work-only | Set up the Slack MCP server with an `xoxp` User OAuth token. macOS Keychain or cloudbox sops. Per-tool env gates and the `file_path` upload allowlist. |
 | [pagerduty-mcp-setup](skills/pagerduty-mcp-setup/SKILL.md) | work-only | Set up the PagerDuty MCP server with a User API token. macOS Keychain or cloudbox sops. |
 | [rollbar-mcp-setup](skills/rollbar-mcp-setup/SKILL.md) | work-only | Set up Rollbar's official MCP server (project access token) for error triage. macOS Keychain or cloudbox sops. Pairs with pagerduty-mcp-setup for the paged-about-Rollbar flow. |
 
