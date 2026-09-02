@@ -43,6 +43,11 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
     ["github_api_token", "GITHUB_API_TOKEN"],
     ["cloudflare_api_token", "CLOUDFLARE_API_TOKEN"],
     ["dolthub_api_token", "DOLTHUB_API_TOKEN"],
+    // cloudbox-only in practice since 2026-09-02: devbox no longer declares
+    // claude_personal_oauth_token, and every lookup here is guarded on the
+    // /run/secrets file existing, so this row is simply inert there. Kept
+    // rather than deleted because cloudbox's own consumer is unverified from
+    // devbox (workstation-bs9g).
     ["claude_personal_oauth_token", "CLAUDE_CODE_OAUTH_TOKEN"],
     // Same key, two names, two consumers: GOOGLE_GENERATIVE_AI_API_KEY is the
     // Vercel AI SDK convention (what opencode's own @ai-sdk/google provider

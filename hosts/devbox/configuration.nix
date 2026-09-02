@@ -82,18 +82,18 @@ in
         group = "dev";
         mode = "0400";
       };
-      # Personal Anthropic subscription token. Despite the env-var-style name
-      # of the secret (which mirrors the historical CLAUDE_CODE_OAUTH_TOKEN
-      # convention used by the @ex-machina/opencode-anthropic-auth opencode
-      # plugin), Claude Code itself is not installed on devbox -- this token is
-      # consumed by the opencode plugin to authenticate as the personal
-      # Anthropic subscription when opencode-serve makes anthropic/claude-*
-      # requests.
-      claude_personal_oauth_token = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
+      # claude_personal_oauth_token was declared here until 2026-09-02. Dropped
+      # because nothing on devbox consumed it. The comment that used to sit here
+      # asserted the @ex-machina/opencode-anthropic-auth plugin did; that is
+      # false -- the shipped dist has zero references to CLAUDE_CODE_OAUTH_TOKEN,
+      # and on devbox the plugin is deliberately in shape-only mode with a dummy
+      # credential (see injectTeamclaudeBaseUrl) while TeamClaude owns the real
+      # tokens. The single real consumer was an undeclared `npm i -g
+      # @anthropic-ai/claude-code`, since uninstalled.
+      #
+      # The encrypted value is still in secrets/devbox.yaml, so restoring this
+      # is a one-block revert. cloudbox keeps its own copy -- unverified from
+      # here, tracked in workstation-bs9g.
       openai_api_key = {
         owner = "dev";
         group = "dev";
