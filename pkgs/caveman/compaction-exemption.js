@@ -15,7 +15,7 @@
 // receives only { sessionID?, model } — no agent name — so the hook cannot tell
 // "this is the compaction/summary agent" by itself. Model-sniffing is not an
 // option either: on macOS the primary model and the compaction model are BOTH
-// gemini-3.7-flash, so there is nothing to discriminate on.
+// gemini-3.8-flash, so there is nothing to discriminate on.
 //
 // THE SEAM
 // --------

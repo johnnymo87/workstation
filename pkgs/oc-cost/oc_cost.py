@@ -25,7 +25,7 @@ from typing import Optional
 # 2027-01-01). Rows are priced against the day they were recorded, so a report
 # spanning the change prices each side correctly instead of applying today's
 # rate to last year's traffic.
-# Shared 3.6/3.7 Flash timeline (see the entries below for the source).
+# Shared 3.6/3.7/3.8 Flash timeline (see the entries below for the source).
 GEMINI_FLASH_PHASES: list[dict] = [
     {"from": "0001-01-01", "input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0},
     {"from": "2027-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 0},
@@ -67,19 +67,22 @@ RATES: dict[tuple[str, str], object] = {
     ("google-vertex-anthropic", "claude-fable-5"):    {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5},
     # --- Google Gemini (Vertex) ---
     ("google-vertex", "gemini-3.5-flash"):  {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5},
-    # gemini-3.6-flash and gemini-3.7-flash (released 2026-08-13) are priced
-    # IDENTICALLY, and both carry Google's dated introductory discount:
+    # gemini-3.6-flash, gemini-3.7-flash (released 2026-08-13) and
+    # gemini-3.8-flash (released 2026-09-02) are priced IDENTICALLY, and all
+    # three carry Google's dated introductory discount:
     #   through 2026-12-31: 0.75 / 3.75 / cache_read 0.075
     #   from   2027-01-01 : 1.50 / 7.50 / cache_read 0.15
     # Source: https://cloud.google.com/vertex-ai/generative-ai/pricing —
-    # "Gemini 3.7 Flash and Gemini 3.6 Flash are offered with introductory
-    # pricing of $0.75 / $3.75 per 1M tokens input / output through December
-    # 31, 2026." The 3.6 entry previously hardcoded the post-intro 1.50/7.50,
-    # which overstated every Gemini estimate by 2x. Gemini bills cache creation
-    # as separate storage and never reports per-request cache-write tokens, so
-    # cache_write is 0.
+    # "Gemini 3.8 Flash, Gemini 3.7 Flash and Gemini 3.6 Flash are offered with
+    # introductory pricing of $0.75 / $3.75 per 1M tokens input / output
+    # through December 31, 2026." The 3.6 entry previously hardcoded the
+    # post-intro 1.50/7.50, which overstated every Gemini estimate by 2x.
+    # Gemini bills cache creation as separate storage and never reports
+    # per-request cache-write tokens, so cache_write is 0.
+    # Superseded pins are KEPT: historical rows still have to price correctly.
     ("google-vertex", "gemini-3.6-flash"): GEMINI_FLASH_PHASES,
     ("google-vertex", "gemini-3.7-flash"): GEMINI_FLASH_PHASES,
+    ("google-vertex", "gemini-3.8-flash"): GEMINI_FLASH_PHASES,
     # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
     # pricing (whole-request selection above 200K input tokens).
     ("google-vertex", "gemini-3.1-pro-preview"): {
