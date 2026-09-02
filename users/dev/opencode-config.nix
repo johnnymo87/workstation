@@ -729,9 +729,56 @@ in
       "opencode-beads" = "0.6.0";
     };
     pinJson = builtins.toJSON opencodePluginPins;
+
+    # Claude Code version that @ex-machina/opencode-anthropic-auth reports to
+    # Anthropic. The plugin hardcodes 2.1.87 (unchanged since before its last
+    # npm release, 1.8.1 / 2026-05-15); Anthropic gates model access on this
+    # value SERVER-SIDE, so a stale constant makes newer models unreachable:
+    #
+    #   400 invalid_request_error / error_code: claude_code_version_too_old
+    #   "Claude Code 2.1.87 does not support this model; version 2.1.251 or
+    #    newer is required."
+    #
+    # In opencode that surfaces as an EMPTY assistant turn, not an error the
+    # user sees — the agent just returns nothing. It broke oracle-fable and
+    # adversarial-reviewer-fable the moment #443/#444 repinned them to
+    # claude-fable-5-1 (gated at >= 2.1.251).
+    #
+    # Measured on devbox 2026-09-02, patching one constant at a time:
+    #
+    #   | patched                        | result                          |
+    #   |--------------------------------|---------------------------------|
+    #   | USER_AGENT only                | 400, still quoting 2.1.87       |
+    #   | USER_AGENT + CLAUDE_CODE_VERSION | 200, agents answer normally   |
+    #
+    # So BOTH must move together. The version reaches Anthropic by two
+    # independent paths — the `user-agent` header, and the `cc_version` field
+    # of the billing header the plugin injects as system[0] (built by
+    # buildBillingHeaderValue from CLAUDE_CODE_VERSION). The server prefers the
+    # billing header, which is why a user-agent-only patch changes nothing and
+    # why a rewrite at the TeamClaude proxy (which only sees headers) cannot
+    # fix this. buildBillingHeaderValue derives its hash suffix locally from
+    # CCH_SALT + version, so bumping the constant recomputes it correctly with
+    # no other coordination.
+    #
+    # UPSTREAM: https://github.com/ex-machina-co/opencode-anthropic-auth/pull/223
+    # bumps to 2.1.258 and derives USER_AGENT from the constant. It is open and
+    # unmerged (bots green, no human review). Do not wait on it — issue #175
+    # reported this same stale constant on 2026-07-02, was closed COMPLETED on
+    # 2026-07-25 with no code change, and nothing has been published to npm
+    # since 2026-05-15.
+    #
+    # REMOVE THIS PATCH when a release containing #223 (or later) ships: bump
+    # the pin above, confirm `CLAUDE_CODE_VERSION` in the published dist is
+    # >= 2.1.251, and delete the patchClaudeCodeVersion block below.
+    #
+    # This constant will go stale again whenever Anthropic gates a new model.
+    # The symptom is always the same empty turn; check the message's stored
+    # `error` in opencode.db before suspecting agent config.
+    claudeCodeVersion = "2.1.258";
   in lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     set -euo pipefail
-    export PATH="${pkgs.nodejs}/bin:${pkgs.jq}/bin:$PATH"
+    export PATH="${pkgs.nodejs}/bin:${pkgs.jq}/bin:${pkgs.coreutils}/bin:${pkgs.gnused}/bin:$PATH"
     mkdir -p "$HOME/.config/opencode"
     cd "$HOME/.config/opencode"
 
@@ -779,6 +826,69 @@ in
       done
       shopt -u nullglob
     done < <(echo "$pins" | jq -r 'to_entries | .[] | "\(.key)\t\(.value)"')
+
+    # Patch the anthropic-auth plugin's reported Claude Code version in every
+    # copy that opencode-serve might load. See claudeCodeVersion above for why
+    # this exists, the two-path evidence, and when to delete it.
+    #
+    # Runs AFTER the purge loop so a freshly-installed copy gets patched too.
+    # Idempotent: re-running is a no-op, and it only flips cache_invalidated
+    # (which triggers the serve restart below) when a file actually changed —
+    # so a normal switch doesn't disrupt live sessions.
+    #
+    # Both cache layouts are covered. Note the purge loop above globs
+    # "<pkg>@*", which matches ".../opencode-anthropic-auth@latest" but NOT the
+    # bare ".../opencode-anthropic-auth" directory, so that second copy is
+    # invisible to the pin check and can hold a different version (1.8.1 here
+    # vs the 1.8.0 pin). That gap is pre-existing and deliberately not fixed
+    # here: closing it would purge the directory, and opencode would refetch an
+    # unpatched copy at plugin load. Patching every copy sidesteps it.
+    cc_version='${claudeCodeVersion}'
+    cc_ua="claude-cli/$cc_version (external, cli)"
+    auth_pkg="@ex-machina/opencode-anthropic-auth"
+
+    shopt -s nullglob
+    for constants in \
+      "$HOME/.config/opencode/node_modules/$auth_pkg/dist/constants.js" \
+      "$HOME/.cache/opencode/packages/$auth_pkg"*/node_modules/"$auth_pkg"/dist/constants.js
+    do
+      [ -f "$constants" ] || continue
+
+      before="$(sha256sum "$constants" | cut -d' ' -f1)"
+      ctmp="$(mktemp "$constants.tmp.XXXXXX")"
+      sed -E \
+        -e "s#^(export const CLAUDE_CODE_VERSION = )'[^']*';#\1'$cc_version';#" \
+        -e "s#^(export const USER_AGENT = )'[^']*';#\1'$cc_ua';#" \
+        "$constants" > "$ctmp"
+      mv "$ctmp" "$constants"
+      after="$(sha256sum "$constants" | cut -d' ' -f1)"
+
+      if [ "$before" != "$after" ]; then
+        echo "installOpencodePlugins: patched reported Claude Code version -> $cc_version in $constants"
+        cache_invalidated=1
+      fi
+    done
+    shopt -u nullglob
+
+    # Fail loudly rather than silently shipping a half-applied patch: if a copy
+    # exists but didn't end up on the intended version, the plugin's internals
+    # have moved and the sed above no longer matches.
+    shopt -s nullglob
+    for constants in \
+      "$HOME/.config/opencode/node_modules/$auth_pkg/dist/constants.js" \
+      "$HOME/.cache/opencode/packages/$auth_pkg"*/node_modules/"$auth_pkg"/dist/constants.js
+    do
+      [ -f "$constants" ] || continue
+      if ! grep -q "^export const CLAUDE_CODE_VERSION = '$cc_version';" "$constants" \
+        || ! grep -q "^export const USER_AGENT = 'claude-cli/$cc_version " "$constants"; then
+        {
+          echo "installOpencodePlugins: WARNING — failed to patch Claude Code version in $constants."
+          echo "installOpencodePlugins: fable/newer models will return EMPTY turns (400 claude_code_version_too_old)."
+          echo "installOpencodePlugins: the plugin's constants.js shape probably changed; see claudeCodeVersion in opencode-config.nix."
+        } >&2
+      fi
+    done
+    shopt -u nullglob
 
     # Restart opencode-serve so it re-resolves the plugin from the freshly
     # populated cache on next request. Only on hosts where the service exists,
