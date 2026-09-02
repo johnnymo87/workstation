@@ -1023,31 +1023,64 @@ in
         echo "Slack MCP xoxp token not found in Keychain; removed mcp.slack + mcp.slack-ro from config" >&2
       # Token present: inject Slack MCP config with xoxp auth
       # MCP is disabled by default; enable manually or use dedicated slack agent when needed.
-      # Two variants: `slack` (read + write, SLACK_MCP_ADD_MESSAGE_TOOL=true) and
-      # `slack-ro` (read-only; omits SLACK_MCP_ADD_MESSAGE_TOOL so the korotovsky
-      # server registers read tools only). slack-ro is used by lgtm's read-only
-      # gather session (`opencode-launch --mcp slack-ro`) so it structurally cannot post.
+      # Two variants: `slack` (read + write) and `slack-ro` (read-only). Both run
+      # the PINNED localPkgs.slack-mcp-server build, not `npx -y ...@latest` —
+      # see pkgs/slack-mcp-server for why (file_upload patch + no unpinned
+      # network fetch for a process holding a Slack user token).
+      #
+      # The korotovsky server registers all READ tools unconditionally; each
+      # write/side-effecting tool is opt-in via its own env var. So the read-only
+      # guarantee of `slack-ro` is exactly "which gates are absent":
+      #   SLACK_MCP_ADD_MESSAGE_TOOL  -> conversations_add_message  (slack only)
+      #   SLACK_MCP_FILE_UPLOAD_TOOL  -> file_upload                (slack only)
+      #   SLACK_MCP_ATTACHMENT_TOOL   -> attachment_get_data        (BOTH: download
+      #                                  is read-only, so slack-ro keeps it)
+      # slack-ro is used by lgtm's read-only gather session
+      # (`opencode-launch --mcp slack-ro`) so it structurally cannot post.
+      #
+      # SLACK_MCP_FILE_UPLOAD_PATHS is deliberately NOT set: without it the
+      # tool's `file_path` source is rejected and only `content` /
+      # `content_base64` work. That costs nothing (an agent can base64 a file
+      # itself) and avoids handing the MCP process its own ambient read
+      # capability over a directory tree.
+      #
+      # SLACK_MCP_LOG_LEVEL=warn because the server's logger middleware logs
+      # every tool call's params at INFO -- which for file_upload is the file
+      # CONTENT, and for conversations_add_message is the message text. The MCP
+      # process's stderr is inherited by opencode-serve, so at the default level
+      # anything uploaded is also durably in the journal. `warn` still logs tool
+      # name and error on failures.
+      #
+      # Neither variant sets SLACK_MCP_ENABLED_TOOLS. Do not add it to slack-ro:
+      # the runtime gate treats a tool named there as enabled, so it is a second
+      # door into the write tools that bypasses the per-tool env vars above.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
           --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
+          --arg bin "${localPkgs.slack-mcp-server}/bin/slack-mcp-server" \
           '.mcp.slack = {
             "type": "local",
-            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "command": [$bin, "--transport", "stdio"],
             "enabled": false,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
-              "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
+              "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }
           | .mcp."slack-ro" = {
             "type": "local",
-            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "command": [$bin, "--transport", "stdio"],
             "enabled": false,
             "environment": {
-              "SLACK_MCP_XOXP_TOKEN": $xoxp
+              "SLACK_MCP_XOXP_TOKEN": $xoxp,
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }' "$runtime" > "$tmp"
 
@@ -1076,30 +1109,45 @@ in
         fi
         echo "Slack MCP xoxp token not found in sops; removed mcp.slack + mcp.slack-ro from config (secret absent -> reference would fail the whole config load)" >&2
       # Token present: inject Slack MCP config with xoxp auth.
-      # Two variants: `slack` (read + write) and `slack-ro` (read-only; omits
-      # SLACK_MCP_ADD_MESSAGE_TOOL so only read tools register). slack-ro is used
-      # by lgtm's read-only gather session so it structurally cannot post.
+      # Two variants: `slack` (read + write) and `slack-ro` (read-only). Both run
+      # the PINNED localPkgs.slack-mcp-server build (see pkgs/slack-mcp-server).
+      # Read tools always register; each write tool is opt-in per env var, so
+      # slack-ro's guarantee is the ABSENCE of SLACK_MCP_ADD_MESSAGE_TOOL and
+      # SLACK_MCP_FILE_UPLOAD_TOOL. SLACK_MCP_ATTACHMENT_TOOL is set on both —
+      # downloading an attachment is a read. SLACK_MCP_FILE_UPLOAD_PATHS is
+      # deliberately unset, so file_upload accepts only content/content_base64,
+      # never a path off local disk.
+      # SLACK_MCP_LOG_LEVEL=warn keeps upload content and message text out of
+      # the journal: the logger middleware logs every call's params at INFO.
+      # Do not add SLACK_MCP_ENABLED_TOOLS to slack-ro -- naming a tool there
+      # enables it regardless of the per-tool gates.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
 
         ${pkgs.jq}/bin/jq \
           --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
+          --arg bin "${localPkgs.slack-mcp-server}/bin/slack-mcp-server" \
           '.mcp.slack = {
             "type": "local",
-            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "command": [$bin, "--transport", "stdio"],
             "enabled": false,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
-              "SLACK_MCP_ADD_MESSAGE_TOOL": "true"
+              "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }
           | .mcp."slack-ro" = {
             "type": "local",
-            "command": ["npx", "-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "command": [$bin, "--transport", "stdio"],
             "enabled": false,
             "environment": {
-              "SLACK_MCP_XOXP_TOKEN": $xoxp
+              "SLACK_MCP_XOXP_TOKEN": $xoxp,
+              "SLACK_MCP_ATTACHMENT_TOOL": "true",
+              "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }' "$runtime" > "$tmp"
 
