@@ -1,6 +1,6 @@
 ---
 name: formatting-slack-messages
-description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), and when attaching a file, image, chart, or CSV to a Slack message. Covers what to say — linking every artifact named, attributing contested claims, ordering by urgency, signing as Claude, drafting before posting — and how it renders, since Slack's mrkdwn dialect is similar to but NOT the same as CommonMark: bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
+description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), when replying in a Slack thread, when reporting an update to people who were not in the session, and when attaching a file, image, chart, or CSV to a Slack message. Slack's mrkdwn dialect is similar to but NOT the same as CommonMark — bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
 ---
 
 # Formatting Slack Messages
@@ -9,21 +9,15 @@ Slack uses its own format called **mrkdwn**. It looks like Markdown but the rule
 
 This skill is the cheat sheet. Read it before writing any Slack message.
 
-## Composing: what to say, before worrying how it renders
+## Composing: before the mrkdwn
 
-Formatting is the easy half. These matter most when posting into a thread of humans who were not in your context.
+The MCP authenticates with the human's `xoxp` User OAuth token, so **every message posts under their name and avatar**. Read one back and it reports their `UserName`, distinguished only by a `BotName` field almost nobody looks at. Three consequences.
 
-**Link every artifact you name.** PR numbers, ticket keys, commits, review comments, dashboards. A reader who cannot check a claim has to take it on faith, and an agent's is the least trusted voice in the thread. `<https://github.com/org/repo/pull/724|protos#724>`, `<https://company.atlassian.net/browse/BLUE-9546|BLUE-9546>`. A *specific* review comment is linkable too, and usually more useful than the PR: `<https://github.com/org/repo/pull/4452#discussion_r3898391764|raised in review>`.
+**Disclose authorship.** Words you composed end with a signature — `— Claude`, or whichever agent you are. Words the human dictated go out verbatim and unsigned. Skip the "I am an AI assistant acting on behalf of" preamble; the signature is the disclosure. Without it, referring to the account owner in the third person reads as them talking about themselves.
 
-**Attribute a contested claim to whoever made it.** "jamesvec raised exactly this in review", plus the link, beats asserting it yourself — it is better evidence, and it routes the follow-up to the person who can defend it.
+**Show the human the draft first.** The first post into a channel or thread, and anything that commits them to something, gets approved before it goes out — notifications carry the full text and cannot be recalled. Once they have approved a thread's shape or said "go ahead", later replies in it do not need re-approval. Reply in-thread (`thread_ts`) unless told otherwise: a top-level post notifies the entire channel. Never `<!here>` or `<!channel>` unasked.
 
-**Order paragraphs by whose day they change.** The item with a deadline goes above the item that is merely interesting. If one paragraph changes what somebody does on Monday, it goes first.
-
-**Say what is still open.** A decision written into a meeting summary reads as settled even when it isn't. If something needs a measurement or an owner before it is real, say that in those words instead of restating it neutrally.
-
-**Sign as yourself.** Post as Claude — not ghostwritten as the human you work for. Readers should be able to tell which claims came from an agent. One short line of standing ("I built the X side of this, so three notes from the implementation"), then substance, then `— Claude`. Skip the qualifiers; nobody needs "I am an AI assistant acting on behalf of".
-
-**Draft, get approval, then post.** Anything going into a shared channel is shown to the human first. There is no undo the recipients won't see — a delete-and-repost is visible to anyone who already read it.
+**Write for readers who were not in your context and cannot ask you follow-ups.** Slack does not autolink `#123` or `KEY-456` the way GitHub and Jira do, so link every PR, ticket, commit and dashboard you name. A *specific* review comment (`<…/pull/N#discussion_r<id>|raised in review>`) usually beats linking the PR. For a claim that is someone else's, name them and link where they said it — a plain name pings nobody, `<@U…>` pings them, so choose deliberately. Nothing the reader cannot open: no issue-tracker ids, session ids, or worktree paths. Absolute dates, not "Monday". Keep proposals labelled as proposals — a decision written into a summary reads as settled. Re-read the thread immediately before posting, in case someone already answered.
 
 ## The Cheat Sheet
 
