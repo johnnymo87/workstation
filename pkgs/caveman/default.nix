@@ -50,6 +50,17 @@
 # the summarizer). See pkgs/caveman/compaction-exemption.js for the full
 # rationale and pkgs/caveman/exemption-test.js for the property test that runs
 # on every build.
+#
+# PROMPT-TOGGLE STRICTNESS. A second build-time patch, same shape. Upstream
+# flips its mode flag on unanchored substring regexes over the whole user
+# prompt, and that flag is HOST-GLOBAL (~/.config/opencode/.caveman-active, no
+# session component), so a session writing *about* caveman silently
+# reconfigured every other session on the host. The same defect made the
+# documented `/caveman <level>` command DEACTIVATE, because opencode expands it
+# into a command body that quotes "stop caveman" as documentation and the
+# deactivation branch is checked first. See
+# pkgs/caveman/prompt-toggle-strictness.js for the rationale and
+# pkgs/caveman/toggle-test.js for the property test.
 { lib
 , stdenvNoCC
 , fetchFromGitHub
@@ -102,11 +113,18 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     # loaded as ESM and break plugin.js's require() bridge. This mirrors what
     # upstream's bin/install.js does.
     #
-    # plugin.js is the PATCHED copy (compaction exemption + ruleset routing);
-    # the patcher asserts every anchor and fails the build if upstream moved.
+    # plugin.js is the PATCHED copy; the patchers assert every anchor and fail
+    # the build if upstream moved. Two patches, applied in sequence:
+    #   1. compaction exemption + ruleset routing
+    #   2. prompt-toggle strictness (prose must not flip the host-global flag)
+    # They touch disjoint regions of the file, so the order is not load-bearing;
+    # it is fixed only so the anchors are checked in a predictable order.
     node ${./compaction-exemption.js} \
       src/plugins/opencode/plugin.js \
       src/rules/caveman-activate.md \
+      plugin.exemption.js
+    node ${./prompt-toggle-strictness.js} \
+      plugin.exemption.js \
       $out/plugin/plugin.js
     cp src/plugins/opencode/package.json  $out/plugin/package.json
     cp src/hooks/caveman-config.js        $out/plugin/caveman-config.cjs
@@ -178,6 +196,13 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     # A compaction leak is invisible at runtime, so it has to fail here.
     export TEST_SCRATCH="$TMPDIR/caveman-exemption-scratch"
     node ${./exemption-test.js} "$out/plugin/plugin.js"
+
+    # The other invisible-at-runtime property: a deliberate command toggles the
+    # mode, prose that merely mentions the command does not. The flag is
+    # host-global and its writes are unlogged, so a regression here silently
+    # reconfigures every concurrent session with nothing to debug from.
+    TEST_SCRATCH="$TMPDIR/caveman-toggle-scratch" \
+      node ${./toggle-test.js} "$out/plugin/plugin.js"
 
     echo "OK: caveman opencode payload complete (plugin siblings, ${toString (builtins.length skills)} skills, ${toString (builtins.length commands)} commands, ruleset)."
 
