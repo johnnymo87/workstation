@@ -1,6 +1,6 @@
 ---
 name: formatting-slack-messages
-description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), and when attaching a file, image, chart, or CSV to a Slack message. Slack's mrkdwn dialect is similar to but NOT the same as CommonMark — bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
+description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), when replying in a Slack thread, when reporting an update to people who were not in the session, and when attaching a file, image, chart, or CSV to a Slack message. Slack's mrkdwn dialect is similar to but NOT the same as CommonMark — bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
 ---
 
 # Formatting Slack Messages
@@ -8,6 +8,16 @@ description: Use when composing or posting messages to Slack via the Slack MCP (
 Slack uses its own format called **mrkdwn**. It looks like Markdown but the rules are different. If you reach for CommonMark/GitHub-flavored Markdown habits, your message will render with literal asterisks, broken links, or invisible headers.
 
 This skill is the cheat sheet. Read it before writing any Slack message.
+
+## Composing: before the mrkdwn
+
+The MCP authenticates with the human's `xoxp` User OAuth token, so **every message posts under their name and avatar**. Read one back and it reports their `UserName`, distinguished only by a `BotName` field almost nobody looks at. Three consequences.
+
+**Disclose authorship.** Words you composed end with a signature — `— Claude`, or whichever agent you are. Words the human dictated go out verbatim and unsigned. Skip the "I am an AI assistant acting on behalf of" preamble; the signature is the disclosure. Without it, referring to the account owner in the third person reads as them talking about themselves.
+
+**Show the human the draft first.** The first post into a channel or thread, and anything that commits them to something, gets approved before it goes out — notifications carry the full text and cannot be recalled. Once they have approved a thread's shape or said "go ahead", later replies in it do not need re-approval. Reply in-thread (`thread_ts`) unless told otherwise: a top-level post notifies the entire channel. Never `<!here>` or `<!channel>` unasked.
+
+**Write for readers who were not in your context and cannot ask you follow-ups.** Slack does not autolink `#123` or `KEY-456` the way GitHub and Jira do, so link every PR, ticket, commit and dashboard you name. A *specific* review comment (`<…/pull/N#discussion_r<id>|raised in review>`) usually beats linking the PR. For a claim that is someone else's, name them and link where they said it — a plain name pings nobody, `<@U…>` pings them, so choose deliberately. Nothing the reader cannot open: no issue-tracker ids, session ids, or worktree paths. Absolute dates, not "Monday". Keep proposals labelled as proposals — a decision written into a summary reads as settled. Re-read the thread immediately before posting, in case someone already answered.
 
 ## The Cheat Sheet
 
