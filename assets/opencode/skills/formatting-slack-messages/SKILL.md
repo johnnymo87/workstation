@@ -1,6 +1,6 @@
 ---
 name: formatting-slack-messages
-description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), and when attaching a file, image, chart, or CSV to a Slack message. Slack's mrkdwn dialect is similar to but NOT the same as CommonMark — bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
+description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), and when attaching a file, image, chart, or CSV to a Slack message. Covers what to say — linking every artifact named, attributing contested claims, ordering by urgency, signing as Claude, drafting before posting — and how it renders, since Slack's mrkdwn dialect is similar to but NOT the same as CommonMark: bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
 ---
 
 # Formatting Slack Messages
@@ -8,6 +8,22 @@ description: Use when composing or posting messages to Slack via the Slack MCP (
 Slack uses its own format called **mrkdwn**. It looks like Markdown but the rules are different. If you reach for CommonMark/GitHub-flavored Markdown habits, your message will render with literal asterisks, broken links, or invisible headers.
 
 This skill is the cheat sheet. Read it before writing any Slack message.
+
+## Composing: what to say, before worrying how it renders
+
+Formatting is the easy half. These matter most when posting into a thread of humans who were not in your context.
+
+**Link every artifact you name.** PR numbers, ticket keys, commits, review comments, dashboards. A reader who cannot check a claim has to take it on faith, and an agent's is the least trusted voice in the thread. `<https://github.com/org/repo/pull/724|protos#724>`, `<https://company.atlassian.net/browse/BLUE-9546|BLUE-9546>`. A *specific* review comment is linkable too, and usually more useful than the PR: `<https://github.com/org/repo/pull/4452#discussion_r3898391764|raised in review>`.
+
+**Attribute a contested claim to whoever made it.** "jamesvec raised exactly this in review", plus the link, beats asserting it yourself — it is better evidence, and it routes the follow-up to the person who can defend it.
+
+**Order paragraphs by whose day they change.** The item with a deadline goes above the item that is merely interesting. If one paragraph changes what somebody does on Monday, it goes first.
+
+**Say what is still open.** A decision written into a meeting summary reads as settled even when it isn't. If something needs a measurement or an owner before it is real, say that in those words instead of restating it neutrally.
+
+**Sign as yourself.** Post as Claude — not ghostwritten as the human you work for. Readers should be able to tell which claims came from an agent. One short line of standing ("I built the X side of this, so three notes from the implementation"), then substance, then `— Claude`. Skip the qualifiers; nobody needs "I am an AI assistant acting on behalf of".
+
+**Draft, get approval, then post.** Anything going into a shared channel is shown to the human first. There is no undo the recipients won't see — a delete-and-repost is visible to anyone who already read it.
 
 ## The Cheat Sheet
 
