@@ -747,6 +747,34 @@
         touch $out
       '';
 
+      # caveman's prompt-toggle strictness, driven against the SHIPPED
+      # plugin.js. Same duplication rationale as caveman-exemption above: this
+      # also runs in the derivation's installCheckPhase, and is mirrored here so
+      # the coverage is legible.
+      #
+      # The property: a deliberate command toggles caveman, prose that merely
+      # mentions the command does not. Worth a gate because the flag is
+      # host-global and its writes are unlogged -- a regression reconfigures
+      # every concurrent session on the machine and leaves no trace.
+      caveman-toggle = devboxPkgs.runCommand "caveman-toggle-tests" {
+        nativeBuildInputs = [ devboxPkgs.nodejs_22 ];
+      } ''
+        cd ${self}
+        # Load-bearing (see caveman-exemption): unset, the test falls back to
+        # `process.cwd()/toggle-scratch`, which under `cd ${self}` is the
+        # read-only store -- EACCES before a single assertion runs.
+        export TEST_SCRATCH="$TMPDIR/caveman-toggle-scratch"
+        export HOME="$TMPDIR"
+        node pkgs/caveman/toggle-test.js \
+          ${(localPkgsFor devboxSystem).caveman}/plugin/plugin.js 2>&1 \
+          | tee "$TMPDIR/out.txt"
+        grep -q '^OK: prompt-toggle strictness verified' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: caveman toggle test did not reach its OK line." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # lgtm-gh. NAMED "-mirror-" on purpose: 9 of its 15 assertions drive a
       # COPY of the resolution logic that lives in pkgs/lgtm-gh/default.nix,
       # not the shipped wrapper, so a green result here is NOT behavioural
