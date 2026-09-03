@@ -880,71 +880,38 @@ in
     done
     shopt -u nullglob
 
-    # Restart opencode-serve so it re-resolves the plugin from the freshly
-    # populated cache on next request. Only on hosts where the service exists,
-    # and only when we actually invalidated something (to avoid disrupting
-    # active sessions on every home-manager switch).
-    ${lib.optionalString isDevbox ''
+    # Report that the cache changed; do NOT restart anything.
+    #
+    # Neither NixOS host auto-restarts, deliberately. Both run a serve POOL of
+    # templated opencode-serve@<port> units under opencode-serve-pool.target
+    # (USER-scoped on devbox, system-scoped on cloudbox). There is no single
+    # "opencode-serve.service" to bounce, and cycling the target is the only
+    # correct whole-pool action — which kills every live session on the box,
+    # including the session running this switch. That is why reset-workspace
+    # does it nightly, behind a confirmation.
+    #
+    # Both branches used to `systemctl restart opencode-serve.service`. That
+    # unit stopped existing at the pool migration (cloudbox aca3de6 2026-06-20,
+    # devbox 67f9b69 2026-06-21), so the call became a guaranteed exit-5 no-op
+    # that printed a warning telling you to run the same nonexistent unit by
+    # hand. devbox was corrected earlier; this is cloudbox catching up, and the
+    # two policies are now identical so they share one branch.
+    #
+    # The consequence was never staleness, only latency — the pool IS restarted
+    # nightly at 03:00 by nightly-restart-background.timer (a SYSTEM timer on
+    # both hosts; `systemctl --user list-timers` does not show it), so a newly
+    # pinned plugin goes live within a day regardless. Verified on cloudbox
+    # 2026-09-03: that run reported "pool restart verified for all ports".
+    #
+    # So: say what happened and what the options are, and let the human pick.
+    ${lib.optionalString (isDevbox || isCloudbox) ''
       if [ "$cache_invalidated" = "1" ]; then
-        # devbox does NOT auto-restart, deliberately. The pool here is a set of
-        # templated USER units (opencode-serve@4096, @4097) under
-        # opencode-serve-pool.target; there is no single "opencode-serve.service"
-        # to bounce. Restarting the target is the only correct whole-pool action,
-        # and it kills every live session on the box — including the session
-        # running this switch. That is why reset-workspace only does it nightly,
-        # behind a confirmation.
-        #
-        # This used to `systemctl --user restart opencode-serve.service`, which
-        # has not existed for some time: it failed with exit 5 on every switch and
-        # printed a warning telling you to run the same nonexistent unit by hand.
-        # The consequence was never staleness, only latency — the pool IS
-        # restarted nightly at 03:00 by nightly-restart-background.timer (a SYSTEM
-        # timer; `systemctl --user list-timers` does not show it), so a new plugin
-        # goes live within a day regardless.
-        #
-        # So: say what happened and what the options are, and let the human pick.
         {
           echo "installOpencodePlugins: plugin cache changed; the new version is on disk but NOT live."
           echo "installOpencodePlugins: running serves keep the old plugin until the pool restarts."
           echo "installOpencodePlugins:   automatic — nightly at 03:00 (nightly-restart-background.timer)"
           echo "installOpencodePlugins:   now, disruptive — reset-workspace   (kills all live sessions)"
         } >&2
-      fi
-    ''}
-    ${lib.optionalString isCloudbox ''
-      if [ "$cache_invalidated" = "1" ]; then
-        # cloudbox: opencode-serve is a system service; restart with sudo.
-        # Use sudo since the service is system-level (cloudbox has
-        # wheelNeedsPassword=false).
-        #
-        # Two non-obvious requirements (both learned the hard way 2026-04-30):
-        #   1. Use the absolute path to systemctl. sudo sanitizes PATH
-        #      (secure_path), so bare `systemctl` is "command not found".
-        #      /run/current-system/sw/bin/systemctl is the stable NixOS path.
-        #   2. Capture the exit code into a variable instead of relying on
-        #      `if sudo ...; then ...; else ...; fi`. The straightforward
-        #      `if` form *appeared* to work in interactive bash but reported
-        #      stale exit codes inside the home-manager activation context
-        #      while we were debugging. The `cmd || rc=$?` pattern is robust
-        #      to whatever set -e / errexit-mask interactions home-manager
-        #      activation introduces.
-        sudo_err="$(mktemp)"
-        sudo_rc=0
-        /run/wrappers/bin/sudo -n /run/current-system/sw/bin/systemctl restart opencode-serve.service 2>"$sudo_err" || sudo_rc=$?
-        if [ "$sudo_rc" -eq 0 ]; then
-          echo "installOpencodePlugins: restarted opencode-serve after cache invalidation"
-        else
-          # Don't fail the whole activation — opencode-serve will eventually
-          # restart on its own (timer / nightly), and the user can restart
-          # manually. But surface the failure clearly.
-          {
-            echo "installOpencodePlugins: WARNING — opencode-serve restart failed (sudo exit $sudo_rc):"
-            sed 's/^/  /' "$sudo_err"
-            echo "installOpencodePlugins: cache was invalidated but service still running stale plugin."
-            echo "installOpencodePlugins: run manually: sudo systemctl restart opencode-serve"
-          } >&2
-        fi
-        rm -f "$sudo_err"
       fi
     ''}
   '';
@@ -1714,30 +1681,36 @@ in
       echo "aigateway/cfp: claude -> ''${anthropic_url:-<direct Vertex>} (cfp=$cfp_state); gemini -> ''${gemini_url:-<direct Vertex>} (aigw=$aigw_state)" >&2
       new_hash="$(printf '%s\n%s' "$anthropic_url" "$gemini_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
 
-      # Auto-restart opencode-serve only when the effective URL changed.
-      # Same sudo dance as installOpencodePlugins for the same reasons
-      # (sudo path-sanitization, errexit-mask interactions): use absolute
-      # paths to systemctl, capture exit code into a variable. Hash file
-      # is updated ONLY after a successful restart so the next rebuild
-      # retries on failure.
+      # A provider's baseURL is read at provider init, so a changed URL only
+      # takes effect once a serve restarts. We do NOT restart here — same policy
+      # as injectTeamclaudeBaseUrl and injectCodexLbBaseUrl, and for the same
+      # reason: cloudbox runs a serve POOL (opencode-serve@<port> under
+      # opencode-serve-pool.target), so there is no single unit to bounce and
+      # cycling the target kills every live session, including the one running
+      # this switch.
+      #
+      # This block used to `sudo systemctl restart opencode-serve.service`. That
+      # unit has not existed here since the pool migration (aca3de6,
+      # 2026-06-20), so the restart was a guaranteed exit-5 no-op — and because
+      # the hash file was only written on restart SUCCESS, the failure path
+      # re-armed itself: every switch that saw a changed URL would warn and
+      # again decline to persist the hash, so the "next rebuild will retry"
+      # promise could never be discharged. Writing the hash unconditionally is
+      # what makes this converge.
+      #
+      # (The live hash file is dated 2026-06-19 — the last day the unit existed.
+      # The URL has not changed since, which is the only reason this site had
+      # stayed quiet rather than warning on every switch.)
       old_hash=""
       [ -r "$hash_file" ] && old_hash="$(cat "$hash_file")"
       if [[ "$new_hash" != "$old_hash" ]]; then
-        echo "aigateway: baseURL changed ($old_hash -> $new_hash); restarting opencode-serve" >&2
-        sudo_err="$(mktemp)"
-        sudo_rc=0
-        /run/wrappers/bin/sudo -n /run/current-system/sw/bin/systemctl restart opencode-serve.service 2>"$sudo_err" || sudo_rc=$?
-        if [ "$sudo_rc" -eq 0 ]; then
-          echo "$new_hash" > "$hash_file"
-          echo "aigateway: opencode-serve restarted; hash file updated" >&2
-        else
-          {
-            echo "aigateway: WARNING — opencode-serve restart failed (sudo exit $sudo_rc):"
-            ${pkgs.gnused}/bin/sed 's/^/  /' "$sudo_err"
-            echo "aigateway: hash file NOT updated; next rebuild will retry"
-          } >&2
-        fi
-        rm -f "$sudo_err"
+        echo "$new_hash" > "$hash_file"
+        {
+          echo "aigateway: baseURL changed (url hash $old_hash -> $new_hash)."
+          echo "aigateway: config written — running serves keep the old provider init until they restart."
+          echo "aigateway:   automatic — nightly at 03:00 (nightly-restart-background.timer)"
+          echo "aigateway:   now, disruptive — reset-workspace   (kills all live sessions)"
+        } >&2
       fi
     '');
 
@@ -1942,14 +1915,17 @@ in
   # tokens. When codex-lb is stopped we DON'T touch the auth store, so going
   # direct just needs a real `opencode auth login`.
   #
-  # NO AUTO SERVE-RESTART (deliberate divergence from injectTeamclaudeBaseUrl):
-  # devbox runs a serve POOL (opencode-serve@<port>, X-SwitchMethod=keep-old),
-  # not a single opencode-serve.service, so home-manager does not cycle the
-  # serves on switch and there is no single unit to bounce. (The teamclaude block
-  # above still names opencode-serve.service, which no longer exists here, so its
-  # restart is already a best-effort no-op.) Rather than kill live pool sessions,
-  # we just write the config + clear the auth entry and print the apply command;
-  # running serves pick it up on their next natural restart.
+  # NO AUTO SERVE-RESTART. Both NixOS hosts run a serve POOL
+  # (opencode-serve@<port>, X-SwitchMethod=keep-old) under
+  # opencode-serve-pool.target, so home-manager does not cycle the serves on
+  # switch and there is no single unit to bounce. Rather than kill live pool
+  # sessions, we just write the config + clear the auth entry and print the
+  # apply command; running serves pick it up on their next natural restart.
+  #
+  # This was once described as a "deliberate divergence from
+  # injectTeamclaudeBaseUrl". It is not, any more: every activation site that
+  # named opencode-serve.service has now dropped its restart, so this is the
+  # house policy rather than an exception to it.
   home.activation.injectCodexLbBaseUrl = lib.mkIf (isDevbox || isCloudbox)
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
