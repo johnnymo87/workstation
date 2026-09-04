@@ -484,11 +484,42 @@ choice.** The TUI fetches `session.messages({ sessionID, limit: 100 })`
 (`context/sync.tsx:603`) and renders only what it fetched. An anchor older than
 the newest 100 messages is never in the store, never rendered, and cannot be
 scrolled to **by any mechanism** — launch parameter, retention, or event. It
-degrades correctly (no scroll, land at bottom), but it degrades *exactly in the
-case the feature is most wanted*: the session you left running overnight that
-accumulated many turns. Worth stating plainly rather than discovering as a bug
-report. Raising the limit is a separate change with its own cost, deliberately
-not bundled here.
+degrades correctly (no scroll, land at bottom).
+
+> **CORRECTED 2026-09-04, after live testing. This paragraph was written as
+> though the ceiling were an edge case. It is the common case, and the feature
+> does nothing about three quarters of the time.**
+>
+> Measured over the 120 most recent non-mirror anchored events (118 resolvable
+> in `opencode.db`): the anchor sits a **median of 192 messages** from the end
+> of the transcript — p25 66, p75 340, max 498. **Only 32/118 (27%) fall within
+> the 100-message window.** The first two real user tests both missed, at 174
+> and 192 back.
+>
+> The error was reasoning about the limit as though messages were conversational
+> turns. They are not. The anchor is the last *human* turn before a
+> notification, and one human turn in an agentic session produces dozens to
+> hundreds of assistant and tool messages — so an anchor far beyond 100 back is
+> the **normal shape** of any session worth notifying about, not a pathological
+> one. One query against `opencode.db` before building would have shown this.
+>
+> Everything else was verified working at the same time: the picker fires (the
+> 0/300/900/2000 schedule is visible in the door log), the door routes
+> `status: 200 action: route-session`, the serve publishes rather than 404s, the
+> TUI clients run the patched binary, and pigeon has written 405 anchors. **The
+> failure is only that the target is not loaded**, i.e. the designed degrade
+> path firing far more often than predicted.
+>
+> **Fix (tracked as `workstation-3qkw`):** `MessagesQuery` already accepts
+> `before` as well as `limit` (`groups/session.ts:43-47`), so when a pending
+> target is set and absent from `messages()`, page **backwards** from the oldest
+> loaded message until the anchor appears — bounded (~5 pages), then give up and
+> stay put. The deferred-layout hop still applies after the final page lands,
+> and the degrade-to-no-scroll contract is unchanged.
+>
+> **Do not simply raise the initial limit.** That would slow every session open
+> to serve a minority case, and at a p75 of 340 it would have to be raised far
+> enough to hurt.
 
 **Q7 (two TUIs on one session).** Both receive the event and both scroll, each
 subject to its own at-bottom guard — so a TUI whose user is already reading does
