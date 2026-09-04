@@ -2854,7 +2854,37 @@ Check:
         fi
 
         TOTAL=$(jq -r '(.accounts // []) | length' "$BODY" 2>/dev/null || echo "")
-        HEALTHY=$(jq -r '[(.accounts // [])[] | select(.disabled != true and .status == "active")] | length' "$BODY" 2>/dev/null || echo "")
+        # HEALTHY excludes PLAN-LESS accounts, not just dead ones.
+        #
+        # An account whose Max subscription lapses keeps its OAuth grant, so it
+        # reports status=active forever while returning no quota at all. That is
+        # a third state between alive and dead, and everything here used to read
+        # it as healthy: johnnymo87 sat in the roster like that from 2026-08-28
+        # and was only noticed on 09-04, in passing, by the operator. For six
+        # days the fleet was 4 accounts while every instrument said 5.
+        #
+        # Discriminator: all three quota buckets unreported AND no 5h
+        # consumption. Unreported-ness alone is NOT enough -- a healthy account
+        # reports a null unified7d for long stretches (johnnymo872 did for ~1620
+        # samples in July 2026) while its Fable and 5h buckets stay live.
+        #
+        # The $reporting fallback is a guard against the global case: if the
+        # quota API stops reporting for EVERYONE, that is an upstream outage,
+        # not simultaneous cancellations, so fall back to the plain active
+        # count rather than declaring the whole fleet plan-less at 3am.
+        #
+        # No new alert path: a plan-less account simply stops counting toward
+        # HEALTHY, so the existing alert-on-decrease fires. The 2-pass dampening
+        # also absorbs the one-sample all-null blip that a weekly window roll
+        # produces (observed on johnnymo872 at 2026-08-05T08:00).
+        HEALTHY=$(jq -r '
+          ( [ (.accounts // [])[]
+              | select(.disabled != true and .status == "active") ] ) as $active
+          | ( [ $active[] | select( ((.quota.unified7d) != null)
+                                 or ((.quota.unified7dFable) != null)
+                                 or (((.quota.unified5h) // 0) > 0) ) ] ) as $reporting
+          | (if ($reporting | length) == 0 then ($active | length) else ($reporting | length) end)
+        ' "$BODY" 2>/dev/null || echo "")
 
         # Both sides must be KNOWN before comparing.
         case "$TOTAL" in ""|*[!0-9]*) echo "WARNING: could not parse account total (unknown; not alerting)"; exit 0 ;; esac
@@ -3067,7 +3097,17 @@ EOF
         DRIFT=""
         if [ -f "$BODY" ]; then
           ROSTER=$(jq -r '(.accounts // [])[] | "  - \(.name // "?"): \(.status // "?")"' "$BODY" 2>/dev/null || echo "  (roster unavailable)")
-          HEALTHY=$(jq -r '[(.accounts // [])[] | select(.disabled != true and .status == "active")] | length' "$BODY" 2>/dev/null || echo "")
+            # Same plan-less-aware count as the canary above; see the long
+          # comment there. A lapsed subscription reports status=active with no
+          # quota, and must not be counted as a healthy account.
+          HEALTHY=$(jq -r '
+            ( [ (.accounts // [])[]
+                | select(.disabled != true and .status == "active") ] ) as $active
+            | ( [ $active[] | select( ((.quota.unified7d) != null)
+                                   or ((.quota.unified7dFable) != null)
+                                   or (((.quota.unified5h) // 0) > 0) ) ] ) as $reporting
+            | (if ($reporting | length) == 0 then ($active | length) else ($reporting | length) end)
+          ' "$BODY" 2>/dev/null || echo "")
           # BOTH sides must be known before comparing. Concatenating them into
           # one glob would let an empty operand through on the digits of the
           # other, and `[ "" -ne 5 ]` is a runtime error, not a false.
