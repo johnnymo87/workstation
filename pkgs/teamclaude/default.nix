@@ -69,11 +69,17 @@ stdenvNoCC.mkDerivation rec {
     #     does report `refresh_token_expires_in` and teamclaude was discarding
     #     it, so the ~30d grant lifetime that kills accounts without warning is
     #     measurable after all; bead xyq)
+    #   + plan-less gating (an account whose subscription lapses keeps its
+    #     OAuth grant and reports status=active with NO quota; _isNearQuota
+    #     only gates on REPORTED buckets, so it stayed selectable forever.
+    #     Sustained over 3 silent probes, self-disabling when the whole fleet
+    #     is silent, and soft -- the exhausted-probe path can still reach it;
+    #     bead claude-failover-proxy-arj)
     # 558/558 tests green on this rev. Not upstreamed, so this cannot be a tag.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "d643bb52eb89cf0a39f720dce348f07a7fedef7b"; # obs/refresh-token-fields-v1113
-    hash = "sha256-FBOVmEuw8DG2nL+/74n49r58KAP6PmAX9u8i06bs65I=";
+    rev = "890108cb25c40ef779fe9ca8c305326e5a75f575"; # obs/refresh-token-fields-v1113
+    hash = "sha256-wgPCwep9+M2LQkzfKyHt7vy5quYDi4S9ut6DdOEMy2w=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
