@@ -510,7 +510,7 @@ degrades correctly (no scroll, land at bottom).
 > failure is only that the target is not loaded**, i.e. the designed degrade
 > path firing far more often than predicted.
 >
-> **Fix (tracked as `workstation-3qkw`):** `MessagesQuery` already accepts
+> **Fix (tracked as `workstation-psh9`):** `MessagesQuery` already accepts
 > `before` as well as `limit` (`groups/session.ts:43-47`), so when a pending
 > target is set and absent from `messages()`, page **backwards** from the oldest
 > loaded message until the anchor appears — bounded (~5 pages), then give up and
