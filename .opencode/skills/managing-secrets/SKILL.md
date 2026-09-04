@@ -131,7 +131,9 @@ sops.secrets = {
 
 **Option A: Export as env var** (for CLI tools)
 
-Edit `users/dev/home.linux.nix`:
+Edit the per-host home module — `users/dev/home.devbox.nix` or
+`users/dev/home.cloudbox.nix` (there is no `home.linux.nix`; do not put host
+secrets in `home.base.nix`, which is shared with Darwin):
 
 ```nix
 programs.bash.initExtra = lib.mkAfter ''
@@ -171,28 +173,107 @@ home-manager switch --flake .#dev  # if you added bash export
 
 ### Step 1: Remove from consumers
 
-- Remove any bash exports from `users/dev/home.linux.nix`
-- Remove any systemd service references
-- Remove declaration from `hosts/devbox/configuration.nix`
+- Remove any bash exports from `users/dev/home.devbox.nix` (or `home.cloudbox.nix`)
+- Remove any systemd service references — including `ExecStart` wrappers that
+  `cat` the secret, which are easy to miss because they are not bash exports
+- Remove the mapping in `assets/opencode/plugins/shell-env.ts`, if present.
+  That plugin injects secrets into every opencode bash tool call, and is a
+  separate path from `programs.bash.initExtra`
+- Remove the declaration from `hosts/<host>/configuration.nix`
+- Grep before believing you are done: `grep -rn <secret_name>` across the repo
 
-### Step 2: Remove from sops file
+### Step 2: Remove from the sops file
+
+Use `sops unset`. It edits in place, so it preserves the file's recipient list
+and never writes plaintext to disk:
 
 ```bash
-sudo nix-shell -p sops -p yq-go --run "
-  cd /home/dev/projects/workstation
-  SOPS_AGE_KEY_FILE=/persist/sops-age-key.txt sops -d secrets/devbox.yaml > /tmp/secrets-plain.yaml
-  yq -i 'del(.secret_to_remove)' /tmp/secrets-plain.yaml
-  SOPS_AGE_KEY_FILE=/persist/sops-age-key.txt sops encrypt --age age1kyd7dzxtgte0rcd0nj3chfvcfvammhywe63f25tlsrf8knhf3u8sxp8z9n --input-type yaml --output-type yaml /tmp/secrets-plain.yaml > secrets/devbox.yaml
-  rm /tmp/secrets-plain.yaml
-"
+sudo nix-shell -p sops --run \
+  "SOPS_AGE_KEY_FILE=/persist/sops-age-key.txt sops unset secrets/devbox.yaml '[\"secret_to_remove\"]'"
 ```
 
-### Step 3: Apply and commit
+File ownership survives the `sudo` (it stays `dev:dev`).
+
+> **Do not decrypt to a temp file and re-encrypt.** This skill used to document
+> exactly that, and the recipe had two defects. Both were found while removing
+> `claude_personal_oauth_token` (PR #462); it is kept here so nobody reinvents it.
+>
+> ```bash
+> # THE OLD RECIPE -- DO NOT USE
+> sops -d secrets/devbox.yaml > /tmp/secrets-plain.yaml
+> yq -i 'del(.secret_to_remove)' /tmp/secrets-plain.yaml
+> sops encrypt --age age1kyd7dzxtgte0rcd0nj3chfvcfvammhywe63f25tlsrf8knhf3u8sxp8z9n ... > secrets/devbox.yaml
+> ```
+>
+> 1. **It silently drops recipients.** That `--age` flag hardcodes *devbox's*
+>    key as the sole recipient. `secrets/cloudbox.yaml`'s only recipient is the
+>    **cloudbox** key, so running this against it re-encrypts cloudbox's secrets
+>    to a key cloudbox does not hold. Nothing fails at edit time; it fails at
+>    cloudbox's next boot, when sops-nix cannot decrypt and every secret-consuming
+>    service breaks at once.
+>
+>    (The original motivating example was `secrets/chromebook.yaml`, which had
+>    two recipients so the recipe would have half-worked. That host is
+>    decommissioned and the file is gone — cloudbox is the live hazard now, and
+>    it is the worse one, since a single-recipient file means total lockout
+>    rather than partial.)
+>
+> 2. **It writes every decrypted secret to `/tmp`.** To delete one key it puts
+>    all ~28 others in plaintext on a multi-tenant box for the duration of the
+>    edit. `sops unset` never materialises them.
+
+### Step 3: Verify before you commit
+
+A botched sops edit is not visibly botched — the file still looks like
+ciphertext. Check the three things that can silently go wrong:
+
+```bash
+cp secrets/devbox.yaml /tmp/before.yaml   # ciphertext, not plaintext
+
+# ... run the sops unset ...
+
+# 1. It still decrypts, and exactly one key went away.
+#    NOTE: pass BOTH --input-type and --output-type. sops guesses from the file
+#    extension, so a copy named *.pre or *.bak decrypts as "binary" and errors
+#    to an EMPTY result -- which then compares equal against a filtered list and
+#    reports a cheerful PASS. Ask me how I know.
+sudo nix-shell -p sops -p yq-go --run \
+  "SOPS_AGE_KEY_FILE=/persist/sops-age-key.txt sops -d --input-type yaml --output-type yaml /tmp/before.yaml | yq 'keys | .[]'" \
+  | grep -v '^secret_to_remove$' > /tmp/expected.keys
+sudo nix-shell -p sops -p yq-go --run \
+  "SOPS_AGE_KEY_FILE=/persist/sops-age-key.txt sops -d --input-type yaml --output-type yaml secrets/devbox.yaml | yq 'keys | .[]'" \
+  > /tmp/actual.keys
+diff /tmp/expected.keys /tmp/actual.keys && echo "PASS: exactly one key removed"
+
+# 2. The recipient list is unchanged.
+diff <(grep recipient: /tmp/before.yaml) <(grep recipient: secrets/devbox.yaml) \
+  && echo "PASS: recipients unchanged"
+
+# 3. No other ciphertext moved. Only the removed key, mac and lastmodified
+#    should differ -- a full re-encrypt rewrites every line, which is the
+#    signature of having used the wrong tool.
+git diff --stat secrets/devbox.yaml
+
+rm -f /tmp/before.yaml /tmp/expected.keys /tmp/actual.keys
+```
+
+Compare **key names only, never values** — a verification step that prints
+secrets into a terminal or an agent transcript has leaked them.
+
+### Step 4: Apply and commit
 
 ```bash
 git add -A && git commit -m "chore: remove secret_to_remove"
 sudo nixos-rebuild switch --flake .#devbox
 ```
+
+### Step 5: Revoke at the source
+
+Removing a credential from sops is **not revocation**. The value is still valid
+at whatever issued it, and the old ciphertext stays in git history forever. If
+the secret is being retired rather than moved, revoke it at the provider — and
+check the other hosts' secret files first (`secrets/*.yaml`), since one
+credential is often shared.
 
 ## Key Files
 
@@ -202,7 +283,8 @@ sudo nixos-rebuild switch --flake .#devbox
 | `secrets/.sops.yaml` | sops config (which keys can decrypt) |
 | `/persist/sops-age-key.txt` | Age private key (never in git, root-only) |
 | `hosts/devbox/configuration.nix` | Secret declarations for sops-nix |
-| `users/dev/home.linux.nix` | Bash exports for env vars |
+| `users/dev/home.devbox.nix`, `home.cloudbox.nix` | Bash exports for env vars (per host; there is no `home.linux.nix`) |
+| `assets/opencode/plugins/shell-env.ts` | Injects `/run/secrets/*` into every opencode bash tool call, since non-interactive shells never source `~/.bashrc` |
 
 ## Troubleshooting
 
@@ -222,7 +304,7 @@ sudo nix-shell -p sops --run "SOPS_AGE_KEY_FILE=/persist/sops-age-key.txt sops s
 
 ### Env var not exported
 
-1. Check the export is in `home.linux.nix` (not `home.nix` - that's shared with Darwin)
+1. Check the export is in the per-host module (`home.devbox.nix` / `home.cloudbox.nix`), not `home.base.nix`, which is shared with Darwin
 2. Run `home-manager switch`
 3. Start a new shell (exports only apply to new shells)
 
@@ -232,4 +314,5 @@ sudo nix-shell -p sops --run "SOPS_AGE_KEY_FILE=/persist/sops-age-key.txt sops s
 - Decrypted secrets are mode 0400 (owner read-only)
 - The age key lives on `/persist/` which survives rebuilds but not re-provisioning
 - Never commit the age private key or decrypted secrets
-- Env var exports are in `home.linux.nix` so they only apply on devbox, not Darwin
+- Env var exports live in the per-host module (`home.devbox.nix` / `home.cloudbox.nix`), so they don't leak to Darwin
+- A secret with no consumer is not harmless: it still gets decrypted to `/run/secrets` and injected into every bash tool call. Remove the plumbing when the consumer goes away
