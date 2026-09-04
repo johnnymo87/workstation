@@ -870,6 +870,23 @@ in
         # state files it wrote are inert. Note the shepherd's own kill switch
         # above does NOT need touching to disable just this.
         "LGTM_ENABLE_ROLLOUT=1"
+        # Tell the AUTHORING session that its PR merged, for every repo in
+        # scope -- not only the ones with a rollout to watch.
+        #
+        # The rollout watcher above only speaks when Kubernetes has something
+        # to say. Merges that deploy nothing end silently at classification
+        # time, so the agent that wrote the PR is never told it landed and
+        # sits idle waiting for news that is not coming. Observed live.
+        #
+        # Default-on per repo, config-to-override: a repo absent from
+        # rollout.yml is not classified at all (no API call, no alarm) and
+        # simply gets the notice. So this covers all nine repos in lgtm.yml,
+        # while LGTM_ROLLOUT_CONFIG still names only the watched one.
+        #
+        # Its own switch, like the rollout above: unset it and the `notice`
+        # markers already written to state files are inert, because nothing
+        # else reads them.
+        "LGTM_ENABLE_MERGE_NOTICE=1"
         # The watched targets: cluster contexts, namespaces and deployment
         # names. Deliberately a path to a file OUTSIDE this repository, which
         # is public -- that list is exactly the topology the Confluence-fetched
