@@ -869,6 +869,14 @@ in
         # Its own switch, and the whole rollback story: unset this and the
         # state files it wrote are inert. Note the shepherd's own kill switch
         # above does NOT need touching to disable just this.
+        #
+        # It does NOT disable *only* this, though, despite the switch below
+        # having its own name. The merge notice's pending markers are written
+        # inside the rollout sweep, so unsetting this also stops any new merge
+        # being marked, and the notice loop then finds nothing forever. To turn
+        # rollout watching off while keeping notices, that coupling has to be
+        # removed in lgtm first -- see the comment on the notice loop in
+        # src/shepherdRun.ts.
         "LGTM_ENABLE_ROLLOUT=1"
         # Tell the AUTHORING session that its PR merged, for every repo in
         # scope -- not only the ones with a rollout to watch.
@@ -886,6 +894,11 @@ in
         # Its own switch, like the rollout above: unset it and the `notice`
         # markers already written to state files are inert, because nothing
         # else reads them.
+        #
+        # But the two switches are NOT independent, in one direction: this one
+        # only governs DELIVERY. The markers it delivers are created inside the
+        # rollout sweep, so LGTM_ENABLE_ROLLOUT=0 silently disables notices too.
+        # Turning THIS off while leaving rollout on behaves as expected.
         "LGTM_ENABLE_MERGE_NOTICE=1"
         # The watched targets: cluster contexts, namespaces and deployment
         # names. Deliberately a path to a file OUTSIDE this repository, which
