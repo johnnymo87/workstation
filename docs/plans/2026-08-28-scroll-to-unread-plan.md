@@ -510,12 +510,66 @@ degrades correctly (no scroll, land at bottom).
 > failure is only that the target is not loaded**, i.e. the designed degrade
 > path firing far more often than predicted.
 >
-> **Fix (tracked as `workstation-psh9`):** `MessagesQuery` already accepts
-> `before` as well as `limit` (`groups/session.ts:43-47`), so when a pending
-> target is set and absent from `messages()`, page **backwards** from the oldest
-> loaded message until the anchor appears — bounded (~5 pages), then give up and
-> stay put. The deferred-layout hop still applies after the final page lands,
-> and the degrade-to-no-scroll contract is unchanged.
+> **Fix (tracked as `workstation-psh9`), as originally stated:** `MessagesQuery`
+> accepts `before` as well as `limit` (`groups/session.ts:43-47`), so page
+> **backwards** from the oldest loaded message until the anchor appears.
+>
+> **That was wrong in two ways, both found by reading the handler before writing
+> any code (shipped 2026-09-04 as `v1.18.18-patched.2`, opencode-patched#47):**
+>
+> 1. **`before` is an opaque CURSOR, not a message id.** `handlers/session.ts`
+>    does `MessageV2.cursor.decode(before)` and 400s on anything else; the cursor
+>    comes only from the `X-Next-Cursor`/`Link` response headers of a previous
+>    page, which the generated SDK does not surface conveniently. `before`
+>    without `limit` is itself a BadRequest. Paging "from the oldest loaded
+>    message" would have failed on the first call.
+> 2. **No paging is needed at all.** `limit: N` alone returns the newest N, and
+>    `limit` absent or 0 returns everything. One `limit: 512` request covers the
+>    observed maximum distance of 498.
+>
+> **And the 100 is a store invariant with TWO trim sites, not a fetch size:** the
+> initial sync slices to the newest 100 and deletes the parts of everything
+> older, and the `message.updated` handler shifts the oldest off on *every*
+> insert past 100. The transcript is also **not virtualized** — `<For each={
+> messages()}>` makes every stored message a live renderable — so
+> `scrollChildIntoView` can only reach a message that is in the store, and
+> reaching an older anchor means rendering everything between it and the present.
+> There is no way around that cost while the list is unvirtualized.
+>
+> **What shipped.** Both trim sites consult a per-session cap. A jump whose
+> anchor is absent does one bounded `limit: 512` fetch; `planReach` keeps only
+> anchor-minus-margin so the rendered count is the anchor's distance plus 20
+> (median ~210, not 512); `mergeReach` reconciles that window against the **live**
+> store rather than a pre-fetch snapshot, prepending only strictly-older messages
+> so the list stays sorted for the binary-search inserts that follow. An
+> in-flight map makes a second jump join the first. The cap is released on
+> `onCleanup`.
+>
+> **Windowed replace was rejected on evidence,** not taste: `status()` derives
+> working/idle from `messages.at(-1)`, and the prompt, subagent footer and move
+> dialog all read the list tail, so a detached historical window would lie to all
+> of them.
+>
+> **Measured cost:** the deep fetch takes ~7.6s and moves ~5.2MiB on a real
+> 759-message session, against ~2.1s and ~1.2MiB for the ordinary one. Hence a
+> progress notice, and an explicit "too far back" notice on a miss — silence for
+> eight seconds is indistinguishable from the failure this change removes.
+>
+> **The blocker adversarial review caught, worth remembering:** releasing the cap
+> via `on(() => route.sessionID)` is DEAD CODE. `app.tsx` mounts this route under
+> a **keyed** `<Show>`, which disposes and rebuilds the component per session, so
+> `route.sessionID` never changes within an instance. The `pendingScroll` clear
+> that shipped in patch 31 was dead for the same reason — harmless only because a
+> fresh instance gets a fresh signal, not because it worked, and its comment
+> claimed a behaviour it never had. Without the fix, every jumped session would
+> have kept its enlarged list and ~5MiB for the life of the process: strictly
+> worse than the no-op it replaces.
+>
+> **Two gaps left open deliberately:** the shift-one eviction still shifts the
+> viewport if enough messages arrive while the user reads history above the
+> bottom (`workstation-hswe`; the margin buys ~20, and a jumped session is
+> usually idle because the anchor is written when the agent *finishes*), and the
+> render cost is measured at the fetch but not at paint (`workstation-p267`).
 >
 > **Do not simply raise the initial limit.** That would slow every session open
 > to serve a minority case, and at a p75 of 340 it would have to be raised far
