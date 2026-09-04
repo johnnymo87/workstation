@@ -2830,7 +2830,9 @@ Check:
         #
         # A deliberate SHRINK needs an operator ack, because otherwise a real
         # loss and an intentional downsize are indistinguishable:
-        #     echo 3 > /var/lib/teamclaude-pool-canary/expected-healthy-ack
+        #     echo 3 | sudo tee /var/lib/teamclaude-pool-canary/expected-healthy-ack
+        # (the state dir is root-owned, so `sudo echo 3 > ...` does NOT work —
+        # the redirect runs as the caller. Use tee.)
         # The ack is CONSUMED once applied, so it lowers the mark exactly once
         # and cannot mask a later real death.
         MARK="$STATE/healthy-high-water"
@@ -2936,10 +2938,22 @@ Check:
             ;;
         esac
 
-        # Operator ack: a DELIBERATE downsize. Consumed on use so it lowers the
-        # mark exactly once and cannot mask a later real death. Only honoured
-        # when the pool already satisfies it, so an ack cannot pre-authorise a
-        # loss that has not happened yet.
+        # Operator ack: a DELIBERATE downsize. It is a LATCH, not an immediate
+        # command: it applies only when the pool actually SITS at the acked
+        # number, and is consumed only when applied.
+        #
+        # The earlier version applied on `WANT <= HEALTHY` and consumed the file
+        # either way. That silently ate a correct ack: on 2026-09-04 the operator
+        # removed an account from the config and acked 4 before restarting
+        # teamclaude, so the daemon still reported 5 healthy. The ack set the
+        # mark to 4, the growth branch below immediately raised it back to 5 in
+        # the same pass, and the ack file was gone — leaving the operator
+        # believing a downsize was acknowledged when nothing had changed.
+        #
+        # As a latch it composes with reality instead of racing it: ack now,
+        # restart whenever, and the mark drops the moment the pool matches. An
+        # ack for a number the pool has NOT reached is held, not consumed, so it
+        # also cannot pre-authorise a loss that has not happened yet.
         if [ -f "$ACK" ]; then
           WANT=$(cat "$ACK" 2>/dev/null || echo "")
           case "$WANT" in
@@ -2947,13 +2961,13 @@ Check:
               echo "WARNING: $ACK is not a number; ignoring"
               ;;
             *)
-              if [ "$WANT" -le "$HEALTHY" ]; then
+              if [ "$WANT" -eq "$HEALTHY" ]; then
                 EXPECTED_HEALTHY="$WANT"
                 echo "$EXPECTED_HEALTHY" > "$MARK"
                 rm -f "$ACK"
                 echo "NOTE: operator ack accepted; high-water mark now $EXPECTED_HEALTHY"
               else
-                echo "NOTE: ack of $WANT held; pool is at $HEALTHY and must reach $WANT first"
+                echo "NOTE: ack of $WANT held (pool is at $HEALTHY); it applies when the two match"
               fi
               ;;
           esac
@@ -2995,8 +3009,9 @@ for auth-dead accounts too and is misleading.
 To fix (interactive, on cloudbox):
   teamclaude login
 
-If the smaller pool is DELIBERATE, ack it once and this stops:
-  echo $HEALTHY > /var/lib/teamclaude-pool-canary/expected-healthy-ack
+If the smaller pool is DELIBERATE, ack it once and this stops (the state dir
+is root-owned, so a plain > redirect from your own shell will NOT work):
+  echo $HEALTHY | sudo tee /var/lib/teamclaude-pool-canary/expected-healthy-ack
 
 Confirm: curl -s localhost:3456/teamclaude/status | jq '[.accounts[].status]'
 EOF
@@ -3068,8 +3083,8 @@ EOF
                  DRIFT="
 NOTE: $HEALTHY accounts healthy but the canary's high-water mark is
 $EXPECTED_HEALTHY. Either re-login the missing account(s), or — if the smaller
-pool is deliberate — ack it once:
-  echo $HEALTHY > /var/lib/teamclaude-pool-canary/expected-healthy-ack"
+pool is deliberate — ack it once (root-owned dir; a plain > redirect fails):
+  echo $HEALTHY | sudo tee /var/lib/teamclaude-pool-canary/expected-healthy-ack"
                fi ;;
           esac
         fi
