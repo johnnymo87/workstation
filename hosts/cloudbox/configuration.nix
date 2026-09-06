@@ -630,8 +630,9 @@ in
       # cross-device-deployment skills, which are updated in a companion PR
       # there. Those skills are exactly what gets reached for during the kind of
       # incident this change exists to make diagnosable, so they must land before
-      # or with this. Note the chromebook runs pigeon as a USER service and is
-      # NOT namespaced -- its recipes must stay as they are.
+      # or with this. (This originally also carved out the chromebook, which ran
+      # pigeon as a USER service and was NOT namespaced. That host has since
+      # been decommissioned, so no such carve-out is needed anymore.)
       #
       # NOTE this captures oc-auto-attach too, which pigeon spawns and which
       # inherits the unit's stdio. Deliberate -- it is pigeon's story -- and the

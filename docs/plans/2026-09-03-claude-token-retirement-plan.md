@@ -81,21 +81,47 @@ Removing the secret from sops is **not revocation**. The credential is still
 valid at Anthropic and the old ciphertext is in git history forever. Once A is
 settled, revoke it. Do not revoke first — cloudbox may still be using it.
 
-### C. chromebook `.sops.yaml` remnants (`workstation-s0ln`)
+### C. chromebook `.sops.yaml` remnants (`workstation-s0ln`) — DONE, PR #474
 
-`secrets/chromebook.yaml` is already deleted, but `secrets/.sops.yaml` still has
-the `&chromebook` key anchor and a `creation_rule` for the missing file. Dead
-config that actively misled: it is why the `managing-secrets` skill cited
-chromebook as the multi-recipient example until #463 corrected it to cloudbox.
+Removed the `&chromebook` anchor and its `creation_rule`. Verified first that
+the key was never a recipient of a surviving file (`git log --all -S'age14hkwan'`
+is empty), so no ciphertext changed and no `updatekeys` was needed.
 
-`hosts/devbox/configuration.nix` and `hosts/cloudbox/configuration.nix` also
-mention chromebook — **read before deleting**, some may be legitimate.
+Two things fell out of it that were bigger than the task:
+
+**Every creation_rule in `.sops.yaml` was inert.** sops strips the config file's
+own directory before matching `path_regex`. The config lives in `secrets/`, so
+the matched string is `devbox.yaml`, and the rules were anchored
+`secrets/devbox\.yaml$`. They matched nothing from the day they were written;
+`sops updatekeys` had always failed with `no matching creation rules found`, and
+the files were created by passing `--age` on the CLI instead. Fixed by dropping
+the prefix. **If you edit that file, re-verify with the command in its header
+comment** — a rule that matches nothing fails silently and looks fine.
+
+**A credential exposure, tracked separately as `workstation-pg8f` (P1).** See
+below; it is not fixed by anything in section C.
+
+### D. Rotate credentials leaked via chromebook history (`workstation-pg8f`)
+
+`secrets/chromebook.yaml` is gone from the tree but lives in this **public**
+repo's history, encrypted to devbox + chromebook. Four of its values are still
+byte-identical to live devbox secrets: `ccr_api_key`, `telegram_bot_token`,
+`dolthub_jwk`, `dolthub_api_token`.
+
+Anyone with the chromebook age private key can read them out of public history,
+permanently. age has no revocation and rewriting public history does not help.
+Needs a human decision on whether that key material was destroyed with the
+device; if not provably destroyed, rotate all four on devbox **and** cloudbox.
+
+Generalise the lesson: **deleting a secrets file does not delete the secret**,
+and neither does removing a recipient. Only rotation at the provider does.
+`secrets/README.md` now says so.
 
 ## Sequencing
 
-C is independent and safe to do from devbox alone. A is blocked on cloudbox
-access. B is blocked on A. So: **C first, then A when cloudbox is reachable,
-then B.**
+C is done. A is blocked on cloudbox access. B is blocked on A. D is
+independent of all three and is the highest-priority item here, being a live
+exposure rather than tidying.
 
 ## Upstream thread (informational, no action owed)
 
