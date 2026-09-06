@@ -885,6 +885,16 @@ def evaluate_iteration(pr_num, owner, repo, lgtm_bound):
         ]
 
         if needs_rerequest:
+            # This branch deliberately does NOT exempt lgtm's pool logins.
+            # SKILL.md briefly said "never re-request lgtm; tier 0b re-reviews
+            # a settled head itself" -- true only where GitHub reports
+            # reviewDecision == REVIEW_REQUIRED, which is a property of the
+            # base branch's protection rules, not of the PR. On
+            # salmon-of-knowledge#208 (2026-09-04) that field was null, tier
+            # 0b could never fire, and this message was the correct advice
+            # while the prose was wrong. Keying on "has this reviewer seen
+            # the current head" is the question that matters; the prose now
+            # cites this script as the tiebreaker.
             logins = [login for login, _ in needs_rerequest]
             return {
                 "exit_code": EXIT_ACTION_NEEDED,

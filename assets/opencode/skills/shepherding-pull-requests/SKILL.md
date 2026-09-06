@@ -63,7 +63,7 @@ From that moment, without being asked:
 - **Hold the PR.** Stay in the loop until it lands, or until there is a genuine human decision only the user can make. → §"Post-PR Monitoring"
 - **When a review lands, reply to every inline comment in its own thread, and mark each thread resolved.** Both, every thread, bot and human alike. → §"Loop body" step 4
 - **Act on the substance with judgment** — accept, push back, or escalate. Nothing gets silently dropped. → `receiving-code-review`
-- **If a HUMAN reviewer has not APPROVED, re-request them** after pushing fixes. If they already approved, do not — and never re-request an automated reviewer, including lgtm. → §"Re-requesting review"
+- **If a HUMAN reviewer has not APPROVED, re-request them** after pushing fixes. If they already approved, do not — and never re-request a bot. lgtm is the qualified case: it re-reviews a settled head by itself only where `reviewDecision` is `REVIEW_REQUIRED`; anywhere else, re-request it once. → §"Re-requesting review"
 - **Before you consider the PR held, check that something is pending on someone.** A PR can be fully answered, green, and permanently stalled. → §"The stalled-but-healthy trap"
 
 Reporting a PR URL and treating the task as finished is the specific failure this skill exists to prevent.
@@ -332,32 +332,55 @@ Cache the answer in a shell var (e.g. `LGTM_BOUND=yes`) for the loop.
 5. **If anything was fixed in steps 2-4**, push, then:
    - **If a HUMAN reviewer's most recent review is `CHANGES_REQUESTED` or `COMMENTED`** -- they asked for changes, you addressed them, now they need to look again -- re-request that login (see §"Re-requesting review"). Nothing else re-notifies them.
    - **If their most recent review was already `APPROVED`**, do NOT re-request -- they signed off; you're just mopping up leftover inline threads. The approval stays valid; pushing fixes for inline-only feedback does not invalidate sign-off.
-   - **Do not re-request lgtm, and do not re-request or trigger-comment any bot.** lgtm returns on its own once the head is settled; bots do not come back and should not be asked to.
+   - **Do not re-request or trigger-comment any bot.** Bots do not come back and should not be asked to.
+   - **lgtm: check `reviewDecision` before deciding.** lgtm returns on its own once the head is settled — but only where GitHub reports `REVIEW_REQUIRED`. Anywhere else, re-request its login once. See §"Re-requesting review" for the check and why.
     - Go back to the 60-second sleep (step 1).
 6. **Otherwise** (nothing to fix this iteration), evaluate exit conditions. If they are unmet and the only thing outstanding is a reviewer who hasn't looked yet, leave the loop and hand off to the watchdog instead of sleeping again.
 
 ### Re-requesting review
 
-**Re-request real people. Nothing else.** Every automated reviewer on these PRs comes back on its own, and chasing one is wasted motion at best.
+**Re-request real people, and lgtm only where its sweep cannot reach you.** Bots come back on their own and chasing one is wasted motion; lgtm comes back on its own *under a precondition*, and that precondition is checkable in one call.
 
 | Reviewer | Re-request after you push fixes? | Why |
 |---|---|---|
 | A human colleague whose latest review is `COMMENTED` / `CHANGES_REQUESTED` | **Yes** | Nothing else re-notifies them. Answering a thread does not; a `COMMENTED` review means they are *not* satisfied and they will not know you are ready again. |
 | Anyone whose latest review is `APPROVED` | **No** | They signed off. Approval survives later pushes for inline-only fixes. |
 | A review bot (`user.type: "Bot"` — Gemini, claude, dependabot) | **No** | They review when the PR opens and have nothing to add on a second pass. |
-| **lgtm's dispatched reviewer** (`user.type: "User"`, a pool identity under a real human PAT) | **No, as of 2026-09-02** | lgtm now re-reviews a *settled head* by itself — see below. |
+| **lgtm's dispatched reviewer** (`user.type: "User"`, a pool identity under a real human PAT) | **Depends on `reviewDecision`** — see below | lgtm re-reviews a *settled head* by itself **only where GitHub reports `REVIEW_REQUIRED`**. Where it does not, re-request once. |
 
 ```bash
 gh pr edit <n> --repo <owner>/<repo> --add-reviewer <login>
 ```
 
-#### Why lgtm no longer needs chasing
+#### When lgtm comes back on its own, and when it cannot
 
 Until 2026-09-02 the author *did* have to re-request lgtm, and this section said so. The reason was a structural gap, not a policy: once lgtm posted a review, that PR became invisible to every discovery lane it had. Tier 2 skips anything already dispatched, and tier 0 was populated entirely by `gh search prs user-review-requested:<pool login>` — and posting a review is precisely what *clears* a review request. So the "head changed, always re-review" branch was unreachable for every PR lgtm had ever looked at, and a human re-requesting by hand was the only way back in.
 
 Observed on `mono#4476`: lgtm reviewed one commit at 05:17Z, the author pushed at 08:47Z, and for the next nine hours every cycle logged the PR in scope and then dropped it.
 
-**Tier 0b now closes that.** lgtm re-reviews a dispatched PR once the head has moved past the one it reviewed *and* threads are clear *and* CI is green *and* GitHub still reports `REVIEW_REQUIRED` — i.e. once the author looks finished. So the useful thing you can do for lgtm is **reach that state**, not ping it. If lgtm has not come back and those four conditions hold, that is a bug in lgtm worth reporting, not a re-request worth sending.
+**Tier 0b closes that — on some repos.** lgtm re-reviews a dispatched PR once the head has moved past the one it reviewed *and* threads are clear *and* CI is green *and* GitHub reports `reviewDecision == "REVIEW_REQUIRED"`. Reaching that state is the useful thing you can do for lgtm. **But the fourth condition is not something you can reach; it is a property of the repo.** Check it:
+
+```bash
+gh pr view <n> --repo <owner>/<repo> --json reviewDecision -q .reviewDecision
+```
+
+- **`REVIEW_REQUIRED`** — tier 0b can see you. Do not re-request lgtm. If it has not come back and the other three conditions hold, that is a bug in lgtm worth reporting, not a re-request worth sending.
+- **Empty (GitHub's null) or `CHANGES_REQUESTED`** — tier 0b **cannot** see you, and it never will on this PR. Re-request lgtm's login once (the exact login from its most recent review) and stop. This is not the retired chase-the-bot habit coming back; it is the one case the sweep is structurally unable to reach, and the re-request is the only way back in.
+
+Why the field behaves that way: `reviewDecision` is only ever `REVIEW_REQUIRED` when the PR's *base branch* carries a review-required protection rule. Without one, GitHub reports the latest *decisive* review and null when there is none — and a `COMMENTED` review is not a decision. lgtm posts `COMMENTED` when it wants changes without blocking, so on such a repo its own review both clears the review request and nulls the field, and tier 0b's gate refuses forever. Measured on `food-truck/salmon-of-knowledge`, 2026-09-04:
+
+| PR | latest non-bot review | pending requests | `reviewDecision` |
+|---|---|---|---|
+| #194 | COMMENTED | 0 | *(null)* |
+| #193 | CHANGES_REQUESTED | 0 | CHANGES_REQUESTED |
+| #191 | APPROVED | 0 | APPROVED |
+| #38 | none | 0 | *(null)* |
+
+`salmon-of-knowledge#208` is the incident this paragraph exists for: CI green, all eight threads resolved, settled head — the exact state tier 0b is for — and an agent following the previous wording of this section waited on a lane that had never once fired on that repo (12 tier-0b firings in the surrounding week, every one on `mono`, `culinary-operations-server` or `internal-frontends`; zero on `salmon-of-knowledge` or `k8s-gitops`, which have **no** open PR reporting `REVIEW_REQUIRED`). What rescued it was tier 0, three minutes after a human re-requested by hand. That is the "stalled-but-healthy trap" below, reached by following this skill.
+
+**`monitor-pr.py` is the tiebreaker when the prose and the script disagree.** On #208 it said `Stale non-APPROVED review(s) from @jamesvec predate current HEAD. Re-request review:` — and it was right. The script keys on "has this reviewer seen the current head", which is the question that actually matters, and it does not carry the `REVIEW_REQUIRED` assumption this section used to. If it tells you to re-request, do it.
+
+The lgtm-side fix (admit a null decision after positively confirming no approval, and admit `CHANGES_REQUESTED` once the head has settled) is in the lgtm repo — see the `settledRereview.ts` header. Once that is deployed the precondition above relaxes, but a single re-request on a settled head stays harmless either way: tier 0 and tier 0b de-duplicate against each other, so the worst case is a race the sweep wins.
 
 #### Never use a bot's trigger comment either
 
@@ -387,7 +410,7 @@ gh api repos/{owner}/{repo}/pulls/<n>/requested_reviewers --jq '[.users[].login]
 gh pr view <n> --json reviewDecision,mergeStateStatus -q '{d:.reviewDecision,m:.mergeStateStatus}'
 ```
 
-Empty reviewers **and** `reviewDecision: REVIEW_REQUIRED` means nothing is pending on anyone. **Before you report a PR as held and end the turn, confirm someone is on the hook** — a human with a live review request, or lgtm with a settled head it will pick up. If neither is true, you are the only thing standing between that PR and indefinite silence.
+Empty reviewers **and** no approval (`reviewDecision` of `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or empty) means nothing is pending on anyone. **Before you report a PR as held and end the turn, confirm someone is on the hook** — a human with a live review request, or lgtm with a settled head it will pick up. That second one is conditional: lgtm picks up a settled head only where `reviewDecision` is `REVIEW_REQUIRED` (see §"When lgtm comes back on its own, and when it cannot"). If the field is empty or `CHANGES_REQUESTED`, nobody is on the hook until you re-request lgtm once. `salmon-of-knowledge#208` sat in exactly this state on 2026-09-04 with an agent waiting for a sweep that could not reach it. If neither is true, you are the only thing standing between that PR and indefinite silence.
 
 Note the shepherd does not rescue this either. `landable` requires an approval, so a stalled PR fails it and falls through to `idle`, which only tells the human — hours later, and only that "it has not moved."
 
@@ -497,7 +520,8 @@ Set `expires_in` generously. A wake defaults to expiring six hours after its del
 - **Mistaking Gemini's review for the gating review.** Gemini fires early and looks like a reviewer has shown up, which makes it tempting to declare done as soon as its threads are resolved. On lgtm-bound repos, the gating review is the lgtm-dispatched one (`type: "User"`), which arrives ~10 min *after* CI goes green and is what you're actually waiting for. Address Gemini's threads, but don't exit on Gemini's signal.
 - **Re-requesting review from a bot login.** Bots aren't on the lgtm reawaken loop; the request is wasted. Filter on `user.type != "Bot"` before re-requesting.
 - **Poking a bot with its trigger comment.** `/gemini review` and `@claude review` are the same mistake as re-requesting them, wearing a different hat — and they *work*, so unlike a wasted API call they produce real noise on the PR. Measured 2026-09-02 on `mono#4476`.
-- **Re-requesting lgtm.** Retired as of 2026-09-02: lgtm re-reviews a settled head itself (tier 0b). Reaching that state is the useful action; the re-request just races the sweep.
+- **Re-requesting lgtm where tier 0b can already see you.** Where `reviewDecision` is `REVIEW_REQUIRED`, lgtm re-reviews a settled head itself; reaching that state is the useful action and the re-request just races the sweep.
+- **NOT re-requesting lgtm where tier 0b cannot see you.** The mirror image, and the more expensive one: on a repo whose base branch has no review-required rule, `reviewDecision` is empty after lgtm's `COMMENTED` review (or `CHANGES_REQUESTED` after its `REQUEST_CHANGES`), tier 0b refuses forever, and "never re-request lgtm" waits indefinitely. `salmon-of-knowledge#208`, 2026-09-04. Check the field; if it is not `REVIEW_REQUIRED`, re-request once. When `monitor-pr.py` says to re-request, it is right.
 - **Running `gh pr merge`.** Not yours. See §"Merging stays with the human" — and note that branch protection refusing your merge is not evidence you were allowed to try.
 - **Ending the turn on a PR with nobody pending on it.** Green plus every thread resolved plus zero requested reviewers is a stalled PR that looks finished. See §"The stalled-but-healthy trap".
 - **Telling the user "a daemon will pick this up" when it will only wake you.** The shepherd routes `needs_reply` / `ci_red` / `conflicted` back to *this session* and only Telegrams the human for `landable` / `idle`. Saying the wrong one leaves the user either ignoring a PR they now own or waiting on a handoff that is coming to you.
