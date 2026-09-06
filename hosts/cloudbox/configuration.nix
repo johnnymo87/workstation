@@ -707,6 +707,9 @@ in
   # only when enabled, so flake evaluation is unaffected when disabled.
   systemd.services.lgtm-run = lib.mkIf enableLgtm {
     description = "LGTM PR review cycle";
+    # Without this, TimeoutStartSec above only converts "hangs silently forever"
+    # into "fails silently in the journal". The failure still has to reach a human.
+    onFailure = [ "lgtm-run-failure.service" ];
     wants = [ "network-online.target" ];
     after = [ "network-online.target" "opencode-serve-pool.target" ];
     # `openssh` is defense-in-depth: lgtm's `git fetch` passes
@@ -720,6 +723,29 @@ in
     path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.curl pkgs.coreutils pkgs.bash pkgs.openssh ];
     serviceConfig = {
       Type = "oneshot";
+      # Type=oneshot defaults to TimeoutStartSec=infinity, and a timer will not
+      # start a unit that is still activating -- so ONE hang stops lgtm-run
+      # permanently, with nothing logged and nothing alerting. (RuntimeMaxSec is
+      # not an option: systemd.service(5) says it has no effect on Type=oneshot.)
+      #
+      # 1140s is ~2.4x the max over the FULL 12-day journal (481s, n=1679).
+      # Not the 600s timer period: this cycle's cost is integer-valued in
+      # DISPATCHES at ~190s each (40s context packet + up to
+      # GATHER_TIMEOUT_MS=120s gather + ~30s launch) with no per-cycle cap, and
+      # 3-dispatch cycles already run 348-482s. Bounding at the period would
+      # kill legitimate bursts.
+      #
+      # Not 1200s either, and this is the non-obvious part: 1200 is EXACTLY two
+      # timer periods, so a timeout would land on the same second as the next
+      # fire. If the fire wins that race it resets Result to success, and the
+      # onFailure unit below would report "FAILED (Result=success)". 1140 is
+      # 1.9 periods, so the two never coincide.
+      #
+      # A hung cycle now costs 1-2 dropped fires instead of forever. Kills stay
+      # cheap: dispatchFresh persists its marker and outcome per PR before
+      # starting the next, so a mid-burst kill loses at most the one in flight
+      # (the ~30s launch window in lgtm-4wq), not the burst.
+      TimeoutStartSec = 1140;
       # NB: default KillMode=control-group is correct here. The old
       # KillMode=process was a run-mode artifact (lgtm-a3r removed run mode):
       # it kept systemd from SIGKILLing detached `opencode run` review children
@@ -819,6 +845,7 @@ in
   # the human. See lgtm's docs/plans/2026-08-21-author-side-shepherd-design.md.
   systemd.services.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
     description = "LGTM author-side PR shepherd sweep";
+    onFailure = [ "lgtm-shepherd-failure.service" ];
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
     # kubectl/kubelogin/azure-cli/python3 are for the rollout watcher (below).
@@ -833,6 +860,32 @@ in
     ];
     serviceConfig = {
       Type = "oneshot";
+      # See lgtm-run above for why Type=oneshot needs this at all. The shepherd
+      # is the worse case to leave unbounded: a hang stops rollout watching,
+      # merge notices AND every needs_reply author wake simultaneously.
+      #
+      # 1500s, anchored on the max over the FULL 12-day journal: 690s
+      # (2026-08-31 16:20, n=1175, median 35s / p90 127s / p99 219s). An earlier
+      # 24h sample showed max 332s and would have justified 900s; that sample
+      # was too short and missed all three >480s runs, which fell on one day.
+      #
+      # The anchor is NOT MAX_ROLLOUT_SWEEP_MS (480s), and NOT the open-PR loop.
+      # The 690s run spent ~11 minutes before its first PR log line, consuming
+      # 20.7s CPU while reading 8.4 GB from disk with 1 MB of network traffic:
+      # that is the SYNCHRONOUS sqlite attribution scan (prAttribution.ts doing
+      # an unindexed scan of opencode.db), disk-bound, not GitHub. The network
+      # figure is what rules GitHub out -- 42 gh calls do not move 1 MB.
+      #
+      # Per-call timeouts cannot help here at all: synchronous work is not
+      # interruptible by a timeout or an AbortSignal. Only this bound covers it.
+      #
+      # 1500s is ~2.2x that 690s. Headroom is deliberately generous because the
+      # scan cost scales with opencode.db (8.85 GB and growing) and with page
+      # cache coldness, so the tail moves on its own without any code change. A
+      # kill lands BEFORE any PR work, wasting the whole sweep, so a too-tight
+      # bound here is worse than a slow sweep. Track the scan itself in the
+      # follow-up bead rather than by tightening this.
+      TimeoutStartSec = 1500;
       User = "dev";
       Group = "dev";
       WorkingDirectory = "/home/dev/projects/lgtm";
@@ -957,6 +1010,93 @@ in
       OnCalendar = "*:0/10";
       Persistent = false;
       RandomizedDelaySec = 60;
+    };
+  };
+
+  # ---------------------------------------------------------------------------
+  # Failure alerts for the two lgtm timers (lgtm-4im / F9).
+  #
+  # These exist because TimeoutStartSec on its own is only half a fix. Before it,
+  # a hung sweep stopped the unit forever and said nothing. With a bound but no
+  # alert, it fails every 10 minutes and still says nothing to a human -- the
+  # 2026-07-24 frontdoor incident in exactly this shape (detection worked for 70
+  # minutes; nobody was told) is why driftAlert exists at all.
+  #
+  # The signature includes Result so a hang episode (timeout) and a crash episode
+  # (exit-code) are distinct, and so backoff restarts when the character changes
+  # rather than suppressing a new problem under an old episode's TTL.
+  # ---------------------------------------------------------------------------
+  systemd.services.lgtm-run-failure = lib.mkIf enableLgtm {
+    description = "Alert that the LGTM review cycle failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "lgtm-failure";
+      # The alerter must not become the thing that hangs. `systemctl show` can
+      # block on a wedged dbus, and this unit is what a silent failure depends
+      # on to become visible at all.
+      TimeoutStartSec = 60;
+      ExecStart = "${pkgs.writeShellScript "lgtm-run-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
+        RESULT="$(systemctl show lgtm-run -p Result --value 2>/dev/null || echo unknown)"
+        ${driftAlert} /var/lib/lgtm-failure/alert-run "lgtm-run:''$RESULT" \
+          "LGTM review cycle FAILED (Result=''$RESULT).
+
+While it is failing, no PR is being reviewed.
+
+Result=timeout means the cycle hit TimeoutStartSec=1140 -- either a genuine hang
+or a legitimate dispatch burst (~190s each; observed max is 4 per cycle). Check
+which before raising the bound. gh calls are individually bounded, so a hang is
+more likely to be a burst than a stall.
+Result=exit-code means it crashed; the journal has the error.
+
+Check:
+  systemctl status lgtm-run.service --no-pager
+  journalctl -u lgtm-run.service -n 80 --no-pager
+
+After a timeout kill, also look for a PR left with a dispatched marker but no
+outcome file in ~/.lgtm -- that is the double-dispatch window (bead lgtm-4wq)." \
+          900 14400
+      ''}";
+    };
+  };
+
+  systemd.services.lgtm-shepherd-failure = lib.mkIf enableLgtmShepherd {
+    description = "Alert that the LGTM shepherd sweep failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "lgtm-failure";
+      # See lgtm-run-failure above: the alerter itself needs a bound.
+      TimeoutStartSec = 60;
+      ExecStart = "${pkgs.writeShellScript "lgtm-shepherd-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
+        RESULT="$(systemctl show lgtm-shepherd -p Result --value 2>/dev/null || echo unknown)"
+        ${driftAlert} /var/lib/lgtm-failure/alert-shepherd "lgtm-shepherd:''$RESULT" \
+          "LGTM shepherd sweep FAILED (Result=''$RESULT).
+
+While it is failing, NOBODY is woken about their own PRs: no needs_reply wakes,
+no rollout watching, and no merge notices. This fails quietly by nature -- the
+symptom is an author who is simply never told, so it will not self-report.
+
+Result=timeout means the sweep hit TimeoutStartSec=1500. The most likely cause is
+the synchronous sqlite attribution scan, not GitHub: the worst run on record
+(690s) spent 11 minutes before its first PR line, reading 8.4 GB from disk while
+moving only 1 MB over the network. Result=exit-code means it crashed.
+
+Check, in this order:
+  systemctl show lgtm-shepherd -p Result --value
+  journalctl -u lgtm-shepherd -n 80 --no-pager
+  # 'read from disk' on the Consumed line is the cheapest tell for the scan:
+  journalctl -u lgtm-shepherd --no-pager | grep 'read from disk' | tail -5
+  # a day with fewer than 144 runs means fires were swallowed by a long run:
+  journalctl -u lgtm-shepherd --no-pager -o short-iso | grep -c Starting" \
+          900 14400
+      ''}";
     };
   };
 
