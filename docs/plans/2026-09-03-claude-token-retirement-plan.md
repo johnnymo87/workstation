@@ -1,7 +1,9 @@
 # Retiring `claude_personal_oauth_token` (and the chromebook sops remnants)
 
-Status: **devbox done, cloudbox + revocation outstanding**
-Beads: `workstation-bs9g` (token), `workstation-s0ln` (chromebook `.sops.yaml`)
+Status: **CLOSED 2026-09-07.** devbox done (#452, #462); chromebook remnants and
+the inert creation rules fixed (#474); cloudbox deferred by the user; credential
+exposure closed on the user's confirmation that no one holds the chromebook key.
+Beads: `workstation-bs9g`, `workstation-s0ln`, `workstation-pg8f` — all closed.
 
 ## Why this exists
 
@@ -45,11 +47,12 @@ any single commit:
 - **cloudbox is not reachable from devbox.** `ssh cloudbox` fails to resolve.
   Nothing in this plan may assume otherwise.
 
-## Remaining work
+## Work items (historical — see Status above for disposition)
 
-### A. cloudbox side of the token (`workstation-bs9g`)
+### A. cloudbox side of the token (`workstation-bs9g`) — DEFERRED by user
 
-cloudbox still declares and exports it:
+Left as-is on the user's call ("don't worry about cloudbox"). The table below
+is what would need doing if that changes. cloudbox still declares and exports it:
 
 | site | what |
 |---|---|
@@ -75,11 +78,11 @@ Note cloudbox routes Anthropic through Vertex/aigateway, not teamclaude, so the
 devbox "plugin is shape-only" argument does **not** transfer. Verify on its own
 terms.
 
-### B. Revoke at the source (`workstation-bs9g`)
+### B. Revoke at the source (`workstation-bs9g`) — DEFERRED with A
 
 Removing the secret from sops is **not revocation**. The credential is still
-valid at Anthropic and the old ciphertext is in git history forever. Once A is
-settled, revoke it. Do not revoke first — cloudbox may still be using it.
+valid at Anthropic and the old ciphertext is in git history forever. Since A is
+deferred, so is this: revoking first would break cloudbox to tidy devbox.
 
 ### C. chromebook `.sops.yaml` remnants (`workstation-s0ln`) — DONE, PR #474
 
@@ -101,7 +104,7 @@ comment** — a rule that matches nothing fails silently and looks fine.
 **A credential exposure, tracked separately as `workstation-pg8f` (P1).** See
 below; it is not fixed by anything in section C.
 
-### D. Rotate credentials leaked via chromebook history (`workstation-pg8f`)
+### D. Rotate credentials leaked via chromebook history (`workstation-pg8f`) — CLOSED, no rotation
 
 `secrets/chromebook.yaml` is gone from the tree but lives in this **public**
 repo's history, encrypted to devbox + chromebook. Four of its values are still
@@ -110,8 +113,9 @@ byte-identical to live devbox secrets: `ccr_api_key`, `telegram_bot_token`,
 
 Anyone with the chromebook age private key can read them out of public history,
 permanently. age has no revocation and rewriting public history does not help.
-Needs a human decision on whether that key material was destroyed with the
-device; if not provably destroyed, rotate all four on devbox **and** cloudbox.
+Resolved on the user's confirmation that no one holds the chromebook key. With
+no holder, ciphertext in history is unreadable, so nothing was rotated. If that
+ever turns out to be wrong, this section is the rotation list.
 
 Generalise the lesson: **deleting a secrets file does not delete the secret**,
 and neither does removing a recipient. Only rotation at the provider does.
@@ -119,9 +123,7 @@ and neither does removing a recipient. Only rotation at the provider does.
 
 ## Sequencing
 
-C is done. A is blocked on cloudbox access. B is blocked on A. D is
-independent of all three and is the highest-priority item here, being a live
-exposure rather than tidying.
+All closed or deferred; nothing owed. See Status at the top.
 
 ## Upstream thread (informational, no action owed)
 
