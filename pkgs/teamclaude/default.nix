@@ -3,39 +3,42 @@
 # (127.0.0.1:3456) that rotates across personal Claude Max accounts and injects
 # the active account's OAuth token.
 #
-# This builds upstream KarpelesLab/teamclaude (tagged releases). We previously
-# ran the johnnymo87/teamclaude "opus-aware" fork to add per-model scoped
-# weekly-limit awareness + model-aware failover; upstream has since implemented
-# the same capability independently (PR #64 "track Fable weekly quota and route
-# by model", #69 "rich status output"), so the fork was retired in favor of
-# upstream on 2026-07-06.
+# This builds upstream KarpelesLab/teamclaude plus a SHORT local patch series
+# (see the fork note at `src` below). History of the fork: the "opus-aware"
+# fork was retired 2026-07-06 once upstream #64/#69 covered it; the
+# "balanced" weekly-routing fork (bead claude-failover-proxy-cto.3) was retired
+# 2026-09-06 once upstream #191 fixed the family gate (#175) and #282 shipped
+# opt-in `expiryRouting` for the concentration problem (#176). Both times the
+# pattern held: file the issue, carry the patch only until upstream moves.
 #
-# Zero runtime dependencies (verified again at v1.1.13: package.json has no
+# Zero runtime dependencies (verified again at v1.1.16: package.json has no
 # `dependencies` key at all, and every src/ import is either relative or a
 # `node:` builtin). So packaging is just: fetch the source, vendor it into the
 # store, and wrap `src/index.js` with a pinned node. No node_modules, no bundler.
 #
 # NODE FLOOR: upstream raised `engines.node` to >=20 in v1.1.9 (#128 fixed a
-# Node-18 stream crash); still >=20.0.0 at v1.1.13. The generic `nodejs` attr
+# Node-18 stream crash); still >=20.0.0 at v1.1.16. The generic `nodejs` attr
 # resolves to 22.x in our pinned nixpkgs, so this is satisfied — but if that
 # attr is ever pinned downward, teamclaude breaks at runtime, not at build time.
 #
-# RATE-LIMIT SEMANTICS (checked at v1.1.13, unchanged since 1.1.9): there are
-# two distinct 429 paths in src/server.js. A *quota rejection* — upstream sends
-# `anthropic-ratelimit-unified-{5h,7d}-status: rejected` — throttles the account
-# and ROTATES. A *transient* rate-limit 429 (no such header) deliberately does
-# NOT rotate: it pauses the account and retries the same one, because moving a
-# burst to the next account just throttles that one too (upstream #84,
-# thundering herd) and discards the account's KV cache. `switchThreshold` only
-# feeds proactive utilization-based selection and has no effect on 429 handling.
-# The inline wait is capped by TEAMCLAUDE_RATE_LIMIT_ABSORB_MAX_SECONDS
-# (default 60); we leave it at the default deliberately, since a slow success
-# beats surfacing a hard 429 to clients.
+# RATE-LIMIT SEMANTICS (changed in v1.1.15 by #271): a *quota rejection* —
+# upstream sends `anthropic-ratelimit-unified-{5h,7d}-status: rejected` —
+# throttles the account and ROTATES, as before. A *transient* rate-limit 429
+# (no such header) and an upstream 5xx now take ONE bounded failover hop to an
+# untried sibling that is not itself inside a 429 pause, then fall back to the
+# old same-account wait. Before #271 they never rotated (upstream #84,
+# thundering herd), which stalled a fleet whose sibling was idle — upstream
+# #137/#156/#165, and our own bead claude-failover-proxy-be0. The hop is bounded
+# to one on purpose: if the second account is throttled too the limit is almost
+# certainly per egress IP, and rotating further only pays cold caches.
+# `switchThreshold` (and the per-bucket `switchThresholds` from #233) only feed
+# proactive utilization-based selection and have no effect on 429 handling.
 #
 # To bump: pick a newer tag from https://github.com/KarpelesLab/teamclaude/tags,
-# set `rev` to its commit SHA, bump `version`, and refresh `src.hash` via
+# rebase branch local/v1116-patches (or its successor) on it in the fork,
+# push, set `rev` to the new head, and refresh `src.hash` via
 #   nix store prefetch-file --json --unpack \
-#     https://github.com/KarpelesLab/teamclaude/archive/<rev>.tar.gz | jq -r .hash
+#     https://github.com/johnnymo87/teamclaude/archive/<rev>.tar.gz | jq -r .hash
 {
   lib,
   stdenvNoCC,
@@ -46,40 +49,41 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.13-balanced"; # fork of upstream v1.1.13 + weekly-balanced routing + refresh-field logging
+  version = "1.1.16-local4"; # upstream v1.1.16 + 4 local patches (see below)
 
   src = fetchFromGitHub {
-    # TEMPORARY FORK. Rollback to STOCK upstream = restore owner "KarpelesLab",
-    # rev 1342e92b7207d5e3bb5af08402909810d7378019 (v1.1.13), its own hash, and
-    # version "1.1.13" — but note that drops `balanced` routing, so also set
-    # routingStrategy back to "drain" in ~/.config/teamclaude.json.
-    # Rollback to the PREVIOUS pin (v1.1.11 base, 15 days of burn-in behind it) =
-    # rev 79f1f69469d379ae84435ffefb7ca08c0d1c410e, hash
-    # sha256-R0S+4Fr750rblKTYQLERgEW4PmcFyuQO03ObP93Pw+g=, version "1.1.11-balanced".
+    # SMALL FORK. Branch local/v1116-patches = upstream v1.1.16 (eed7b33) + four
+    # self-contained commits, in order:
+    #   d5bddec fix(routing): advisor-model family check in _selectNext's
+    #           resurrect fallback (upstream checks _routeAllows only; a
+    #           resurrect could land on an account whose advisor family bucket
+    #           is spent). One line. Not filed upstream yet.
+    #   333b313 feat(oauth): log the FIELD NAMES of a token-refresh response,
+    #           once per shape.
+    #   2f1a5c4 feat(oauth): log refresh_token_expires_in on EVERY refresh --
+    #           the ~30d grant lifetime that kills accounts without warning is
+    #           reported by the endpoint and upstream discards it (bead xyq).
+    #   770b261 fix(routing): plan-less gating -- an account whose subscription
+    #           lapsed keeps its OAuth grant, reports status=active and NO
+    #           quota, and was never gated. Sustained over 3 silent probes,
+    #           self-disabling when the whole fleet is silent, soft (the
+    #           exhausted-probe path can still reach it). Returns the reason
+    #           'plan-less' since #262 made _isAvailable a wrapper over
+    #           unavailableReason() (bead claude-failover-proxy-arj).
+    # 1345/1345 tests green on this rev (upstream alone is 1331).
     #
-    # Branch obs/refresh-token-fields-v1113 = upstream v1.1.13
-    #   + fix/family-weekly-gate-v1113   (F2: family models were never gated on
-    #     the shared unified7d bucket, so an account past its weekly cap kept
-    #     serving Fable and ratcheted further over)
-    #   + feat/weekly-balanced-routing-v1113 (the opt-in `balanced` strategy;
-    #     claude-failover-proxy bead cto.3, verdict GO on 2026-08-10)
-    #   + obs/refresh-token-fields (logs the FIELD NAMES of a token-refresh
-    #     response, once per shape, plus the refresh token's own remaining TTL
-    #     on EVERY refresh. The first captured response proved the endpoint
-    #     does report `refresh_token_expires_in` and teamclaude was discarding
-    #     it, so the ~30d grant lifetime that kills accounts without warning is
-    #     measurable after all; bead xyq)
-    #   + plan-less gating (an account whose subscription lapses keeps its
-    #     OAuth grant and reports status=active with NO quota; _isNearQuota
-    #     only gates on REPORTED buckets, so it stayed selectable forever.
-    #     Sustained over 3 silent probes, self-disabling when the whole fleet
-    #     is silent, and soft -- the exhausted-probe path can still reach it;
-    #     bead claude-failover-proxy-arj)
-    # 558/558 tests green on this rev. Not upstreamed, so this cannot be a tag.
+    # Rollback to STOCK upstream = owner "KarpelesLab",
+    # rev eed7b330826ef07f2e8d90b2a8fb3cda900173cf (v1.1.16), its own hash,
+    # version "1.1.16". Costs only the four patches above; no config change.
+    # Previous pin (v1.1.13 + balanced routing, 34 days in production) =
+    # rev 890108cb25c40ef779fe9ca8c305326e5a75f575, hash
+    # sha256-wgPCwep9+M2LQkzfKyHt7vy5quYDi4S9ut6DdOEMy2w=, version
+    # "1.1.13-balanced" -- and put routingStrategy/weeklyBalanceMargin back in
+    # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "890108cb25c40ef779fe9ca8c305326e5a75f575"; # obs/refresh-token-fields-v1113
-    hash = "sha256-wgPCwep9+M2LQkzfKyHt7vy5quYDi4S9ut6DdOEMy2w=";
+    rev = "770b2612546ebfb67b9aa7df5130462a984b1331"; # local/v1116-patches
+    hash = "sha256-7wxTjVdop0qApXNKQVERf9/tFZs9MLgkPfMoXCTMtNk=";
   };
 
   nativeBuildInputs = [ makeWrapper ];

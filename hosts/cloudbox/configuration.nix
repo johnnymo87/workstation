@@ -2852,8 +2852,9 @@ Check:
 
   # TeamClaude: personal Claude Max rotator that the claude-failover-proxy
   # router forwards to when work Claude-on-Vertex spend is over budget
-  # (8fe.15 PREREQ). Runs upstream KarpelesLab/teamclaude (tagged release,
-  # zero-dep Node) from the nix package (pkgs/teamclaude), not a ~/projects checkout.
+  # (8fe.15 PREREQ). Runs KarpelesLab/teamclaude (zero-dep Node; currently a
+  # short local patch series on top of a tagged release, see pkgs/teamclaude)
+  # from the nix package, not a ~/projects checkout.
   #
   # CONFIG IS RUNTIME STATE, NOT NIX-MANAGED. TeamClaude reads + REWRITES
   # /home/dev/.config/teamclaude.json (OAuth access/refresh tokens auto-refresh
