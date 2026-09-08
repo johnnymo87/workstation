@@ -597,6 +597,7 @@ in
 
     # OpenCode usage and cost reporting
     localPkgs.oc-cost
+    localPkgs.oc-tags
 
     # OpenCode per-session context-window usage ("who should compact?")
     localPkgs.oc-context
