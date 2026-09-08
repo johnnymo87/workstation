@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import fnmatch
 import os
 import posixpath
 import sqlite3
 import sys
 import time
+import zoneinfo
 
 VERSION = "0.1.0"
 
@@ -158,6 +160,19 @@ def effective_tag(
             # Longest pattern wins: specific beats general.
             return dir_tags[max(matches, key=len)], "manual"
     return auto_key(directory), "auto"
+
+
+ET = zoneinfo.ZoneInfo("America/New_York")
+
+
+def bucket_key(epoch_ms: int, size: str) -> str:
+    dt = datetime.datetime.fromtimestamp(epoch_ms / 1000, ET)
+    return dt.strftime("%Y-%m-%dT%H") if size == "hour" else dt.strftime("%Y-%m-%d")
+
+
+def choose_bucket(days: int) -> str:
+    """Hourly only for short windows. 720 hourly bars x 15 series is noise."""
+    return "hour" if days <= 3 else "day"
 
 
 

@@ -190,6 +190,26 @@ class TestEffectiveTag(unittest.TestCase):
         )
 
 
+class TestBucketing(unittest.TestCase):
+    def test_hour_bucket_et(self):
+        # 2026-09-08T13:30:00Z == 09:30 ET (EDT, UTC-4)
+        self.assertEqual(oc_tags.bucket_key(1788874200000, "hour"), "2026-09-08T09")
+
+    def test_day_bucket_et(self):
+        self.assertEqual(oc_tags.bucket_key(1788874200000, "day"), "2026-09-08")
+
+    def test_utc_midnight_is_previous_et_day(self):
+        # 2026-09-08T02:00:00Z is 2026-09-07 22:00 ET. A UTC bucket would put
+        # this on the wrong side of the 0-ET spend-cap reset.
+        self.assertEqual(oc_tags.bucket_key(1788832800000, "day"), "2026-09-07")
+
+    def test_choose_bucket_size(self):
+        self.assertEqual(oc_tags.choose_bucket(1), "hour")
+        self.assertEqual(oc_tags.choose_bucket(3), "hour")
+        self.assertEqual(oc_tags.choose_bucket(4), "day")
+        self.assertEqual(oc_tags.choose_bucket(30), "day")
+
+
 
 
 # Without this guard, `python3 test_oc_tags.py` imports the module, defines
