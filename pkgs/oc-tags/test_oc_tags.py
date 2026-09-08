@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -86,6 +87,59 @@ class TestRootOf(unittest.TestCase):
 
     def test_empty_parents_map(self):
         self.assertEqual(oc_tags.root_of("a", {}), "a")
+
+
+class TestStore(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = str(Path(self.tmp.name) / "tags.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_set_and_get_session_tag(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_session_tag(st, "ses_a", "billing")
+            self.assertEqual(oc_tags.session_tags(st), {"ses_a": "billing"})
+
+    def test_one_tag_per_session_overwrites(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_session_tag(st, "ses_a", "billing")
+            oc_tags.set_session_tag(st, "ses_a", "infra")
+            # A stacked area's top edge must equal the total; two tags on one
+            # session would double count. Last write wins.
+            self.assertEqual(oc_tags.session_tags(st), {"ses_a": "infra"})
+
+    def test_tag_normalised_to_lowercase(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_session_tag(st, "ses_a", "  Infra  ")
+            self.assertEqual(oc_tags.session_tags(st), {"ses_a": "infra"})
+
+    def test_empty_tag_rejected(self):
+        with oc_tags.open_store(self.path) as st:
+            with self.assertRaises(ValueError):
+                oc_tags.set_session_tag(st, "ses_a", "   ")
+
+    def test_dir_tag_roundtrip(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/fbm-*", "fbm")
+            self.assertEqual(
+                oc_tags.dir_tags(st),
+                {"/home/dev/projects/mono/.worktrees/fbm-*": "fbm"},
+            )
+
+    def test_rm_session_tag(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_session_tag(st, "ses_a", "billing")
+            self.assertTrue(oc_tags.rm_session_tag(st, "ses_a"))
+            self.assertEqual(oc_tags.session_tags(st), {})
+            self.assertFalse(oc_tags.rm_session_tag(st, "ses_a"))
+
+    def test_schema_created_idempotently(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_session_tag(st, "ses_a", "billing")
+        with oc_tags.open_store(self.path) as st:
+            self.assertEqual(oc_tags.session_tags(st), {"ses_a": "billing"})
 
 
 

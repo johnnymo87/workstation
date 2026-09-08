@@ -11,9 +11,12 @@ docs/plans/2026-09-08-oc-tags-design.md.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import posixpath
+import sqlite3
 import sys
+import time
 
 VERSION = "0.1.0"
 
@@ -60,6 +63,79 @@ def root_of(session_id: str, parents: dict[str, str | None]) -> str:
         if not parent or parent not in parents:
             return cur
         cur = parent
+
+
+DEFAULT_TAGS_DB = os.path.expanduser("~/.local/share/oc-tags/tags.db")
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS session_tag (
+    session_id TEXT PRIMARY KEY,
+    tag        TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dir_tag (
+    pattern    TEXT PRIMARY KEY,
+    tag        TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+"""
+
+
+def normalise_tag(tag: str) -> str:
+    t = (tag or "").strip().lower()
+    if not t:
+        raise ValueError("tag must not be empty")
+    return t
+
+
+@contextlib.contextmanager
+def open_store(path: str = DEFAULT_TAGS_DB):
+    """Open (creating if needed) the sidecar tag DB.
+
+    Deliberately NOT beside opencode.db: `rm ~/.local/share/opencode/*.db*`
+    is a documented remedy and must not take hand-made tags with it.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(_SCHEMA)
+        conn.commit()
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_session_tag(conn, session_id: str, tag: str) -> None:
+    conn.execute(
+        "INSERT INTO session_tag(session_id, tag, created_at) VALUES (?,?,?) "
+        "ON CONFLICT(session_id) DO UPDATE SET tag=excluded.tag, created_at=excluded.created_at",
+        (session_id, normalise_tag(tag), int(time.time() * 1000)),
+    )
+
+
+def set_dir_tag(conn, pattern: str, tag: str) -> None:
+    conn.execute(
+        "INSERT INTO dir_tag(pattern, tag, created_at) VALUES (?,?,?) "
+        "ON CONFLICT(pattern) DO UPDATE SET tag=excluded.tag, created_at=excluded.created_at",
+        (pattern, normalise_tag(tag), int(time.time() * 1000)),
+    )
+
+
+def session_tags(conn) -> dict[str, str]:
+    return dict(conn.execute("SELECT session_id, tag FROM session_tag"))
+
+
+def dir_tags(conn) -> dict[str, str]:
+    return dict(conn.execute("SELECT pattern, tag FROM dir_tag"))
+
+
+def rm_session_tag(conn, session_id: str) -> bool:
+    return conn.execute("DELETE FROM session_tag WHERE session_id=?", (session_id,)).rowcount > 0
+
+
+def rm_dir_tag(conn, pattern: str) -> bool:
+    return conn.execute("DELETE FROM dir_tag WHERE pattern=?", (pattern,)).rowcount > 0
 
 
 
