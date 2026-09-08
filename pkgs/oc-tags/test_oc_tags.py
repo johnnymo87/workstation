@@ -713,6 +713,17 @@ class TestCli(unittest.TestCase):
         self.assertIn("--dir", out)
         self.assertIn("/home/dev/projects/mono/.worktrees/*", out)
 
+    def test_broken_pipe_suppressed(self):
+        class BrokenPipeWriter:
+            def write(self, s):
+                raise BrokenPipeError(32, "Broken pipe")
+            def flush(self):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        with contextlib.redirect_stdout(BrokenPipeWriter()):
+            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+
 
 class TestCfp(unittest.TestCase):
     def setUp(self):

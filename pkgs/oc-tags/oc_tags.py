@@ -701,16 +701,24 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
 
-    if args.command == "set":
-        return cmd_set(args)
-    elif args.command == "ls":
-        return cmd_ls(args)
-    elif args.command == "rm":
-        return cmd_rm(args)
-    elif args.command == "report":
-        return cmd_report(args)
-    elif args.command == "top":
-        return cmd_top(args)
+    try:
+        if args.command == "set":
+            return cmd_set(args)
+        elif args.command == "ls":
+            return cmd_ls(args)
+        elif args.command == "rm":
+            return cmd_rm(args)
+        elif args.command == "report":
+            return cmd_report(args)
+        elif args.command == "top":
+            return cmd_top(args)
+    except BrokenPipeError:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except Exception:
+            pass
+        return 0
     return 0
 
 
