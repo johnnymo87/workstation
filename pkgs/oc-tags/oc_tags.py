@@ -11,9 +11,34 @@ docs/plans/2026-09-08-oc-tags-design.md.
 from __future__ import annotations
 
 import argparse
+import os
+import posixpath
 import sys
 
 VERSION = "0.1.0"
+
+_WORKTREE_MARKER = "/.worktrees/"
+
+
+def auto_key(directory: str | None) -> str:
+    """Fallback tag for an untagged root session, derived from its directory.
+
+    Worktrees KEEP their slug: `mono/.worktrees/w3-pr2` -> `auto:mono/w3-pr2`.
+    The slug is the epic/ticket signal and is the only free attribution this
+    tool gets. Collapsing it merges ~$15k of distinct work into one band.
+    """
+    if not directory:
+        return "auto:no-dir"
+    d = directory.rstrip("/") or "/"
+    if d == "/tmp" or d.startswith("/tmp/"):
+        return "auto:tmp"
+    if _WORKTREE_MARKER in d:
+        head, _, tail = d.partition(_WORKTREE_MARKER)
+        project = posixpath.basename(head) or head
+        slug = tail.split("/", 1)[0]
+        return f"auto:{project}/{slug}"
+    return f"auto:{posixpath.basename(d) or d}"
+
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

@@ -19,6 +19,35 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.days, 14)
 
 
+class TestAutoKey(unittest.TestCase):
+    def test_worktree_keeps_slug(self):
+        self.assertEqual(
+            oc_tags.auto_key("/home/dev/projects/mono/.worktrees/fbm-transform-evidence"),
+            "auto:mono/fbm-transform-evidence",
+        )
+
+    def test_primary_root(self):
+        self.assertEqual(oc_tags.auto_key("/home/dev/projects/mono"), "auto:mono")
+
+    def test_tmp_collapses(self):
+        self.assertEqual(oc_tags.auto_key("/tmp/yt0p-verify"), "auto:tmp")
+        self.assertEqual(oc_tags.auto_key("/tmp"), "auto:tmp")
+
+    def test_nested_worktree_path(self):
+        self.assertEqual(
+            oc_tags.auto_key("/home/dev/projects/mono/.worktrees/w3-pr2/sub/dir"),
+            "auto:mono/w3-pr2",
+        )
+
+    def test_missing_directory(self):
+        self.assertEqual(oc_tags.auto_key(None), "auto:no-dir")
+        self.assertEqual(oc_tags.auto_key(""), "auto:no-dir")
+
+    def test_trailing_slash(self):
+        self.assertEqual(oc_tags.auto_key("/home/dev/projects/mono/"), "auto:mono")
+
+
+
 # Without this guard, `python3 test_oc_tags.py` imports the module, defines
 # every test, runs NONE, prints nothing and exits 0 -- the exact failure mode
 # documented at the bottom of pkgs/oc-cost/test_oc_cost.py. The flake check
