@@ -23,11 +23,14 @@ upsert_block() {
 DEVBOX_MARKER_START="# BEGIN devbox managed block"
 DEVBOX_MARKER_END="# END devbox managed block"
 
-DEVBOX_IP=$(hcloud server ip devbox 2>/dev/null) || {
-    echo "Warning: Could not get IP for devbox (hcloud not configured?)"
+DEVBOX_IP=$(hcloud server ip devbox 2>/dev/null) || true
+if [ -z "$DEVBOX_IP" ] && [ -f "$SSH_CONFIG" ]; then
+    DEVBOX_IP=$(awk '/Host devbox$/{flag=1; next} flag && /HostName/{print $2; exit}' "$SSH_CONFIG" 2>/dev/null || true)
+fi
+if [ -z "$DEVBOX_IP" ]; then
+    echo "Warning: Could not get IP for devbox (hcloud not configured and no existing SSH config entry)"
     echo "Skipping devbox block"
-    DEVBOX_IP=""
-}
+fi
 
 if [ -n "$DEVBOX_IP" ]; then
     read -r -d '' DEVBOX_BLOCK << EOF || true
@@ -78,11 +81,14 @@ CLOUDBOX_MARKER_END="# END cloudbox managed block"
 
 CLOUDBOX_IP=$(gcloud compute instances describe cloudbox \
     --zone=us-east1-b \
-    --format='get(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null) || {
-    echo "Warning: Could not get IP for cloudbox (gcloud not configured?)"
+    --format='get(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null) || true
+if [ -z "$CLOUDBOX_IP" ] && [ -f "$SSH_CONFIG" ]; then
+    CLOUDBOX_IP=$(awk '/Host cloudbox$/{flag=1; next} flag && /HostName/{print $2; exit}' "$SSH_CONFIG" 2>/dev/null || true)
+fi
+if [ -z "$CLOUDBOX_IP" ]; then
+    echo "Warning: Could not get IP for cloudbox (gcloud not configured and no existing SSH config entry)"
     echo "Skipping cloudbox block"
-    CLOUDBOX_IP=""
-}
+fi
 
 if [ -n "$CLOUDBOX_IP" ]; then
     read -r -d '' CLOUDBOX_BLOCK << EOF || true
