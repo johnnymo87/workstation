@@ -10,6 +10,13 @@
 
 **Design doc:** `docs/plans/2026-09-08-oc-tags-design.md`. Read it before starting — it records why metered dollars were rejected, why the rate book was rejected, and why one tag per session is mandatory.
 
+**Beads:** epic `workstation-3umv`; Task N below is bead `workstation-3umv.N`. Claim
+with `bd update workstation-3umv.N --claim` before starting and `bd close` it when the
+task's commit lands. The dependency graph is already wired, so `bd ready` shows exactly
+what is unblocked. The out-of-scope oc-cost rate-book correction is `workstation-xuq2`.
+
+**Worktree:** `.worktrees/oc-tags`, branch `oc-tags`. Never commit at the primary root.
+
 ---
 
 ## Ground rules for every task
