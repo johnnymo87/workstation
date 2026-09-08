@@ -1009,6 +1009,49 @@ class TestRenderSvg(unittest.TestCase):
         svg = oc_tags.render_svg(agg, spend)
         self.assertIn("Drift warning", svg)
 
+    def test_render_svg_coverage_ratio_excludes_unmatched_buckets_and_discloses_count(self):
+        agg = self._sample_agg()
+        # agg has buckets 2026-09-07 ($15.00) and 2026-09-08 ($35.00), total $50.00.
+        # Only 2026-09-07 is present in notional ($15.00).
+        spend = oc_tags.CfpSpend(
+            metered={"2026-09-07": 15.0},
+            notional={"2026-09-07": 15.0},
+        )
+        svg = oc_tags.render_svg(agg, spend)
+        # Correct computation: matching list $15.00 / notional $15.00 = 100.0%, 1 of 2 days.
+        # Naive computation would yield $50.00 / $15.00 = 333.3%.
+        self.assertIn("Coverage: 100.0% vs CFP notional ($15.00 / $15.00, 1 of 2 days)", svg)
+        self.assertNotIn("333.3%", svg)
+        self.assertNotIn("$50.00 / $15.00", svg)
+        self.assertIn("1 of 2 days", svg)
+
+    def test_render_svg_coverage_no_excluded_days_omits_count(self):
+        agg = self._sample_agg()
+        spend = oc_tags.CfpSpend(
+            metered={"2026-09-07": 15.0, "2026-09-08": 35.0},
+            notional={"2026-09-07": 15.0, "2026-09-08": 35.0},
+        )
+        svg = oc_tags.render_svg(agg, spend)
+        self.assertIn("Coverage: 100.0% vs CFP notional ($50.00 / $50.00)", svg)
+        self.assertNotIn("of 2 days", svg)
+
+    def test_render_svg_coverage_fallback_when_no_matching_days(self):
+        agg = self._sample_agg()
+        spend = oc_tags.CfpSpend(metered={}, notional={})
+        svg = oc_tags.render_svg(agg, spend)
+        self.assertIn("Total list price: $50.00", svg)
+        self.assertNotIn("Coverage:", svg)
+
+    def test_render_svg_drift_warning_inside_band_renders_no_warning(self):
+        agg = self._sample_agg()
+        # Both days match perfectly 1.0 ratio, within [0.90, 1.05]
+        spend = oc_tags.CfpSpend(
+            metered={"2026-09-07": 15.0, "2026-09-08": 35.0},
+            notional={"2026-09-07": 15.0, "2026-09-08": 35.0},
+        )
+        svg = oc_tags.render_svg(agg, spend)
+        self.assertNotIn("Drift warning", svg)
+
 
 class TestServer(unittest.TestCase):
     def setUp(self):

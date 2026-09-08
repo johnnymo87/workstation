@@ -795,11 +795,13 @@ def render_svg(
     # Footer: coverage vs cfp notional, unpriced summary, and drift warning
     total_list = sum(agg.totals.values())
     matching_days = [b for b in agg.buckets if b in notional]
+    matching_list = sum(agg.series[t].get(d, 0.0) for t in agg.totals for d in matching_days)
     total_notional = sum(notional[b] for b in matching_days)
 
     if total_notional > 0:
-        cov_pct = (total_list / total_notional) * 100.0
-        cov_str = f"Coverage: {cov_pct:.1f}% vs CFP notional (${total_list:,.2f} / ${total_notional:,.2f})"
+        cov_pct = (matching_list / total_notional) * 100.0
+        day_note = f", {len(matching_days)} of {len(agg.buckets)} days" if len(matching_days) < len(agg.buckets) else ""
+        cov_str = f"Coverage: {cov_pct:.1f}% vs CFP notional (${matching_list:,.2f} / ${total_notional:,.2f}{day_note})"
     else:
         cov_str = f"Total list price: ${total_list:,.2f}"
 
