@@ -98,12 +98,29 @@ def normalise_tag(tag: str) -> str:
 
 
 @contextlib.contextmanager
-def open_store(path: str = DEFAULT_TAGS_DB):
-    """Open (creating if needed) the sidecar tag DB.
+def open_store(path: str = DEFAULT_TAGS_DB, readonly: bool = False):
+    """Open (creating if needed when writable) the sidecar tag DB.
 
     Deliberately NOT beside opencode.db: `rm ~/.local/share/opencode/*.db*`
     is a documented remedy and must not take hand-made tags with it.
     """
+    if readonly:
+        if not os.path.exists(path):
+            conn = sqlite3.connect(":memory:")
+            conn.executescript(_SCHEMA)
+            try:
+                yield conn
+            finally:
+                conn.close()
+            return
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            yield conn
+        finally:
+            conn.close()
+        return
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -201,6 +218,18 @@ DEFAULT_OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 
 
 @dataclass
+class Window:
+    since_ms: int
+    until_ms: int
+    since_dt: datetime.datetime
+    until_dt: datetime.datetime
+    today_start: datetime.datetime
+    since_str: str
+    until_str: str
+    now_ms: int
+
+
+@dataclass
 class Aggregate:
     series: dict = field(default_factory=lambda: collections.defaultdict(dict))
     totals: dict = field(default_factory=dict)
@@ -210,6 +239,7 @@ class Aggregate:
     partial_bucket: str | None = None
     root_totals: dict = field(default_factory=dict)   # root_id -> float
     root_meta: dict = field(default_factory=dict)     # root_id -> {title, directory, tag, source}
+    window: Window | None = None
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -322,20 +352,79 @@ def aggregate(
     return agg
 
 
+def calculate_window(days: int, now_ms: int | None = None) -> Window:
+    if now_ms is None:
+        raw_now = os.environ.get("OC_TAGS_NOW_MS")
+        now_ms = int(raw_now) if raw_now else int(time.time() * 1000)
+    now_dt = datetime.datetime.fromtimestamp(now_ms / 1000, ET)
+    today_start = datetime.datetime(now_dt.year, now_dt.month, now_dt.day, tzinfo=ET)
+    since_dt = today_start - datetime.timedelta(days=days)
+    until_dt = today_start + datetime.timedelta(days=1)
+    return Window(
+        since_ms=int(since_dt.timestamp() * 1000),
+        until_ms=int(until_dt.timestamp() * 1000),
+        since_dt=since_dt,
+        until_dt=until_dt,
+        today_start=today_start,
+        since_str=since_dt.strftime("%Y-%m-%d"),
+        until_str=today_start.strftime("%Y-%m-%d"),
+        now_ms=now_ms,
+    )
+
+
+def load_aggregate(
+    db_path: str = DEFAULT_OPENCODE_DB,
+    tags_db: str = DEFAULT_TAGS_DB,
+    days: int = 14,
+    bucket: str | None = None,
+    now_ms: int | None = None,
+) -> Aggregate:
+    win = calculate_window(days, now_ms=now_ms)
+    s_tags = {}
+    d_tags = {}
+    if os.path.exists(tags_db):
+        with open_store(tags_db, readonly=True) as st:
+            s_tags = session_tags(st)
+            d_tags = dir_tags(st)
+
+    b = bucket if bucket is not None else choose_bucket(days)
+    if not os.path.exists(db_path):
+        agg = Aggregate()
+        agg.window = win
+        return agg
+
+    agg = aggregate(
+        db_path,
+        since_ms=win.since_ms,
+        until_ms=win.until_ms,
+        bucket=b,
+        session_tags=s_tags,
+        dir_tags=d_tags,
+        now_ms=win.now_ms,
+    )
+    agg.window = win
+    return agg
+
+
 CFP_DIR = "/var/lib/claude-failover-proxy"
 
 
-def cfp_metered_by_day(cfp_dir: str = CFP_DIR) -> dict[str, float]:
-    """Actual billed dollars per ET day. Returns {} if cfp is absent.
+@dataclass(frozen=True)
+class CfpSpend:
+    metered: dict[str, float] = field(default_factory=dict)
+    notional: dict[str, float] = field(default_factory=dict)
 
-    This is a REFERENCE LINE, never a band: it is pinned near $210/day by two
-    $100 ceilings, so per-tag metered dollars would measure which work reached
-    the cap first, i.e. time of day. See the design doc.
+
+def cfp_spend_by_day(cfp_dir: str = CFP_DIR) -> CfpSpend:
+    """Actual billed dollars and notional vertex cost per ET day.
+
+    Returns empty mappings if cfp is absent.
     """
     if not os.path.isdir(cfp_dir):
-        return {}
+        return CfpSpend()
 
-    by_day: dict[str, float] = {}
+    metered_by_day: dict[str, float] = {}
+    notional_by_day: dict[str, float] = {}
 
     history_path = os.path.join(cfp_dir, "history.jsonl")
     if os.path.isfile(history_path):
@@ -349,33 +438,67 @@ def cfp_metered_by_day(cfp_dir: str = CFP_DIR) -> dict[str, float]:
                         record = json.loads(line)
                     except Exception:
                         continue
-                    day = record.get("day")
-                    if not day:
+                    if not isinstance(record, dict):
                         continue
-                    spend = float(record.get("spend") or 0.0)
-                    ent = float(record.get("enterpriseSpend") or 0.0)
-                    by_day[day] = spend + ent
-        except Exception:
+                    day = record.get("day")
+                    if not day or not isinstance(day, str):
+                        continue
+                    try:
+                        spend = float(record.get("spend") or 0.0)
+                        ent = float(record.get("enterpriseSpend") or 0.0)
+                        notional = float(record.get("notionalVertexCost") or 0.0)
+                    except (ValueError, TypeError):
+                        continue
+                    metered_by_day[day] = spend + ent
+                    if notional:
+                        notional_by_day[day] = notional
+        except FileNotFoundError:
             pass
+        except OSError as e:
+            sys.stderr.write(f"Warning: could not read {history_path}: {e}\n")
 
     today_spend: dict[str, float] = collections.defaultdict(float)
+    today_notional: dict[str, float] = collections.defaultdict(float)
     for fname in ("spend.json", "spend-enterprise.json"):
         fpath = os.path.join(cfp_dir, fname)
         if os.path.isfile(fpath):
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                if not isinstance(data, dict):
+                    continue
                 day = data.get("day")
-                total = float(data.get("total") or 0.0)
-                if day:
-                    today_spend[day] += total
-            except Exception:
+                if not day or not isinstance(day, str):
+                    continue
+                try:
+                    total = float(data.get("total") or 0.0)
+                    notional = float(data.get("notionalVertexCost") or 0.0)
+                except (ValueError, TypeError):
+                    continue
+                today_spend[day] += total
+                if notional:
+                    today_notional[day] += notional
+            except FileNotFoundError:
                 pass
+            except OSError as e:
+                sys.stderr.write(f"Warning: could not read {fpath}: {e}\n")
 
     for day, total in today_spend.items():
-        by_day[day] = total
+        metered_by_day[day] = total
+    for day, notional in today_notional.items():
+        notional_by_day[day] = notional
 
-    return by_day
+    return CfpSpend(metered=metered_by_day, notional=notional_by_day)
+
+
+def cfp_metered_by_day(cfp_dir: str = CFP_DIR) -> dict[str, float]:
+    """Actual billed dollars per ET day. Returns {} if cfp is absent.
+
+    This is a REFERENCE LINE, never a band: it is pinned near $210/day by two
+    $100 ceilings, so per-tag metered dollars would measure which work reached
+    the cap first, i.e. time of day. See the design doc.
+    """
+    return cfp_spend_by_day(cfp_dir).metered
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -477,7 +600,7 @@ def cmd_set(args: argparse.Namespace) -> int:
 
 
 def cmd_ls(args: argparse.Namespace) -> int:
-    with open_store(args.tags_db) as conn:
+    with open_store(args.tags_db, readonly=True) as conn:
         s_tags = session_tags(conn)
         d_tags = dir_tags(conn)
 
@@ -531,41 +654,10 @@ def cmd_rm(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    raw_now = os.environ.get("OC_TAGS_NOW_MS")
-    now_ms = int(raw_now) if raw_now else int(time.time() * 1000)
-    now_dt = datetime.datetime.fromtimestamp(now_ms / 1000, ET)
-    today_start = datetime.datetime(now_dt.year, now_dt.month, now_dt.day, tzinfo=ET)
-    since_dt = today_start - datetime.timedelta(days=args.days)
-    until_dt = today_start + datetime.timedelta(days=1)
-
-    since_ms = int(since_dt.timestamp() * 1000)
-    until_ms = int(until_dt.timestamp() * 1000)
-    since_str = since_dt.strftime("%Y-%m-%d")
-    until_str = today_start.strftime("%Y-%m-%d")
-
-    if os.path.exists(args.tags_db):
-        with open_store(args.tags_db) as st:
-            s_tags = session_tags(st)
-            d_tags = dir_tags(st)
-    else:
-        s_tags = {}
-        d_tags = {}
-
-    bucket = choose_bucket(args.days)
-    if not os.path.exists(args.db):
-        print(f"Consumed at list price (USD) -- not billed.  Window: {since_str}..{until_str} (ET)\n")
-        print("No assistant messages found in this window.")
-        return 0
-
-    agg = aggregate(
-        args.db,
-        since_ms=since_ms,
-        until_ms=until_ms,
-        bucket=bucket,
-        session_tags=s_tags,
-        dir_tags=d_tags,
-        now_ms=now_ms,
-    )
+    agg = load_aggregate(db_path=args.db, tags_db=args.tags_db, days=args.days)
+    win = agg.window
+    since_str = win.since_str if win else ""
+    until_str = win.until_str if win else ""
 
     print(f"Consumed at list price (USD) -- not billed.  Window: {since_str}..{until_str} (ET)\n")
 
@@ -605,38 +697,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_top(args: argparse.Namespace) -> int:
-    raw_now = os.environ.get("OC_TAGS_NOW_MS")
-    now_ms = int(raw_now) if raw_now else int(time.time() * 1000)
-    now_dt = datetime.datetime.fromtimestamp(now_ms / 1000, ET)
-    today_start = datetime.datetime(now_dt.year, now_dt.month, now_dt.day, tzinfo=ET)
-    since_dt = today_start - datetime.timedelta(days=args.days)
-    until_dt = today_start + datetime.timedelta(days=1)
-
-    since_ms = int(since_dt.timestamp() * 1000)
-    until_ms = int(until_dt.timestamp() * 1000)
-
-    if os.path.exists(args.tags_db):
-        with open_store(args.tags_db) as st:
-            s_tags = session_tags(st)
-            d_tags = dir_tags(st)
-    else:
-        s_tags = {}
-        d_tags = {}
-
-    bucket = choose_bucket(args.days)
-    if not os.path.exists(args.db):
-        print("No untagged root sessions found.")
-        return 0
-
-    agg = aggregate(
-        args.db,
-        since_ms=since_ms,
-        until_ms=until_ms,
-        bucket=bucket,
-        session_tags=s_tags,
-        dir_tags=d_tags,
-        now_ms=now_ms,
-    )
+    agg = load_aggregate(db_path=args.db, tags_db=args.tags_db, days=args.days)
 
     untagged = []
     for root_id, dollars in agg.root_totals.items():
@@ -658,7 +719,12 @@ def cmd_top(args: argparse.Namespace) -> int:
         print(f"{d_str:>10}  {root_id:<32}  {t_disp:<40}  {directory}")
 
     # Detect shared directory prefixes among untagged roots (>= 3 roots)
-    prefix_counts: dict[str, list[str]] = collections.defaultdict(list)
+    _home = os.path.expanduser("~").rstrip("/")
+    _WORKSPACE_CONTAINERS = {"/", "/tmp", "/home/dev/projects", "/home/dev/Code"}
+    if _home:
+        _WORKSPACE_CONTAINERS.update({_home, f"{_home}/projects", f"{_home}/Code"})
+
+    prefix_counts: dict[str, set[str]] = collections.defaultdict(set)
     for _, root_id, _, directory in untagged:
         if not directory:
             continue
@@ -666,20 +732,20 @@ def cmd_top(args: argparse.Namespace) -> int:
         if _WORKTREE_MARKER in d_norm:
             head, _, _ = d_norm.partition(_WORKTREE_MARKER)
             pat = f"{head}{_WORKTREE_MARKER}*"
-            prefix_counts[pat].append(root_id)
-        parent = posixpath.dirname(d_norm)
-        if parent and parent not in ("/", "/tmp"):
-            pat = f"{parent}/*"
-            prefix_counts[pat].append(root_id)
-        prefix_counts[d_norm].append(root_id)
+            prefix_counts[pat].add(root_id)
+        else:
+            parent = posixpath.dirname(d_norm)
+            if parent and parent not in _WORKSPACE_CONTAINERS:
+                pat = f"{parent}/*"
+                prefix_counts[pat].add(root_id)
+        prefix_counts[d_norm].add(root_id)
 
     hints = []
     seen_roots: set[str] = set()
     for pat, roots in sorted(prefix_counts.items(), key=lambda item: (-len(item[1]), -len(item[0]))):
-        unique_roots = set(roots)
-        if len(unique_roots) >= 3 and not unique_roots.issubset(seen_roots):
-            hints.append((pat, len(unique_roots)))
-            seen_roots.update(unique_roots)
+        if len(roots) >= 3 and not roots.issubset(seen_roots):
+            hints.append((pat, len(roots)))
+            seen_roots.update(roots)
 
     if hints:
         print()
@@ -701,24 +767,29 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
 
-    try:
-        if args.command == "set":
-            return cmd_set(args)
-        elif args.command == "ls":
-            return cmd_ls(args)
-        elif args.command == "rm":
-            return cmd_rm(args)
-        elif args.command == "report":
-            return cmd_report(args)
-        elif args.command == "top":
-            return cmd_top(args)
-    except BrokenPipeError:
+    if args.command in ("report", "top", "ls"):
         try:
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, sys.stdout.fileno())
-        except Exception:
-            pass
-        return 0
+            if args.command == "report":
+                return cmd_report(args)
+            elif args.command == "top":
+                return cmd_top(args)
+            elif args.command == "ls":
+                return cmd_ls(args)
+        except BrokenPipeError:
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                try:
+                    os.dup2(devnull, sys.stdout.fileno())
+                finally:
+                    os.close(devnull)
+            except Exception:
+                pass
+            return 0
+
+    if args.command == "set":
+        return cmd_set(args)
+    elif args.command == "rm":
+        return cmd_rm(args)
     return 0
 
 

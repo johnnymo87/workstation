@@ -111,6 +111,14 @@ class TestStore(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_open_store_readonly(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_session_tag(st, "ses_1", "test-tag")
+        with oc_tags.open_store(self.path, readonly=True) as st:
+            self.assertEqual(oc_tags.session_tags(st), {"ses_1": "test-tag"})
+            with self.assertRaises(sqlite3.OperationalError):
+                st.execute("INSERT INTO session_tag VALUES ('x', 'y', 1)")
+
     def test_set_and_get_session_tag(self):
         with oc_tags.open_store(self.path) as st:
             oc_tags.set_session_tag(st, "ses_a", "billing")
@@ -713,6 +721,78 @@ class TestCli(unittest.TestCase):
         self.assertIn("--dir", out)
         self.assertIn("/home/dev/projects/mono/.worktrees/*", out)
 
+    def test_top_dir_hint_worktree_ranking_not_skewed_by_double_counting(self):
+        conn = sqlite3.connect(self.db)
+        t = 1788874200000
+        # Repo A: 3 worktree sessions
+        for i in range(3):
+            sid = f"repoA_{i}"
+            conn.execute(
+                "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
+                (sid, None, f"/home/dev/projects/repoA/.worktrees/wt-{i}", f"RepoA {i}", t, t),
+            )
+            data = {"role": "assistant", "cost": 1.00, "modelID": "m", "tokens": {"input": 1, "output": 1}}
+            conn.execute(
+                "INSERT INTO message VALUES (?,?,?,?)",
+                (f"m_repoA_{i}", sid, t, json.dumps(data)),
+            )
+        # Repo B: 4 worktree sessions
+        for i in range(4):
+            sid = f"repoB_{i}"
+            conn.execute(
+                "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
+                (sid, None, f"/home/dev/projects/repoB/.worktrees/wt-{i}", f"RepoB {i}", t, t),
+            )
+            data = {"role": "assistant", "cost": 1.00, "modelID": "m", "tokens": {"input": 1, "output": 1}}
+            conn.execute(
+                "INSERT INTO message VALUES (?,?,?,?)",
+                (f"m_repoB_{i}", sid, t, json.dumps(data)),
+            )
+        conn.commit()
+        conn.close()
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        # Repo B (4 roots) must appear before Repo A (3 roots) in hints
+        pos_b = out.find("/home/dev/projects/repoB/.worktrees/*")
+        pos_a = out.find("/home/dev/projects/repoA/.worktrees/*")
+        self.assertNotEqual(pos_b, -1)
+        self.assertNotEqual(pos_a, -1)
+        self.assertLess(pos_b, pos_a)
+
+    def test_top_dir_hint_primary_root_does_not_hint_parent_container(self):
+        conn = sqlite3.connect(self.db)
+        t = 1788874200000
+        for i in range(3):
+            sid = f"mono_{i}"
+            conn.execute(
+                "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
+                (sid, None, "/home/dev/projects/mono", f"Mono {i}", t, t),
+            )
+            data = {"role": "assistant", "cost": 1.00, "modelID": "m", "tokens": {"input": 1, "output": 1}}
+            conn.execute(
+                "INSERT INTO message VALUES (?,?,?,?)",
+                (f"m_mono_{i}", sid, t, json.dumps(data)),
+            )
+        conn.commit()
+        conn.close()
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertNotIn("/home/dev/projects/*", out)
+        self.assertIn("'/home/dev/projects/mono'", out)
+
+    def test_load_aggregate_helper(self):
+        agg = oc_tags.load_aggregate(db_path=self.db, tags_db=self.tags_db, days=7)
+        self.assertIsNotNone(agg.window)
+        self.assertIn("root_a", agg.root_totals)
+
     def test_broken_pipe_suppressed(self):
         class BrokenPipeWriter:
             def write(self, s):
@@ -785,6 +865,47 @@ class TestCfp(unittest.TestCase):
 
         res = oc_tags.cfp_metered_by_day(self.tmp.name)
         self.assertAlmostEqual(res["2026-09-08"], 103.50)
+
+    def test_history_jsonl_reads_notional_vertex_cost(self):
+        h = Path(self.tmp.name) / "history.jsonl"
+        lines = [
+            json.dumps({"day": "2026-09-05", "spend": 105.25, "enterpriseSpend": 95.75, "notionalVertexCost": 333.88}),
+        ]
+        h.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        spend = oc_tags.cfp_spend_by_day(self.tmp.name)
+        self.assertAlmostEqual(spend.metered["2026-09-05"], 201.00)
+        self.assertAlmostEqual(spend.notional["2026-09-05"], 333.88)
+
+    def test_spend_json_reads_notional_vertex_cost(self):
+        s1 = Path(self.tmp.name) / "spend.json"
+        s1.write_text(json.dumps({"day": "2026-09-08", "total": 103.50, "notionalVertexCost": 150.0}), encoding="utf-8")
+        spend = oc_tags.cfp_spend_by_day(self.tmp.name)
+        self.assertAlmostEqual(spend.metered["2026-09-08"], 103.50)
+        self.assertAlmostEqual(spend.notional["2026-09-08"], 150.0)
+
+    def test_non_numeric_spend_in_history_jsonl_skipped_without_aborting_remaining_lines(self):
+        h = Path(self.tmp.name) / "history.jsonl"
+        lines = [
+            json.dumps({"day": "2026-09-05", "spend": 100.0, "enterpriseSpend": 50.0}),
+            json.dumps({"day": "2026-09-06", "spend": "invalid_number", "enterpriseSpend": 50.0}),
+            json.dumps({"day": "2026-09-07", "spend": 80.0, "enterpriseSpend": 70.0}),
+        ]
+        h.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        res = oc_tags.cfp_metered_by_day(self.tmp.name)
+        self.assertEqual(set(res.keys()), {"2026-09-05", "2026-09-07"})
+        self.assertAlmostEqual(res["2026-09-05"], 150.0)
+        self.assertAlmostEqual(res["2026-09-07"], 150.0)
+
+    def test_cfp_oserror_warns_on_stderr(self):
+        h = Path(self.tmp.name) / "history.jsonl"
+        h.write_text("data\n", encoding="utf-8")
+        from unittest import mock
+        with mock.patch("builtins.open", side_effect=PermissionError("Permission denied")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                res = oc_tags.cfp_spend_by_day(self.tmp.name)
+            self.assertEqual(res.metered, {})
+            self.assertIn("Permission denied", err.getvalue())
 
 
 
