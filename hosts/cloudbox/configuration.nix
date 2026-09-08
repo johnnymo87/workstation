@@ -4201,6 +4201,63 @@ EOF
   time.timeZone = "America/New_York";
   i18n.defaultLocale = "en_US.UTF-8";
 
+  # Jenkins (jenkins.util.b--a.co) via the Mac's WARP tunnel -- bead workstation-h559.
+  #
+  # cloudbox cannot reach Jenkins directly: the host allowlists a dedicated
+  # Cloudflare Zero Trust egress IP, and every alternative was measured dead
+  # (not a Cloudflare Access app; WARP enrolment is policy-locked to full tunnel,
+  # which would hijack this console-less VM's routing and DNS; BA prod/staging
+  # EKS pods time out identically; the util AWS account holding Jenkins grants
+  # this identity no role). What remains is the Mac, which IS on WARP.
+  #
+  # Path:  https://jenkins.util.b--a.co  (resolves to 127.0.0.1 here)
+  #        -> 127.0.0.1:443   systemd-socket-proxyd (root-bound socket, below)
+  #        -> 127.0.0.1:8443  sshd RemoteForward opened by the Mac's always-on
+  #                           cloudbox-dev-tunnel (scripts/update-ssh-config.sh)
+  #        -> Mac dials jenkins.util.b--a.co:443 over WARP
+  #        -> TLS terminates at Jenkins: SNI and certificate validation intact,
+  #           so every URL-driven tool (curl, ba, python) just works.
+  #
+  # Why the proxy hop instead of forwarding straight to :443: sshd cannot bind a
+  # privileged port for a non-root login (PermitRootLogin=no), and a hosts entry
+  # to 127.0.0.1 only helps if something answers on 443.
+  #
+  # Failure mode is loud, not slow: with the Mac asleep nothing listens on 8443,
+  # so a request gets an immediate connection refused/reset, not a 10 s hang.
+  # A refused connection here means "Mac tunnel is down, retry in ~2 min", NOT
+  # "Jenkins is unreachable" -- see assets/opencode/AGENTS.md.
+  #
+  # Disclosed, not hidden: this lends the Mac's Zero Trust identity to a public
+  # VM. Every Jenkins request from cloudbox appears in Gateway logs as the Mac.
+  # Bound to loopback only: the NixOS firewall is disabled on this host (GCP
+  # rules apply), so never widen these bind addresses.
+  networking.extraHosts = "127.0.0.1 jenkins.util.b--a.co";
+
+  systemd.sockets.jenkins-mac-proxy = {
+    description = "Loopback :443 front for the Mac's Jenkins RemoteForward";
+    wantedBy = [ "sockets.target" ];
+    listenStreams = [ "127.0.0.1:443" ];
+    socketConfig.NoDelay = true;
+  };
+
+  systemd.services.jenkins-mac-proxy = {
+    description = "Forward loopback :443 to the Mac's Jenkins RemoteForward on :8443";
+    requires = [ "jenkins-mac-proxy.socket" ];
+    after = [ "jenkins-mac-proxy.socket" ];
+    serviceConfig = {
+      # Socket is bound by systemd (root); the proxy itself needs no privilege.
+      ExecStart = "${pkgs.systemd}/lib/systemd/systemd-socket-proxyd --exit-idle-time=5min 127.0.0.1:8443";
+      DynamicUser = true;
+      PrivateTmp = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      NoNewPrivileges = true;
+      RestrictAddressFamilies = [ "AF_INET" "AF_UNIX" ];
+      IPAddressAllow = [ "localhost" ];
+      IPAddressDeny = [ "any" ];
+    };
+  };
+
   # Default editor: nvim, not nano.
   #
   # nixpkgs' programs/environment.nix sets `environment.variables.EDITOR =

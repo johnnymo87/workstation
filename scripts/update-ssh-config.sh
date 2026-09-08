@@ -116,6 +116,14 @@ Host cloudbox-tunnel
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
     RemoteForward 2850 127.0.0.1:2850
+    # Jenkins over this Mac's WARP tunnel. cloudbox's loopback :443 proxies to
+    # this port and /etc/hosts maps jenkins.util.b--a.co -> 127.0.0.1 there
+    # (hosts/cloudbox/configuration.nix, jenkins-mac-proxy). The destination is
+    # dialled per-connection, so this line cannot fail the tunnel at startup
+    # even when WARP is not yet up. Keep it OUT of \`Host cloudbox\` above: an
+    # interactive login holding 8443 would kill the tunnel on its next restart
+    # (ExitOnForwardFailure). Bead workstation-h559.
+    RemoteForward 8443 jenkins.util.b--a.co:443
 
 # On-demand reverse SSH: opens cloudbox 127.0.0.1:2222 -> Mac :22 ONLY while a
 # human runs \`ssh cloudbox-cutover\` from the Mac. This is the intentional
