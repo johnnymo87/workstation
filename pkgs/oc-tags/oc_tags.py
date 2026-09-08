@@ -11,8 +11,10 @@ docs/plans/2026-09-08-oc-tags-design.md.
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import datetime
+from dataclasses import dataclass, field
 import fnmatch
 import os
 import posixpath
@@ -191,6 +193,95 @@ def bucket_key(epoch_ms: int, size: str) -> str:
 def choose_bucket(days: int) -> str:
     """Hourly only for short windows. 720 hourly bars x 15 series is noise."""
     return "hour" if days <= 3 else "day"
+
+
+DEFAULT_OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
+
+
+@dataclass
+class Aggregate:
+    series: dict = field(default_factory=lambda: collections.defaultdict(dict))
+    totals: dict = field(default_factory=dict)
+    buckets: list = field(default_factory=list)
+    sources: dict = field(default_factory=dict)   # tag -> 'manual' | 'auto'
+    unpriced: dict = field(default_factory=dict)  # model -> {messages, tokens}
+    partial_bucket: str | None = None
+
+
+def connect_ro(db_path: str) -> sqlite3.Connection:
+    """Read-only connection to opencode.db.
+
+    NEVER immutable=1: WAL needs a writable -shm, which exists while any serve
+    runs. busy_timeout because ~15 serves write concurrently.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def aggregate(
+    db_path: str,
+    since_ms: int,
+    until_ms: int,
+    bucket: str,
+    session_tags: dict[str, str],
+    dir_tags: dict[str, str],
+) -> Aggregate:
+    conn = connect_ro(db_path)
+    try:
+        parents = dict(conn.execute("SELECT id, parent_id FROM session"))
+        dirs = dict(conn.execute("SELECT id, directory FROM session"))
+
+        rows = conn.execute(
+            """
+            SELECT session_id,
+                   time_created,
+                   json_extract(data, '$.cost'),
+                   json_extract(data, '$.modelID'),
+                   json_extract(data, '$.tokens.input'),
+                   json_extract(data, '$.tokens.output')
+              FROM message
+             WHERE time_created >= ? AND time_created < ?
+               AND json_extract(data, '$.role') = 'assistant'
+            """,
+            (since_ms, until_ms),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    agg = Aggregate()
+    tag_cache: dict[str, tuple[str, str]] = {}
+    per_bucket = collections.defaultdict(lambda: collections.defaultdict(float))
+    buckets = set()
+
+    for sid, ts, cost, model, tin, tout in rows:
+        cost = cost or 0.0
+        root = root_of(sid, parents)
+        if root not in tag_cache:
+            tag_cache[root] = effective_tag(
+                root, dirs.get(root), session_tag_map=session_tags, dir_tag_map=dir_tags
+            )
+        tag, source = tag_cache[root]
+        agg.sources[tag] = source
+
+        key = bucket_key(ts, bucket)
+        buckets.add(key)
+        per_bucket[tag][key] += cost
+
+        # A model with no recorded price must be LOUD. Rendering it as $0
+        # would silently under-report on exactly the day a new model ships.
+        if cost == 0 and ((tin or 0) + (tout or 0)) > 0:
+            u = agg.unpriced.setdefault(model, {"messages": 0, "tokens": 0})
+            u["messages"] += 1
+            u["tokens"] += (tin or 0) + (tout or 0)
+
+    agg.buckets = sorted(buckets)
+    agg.series = {t: dict(b) for t, b in per_bucket.items()}
+    agg.totals = {t: sum(b.values()) for t, b in agg.series.items()}
+    # In-flight turns carry no cost until they complete, so the newest bucket
+    # always under-reads and must be labelled.
+    agg.partial_bucket = agg.buckets[-1] if agg.buckets else None
+    return agg
 
 
 

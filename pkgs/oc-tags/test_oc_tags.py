@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -293,6 +295,115 @@ class TestBucketing(unittest.TestCase):
         self.assertEqual(oc_tags.choose_bucket(3), "hour")
         self.assertEqual(oc_tags.choose_bucket(4), "day")
         self.assertEqual(oc_tags.choose_bucket(30), "day")
+
+
+def _fixture_db(path):
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT,
+                              directory TEXT, title TEXT, cost REAL,
+                              time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
+                              time_created INTEGER, data TEXT);
+        """
+    )
+    sessions = [
+        # id,        parent,   directory,                                       title
+        ("root_a", None, "/home/dev/projects/mono", "FBM OOS webhook investigation"),
+        ("kid_a", "root_a", "/home/dev/projects/mono", "subagent"),
+        ("root_b", None, "/home/dev/projects/mono/.worktrees/w3-pr2", "w3 pr2"),
+        # dangling parent: parent row does not exist
+        ("orphan", "deleted_parent", "/home/dev/projects/salmon", "orphan"),
+        ("tmp_s", None, "/tmp/yt0p-verify", "throwaway"),
+    ]
+    for sid, par, d, title in sessions:
+        conn.execute(
+            "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
+            (sid, par, d, title, 1788874200000, 1788874200000),
+        )
+
+    def msg(mid, sid, ts, cost, model="claude-opus-5@default",
+            provider="google-vertex-anthropic", role="assistant", tokens=None):
+        data = {
+            "role": role, "cost": cost, "modelID": model, "providerID": provider,
+            "time": {"created": ts},
+            "tokens": tokens or {"input": 10, "output": 20,
+                                 "cache": {"read": 100, "write": 5}},
+        }
+        conn.execute("INSERT INTO message VALUES (?,?,?,?)",
+                     (mid, sid, ts, json.dumps(data)))
+
+    t = 1788874200000                    # 2026-09-08 09:30 ET
+    msg("m1", "root_a", t, 1.50)
+    msg("m2", "kid_a", t, 0.50)          # rolls up to root_a
+    msg("m3", "root_b", t, 2.00)
+    msg("m4", "orphan", t, 0.25)
+    msg("m5", "tmp_s", t, 0.10)
+    # zero-token error row: $0 is correct, must not crash
+    msg("m6", "root_a", t, 0.0, tokens={"input": 0, "output": 0,
+                                        "cache": {"read": 0, "write": 0}})
+    # a user message must never be counted
+    msg("m7", "root_a", t, 99.0, role="user")
+    # unpriced model: cost recorded as 0 but tokens present
+    msg("m8", "root_b", t, 0.0, model="claude-brand-new@default",
+        tokens={"input": 1000, "output": 2000, "cache": {"read": 0, "write": 0}})
+    # outside the window (much older)
+    msg("m9", "root_a", t - 90 * 86400 * 1000, 5.00)
+    conn.commit()
+    conn.close()
+
+
+class TestAggregate(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "opencode.db")
+        _fixture_db(self.db)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _agg(self, session_tags=None, dir_tags=None):
+        return oc_tags.aggregate(
+            self.db,
+            since_ms=1788874200000 - 86400 * 1000,
+            until_ms=1788874200000 + 86400 * 1000,
+            bucket="day",
+            session_tags=session_tags or {},
+            dir_tags=dir_tags or {},
+        )
+
+    def test_child_cost_rolls_up_to_root(self):
+        rows = self._agg()
+        # root_a: 1.50 + 0.50 (child) + 0.0 = 2.00; the $99 user row excluded
+        self.assertAlmostEqual(rows.totals["auto:mono"], 2.00)
+
+    def test_worktree_slug_preserved(self):
+        rows = self._agg()
+        self.assertIn("auto:mono/w3-pr2", rows.totals)
+
+    def test_orphan_attributed_not_dropped(self):
+        rows = self._agg()
+        self.assertAlmostEqual(rows.totals["auto:salmon"], 0.25)
+
+    def test_manual_tag_applied(self):
+        rows = self._agg(session_tags={"root_a": "billing"})
+        self.assertAlmostEqual(rows.totals["billing"], 2.00)
+        self.assertNotIn("auto:mono", rows.totals)
+
+    def test_window_excludes_old_rows(self):
+        rows = self._agg()
+        self.assertNotIn(5.00, rows.totals.values())
+
+    def test_unpriced_models_reported(self):
+        rows = self._agg()
+        self.assertIn("claude-brand-new@default", rows.unpriced)
+        self.assertEqual(rows.unpriced["claude-brand-new@default"]["messages"], 1)
+        self.assertEqual(rows.unpriced["claude-brand-new@default"]["tokens"], 3000)
+
+    def test_buckets_are_populated(self):
+        rows = self._agg()
+        self.assertEqual(set(rows.series["auto:mono"]), {"2026-09-08"})
 
 
 
