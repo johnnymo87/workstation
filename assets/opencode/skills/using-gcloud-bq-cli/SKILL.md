@@ -72,6 +72,42 @@ gcloud auth revoke SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
 gcloud config set account YOUR_EMAIL@example.com
 ```
 
+This cleanup is not just tidiness — see below for what skipping it does to
+everyone else on the host.
+
+## `gcloud config` Is Shared Host State, Not Per-Session
+
+`gcloud config` is a single file on the machine. Every opencode session on the
+host reads and writes the *same* active account. There is no per-session or
+per-process isolation.
+
+So an unrelated session that activates a service account silently changes the
+identity **your** `bq` and `gcloud` commands run as. On 2026-09-02 a launched
+session switched the active account to a Kafka service account, and a parent
+session's queries immediately started failing:
+
+```
+Access Denied: ... does not have bigquery.jobs.create permission in project <project>
+```
+
+on a project that had worked minutes earlier. That reads like someone revoked
+your IAM grant, which is why it is expensive to diagnose — the expensive part
+is time spent auditing permissions that were never touched.
+
+**Before concluding you lost access, check who you currently are:**
+
+```bash
+gcloud config get-value account
+```
+
+Two rules follow:
+
+- Any session or skill that activates a service account **must restore the
+  prior account afterwards** (the cleanup block above).
+- Recovery may need an **interactive** `gcloud auth login <user>` if the user
+  token also expired. `bq` cannot reauthenticate non-interactively, so a
+  headless session can get stuck here and needs a human at a terminal.
+
 ## Schema Updates for Nested RECORD Fields
 
 BigQuery doesn't support `ALTER TABLE ADD COLUMN parent.child` for nested fields. Instead:

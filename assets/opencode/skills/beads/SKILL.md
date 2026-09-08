@@ -35,7 +35,7 @@ Both halves are required, because each covers a different collision order:
 ```bash
 # 1. Before starting, claim it — even for a "quick fix".
 bd update <id> --claim
-bd update <id> --notes "claimed by session <ses_id>, worktree <abs path>"
+bd note <id> "claimed by session <ses_id>, worktree <abs path>"
 
 # 2. Before starting, look for a branch someone else already has open.
 git branch -a --sort=-committerdate | head -20
@@ -79,7 +79,7 @@ bd q "Quick capture"        # Returns only ID
 
 # Update as you work
 bd update bd-a1b2 --status in_progress
-bd update bd-a1b2 --notes "DONE: X. NEXT: Y. BLOCKER: Z"
+bd note bd-a1b2 "DONE: X. NEXT: Y. BLOCKER: Z"   # APPENDS -- see below
 bd update bd-a1b2 --design "Decided approach A because..."
 
 # Close when done
@@ -91,6 +91,50 @@ bd dolt pull                # Pull database changes from Dolt remote
 ```
 
 **IDs use hash format** like `bd-a1b2`, not sequential numbers.
+
+## Never Write Notes With `bd update --notes`
+
+`bd update <id> --notes "text"` **replaces the entire notes field**. It does not
+append. It prints an ordinary success line either way, with no diff, no size
+warning, and no confirmation prompt — so the only tell is a byte count nobody
+was looking at.
+
+```bash
+bd note <id> "text"          # APPENDS. Always use this.
+bd update <id> --notes "..." # REPLACES everything. Effectively never correct.
+```
+
+This has destroyed accumulated notes twice: 80,290 characters on one epic
+(2026-08-25) and 38,903 on another (2026-08-11). Both were multi-week spines
+that several sessions had built up.
+
+Three general traps showed up in the second incident, each worth avoiding on its
+own:
+
+- **Read-modify-write across two commands is not atomic.** The pattern
+  `helper.py … && bd update --notes "$(cat combined.txt)"` wrote a *stale* file
+  that still held a different bead's notes. Never let a file sit between the
+  read and the write.
+- **A pipeline's exit status is the last command's.** `helper.py … | tail -3 &&
+  bd update …` ran the update even though the helper had bailed, because `tail`
+  returned 0. Don't pipe a guard through `head`/`tail` before `&&`.
+- **An idempotency check on a truncated prefix isn't a check.** The guard
+  compared the first 60 characters of the addition; for a note starting with a
+  `=====` banner that slice is just equals signs, present in every prior note,
+  so it fired every time.
+
+**If it happens anyway, notes are recoverable.** They're versioned in Dolt:
+
+```bash
+bd history <id> --limit 20 --json    # each revision carries the full Issue object
+```
+
+Pick the `CommitHash` from just before the clobber and lift the old `notes`
+value straight out of the JSON. Use the `--json` output specifically — it
+carries full 32-character hashes, and both `bd show --as-of` and `bd diff`
+reject the short hashes that `bd history` prints in its human-readable output
+(`branch not found`). Beads keeps roughly 250 revisions per issue, so this stays
+available for a long time — but only if someone notices.
 
 ## Write for Handoff
 

@@ -68,7 +68,7 @@ After Compaction:
 
 **Good note (enables recovery):**
 ```
-bd update bd-a1b2 --notes "COMPLETED: User authentication - added JWT token
+bd note bd-a1b2 "COMPLETED: User authentication - added JWT token
 generation with 1hr expiry, implemented refresh token endpoint using rotating
 tokens pattern. IN PROGRESS: Password reset flow. Email service integration
 working. NEXT: Need to add rate limiting to reset endpoint (currently unlimited
@@ -78,7 +78,7 @@ recommendations, tech lead concerned about response time but benchmarks show <10
 
 **Bad note (insufficient for recovery):**
 ```
-bd update bd-a1b2 --notes "Working on auth feature. Made some progress.
+bd note bd-a1b2 "Working on auth feature. Made some progress.
 More to do later."
 ```
 
