@@ -60,6 +60,15 @@ class TestAutoKey(unittest.TestCase):
     def test_root_worktrees_slug(self):
         self.assertEqual(oc_tags.auto_key("/.worktrees/slug"), "auto:root/slug")
 
+    def test_root_directory(self):
+        self.assertEqual(oc_tags.auto_key("/"), "auto:root")
+
+    def test_casing_is_lowercased(self):
+        self.assertEqual(
+            oc_tags.auto_key("/home/dev/projects/Mono/.worktrees/PR-123"),
+            "auto:mono/pr-123",
+        )
+
 
 class TestRootOf(unittest.TestCase):
     def test_root_is_itself(self):
@@ -120,6 +129,45 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(ValueError):
                 oc_tags.set_session_tag(st, "ses_a", "   ")
 
+    def test_tag_rejects_auto_prefix(self):
+        with oc_tags.open_store(self.path) as st:
+            with self.assertRaises(ValueError):
+                oc_tags.set_session_tag(st, "ses_a", "auto:foo")
+            with self.assertRaises(ValueError):
+                oc_tags.set_session_tag(st, "ses_a", "  AUTO:foo  ")
+
+    def test_empty_pattern_rejected(self):
+        with oc_tags.open_store(self.path) as st:
+            with self.assertRaises(ValueError):
+                oc_tags.set_dir_tag(st, "   ", "tag")
+            with self.assertRaises(ValueError):
+                oc_tags.set_dir_tag(st, "", "tag")
+
+    def test_dir_tags_ordered_by_pattern(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_dir_tag(st, "zzz", "t1")
+            oc_tags.set_dir_tag(st, "aaa", "t2")
+            oc_tags.set_dir_tag(st, "mmm", "t3")
+            self.assertEqual(
+                list(oc_tags.dir_tags(st).keys()),
+                ["aaa", "mmm", "zzz"],
+            )
+
+    def test_concurrency_pragmas(self):
+        with oc_tags.open_store(self.path) as st:
+            mode = st.execute("PRAGMA journal_mode").fetchone()[0]
+            self.assertEqual(mode.lower(), "wal")
+            timeout = st.execute("PRAGMA busy_timeout").fetchone()[0]
+            self.assertEqual(timeout, 5000)
+
+    def test_rollback_on_exception(self):
+        with self.assertRaises(RuntimeError):
+            with oc_tags.open_store(self.path) as st:
+                oc_tags.set_session_tag(st, "ses_fail", "tag")
+                raise RuntimeError("boom")
+        with oc_tags.open_store(self.path) as st:
+            self.assertEqual(oc_tags.session_tags(st), {})
+
     def test_dir_tag_roundtrip(self):
         with oc_tags.open_store(self.path) as st:
             oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/fbm-*", "fbm")
@@ -147,8 +195,8 @@ class TestEffectiveTag(unittest.TestCase):
         self.assertEqual(
             oc_tags.effective_tag(
                 "ses_a", "/home/dev/projects/mono",
-                session_tags={"ses_a": "billing"},
-                dir_tags={"/home/dev/projects/mono": "monorepo"},
+                session_tag_map={"ses_a": "billing"},
+                dir_tag_map={"/home/dev/projects/mono": "monorepo"},
             ),
             ("billing", "manual"),
         )
@@ -157,8 +205,8 @@ class TestEffectiveTag(unittest.TestCase):
         self.assertEqual(
             oc_tags.effective_tag(
                 "ses_a", "/home/dev/projects/mono/.worktrees/fbm-webhook-res",
-                session_tags={},
-                dir_tags={"/home/dev/projects/mono/.worktrees/fbm-*": "fbm"},
+                session_tag_map={},
+                dir_tag_map={"/home/dev/projects/mono/.worktrees/fbm-*": "fbm"},
             ),
             ("fbm", "manual"),
         )
@@ -175,13 +223,50 @@ class TestEffectiveTag(unittest.TestCase):
         self.assertEqual(
             oc_tags.effective_tag(
                 "ses_a", "/home/dev/projects/mono/.worktrees/fbm-webhook-res",
-                session_tags={},
-                dir_tags={
+                session_tag_map={},
+                dir_tag_map={
                     "/home/dev/projects/mono/*": "mono-all",
                     "/home/dev/projects/mono/.worktrees/fbm-*": "fbm",
                 },
             ),
             ("fbm", "manual"),
+        )
+
+    def test_pattern_tie_break_deterministic(self):
+        # Two equal-length patterns matching the same directory.
+        # Alphabetical tie-break: max(matches, key=lambda p: (len(p), p))
+        # 'dir/*/sub' vs '*/dir/sub' - length 9.
+        # 'dir/*/sub' > '*/dir/sub', so 'dir/*/sub' must win.
+        self.assertEqual(
+            oc_tags.effective_tag(
+                "ses_a", "dir/dir/sub",
+                session_tag_map={},
+                dir_tag_map={
+                    "*/dir/sub": "first",
+                    "dir/*/sub": "second",
+                },
+            ),
+            ("second", "manual"),
+        )
+
+    def test_trailing_slash_normalization(self):
+        # Trailing slash on directory matches pattern without trailing slash
+        self.assertEqual(
+            oc_tags.effective_tag(
+                "ses_a", "/home/dev/projects/mono/",
+                session_tag_map={},
+                dir_tag_map={"/home/dev/projects/mono": "mono-tag"},
+            ),
+            ("mono-tag", "manual"),
+        )
+        # Trailing slash on pattern matches directory without trailing slash
+        self.assertEqual(
+            oc_tags.effective_tag(
+                "ses_a", "/home/dev/projects/mono",
+                session_tag_map={},
+                dir_tag_map={"/home/dev/projects/mono/": "mono-tag"},
+            ),
+            ("mono-tag", "manual"),
         )
 
     def test_no_directory(self):

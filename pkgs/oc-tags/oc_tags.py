@@ -42,11 +42,12 @@ def auto_key(directory: str | None) -> str:
         head, _, tail = d.partition(_WORKTREE_MARKER)
         project = posixpath.basename(head) or (head.strip("/") or "root")
         slug = tail.strip("/").split("/", 1)[0]
-        return f"auto:{project}/{slug}" if slug else f"auto:{project}"
+        return f"auto:{project}/{slug}".lower() if slug else f"auto:{project}".lower()
     if d.endswith("/.worktrees"):
         head = d[: -len("/.worktrees")]
-        return f"auto:{posixpath.basename(head) or (head.strip('/') or 'root')}"
-    return f"auto:{posixpath.basename(d) or d}"
+        return f"auto:{posixpath.basename(head) or (head.strip('/') or 'root')}".lower()
+    base = posixpath.basename(d) or (d.strip("/") or "root")
+    return f"auto:{base}".lower()
 
 
 def root_of(session_id: str, parents: dict[str, str | None]) -> str:
@@ -88,6 +89,8 @@ def normalise_tag(tag: str) -> str:
     t = (tag or "").strip().lower()
     if not t:
         raise ValueError("tag must not be empty")
+    if t.startswith("auto:"):
+        raise ValueError("tag must not start with 'auto:'")
     return t
 
 
@@ -100,11 +103,15 @@ def open_store(path: str = DEFAULT_TAGS_DB):
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         conn.executescript(_SCHEMA)
-        conn.commit()
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -118,10 +125,13 @@ def set_session_tag(conn, session_id: str, tag: str) -> None:
 
 
 def set_dir_tag(conn, pattern: str, tag: str) -> None:
+    p = (pattern or "").strip()
+    if not p:
+        raise ValueError("pattern must not be empty")
     conn.execute(
         "INSERT INTO dir_tag(pattern, tag, created_at) VALUES (?,?,?) "
         "ON CONFLICT(pattern) DO UPDATE SET tag=excluded.tag, created_at=excluded.created_at",
-        (pattern, normalise_tag(tag), int(time.time() * 1000)),
+        (p, normalise_tag(tag), int(time.time() * 1000)),
     )
 
 
@@ -130,7 +140,7 @@ def session_tags(conn) -> dict[str, str]:
 
 
 def dir_tags(conn) -> dict[str, str]:
-    return dict(conn.execute("SELECT pattern, tag FROM dir_tag"))
+    return dict(conn.execute("SELECT pattern, tag FROM dir_tag ORDER BY pattern"))
 
 
 def rm_session_tag(conn, session_id: str) -> bool:
@@ -144,21 +154,26 @@ def rm_dir_tag(conn, pattern: str) -> bool:
 def effective_tag(
     session_id: str,
     directory: str | None,
-    session_tags: dict[str, str],
-    dir_tags: dict[str, str],
+    session_tag_map: dict[str, str],
+    dir_tag_map: dict[str, str],
 ) -> tuple[str, str]:
     """Resolve a ROOT session's tag. Returns (tag, source) where source is
     'manual' or 'auto'. `oc-tags top` treats 'auto' as untagged so the
     backlog stays visible rather than hidden behind a plausible label.
     """
-    tag = session_tags.get(session_id)
+    tag = session_tag_map.get(session_id)
     if tag:
         return tag, "manual"
     if directory:
-        matches = [p for p in dir_tags if fnmatch.fnmatch(directory, p)]
+        d_norm = directory.rstrip("/") or "/"
+        matches = [
+            p for p in dir_tag_map
+            if fnmatch.fnmatch(d_norm, p.rstrip("/") or "/")
+        ]
         if matches:
-            # Longest pattern wins: specific beats general.
-            return dir_tags[max(matches, key=len)], "manual"
+            # Longest pattern wins: specific beats general. Tie-break lexicographically.
+            best = max(matches, key=lambda p: (len(p), p))
+            return dir_tag_map[best], "manual"
     return auto_key(directory), "auto"
 
 
@@ -166,6 +181,9 @@ ET = zoneinfo.ZoneInfo("America/New_York")
 
 
 def bucket_key(epoch_ms: int, size: str) -> str:
+    # Note on November fall-back (DST transition):
+    # Wall-clock hour 01 occurs twice, so both map to the same "...T01" key
+    # and that bucket absorbs two hours. Harmless for a <=3-day hourly view.
     dt = datetime.datetime.fromtimestamp(epoch_ms / 1000, ET)
     return dt.strftime("%Y-%m-%dT%H") if size == "hour" else dt.strftime("%Y-%m-%d")
 
