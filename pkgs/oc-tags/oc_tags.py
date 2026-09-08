@@ -323,19 +323,244 @@ def aggregate(
 
 
 
-def parse_args(argv: list[str]) -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     desc = __doc__.splitlines()[0] if __doc__ else ""
     p = argparse.ArgumentParser(prog="oc-tags", description=desc)
+    p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
+    p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+
     sub = p.add_subparsers(dest="command", required=True)
 
-    rep = sub.add_parser("report", help="text table of dollars by tag by day")
-    rep.add_argument("--days", type=int, default=14)
+    # set
+    set_p = sub.add_parser("set", help="tag a session or directory pattern")
+    set_p.add_argument("--dir", metavar="PATH", help="directory pattern to tag")
+    set_p.add_argument("target", nargs="?", help="tag (or tag when --dir is used)")
+    set_p.add_argument("session_id", nargs="?", help="optional session id")
+    set_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
+    set_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
 
-    return p.parse_args(argv)
+    # ls
+    ls_p = sub.add_parser("ls", help="list tags")
+    ls_p.add_argument("--counts", action="store_true", help="show session and directory counts")
+    ls_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
+    ls_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+
+    # rm
+    rm_p = sub.add_parser("rm", help="remove a tag")
+    rm_p.add_argument("--dir", metavar="PATH", help="directory pattern to remove")
+    rm_p.add_argument("target", nargs="?", help="session id to remove")
+    rm_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
+    rm_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+
+    # report
+    rep = sub.add_parser("report", help="text table of dollars by tag by day")
+    rep.add_argument("--days", type=int, default=14, help="number of days to report")
+    rep.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
+    rep.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+
+    return p
+
+
+def cmd_set(args: argparse.Namespace) -> int:
+    if args.dir:
+        tag = args.target
+        if not tag:
+            sys.stderr.write("Error: tag is required\n")
+            return 1
+        try:
+            with open_store(args.tags_db) as st:
+                set_dir_tag(st, args.dir, tag)
+        except ValueError as e:
+            sys.stderr.write(f"Error: {e}\n")
+            return 1
+        print(f"Tagged dir pattern '{args.dir.strip()}' as '{normalise_tag(tag)}'")
+        return 0
+
+    tag = args.target
+    if not tag:
+        sys.stderr.write("Error: tag is required\n")
+        return 1
+
+    target_sid = args.session_id or os.environ.get("OPENCODE_SESSION_ID")
+    if not target_sid:
+        sys.stderr.write("Error: no session ID provided and OPENCODE_SESSION_ID is not set\n")
+        return 1
+
+    root_sid = target_sid
+    if os.path.exists(args.db):
+        try:
+            conn = connect_ro(args.db)
+            try:
+                s_rows = conn.execute("SELECT id, parent_id FROM session").fetchall()
+                parents = {r[0]: r[1] for r in s_rows}
+                root_sid = root_of(target_sid, parents)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    try:
+        with open_store(args.tags_db) as st:
+            set_session_tag(st, root_sid, tag)
+    except ValueError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 1
+
+    norm = normalise_tag(tag)
+    if root_sid != target_sid:
+        print(f"Tagged root session '{root_sid}' (resolved from '{target_sid}') as '{norm}'")
+    else:
+        print(f"Tagged session '{root_sid}' as '{norm}'")
+    return 0
+
+
+def cmd_ls(args: argparse.Namespace) -> int:
+    with open_store(args.tags_db) as conn:
+        s_tags = session_tags(conn)
+        d_tags = dir_tags(conn)
+
+    if args.counts:
+        all_tags = sorted(set(s_tags.values()) | set(d_tags.values()))
+        if not all_tags:
+            print("No tags defined.")
+            return 0
+        s_counts = collections.Counter(s_tags.values())
+        d_counts = collections.Counter(d_tags.values())
+        print(f"{'tag':<36} {'sessions':>10} {'dirs':>8}")
+        print("-" * 56)
+        for t in all_tags:
+            print(f"{t:<36} {s_counts[t]:>10} {d_counts[t]:>8}")
+    else:
+        if not d_tags and not s_tags:
+            print("No tags defined.")
+            return 0
+        if d_tags:
+            print("Directory patterns:")
+            for p, t in d_tags.items():
+                print(f"  {p} -> {t}")
+        if s_tags:
+            print("Sessions:")
+            for s, t in s_tags.items():
+                print(f"  {s} -> {t}")
+    return 0
+
+
+def cmd_rm(args: argparse.Namespace) -> int:
+    if args.dir:
+        with open_store(args.tags_db) as st:
+            deleted = rm_dir_tag(st, args.dir)
+        if deleted:
+            print(f"Removed dir tag for '{args.dir.strip()}'")
+            return 0
+        sys.stderr.write(f"Error: no dir tag found for '{args.dir.strip()}'\n")
+        return 1
+
+    if args.target:
+        with open_store(args.tags_db) as st:
+            deleted = rm_session_tag(st, args.target)
+        if deleted:
+            print(f"Removed session tag for '{args.target}'")
+            return 0
+        sys.stderr.write(f"Error: no session tag found for '{args.target}'\n")
+        return 1
+
+    sys.stderr.write("Error: specify session-id or --dir <path>\n")
+    return 1
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    raw_now = os.environ.get("OC_TAGS_NOW_MS")
+    now_ms = int(raw_now) if raw_now else int(time.time() * 1000)
+    now_dt = datetime.datetime.fromtimestamp(now_ms / 1000, ET)
+    today_start = datetime.datetime(now_dt.year, now_dt.month, now_dt.day, tzinfo=ET)
+    since_dt = today_start - datetime.timedelta(days=args.days)
+    until_dt = today_start + datetime.timedelta(days=1)
+
+    since_ms = int(since_dt.timestamp() * 1000)
+    until_ms = int(until_dt.timestamp() * 1000)
+    since_str = since_dt.strftime("%Y-%m-%d")
+    until_str = today_start.strftime("%Y-%m-%d")
+
+    if os.path.exists(args.tags_db):
+        with open_store(args.tags_db) as st:
+            s_tags = session_tags(st)
+            d_tags = dir_tags(st)
+    else:
+        s_tags = {}
+        d_tags = {}
+
+    bucket = choose_bucket(args.days)
+    if not os.path.exists(args.db):
+        print(f"Consumed at list price (USD) -- not billed.  Window: {since_str}..{until_str} (ET)\n")
+        print("No assistant messages found in this window.")
+        return 0
+
+    agg = aggregate(
+        args.db,
+        since_ms=since_ms,
+        until_ms=until_ms,
+        bucket=bucket,
+        session_tags=s_tags,
+        dir_tags=d_tags,
+        now_ms=now_ms,
+    )
+
+    print(f"Consumed at list price (USD) -- not billed.  Window: {since_str}..{until_str} (ET)\n")
+
+    if not agg.totals:
+        print("No assistant messages found in this window.")
+        return 0
+
+    total_dollars = sum(agg.totals.values())
+    print(f"{'tag':<36} {'total':>10} {'share':>7}")
+    print("-" * 55)
+    for tag, dollars in agg.totals.items():
+        share = (dollars / total_dollars * 100.0) if total_dollars > 0 else 0.0
+        print(f"{tag:<36} {dollars:>10.2f} {share:>6.1f}%")
+    print("-" * 55)
+    print(f"{'total':<36} {total_dollars:>10.2f}\n")
+
+    if agg.unpriced:
+        unpriced_parts = []
+        for model in sorted(agg.unpriced):
+            info = agg.unpriced[model]
+            msgs = info["messages"]
+            toks = info["tokens"]
+            if toks >= 1_000_000:
+                tok_str = f"{toks / 1_000_000:.1f}M"
+            elif toks >= 1_000:
+                tok_str = f"{toks / 1_000:.1f}K"
+            else:
+                tok_str = str(toks)
+            msg_str = "msg" if msgs == 1 else "msgs"
+            unpriced_parts.append(f"{model} ({msgs} {msg_str}, {tok_str} tok)")
+        print(f"Unpriced models: {', '.join(unpriced_parts)}")
+
+    if agg.partial_bucket:
+        print("Newest bucket is PARTIAL (in-flight turns carry no cost until they complete).")
+
+    return 0
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parse_args(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    try:
+        args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+
+    if args.command == "set":
+        return cmd_set(args)
+    elif args.command == "ls":
+        return cmd_ls(args)
+    elif args.command == "rm":
+        return cmd_rm(args)
+    elif args.command == "report":
+        return cmd_report(args)
     return 0
 
 

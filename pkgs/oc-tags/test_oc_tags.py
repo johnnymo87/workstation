@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -500,6 +503,150 @@ class TestAggregate(unittest.TestCase):
     def test_buckets_are_populated(self):
         rows = self._agg()
         self.assertEqual(set(rows.series["auto:mono"]), {"2026-09-08"})
+
+
+class TestCli(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "opencode.db")
+        self.tags_db = str(Path(self.tmp.name) / "tags.db")
+        _fixture_db(self.db)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_set_session_with_explicit_id_resolves_to_root(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            # kid_a's parent is root_a; must resolve to root_a
+            rc = oc_tags.main(["set", "billing", "kid_a", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.session_tags(st), {"root_a": "billing"})
+
+    def test_set_session_with_opencode_session_id_env(self):
+        buf = io.StringIO()
+        old_env = os.environ.get("OPENCODE_SESSION_ID")
+        try:
+            os.environ["OPENCODE_SESSION_ID"] = "kid_a"
+            with contextlib.redirect_stdout(buf):
+                rc = oc_tags.main(["set", "billing", "--db", self.db, "--tags-db", self.tags_db])
+            self.assertEqual(rc, 0)
+            with oc_tags.open_store(self.tags_db) as st:
+                self.assertEqual(oc_tags.session_tags(st), {"root_a": "billing"})
+        finally:
+            if old_env is None:
+                os.environ.pop("OPENCODE_SESSION_ID", None)
+            else:
+                os.environ["OPENCODE_SESSION_ID"] = old_env
+
+    def test_set_without_session_id_or_env_fails(self):
+        buf = io.StringIO()
+        err = io.StringIO()
+        old_env = os.environ.get("OPENCODE_SESSION_ID")
+        try:
+            os.environ.pop("OPENCODE_SESSION_ID", None)
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                rc = oc_tags.main(["set", "billing", "--db", self.db, "--tags-db", self.tags_db])
+            self.assertNotEqual(rc, 0)
+            self.assertIn("OPENCODE_SESSION_ID", err.getvalue())
+        finally:
+            if old_env is not None:
+                os.environ["OPENCODE_SESSION_ID"] = old_env
+
+    def test_set_dir_tag(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main([
+                "set", "--dir", "/home/dev/projects/mono/.worktrees/*", "mono-wt",
+                "--tags-db", self.tags_db,
+            ])
+        self.assertEqual(rc, 0)
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(
+                oc_tags.dir_tags(st),
+                {"/home/dev/projects/mono/.worktrees/*": "mono-wt"},
+            )
+
+    def test_rm_dir_tag(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/*", "mono-wt")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main([
+                "rm", "--dir", "/home/dev/projects/mono/.worktrees/*",
+                "--tags-db", self.tags_db,
+            ])
+        self.assertEqual(rc, 0)
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.dir_tags(st), {})
+
+    def test_rm_session_tag(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["rm", "root_a", "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.session_tags(st), {})
+
+    def test_ls_without_counts_and_with_counts(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/*", "mono-wt")
+
+        # Without --counts
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["ls", "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("root_a", out)
+        self.assertIn("billing", out)
+        self.assertIn("mono-wt", out)
+
+        # With --counts
+        buf_counts = io.StringIO()
+        with contextlib.redirect_stdout(buf_counts):
+            rc = oc_tags.main(["ls", "--counts", "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out_counts = buf_counts.getvalue()
+        self.assertIn("tag", out_counts)
+        self.assertIn("billing", out_counts)
+        self.assertIn("mono-wt", out_counts)
+
+    def test_report_output_table(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["report", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("Consumed at list price (USD) -- not billed.", out)
+        self.assertIn("tag", out)
+        self.assertIn("total", out)
+        self.assertIn("share", out)
+        self.assertIn("auto:mono", out)
+        self.assertIn("Unpriced models:", out)
+
+    def test_report_empty_window(self):
+        # Empty opencode db
+        empty_db = str(Path(self.tmp.name) / "empty.db")
+        conn = sqlite3.connect(empty_db)
+        conn.executescript(
+            """
+            CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+            """
+        )
+        conn.close()
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["report", "--days", "1", "--db", empty_db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("No assistant messages found", out)
 
 
 
