@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fnmatch
 import os
 import posixpath
 import sqlite3
@@ -136,6 +137,27 @@ def rm_session_tag(conn, session_id: str) -> bool:
 
 def rm_dir_tag(conn, pattern: str) -> bool:
     return conn.execute("DELETE FROM dir_tag WHERE pattern=?", (pattern,)).rowcount > 0
+
+
+def effective_tag(
+    session_id: str,
+    directory: str | None,
+    session_tags: dict[str, str],
+    dir_tags: dict[str, str],
+) -> tuple[str, str]:
+    """Resolve a ROOT session's tag. Returns (tag, source) where source is
+    'manual' or 'auto'. `oc-tags top` treats 'auto' as untagged so the
+    backlog stays visible rather than hidden behind a plausible label.
+    """
+    tag = session_tags.get(session_id)
+    if tag:
+        return tag, "manual"
+    if directory:
+        matches = [p for p in dir_tags if fnmatch.fnmatch(directory, p)]
+        if matches:
+            # Longest pattern wins: specific beats general.
+            return dir_tags[max(matches, key=len)], "manual"
+    return auto_key(directory), "auto"
 
 
 

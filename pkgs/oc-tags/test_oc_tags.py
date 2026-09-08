@@ -142,6 +142,54 @@ class TestStore(unittest.TestCase):
             self.assertEqual(oc_tags.session_tags(st), {"ses_a": "billing"})
 
 
+class TestEffectiveTag(unittest.TestCase):
+    def test_session_tag_wins(self):
+        self.assertEqual(
+            oc_tags.effective_tag(
+                "ses_a", "/home/dev/projects/mono",
+                session_tags={"ses_a": "billing"},
+                dir_tags={"/home/dev/projects/mono": "monorepo"},
+            ),
+            ("billing", "manual"),
+        )
+
+    def test_dir_pattern_next(self):
+        self.assertEqual(
+            oc_tags.effective_tag(
+                "ses_a", "/home/dev/projects/mono/.worktrees/fbm-webhook-res",
+                session_tags={},
+                dir_tags={"/home/dev/projects/mono/.worktrees/fbm-*": "fbm"},
+            ),
+            ("fbm", "manual"),
+        )
+
+    def test_auto_fallback(self):
+        self.assertEqual(
+            oc_tags.effective_tag("ses_a", "/home/dev/projects/mono", {}, {}),
+            ("auto:mono", "auto"),
+        )
+
+    def test_longest_pattern_wins(self):
+        # Specific beats general, so a broad `mono/*` rule never shadows a
+        # narrow one added later.
+        self.assertEqual(
+            oc_tags.effective_tag(
+                "ses_a", "/home/dev/projects/mono/.worktrees/fbm-webhook-res",
+                session_tags={},
+                dir_tags={
+                    "/home/dev/projects/mono/*": "mono-all",
+                    "/home/dev/projects/mono/.worktrees/fbm-*": "fbm",
+                },
+            ),
+            ("fbm", "manual"),
+        )
+
+    def test_no_directory(self):
+        self.assertEqual(
+            oc_tags.effective_tag("ses_a", None, {}, {}), ("auto:no-dir", "auto")
+        )
+
+
 
 
 # Without this guard, `python3 test_oc_tags.py` imports the module, defines
