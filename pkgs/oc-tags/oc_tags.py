@@ -16,6 +16,7 @@ import contextlib
 import datetime
 from dataclasses import dataclass, field
 import fnmatch
+import html
 import json
 import os
 import posixpath
@@ -240,6 +241,7 @@ class Aggregate:
     root_totals: dict = field(default_factory=dict)   # root_id -> float
     root_meta: dict = field(default_factory=dict)     # root_id -> {title, directory, tag, source}
     window: Window | None = None
+    cap_hits: dict[str, str] = field(default_factory=dict)  # day -> "HH:MM"
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -284,6 +286,7 @@ def aggregate(
               FROM message
              WHERE time_created >= ? AND time_created < ?
                AND json_extract(data, '$.role') = 'assistant'
+             ORDER BY time_created ASC
             """,
             (since_ms, until_ms),
         ).fetchall()
@@ -296,10 +299,16 @@ def aggregate(
     agg = Aggregate()
     tag_cache: dict[str, tuple[str, str]] = {}
     per_bucket = collections.defaultdict(lambda: collections.defaultdict(float))
+    day_accum: dict[str, float] = collections.defaultdict(float)
     buckets = set()
 
     for sid, ts, cost, model, total_tok, tin, tout, cread, cwrite in rows:
         cost = cost or 0.0
+        dt = datetime.datetime.fromtimestamp(ts / 1000, ET)
+        day_str = dt.strftime("%Y-%m-%d")
+        day_accum[day_str] += cost
+        if day_accum[day_str] >= 195.0 and day_str not in agg.cap_hits:
+            agg.cap_hits[day_str] = dt.strftime("%H:%M")
         root = root_of(sid, parents)
         if root not in tag_cache:
             tag, source = effective_tag(
@@ -499,6 +508,327 @@ def cfp_metered_by_day(cfp_dir: str = CFP_DIR) -> dict[str, float]:
     the cap first, i.e. time of day. See the design doc.
     """
     return cfp_spend_by_day(cfp_dir).metered
+
+
+def render_svg(
+    agg: Aggregate,
+    metered_by_day: dict[str, float] | CfpSpend,
+    hide: frozenset[str] = frozenset(),
+    top_n: int = 12,
+    notional_by_day: dict[str, float] | None = None,
+) -> str:
+    """Render a stacked-area chart of list-price LLM consumption per tag as SVG.
+
+    Pure function: no socket, no DB access, testable in a sandbox.
+    """
+    import math
+
+    if isinstance(metered_by_day, CfpSpend):
+        metered = metered_by_day.metered
+        notional = metered_by_day.notional if notional_by_day is None else notional_by_day
+    else:
+        metered = metered_by_day or {}
+        notional = notional_by_day or {}
+
+    visible_tags = [t for t in agg.totals if t not in hide]
+    if not visible_tags or not agg.buckets:
+        return (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 400" width="100%" height="400">\n'
+            '  <style>\n'
+            '    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }\n'
+            '  </style>\n'
+            '  <rect width="1100" height="400" fill="#ffffff"/>\n'
+            '  <text x="550" y="200" text-anchor="middle" font-size="18" fill="#64748b">No data in window</text>\n'
+            '</svg>\n'
+        )
+
+    # Top-N partitioning
+    if len(visible_tags) > top_n:
+        head_tags = visible_tags[:top_n]
+        tail_tags = visible_tags[top_n:]
+        bands = list(head_tags)
+        other_series: dict[str, float] = collections.defaultdict(float)
+        other_total = 0.0
+        for t in tail_tags:
+            other_total += agg.totals[t]
+            for b in agg.buckets:
+                other_series[b] += agg.series[t].get(b, 0.0)
+        if "other" not in hide and other_total > 0:
+            bands.append("other")
+    else:
+        head_tags = visible_tags
+        tail_tags = []
+        bands = list(head_tags)
+        other_series = collections.defaultdict(float)
+        other_total = 0.0
+
+    def band_val(tag: str, b: str) -> float:
+        if tag == "other":
+            return other_series.get(b, 0.0)
+        return agg.series[tag].get(b, 0.0)
+
+    def band_tot(tag: str) -> float:
+        if tag == "other":
+            return other_total
+        return agg.totals[tag]
+
+    # Assign colors: saturated for manual, desaturated for auto, neutral for other
+    PALETTE_HUES = [215, 145, 28, 280, 345, 185, 45, 95, 315, 165, 10, 250]
+    colors: dict[str, str] = {}
+    for i, t in enumerate(bands):
+        if t == "other":
+            colors[t] = "#94a3b8"
+        else:
+            source = agg.sources.get(t, "auto" if t.startswith("auto:") else "manual")
+            hue = PALETTE_HUES[i % len(PALETTE_HUES)]
+            if source == "manual":
+                colors[t] = f"hsl({hue}, 75%, 48%)"
+            else:
+                colors[t] = f"hsl({hue}, 25%, 68%)"
+
+    # SVG layout dimensions
+    width = 1100
+    height = 640
+    plot_x = 90
+    plot_y = 65
+    plot_w = 710
+    plot_h = 460
+    x_left = plot_x
+    x_right = plot_x + plot_w
+    y_top = plot_y
+    y_bottom = plot_y + plot_h
+
+    M = len(agg.buckets)
+    x_coords = []
+    for i in range(M):
+        if M == 1:
+            x_coords.append(plot_x + plot_w / 2)
+        else:
+            x_coords.append(plot_x + i * (plot_w / (M - 1)))
+
+    totals_by_bucket = []
+    for i, b in enumerate(agg.buckets):
+        tot_b = sum(band_val(t, b) for t in bands)
+        totals_by_bucket.append(tot_b)
+
+    metered_vals = [metered.get(b, 0.0) for b in agg.buckets]
+    max_val = max(totals_by_bucket + metered_vals + [1.0])
+
+    target_ticks = 5
+    raw_step = max_val / target_ticks
+    mag = 10 ** math.floor(math.log10(raw_step or 1.0))
+    norm_step = raw_step / mag
+    if norm_step <= 1.2:
+        step = 1.0 * mag
+    elif norm_step <= 2.5:
+        step = 2.0 * mag
+    elif norm_step <= 6.0:
+        step = 5.0 * mag
+    else:
+        step = 10.0 * mag
+    y_max = math.ceil(max_val / step) * step
+    if y_max <= 0:
+        y_max = 1.0
+
+    def y_scale(val: float) -> float:
+        return y_bottom - (val / y_max) * plot_h
+
+    svg_parts = []
+    svg_parts.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="{height}">\n'
+        f'  <style>\n'
+        f'    text {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}\n'
+        f'  </style>\n'
+        f'  <defs>\n'
+        f'    <pattern id="hatch" width="8" height="8" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">\n'
+        f'      <line x1="0" y1="0" x2="0" y2="8" stroke="#64748b" stroke-width="2" opacity="0.4"/>\n'
+        f'    </pattern>\n'
+        f'  </defs>\n'
+        f'  <rect width="{width}" height="{height}" fill="#ffffff"/>'
+    )
+
+    # Gridlines and Y-axis labels
+    y_val = 0.0
+    while y_val <= y_max + 1e-9:
+        y_pos = y_scale(y_val)
+        svg_parts.append(
+            f'  <line x1="{x_left}" y1="{y_pos:.1f}" x2="{x_right}" y2="{y_pos:.1f}" stroke="#e2e8f0" stroke-width="1"/>'
+        )
+        val_str = f"${y_val:,.0f}" if y_val >= 10 else f"${y_val:,.2f}"
+        svg_parts.append(
+            f'  <text x="{x_left - 10}" y="{y_pos + 4:.1f}" text-anchor="end" font-size="11" fill="#64748b">{val_str}</text>'
+        )
+        y_val += step
+
+    # X-axis bucket labels
+    label_step = max(1, math.ceil(M / 12))
+    for i, b in enumerate(agg.buckets):
+        if i % label_step == 0 or i == M - 1:
+            x_pos = x_coords[i]
+            label = b[5:] if len(b) > 5 else b
+            svg_parts.append(
+                f'  <text x="{x_pos:.1f}" y="{y_bottom + 18}" text-anchor="middle" font-size="10" fill="#64748b">{html.escape(label)}</text>'
+            )
+
+    # Partial bucket hatching
+    if agg.partial_bucket and agg.partial_bucket in agg.buckets:
+        p_idx = agg.buckets.index(agg.partial_bucket)
+        p_x = x_coords[p_idx]
+        if M == 1:
+            h_start = x_left
+            h_w = plot_w
+        else:
+            dx = plot_w / (M - 1)
+            h_start = max(x_left, p_x - dx / 2)
+            h_end = min(x_right, p_x + dx / 2)
+            h_w = h_end - h_start
+        svg_parts.append(
+            f'  <rect x="{h_start:.1f}" y="{y_top}" width="{h_w:.1f}" height="{plot_h}" fill="url(#hatch)"/>'
+        )
+        svg_parts.append(
+            f'  <text x="{p_x:.1f}" y="{y_top + 16}" text-anchor="middle" font-size="11" font-style="italic" fill="#475569">partial</text>'
+        )
+
+    # Stacked Area Bands
+    y_cum = [0.0] * M
+    for t in bands:
+        bot_pts = []
+        top_pts = []
+        for i, b in enumerate(agg.buckets):
+            v = band_val(t, b)
+            bot_y = y_scale(y_cum[i])
+            top_y = y_scale(y_cum[i] + v)
+            bot_pts.append((x_coords[i], bot_y))
+            top_pts.append((x_coords[i], top_y))
+            y_cum[i] += v
+
+        if M == 1:
+            x_m = x_coords[0]
+            bw = 40
+            top_y = top_pts[0][1]
+            bot_y = bot_pts[0][1]
+            bh = bot_y - top_y
+            svg_parts.append(
+                f'  <rect x="{x_m - bw/2:.1f}" y="{top_y:.1f}" width="{bw}" height="{bh:.1f}" fill="{colors[t]}" stroke="{colors[t]}" stroke-width="0.5"/>'
+            )
+        else:
+            path_d = [f"M {bot_pts[0][0]:.1f} {bot_pts[0][1]:.1f}"]
+            for pt in bot_pts[1:]:
+                path_d.append(f"L {pt[0]:.1f} {pt[1]:.1f}")
+            for pt in reversed(top_pts):
+                path_d.append(f"L {pt[0]:.1f} {pt[1]:.1f}")
+            path_d.append("Z")
+            d_str = " ".join(path_d)
+            svg_parts.append(
+                f'  <path d="{d_str}" fill="{colors[t]}" stroke="{colors[t]}" stroke-width="0.5"/>'
+            )
+
+    # Metered Reference Line
+    if any(m > 0 for m in metered_vals):
+        line_pts = []
+        for i, b in enumerate(agg.buckets):
+            m_val = metered.get(b, 0.0)
+            line_pts.append(f"{x_coords[i]:.1f},{y_scale(m_val):.1f}")
+        pts_str = " ".join(line_pts)
+        svg_parts.append(
+            f'  <polyline points="{pts_str}" fill="none" stroke="#e11d48" stroke-width="2" stroke-dasharray="4,2"/>'
+        )
+
+    # Axis Title
+    svg_parts.append(
+        f'  <text transform="rotate(-90)" x="{- (y_top + plot_h / 2):.1f}" y="25" text-anchor="middle" font-size="12" fill="#475569">Consumed at list price (USD) — not billed</text>'
+    )
+
+    # Headline above chart: cap hit at HH:MM for most recent day where metered >= $195
+    qualifying_days = [d for d, m in metered.items() if m >= 195.0]
+    if qualifying_days:
+        recent_day = max(qualifying_days)
+        hit_time = agg.cap_hits.get(recent_day)
+        if hit_time:
+            svg_parts.append(
+                f'  <text x="{plot_x}" y="38" font-size="15" font-weight="600" fill="#dc2626">cap hit at {html.escape(hit_time)}</text>'
+            )
+
+    # Legend
+    leg_x = 825
+    leg_y = 65
+    row_h = 18
+    for i, t in enumerate(bands):
+        curr_y = leg_y + i * row_h
+        tot_str = f"${band_tot(t):,.2f}"
+        esc_tag = html.escape(t)
+        svg_parts.append(
+            f'  <rect x="{leg_x}" y="{curr_y}" width="11" height="11" rx="2" fill="{colors[t]}"/>'
+        )
+        svg_parts.append(
+            f'  <text x="{leg_x + 18}" y="{curr_y + 9}" font-size="11" fill="#1e293b">{esc_tag}: {tot_str}</text>'
+        )
+
+    # Unpriced entry (pinned regardless of Top-N, labelled in tokens, not dollars)
+    u_curr_y = leg_y + len(bands) * row_h
+    unpriced_toks = sum(info.get("tokens", 0) for info in agg.unpriced.values()) if agg.unpriced else 0
+    if unpriced_toks >= 1_000_000:
+        tok_str = f"{unpriced_toks / 1_000_000:.1f}M"
+    elif unpriced_toks >= 1_000:
+        tok_str = f"{unpriced_toks / 1_000:.1f}K"
+    else:
+        tok_str = str(unpriced_toks)
+    svg_parts.append(
+        f'  <rect x="{leg_x}" y="{u_curr_y}" width="11" height="11" rx="2" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1"/>'
+    )
+    svg_parts.append(
+        f'  <text x="{leg_x + 18}" y="{u_curr_y + 9}" font-size="11" fill="#64748b">unpriced: {tok_str} tok</text>'
+    )
+
+    # Metered line in legend
+    if any(m > 0 for m in metered_vals):
+        m_curr_y = u_curr_y + row_h
+        svg_parts.append(
+            f'  <line x1="{leg_x}" y1="{m_curr_y + 5}" x2="{leg_x + 12}" y2="{m_curr_y + 5}" stroke="#e11d48" stroke-width="2" stroke-dasharray="3,1"/>'
+        )
+        svg_parts.append(
+            f'  <text x="{leg_x + 18}" y="{m_curr_y + 9}" font-size="11" fill="#e11d48">billed (capped)</text>'
+        )
+
+    # Footer: coverage vs cfp notional, unpriced summary, and drift warning
+    total_list = sum(agg.totals.values())
+    matching_days = [b for b in agg.buckets if b in notional]
+    total_notional = sum(notional[b] for b in matching_days)
+
+    if total_notional > 0:
+        cov_pct = (total_list / total_notional) * 100.0
+        cov_str = f"Coverage: {cov_pct:.1f}% vs CFP notional (${total_list:,.2f} / ${total_notional:,.2f})"
+    else:
+        cov_str = f"Total list price: ${total_list:,.2f}"
+
+    if agg.unpriced:
+        u_items = [f"{m} ({info.get('tokens', 0)} tok)" for m, info in sorted(agg.unpriced.items())]
+        unp_str = f"Unpriced: {', '.join(u_items)}"
+    else:
+        unp_str = "Unpriced: none"
+
+    # Drift warning: per-day ratio outside 0.90-1.05
+    drift_alerts = []
+    for d in matching_days:
+        n_val = notional[d]
+        if n_val > 0:
+            d_list = sum(agg.series[t].get(d, 0.0) for t in agg.totals)
+            ratio = d_list / n_val
+            if ratio < 0.90 or ratio > 1.05:
+                drift_alerts.append(f"{d} ({ratio:.2f})")
+
+    footer_y = y_bottom + 42
+    svg_parts.append(
+        f'  <text x="{plot_x}" y="{footer_y}" font-size="11" fill="#64748b">{html.escape(cov_str)} | {html.escape(unp_str)}</text>'
+    )
+    if drift_alerts:
+        drift_msg = f"⚠️ Drift warning: per-day coverage ratio outside 0.90–1.05: {', '.join(drift_alerts)}"
+        svg_parts.append(
+            f'  <text x="{plot_x}" y="{footer_y + 16}" font-size="11" font-weight="600" fill="#b91c1c">{html.escape(drift_msg)}</text>'
+        )
+
+    svg_parts.append("</svg>\n")
+    return "\n".join(svg_parts)
 
 
 def build_parser() -> argparse.ArgumentParser:

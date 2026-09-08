@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Allow `import oc_tags` when running from repo root or anywhere else.
@@ -906,6 +907,101 @@ class TestCfp(unittest.TestCase):
                 res = oc_tags.cfp_spend_by_day(self.tmp.name)
             self.assertEqual(res.metered, {})
             self.assertIn("Permission denied", err.getvalue())
+
+
+class TestRenderSvg(unittest.TestCase):
+    def _sample_agg(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-07", "2026-09-08"]
+        agg.series = {
+            "tag_a": {"2026-09-07": 10.0, "2026-09-08": 20.0},
+            "tag_b": {"2026-09-07": 5.0, "2026-09-08": 15.0},
+        }
+        agg.totals = {"tag_a": 30.0, "tag_b": 20.0}
+        agg.sources = {"tag_a": "manual", "tag_b": "auto"}
+        return agg
+
+    def test_render_svg_starts_with_svg_and_parses_xml(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {"2026-09-07": 15.0, "2026-09-08": 35.0})
+        self.assertTrue(svg.strip().startswith("<svg"))
+        root = ET.fromstring(svg)
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg" if "}" in root.tag else "svg")
+        self.assertIn("Consumed at list price (USD) — not billed", svg)
+
+    def test_render_svg_empty_aggregate_renders_valid_no_data(self):
+        agg = oc_tags.Aggregate()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertTrue(svg.strip().startswith("<svg"))
+        root = ET.fromstring(svg)
+        self.assertIsNotNone(root)
+        self.assertIn("No data", svg)
+
+    def test_render_svg_escapes_script_tag(self):
+        agg = self._sample_agg()
+        evil = "<script>alert(1)</script>"
+        agg.series[evil] = {"2026-09-07": 1.0, "2026-09-08": 1.0}
+        agg.totals[evil] = 2.0
+        agg.sources[evil] = "manual"
+        svg = oc_tags.render_svg(agg, {})
+        root = ET.fromstring(svg)
+        self.assertIsNone(root.find(".//script"))
+        self.assertIn("&lt;script&gt;", svg)
+
+    def test_render_svg_hide_removes_band_and_legend(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {}, hide=frozenset(["tag_a"]))
+        self.assertNotIn("tag_a", svg)
+        self.assertIn("tag_b", svg)
+
+    def test_render_svg_top_n_creates_other_band_matching_tail_sum(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-07", "2026-09-08"]
+        # 5 tags
+        for i in range(5):
+            tname = f"t{i}"
+            val = (5 - i) * 10.0
+            agg.series[tname] = {"2026-09-07": val / 2, "2026-09-08": val / 2}
+            agg.totals[tname] = val
+            agg.sources[tname] = "manual"
+        # Top 2 -> t0 (50), t1 (40); tail -> t2(30) + t3(20) + t4(10) = 60
+        svg = oc_tags.render_svg(agg, {}, top_n=2)
+        root = ET.fromstring(svg)
+        self.assertIsNotNone(root)
+        self.assertIn("other", svg)
+        self.assertIn("$60.00", svg)
+        self.assertIn("t0", svg)
+        self.assertIn("t1", svg)
+        self.assertNotIn("t2", svg)
+
+    def test_render_svg_unpriced_entry_survives_top_n_truncation(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-07", "2026-09-08"]
+        for i in range(5):
+            tname = f"t{i}"
+            agg.series[tname] = {"2026-09-07": 10.0, "2026-09-08": 10.0}
+            agg.totals[tname] = 20.0
+        agg.unpriced = {"test-model": {"messages": 5, "tokens": 120000}}
+        svg = oc_tags.render_svg(agg, {}, top_n=2)
+        self.assertIn("unpriced", svg)
+        self.assertIn("120.0K tok", svg)
+        self.assertNotIn("unpriced: $", svg)
+
+    def test_render_svg_metered_line_and_cap_hit_headline(self):
+        agg = self._sample_agg()
+        agg.cap_hits["2026-09-08"] = "12:37"
+        svg = oc_tags.render_svg(agg, {"2026-09-07": 100.0, "2026-09-08": 204.0})
+        self.assertIn("billed (capped)", svg)
+        self.assertIn("cap hit at 12:37", svg)
+
+    def test_render_svg_drift_warning_when_ratio_outside_bounds(self):
+        agg = self._sample_agg()
+        spend = oc_tags.CfpSpend(
+            metered={"2026-09-07": 15.0},
+            notional={"2026-09-07": 50.0},
+        )
+        svg = oc_tags.render_svg(agg, spend)
+        self.assertIn("Drift warning", svg)
 
 
 
