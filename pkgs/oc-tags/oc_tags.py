@@ -34,9 +34,12 @@ def auto_key(directory: str | None) -> str:
         return "auto:tmp"
     if _WORKTREE_MARKER in d:
         head, _, tail = d.partition(_WORKTREE_MARKER)
-        project = posixpath.basename(head) or head
-        slug = tail.split("/", 1)[0]
-        return f"auto:{project}/{slug}"
+        project = posixpath.basename(head) or (head.strip("/") or "root")
+        slug = tail.strip("/").split("/", 1)[0]
+        return f"auto:{project}/{slug}" if slug else f"auto:{project}"
+    if d.endswith("/.worktrees"):
+        head = d[: -len("/.worktrees")]
+        return f"auto:{posixpath.basename(head) or (head.strip('/') or 'root')}"
     return f"auto:{posixpath.basename(d) or d}"
 
 

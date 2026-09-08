@@ -46,6 +46,19 @@ class TestAutoKey(unittest.TestCase):
     def test_trailing_slash(self):
         self.assertEqual(oc_tags.auto_key("/home/dev/projects/mono/"), "auto:mono")
 
+    def test_worktree_container_without_slug(self):
+        self.assertEqual(oc_tags.auto_key("/home/dev/projects/mono/.worktrees"), "auto:mono")
+        self.assertEqual(oc_tags.auto_key("/home/dev/projects/mono/.worktrees/"), "auto:mono")
+
+    def test_doubled_slash_in_worktrees(self):
+        self.assertEqual(
+            oc_tags.auto_key("/home/dev/projects/mono/.worktrees//w3-pr2"),
+            "auto:mono/w3-pr2",
+        )
+
+    def test_root_worktrees_slug(self):
+        self.assertEqual(oc_tags.auto_key("/.worktrees/slug"), "auto:root/slug")
+
 
 class TestRootOf(unittest.TestCase):
     def test_root_is_itself(self):
@@ -67,6 +80,12 @@ class TestRootOf(unittest.TestCase):
 
     def test_unknown_session(self):
         self.assertEqual(oc_tags.root_of("zzz", {"a": None}), "zzz")
+
+    def test_lasso_cycle(self):
+        self.assertEqual(oc_tags.root_of("c", {"c": "b", "b": "a", "a": "b"}), "b")
+
+    def test_empty_parents_map(self):
+        self.assertEqual(oc_tags.root_of("a", {}), "a")
 
 
 
