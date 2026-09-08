@@ -150,6 +150,21 @@ Host cloudbox-cutover
     ServerAliveInterval 60
     ServerAliveCountMax 3
     RemoteForward 2222 127.0.0.1:22
+
+# On-demand chart tunnel: forwards this Mac's 4710 to cloudbox's loopback 4710
+# where \`oc-tags serve\` runs. Deliberately NOT in the always-on
+# \`cloudbox-tunnel\` block above: that runs under ExitOnForwardFailure=yes from
+# a LaunchAgent, so a busy :4710 on this Mac would kill the whole tunnel,
+# taking gclpr (2850), chatgpt-relay (3033) and the Jenkins :8443 forward with
+# it. Note this is a LocalForward -- the opposite direction to
+# \`cloudbox-cutover\`'s RemoteForward.
+Host cloudbox-chart
+    HostName $CLOUDBOX_IP
+    User dev
+    ForwardAgent yes
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    LocalForward 4710 127.0.0.1:4710
 $CLOUDBOX_MARKER_END
 EOF
 
