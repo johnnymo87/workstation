@@ -648,6 +648,71 @@ class TestCli(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("No assistant messages found", out)
 
+    def test_top_auto_source_roots_appear_and_manual_do_not(self):
+        # Manually tag root_a
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        # root_b (auto) should appear
+        self.assertIn("root_b", out)
+        self.assertIn("w3 pr2", out)
+        # root_a (manual) must NOT appear
+        self.assertNotIn("root_a", out)
+        self.assertNotIn("FBM OOS webhook investigation", out)
+
+    def test_top_ordering_and_min_filter(self):
+        # Without --min, orphan ($0.25) appears
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("orphan", out)
+        # Verify ordering: root_a ($2.00) appears before orphan ($0.25)
+        pos_root = out.find("root_a")
+        pos_orphan = out.find("orphan")
+        self.assertLess(pos_root, pos_orphan)
+
+        # With --min 1.0, orphan ($0.25) is filtered out
+        buf_min = io.StringIO()
+        with contextlib.redirect_stdout(buf_min):
+            rc = oc_tags.main(["top", "--days", "7", "--min", "1.0", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out_min = buf_min.getvalue()
+        self.assertIn("root_a", out_min)
+        self.assertNotIn("orphan", out_min)
+
+    def test_top_dir_hint_for_shared_prefix(self):
+        # Add 3 sessions sharing a directory prefix
+        conn = sqlite3.connect(self.db)
+        t = 1788874200000
+        for i in range(3):
+            sid = f"wt_{i}"
+            conn.execute(
+                "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
+                (sid, None, f"/home/dev/projects/mono/.worktrees/pr-{i}", f"PR {i}", t, t),
+            )
+            data = {"role": "assistant", "cost": 1.00, "modelID": "m", "tokens": {"input": 1, "output": 1}}
+            conn.execute(
+                "INSERT INTO message VALUES (?,?,?,?)",
+                (f"m_wt_{i}", sid, t, json.dumps(data)),
+            )
+        conn.commit()
+        conn.close()
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("--dir", out)
+        self.assertIn("/home/dev/projects/mono/.worktrees/*", out)
+
 
 
 

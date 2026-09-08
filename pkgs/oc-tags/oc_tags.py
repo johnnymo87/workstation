@@ -358,6 +358,13 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
     rep.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
 
+    # top
+    top_p = sub.add_parser("top", help="rank untagged root sessions by dollars")
+    top_p.add_argument("--days", type=int, default=14, help="number of days to look back")
+    top_p.add_argument("--min", type=float, default=0.0, help="minimum dollar threshold")
+    top_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
+    top_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+
     return p
 
 
@@ -542,6 +549,92 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_top(args: argparse.Namespace) -> int:
+    raw_now = os.environ.get("OC_TAGS_NOW_MS")
+    now_ms = int(raw_now) if raw_now else int(time.time() * 1000)
+    now_dt = datetime.datetime.fromtimestamp(now_ms / 1000, ET)
+    today_start = datetime.datetime(now_dt.year, now_dt.month, now_dt.day, tzinfo=ET)
+    since_dt = today_start - datetime.timedelta(days=args.days)
+    until_dt = today_start + datetime.timedelta(days=1)
+
+    since_ms = int(since_dt.timestamp() * 1000)
+    until_ms = int(until_dt.timestamp() * 1000)
+
+    if os.path.exists(args.tags_db):
+        with open_store(args.tags_db) as st:
+            s_tags = session_tags(st)
+            d_tags = dir_tags(st)
+    else:
+        s_tags = {}
+        d_tags = {}
+
+    bucket = choose_bucket(args.days)
+    if not os.path.exists(args.db):
+        print("No untagged root sessions found.")
+        return 0
+
+    agg = aggregate(
+        args.db,
+        since_ms=since_ms,
+        until_ms=until_ms,
+        bucket=bucket,
+        session_tags=s_tags,
+        dir_tags=d_tags,
+        now_ms=now_ms,
+    )
+
+    untagged = []
+    for root_id, dollars in agg.root_totals.items():
+        meta = agg.root_meta.get(root_id, {})
+        if meta.get("source") == "auto" and dollars >= args.min and dollars > 0:
+            untagged.append((dollars, root_id, meta.get("title") or "", meta.get("directory") or ""))
+
+    untagged.sort(key=lambda item: (-item[0], item[1]))
+
+    if not untagged:
+        print("No untagged root sessions found.")
+        return 0
+
+    print(f"{'dollars':>10}  {'session_id':<32}  {'title':<40}  directory")
+    print("-" * 110)
+    for dollars, root_id, title, directory in untagged:
+        d_str = f"${dollars:,.2f}"
+        t_disp = title if len(title) <= 40 else title[:37] + "..."
+        print(f"{d_str:>10}  {root_id:<32}  {t_disp:<40}  {directory}")
+
+    # Detect shared directory prefixes among untagged roots (>= 3 roots)
+    prefix_counts: dict[str, list[str]] = collections.defaultdict(list)
+    for _, root_id, _, directory in untagged:
+        if not directory:
+            continue
+        d_norm = directory.rstrip("/")
+        if _WORKTREE_MARKER in d_norm:
+            head, _, _ = d_norm.partition(_WORKTREE_MARKER)
+            pat = f"{head}{_WORKTREE_MARKER}*"
+            prefix_counts[pat].append(root_id)
+        parent = posixpath.dirname(d_norm)
+        if parent and parent not in ("/", "/tmp"):
+            pat = f"{parent}/*"
+            prefix_counts[pat].append(root_id)
+        prefix_counts[d_norm].append(root_id)
+
+    hints = []
+    seen_roots: set[str] = set()
+    for pat, roots in sorted(prefix_counts.items(), key=lambda item: (-len(item[1]), -len(item[0]))):
+        unique_roots = set(roots)
+        if len(unique_roots) >= 3 and not unique_roots.issubset(seen_roots):
+            hints.append((pat, len(unique_roots)))
+            seen_roots.update(unique_roots)
+
+    if hints:
+        print()
+        for pat, count in hints:
+            print(f"Hint: {count} untagged roots share directory prefix '{pat}'. Cover them with:")
+            print(f"  oc-tags set --dir '{pat}' <tag>")
+
+    return 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
@@ -561,6 +654,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_rm(args)
     elif args.command == "report":
         return cmd_report(args)
+    elif args.command == "top":
+        return cmd_top(args)
     return 0
 
 
