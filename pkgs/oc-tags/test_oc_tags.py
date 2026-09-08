@@ -714,6 +714,68 @@ class TestCli(unittest.TestCase):
         self.assertIn("/home/dev/projects/mono/.worktrees/*", out)
 
 
+class TestCfp(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_missing_directory_returns_empty(self):
+        missing = str(Path(self.tmp.name) / "does-not-exist")
+        self.assertEqual(oc_tags.cfp_metered_by_day(missing), {})
+
+    def test_history_jsonl_sums_spend_and_enterprise(self):
+        h = Path(self.tmp.name) / "history.jsonl"
+        lines = [
+            json.dumps({"day": "2026-09-05", "spend": 105.25, "enterpriseSpend": 95.75}),
+            json.dumps({"day": "2026-09-06", "spend": 100.00, "enterpriseSpend": 100.00}),
+        ]
+        h.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        res = oc_tags.cfp_metered_by_day(self.tmp.name)
+        self.assertAlmostEqual(res["2026-09-05"], 201.00)
+        self.assertAlmostEqual(res["2026-09-06"], 200.00)
+
+    def test_malformed_and_torn_lines_skipped(self):
+        h = Path(self.tmp.name) / "history.jsonl"
+        lines = [
+            json.dumps({"day": "2026-09-05", "spend": 100.0, "enterpriseSpend": 50.0}),
+            '{"day": "2026-09-06", "spend": 100.0, torn line...',
+            'not json',
+            "",
+            json.dumps({"day": "2026-09-07", "spend": 80.0, "enterpriseSpend": 70.0}),
+        ]
+        h.write_text("\n".join(lines), encoding="utf-8")
+
+        res = oc_tags.cfp_metered_by_day(self.tmp.name)
+        self.assertEqual(set(res.keys()), {"2026-09-05", "2026-09-07"})
+        self.assertAlmostEqual(res["2026-09-05"], 150.0)
+        self.assertAlmostEqual(res["2026-09-07"], 150.0)
+
+    def test_today_totals_from_spend_json_files(self):
+        h = Path(self.tmp.name) / "history.jsonl"
+        h.write_text(
+            json.dumps({"day": "2026-09-07", "spend": 100.0, "enterpriseSpend": 100.0}) + "\n",
+            encoding="utf-8",
+        )
+        s1 = Path(self.tmp.name) / "spend.json"
+        s1.write_text(json.dumps({"day": "2026-09-08", "total": 103.50}), encoding="utf-8")
+        s2 = Path(self.tmp.name) / "spend-enterprise.json"
+        s2.write_text(json.dumps({"day": "2026-09-08", "total": 101.50}), encoding="utf-8")
+
+        res = oc_tags.cfp_metered_by_day(self.tmp.name)
+        self.assertAlmostEqual(res["2026-09-07"], 200.00)
+        self.assertAlmostEqual(res["2026-09-08"], 205.00)
+
+    def test_single_spend_file_partial(self):
+        s1 = Path(self.tmp.name) / "spend.json"
+        s1.write_text(json.dumps({"day": "2026-09-08", "total": 103.50}), encoding="utf-8")
+
+        res = oc_tags.cfp_metered_by_day(self.tmp.name)
+        self.assertAlmostEqual(res["2026-09-08"], 103.50)
+
+
 
 
 # Without this guard, `python3 test_oc_tags.py` imports the module, defines

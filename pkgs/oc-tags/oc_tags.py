@@ -16,6 +16,7 @@ import contextlib
 import datetime
 from dataclasses import dataclass, field
 import fnmatch
+import json
 import os
 import posixpath
 import sqlite3
@@ -321,6 +322,60 @@ def aggregate(
     return agg
 
 
+CFP_DIR = "/var/lib/claude-failover-proxy"
+
+
+def cfp_metered_by_day(cfp_dir: str = CFP_DIR) -> dict[str, float]:
+    """Actual billed dollars per ET day. Returns {} if cfp is absent.
+
+    This is a REFERENCE LINE, never a band: it is pinned near $210/day by two
+    $100 ceilings, so per-tag metered dollars would measure which work reached
+    the cap first, i.e. time of day. See the design doc.
+    """
+    if not os.path.isdir(cfp_dir):
+        return {}
+
+    by_day: dict[str, float] = {}
+
+    history_path = os.path.join(cfp_dir, "history.jsonl")
+    if os.path.isfile(history_path):
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    day = record.get("day")
+                    if not day:
+                        continue
+                    spend = float(record.get("spend") or 0.0)
+                    ent = float(record.get("enterpriseSpend") or 0.0)
+                    by_day[day] = spend + ent
+        except Exception:
+            pass
+
+    today_spend: dict[str, float] = collections.defaultdict(float)
+    for fname in ("spend.json", "spend-enterprise.json"):
+        fpath = os.path.join(cfp_dir, fname)
+        if os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                day = data.get("day")
+                total = float(data.get("total") or 0.0)
+                if day:
+                    today_spend[day] += total
+            except Exception:
+                pass
+
+    for day, total in today_spend.items():
+        by_day[day] = total
+
+    return by_day
 
 
 def build_parser() -> argparse.ArgumentParser:
