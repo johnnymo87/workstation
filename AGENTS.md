@@ -158,6 +158,7 @@ workstation/
 ├── pkgs/                  # Self-packaged tools (auto-updated by nix-update)
 │   ├── dd-cli/            # Datadog CLI (installed as editable Python tool via home.activation.installDdCli in home.base.nix)
 │   ├── beads/             # Distributed issue tracker
+│   ├── oc-tags/           # Session cost tagging and stacked-area SVG visualization
 │   └── pinentry-op/       # macOS GPG pinentry via 1Password
 ├── assets/                # Content deployed to user
 │   ├── opencode/          # OpenCode agents, skills, plugins, base config
