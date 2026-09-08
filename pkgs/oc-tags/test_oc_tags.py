@@ -185,6 +185,12 @@ class TestStore(unittest.TestCase):
             self.assertEqual(oc_tags.session_tags(st), {})
             self.assertFalse(oc_tags.rm_session_tag(st, "ses_a"))
 
+    def test_rm_dir_tag_strips_whitespace(self):
+        with oc_tags.open_store(self.path) as st:
+            oc_tags.set_dir_tag(st, "  /home/dev/projects/mono  ", "mono")
+            self.assertTrue(oc_tags.rm_dir_tag(st, "   /home/dev/projects/mono   \n"))
+            self.assertEqual(oc_tags.dir_tags(st), {})
+
     def test_schema_created_idempotently(self):
         with oc_tags.open_store(self.path) as st:
             oc_tags.set_session_tag(st, "ses_a", "billing")
@@ -323,7 +329,7 @@ def _fixture_db(path):
             (sid, par, d, title, 1788874200000, 1788874200000),
         )
 
-    def msg(mid, sid, ts, cost, model="claude-opus-5@default",
+    def msg(mid, sid, ts, cost, model: str | None = "claude-opus-5@default",
             provider="google-vertex-anthropic", role="assistant", tokens=None):
         data = {
             "role": role, "cost": cost, "modelID": model, "providerID": provider,
@@ -345,11 +351,15 @@ def _fixture_db(path):
                                         "cache": {"read": 0, "write": 0}})
     # a user message must never be counted
     msg("m7", "root_a", t, 99.0, role="user")
-    # unpriced model: cost recorded as 0 but tokens present
+    # unpriced model with tokens.total: must use total (5000), not sum of parts (3600)
     msg("m8", "root_b", t, 0.0, model="claude-brand-new@default",
-        tokens={"input": 1000, "output": 2000, "cache": {"read": 0, "write": 0}})
+        tokens={"total": 5000, "input": 1000, "output": 2000, "cache": {"read": 500, "write": 100}})
     # outside the window (much older)
     msg("m9", "root_a", t - 90 * 86400 * 1000, 5.00)
+    # unpriced model with missing total and null modelID:
+    # fallback to input+output+cache.read+cache.write = 200; model defaults to "unknown"
+    msg("m10", "root_a", t, 0.0, model=None,
+        tokens={"input": 50, "output": 50, "cache": {"read": 90, "write": 10}})
     conn.commit()
     conn.close()
 
@@ -399,7 +409,93 @@ class TestAggregate(unittest.TestCase):
         rows = self._agg()
         self.assertIn("claude-brand-new@default", rows.unpriced)
         self.assertEqual(rows.unpriced["claude-brand-new@default"]["messages"], 1)
-        self.assertEqual(rows.unpriced["claude-brand-new@default"]["tokens"], 3000)
+        self.assertEqual(rows.unpriced["claude-brand-new@default"]["tokens"], 5000)
+        self.assertIn("unknown", rows.unpriced)
+        self.assertEqual(rows.unpriced["unknown"]["messages"], 1)
+        self.assertEqual(rows.unpriced["unknown"]["tokens"], 200)
+
+    def test_root_totals_and_meta(self):
+        rows = self._agg()
+        self.assertAlmostEqual(rows.root_totals["root_a"], 2.00)
+        self.assertEqual(
+            rows.root_meta["root_a"],
+            {
+                "title": "FBM OOS webhook investigation",
+                "directory": "/home/dev/projects/mono",
+                "tag": "auto:mono",
+                "source": "auto",
+            },
+        )
+        self.assertAlmostEqual(rows.root_totals["root_b"], 2.00)
+        self.assertEqual(
+            rows.root_meta["root_b"],
+            {
+                "title": "w3 pr2",
+                "directory": "/home/dev/projects/mono/.worktrees/w3-pr2",
+                "tag": "auto:mono/w3-pr2",
+                "source": "auto",
+            },
+        )
+
+    def test_partial_bucket_in_flight_vs_past(self):
+        t = 1788874200000  # 2026-09-08 09:30 ET
+        # When now_ms is in the current bucket (day: 2026-09-08):
+        agg_now = oc_tags.aggregate(
+            self.db,
+            since_ms=t - 86400 * 1000,
+            until_ms=t + 86400 * 1000,
+            bucket="day",
+            session_tags={},
+            dir_tags={},
+            now_ms=t,
+        )
+        self.assertEqual(agg_now.partial_bucket, "2026-09-08")
+
+        # When the window ends in the past relative to now_ms:
+        agg_past = oc_tags.aggregate(
+            self.db,
+            since_ms=t - 86400 * 1000,
+            until_ms=t + 86400 * 1000,
+            bucket="day",
+            session_tags={},
+            dir_tags={},
+            now_ms=t + 10 * 86400 * 1000,  # 10 days later
+        )
+        self.assertIsNone(agg_past.partial_bucket)
+
+    def test_totals_ordered_descending_by_dollars(self):
+        rows = self._agg()
+        totals_list = list(rows.totals.values())
+        self.assertEqual(totals_list, sorted(totals_list, reverse=True))
+
+    def test_aggregate_transaction_lifecycle(self):
+        executed = []
+        real_connect = oc_tags.connect_ro
+
+        class ConnectionProxy:
+            def __init__(self, target):
+                self._target = target
+            def execute(self, sql, *args):
+                executed.append(sql.strip().split()[0].upper())
+                return self._target.execute(sql, *args)
+            def rollback(self):
+                executed.append("ROLLBACK")
+                return self._target.rollback()
+            def close(self):
+                return self._target.close()
+            def __getattr__(self, name):
+                return getattr(self._target, name)
+
+        def tracking_connect(path):
+            return ConnectionProxy(real_connect(path))
+
+        try:
+            oc_tags.connect_ro = tracking_connect
+            self._agg()
+            self.assertIn("BEGIN", executed)
+            self.assertIn("ROLLBACK", executed)
+        finally:
+            oc_tags.connect_ro = real_connect
 
     def test_buckets_are_populated(self):
         rows = self._agg()

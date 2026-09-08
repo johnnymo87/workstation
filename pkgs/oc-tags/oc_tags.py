@@ -150,7 +150,8 @@ def rm_session_tag(conn, session_id: str) -> bool:
 
 
 def rm_dir_tag(conn, pattern: str) -> bool:
-    return conn.execute("DELETE FROM dir_tag WHERE pattern=?", (pattern,)).rowcount > 0
+    p = (pattern or "").strip()
+    return conn.execute("DELETE FROM dir_tag WHERE pattern=?", (p,)).rowcount > 0
 
 
 def effective_tag(
@@ -206,6 +207,8 @@ class Aggregate:
     sources: dict = field(default_factory=dict)   # tag -> 'manual' | 'auto'
     unpriced: dict = field(default_factory=dict)  # model -> {messages, tokens}
     partial_bucket: str | None = None
+    root_totals: dict = field(default_factory=dict)   # root_id -> float
+    root_meta: dict = field(default_factory=dict)     # root_id -> {title, directory, tag, source}
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -226,11 +229,15 @@ def aggregate(
     bucket: str,
     session_tags: dict[str, str],
     dir_tags: dict[str, str],
+    now_ms: int | None = None,
 ) -> Aggregate:
     conn = connect_ro(db_path)
+    conn.execute("BEGIN")
     try:
-        parents = dict(conn.execute("SELECT id, parent_id FROM session"))
-        dirs = dict(conn.execute("SELECT id, directory FROM session"))
+        s_rows = conn.execute("SELECT id, parent_id, directory, title FROM session").fetchall()
+        parents = {r[0]: r[1] for r in s_rows}
+        dirs = {r[0]: r[2] for r in s_rows}
+        titles = {r[0]: r[3] for r in s_rows}
 
         rows = conn.execute(
             """
@@ -238,8 +245,11 @@ def aggregate(
                    time_created,
                    json_extract(data, '$.cost'),
                    json_extract(data, '$.modelID'),
+                   json_extract(data, '$.tokens.total'),
                    json_extract(data, '$.tokens.input'),
-                   json_extract(data, '$.tokens.output')
+                   json_extract(data, '$.tokens.output'),
+                   json_extract(data, '$.tokens.cache.read'),
+                   json_extract(data, '$.tokens.cache.write')
               FROM message
              WHERE time_created >= ? AND time_created < ?
                AND json_extract(data, '$.role') = 'assistant'
@@ -247,40 +257,67 @@ def aggregate(
             (since_ms, until_ms),
         ).fetchall()
     finally:
-        conn.close()
+        try:
+            conn.rollback()
+        finally:
+            conn.close()
 
     agg = Aggregate()
     tag_cache: dict[str, tuple[str, str]] = {}
     per_bucket = collections.defaultdict(lambda: collections.defaultdict(float))
     buckets = set()
 
-    for sid, ts, cost, model, tin, tout in rows:
+    for sid, ts, cost, model, total_tok, tin, tout, cread, cwrite in rows:
         cost = cost or 0.0
         root = root_of(sid, parents)
         if root not in tag_cache:
-            tag_cache[root] = effective_tag(
+            tag, source = effective_tag(
                 root, dirs.get(root), session_tag_map=session_tags, dir_tag_map=dir_tags
             )
+            tag_cache[root] = (tag, source)
+            agg.root_meta[root] = {
+                "title": titles.get(root),
+                "directory": dirs.get(root),
+                "tag": tag,
+                "source": source,
+            }
         tag, source = tag_cache[root]
         agg.sources[tag] = source
 
         key = bucket_key(ts, bucket)
         buckets.add(key)
         per_bucket[tag][key] += cost
+        agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+
+        if total_tok is not None:
+            toks = int(total_tok)
+        else:
+            toks = int((tin or 0) + (tout or 0) + (cread or 0) + (cwrite or 0))
 
         # A model with no recorded price must be LOUD. Rendering it as $0
         # would silently under-report on exactly the day a new model ships.
-        if cost == 0 and ((tin or 0) + (tout or 0)) > 0:
-            u = agg.unpriced.setdefault(model, {"messages": 0, "tokens": 0})
+        if cost == 0 and toks > 0:
+            model_key = model or "unknown"
+            u = agg.unpriced.setdefault(model_key, {"messages": 0, "tokens": 0})
             u["messages"] += 1
-            u["tokens"] += (tin or 0) + (tout or 0)
+            u["tokens"] += toks
 
     agg.buckets = sorted(buckets)
     agg.series = {t: dict(b) for t, b in per_bucket.items()}
-    agg.totals = {t: sum(b.values()) for t, b in agg.series.items()}
+    # Deterministically ordered, descending by dollars; tie-break alphabetically by tag
+    agg.totals = dict(
+        sorted(
+            ((t, sum(b.values())) for t, b in agg.series.items()),
+            key=lambda item: (-item[1], item[0]),
+        )
+    )
     # In-flight turns carry no cost until they complete, so the newest bucket
-    # always under-reads and must be labelled.
-    agg.partial_bucket = agg.buckets[-1] if agg.buckets else None
+    # always under-reads and must be labelled if it is currently in flight.
+    now_epoch_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    current_bucket = bucket_key(now_epoch_ms, bucket)
+    agg.partial_bucket = (
+        agg.buckets[-1] if (agg.buckets and agg.buckets[-1] == current_bucket) else None
+    )
     return agg
 
 
