@@ -40,6 +40,26 @@ def auto_key(directory: str | None) -> str:
     return f"auto:{posixpath.basename(d) or d}"
 
 
+def root_of(session_id: str, parents: dict[str, str | None]) -> str:
+    """Topmost EXISTING ancestor of `session_id`.
+
+    `parents` maps session id -> parent id (or None). A parent that is absent
+    from the map is a deleted session; we stop at the last id that exists
+    rather than dropping the row. Visited-set guards a cycle.
+    """
+    cur = session_id
+    seen: set[str] = set()
+    while True:
+        if cur in seen:
+            return cur
+        seen.add(cur)
+        parent = parents.get(cur)
+        if not parent or parent not in parents:
+            return cur
+        cur = parent
+
+
+
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     desc = __doc__.splitlines()[0] if __doc__ else ""

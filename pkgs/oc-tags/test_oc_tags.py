@@ -47,6 +47,29 @@ class TestAutoKey(unittest.TestCase):
         self.assertEqual(oc_tags.auto_key("/home/dev/projects/mono/"), "auto:mono")
 
 
+class TestRootOf(unittest.TestCase):
+    def test_root_is_itself(self):
+        self.assertEqual(oc_tags.root_of("a", {"a": None}), "a")
+
+    def test_child_resolves_to_parent(self):
+        self.assertEqual(oc_tags.root_of("b", {"a": None, "b": "a"}), "a")
+
+    def test_dangling_parent_stops_at_self(self):
+        # 983 live sessions point at a deleted parent. Attribute to the
+        # topmost EXISTING ancestor -- here, the child itself.
+        self.assertEqual(oc_tags.root_of("b", {"b": "gone"}), "b")
+
+    def test_dangling_grandparent_stops_at_existing(self):
+        self.assertEqual(oc_tags.root_of("c", {"b": "gone", "c": "b"}), "b")
+
+    def test_cycle_guard(self):
+        self.assertEqual(oc_tags.root_of("a", {"a": "b", "b": "a"}), "a")
+
+    def test_unknown_session(self):
+        self.assertEqual(oc_tags.root_of("zzz", {"a": None}), "zzz")
+
+
+
 
 # Without this guard, `python3 test_oc_tags.py` imports the module, defines
 # every test, runs NONE, prints nothing and exits 0 -- the exact failure mode
