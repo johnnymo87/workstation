@@ -17,12 +17,14 @@ import datetime
 from dataclasses import dataclass, field
 import fnmatch
 import html
+import http.server
 import json
 import os
 import posixpath
 import sqlite3
 import sys
 import time
+import urllib.parse
 import zoneinfo
 
 VERSION = "0.1.0"
@@ -831,6 +833,116 @@ def render_svg(
     return "\n".join(svg_parts)
 
 
+def handle_request(
+    path: str,
+    query: str | dict[str, list[str]],
+    db_path: str = DEFAULT_OPENCODE_DB,
+    tags_db: str = DEFAULT_TAGS_DB,
+    cfp_dir: str = CFP_DIR,
+    now_ms: int | None = None,
+) -> tuple[int, str, str]:
+    if path == "/healthz":
+        return (200, "text/plain; charset=utf-8", "ok\n")
+
+    if path != "/":
+        return (404, "text/plain; charset=utf-8", "Not Found\n")
+
+    if isinstance(query, str):
+        params = urllib.parse.parse_qs(query)
+    elif isinstance(query, dict):
+        params = query
+    else:
+        params = {}
+
+    days = 7
+    if "days" in params:
+        raw_days = params["days"][0] if params["days"] else ""
+        try:
+            days = int(raw_days)
+            if days <= 0:
+                return (400, "text/plain; charset=utf-8", "Error: days must be a positive integer\n")
+        except ValueError:
+            return (400, "text/plain; charset=utf-8", "Error: days must be an integer\n")
+
+    bucket = None
+    if "bucket" in params:
+        raw_bucket = params["bucket"][0] if params["bucket"] else ""
+        if raw_bucket not in ("hour", "day"):
+            return (400, "text/plain; charset=utf-8", "Error: bucket must be 'hour' or 'day'\n")
+        bucket = raw_bucket
+
+    hide_set = set()
+    if "hide" in params:
+        for val in params["hide"]:
+            for item in val.split(","):
+                item = item.strip()
+                if item:
+                    hide_set.add(item)
+    hide = frozenset(hide_set)
+
+    top_n = 12
+    if "top_n" in params:
+        try:
+            top_n = int(params["top_n"][0])
+        except (ValueError, IndexError):
+            pass
+
+    try:
+        agg = load_aggregate(
+            db_path=db_path,
+            tags_db=tags_db,
+            days=days,
+            bucket=bucket,
+            now_ms=now_ms,
+        )
+        spend = cfp_spend_by_day(cfp_dir)
+        svg = render_svg(agg, spend, hide=hide, top_n=top_n)
+        return (200, "image/svg+xml; charset=utf-8", svg)
+    except sqlite3.OperationalError as e:
+        return (503, "text/plain; charset=utf-8", f"Database error: {e}\n")
+
+
+def make_handler(db_path: str, tags_db: str, cfp_dir: str):
+    class OcTagsHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            pr = urllib.parse.urlparse(self.path)
+            status, ctype, body = handle_request(
+                pr.path,
+                pr.query,
+                db_path=db_path,
+                tags_db=tags_db,
+                cfp_dir=cfp_dir,
+            )
+            body_bytes = body.encode("utf-8") if isinstance(body, str) else body
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.end_headers()
+            try:
+                self.wfile.write(body_bytes)
+            except BrokenPipeError:
+                pass
+
+        def log_message(self, format, *args):
+            pass
+
+    return OcTagsHandler
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    host = args.host
+    port = args.port
+    server = http.server.HTTPServer((host, port), make_handler(args.db, args.tags_db, CFP_DIR))
+    print(f"Serving oc-tags chart on http://{host}:{port}/ (Ctrl+C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     desc = __doc__.splitlines()[0] if __doc__ else ""
     p = argparse.ArgumentParser(prog="oc-tags", description=desc)
@@ -872,6 +984,13 @@ def build_parser() -> argparse.ArgumentParser:
     top_p.add_argument("--min", type=float, default=0.0, help="minimum dollar threshold")
     top_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
     top_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+
+    # serve
+    serve_p = sub.add_parser("serve", help="serve stacked-area chart over HTTP")
+    serve_p.add_argument("--host", default="127.0.0.1", help="host to bind (default: 127.0.0.1)")
+    serve_p.add_argument("--port", type=int, default=4710, help="port to bind (default: 4710)")
+    serve_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
+    serve_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
 
     return p
 
@@ -1120,6 +1239,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_set(args)
     elif args.command == "rm":
         return cmd_rm(args)
+    elif args.command == "serve":
+        return cmd_serve(args)
     return 0
 
 

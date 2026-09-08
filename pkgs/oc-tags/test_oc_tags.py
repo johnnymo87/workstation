@@ -25,6 +25,12 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.command, "report")
         self.assertEqual(args.days, 14)
 
+    def test_serve_defaults(self):
+        args = oc_tags.parse_args(["serve"])
+        self.assertEqual(args.command, "serve")
+        self.assertEqual(args.host, "127.0.0.1")
+        self.assertEqual(args.port, 4710)
+
 
 class TestAutoKey(unittest.TestCase):
     def test_worktree_keeps_slug(self):
@@ -1002,6 +1008,68 @@ class TestRenderSvg(unittest.TestCase):
         )
         svg = oc_tags.render_svg(agg, spend)
         self.assertIn("Drift warning", svg)
+
+
+class TestServer(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "opencode.db")
+        self.tags_db = str(Path(self.tmp.name) / "tags.db")
+
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER)")
+        conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
+        t = 1788874200000
+        conn.execute("INSERT INTO session VALUES ('s1', NULL, '/home/dev/projects/repo', 'Title 1', 0, 0)")
+        data = {"role": "assistant", "cost": 5.0, "modelID": "model", "tokens": {"input": 1, "output": 1}}
+        conn.execute("INSERT INTO message VALUES ('m1', 's1', ?, ?)", (t, json.dumps(data)))
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_healthz_returns_200_ok(self):
+        status, ctype, body = oc_tags.handle_request("/healthz", "")
+        self.assertEqual(status, 200)
+        self.assertIn("text/plain", ctype)
+        self.assertEqual(body.strip(), "ok")
+
+    def test_unknown_path_returns_404(self):
+        status, ctype, body = oc_tags.handle_request("/nope", "")
+        self.assertEqual(status, 404)
+
+    def test_bad_days_returns_400(self):
+        status, ctype, body = oc_tags.handle_request("/", "days=banana", db_path=self.db, tags_db=self.tags_db)
+        self.assertEqual(status, 400)
+        status, ctype, body = oc_tags.handle_request("/", "days=-5", db_path=self.db, tags_db=self.tags_db)
+        self.assertEqual(status, 400)
+
+    def test_root_returns_200_svg(self):
+        status, ctype, body = oc_tags.handle_request("/", "days=7", db_path=self.db, tags_db=self.tags_db)
+        self.assertEqual(status, 200)
+        self.assertIn("image/svg+xml", ctype)
+        self.assertTrue(body.strip().startswith("<svg"))
+
+    def test_days_1_selects_hourly_bucketing(self):
+        status, ctype, body = oc_tags.handle_request("/", "days=1", db_path=self.db, tags_db=self.tags_db)
+        self.assertEqual(status, 200)
+        self.assertIn("T", body)
+
+    def test_hide_param_filtered(self):
+        # Tag session
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "s1", "tag_x")
+        status, ctype, body = oc_tags.handle_request("/", "days=7&hide=tag_x", db_path=self.db, tags_db=self.tags_db)
+        self.assertEqual(status, 200)
+        self.assertNotIn("tag_x", body)
+
+    def test_database_locked_returns_503(self):
+        from unittest import mock
+        with mock.patch("oc_tags.load_aggregate", side_effect=sqlite3.OperationalError("database is locked")):
+            status, ctype, body = oc_tags.handle_request("/", "days=7", db_path=self.db, tags_db=self.tags_db)
+            self.assertEqual(status, 503)
+            self.assertIn("database is locked", body)
 
 
 
