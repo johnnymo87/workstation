@@ -375,6 +375,15 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Jenkins hostname. Org-identifying, so it is a secret rather than a
+      # literal: it feeds the /etc/hosts template below (via sops.templates,
+      # rendered at activation) and the JENKINS_HOST env var. See the
+      # reading-jenkins-builds skill's INTERNAL.md for the value and the path.
+      jenkins_host = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Google Workspace CLI (gws) OAuth credentials
       gws_client_id = {
         owner = "dev";
@@ -1288,6 +1297,10 @@ ${serveIdCase}
         fi
         if [ -r /run/secrets/buildbuddy_api_key ]; then
           export BUILDBUDDY_API_KEY="$(cat /run/secrets/buildbuddy_api_key)"
+        fi
+        # Jenkins hostname for the reading-jenkins-builds skill (org-identifying).
+        if [ -r /run/secrets/jenkins_host ]; then
+          export JENKINS_HOST="$(cat /run/secrets/jenkins_host)"
         fi
         # Datadog credentials for `dd-cli` launched from OpenCode sessions.
         # Mirrors the interactive-shell exports in users/dev/home.cloudbox.nix;
@@ -4201,20 +4214,19 @@ EOF
   time.timeZone = "America/New_York";
   i18n.defaultLocale = "en_US.UTF-8";
 
-  # Jenkins (jenkins.util.b--a.co) via the Mac's WARP tunnel -- bead workstation-h559.
+  # Jenkins via the Mac's VPN session -- bead workstation-h559.
   #
-  # cloudbox cannot reach Jenkins directly: the host allowlists a dedicated
-  # Cloudflare Zero Trust egress IP, and every alternative was measured dead
-  # (not a Cloudflare Access app; WARP enrolment is policy-locked to full tunnel,
-  # which would hijack this console-less VM's routing and DNS; BA prod/staging
-  # EKS pods time out identically; the util AWS account holding Jenkins grants
-  # this identity no role). What remains is the Mac, which IS on WARP.
+  # cloudbox cannot reach the work Jenkins directly (source-IP allowlist that
+  # only the Mac's VPN egress satisfies; every alternative was measured dead --
+  # the reading-jenkins-builds skill's INTERNAL.md has the evidence and the
+  # hostname, which is org-identifying and therefore a sops secret, not a
+  # literal here).
   #
-  # Path:  https://jenkins.util.b--a.co  (resolves to 127.0.0.1 here)
+  # Path:  https://$JENKINS_HOST  (resolves to 127.0.0.1 here, see below)
   #        -> 127.0.0.1:443   systemd-socket-proxyd (root-bound socket, below)
   #        -> 127.0.0.1:8443  sshd RemoteForward opened by the Mac's always-on
   #                           cloudbox-dev-tunnel (scripts/update-ssh-config.sh)
-  #        -> Mac dials jenkins.util.b--a.co:443 over WARP
+  #        -> Mac dials $JENKINS_HOST:443 over its VPN
   #        -> TLS terminates at Jenkins: SNI and certificate validation intact,
   #           so every URL-driven tool (curl, ba, python) just works.
   #
@@ -4225,13 +4237,27 @@ EOF
   # Failure mode is loud, not slow: with the Mac asleep nothing listens on 8443,
   # so a request gets an immediate connection refused/reset, not a 10 s hang.
   # A refused connection here means "Mac tunnel is down, retry in ~2 min", NOT
-  # "Jenkins is unreachable" -- see assets/opencode/AGENTS.md.
+  # "Jenkins is unreachable" -- see the reading-jenkins-builds skill.
   #
-  # Disclosed, not hidden: this lends the Mac's Zero Trust identity to a public
-  # VM. Every Jenkins request from cloudbox appears in Gateway logs as the Mac.
+  # Disclosed, not hidden: this lends the Mac's VPN identity to a public VM.
   # Bound to loopback only: the NixOS firewall is disabled on this host (GCP
   # rules apply), so never widen these bind addresses.
-  networking.extraHosts = "127.0.0.1 jenkins.util.b--a.co";
+  #
+  # /etc/hosts is rendered at activation from a sops template so the hostname
+  # never enters source or the store. Same shape nixpkgs uses for resolved's
+  # /etc/resolv.conf -> /run/systemd/resolve/stub-resolv.conf: environment.etc
+  # symlinks to a runtime path. The template is the stock hosts content
+  # (networking.hostFiles: localhost, this host, the GCP metadata entry) plus
+  # one line whose hostname is a sops placeholder substituted when secrets are
+  # installed -- no import-from-derivation, no literal. Mode 0444 because
+  # sops.templates default to 0400 and /etc/hosts must be world-readable.
+  sops.templates.hosts = {
+    file = pkgs.concatText "hosts-with-jenkins" (config.networking.hostFiles ++ [
+      (pkgs.writeText "jenkins-host-entry" "127.0.0.1 ${config.sops.placeholder.jenkins_host}\n")
+    ]);
+    mode = "0444";
+  };
+  environment.etc.hosts.source = lib.mkForce config.sops.templates.hosts.path;
 
   systemd.sockets.jenkins-mac-proxy = {
     description = "Loopback :443 front for the Mac's Jenkins RemoteForward";

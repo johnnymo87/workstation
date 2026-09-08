@@ -46,6 +46,7 @@ Current env vars managed this way:
 | `BASECAMP_ACCOUNT_ID` | `basecamp-account-id` | N/A |
 | `GOOGLE_CLOUD_PROJECT` | `google-cloud-project` | `google_cloud_project` |
 | `BUILDBUDDY_HOST` | `buildbuddy-host` | `buildbuddy_host` |
+| `JENKINS_HOST` | `jenkins-host` | `jenkins_host` |
 | `BUNDLE_<HOST>` (composed) | `bundle-source-host` + `bundle-source-token` | `bundle_source_host` + `bundle_source_token` |
 
 **To add a new env var:**
