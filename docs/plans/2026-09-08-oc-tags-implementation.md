@@ -598,16 +598,16 @@ Buckets are **America/New_York**, because the spend ceilings reset at 0 ET. UTC 
 ```python
 class TestBucketing(unittest.TestCase):
     def test_hour_bucket_et(self):
-        # 2026-09-08T13:30:00Z == 09:30 ET (EDT, UTC-4)
-        self.assertEqual(oc_tags.bucket_key(1788960600000, "hour"), "2026-09-08T09")
+        # 1788874200000 == 2026-09-08 09:30 ET (EDT, UTC-4)
+        self.assertEqual(oc_tags.bucket_key(1788874200000, "hour"), "2026-09-08T09")
 
     def test_day_bucket_et(self):
-        self.assertEqual(oc_tags.bucket_key(1788960600000, "day"), "2026-09-08")
+        self.assertEqual(oc_tags.bucket_key(1788874200000, "day"), "2026-09-08")
 
     def test_utc_midnight_is_previous_et_day(self):
-        # 2026-09-08T02:00:00Z is 2026-09-07 22:00 ET. A UTC bucket would put
+        # 1788832800000 is 2026-09-07 22:00 ET (2026-09-08 02:00Z). A UTC bucket would put
         # this on the wrong side of the 0-ET spend-cap reset.
-        self.assertEqual(oc_tags.bucket_key(1788919200000, "day"), "2026-09-07")
+        self.assertEqual(oc_tags.bucket_key(1788832800000, "day"), "2026-09-07")
 
     def test_choose_bucket_size(self):
         self.assertEqual(oc_tags.choose_bucket(1), "hour")
@@ -621,7 +621,7 @@ Verify the two epoch-ms constants before writing them into the test:
 ```bash
 python3 -c "
 import datetime,zoneinfo
-for ms in (1788960600000, 1788919200000):
+for ms in (1788874200000, 1788832800000):
     print(ms, datetime.datetime.fromtimestamp(ms/1000, zoneinfo.ZoneInfo('America/New_York')))"
 ```
 
@@ -693,7 +693,7 @@ def _fixture_db(path):
     for sid, par, d, title in sessions:
         conn.execute(
             "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
-            (sid, par, d, title, 1788960600000, 1788960600000),
+            (sid, par, d, title, 1788874200000, 1788874200000),
         )
 
     def msg(mid, sid, ts, cost, model="claude-opus-5@default",
@@ -707,7 +707,7 @@ def _fixture_db(path):
         conn.execute("INSERT INTO message VALUES (?,?,?,?)",
                      (mid, sid, ts, json.dumps(data)))
 
-    t = 1788960600000                    # 2026-09-08 09:30 ET
+    t = 1788874200000                    # 2026-09-08 09:30 ET
     msg("m1", "root_a", t, 1.50)
     msg("m2", "kid_a", t, 0.50)          # rolls up to root_a
     msg("m3", "root_b", t, 2.00)
@@ -739,8 +739,8 @@ class TestAggregate(unittest.TestCase):
     def _agg(self, session_tags=None, dir_tags=None):
         return oc_tags.aggregate(
             self.db,
-            since_ms=1788960600000 - 86400 * 1000,
-            until_ms=1788960600000 + 86400 * 1000,
+            since_ms=1788874200000 - 86400 * 1000,
+            until_ms=1788874200000 + 86400 * 1000,
             bucket="day",
             session_tags=session_tags or {},
             dir_tags=dir_tags or {},
