@@ -1149,3 +1149,62 @@ creation is not a terminal state.
   `gemini-3.6` intro rate, and making unknown models fail loud instead of
   prefix-pricing). That is a separate correctness PR against `oc-cost` and is not
   a dependency of this work.
+
+---
+
+## Progress log
+
+Executed via subagent-driven development: one `implementer` per batch, then a
+`spec-reviewer` (compliance) followed by a `code-reviewer` (quality), in that
+order. Review findings were folded into the next batch's first commit rather
+than left open.
+
+| Task | Bead | Commit(s) | State |
+|---|---|---|---|
+| T1 scaffold + wired check | 3umv.1 | `3ab8612` | reviewed, approved |
+| T2 auto_key | 3umv.2 | `e77ec99` | reviewed, approved |
+| T3 root_of | 3umv.3 | `c275960` | reviewed, approved |
+| review fixes (auto_key hardening) | — | `b4e5cc1` | reviewed, approved |
+| T4 tag store | 3umv.4 | `ad840e7` | reviewed, approved |
+| T5 effective_tag | 3umv.5 | `aa30a17` | reviewed, approved |
+| T6 ET bucketing | 3umv.6 | `06df095` | reviewed, approved |
+| review fixes (tie-break, lowercase, WAL) | — | `e5a2b55` | reviewed, approved |
+| T7 aggregate | 3umv.7 | `7dedaed` | reviewed, approved |
+| review fixes (snapshot, root_totals, partial, unpriced) | — | `fb8012a` | **review pending** |
+| T8 set/ls/rm/report | 3umv.8 | `310f453` | **review pending** |
+| T9 top | 3umv.9 | `365d964` | **review pending** |
+| T10 cfp reference line | 3umv.10 | `9a5975a` | **review pending** |
+| BrokenPipe fix (implementer self-review) | — | `61681f6` | **review pending** |
+| T11 SVG renderer | 3umv.11 | — | not started |
+| T12 serve | 3umv.12 | — | not started |
+| T13 SSH forward | 3umv.13 | — | not started |
+| T14 README + gates + PR | 3umv.14 | — | not started |
+
+Pinned test count is currently `Ran 73 tests` in `flake.nix`. Every commit
+updates that pin in the same commit as the tests it covers.
+
+### Measurements taken against live data (do not re-derive)
+
+- `aggregate` on the real 8.9 GB DB: 7-day window 0.30 s; 30-day 1.00 s / 588
+  tags / $26,519. An independent hand-query measured $26,498 for the same
+  window, so the rollup reconciles.
+- 7-day `report` total $5,033; top bands `auto:salmon-of-knowledge`,
+  `auto:mono`, `auto:workstation`, then `auto:<project>/<worktree-slug>` rows.
+- `cfp_metered_by_day` returns $183-$218/day (2026-09-04..08). That is the
+  two-$100-ceiling signature and confirms the function reads **metered** spend,
+  not notional. Thousands/day would mean it read the wrong field.
+- `$.tokens.total` is present on 2,995 of 3,000 sampled assistant rows; token
+  keys are `input`, `output`, `reasoning`, `cache`, `total`. Null `modelID`:
+  0 rows in 30 days.
+- Zero live sessions have a directory ending in `/.worktrees` or containing
+  `//`, so the `auto_key` degenerate-path hardening is latent, not live.
+
+### Process lessons worth keeping
+
+- The plan's epoch-ms constants were 24 h off. The Task 6 verification step
+  caught it because it told the implementer to **recompute rather than loosen
+  the assertion**. Commit `b93c806` fixed the plan, including the Task 7 fixture
+  that inherited the same constant. Keep that instruction shape in future plans.
+- A spec reviewer once cited line numbers in the 800s for a 306-line file. Its
+  conclusions happened to be right, but they were re-verified by hand before
+  being accepted. Verify reviewer citations that look impossible.
