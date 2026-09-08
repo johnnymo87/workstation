@@ -53,7 +53,8 @@ Complete command reference for bd (beads) CLI tool v0.42+. All commands support 
 | `bd list` | List issues with filters | `--status`, `--priority`, `--type`, `--assignee` |
 | `bd show <id>` | Show issue details | `--json` |
 | `bd create "Title"` | Create new issue | `-t`, `-p`, `-d`, `--design`, `--acceptance` |
-| `bd update <id>` | Update existing issue | `--status`, `--priority`, `--notes`, `--design` |
+| `bd update <id>` | Update existing issue | `--status`, `--priority`, `--design` (NOT `--notes` — it replaces) |
+| `bd note <id> "text"` | Append to notes | `--file`, `--stdin` |
 | `bd close <id>` | Close completed issue | `--reason` |
 
 ### Standard Commands
@@ -145,14 +146,19 @@ Update an existing issue's fields.
 ```bash
 bd update bd-a1b2 --status in_progress
 bd update bd-a1b2 --priority 0
-bd update bd-a1b2 --notes "Progress: completed X, next: Y"
+bd note bd-a1b2 "Progress: completed X, next: Y"   # APPENDS
 bd update bd-a1b2 --design "Decided to use Redis"
 bd update bd-a1b2 --acceptance "Tests passing"
 ```
 
 **Status values**: `open`, `in_progress`, `blocked`, `deferred`, `closed`
 
-**Tip:** Use `--notes` to capture progress that survives compaction.
+**Tip:** Use `bd note` to capture progress that survives compaction.
+
+**WARNING:** `bd update --notes` **replaces** the whole notes field rather than
+appending, silently and with a success message. It has destroyed 80k+ characters
+of accumulated notes. Use `bd note <id> "text"` instead. See the "Never Write
+Notes With `bd update --notes`" section in SKILL.md.
 
 ---
 
