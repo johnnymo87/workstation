@@ -204,6 +204,84 @@ lib.mkIf isDarwin {
       };
     };
 
+    # `oc-tags serve` chart, at http://127.0.0.1:4710 on this Mac.
+    #
+    # SOCKET-ACTIVATED, unlike the two tunnels above -- launchd owns :4710 and
+    # spawns one `ssh -W` per accepted connection, so nothing is connected while
+    # nobody is looking at the chart. The persistent-tunnel shape was built and
+    # measured first; the numbers are in the commit message. Summary: this costs
+    # ~+0.5s on a page load that is otherwise ~0.5s, and buys the removal of an
+    # idle connection, a keepalive loop, and the failure mode below.
+    #
+    # Why not just add `LocalForward 4710` to the `cloudbox-tunnel` block above?
+    # Not because that block is remote-only -- it already carries
+    # `LocalForward 3334`, and devbox-tunnel carries six -- but because :4710
+    # has plausible LOCAL colliders where 3334 has none: a muscle-memory
+    # `ssh -N cloudbox-chart`, or an `oc-tags serve` started on this Mac. That
+    # block runs under ExitOnForwardFailure=yes, where one bind clash aborts the
+    # whole ssh process and takes gclpr (2850), chatgpt-relay (3033) and the
+    # Jenkins forward (8443) down with the chart. Same hazard as LocalForward
+    # 1455, which update-ssh-config.sh gives exclusively to devbox-tunnel.
+    #
+    # Socket activation also improves how a collision fails. A keepalive agent
+    # would lose the bind and then reconnect to a public-IP VM every ~10s
+    # forever, into an unrotated log, while whatever holds the port kept serving
+    # the browser well enough that nothing looked wrong. launchd instead fails
+    # the bind once, at load, and stops.
+    #
+    # The tradeoff is that it does NOT come back by itself: where the keepalive
+    # loop would reclaim :4710 on its next retry once the collider exited, this
+    # stays down until re-bootstrapped (bootout + bootstrap, or another
+    # switch). troubleshooting-nixos-host/SKILL.md carries the recovery command.
+    #
+    # `-W` implies ClearAllForwardings, so the `LocalForward 4710` in the
+    # cloudbox-chart ssh block is ignored here and cannot fight launchd for the
+    # port. That block stays as the manual fallback (`ssh -N cloudbox-chart`).
+    #
+    # SockNodeName pins the listener to loopback -- omitting it would bind every
+    # interface and publish the chart to the network. It is IPv4-literal because
+    # every path we document (README, skills, this file) says 127.0.0.1.
+    # `localhost` still works: it may try ::1 first and get refused, but clients
+    # fall back to 127.0.0.1 (measured: 200, just slower for the wasted attempt).
+    #
+    # The far end need not be up. The remote dial happens per-connection, so a
+    # stopped `oc-tags serve` shows as a reset / empty response, NOT connection
+    # refused -- refused would mean this listener itself is gone.
+    cloudbox-chart-tunnel = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${pkgs.openssh}/bin/ssh"
+          "-o" "BatchMode=yes"          # no tty here; a prompt would hang the browser's connection
+          "-o" "ConnectTimeout=10"
+          "-o" "IgnoreUnknown=UseKeychain"  # parity with sshTunnelCommand: nix ssh aborts on unknown
+                                            # config keys, so this keeps a future UseKeychain line in
+                                            # the ssh config from killing the chart but not the tunnels
+          "-W" "127.0.0.1:4710"
+          "cloudbox-chart"
+        ];
+        inetdCompatibility = { Wait = false; };
+        Sockets = {
+          Listeners = {
+            SockNodeName = "127.0.0.1";
+            SockServiceName = "4710";
+            SockType = "stream";
+            SockFamily = "IPv4";
+          };
+        };
+        # No RunAtLoad/KeepAlive/ThrottleInterval: launchd runs this on demand,
+        # and each instance is meant to exit when its connection closes.
+        #
+        # StandardErrorPath is load-bearing, not logging garnish. In nowait
+        # inetd mode launchd hands the accepted socket to stdin, stdout AND
+        # stderr, so without this redirect ssh's own chatter ("Connection reset
+        # by peer", host-key warnings) would be written into the HTTP response
+        # and corrupt the chart. Deliberately no StandardOutPath: stdout must
+        # stay the socket, which is how the reply reaches the browser.
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-chart-tunnel.err.log";
+      };
+    };
+
     # gclpr clipboard server.
     # Exposes macOS pbcopy/pbpaste over signed TCP so remote sessions (via SSH
     # RemoteForward) can copy/paste to the local clipboard through mosh.
@@ -572,9 +650,29 @@ lib.mkIf isDarwin {
     rm -f ~/.bazelrc 2>/dev/null || true
   '';
 
+  # cloudbox-chart-tunnel is deliberately NOT in this list: it is socket-
+  # activated, so launchd starts it when something connects to :4710. Kick-
+  # starting it would force-run an `ssh -W` with no accepted socket on stdin,
+  # which just exits.
+  #
+  # The `timeout` is load-bearing, not defensive dressing. `kickstart -k` kills
+  # the instance and then BLOCKS until launchd restarts it. On the first switch
+  # after adding an agent, that was observed stalling activation for ~2 minutes
+  # with no output explaining why.
+  #
+  # The stall duration matched ThrottleInterval (120s), and the likeliest
+  # explanation is that the kill lands inside that window for an agent
+  # setupLaunchAgents started seconds earlier. Treat that as unconfirmed: the
+  # exact launchd behaviour here is not documented, and reproducing it means
+  # kickstarting live tunnels. The bound does not depend on the diagnosis being
+  # right -- whatever the cause, activation stops waiting, and KeepAlive plus
+  # StartInterval bring the agent up within ~30-120s regardless.
+  #
+  # (`kickstart -p` is not the fix -- -p prints the new PID, it does not
+  # detach, and awaiting a PID can block for longer rather than less.)
   home.activation.startDevTunnels = lib.hm.dag.entryAfter [ "setupLaunchAgents" ] ''
     for agent in devbox-dev-tunnel cloudbox-dev-tunnel; do
-      /bin/launchctl kickstart -k "gui/$UID/org.nix-community.home.$agent" 2>/dev/null || true
+      ${pkgs.coreutils}/bin/timeout 10 /bin/launchctl kickstart -k "gui/$UID/org.nix-community.home.$agent" 2>/dev/null || true
     done
   '';
 

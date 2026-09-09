@@ -14,6 +14,7 @@ oc-tags top --days 7            # find what to tag
 oc-tags set billing             # tag the current session
 oc-tags set --dir '/home/dev/projects/mono/.worktrees/fbm-*' fbm
 oc-tags report --days 7
-oc-tags serve                   # then, from the Mac: ssh -N cloudbox-chart
-                                # and open http://127.0.0.1:4710
+oc-tags serve                   # then, from the Mac, just open
+                                # http://127.0.0.1:4710 -- the socket-activated
+                                # cloudbox-chart-tunnel LaunchAgent connects on demand
 ```
