@@ -337,6 +337,67 @@ let
 
   opencodeBase = builtins.fromJSON (builtins.readFile "${assetsPath}/opencode/opencode.base.json");
 
+  # Pinned npm-resolved plugin versions. Add new entries here when adding more
+  # plugins to opencode.base.json's `plugin` array that need version pinning.
+  # Format: { "<package-name>" = "<exact-version>"; }
+  #
+  # WHY THIS LIVES AT MODULE SCOPE: it feeds TWO consumers that must agree, and
+  # they silently disagreed for months when it only fed one.
+  #
+  #   1. `pluginSpecs` below, which rewrites opencode.base.json's `plugin`
+  #      entries from "<pkg>" to "<pkg>@<version>". This is the part that
+  #      actually pins anything.
+  #   2. `installOpencodePlugins`, which purges any ~/.cache/opencode/packages/
+  #      entry whose on-disk version disagrees with the pin.
+  #
+  # Before pluginSpecs existed, the runtime `plugin` array carried BARE package
+  # names. opencode resolves a bare name as `latest`, caches it under the bare
+  # name, and never re-resolves. So the pin governed nothing: activation purged
+  # the cache on every single rebuild (pinned 0.6.0 vs cached latest), opencode
+  # immediately re-downloaded `latest`, and the next rebuild purged it again.
+  # The visible symptom was a per-rebuild churn line that looked like a
+  # DOWNGRADE ("cached at 0.7.0, pinned at 0.6.0 -> purging"); the real bug was
+  # that the pin had no delivery mechanism. Keep both consumers fed from this
+  # one attrset, or the loop comes back.
+  opencodePluginPins = {
+    # REQUIRED for the devbox TeamClaude routing — this plugin shapes opencode's
+    # requests into Claude-Code OAuth form (anthropic-beta, ?beta=true, "You are
+    # Claude Code" system identity, mcp_ tool prefixes) which premium models
+    # require; TeamClaude only swaps the token, it does NOT shape. Removing it
+    # makes opus/sonnet 429 and TeamClaude retry-loop forever. See
+    # injectTeamclaudeBaseUrl below for the full coexistence rationale.
+    #
+    # >= 1.8.2 is REQUIRED, not merely preferred. Anthropic gates model access
+    # on the Claude Code version the client reports, SERVER-SIDE. Releases up
+    # to 1.8.1 hardcode 2.1.87, which newer models reject:
+    #
+    #   400 invalid_request_error / error_code: claude_code_version_too_old
+    #   "Claude Code 2.1.87 does not support this model; version 2.1.251 or
+    #    newer is required."
+    #
+    # opencode surfaces that as an EMPTY assistant turn with no visible error,
+    # so it presents as "the agent is down". It broke oracle-fable and
+    # adversarial-reviewer-fable the moment #443/#444 repinned them to
+    # claude-fable-5-1. 1.8.2 reports 2.1.258 and derives the user-agent from
+    # the same constant (upstream PR #223).
+    #
+    # This will recur whenever Anthropic gates a newer model than the bundled
+    # constant. Diagnose from the stored `error` on the assistant message in
+    # opencode.db before suspecting agent config; the fix is a pin bump here.
+    #
+    # 1.8.4 verified to report CLAUDE_CODE_VERSION 2.1.258 (>= the floor below).
+    "@ex-machina/opencode-anthropic-auth" = "1.8.4";
+    "opencode-beads" = "0.8.0";
+  };
+
+  # opencode.base.json's `plugin` array carries bare package names so the file
+  # stays readable and version-free; the pins are applied here. A bare name that
+  # has no pin is passed through untouched (e.g. a relative "./plugins/..." path
+  # would never match a pin key anyway).
+  pluginSpecs = map
+    (p: if opencodePluginPins ? ${p} then "${p}@${opencodePluginPins.${p}}" else p)
+    (opencodeBase.plugin or []);
+
   # codex-lb (devbox only): ChatGPT/Codex-subscription models served by the local
   # codex-lb rotator (127.0.0.1:2455). These model IDs only exist for a ChatGPT
   # subscription account routed through codex-lb — NOT the direct OpenAI API — so
@@ -397,7 +458,7 @@ let
     # experimental.chat.system.transform hook, which pkgs/caveman patches to
     # skip compaction. See pkgs/caveman/compaction-exemption.js.
     {
-      plugin = (opencodeBase.plugin or []) ++ [ "./plugins/caveman/plugin.js" ];
+      plugin = pluginSpecs ++ [ "./plugins/caveman/plugin.js" ];
     }
     // (lib.optionalAttrs isDevbox {
       model = devboxModel;
@@ -721,43 +782,14 @@ in
     [[ "$base" == "$runtime" ]] || rm -f "$base"
   '';
 
-  # Pinned npm-resolved plugin versions. Add new entries here when adding more
-  # plugins to opencode.base.json's `plugin` array that need version pinning.
-  # Format: { "<package-name>" = "<exact-version>"; }
   # WARNING: opencode caches resolved plugins under ~/.cache/opencode/packages/
-  # keyed by the version spec at first-fetch time (e.g. <pkg>@latest/). The
-  # cache never re-resolves on its own, so bumping the pin below WITHOUT
-  # invalidating the cache silently keeps the old version live in opencode-serve.
-  # The activation script below handles the invalidation; do not skip it.
+  # keyed by the version spec in the runtime `plugin` array (e.g. <pkg>@1.2.3/).
+  # The cache never re-resolves on its own, so bumping a pin in
+  # `opencodePluginPins` WITHOUT invalidating the cache silently keeps the old
+  # version live in opencode-serve. This script handles the invalidation; do not
+  # skip it. The pin table itself lives at module scope — see the long note
+  # there for why it must also drive `pluginSpecs`.
   home.activation.installOpencodePlugins = let
-    opencodePluginPins = {
-      # REQUIRED for the devbox TeamClaude routing — this plugin shapes opencode's
-      # requests into Claude-Code OAuth form (anthropic-beta, ?beta=true, "You are
-      # Claude Code" system identity, mcp_ tool prefixes) which premium models
-      # require; TeamClaude only swaps the token, it does NOT shape. Removing it
-      # makes opus/sonnet 429 and TeamClaude retry-loop forever. See
-      # injectTeamclaudeBaseUrl below for the full coexistence rationale.
-      #
-      # >= 1.8.2 is REQUIRED, not merely preferred. Anthropic gates model access
-      # on the Claude Code version the client reports, SERVER-SIDE. Releases up
-      # to 1.8.1 hardcode 2.1.87, which newer models reject:
-      #
-      #   400 invalid_request_error / error_code: claude_code_version_too_old
-      #   "Claude Code 2.1.87 does not support this model; version 2.1.251 or
-      #    newer is required."
-      #
-      # opencode surfaces that as an EMPTY assistant turn with no visible error,
-      # so it presents as "the agent is down". It broke oracle-fable and
-      # adversarial-reviewer-fable the moment #443/#444 repinned them to
-      # claude-fable-5-1. 1.8.2 reports 2.1.258 and derives the user-agent from
-      # the same constant (upstream PR #223).
-      #
-      # This will recur whenever Anthropic gates a newer model than the bundled
-      # constant. Diagnose from the stored `error` on the assistant message in
-      # opencode.db before suspecting agent config; the fix is a pin bump here.
-      "@ex-machina/opencode-anthropic-auth" = "1.8.2";
-      "opencode-beads" = "0.6.0";
-    };
     pinJson = builtins.toJSON opencodePluginPins;
 
     # Minimum Claude Code version the pinned anthropic-auth plugin must report.
@@ -1032,7 +1064,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.basecamp)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Basecamp MCP credentials not found in Keychain; removed mcp.basecamp from config" >&2
+        echo "opencode MCP: basecamp not configured (optional) -- no Basecamp credentials in Keychain; omitting mcp.basecamp." >&2
       # Both credentials present: inject full Basecamp MCP config
       # Disabled by default; enable manually when needed
       # NOTE: elif (not a separate `if` after `exit 0`) — an `exit` here would
@@ -1089,7 +1121,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.slack) | del(.mcp."slack-ro")' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Slack MCP xoxp token not found in Keychain; removed mcp.slack + mcp.slack-ro from config" >&2
+        echo "opencode MCP: slack not configured (optional) -- no 'slack-mcp-xoxp-token' in Keychain; omitting mcp.slack + mcp.slack-ro. To enable, see the slack-mcp-setup skill." >&2
       # Token present: inject Slack MCP config with xoxp auth
       # MCP is disabled by default; enable manually or use dedicated slack agent when needed.
       # Two variants: `slack` (read + write) and `slack-ro` (read-only). Both run
@@ -1214,7 +1246,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.slack) | del(.mcp."slack-ro")' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Slack MCP xoxp token not found in sops; removed mcp.slack + mcp.slack-ro from config (secret absent -> reference would fail the whole config load)" >&2
+        echo "opencode MCP: slack not configured (optional) -- no slack_mcp_xoxp_token in sops; omitting mcp.slack + mcp.slack-ro (a dangling secret reference would fail the WHOLE config load, so omitting is mandatory, not cosmetic). To enable, see the slack-mcp-setup skill." >&2
       # Token present: inject Slack MCP config with xoxp auth.
       # Two variants: `slack` (read + write) and `slack-ro` (read-only). Both run
       # the PINNED localPkgs.slack-mcp-server build (see pkgs/slack-mcp-server).
@@ -1306,7 +1338,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.pagerduty)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "PagerDuty API token not found in Keychain; removed mcp.pagerduty from config" >&2
+        echo "opencode MCP: pagerduty not configured (optional) -- no 'pagerduty-user-api-key' in Keychain; omitting mcp.pagerduty. To enable, see the pagerduty-mcp-setup skill." >&2
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
@@ -1343,7 +1375,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.pagerduty)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "PagerDuty API token not found in sops; removed mcp.pagerduty from config" >&2
+        echo "opencode MCP: pagerduty not configured (optional) -- no pagerduty_user_api_key in sops; omitting mcp.pagerduty. To enable, see the pagerduty-mcp-setup skill." >&2
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
@@ -1382,7 +1414,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.rollbar)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Rollbar access token not found in Keychain; removed mcp.rollbar from config" >&2
+        echo "opencode MCP: rollbar not configured (optional) -- no 'rollbar-access-token' in Keychain; omitting mcp.rollbar. To enable, see the rollbar-mcp-setup skill." >&2
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
@@ -1419,7 +1451,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.rollbar)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Rollbar access token not found in sops; removed mcp.rollbar from config" >&2
+        echo "opencode MCP: rollbar not configured (optional) -- no rollbar_access_token in sops; omitting mcp.rollbar. To enable, see the rollbar-mcp-setup skill." >&2
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
@@ -1474,7 +1506,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.devcycle)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "DevCycle: no client id/secret (Keychain) and no SSO auth.yml; removed mcp.devcycle from config" >&2
+        echo "opencode MCP: devcycle not configured (optional) -- no 'devcycle-client-id'/'devcycle-client-secret' in Keychain and no ~/.config/devcycle/auth.yml; omitting mcp.devcycle. To enable, see the setting-up-devcycle-mcp skill." >&2
       fi
       # NOTE: no 'exit' after the removal above — an exit aborts the whole
       # concatenated HM activation. Gate the inject on creds/SSO instead.
@@ -1533,7 +1565,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.devcycle)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "DevCycle: no client id/secret (sops) and no SSO auth.yml; removed mcp.devcycle from config" >&2
+        echo "opencode MCP: devcycle not configured (optional) -- no devcycle_client_id/devcycle_client_secret in sops and no ~/.config/devcycle/auth.yml; omitting mcp.devcycle. To enable, see the setting-up-devcycle-mcp skill." >&2
       fi
       # NOTE: no 'exit' after the removal above — an exit aborts the whole
       # concatenated HM activation. Gate the inject on creds/SSO instead.
@@ -2059,7 +2091,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.datadog)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Datadog PAT not found in Keychain (dd-pat); removed mcp.datadog from config" >&2
+        echo "opencode MCP: datadog not configured (optional) -- no 'dd-pat' in Keychain; omitting mcp.datadog." >&2
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
@@ -2095,7 +2127,7 @@ in
           ${pkgs.jq}/bin/jq 'del(.mcp.datadog)' "$runtime" > "$tmp"
           mv "$tmp" "$runtime"
         fi
-        echo "Datadog PAT not found in sops (dd_pat); removed mcp.datadog from config" >&2
+        echo "opencode MCP: datadog not configured (optional) -- no dd_pat in sops; omitting mcp.datadog." >&2
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
