@@ -163,17 +163,31 @@ Host cloudbox-cutover
     ServerAliveCountMax 3
     RemoteForward 2222 127.0.0.1:22
 
-# On-demand chart tunnel: forwards this Mac's 4710 to cloudbox's loopback 4710
-# where \`oc-tags serve\` runs. Deliberately NOT in the always-on
-# \`cloudbox-tunnel\` block above: that runs under ExitOnForwardFailure=yes from
-# a LaunchAgent, so a busy :4710 on this Mac would kill the whole tunnel,
-# taking gclpr (2850), chatgpt-relay (3033) and the Jenkins :8443 forward with
-# it. Note this is a LocalForward -- the opposite direction to
-# \`cloudbox-cutover\`'s RemoteForward.
+# Chart tunnel: reaches cloudbox's loopback 4710, where \`oc-tags serve\` runs.
+# No manual \`ssh -N\` is needed -- just open http://127.0.0.1:4710. The
+# socket-activated \`cloudbox-chart-tunnel\` LaunchAgent
+# (users/dev/home.darwin.nix) owns that port and runs \`ssh -W\` through THIS
+# host block on demand. Since \`-W\` implies ClearAllForwardings, the
+# LocalForward below is ignored on that path; it is what makes the manual
+# \`ssh -N cloudbox-chart\` fallback still work.
+#
+# Deliberately NOT a forward on the always-on \`cloudbox-tunnel\` block above --
+# not because that block is remote-only (it already has LocalForward 3334), but
+# because :4710 has plausible local colliders that 3334 does not: a
+# muscle-memory \`ssh -N cloudbox-chart\`, or an \`oc-tags serve\` running on this
+# Mac. That block runs under ExitOnForwardFailure=yes, so a bind clash there
+# kills the whole tunnel, taking gclpr (2850), chatgpt-relay (3033) and the
+# Jenkins :8443 forward with it -- the same reason LocalForward 1455 is owned
+# exclusively by devbox-tunnel (see the note above). A separate agent contains
+# the blast radius to the chart.
+#
+# No ForwardAgent here: this host exists only to carry the forward, and the
+# LaunchAgent's \`ssh -N\` opens no session channel to forward an agent over
+# anyway. Omitting it means an interactive \`ssh cloudbox-chart\` run while
+# debugging does not hand this Mac's SSH agent to a public-IP VM.
 Host cloudbox-chart
     HostName $CLOUDBOX_IP
     User dev
-    ForwardAgent yes
     ServerAliveInterval 60
     ServerAliveCountMax 3
     LocalForward 4710 127.0.0.1:4710

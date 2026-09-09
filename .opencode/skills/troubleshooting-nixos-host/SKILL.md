@@ -26,12 +26,77 @@ Port forwarding runs via **persistent SSH tunnel launchd agents** on macOS (alwa
 | Agent | SSH Host | Purpose |
 |-------|----------|---------|
 | `devbox-dev-tunnel` | `devbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay |
-| `cloudbox-dev-tunnel` | `cloudbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay |
+| `cloudbox-dev-tunnel` | `cloudbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay + Jenkins |
+| `cloudbox-chart-tunnel` | `cloudbox-chart` | `oc-tags serve` chart on 127.0.0.1:4710 (socket-activated) |
 
 Check tunnel status:
 ```bash
-launchctl list | grep dev-tunnel
+launchctl list | grep tunnel
 ```
+
+`cloudbox-chart-tunnel` behaves differently from the other two, so don't debug
+it the same way. It is **socket-activated**: launchd owns :4710 and spawns one
+`ssh -W` per connection. Expect **no running process and no connection while
+nobody is viewing the chart** -- `launchctl list` showing it with no PID is the
+healthy idle state, not a fault. It also has no keepalive loop, so there is
+nothing to `kickstart`; forcing it to run just exits immediately (no socket on
+stdin).
+
+It is separate from `cloudbox-dev-tunnel` because :4710 binds on the *Mac* and
+can collide with a hand-run `ssh -N cloudbox-chart` or a local `oc-tags serve`.
+That block runs `ExitOnForwardFailure=yes`, where one bind clash aborts the
+whole ssh and would take gclpr, chatgpt-relay and Jenkins with it.
+
+**A lost bind does not heal itself.** If something else held :4710 when the
+agent loaded, launchd failed the bind once and gave up -- unlike the keepalive
+tunnels, nothing retries. Killing the collider is necessary but not sufficient;
+you must also re-bootstrap:
+
+```bash
+lsof -nP -iTCP:4710 -sTCP:LISTEN   # find and stop the collider first
+launchctl bootout gui/$UID/org.nix-community.home.cloudbox-chart-tunnel
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/org.nix-community.home.cloudbox-chart-tunnel.plist
+```
+
+Re-running `darwin-rebuild switch` does the same thing if you prefer.
+
+Triage:
+
+```bash
+netstat -an | grep '127.0.0.1.4710 ' | grep LISTEN   # is the listener up?
+tail ~/Library/Logs/cloudbox-chart-tunnel.err.log
+```
+
+Use `netstat`, **not** `lsof`, to check this listener. `launchd` holds the
+socket on the agent's behalf, and `lsof -iTCP:4710` reports *nothing* for it
+even when it is healthy and serving -- with or without `-sTCP:LISTEN`, and as
+your own user. `lsof` is still the right tool for asking who holds :4710 when
+you suspect a *collider* (a hand-run `ssh -N`, a local `oc-tags serve`), since
+those are ordinary processes and do show up.
+
+| Browser symptom | Means |
+|---|---|
+| Connection refused | launchd is not holding :4710 -- agent not loaded, or lost the bind to a collider |
+| Reset / empty response, **instantly** | Listener fine, reached cloudbox, but `oc-tags serve` is down there |
+| Reset / empty response after **~10s** | Could not reach cloudbox at all -- `ConnectTimeout=10` expired. Stale IP (re-run `scripts/update-ssh-config.sh`), or the box is down |
+| Reset / empty response, **fast, with a new err-log line** | Reached cloudbox, SSH refused: changed host key, or auth failed under `BatchMode=yes` |
+| Loads, but stale/wrong | Something *else* may own :4710 (stale manual ssh, local `oc-tags serve`) |
+
+Timing is the disambiguator, so notice it before theorising. The quickest
+cross-check: if `cloudbox-dev-tunnel` is also unhealthy, the problem is the box
+or its IP, not the chart plumbing. Auth is the same story -- this agent uses the
+same ssh binary and launchd credential context as the dev tunnels, so it cannot
+fail authentication alone.
+
+A page load takes ~1.0s, about half of which is one SSH handshake -- that is
+normal for on-demand activation, not a symptom. During a load you will briefly
+see an `ssh -W` process and a second `launchctl list` entry with a UUID suffix;
+both should disappear within seconds of the connection closing. `ssh -W`
+processes that accumulate and outlive their connections would be a real fault.
+
+Note the err log is shared with whatever ran before it, and `sshTunnelCommand`
+lines in it (`starting ... tunnel`, `retrying in 10s`) are from the older
+keepalive design, not this agent.
 
 Restart a tunnel:
 ```bash
