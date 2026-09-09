@@ -66,6 +66,7 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 | [working-with-kubernetes](skills/working-with-kubernetes/SKILL.md) | work-only | Running commands in company pods: the internal `ba` CLI estate, the Azure AKS estate, and generic `kubectl` (pod interaction, file transfer, distroless debugging, kubeconfig). Which CLI/kubeconfig/namespace a given repo uses is in the skill's Confluence-fetched `INTERNAL.md` — check it before concluding a pod is unreachable. |
 | [using-gcloud-bq-cli](skills/using-gcloud-bq-cli/SKILL.md) | work-only | Gotchas for `gcloud` and `bq`: service-account auth, IAM permission checks, BigQuery access errors. |
 | [using-buildbuddy](skills/using-buildbuddy/SKILL.md) | work-only | Fetch raw, untruncated test logs from a BuildBuddy invocation by URL/ID via the `bb-test-log` helper or the enterprise API directly. |
+| [reading-jenkins-builds](skills/reading-jenkins-builds/SKILL.md) | work-only | Explain a pending/failed/stuck `continuous-integration/jenkins/*` check from the Jenkins side: eight-call recipe (`curl -g`, `wfapi`, node/queue state), failure signatures that separate controller trouble (disk full, `StreamException`, dropped runs) from real PR failures, and the tunnel-refused-means-retry rule. Hostname, job folders, token scope and contacts are in its Confluence-fetched `INTERNAL.md`. |
 | [shepherding-pull-requests](skills/shepherding-pull-requests/SKILL.md) | work-only | The whole arc of a PR you authored: pre-PR checks, title/description, and the monitoring loop until it lands. PR creation is not a terminal state — invoke it the moment `gh pr create` returns, not only once something looks wrong. Replying and resolving every inline thread, and re-requesting a non-approving **human** reviewer, are standing defaults nobody should have to ask for — but never re-request or trigger-comment an automated reviewer, and never `gh pr merge`. Also covers the stalled-but-healthy trap (green, fully answered, nobody pending) and the fact that `lgtm-shepherd` wakes **this session** for `needs_reply`/`ci_red`/`conflicted` rather than only notifying the human. |
 | [cleaning-disk](skills/cleaning-disk/SKILL.md) | work-only | Reclaim disk on devbox/macOS: Nix store/generations, Python caches, app caches, project bloat. |
 
@@ -171,34 +172,16 @@ the Atlassian vars, etc. are all available in opencode bash sessions.
 The read is host-safe: where `/run/secrets/*` does not exist
 (devbox/macOS) each lookup returns `undefined` and nothing is injected.
 
-### Jenkins from cloudbox goes through the Mac, and fails loud
+### Jenkins is reachable, through a path that fails loud
 
-`jenkins.util.b--a.co` allowlists a dedicated Cloudflare Zero Trust egress IP
-that only the Mac's WARP client has. cloudbox cannot reach it directly, and
-every alternative was measured dead (bead `workstation-h559`: not a Cloudflare
-Access app; WARP enrolment is policy-locked to full tunnel; BA prod/staging EKS
-pods time out identically; no role in the AWS account that holds it). So on
-cloudbox `/etc/hosts` maps the name to `127.0.0.1`, a root-bound loopback `:443`
-(`jenkins-mac-proxy`) forwards to `:8443`, and `:8443` is a `RemoteForward` the
-Mac's always-on `cloudbox-dev-tunnel` opens over its own WARP session
-(`scripts/update-ssh-config.sh`). Plain `curl https://jenkins.util.b--a.co/...`
-with `JENKINS_USER`/`JENKINS_API_TOKEN` therefore works — TLS terminates at
-Jenkins, cert and SNI intact — and so does `ba`.
-
-Read the failure correctly. **Connection refused or reset on that URL means the
-Mac tunnel is down** (Mac asleep, WARP reconnecting, tunnel flapping — it drops
-~35×/day on sleep and comes back within ~2 min). It does **not** mean Jenkins is
-unreachable, and it is not a reason to re-investigate the network path. Retry
-after a minute or two; if it stays refused for >10 min, tell the human the Mac
-tunnel is down. A 403 means it *worked* at the network layer and the token was
-rejected. A 10 s hang means the hosts entry is missing (rebuild not applied).
-
-Two facts to hold in mind when using it: this path lends the Mac's Zero Trust
-identity to a public VM, and every request appears in Cloudflare Gateway logs
-as the Mac — do not use it for anything you would not do from the Mac itself.
-And `JENKINS_API_TOKEN` carries its Jenkins user's *full* permission set, which
-this path now makes reachable from every process on cloudbox; treat it as
-read-only tooling for build logs and job status, not as a deploy trigger.
+`https://$JENKINS_HOST` works from cloudbox and the Mac with
+`JENKINS_USER`/`JENKINS_API_TOKEN` (all three injected into every bash call).
+On cloudbox the path borrows the Mac's VPN session, so **connection refused or
+reset means the Mac tunnel is down — retry in ~2 min**, not "Jenkins is
+unreachable". Everything else — recipes, failure signatures, what the token can
+and must not do, and the org-specific facts (hostname, job folders, contacts;
+fetched from Confluence into `INTERNAL.md`) — is in the `reading-jenkins-builds`
+skill. Load it before touching Jenkins.
 
 ## Backgrounding Long-Running Processes
 

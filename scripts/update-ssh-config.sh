@@ -90,6 +90,17 @@ if [ -z "$CLOUDBOX_IP" ]; then
     echo "Skipping cloudbox block"
 fi
 
+# Jenkins hostname for the cloudbox RemoteForward below. Org-identifying, so it
+# lives in the Keychain (service `jenkins-host`), never in this file. When the
+# entry is absent the forward is simply omitted and the tunnel still comes up.
+JENKINS_HOST=$(/usr/bin/security find-generic-password -s jenkins-host -w 2>/dev/null) || true
+if [ -n "$JENKINS_HOST" ]; then
+    JENKINS_FORWARD="    RemoteForward 8443 ${JENKINS_HOST}:443"
+else
+    echo "Warning: Keychain entry jenkins-host missing; omitting the Jenkins RemoteForward (reading-jenkins-builds skill)"
+    JENKINS_FORWARD="    # RemoteForward 8443 <jenkins-host>:443  (Keychain entry jenkins-host was missing when this was generated)"
+fi
+
 if [ -n "$CLOUDBOX_IP" ]; then
     read -r -d '' CLOUDBOX_BLOCK << EOF || true
 $CLOUDBOX_MARKER_START
@@ -122,14 +133,15 @@ Host cloudbox-tunnel
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
     RemoteForward 2850 127.0.0.1:2850
-    # Jenkins over this Mac's WARP tunnel. cloudbox's loopback :443 proxies to
-    # this port and /etc/hosts maps jenkins.util.b--a.co -> 127.0.0.1 there
+    # Jenkins over this Mac's VPN session. cloudbox's loopback :443 proxies to
+    # this port and its /etc/hosts maps the Jenkins hostname -> 127.0.0.1
     # (hosts/cloudbox/configuration.nix, jenkins-mac-proxy). The destination is
     # dialled per-connection, so this line cannot fail the tunnel at startup
-    # even when WARP is not yet up. Keep it OUT of \`Host cloudbox\` above: an
+    # even when the VPN is not yet up. Keep it OUT of \`Host cloudbox\` above: an
     # interactive login holding 8443 would kill the tunnel on its next restart
-    # (ExitOnForwardFailure). Bead workstation-h559.
-    RemoteForward 8443 jenkins.util.b--a.co:443
+    # (ExitOnForwardFailure). Hostname from Keychain \`jenkins-host\`; see the
+    # reading-jenkins-builds skill. Bead workstation-h559.
+$JENKINS_FORWARD
 
 # On-demand reverse SSH: opens cloudbox 127.0.0.1:2222 -> Mac :22 ONLY while a
 # human runs \`ssh cloudbox-cutover\` from the Mac. This is the intentional

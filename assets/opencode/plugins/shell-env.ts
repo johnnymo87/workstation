@@ -67,6 +67,7 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
     ["ba_cli_repo", "BA_CLI_REPO"],
     ["jenkins_api_token", "JENKINS_API_TOKEN"],
     ["jenkins_user", "JENKINS_USER"],
+    ["jenkins_host", "JENKINS_HOST"],
     ["bundle_gem_fury_io", "BUNDLE_GEM__FURY__IO"],
     ["bundle_enterprise_contribsys_com", "BUNDLE_ENTERPRISE__CONTRIBSYS__COM"],
     ["bundle_gems_graphql_pro", "BUNDLE_GEMS__GRAPHQL__PRO"],

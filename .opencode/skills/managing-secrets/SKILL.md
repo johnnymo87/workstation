@@ -13,6 +13,7 @@ Secrets are managed with sops-nix using age encryption. They're encrypted in the
 |--------|-------|-------------------|
 | `github_ssh_key` | Git operations | Deployed to `~/.ssh/id_ed25519_github` |
 | `cloudflared_tunnel_token` | Cloudflare tunnel | Systemd service reads from `/run/secrets/` |
+| `jenkins_host` | **cloudbox only.** Jenkins hostname (org-identifying). | Exported as `JENKINS_HOST`; also substituted into `/etc/hosts` via `sops.templates.hosts` (see `hosts/cloudbox/configuration.nix`). Mac equivalent: Keychain `jenkins-host`. |
 | `cloudflare_api_token` | Wrangler CLI | Exported as `CLOUDFLARE_API_TOKEN` in bash |
 | `claude_personal_oauth_token` | **cloudbox only** as of 2026-09-02. Removed from devbox: nothing consumed it. The old entry claimed the `@ex-machina/opencode-anthropic-auth` plugin did — it does not (zero references to `CLAUDE_CODE_OAUTH_TOKEN` in the shipped dist), and on devbox that plugin runs shape-only with a dummy credential while TeamClaude owns the tokens. | Exported as `CLAUDE_CODE_OAUTH_TOKEN` on cloudbox. `shell-env.ts` still maps it for bash tool calls, but the mapping is guarded on `/run/secrets/<name>` existing, so it is inert on devbox. |
 | `ccr_api_key` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |

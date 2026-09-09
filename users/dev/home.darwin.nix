@@ -457,6 +457,10 @@ lib.mkIf isDarwin {
       unset JENKINS_API_TOKEN_VAL
       JENKINS_USER_VAL="$(/usr/bin/security find-generic-password -s jenkins-user -w 2>/dev/null)" && export JENKINS_USER="$JENKINS_USER_VAL"
       unset JENKINS_USER_VAL
+      # Jenkins hostname (org-identifying; see the reading-jenkins-builds skill).
+      # Also read by scripts/update-ssh-config.sh for the cloudbox RemoteForward.
+      JENKINS_HOST_VAL="$(/usr/bin/security find-generic-password -s jenkins-host -w 2>/dev/null)" && export JENKINS_HOST="$JENKINS_HOST_VAL"
+      unset JENKINS_HOST_VAL
     '')
     ];
     shellAliases = {

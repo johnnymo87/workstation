@@ -38,6 +38,7 @@ let
     "escalating-azure-aks-rbac"
     "monitoring-deployments"
     "pagerduty-mcp-setup"
+    "reading-jenkins-builds"
     "rollbar-mcp-setup"
     "shepherding-pull-requests"
     "slack-mcp-setup"
@@ -136,6 +137,7 @@ let
     { pageId = "4909269028"; skillName = "working-with-kubernetes"; fileName = "INTERNAL.md"; }
     { pageId = "5386600450"; skillName = "escalating-azure-aks-rbac"; fileName = "INTERNAL.md"; }
     { pageId = "5398265910"; skillName = "monitoring-deployments"; fileName = "INTERNAL.md"; }
+    { pageId = "5667029033"; skillName = "reading-jenkins-builds"; fileName = "INTERNAL.md"; }
   ];
 
   # Activation script: fetch Confluence pages into skill directories

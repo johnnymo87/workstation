@@ -418,6 +418,10 @@ lib.mkIf isCloudbox {
     if [ -r /run/secrets/jenkins_user ]; then
       export JENKINS_USER="$(cat /run/secrets/jenkins_user)"
     fi
+    # Jenkins hostname (org-identifying; see the reading-jenkins-builds skill)
+    if [ -r /run/secrets/jenkins_host ]; then
+      export JENKINS_HOST="$(cat /run/secrets/jenkins_host)"
+    fi
 
     # Bundler private gem source credentials
     if [ -r /run/secrets/bundle_gem_fury_io ]; then
