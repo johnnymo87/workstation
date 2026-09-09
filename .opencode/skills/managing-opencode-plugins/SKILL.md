@@ -12,7 +12,24 @@ the version spec at first-fetch time. Bumping the version pin in
 `users/dev/opencode-config.nix` is necessary but **not sufficient** — without
 cache invalidation, opencode-serve continues to load the old version forever.
 
-The `installOpencodePlugins` activation already automates this. If you bypass
+A pin must do **two** things, and for months it only did one:
+
+1. **Rewrite the runtime spec.** `opencodePluginPins` feeds `pluginSpecs`,
+   which turns the bare names in `opencode.base.json` into `<pkg>@<version>`
+   in the generated `opencode.json`. *This* is what makes opencode fetch and
+   cache the pinned version.
+2. **Invalidate a mismatched cache**, which the activation loop does.
+
+Until 2026-09-09 only (2) existed. The runtime array carried bare names,
+opencode normalised them to `@latest`, and the pin had **no delivery
+mechanism at all** — it could not pin, and it could not downgrade. What it
+did produce was *churn*: every rebuild saw `latest != pin`, purged, and
+opencode immediately re-downloaded `latest`. The log line looked like an
+impending downgrade and was nothing of the sort. If you are reading a
+`cached at X, pinned at Y -> purging` line from before that date, that is
+what it means.
+
+The `installOpencodePlugins` activation automates both halves. If you bypass
 it (manual edits, fresh clones, foreign machines), use the recipe at the
 bottom of this file.
 
@@ -62,39 +79,55 @@ version from `~/.cache/opencode/packages/`, the cache wins.
 
 ## How `installOpencodePlugins` Handles This
 
-In `users/dev/opencode-config.nix`, the activation:
+`opencodePluginPins` lives at **module scope** in
+`users/dev/opencode-config.nix` (not inside the activation). Two consumers
+read it:
 
-1. Reads the `opencodePluginPins` attrset (currently just
-   `@ex-machina/opencode-anthropic-auth`).
-2. Runs `npm install <pkg>@<pin> --no-save` (legacy/parallel copy — see
-   note above; we keep it as a side-effect documentation of intent).
-3. **For each pin, checks the cached version and `rm -rf`s the cache dir
-   if it doesn't match.**
-4. **If anything was invalidated, restarts opencode-serve via sudo** (devbox
-   and cloudbox only — both have `wheelNeedsPassword=false`).
+1. **`pluginSpecs`** — rewrites `opencode.base.json`'s bare `plugin` entries
+   into `<pkg>@<version>` for the generated `opencode.json`. Entries with no
+   pin (e.g. `./plugins/caveman/plugin.js`) pass through untouched. Pins are
+   asserted to be **exact** versions at eval time; a range or a dist-tag
+   would re-create the churn described above and is rejected.
+2. **The activation**, which:
+   - runs ONE `npm install <pkg1>@<v1> <pkg2>@<v2> --no-save` for all pins
+     (never one per package — `--no-save` prunes the previous one as
+     extraneous, leaving only the last pin on disk);
+   - for each pin, checks each cached copy's version and `rm -rf`s the dir
+     if it doesn't match.
 
-Result: bumping the version pin and running `home-manager switch` Just
-Works™. You'll see log lines like:
+Log lines look like:
 
 ```
 installOpencodePlugins: @ex-machina/opencode-anthropic-auth cached at 1.2.0, pinned at 1.8.0 -> purging /home/dev/.cache/opencode/packages/@ex-machina/opencode-anthropic-auth@latest
-installOpencodePlugins: restarted opencode-serve after cache invalidation
+installOpencodePlugins: stale plugin cache purged. Running serves keep the OLD plugin until the pool restarts.
 ```
 
-When pin == cache, no purge, no restart, no log lines (idempotent).
+When pin == cache, no purge, no log lines (idempotent).
+
+**The activation does not restart opencode-serve.** It prints options and
+lets you choose: the nightly 03:00 `nightly-restart-background.timer` picks
+it up automatically within a day, or `reset-workspace` does it now and kills
+live sessions. Note that after a purge the pinned version is **not yet on
+disk** — opencode re-fetches it from npm at that restart, so the restart
+needs registry access.
 
 ## Adding a New Pinned Plugin
 
 1. Add the entry to `opencode.base.json`'s `plugin: [...]` array.
-2. Add the version pin to `opencodePluginPins` in
-   `users/dev/opencode-config.nix:installOpencodePlugins`:
+2. Add the version pin to the module-scope `opencodePluginPins` attrset in
+   `users/dev/opencode-config.nix` (search for `opencodePluginPins =`; it sits
+   above `pluginSpecs`, NOT inside `installOpencodePlugins`):
 
    ```nix
    opencodePluginPins = {
-     "@ex-machina/opencode-anthropic-auth" = "1.8.0";
-     "your-new-plugin" = "0.3.1";  # add this
+     "@ex-machina/opencode-anthropic-auth" = "1.8.4";
+     "your-new-plugin" = "0.3.1";  # add this — exact version, no ranges
    };
    ```
+
+   Adding it here is what makes the runtime spec `your-new-plugin@0.3.1`.
+   A bare entry in `opencode.base.json` with no pin resolves to `latest` and
+   is effectively unpinned.
 
 3. Run `nix run home-manager -- switch --flake .#$(cat /etc/hostname)`.
 4. Verify with the `find ... package.json` recipe above.
@@ -104,7 +137,8 @@ When pin == cache, no purge, no restart, no log lines (idempotent).
 1. Check what's on npm: `npm view <plugin-name> versions --json | jq '.[-5:]'`
 2. Edit the version in `opencodePluginPins`.
 3. `nix run home-manager -- switch --flake .#$(cat /etc/hostname)`.
-4. Watch for `installOpencodePlugins:` log lines confirming purge + restart.
+4. Watch for `installOpencodePlugins:` log lines confirming the purge. The new
+   version goes live at the next pool restart, not at switch time.
 5. Smoke-test by sending a request that exercises the plugin (e.g. for
    `@ex-machina/opencode-anthropic-auth`, send any anthropic-provider message
    and confirm `cost: 0` in the response — that means OAuth headers were

@@ -390,13 +390,26 @@ let
     "opencode-beads" = "0.8.0";
   };
 
+  # Every pin must be an EXACT version, never a range or a dist-tag. A pin of
+  # "^1.8.0" or "latest" would key the cache on that literal spec, resolve to
+  # some concrete version, and then fail the `cached_ver != pinned_ver` check on
+  # every single activation — reintroducing the purge/refetch churn this whole
+  # change exists to kill, through a new door. Fail at eval instead.
+  _assertExactPins = lib.mapAttrsToList
+    (name: ver: lib.throwIf (builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+" ver == null)
+      ''opencodePluginPins."${name}" = "${ver}" is not an exact version. Pins must be exact (e.g. "1.8.4"); ranges and dist-tags break cache invalidation.''
+      null)
+    opencodePluginPins;
+
   # opencode.base.json's `plugin` array carries bare package names so the file
   # stays readable and version-free; the pins are applied here. A bare name that
   # has no pin is passed through untouched (e.g. a relative "./plugins/..." path
   # would never match a pin key anyway).
-  pluginSpecs = map
+  # deepSeq, not seq: the list is already in weak head normal form, so `seq`
+  # would never force the elements and the throwIf would never fire.
+  pluginSpecs = lib.deepSeq _assertExactPins (map
     (p: if opencodePluginPins ? ${p} then "${p}@${opencodePluginPins.${p}}" else p)
-    (opencodeBase.plugin or []);
+    (opencodeBase.plugin or []));
 
   # codex-lb (devbox only): ChatGPT/Codex-subscription models served by the local
   # codex-lb rotator (127.0.0.1:2455). These model IDs only exist for a ChatGPT
@@ -809,31 +822,55 @@ in
     pins='${pinJson}'
     cache_invalidated=0
 
-    # For each pinned plugin: install via npm into ~/.config/opencode/node_modules/
-    # AND check ~/.cache/opencode/packages/ for stale copies that opencode-serve
-    # would actually load (it prefers cache over node_modules).
+    # Install ALL pinned plugins in ONE npm invocation.
+    #
+    # This must not be done one-per-package inside the loop below. `npm install
+    # <pkg> --no-save` does not record <pkg> in package.json, so the NEXT
+    # --no-save install treats the previous one as extraneous and prunes it.
+    # Sequential installs therefore leave only the last pin on disk, which is
+    # exactly what cloudbox showed: node_modules/opencode-beads present,
+    # node_modules/@ex-machina/ empty. That silently disabled the
+    # CLAUDE_CODE_VERSION assertion below, which reads its constant out of
+    # node_modules and skips when the file is absent.
+    #
+    # Note this leg is NOT on opencode's plugin-resolution path (opencode loads
+    # from ~/.cache/opencode/packages/, never from here — see the
+    # managing-opencode-plugins skill). It exists to materialise the
+    # @opencode-ai/plugin peer dep and to fail early if a pin does not exist on
+    # npm. Failure to reach the registry must not abort the whole switch, hence
+    # the `|| true`; the assertion below reports the consequence.
+    mapfile -t plugin_specs < <(echo "$pins" | jq -r 'to_entries | .[] | "\(.key)@\(.value)"')
+    if [ ''${#plugin_specs[@]} -gt 0 ]; then
+      npm install "''${plugin_specs[@]}" --no-save >/dev/null 2>&1 || \
+        echo "installOpencodePlugins: WARNING: npm install of ''${plugin_specs[*]} failed (registry unreachable, or a pinned version does not exist). Cache checks below still run." >&2
+    fi
+
+    # For each pinned plugin, check ~/.cache/opencode/packages/ for stale copies
+    # that opencode-serve would actually load (it prefers cache over node_modules).
     while IFS=$'\t' read -r pkg pinned_ver; do
       [ -n "$pkg" ] || continue
 
-      npm install "''${pkg}@''${pinned_ver}" --no-save >/dev/null 2>&1
-
       # Find any cached copies of this package and purge those whose installed
-      # version doesn't match the pin. The cache key is the version spec at
-      # first-fetch time, so we cover BOTH shapes:
+      # version doesn't match the pin. The cache key is the version spec in the
+      # runtime `plugin` array at first-fetch time, so we cover THREE shapes:
       #
-      #   <name>@<spec>  what current opencode writes — a bare entry in the
-      #                  `plugin` array is normalised to "@latest"
-      #   <name>         bare directories left by older opencode builds
+      #   <name>@<pin>   what opencode writes NOW that pluginSpecs emits an
+      #                  explicit version. This is the live one.
+      #   <name>@latest  what it wrote while the array carried bare names.
+      #                  Dead after this change; purged once, then never
+      #                  recreated, because nothing resolves `latest` anymore.
+      #   <name>         bare directories left by older opencode builds.
       #
-      # Only the first shape is live today, and the pre-2026-09-02 "<name>@*"
-      # glob did cover it. The bare directories are stale: devbox had one at
-      # 1.8.1 that survived every pin check, while the loaded "@latest" copy
-      # tracked the pin correctly. Purging both is hygiene, not a bug fix —
-      # a stale copy is only inert until some future opencode resolves that
-      # spec shape again, and it makes "which copy is live?" a question you
-      # can answer by looking rather than by testing.
+      # Note the consequence for reading the cache by eye: immediately after
+      # this change a host can hold all three directories at the SAME version,
+      # so "which copy is live?" is answered by the spec in the generated
+      # opencode.json, not by which directory exists. The stale two are purged
+      # on the first activation whose pin differs from their contents.
       #
-      # (Verified after a purge: opencode recreated only "@latest".)
+      # One case this does NOT cover: a PROJECT-level opencode.json that lists
+      # a bare `opencode-beads`. opencode dedupes plugin origins by package
+      # name with last-one-wins, so such a project reintroduces the `@latest`
+      # spec and its churn on that host. No project in this estate does today.
       #
       # The cached package.json lives at:
       #   <cache_dir>/node_modules/<scope>/<name>/package.json
@@ -939,8 +976,8 @@ in
     ${lib.optionalString (isDevbox || isCloudbox) ''
       if [ "$cache_invalidated" = "1" ]; then
         {
-          echo "installOpencodePlugins: plugin cache changed; the new version is on disk but NOT live."
-          echo "installOpencodePlugins: running serves keep the old plugin until the pool restarts."
+          echo "installOpencodePlugins: stale plugin cache purged. Running serves keep the OLD plugin until the pool restarts."
+          echo "installOpencodePlugins: the pinned version is not on disk yet — opencode re-fetches it from npm on the first restart, so that restart needs registry access."
           echo "installOpencodePlugins:   automatic — nightly at 03:00 (nightly-restart-background.timer)"
           echo "installOpencodePlugins:   now, disruptive — reset-workspace   (kills all live sessions)"
         } >&2

@@ -166,13 +166,20 @@ let
       [ "$_conf_probed" = "1" ] && return 0
       _conf_probed=1
 
+      # NOTE the `|| true` rather than `|| echo "000"`. curl writes its
+      # -w '%{http_code}' template (which is literally "000" when no response
+      # was received) BEFORE exiting non-zero, so an `|| echo "000"` fallback
+      # APPENDS to that and yields "000000" — which falls through to the `*)`
+      # branch and reports "unexpected" for the single most expected failure
+      # there is. `|| true` keeps curl's own output; ${code:-000} covers the
+      # case where curl printed nothing at all.
       local code
       code="$(${pkgs.curl}/bin/curl -sS -o /dev/null -w '%{http_code}' \
                 --max-time 20 \
                 -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN" \
-                "https://$ATLASSIAN_SITE/wiki/rest/api/user/current" 2>/dev/null || echo "000")"
+                "https://$ATLASSIAN_SITE/wiki/rest/api/user/current" 2>/dev/null || true)"
 
-      case "$code" in
+      case "''${code:-000}" in
         200)
           _conf_ok=1
           ;;
@@ -273,10 +280,16 @@ let
         page_code="$(${pkgs.curl}/bin/curl -sS -o /dev/null -w '%{http_code}' \
                       --max-time 20 \
                       -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN" \
-                      "https://$ATLASSIAN_SITE/wiki/rest/api/content/$page_id" 2>/dev/null || echo "000")"
-        case "$page_code" in
+                      "https://$ATLASSIAN_SITE/wiki/rest/api/content/$page_id" 2>/dev/null || true)"
+        # `|| true`, not `|| echo "000"` — see conf_preflight above.
+        case "''${page_code:-000}" in
           200)
-            echo "fetchConfluenceSkills: WARNING: page $page_id is readable (HTTP 200) but the nvim fetch produced nothing — this is a client-side fault (atlassian.lua / nvim), not access." >&2
+            # Deliberately NOT "not an access problem": this probe and
+            # atlassian.lua hit DIFFERENT APIs. The probe is REST; the fetch
+            # goes through the GraphQL gateway with an ARI built from
+            # ATLASSIAN_CLOUD_ID. A wrong cloud id, or a denial that applies
+            # only to the GraphQL path, reads 200 here and still fails there.
+            echo "fetchConfluenceSkills: WARNING: page $page_id is readable over REST (HTTP 200) but the nvim fetch produced nothing. The fetch uses the GraphQL gateway, not REST, so this is most likely a client-side fault (atlassian.lua / nvim) or a bad ATLASSIAN_CLOUD_ID — see the nvim output below." >&2
             ;;
           404)
             echo "fetchConfluenceSkills: WARNING: page $page_id not found (HTTP 404) — deleted, moved, or not visible to $ATLASSIAN_EMAIL. Fix or drop the entry for $skill_name in users/dev/opencode-skills.nix." >&2
