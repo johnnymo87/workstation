@@ -79,6 +79,7 @@
       oc-mcp-enable = p.callPackage ./pkgs/oc-mcp-enable { };
       oc-scoped-shell = p.callPackage ./pkgs/oc-scoped-shell { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
+      oc-tags = p.callPackage ./pkgs/oc-tags { };
       oc-throwaway-serve = p.callPackage ./pkgs/oc-throwaway-serve { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
       # NOTE: `opencode-frontdoor-route-gate` is deliberately NOT exposed here.
@@ -696,6 +697,31 @@
         }
         grep -q '^OK$' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: oc-cost suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      oc-tags-tests = devboxPkgs.runCommand "oc-tags-tests" {
+        nativeBuildInputs = [
+          # zoneinfo has no tzdata inside the sandbox; ET bucketing needs it.
+          (devboxPkgs.python3.withPackages (ps: [ ps.tzdata ]))
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 pkgs/oc-tags/test_oc_tags.py 2>&1 | tee "$TMPDIR/out.txt"
+
+        # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
+        # also what a suite that silently stopped collecting tests prints.
+        grep -q '^Ran 101 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 101 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: oc-tags suite did not report OK." >&2
           exit 1
         }
         touch $out
