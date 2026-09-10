@@ -255,7 +255,10 @@ Behaviour:
   letter or digit and use only `[A-Za-z0-9._:/-]`, 64 characters max. The
   leading-alphanumeric rule is what blocks argument injection (a tag named
   `--dir` that oc-tags' argparse would read as a flag). `auto:` is rejected —
-  it is reserved for the fallback.
+  it is reserved for the fallback. ASCII means ASCII: the check runs under
+  `LC_ALL=C`, because under the ambient `en_US.UTF-8` bash's `[A-Za-z0-9]`
+  matches accented letters and `épic` would otherwise slip through here while
+  pigeon's identical-looking check rejected it.
 - The tag is applied **after** the launch succeeds, by running
   `oc-tags set <tag> <session-id>`. That costs nothing, because attribution is
   retroactive: `report`/`top` join costs against `tags.db` at read time, so a
@@ -264,6 +267,15 @@ Behaviour:
   launcher prints a `Note:` on stderr (including the by-hand command) and still
   reports a live, prompted session. Losing a launch to a bookkeeping write would
   be a strictly worse trade.
+- Precise about what "never delays the launch" means: the session and its prompt
+  are untouched, but the *launcher process* can be held up to 10s (the `timeout`
+  bound) by a locked `tags.db` before it prints its `Attach:`/`Kill:` lines. The
+  happy path measures ~130ms. Spinning up a swarm runs `opencode-launch` N times
+  serially, so a wedged tag DB costs up to 10s × N — annoying, never fatal.
+- The tag is stored lower-cased (`oc-tags`' `normalise_tag`), so `--tag
+  FBM-Migration` charts as `fbm-migration`. The launcher prints oc-tags' own
+  confirmation line rather than echoing your spelling back, so what you read is
+  what the chart will show.
 
 Forgot to pass it? Nothing is lost — tag afterwards with
 `oc-tags set <tag> <session-id>`, or cover a whole directory at once with

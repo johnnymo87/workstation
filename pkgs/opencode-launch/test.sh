@@ -66,8 +66,11 @@ resolve_model_id() {
 #   - no "auto:" prefix (case-insensitive): oc-tags reserves that for its
 #     directory-derived fallback and rejects it at write time anyway. Failing
 #     here, before a session exists, beats a confusing failure after launch.
+# LC_ALL=C is load-bearing: under the ambient en_US.UTF-8, [A-Za-z0-9] matches
+# accented letters, so the charset promised by --help holds only under C.
 validate_tag() {
   local t="$1"
+  local LC_ALL=C
   [[ "$t" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$ ]] || return 1
   case "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" in
     auto:*) return 1 ;;
@@ -251,6 +254,16 @@ assert_tag_rejected 'semi;colon' "a shell metacharacter (belt and braces)"
 assert_tag_rejected '$(id)' "a command substitution shape"
 assert_tag_rejected "$(printf 'a%.0s' $(seq 1 65))" "a 65-character tag (over max length)"
 assert_tag_rejected "$(printf 'tag\nsecond')" "an embedded newline"
+
+# The locale hole, asserted explicitly. Bash's [A-Za-z0-9] is collation-dependent:
+# under the ambient en_US.UTF-8 (what cloudbox actually runs) it MATCHES "é", so
+# without the function's own LC_ALL=C this tag would be accepted here and by
+# oc-tags' normalise_tag while pigeon's TAG_RE rejected the identical string.
+saved_lc="${LC_ALL-__unset__}"
+LC_ALL=en_US.UTF-8
+assert_tag_rejected "épic" "a non-ASCII letter (under a UTF-8 ambient locale)"
+assert_tag_rejected "café/latte" "non-ASCII mid-tag (under a UTF-8 ambient locale)"
+if [ "$saved_lc" = "__unset__" ]; then unset LC_ALL; else LC_ALL="$saved_lc"; fi
 
 # ---- production-source check (default.nix) -----------------------------------
 #
@@ -552,6 +565,19 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  source tag regex must match the mirror under test\n        want: %s\n' "$tag_re"; exit 1
   fi
+  # The regex is only half the function. The auto: rejection must be
+  # case-insensitive, and the whole match must run under LC_ALL=C or the
+  # bracket expression silently widens to accented letters under en_US.UTF-8.
+  if grep -A4 'validate_tag()' "$default_nix" | grep -q 'local LC_ALL=C'; then
+    printf 'PASS  source validates the tag under LC_ALL=C\n'
+  else
+    printf 'FAIL  validate_tag must pin LC_ALL=C\n        in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -A10 'validate_tag()' "$default_nix" | grep -q "tr '\[:upper:\]' '\[:lower:\]'"; then
+    printf 'PASS  source rejects the auto: prefix case-insensitively\n'
+  else
+    printf 'FAIL  auto: rejection must be case-insensitive\n        in: %s\n' "$default_nix"; exit 1
+  fi
   if grep -q 'apply_session_tag()' "$default_nix"; then
     printf 'PASS  source defines apply_session_tag\n'
   else
@@ -600,12 +626,30 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  a failed tag must warn on stderr\n        in: %s\n' "$default_nix"; exit 1
   fi
-  # oc-tags is a runtimeInput, so `oc-tags` resolves under a minimal PATH
-  # (systemd units, the pigeon worker) exactly the way git/coreutils do.
-  if grep -q 'oc-tags' "$default_nix" && grep -q 'runtimeInputs' "$default_nix"; then
-    printf 'PASS  source references oc-tags\n'
+  # oc-tags must be a runtimeInput, so `oc-tags` resolves under a minimal PATH
+  # (a systemd unit) exactly the way git/coreutils do. Assert the actual
+  # assignment line: a bare `grep -q oc-tags` also passes on a comment
+  # mentioning it, which is exactly the state this guard exists to catch.
+  if grep -q '^  runtimeInputs = .*oc-tags' "$default_nix"; then
+    printf 'PASS  oc-tags is pinned in runtimeInputs\n'
   else
-    printf 'FAIL  source references oc-tags\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'FAIL  oc-tags must be pinned in runtimeInputs\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # The failure path must name a REASON. A `timeout` kill (rc 124) prints
+  # nothing, so the naive "$out" degrades to an empty explanation precisely
+  # when the launcher was held up longest.
+  if grep -A24 'apply_session_tag()' "$default_nix" | grep -q 'rc" -eq 124'; then
+    printf 'PASS  a timed-out oc-tags reports as a timeout, not an empty reason\n'
+  else
+    printf 'FAIL  timeout (rc 124) must be reported as such\n        in: %s\n' "$default_nix"; exit 1
+  fi
+  # oc-tags lowercases the tag (normalise_tag), so the launcher must print
+  # oc-tags' own line rather than echoing back what the human typed -- otherwise
+  # "--tag FBM-Migration" reports a tag the chart will never show.
+  if grep -A30 'apply_session_tag()' "$default_nix" | grep -q "printf '%s\\\\n' \"\$out\""; then
+    printf 'PASS  success line comes from oc-tags, not from the launcher\n'
+  else
+    printf 'FAIL  success line must print oc-tags own output\n        in: %s\n' "$default_nix"; exit 1
   fi
   # loud-fail: a work failure must abort, never silently launch at the root.
   if grep -q 'failed to create worktree' "$default_nix"; then

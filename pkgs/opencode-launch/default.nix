@@ -16,12 +16,17 @@ pkgs.writeShellApplication {
   # with a loud `command -v` guard.)
   # oc-tags backs --tag. It is PINNED rather than probed-for at runtime the way
   # pigeon's daemon has to probe (its systemd unit has a minimal PATH): being a
-  # derivation is exactly what lets us skip that, and --tag then works
-  # identically from a shell, a systemd unit, and the pigeon worker. The cost is
-  # a build-time edge opencode-launch -> oc-tags; that is cheap here because both
-  # are already installed together on every host (users/dev/home.base.nix) and
-  # oc-tags is a single pure-Python file with no non-stdlib dependencies.
-  # $OC_TAGS_BIN overrides the resolved binary (tests point it at a stub).
+  # derivation is exactly what lets us skip that, so --tag behaves the same from
+  # an interactive shell and from a systemd unit with a stripped PATH. The cost
+  # is a build-time edge opencode-launch -> oc-tags, which adds no new failure
+  # surface: both are already in the same shared package list
+  # (users/dev/home.base.nix), so an oc-tags build failure already blocks every
+  # host's home-manager switch. oc-tags is one pure-Python file, stdlib only.
+  # $OC_TAGS_BIN overrides the resolved binary -- an escape hatch for pointing
+  # at a checkout or a stub, not something any deployed config sets.
+  # (Note pigeon's Telegram /launch does NOT go through this script -- it calls
+  # createSession over HTTP directly, see launch-ingest.ts -- so --tag is not
+  # reachable from a phone. Pigeon's own /tag command covers that.)
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.git pkgs.coreutils oc-tags ];
   text = ''
       # shellcheck disable=SC1091  # sourced from a nix store path shellcheck cannot follow
@@ -171,8 +176,16 @@ pkgs.writeShellApplication {
       #     after one is already live.
       # Kept in lockstep with pkgs/opencode-launch/test.sh by a source-grep guard
       # in that test.
+      #
+      # LC_ALL=C is load-bearing, not hygiene. Under the ambient en_US.UTF-8 the
+      # bracket expression [A-Za-z0-9] matches accented letters, so `--tag épic`
+      # would pass here, pass oc-tags' normalise_tag, and land in tags.db --
+      # while pigeon's JS TAG_RE rejects the identical string. Two validators,
+      # two answers, and a --help text that promises "letters, digits" and means
+      # it only under one locale.
       validate_tag() {
         local t="$1"
+        local LC_ALL=C
         [[ "$t" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$ ]] || return 1
         case "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" in
           auto:*) return 1 ;;
@@ -203,17 +216,32 @@ pkgs.writeShellApplication {
       # "-". oc-tags resolves the id to its ROOT session, which for a
       # just-created session is itself.
       apply_session_tag() {
-        local bin="''${OC_TAGS_BIN:-oc-tags}" out
+        local bin="''${OC_TAGS_BIN:-oc-tags}" out rc=0 reason
         if ! command -v "$bin" >/dev/null 2>&1; then
           echo "Note: tag '$tag' not applied: '$bin' not found on PATH (session $session_id keeps its auto: tag)" >&2
           return 0
         fi
-        if ! out="$(timeout 10 "$bin" set -- "$tag" "$session_id" 2>&1)"; then
-          echo "Note: tag '$tag' not applied to $session_id: $out" >&2
+        out="$(timeout 10 "$bin" set -- "$tag" "$session_id" 2>&1)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          # Report a REASON, not a dump. The two likeliest failures both hide
+          # behind the naive `$out`: a `timeout` kill (rc 124) prints nothing at
+          # all, and a locked tags.db (~15 concurrent sessions on this host)
+          # prints a 20-line Python traceback whose only useful line is the last.
+          if [ "$rc" -eq 124 ]; then
+            reason="timed out after 10s"
+          else
+            reason="$(printf '%s' "$out" | tail -n1)"
+            [ -n "$reason" ] || reason="exit $rc, no output"
+          fi
+          echo "Note: tag '$tag' not applied to $session_id: $reason" >&2
           echo "      Apply it by hand with: oc-tags set $tag $session_id" >&2
           return 0
         fi
-        echo "Tag: $tag"
+        # Print oc-tags' OWN line rather than echoing back "$tag". oc-tags
+        # lowercases via normalise_tag, so "--tag FBM-Migration" is stored (and
+        # charted) as "fbm-migration"; a self-reported "Tag: FBM-Migration"
+        # would name something the chart never shows.
+        printf '%s\n' "$out"
         return 0
       }
 
