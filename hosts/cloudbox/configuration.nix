@@ -1153,7 +1153,20 @@ Check, in this order:
      # would silently ENOENT those from dispatched/launched
     # sessions; keeping it just mirrors the interactive-shell PATH and is
     # collision-safe (appended last). See workstation-4hm for the rationale.
-    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" "/home/dev/.local" ];
+    #
+    # `/run/wrappers` MUST come before `config.system.path`. NixOS ships the
+    # plain binary in the package (so, in system-path) and the setuid shim in
+    # /run/wrappers/bin, for all 12 wrappers: fusermount{,3}, mount, newgidmap,
+    # newgrp, newuidmap, sg, su, sudo, sudoedit, umount, unix_chkpwd. With
+    # system-path first, the non-setuid copy wins and `sudo` fails with
+    #   sudo: .../system-path/bin/sudo must be owned by uid 0 and have the
+    #   setuid bit set
+    # which reads like a broken wrapper install or a tampered host rather than
+    # a PATH-order bug. Interactive shells are unaffected (a login PATH puts
+    # /run/wrappers/bin first), so this only ever bit commands issued from an
+    # opencode bash tool call. Matches the order documented in
+    # users/dev/home.devbox.nix.
+    path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" "/home/dev/.local" ];
     serviceConfig = {
       Type = "simple";
       User = "dev";
@@ -2902,7 +2915,9 @@ Check:
     description = "TeamClaude (personal Claude Max rotator for failover)";
     wantedBy = [ "multi-user.target" ];
     after = [ "network.target" ];
-    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" ];
+    # /run/wrappers first so the setuid shims beat the plain copies in
+    # system-path (see the opencode-serve@ path comment above).
+    path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" ];
     serviceConfig = {
       Type = "simple";
       User = "dev";
@@ -3378,7 +3393,9 @@ EOF
     # bazel lives at /home/dev/.local/bin/bazel (symlink into ~/.nix-profile),
     # docker is in system path, coreutils via system path. Same recipe as
     # opencode-serve.
-    path = [ config.system.path "/run/wrappers" "/home/dev/.nix-profile" "/home/dev/.local" ];
+    # /run/wrappers first so the setuid shims beat the plain copies in
+    # system-path (see the opencode-serve@ path comment above).
+    path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" "/home/dev/.local" ];
 
     # Never let `nixos-rebuild switch` restart this unit on a config change:
     # a restart would (a) briefly drop gemini's global-default route and
