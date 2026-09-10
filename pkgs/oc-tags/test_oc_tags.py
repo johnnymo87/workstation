@@ -1261,7 +1261,9 @@ class TestRenderSvg(unittest.TestCase):
 
     def _dark_block(self, svg):
         css = self._css(svg)
-        m = re.search(r"@media\s*\(prefers-color-scheme:\s*dark\)\s*\{(.*)\}", css, re.S)
+        m = re.search(
+            r"@media\s*\(prefers-color-scheme:\s*dark\)\s*\{(.*?)\n    \}", css, re.S
+        )
         self.assertIsNotNone(m, "no prefers-color-scheme: dark block")
         return m.group(1)
 
@@ -1284,6 +1286,12 @@ class TestRenderSvg(unittest.TestCase):
         svg = oc_tags.render_svg(agg, {})
         self.assertNotIn('fill="#ffffff"', svg)
         self.assertIn('class="bg"', svg)
+        # No hardcoded colour may survive as a presentation attribute at all,
+        # since a @media rule cannot reach one.
+        self.assertIsNone(
+            re.search(r'(fill|stroke)="#[0-9a-fA-F]{3,6}"', svg),
+            "a hardcoded colour attribute escaped the class refactor",
+        )
 
     def test_dark_mode_keeps_auto_bands_recessive(self):
         # The saturation encoding must INVERT for dark. On white, auto bands are
@@ -1305,6 +1313,10 @@ class TestRenderSvg(unittest.TestCase):
         man_d, auto_d = lightness(dark, "b0"), lightness(dark, "b1")
         self.assertGreater(auto_l, man_l, "on white, auto should be paler than manual")
         self.assertLess(auto_d, man_d, "on black, auto must be DARKER than manual")
+        # Bounds too: the inversion alone would accept hsl(h,30%,1%) vs
+        # hsl(h,80%,99%), which inverts correctly and is unreadable.
+        self.assertTrue(25 <= auto_d <= 40, f"dark auto lightness {auto_d}% out of range")
+        self.assertTrue(50 <= man_d <= 65, f"dark manual lightness {man_d}% out of range")
 
     def test_dark_mode_hover_highlight_flips_to_light(self):
         # A black highlight is invisible on a black background.
@@ -1334,6 +1346,24 @@ class TestRenderSvg(unittest.TestCase):
         svg = oc_tags.render_svg(agg, {})
         self.assertNotIn("<script", svg.lower())
         self.assertIsNone(re.search(r"\bon[a-z]+\s*=", svg, re.I))
+
+    def test_root_background_covers_letterbox_in_both_themes(self):
+        # Standalone SVG: preserveAspectRatio letterboxes when the viewport
+        # aspect differs from the viewBox, and everything below the fixed
+        # height is canvas too. Only the ROOT element's background paints the
+        # canvas -- the .bg rect stops at the viewBox. Without this, dark mode
+        # renders a black chart framed by white. No other test catches it.
+        svg = oc_tags.render_svg(self._sample_agg(), {})
+        css = self._css(svg)
+        light = css[: css.index("@media")]
+        self.assertRegex(light, r"svg:root\s*\{[^}]*background\s*:\s*#ffffff")
+        self.assertRegex(self._dark_block(svg), r"svg:root\s*\{[^}]*background\s*:\s*#000000")
+        # `:root` alone would repaint a host HTML page if this SVG is inlined.
+        self.assertNotRegex(css, r"(?<!svg):root\s*\{")
+
+    def test_no_data_svg_also_paints_the_canvas(self):
+        svg = oc_tags.render_svg(oc_tags.Aggregate(), {})
+        self.assertRegex(self._dark_block(svg), r"svg:root\s*\{[^}]*background\s*:\s*#000000")
 
 class TestServer(unittest.TestCase):
     def setUp(self):

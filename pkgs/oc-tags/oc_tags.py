@@ -588,9 +588,19 @@ def _style_block(band_light="", band_dark=""):
         "    .hz .tt { opacity: 0; pointer-events: none; }\n"
         "    .hz .hit { pointer-events: all; }\n"
         "    .hz:hover .tt { opacity: 1; }\n"
+        # Standalone SVG: the root element IS the document, so the letterbox
+        # strips left by preserveAspectRatio (and everything below the fixed
+        # height) are CANVAS, which only the ROOT element's background paints.
+        # The .bg rect covers the viewBox and cannot reach them -- without this
+        # rule dark mode renders a black chart framed by white bars.
+        # `svg:root` not `:root`: if this SVG is ever inlined into HTML, `:root`
+        # would match <html> and repaint the host page, whereas `svg:root`
+        # matches nothing and leaves the host in control.
+        "    svg:root { background: #ffffff; color-scheme: light dark; }\n"
         + _CHROME_LIGHT.rstrip("\n")
         + ("\n" + band_light if band_light else "")
         + "\n    @media (prefers-color-scheme: dark) {"
+        + "\n      svg:root { background: #000000; }"
         + _CHROME_DARK.rstrip("\n")
         + ("\n" + band_dark if band_dark else "")
         + "\n    }\n"
