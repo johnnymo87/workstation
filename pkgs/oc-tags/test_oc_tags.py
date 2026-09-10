@@ -1252,6 +1252,89 @@ class TestRenderSvg(unittest.TestCase):
         for r in boxes:
             self.assertLessEqual(float(r.get("x")) + float(r.get("width")), 825.0)
 
+    # --- dark mode (prefers-color-scheme, zero JS) ---
+
+    def _css(self, svg):
+        m = re.search(r"<style>(.*?)</style>", svg, re.S)
+        self.assertIsNotNone(m, "no <style> block")
+        return m.group(1)
+
+    def _dark_block(self, svg):
+        css = self._css(svg)
+        m = re.search(r"@media\s*\(prefers-color-scheme:\s*dark\)\s*\{(.*)\}", css, re.S)
+        self.assertIsNotNone(m, "no prefers-color-scheme: dark block")
+        return m.group(1)
+
+    def test_dark_mode_uses_media_query_not_a_param(self):
+        # The theme follows the OS. Deliberately NOT a GET param.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertIn("prefers-color-scheme: dark", self._css(svg))
+        self.assertNotIn("theme=", svg)
+
+    def test_dark_mode_background_is_true_black(self):
+        agg = self._sample_agg()
+        dark = self._dark_block(oc_tags.render_svg(agg, {}))
+        self.assertRegex(dark, r"\.bg\s*\{[^}]*fill\s*:\s*#000000")
+
+    def test_chrome_colors_are_classed_not_hardcoded(self):
+        # A media query cannot retheme a presentation attribute, so chrome must
+        # carry classes. The background must not be a literal white fill.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertNotIn('fill="#ffffff"', svg)
+        self.assertIn('class="bg"', svg)
+
+    def test_dark_mode_keeps_auto_bands_recessive(self):
+        # The saturation encoding must INVERT for dark. On white, auto bands are
+        # pale so they recede. On black, pale would make the untagged backlog the
+        # brightest thing on screen, inverting the hierarchy -- so in dark mode
+        # auto must be DARKER than manual, not lighter.
+        agg = self._sample_agg()   # tag_a = manual, tag_b = auto
+        svg = oc_tags.render_svg(agg, {})
+        css = self._css(svg)
+        dark = self._dark_block(svg)
+        light = css[: css.index("@media")]
+
+        def lightness(block, cls):
+            m = re.search(rf"\.{cls}\s*\{{[^}}]*fill\s*:\s*hsl\([^)]*?,\s*[\d.]+%,\s*([\d.]+)%\)", block)
+            self.assertIsNotNone(m, f"no hsl fill for .{cls} in block")
+            return float(m.group(1))
+
+        man_l, auto_l = lightness(light, "b0"), lightness(light, "b1")
+        man_d, auto_d = lightness(dark, "b0"), lightness(dark, "b1")
+        self.assertGreater(auto_l, man_l, "on white, auto should be paler than manual")
+        self.assertLess(auto_d, man_d, "on black, auto must be DARKER than manual")
+
+    def test_dark_mode_hover_highlight_flips_to_light(self):
+        # A black highlight is invisible on a black background.
+        agg = self._sample_agg()
+        dark = self._dark_block(oc_tags.render_svg(agg, {}))
+        self.assertRegex(dark, r"\.hz:hover\s+\.hit\s*\{[^}]*fill\s*:\s*#f|\.hz:hover\s+\.hit\s*\{[^}]*fill\s*:\s*#ffffff")
+
+    def test_dark_mode_tooltip_stays_distinct_from_background(self):
+        # The tooltip is near-black by default; on a true-black page it would
+        # vanish, so dark mode must lift it and/or give it a border.
+        agg = self._sample_agg()
+        dark = self._dark_block(oc_tags.render_svg(agg, {}))
+        m = re.search(r"\.ttbg\s*\{([^}]*)\}", dark)
+        self.assertIsNotNone(m, "dark mode does not restyle .ttbg")
+        body = m.group(1)
+        self.assertNotIn("#000000", body)
+        self.assertRegex(body, r"stroke\s*:", "tooltip needs a border to separate it from black")
+
+    def test_no_data_svg_is_themed_too(self):
+        svg = oc_tags.render_svg(oc_tags.Aggregate(), {})
+        self.assertIn("No data", svg)
+        self.assertIn("prefers-color-scheme: dark", svg)
+        self.assertNotIn('fill="#ffffff"', svg)
+
+    def test_dark_mode_adds_no_javascript(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertNotIn("<script", svg.lower())
+        self.assertIsNone(re.search(r"\bon[a-z]+\s*=", svg, re.I))
+
 class TestServer(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

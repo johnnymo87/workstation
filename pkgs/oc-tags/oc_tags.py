@@ -512,6 +512,92 @@ def cfp_metered_by_day(cfp_dir: str = CFP_DIR) -> dict[str, float]:
     return cfp_spend_by_day(cfp_dir).metered
 
 
+# Chrome colours live in CSS classes, not SVG presentation attributes: a
+# @media rule cannot retheme a presentation attribute, and fill="var(--x)" is
+# not reliably supported. CSS rules also beat presentation attributes on
+# specificity, so classing is the clean way in.
+#
+# Theme follows the OS via prefers-color-scheme. Deliberately not a GET param.
+_CHROME_LIGHT = """
+    .bg { fill: #ffffff; }
+    .grid { stroke: #e2e8f0; }
+    .axl { fill: #64748b; }
+    .axt { fill: #475569; }
+    .lgd { fill: #1e293b; }
+    .met { stroke: #e11d48; }
+    .mett { fill: #e11d48; }
+    .cap { fill: #dc2626; }
+    .drift { fill: #b91c1c; }
+    .unp { fill: #e2e8f0; stroke: #94a3b8; }
+    .hatchline { stroke: #64748b; }
+    .ttbg { fill: #0f172a; fill-opacity: 0.92; }
+    .ttname { fill: #ffffff; }
+    .ttval { fill: #cbd5e1; }
+    .hz:hover .hit { fill: #000000; fill-opacity: 0.06; }
+"""
+
+# True black, per request. Note the deliberate inversion of the source
+# encoding in _band_css: on white, auto bands are PALER so they recede; on
+# black, paler would make the untagged backlog the brightest thing on screen,
+# so auto must go darker instead.
+_CHROME_DARK = """
+      .bg { fill: #000000; }
+      .grid { stroke: #1f2937; }
+      .axl { fill: #9ca3af; }
+      .axt { fill: #cbd5e1; }
+      .lgd { fill: #e5e7eb; }
+      .met { stroke: #fb7185; }
+      .mett { fill: #fb7185; }
+      .cap { fill: #f87171; }
+      .drift { fill: #fca5a5; }
+      .unp { fill: #374151; stroke: #6b7280; }
+      .hatchline { stroke: #9ca3af; }
+      .ttbg { fill: #1f2937; fill-opacity: 0.98; stroke: #6b7280; stroke-width: 1; }
+      .ttname { fill: #f9fafb; }
+      .ttval { fill: #d1d5db; }
+      .hz:hover .hit { fill: #ffffff; fill-opacity: 0.10; }
+"""
+
+
+def _band_css(bands, sources, hues):
+    """Per-band colour rules, light then dark. Returns (light, dark, class_map)."""
+    light, dark, cls_map = [], [], {}
+    for i, t in enumerate(bands):
+        cls = f"b{i}"
+        cls_map[t] = cls
+        if t == "other":
+            light.append(f"    .{cls} {{ fill: #94a3b8; stroke: #94a3b8; }}")
+            dark.append(f"      .{cls} {{ fill: #4b5563; stroke: #4b5563; }}")
+            continue
+        src = sources.get(t, "auto" if t.startswith("auto:") else "manual")
+        h = hues[i % len(hues)]
+        if src == "manual":
+            lc, dc = f"hsl({h}, 75%, 48%)", f"hsl({h}, 80%, 58%)"
+        else:
+            # 68% on white (pale, recedes) -> 32% on black (dark, recedes).
+            lc, dc = f"hsl({h}, 25%, 68%)", f"hsl({h}, 30%, 32%)"
+        light.append(f"    .{cls} {{ fill: {lc}; stroke: {lc}; }}")
+        dark.append(f"      .{cls} {{ fill: {dc}; stroke: {dc}; }}")
+    return "\n".join(light), "\n".join(dark), cls_map
+
+
+def _style_block(band_light="", band_dark=""):
+    return (
+        "  <style>\n"
+        '    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }\n'
+        "    .hz .tt { opacity: 0; pointer-events: none; }\n"
+        "    .hz .hit { pointer-events: all; }\n"
+        "    .hz:hover .tt { opacity: 1; }\n"
+        + _CHROME_LIGHT.rstrip("\n")
+        + ("\n" + band_light if band_light else "")
+        + "\n    @media (prefers-color-scheme: dark) {"
+        + _CHROME_DARK.rstrip("\n")
+        + ("\n" + band_dark if band_dark else "")
+        + "\n    }\n"
+        "  </style>\n"
+    )
+
+
 def render_svg(
     agg: Aggregate,
     metered_by_day: dict[str, float] | CfpSpend,
@@ -536,11 +622,9 @@ def render_svg(
     if not visible_tags or not agg.buckets:
         return (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 400" width="100%" height="400">\n'
-            '  <style>\n'
-            '    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }\n'
-            '  </style>\n'
-            '  <rect width="1100" height="400" fill="#ffffff"/>\n'
-            '  <text x="550" y="200" text-anchor="middle" font-size="18" fill="#64748b">No data in window</text>\n'
+            + _style_block()
+            + '  <rect class="bg" width="1100" height="400"/>\n'
+            '  <text class="axl" x="550" y="200" text-anchor="middle" font-size="18">No data in window</text>\n'
             '</svg>\n'
         )
 
@@ -576,17 +660,7 @@ def render_svg(
 
     # Assign colors: saturated for manual, desaturated for auto, neutral for other
     PALETTE_HUES = [215, 145, 28, 280, 345, 185, 45, 95, 315, 165, 10, 250]
-    colors: dict[str, str] = {}
-    for i, t in enumerate(bands):
-        if t == "other":
-            colors[t] = "#94a3b8"
-        else:
-            source = agg.sources.get(t, "auto" if t.startswith("auto:") else "manual")
-            hue = PALETTE_HUES[i % len(PALETTE_HUES)]
-            if source == "manual":
-                colors[t] = f"hsl({hue}, 75%, 48%)"
-            else:
-                colors[t] = f"hsl({hue}, 25%, 68%)"
+    band_light, band_dark, band_cls = _band_css(bands, agg.sources, PALETTE_HUES)
 
     # SVG layout dimensions
     width = 1100
@@ -638,19 +712,13 @@ def render_svg(
     svg_parts = []
     svg_parts.append(
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="{height}">\n'
-        f'  <style>\n'
-        f'    text {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}\n'
-        f'    .hz .tt {{ opacity: 0; pointer-events: none; }}\n'
-        f'    .hz .hit {{ pointer-events: all; }}\n'
-        f'    .hz:hover .tt {{ opacity: 1; }}\n'
-        f'    .hz:hover .hit {{ fill: #000000; fill-opacity: 0.06; }}\n'
-        f'  </style>\n'
-        f'  <defs>\n'
+        + _style_block(band_light, band_dark)
+        + f'  <defs>\n'
         f'    <pattern id="hatch" width="8" height="8" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">\n'
-        f'      <line x1="0" y1="0" x2="0" y2="8" stroke="#64748b" stroke-width="2" opacity="0.4"/>\n'
+        f'      <line class="hatchline" x1="0" y1="0" x2="0" y2="8" stroke-width="2" opacity="0.4"/>\n'
         f'    </pattern>\n'
         f'  </defs>\n'
-        f'  <rect width="{width}" height="{height}" fill="#ffffff"/>'
+        f'  <rect class="bg" width="{width}" height="{height}"/>'
     )
 
     # Gridlines and Y-axis labels
@@ -658,11 +726,11 @@ def render_svg(
     while y_val <= y_max + 1e-9:
         y_pos = y_scale(y_val)
         svg_parts.append(
-            f'  <line x1="{x_left}" y1="{y_pos:.1f}" x2="{x_right}" y2="{y_pos:.1f}" stroke="#e2e8f0" stroke-width="1"/>'
+            f'  <line class="grid" x1="{x_left}" y1="{y_pos:.1f}" x2="{x_right}" y2="{y_pos:.1f}" stroke-width="1"/>'
         )
         val_str = f"${y_val:,.0f}" if y_val >= 10 else f"${y_val:,.2f}"
         svg_parts.append(
-            f'  <text x="{x_left - 10}" y="{y_pos + 4:.1f}" text-anchor="end" font-size="11" fill="#64748b">{val_str}</text>'
+            f'  <text class="axl" x="{x_left - 10}" y="{y_pos + 4:.1f}" text-anchor="end" font-size="11">{val_str}</text>'
         )
         y_val += step
 
@@ -673,7 +741,7 @@ def render_svg(
             x_pos = x_coords[i]
             label = b[5:] if len(b) > 5 else b
             svg_parts.append(
-                f'  <text x="{x_pos:.1f}" y="{y_bottom + 18}" text-anchor="middle" font-size="10" fill="#64748b">{html.escape(label)}</text>'
+                f'  <text class="axl" x="{x_pos:.1f}" y="{y_bottom + 18}" text-anchor="middle" font-size="10">{html.escape(label)}</text>'
             )
 
     # Partial bucket hatching
@@ -692,7 +760,7 @@ def render_svg(
             f'  <rect x="{h_start:.1f}" y="{y_top}" width="{h_w:.1f}" height="{plot_h}" fill="url(#hatch)"/>'
         )
         svg_parts.append(
-            f'  <text x="{p_x:.1f}" y="{y_top + 16}" text-anchor="middle" font-size="11" font-style="italic" fill="#475569">partial</text>'
+            f'  <text class="axt" x="{p_x:.1f}" y="{y_top + 16}" text-anchor="middle" font-size="11" font-style="italic">partial</text>'
         )
 
     # Stacked Area Bands
@@ -719,7 +787,7 @@ def render_svg(
             bot_y = bot_pts[0][1]
             bh = bot_y - top_y
             svg_parts.append(
-                f'  <rect x="{x_m - bw/2:.1f}" y="{top_y:.1f}" width="{bw}" height="{bh:.1f}" fill="{colors[t]}" stroke="{colors[t]}" stroke-width="0.5"/>'
+                f'  <rect x="{x_m - bw/2:.1f}" y="{top_y:.1f}" width="{bw}" height="{bh:.1f}" class="{band_cls[t]}" stroke-width="0.5"/>'
             )
         else:
             path_d = [f"M {bot_pts[0][0]:.1f} {bot_pts[0][1]:.1f}"]
@@ -730,7 +798,7 @@ def render_svg(
             path_d.append("Z")
             d_str = " ".join(path_d)
             svg_parts.append(
-                f'  <path d="{d_str}" fill="{colors[t]}" stroke="{colors[t]}" stroke-width="0.5"/>'
+                f'  <path d="{d_str}" class="{band_cls[t]}" stroke-width="0.5"/>'
             )
 
     # Metered Reference Line
@@ -741,7 +809,7 @@ def render_svg(
             line_pts.append(f"{x_coords[i]:.1f},{y_scale(m_val):.1f}")
         pts_str = " ".join(line_pts)
         svg_parts.append(
-            f'  <polyline points="{pts_str}" fill="none" stroke="#e11d48" stroke-width="2" stroke-dasharray="4,2"/>'
+            f'  <polyline class="met" points="{pts_str}" fill="none" stroke-width="2" stroke-dasharray="4,2"/>'
         )
 
     # Hover layer, built here but EMITTED LAST (see hover_parts append below) so
@@ -810,16 +878,16 @@ def render_svg(
                     f'  <g class="hz">\n'
                     f'    <polygon class="hit" points="{pts}" fill="transparent" stroke="transparent" stroke-width="4"/>\n'
                     f'    <g class="tt">\n'
-                    f'      <rect class="ttbg" x="{tx:.1f}" y="{ty:.1f}" width="{tw:.1f}" height="{th:.1f}" rx="4" fill="#0f172a" fill-opacity="0.92"/>\n'
-                    f'      <text x="{tx + 9:.1f}" y="{ty + 17:.1f}" font-size="11" font-weight="600" fill="#ffffff">{html.escape(line1)}</text>\n'
-                    f'      <text x="{tx + 9:.1f}" y="{ty + 32:.1f}" font-size="11" fill="#cbd5e1">{html.escape(line2)}</text>\n'
+                    f'      <rect class="ttbg" x="{tx:.1f}" y="{ty:.1f}" width="{tw:.1f}" height="{th:.1f}" rx="4" />\n'
+                    f'      <text class="ttname" x="{tx + 9:.1f}" y="{ty + 17:.1f}" font-size="11" font-weight="600">{html.escape(line1)}</text>\n'
+                    f'      <text class="ttval" x="{tx + 9:.1f}" y="{ty + 32:.1f}" font-size="11">{html.escape(line2)}</text>\n'
                     f'    </g>\n'
                     f'  </g>'
                 )
 
     # Axis Title
     svg_parts.append(
-        f'  <text transform="rotate(-90)" x="{- (y_top + plot_h / 2):.1f}" y="25" text-anchor="middle" font-size="12" fill="#475569">Consumed at list price (USD) — not billed</text>'
+        f'  <text transform="rotate(-90)" x="{- (y_top + plot_h / 2):.1f}" y="25" text-anchor="middle" class="axt" font-size="12">Consumed at list price (USD) — not billed</text>'
     )
 
     # Headline above chart: cap hit at HH:MM for most recent day where metered >= $195
@@ -829,7 +897,7 @@ def render_svg(
         hit_time = agg.cap_hits.get(recent_day)
         if hit_time:
             svg_parts.append(
-                f'  <text x="{plot_x}" y="38" font-size="15" font-weight="600" fill="#dc2626">cap hit at {html.escape(hit_time)}</text>'
+                f'  <text x="{plot_x}" y="38" class="cap" font-size="15" font-weight="600">cap hit at {html.escape(hit_time)}</text>'
             )
 
     # Legend
@@ -841,10 +909,10 @@ def render_svg(
         tot_str = f"${band_tot(t):,.2f}"
         esc_tag = html.escape(t)
         svg_parts.append(
-            f'  <rect x="{leg_x}" y="{curr_y}" width="11" height="11" rx="2" fill="{colors[t]}"/>'
+            f'  <rect class="{band_cls[t]}" x="{leg_x}" y="{curr_y}" width="11" height="11" rx="2"/>'
         )
         svg_parts.append(
-            f'  <text x="{leg_x + 18}" y="{curr_y + 9}" font-size="11" fill="#1e293b">{esc_tag}: {tot_str}</text>'
+            f'  <text class="lgd" x="{leg_x + 18}" y="{curr_y + 9}" font-size="11">{esc_tag}: {tot_str}</text>'
         )
 
     # Unpriced entry (pinned regardless of Top-N, labelled in tokens, not dollars)
@@ -857,20 +925,20 @@ def render_svg(
     else:
         tok_str = str(unpriced_toks)
     svg_parts.append(
-        f'  <rect x="{leg_x}" y="{u_curr_y}" width="11" height="11" rx="2" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1"/>'
+        f'  <rect x="{leg_x}" y="{u_curr_y}" width="11" height="11" class="unp" rx="2" stroke-width="1"/>'
     )
     svg_parts.append(
-        f'  <text x="{leg_x + 18}" y="{u_curr_y + 9}" font-size="11" fill="#64748b">unpriced: {tok_str} tok</text>'
+        f'  <text class="axl" x="{leg_x + 18}" y="{u_curr_y + 9}" font-size="11">unpriced: {tok_str} tok</text>'
     )
 
     # Metered line in legend
     if any(m > 0 for m in metered_vals):
         m_curr_y = u_curr_y + row_h
         svg_parts.append(
-            f'  <line x1="{leg_x}" y1="{m_curr_y + 5}" x2="{leg_x + 12}" y2="{m_curr_y + 5}" stroke="#e11d48" stroke-width="2" stroke-dasharray="3,1"/>'
+            f'  <line x1="{leg_x}" y1="{m_curr_y + 5}" x2="{leg_x + 12}" y2="{m_curr_y + 5}" class="met" stroke-width="2" stroke-dasharray="3,1"/>'
         )
         svg_parts.append(
-            f'  <text x="{leg_x + 18}" y="{m_curr_y + 9}" font-size="11" fill="#e11d48">billed (capped)</text>'
+            f'  <text x="{leg_x + 18}" y="{m_curr_y + 9}" class="mett" font-size="11">billed (capped)</text>'
         )
 
     # Footer: coverage vs cfp notional, unpriced summary, and drift warning
@@ -904,12 +972,12 @@ def render_svg(
 
     footer_y = y_bottom + 42
     svg_parts.append(
-        f'  <text x="{plot_x}" y="{footer_y}" font-size="11" fill="#64748b">{html.escape(cov_str)} | {html.escape(unp_str)}</text>'
+        f'  <text class="axl" x="{plot_x}" y="{footer_y}" font-size="11">{html.escape(cov_str)} | {html.escape(unp_str)}</text>'
     )
     if drift_alerts:
         drift_msg = f"⚠️ Drift warning: per-day coverage ratio outside 0.90–1.05: {', '.join(drift_alerts)}"
         svg_parts.append(
-            f'  <text x="{plot_x}" y="{footer_y + 16}" font-size="11" font-weight="600" fill="#b91c1c">{html.escape(drift_msg)}</text>'
+            f'  <text x="{plot_x}" y="{footer_y + 16}" class="drift" font-size="11" font-weight="600">{html.escape(drift_msg)}</text>'
         )
 
     # Tooltips must be the last painted thing in the document, or the legend
