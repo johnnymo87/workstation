@@ -178,7 +178,8 @@ The read is host-safe: where `/run/secrets/*` does not exist
 `JENKINS_USER`/`JENKINS_API_TOKEN` (all three injected into every bash call).
 On cloudbox the path borrows the Mac's VPN session, so **connection refused or
 reset means the Mac tunnel is down — retry in ~2 min**, not "Jenkins is
-unreachable". Everything else — recipes, failure signatures, what the token can
+unreachable"; a **hang** is one of three other things and the skill's
+connection table tells them apart — do not retry a hang. Everything else — recipes, failure signatures, what the token can
 and must not do, and the org-specific facts (hostname, job folders, contacts;
 fetched from Confluence into `INTERNAL.md`) — is in the `reading-jenkins-builds`
 skill. Load it before touching Jenkins.

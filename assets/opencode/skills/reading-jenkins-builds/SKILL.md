@@ -1,18 +1,16 @@
 ---
 name: reading-jenkins-builds
-description: Use when a GitHub check named continuous-integration/jenkins/* is pending, failed, or stuck; when a Jenkins build log, stage result, or queue state is needed to explain a CI failure; when a Jenkins URL is unreachable, refused, or hangs from this host; or before deciding a Jenkins failure is caused by the PR's code.
+description: Reads Jenkins builds, stage results, logs, and node/queue state through the work hosts' Jenkins access path, and separates controller trouble from real PR failures. Use when a GitHub check named continuous-integration/jenkins/* is pending, failed, or stuck; when a Jenkins build log or stage result is needed to explain a CI failure; when a Jenkins URL is unreachable, refused, or hangs from this host; or before deciding a Jenkins failure is caused by the PR's code.
 ---
 
 # Reading Jenkins Builds
 
-Jenkins is reachable from the work hosts, but only through a path with its own
-failure modes, and its API has traps that cost a baseline agent 33 tool calls
-and one leaked credential. This skill is the eight-call version.
-
-Company facts (hostname, how the path works, job-folder convention, what the
-token can do, who to contact) live in **INTERNAL.md beside this file**, fetched
-from Confluence at home-manager activation. If `INTERNAL.md` or `$JENKINS_HOST`
-is missing, run the home-manager switch for this host first.
+Jenkins is reachable from the work hosts through a tunnel with its own
+failure modes, and its API has traps that waste calls and can leak
+credentials. Company facts (hostname, how the tunnel works, job-folder
+convention, what the token can do, incident log, who to contact) live in
+**INTERNAL.md beside this file**, fetched from Confluence at home-manager
+activation. If `INTERNAL.md` is missing, run the home-manager switch first.
 
 ## Prerequisites
 
@@ -28,14 +26,33 @@ J="https://$JENKINS_HOST"
 `-g` is not optional. Jenkins `tree=` queries use `[]` and `{}`, which curl
 otherwise treats as URL globbing and fails with `bad range in URL`.
 
-## Read the connection, not just the response
+## Read the connection before the response
 
-| Symptom | Meaning | Do |
-|---|---|---|
-| refused / reset in <1 s | the local access path is down (INTERNAL.md) | retry in ~2 min; >10 min, tell the human |
-| 403 anonymously | reachable; auth layer working | proceed with the token |
-| ~10 s hang | host mapping not applied on this box | rebuild, do not re-investigate the network |
-| 503 "Starting Jenkins" | an admin is restarting it | wait; build records may change under you |
+On cloudbox the request crosses four hops (INTERNAL.md has the diagram):
+hosts entry → loopback `:443` proxy → `:8443` sshd forward → the Mac's VPN.
+Each failing hop has a distinct signature; three of them look identical from
+`curl` alone, so run the discriminators, not just curl.
+
+```bash
+getent hosts "$JENKINS_HOST"                                    # 127.0.0.1 or public IP?
+ss -ltn | grep -E '127.0.0.1:(443|8443) '                       # both listening?
+timeout 12 bash -c 'exec 3<>/dev/tcp/127.0.0.1/8443 && echo connected && timeout 8 head -c1 <&3 >/dev/null; echo "read exit=$?"'
+journalctl -u sshd --since -2d | grep 'Accepted publickey for dev' | awk '{print $1,$2,$3,$11}' | tail -5   # Mac's source IP, with history
+```
+
+The Mac's source IP is a VPN probe: with the VPN connected the Mac's *own*
+SSH to cloudbox egresses through the VPN provider (INTERNAL.md names it), so
+the IP changing to the Mac's ISP means the VPN dropped. Compare with the last
+known-good line rather than guessing address ranges.
+
+| curl shows | discriminator | meaning | do |
+|---|---|---|---|
+| refused / reset in <1 s | `:8443` not listening | Mac tunnel down (Mac asleep, tunnel flapping) | retry in ~2 min; >10 min, tell the human |
+| hangs to `--max-time` | `getent` returns a **public** IP | hosts entry missing on this box | `nixos-rebuild switch`; do not re-investigate the network |
+| hangs to `--max-time` | `getent` is `127.0.0.1`; `:8443` listening; `/dev/tcp` connects then `read exit=124`; Mac's source IP changed from the VPN provider to an ISP | Mac tunnel up, **Mac's VPN off**: the Mac dials Jenkins from an IP the allowlist drops | tell the human to reconnect the VPN on the Mac |
+| hangs to `--max-time` | as above, but the Mac's source IP is still the VPN provider | Jenkins itself is unreachable even from the Mac (down, or the Mac is on the wrong VPN network) | tell the human; nothing on either host fixes it |
+| 403 anonymously | — | reachable; auth layer working | proceed with the token |
+| 503 "Starting Jenkins" | — | an admin is restarting it | wait; build records may change under you |
 
 ## Recipes
 
@@ -43,7 +60,7 @@ First check INTERNAL.md's incident log for the build's date: a known controller
 incident explains a whole day of failures at once. Then PR → job: multibranch
 jobs are `job/<folder>/job/<repo>/job/PR-<n>`; the folder name is in
 INTERNAL.md. Take the URL from the GitHub check's `detailsUrl` rather than
-guessing.
+guessing. A merged PR's job is pruned; `Not Found` there is not a tunnel fault.
 
 ```bash
 P="$J/job/<folder>/job/<repo>/job/PR-<n>"
@@ -88,3 +105,5 @@ console signatures below do.
   basic-auth credentials into the transcript. The GitHub side of a stuck
   check is answered by the build/queue state above, not by hook config.
 - Conclude "no nodes" from a stuck check without reading `/computer/api/json`.
+- Restart `jenkins-mac-proxy` or sshd on cloudbox for a hang: no hang in the
+  table above is fixed on cloudbox.
