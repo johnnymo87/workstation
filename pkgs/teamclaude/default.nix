@@ -11,6 +11,26 @@
 # opt-in `expiryRouting` for the concentration problem (#176). Both times the
 # pattern held: file the issue, carry the patch only until upstream moves.
 #
+# `balanced` came BACK on 2026-09-10, and the retirement note above is why this
+# one is shaped differently. #282's `expiryRouting` did not solve the
+# concentration problem, it relocated it: routing by soonest-expiry
+# concentrates the fleet's spend on the soonest-expiring account BY DESIGN.
+# Measured that day with healthy=0 and all four accounts at 5h ~ 1.0, the rank
+# correlation between time-to-reset and drain was 4-of-4, monotone in both
+# buckets (jonathan u7dF 0.97 vs 872 at 0.11). So `balanced` is re-added as a
+# PORT ONTO v1.1.16 rather than a revert to the old fork -- keeping #191/#175
+# and #282 -- expressed in v1.1.16's own band/pressure terms as a different
+# pressure FUNCTION, not the old parallel `_select`. Bead
+# claude-failover-proxy-yri.
+#
+# SCOPE, stated because it is easy to over-claim: this fixes WEEKLY
+# DISTRIBUTION. It does NOT fix the 5-hour wall -- total 5h capacity is
+# policy-independent -- and it plausibly makes intraday slightly WORSE, since it
+# rotates more and each rotation costs a prompt-cache re-write. That trade is
+# UNMEASURED: the replay harness built to measure it failed its own
+# pre-registered gate and was closed without a verdict (bead
+# claude-failover-proxy-tw9).
+#
 # Zero runtime dependencies (verified again at v1.1.16: package.json has no
 # `dependencies` key at all, and every src/ import is either relative or a
 # `node:` builtin). So packaging is just: fetch the source, vendor it into the
@@ -49,11 +69,26 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.16-local4"; # upstream v1.1.16 + 4 local patches (see below)
+  version = "1.1.16-balanced"; # upstream v1.1.16 + local patches + balanced port
 
   src = fetchFromGitHub {
-    # SMALL FORK. Branch local/v1116-patches = upstream v1.1.16 (eed7b33) + four
-    # self-contained commits, in order:
+    # SMALL FORK. Branch local/v1116-patches = upstream v1.1.16 (eed7b33) + the
+    # four self-contained commits below, PLUS the `balanced` routing port merged
+    # 2026-09-10 as 2fc0258 (PR johnnymo87/teamclaude#1, 15 commits).
+    #
+    # THIS BUILD DEFAULTS TO `routingStrategy: "expiry"`, which is byte-for-byte
+    # the behaviour of the previous pin. Deploying it therefore changes NOTHING
+    # until ~/.config/teamclaude.json opts in with routingStrategy "balanced".
+    # That opt-in is a separate, deliberate act: it ends the expiryRouting era
+    # that Track A (bead claude-failover-proxy-1o1) is measuring, and that
+    # measurement cannot be re-run afterwards.
+    #
+    # Balanced also makes `quotaProbeSeconds > 0` a FATAL startup requirement --
+    # ranking by utilization removes drain's "unknown weekly ranks first"
+    # discovery pressure, so the periodic prober becomes the only way an
+    # account's quota is ever learned. Our config has 90.
+    #
+    # The four pre-existing patches, in order:
     #   d5bddec fix(routing): advisor-model family check in _selectNext's
     #           resurrect fallback (upstream checks _routeAllows only; a
     #           resurrect could land on an account whose advisor family bucket
@@ -70,11 +105,23 @@ stdenvNoCC.mkDerivation rec {
     #           exhausted-probe path can still reach it). Returns the reason
     #           'plan-less' since #262 made _isAvailable a wrapper over
     #           unavailableReason() (bead claude-failover-proxy-arj).
-    # 1345/1345 tests green on this rev (upstream alone is 1331).
+    # 1412/1412 tests green on this rev (1345 on the previous pin, of which all
+    # 1345 still pass unmodified; upstream alone is 1331). One pre-existing
+    # upstream flake, unrelated: test/throttle-revalidation.test.js:74 races a
+    # 5 ms real-time window and fails ~1 run in 23 (bead
+    # claude-failover-proxy-fvb).
     #
-    # Rollback to STOCK upstream = owner "KarpelesLab",
-    # rev eed7b330826ef07f2e8d90b2a8fb3cda900173cf (v1.1.16), its own hash,
-    # version "1.1.16". Costs only the four patches above; no config change.
+    # Rollback, cheapest first:
+    #   1. CONFIG ONLY -- drop routingStrategy from ~/.config/teamclaude.json
+    #      (or set it to "expiry"). No rebuild. This is the real rollback for
+    #      anything balanced does wrong, and it is why the port ships behind a
+    #      default rather than as a replacement.
+    #   2. PREVIOUS PIN = rev 770b2612546ebfb67b9aa7df5130462a984b1331, hash
+    #      sha256-7wxTjVdop0qApXNKQVERf9/tFZs9MLgkPfMoXCTMtNk=, version
+    #      "1.1.16-local4".
+    #   3. STOCK upstream = owner "KarpelesLab", rev
+    #      eed7b330826ef07f2e8d90b2a8fb3cda900173cf (v1.1.16), its own hash,
+    #      version "1.1.16". Costs the four patches above; no config change.
     # Previous pin (v1.1.13 + balanced routing, 34 days in production) =
     # rev 890108cb25c40ef779fe9ca8c305326e5a75f575, hash
     # sha256-wgPCwep9+M2LQkzfKyHt7vy5quYDi4S9ut6DdOEMy2w=, version
@@ -82,8 +129,8 @@ stdenvNoCC.mkDerivation rec {
     # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "770b2612546ebfb67b9aa7df5130462a984b1331"; # local/v1116-patches
-    hash = "sha256-7wxTjVdop0qApXNKQVERf9/tFZs9MLgkPfMoXCTMtNk=";
+    rev = "2fc0258715590215b77d4f2ee7f169b4789924c1"; # local/v1116-patches
+    hash = "sha256-FGgGmZ3RQ7leKZe7XKlNqZSjVX3ocjiizt3rS0hCKPs=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
