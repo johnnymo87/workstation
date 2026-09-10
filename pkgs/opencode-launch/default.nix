@@ -1,4 +1,7 @@
-{ pkgs, opencode-serve-auth-sh ? pkgs.callPackage ../opencode-serve-auth-sh { } }:
+{ pkgs
+, opencode-serve-auth-sh ? pkgs.callPackage ../opencode-serve-auth-sh { }
+, oc-tags ? pkgs.callPackage ../oc-tags { }
+}:
 
 pkgs.writeShellApplication {
   name = "opencode-launch";
@@ -11,7 +14,20 @@ pkgs.writeShellApplication {
   # ambient PATH, but pinning them keeps --worktree working under a restricted
   # PATH too. (The `work` helper itself is our own package, discovered on PATH
   # with a loud `command -v` guard.)
-  runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.git pkgs.coreutils ];
+  # oc-tags backs --tag. It is PINNED rather than probed-for at runtime the way
+  # pigeon's daemon has to probe (its systemd unit has a minimal PATH): being a
+  # derivation is exactly what lets us skip that, so --tag behaves the same from
+  # an interactive shell and from a systemd unit with a stripped PATH. The cost
+  # is a build-time edge opencode-launch -> oc-tags, which adds no new failure
+  # surface: both are already in the same shared package list
+  # (users/dev/home.base.nix), so an oc-tags build failure already blocks every
+  # host's home-manager switch. oc-tags is one pure-Python file, stdlib only.
+  # $OC_TAGS_BIN overrides the resolved binary -- an escape hatch for pointing
+  # at a checkout or a stub, not something any deployed config sets.
+  # (Note pigeon's Telegram /launch does NOT go through this script -- it calls
+  # createSession over HTTP directly, see launch-ingest.ts -- so --tag is not
+  # reachable from a phone. Pigeon's own /tag command covers that.)
+  runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.git pkgs.coreutils oc-tags ];
   text = ''
       # shellcheck disable=SC1091  # sourced from a nix store path shellcheck cannot follow
       source "${opencode-serve-auth-sh}"
@@ -143,9 +159,95 @@ pkgs.writeShellApplication {
             end' 2>/dev/null || printf '__SKIP__\n'
       }
 
+      # validate_tag <tag>
+      #
+      # Accept a manual oc-tags tag; reject anything unsafe or meaningless as an
+      # argv element handed to `oc-tags set`. Rules match pigeon's already-shipped
+      # isValidTag (packages/worker/src/tag-command.ts,
+      # packages/daemon/src/worker/tag-ingest.ts):
+      #   - first character alphanumeric. That is what rules out the REAL hazard,
+      #     argument injection: a tag named "--dir" would be read by oc-tags'
+      #     argparse as a flag. Shell metacharacters are NOT the hazard -- we
+      #     always pass argv, never build a command string.
+      #   - remaining characters from [A-Za-z0-9._:/-], 64 characters max.
+      #   - no "auto:" prefix (case-insensitive). oc-tags reserves that for its
+      #     directory-derived fallback and rejects it at write time anyway, but
+      #     failing HERE, before a session exists, beats a confusing failure
+      #     after one is already live.
+      # Kept in lockstep with pkgs/opencode-launch/test.sh by a source-grep guard
+      # in that test.
+      #
+      # LC_ALL=C is load-bearing, not hygiene. Under the ambient en_US.UTF-8 the
+      # bracket expression [A-Za-z0-9] matches accented letters, so `--tag épic`
+      # would pass here, pass oc-tags' normalise_tag, and land in tags.db --
+      # while pigeon's JS TAG_RE rejects the identical string. Two validators,
+      # two answers, and a --help text that promises "letters, digits" and means
+      # it only under one locale.
+      validate_tag() {
+        local t="$1"
+        local LC_ALL=C
+        [[ "$t" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$ ]] || return 1
+        case "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" in
+          auto:*) return 1 ;;
+        esac
+        return 0
+      }
+
+      # apply_session_tag
+      #
+      # Convert the freshly launched session from its directory-derived "auto:"
+      # tag to the manual $tag. Reads caller-scoped $tag and $session_id.
+      #
+      # STRICTLY best-effort and deliberately LAST: the launch is the point, the
+      # tag is bookkeeping. Losing a launch (or delaying its prompt) to a tag DB
+      # write would be a strictly worse trade, so every failure path warns on
+      # stderr and returns 0, and the whole call is bounded by `timeout`.
+      #
+      # Applying after the prompt costs nothing, because oc-tags attribution is
+      # RETROACTIVE: report/top join opencode.db's cost rows against tags.db at
+      # read time, so a tag written a second after the session started still
+      # covers every dollar that session ever spends. There is no race to win by
+      # tagging earlier -- only a launch to risk.
+      #
+      # Note the argv order: oc-tags takes the TAG first and the session id
+      # second (cmd_set/build_parser in pkgs/oc-tags/oc_tags.py). Reversed, it
+      # would happily tag the session "ses_..." and say so. `--` guards the
+      # positional boundary even though validate_tag already rejects a leading
+      # "-". oc-tags resolves the id to its ROOT session, which for a
+      # just-created session is itself.
+      apply_session_tag() {
+        local bin="''${OC_TAGS_BIN:-oc-tags}" out rc=0 reason
+        if ! command -v "$bin" >/dev/null 2>&1; then
+          echo "Note: tag '$tag' not applied: '$bin' not found on PATH (session $session_id keeps its auto: tag)" >&2
+          return 0
+        fi
+        out="$(timeout 10 "$bin" set -- "$tag" "$session_id" 2>&1)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          # Report a REASON, not a dump. The two likeliest failures both hide
+          # behind the naive `$out`: a `timeout` kill (rc 124) prints nothing at
+          # all, and a locked tags.db (~15 concurrent sessions on this host)
+          # prints a 20-line Python traceback whose only useful line is the last.
+          if [ "$rc" -eq 124 ]; then
+            reason="timed out after 10s"
+          else
+            reason="$(printf '%s' "$out" | tail -n1)"
+            [ -n "$reason" ] || reason="exit $rc, no output"
+          fi
+          echo "Note: tag '$tag' not applied to $session_id: $reason" >&2
+          echo "      Apply it by hand with: oc-tags set $tag $session_id" >&2
+          return 0
+        fi
+        # Print oc-tags' OWN line rather than echoing back "$tag". oc-tags
+        # lowercases via normalise_tag, so "--tag FBM-Migration" is stored (and
+        # charted) as "fbm-migration"; a self-reported "Tag: FBM-Migration"
+        # would name something the chart never shows.
+        printf '%s\n' "$out"
+        return 0
+      }
+
       usage() {
         local exit_code="''${1:-1}"
-        echo "Usage: opencode-launch [--model provider/model] [--mcp server] [--worktree slug] [directory] <prompt>"
+        echo "Usage: opencode-launch [--model provider/model] [--mcp server] [--worktree slug] [--tag tag] [directory] <prompt>"
         echo ""
         echo "Launch a headless opencode session."
         echo ""
@@ -157,6 +259,20 @@ pkgs.writeShellApplication {
         echo "                                 under <directory> (a git repo) instead of at"
         echo "                                 its root. Use for WRITABLE sessions so the"
         echo "                                 read-only-main guard is bypassed by design."
+        echo "  --tag <tag>                    Tag the session for oc-tags cost reporting."
+        echo "                                 Every session ALWAYS has a tag, so this does"
+        echo "                                 not create one from nothing -- it OVERRIDES the"
+        echo "                                 directory-derived 'auto:' fallback with what"
+        echo "                                 this session was launched to DO."
+        echo "                                 Worth it most at a repo ROOT, where the"
+        echo "                                 directory says nothing (auto:mono covers"
+        echo "                                 unrelated work). With --worktree you already"
+        echo "                                 get auto:<repo>/<slug>, which is often enough;"
+        echo "                                 --tag earns its keep there when several"
+        echo "                                 worktrees are one project and should add up to"
+        echo "                                 a single line on the chart."
+        echo "                                 Applied after the launch succeeds and never"
+        echo "                                 fails it; tag attribution is retroactive."
         echo "  --tmux-session <name>          Auto-attach in this tmux session (default: main)"
         echo ""
         echo "Favorite Models:"
@@ -171,6 +287,7 @@ pkgs.writeShellApplication {
         echo "  opencode-launch --model google-vertex/gemini-3.8-flash \"run pytest and fix any errors\""
         echo "  opencode-launch --model google-vertex-anthropic/claude-opus-4-7@default ~/projects/pigeon \"review the PR\""
         echo "  opencode-launch --mcp slack ~/projects/pigeon \"summarize #incidents today\""
+        echo "  opencode-launch --tag fbm-migration ~/projects/mono \"port the last two callers\""
         exit "$exit_code"
       }
 
@@ -181,6 +298,7 @@ pkgs.writeShellApplication {
 
       model_spec=""
       worktree_slug=""
+      tag=""
       mcp_servers=()
       # Default the auto-attach target to the user's primary `main` tmux
       # session so headless launches (no $TMUX) land deterministically there
@@ -234,6 +352,22 @@ pkgs.writeShellApplication {
             worktree_slug="''${1#--worktree=}"
             if [ -z "$worktree_slug" ]; then
               echo "Error: --worktree requires a slug" >&2
+              exit 1
+            fi
+            shift
+            ;;
+          --tag)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+              echo "Error: --tag requires a tag" >&2
+              exit 1
+            fi
+            tag="$2"
+            shift 2
+            ;;
+          --tag=*)
+            tag="''${1#--tag=}"
+            if [ -z "$tag" ]; then
+              echo "Error: --tag requires a tag" >&2
               exit 1
             fi
             shift
@@ -296,6 +430,18 @@ pkgs.writeShellApplication {
         model_id="$model_rest"
         if [ -z "$model_id" ]; then
           echo "Error: --model must be provider/model" >&2
+          exit 1
+        fi
+      fi
+
+      # Validate --tag up front -- before the health check, the session, and any
+      # worktree. A typo must cost nothing; a tag rejected after a session exists
+      # would leave a live session and a confusing oc-tags error.
+      if [ -n "$tag" ]; then
+        if ! validate_tag "$tag"; then
+          echo "Error: invalid --tag '$tag'" >&2
+          echo "A tag must start with a letter or digit and use only letters, digits, . _ : / - (64 chars max)." >&2
+          echo "'auto:' is reserved for oc-tags' directory-derived fallback and cannot be set by hand." >&2
           exit 1
         fi
       fi
@@ -577,6 +723,12 @@ pkgs.writeShellApplication {
 
       echo "Session launched: $session_id"
       echo "Directory: $directory"
+      # LAST, and after the auto-attach hand-off above, so nothing about the
+      # launch waits on a sqlite write. apply_session_tag prints "Tag: <tag>" on
+      # success and warns without failing otherwise.
+      if [ -n "$tag" ]; then
+        apply_session_tag
+      fi
       echo ""
       # Attach hint rides the door, matching what oc-pool-attach/oc-auto-attach
       # actually do. Printing $serve_url here taught the human the pool's

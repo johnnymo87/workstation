@@ -27,6 +27,8 @@ opencode-launch --mcp slack ~/projects/pigeon "summarize the last hour of #incid
 2. Creates a new session via `POST /session`
 3. Sends the prompt via `POST /session/{id}/prompt_async`
 4. Prints the session ID and commands to attach or kill
+5. With `--tag`, tags the session for `oc-tags` cost reporting (best-effort,
+   after the launch — see below)
 
 The session runs headless. The pigeon plugin inside the session auto-registers
 with the daemon, so you will receive Telegram notifications for stop/question events.
@@ -219,6 +221,65 @@ worktrees (in-flight/dirty ones are always kept). To prune on demand:
 
 Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos with
 `origin/HEAD` set (mono has it); pass `work`'s trunk via the repo if needed.
+
+## Tagging the Session for Cost Reporting (`--tag`)
+
+`--tag <tag>` records what the session was launched to **do**, so `oc-tags`
+(`oc-tags top`, `oc-tags report`, the chart) can attribute its list-price
+consumption to that work.
+
+```bash
+opencode-launch --tag fbm-migration ~/projects/mono "port the last two callers"
+opencode-launch --tag deploy-triage --worktree ops-991 ~/projects/mono "fix the rollout"
+```
+
+Three things about the oc-tags model make this worth using:
+
+- **It is an override, not a creation.** Every session *always* has exactly one
+  tag; an untagged one falls back to a directory-derived `auto:` tag
+  (`auto:mono`, `auto:mono/some-worktree`). `--tag` converts the session off
+  that fallback. Precedence: explicit session tag > directory glob (longest
+  pattern wins) > `auto:`.
+- **A repo ROOT launch is where it pays.** `auto:mono` lumps together every
+  unrelated thing ever done at that root, and that is where most of the dollars
+  sit. The launcher knows what the session is for; without `--tag` that knowledge
+  is thrown away and reconstructed by hand later.
+- **With `--worktree` it is optional.** That launch already gets
+  `auto:<repo>/<slug>`, which is usually decent. `--tag` earns its keep there
+  when several worktrees are one project and should add up to a single line on
+  the chart — tag them all the same thing.
+
+Behaviour:
+
+- The tag is validated **before** anything is created: it must start with a
+  letter or digit and use only `[A-Za-z0-9._:/-]`, 64 characters max. The
+  leading-alphanumeric rule is what blocks argument injection (a tag named
+  `--dir` that oc-tags' argparse would read as a flag). `auto:` is rejected —
+  it is reserved for the fallback. ASCII means ASCII: the check runs under
+  `LC_ALL=C`, because under the ambient `en_US.UTF-8` bash's `[A-Za-z0-9]`
+  matches accented letters and `épic` would otherwise slip through here while
+  pigeon's identical-looking check rejected it.
+- The tag is applied **after** the launch succeeds, by running
+  `oc-tags set <tag> <session-id>`. That costs nothing, because attribution is
+  retroactive: `report`/`top` join costs against `tags.db` at read time, so a
+  tag written a second later still covers every dollar the session spends.
+- Tagging is **strictly best-effort**. If `oc-tags` is missing or errors, the
+  launcher prints a `Note:` on stderr (including the by-hand command) and still
+  reports a live, prompted session. Losing a launch to a bookkeeping write would
+  be a strictly worse trade.
+- Precise about what "never delays the launch" means: the session and its prompt
+  are untouched, but the *launcher process* can be held up to 10s (the `timeout`
+  bound) by a locked `tags.db` before it prints its `Attach:`/`Kill:` lines. The
+  happy path measures ~130ms. Spinning up a swarm runs `opencode-launch` N times
+  serially, so a wedged tag DB costs up to 10s × N — annoying, never fatal.
+- The tag is stored lower-cased (`oc-tags`' `normalise_tag`), so `--tag
+  FBM-Migration` charts as `fbm-migration`. The launcher prints oc-tags' own
+  confirmation line rather than echoing your spelling back, so what you read is
+  what the chart will show.
+
+Forgot to pass it? Nothing is lost — tag afterwards with
+`oc-tags set <tag> <session-id>`, or cover a whole directory at once with
+`oc-tags set --dir '/home/dev/projects/mono/.worktrees/fbm-*' fbm`.
 
 ## Auto-Attach to nvim+tmux
 
