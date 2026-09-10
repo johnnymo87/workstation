@@ -1110,9 +1110,33 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_db_options(parser: argparse.ArgumentParser) -> None:
+    """Attach --db/--tags-db to a SUBparser without clobbering the parent's value.
+
+    default=SUPPRESS is the whole point (workstation-ueaf). A subparser writes
+    its defaults into the same namespace the parent already populated, so
+    re-declaring these with their real defaults made
+    `oc-tags --tags-db /tmp/x set ...` silently fall back to the REAL
+    ~/.local/share paths -- and report success while doing it. SUPPRESS means
+    "set this only if it was actually passed", so the parent's parsed value
+    survives and the post-subcommand form still wins when both are given.
+
+    The flags are duplicated onto every subparser (rather than left only on the
+    parent) so that both orders work; users reach for the post-subcommand form
+    and shells complete it more naturally.
+    """
+    parser.add_argument(
+        "--db", default=argparse.SUPPRESS, help="path to opencode.db"
+    )
+    parser.add_argument(
+        "--tags-db", default=argparse.SUPPRESS, help="path to tags.db"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     desc = __doc__.splitlines()[0] if __doc__ else ""
     p = argparse.ArgumentParser(prog="oc-tags", description=desc)
+    # The parent owns the real defaults; every subparser SUPPRESSes its own.
     p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
     p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
 
@@ -1123,41 +1147,35 @@ def build_parser() -> argparse.ArgumentParser:
     set_p.add_argument("--dir", metavar="PATH", help="directory pattern to tag")
     set_p.add_argument("target", nargs="?", help="tag (or tag when --dir is used)")
     set_p.add_argument("session_id", nargs="?", help="optional session id")
-    set_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
-    set_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+    _add_db_options(set_p)
 
     # ls
     ls_p = sub.add_parser("ls", help="list tags")
     ls_p.add_argument("--counts", action="store_true", help="show session and directory counts")
-    ls_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
-    ls_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+    _add_db_options(ls_p)
 
     # rm
     rm_p = sub.add_parser("rm", help="remove a tag")
     rm_p.add_argument("--dir", metavar="PATH", help="directory pattern to remove")
     rm_p.add_argument("target", nargs="?", help="session id to remove")
-    rm_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
-    rm_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+    _add_db_options(rm_p)
 
     # report
     rep = sub.add_parser("report", help="text table of dollars by tag by day")
     rep.add_argument("--days", type=int, default=14, help="number of days to report")
-    rep.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
-    rep.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+    _add_db_options(rep)
 
     # top
     top_p = sub.add_parser("top", help="rank untagged root sessions by dollars")
     top_p.add_argument("--days", type=int, default=14, help="number of days to look back")
     top_p.add_argument("--min", type=float, default=0.0, help="minimum dollar threshold")
-    top_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
-    top_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+    _add_db_options(top_p)
 
     # serve
     serve_p = sub.add_parser("serve", help="serve stacked-area chart over HTTP")
     serve_p.add_argument("--host", default="127.0.0.1", help="host to bind (default: 127.0.0.1)")
     serve_p.add_argument("--port", type=int, default=4710, help="port to bind (default: 4710)")
-    serve_p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
-    serve_p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+    _add_db_options(serve_p)
 
     return p
 

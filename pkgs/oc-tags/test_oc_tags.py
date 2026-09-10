@@ -46,6 +46,85 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.port, 4710)
 
 
+class TestGlobalDbFlagsBeforeSubcommand(unittest.TestCase):
+    """`--tags-db X set ...` must not be silently discarded (workstation-ueaf).
+
+    Every subparser re-declares --db/--tags-db. argparse applies a subparser's
+    default over whatever the parent already parsed, so the pre-subcommand form
+    used to lose the value and fall back to the REAL ~/.local/share paths --
+    while printing success. That is the worst shape a bug can have: someone
+    isolating a test run silently writes to the production tag DB and is told
+    it worked. (Found by adversarial review of PR #491; reproduced on cloudbox
+    by tagging into /tmp/probe.db and finding the row in the real tags.db.)
+
+    Both orders must work, for every subcommand that takes these flags.
+    """
+
+    SUBCOMMAND_ARGV = {
+        "set": ["mytag", "ses_x"],
+        "ls": [],
+        "rm": ["ses_x"],
+        "report": [],
+        "top": [],
+        "serve": [],
+    }
+
+    def test_before_subcommand_is_honoured(self):
+        for cmd, rest in self.SUBCOMMAND_ARGV.items():
+            with self.subTest(command=cmd):
+                args = oc_tags.parse_args(
+                    ["--tags-db", "/tmp/t.db", "--db", "/tmp/o.db", cmd, *rest]
+                )
+                self.assertEqual(args.tags_db, "/tmp/t.db")
+                self.assertEqual(args.db, "/tmp/o.db")
+
+    def test_after_subcommand_still_works(self):
+        # The form that always worked must keep working -- this is the half a
+        # naive "just delete the duplicated options" fix would break.
+        for cmd, rest in self.SUBCOMMAND_ARGV.items():
+            with self.subTest(command=cmd):
+                args = oc_tags.parse_args(
+                    [cmd, "--tags-db", "/tmp/t.db", "--db", "/tmp/o.db", *rest]
+                )
+                self.assertEqual(args.tags_db, "/tmp/t.db")
+                self.assertEqual(args.db, "/tmp/o.db")
+
+    def test_after_subcommand_wins_over_before(self):
+        # Ordinary argparse last-wins. Stated as a test so the behaviour is
+        # deliberate rather than incidental.
+        args = oc_tags.parse_args(
+            ["--tags-db", "/tmp/first.db", "set", "--tags-db", "/tmp/second.db", "mytag", "ses_x"]
+        )
+        self.assertEqual(args.tags_db, "/tmp/second.db")
+
+    def test_defaults_survive_when_neither_is_passed(self):
+        for cmd, rest in self.SUBCOMMAND_ARGV.items():
+            with self.subTest(command=cmd):
+                args = oc_tags.parse_args([cmd, *rest])
+                self.assertEqual(args.tags_db, oc_tags.DEFAULT_TAGS_DB)
+                self.assertEqual(args.db, oc_tags.DEFAULT_OPENCODE_DB)
+
+    def test_writes_land_in_the_named_db_not_the_default(self):
+        # The parse-level assertions above are necessary but not sufficient:
+        # this is the end-to-end shape the bug actually took. Uses a temp dir
+        # and asserts the file is CREATED there, so a regression cannot pass by
+        # writing somewhere else and reporting success.
+        with tempfile.TemporaryDirectory() as td:
+            tags_db = os.path.join(td, "isolated.db")
+            opencode_db = os.path.join(td, "absent-opencode.db")
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = oc_tags.main(
+                    ["--tags-db", tags_db, "--db", opencode_db, "set", "isolation-probe", "ses_probe"]
+                )
+            self.assertEqual(rc, 0)
+            self.assertTrue(
+                os.path.exists(tags_db),
+                "write went somewhere other than --tags-db (this is the bug)",
+            )
+            with oc_tags.open_store(tags_db, readonly=True) as conn:
+                self.assertEqual(oc_tags.session_tags(conn).get("ses_probe"), "isolation-probe")
+
+
 class TestAutoKey(unittest.TestCase):
     def test_worktree_keeps_slug(self):
         self.assertEqual(
