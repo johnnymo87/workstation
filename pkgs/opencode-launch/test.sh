@@ -54,6 +54,27 @@ resolve_model_id() {
       end' 2>/dev/null || printf '__SKIP__\n'
 }
 
+# validate_tag <tag>: accept a manual oc-tags tag, reject anything that would be
+# unsafe or meaningless as an argv element handed to `oc-tags set`. Mirror of the
+# production function in default.nix; kept in lockstep by the source-grep guard
+# at the bottom. Rules match pigeon's isValidTag (packages/worker/src/tag-command.ts,
+# packages/daemon/src/worker/tag-ingest.ts), which is already shipped and reviewed:
+#   - first character alphanumeric, which is what actually rules out the argument
+#     -injection hazard (a tag named "--dir" that argparse would read as a flag);
+#     shell metacharacters are NOT a hazard because we pass argv, never a string
+#   - the rest from [A-Za-z0-9._:/-], max 64 characters total
+#   - no "auto:" prefix (case-insensitive): oc-tags reserves that for its
+#     directory-derived fallback and rejects it at write time anyway. Failing
+#     here, before a session exists, beats a confusing failure after launch.
+validate_tag() {
+  local t="$1"
+  [[ "$t" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$ ]] || return 1
+  case "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" in
+    auto:*) return 1 ;;
+  esac
+  return 0
+}
+
 # ---- test infrastructure ----------------------------------------------------
 
 assert_eq() {
@@ -187,6 +208,49 @@ PIGEON_DAEMON_AUTH_TOKEN_FILE="/nonexistent/pigeon_token_test"
 resolve_pigeon_auth
 assert_eq "0" "${#pigeon_auth[@]}" "resolve_pigeon_auth: neither set yields empty auth array"
 unset PIGEON_DAEMON_AUTH_TOKEN_FILE
+
+# ---- validate_tag tests ------------------------------------------------------
+#
+# --tag <tag> converts the launched session from its directory-derived "auto:"
+# fallback to a manual oc-tags tag. The tag comes from a human on a command line
+# and goes into another process's argv, so it is validated BEFORE anything is
+# created: a bad tag must cost nothing, and must not surface as a confusing
+# oc-tags error after a session is already live.
+assert_tag_ok() {
+  if validate_tag "$1"; then
+    printf 'PASS  validate_tag accepts %s\n' "$2"
+  else
+    printf 'FAIL  validate_tag accepts %s\n        rejected: %s\n' "$2" "$1"; exit 1
+  fi
+}
+assert_tag_rejected() {
+  if validate_tag "$1"; then
+    printf 'FAIL  validate_tag rejects %s\n        accepted: %s\n' "$2" "$1"; exit 1
+  else
+    printf 'PASS  validate_tag rejects %s\n' "$2"
+  fi
+}
+
+assert_tag_ok "billing" "a plain tag"
+assert_tag_ok "fbm-migration" "a hyphenated tag"
+assert_tag_ok "team/infra" "a slash-namespaced tag"
+assert_tag_ok "v1.2_x" "dots and underscores"
+assert_tag_ok "epic:swarm" "an interior colon"
+assert_tag_ok "9lives" "a leading digit"
+assert_tag_ok "$(printf 'a%.0s' $(seq 1 64))" "a 64-character tag (max length)"
+
+# Argument injection is the hazard, not shell metacharacters: we pass argv, never
+# a command string. A leading "-" is what argparse would read as a flag.
+assert_tag_rejected "--dir" "a tag that argparse would read as a flag"
+assert_tag_rejected "-x" "a leading hyphen"
+assert_tag_rejected "" "the empty tag"
+assert_tag_rejected "auto:mono" "the reserved auto: prefix"
+assert_tag_rejected "AUTO:mono" "the reserved prefix, upper case"
+assert_tag_rejected "has space" "an embedded space"
+assert_tag_rejected 'semi;colon' "a shell metacharacter (belt and braces)"
+assert_tag_rejected '$(id)' "a command substitution shape"
+assert_tag_rejected "$(printf 'a%.0s' $(seq 1 65))" "a 65-character tag (over max length)"
+assert_tag_rejected "$(printf 'tag\nsecond')" "an embedded newline"
 
 # ---- production-source check (default.nix) -----------------------------------
 #
@@ -459,6 +523,89 @@ if [ -f "$default_nix" ]; then
     printf 'PASS  launch-prompt record warns on unexpected HTTP status (w36w)\n'
   else
     printf 'FAIL  launch-prompt record must warn on unexpected HTTP status (w36w)\n'; exit 1
+  fi
+  # ---- --tag: launch-time oc-tags tagging (workstation-simy) -----------------
+  #
+  # A launched session knows what it was launched to DO; without --tag that
+  # knowledge is thrown away and reconstructed by hand later. The invariants the
+  # source must keep:
+  #   - the flag is parsed and the tag validated BEFORE anything is created
+  #   - the tag is applied only AFTER the launch has succeeded, so bookkeeping
+  #     can never fail or delay the launch (tag lookup is retroactive at report
+  #     time, so applying late costs nothing)
+  #   - oc-tags argv order is `set <tag> <session-id>` (tag FIRST)
+  #   - any oc-tags failure warns on stderr and returns 0
+  if grep -q -- '--tag)' "$default_nix"; then
+    printf 'PASS  source parses --tag flag\n'
+  else
+    printf 'FAIL  source parses --tag flag\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q 'validate_tag()' "$default_nix"; then
+    printf 'PASS  source defines validate_tag\n'
+  else
+    printf 'FAIL  source defines validate_tag\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # The mirror above is only worth anything if it is byte-identical to prod.
+  tag_re='^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$'
+  if grep -qF "$tag_re" "$default_nix"; then
+    printf 'PASS  source tag regex matches the mirror under test\n'
+  else
+    printf 'FAIL  source tag regex must match the mirror under test\n        want: %s\n' "$tag_re"; exit 1
+  fi
+  if grep -q 'apply_session_tag()' "$default_nix"; then
+    printf 'PASS  source defines apply_session_tag\n'
+  else
+    printf 'FAIL  source defines apply_session_tag\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # argv order: oc-tags takes the TAG first and the session id second
+  # (cmd_set/build_parser in pkgs/oc-tags/oc_tags.py). Reversed, it would try to
+  # tag the session "ses_..." -- which oc-tags accepts, silently.
+  if grep -q 'set -- "\$tag" "\$session_id"' "$default_nix"; then
+    printf 'PASS  source calls oc-tags set <tag> <session-id> (tag first)\n'
+  else
+    printf 'FAIL  source must call oc-tags set <tag> <session-id>\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  # Validation must happen before the session is created, so a typo costs nothing.
+  validate_line="$(grep -n 'if ! validate_tag' "$default_nix" | head -1 | cut -d: -f1)"
+  if [ -n "$validate_line" ] && [ -n "$create_line" ] && [ "$validate_line" -lt "$create_line" ]; then
+    printf 'PASS  tag is validated before the session is created\n'
+  else
+    printf 'FAIL  tag must be validated before session create (validate@%s create@%s)\n' "$validate_line" "$create_line"; exit 1
+  fi
+  # Tagging must happen only after the launch succeeded (launch_ok=1). The launch
+  # is the point; the tag is bookkeeping, and it must never sit in front of the
+  # prompt where an oc-tags hang would delay or lose the launch.
+  apply_line="$(grep -n '^ *apply_session_tag$' "$default_nix" | head -1 | cut -d: -f1)"
+  ok_line="$(grep -n '^      launch_ok=1$' "$default_nix" | head -1 | cut -d: -f1)"
+  if [ -n "$apply_line" ] && [ -n "$ok_line" ] && [ "$apply_line" -gt "$ok_line" ]; then
+    printf 'PASS  tag is applied only after the launch succeeded\n'
+  else
+    printf 'FAIL  tag must be applied after launch_ok=1 (apply@%s launch_ok@%s)\n' "$apply_line" "$ok_line"; exit 1
+  fi
+  # ...and specifically after prompt_async, never before it.
+  if [ -n "$apply_line" ] && [ -n "$prompt_line" ] && [ "$apply_line" -gt "$prompt_line" ]; then
+    printf 'PASS  tag is applied after prompt_async (bookkeeping never delays the launch)\n'
+  else
+    printf 'FAIL  tag must be applied after prompt_async (apply@%s prompt@%s)\n' "$apply_line" "$prompt_line"; exit 1
+  fi
+  # The apply must be time-bounded and best-effort: a hung or broken oc-tags
+  # warns and the launcher still reports a live, prompted session.
+  if grep -A12 'apply_session_tag()' "$default_nix" | grep -q -- '--max-time\|timeout '; then
+    printf 'PASS  oc-tags invocation is time-bounded\n'
+  else
+    printf 'FAIL  oc-tags invocation must be time-bounded\n        in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -A16 'apply_session_tag()' "$default_nix" | grep -q 'not applied'; then
+    printf 'PASS  a failed tag warns on stderr instead of failing the launch\n'
+  else
+    printf 'FAIL  a failed tag must warn on stderr\n        in: %s\n' "$default_nix"; exit 1
+  fi
+  # oc-tags is a runtimeInput, so `oc-tags` resolves under a minimal PATH
+  # (systemd units, the pigeon worker) exactly the way git/coreutils do.
+  if grep -q 'oc-tags' "$default_nix" && grep -q 'runtimeInputs' "$default_nix"; then
+    printf 'PASS  source references oc-tags\n'
+  else
+    printf 'FAIL  source references oc-tags\n        not found in: %s\n' "$default_nix"; exit 1
   fi
   # loud-fail: a work failure must abort, never silently launch at the root.
   if grep -q 'failed to create worktree' "$default_nix"; then
