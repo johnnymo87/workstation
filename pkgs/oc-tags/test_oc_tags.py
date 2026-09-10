@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -940,6 +941,10 @@ class TestRenderSvg(unittest.TestCase):
         agg.sources = {"tag_a": "manual", "tag_b": "auto"}
         return agg
 
+    def _hover_groups(self, svg):
+        """Only the <g class="hz"> blocks -- the legend also names tags."""
+        return re.findall(r'<g class="hz">.*?\n  </g>', svg, re.S)
+
     def test_render_svg_starts_with_svg_and_parses_xml(self):
         agg = self._sample_agg()
         svg = oc_tags.render_svg(agg, {"2026-09-07": 15.0, "2026-09-08": 35.0})
@@ -1065,6 +1070,187 @@ class TestRenderSvg(unittest.TestCase):
         svg = oc_tags.render_svg(agg, spend)
         self.assertNotIn("Drift warning", svg)
 
+
+    # --- hover tooltips (zero-JS) ---
+
+    def test_hover_tooltip_shows_tag_and_bucket_dollars(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertIn('class="hz"', svg)
+        self.assertIn("tag_a", svg)
+        self.assertIn("$20.00", svg)   # tag_a on 2026-09-08
+        self.assertIn("$5.00", svg)    # tag_b on 2026-09-07
+
+    def test_hover_tooltip_hidden_until_hover_via_css_only(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertIn(".hz:hover", svg)
+        self.assertRegex(svg, r"\.hz\s+\.tt\s*\{[^}]*opacity\s*:\s*0")
+
+    def test_hover_layer_contains_no_javascript(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {"2026-09-08": 12.0})
+        self.assertNotIn("<script", svg.lower())
+        self.assertNotIn("javascript:", svg.lower())
+        # Catch ANY on*= handler rather than a hand-enumerated list, which had
+        # missed onmousemove, SMIL onbegin/onend, onfocusin and onerror.
+        self.assertIsNone(
+            re.search(r"\bon[a-z]+\s*=", svg, re.I),
+            "an event handler attribute leaked into the SVG",
+        )
+
+    def test_hover_tooltip_escapes_tag_markup(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-08"]
+        agg.series = {"<script>x</script>": {"2026-09-08": 7.0}}
+        agg.totals = {"<script>x</script>": 7.0}
+        agg.sources = {"<script>x</script>": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        self.assertNotIn("<script", svg.lower())
+        self.assertIn("&lt;script&gt;", svg)
+        self.assertIsNotNone(ET.fromstring(svg))
+
+    def test_hover_tooltip_omits_zero_value_segments(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-07", "2026-09-08"]
+        agg.series = {
+            "tag_a": {"2026-09-07": 0.0, "2026-09-08": 4.0},
+            "zeroed": {"2026-09-07": 0.0, "2026-09-08": 0.0},
+        }
+        agg.totals = {"tag_a": 4.0, "zeroed": 0.0}
+        agg.sources = {"tag_a": "manual", "zeroed": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        hover = "".join(self._hover_groups(svg))
+        self.assertNotIn("zeroed", hover)
+        self.assertIn("tag_a", hover)
+        self.assertEqual(len(self._hover_groups(svg)), 1)
+
+    def test_hover_tooltip_respects_hide(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {}, hide=frozenset({"tag_b"}))
+        hover = "".join(self._hover_groups(svg))
+        self.assertNotIn("tag_b", hover)
+        self.assertIn("tag_a", hover)
+
+    def test_hover_tooltip_stays_within_canvas(self):
+        long_tag = "a-very-long-tag-name-that-would-overflow-the-right-edge"
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-08"]
+        agg.series = {long_tag: {"2026-09-08": 3.0}}
+        agg.totals = {long_tag: 3.0}
+        agg.sources = {long_tag: "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        root = ET.fromstring(svg)
+        canvas_w = float(root.get("viewBox").split()[2])
+        ns = "{http://www.w3.org/2000/svg}"
+        found = 0
+        for rect in root.iter(f"{ns}rect"):
+            if rect.get("class") != "ttbg":
+                continue
+            found += 1
+            x = float(rect.get("x")); w = float(rect.get("width"))
+            self.assertGreaterEqual(x, 0.0)
+            self.assertLessEqual(x + w, canvas_w)
+        self.assertGreater(found, 0)
+
+
+    def _hit_polys(self, svg):
+        """(tag, [(x, y), ...]) per hover target, read from rendered output."""
+        ns = "{http://www.w3.org/2000/svg}"
+        root = ET.fromstring(svg)
+        out = []
+        for g in root.iter(f"{ns}g"):
+            if g.get("class") != "hz":
+                continue
+            poly = g.find(f"{ns}polygon")
+            tag = g.find(f"{ns}g").find(f"{ns}text").text
+            pts = [tuple(map(float, s.split(","))) for s in poly.get("points").split()]
+            out.append((tag, pts))
+        return out
+
+    def test_hit_shape_is_polygon_matching_painted_trapezoid(self):
+        # A stacked area interpolates between buckets, so the painted segment is
+        # a trapezoid. An axis-aligned rect named the wrong tag on 29.7% of
+        # hoverable pixels of real data; the hit shape must be a polygon.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertNotIn('<rect class="hit"', svg)
+        polys = self._hit_polys(svg)
+        self.assertTrue(polys)
+        for _tag, pts in polys:
+            self.assertEqual(len(pts), 6, "expected a 6-point trapezoid hit shape")
+
+    def test_hit_polygons_tile_adjacent_bands_without_overlap(self):
+        # tag_b stacks directly on tag_a. At every shared x, tag_a's top edge
+        # must equal tag_b's bottom edge -- exact tiling means no pixel can be
+        # claimed by two bands, which is what removes the wrong-tag failure.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        by_tag = {}
+        for tag, pts in self._hit_polys(svg):
+            by_tag.setdefault(tag, []).append(pts)
+        self.assertIn("tag_a", by_tag)
+        self.assertIn("tag_b", by_tag)
+        for a_pts, b_pts in zip(by_tag["tag_a"], by_tag["tag_b"]):
+            # polygon order: (xl,tl) (sx,top) (xr,tr) (xr,br) (sx,bot) (xl,bl)
+            a_top = [a_pts[0], a_pts[1], a_pts[2]]
+            b_bot = [b_pts[5], b_pts[4], b_pts[3]]
+            for (ax, ay), (bx, by) in zip(a_top, b_bot):
+                self.assertAlmostEqual(ax, bx, places=1)
+                self.assertAlmostEqual(ay, by, places=1)
+
+    def test_hit_polygon_side_edges_sit_at_bucket_midpoint_value(self):
+        # Steeply-changing band: the side edge must be the MEAN of the two
+        # bucket boundaries, matching linear interpolation of the paint.
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["d1", "d2", "d3"]
+        agg.series = {"spike": {"d1": 1.0, "d2": 100.0, "d3": 1.0}}
+        agg.totals = {"spike": 102.0}
+        agg.sources = {"spike": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        polys = [p for t, p in self._hit_polys(svg) if t == "spike"]
+        self.assertEqual(len(polys), 3)
+        tops = [p[1][1] for p in polys]           # top y at each bucket centre
+        mid_right_of_d1 = polys[0][2][1]          # d1's right edge top
+        mid_left_of_d2 = polys[1][0][1]           # d2's left edge top
+        self.assertAlmostEqual(mid_right_of_d1, (tops[0] + tops[1]) / 2, places=1)
+        self.assertAlmostEqual(mid_left_of_d2, (tops[0] + tops[1]) / 2, places=1)
+        self.assertAlmostEqual(mid_right_of_d1, mid_left_of_d2, places=1)
+
+    def test_hover_layer_painted_after_legend(self):
+        # The legend lives at x >= 825 and is drawn later in document order, so
+        # a hover layer emitted before it would render UNDER it.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        hover_at = svg.index("<!-- hover -->")
+        # Every legend swatch (x=825) and label (x=843) must precede the layer.
+        self.assertGreater(hover_at, svg.rindex('x="825"'))
+        self.assertGreater(hover_at, svg.rindex('x="843"'))
+        # And nothing but hover groups may follow it.
+        self.assertNotIn('x="843"', svg[hover_at:])
+
+    def test_hit_declares_pointer_events_explicitly(self):
+        # fill="transparent" works only because visiblePainted counts a painted
+        # fill; state pointer-events outright so an editor switching to
+        # fill="none" does not silently kill every tooltip.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertRegex(svg, r"\.hz\s+\.hit\s*\{[^}]*pointer-events\s*:\s*all")
+
+    def test_right_edge_tooltip_flips_left_of_plot(self):
+        # Clamping alone pushed right-edge tooltips into the legend column.
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["d1", "d2"]
+        agg.series = {"t": {"d1": 5.0, "d2": 5.0}}
+        agg.totals = {"t": 10.0}
+        agg.sources = {"t": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        ns = "{http://www.w3.org/2000/svg}"
+        root = ET.fromstring(svg)
+        boxes = [r for r in root.iter(f"{ns}rect") if r.get("class") == "ttbg"]
+        self.assertTrue(boxes)
+        for r in boxes:
+            self.assertLessEqual(float(r.get("x")) + float(r.get("width")), 825.0)
 
 class TestServer(unittest.TestCase):
     def setUp(self):
