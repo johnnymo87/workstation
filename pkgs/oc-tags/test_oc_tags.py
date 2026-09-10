@@ -18,6 +18,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import oc_tags  # noqa: E402
 
+# Every fixture in this file timestamps its rows at FIXTURE_NOW_MS (2026-09-08
+# 09:30 ET). Window selection, however, is relative to *now*: `days=N` spans
+# [today_start - N days, today_start + 1 day]. Left on the wall clock, each of
+# those tests is a time bomb that passes for N days after 2026-09-08 and then
+# reports "No data in window" -- which is a false RED for an `assertIn` and a
+# false GREEN for an `assertNotIn`. `days=1` duly broke CI on 2026-09-10 and
+# blocked two unrelated dependency bumps.
+#
+# `calculate_window` already honours OC_TAGS_NOW_MS, so pin the clock for the
+# whole suite. Tests that pass now_ms= explicitly still override this.
+FIXTURE_NOW_MS = 1788874200000
+os.environ["OC_TAGS_NOW_MS"] = str(FIXTURE_NOW_MS)
+
 
 class TestParseArgs(unittest.TestCase):
     def test_report_defaults(self):
@@ -1097,7 +1110,12 @@ class TestServer(unittest.TestCase):
     def test_days_1_selects_hourly_bucketing(self):
         status, ctype, body = oc_tags.handle_request("/", "days=1", db_path=self.db, tags_db=self.tags_db)
         self.assertEqual(status, 200)
-        self.assertIn("T", body)
+        # An hour bucket, not a day bucket: the axis label carries the hour.
+        # Assert the label itself -- a bare "T" is also absent from the
+        # "No data in window" placeholder, so it cannot tell an hourly chart
+        # from an empty one.
+        self.assertIn("09-08T09", body)
+        self.assertNotIn("No data in window", body)
 
     def test_hide_param_filtered(self):
         # Tag session
