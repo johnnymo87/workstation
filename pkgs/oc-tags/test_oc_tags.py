@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -940,6 +941,10 @@ class TestRenderSvg(unittest.TestCase):
         agg.sources = {"tag_a": "manual", "tag_b": "auto"}
         return agg
 
+    def _hover_groups(self, svg):
+        """Only the <g class="hz"> blocks -- the legend also names tags."""
+        return re.findall(r'<g class="hz">.*?\n  </g>', svg, re.S)
+
     def test_render_svg_starts_with_svg_and_parses_xml(self):
         agg = self._sample_agg()
         svg = oc_tags.render_svg(agg, {"2026-09-07": 15.0, "2026-09-08": 35.0})
@@ -1064,6 +1069,84 @@ class TestRenderSvg(unittest.TestCase):
         )
         svg = oc_tags.render_svg(agg, spend)
         self.assertNotIn("Drift warning", svg)
+
+
+    # --- hover tooltips (zero-JS) ---
+
+    def test_hover_tooltip_shows_tag_and_bucket_dollars(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertIn('class="hz"', svg)
+        self.assertIn("tag_a", svg)
+        self.assertIn("$20.00", svg)   # tag_a on 2026-09-08
+        self.assertIn("$5.00", svg)    # tag_b on 2026-09-07
+
+    def test_hover_tooltip_hidden_until_hover_via_css_only(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertIn(".hz:hover", svg)
+        self.assertRegex(svg, r"\.hz\s+\.tt\s*\{[^}]*opacity\s*:\s*0")
+
+    def test_hover_layer_contains_no_javascript(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {"2026-09-08": 12.0})
+        self.assertNotIn("<script", svg.lower())
+        for attr in ("onmouseover", "onmouseenter", "onclick", "onload", "javascript:"):
+            self.assertNotIn(attr, svg.lower())
+
+    def test_hover_tooltip_escapes_tag_markup(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-08"]
+        agg.series = {"<script>x</script>": {"2026-09-08": 7.0}}
+        agg.totals = {"<script>x</script>": 7.0}
+        agg.sources = {"<script>x</script>": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        self.assertNotIn("<script", svg.lower())
+        self.assertIn("&lt;script&gt;", svg)
+        self.assertIsNotNone(ET.fromstring(svg))
+
+    def test_hover_tooltip_omits_zero_value_segments(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-07", "2026-09-08"]
+        agg.series = {
+            "tag_a": {"2026-09-07": 0.0, "2026-09-08": 4.0},
+            "zeroed": {"2026-09-07": 0.0, "2026-09-08": 0.0},
+        }
+        agg.totals = {"tag_a": 4.0, "zeroed": 0.0}
+        agg.sources = {"tag_a": "manual", "zeroed": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        hover = "".join(self._hover_groups(svg))
+        self.assertNotIn("zeroed", hover)
+        self.assertIn("tag_a", hover)
+        self.assertEqual(len(self._hover_groups(svg)), 1)
+
+    def test_hover_tooltip_respects_hide(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {}, hide=frozenset({"tag_b"}))
+        hover = "".join(self._hover_groups(svg))
+        self.assertNotIn("tag_b", hover)
+        self.assertIn("tag_a", hover)
+
+    def test_hover_tooltip_stays_within_canvas(self):
+        long_tag = "a-very-long-tag-name-that-would-overflow-the-right-edge"
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-08"]
+        agg.series = {long_tag: {"2026-09-08": 3.0}}
+        agg.totals = {long_tag: 3.0}
+        agg.sources = {long_tag: "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        root = ET.fromstring(svg)
+        canvas_w = float(root.get("viewBox").split()[2])
+        ns = "{http://www.w3.org/2000/svg}"
+        found = 0
+        for rect in root.iter(f"{ns}rect"):
+            if rect.get("class") != "ttbg":
+                continue
+            found += 1
+            x = float(rect.get("x")); w = float(rect.get("width"))
+            self.assertGreaterEqual(x, 0.0)
+            self.assertLessEqual(x + w, canvas_w)
+        self.assertGreater(found, 0)
 
 
 class TestServer(unittest.TestCase):

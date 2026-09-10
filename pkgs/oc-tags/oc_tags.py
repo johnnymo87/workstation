@@ -640,6 +640,9 @@ def render_svg(
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="{height}">\n'
         f'  <style>\n'
         f'    text {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}\n'
+        f'    .hz .tt {{ opacity: 0; pointer-events: none; }}\n'
+        f'    .hz:hover .tt {{ opacity: 1; }}\n'
+        f'    .hz:hover .hit {{ fill: #000000; fill-opacity: 0.06; }}\n'
         f'  </style>\n'
         f'  <defs>\n'
         f'    <pattern id="hatch" width="8" height="8" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">\n'
@@ -693,6 +696,7 @@ def render_svg(
 
     # Stacked Area Bands
     y_cum = [0.0] * M
+    segments = []  # (tag, bucket, value, x, seg_top_y, seg_bot_y) for hover targets
     for t in bands:
         bot_pts = []
         top_pts = []
@@ -702,6 +706,8 @@ def render_svg(
             top_y = y_scale(y_cum[i] + v)
             bot_pts.append((x_coords[i], bot_y))
             top_pts.append((x_coords[i], top_y))
+            if v > 0:
+                segments.append((t, b, v, x_coords[i], top_y, bot_y))
             y_cum[i] += v
 
         if M == 1:
@@ -735,6 +741,40 @@ def render_svg(
         svg_parts.append(
             f'  <polyline points="{pts_str}" fill="none" stroke="#e11d48" stroke-width="2" stroke-dasharray="4,2"/>'
         )
+
+    # Hover layer: one CSS-revealed tooltip per non-zero segment. Deliberately
+    # zero JavaScript -- an SVG <title> would work too but browsers delay it
+    # ~1s and style it as an OS tooltip, which reads as lag on a dense chart.
+    if segments:
+        slot = (plot_w / (M - 1)) if M > 1 else 40.0
+        svg_parts.append("  <!-- hover -->")
+        for t, b, v, sx, s_top, s_bot in segments:
+            hit_x = max(x_left, sx - slot / 2)
+            hit_w = min(x_right, sx + slot / 2) - hit_x
+            if hit_w <= 0:
+                continue
+            # Hair-thin bands still need a grabbable target.
+            hit_h = max(s_bot - s_top, 4.0)
+            hit_y = s_top if (s_bot - s_top) >= 4.0 else (s_top + s_bot) / 2 - 2.0
+
+            line1 = t
+            line2 = f"{b}: ${v:,.2f}"
+            tw = max(len(line1), len(line2)) * 6.6 + 18.0
+            th = 42.0
+            tx = min(sx + 12.0, width - 5.0 - tw)
+            tx = max(tx, 5.0)
+            ty = min(max((s_top + s_bot) / 2 - th / 2, 5.0), height - 5.0 - th)
+
+            svg_parts.append(
+                f'  <g class="hz">\n'
+                f'    <rect class="hit" x="{hit_x:.1f}" y="{hit_y:.1f}" width="{hit_w:.1f}" height="{hit_h:.1f}" fill="transparent"/>\n'
+                f'    <g class="tt">\n'
+                f'      <rect class="ttbg" x="{tx:.1f}" y="{ty:.1f}" width="{tw:.1f}" height="{th:.1f}" rx="4" fill="#0f172a" fill-opacity="0.92"/>\n'
+                f'      <text x="{tx + 9:.1f}" y="{ty + 17:.1f}" font-size="11" font-weight="600" fill="#ffffff">{html.escape(line1)}</text>\n'
+                f'      <text x="{tx + 9:.1f}" y="{ty + 32:.1f}" font-size="11" fill="#cbd5e1">{html.escape(line2)}</text>\n'
+                f'    </g>\n'
+                f'  </g>'
+            )
 
     # Axis Title
     svg_parts.append(
