@@ -1208,3 +1208,100 @@ updates that pin in the same commit as the tests it covers.
 - A spec reviewer once cited line numbers in the 800s for a 306-line file. Its
   conclusions happened to be right, but they were re-verified by hand before
   being accepted. Verify reviewer citations that look impossible.
+
+---
+
+## Post-T14: chart iterations (2026-09-09 .. 2026-09-11)
+
+The original 14 tasks shipped in PR #481. What follows were user-driven
+iterations on the rendered chart, each merged and applied to cloudbox. Tracked
+under epic `workstation-fsod`; the original epic `workstation-3umv` is closed.
+
+| Change | PR | Commit |
+|---|---|---|
+| Hover tooltips (CSS `:hover`, zero JS) | #487 | `5ab0e9e` |
+| Dark mode (`prefers-color-scheme`, true black) | #490 | `f3bbd3e` |
+| Stacked bars replacing the interpolated area | #496 | `2303ea6` |
+| Chart server as a declared user service | #497 | `ab240c1` |
+
+Not mine but adjacent, and landed in the same window: `--tag` on
+`opencode-launch` (#491), a `--db`/`--tags-db` arg-order fix (#493), and a test
+isolation fix stopping the suite writing to the real `tags.db` (#494).
+
+### The pattern worth carrying forward
+
+**Every one of these shipped a green test suite over a broken feature, and the
+adversarial reviewer found it each time.** This is the single most useful thing
+in this document.
+
+- **Hover**: hit targets were axis-aligned rects over a stacked *area*, whose
+  painted segments are trapezoids. Measured **29.7% of hoverable pixels named
+  the wrong tag**. 108 tests passed; none compared hit shape to paint.
+- **Dark mode**: the chart rendered **black framed by white**. In a standalone
+  SVG the letterbox strips and everything below the fixed height are *canvas*,
+  which only the root element's background paints; a `<rect>` covering the
+  viewBox cannot reach it. 122 tests passed; none looked at the root element.
+- **Bars**: the metered ticks were `bar_w/2 + 3` wide, exceeding `slot/2` once
+  the slot drops under 27.3px, so at 30 daily buckets they **fused back into
+  the connected line the change existed to remove**. Also `stroke-width="4"`
+  on hit rects made the hit region rect±2px, so the top 2px of every segment
+  named the band above — 10.6% of painted area — while a code comment asserted
+  "exact by construction".
+- **Serve unit**: `home-manager switch` would have **reported success and
+  changed nothing**, because a transient unit in `/run/user/$UID/systemd/transient`
+  outranks `~/.config/systemd/user` in the unit search path. And the
+  start-limit rationale was factually false: `cmd_serve` touches no DB, so the
+  only startup exit is `EADDRINUSE` — transient by nature — which a 5-in-300s
+  limit would have turned into permanently-down.
+
+The common failure was **testing the code I wrote rather than the outcome I
+wanted**. Corrections now in force:
+
+1. Run `adversarial-reviewer-fable` on anything visual or operational *before*
+   opening the PR, not only when asked.
+2. **Verify a new guard fails when its fix is reverted.** A test that cannot
+   fail is decoration. Done for the `svg:root`, metered-tick and hit-stroke
+   guards.
+3. Watch for guards that quietly *become* vacuous. Moving bucket centres off
+   the plot edge silently stopped `test_right_edge_tooltip_flips_left_of_plot`
+   from exercising any flip; it asserted `x <= 825` against a tooltip at 634
+   and passed.
+4. Prefer asserting on **text nodes** over whole-document substrings. A class
+   named `.ttt2` collided with a test asserting a truncated tag `t2` never
+   appears. Renaming dodged the instance, not the class of bug.
+
+### Operational notes
+
+- The chart server is `systemd.user.services.oc-tags-serve`
+  (`users/dev/oc-tags-serve.nix`, cloudbox only). `ExecStart` references the
+  **derivation**, not `~/.nix-profile/bin`, so a `home-manager switch` restarts
+  it and thereby deploys. That closes a real trap: the serve ran pre-hover code
+  for hours after the hover feature merged, making the feature look nonexistent.
+- A hand-started `systemd-run --unit=oc-tags-serve` transient unit **shadows**
+  the declared one silently. An activation step ordered before `reloadSystemd`
+  stops it. After any deploy, confirm with
+  `systemctl --user show -p FragmentPath,Transient oc-tags-serve.service` —
+  expect the `~/.config/systemd/user` path and `Transient=no`.
+- Pre-merge inspection recipe, used successfully: build the branch
+  (`nix build .#packages.aarch64-linux.oc-tags --out-link /tmp/...`), stop the
+  unit, run the built binary on `:4710` so the existing tunnel picks it up.
+  **Do not** create the preview with the same unit name as the real service.
+
+### Open follow-ups
+
+Both were found by the adversarial review of #496 and deliberately not fixed
+there. Full reproduction detail and fix shapes are in the bead notes.
+
+- **`workstation-9e7j`** (ready) — bucket count is unbounded.
+  `?days=30&bucket=hour` is 532 bars at 1.0px in an ~850KB document; sub-pixel
+  segments render `height="0.0"`, which is both invisible *and* unhoverable.
+- **`workstation-6f0c`** (blocked by `9e7j`) — bars delete missing buckets
+  rather than showing a gap. Buckets come from observed rows, not the window,
+  so `?days=1` hourly rendered 19 bars for 48 hours with labels jumping
+  05 → 08 → 10. This half-undermines the honesty argument that motivated bars:
+  the area lied by interpolating *across* a missing day, bars lie by *deleting*
+  it. Ordered second because fixing it **raises** M by construction (a 30-day
+  hourly window becomes 720 slots), making `9e7j` strictly worse.
+
+Also still open and explicitly out of scope for this plan:
+`workstation-xuq2` (oc-cost rate-book drift).
