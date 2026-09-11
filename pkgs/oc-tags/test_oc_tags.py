@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -12,10 +13,31 @@ import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+from unittest import mock
 from pathlib import Path
 
 # Allow `import oc_tags` when running from repo root or anywhere else.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Redirect HOME to a throwaway dir BEFORE importing oc_tags, because
+# DEFAULT_TAGS_DB / DEFAULT_OPENCODE_DB are `os.path.expanduser` results
+# computed at import time. Without this, any test that reaches a default path
+# -- by regression, or simply by someone forgetting to pass --tags-db to a new
+# main() test -- writes into the developer's REAL
+# ~/.local/share/oc-tags/tags.db and reports nothing amiss.
+#
+# That is not hypothetical: the suite for the workstation-ueaf fix
+# (`--tags-db` before the subcommand being silently discarded) did exactly this
+# on its first, correctly-failing run, and a row had to be removed from the
+# production DB by hand. A test that detects a data-integrity bug by causing it
+# is only half a test.
+#
+# flake.nix's oc-tags-tests check already exports HOME="$TMPDIR", so this only
+# closes the gap for a suite run directly (`python3 test_oc_tags.py`), which is
+# how it is run while developing -- i.e. exactly when the code is most likely
+# to be wrong.
+_HOME_SANDBOX = tempfile.TemporaryDirectory(prefix="oc-tags-test-home-")
+os.environ["HOME"] = _HOME_SANDBOX.name
 
 import oc_tags  # noqa: E402
 
@@ -106,23 +128,61 @@ class TestGlobalDbFlagsBeforeSubcommand(unittest.TestCase):
 
     def test_writes_land_in_the_named_db_not_the_default(self):
         # The parse-level assertions above are necessary but not sufficient:
-        # this is the end-to-end shape the bug actually took. Uses a temp dir
-        # and asserts the file is CREATED there, so a regression cannot pass by
-        # writing somewhere else and reporting success.
+        # this is the end-to-end shape the bug actually took.
+        #
+        # Both halves are load-bearing, and the second one is the one that was
+        # missing. "The named file was written" catches a regression, but it
+        # does not say WHERE a regression would write instead -- and the honest
+        # answer is DEFAULT_TAGS_DB, i.e. the developer's real tag database.
+        # So point that default at a decoy inside the tempdir and assert the
+        # decoy stays absent. The test then proves "wrote here AND nowhere
+        # else", and a regression damages a throwaway file rather than
+        # production data.
+        #
+        # Patching the module attribute works because build_parser() reads
+        # DEFAULT_TAGS_DB at call time, not at import time.
         with tempfile.TemporaryDirectory() as td:
             tags_db = os.path.join(td, "isolated.db")
             opencode_db = os.path.join(td, "absent-opencode.db")
-            with contextlib.redirect_stdout(io.StringIO()):
-                rc = oc_tags.main(
-                    ["--tags-db", tags_db, "--db", opencode_db, "set", "isolation-probe", "ses_probe"]
-                )
+            decoy = os.path.join(td, "decoy-default-tags.db")
+            with mock.patch.object(oc_tags, "DEFAULT_TAGS_DB", decoy):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = oc_tags.main(
+                        ["--tags-db", tags_db, "--db", opencode_db, "set", "isolation-probe", "ses_probe"]
+                    )
             self.assertEqual(rc, 0)
             self.assertTrue(
                 os.path.exists(tags_db),
                 "write went somewhere other than --tags-db (this is the bug)",
             )
+            self.assertFalse(
+                os.path.exists(decoy),
+                "write fell back to the DEFAULT tags.db -- in production that is the "
+                "developer's real ~/.local/share/oc-tags/tags.db",
+            )
             with oc_tags.open_store(tags_db, readonly=True) as conn:
                 self.assertEqual(oc_tags.session_tags(conn).get("ses_probe"), "isolation-probe")
+
+    def test_subcommand_roster_is_complete(self):
+        # The tests above loop over SUBCOMMAND_ARGV, and a loop asserts nothing
+        # about entries it does not contain: drop a subcommand from that dict
+        # (or add one to the parser without adding it here) and the suite stays
+        # green while covering less. Pin the roster to the parser itself.
+        #
+        # This reaches into argparse's private _SubParsersAction. That is a
+        # deliberate trade: if the private shape ever changes, this test ERRORS
+        # loudly on the next run, which is strictly better than the silent
+        # coverage loss it exists to prevent.
+        sub_actions = [
+            a for a in oc_tags.build_parser()._actions
+            if isinstance(a, argparse._SubParsersAction)
+        ]
+        self.assertEqual(len(sub_actions), 1, "expected exactly one subparser group")
+        self.assertEqual(
+            set(self.SUBCOMMAND_ARGV),
+            set(sub_actions[0].choices),
+            "SUBCOMMAND_ARGV has drifted from the parser's actual subcommands",
+        )
 
 
 class TestAutoKey(unittest.TestCase):
