@@ -14,6 +14,7 @@
     ./opencode-llm-audit.nix
     ./home.darwin.nix
     ./codex-lb.nix
+    ./oc-tags-serve.nix
     ./opencode-config.nix
     ./opencode-skills.nix
     ./tmux.devbox.nix
