@@ -1233,68 +1233,37 @@ class TestRenderSvg(unittest.TestCase):
         self.assertGreater(found, 0)
 
 
-    def _hit_polys(self, svg):
-        """(tag, [(x, y), ...]) per hover target, read from rendered output."""
+    def _hit_rects(self, svg):
+        """(tag, x, y, w, h) per hover target, read from rendered output."""
         ns = "{http://www.w3.org/2000/svg}"
         root = ET.fromstring(svg)
         out = []
         for g in root.iter(f"{ns}g"):
             if g.get("class") != "hz":
                 continue
-            poly = g.find(f"{ns}polygon")
+            r = g.find(f"{ns}rect")
             tag = g.find(f"{ns}g").find(f"{ns}text").text
-            pts = [tuple(map(float, s.split(","))) for s in poly.get("points").split()]
-            out.append((tag, pts))
+            out.append((tag, float(r.get("x")), float(r.get("y")),
+                        float(r.get("width")), float(r.get("height"))))
         return out
 
-    def test_hit_shape_is_polygon_matching_painted_trapezoid(self):
-        # A stacked area interpolates between buckets, so the painted segment is
-        # a trapezoid. An axis-aligned rect named the wrong tag on 29.7% of
-        # hoverable pixels of real data; the hit shape must be a polygon.
-        agg = self._sample_agg()
-        svg = oc_tags.render_svg(agg, {})
-        self.assertNotIn('<rect class="hit"', svg)
-        polys = self._hit_polys(svg)
-        self.assertTrue(polys)
-        for _tag, pts in polys:
-            self.assertEqual(len(pts), 6, "expected a 6-point trapezoid hit shape")
+    def _bar_rects(self, svg):
+        """(class, x, y, w, h) for painted band segments (not hover, not legend)."""
+        ns = "{http://www.w3.org/2000/svg}"
+        root = ET.fromstring(svg)
+        out = []
+        for r in root.iter(f"{ns}rect"):
+            cls = r.get("class") or ""
+            if not re.fullmatch(r"b\d+", cls):
+                continue
+            if float(r.get("width")) == 11.0:      # legend swatch
+                continue
+            out.append((cls, float(r.get("x")), float(r.get("y")),
+                        float(r.get("width")), float(r.get("height"))))
+        return out
 
-    def test_hit_polygons_tile_adjacent_bands_without_overlap(self):
-        # tag_b stacks directly on tag_a. At every shared x, tag_a's top edge
-        # must equal tag_b's bottom edge -- exact tiling means no pixel can be
-        # claimed by two bands, which is what removes the wrong-tag failure.
-        agg = self._sample_agg()
-        svg = oc_tags.render_svg(agg, {})
-        by_tag = {}
-        for tag, pts in self._hit_polys(svg):
-            by_tag.setdefault(tag, []).append(pts)
-        self.assertIn("tag_a", by_tag)
-        self.assertIn("tag_b", by_tag)
-        for a_pts, b_pts in zip(by_tag["tag_a"], by_tag["tag_b"]):
-            # polygon order: (xl,tl) (sx,top) (xr,tr) (xr,br) (sx,bot) (xl,bl)
-            a_top = [a_pts[0], a_pts[1], a_pts[2]]
-            b_bot = [b_pts[5], b_pts[4], b_pts[3]]
-            for (ax, ay), (bx, by) in zip(a_top, b_bot):
-                self.assertAlmostEqual(ax, bx, places=1)
-                self.assertAlmostEqual(ay, by, places=1)
 
-    def test_hit_polygon_side_edges_sit_at_bucket_midpoint_value(self):
-        # Steeply-changing band: the side edge must be the MEAN of the two
-        # bucket boundaries, matching linear interpolation of the paint.
-        agg = oc_tags.Aggregate()
-        agg.buckets = ["d1", "d2", "d3"]
-        agg.series = {"spike": {"d1": 1.0, "d2": 100.0, "d3": 1.0}}
-        agg.totals = {"spike": 102.0}
-        agg.sources = {"spike": "manual"}
-        svg = oc_tags.render_svg(agg, {})
-        polys = [p for t, p in self._hit_polys(svg) if t == "spike"]
-        self.assertEqual(len(polys), 3)
-        tops = [p[1][1] for p in polys]           # top y at each bucket centre
-        mid_right_of_d1 = polys[0][2][1]          # d1's right edge top
-        mid_left_of_d2 = polys[1][0][1]           # d2's left edge top
-        self.assertAlmostEqual(mid_right_of_d1, (tops[0] + tops[1]) / 2, places=1)
-        self.assertAlmostEqual(mid_left_of_d2, (tops[0] + tops[1]) / 2, places=1)
-        self.assertAlmostEqual(mid_right_of_d1, mid_left_of_d2, places=1)
+
 
     def test_hover_layer_painted_after_legend(self):
         # The legend lives at x >= 825 and is drawn later in document order, so
@@ -1443,6 +1412,112 @@ class TestRenderSvg(unittest.TestCase):
     def test_no_data_svg_also_paints_the_canvas(self):
         svg = oc_tags.render_svg(oc_tags.Aggregate(), {})
         self.assertRegex(self._dark_block(svg), r"svg:root\s*\{[^}]*background\s*:\s*#000000")
+
+    # --- discrete bars, one per bucket ---
+
+    def test_bands_render_as_bars_not_interpolated_areas(self):
+        # A stacked area interpolates between buckets, drawing values that
+        # never existed. Daily totals are discrete; bars say only what is true.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertNotIn("<path", svg)
+        self.assertNotIn("<polyline", svg)
+        self.assertEqual(len(self._bar_rects(svg)), 4)   # 2 bands x 2 buckets
+
+    def test_bars_sit_inside_the_plot_and_do_not_overhang_edges(self):
+        # Bucket centres used to be spread over M-1 gaps, putting the first and
+        # last ON the axis edges -- as bars they would hang half off the plot.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        for _cls, x, _y, w, _h in self._bar_rects(svg):
+            self.assertGreaterEqual(round(x, 3), 90.0)
+            self.assertLessEqual(round(x + w, 3), 800.0)
+
+    def test_bars_in_same_bucket_share_x_and_stack_without_gaps(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        by_x = {}
+        for cls, x, y, w, h in self._bar_rects(svg):
+            by_x.setdefault(round(x, 3), []).append((y, h, cls))
+        self.assertEqual(len(by_x), 2)                    # two buckets
+        for _x, segs in by_x.items():
+            segs.sort()
+            for (y1, h1, _c1), (y2, _h2, _c2) in zip(segs, segs[1:]):
+                self.assertAlmostEqual(y1 + h1, y2, places=1)   # flush stack
+
+    def test_bars_are_separated_by_a_gap(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        xs = sorted({round(x, 3) for _c, x, _y, _w, _h in self._bar_rects(svg)})
+        w = self._bar_rects(svg)[0][3]
+        self.assertGreater(xs[1] - xs[0], w, "bars should not touch")
+
+    def test_hover_target_is_the_bar_itself(self):
+        # The trapezoid hit-polygon existed only because the painted region was
+        # not a rectangle. With bars it is, so the hit shape is exact.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        bars = {(round(x, 1), round(y, 1), round(w, 1), round(h, 1))
+                for _c, x, y, w, h in self._bar_rects(svg)}
+        for _tag, x, y, w, h in self._hit_rects(svg):
+            self.assertIn((round(x, 1), round(y, 1), round(w, 1), round(h, 1)), bars)
+
+    def test_metered_renders_as_per_bar_ticks_not_a_connected_line(self):
+        # Same interpolation critique as the bands: no fabricated slope.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {"2026-09-07": 12.0, "2026-09-08": 30.0})
+        self.assertNotIn("<polyline", svg)
+        ns = "{http://www.w3.org/2000/svg}"
+        ticks = [l for l in ET.fromstring(svg).iter(f"{ns}line")
+                 if (l.get("class") or "") == "met"]   # legend swatch is "met metsw"
+        self.assertEqual(len(ticks), 2)
+        for l in ticks:
+            self.assertAlmostEqual(float(l.get("y1")), float(l.get("y2")), places=3)
+
+    def test_metered_tick_omitted_for_buckets_with_no_metered_value(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {"2026-09-08": 30.0})
+        ns = "{http://www.w3.org/2000/svg}"
+        ticks = [l for l in ET.fromstring(svg).iter(f"{ns}line")
+                 if (l.get("class") or "") == "met"]
+        self.assertEqual(len(ticks), 1)
+
+    def test_partial_bucket_hatches_only_its_own_bar(self):
+        agg = self._sample_agg()
+        agg.partial_bucket = "2026-09-08"
+        svg = oc_tags.render_svg(agg, {})
+        ns = "{http://www.w3.org/2000/svg}"
+        hatch = [r for r in ET.fromstring(svg).iter(f"{ns}rect")
+                 if (r.get("fill") or "") == "url(#hatch)"]
+        self.assertEqual(len(hatch), 1)
+        hx, hw = float(hatch[0].get("x")), float(hatch[0].get("width"))
+        last_x = max(round(x, 3) for _c, x, _y, _w, _h in self._bar_rects(svg))
+        bar_w = self._bar_rects(svg)[0][3]
+        self.assertAlmostEqual(hx, last_x, places=1)
+        self.assertAlmostEqual(hw, bar_w, places=1)
+
+    def test_single_bucket_still_renders_one_bar(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-08"]
+        agg.series = {"solo": {"2026-09-08": 9.0}}
+        agg.totals = {"solo": 9.0}
+        agg.sources = {"solo": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        self.assertEqual(len(self._bar_rects(svg)), 1)
+        self.assertIsNotNone(ET.fromstring(svg))
+
+    def test_many_buckets_still_fit(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = [f"h{i:02d}" for i in range(24)]
+        agg.series = {"t": {b: 1.0 for b in agg.buckets}}
+        agg.totals = {"t": 24.0}
+        agg.sources = {"t": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        bars = self._bar_rects(svg)
+        self.assertEqual(len(bars), 24)
+        for _c, x, _y, w, _h in bars:
+            self.assertGreater(w, 1.0)
+            self.assertLessEqual(round(x + w, 3), 800.0)
 
 class TestServer(unittest.TestCase):
     def setUp(self):

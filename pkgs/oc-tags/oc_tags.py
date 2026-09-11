@@ -685,12 +685,11 @@ def render_svg(
     y_bottom = plot_y + plot_h
 
     M = len(agg.buckets)
-    x_coords = []
-    for i in range(M):
-        if M == 1:
-            x_coords.append(plot_x + plot_w / 2)
-        else:
-            x_coords.append(plot_x + i * (plot_w / (M - 1)))
+    # One slot per bucket, bar centred in it. (An area chart put points ON the
+    # plot edges via M-1 gaps; as bars those would hang half off the plot.)
+    slot = plot_w / M
+    bar_w = min(slot * 0.78, 90.0)
+    x_coords = [plot_x + (i + 0.5) * slot for i in range(M)]
 
     totals_by_bucket = []
     for i, b in enumerate(agg.buckets):
@@ -758,142 +757,81 @@ def render_svg(
     if agg.partial_bucket and agg.partial_bucket in agg.buckets:
         p_idx = agg.buckets.index(agg.partial_bucket)
         p_x = x_coords[p_idx]
-        if M == 1:
-            h_start = x_left
-            h_w = plot_w
-        else:
-            dx = plot_w / (M - 1)
-            h_start = max(x_left, p_x - dx / 2)
-            h_end = min(x_right, p_x + dx / 2)
-            h_w = h_end - h_start
         svg_parts.append(
-            f'  <rect x="{h_start:.1f}" y="{y_top}" width="{h_w:.1f}" height="{plot_h}" fill="url(#hatch)"/>'
+            f'  <rect x="{p_x - bar_w / 2:.1f}" y="{y_top}" width="{bar_w:.1f}" height="{plot_h}" fill="url(#hatch)"/>'
         )
         svg_parts.append(
             f'  <text class="axt" x="{p_x:.1f}" y="{y_top + 16}" text-anchor="middle" font-size="11" font-style="italic">partial</text>'
         )
 
-    # Stacked Area Bands
+    # Stacked bars: one rect per band per bucket. Deliberately NOT an area --
+    # linear interpolation between daily buckets draws values that never
+    # existed. It also means the hit shape below is exactly the painted rect,
+    # which is why the trapezoid hit-polygon machinery is gone.
     y_cum = [0.0] * M
-    band_geom = []  # (tag, top_pts, bot_pts, values) -- hover targets built after
+    band_geom = []  # (tag, [(x, y, w, h, value), ...]) -- hover targets built after
     for t in bands:
-        bot_pts = []
-        top_pts = []
-        vals = []
+        segs = []
         for i, b in enumerate(agg.buckets):
             v = band_val(t, b)
             bot_y = y_scale(y_cum[i])
             top_y = y_scale(y_cum[i] + v)
-            bot_pts.append((x_coords[i], bot_y))
-            top_pts.append((x_coords[i], top_y))
-            vals.append(v)
+            segs.append((x_coords[i] - bar_w / 2, top_y, bar_w, bot_y - top_y, v, b))
             y_cum[i] += v
-        band_geom.append((t, list(top_pts), list(bot_pts), vals))
+        band_geom.append((t, segs))
 
-        if M == 1:
-            x_m = x_coords[0]
-            bw = 40
-            top_y = top_pts[0][1]
-            bot_y = bot_pts[0][1]
-            bh = bot_y - top_y
+        for bx, by, bw, bh, v, _b in segs:
+            if v <= 0:
+                continue
             svg_parts.append(
-                f'  <rect x="{x_m - bw/2:.1f}" y="{top_y:.1f}" width="{bw}" height="{bh:.1f}" class="{band_cls[t]}" stroke-width="0.5"/>'
-            )
-        else:
-            path_d = [f"M {bot_pts[0][0]:.1f} {bot_pts[0][1]:.1f}"]
-            for pt in bot_pts[1:]:
-                path_d.append(f"L {pt[0]:.1f} {pt[1]:.1f}")
-            for pt in reversed(top_pts):
-                path_d.append(f"L {pt[0]:.1f} {pt[1]:.1f}")
-            path_d.append("Z")
-            d_str = " ".join(path_d)
-            svg_parts.append(
-                f'  <path d="{d_str}" class="{band_cls[t]}" stroke-width="0.5"/>'
+                f'  <rect class="{band_cls[t]}" x="{bx:.1f}" y="{by:.1f}" '
+                f'width="{bw:.1f}" height="{bh:.1f}" stroke-width="0.5"/>'
             )
 
-    # Metered Reference Line
+    # Metered reference: a tick per bar, not a connected line. The same
+    # interpolation objection that removed the area applies to a trend line
+    # drawn across discrete daily totals.
     if any(m > 0 for m in metered_vals):
-        line_pts = []
         for i, b in enumerate(agg.buckets):
             m_val = metered.get(b, 0.0)
-            line_pts.append(f"{x_coords[i]:.1f},{y_scale(m_val):.1f}")
-        pts_str = " ".join(line_pts)
-        svg_parts.append(
-            f'  <polyline class="met" points="{pts_str}" fill="none" stroke-width="2" stroke-dasharray="4,2"/>'
-        )
+            if m_val <= 0:
+                continue
+            m_y = y_scale(m_val)
+            t_half = bar_w / 2 + 3.0
+            svg_parts.append(
+                f'  <line class="met" x1="{x_coords[i] - t_half:.1f}" y1="{m_y:.1f}" '
+                f'x2="{x_coords[i] + t_half:.1f}" y2="{m_y:.1f}" stroke-width="2"/>'
+            )
 
-    # Hover layer, built here but EMITTED LAST (see hover_parts append below) so
-    # tooltips paint over the legend instead of under it.
-    #
-    # The hit shape is a polygon, not a rectangle. A stacked *area* interpolates
-    # linearly between buckets, so a segment's painted region is a trapezoid; an
-    # axis-aligned rect sized from one bucket's endpoints disagreed with the paint
-    # on 29.7% of hoverable pixels of real 7-day data (13 bands x 8 buckets),
-    # i.e. it named the wrong tag about a third of the time. The polygon's side
-    # edges sit at the midpoint between adjacent buckets, where the interpolated
-    # boundary is the mean of the two bucket boundaries -- so adjacent bands tile
-    # exactly and no inter-band overlap remains.
+    # Hover layer, built here but EMITTED LAST so tooltips paint over the
+    # legend. The hit shape is the bar rect verbatim -- exact by construction.
     hover_parts = []
-    if band_geom and M >= 1:
-        slot = (plot_w / (M - 1)) if M > 1 else 40.0
-        for t, top_pts, bot_pts, vals in band_geom:
-            for i, b in enumerate(agg.buckets):
-                v = vals[i]
-                if v <= 0:
-                    continue
-                sx = x_coords[i]
-                s_top = top_pts[i][1]
-                s_bot = bot_pts[i][1]
+    for t, segs in band_geom:
+        for bx, by, bw, bh, v, b in segs:
+            if v <= 0:
+                continue
+            line1 = t
+            line2 = f"{b}: ${v:,.2f}"
+            tw = max(len(line1), len(line2)) * 6.6 + 18.0
+            th = 42.0
+            cx = bx + bw / 2
+            # Flip left rather than clamp, so a right-edge tooltip stays over
+            # the plot and clear of the legend column.
+            tx = cx - 12.0 - tw if cx + 12.0 + tw > x_right else cx + 12.0
+            tx = min(max(tx, 5.0), width - 5.0 - tw)
+            ty = min(max(by + bh / 2 - th / 2, 5.0), height - 5.0 - th)
 
-                if M == 1:
-                    xl, xr = sx - slot / 2, sx + slot / 2
-                    tl = tr = s_top
-                    bl = br = s_bot
-                else:
-                    if i > 0:
-                        xl = sx - slot / 2
-                        tl = (s_top + top_pts[i - 1][1]) / 2
-                        bl = (s_bot + bot_pts[i - 1][1]) / 2
-                    else:
-                        xl, tl, bl = sx, s_top, s_bot
-                    if i < M - 1:
-                        xr = sx + slot / 2
-                        tr = (s_top + top_pts[i + 1][1]) / 2
-                        br = (s_bot + bot_pts[i + 1][1]) / 2
-                    else:
-                        xr, tr, br = sx, s_top, s_bot
-
-                pts = (
-                    f"{xl:.1f},{tl:.1f} {sx:.1f},{s_top:.1f} {xr:.1f},{tr:.1f} "
-                    f"{xr:.1f},{br:.1f} {sx:.1f},{s_bot:.1f} {xl:.1f},{bl:.1f}"
-                )
-
-                line1 = t
-                line2 = f"{b}: ${v:,.2f}"
-                tw = max(len(line1), len(line2)) * 6.6 + 18.0
-                th = 42.0
-                # Flip to the left of the bucket rather than clamping, so a
-                # right-edge tooltip stays over the plot and clear of the legend.
-                if sx + 12.0 + tw > x_right:
-                    tx = sx - 12.0 - tw
-                else:
-                    tx = sx + 12.0
-                tx = min(max(tx, 5.0), width - 5.0 - tw)
-                ty = min(max((s_top + s_bot) / 2 - th / 2, 5.0), height - 5.0 - th)
-
-                # A transparent 4px stroke widens the hit area of hair-thin bands
-                # without mutating the geometry (visiblePainted counts a painted
-                # stroke), so the polygon keeps matching the paint exactly.
-                hover_parts.append(
-                    f'  <g class="hz">\n'
-                    f'    <polygon class="hit" points="{pts}" fill="transparent" stroke="transparent" stroke-width="4"/>\n'
-                    f'    <g class="tt">\n'
-                    f'      <rect class="ttbg" x="{tx:.1f}" y="{ty:.1f}" width="{tw:.1f}" height="{th:.1f}" rx="4" />\n'
-                    f'      <text class="ttname" x="{tx + 9:.1f}" y="{ty + 17:.1f}" font-size="11" font-weight="600">{html.escape(line1)}</text>\n'
-                    f'      <text class="ttval" x="{tx + 9:.1f}" y="{ty + 32:.1f}" font-size="11">{html.escape(line2)}</text>\n'
-                    f'    </g>\n'
-                    f'  </g>'
-                )
+            hover_parts.append(
+                f'  <g class="hz">\n'
+                f'    <rect class="hit" x="{bx:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" '
+                f'fill="transparent" stroke="transparent" stroke-width="4"/>\n'
+                f'    <g class="tt">\n'
+                f'      <rect class="ttbg" x="{tx:.1f}" y="{ty:.1f}" width="{tw:.1f}" height="{th:.1f}" rx="4" />\n'
+                f'      <text class="ttname" x="{tx + 9:.1f}" y="{ty + 17:.1f}" font-size="11" font-weight="600">{html.escape(line1)}</text>\n'
+                f'      <text class="ttval" x="{tx + 9:.1f}" y="{ty + 32:.1f}" font-size="11">{html.escape(line2)}</text>\n'
+                f'    </g>\n'
+                f'  </g>'
+            )
 
     # Axis Title
     svg_parts.append(
@@ -945,7 +883,7 @@ def render_svg(
     if any(m > 0 for m in metered_vals):
         m_curr_y = u_curr_y + row_h
         svg_parts.append(
-            f'  <line x1="{leg_x}" y1="{m_curr_y + 5}" x2="{leg_x + 12}" y2="{m_curr_y + 5}" class="met" stroke-width="2" stroke-dasharray="3,1"/>'
+            f'  <line x1="{leg_x}" y1="{m_curr_y + 5}" x2="{leg_x + 12}" y2="{m_curr_y + 5}" class="met metsw" stroke-width="2"/>'
         )
         svg_parts.append(
             f'  <text x="{leg_x + 18}" y="{m_curr_y + 9}" class="mett" font-size="11">billed (capped)</text>'
