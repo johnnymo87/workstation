@@ -746,7 +746,9 @@ def render_svg(
     # X-axis bucket labels
     label_step = max(1, math.ceil(M / 12))
     for i, b in enumerate(agg.buckets):
-        if i % label_step == 0 or i == M - 1:
+        # Anchor on the newest bucket so the forced last label cannot land a
+        # few px from its neighbour (measured 12.5px apart at days=3 hourly).
+        if (M - 1 - i) % label_step == 0:
             x_pos = x_coords[i]
             label = b[5:] if len(b) > 5 else b
             svg_parts.append(
@@ -797,14 +799,22 @@ def render_svg(
             if m_val <= 0:
                 continue
             m_y = y_scale(m_val)
-            t_half = bar_w / 2 + 3.0
+            # Clamp to the slot: bar_w/2 + 3 exceeds slot/2 once slot < 27.3px
+            # (30d = 22.9px), and overlapping ticks fuse into a continuous
+            # stepped line -- reintroducing the interpolation this removed.
+            t_half = min(bar_w / 2 + 3.0, slot / 2 - 1.0)
             svg_parts.append(
                 f'  <line class="met" x1="{x_coords[i] - t_half:.1f}" y1="{m_y:.1f}" '
                 f'x2="{x_coords[i] + t_half:.1f}" y2="{m_y:.1f}" stroke-width="2"/>'
             )
 
     # Hover layer, built here but EMITTED LAST so tooltips paint over the
-    # legend. The hit shape is the bar rect verbatim -- exact by construction.
+    # legend. The hit shape is the bar rect. A transparent stroke is applied
+    # ONLY to segments too thin to hover otherwise: a stroke is centred on the
+    # edge, so on a normal segment it would push the hit region 2px into the
+    # neighbouring band, and since groups are emitted bottom-to-top the band
+    # above would win the overlap. Measured at 10.6% of painted area before
+    # this was conditional.
     hover_parts = []
     for t, segs in band_geom:
         for bx, by, bw, bh, v, b in segs:
@@ -824,7 +834,7 @@ def render_svg(
             hover_parts.append(
                 f'  <g class="hz">\n'
                 f'    <rect class="hit" x="{bx:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" '
-                f'fill="transparent" stroke="transparent" stroke-width="4"/>\n'
+                f'fill="transparent" stroke="transparent" stroke-width="{4 if bh < 4.0 else 0}"/>\n'
                 f'    <g class="tt">\n'
                 f'      <rect class="ttbg" x="{tx:.1f}" y="{ty:.1f}" width="{tw:.1f}" height="{th:.1f}" rx="4" />\n'
                 f'      <text class="ttname" x="{tx + 9:.1f}" y="{ty + 17:.1f}" font-size="11" font-weight="600">{html.escape(line1)}</text>\n'

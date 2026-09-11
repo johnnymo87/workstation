@@ -1256,7 +1256,7 @@ class TestRenderSvg(unittest.TestCase):
             cls = r.get("class") or ""
             if not re.fullmatch(r"b\d+", cls):
                 continue
-            if float(r.get("width")) == 11.0:      # legend swatch
+            if float(r.get("x")) >= 825.0:          # legend swatch column
                 continue
             out.append((cls, float(r.get("x")), float(r.get("y")),
                         float(r.get("width")), float(r.get("height"))))
@@ -1287,18 +1287,30 @@ class TestRenderSvg(unittest.TestCase):
 
     def test_right_edge_tooltip_flips_left_of_plot(self):
         # Clamping alone pushed right-edge tooltips into the legend column.
+        # A long tag on the LAST bucket is what forces the flip -- with a short
+        # tag and few buckets the tooltip fits to the right and this test
+        # silently stops exercising the flip at all.
+        long_tag = "a-tag-long-enough-to-force-the-tooltip-to-flip"
         agg = oc_tags.Aggregate()
-        agg.buckets = ["d1", "d2"]
-        agg.series = {"t": {"d1": 5.0, "d2": 5.0}}
-        agg.totals = {"t": 10.0}
-        agg.sources = {"t": "manual"}
+        agg.buckets = [f"d{i}" for i in range(8)]
+        agg.series = {long_tag: {b: 5.0 for b in agg.buckets}}
+        agg.totals = {long_tag: 40.0}
+        agg.sources = {long_tag: "manual"}
         svg = oc_tags.render_svg(agg, {})
         ns = "{http://www.w3.org/2000/svg}"
         root = ET.fromstring(svg)
         boxes = [r for r in root.iter(f"{ns}rect") if r.get("class") == "ttbg"]
-        self.assertTrue(boxes)
+        hits = [r for r in root.iter(f"{ns}rect") if r.get("class") == "hit"]
+        self.assertEqual(len(boxes), 8)
         for r in boxes:
             self.assertLessEqual(float(r.get("x")) + float(r.get("width")), 825.0)
+        # The last bar's tooltip must actually be left of its bar.
+        last_hit = max(hits, key=lambda r: float(r.get("x")))
+        last_box = max(boxes, key=lambda r: float(r.get("x")))
+        self.assertLess(
+            float(last_box.get("x")), float(last_hit.get("x")),
+            "right-edge tooltip did not flip left",
+        )
 
     # --- dark mode (prefers-color-scheme, zero JS) ---
 
@@ -1518,6 +1530,70 @@ class TestRenderSvg(unittest.TestCase):
         for _c, x, _y, w, _h in bars:
             self.assertGreater(w, 1.0)
             self.assertLessEqual(round(x + w, 3), 800.0)
+
+    def test_metered_ticks_do_not_overlap_into_a_continuous_line(self):
+        # bar_w/2 + 3 exceeds slot/2 once slot < 27.3px (30 daily buckets),
+        # and overlapping ticks fuse into exactly the connected line that
+        # switching to bars was meant to remove.
+        agg = oc_tags.Aggregate()
+        agg.buckets = [f"d{i:02d}" for i in range(31)]
+        agg.series = {"t": {b: 1.0 for b in agg.buckets}}
+        agg.totals = {"t": 31.0}
+        agg.sources = {"t": "manual"}
+        svg = oc_tags.render_svg(agg, {b: 2.0 for b in agg.buckets})
+        ns = "{http://www.w3.org/2000/svg}"
+        ticks = sorted(
+            (float(l.get("x1")), float(l.get("x2")))
+            for l in ET.fromstring(svg).iter(f"{ns}line")
+            if (l.get("class") or "") == "met"
+        )
+        self.assertEqual(len(ticks), 31)
+        for (_x1, x2), (nx1, _nx2) in zip(ticks, ticks[1:]):
+            self.assertLess(x2, nx1, "metered ticks overlap into a continuous line")
+
+    def test_hit_stroke_only_widens_segments_too_thin_to_hover(self):
+        # A stroke is centred on the edge, so on a normal segment it pushes the
+        # hit region into the neighbouring band; groups are emitted bottom-to-
+        # top, so the band above wins. Only hairline segments may carry it.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        ns = "{http://www.w3.org/2000/svg}"
+        for r in ET.fromstring(svg).iter(f"{ns}rect"):
+            if r.get("class") != "hit":
+                continue
+            h = float(r.get("height"))
+            sw = float(r.get("stroke-width") or 0)
+            if h >= 4.0:
+                self.assertEqual(sw, 0.0, "thick segment must not bleed into its neighbour")
+            else:
+                self.assertGreater(sw, 0.0, "hairline segment must stay grabbable")
+
+    def test_bar_height_is_proportional_to_value(self):
+        # Nothing previously pinned a bar's height to its dollars.
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["d1"]
+        agg.series = {"solo": {"d1": 10.0}}
+        agg.totals = {"solo": 10.0}
+        agg.sources = {"solo": "manual"}
+        svg = oc_tags.render_svg(agg, {})
+        (_cls, _x, y, _w, h) = self._bar_rects(svg)[0]
+        self.assertAlmostEqual(y, 65.0, places=1)      # full height => plot top
+        self.assertAlmostEqual(h, 460.0, places=1)     # full plot height
+
+    def test_bands_paint_bottom_up_in_total_order(self):
+        # b0 is the largest band and must sit at the BOTTOM of the stack.
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        col = sorted(self._bar_rects(svg), key=lambda r: (round(r[1], 3), r[2]))
+        first_bucket = [r for r in col if round(r[1], 3) == round(col[0][1], 3)]
+        classes_top_down = [r[0] for r in first_bucket]
+        self.assertEqual(classes_top_down, ["b1", "b0"], "stack order inverted")
+
+    def test_every_painted_bar_has_a_hover_target(self):
+        agg = self._sample_agg()
+        svg = oc_tags.render_svg(agg, {})
+        self.assertEqual(len(self._hit_rects(svg)), len(self._bar_rects(svg)))
+        self.assertGreater(len(self._hit_rects(svg)), 0)
 
 class TestServer(unittest.TestCase):
     def setUp(self):
