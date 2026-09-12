@@ -479,13 +479,19 @@ in
     };
   };
 
-  # Pigeon daemon service (depends on cloudflared)
+  # Pigeon daemon service.
+  #
+  # Deliberately does NOT depend on cloudflared-tunnel.service -- see the
+  # matching comment in hosts/devbox/configuration.nix. The dependency was a
+  # rename artifact (commit 58ff034, `ccr-webhooks` -> `pigeon-daemon`); the
+  # daemon polls the CCR Worker outbound and never receives an inbound push, and
+  # `requires=` meant a cloudflared failure would stop the notification path.
+  # The pigeon-stack target still `wants` both units, so boot is unchanged.
   systemd.services.pigeon-daemon = {
     description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" "cloudflared-tunnel.service" ];
-    requires = [ "cloudflared-tunnel.service" ];
+    after = [ "network-online.target" ];
 
     # NO neovim here, deliberately -- see NVIM_BIN below.
     #
