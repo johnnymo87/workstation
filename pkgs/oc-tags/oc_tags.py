@@ -217,6 +217,84 @@ def choose_bucket(days: int) -> str:
     return "hour" if days <= 3 else "day"
 
 
+# The chart is 710px wide and bar_w = (710 / M) * 0.78, so a >=3px bar needs
+# M <= 184. Past that, stacked segments begin rendering height="0.0", which is
+# both invisible AND excluded from hit-testing -- the dollars stop being merely
+# small and become unreachable. Measured: M=366 gives 1.5px bars, M=744 gives
+# 0.7px in an ~850KB document.
+#
+# Deliberately NOT raised to admit days=7&bucket=hour (M=192, 2.88px). 3px is a
+# floor stated in advance; bending it to fit one URL is how a cap creeps toward
+# a number that protects bytes rather than legibility. The 400 names days=6.
+MAX_CHART_BUCKETS = 184
+
+
+def chart_bucket_count(days: int, bucket: str) -> int:
+    """Upper bound on the buckets this request could render.
+
+    days=N spans N+1 calendar days: calculate_window runs from today-N to
+    tomorrow, so the trailing day counts. Off-by-one here would put the cap
+    boundary one day off in the error message too.
+
+    Deliberately an upper bound rather than the exact count. Enumeration is
+    clamped to now, so the true hourly M grows through the day (days=7 hourly
+    is 169 buckets at 00:30 and 192 at 23:30). Admitting the request on that
+    basis would make a bookmarked URL flip between 200 and 400 depending on
+    what time it was opened, so the cap judges the worst case and is constant.
+    """
+    return (days + 1) * (24 if bucket == "hour" else 1)
+
+
+def enumerate_buckets(since_ms: int, until_ms: int, size: str, through_ms: int) -> list[str]:
+    """Every bucket in the window, including the empty ones.
+
+    Deriving buckets from observed rows instead DELETED empty ones, so a
+    48-hour window with sparse traffic drew 19 contiguous bars and an axis
+    whose labels jumped 05 -> 08 -> 10. That misleads about WHEN as well as
+    HOW MUCH -- a worse lie than the interpolation that motivated bars, since
+    it corrupts the axis itself rather than the values on it.
+
+    Runs through `through_ms`, normally now: calculate_window ends at tomorrow
+    00:00, so without that clamp every hourly view would trail a dozen empty
+    FUTURE hours. Callers pass max(now, newest observed row) so that a row
+    timestamped ahead of now still lands inside the enumerated range.
+
+    Extending the RANGE rather than unioning the stray key in is what keeps the
+    axis contiguous. A union produced [T07, T08, T09, T15] -- the same gap this
+    function exists to remove, reintroduced by the code meant to prevent data
+    loss.
+    """
+    last_ms = min(until_ms - 1, through_ms)
+    if last_ms < since_ms:
+        return []
+    out: list[str] = []
+    if size == "hour":
+        # Step epoch seconds rather than adding timedelta to an aware datetime:
+        # wall-clock arithmetic across a DST boundary is ambiguous. Stepping
+        # epoch makes spring-forward skip 02 naturally, and fall-back repeat
+        # wall-clock 01 -- which bucket_key already folds into one key, so the
+        # dedupe keeps that bucket single while it absorbs two hours.
+        dt0 = datetime.datetime.fromtimestamp(since_ms / 1000, ET).replace(
+            minute=0, second=0, microsecond=0
+        )
+        cur_ms = int(dt0.timestamp() * 1000)
+        seen: set[str] = set()
+        while cur_ms <= last_ms:
+            key = bucket_key(cur_ms, "hour")
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+            cur_ms += 3_600_000
+    else:
+        # Calendar dates have no DST ambiguity, so iterate them directly.
+        day = datetime.datetime.fromtimestamp(since_ms / 1000, ET).date()
+        end_day = datetime.datetime.fromtimestamp(last_ms / 1000, ET).date()
+        while day <= end_day:
+            out.append(day.strftime("%Y-%m-%d"))
+            day += datetime.timedelta(days=1)
+    return out
+
+
 DEFAULT_OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 
 
@@ -302,7 +380,7 @@ def aggregate(
     tag_cache: dict[str, tuple[str, str]] = {}
     per_bucket = collections.defaultdict(lambda: collections.defaultdict(float))
     day_accum: dict[str, float] = collections.defaultdict(float)
-    buckets = set()
+    newest_row_ms = 0
 
     for sid, ts, cost, model, total_tok, tin, tout, cread, cwrite in rows:
         cost = cost or 0.0
@@ -327,7 +405,7 @@ def aggregate(
         agg.sources[tag] = source
 
         key = bucket_key(ts, bucket)
-        buckets.add(key)
+        newest_row_ms = max(newest_row_ms, ts)
         per_bucket[tag][key] += cost
         agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
 
@@ -344,7 +422,14 @@ def aggregate(
             u["messages"] += 1
             u["tokens"] += toks
 
-    agg.buckets = sorted(buckets)
+    now_epoch_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    # Enumerate THROUGH the newest observed row, not merely up to now, so a
+    # message timestamped ahead of now still has a slot. Unioning its key in
+    # instead would leave the intervening buckets missing and punch a gap in
+    # the axis -- the very bug this replaces. Extending the range fills them.
+    agg.buckets = enumerate_buckets(
+        since_ms, until_ms, bucket, max(now_epoch_ms, newest_row_ms)
+    )
     agg.series = {t: dict(b) for t, b in per_bucket.items()}
     # Deterministically ordered, descending by dollars; tie-break alphabetically by tag
     agg.totals = dict(
@@ -353,13 +438,15 @@ def aggregate(
             key=lambda item: (-item[1], item[0]),
         )
     )
-    # In-flight turns carry no cost until they complete, so the newest bucket
-    # always under-reads and must be labelled if it is currently in flight.
-    now_epoch_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    # In-flight turns carry no cost until they complete, so the bucket holding
+    # `now` always under-reads and must be labelled while it is in flight.
+    #
+    # Membership rather than "is the last bucket": buckets are now enumerated
+    # from the window, and the union above can append a clock-skewed future
+    # bucket past the current one. `current in buckets` is true exactly when
+    # now falls inside the window, which is the condition actually meant.
     current_bucket = bucket_key(now_epoch_ms, bucket)
-    agg.partial_bucket = (
-        agg.buckets[-1] if (agg.buckets and agg.buckets[-1] == current_bucket) else None
-    )
+    agg.partial_bucket = current_bucket if current_bucket in agg.buckets else None
     return agg
 
 
@@ -615,7 +702,7 @@ def render_svg(
     top_n: int = 12,
     notional_by_day: dict[str, float] | None = None,
 ) -> str:
-    """Render a stacked-area chart of list-price LLM consumption per tag as SVG.
+    """Render a stacked-bar chart of list-price LLM consumption per tag as SVG.
 
     Pure function: no socket, no DB access, testable in a sandbox.
     \n\n    NOTE: the hover tooltips depend on CSS :hover inside the SVG document.\n    They work when this SVG is served as a top-level image/svg+xml document\n    (as handle_request does) or inlined into HTML. Wrapping it in <img src=...>\n    silently disables every tooltip -- no error, they just never appear."""
@@ -986,6 +1073,31 @@ def handle_request(
             return (400, "text/plain; charset=utf-8", "Error: bucket must be 'hour' or 'day'\n")
         bucket = raw_bucket
 
+    # Reject a window the chart cannot draw legibly, BEFORE touching the DB: a
+    # 365-day scan costs ~6.6s against the real message table, and there is no
+    # reason to pay it to render something unreadable.
+    #
+    # Refuse rather than silently coarsening. An absent `bucket` already
+    # resolves to `day` via choose_bucket, so an over-cap hourly request can
+    # only mean the caller EXPLICITLY typed bucket=hour -- the one parameter
+    # least worth overriding on their behalf. Clamping `days` would be worse
+    # still: it changes which dollars are on screen, so the total answers a
+    # different question than the one asked.
+    eff_bucket = bucket if bucket is not None else choose_bucket(days)
+    n_buckets = chart_bucket_count(days, eff_bucket)
+    if n_buckets > MAX_CHART_BUCKETS:
+        max_days = MAX_CHART_BUCKETS // (24 if eff_bucket == "hour" else 1) - 1
+        alt = ", or bucket=day for the full window" if eff_bucket == "hour" else ""
+        return (
+            400,
+            "text/plain; charset=utf-8",
+            f"Error: days={days} with bucket={eff_bucket} needs {n_buckets} bars, "
+            f"over the limit of {MAX_CHART_BUCKETS}. Below ~3px a stacked segment "
+            f"renders at zero height, which is invisible and unhoverable, so its "
+            f"dollars would be unreachable rather than merely small. "
+            f"Use days={max_days} or fewer with bucket={eff_bucket}{alt}.\n",
+        )
+
     hide_set = set()
     if "hide" in params:
         for val in params["hide"]:
@@ -1120,7 +1232,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_db_options(top_p)
 
     # serve
-    serve_p = sub.add_parser("serve", help="serve stacked-area chart over HTTP")
+    serve_p = sub.add_parser("serve", help="serve stacked-bar chart over HTTP")
     serve_p.add_argument("--host", default="127.0.0.1", help="host to bind (default: 127.0.0.1)")
     serve_p.add_argument("--port", type=int, default=4710, help="port to bind (default: 4710)")
     _add_db_options(serve_p)

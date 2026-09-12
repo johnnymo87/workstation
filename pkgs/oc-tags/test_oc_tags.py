@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import xml.etree.ElementTree as ET
 from unittest import mock
 from pathlib import Path
@@ -1722,6 +1723,272 @@ class TestServer(unittest.TestCase):
             self.assertIn("database is locked", body)
 
 
+
+class TestChartBucketCap(unittest.TestCase):
+    """The chart refuses windows it cannot draw legibly (workstation-9e7j).
+
+    plot_w is a fixed 710px and bar_w = (710/M) * 0.78, so M=184 is the last
+    count with a >=3px bar. Past that, stacked segments start rendering
+    height="0.0" -- invisible AND excluded from hit-testing, so the dollars
+    become unreachable rather than merely small.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "opencode.db")
+        self.tags_db = str(Path(self.tmp.name) / "tags.db")
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER)")
+        conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
+        conn.execute("INSERT INTO session VALUES ('s1', NULL, '/home/dev/projects/repo', 'T', 0, 0)")
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 's1', ?, ?)",
+            (1788874200000, json.dumps({"role": "assistant", "cost": 5.0, "modelID": "m", "tokens": {"input": 1, "output": 1}})),
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _get(self, qs):
+        return oc_tags.handle_request(
+            "/", qs, db_path=self.db, tags_db=self.tags_db, now_ms=1788874200000
+        )
+
+    def test_bucket_count_formula_counts_the_trailing_day(self):
+        # days=N spans N+1 calendar days (since=today-N, until=tomorrow).
+        self.assertEqual(oc_tags.chart_bucket_count(1, "hour"), 48)
+        self.assertEqual(oc_tags.chart_bucket_count(7, "day"), 8)
+        self.assertEqual(oc_tags.chart_bucket_count(30, "hour"), 744)
+
+    def test_daily_boundary_183_ok_184_rejected(self):
+        self.assertEqual(self._get("days=183")[0], 200)
+        self.assertEqual(self._get("days=184")[0], 400)
+
+    def test_hourly_boundary_6_ok_7_rejected(self):
+        self.assertEqual(self._get("days=6&bucket=hour")[0], 200)
+        self.assertEqual(self._get("days=7&bucket=hour")[0], 400)
+
+    def test_rejection_names_the_limit_and_a_concrete_fix(self):
+        status, ctype, body = self._get("days=30&bucket=hour")
+        self.assertEqual(status, 400)
+        self.assertIn("744", body)   # what they asked for
+        self.assertIn("184", body)   # the limit
+        self.assertIn("days=6", body)          # how to keep hourly
+        self.assertIn("bucket=day", body)      # how to keep the window
+        # Under-reporting must be LOUD: say WHY, not just "invalid".
+        self.assertIn("unhoverable", body)
+
+    def test_explicit_hourly_is_never_silently_coarsened(self):
+        # Absent a bucket param choose_bucket() already picks 'day', so this
+        # path is reachable only when the caller EXPLICITLY typed bucket=hour.
+        # Serving them day buckets under a 200 would discard the one parameter
+        # they overrode -- the substitution least worth making silently.
+        status, ctype, body = self._get("days=30&bucket=hour")
+        self.assertEqual(status, 400)
+        self.assertNotIn("<svg", body)
+
+    def test_cap_is_enforced_before_the_database_is_touched(self):
+        # A 365-day scan costs ~6.6s against the real 9GB message table, so the
+        # rejection has to precede the query rather than merely discard its
+        # result. Proven directly: make load_aggregate fatal, then show the
+        # capped request still answers while an in-range one reaches it.
+        calls = []
+
+        def exploding(*a, **kw):
+            calls.append(kw.get("days"))
+            raise AssertionError("load_aggregate must not run for a capped request")
+
+        with unittest.mock.patch.object(oc_tags, "load_aggregate", exploding):
+            status, _, _ = self._get("days=365")
+            self.assertEqual(status, 400)
+            self.assertEqual(calls, [])
+            # The patch is live, so an in-range request DOES reach it. Without
+            # this the test would pass even if handle_request stopped calling
+            # load_aggregate altogether.
+            with self.assertRaises(AssertionError):
+                self._get("days=7")
+            self.assertEqual(calls, [7])
+
+    def test_cli_aggregate_is_not_subject_to_the_chart_cap(self):
+        # `oc-tags report --days 365` shares load_aggregate() but renders no
+        # bars, so the geometry limit must not reach it.
+        agg = oc_tags.load_aggregate(
+            db_path=self.db, tags_db=self.tags_db, days=365, now_ms=1788874200000
+        )
+        self.assertGreater(len(agg.buckets), 184)
+
+
+class TestWindowDerivedBuckets(unittest.TestCase):
+    """Buckets come from the window, not from observed rows (workstation-6f0c).
+
+    Deriving them from rows DELETED empty buckets: days=1 hourly drew 19
+    contiguous bars for a 48-hour window with labels jumping 05 -> 08 -> 10.
+    The area chart lied by interpolating across a gap; bars lied by removing
+    it, which misleads about WHEN as well as HOW MUCH.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "opencode.db")
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER)")
+        conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
+        conn.execute("INSERT INTO session VALUES ('s1', NULL, '/home/dev/projects/repo', 'T', 0, 0)")
+        self.now = 1788874200000  # 2026-09-08 09:30 ET
+        # Rows at 05, 08 and 09 -- UNEVEN gaps on purpose. With evenly spaced
+        # rows the label-spacing test cannot fail: two data points yield one
+        # interval, and a set of one element is trivially uniform.
+        for i, off in enumerate((-4 * 3600 * 1000, -1 * 3600 * 1000, 0)):
+            conn.execute(
+                "INSERT INTO message VALUES (?, 's1', ?, ?)",
+                (f"m{i}", self.now + off, json.dumps({"role": "assistant", "cost": 2.0, "modelID": "m", "tokens": {"input": 1, "output": 1}})),
+            )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _agg(self, since_off_h, until_off_h, bucket="hour", now=None):
+        return oc_tags.aggregate(
+            self.db,
+            since_ms=self.now + since_off_h * 3600 * 1000,
+            until_ms=self.now + until_off_h * 3600 * 1000,
+            bucket=bucket,
+            session_tags={},
+            dir_tags={},
+            now_ms=self.now if now is None else now,
+        )
+
+    def test_empty_hours_between_data_are_kept_as_buckets(self):
+        agg = self._agg(-5, 1)
+        # Window is 04:30 -> 10:30, clamped to now (09:30). The bucket holding
+        # since_ms counts: a row at 04:45 is inside the window and belongs to
+        # hour 04, so omitting it would drop a slot that can hold data.
+        # Data exists only in 05 and 09; 06/07/08 are the empties under test.
+        self.assertEqual(
+            agg.buckets,
+            ["2026-09-08T04", "2026-09-08T05", "2026-09-08T06",
+             "2026-09-08T07", "2026-09-08T08", "2026-09-08T09"],
+        )
+
+    def test_buckets_are_contiguous_in_time(self):
+        agg = self._agg(-8, 1)
+        hours = [int(b[-2:]) for b in agg.buckets]
+        self.assertEqual(hours, list(range(hours[0], hours[0] + len(hours))))
+
+    def test_no_buckets_are_drawn_beyond_now(self):
+        # calculate_window ends at tomorrow 00:00, so without a clamp an hourly
+        # view would draw a dozen empty FUTURE hours.
+        agg = oc_tags.load_aggregate(db_path=self.db, tags_db="/nonexistent", days=1, now_ms=self.now)
+        self.assertEqual(agg.buckets[-1], "2026-09-08T09")
+
+    def test_clamping_to_now_keeps_the_partial_bucket_detectable(self):
+        # The clamp is what makes the newest bucket the CURRENT one, which is
+        # what partial-bucket detection depends on. Without it the newest
+        # bucket would be 23:00 and an in-flight turn would go unlabelled.
+        agg = oc_tags.load_aggregate(db_path=self.db, tags_db="/nonexistent", days=1, now_ms=self.now)
+        self.assertEqual(agg.partial_bucket, "2026-09-08T09")
+
+    def test_observed_data_is_never_dropped_off_the_axis(self):
+        # A row timestamped ahead of now (clock skew between concurrent serves)
+        # must still get a slot, or its dollars would count in the legend total
+        # while appearing in no bar.
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "INSERT INTO message VALUES ('future', 's1', ?, ?)",
+            (self.now + 6 * 3600 * 1000, json.dumps({"role": "assistant", "cost": 3.0, "modelID": "m", "tokens": {"input": 1, "output": 1}})),
+        )
+        conn.commit()
+        conn.close()
+        agg = self._agg(-2, 8)
+        self.assertIn("2026-09-08T15", agg.buckets)
+        # ...and the hours between now and that row must be filled in, not
+        # skipped. Unioning the stray key onto a now-clamped range produced
+        # [T07, T08, T09, T15]: data preserved, axis broken -- the same defect
+        # in the code written to prevent the other one.
+        hours = [int(b[-2:]) for b in agg.buckets]
+        self.assertEqual(hours, list(range(hours[0], hours[0] + len(hours))))
+
+    def test_partial_bucket_survives_a_later_bucket_being_appended(self):
+        # Detection is membership, not "is the newest bucket". The union above
+        # can append a clock-skewed bucket AFTER the current one, and the
+        # in-flight bucket must still be labelled partial -- otherwise one
+        # skewed row silently removes the under-reporting warning from a bar
+        # that is genuinely still filling.
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "INSERT INTO message VALUES ('future', 's1', ?, ?)",
+            (self.now + 6 * 3600 * 1000, json.dumps({"role": "assistant", "cost": 3.0, "modelID": "m", "tokens": {"input": 1, "output": 1}})),
+        )
+        conn.commit()
+        conn.close()
+        agg = self._agg(-2, 8)
+        self.assertGreater(agg.buckets[-1], "2026-09-08T09")  # a later bucket exists
+        self.assertEqual(agg.partial_bucket, "2026-09-08T09")  # yet 09 is still partial
+
+    def test_empty_bucket_occupies_a_slot_rather_than_collapsing(self):
+        # The geometric point of the fix: with 5 buckets the bars sit at 1/10
+        # and 9/10 of the plot, not shoulder to shoulder in the middle.
+        agg = self._agg(-5, 1)
+        svg = oc_tags.render_svg(agg, oc_tags.CfpSpend())
+        # Confine to the plot: the legend draws its swatches with the same
+        # band classes, at x=825. Without this bound the match count is 3 and
+        # the assertion measures the legend rather than the chart.
+        xs = sorted(
+            x for x in (float(m) for m in re.findall(r'<rect class="b\d+" x="([\d.]+)"', svg))
+            if x < 800.0
+        )
+        self.assertEqual(len(xs), 3)
+        # 6 slots across 710px. Rows at 05/08/09 sit in slots 1, 4 and 5, so
+        # the 05->08 gap spans three slots (~355px). Collapsed to three
+        # buckets the same bars would be ~237px apart, so this bound is what
+        # distinguishes "empty slots occupy space" from "empty slots deleted".
+        self.assertGreater(xs[1] - xs[0], 300.0)
+
+    def test_a_zero_spend_day_now_counts_against_coverage(self):
+        # Consequence of window-derived buckets, pinned deliberately rather
+        # than discovered later: the coverage footer joins CFP notional spend
+        # on day keys, and a day with no rows is now a bucket, so it joins.
+        # Coverage therefore falls and that day reports 0.00 drift where it
+        # used to be omitted. That is the more honest reading -- the day
+        # really did have notional spend and no metered work -- but it does
+        # change the number, most visibly after opencode.db is recreated while
+        # the CFP history retains earlier days.
+        agg = oc_tags.load_aggregate(db_path=self.db, tags_db="/nonexistent", days=4, now_ms=self.now)
+        self.assertIn("2026-09-06", agg.buckets)  # a day with no rows at all
+        svg = oc_tags.render_svg(
+            agg, oc_tags.CfpSpend(), notional_by_day={"2026-09-06": 10.0, "2026-09-08": 10.0}
+        )
+        self.assertIn("of 5 days", svg)
+
+    def test_the_current_bucket_is_always_marked_partial(self):
+        # Also a consequence: the window always contains now, so the current
+        # bucket always exists and is always labelled. Previously the label
+        # appeared only once that bucket had rows, which meant an in-flight
+        # turn that had not yet recorded cost went unmarked -- a false
+        # negative on exactly the bar most likely to be under-reporting.
+        empty = str(Path(self.tmp.name) / "empty.db")
+        conn = sqlite3.connect(empty)
+        conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER)")
+        conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
+        conn.commit()
+        conn.close()
+        agg = oc_tags.load_aggregate(db_path=empty, tags_db="/nonexistent", days=1, now_ms=self.now)
+        self.assertEqual(agg.partial_bucket, "2026-09-08T09")
+
+    def test_axis_labels_step_by_a_constant_time_interval(self):
+        # Assert on TEXT NODES, not a whole-document substring: the bug was an
+        # axis whose labels jumped 05 -> 08 -> 10 while looking contiguous.
+        agg = self._agg(-8, 1)
+        svg = oc_tags.render_svg(agg, oc_tags.CfpSpend())
+        labels = [m for m in re.findall(r'<text class="axl"[^>]*font-size="10">([^<]+)</text>', svg)]
+        hours = [int(x[-2:]) for x in labels if "T" in x]
+        self.assertGreater(len(hours), 2)
+        steps = {b - a for a, b in zip(hours, hours[1:])}
+        self.assertEqual(len(steps), 1, f"labels not evenly spaced: {labels}")
 
 
 # Without this guard, `python3 test_oc_tags.py` imports the module, defines
