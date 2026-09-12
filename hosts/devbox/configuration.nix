@@ -869,6 +869,92 @@ in
   # need `sg docker -c ...` (or an opencode-serve restart) until then.
   virtualisation.docker.enable = true;
 
+  # Docker's published ports BYPASS networking.firewall. This is not a
+  # misconfiguration of ours -- it is how Docker works, and it is silent:
+  # `iptables -S nixos-fw` shows the port blocked, `ss` shows it bound to
+  # 0.0.0.0, and the internet can reach it anyway.
+  #
+  # Mechanism: nixos-fw is hooked into INPUT only. A published port is
+  # implemented as `nat PREROUTING -m addrtype --dst-type LOCAL -j DOCKER`,
+  # which DNATs the packet to the container's address BEFORE the INPUT
+  # decision. The packet is then routed as forwarded traffic and traverses
+  # FORWARD (policy ACCEPT) -> DOCKER-USER -> DOCKER, where Docker has
+  # already installed an explicit ACCEPT with source 0.0.0.0/0. INPUT, and
+  # therefore nixos-fw, is never consulted.
+  #
+  # Found 2026-09-12: the BoldCo Supabase stack (`supabase start` in
+  # ~/projects/boldco) had been publishing to 0.0.0.0 for two weeks --
+  # Postgres on 54322 with Supabase's fixed default `postgres:postgres`
+  # superuser credentials, Kong on 54321 carrying the publicly-documented
+  # `service_role` JWT that bypasses RLS, and Studio on 54323 with no auth
+  # at all. Reachable from the public internet with no code execution and
+  # no credentials worth the name. The database happened to be empty, but
+  # Postgres superuser implies `COPY ... FROM PROGRAM`, i.e. a shell in the
+  # container -- so this was an entry point, not merely data exposure.
+  #
+  # Two independent layers, because either one alone has a hole:
+
+  # Layer 1: make loopback the DEFAULT publish address, so a bare
+  # `-p 59999:80` cannot reach the wire. Verified: such a container now binds
+  # 127.0.0.1:59999 rather than 0.0.0.0:59999.
+  #
+  # This layer does NOT cover the Supabase case that motivated the fix.
+  # Measured after recreating the stack under this setting: every container
+  # still published on 0.0.0.0, because the Supabase CLI passes an explicit
+  # host IP of 0.0.0.0 and an explicit bind overrides the daemon default.
+  # Layer 1 is therefore a guard against FUTURE careless `-p` usage, and
+  # layer 2 is what actually closed this hole. Do not drop layer 2 on the
+  # theory that layer 1 subsumes it -- for this stack it does not.
+  virtualisation.docker.daemon.settings.ip = "127.0.0.1";
+
+  # Layer 2: drop internet-originated traffic at DOCKER-USER, which Docker
+  # consults BEFORE its own ACCEPTs and never flushes. This is the layer that
+  # actually contains an explicit 0.0.0.0 publish.
+  #
+  # The interface is enp1s0. An earlier draft of this fix said `eth0`, which
+  # does not exist on this host -- the rule would have loaded fine, matched
+  # nothing, and left the exposure wide open while looking like a fix. Check
+  # `ip -br addr` before editing this.
+  #
+  # The conntrack ACCEPT must come first and is load-bearing: reply packets
+  # for connections a container ORIGINATED also arrive on enp1s0 and are
+  # forwarded, so a bare DROP would break all outbound container networking
+  # (DNS, image pulls, any API call) rather than just blocking inbound.
+  #
+  # No IPv6 counterpart: this host has no public IPv6, only link-local
+  # (fe80::/64) on enp1s0. Docker's ip6tables NAT is off by default, so the
+  # `[::]` binds are userland docker-proxy listeners on the host itself,
+  # which do traverse INPUT and are therefore already covered by nixos-fw.
+  #
+  # firewall-start runs under `bash -e`, so every command here must succeed:
+  # create the chain if Docker has not yet (firewall.service can start before
+  # docker.service), and test with -C before inserting so a firewall reload
+  # does not stack duplicates.
+  networking.firewall.extraCommands = ''
+    iptables -w -N DOCKER-USER 2>/dev/null || true
+    iptables -w -C DOCKER-USER -i enp1s0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+      || iptables -w -I DOCKER-USER 1 -i enp1s0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    iptables -w -C DOCKER-USER -i enp1s0 -j DROP 2>/dev/null \
+      || iptables -w -A DOCKER-USER -i enp1s0 -j DROP
+  '';
+
+  # Verifying this from the host itself does not work. Connecting to the
+  # machine's own public IP is a hairpin: the packet is delivered locally and
+  # arrives with `-i lo`, so it never matches the enp1s0 rules and reports
+  # OPEN while the internet sees nothing. Use an off-host vantage point, e.g.
+  #   curl -s -H 'Accept: application/json' \
+  #     'https://check-host.net/check-tcp?host=<ip>:54322&max_nodes=12'
+  #   # then GET https://check-host.net/check-result/<request_id>
+  # and always include a NEGATIVE CONTROL -- a port with nothing listening.
+  # One node (ua3) reported a bogus 2 ms "open" for an unused port during the
+  # 2026-09-12 verification; without the control that single node reads as a
+  # live exposure. Confirm port 22 answers too, to prove the prober works and
+  # the rule is specific rather than blackholing the host.
+  networking.firewall.extraStopCommands = ''
+    iptables -w -D DOCKER-USER -i enp1s0 -j DROP 2>/dev/null || true
+    iptables -w -D DOCKER-USER -i enp1s0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  '';
+
   # --- OOM mitigation (P0-P4) ---
   # Context: 16 GB RAM + 7.6 GB zram, opencode sessions leak to 8-13 GB,
   # triggering global OOM kills that cascade into user@1000.service collapse.
