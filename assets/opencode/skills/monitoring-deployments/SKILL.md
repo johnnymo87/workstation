@@ -59,8 +59,8 @@ each target's deployment spec image and pod health.
 
 | Exit code | Meaning | What to do |
 |---|---|---|
-| `0` | All targets on the new tag, pods Running+Ready | Done. |
-| `1` | A new-revision pod is wedged (CrashLoopBackOff / image-pull error / restart spike) | Read stdout, investigate (step below), then re-invoke or escalate. |
+| `0` | All targets on the new tag, pods Running and pod-level `Ready` | Done. |
+| `1` | A new-revision pod is wedged — CrashLoopBackOff / image-pull error / restart spike in **any** of its containers, sidecars included | Read stdout (it names the container), investigate (step below), then re-invoke or escalate. |
 | `2` | Unrecoverable (gh/kubectl failed, unknown context, missing deployment) | Surface to user; don't silently retry. |
 | `3` | Still rolling (merge pending, spec not bumped, pods updating) | Re-invoke immediately. |
 | `4` | Deployed **as an ancestor** of a later commit, pods healthy (merge-queue batch — see below) | Done. Record the batch head as the deployed SHA, not yours. |
@@ -149,12 +149,33 @@ kubectl --context <c> -n <ns> get deploy <d> \
 # Are the new pods healthy?
 kubectl --context <c> -n <ns> get pods -l app=<d>
 kubectl --context <c> -n <ns> rollout status deploy/<d> --timeout=0
+# Which revision is each pod actually on? Read the pod's SPEC, not its status.
+kubectl --context <c> -n <ns> get pods -l app=<d> \
+  -o custom-columns='POD:.metadata.name,SPEC:.spec.containers[0].image,KUBELET:.status.containerStatuses[0].image'
 ```
 
 Match the running image tag's short-SHA prefix to the PR's merge commit — or,
 on a merge-queue repo, to the batch head that contains it (verify with
 `gh api repos/<owner>/<repo>/compare/<yours>...<deployed> --jq .status` →
 `ahead`).
+
+### A pod's status image tag is NOT its revision
+
+`status.containerStatuses[].image` reports whichever **tag the kubelet first
+cached for that DIGEST** — not the tag the pod was created with. With
+reproducible builds (bazel), a merge that doesn't touch a service produces a
+byte-identical image, so consecutive commits share a digest and a pod created
+for commit C reports commit A's tag *forever*.
+
+Measured on food-truck/mono 2026-09-12: all three `ba-fulfillment-service`
+pods of ReplicaSet `846f965849` had spec image `:c092993` and imageID
+`sha256:d68597cae56b…`; one reported status image `:adf1a60`. Reading that
+column, the rollout looks permanently half-updated. It was finished.
+
+Judge a pod's revision by `spec.containers[].image` (set by the ReplicaSet
+from the Deployment template, never mutated) or by its `pod-template-hash`
+label against the Deployment's current ReplicaSet. `monitor-rollout.py` uses
+the spec image and prints the kubelet's cached tag beside it when they differ.
 
 ## Related
 

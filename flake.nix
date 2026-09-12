@@ -1768,6 +1768,43 @@
         touch $out
       '';
 
+      # monitor-rollout.py's suite: hermetic (stdlib unittest, `run_cmd`
+      # replaced by a fixture cluster -- no kubectl, no gh, no network).
+      #
+      # Wired the moment the suite was written, rather than after the fact: the
+      # script is deployed to ~/.config/opencode/skills by home-manager and is
+      # what lgtm's rollout watcher shells out to (LGTM_ROLLOUT_SCRIPT), so a
+      # regression here is invisible until a merge silently ages out at the
+      # watcher's 30h horizon -- which is exactly how the bug it fixes was
+      # found, 30 hours late.
+      #
+      # The count is PINNED, following checks.oc-cost-tests: the load-bearing
+      # tests are the two DIRECTIONS of the revision judgement (a stale status
+      # tag must not hold a finished rollout open; a matching status tag must
+      # not pass an old-revision pod), and losing either one still prints "OK".
+      monitor-rollout = devboxPkgs.runCommand "monitor-rollout-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        # pipefail so an import error or a crash fails HERE, with python's
+        # traceback as the reason, instead of surviving `tee` and resurfacing
+        # below as a confusing "expected Ran N tests".
+        set -o pipefail
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 ${self}/assets/opencode/skills/monitoring-deployments/test_monitor_rollout.py 2>&1 \
+          | tee "$TMPDIR/out.txt"
+
+        grep -q '^Ran 18 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 18 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: monitor-rollout suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       oc-session-list-bin = devboxPkgs.runCommand "oc-session-list-bin-tests" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.bun devboxPkgs.gnugrep ];
         OC_SESSION_LIST_BIN = "${(localPkgsFor devboxSystem).oc-session-list}/bin/oc-session-list";

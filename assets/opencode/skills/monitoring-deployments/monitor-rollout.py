@@ -360,9 +360,20 @@ def get_spec_image_tag(target):
 
 def get_pods(target, selector):
     """Return a list of pod dicts {name, phase, ready, restarts, tag,
-    waiting_reason} for the deployment's pods. Raises RolloutError on query
-    failure. Uses the first container per pod (matches the single-container
-    app-deployment assumption)."""
+    status_tag, image_id, waiting_reason} for the deployment's pods. Raises
+    RolloutError on query failure. Uses the first container per pod (matches
+    the single-container app-deployment assumption).
+
+    `tag` -- the field the revision judgement uses -- comes from the pod's own
+    SPEC, not from its container status. See the on_target docstring: the
+    status image is a fact about the kubelet's image cache, not about the pod.
+    `status_tag` and `image_id` are kept for the human reading the output, so
+    a disagreement is visible rather than merely resolved.
+
+    The container's STATUS is located by NAME, not by position.
+    `status.containerStatuses` is not ordered like `spec.containers` (the
+    kubelet sorts it), so taking [0] from each can pair the app container's
+    image with a sidecar's readiness and restart count."""
     cmd = [
         "kubectl", "--context", target["context"], "-n", target["namespace"],
         "get", "pods", "-l", selector, "-o", "json",
@@ -383,32 +394,105 @@ def get_pods(target, selector):
     for item in data.get("items", []):
         status = item.get("status", {}) or {}
         cstatuses = status.get("containerStatuses") or []
-        ready = False
-        restarts = 0
-        tag = None
-        waiting_reason = None
-        if cstatuses:
-            c0 = cstatuses[0]
-            ready = bool(c0.get("ready", False))
-            restarts = c0.get("restartCount", 0)
-            tag = image_tag(c0.get("image", ""))
-            waiting = (c0.get("state", {}) or {}).get("waiting")
-            if waiting:
-                waiting_reason = waiting.get("reason")
+        containers = (item.get("spec", {}) or {}).get("containers") or []
+
+        # The pod's own spec container -- the revision it was CREATED for.
+        spec_container = containers[0] if containers else {}
+        tag = image_tag(spec_container.get("image", ""))
+
+        # Its status, matched by name. A pod that has a spec container but no
+        # matching status yet (still being created, image still pulling) is on
+        # the new revision and not ready -- which is "still rolling", the
+        # correct answer. When the spec names no container at all we fall back
+        # to cstatuses[0] so the pod still reports SOMETHING; note that such a
+        # pod can never be judged on-target (no spec tag), so the fallback is
+        # diagnostic output only and cannot raise a wedge.
+        name = spec_container.get("name")
+        cstatus = next((c for c in cstatuses if c.get("name") == name), None)
+        if cstatus is None and name is None and cstatuses:
+            cstatus = cstatuses[0]
+        cstatus = cstatus or {}
+
+        waiting = (cstatus.get("state", {}) or {}).get("waiting")
         pods.append({
             "name": (item.get("metadata", {}) or {}).get("name", "<unknown>"),
             "phase": status.get("phase"),
-            "ready": ready,
-            "restarts": restarts,
+            "ready": pod_ready(status, cstatus),
+            "restarts": cstatus.get("restartCount", 0),
             "tag": tag,
-            "waiting_reason": waiting_reason,
+            "status_tag": image_tag(cstatus.get("image", "")),
+            "image_id": cstatus.get("imageID") or None,
+            "waiting_reason": waiting.get("reason") if waiting else None,
+            "wedge_reason": wedge_reason(cstatuses),
         })
     return pods
+
+
+def pod_ready(status, cstatus):
+    """Is the POD ready -- the fact a Service routes on?
+
+    Not "is the app container ready". A pod with a failing sidecar (istio,
+    a log shipper) has a ready app container and is out of the Service's
+    endpoints; reporting that rollout as healthy would be an all-clear over a
+    pod receiving no traffic.
+
+    Falls back to the judged container's own readiness when the pod carries no
+    Ready condition, so a truncated or projected pod object still yields an
+    answer instead of a silent False."""
+    for cond in status.get("conditions") or []:
+        if cond.get("type") == "Ready":
+            return cond.get("status") == "True"
+    return bool(cstatus.get("ready", False))
+
+
+def wedge_reason(cstatuses):
+    """Why this pod will not become ready on its own, or None.
+
+    Scans EVERY container, not just the one whose image identifies the
+    revision. A crashlooping sidecar keeps the pod unready forever, and
+    reporting that as "pods updating" is the failure this script exists to
+    delete: the caller idles until its horizon and then reports a timeout
+    instead of the reason. The container is named, because "CrashLoopBackOff"
+    without it sends the reader to the wrong logs."""
+    for c in cstatuses:
+        reason = ((c.get("state", {}) or {}).get("waiting") or {}).get("reason")
+        if reason in WEDGED_WAITING_REASONS:
+            return f"{reason} in container {c.get('name', '<unnamed>')}"
+    for c in cstatuses:
+        restarts = c.get("restartCount", 0)
+        if restarts >= RESTART_SPIKE_THRESHOLD:
+            return f"{restarts} restarts in container {c.get('name', '<unnamed>')}"
+    return None
 
 
 # --- Evaluation ------------------------------------------------------------
 
 def on_target(pod, short_sha):
+    """Is this pod on the target revision?
+
+    Judged by the pod's OWN SPEC image tag (`pod["tag"]`), NEVER by the tag in
+    its container status.
+
+    `status.containerStatuses[].image` is not a fact about the pod: it is the
+    name the KUBELET has cached for the image's DIGEST, which is whichever tag
+    it first pulled that digest under. With reproducible builds (bazel), a
+    merge that does not touch a given service produces a byte-identical image,
+    so consecutive commits share one digest -- and a pod created for commit C
+    reports the tag of commit A, forever.
+
+    Measured on food-truck/mono 2026-09-12: all three ba-fulfillment-service
+    pods of ReplicaSet 846f965849 had spec image `:c092993` and imageID
+    `sha256:d68597cae56b...`; one reported status image `:adf1a60`. The
+    watcher read that as "pods updating" for 30 hours, then reported a merge
+    that HAD deployed as "still on the old tag".
+
+    The pod spec is set by the ReplicaSet from the Deployment's template and
+    never mutates, so it IS ReplicaSet membership for the purpose of "which
+    image was this pod asked to run" -- the same answer a pod-template-hash
+    lookup gives, without a third kubectl call per target. The digest stays in
+    the output (`image_id`) as the evidence, not as the judge: resolving the
+    spec TAG to a digest would need a registry credential this script does not
+    have and must not require."""
     return bool(pod["tag"]) and pod["tag"].lower().startswith(short_sha)
 
 
@@ -473,18 +557,24 @@ def evaluate_rollout(targets, short_sha, selector_tmpl,
         # failure. An image-pull failure still sets the pod's image to the
         # requested (target) tag, so it is correctly counted as on-target.
         for p in pods:
-            is_wedged = on_target(p, effective_sha) and (
-                p["waiting_reason"] in WEDGED_WAITING_REASONS
-                or p["restarts"] >= RESTART_SPIKE_THRESHOLD
-            )
+            is_wedged = on_target(p, effective_sha) and p["wedge_reason"] is not None
             mark = ""
             if is_wedged:
-                reason = p["waiting_reason"] or f"{p['restarts']} restarts"
+                reason = p["wedge_reason"]
                 wedged.append(f"[{label}] {p['name']}: {reason} (tag={p['tag']})")
                 mark = f"   <-- WEDGED ({reason})"
+            # Report the kubelet's disagreement rather than hiding it: a
+            # reader who sees a pod counted as on-target while `kubectl get
+            # pod -o wide` shows another tag needs to be told which field was
+            # judged and why the other one lies (see on_target).
+            alias = ""
+            if p["status_tag"] and p["status_tag"] != p["tag"]:
+                alias = (f" (kubelet reports {p['status_tag'][:SHORT_SHA_LEN]}"
+                         f" for digest {(p['image_id'] or '?')[-12:]};"
+                         f" cached tag, not the pod's revision)")
             print(f"      pod {p['name']}: phase={p['phase']} "
                   f"ready={p['ready']} restarts={p['restarts']} "
-                  f"tag={p['tag']}{mark}")
+                  f"tag={p['tag']}{alias}{mark}")
 
         if not spec_ok:
             all_done = False
