@@ -154,6 +154,22 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Bearer token for the pigeon daemon's HTTP API. Parity with cloudbox
+      # (hosts/cloudbox/configuration.nix), which has had this since the dx8p
+      # work; devbox never got it, and that gap is what made the daemon
+      # anonymous. `checkAuth` (pigeon/packages/daemon/src/auth.ts:6) is
+      # `if (!authToken) return null` -- with no token, auth is not merely weak,
+      # it is skipped, and every route answers unauthenticated.
+      #
+      # owner=dev, NOT the sops-nix root:0400 default: pigeon, the serves and
+      # the front door all run as dev and read this file at CALL TIME. A
+      # root-only file makes every client silently fall back to sending no
+      # header and 401 against an armed daemon.
+      pigeon_daemon_auth_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Cloudflare Queue ID (used by my-podcasts-consumer)
       cloudflare_queue_id = {
         owner = "dev";
@@ -220,9 +236,22 @@ in
     description = "Cloudflare Tunnel daemon user";
   };
 
-  # Cloudflare Tunnel for CCR webhooks (dashboard-managed with token)
+  # Cloudflare Tunnel (dashboard-managed with token).
+  #
+  # NOT "for CCR webhooks", which is what this said until 2026-09-12 and which
+  # was actively misleading: the CCR webhook architecture is dead. Telegram
+  # posts to the Worker (`ccr-router.<...>.workers.dev/webhook/telegram/...`),
+  # the Worker only calls api.telegram.org, and this box POLLS the Worker
+  # outbound (`pigeon/packages/daemon/src/index.ts:183`). Nothing is pushed in.
+  #
+  # What the tunnel actually serves is dashboard-managed and invisible to this
+  # repo, but it is readable at runtime without any Cloudflare credential:
+  #   curl -s http://127.0.0.1:20241/config | jq '.config.ingress'
+  # As of 2026-09-12 that is `boldco.mohrbacher.dev -> http://localhost:3000`
+  # plus a `http_status:404` catch-all. Prefer that command over the dashboard;
+  # the API token in sops is 1001-denied on /cfd_tunnel/{id}/configurations.
   systemd.services.cloudflared-tunnel = {
-    description = "Cloudflare Tunnel for CCR webhooks";
+    description = "Cloudflare Tunnel (boldco public hostname)";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
@@ -232,22 +261,47 @@ in
       User = "cloudflared";
       Group = "cloudflared";
       OOMScoreAdjust = "500";
+      # --token-file, NOT --token "$(cat ...)". Passing the token as an argv
+      # element put it in /proc/<pid>/cmdline, which is mode 444 -- so every
+      # local uid, including any agent subprocess, could read the full tunnel
+      # token despite the sops file being 0400 cloudflared:cloudflared. The
+      # file permission was defeated by the command line. A tunnel token alone
+      # lets the holder register a new connector from anywhere and serve every
+      # hostname on the tunnel.
+      #
+      # Verified on cloudflared 2025.11.1: `--token-file value [$TUNNEL_TOKEN_FILE]`.
+      # EnvironmentFile= is the wrong tool here -- the sops file is a bare
+      # token, not KEY=value, so it would need a template. The secret has no
+      # trailing newline (184 bytes, checked), so the file is read as-is.
+      # Failure mode is loud, never silent: a bad path or flag exits non-zero
+      # into the Restart=on-failure loop.
       ExecStart = "${pkgs.writeShellScript "cloudflared-run" ''
         exec ${pkgs.cloudflared}/bin/cloudflared tunnel --no-autoupdate run \
-          --token "$(cat ${config.sops.secrets.cloudflared_tunnel_token.path})"
+          --token-file ${config.sops.secrets.cloudflared_tunnel_token.path}
       ''}";
       Restart = "on-failure";
       RestartSec = 5;
     };
   };
 
-  # Pigeon daemon service (depends on cloudflared)
+  # Pigeon daemon service.
+  #
+  # Deliberately does NOT depend on cloudflared-tunnel.service. It used to
+  # (`after=` + `requires=`), which was a rename artifact: commit 58ff034
+  # renamed `ccr-webhooks` -> `pigeon-daemon` and carried the dependency across
+  # verbatim. The daemon binds loopback and initiates every connection it
+  # makes -- it polls the CCR Worker outbound and never receives a push -- so it
+  # does not need the tunnel at all. `requires=` was also actively harmful: a
+  # cloudflared failure would STOP the daemon, coupling the whole Telegram
+  # notification path to a tunnel it does not use.
+  #
+  # Boot behaviour is unchanged: the pigeon-stack target still `wants` both
+  # units, so both still start.
   systemd.services.pigeon-daemon = {
     description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" "cloudflared-tunnel.service" ];
-    requires = [ "cloudflared-tunnel.service" ];
+    after = [ "network-online.target" ];
 
     path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ];
 
@@ -294,6 +348,24 @@ in
         export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
         export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
+        # Arms the daemon's bearer auth. Without this the daemon answers EVERY
+        # route unauthenticated (auth.ts:6 short-circuits on a falsy token), and
+        # on 2026-09-12 it was doing so to the public internet through this
+        # tunnel's `ccr` hostname -- `POST /swarm/send` returned 400 (body
+        # validation) rather than 401, i.e. auth was never entered.
+        #
+        # Every client resolves the token at CALL TIME from this same path, so
+        # no serve-pool bounce or front-door restart is needed to adopt it.
+        #
+        # NOTE: /health and /outbox/stats stay anonymous BY DESIGN (auth.ts:11-14)
+        # so monitoring can probe them. A 200 from /health therefore proves
+        # nothing about whether auth is on -- test an authenticated route like
+        # /swarm/send and require 401. An earlier review mistook that 200 for a
+        # missing-auth finding.
+        #
+        # ROLLBACK: delete this line, rebuild, restart pigeon. Every client's
+        # Authorization header becomes a harmless no-op again.
+        export PIGEON_DAEMON_AUTH_TOKEN="$(cat /run/secrets/pigeon_daemon_auth_token)"
         # frontdoor-exempt(C1): pigeon is the router the door DEPENDS on; door->pigeon->door is a startup cycle
         export OPENCODE_URL="http://127.0.0.1:4096"
         exec ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
@@ -930,12 +1002,95 @@ in
   # create the chain if Docker has not yet (firewall.service can start before
   # docker.service), and test with -C before inserting so a firewall reload
   # does not stack duplicates.
+  #
+  # The cloudflared rules below are a SECOND, unrelated firewall-bypass of the
+  # same shape, found the same day. A Cloudflare tunnel dials OUT from this box,
+  # so an ingress rule reaches any loopback port without traversing nixos-fw at
+  # all -- the host firewall is not bypassed so much as irrelevant. On
+  # 2026-09-12 the tunnel's `ccr` hostname pointed at the pigeon daemon on
+  # 127.0.0.1:4731, which had no auth token, exposing `/swarm/send` and
+  # `/injected-prompts` (prompt injection into an opencode session running as
+  # dev, with docker group and passwordless sudo) to the internet.
+  #
+  # Deliberately a DEFAULT-DENY with a single allowlisted port, not a block on
+  # 4731. Blocking the one known-bad port requires a new rule for every future
+  # ingress rule someone adds in the dashboard; default-deny means a new ingress
+  # rule pointing anywhere else fails CLOSED. The live ingress list is readable
+  # without a Cloudflare credential:
+  #   curl -s http://127.0.0.1:20241/config | jq '.config.ingress'
+  # Keep the allowlist below in sync with it. Today: boldco -> localhost:3000.
+  #
+  # `-o lo` rather than `-d 127.0.0.1/8`: the loopback INTERFACE also carries
+  # traffic addressed to this host's own public IP (the hairpin path that made
+  # the Docker verification above lie), so matching the interface covers a case
+  # matching the destination address does not.
+  #
+  # Both families. Nothing listens on ::1:4731 today, but cloudflared resolves
+  # its `http://localhost:PORT` ingress target dual-stack and tries ::1 FIRST
+  # (visible in its journal as `dial tcp [::1]:4731: connect: connection
+  # refused`). So the v6 leg is currently protected only by pigeon's bind
+  # address -- one `localhost`-instead-of-127.0.0.1 change in pigeon's listen
+  # config would silently reopen it with no rule in the way.
+  #
+  # !!! READ BEFORE EDITING ANYTHING IN extraCommands !!!
+  #
+  # `extraCommands` is spliced into firewall-start BEFORE its final
+  # `ip46tables -A INPUT -j nixos-fw` ("Enable the firewall"), and the script
+  # runs under `bash -e`. The script has ALSO already removed the previous
+  # INPUT hook near the top. So a single failing command here does not merely
+  # skip its own rule -- it aborts the script before the firewall is enabled
+  # and leaves the host with `-P INPUT ACCEPT` and no rules at all. Every
+  # 0.0.0.0-bound service becomes internet-reachable and the only signal is a
+  # failed systemd unit.
+  #
+  # That is not hypothetical. On 2026-09-12 a `--reject-with tcp-reset` without
+  # a matching `-p tcp` (invalid: the reset reject type requires tcp) did
+  # exactly this, and the box sat fully unfirewalled until it was noticed.
+  #
+  # Hence two structural defences below:
+  #   1. Each group is wrapped in `{ ...; } || echo WARNING >&2`. Under `set -e`
+  #      a failure inside the group aborts the GROUP, runs the echo, and lets
+  #      the script continue to enable the firewall. A broken defence-in-depth
+  #      rule must never cost us the primary firewall.
+  #   2. Rules live in their own chains, filled with flush-then-append. No
+  #      `-I <index>` arithmetic (which breaks as soon as rule counts change)
+  #      and no per-rule `-C` probe: `-F` then `-A` is idempotent by
+  #      construction, so a firewall reload cannot stack duplicates.
+  #
+  # After ANY edit here, verify the firewall actually came up -- the rules being
+  # present does not imply it did:
+  #   sudo iptables -S INPUT | grep -q 'j nixos-fw' && echo ENABLED || echo OPEN
   networking.firewall.extraCommands = ''
-    iptables -w -N DOCKER-USER 2>/dev/null || true
-    iptables -w -C DOCKER-USER -i enp1s0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-      || iptables -w -I DOCKER-USER 1 -i enp1s0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-    iptables -w -C DOCKER-USER -i enp1s0 -j DROP 2>/dev/null \
-      || iptables -w -A DOCKER-USER -i enp1s0 -j DROP
+    {
+      iptables -w -N nixos-fw-docker-ext 2>/dev/null || true
+      iptables -w -F nixos-fw-docker-ext
+      iptables -w -A nixos-fw-docker-ext -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+      iptables -w -A nixos-fw-docker-ext -j DROP
+
+      iptables -w -N DOCKER-USER 2>/dev/null || true
+      iptables -w -C DOCKER-USER -i enp1s0 -j nixos-fw-docker-ext 2>/dev/null \
+        || iptables -w -I DOCKER-USER 1 -i enp1s0 -j nixos-fw-docker-ext
+    } || echo "WARNING: docker external-ingress rules failed to apply" >&2
+
+    {
+      iptables -w -N nixos-fw-cflared-lo 2>/dev/null || true
+      iptables -w -F nixos-fw-cflared-lo
+      iptables -w -A nixos-fw-cflared-lo -p tcp --dport 3000 -j ACCEPT
+      iptables -w -A nixos-fw-cflared-lo -p tcp -j REJECT --reject-with tcp-reset
+      iptables -w -A nixos-fw-cflared-lo -j REJECT
+      iptables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
+        || iptables -w -I OUTPUT 1 -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo
+    } || echo "WARNING: cloudflared v4 loopback rules failed to apply" >&2
+
+    {
+      ip6tables -w -N nixos-fw-cflared-lo 2>/dev/null || true
+      ip6tables -w -F nixos-fw-cflared-lo
+      ip6tables -w -A nixos-fw-cflared-lo -p tcp --dport 3000 -j ACCEPT
+      ip6tables -w -A nixos-fw-cflared-lo -p tcp -j REJECT --reject-with tcp-reset
+      ip6tables -w -A nixos-fw-cflared-lo -j REJECT
+      ip6tables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
+        || ip6tables -w -I OUTPUT 1 -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo
+    } || echo "WARNING: cloudflared v6 loopback rules failed to apply" >&2
   '';
 
   # Verifying this from the host itself does not work. Connecting to the
@@ -950,9 +1105,31 @@ in
   # 2026-09-12 verification; without the control that single node reads as a
   # live exposure. Confirm port 22 answers too, to prove the prober works and
   # the rule is specific rather than blackholing the host.
+  #
+  # For the cloudflared rules, verify from OUTSIDE and against an AUTHENTICATED
+  # route -- `/health` is anonymous by design (auth.ts:11-14), so a 200 there
+  # says nothing. `curl -X POST https://<host>/swarm/send -d '{}'` must return
+  # 502 (origin unreachable, this rule) or 401 (armed daemon), never 400.
+  #
+  # And check EVERY connector. This tunnel has more than one (devbox and
+  # cloudbox share a token), Cloudflare load-balances between them, and a fix
+  # applied to one origin leaves the hostname answering from the other. A single
+  # probe has a coin-flip chance of testing the wrong box; repeat it ~8 times
+  # and look at the distribution, not one result.
+  # Every line here is `|| true`: firewall-stop also runs under `bash -e`, and a
+  # failed stop leaves the tree in a half-torn-down state.
   networking.firewall.extraStopCommands = ''
-    iptables -w -D DOCKER-USER -i enp1s0 -j DROP 2>/dev/null || true
-    iptables -w -D DOCKER-USER -i enp1s0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -w -D DOCKER-USER -i enp1s0 -j nixos-fw-docker-ext 2>/dev/null || true
+    iptables -w -F nixos-fw-docker-ext 2>/dev/null || true
+    iptables -w -X nixos-fw-docker-ext 2>/dev/null || true
+
+    iptables -w -D OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null || true
+    iptables -w -F nixos-fw-cflared-lo 2>/dev/null || true
+    iptables -w -X nixos-fw-cflared-lo 2>/dev/null || true
+
+    ip6tables -w -D OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null || true
+    ip6tables -w -F nixos-fw-cflared-lo 2>/dev/null || true
+    ip6tables -w -X nixos-fw-cflared-lo 2>/dev/null || true
   '';
 
   # --- OOM mitigation (P0-P4) ---

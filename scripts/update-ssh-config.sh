@@ -38,7 +38,18 @@ $DEVBOX_MARKER_START
 Host devbox
     HostName $DEVBOX_IP
     User dev
-    ForwardAgent yes
+    # No ForwardAgent: nothing on devbox needs this Mac's SSH identity, so
+    # lending it out bought nothing and risked a devbox compromise
+    # authenticating as you against OTHER hosts. Verified 2026-09-12: devbox's
+    # known_hosts contains only github.com and has not changed since
+    # 2026-01-15; it reaches GitHub with its own sops-deployed key under
+    # \`IdentitiesOnly yes\` (which ignores a forwarded agent anyway); commit
+    # signing uses an on-disk key, not an agent. The line dated from this
+    # file's FIRST commit (4cfef74), alongside a since-deleted GPG socket
+    # forward, and predated the sops GitHub key by ~16 hours -- i.e. it was
+    # plausibly load-bearing for one afternoon in January and residue after.
+    # Same reasoning as the deliberate omission on \`cloudbox-chart\` below.
+    # If you ever genuinely need it for a one-off, \`ssh -A devbox\`.
     ServerAliveInterval 60
     ServerAliveCountMax 3
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
@@ -50,7 +61,7 @@ Host devbox
 Host devbox-tunnel
     HostName $DEVBOX_IP
     User dev
-    ForwardAgent yes
+    # No ForwardAgent -- see the \`Host devbox\` block above.
     ServerAliveInterval 60
     ServerAliveCountMax 3
     # Development tunnels (see troubleshooting-nixos-host skill for details)
