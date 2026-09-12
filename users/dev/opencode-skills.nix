@@ -26,6 +26,12 @@ let
     "reviving-worktree-orphaned-sessions"
     "scheduling-wakes"
     "searching-sessions"
+    # Cross, not work-only: PR shepherding applies to personal repos and this
+    # one too, and the skill already anticipates devbox (it tells you to treat a
+    # PR as not lgtm-bound when ~/projects/lgtm/lgtm.yml is absent). The
+    # work-only classification was stale, and it left devbox as the one host
+    # where agents invented their own PR-monitoring behavior per session.
+    "shepherding-pull-requests"
     "swarm-messaging"
     "swarm-shaped-work"
     "using-chatgpt-relay"
@@ -40,7 +46,6 @@ let
     "pagerduty-mcp-setup"
     "reading-jenkins-builds"
     "rollbar-mcp-setup"
-    "shepherding-pull-requests"
     "slack-mcp-setup"
     "using-atlassian"
     "using-buildbuddy"
@@ -317,10 +322,10 @@ in
     // beadsReferences
     // superpowersSkills
     // cavemanSkills
+    // shepherdingExtras
     // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills
       // atlassianExtras
-      // shepherdingExtras
       // monitoringDeploymentsExtras
     );
 
