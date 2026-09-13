@@ -4,12 +4,19 @@
 # token + chatgpt-account-id server-side, tracks per-account 5h/weekly quota, and
 # fails over between accounts. opencode's first-party `openai` provider is pointed
 # at it by `injectCodexLbBaseUrl` in opencode-config.nix (gated on this unit being
-# active), and the sol/terra/luna subscription model catalog is injected there.
+# active), and the astra/sol/terra/luna subscription model catalog is injected
+# there.
 #
-# HOSTS: devbox + cloudbox (both NixOS/systemd). NOT macOS
-# (launchd, not systemd — would need a separate darwin flavor). Each host runs
-# its OWN codex-lb instance with its OWN account logins; ~/.codex-lb is per-host
-# runtime state, never synced.
+# HOSTS: devbox + cloudbox here (both NixOS/systemd). macOS runs codex-lb too,
+# but through a SEPARATE launchd flavor in users/dev/home.darwin.nix — this file
+# is `mkIf (isDevbox || isCloudbox)` and never evaluates there. THE VERSION PIN
+# EXISTS IN BOTH PLACES and must be bumped in both; they drifted once already
+# (darwin sat on 1.20.1 with the retired aiohttp pin after NixOS moved to
+# 1.24.0). Everything below about why a pin or an env var is what it is applies
+# to the darwin flavor too, which points back here rather than repeating it.
+#
+# Each host runs its OWN codex-lb instance with its OWN account logins;
+# ~/.codex-lb is per-host runtime state, never synced.
 #
 # OPT-IN PER HOST (ConditionPathExists = %h/.codex-lb/enabled): the code is
 # present on every gated host, but the service only starts where the marker file
@@ -18,11 +25,20 @@
 # (breaking openai there until an account is logged in). devbox's marker is
 # created automatically below (it is already bootstrapped). To enable a NEW host:
 #   1. run codex-lb once by hand to bootstrap the store + log in an account via
-#      the dashboard (SSH-forward 2455, browser OAuth):
+#      the dashboard (SSH-forward 2455, browser OAuth). Both env vars matter:
+#      without LD_LIBRARY_PATH, greenlet cannot load libstdc++.so.6 and startup
+#      dies inside the SQLAlchemy session teardown with a misleading
+#      "the greenlet library is required to use this function":
 #        SSL_CERT_FILE=$(nix eval --raw nixpkgs#cacert)/etc/ssl/certs/ca-bundle.crt \
-#          uvx --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455
+#        LD_LIBRARY_PATH=/run/current-system/sw/share/nix-ld/lib \
+#          uvx --python 3.13 --with 'aiohttp<3.15' --from codex-lb==1.24.0 codex-lb --host 127.0.0.1 --port 2455
 #   2. touch ~/.codex-lb/enabled
 #   3. systemctl --user start codex-lb   (and re-run home-manager switch to wire opencode)
+#
+# CLOUDBOX IS ENABLED TOO, by hand, via exactly that procedure. Only devbox's
+# marker is created declaratively (below); cloudbox's was touched manually and
+# is therefore invisible to this file. Do not read the `mkIf isDevbox` on the
+# activation script as "cloudbox does not run codex-lb" — it does.
 #
 # RUN VIA uvx (not a nix package): codex-lb is a FastAPI + bun-SPA app; packaging
 # it purely in Nix is a big lift, so we run the pinned PyPI release through uv's
@@ -36,32 +52,120 @@
 #   --python 3.13   uvx otherwise grabs the newest interpreter on the box. That
 #                   drifted to a 3.14 alpha on cloudbox.
 #
-#   aiohttp<3.14    codex-lb 1.20.1 hand-rolls its upstream WebSocket upgrade
+#   aiohttp<3.15    A CEILING, not a workaround — see the history below. codex-lb
+#                   declares `aiohttp>=3.13.4` with NO upper bound while still
+#                   calling aiohttp private internals, and its own lock is
+#                   3.14.3. Without a ceiling, a long-running host keeps the
+#                   cached 3.14.3 while a fresh box or a wiped ~/.cache/uv
+#                   floats to whatever aiohttp ships next — which is precisely
+#                   the looks-host-specific breakage described below, and it has
+#                   already happened once. Widen deliberately after checking
+#                   that `_open_upstream_websocket` still matches the new
+#                   aiohttp, not reflexively on the next bump.
+#
+# THE HISTORY, because the ceiling above is the scar tissue from it:
+#
+#   aiohttp<3.14    codex-lb 1.20.1 hand-rolled its upstream WebSocket upgrade
 #                   against aiohttp PRIVATE internals (app/core/clients/proxy.py
 #                   _open_upstream_websocket -> WebSocketDataQueue /
-#                   WebSocketReader / WebSocketWriter). aiohttp 3.14 changed the
-#                   Cython WebSocketReader.__init__ from 2 to 4 required
+#                   WebSocketReader / WebSocketWriter). aiohttp 3.14.2 changed
+#                   the Cython WebSocketReader.__init__ from 2 to 4 required
 #                   positional args, so every streaming request died with
 #                   `TypeError: __init__() takes exactly 4 positional arguments
 #                   (2 given)`, surfaced to clients as a 502 `upstream_error`.
 #                   Non-streaming paths (dashboard, /api/accounts, model
-#                   refresh) kept working, which makes this look like an auth
-#                   problem rather than a dependency problem. Drop this pin once
-#                   codex-lb supports aiohttp 3.14.
+#                   refresh) kept working, which made this look like an auth
+#                   problem rather than a dependency problem.
+#
+#                   Fixed upstream in codex-lb 1.22.0 (commit ed017d52, buried
+#                   in a dependency-bump squash): the call now passes
+#                   `compress=False, decode_text=True`. So the <3.14 ceiling is
+#                   obsolete and was raised to <3.15 with the 1.24.0 bump — the
+#                   ceiling was kept, not removed.
+#
+#                   Note the old pin was also mis-aimed: v1.20.1's own lock was
+#                   already aiohttp 3.14.1, so the break was at 3.14.2, not
+#                   3.14.0.
+#
+#                   THE UNDERLYING FRAGILITY REMAINS. `_open_upstream_websocket`
+#                   still imports aiohttp private internals and still hand-rolls
+#                   the Sec-WebSocket-Key challenge. It is reached on the
+#                   DEFAULT direct-egress path whenever an HTTP request gets
+#                   promoted to an upstream WebSocket, so it is not an exotic
+#                   code path. Expect it to break again on some future aiohttp.
+#
+#                   3AM ESCAPE HATCH if it does, or for a WebSocket-502 storm:
+#                   `CODEX_LB_UPSTREAM_STREAM_TRANSPORT=http` bypasses that
+#                   function entirely. Untested here — do not flip it blind, but
+#                   know it exists.
 #
 # CONFIG/STATE IS RUNTIME (NOT nix-managed): codex-lb reads + REWRITES
 # ~/.codex-lb/ (store.db with accounts + OAuth tokens that auto-refresh, plus
 # encryption.key), so it must stay writable + persistent and is LOST on a full
 # reprovision.
 #
-# TWO NixOS gotchas the env below fixes: (1) SSL_CERT_FILE — a bare user service
-# has no CA bundle, so httpx/aiohttp can't verify chatgpt.com and every upstream
-# call fails CERTIFICATE_VERIFY_FAILED; (2) PATH — the uvx-generated wrapper
-# shells out to realpath/dirname, which need coreutils on PATH.
+# BUMPING THE PIN MIGRATES THE STORE, AND THE PIN ALONE DOES NOT ROLL BACK.
+# codex-lb runs alembic migrations against ~/.codex-lb/store.db at startup; a
+# newer version migrates the schema and an older version may then refuse to
+# load it. Reverting this file gets you the old binary against a new store.
+#
+# You do NOT have to take the backup by hand: since 1.2x codex-lb writes its own
+# consistent pre-migration snapshot via the sqlite backup API
+# (`database_sqlite_pre_migrate_backup_enabled`, default true, keeps the last
+# 5), landing as `~/.codex-lb/store.pre-migrate-<UTC timestamp>.db`. Verified
+# present after the 1.20.1 -> 1.24.0 migration.
+#
+# ROLLBACK, therefore:
+#   1. systemctl --user stop codex-lb
+#   2. cp -f ~/.codex-lb/store.pre-migrate-<ts>.db ~/.codex-lb/store.db
+#      (and remove store.db-wal / store.db-shm, which belong to the newer file)
+#   3. revert the version in this file, home-manager switch
+#   4. systemctl --user start codex-lb
+#
+# CAVEAT, suspected and unverified: OAuth refresh tokens rotate, and the
+# snapshot holds whatever token was current at migration time. If enough time
+# has passed the restored token may already be dead, in which case rollback
+# costs you a re-login rather than being free. Roll back promptly or not at all.
+#
+# If you are taking a manual copy anyway, copy store.db + store.db-wal +
+# store.db-shm + encryption.key together — store.db alone while the WAL is live
+# is not a consistent snapshot.
+#
+# WHY 1.24.0 AND NOT NEWER: 1.24.0 is the latest STABLE. Everything after it is
+# a 1.25.0-beta, which at the time of writing carries a dashboard RBAC/OIDC
+# rewrite we do not want on a single-user loopback box.
+#
+# WHAT THE 1.20.1 -> 1.24.0 BUMP FIXED, concretely: on 1.20.1 our one account
+# sat `status: deactivated`, `deactivationReason: "Usage API error: HTTP 404 -
+# None"`, with `lastRefreshAt` frozen at 2026-08-30 — upstream moved the
+# `backend-api/wham/usage` shape out from under the pinned version and the
+# proxy quietly benched the account rather than failing loudly. 1.24.0 refreshes
+# usage again. If this recurs, the symptom to look for is a frozen
+# `lastRefreshAt` in `GET /api/accounts`, not an error in the log.
+#
+# THREE NixOS gotchas the env below fixes: (1) SSL_CERT_FILE — a bare user
+# service has no CA bundle, so httpx/aiohttp can't verify chatgpt.com and every
+# upstream call fails CERTIFICATE_VERIFY_FAILED; (2) PATH — the uvx-generated
+# wrapper shells out to realpath/dirname, which need coreutils on PATH;
+# (3) LD_LIBRARY_PATH — greenlet (via SQLAlchemy's async session) dlopens
+# libstdc++.so.6, which a bare user service cannot find. Without it startup
+# reaches "Application startup complete"'s neighbourhood and then dies in the
+# session teardown with `ValueError: the greenlet library is required to use
+# this function. libstdc++.so.6: cannot open shared object file`, which reads
+# like a missing Python package rather than a missing C++ runtime.
 #
 # BIND + PRIVACY: bound to 127.0.0.1 explicitly (--host); neither box opens 2455
 # in its firewall. opencode connects via 127.0.0.1 (auth-exempt on codex-lb), so
 # no proxy API key is needed locally.
+#
+# TELEMETRY IS ON BY DEFAULT upstream and is turned OFF here. codex-lb ships an
+# anonymous-telemetry reporter that starts with the app and announces itself in
+# the log ("Anonymous telemetry is active; ... disable with
+# CODEX_LB_TELEMETRY_ENABLED=false"). Upstream is actively expanding it
+# (soju06/codex-lb#2294, schema v2) and has an open consent/send race
+# (#1844). We are pooling subscription accounts through this thing; do not
+# volunteer fleet shape to a third party. Flip it back deliberately if ever
+# wanted.
 { config, pkgs, lib, isDevbox, isCloudbox, ... }:
 
 lib.mkIf (isDevbox || isCloudbox) {
@@ -83,10 +187,17 @@ lib.mkIf (isDevbox || isCloudbox) {
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
         "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
         "LD_LIBRARY_PATH=/run/current-system/sw/share/nix-ld/lib"
+        "CODEX_LB_TELEMETRY_ENABLED=false"
       ];
-      ExecStart = "${pkgs.uv}/bin/uvx --python 3.13 --with 'aiohttp<3.14' --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455";
+      ExecStart = "${pkgs.uv}/bin/uvx --python 3.13 --with 'aiohttp<3.15' --from codex-lb==1.24.0 codex-lb --host 127.0.0.1 --port 2455";
       Restart = "always";
       RestartSec = 10;
+      # A clean `systemctl --user stop` leaves the unit in `failed` state without
+      # this: uvicorn exits 143 (128+SIGTERM) rather than 0, and systemd counts a
+      # non-zero exit as a failure even when it sent the signal. Cosmetic, but it
+      # makes `is-active` lie about why the service is down, which is exactly the
+      # signal you want trustworthy while debugging an outage.
+      SuccessExitStatus = "143";
     };
     Install = {
       WantedBy = [ "default.target" ];
