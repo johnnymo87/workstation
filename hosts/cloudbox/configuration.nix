@@ -172,11 +172,6 @@ in
         group = "dev";
         mode = "0400";
       };
-      cloudflared_tunnel_token = {
-        owner = "cloudflared";
-        group = "cloudflared";
-        mode = "0400";
-      };
       cloudflare_api_token = {
         owner = "dev";
         group = "dev";
@@ -451,33 +446,34 @@ in
     };
   };
 
-  # cloudflared service user
-  users.groups.cloudflared = {};
-  users.users.cloudflared = {
-    isSystemUser = true;
-    group = "cloudflared";
-    description = "Cloudflare Tunnel daemon user";
-  };
-
-  # Cloudflare Tunnel for CCR webhooks (dashboard-managed with token)
-  systemd.services.cloudflared-tunnel = {
-    description = "Cloudflare Tunnel for CCR webhooks";
-    wantedBy = [ "multi-user.target" ];
-    wants = [ "network-online.target" ];
-    after = [ "network-online.target" ];
-
-    serviceConfig = {
-      Type = "simple";
-      User = "cloudflared";
-      Group = "cloudflared";
-      ExecStart = "${pkgs.writeShellScript "cloudflared-run" ''
-        exec ${pkgs.cloudflared}/bin/cloudflared tunnel --no-autoupdate run \
-          --token "$(cat ${config.sops.secrets.cloudflared_tunnel_token.path})"
-      ''}";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-  };
+  # NO cloudflared here, deliberately. Removed 2026-09-13; do not restore it by
+  # copying the devbox block.
+  #
+  # This host ran a second connector on the SAME tunnel as devbox, sharing one
+  # token. It served exactly two hostnames, and both reasons are now gone:
+  #   - `ccr.mohrbacher.dev` fronted the pigeon daemon. It was a dead relic of
+  #     the CCR webhook architecture (Telegram now posts to the Worker and the
+  #     daemon POLLS outbound), and it was exposing pigeon unauthenticated to
+  #     the internet -- see #502. The tunnel was deleted outright on 2026-09-13.
+  #   - `boldco.mohrbacher.dev` is a DEVBOX-only service. It never had an origin
+  #     here.
+  # No cloudbox-specific hostname has ever existed in the mohrbacher.dev zone.
+  #
+  # Removing the service rather than fixing it also deletes, rather than
+  # mitigates, the token-in-argv bug: this host still passed the tunnel token as
+  # a command-line argument, where /proc/<pid>/cmdline (mode 444) made it
+  # readable by any local uid despite the sops file being 0400. devbox got
+  # `--token-file` in #502; cloudbox never needs the fix because it no longer
+  # holds a token at all.
+  #
+  # Consequence worth knowing when boldco returns (bead workstation-bak3): the
+  # NEW tunnel token goes to devbox ONLY. There is no longer a two-host
+  # coordination problem.
+  #
+  # The sops ENTRY for cloudflared_tunnel_token is removed from this host's
+  # declarations below, so it stops being decrypted into /run/secrets. The
+  # ciphertext still sits in secrets/cloudbox.yaml; clearing it needs cloudbox's
+  # own age key (/var/lib/sops-age-key.txt) and so must be done on that host.
 
   # Pigeon daemon service.
   #
@@ -681,10 +677,12 @@ in
     };
   };
 
-  # Stack target to start/stop cloudflared + pigeon together
+  # Stack target to start/stop the pigeon daemon.
+  # cloudflared dropped from this list 2026-09-13 along with the service itself
+  # (see the note above the pigeon-daemon service); the daemon never used it.
   systemd.targets.pigeon = {
-    description = "Pigeon stack (cloudflared + daemon)";
-    wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
+    description = "Pigeon stack (daemon)";
+    wants = [ "pigeon-daemon.service" ];
   };
   # workstation-9f7a: the `pigeon` journal namespace declared by
   # systemd.services.pigeon-daemon (LogNamespace = "pigeon").
