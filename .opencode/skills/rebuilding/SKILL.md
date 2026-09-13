@@ -68,6 +68,50 @@ This rebuilds the NixOS system. May require reboot if kernel changed.
 
 > **WARNING (cloudbox):** `nixos-rebuild switch` updates `opencode-frontdoor` on disk but does **NOT** restart the running process (`restartIfChanged = false`). Run `sudo systemctl restart opencode-frontdoor` afterward or the door keeps serving OLD code. See [Deploy Runbook: Front Door & Serve Pool](#deploy-runbook-front-door--serve-pool).
 
+### `switch` restarts units you stopped by hand, and `dry-activate` won't warn you
+
+A `switch` starts every unit that is **enabled**, regardless of its current
+runtime state. So a unit you stopped with `systemctl stop` — but did not
+*disable* — comes back on the next rebuild, **by anyone, for any reason**. A
+manual stop is not a fix; it is a countdown.
+
+**`nixos-rebuild dry-activate` does not predict this.** It reports restarts of
+units whose *definition* it considers changed. A unit whose definition is
+unchanged but whose runtime state was altered by hand does not appear anywhere
+in its output, so a clean dry-activate is **not** evidence that no unit will
+start.
+
+Found the hard way on devbox, 2026-09-13. `cloudflared-tunnel` had been stopped
+by hand at 12:58 (deliberate, temporary: it was logging 541 journal lines/hour
+retrying a deleted Cloudflare tunnel, on a box that had hit 100% disk that
+morning). An unrelated session then deployed an unrelated change:
+
+```
+$ sudo nixos-rebuild dry-activate --flake .#devbox
+would restart the following units: nix-daemon.service      # <- no mention of cloudflared
+
+$ sudo nixos-rebuild switch --flake .#devbox
+the following new units were started: cloudflared-tunnel.service   # <- started anyway
+```
+
+It then sat in an exponential-backoff loop logging
+`Register tunnel error from server side error="Unauthorized: Tunnel not found"`
+until stopped again 42s later.
+
+What to do instead, in order of durability:
+
+1. **Remove or disable it declaratively** if it should not run — that is the
+   only change a rebuild cannot undo.
+2. If a hand-stop is genuinely the right call (temporary, you want it back
+   soon), **write down that it is non-durable** where the next person will look
+   — the bead, the plan file — and expect it back.
+3. **Verify runtime state after any rebuild**, yours or someone else's, rather
+   than trusting `dry-activate`:
+   ```bash
+   systemctl is-active <unit>; systemctl is-enabled <unit>
+   ```
+   `enabled` + `inactive` is precisely the unstable combination.
+
 ### User Changes (no sudo, fast)
 
 After editing files in `users/dev/` or `assets/`:
