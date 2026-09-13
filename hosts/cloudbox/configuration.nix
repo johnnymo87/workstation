@@ -466,7 +466,7 @@ in
   # `--token-file` in #502; cloudbox never needs the fix because it no longer
   # holds a token at all.
   #
-  # Consequence worth knowing when boldco returns (bead workstation-p2gd): the
+  # Consequence worth knowing when boldco returns (bead workstation-bak3): the
   # NEW tunnel token goes to devbox ONLY. There is no longer a two-host
   # coordination problem.
   #
