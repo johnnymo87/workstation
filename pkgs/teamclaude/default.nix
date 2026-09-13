@@ -178,6 +178,51 @@ stdenvNoCC.mkDerivation rec {
     makeWrapper ${nodejs}/bin/node "$out/bin/teamclaude" \
       --add-flags "$dest/src/index.js"
 
+    # teamclaude-seeded: exit 0 iff the config names at least one account.
+    #
+    # THE ONE PLACE THAT ANSWERS "is teamclaude usable here". Three separate
+    # sites need that answer and they used to encode it three different ways:
+    # the devbox systemd unit and the darwin launchd wrapper both tested mere
+    # FILE EXISTENCE, while opencode-config.nix's injectTeamclaudeBaseUrl tested
+    # the accounts array (added in #511). File existence is the wrong test --
+    # teamclaude's own `loadOrCreateConfig()` writes a default config with
+    # `accounts: []` on almost any CLI invocation, including at the top of
+    # `teamclaude login` BEFORE the OAuth flow, so an aborted login leaves a file
+    # that passes it while the server exits 1 and respawns forever. Shipping the
+    # predicate as a binary means the next person cannot bring back a fourth
+    # spelling.
+    #
+    # Node, not jq: node is already a pinned dependency here and is the same
+    # parser teamclaude itself uses, so the check cannot disagree with the server
+    # about what the config says.
+    #
+    # A FAILURE OF THE CHECK ITSELF ALSO READS AS "not seeded". If this binary
+    # were missing or broken, systemd reports exit 203 and still SKIPS the unit
+    # (Result=success), and the darwin wrapper's `|| exit 0` does the same. That
+    # is the safe direction -- it cannot crash-loop -- but it does mean a broken
+    # predicate looks exactly like an unseeded host. The store path is pinned
+    # into the unit, so the GC cannot cause it.
+    #
+    # EXIT CODES ARE LOAD-BEARING. systemd's ExecCondition treats 1-254 as
+    # "skip the unit cleanly" but 255 (and signals) as "the unit FAILED", so
+    # every path here must land in 1-254. The catch-all is what guarantees that:
+    # an unreadable file, malformed JSON or a surprise exception all become 1,
+    # never an uncaught throw.
+    cat > "$out/bin/teamclaude-seeded" <<'SEEDED'
+#!/bin/sh
+exec ${nodejs}/bin/node -e '
+  try {
+    const p = process.env.TEAMCLAUDE_CONFIG
+      || ((process.env.XDG_CONFIG_HOME || (process.env.HOME + "/.config")) + "/teamclaude.json");
+    const c = JSON.parse(require("fs").readFileSync(p, "utf8"));
+    process.exit(Array.isArray(c.accounts) && c.accounts.length > 0 ? 0 : 1);
+  } catch (e) {
+    process.exit(1);
+  }
+'
+SEEDED
+    chmod +x "$out/bin/teamclaude-seeded"
+
     runHook postInstall
   '';
 

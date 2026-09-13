@@ -1705,13 +1705,17 @@ down and its silence means nothing. This host has no second leg.
   # OAuth flow -- so an aborted login creates the file, satisfies
   # ConditionPathExists, and the unit crash-loops to `failed` rather than staying
   # inactive. `teamclaude remove` of the last account gets you there too.
-  # `teamclaude accounts` is the check; a zero-account config is the usual cause
-  # of a `failed` teamclaude.
+  # `teamclaude accounts` is the check.
   #
-  # This is why injectTeamclaudeBaseUrl tests the accounts array rather than
-  # copying ConditionPathExists. Making the unit agree (an `ExecCondition=` that
-  # runs the same check, so a zero-account config is SKIPPED rather than failed)
-  # is filed separately.
+  # The unit now agrees: the `ExecCondition=` below runs `teamclaude-seeded`,
+  # the same check injectTeamclaudeBaseUrl uses, so a zero-account config is
+  # SKIPPED (inactive, Result=success) instead of crash-looping to failed.
+  #
+  # ConditionPathExists and the StartLimit both STAY. The former is a cheaper
+  # first gate; the latter still matters because `resolveAccounts()` can reduce a
+  # non-empty accounts list to nothing at runtime (every entry disabled or
+  # unusable), and the server exits 1 on that too -- which no static read of the
+  # config file can predict.
   #
   # After `teamclaude login`, run `systemctl --user enable --now teamclaude`.
   #
@@ -1752,6 +1756,24 @@ down and its silence means nothing. This host has no second leg.
         # already baked into the wrapper, but keep the standard set for parity.
         "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
       ];
+      # ExecCondition, not ExecStartPre: a non-zero ExecCondition in 1-254 makes
+      # systemd SKIP the unit cleanly (ActiveState=inactive, Result=success,
+      # NRestarts=0, journal "Skipped due to 'exec-condition'"), and Restart=
+      # always explicitly does not retry a condition-skip. ExecStartPre would
+      # FAIL the unit and re-arm the restart loop this is here to remove.
+      # Verified on this systemd (258.7) with a throwaway transient unit.
+      #
+      # This is the gate ConditionPathExists above cannot be: existence of the
+      # config is not evidence of a usable config (see the SEED-FIRST comment).
+      # `teamclaude-seeded` is the single shared implementation of that check --
+      # the darwin wrapper and injectTeamclaudeBaseUrl call the same binary.
+      #
+      # TRADEOFF, worth knowing before you debug it: a skip is QUIET. After an
+      # aborted `teamclaude login`, `systemctl --user start teamclaude` now exits
+      # 0 and prints nothing, leaving the unit inactive(dead); only the journal
+      # says why. The previous behaviour -- crash-loop to `failed` -- was loud
+      # but wrong. `teamclaude accounts` is the check.
+      ExecCondition = "${localPkgs.teamclaude}/bin/teamclaude-seeded";
       ExecStart = "${localPkgs.teamclaude}/bin/teamclaude server --headless";
       Restart = "always";
       RestartSec = 10;
