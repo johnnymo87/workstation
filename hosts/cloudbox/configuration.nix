@@ -4444,6 +4444,94 @@ EOF
   # Docker (for testcontainers)
   virtualisation.docker.enable = true;
 
+  # Make loopback the default publish address, so a bare `-p 6379:6379` in some
+  # compose file cannot reach the wire. TWO settings, because one is not enough
+  # -- see "the trap" below.
+  #
+  # Docker's published ports BYPASS the host firewall -- a published port is
+  # `nat PREROUTING -m addrtype --dst-type LOCAL -j DOCKER`, which DNATs before
+  # the INPUT decision, so the packet is forwarded rather than input and never
+  # meets a filter INPUT chain. On this host that is doubly moot:
+  # google-compute-config disables networking.firewall entirely (see the
+  # firewall note further down), so GCP's VPC ingress rules are the only
+  # external filter there is.
+  #
+  # And they are permissive. As of 2026-09-13, `default-allow-internal` permits
+  # 10.128.0.0/9 on ALL ports, and the project has two ESTABLISHED Azure VPN
+  # tunnels whose BGP sessions advertise prefixes inside that /9 (10.132.0.0/24,
+  # 10.132.32.0/19, 10.132.64.0/18, 10.132.128.0/24) while GCP advertises
+  # 10.142.0.0/20 back out. "Internal" therefore included the Azure ftidev
+  # network, not just this VPC. Re-check with `gcloud compute firewall-rules
+  # list` and `gcloud compute routers get-status` rather than trusting the
+  # prefixes above; they are a snapshot, not an invariant.
+  #
+  # Found that day, during a review prompted by an unrelated SCC
+  # EXTERNALLY_EXPOSED_VM_INSTANCE finding: the aigateway dev compose stack
+  # (wonder/data/aigateway/dev/docker-compose.yml in mono, started by the
+  # aigateway unit above) published 0.0.0.0:5432, 0.0.0.0:6379 and
+  # 0.0.0.0:8080. The Redis was redis:7-alpine with an empty requirepass, i.e.
+  # unauthenticated, and reachable by anything that could route here. Those
+  # three ports were also on SCC External Exposure's scanned-port baseline at
+  # the time, so one careless firewall edit on top of it would have produced an
+  # instant EXTERNALLY_EXPOSED_DATABASE CRITICAL. Fixing that compose file
+  # closes the instance; this narrows the class.
+  #
+  # THE TRAP: `ip` alone would have done nothing for the stack above.
+  # Despite the option name and the one-line `dockerd --help` text, `ip` sets
+  # the default binding address for the DEFAULT BRIDGE ONLY (docker0). Every
+  # compose project creates its own user-defined bridge network, and those take
+  # their default from the per-network option `host_binding_ipv4`, falling back
+  # to 0.0.0.0 when unset. docker0 on this host is DOWN with zero containers,
+  # so `ip` on its own would have protected exactly nothing.
+  #
+  # Measured on this host, 2026-09-13, with a throwaway second dockerd (own
+  # socket/data-root, live daemon untouched), moby 28.5.2:
+  #
+  #   --ip=127.0.0.1 alone, container on a user-defined network:
+  #       ss -> LISTEN 0.0.0.0:39997        <- still on the wire
+  #   both settings, network created afterwards:
+  #       ss -> LISTEN 127.0.0.1:39996      <- contained
+  #   both settings, explicit `-p 0.0.0.0:39995:80`:
+  #       ss -> LISTEN 0.0.0.0:39995        <- escape hatch works
+  #
+  # `default-network-opts` is applied at network CREATION. Networks that already
+  # exist (`docker network inspect <n> --format '{{json .Options}}'` shows `{}`)
+  # keep their old behaviour until recreated, and the aigateway unit
+  # deliberately never runs `compose down`, so `dev_default` will stay uncovered
+  # indefinitely. That is tolerable only because the compose file itself now
+  # pins 127.0.0.1.
+  #
+  # What this does NOT cover, stated plainly because the option names oversell
+  # it -- these are DEFAULTS, not enforcement:
+  #   * an explicit host IP in the publish spec (`-p 0.0.0.0:x:y`), including
+  #     one a tool passes on your behalf. The Supabase CLI does exactly that;
+  #     it is why devbox needed a second layer (hosts/devbox/configuration.nix).
+  #   * `network_mode: host` containers, which bind eth0 directly and are seen
+  #     by neither setting nor by any filter on this host.
+  #   * pre-existing networks, per the paragraph above.
+  # Only a DOCKER-USER rule covers the first; nothing here covers the second.
+  # Devbox installs its DOCKER-USER jump from networking.firewall.extraCommands,
+  # which this host has no firewall-start to hang off -- but the DOCKER-USER
+  # chain itself does exist here (`FORWARD -j DOCKER-USER` is the first FORWARD
+  # rule), so an equivalent layer is a small oneshot unit ordered after
+  # docker.service, not an impossibility. Deliberately out of scope here.
+  #
+  # Containers that genuinely need to be reachable from another host must now
+  # say `0.0.0.0:` themselves. Nothing on this box does today: every published
+  # port is the aigateway trio, and no compose file under ~/projects publishes
+  # with an explicit host IP.
+  #
+  # Bindings resolve at container START, not at create -- and `live-restore` is
+  # false here, so nothing survives a dockerd restart anyway. A container with a
+  # bare `-p` and a restart policy therefore flips to loopback on the way back
+  # up, without being recreated.
+  virtualisation.docker.daemon.settings = {
+    ip = "127.0.0.1"; # default bridge (docker0)
+    # user-defined bridges: compose projects, testcontainers' Network
+    default-network-opts.bridge."com.docker.network.bridge.host_binding_ipv4" =
+      "127.0.0.1";
+  };
+
   # Pin GCP metadata server route to eth0 so Docker bridge networks
   # can't steal the 169.254.0.0/16 link-local route and break DNS.
   # Without this, testcontainers' bridge network creates a veth that
