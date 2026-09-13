@@ -564,6 +564,43 @@
         touch $out
       '';
 
+      # Devbox's standalone /tmp scratch sweeper. Same SRC seam and same
+      # anti-vacuity pin as the two checks above.
+      #
+      # WHY THIS ONE IS WORTH A CHECK OF ITS OWN. Every other guard in this
+      # repo protects a report; this script's failure mode is `shutil.rmtree`
+      # on somebody's working tree. The guards it carries were each written
+      # after a real deletion -- cloudbox's worktree sweeper removed a LIVE
+      # opencode session's directory on 2026-09-01 -- and the suite's four
+      # keep-assertions were each confirmed to FAIL under a mutation that
+      # disables the guard they cover, so a guard that rots cannot stay green.
+      #
+      # The suite drives the sweeper at a fixture tree through the
+      # TMP_SCRATCH_ROOTS seam and never touches the real /tmp.
+      tmp-scratch-sweep-tests = devboxPkgs.runCommand "tmp-scratch-sweep-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
+          devboxPkgs.coreutils devboxPkgs.gnugrep devboxPkgs.findutils
+        ];
+        TMP_SCRATCH_SWEEP_SRC = self.homeConfigurations.dev.config.home.file.".local/bin/tmp-scratch-sweep".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid
+        export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid
+        bash users/dev/test-tmp-scratch-sweep.sh 2>&1 | tee "$TMPDIR/tss.txt"
+        grep -q '^all tmp-scratch-sweep tests passed' "$TMPDIR/tss.txt" || {
+          echo "GATE FAILURE: tmp-scratch-sweep suite did not reach its final banner." >&2
+          exit 1
+        }
+        [ "$(grep -c '^PASS  ' "$TMPDIR/tss.txt")" = 20 ] || {
+          echo "GATE FAILURE: expected 20 'PASS' lines, got" \
+               "$(grep -c '^PASS  ' "$TMPDIR/tss.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       opencode-llm-audit-tests = devboxPkgs.runCommand "opencode-llm-audit-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.python3

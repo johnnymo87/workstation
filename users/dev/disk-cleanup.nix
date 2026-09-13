@@ -1,12 +1,19 @@
 # Disk hygiene for the NixOS hosts.
 #
-# TWO SEPARATE THINGS LIVE HERE, with different host scopes:
+# THREE SEPARATE THINGS LIVE HERE, with different host scopes:
 #
 #   disk-cleanup  CLOUDBOX ONLY. Auto-discovers repos with worktrees, cleans
 #                 orphan Bazel output bases, prunes stale caches, runs nix GC.
 #                 Devbox has no bazel and no mono, and the guards below are
 #                 tuned to cloudbox's worktree population; porting it is a
 #                 separate decision, not a side effect of wanting an alarm.
+#
+#   tmp-scratch-  DEVBOX ONLY, and it is the ONE piece of disk-cleanup that was
+#   sweep         worth porting on its own (2026-09-13, bd workstation-w31j).
+#                 The sweep body is shared with cloudbox's cleanup_tmp_scratch
+#                 via tmpScratchSweepPy; only the wrapper and schedule differ.
+#                 Cloudbox reaches it through disk-cleanup, so it deliberately
+#                 does NOT get a second unit.
 #
 #   disk-watch    BOTH NixOS HOSTS. The between-cleanups threshold alarm. One
 #                 implementation, instantiated per host with its own thresholds
@@ -25,7 +32,7 @@ let
   # written twice and allowed to drift. Interpolated into each sweeper's
   # python heredoc.
   pathsInUsePy = ''
-    def paths_in_use(paths):
+    def paths_in_use(paths, proc=None):
         """The subset of `paths` that a live process is inside.
 
         A path counts as in use when some process has it -- or anything under
@@ -37,16 +44,21 @@ let
         that as "cannot tell" and keep the path. An empty result from a probe
         that never ran looks exactly like "nothing is using it", and acting on
         that difference is unrecoverable.
+
+        `proc` exists so a test can point the probe at a directory that is not
+        /proc and watch the caller fail safe. It is NOT a general knob: the
+        default is the only value any shipped caller passes.
         """
+        proc = proc or "/proc"
         paths = [p.rstrip("/") or "/" for p in paths]
         inuse = set()
-        for pid in os.listdir("/proc"):
+        for pid in os.listdir(proc):
             if not pid.isdigit():
                 continue
-            links = ["/proc/" + pid + "/cwd", "/proc/" + pid + "/exe"]
+            base = os.path.join(proc, pid)
+            links = [base + "/cwd", base + "/exe"]
             try:
-                links += ["/proc/" + pid + "/fd/" + f
-                          for f in os.listdir("/proc/" + pid + "/fd")]
+                links += [base + "/fd/" + f for f in os.listdir(base + "/fd")]
             except OSError:
                 pass
             for link in links:
@@ -59,6 +71,136 @@ let
                         inuse.add(p)
         return inuse
   '';
+
+  # ONE implementation of the stale-/tmp-scratch sweep, shared by cloudbox's
+  # nightly disk-cleanup (as cleanup_tmp_scratch) and devbox's standalone
+  # tmp-scratch-sweep, for the same reason mkDiskWatch is a function: the guards
+  # below are the expensive part, every one of them written after something was
+  # deleted that should not have been, and two copies of them drift.
+  #
+  # Reads argv: <age_days> <min_mb> [root ...].
+  tmpScratchSweepPy = ''
+    import os, shutil, subprocess, sys, time
+
+    ${pathsInUsePy}
+
+    age_days, min_mb = int(sys.argv[1]), int(sys.argv[2])
+    cutoff = time.time() - age_days * 86400
+    roots = [r.rstrip("/") or "/" for r in sys.argv[3:]]
+    # Test seam only; see paths_in_use.
+    proc_dir = os.environ.get("TMP_SCRATCH_PROC") or "/proc"
+    # Rehearsal mode: decide exactly as a real sweep would, delete nothing, and
+    # say "would remove" instead of "removed". It exists because the FIRST run
+    # on a new host is the one nobody can check afterwards -- on devbox it was
+    # about to remove 3G of trees chosen by a rule (tree-walk mtime) that no
+    # human has ever watched run there. Every guard is upstream of the rmtree,
+    # so the rehearsal exercises all of them and only skips the irreversible
+    # step.
+    dry_run = bool(os.environ.get("TMP_SCRATCH_DRY_RUN"))
+
+    def measure(p):
+        """(megabytes, newest mtime anywhere in the tree).
+
+        The newest mtime is the load-bearing half. A DIRECTORY's own mtime
+        only moves when its top-level entries change -- writing to
+        `<dir>/sub/file` does not touch `<dir>`. Long-running agent scratch is
+        created once and then written through nested paths, so judging it by
+        `os.lstat(dir).st_mtime` would read a tree that was active five
+        minutes ago as untouched for a month, and delete it.
+
+        The in-use check below does not cover that gap: it sees only
+        processes holding a handle at the instant the sweep runs, and scratch
+        written by a series of short-lived commands holds nothing in between.
+
+        So "abandoned" has to mean "nothing ANYWHERE underneath has changed
+        within the window". Walking is also cheaper than it looks -- it
+        replaces the `du` subprocess rather than adding to it.
+        """
+        total = 0
+        newest = 0.0
+        for dirpath, dirnames, filenames in os.walk(p, onerror=lambda e: None):
+            try: newest = max(newest, os.lstat(dirpath).st_mtime)
+            except OSError: pass
+            for name in filenames + dirnames:
+                try: st = os.lstat(os.path.join(dirpath, name))
+                except OSError: continue
+                newest = max(newest, st.st_mtime)
+                if not os.path.islink(os.path.join(dirpath, name)):
+                    total += getattr(st, "st_blocks", 0) * 512
+        return total // (1024 * 1024), newest
+
+    def classify(p):
+        """'no-repo' | 'clean' | 'dirty' | 'unpushed'. Only the last two protect."""
+        if not os.path.exists(os.path.join(p, ".git")):
+            return "no-repo"
+        if subprocess.run(["git", "-C", p, "rev-parse", "--git-dir"],
+                          capture_output=True).returncode != 0:
+            return "no-repo"          # stray or gutted .git, not a real repo
+        st = subprocess.run(["git", "-C", p, "status", "--porcelain",
+                             "--untracked-files=all"], capture_output=True, text=True)
+        if st.returncode != 0 or st.stdout.strip():
+            return "dirty"            # cannot tell counts as dirty
+        up = subprocess.run(["git", "-C", p, "log", "--branches", "--not",
+                             "--remotes", "--oneline"], capture_output=True, text=True)
+        return "unpushed" if (up.returncode == 0 and up.stdout.strip()) else "clean"
+
+    cands = []
+    for root in roots:
+        if not os.path.isdir(root): continue
+        for name in sorted(os.listdir(root)):
+            p = os.path.join(root, name)
+            # A root nested inside another root is swept per-CHILD, never as one
+            # object: /tmp/opencode is a container of scratch, not scratch.
+            if p in roots: continue
+            if not os.path.isdir(p) or os.path.islink(p): continue
+            try: st = os.lstat(p)
+            except OSError: continue
+            if st.st_uid != os.getuid(): continue
+            if st.st_mtime >= cutoff: continue      # cheap reject first
+            mb, newest = measure(p)                 # then the honest test
+            if newest >= cutoff:
+                print(f"  keep {mb}M {p} (touched {(time.time()-newest)/86400:.1f}d ago, nested)")
+                continue
+            if mb >= min_mb: cands.append((mb, p))
+
+    inuse = paths_in_use([p for _, p in cands], proc_dir)
+
+    freed = 0
+    for mb, p in sorted(cands, reverse=True):
+        if p in inuse:
+            print(f"  keep {mb}M {p} (open by a live process)"); continue
+        state = classify(p)
+        if state in ("dirty", "unpushed"):
+            print(f"  keep {mb}M {p} ({state})"); continue
+        gitfile = os.path.join(p, ".git")
+        if os.path.isfile(gitfile) and not dry_run:
+            # A registered worktree: deregister so the parent repo does not
+            # keep a dangling administrative entry.
+            try:
+                gitdir = open(gitfile).read().strip().split("gitdir:", 1)[1].strip()
+                main = gitdir.split("/.git/worktrees/")[0]
+                subprocess.run(["git", "-C", main, "worktree", "remove", "--force", p],
+                               capture_output=True)
+            except (IndexError, OSError):
+                pass
+        if dry_run:
+            print(f"  would remove {mb}M {p} ({state})")
+            freed += mb
+            continue
+        if os.path.exists(p):
+            shutil.rmtree(p, ignore_errors=True)
+        print(f"  removed {mb}M {p} ({state})")
+        freed += mb
+    verb = "would free" if dry_run else "freed"
+    print(f"  /tmp scratch sweep {verb} {freed} MB")
+  '';
+
+  # The knobs, shared so the two hosts cannot quietly diverge on what "stale"
+  # means. Both are env-overridable at the call sites below; nothing shipped
+  # overrides them, the suite does.
+  tmpScratchAgeDays = 7;
+  tmpScratchMinMb = 100;
+  tmpScratchRoots = "/tmp /tmp/opencode";
 
   # --------------------------------------------------------------------------
   # disk-watch, the alarm BETWEEN cleanups -- ONE implementation, instantiated
@@ -762,108 +904,17 @@ lib.mkMerge [
       # half-removed worktree. An earlier version of this conflated "git cannot
       # read this" with "this has uncommitted work" and would have protected
       # 12 GB of unrecoverable junk forever while sounding careful.
-      TMP_SCRATCH_AGE_DAYS=7
-      TMP_SCRATCH_MIN_MB=100
+      TMP_SCRATCH_AGE_DAYS=${toString tmpScratchAgeDays}
+      TMP_SCRATCH_MIN_MB=${toString tmpScratchMinMb}
+      TMP_SCRATCH_ROOTS="${tmpScratchRoots}"
 
       cleanup_tmp_scratch() {
         log "Sweeping stale /tmp scratch (>''${TMP_SCRATCH_AGE_DAYS}d, >=''${TMP_SCRATCH_MIN_MB}MB)..."
-        python3 - "$TMP_SCRATCH_AGE_DAYS" "$TMP_SCRATCH_MIN_MB" <<'PYEOF' || log "WARN: /tmp scratch sweep failed"
-      import os, shutil, subprocess, sys, time
-
-      ${pathsInUsePy}
-
-      age_days, min_mb = int(sys.argv[1]), int(sys.argv[2])
-      cutoff = time.time() - age_days * 86400
-      roots = ["/tmp", "/tmp/opencode"]
-
-      def measure(p):
-          """(megabytes, newest mtime anywhere in the tree).
-
-          The newest mtime is the load-bearing half. A DIRECTORY's own mtime
-          only moves when its top-level entries change -- writing to
-          `<dir>/sub/file` does not touch `<dir>`. Long-running agent scratch is
-          created once and then written through nested paths, so judging it by
-          `os.lstat(dir).st_mtime` would read a tree that was active five
-          minutes ago as untouched for a month, and delete it.
-
-          The in-use check below does not cover that gap: it sees only
-          processes holding a handle at the instant the sweep runs, and scratch
-          written by a series of short-lived commands holds nothing in between.
-
-          So "abandoned" has to mean "nothing ANYWHERE underneath has changed
-          within the window". Walking is also cheaper than it looks -- it
-          replaces the `du` subprocess rather than adding to it.
-          """
-          total = 0
-          newest = 0.0
-          for dirpath, dirnames, filenames in os.walk(p, onerror=lambda e: None):
-              try: newest = max(newest, os.lstat(dirpath).st_mtime)
-              except OSError: pass
-              for name in filenames + dirnames:
-                  try: st = os.lstat(os.path.join(dirpath, name))
-                  except OSError: continue
-                  newest = max(newest, st.st_mtime)
-                  if not os.path.islink(os.path.join(dirpath, name)):
-                      total += getattr(st, "st_blocks", 0) * 512
-          return total // (1024 * 1024), newest
-
-      def classify(p):
-          """'no-repo' | 'clean' | 'dirty' | 'unpushed'. Only the last two protect."""
-          if not os.path.exists(os.path.join(p, ".git")):
-              return "no-repo"
-          if subprocess.run(["git", "-C", p, "rev-parse", "--git-dir"],
-                            capture_output=True).returncode != 0:
-              return "no-repo"          # stray or gutted .git, not a real repo
-          st = subprocess.run(["git", "-C", p, "status", "--porcelain",
-                               "--untracked-files=all"], capture_output=True, text=True)
-          if st.returncode != 0 or st.stdout.strip():
-              return "dirty"            # cannot tell counts as dirty
-          up = subprocess.run(["git", "-C", p, "log", "--branches", "--not",
-                               "--remotes", "--oneline"], capture_output=True, text=True)
-          return "unpushed" if (up.returncode == 0 and up.stdout.strip()) else "clean"
-
-      cands = []
-      for root in roots:
-          if not os.path.isdir(root): continue
-          for name in sorted(os.listdir(root)):
-              p = os.path.join(root, name)
-              if root == "/tmp" and name == "opencode": continue   # swept per-child
-              if not os.path.isdir(p) or os.path.islink(p): continue
-              try: st = os.lstat(p)
-              except OSError: continue
-              if st.st_uid != os.getuid(): continue
-              if st.st_mtime >= cutoff: continue      # cheap reject first
-              mb, newest = measure(p)                 # then the honest test
-              if newest >= cutoff:
-                  print(f"  keep {mb}M {p} (touched {(time.time()-newest)/86400:.1f}d ago, nested)")
-                  continue
-              if mb >= min_mb: cands.append((mb, p))
-
-      inuse = paths_in_use([p for _, p in cands])
-
-      freed = 0
-      for mb, p in sorted(cands, reverse=True):
-          if p in inuse:
-              print(f"  keep {mb}M {p} (open by a live process)"); continue
-          state = classify(p)
-          if state in ("dirty", "unpushed"):
-              print(f"  keep {mb}M {p} ({state})"); continue
-          gitfile = os.path.join(p, ".git")
-          if os.path.isfile(gitfile):
-              # A registered worktree: deregister so the parent repo does not
-              # keep a dangling administrative entry.
-              try:
-                  gitdir = open(gitfile).read().strip().split("gitdir:", 1)[1].strip()
-                  main = gitdir.split("/.git/worktrees/")[0]
-                  subprocess.run(["git", "-C", main, "worktree", "remove", "--force", p],
-                                 capture_output=True)
-              except (IndexError, OSError):
-                  pass
-          if os.path.exists(p):
-              shutil.rmtree(p, ignore_errors=True)
-          print(f"  removed {mb}M {p} ({state})")
-          freed += mb
-      print(f"  /tmp scratch sweep freed {freed} MB")
+        # Unquoted on purpose: TMP_SCRATCH_ROOTS is a space-separated list and
+        # each root must arrive as its own argv entry.
+        # shellcheck disable=SC2086
+        python3 - "$TMP_SCRATCH_AGE_DAYS" "$TMP_SCRATCH_MIN_MB" $TMP_SCRATCH_ROOTS <<'PYEOF' || log "WARN: /tmp scratch sweep failed"
+      ${tmpScratchSweepPy}
       PYEOF
       }
 
@@ -982,7 +1033,131 @@ lib.mkMerge [
   }))
 
   # ==========================================================================
-  # DEVBOX disk-watch. Alarm only -- devbox has no nightly reclaimer.
+  # DEVBOX: the /tmp scratch sweeper, alone.
+  #
+  # WHY ONLY THIS PIECE OF disk-cleanup. The rest of that script is about
+  # things devbox does not have -- bazel output bases, a mono worktree
+  # population -- and its cleanup_nix step is the box-wedging I/O storm the
+  # disk-watch comment below refuses to automate. cleanup_tmp_scratch is the
+  # one part that is purely about /tmp and carries no such hazard.
+  #
+  # WHY IT CANNOT BE A tmpfiles AGE RULE, which is where everyone starts.
+  # /etc/tmpfiles.d/tmp.conf already carries `q /tmp 1777 root root 10d` and
+  # systemd-tmpfiles-clean.timer runs daily and SUCCEEDS. It still collects
+  # none of this. systemd-tmpfiles ages on the NEWEST of atime/mtime/ctime,
+  # and /tmp/spec-review-fresh is a bun hardlink farm: counted on 2026-09-13,
+  # 140503 files had mtime older than 10d, 136811 had atime older than 10d,
+  # and ZERO had ctime older than 10d. Every unrelated `bun install` anywhere
+  # on the box changes link counts on those shared inodes, which moves ctime,
+  # which resets the clock. No value of that age field can ever win. Judging by
+  # a directory-tree mtime WALK is not a nicer way to do the same thing; it is
+  # the only thing that works here.
+  #
+  # MEASURED TARGETS, devbox 2026-09-13 (/tmp totalled 4.0G):
+  #   2.5G /tmp/spec-review-fresh      (node_modules, dir mtime 2026-05-06)
+  #   543M /tmp/opencode/advrev
+  #    49M /tmp/test-baseline          (2026-02-17)
+  #    47M /tmp/test-patch-v1.2.6      (2026-05-06)
+  # The last two sit below TMP_SCRATCH_MIN_MB and are left alone on purpose:
+  # the floor buys the sweeper a smaller blast radius, and 96M is not the
+  # problem. /tmp/devenv-up-panel.log (74M) is a FILE and this sweeper only
+  # considers directories.
+  #
+  # /tmp/opencode-{frontdoor-canary,serve-canary,wedge-watcher} ARE SAFE
+  # WITHOUT A SPECIAL CASE. They are canary state dirs, 4.0K each, 12K
+  # together -- three orders of magnitude under the floor, so the size guard
+  # already protects them. Deleting them would re-arm alerts and reclaim
+  # nothing. Do not "optimise" the floor away.
+  #
+  # NO sudo, unlike cloudbox's cleanup_caches: every candidate is rejected
+  # unless it is owned by this uid, so the sweeper never needs privilege it
+  # could misuse.
+  # ==========================================================================
+  (lib.mkIf isDevbox {
+    home.file.".local/bin/tmp-scratch-sweep" = {
+      executable = true;
+      text = ''
+        #!${pkgs.bash}/bin/bash
+        set -euo pipefail
+
+        PATH="${lib.makeBinPath [
+          pkgs.coreutils
+          pkgs.git
+          pkgs.python3
+        ]}:$PATH"
+
+        # Env-overridable so the suite can drive this at a fixture tree instead
+        # of the real /tmp. Nothing shipped overrides them; a test that had to
+        # seed the actual /tmp would be indistinguishable from running the
+        # sweeper for real on somebody's machine.
+        TMP_SCRATCH_AGE_DAYS="''${TMP_SCRATCH_AGE_DAYS:-${toString tmpScratchAgeDays}}"
+        TMP_SCRATCH_MIN_MB="''${TMP_SCRATCH_MIN_MB:-${toString tmpScratchMinMb}}"
+        TMP_SCRATCH_ROOTS="''${TMP_SCRATCH_ROOTS:-${tmpScratchRoots}}"
+
+        log() { echo "[tmp-scratch-sweep] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+        # Rehearse before trusting it on a host it has never run on:
+        #   TMP_SCRATCH_DRY_RUN=1 ~/.local/bin/tmp-scratch-sweep
+        # Same decisions, no deletions, "would remove" in the log.
+        log "Sweeping stale scratch in $TMP_SCRATCH_ROOTS (>''${TMP_SCRATCH_AGE_DAYS}d, >=''${TMP_SCRATCH_MIN_MB}MB)..."
+        # Unquoted on purpose: TMP_SCRATCH_ROOTS is a space-separated list and
+        # each root must arrive as its own argv entry.
+        # shellcheck disable=SC2086
+        python3 - "$TMP_SCRATCH_AGE_DAYS" "$TMP_SCRATCH_MIN_MB" $TMP_SCRATCH_ROOTS <<'PYEOF' || log "WARN: scratch sweep failed"
+        ${tmpScratchSweepPy}
+        PYEOF
+        log "Sweep complete"
+      '';
+    };
+
+    systemd.user.services.tmp-scratch-sweep = {
+      Unit = {
+        Description = "Sweep stale /tmp scratch directories";
+      };
+      Service = {
+        Type = "oneshot";
+        ExecStart = "%h/.local/bin/tmp-scratch-sweep";
+        StandardOutput = "journal";
+        StandardError = "journal";
+        Nice = 19;
+        IOSchedulingClass = "idle";
+        Environment = [
+          "HOME=%h"
+          # No /run/wrappers/bin here, deliberately: cloudbox's disk-cleanup
+          # needs it so `sudo` resolves to the setuid wrapper, and this sweeper
+          # must never want sudo at all.
+          "PATH=/run/current-system/sw/bin"
+        ];
+      };
+    };
+
+    systemd.user.timers.tmp-scratch-sweep = {
+      Unit = {
+        Description = "Stale /tmp scratch sweep timer";
+      };
+      Timer = {
+        # 03:00 matches cloudbox's nightly cleanup rather than picking a new
+        # hour, so "the reclaimer runs at 3" stays true on both hosts.
+        # Persistent so a box that was off at 03:00 still sweeps; the jitter
+        # keeps it off the same second as home-manager-auto-expire.
+        OnCalendar = "*-*-* 03:00:00";
+        Persistent = true;
+        RandomizedDelaySec = "30min";
+      };
+      Install = {
+        WantedBy = [ "timers.target" ];
+      };
+    };
+  })
+
+  # ==========================================================================
+  # DEVBOX disk-watch. Alarm only.
+  #
+  # DEVBOX NOW HAS A NIGHTLY SWEEP (tmp-scratch-sweep, above) AND THIS IS STILL
+  # WARN-ONLY, because that sweep reclaims /tmp and nothing else -- about 3G,
+  # once, against a 149G root whose measured holders are ~/.local/share (25G),
+  # ~/projects (23G), ~/.npm/_cacache (12G) and /nix/store (44G). It moves the
+  # baseline down a little; it cannot answer an alert.
   #
   # WHY IT EXISTS. On 2026-09-11/12 the devbox root filesystem (/dev/sdb2,
   # 149G) filled and silently killed a dev Postgres and its process manager in
@@ -1074,7 +1249,7 @@ lib.mkMerge [
   (lib.mkIf isDevbox (diskWatchFor {
     warnPct = 90;
     clearPct = 84;
-    remedy = ". Devbox has NO nightly reclaimer, so nothing will fix this on its own. On 2026-09-11/12 this filesystem hit 100% and killed the eternal-machinery dev Postgres with no warning. Biggest reliable reclaim, ~12G, safe (it only re-downloads): rm -rf ~/.npm/_cacache -- that path ONLY, never ~/.npm or ~/.npm/_npx, which long-running MCP servers execute out of. A nix GC is safer but yields much less than you would expect, because the store is already collected nightly: sudo nix-collect-garbage --delete-older-than 7d typically frees only what accumulated since 00:01 (measured 2.3G mid-day). After those, the measured holders are ~/.local/share/devenv (11G), ~/.local/share/tts_joinery (5.2G), ~/.local/share/tec-codex (4.6G) and ~/projects (23G). Check current shape with: du -sh /nix /home/dev/.local/share/* /home/dev/projects /tmp";
+    remedy = ". The nightly tmp-scratch-sweep only reclaims /tmp (~3G, once); nothing else on devbox will fix this on its own. On 2026-09-11/12 this filesystem hit 100% and killed the eternal-machinery dev Postgres with no warning. Biggest reliable reclaim, ~12G, safe (it only re-downloads): rm -rf ~/.npm/_cacache -- that path ONLY, never ~/.npm or ~/.npm/_npx, which long-running MCP servers execute out of. A nix GC is safer but yields much less than you would expect, because the store is already collected nightly: sudo nix-collect-garbage --delete-older-than 7d typically frees only what accumulated since 00:01 (measured 2.3G mid-day). After those, the measured holders are ~/.local/share/devenv (11G), ~/.local/share/tts_joinery (5.2G), ~/.local/share/tec-codex (4.6G) and ~/projects (23G). Check current shape with: du -sh /nix /home/dev/.local/share/* /home/dev/projects /tmp";
   }))
 
 ]
