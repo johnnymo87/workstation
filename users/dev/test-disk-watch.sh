@@ -50,8 +50,13 @@ WARN_PCT="${DISK_WATCH_TEST_WARN_PCT:-85}"         # lowest value that MUST aler
 DEADBAND_PCT="${DISK_WATCH_TEST_DEADBAND_PCT:-82}" # below warn, at/above clear: state survives
 CLEARED_PCT="${DISK_WATCH_TEST_CLEARED_PCT:-79}"   # below clear: state is dropped
 # A string the alert text must contain, naming the remedy for THIS host. Cloudbox
-# points at its nightly reclaimer; devbox has none and points at a nix GC.
-REMEDY_TOKEN="${DISK_WATCH_TEST_REMEDY_TOKEN:-disk-cleanup}"
+# points at its nightly reclaimer; devbox has none and points at a cache path.
+#
+# `-` and NOT `:-`, deliberately. With `:-`, an explicitly EMPTY value silently
+# becomes the other host's token, which is a confusing failure at best and a
+# silent pass at worst. With `-`, an explicit empty survives to the guard below
+# and fails loudly, which is what a caller who wrote `TOKEN=` deserves to see.
+REMEDY_TOKEN="${DISK_WATCH_TEST_REMEDY_TOKEN-disk-cleanup}"
 
 # Sanity-check the bracket itself, so a caller that passes a nonsensical set gets
 # a hard failure instead of a green run that asserted nothing. Without this, e.g.
@@ -63,6 +68,13 @@ REMEDY_TOKEN="${DISK_WATCH_TEST_REMEDY_TOKEN:-disk-cleanup}"
   || { echo "FAIL: CLEARED_PCT ($CLEARED_PCT) must be below DEADBAND_PCT ($DEADBAND_PCT)"; exit 1; }
 [ "$DEADBAND_PCT" -lt "$WARN_PCT" ] \
   || { echo "FAIL: DEADBAND_PCT ($DEADBAND_PCT) must be below WARN_PCT ($WARN_PCT)"; exit 1; }
+# An EMPTY remedy token would make `grep -q -- ""` match any alert text at all,
+# so the remedy assertion would pass against a script that named no remedy --
+# a vacuous green in the one assertion that checks alert CONTENT rather than
+# thresholds. Caught in adversarial review of this parameterization. Reachable
+# only because REMEDY_TOKEN uses `-` rather than `:-` above; verified to fire.
+[ -n "$REMEDY_TOKEN" ] \
+  || { echo "FAIL: REMEDY_TOKEN is empty; the remedy assertion would match anything"; exit 1; }
 
 # A comfortably-alarming reading used by the alert-contract section. 91 is above
 # both hosts' warn lines, so it needs no per-host value -- but it is checked, not

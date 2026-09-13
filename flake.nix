@@ -539,13 +539,16 @@
       } ''
         cd ${self}
         export HOME="$TMPDIR"
-        # Devbox's bracket: warn 90, clear 86. QUIET/DEADBAND/CLEARED sit just
+        # Devbox's bracket: warn 90, clear 84. QUIET/DEADBAND/CLEARED sit just
         # under each line so the suite's own sanity checks prove the bracket is
         # the host's actual one rather than a loose range that anything passes.
+        # DEADBAND=85 is inside 84..89 (state must survive); CLEARED=83 is below
+        # the clear line (state must be dropped). The band is wide on devbox
+        # because its daily GC swing is only ~0.25 points -- see disk-cleanup.nix.
         export DISK_WATCH_TEST_QUIET_PCT=89
         export DISK_WATCH_TEST_WARN_PCT=90
-        export DISK_WATCH_TEST_DEADBAND_PCT=88
-        export DISK_WATCH_TEST_CLEARED_PCT=85
+        export DISK_WATCH_TEST_DEADBAND_PCT=85
+        export DISK_WATCH_TEST_CLEARED_PCT=83
         export DISK_WATCH_TEST_REMEDY_TOKEN=nix-collect-garbage
         bash users/dev/test-disk-watch.sh 2>&1 | tee "$TMPDIR/dwd.txt"
         grep -q '^18 passed, 0 failed' "$TMPDIR/dwd.txt" || {

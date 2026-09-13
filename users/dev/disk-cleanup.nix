@@ -991,7 +991,7 @@ lib.mkMerge [
   # That is the gap being closed here, and it is the one that would actually
   # have changed the outcome.
   #
-  # WHY 90/86 AND NOT CLOUDBOX'S 85/80, measured on devbox 2026-09-13 rather
+  # WHY 90/84 AND NOT CLOUDBOX'S 85/80, measured on devbox 2026-09-13 rather
   # than inherited. Devbox sat at 119G used / 23G free / 84% AFTER a manual
   # `nix-collect-garbage --delete-older-than 14d` reclaimed 9.3G. 84% is not a
   # peak on this host, it is the floor. Cloudbox's 85% line would therefore be
@@ -1001,10 +1001,36 @@ lib.mkMerge [
   #
   # Read as absolute free space, which is what actually kills a database:
   #   90% of 149G  ->  fires below ~15G free
-  #   86% of 149G  ->  clears above ~21G free
-  # Against the incident (100%, 0 bytes free) it fires with ~15G of headroom
-  # still left, which is hours at devbox's observed fill rate. Against today's
-  # measured 84% it is silent. Quiet on a normal day, early on a bad one.
+  #   84% of 149G  ->  clears above ~24G free
+  #
+  # THIS WILL FIRE SOON, AND THAT IS THE CORRECT BEHAVIOUR. Say it plainly,
+  # because the first draft of this comment claimed the line was "quiet on a
+  # normal day" and that was falsified the same day it was written: running
+  # `nix flake check` for this very change moved the root filesystem from 84%
+  # to 88% (17.0G free) within a few hours. The line is about 1.5G of growth
+  # away. Anyone reading this should expect a page within days of the switch.
+  #
+  # That is not a mis-set threshold, it is the threshold reporting a true fact:
+  # devbox has no headroom. A single flake check costs ~4 points here. Setting
+  # the line above the baseline instead -- 95%, say -- would buy silence at the
+  # cost of warning only once 7G remain, which is not enough runway to react,
+  # and is precisely how the 2026-09-11/12 incident killed a database with no
+  # warning. Between "an alarm that tells the truth loudly" and "an alarm that
+  # is quiet because it is set past the point of usefulness", this picks the
+  # former deliberately, as a forcing function for the reclaim tracked in bd
+  # workstation-gbr5. When the baseline comes down, revisit the line.
+  #
+  # WHY THE CLEAR LINE IS 84 AND NOT 86. The dead band has to be wider than the
+  # routine daily swing, or every day starts a fresh episode at alert #1 and the
+  # helper's escalation to severity=error (which happens on the 3rd alert) never
+  # arrives -- the exact alert-storm failure the hysteresis exists to prevent.
+  # Measured swing, from home-manager-auto-expire on six ordinary days
+  # (2026-09-08..12): 386, 369, 380, 395, 378 MiB, i.e. about 0.25 points. The
+  # 5912 MiB it freed on 09-13 was post-incident churn, not a daily figure. So
+  # a 6-point band (84..89, ~9G) clears the routine swing by more than an order
+  # of magnitude, and matches cloudbox's 5-point band in spirit: an episode ends
+  # only when the box is genuinely back to the state a full GC leaves it in, not
+  # when it jitters one point.
   #
   # THE UNCOMFORTABLE PART, which the threshold encodes rather than fixes: a
   # 15G trigger margin is thin, and it is thin because devbox has no headroom
@@ -1015,22 +1041,40 @@ lib.mkMerge [
   # still wanted, not something an unattended sweeper should take -- so this
   # ships as an alarm and the reclaim is tracked separately (bd workstation-gbr5).
   #
+  # WARN-ONLY MEANS NOBODY IS COMING. If the alert fires and no human reclaims,
+  # the disk still reaches 100% and still kills whatever is running. That is
+  # accepted, not overlooked: the alternative is an unattended sweeper deciding
+  # which of ~/projects and ~/.local/share is expendable, which is not a call
+  # this module is competent to make.
+  #
   # WARN-ONLY for the same reason as cloudbox, plus a devbox-specific one: the
   # only automatic reclaimer available here is a nix GC, and the cleaning-disk
   # skill documents that a GC above ~90% can generate enough I/O to stop
   # socket-activated sshd answering. Auto-running it at 90% would fire the
   # box-wedging operation exactly and only inside the danger zone.
   #
-  # The remedy text names `nix-collect-garbage` first because it is the one
-  # step that is safe, reversible-by-rebuild, and measured: the weekly system
-  # GC freed 5.7G on 2026-09-07 and the daily home-manager expiry freed 5.9G on
-  # 2026-09-13. The cache paths after it are named with their measured sizes so
-  # the reader does not have to go find out what is big.
+  # THE REMEDY TEXT LEADS WITH ~/.npm/_cacache, NOT WITH A NIX GC, and the
+  # ordering is measured rather than conventional. A GC is the safer-feeling
+  # first move, but the store is already collected daily (system nix-gc weekly
+  # plus home-manager autoExpire nightly), so by the time this alert fires
+  # mid-day the dead set is only what has accumulated since 00:01 --
+  # `nix-store --gc --print-dead` measured 2862 paths / 2.3G at 12:40 on
+  # 2026-09-13, against an alert that fires with 15G free and a 9G dead band to
+  # climb back through. A reader who runs the GC first gets ~2G, is still above
+  # the warn line, and now distrusts the alert. So the text states that yield
+  # honestly and puts the one reliable double-digit reclaim first.
+  #
+  # THE _cacache/_npx DISTINCTION IS LOAD-BEARING, not pedantry. ~/.npm/_npx
+  # holds UNPACKED packages that long-running `npm exec` processes execute out
+  # of -- deleting it kills MCP servers mid-session. ~/.npm/_cacache is only the
+  # download cache. cleanup_caches above carries the same warning for the same
+  # reason; an alert that said "clear ~/.npm" would be handing the reader a
+  # session-killer at the worst possible moment.
   # ==========================================================================
   (lib.mkIf isDevbox (diskWatchFor {
     warnPct = 90;
-    clearPct = 86;
-    remedy = ". Devbox has NO nightly reclaimer, so nothing will fix this on its own. On 2026-09-11/12 this filesystem hit 100% and killed the eternal-machinery dev Postgres with no warning. Safest first step, ~6-9G, reversible by rebuild: sudo nix-collect-garbage --delete-older-than 7d. If that is not enough, the measured big holders are ~/.npm/_cacache (12G, re-downloads), ~/.local/share/devenv (11G), ~/.local/share/tts_joinery (5.2G) and ~/.local/share/tec-codex (4.6G). Check current shape with: du -sh /nix /home/dev/.local/share/* /home/dev/projects /tmp";
+    clearPct = 84;
+    remedy = ". Devbox has NO nightly reclaimer, so nothing will fix this on its own. On 2026-09-11/12 this filesystem hit 100% and killed the eternal-machinery dev Postgres with no warning. Biggest reliable reclaim, ~12G, safe (it only re-downloads): rm -rf ~/.npm/_cacache -- that path ONLY, never ~/.npm or ~/.npm/_npx, which long-running MCP servers execute out of. A nix GC is safer but yields much less than you would expect, because the store is already collected nightly: sudo nix-collect-garbage --delete-older-than 7d typically frees only what accumulated since 00:01 (measured 2.3G mid-day). After those, the measured holders are ~/.local/share/devenv (11G), ~/.local/share/tts_joinery (5.2G), ~/.local/share/tec-codex (4.6G) and ~/projects (23G). Check current shape with: du -sh /nix /home/dev/.local/share/* /home/dev/projects /tmp";
   }))
 
 ]
