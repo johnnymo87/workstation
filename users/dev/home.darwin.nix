@@ -347,8 +347,29 @@ lib.mkIf isDarwin {
     };
 
     # teamclaude (Claude Max rotator) — darwin/launchd flavor of the systemd unit
-    # in home.devbox.nix. Same opt-in wrapper pattern as codex-lb. Marker is the
-    # config file itself, created by interactive `teamclaude login`. Bootstrap:
+    # in home.devbox.nix. Same opt-in wrapper pattern as codex-lb.
+    #
+    # THE GATE IS `teamclaude-seeded`, NOT FILE EXISTENCE. This wrapper used to
+    # test `[ -e "$HOME/.config/teamclaude.json" ]`, which is not the same
+    # question: teamclaude writes a default config with `accounts: []` on almost
+    # any CLI invocation, including at the top of `teamclaude login` BEFORE the
+    # OAuth flow. So an aborted login left a file that passed the test while the
+    # server exited 1 -- and with `KeepAlive.SuccessfulExit = false` below,
+    # launchd respawns a non-zero exit, so this WOULD BE an unbounded respawn
+    # loop (launchd's default ThrottleInterval is 10s) appending "No accounts
+    # configured" to the error log forever. Stated from the specs of the two
+    # mechanisms, not from an observation on a Mac -- nothing here can watch
+    # that host. Exiting 0 instead is a clean "nothing to do" that KeepAlive
+    # does not retry.
+    #
+    # NOTE THIS ONLY NARROWS THE LOOP, it does not remove it. The check reads
+    # the config file; an account list that is non-empty but whose entries are
+    # all disabled or unusable still gets past it, and the server still exits 1
+    # at runtime and still respawns forever. Only a zero-length list is covered.
+    #
+    # `teamclaude-seeded` is the single shared implementation of that check --
+    # the devbox unit's ExecCondition and injectTeamclaudeBaseUrlDarwin call the
+    # same binary, so the three sites cannot drift apart again. Bootstrap:
     #   1. teamclaude login    # PKCE OAuth, needs TTY + browser; repeat per account
     #   2. launchctl kickstart -k gui/$(id -u)/org.nix-community.home.teamclaude
     #   3. darwin-rebuild switch  (wires opencode via injectTeamclaudeBaseUrlDarwin)
@@ -358,7 +379,7 @@ lib.mkIf isDarwin {
         ProgramArguments = [
           "/bin/sh" "-c"
           ''
-            [ -e "$HOME/.config/teamclaude.json" ] || exit 0
+            ${localPkgs.teamclaude}/bin/teamclaude-seeded || exit 0
             exec ${localPkgs.teamclaude}/bin/teamclaude server --headless
           ''
         ];

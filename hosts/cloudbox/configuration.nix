@@ -2915,6 +2915,36 @@ Check:
   # NON-localhost client. The router sends the key anyway.
   #
   # Auto-starts on boot (wantedBy multi-user.target) per the deploy decision.
+  #
+  # DELIBERATELY HAS NO `ExecCondition = teamclaude-seeded`, unlike the devbox
+  # user unit and the macOS launchd agent (whose wrapper gained the same check on
+  # 2026-09-13, so a zero-account config is passed over instead of respawning
+  # forever). Those are personal boxes where an unseeded teamclaude is an
+  # ordinary not-set-up-yet state. Here teamclaude is cfp's `max` tier with four
+  # seeded accounts, and a config that has gone missing or empty is a genuine
+  # fault rather than a state to pass over quietly.
+  #
+  # BE HONEST ABOUT WHAT THAT BUYS, THOUGH — an earlier draft of this comment
+  # claimed a missing config would "go `failed`, loudly, and trip the
+  # teamclaude-pool canary", and BOTH halves of that are false:
+  #
+  #   * It never reaches `failed`. StartLimitIntervalUSec=10s with
+  #     StartLimitBurst=5 and RestartUSec=10s means one start attempt per 10s,
+  #     which can never be 5 within 10s. The unit loops in
+  #     `activating (auto-restart)` indefinitely.
+  #   * The canary does not fire on it. Its probe does
+  #     `if HTTP_CODE != 200 -> "unknown; not alerting" -> exit 0` (below), so a
+  #     teamclaude that is not answering at all is SILENT to it, whatever the
+  #     unit state. Meanwhile cfp gets ECONNREFUSED on its `max` tier and
+  #     quietly pays Vertex instead.
+  #
+  # So the real reason not to add ExecCondition here is narrower than "it would
+  # hide an outage": it would swap one non-alerting state (`activating`) for
+  # another (`inactive`), while removing the retry that recovers if the config
+  # is restored. Neither state pages anyone today, which is its own bug --
+  # filed as workstation-onjr. If that lands and the canary starts treating
+  # not-answering as pageable, revisit this exclusion; the argument for it
+  # largely evaporates.
   systemd.services.teamclaude = {
     description = "TeamClaude (personal Claude Max rotator for failover)";
     wantedBy = [ "multi-user.target" ];
@@ -3377,9 +3407,12 @@ EOF
   #     definition takes effect on the next reboot or manual restart.
   #
   # Disabled by default — enable with `sudo systemctl enable --now
-  # aigateway.service`. The home-manager activation
-  # `injectAigatewayBaseUrl` keys off this unit's `is-enabled` state to
-  # decide whether to point opencode at the gateway.
+  # aigateway.service`. The home-manager activation `injectAigatewayBaseUrl`
+  # keys off this unit's `is-active` state (NOT `is-enabled`, as this comment
+  # said until 2026-09-13) to decide whether to point opencode at the gateway.
+  # The distinction matters: unit files here are read-only symlinks into the Nix
+  # store, so `is-enabled` reports "linked" permanently and could never be the
+  # signal; `systemctl start`/`stop` is what an operator actually controls.
   systemd.services.aigateway = {
     description = "AI Gateway (local Anthropic-on-Vertex proxy)";
     after = [ "docker.service" "network-online.target" ];

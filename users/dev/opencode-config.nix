@@ -1989,6 +1989,11 @@ in
 
       # Decides the config. Order-independent.
       #
+      # THE SHARED PREDICATE. `teamclaude-seeded` (pkgs/teamclaude) exits 0 iff
+      # the config names at least one account. The devbox unit's ExecCondition
+      # and the darwin launchd wrapper call the same binary, so all three sites
+      # answer "is teamclaude usable here" identically by construction.
+      #
       # STRICTER THAN THE UNIT'S OWN ConditionPathExists, deliberately. Mere
       # existence of teamclaude.json is NOT evidence that teamclaude will run:
       # `loadOrCreateConfig()` writes a default config with `accounts: []` on
@@ -2008,8 +2013,13 @@ in
       # unreadable config reads as disabled, which matches what the server would
       # do with it anyway.
       tc_enabled=0
-      if ${pkgs.jq}/bin/jq -e '(.accounts | if type == "array" then length else 0 end) > 0' \
-           "$HOME/.config/teamclaude.json" >/dev/null 2>&1; then
+      # TEAMCLAUDE_CONFIG is pinned here for the same reason the unit pins it:
+      # this runs during a home-manager switch from whatever shell invoked it,
+      # which may carry an XDG_CONFIG_HOME the service will never see. Without
+      # the pin, activation and the service could resolve different files and
+      # disagree about whether teamclaude is seeded.
+      if TEAMCLAUDE_CONFIG="$HOME/.config/teamclaude.json" \
+           ${localPkgs.teamclaude}/bin/teamclaude-seeded; then
         tc_enabled=1
       fi
 
@@ -2080,10 +2090,13 @@ in
           active|activating) ;;
           # sd-switch will NOT start a unit that is already `failed` on an
           # unchanged unit file, so unlike `inactive` this does not self-resolve.
-          # The usual cause here is a teamclaude.json with zero accounts, which
-          # the unit's ConditionPathExists cannot detect -- it exits 1 and
-          # crash-loops. `teamclaude accounts` is the check.
-          failed) echo "teamclaude: unit is FAILED and this switch will not start it — check for a zero-account config (teamclaude accounts), then: systemctl --user reset-failed teamclaude.service && systemctl --user start teamclaude.service" >&2 ;;
+          #
+          # A zero-account config no longer lands here: the unit's ExecCondition
+          # runs `teamclaude-seeded` and a condition-skip is inactive+success,
+          # not failed. So `failed` now means the server started and died for a
+          # reason the config file alone does not predict -- most likely every
+          # account being unusable at runtime, or a port conflict on 3456.
+          failed) echo "teamclaude: unit is FAILED and this switch will not start it — the config has accounts (ExecCondition passed), so check the logs, then: systemctl --user reset-failed teamclaude.service && systemctl --user start teamclaude.service" >&2 ;;
           *) echo "teamclaude: unit reads ''${tc_state:-unknown} right now — expected if this switch is about to start it; if anthropic/* still fails afterwards, check: systemctl --user status teamclaude" >&2 ;;
         esac
       fi
@@ -2126,9 +2139,10 @@ in
   # equivalent was not -- no darwin builder here -- so this says "same shape"
   # rather than naming an exact node order.)
   #
-  # The marker `~/.config/teamclaude.json` is exactly what the launchd wrapper
-  # itself tests (`[ -e ... ] || exit 0` in home.darwin.nix), so both flavors and
-  # the unit now agree on one predicate. Keep them agreeing.
+  # Predicate is `teamclaude-seeded`, the same BINARY the launchd wrapper and the
+  # devbox unit's ExecCondition run (pkgs/teamclaude). Not merely the same rule
+  # written out three times -- the same executable, so the three sites cannot
+  # drift. If you add a fourth consumer, call it rather than re-deriving it.
   #
   # Dummy-cred seed identical to the systemd path; no auto serve-restart (pool)
   # — the dummy cred's shape-only mode is decided at provider init, so a manual
@@ -2142,8 +2156,13 @@ in
       # test as the systemd flavor -- see its comment for why mere file existence
       # is not enough.
       tc_enabled=0
-      if ${pkgs.jq}/bin/jq -e '(.accounts | if type == "array" then length else 0 end) > 0' \
-           "$HOME/.config/teamclaude.json" >/dev/null 2>&1; then
+      # TEAMCLAUDE_CONFIG is pinned here for the same reason the unit pins it:
+      # this runs during a home-manager switch from whatever shell invoked it,
+      # which may carry an XDG_CONFIG_HOME the service will never see. Without
+      # the pin, activation and the service could resolve different files and
+      # disagree about whether teamclaude is seeded.
+      if TEAMCLAUDE_CONFIG="$HOME/.config/teamclaude.json" \
+           ${localPkgs.teamclaude}/bin/teamclaude-seeded; then
         tc_enabled=1
       fi
 
