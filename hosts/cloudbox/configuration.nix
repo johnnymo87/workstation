@@ -3516,6 +3516,23 @@ EOF
         "CFP_AIGATEWAY_URL=http://127.0.0.1:8080"
         "CFP_TEAMCLAUDE_URL=http://127.0.0.1:3456"
         "CFP_BUDGET_DOLLARS=100"
+        # Family-aware inversion (cfp v0.9.4+): send Opus to Max ahead of Vertex
+        # and leave the paid budget for Fable. Fable costs 2.0x Opus per dollar
+        # on Vertex but drains the Max 5h bucket ~4.5x faster per weighted token,
+        # so each family was previously on the backend where it is dearest --
+        # and Opus was taking 69% of the Vertex budget, pushing Fable onto Max.
+        #
+        # The reliable win is COST, not 5h-bucket pressure. Moving Opus off the
+        # paid tiers adds ~Opus_paid/68M bucket-units while the displaced Fable
+        # removes ~4.5*Fable_on_Max/68M, so break-even is ~7M weighted tokens of
+        # Fable spilling to Max; days below that raise net Max load. Over
+        # 2026-09-06..13 that was four days better, four worse.
+        #
+        # ONLY the literal string "true" enables it (cfp warns on anything else
+        # and stays off) -- note CFP_DISABLE_BILLING_HEADER in the same codebase
+        # uses "1", so the convention is not uniform. To roll back, set this to
+        # "false" and rebuild; no cfp release change is needed.
+        "CFP_OPUS_MAX_FIRST=true"
         "CFP_IDLE_MIGRATE_SECONDS=300"
         "CFP_RESET_HOUR=0"
         # Budget rolls over at local midnight; ET matches the system tz and the
