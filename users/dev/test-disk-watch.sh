@@ -27,7 +27,53 @@
 # purge SKIPS any output base whose server PID is alive, which during a live build spike is all of
 # them. Hazard constant, benefit near zero.
 
+#
+# TWO HOSTS, ONE SUITE. disk-cleanup.nix generates disk-watch from a single
+# mkDiskWatch function and instantiates it per host, because cloudbox and devbox
+# cannot share thresholds -- devbox's ORDINARY baseline is 84% on a 149G root
+# (measured 2026-09-13, after a GC), which is cloudbox's alarm line. So the
+# threshold-specific assertions below read their percentages from the
+# environment, defaulting to cloudbox's. checks.disk-watch-tests runs this
+# against the cloudbox script with the defaults; checks.disk-watch-devbox-tests
+# runs the SAME assertions against the devbox script with devbox's numbers.
+#
+# The defaults are cloudbox's on purpose: a suite whose thresholds all had to be
+# supplied would silently test nothing if a caller forgot to supply them, and the
+# tally would still read green.
+
 set -o errexit -o nounset -o pipefail
+
+# Percentages that bracket the host's WARN_PCT/CLEAR_PCT. Defaults = cloudbox
+# (warn 85, clear 80); devbox passes its own (warn 90, clear 86).
+QUIET_PCT="${DISK_WATCH_TEST_QUIET_PCT:-84}"       # highest value that must NOT alert
+WARN_PCT="${DISK_WATCH_TEST_WARN_PCT:-85}"         # lowest value that MUST alert
+DEADBAND_PCT="${DISK_WATCH_TEST_DEADBAND_PCT:-82}" # below warn, at/above clear: state survives
+CLEARED_PCT="${DISK_WATCH_TEST_CLEARED_PCT:-79}"   # below clear: state is dropped
+# A string the alert text must contain, naming the remedy for THIS host. Cloudbox
+# points at its nightly reclaimer; devbox has none and points at a nix GC.
+REMEDY_TOKEN="${DISK_WATCH_TEST_REMEDY_TOKEN:-disk-cleanup}"
+
+# Sanity-check the bracket itself, so a caller that passes a nonsensical set gets
+# a hard failure instead of a green run that asserted nothing. Without this, e.g.
+# QUIET_PCT >= WARN_PCT would make "quiet" and "warns" contradictory and one of
+# them would be trivially satisfiable by a broken script.
+[ "$QUIET_PCT" -lt "$WARN_PCT" ] \
+  || { echo "FAIL: QUIET_PCT ($QUIET_PCT) must be below WARN_PCT ($WARN_PCT)"; exit 1; }
+[ "$CLEARED_PCT" -lt "$DEADBAND_PCT" ] \
+  || { echo "FAIL: CLEARED_PCT ($CLEARED_PCT) must be below DEADBAND_PCT ($DEADBAND_PCT)"; exit 1; }
+[ "$DEADBAND_PCT" -lt "$WARN_PCT" ] \
+  || { echo "FAIL: DEADBAND_PCT ($DEADBAND_PCT) must be below WARN_PCT ($WARN_PCT)"; exit 1; }
+
+# A comfortably-alarming reading used by the alert-contract section. 91 is above
+# both hosts' warn lines, so it needs no per-host value -- but it is checked, not
+# assumed, because a future host with a higher line would otherwise turn every
+# assertion in section 4 into a vacuous pass against an empty log.
+ALERT_PCT="${DISK_WATCH_TEST_ALERT_PCT:-91}"
+[ "$ALERT_PCT" -ge "$WARN_PCT" ] \
+  || { echo "FAIL: ALERT_PCT ($ALERT_PCT) must be at or above WARN_PCT ($WARN_PCT)"; exit 1; }
+
+# Which host's script to evaluate when DISK_WATCH_SRC is not supplied.
+DISK_WATCH_ATTR="${DISK_WATCH_ATTR:-cloudbox}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/disk-watch.XXXXXX")"
@@ -47,7 +93,7 @@ if [ -n "${DISK_WATCH_SRC:-}" ]; then
   cp "$DISK_WATCH_SRC" "$script_src"
 else
   nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
-    eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/disk-watch\".text" \
+    eval --raw "git+file:$repo_root#homeConfigurations.$DISK_WATCH_ATTR.config.home.file.\".local/bin/disk-watch\".text" \
     > "$script_src"
 fi
 [ -s "$script_src" ] || { echo "FAIL: empty disk-watch source"; exit 1; }
@@ -136,14 +182,17 @@ alerted() { [ -s "$alert_log" ]; }
 run_at 70 || true
 alerted && bad "70% is quiet" "alerted at 70%, far below any threshold" || ok "70% is quiet"
 
-run_at 84 || true
-alerted && bad "84% is quiet (the worst measured quiet-day peak)" \
-  "84% was the highest normal pre-nightly peak in the measured series; alerting here is the
-   daily-wallpaper failure that makes an alarm worthless" \
-  || ok "84% is quiet (the worst measured quiet-day peak)"
+run_at "$QUIET_PCT" || true
+alerted && bad "$QUIET_PCT% is quiet (this host's worst normal reading)" \
+  "on cloudbox 84% was the highest normal pre-nightly peak in the measured series; on devbox 84% is
+   the post-GC BASELINE. Either way, alerting at the host's ordinary level is the daily-wallpaper
+   failure that makes an alarm worthless -- and worse than absent, since it also burns the shared
+   Telegram channel the other canaries use" \
+  || ok "$QUIET_PCT% is quiet (this host's worst normal reading)"
 
-run_at 85 || true
-alerted && ok "85% warns" || bad "85% warns" "the threshold is >=85, so 85 itself must fire"
+run_at "$WARN_PCT" || true
+alerted && ok "$WARN_PCT% warns" \
+  || bad "$WARN_PCT% warns" "the threshold is >=$WARN_PCT, so $WARN_PCT itself must fire"
 
 run_at 97 || true
 alerted && ok "97% warns (the 2026-08-25 incident level)" \
@@ -187,22 +236,23 @@ run_at 95 || true
 # alert storm the helper exists to prevent. So recovery is a LOWER floor, with a dead band between.
 
 printf 'disk-warn\n3\n1756000000\n' > "$state_file"
-run_at 82 || true
-[ -f "$state_file" ] && ok "82% is in the dead band: state survives, no re-arm" \
-  || bad "82% is in the dead band: state survives, no re-arm" \
-         "clearing state at 82 lets an 84<->86 sawtooth alert on every single crossing"
+run_at "$DEADBAND_PCT" || true
+[ -f "$state_file" ] && ok "$DEADBAND_PCT% is in the dead band: state survives, no re-arm" \
+  || bad "$DEADBAND_PCT% is in the dead band: state survives, no re-arm" \
+         "clearing state inside the dead band lets a sawtooth across the warn line alert on every
+          single crossing"
 
 printf 'disk-warn\n3\n1756000000\n' > "$state_file"
-run_at 79 || true
+run_at "$CLEARED_PCT" || true
 [ -f "$state_file" ] \
-  && bad "below 79% the episode is over and state is cleared" \
+  && bad "below the clear line ($CLEARED_PCT%) the episode is over and state is cleared" \
          "a stale state file makes the NEXT episode's first alert claim 'STILL UNRESOLVED: alert #4,
           first reported 400h ago', which is false and trains the reader to ignore it" \
-  || ok "below 79% the episode is over and state is cleared"
+  || ok "below the clear line ($CLEARED_PCT%) the episode is over and state is cleared"
 
 # --- 4. the alert contract ------------------------------------------------------------------------
 
-run_at 91 || true
+run_at "$ALERT_PCT" || true
 grep -q 'ttl=900' "$alert_log" \
   && ok "uses the house backoff base (900s)" \
   || bad "uses the house backoff base (900s)" "$(cat "$alert_log")"
@@ -216,11 +266,15 @@ grep -q 'sig=disk-warn' "$alert_log" \
 
 # The text has to carry both the number and what to DO about it. An alert that says only "disk is
 # full" costs the reader a terminal session before they can act.
-grep -q '91%' "$alert_log" \
+grep -q "$ALERT_PCT%" "$alert_log" \
   && ok "the alert text states the actual percentage" || bad "the alert text states the actual percentage" "$(cat "$alert_log")"
-grep -q 'disk-cleanup' "$alert_log" \
-  && ok "the alert text names the remedy" \
-  || bad "the alert text names the remedy" "the reader should not have to go find the command"
+grep -q -- "$REMEDY_TOKEN" "$alert_log" \
+  && ok "the alert text names the remedy ($REMEDY_TOKEN)" \
+  || bad "the alert text names the remedy ($REMEDY_TOKEN)" \
+         "the reader should not have to go find the command. NOTE this string is per-host: cloudbox
+          points at its nightly reclaimer, devbox has none and must point at a nix GC instead --
+          shipping cloudbox's text to devbox would name a unit that does not exist there" \
+         "$(cat "$alert_log")"
 
 # --- 5. it must not break its own timer -----------------------------------------------------------
 # A watcher that exits non-zero puts its unit in `failed`, and a failed unit is one nobody looks at.

@@ -838,6 +838,33 @@ in
     extra-trusted-public-keys = [
       "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw="
     ];
+
+    # Reactive GC floor, added 2026-09-13 after the root filesystem filled on
+    # 2026-09-11/12 (see nix.gc below and users/dev/disk-cleanup.nix).
+    #
+    # WHAT THESE DO: during a build, whenever free space on the store's
+    # filesystem drops below min-free, the daemon garbage-collects until it is
+    # above max-free. It is the only nix mechanism that reacts to the disk
+    # rather than to the calendar.
+    #
+    # WHAT THEY DO NOT DO, stated plainly so nobody mistakes this for the fix:
+    # this only ever runs INSIDE a nix build. The 2026-09-11/12 fill was not
+    # caused by nix -- measured afterwards, the store was 44G of a 119G-used
+    # 149G root, while ~/.local/share held 25G, ~/projects 23G and
+    # ~/.npm/_cacache 12G. min-free would not have prevented that incident. It
+    # is here because a `nixos-rebuild` on an already-tight disk is a plausible
+    # way to take the last few gigabytes, and this makes that specific path
+    # self-limiting. The thing that would actually have helped is the alarm
+    # (disk-watch, now enabled for devbox).
+    #
+    # VALUES, against a 149G root whose measured free space was 23G: free below
+    # 10G is already past the point where a Postgres or a build starts failing,
+    # so collect then; 25G is the smallest target that leaves useful headroom
+    # without asking the collector to delete most of a store it will rebuild.
+    # Deliberately NOT larger: max-free is a target the daemon works toward, and
+    # an aggressive one turns every build on a busy disk into a long GC.
+    min-free = 10 * 1024 * 1024 * 1024;   # 10 GiB
+    max-free = 25 * 1024 * 1024 * 1024;   # 25 GiB
   };
 
   # Nix daemon scheduling — treat builds as batch work so interactive
@@ -845,7 +872,22 @@ in
   nix.daemonCPUSchedPolicy = "batch";
   nix.daemonIOSchedClass = "idle";
 
-  # Garbage collection
+  # Garbage collection.
+  #
+  # LEFT UNCHANGED ON PURPOSE, 2026-09-13. The 2026-09-11/12 disk-full incident
+  # prompted a review of whether devbox needed an automatic GC policy. It
+  # already had one, identical to cloudbox's, and it was working: nix-gc.service
+  # ran 2026-09-07 00:00 and freed 5698 MiB, and the daily home-manager
+  # generation expiry (users/dev/home.devbox.nix, autoExpire with
+  # store.cleanup) freed a further 5912 MiB on 2026-09-13 00:01. Between them
+  # the store is collected daily, so raising the cadence here would add churn
+  # without adding reclamation.
+  #
+  # The gap this incident exposed was not cadence, it was that a calendar
+  # schedule has no floor and nothing was watching between runs -- the disk
+  # filled on the 11th/12th, mid-window, with the next weekly run due on the
+  # 14th. That is addressed by min-free/max-free above (reactive, but only
+  # during builds) and by disk-watch (the alarm, users/dev/disk-cleanup.nix).
   nix.gc = {
     automatic = true;
     dates = "weekly";

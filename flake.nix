@@ -516,6 +516,51 @@
         touch $out
       '';
 
+      # The SAME suite, run against DEVBOX's instantiation of disk-watch.
+      #
+      # WHY A SECOND CHECK AND NOT A WIDER FIRST ONE. disk-cleanup.nix generates
+      # one script from one function and instantiates it per host, so the logic
+      # is shared -- but the CONSTANTS are not, and constants are exactly what
+      # this suite adjudicates. Devbox warns at 90 and clears at 86 because its
+      # ordinary post-GC baseline is 84% on a 149G root (measured 2026-09-13);
+      # cloudbox's 85/80 shipped to devbox would alert every day forever. A
+      # single check could only pin one host's numbers, and the unpinned host is
+      # the one that would silently drift back to useless.
+      #
+      # It also pins the remedy string per host. Cloudbox's alert names
+      # `disk-cleanup.service`; devbox has no such unit, so naming it there would
+      # hand the reader a command that does nothing at the moment the disk is
+      # full. That is a content bug no threshold test could catch.
+      disk-watch-devbox-tests = devboxPkgs.runCommand "disk-watch-devbox-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        DISK_WATCH_SRC = self.homeConfigurations.dev.config.home.file.".local/bin/disk-watch".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # Devbox's bracket: warn 90, clear 86. QUIET/DEADBAND/CLEARED sit just
+        # under each line so the suite's own sanity checks prove the bracket is
+        # the host's actual one rather than a loose range that anything passes.
+        export DISK_WATCH_TEST_QUIET_PCT=89
+        export DISK_WATCH_TEST_WARN_PCT=90
+        export DISK_WATCH_TEST_DEADBAND_PCT=88
+        export DISK_WATCH_TEST_CLEARED_PCT=85
+        export DISK_WATCH_TEST_REMEDY_TOKEN=nix-collect-garbage
+        bash users/dev/test-disk-watch.sh 2>&1 | tee "$TMPDIR/dwd.txt"
+        grep -q '^18 passed, 0 failed' "$TMPDIR/dwd.txt" || {
+          echo "GATE FAILURE: devbox disk-watch suite did not reach its 18/0 tally." >&2
+          exit 1
+        }
+        # Same anti-vacuity pin as the cloudbox check above.
+        [ "$(grep -c '^PASS  ' "$TMPDIR/dwd.txt")" = 18 ] || {
+          echo "GATE FAILURE: expected 18 'PASS' lines, got" \
+               "$(grep -c '^PASS  ' "$TMPDIR/dwd.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       opencode-llm-audit-tests = devboxPkgs.runCommand "opencode-llm-audit-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
