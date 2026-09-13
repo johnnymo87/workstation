@@ -1908,8 +1908,10 @@ in
     '');
 
   # Point opencode's first-party `anthropic` provider at the local TeamClaude
-  # rotator (devbox) when its user service is active; otherwise strip the
-  # override so opencode talks to api.anthropic.com directly. TeamClaude proxies
+  # rotator (devbox) when this host has a SEEDED teamclaude config (at least one
+  # account); otherwise strip the override so opencode talks to api.anthropic.com
+  # directly. Note that predicate is about configuration, not liveness -- see the
+  # PREDICATE section below. TeamClaude proxies
   # /v1/* to api.anthropic.com and SWAPS IN the active Max account's OAuth bearer
   # token, and exempts localhost from its x-api-key gate — so 127.0.0.1:3456/v1
   # with no key is all the *transport* opencode needs.
@@ -1929,14 +1931,41 @@ in
   # zeros cost) but never refreshes; TeamClaude overwrites the dummy bearer anyway
   # and remains the sole token owner. (Tradeoff: when TeamClaude is down the
   # direct-Anthropic fallback can't authenticate with the dummy — acceptable on
-  # this play box; stop teamclaude AND re-`opencode auth login` to go fully direct.)
+  # this play box. To go fully direct, move ~/.config/teamclaude.json aside and
+  # re-switch so this block stops seeding the dummy, THEN `opencode auth login`.
+  # Merely stopping the service no longer does it — see the PREDICATE note below.)
   #
-  # Gated + auto-fallback (mirrors injectAigatewayBaseUrl): the override only
-  # takes effect once accounts are seeded (`teamclaude login`) and the unit is
-  # started, and reverts to direct Anthropic the moment teamclaude.service is
-  # stopped + this activation re-runs — so stopping the service is a clean
-  # rollback. opencode-serve (a USER service on devbox) is restarted when the
-  # effective URL changes OR the dummy credential is freshly seeded.
+  # THE PREDICATE IS THE OPT-IN MARKER, NOT LIVENESS — same fix, same reasoning
+  # as injectCodexLbBaseUrl below (bead workstation-m55p, sibling of
+  # workstation-k03x). Read that block's PREDICATE section for the full argument;
+  # the short version is that home-manager runs file activation BEFORE sd-switch
+  # starts changed units, so `systemctl --user is-active teamclaude.service` here
+  # reads the PRE-switch state. A switch taken while teamclaude happened to be
+  # down therefore stripped the baseURL, and systemd started teamclaude
+  # successfully seconds later, leaving a healthy rotator that opencode was not
+  # pointed at — until somebody ran a second switch. That exact sequence caused a
+  # live outage on the codex-lb twin on 2026-09-13.
+  #
+  # The signal is `~/.config/teamclaude.json` -- the same file the unit gates on
+  # (`ConditionPathExists`, users/dev/home.devbox.nix) and the darwin launchd
+  # wrapper tests -- but read for a NON-EMPTY ACCOUNTS ARRAY rather than mere
+  # existence. See the predicate comment at the test itself for why that
+  # difference is load-bearing and why it does not reintroduce the race.
+  # Seeded config => this host intends to route Anthropic through teamclaude.
+  # Order-independent, so it cannot race sd-switch.
+  #
+  # "Stopping the service is a clean rollback" WAS TRUE OF THE OLD GATE AND IS
+  # NOT TRUE NOW. Stopping teamclaude no longer reverts opencode to direct
+  # Anthropic; you must remove/rename ~/.config/teamclaude.json (or move it aside)
+  # and re-switch. That is a real loss of convenience, accepted because the thing
+  # it bought was mostly fictional: the dummy credential seeded below is
+  # non-expiring and NOT a real grant, so a "direct Anthropic" fallback reached by
+  # stopping the service could not authenticate anyway — the header above already
+  # said as much. Going genuinely direct always required a real
+  # `opencode auth login` on top, and it still does.
+  #
+  # opencode-serve (a USER service on devbox) is restarted when the effective URL
+  # changes OR the dummy credential is freshly seeded.
   #
   # Path shape: api.anthropic.com base is .../v1 and @ai-sdk/anthropic appends
   # /messages, so the override is .../v1 (no trailing /messages). The
@@ -1957,13 +1986,41 @@ in
       # devbox opencode-serve + teamclaude are USER services; reach the user bus.
       export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$UID}"
       sc=/run/current-system/sw/bin/systemctl
+
+      # Decides the config. Order-independent.
+      #
+      # STRICTER THAN THE UNIT'S OWN ConditionPathExists, deliberately. Mere
+      # existence of teamclaude.json is NOT evidence that teamclaude will run:
+      # `loadOrCreateConfig()` writes a default config with `accounts: []` on
+      # almost any CLI invocation -- including at the TOP of `teamclaude login`,
+      # before the OAuth flow (src/index.js), so an aborted login leaves the file
+      # behind -- and `teamclaude remove` of the last account leaves it empty too.
+      # teamclaude then exits 1 on a zero-account config and crash-loops.
+      #
+      # That matters here because being wrong in this direction is destructive,
+      # not merely useless: we would point anthropic/* at a dead port AND
+      # overwrite a real credential with the dummy below, on a host that had
+      # simply run `teamclaude accounts` once. Nothing would self-heal it.
+      #
+      # This does not reintroduce the race #509 fixed. The stricter test only
+      # diverges from the unit's where the unit CANNOT run healthily, so it still
+      # never strips while a healthy teamclaude is about to start. A garbled or
+      # unreadable config reads as disabled, which matches what the server would
+      # do with it anyway.
+      tc_enabled=0
+      if ${pkgs.jq}/bin/jq -e '(.accounts | if type == "array" then length else 0 end) > 0' \
+           "$HOME/.config/teamclaude.json" >/dev/null 2>&1; then
+        tc_enabled=1
+      fi
+
+      # Reported only, never decisive. Legitimately reads inactive/failed here on
+      # a switch that is about to start the unit.
       tc_state="$($sc --user is-active teamclaude.service 2>/dev/null || true)"
 
       anthropic_url=""
-      case "$tc_state" in
-        active|activating)
-          anthropic_url="http://127.0.0.1:3456/v1" ;;
-      esac
+      if [[ "$tc_enabled" == 1 ]]; then
+        anthropic_url="http://127.0.0.1:3456/v1"
+      fi
 
       seeded=0
 
@@ -1986,10 +2043,20 @@ in
       # stays in oauth mode (shapes the Claude-Code request + zeros cost) but never
       # refreshes. TeamClaude owns + rotates the real tokens and overwrites the dummy
       # bearer. (See the header comment for the full rationale.) Enforced on every
-      # switch while teamclaude is active, so a stray `opencode auth login` can't
-      # reintroduce the refresh conflict; idempotent via the sorted-key compare. When
-      # teamclaude is stopped (anthropic_url empty) we DON'T touch the auth store, so
-      # going direct just needs a real `opencode auth login`.
+      # switch while the teamclaude MARKER exists (~/.config/teamclaude.json) --
+      # not merely while the service is up -- so a stray `opencode auth login`
+      # can't reintroduce the refresh conflict; idempotent via the sorted-key
+      # compare.
+      #
+      # NOTE THIS NOW FIRES WHILE TEAMCLAUDE IS DOWN TOO. Under the old liveness
+      # gate a stopped teamclaude left the auth store alone; now the dummy is
+      # (re)seeded on every switch as long as the config file exists. In practice
+      # that changes little -- the dummy would already be sitting there from the
+      # previous switch, which is exactly why the header says the direct-Anthropic
+      # fallback cannot authenticate -- but it does mean a real
+      # `opencode auth login` performed while teamclaude is stopped gets
+      # overwritten by the next switch. To go genuinely direct, move
+      # ~/.config/teamclaude.json aside first, then log in.
       if [[ -n "$anthropic_url" ]]; then
         auth="$HOME/.local/share/opencode/auth.json"
         mkdir -p "$(dirname "$auth")"
@@ -2007,7 +2074,19 @@ in
         fi
       fi
 
-      echo "teamclaude: anthropic -> ''${anthropic_url:-<direct Anthropic>} (teamclaude=$tc_state)" >&2
+      echo "teamclaude: anthropic -> ''${anthropic_url:-<direct Anthropic>} (marker=$tc_enabled, unit=''${tc_state:-unknown})" >&2
+      if [[ -n "$anthropic_url" ]]; then
+        case "$tc_state" in
+          active|activating) ;;
+          # sd-switch will NOT start a unit that is already `failed` on an
+          # unchanged unit file, so unlike `inactive` this does not self-resolve.
+          # The usual cause here is a teamclaude.json with zero accounts, which
+          # the unit's ConditionPathExists cannot detect -- it exits 1 and
+          # crash-loops. `teamclaude accounts` is the check.
+          failed) echo "teamclaude: unit is FAILED and this switch will not start it — check for a zero-account config (teamclaude accounts), then: systemctl --user reset-failed teamclaude.service && systemctl --user start teamclaude.service" >&2 ;;
+          *) echo "teamclaude: unit reads ''${tc_state:-unknown} right now — expected if this switch is about to start it; if anthropic/* still fails afterwards, check: systemctl --user status teamclaude" >&2 ;;
+        esac
+      fi
       new_hash="$(printf '%s' "$anthropic_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
 
       # The plugin's loader decides oauth-mode (shaping) at provider init, so a
@@ -2038,17 +2117,42 @@ in
       fi
     '');
 
-  # Darwin flavor of injectTeamclaudeBaseUrl. Port-probe detection; dummy-cred
-  # seed identical to the systemd path; no auto serve-restart (pool) — the dummy
-  # cred's shape-only mode is decided at provider init, so a manual
+  # Darwin flavor of injectTeamclaudeBaseUrl. Same marker predicate and the same
+  # reasoning as the systemd flavor above — read that header, not repeated here.
+  # This one used a loopback port probe (`nc -z 127.0.0.1 3456`), which is the
+  # same bug shape: the probe samples state from before the switch restarts the
+  # launchd agent, so a teamclaude the switch is about to start reads as down.
+  # (The systemd ordering was verified in a built activate script; the darwin
+  # equivalent was not -- no darwin builder here -- so this says "same shape"
+  # rather than naming an exact node order.)
+  #
+  # The marker `~/.config/teamclaude.json` is exactly what the launchd wrapper
+  # itself tests (`[ -e ... ] || exit 0` in home.darwin.nix), so both flavors and
+  # the unit now agree on one predicate. Keep them agreeing.
+  #
+  # Dummy-cred seed identical to the systemd path; no auto serve-restart (pool)
+  # — the dummy cred's shape-only mode is decided at provider init, so a manual
   # `opencode-serve-pool-restart` is required to take effect.
   home.activation.injectTeamclaudeBaseUrlDarwin = lib.mkIf isDarwin
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
       runtime="$HOME/.config/opencode/opencode.json"
 
+      # Decides the config. Order- and race-independent. Same accounts-non-empty
+      # test as the systemd flavor -- see its comment for why mere file existence
+      # is not enough.
+      tc_enabled=0
+      if ${pkgs.jq}/bin/jq -e '(.accounts | if type == "array" then length else 0 end) > 0' \
+           "$HOME/.config/teamclaude.json" >/dev/null 2>&1; then
+        tc_enabled=1
+      fi
+
+      # Reported only, never decisive.
+      tc_live="down"
+      /usr/bin/nc -z -G2 127.0.0.1 3456 2>/dev/null && tc_live="up"
+
       anthropic_url=""
-      if /usr/bin/nc -z -G2 127.0.0.1 3456 2>/dev/null; then
+      if [[ "$tc_enabled" == 1 ]]; then
         anthropic_url="http://127.0.0.1:3456/v1"
       fi
 
@@ -2081,7 +2185,7 @@ in
         fi
       fi
 
-      echo "teamclaude(darwin): anthropic -> ''${anthropic_url:-<direct Anthropic>}" >&2
+      echo "teamclaude(darwin): anthropic -> ''${anthropic_url:-<direct Anthropic>} (marker=$tc_enabled, port=$tc_live)" >&2
       [[ -n "$anthropic_url" ]] && echo "teamclaude(darwin): run 'opencode-serve-pool-restart' to apply to running serves" >&2 || true
     '');
 
