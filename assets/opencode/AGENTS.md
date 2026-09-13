@@ -67,8 +67,85 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 | [using-gcloud-bq-cli](skills/using-gcloud-bq-cli/SKILL.md) | work-only | Gotchas for `gcloud` and `bq`: service-account auth, IAM permission checks, BigQuery access errors. |
 | [using-buildbuddy](skills/using-buildbuddy/SKILL.md) | work-only | Fetch raw, untruncated test logs from a BuildBuddy invocation by URL/ID via the `bb-test-log` helper or the enterprise API directly. |
 | [reading-jenkins-builds](skills/reading-jenkins-builds/SKILL.md) | work-only | Explain a pending/failed/stuck `continuous-integration/jenkins/*` check from the Jenkins side: eight-call recipe (`curl -g`, `wfapi`, node/queue state), failure signatures that separate controller trouble (disk full, `StreamException`, dropped runs) from real PR failures, and the tunnel-refused-means-retry rule. Hostname, job folders, token scope and contacts are in its Confluence-fetched `INTERNAL.md`. |
-| [shepherding-pull-requests](skills/shepherding-pull-requests/SKILL.md) | work-only | The whole arc of a PR you authored: pre-PR checks, title/description, and the monitoring loop until it lands. PR creation is not a terminal state — invoke it the moment `gh pr create` returns, not only once something looks wrong. Replying and resolving every inline thread, and re-requesting a non-approving **human** reviewer, are standing defaults nobody should have to ask for — but never re-request or trigger-comment an automated reviewer, and never `gh pr merge`. Also covers the stalled-but-healthy trap (green, fully answered, nobody pending) and the fact that `lgtm-shepherd` wakes **this session** for `needs_reply`/`ci_red`/`conflicted` rather than only notifying the human. |
+| [shepherding-pull-requests](skills/shepherding-pull-requests/SKILL.md) | cross | The whole arc of a PR you authored: pre-PR checks (including a **default, unasked adversarial review of the diff** with a mechanical skip rule — and a standing ban on narrating that review to the user), title/description, and the monitoring loop until it lands. PR creation is not a terminal state — load this skill *before* `gh pr create` and again the moment it returns, not only once something looks wrong. Replying and resolving every inline thread, and re-requesting a non-approving **human** reviewer, are standing defaults nobody should have to ask for — but never re-request or trigger-comment an automated reviewer, and never `gh pr merge`. Also covers the stalled-but-healthy trap (green, fully answered, nobody pending) and the fact that `lgtm-shepherd` wakes **this session** for `needs_reply`/`ci_red`/`conflicted` rather than only notifying the human. |
 | [cleaning-disk](skills/cleaning-disk/SKILL.md) | work-only | Reclaim disk on devbox/macOS: Nix store/generations, Python caches, app caches, project bloat. |
+
+## Superpowers Overrides
+
+The `superpowers` skills are an upstream clone (`obra/superpowers`), not a fork —
+they cannot be edited in place without taking on a permanent rebase burden.
+Where their guidance and ours differ, ours wins, and the overrides are listed
+here rather than patched into their files:
+
+| Superpowers says | Do this instead |
+|---|---|
+| `finishing-a-development-branch` → run `gh pr create` with its own body template | Load `shepherding-pull-requests` **first** and follow it: its pre-PR checks (rebase, stowaway commits, adversarial review), its title/description format, and its post-PR monitoring loop. There must be exactly one route to opening a PR, and this is it. |
+| `finishing-a-development-branch` Step 5 → `git worktree remove` after Option 2 (push + PR) | **Do not.** An open PR is not finished work — you still owe it the monitoring loop, and fixes have to land from somewhere. Removing the worktree you are sitting in kills this session silently (see `reviving-worktree-orphaned-sessions`) and any shepherd wake arrives in a corpse. Keep the worktree until the PR is merged or closed. Step 5 is correct for Options 1 and 4, which are terminal. |
+| `Task tool (general-purpose)` for implementation or review | The named agents — see the `<subagent-routing>` block, where deployed |
+
+Two routes to `gh pr create` means two sets of pre-PR checks, one of which is
+nobody's. If you find a third, add a row here rather than following it.
+
+## Reporting to Humans
+
+**Report the conclusion and what it obligates the reader to do. The route is
+available on request.**
+
+Your reader was not in the session. They did not hold your earlier draft, your
+discarded approach, or the number you later found was wrong — so the delta
+between those and where you ended up is news only to you. Give them the state
+of the world now, and what it asks of them.
+
+What this rules out, concretely:
+
+- **Superseded states are not news.** Plan v1 was wrong and v2 is right: ship
+  v2. Don't stage the correction as a reveal.
+- **Evidence is a clause, not a section.** `auth.ts:88` inline, `34/34 pass`
+  inline. No appendix narrating how you verified.
+- **Corrections you received are internal.** A subagent pushed back and you
+  updated — that's the pipeline working, not an event.
+
+What this does **not** license, and these override the above:
+
+- **Anything you changed outside the conversation gets reported.** Files,
+  services, remote state, config, anything with a side effect. One line, at the
+  end, plainly. If you are weighing whether a change is worth mentioning, that
+  weighing is the signal that it is. (`attributing-causes` treats this as
+  load-bearing infrastructure, and it still is.)
+- **A route the reader would have vetoed is a conclusion, not a route.** The
+  clean approach failed, you switched to something hackier, and it works — they
+  would have objected to the hack, and reporting only "it works" is how they
+  never get the chance. Being wrong in a way that changes *their* model gets
+  said, once, flatly; being wrong in a way that only changes yours does not.
+  Tiebreaker, because this one asks you to model the reader and you will be
+  tempted to model them as agreeable: **if you find yourself constructing the
+  argument that they wouldn't have minded, they would have.**
+- **Anything asked for and not done — or done narrower — gets reported.** Five
+  things were requested and four are done; a constraint was relaxed; a case was
+  left unhandled. This is not a superseded intermediate state, it is the
+  present state, and the reader is the only one who can decide whether the gap
+  matters.
+- **This shapes the report, not the work.** Skills demanding verification and
+  calibrated confidence (`verification-before-completion`, the reviewer
+  charters) are fully satisfied by a clause. Do the verifying; don't narrate it.
+
+Scope: this binds the message that **ends a turn, addressed to a human**.
+Running commentary mid-turn is progress signal and an interrupt hook — leave it
+alone. It does not bind a subagent reporting to its parent: the parent needs the
+route in order to check the work, and applies this rule itself when it speaks to
+the user.
+
+Where the route goes instead: the bead, the plan file, the commit message. "On
+request" is a promise that it is written down somewhere, not that you can
+reconstruct it.
+
+Named exception — when the route **is** the deliverable: postmortems, a
+debugging trail the reader must be able to reproduce, a decision they may need
+to reverse, and **your own output when you are the reviewer** (where "which
+assumptions I checked, and how confident I am in each" is the product). That
+last one exempts the review you write. It does not exempt *relaying someone
+else's review* to a human — that is route, and it is the specific thing the
+rule was written to stop.
 
 ## Bash Environment
 

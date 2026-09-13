@@ -32,11 +32,12 @@ description: Use when you are about to run `gh pr create`, immediately after it 
 > end the turn.** Ending the turn is correct here; it is not you deciding the PR stopped being your
 > problem, and it is not the end of the PR's supervision either.
 >
-> **Be accurate about what happens next.** If the PR is quiet and merely awaiting a reviewer, the
-> shepherd tells the *human* and nothing wakes you. If a reviewer comes back with threads, or CI
-> goes red, or the branch conflicts, **the shepherd will wake you** — the same session, in the same
-> worktree, with a payload describing what it saw. Say which of those you expect. Do not tell the
-> user a daemon will finish the work; it will either notify them or hand the work back to you.
+> **Be accurate about what happens next.** If the PR is quiet and merely
+> awaiting a reviewer, the shepherd tells the *human* and nothing wakes you. If a reviewer comes
+> back with threads, or CI goes red, or the branch conflicts, **the shepherd will wake you** — the
+> same session, in the same worktree, with a payload describing what it saw. Say which of those you
+> expect. Do not tell the user a daemon will finish the work; it will either notify them or hand the
+> work back to you.
 >
 > Two consequences worth knowing before you hand off:
 >
@@ -81,6 +82,8 @@ digraph pr_lifecycle {
     "Review commits/diff" [shape=box];
     "Looks right?" [shape=diamond];
     "Fix (drop/squash/amend)" [shape=box];
+    "Skip rule says review?" [shape=diamond];
+    "Adversarial review of diff" [shape=box];
     "Create PR" [shape=box];
     "Check lgtm scope" [shape=box];
     "Sleep 60s" [shape=box];
@@ -105,9 +108,12 @@ digraph pr_lifecycle {
     "Rebase failed?" -> "Review commits/diff" [label="no"];
     "Rebase failed?" -> "Abort + warn user" [label="yes"];
     "Review commits/diff" -> "Looks right?";
-    "Looks right?" -> "Create PR" [label="yes"];
+    "Looks right?" -> "Skip rule says review?" [label="yes"];
     "Looks right?" -> "Fix (drop/squash/amend)" [label="no"];
     "Fix (drop/squash/amend)" -> "Review commits/diff";
+    "Skip rule says review?" -> "Adversarial review of diff" [label="yes"];
+    "Skip rule says review?" -> "Create PR" [label="no (doc/lock only,\nor <30 lines)"];
+    "Adversarial review of diff" -> "Create PR";
     "Create PR" -> "Check lgtm scope";
     "Check lgtm scope" -> "Sleep 60s";
     "Sleep 60s" -> "Check CI + fetch reviews + comments";
@@ -186,8 +192,8 @@ If rebase succeeds, force-push the rebased branch. If rebase fails (conflicts ca
 ### 2. Verify commits and diff
 
 ```bash
-git log origin/main..HEAD --oneline
-git diff origin/main...HEAD --stat
+git log origin/<trunk>..HEAD --oneline
+git diff origin/<trunk>...HEAD --stat
 ```
 
 Sanity-check: are these the commits and files you expect? Use best judgement -- if something looks wrong (unrelated commits, unexpected files, merge commits from another branch), fix it (drop, squash, amend). If it looks clean, proceed.
@@ -201,6 +207,38 @@ git rebase --onto origin/<trunk> <local-trunk> <your-branch>
 ```
 
 This replays only your branch-tip commits onto `origin/<trunk>`, dropping everything between `origin/<trunk>` and `<local-trunk>`.
+
+### 3. Adversarial review of the change — by default, unasked
+
+Dispatch `adversarial-reviewer-fable` on the diff before `gh pr create`. This is a standing default like the post-PR ones: the user should never have to ask for it, and "the change looks straightforward to me" is not a reason to skip — that judgement is exactly what the review exists to check.
+
+**When to skip.** Decide mechanically, not by feel:
+
+```bash
+git diff --numstat origin/<trunk>...HEAD
+```
+
+Skip only if every changed path is `*.md`, `*.lock`, `flake.lock`, `package-lock.json`, or a snapshot/fixture file, **or** the diff totals under ~30 changed lines.
+
+**Never skip on those grounds when the diff touches `assets/opencode/**` or any `AGENTS.md`.** Prose that changes how agents behave is a behavior change wearing a `.md` extension; the fact that it cannot break a compiler is exactly why nothing else will catch it.
+
+Anything else gets reviewed. Two non-reasons to skip, both of which look like reasons:
+
+- *"Big diff, but it's all mechanical."* Judgement call, and judgement calls are what get skipped under time pressure.
+- *"It was already reviewed at plan time."* A plan-time review does not cover the implementation — the value of reviewing the diff afterward is precisely the **drift** between the design that was approved and the code that got written. Dispatch anyway, tell it where the plan-time review was, and ask for a drift check. It is cheap: the agent is instructed to answer "nothing load-bearing here" in one paragraph when that is true.
+
+**What to send it.** A diff with no intent is unreviewable at the level this agent works at, so the dispatch must carry:
+
+- the intent — bead ID, ticket, plan file, or the draft PR body
+- the diff range (`origin/<trunk>...HEAD`) and the repo path
+- whether a plan-time adversarial review already happened, and where to find it
+- what is out of scope: style, naming, test structure, spec conformance (other agents own those)
+
+**What to do with the findings.** Act on them like any review — fix, or decide not to and know why. Then:
+
+> **Do not narrate the review to the user.** No summary of what the reviewer said, no list of findings-and-dispositions, no "the adversarial reviewer flagged X and I addressed it in Y." The fixes land in commits, where they belong; the PR description describes the change, not the process that produced it. One exception, and take it from the general rule rather than inventing a narrower one here: a finding you **declined** is reportable exactly when the route you chose instead is one the user would have vetoed — see "Reporting to Humans" in `AGENTS.md`, including its tiebreaker. Not "does it gate the merge"; that test is narrower and lets through precisely the case worth hearing about, where the implementation is hackier than the design you agreed on and works anyway.
+
+The point of the default is that the review happens, not that it is visible.
 
 ## Post-PR Monitoring
 

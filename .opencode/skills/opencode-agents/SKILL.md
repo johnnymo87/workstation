@@ -30,13 +30,13 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 **Key trait:** Cannot modify files. Gives a recommendation with effort estimate (Quick/Short/Medium/Large) and action plan. Pragmatic minimalism — biases toward simplest solution. Its prompt is written as ethos + judgment (terse, actionable) rather than a rigid rule-list.
 
 ### adversarial-reviewer-fable (subagent)
-**Purpose:** Skeptical, adversarial review of a **design / plan / approach before it's built** — hunts flaws, wrong assumptions, missing cases, hazards, and better alternatives.
+**Purpose:** Skeptical, adversarial review of a **design / plan / approach before it's built** — hunts flaws, wrong assumptions, missing cases, hazards, and better alternatives. Also runs in **pre-PR mode** on a finished diff, where it reviews the thinking behind the change (load-bearing assumptions, failure/rollback/migration cases) rather than its line-level correctness; that dispatch is a standing default, see `shepherding-pull-requests` §Pre-PR Checks step 3.
 **Model:** `claude-fable-5-1`, pinned in `assets/opencode/agents/adversarial-reviewer.md`. Single variant; the `-opus` and `-sol` twins were removed 2026-09-01. Same `-fable`-suffix-as-compat-hook rationale as oracle above.
 **Model routing:** host-correct, same as oracle — source pins `anthropic/`, cloudbox gets the Vertex rewrite via `patchAgent`.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
 **When to use:** You have a design or plan and want it pressure-tested *before* writing code; you want the uncomfortable "this is solving the wrong problem" read. No CAUTION any more — reach for it directly.
 **Key trait:** Grounds every claim in the actual code/artifact (`file:line`, never fabricates); distinguishes verified findings from suspicions; reports verdict → confirmed-sound → flaws-by-severity → missing cases → concrete recommendations.
-**Complements:** oracle is the *advisor* ("what should we do?"); the adversarial reviewers are its skeptic ("here's how that goes wrong"). code-reviewer / spec-reviewer check a *finished implementation* against a spec; the adversarial reviewers check the *design itself*, earlier. Their prompt is deliberately ethos-driven (care that the design is correct; judgment over checklist) per the Amanda Askell steer.
+**Complements:** oracle is the *advisor* ("what should we do?"); the adversarial reviewers are its skeptic ("here's how that goes wrong"). code-reviewer / spec-reviewer check a *finished implementation* against a spec; the adversarial reviewers check the *design itself* — earlier at plan time, and again pre-PR against the diff, where the question is whether merging would be a mistake rather than whether the code is clean. Their prompt is deliberately ethos-driven (care that the design is correct; judgment over checklist) per the Amanda Askell steer.
 
 ### vision-qa (subagent — devbox only)
 **Purpose:** Visual QA analyst — analyzes screenshots and UI renders.
