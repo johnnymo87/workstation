@@ -321,8 +321,12 @@ lib.mkIf isDarwin {
           "/bin/sh" "-c"
           ''
             [ -e "$HOME/.codex-lb/enabled" ] || exit 0
-            # --python 3.13 + aiohttp<3.14: see the pin rationale in codex-lb.nix
-            exec ${pkgs.uv}/bin/uvx --python 3.13 --with 'aiohttp<3.14' --from codex-lb==1.20.1 codex-lb --host 127.0.0.1 --port 2455
+            # --python 3.13, and the version pin: see codex-lb.nix, which holds
+            # the rationale for BOTH flavors. KEEP THE VERSION HERE IN SYNC WITH
+            # IT — these are two copies of one decision, and they drifted once
+            # already (this flavor sat on 1.20.1 with the retired aiohttp<3.14
+            # pin after the NixOS side moved to 1.24.0).
+            exec ${pkgs.uv}/bin/uvx --python 3.13 --with 'aiohttp<3.15' --from codex-lb==1.24.0 codex-lb --host 127.0.0.1 --port 2455
           ''
         ];
         EnvironmentVariables = {
@@ -331,6 +335,9 @@ lib.mkIf isDarwin {
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           # uvx-generated wrapper shells out to realpath/dirname
           PATH = lib.concatStringsSep ":" [ "${pkgs.coreutils}/bin" "/usr/bin" "/bin" ];
+          # Upstream defaults telemetry ON; off here for the same reason as the
+          # NixOS flavor (see codex-lb.nix).
+          CODEX_LB_TELEMETRY_ENABLED = "false";
         };
         RunAtLoad = true;
         KeepAlive = { SuccessfulExit = false; };

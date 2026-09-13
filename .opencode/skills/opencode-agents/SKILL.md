@@ -21,8 +21,9 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### oracle-fable (subagent)
 **Purpose:** Read-only strategic technical advisor — architecture, debugging, high-stakes decisions.
-**Model:** `claude-fable-5-1`, pinned in the agent's own source (`assets/opencode/agents/oracle.md`). There is one variant, not three: the `-opus` and `-sol` twins were removed 2026-09-01 along with the `mkAgentVariant` machinery that generated them.
-**Why the handle still says `-fable`:** it is a compat hook. Nothing needs disambiguating today, but keeping the suffix means re-introducing a second model later is purely additive instead of renaming a handle every call site already uses. The *source file* deliberately does not carry the suffix — it is named for the agent, not the model.
+**Model:** `claude-fable-5-1`, pinned in the agent's own source (`assets/opencode/agents/oracle.md`). This is the **default** variant.
+**Second variant — `oracle-astra`:** same prompt body, pinned to `openai/gpt-6-astra`, generated at build time by `mkAstraVariant` from the same source file. It carries an opt-in `CAUTION` in its description, so reach for it **only when explicitly asked**. See "The astra twins" below.
+**Why the handle says `-fable`:** originally a compat hook held open for exactly this — the 2026-09-01 cut to a single variant kept the suffix so that re-introducing a second model would be additive rather than a rename. It was, on 2026-09-13. The *source file* still deliberately does not carry a model suffix — it is named for the agent, because it is now the source of two pins.
 **Model routing:** host-correct — the source pins `anthropic/claude-fable-5-1`, and on cloudbox `patchAgent`'s `afterFable` branch rewrites it to `google-vertex-anthropic/claude-fable-5-1@default`, because cloudbox has no first-party Anthropic auth. That rewrite captures the version rather than matching a literal, so a future 5.2 pin does not silently produce `claude-fable-5@default-1`.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
 **When to use:** Stuck after 2+ attempts, architectural decision, need a second opinion. No CAUTION on the description any more — it is the only variant, so the orchestrator should reach for it directly.
@@ -31,12 +32,33 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### adversarial-reviewer-fable (subagent)
 **Purpose:** Skeptical, adversarial review of a **design / plan / approach before it's built** — hunts flaws, wrong assumptions, missing cases, hazards, and better alternatives. Also runs in **pre-PR mode** on a finished diff, where it reviews the thinking behind the change (load-bearing assumptions, failure/rollback/migration cases) rather than its line-level correctness; that dispatch is a standing default, see `shepherding-pull-requests` §Pre-PR Checks step 3.
-**Model:** `claude-fable-5-1`, pinned in `assets/opencode/agents/adversarial-reviewer.md`. Single variant; the `-opus` and `-sol` twins were removed 2026-09-01. Same `-fable`-suffix-as-compat-hook rationale as oracle above.
+**Model:** `claude-fable-5-1`, pinned in `assets/opencode/agents/adversarial-reviewer.md`. The **default** variant. A second variant `adversarial-reviewer-astra` pins `openai/gpt-6-astra` from the same source, with an opt-in `CAUTION` — see "The astra twins" below. Same `-fable`-suffix rationale as oracle above.
 **Model routing:** host-correct, same as oracle — source pins `anthropic/`, cloudbox gets the Vertex rewrite via `patchAgent`.
+**A note on the pre-PR default:** `shepherding-pull-requests` dispatches `adversarial-reviewer-fable` by default. That default is unchanged — do **not** silently substitute the astra twin into it. A cross-model second opinion on a diff is a thing you can ask for; it is not the standing behaviour.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
 **When to use:** You have a design or plan and want it pressure-tested *before* writing code; you want the uncomfortable "this is solving the wrong problem" read. No CAUTION any more — reach for it directly.
 **Key trait:** Grounds every claim in the actual code/artifact (`file:line`, never fabricates); distinguishes verified findings from suspicions; reports verdict → confirmed-sound → flaws-by-severity → missing cases → concrete recommendations.
 **Complements:** oracle is the *advisor* ("what should we do?"); the adversarial reviewers are its skeptic ("here's how that goes wrong"). code-reviewer / spec-reviewer check a *finished implementation* against a spec; the adversarial reviewers check the *design itself* — earlier at plan time, and again pre-PR against the diff, where the question is whether merging would be a mistake rather than whether the code is clean. Their prompt is deliberately ethos-driven (care that the design is correct; judgment over checklist) per the Amanda Askell steer.
+
+### The astra twins (`oracle-astra`, `adversarial-reviewer-astra`)
+
+**What they are:** byte-identical prompt bodies to their `-fable` counterparts, pinned to `openai/gpt-6-astra` instead. Generated at build time by `mkAgentVariant` / `mkAstraVariant` in `users/dev/opencode-config.nix` from the same source file, so the prompt has one source of truth and the twins cannot drift apart.
+
+**What they are for:** a genuinely different model's read on the same question. Both agents exist to be a second opinion, and a second opinion from the same model family is worth less than one from outside it. Reach for the astra twin when the fable answer feels like it might be a house style rather than a conclusion.
+
+**They are opt-in, deliberately.** The generated `description:` carries a `CAUTION` telling the orchestrator to default to the `-fable` handle. Do not auto-select them.
+
+**Devbox and cloudbox only.** They are gated to the hosts where the codex-lb subscription model catalog is injected into opencode's `openai` provider — which is *not* the same as the hosts that run codex-lb. macOS runs codex-lb (launchd flavor in `home.darwin.nix`) and has its `openai` baseURL redirected to it, but never gets the catalog, so `gpt-6-astra` is not selectable there. Rather than ship a handle that always fails, the twins are simply absent on macOS.
+
+**They can be present but dead.** Even where deployed, `openai/gpt-6-astra` is only reachable while `codex-lb.service` is up *and* codex-lb's upstream model-catalog refresh is healthy. astra has a `minimal_client_version` of 0.153.0 and codex-lb's hardcoded fallback Codex version is 0.144.0, so if codex-lb's GitHub/npm version lookup fails, astra silently disappears from its catalog. A dead astra fails at **request** time, not build time. Check with:
+
+```bash
+curl -s localhost:2455/v1/models | jq -r '.data[].id' | grep astra
+```
+
+**Cost:** the ChatGPT subscription is flat-rate, so an astra call costs nothing on the aigateway ledger — unlike a fable call, which is a real line item. It spends 5h/weekly subscription quota instead, visible on codex-lb's own dashboard at `127.0.0.1:2455`. That makes astra the *cheaper* second opinion in dollar terms; it is not the reason to prefer it, but it is a reason not to avoid it.
+
+**If these twins are ever removed, delete `mkAgentVariant` with them.** The builder was deleted once before (2026-09-01) on the explicit reasoning that an unevaluated nix builder gets no build coverage and rots silently — which is how a literal `claude-fable-5` bug survived in the live rewrite path. That reasoning still holds; the builder is only safe to keep while something evaluates it.
 
 ### vision-qa (subagent — devbox only)
 **Purpose:** Visual QA analyst — analyzes screenshots and UI renders.
@@ -74,6 +96,11 @@ lands on a model it can actually call:
   than matching a literal — a literal `claude-fable-5` match against a
   `claude-fable-5-1` pin yields `claude-fable-5@default-1`, a model that does not
   exist and fails at *request* time, not build time.
+
+No branch matches an `openai/` pin, and that is correct rather than an omission:
+codex-lb serves the same model id on every host it runs on, so the
+`-astra` twins pass through `patchAgent` unmodified. Their build output is
+identical on devbox and cloudbox.
 
 When adding an Anthropic-pinned agent, pin it to `anthropic/claude-<model>` in
 the source file and let `patchAgent` handle cloudbox — do **not** hardcode the

@@ -110,31 +110,101 @@ let
     in
       afterFable;
 
-  # NOTE ON THE REMOVED MODEL-TWIN MACHINERY (mkAgentVariant / mkFableVariant /
-  # mkSolVariant), deleted 2026-09-01. oracle and adversarial-reviewer used to
-  # ship as three model-pinned twins each (-opus / -fable / -sol) generated from
-  # one prompt source, with the non-default two carrying an opt-in CAUTION. Only
-  # -fable is wanted now, so the builders are gone rather than kept unused: an
-  # unevaluated nix builder gets no build coverage and rots silently, which is
-  # exactly how the literal `claude-fable-5` bug survived in the LIVE rewrite
-  # path. `git log -- users/dev/opencode-config.nix` has the full implementation
-  # if a twin is ever wanted again.
+  # mkAgentVariant: build a model-pinned twin of an agent from the SAME source
+  # body at build time, so a shared prompt has one source of truth and no
+  # hand-maintained copy to drift. Used for oracle and adversarial-reviewer,
+  # whose sources pin `anthropic/claude-fable-5-1` and carry a
+  # `(fable-5-1 model)` token in their description. It rewrites only:
+  #   - the model pin (fable-5-1 -> modelPin)
+  #   - the `(fable-5-1 model)` description token -> `(modelTag model)`
+  #   - appends an opt-in CAUTION so the orchestrator does NOT auto-select the
+  #     twin; the `-fable` handle stays the default.
+  # The result is fed through patchAgent for host rewrites. For an `openai/`
+  # pin every patchAgent branch is a no-op, which is correct — codex-lb serves
+  # that pin identically on both hosts.
   #
-  # The deployed handles deliberately keep the `-fable` suffix even though there
-  # is nothing to disambiguate against today. That is the compat hook: re-adding
-  # a second model later is then additive and does not rename or break the
-  # handle everything already calls.
+  # HISTORY, because this was deleted and brought back. An equivalent builder
+  # (with -opus/-fable/-sol twins) existed until 2026-09-01, when #444 cut the
+  # set to fable-only and deleted the machinery rather than leave it unused —
+  # the stated reason being that an unevaluated nix builder gets no build
+  # coverage and rots silently, which is exactly how the literal
+  # `claude-fable-5` bug survived in the LIVE rewrite path until #443. That
+  # reasoning was sound and still is: this builder is only safe to keep because
+  # it is EVALUATED below. If the astra twins are ever removed, delete this
+  # again rather than leaving it dormant.
   #
-  # One hard-won constraint to preserve if that machinery ever comes back: the
-  # generated `description:` must NOT contain a colon-space (": "). opencode
+  # #444 also predicted this moment and paid for it in advance: it kept the
+  # `-fable` suffix on the deployed handles even when nothing needed
+  # disambiguating, precisely so re-introducing a second model would be purely
+  # additive. It is. No handle renames here.
+  #
+  # IMPORTANT: the appended text must NOT contain a colon-space (": "). opencode
   # parses agent frontmatter with gray-matter/js-yaml (packages/opencode/src/
-  # config/markdown.ts), and a ": " inside an unquoted YAML scalar makes the
-  # primary matter() parse THROW, forcing the fragile fallbackSanitization
-  # double-parse path. That path is racy under the concurrent agent-load in
-  # loadAgent(): it nondeterministically fails, and a failed parse SKIPS the
-  # agent (config.ts:198-207), leaving a default stub (mode=all, model=null)
-  # that silently runs the CALLER's model instead of the pinned one. The
-  # em-dash in both descriptions is load-bearing for that reason.
+  # config/markdown.ts), and a ": " inside an unquoted YAML scalar (the
+  # `description:` value) makes the primary matter() parse THROW, forcing the
+  # fragile fallbackSanitization double-parse path. That path is racy under the
+  # concurrent agent-load in loadAgent(): it nondeterministically fails, and a
+  # failed parse SKIPS the agent (config.ts:198-207), leaving a default stub
+  # (mode=all, model=null) that silently runs the CALLER's model instead of the
+  # pinned one — i.e. the failure is a silent wrong-model, not an error. The
+  # em-dashes below are load-bearing for that reason.
+  # EVERY SUBSTITUTION IS VERSION-AGNOSTIC AND DIES IF IT DOES NOT MATCH.
+  # Both properties are load-bearing and were added after review caught the
+  # first draft repeating #443's exact mistake. That draft matched the literal
+  # `claude-fable-5-1`; bump the source to fable-5-2 and all three matches miss,
+  # the build stays GREEN, and the emitted twin is an `-astra` handle still
+  # pinned to fable — which on cloudbox patchAgent then happily rewrites to a
+  # working Vertex model, so `@oracle-astra` runs and answers, on the wrong
+  # model, forever. Silent wrong-model is the worst outcome this file can
+  # produce, and a literal version match is how you get there.
+  #
+  # `or die` under `-p` gives a non-zero exit, which fails the runCommand and
+  # therefore the whole home-manager build. Loud beats silent.
+  #
+  # The description guard also refuses a quoted or folded YAML scalar
+  # (`description: "..."` / `>-`): appending to those produces either broken
+  # YAML or text outside the scalar, and the failure mode of broken agent
+  # frontmatter is the racy skip-to-stub described above.
+  mkAgentVariant = { base, slug, modelPin, modelTag }: src:
+    pkgs.runCommand "${base}-${slug}-src.md" {} ''
+      # Delimiter is `!`, not `|`: the description guard's character class
+      # contains a literal `|` (the YAML block-scalar marker it must reject),
+      # and perl scans for the closing delimiter without regard for brackets,
+      # so `s|...[^"'"'"'>|]...|` terminates early and dies with a syntax error.
+      # Nothing substituted here contains `!`.
+      ${pkgs.perl}/bin/perl -0pe '
+        s!model: anthropic/claude-fable-[0-9]+(?:-[0-9]+)*!model: ${modelPin}!
+          or die "mkAgentVariant: no anthropic/claude-fable-* pin found in ${base} source\n";
+        s!\(fable-[0-9]+(?:-[0-9]+)* model\)!(${modelTag} model)!
+          or die "mkAgentVariant: no (fable-N model) token found in ${base} description\n";
+        s!^(description: [^"'"'"'>|].*)$!$1. CAUTION — use this ${modelTag} variant ONLY when the user explicitly asks for it; otherwise default to ${base}-fable!m
+          or die "mkAgentVariant: ${base} has no plain unquoted description: scalar to append to\n";
+      ' ${src} > $out
+
+      # Enforce the colon-space rule at BUILD time, not by comment. A ": "
+      # anywhere in the description VALUE makes opencode's gray-matter parse
+      # throw and fall into a racy fallback that skips the agent entirely,
+      # leaving a stub that silently runs the caller's model. The key's own
+      # ": " is the one legal occurrence on that line.
+      colons=$(${pkgs.gnugrep}/bin/grep -m1 '^description: ' $out | ${pkgs.gnugrep}/bin/grep -o ': ' | ${pkgs.coreutils}/bin/wc -l)
+      if [ "$colons" != "1" ]; then
+        echo "mkAgentVariant: ${base}-${slug} description contains $colons colon-space sequences, expected exactly 1 (the key)." >&2
+        echo "A ': ' inside the description value breaks opencode frontmatter parsing and silently degrades the agent to the caller's model." >&2
+        exit 1
+      fi
+    '';
+
+  # The one twin model: gpt-6-astra, OpenAI's most capable, reached over the
+  # ChatGPT subscription through codex-lb on 127.0.0.1:2455. Deployed on devbox
+  # and cloudbox (both run codex-lb); patchAgent is a pass-through for the pin.
+  #
+  # Unlike the fable twins this one can be present-but-dead: the agent file is
+  # built unconditionally, while the model behind it exists only while
+  # codex-lb.service is up AND codex-lb's upstream catalog refresh is healthy
+  # (see the codex-lb model-catalog note further down for why astra in
+  # particular can vanish). A call to @oracle-astra with codex-lb down fails at
+  # request time rather than at build time.
+  mkAstraVariant = base: mkAgentVariant { inherit base; slug = "astra"; modelPin = "openai/gpt-6-astra"; modelTag = "gpt-6-astra"; };
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -411,16 +481,39 @@ let
     (p: if opencodePluginPins ? ${p} then "${p}@${opencodePluginPins.${p}}" else p)
     (opencodeBase.plugin or []));
 
-  # codex-lb (devbox only): ChatGPT/Codex-subscription models served by the local
-  # codex-lb rotator (127.0.0.1:2455). These model IDs only exist for a ChatGPT
-  # subscription account routed through codex-lb — NOT the direct OpenAI API — so
-  # they are injected on devbox only, and only take effect while codex-lb.service
-  # is up (see injectCodexLbBaseUrl below, which flips
-  # provider.openai.options.baseURL to codex-lb and clears the openai auth entry).
+  # codex-lb: ChatGPT/Codex-subscription models served by the local codex-lb
+  # rotator (127.0.0.1:2455). These model IDs only exist for a ChatGPT
+  # subscription account routed through codex-lb — NOT the direct OpenAI API —
+  # and only take effect while codex-lb.service is up (see injectCodexLbBaseUrl
+  # below, which flips provider.openai.options.baseURL to codex-lb and clears the
+  # openai auth entry). Injected on devbox AND cloudbox; both run codex-lb.
   # Subscription usage has no per-token billing, so cost is zeroed here (codex-lb's
   # own dashboard tracks real spend). Effort defaults track each tier's role:
-  # Sol = frontier (high), Terra = balanced (medium), Luna = fast (low); override
-  # per call with a variant if needed.
+  # Astra = most capable (high), Sol = frontier workhorse (high), Terra =
+  # balanced (medium), Luna = fast (low).
+  #
+  # THIS CATALOG IS HAND-MAINTAINED AND WILL DRIFT. codex-lb re-fetches the real
+  # catalog from upstream every 300s per account plan; opencode gets no such
+  # feed, so anything not listed here is unselectable even when codex-lb serves
+  # it. Reconcile against the live list rather than guessing:
+  #
+  #   curl -s localhost:2455/v1/models | jq -r '.data[].id'
+  #   curl -s localhost:2455/backend-api/codex/models \
+  #     | jq -r '.models[] | "\(.slug) ctx=\(.context_window) min_client=\(.minimal_client_version)"'
+  #
+  # Deliberately omitted from the live list: `gpt-reserve` (a quota bucket, not a
+  # chat model) and `codex-auto-review` (a Codex-CLI-internal review model).
+  #
+  # A MODEL CAN BE ABSENT UPSTREAM FOR A REASON THAT IS NOT YOUR ACCOUNT.
+  # Upstream gates new slugs on the Codex client version the caller presents.
+  # codex-lb looks the latest release up from GitHub/npm at refresh time and
+  # presents `codex_cli_rs/<version>`; its hardcoded FALLBACK is only 0.144.0
+  # (`model_registry_client_version`), which is below astra's
+  # `minimal_client_version` of 0.153.0. So if that lookup fails — no network at
+  # refresh time, GitHub rate limit — astra silently vanishes from
+  # /v1/models and opencode calls against it start failing. That is a codex-lb
+  # degradation, not a subscription problem. `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION`
+  # can pin it higher if this turns out to be flaky.
   mkCodexLbModel = { name, effort }: {
     inherit name;
     reasoning = true;
@@ -437,6 +530,7 @@ let
     };
   };
   codexLbModels = {
+    "gpt-6-astra" = mkCodexLbModel { name = "GPT-6 Astra"; effort = "high"; };
     "gpt-5.6-sol" = mkCodexLbModel { name = "GPT-5.6 Sol"; effort = "high"; };
     "gpt-5.6-terra" = mkCodexLbModel { name = "GPT-5.6 Terra"; effort = "medium"; };
     "gpt-5.6-luna" = mkCodexLbModel { name = "GPT-5.6 Luna"; effort = "low"; };
@@ -611,19 +705,45 @@ in
    # Custom agents via OpenCode-native markdown format.
    # OpenCode loads agents from ~/.config/opencode/agents/ with tools as a YAML map.
    xdg.configFile."opencode/agents/librarian.md".source = patchAgent "librarian" "${assetsPath}/opencode/agents/librarian.md";
-   # oracle and adversarial-reviewer ship as a single model each, pinned to
-   # claude-fable-5-1 in their own source file. The deployed FILE keeps the
-   # `-fable` suffix while the SOURCE does not: the suffix is a compat hook for
-   # re-introducing a second model later (see the note above), and renaming the
-   # source to match the pin avoids a file called `-opus.md` that pins no opus.
+   # oracle and adversarial-reviewer each ship as TWO model-pinned twins,
+   # generated from one prompt source per agent so the body cannot drift:
    #
-   # patchAgent still matters here: on cloudbox its afterFable branch rewrites
-   # the `anthropic/` pin to `google-vertex-anthropic/claude-fable-5-1@default`,
-   # because cloudbox has no first-party Anthropic auth.
+   #   @<base>-fable  -> claude-fable-5-1, straight from the source file.
+   #                     THE DEFAULT. On cloudbox patchAgent's afterFable branch
+   #                     rewrites the `anthropic/` pin to
+   #                     `google-vertex-anthropic/claude-fable-5-1@default`,
+   #                     because cloudbox has no first-party Anthropic auth.
+   #   @<base>-astra  -> openai/gpt-6-astra via codex-lb (mkAstraVariant).
+   #                     Carries an opt-in CAUTION in its description so the
+   #                     orchestrator does not reach for it on its own.
+   #                     patchAgent is a no-op for an `openai/` pin.
+   #
+   # THE ASTRA TWINS ARE GATED TO devbox + cloudbox, matching the hosts where
+   # `codexLbModels` is injected into the openai provider — NOT the hosts that
+   # run codex-lb. macOS runs codex-lb too (home.darwin.nix, launchd flavor) and
+   # has its baseURL redirected by injectCodexLbBaseUrlDarwin, but it never gets
+   # the subscription model catalog, so `openai/gpt-6-astra` is not a selectable
+   # model there and an astra agent would be a handle that always fails at
+   # request time. Shipping a dead handle is worse than shipping none: the
+   # orchestrator can still be asked for it by name. Closing that gap means
+   # injecting codexLbModels on darwin as well — deliberately not done here
+   # because it also adds sol/terra/luna to the macOS picker and nothing on this
+   # box can test it.
+   #
+   # The deployed FILE keeps the `-fable` suffix while the SOURCE does not. That
+   # asymmetry is deliberate and predates the astra twin: the suffix was held as
+   # a compat hook precisely so a second model could be added without renaming a
+   # handle that call sites and skill docs already reference.
    xdg.configFile."opencode/agents/adversarial-reviewer-fable.md".source =
      patchAgent "adversarial-reviewer-fable" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
+   xdg.configFile."opencode/agents/adversarial-reviewer-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
+     source = patchAgent "adversarial-reviewer-astra" (mkAstraVariant "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer.md");
+   };
    xdg.configFile."opencode/agents/oracle-fable.md".source =
      patchAgent "oracle-fable" "${assetsPath}/opencode/agents/oracle.md";
+   xdg.configFile."opencode/agents/oracle-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
+     source = patchAgent "oracle-astra" (mkAstraVariant "oracle" "${assetsPath}/opencode/agents/oracle.md");
+   };
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
    xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
