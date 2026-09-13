@@ -838,6 +838,52 @@ in
     extra-trusted-public-keys = [
       "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw="
     ];
+
+    # Reactive GC floor, added 2026-09-13 after the root filesystem filled on
+    # 2026-09-11/12 (see nix.gc below and users/dev/disk-cleanup.nix).
+    #
+    # WHAT THESE DO: during a build, whenever free space on the store's
+    # filesystem drops below min-free, the daemon garbage-collects until it is
+    # above max-free. It is the only nix mechanism that reacts to the disk
+    # rather than to the calendar.
+    #
+    # WHAT THEY DO NOT DO, stated plainly so nobody mistakes this for the fix:
+    # this only ever runs INSIDE a nix build. The 2026-09-11/12 fill was not
+    # caused by nix -- measured afterwards, the store was 44G of a 119G-used
+    # 149G root, while ~/.local/share held 25G, ~/projects 23G and
+    # ~/.npm/_cacache 12G. min-free would not have prevented that incident. It
+    # is here because a `nixos-rebuild` on an already-tight disk is a plausible
+    # way to take the last few gigabytes, and this makes that specific path
+    # self-limiting. The thing that would actually have helped is the alarm
+    # (disk-watch, now enabled for devbox).
+    #
+    # HOW MUCH IT ACTUALLY YIELDS, measured rather than assumed: not much, and
+    # the comment should not imply otherwise. Because the store is already
+    # collected nightly (nix.gc weekly + home-manager autoExpire daily), the
+    # dead set mid-day is small -- `nix-store --gc --print-dead` was 2862 paths
+    # / 2.3G at 12:40 on 2026-09-13. max-free is a target the daemon works
+    # toward, not a promise; nix also stops early once a collection stops making
+    # progress. So this buys roughly a couple of gigabytes at the moment a build
+    # would otherwise have taken the last of the disk. That is worth having as a
+    # backstop and is not worth describing as a solution.
+    #
+    # TENSION WITH THE disk-watch COMMENT, acknowledged rather than ignored:
+    # users/dev/disk-cleanup.nix argues that auto-running a GC above ~90% full
+    # is hazardous, because the cleaning-disk skill records a GC generating
+    # enough I/O that socket-activated sshd stopped answering. min-free fires at
+    # 10G free on a 149G root, which is ~93% -- deeper into that zone. Two
+    # things make it a different operation, and if either turns out to be wrong
+    # this setting should go rather than the alarm:
+    #   - The incident behind that warning was a foreground, normal-priority
+    #     `nix-collect-garbage`. This runs in nix-daemon, which this host puts
+    #     at daemonCPUSchedPolicy=batch / daemonIOSchedClass=idle (below), so it
+    #     yields to sshd rather than competing with it.
+    #   - It collects ~2G, not the 80-90G a full nightly reclaim moves. The
+    #     hazard scales with the I/O, and this is two orders of magnitude less.
+    # The disk-watch alarm remains warn-only for exactly the reason above; that
+    # position is unchanged.
+    min-free = 10 * 1024 * 1024 * 1024;   # 10 GiB
+    max-free = 25 * 1024 * 1024 * 1024;   # 25 GiB
   };
 
   # Nix daemon scheduling — treat builds as batch work so interactive
@@ -845,7 +891,22 @@ in
   nix.daemonCPUSchedPolicy = "batch";
   nix.daemonIOSchedClass = "idle";
 
-  # Garbage collection
+  # Garbage collection.
+  #
+  # LEFT UNCHANGED ON PURPOSE, 2026-09-13. The 2026-09-11/12 disk-full incident
+  # prompted a review of whether devbox needed an automatic GC policy. It
+  # already had one, identical to cloudbox's, and it was working: nix-gc.service
+  # ran 2026-09-07 00:00 and freed 5698 MiB, and the daily home-manager
+  # generation expiry (users/dev/home.devbox.nix, autoExpire with
+  # store.cleanup) freed a further 5912 MiB on 2026-09-13 00:01. Between them
+  # the store is collected daily, so raising the cadence here would add churn
+  # without adding reclamation.
+  #
+  # The gap this incident exposed was not cadence, it was that a calendar
+  # schedule has no floor and nothing was watching between runs -- the disk
+  # filled on the 11th/12th, mid-window, with the next weekly run due on the
+  # 14th. That is addressed by min-free/max-free above (reactive, but only
+  # during builds) and by disk-watch (the alarm, users/dev/disk-cleanup.nix).
   nix.gc = {
     automatic = true;
     dates = "weekly";

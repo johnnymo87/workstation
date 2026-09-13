@@ -1,7 +1,19 @@
-# Nightly disk cleanup for cloudbox
-# Auto-discovers repos with worktrees, cleans orphan Bazel output bases,
-# prunes stale caches, and runs nix garbage collection.
-{ config, pkgs, lib, isCloudbox, ... }:
+# Disk hygiene for the NixOS hosts.
+#
+# TWO SEPARATE THINGS LIVE HERE, with different host scopes:
+#
+#   disk-cleanup  CLOUDBOX ONLY. Auto-discovers repos with worktrees, cleans
+#                 orphan Bazel output bases, prunes stale caches, runs nix GC.
+#                 Devbox has no bazel and no mono, and the guards below are
+#                 tuned to cloudbox's worktree population; porting it is a
+#                 separate decision, not a side effect of wanting an alarm.
+#
+#   disk-watch    BOTH NixOS HOSTS. The between-cleanups threshold alarm. One
+#                 implementation, instantiated per host with its own thresholds
+#                 and remedy text -- see mkDiskWatch below. Devbox got this on
+#                 2026-09-13 after its root filesystem filled on 2026-09-11/12
+#                 and killed a dev Postgres with no warning of any kind.
+{ config, pkgs, lib, isCloudbox, isDevbox, ... }:
 
 let
   # Same shared alert helper the opencode canaries use, so disk pressure reaches
@@ -47,8 +59,145 @@ let
                         inuse.add(p)
         return inuse
   '';
+
+  # --------------------------------------------------------------------------
+  # disk-watch, the alarm BETWEEN cleanups -- ONE implementation, instantiated
+  # per host.
+  #
+  # WHY A FUNCTION AND NOT A COPY. Devbox needed this alarm after 2026-09-11/12
+  # (below), and the two hosts cannot share thresholds: cloudbox's 85% warn line
+  # sits above its worst quiet-day peak, while devbox's ORDINARY baseline is 84%
+  # on a 149G root. Shipping cloudbox's constants to devbox would page every
+  # single day, which is the daily-wallpaper failure that makes an alarm worth
+  # less than no alarm at all. Copying the script to retune two numbers would
+  # fork ~60 lines of carefully-reviewed hysteresis and fail-safe logic into two
+  # files that drift. So the LOGIC is shared and only the constants and the
+  # remedy sentence vary.
+  #
+  # Cloudbox's instantiation below reproduces its previous thresholds and its
+  # alert text byte-for-byte, deliberately: checks.disk-watch-tests pins that
+  # script's behaviour at 18/0 and must not move as a side effect of adding a
+  # host. (Only the in-script COMMENTS differ, since two hosts now share them.)
+  mkDiskWatch = { warnPct, clearPct, remedy }: {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      # NOTE: `set -e` is deliberately absent. This script's whole job is to
+      # report a problem, and a nonzero exit would put disk-watch.service into
+      # `failed` -- a state nobody reads -- precisely when the disk is in
+      # trouble. Every step below either succeeds or degrades to a log line.
+      set -uo pipefail
+
+      TARGET="''${DISK_WATCH_TARGET:-/}"
+      STATE="''${DISK_WATCH_STATE:-''${XDG_STATE_HOME:-$HOME/.local/state}/disk-watch/alert}"
+      # Same override seam as the opencode plugin canary: the tests point this at
+      # a stub, the unit gets the real store path.
+      ALERT="''${DISK_WATCH_ALERT:-${driftAlert}}"
+
+      WARN_PCT=${toString warnPct}
+      # Recovery floor. NOT the same as WARN_PCT: clearing the episode the moment
+      # we drop below the warn line means a sawtooth across the boundary starts a
+      # brand-new episode on every crossing, and the helper dedupes per episode --
+      # so it would alert on each one, resetting the backoff counter every time.
+      # That is the alert storm the helper exists to prevent. The gap between
+      # CLEAR_PCT and WARN_PCT is the dead band.
+      CLEAR_PCT=${toString clearPct}
+
+      log() { printf '[disk-watch] %s\n' "$*" >&2; }
+
+      # `df -P` guarantees the one-line-per-filesystem POSIX format, so the data
+      # is on the LAST line; the first is the header, and parsing that yields the
+      # literal string "Capacity" where a number belongs.
+      LINE="$(df -P "$TARGET" 2>/dev/null | tail -1)"
+      # Fields: filesystem blocks used available capacity mountpoint.
+      PCT=""; AVAIL=""
+      read -r _ _ _ AVAIL PCT _ <<< "$LINE"
+      PCT="''${PCT%\%}"
+
+      case "$PCT" in
+        ""|*[!0-9]*)
+          log "could not read a usage percentage for $TARGET from: $LINE"
+          exit 0
+          ;;
+      esac
+
+      if [ "$PCT" -ge "$WARN_PCT" ]; then
+        case "$AVAIL" in ""|*[!0-9]*) AVAIL=0 ;; esac
+        AVAIL_G=$(( AVAIL / 1048576 ))
+        # NO $USER HERE. The unit sets only HOME and PATH, so $USER is unbound
+        # under `set -u` and the script would abort BEFORE alerting -- putting
+        # disk-watch.service into `failed` at exactly the moment the disk is
+        # full, which is the one thing this script must never do. Caught by
+        # running the suite under the unit's actual environment rather than an
+        # interactive shell's; a glob needs no variable anyway.
+        # No separator is inserted between the reading and the remedy: each
+        # host's `remedy` supplies its own leading punctuation. That keeps
+        # cloudbox's alert text identical to the pre-refactor byte sequence,
+        # which checks.disk-watch-tests asserts on.
+        TEXT="Disk $TARGET is $PCT% full (''${AVAIL_G}G free)${remedy}"
+        mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
+        # 900s base, doubling, capped at 4h -- the house convention shared with
+        # the auth-drift and plugin canaries.
+        "$ALERT" "$STATE" "disk-warn" "$TEXT" 900 14400 \
+          || log "alert helper failed (rc=$?); disk is at $PCT%"
+      elif [ "$PCT" -lt "$CLEAR_PCT" ]; then
+        # Episode over. Drop the helper's state so the next one starts at alert
+        # #1 rather than inheriting a stale count and announcing itself as
+        # "STILL UNRESOLVED: alert #7, first reported 400h ago".
+        rm -f "$STATE" 2>/dev/null || true
+      fi
+
+      exit 0
+    '';
+  };
+
+  # The units are identical on both hosts; only the script text differs.
+  diskWatchFor = args: {
+    home.file.".local/bin/disk-watch" = mkDiskWatch args;
+
+    systemd.user.services.disk-watch = {
+      Unit = {
+        Description = "Disk usage threshold watch (warn only)";
+      };
+      Service = {
+        Type = "oneshot";
+        ExecStart = "%h/.local/bin/disk-watch";
+        StandardOutput = "journal";
+        StandardError = "journal";
+        Nice = 19;
+        IOSchedulingClass = "idle";
+        Environment = [
+          "HOME=%h"
+          "PATH=/run/wrappers/bin:/run/current-system/sw/bin"
+        ];
+      };
+    };
+
+    systemd.user.timers.disk-watch = {
+      Unit = {
+        Description = "Disk usage threshold watch timer";
+      };
+      Timer = {
+        # OnUnitActiveSec alone would never fire: it is measured from the last
+        # activation, and a unit that has never run has none. OnStartupSec gives
+        # it the first one. Persistent= is omitted deliberately -- it only applies
+        # to OnCalendar timers, and replaying a missed disk poll is meaningless
+        # anyway since the reading is only ever about right now.
+        OnStartupSec = "5min";
+        OnUnitActiveSec = "15min";
+      };
+      Install = {
+        WantedBy = [ "timers.target" ];
+      };
+    };
+  };
 in
-lib.mkIf isCloudbox {
+lib.mkMerge [
+
+  # ==========================================================================
+  # CLOUDBOX: the nightly reclaimer, plus its alarm.
+  # ==========================================================================
+  (lib.mkIf isCloudbox {
   home.file.".local/bin/disk-cleanup" = {
     executable = true;
     text = ''
@@ -788,8 +937,10 @@ lib.mkIf isCloudbox {
     };
   };
 
-  # --------------------------------------------------------------------------
-  # disk-watch: the alarm BETWEEN nightly cleanups.
+  })
+
+  # ==========================================================================
+  # CLOUDBOX disk-watch: the alarm BETWEEN nightly cleanups.
   #
   # The cleanup above is not the problem -- when it runs it reclaims 80-90G in
   # about fifteen minutes. The problem is that it runs once a day and nothing
@@ -823,107 +974,107 @@ lib.mkIf isCloudbox {
   #      almost everything worth reclaiming is exactly what gets skipped.
   # Constant hazard, near-zero benefit. A human (or an agent reading the alert)
   # can run the cleanup deliberately, which is what happened both times already.
-  home.file.".local/bin/disk-watch" = {
-    executable = true;
-    text = ''
-      #!${pkgs.bash}/bin/bash
-      # NOTE: `set -e` is deliberately absent. This script's whole job is to
-      # report a problem, and a nonzero exit would put disk-watch.service into
-      # `failed` -- a state nobody reads -- precisely when the disk is in
-      # trouble. Every step below either succeeds or degrades to a log line.
-      set -uo pipefail
+  # ==========================================================================
+  (lib.mkIf isCloudbox (diskWatchFor {
+    warnPct = 85;
+    clearPct = 80;
+    remedy = " and the next scheduled cleanup is 03:00. Twice recently this went to 100% within hours and killed a running job. To reclaim now: systemctl --user start disk-cleanup.service (frees 80-90G, takes ~15min). If it reclaims little, the space is held by LIVE bazel servers, which the cleanup skips on purpose -- find them with: ls -d ~/.cache/bazel/_bazel_*/*/server";
+  }))
 
-      TARGET="''${DISK_WATCH_TARGET:-/}"
-      STATE="''${DISK_WATCH_STATE:-''${XDG_STATE_HOME:-$HOME/.local/state}/disk-watch/alert}"
-      # Same override seam as the opencode plugin canary: the tests point this at
-      # a stub, the unit gets the real store path.
-      ALERT="''${DISK_WATCH_ALERT:-${driftAlert}}"
+  # ==========================================================================
+  # DEVBOX disk-watch. Alarm only -- devbox has no nightly reclaimer.
+  #
+  # WHY IT EXISTS. On 2026-09-11/12 the devbox root filesystem (/dev/sdb2,
+  # 149G) filled and silently killed a dev Postgres and its process manager in
+  # ~/projects/eternal-machinery. Nothing warned anybody, because devbox had no
+  # disk monitoring of any kind -- this entire module was `mkIf isCloudbox`.
+  # That is the gap being closed here, and it is the one that would actually
+  # have changed the outcome.
+  #
+  # WHY 90/84 AND NOT CLOUDBOX'S 85/80, measured on devbox 2026-09-13 rather
+  # than inherited. Devbox sat at 119G used / 23G free / 84% AFTER a manual
+  # `nix-collect-garbage --delete-older-than 14d` reclaimed 9.3G. 84% is not a
+  # peak on this host, it is the floor. Cloudbox's 85% line would therefore be
+  # tripped essentially always, and an alarm that is always on is one that gets
+  # muted -- strictly worse than none, because it also consumes the Telegram
+  # channel the other canaries share.
+  #
+  # Read as absolute free space, which is what actually kills a database:
+  #   90% of 149G  ->  fires below ~15G free
+  #   84% of 149G  ->  clears above ~24G free
+  #
+  # THIS WILL FIRE SOON, AND THAT IS THE CORRECT BEHAVIOUR. Say it plainly,
+  # because the first draft of this comment claimed the line was "quiet on a
+  # normal day" and that was falsified the same day it was written: running
+  # `nix flake check` for this very change moved the root filesystem from 84%
+  # to 88% (17.0G free) within a few hours. The line is about 1.5G of growth
+  # away. Anyone reading this should expect a page within days of the switch.
+  #
+  # That is not a mis-set threshold, it is the threshold reporting a true fact:
+  # devbox has no headroom. A single flake check costs ~4 points here. Setting
+  # the line above the baseline instead -- 95%, say -- would buy silence at the
+  # cost of warning only once 7G remain, which is not enough runway to react,
+  # and is precisely how the 2026-09-11/12 incident killed a database with no
+  # warning. Between "an alarm that tells the truth loudly" and "an alarm that
+  # is quiet because it is set past the point of usefulness", this picks the
+  # former deliberately, as a forcing function for the reclaim tracked in bd
+  # workstation-gbr5. When the baseline comes down, revisit the line.
+  #
+  # WHY THE CLEAR LINE IS 84 AND NOT 86. The dead band has to be wider than the
+  # routine daily swing, or every day starts a fresh episode at alert #1 and the
+  # helper's escalation to severity=error (which happens on the 3rd alert) never
+  # arrives -- the exact alert-storm failure the hysteresis exists to prevent.
+  # Measured swing, from home-manager-auto-expire on six ordinary days
+  # (2026-09-08..12): 386, 369, 380, 395, 378 MiB, i.e. about 0.25 points. The
+  # 5912 MiB it freed on 09-13 was post-incident churn, not a daily figure. So
+  # a 6-point band (84..89, ~9G) clears the routine swing by more than an order
+  # of magnitude, and matches cloudbox's 5-point band in spirit: an episode ends
+  # only when the box is genuinely back to the state a full GC leaves it in, not
+  # when it jitters one point.
+  #
+  # THE UNCOMFORTABLE PART, which the threshold encodes rather than fixes: a
+  # 15G trigger margin is thin, and it is thin because devbox has no headroom
+  # to spend. A lower line cannot be set until the baseline comes down. The
+  # measured holders are ~/.local/share (25G: devenv 11G, tts_joinery 5.2G,
+  # tec-codex 4.6G, opencode 3.4G), ~/projects (23G), ~/.npm/_cacache (12G),
+  # and /nix/store (44G). Reclaiming those is a human decision about what is
+  # still wanted, not something an unattended sweeper should take -- so this
+  # ships as an alarm and the reclaim is tracked separately (bd workstation-gbr5).
+  #
+  # WARN-ONLY MEANS NOBODY IS COMING. If the alert fires and no human reclaims,
+  # the disk still reaches 100% and still kills whatever is running. That is
+  # accepted, not overlooked: the alternative is an unattended sweeper deciding
+  # which of ~/projects and ~/.local/share is expendable, which is not a call
+  # this module is competent to make.
+  #
+  # WARN-ONLY for the same reason as cloudbox, plus a devbox-specific one: the
+  # only automatic reclaimer available here is a nix GC, and the cleaning-disk
+  # skill documents that a GC above ~90% can generate enough I/O to stop
+  # socket-activated sshd answering. Auto-running it at 90% would fire the
+  # box-wedging operation exactly and only inside the danger zone.
+  #
+  # THE REMEDY TEXT LEADS WITH ~/.npm/_cacache, NOT WITH A NIX GC, and the
+  # ordering is measured rather than conventional. A GC is the safer-feeling
+  # first move, but the store is already collected daily (system nix-gc weekly
+  # plus home-manager autoExpire nightly), so by the time this alert fires
+  # mid-day the dead set is only what has accumulated since 00:01 --
+  # `nix-store --gc --print-dead` measured 2862 paths / 2.3G at 12:40 on
+  # 2026-09-13, against an alert that fires with 15G free and a 9G dead band to
+  # climb back through. A reader who runs the GC first gets ~2G, is still above
+  # the warn line, and now distrusts the alert. So the text states that yield
+  # honestly and puts the one reliable double-digit reclaim first.
+  #
+  # THE _cacache/_npx DISTINCTION IS LOAD-BEARING, not pedantry. ~/.npm/_npx
+  # holds UNPACKED packages that long-running `npm exec` processes execute out
+  # of -- deleting it kills MCP servers mid-session. ~/.npm/_cacache is only the
+  # download cache. cleanup_caches above carries the same warning for the same
+  # reason; an alert that said "clear ~/.npm" would be handing the reader a
+  # session-killer at the worst possible moment.
+  # ==========================================================================
+  (lib.mkIf isDevbox (diskWatchFor {
+    warnPct = 90;
+    clearPct = 84;
+    remedy = ". Devbox has NO nightly reclaimer, so nothing will fix this on its own. On 2026-09-11/12 this filesystem hit 100% and killed the eternal-machinery dev Postgres with no warning. Biggest reliable reclaim, ~12G, safe (it only re-downloads): rm -rf ~/.npm/_cacache -- that path ONLY, never ~/.npm or ~/.npm/_npx, which long-running MCP servers execute out of. A nix GC is safer but yields much less than you would expect, because the store is already collected nightly: sudo nix-collect-garbage --delete-older-than 7d typically frees only what accumulated since 00:01 (measured 2.3G mid-day). After those, the measured holders are ~/.local/share/devenv (11G), ~/.local/share/tts_joinery (5.2G), ~/.local/share/tec-codex (4.6G) and ~/projects (23G). Check current shape with: du -sh /nix /home/dev/.local/share/* /home/dev/projects /tmp";
+  }))
 
-      WARN_PCT=85
-      # Recovery floor. NOT 85: clearing the episode the moment we drop below the
-      # warn line means an 84<->86 sawtooth starts a brand-new episode on every
-      # crossing, and the helper dedupes per episode -- so it would alert on each
-      # one, resetting the backoff counter every time. That is the alert storm
-      # the helper exists to prevent. The gap between 80 and 85 is the dead band.
-      CLEAR_PCT=80
-
-      log() { printf '[disk-watch] %s\n' "$*" >&2; }
-
-      # `df -P` guarantees the one-line-per-filesystem POSIX format, so the data
-      # is on the LAST line; the first is the header, and parsing that yields the
-      # literal string "Capacity" where a number belongs.
-      LINE="$(df -P "$TARGET" 2>/dev/null | tail -1)"
-      # Fields: filesystem blocks used available capacity mountpoint.
-      PCT=""; AVAIL=""
-      read -r _ _ _ AVAIL PCT _ <<< "$LINE"
-      PCT="''${PCT%\%}"
-
-      case "$PCT" in
-        ""|*[!0-9]*)
-          log "could not read a usage percentage for $TARGET from: $LINE"
-          exit 0
-          ;;
-      esac
-
-      if [ "$PCT" -ge "$WARN_PCT" ]; then
-        case "$AVAIL" in ""|*[!0-9]*) AVAIL=0 ;; esac
-        AVAIL_G=$(( AVAIL / 1048576 ))
-        # NO $USER HERE. The unit sets only HOME and PATH, so $USER is unbound
-        # under `set -u` and the script would abort BEFORE alerting -- putting
-        # disk-watch.service into `failed` at exactly the moment the disk is
-        # full, which is the one thing this script must never do. Caught by
-        # running the suite under the unit's actual environment rather than an
-        # interactive shell's; a glob needs no variable anyway.
-        TEXT="Disk $TARGET is $PCT% full (''${AVAIL_G}G free) and the next scheduled cleanup is 03:00. Twice recently this went to 100% within hours and killed a running job. To reclaim now: systemctl --user start disk-cleanup.service (frees 80-90G, takes ~15min). If it reclaims little, the space is held by LIVE bazel servers, which the cleanup skips on purpose -- find them with: ls -d ~/.cache/bazel/_bazel_*/*/server"
-        mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
-        # 900s base, doubling, capped at 4h -- the house convention shared with
-        # the auth-drift and plugin canaries.
-        "$ALERT" "$STATE" "disk-warn" "$TEXT" 900 14400 \
-          || log "alert helper failed (rc=$?); disk is at $PCT%"
-      elif [ "$PCT" -lt "$CLEAR_PCT" ]; then
-        # Episode over. Drop the helper's state so the next one starts at alert
-        # #1 rather than inheriting a stale count and announcing itself as
-        # "STILL UNRESOLVED: alert #7, first reported 400h ago".
-        rm -f "$STATE" 2>/dev/null || true
-      fi
-
-      exit 0
-    '';
-  };
-
-  systemd.user.services.disk-watch = {
-    Unit = {
-      Description = "Disk usage threshold watch (warn only)";
-    };
-    Service = {
-      Type = "oneshot";
-      ExecStart = "%h/.local/bin/disk-watch";
-      StandardOutput = "journal";
-      StandardError = "journal";
-      Nice = 19;
-      IOSchedulingClass = "idle";
-      Environment = [
-        "HOME=%h"
-        "PATH=/run/wrappers/bin:/run/current-system/sw/bin"
-      ];
-    };
-  };
-
-  systemd.user.timers.disk-watch = {
-    Unit = {
-      Description = "Disk usage threshold watch timer";
-    };
-    Timer = {
-      # OnUnitActiveSec alone would never fire: it is measured from the last
-      # activation, and a unit that has never run has none. OnStartupSec gives
-      # it the first one. Persistent= is omitted deliberately -- it only applies
-      # to OnCalendar timers, and replaying a missed disk poll is meaningless
-      # anyway since the reading is only ever about right now.
-      OnStartupSec = "5min";
-      OnUnitActiveSec = "15min";
-    };
-    Install = {
-      WantedBy = [ "timers.target" ];
-    };
-  };
-}
+]
