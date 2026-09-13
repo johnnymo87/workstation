@@ -1742,6 +1742,86 @@ down and its silence means nothing. This host has no second leg.
     };
   };
 
+  # BoldCo: the ORIGIN behind the cloudflared tunnel for boldco.mohrbacher.dev.
+  # cloudflared's ingress is `boldco.mohrbacher.dev -> http://localhost:3000`, so
+  # without this unit the public hostname 502s. Gated behind Cloudflare Access
+  # (email one-time-PIN, single allowlisted address) — it is a dev-keyed pre-prod
+  # demo and must not be exposed unauthenticated.
+  #
+  # THE CHECKOUT IS RUNTIME STATE (NOT nix-managed): ~/srv/boldco is a detached
+  # git worktree of johnnymo87/boldco at origin/main, holding a built .next and a
+  # 0600 .env.local full of credentials. Nix runs it; nix does not create it.
+  # Deliberately NOT ~/projects/boldco (a shared checkout carrying other sessions'
+  # uncommitted work) and NOT an agent's throwaway worktree (those get pruned out
+  # from under the unit). To deploy a new commit:
+  #   systemctl --user stop boldco   # `npm ci` deletes node_modules and `next
+  #                                  # build` rewrites .next UNDER the running
+  #                                  # server, which lazy-loads from both -> 500s
+  #   cd ~/srv/boldco && git fetch origin && git checkout --detach origin/main \
+  #     && npm ci && npm run build && systemctl --user start boldco
+  # The build is NOT optional: NEXT_PUBLIC_* values are baked in at build time.
+  # Use the same node this unit runs (`${pkgs.nodejs}/bin/node` is on PATH via
+  # nix-profile today, same major) so node_modules isn't installed under one node
+  # and executed under another.
+  #
+  # BUILD-FIRST: with no build output, `next start` exits immediately and
+  # Restart=always would crash-loop. ConditionPathExists gates the unit so a
+  # machine without the checkout stays inactive (not failed) — same seed-first
+  # shape as teamclaude above. The sentinel is .next/BUILD_ID, not .next: a
+  # FAILED build leaves .next behind, and BUILD_ID is written last.
+  #
+  # `-H localhost`, NOT `-H 127.0.0.1` / `-H ::1`: with Next 16.2.10 plus a
+  # middleware/proxy file, a LITERAL-IP -H makes the proxy layer hang ~30s and
+  # 500 on every request ("Failed to proxy ... socket hang up") while the port
+  # still listens and the log cheerfully says Ready. Verified all four ways on
+  # :3100. `-H localhost` binds loopback only ([::1] here), which is what we
+  # want; dropping -H entirely also works but binds 0.0.0.0 (the box's public IP)
+  # and leans entirely on the firewall. Consequence for debugging: reach it as
+  # http://localhost:3000, NOT 127.0.0.1. cloudflared's `http://localhost:3000`
+  # dials both families, so the tunnel is unaffected either way.
+  #
+  # PORT 3000 IS LOAD-BEARING. hosts/devbox/configuration.nix default-denies
+  # loopback egress for uid `cloudflared` and allowlists exactly tcp/3000 (both
+  # address families) — see the extraCommands block there, and #502 for why.
+  # Moving this port without moving that allowlist presents as a TUNNEL fault
+  # (502 at the edge), not a firewall one, which is a long way to debug.
+  systemd.user.services.boldco = {
+    Unit = {
+      Description = "BoldCo Next.js app (origin for boldco.mohrbacher.dev)";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+      ConditionPathExists = "%h/srv/boldco/.next/BUILD_ID";
+      # No start-limit: hitting one latches the unit `failed`, and Restart=always
+      # does NOT recover from that — the public hostname would 502 until a human
+      # ran `reset-failed`. The realistic trigger is mundane: something else
+      # grabs :3000 for a few minutes (an agent running a demo `next start`).
+      # Retrying forever at RestartSec=5 is cheap and self-heals. Same choice as
+      # opencode-serve@ above.
+      StartLimitIntervalSec = 0;
+    };
+    Service = {
+      Type = "simple";
+      WorkingDirectory = "${config.home.homeDirectory}/srv/boldco";
+      Environment = [
+        "NODE_ENV=production"
+        "HOME=${config.home.homeDirectory}"
+        "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
+      ];
+      ExecStart =
+        "${pkgs.nodejs}/bin/node "
+        + "${config.home.homeDirectory}/srv/boldco/node_modules/next/dist/bin/next "
+        + "start -H localhost -p 3000";
+      Restart = "always";
+      RestartSec = 5;
+      # `next start` exits 143 on SIGTERM rather than handling it; without this
+      # every ordinary stop/restart marks the unit failed.
+      SuccessExitStatus = 143;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
   # Sibling slices under user@1000.service for explicit placement of
   # agent workloads and devenv stacks. Processes do NOT land here
   # automatically — they're reached via systemd-run --user --scope
