@@ -209,6 +209,94 @@ assert_log 'keep .*inuse .*live process'     "the in-use keep says why"
 assert_log 'keep .*repo-dirty .*dirty'       "the dirty keep says why"
 assert_log 'keep .*repo-unpushed .*unpushed' "the unpushed keep says why"
 
+# An opencode session's working directory is a ROW, not a process handle: the
+# serve holds nothing inside the tree, so /proc cannot see it and the sweeper
+# has to ask opencode.db. Two trees, identical to every other guard -- old,
+# big, clean, unheld -- separated only by what the database says.
+session_db="$tmpdir/opencode.db"
+big "$root/session-live"
+big "$root/session-live-sub/clone"
+big "$root/session-stale"
+age "$root/session-live" ; age "$root/session-live-sub" ; age "$root/session-stale"
+python3 - "$session_db" "$root" <<'PYEOF'
+import sqlite3, sys, time
+db, root = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db)
+con.execute("create table session (id text, directory text, time_updated integer)")
+now = int(time.time() * 1000)
+con.executemany("insert into session values (?, ?, ?)", [
+    ("live", root + "/session-live", now),
+    # A session sitting in a SUBDIRECTORY of the candidate. An exact-match
+    # query misses this one and deletes the parent out from under it.
+    ("live-sub", root + "/session-live-sub/clone", now),
+    ("stale", root + "/session-stale", now - 30 * 86400 * 1000),
+])
+con.commit()
+PYEOF
+
+session_log="$tmpdir/session.log"
+TMP_SCRATCH_ROOTS="$root" \
+TMP_SCRATCH_AGE_DAYS=7 \
+TMP_SCRATCH_MIN_MB=1 \
+TMP_SCRATCH_SESSION_DB="$session_db" \
+  "$script_src" > "$session_log" 2>&1 || fail "session-aware sweep exited non-zero"
+assert_kept "$root/session-live"     "tree named by a RECENT opencode session is kept"
+assert_kept "$root/session-live-sub" "tree CONTAINING a recent session's directory is kept"
+assert_gone "$root/session-stale"    "tree named only by a long-idle session is removed"
+
+# An unreadable database is not the same as "no sessions". Fail safe.
+corrupt_db="$tmpdir/corrupt.db"
+echo 'this is not a database' > "$corrupt_db"
+big "$root/db-unreadable"; age "$root/db-unreadable"
+corrupt_log="$tmpdir/corrupt.log"
+TMP_SCRATCH_ROOTS="$root" \
+TMP_SCRATCH_AGE_DAYS=7 \
+TMP_SCRATCH_MIN_MB=1 \
+TMP_SCRATCH_SESSION_DB="$corrupt_db" \
+  "$script_src" > "$corrupt_log" 2>&1 || fail "corrupt-db sweep exited non-zero"
+assert_kept "$root/db-unreadable" "an unreadable session database keeps everything"
+assert_log 'session probe failed' "the failed session probe says so" "$corrupt_log"
+
+# Commits on a DETACHED HEAD are on no branch, so `git log --branches` cannot
+# see them -- and AGENTS.md's own throwaway-worktree recipe is
+# `git worktree add --detach "$(mktemp -d)"`, i.e. detached, in /tmp. Removing
+# such a tree takes its reflog with it, so the commits are not merely orphaned,
+# they are unreachable.
+big "$root/repo-detached"
+git_init "$root/repo-detached"
+git init --quiet --bare "$tmpdir/detached-origin.git"
+git -C "$root/repo-detached" remote add origin "$tmpdir/detached-origin.git"
+git -C "$root/repo-detached" push --quiet origin main
+git -C "$root/repo-detached" checkout --quiet --detach HEAD
+echo work > "$root/repo-detached/only-on-detached-head"
+git -C "$root/repo-detached" -c user.email=t@t -c user.name=t add -A
+git -C "$root/repo-detached" -c user.email=t@t -c user.name=t commit --quiet -m detached
+age "$root/repo-detached"
+
+detached_log="$tmpdir/detached.log"
+TMP_SCRATCH_ROOTS="$root" TMP_SCRATCH_AGE_DAYS=7 TMP_SCRATCH_MIN_MB=1 \
+  "$script_src" > "$detached_log" 2>&1 || fail "detached-head sweep exited non-zero"
+assert_kept "$root/repo-detached" "repo whose only unpushed commit is on a detached HEAD is kept"
+
+# The /proc probe must prove it can READ, not merely that the directory lists.
+# hidepid=2, ProtectProc= and container namespaces all leave the listing intact
+# while every readlink fails EACCES -- and the per-link error handler swallows
+# those one at a time, yielding an empty "nothing is in use" from a probe that
+# saw nothing at all. A fake /proc that lists a pid but has no readable self is
+# that situation without needing privileges to create it.
+mkdir -p "$tmpdir/blind-proc/123"
+big "$root/blind"; age "$root/blind"
+blind_log="$tmpdir/blind.log"
+TMP_SCRATCH_ROOTS="$root" TMP_SCRATCH_AGE_DAYS=7 TMP_SCRATCH_MIN_MB=1 \
+TMP_SCRATCH_PROC="$tmpdir/blind-proc" \
+  "$script_src" > "$blind_log" 2>&1 || true
+assert_kept "$root/blind" "a /proc that lists but cannot be read keeps everything"
+
+# NOT COVERED, deliberately: os.path.ismount(). Creating a mount point needs
+# privileges the build sandbox does not have, so the one-line guard against
+# rmtree walking into a bind or FUSE mount under /tmp is reasoned, not tested.
+# Said out loud rather than left as an apparent oversight.
+
 # Rehearsal mode decides the same way and deletes nothing. Asserted on a tree
 # the real sweep ALREADY proved it removes, so a dry run that silently stopped
 # selecting anything cannot pass this.

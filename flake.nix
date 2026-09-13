@@ -593,8 +593,8 @@
           echo "GATE FAILURE: tmp-scratch-sweep suite did not reach its final banner." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/tss.txt")" = 20 ] || {
-          echo "GATE FAILURE: expected 20 'PASS' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/tss.txt")" = 27 ] || {
+          echo "GATE FAILURE: expected 27 'PASS' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/tss.txt")." >&2
           exit 1
         }

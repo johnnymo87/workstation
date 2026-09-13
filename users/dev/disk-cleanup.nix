@@ -52,6 +52,15 @@ let
         proc = proc or "/proc"
         paths = [p.rstrip("/") or "/" for p in paths]
         inuse = set()
+        # Listing /proc is necessary but not sufficient: hidepid=2,
+        # ProtectProc=, or a container namespace leaves the listing intact
+        # while every readlink fails with EACCES, and the per-link handler
+        # below swallows those individually. The result is an EMPTY answer from
+        # a probe that saw nothing -- indistinguishable from "nothing is using
+        # these", which is the exact confusion the docstring says is
+        # unrecoverable. So prove the probe can read at least OUR OWN cwd,
+        # which is the one link we are always entitled to.
+        os.readlink(os.path.join(proc, "self", "cwd"))
         for pid in os.listdir(proc):
             if not pid.isdigit():
                 continue
@@ -80,7 +89,7 @@ let
   #
   # Reads argv: <age_days> <min_mb> [root ...].
   tmpScratchSweepPy = ''
-    import os, shutil, subprocess, sys, time
+    import os, shutil, sqlite3, subprocess, sys, time
 
     ${pathsInUsePy}
 
@@ -97,6 +106,69 @@ let
     # so the rehearsal exercises all of them and only skips the irreversible
     # step.
     dry_run = bool(os.environ.get("TMP_SCRATCH_DRY_RUN"))
+
+    # GUARD 4: the opencode session table.
+    #
+    # paths_in_use() is documented as sufficient because "an agent sitting in a
+    # worktree always has it as cwd even when idle". That is true of a shell or
+    # an nvim and FALSE of an opencode session, whose working directory is a
+    # ROW IN opencode.db and not any process's cwd -- the serve that owns the
+    # session runs from its own directory and holds no handle inside the tree.
+    # Measured on cloudbox 2026-09-01, when the sibling worktree sweeper
+    # deleted a live session's directory with /proc showing nothing there.
+    #
+    # This is not a theoretical overlap with /tmp. Sessions live in these very
+    # roots: cloudbox's opencode.db has 130 sessions whose directory is under
+    # /tmp, mostly /tmp/opencode/<name>, two of them touched within the window
+    # this sweeper calls stale. A clean throwaway clone that a week-long review
+    # session reads from but never writes to is exactly the shape that clears
+    # every other guard here.
+    #
+    # The worktree sweeper already carries this check; it was never applied to
+    # the /tmp sweep. Same query, same read-only connection, same tri-state.
+    # MISSING db is not an error -- no opencode, no sessions -- so this stays
+    # inert on a host that never runs it. Unreadable or locked IS an error and
+    # keeps the tree.
+    SESSION_DB = os.environ.get("TMP_SCRATCH_SESSION_DB") or os.path.expanduser(
+        "~/.local/share/opencode/opencode.db")
+    SESSION_ACTIVE_DAYS = 7
+
+    def session_owns(p):
+        """'session' | 'free' | 'unknown'. Only 'free' permits removal."""
+        if not os.path.isfile(SESSION_DB):
+            return "free"
+        candidates = {p.rstrip("/") or "/"}
+        try:
+            candidates.add(os.path.realpath(p))
+        except OSError:
+            pass
+        cutoff_ms = int((time.time() - SESSION_ACTIVE_DAYS * 86400) * 1000)
+        try:
+            # Read-only URI: a concurrent serve is writing this database and
+            # must never be disturbed by a cleanup probe.
+            con = sqlite3.connect("file:%s?mode=ro" % SESSION_DB, uri=True, timeout=10)
+            # Filter in SQL by TIME only, then match paths in python. The
+            # worktree sweeper compares directory with `in (...)`, which is an
+            # exact match -- fine there, because it is handed the worktree path
+            # itself. Here the candidate is a /tmp scratch DIRECTORY and the
+            # session may be sitting in a subdirectory of it (a clone inside the
+            # scratch dir), which an exact match misses while deleting the
+            # parent out from under it. Recent sessions are few; the stale rows
+            # that make this table large are excluded by the time predicate.
+            rows = con.execute(
+                "select id, directory from session where time_updated >= ?",
+                (cutoff_ms,),
+            ).fetchall()
+        except Exception:
+            return "unknown"
+        for _id, directory in rows:
+            if not directory:
+                continue
+            directory = directory.rstrip("/") or "/"
+            for c in candidates:
+                if directory == c or directory.startswith(c + "/"):
+                    return "session"
+        return "free"
 
     def measure(p):
         """(megabytes, newest mtime anywhere in the tree).
@@ -140,7 +212,13 @@ let
                              "--untracked-files=all"], capture_output=True, text=True)
         if st.returncode != 0 or st.stdout.strip():
             return "dirty"            # cannot tell counts as dirty
-        up = subprocess.run(["git", "-C", p, "log", "--branches", "--not",
+        # HEAD is listed explicitly: `--branches` does NOT include a detached
+        # HEAD, and AGENTS.md's own throwaway-worktree recipe is
+        # `git worktree add --detach "$(mktemp -d)"` -- i.e. detached, in /tmp,
+        # which is exactly this sweeper's territory. Commits made there are on
+        # no branch, so without HEAD they read as "clean" and the removal below
+        # takes the reflog with it.
+        up = subprocess.run(["git", "-C", p, "log", "HEAD", "--branches", "--not",
                              "--remotes", "--oneline"], capture_output=True, text=True)
         return "unpushed" if (up.returncode == 0 and up.stdout.strip()) else "clean"
 
@@ -153,6 +231,10 @@ let
             # object: /tmp/opencode is a container of scratch, not scratch.
             if p in roots: continue
             if not os.path.isdir(p) or os.path.islink(p): continue
+            # A mount point under a root (a bind mount, a FUSE tree) is another
+            # filesystem wearing a scratch directory's name. os.walk and rmtree
+            # both cross it happily.
+            if os.path.ismount(p): continue
             try: st = os.lstat(p)
             except OSError: continue
             if st.st_uid != os.getuid(): continue
@@ -169,6 +251,11 @@ let
     for mb, p in sorted(cands, reverse=True):
         if p in inuse:
             print(f"  keep {mb}M {p} (open by a live process)"); continue
+        owner = session_owns(p)
+        if owner != "free":
+            print(f"  keep {mb}M {p} (recent opencode session)" if owner == "session"
+                  else f"  keep {mb}M {p} (session probe failed)")
+            continue
         state = classify(p)
         if state in ("dirty", "unpushed"):
             print(f"  keep {mb}M {p} ({state})"); continue
@@ -1053,6 +1140,15 @@ lib.mkMerge [
   # a directory-tree mtime WALK is not a nicer way to do the same thing; it is
   # the only thing that works here.
   #
+  # HOW MUCH THIS ACTUALLY RECLAIMS IS NOT KNOWN, and the hardlink farm that
+  # motivates the sweep is also what makes the figure unknowable in advance.
+  # `du` charges a shared inode to whichever tree it counts first and reports 2.5G
+  # for /tmp/spec-review-fresh, but bun's store holds a second link to most of
+  # those inodes (Links:3 on the sampled file), so deleting the /tmp copy frees
+  # only the links nothing else holds. Anyone who wants the real number should
+  # run the rehearsal (TMP_SCRATCH_DRY_RUN=1) and measure with df across the
+  # first real sweep, rather than quoting du.
+  #
   # MEASURED TARGETS, devbox 2026-09-13 (/tmp totalled 4.0G):
   #   2.5G /tmp/spec-review-fresh      (node_modules, dir mtime 2026-05-06)
   #   543M /tmp/opencode/advrev
@@ -1136,11 +1232,22 @@ lib.mkMerge [
         Description = "Stale /tmp scratch sweep timer";
       };
       Timer = {
-        # 03:00 matches cloudbox's nightly cleanup rather than picking a new
-        # hour, so "the reclaimer runs at 3" stays true on both hosts.
-        # Persistent so a box that was off at 03:00 still sweeps; the jitter
-        # keeps it off the same second as home-manager-auto-expire.
-        OnCalendar = "*-*-* 03:00:00";
+        # 02:00, NOT cloudbox's 03:00, and the difference is load-bearing.
+        # hosts/devbox/configuration.nix runs nightly-restart-background at
+        # 03:00, which SIGKILLs every nvim and reaps every opencode TUI hosted
+        # under one. The /proc liveness guard below is the thing standing
+        # between this sweeper and a directory somebody is working in -- and it
+        # can only see processes that are ALIVE when it runs. Sweeping at 03:00
+        # (+ up to 30min jitter) would run it immediately AFTER the reset has
+        # killed the very handles it looks for, so the guard would be present,
+        # correct, and blind. 02:00 + <=30min jitter finishes before the reset.
+        #
+        # Cloudbox has the same 03:00 overlap and this does not fix it; copying
+        # the hour for parity would have propagated an unexamined collision
+        # rather than inherited a decision. Cloudbox tracked separately.
+        #
+        # Persistent so a box that was off at 02:00 still sweeps.
+        OnCalendar = "*-*-* 02:00:00";
         Persistent = true;
         RandomizedDelaySec = "30min";
       };
@@ -1154,8 +1261,10 @@ lib.mkMerge [
   # DEVBOX disk-watch. Alarm only.
   #
   # DEVBOX NOW HAS A NIGHTLY SWEEP (tmp-scratch-sweep, above) AND THIS IS STILL
-  # WARN-ONLY, because that sweep reclaims /tmp and nothing else -- about 3G,
-  # once, against a 149G root whose measured holders are ~/.local/share (25G),
+  # WARN-ONLY, because that sweep reclaims /tmp and nothing else -- at most the
+  # 4.0G /tmp held on 2026-09-13, once, and probably less, since much of that
+  # is hardlinked into bun's store. Against a 149G root whose measured holders
+  # are ~/.local/share (25G),
   # ~/projects (23G), ~/.npm/_cacache (12G) and /nix/store (44G). It moves the
   # baseline down a little; it cannot answer an alert.
   #
@@ -1249,7 +1358,7 @@ lib.mkMerge [
   (lib.mkIf isDevbox (diskWatchFor {
     warnPct = 90;
     clearPct = 84;
-    remedy = ". The nightly tmp-scratch-sweep only reclaims /tmp (~3G, once); nothing else on devbox will fix this on its own. On 2026-09-11/12 this filesystem hit 100% and killed the eternal-machinery dev Postgres with no warning. Biggest reliable reclaim, ~12G, safe (it only re-downloads): rm -rf ~/.npm/_cacache -- that path ONLY, never ~/.npm or ~/.npm/_npx, which long-running MCP servers execute out of. A nix GC is safer but yields much less than you would expect, because the store is already collected nightly: sudo nix-collect-garbage --delete-older-than 7d typically frees only what accumulated since 00:01 (measured 2.3G mid-day). After those, the measured holders are ~/.local/share/devenv (11G), ~/.local/share/tts_joinery (5.2G), ~/.local/share/tec-codex (4.6G) and ~/projects (23G). Check current shape with: du -sh /nix /home/dev/.local/share/* /home/dev/projects /tmp";
+    remedy = ". The nightly tmp-scratch-sweep only reclaims stale /tmp scratch, once, and less than du suggests because much of it is hardlinked into bun's store; nothing else on devbox will fix this on its own. On 2026-09-11/12 this filesystem hit 100% and killed the eternal-machinery dev Postgres with no warning. Biggest reliable reclaim, ~12G, safe (it only re-downloads): rm -rf ~/.npm/_cacache -- that path ONLY, never ~/.npm or ~/.npm/_npx, which long-running MCP servers execute out of. A nix GC is safer but yields much less than you would expect, because the store is already collected nightly: sudo nix-collect-garbage --delete-older-than 7d typically frees only what accumulated since 00:01 (measured 2.3G mid-day). After those, the measured holders are ~/.local/share/devenv (11G), ~/.local/share/tts_joinery (5.2G), ~/.local/share/tec-codex (4.6G) and ~/projects (23G). Check current shape with: du -sh /nix /home/dev/.local/share/* /home/dev/projects /tmp";
   }))
 
 ]
