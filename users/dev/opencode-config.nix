@@ -484,9 +484,13 @@ let
   # codex-lb: ChatGPT/Codex-subscription models served by the local codex-lb
   # rotator (127.0.0.1:2455). These model IDs only exist for a ChatGPT
   # subscription account routed through codex-lb — NOT the direct OpenAI API —
-  # and only take effect while codex-lb.service is up (see injectCodexLbBaseUrl
-  # below, which flips provider.openai.options.baseURL to codex-lb and clears the
-  # openai auth entry). Injected on devbox AND cloudbox; both run codex-lb.
+  # and are only reachable while codex-lb is actually serving (see
+  # injectCodexLbBaseUrl below, which points provider.openai.options.baseURL at
+  # codex-lb and clears the openai auth entry). Note that the baseURL is written
+  # whenever the host OPTS IN via the ~/.codex-lb/enabled marker, not whenever
+  # the service happens to be up — so a stopped codex-lb makes these models fail
+  # at request time rather than silently rerouting them. Injected on devbox AND
+  # cloudbox; both run codex-lb.
   # Subscription usage has no per-token billing, so cost is zeroed here (codex-lb's
   # own dashboard tracks real spend). Effort defaults track each tier's role:
   # Astra = most capable (high), Sol = frontier workhorse (high), Terra =
@@ -610,7 +614,7 @@ let
         # provider (which carries options.chunkTimeout + gpt-5.5) by the outer
         # recursiveUpdate, so gpt-5.5 and the sol/terra/luna tiers coexist. The
         # baseURL/apiKey that route these through codex-lb are set dynamically by
-        # injectCodexLbBaseUrl (gated on codex-lb.service being active).
+        # injectCodexLbBaseUrl (gated on the ~/.codex-lb/enabled opt-in marker).
         openai = { models = codexLbModels; };
       };
     })
@@ -2082,9 +2086,12 @@ in
     '');
 
   # Point opencode's first-party `openai` provider at the local codex-lb rotator
-  # (devbox) when its user service is active; otherwise strip the override so the
-  # provider falls back to its default (direct OpenAI). This is the OpenAI/Codex
-  # analog of injectTeamclaudeBaseUrl above, but SIMPLER by design:
+  # when this host has OPTED IN to codex-lb (the ~/.codex-lb/enabled marker);
+  # otherwise strip the override so the provider falls back to its default
+  # (direct OpenAI). Note "opted in", not "currently running" — see the
+  # PREDICATE section below, which is the whole design of this block. This is
+  # the OpenAI/Codex analog of injectTeamclaudeBaseUrl above, but SIMPLER by
+  # design:
   #
   # codex-lb pools ChatGPT/Codex *subscription* OAuth accounts and injects the
   # active account's token + chatgpt-account-id SERVER-SIDE, exposing an
@@ -2101,8 +2108,16 @@ in
   # user's OWN ChatGPT token + account id — which fights codex-lb's server-side
   # injection. So when routing through codex-lb we DELETE .openai from auth.json,
   # forcing apiKey mode (the throwaway local bearer). codex-lb owns the real
-  # tokens. When codex-lb is stopped we DON'T touch the auth store, so going
-  # direct just needs a real `opencode auth login`.
+  # tokens.
+  #
+  # THAT DELETE NOW FOLLOWS THE MARKER, NOT LIVENESS, and it is destructive, so
+  # be precise about it: while the marker exists, every switch clears `.openai`
+  # — INCLUDING when codex-lb is stopped or broken. Under the old liveness gate
+  # a stopped codex-lb left the auth store alone. So if you `opencode auth login
+  # openai` as a workaround while codex-lb is down, the next switch will wipe
+  # that credential. Recoverable by logging in again (codex-lb's own tokens live
+  # in its store.db and are never touched), but it will surprise you once.
+  # Remove the marker if you actually want to go direct.
   #
   # NO AUTO SERVE-RESTART. Both NixOS hosts run a serve POOL
   # (opencode-serve@<port>, X-SwitchMethod=keep-old) under
@@ -2115,23 +2130,78 @@ in
   # injectTeamclaudeBaseUrl". It is not, any more: every activation site that
   # named opencode-serve.service has now dropped its restart, so this is the
   # house policy rather than an exception to it.
+  # THE PREDICATE IS "IS CODEX-LB CONFIGURED TO RUN HERE", NOT "IS IT UP RIGHT
+  # NOW". That distinction is the whole point of this block, and getting it
+  # wrong cost a live outage on 2026-09-13 (bead workstation-k03x).
+  #
+  # What went wrong: this used to gate on `systemctl --user is-active
+  # codex-lb.service`. home-manager runs file activation BEFORE sd-switch starts
+  # changed units, so on any switch where codex-lb happened to be down
+  # beforehand — a reboot, a crash, a failed unit, or a version bump that left
+  # it stopped — the probe saw `failed`, deleted the baseURL, and systemd then
+  # started codex-lb successfully seconds later. Result: a healthy codex-lb that
+  # opencode was not pointed at, with `openai/*` silently going direct to
+  # api.openai.com (on cloudbox, with no key at all). It stayed that way until
+  # somebody ran a second switch, because nothing re-evaluates this until then.
+  #
+  # Moving the DAG node after `reloadSystemd` would fix that particular
+  # ordering, but it would still be the wrong instrument: we are writing a
+  # DURABLE config file that serves read on their next restart, potentially
+  # hours later, so a point-in-time liveness sample is not what should decide
+  # its contents. A transient codex-lb outage must not rewrite config.
+  #
+  # So the predicate is the same one the UNIT itself uses: the opt-in marker
+  # `~/.codex-lb/enabled` (`ConditionPathExists` on the unit). Marker present =>
+  # this host intends to route OpenAI through codex-lb => write the baseURL,
+  # regardless of whether the process happens to be running this second. Marker
+  # absent => genuinely opted out => strip. This is order-independent, so it
+  # cannot race sd-switch no matter where the node lands in the DAG.
+  #
+  # Consequence worth stating plainly: if codex-lb is enabled but broken, we now
+  # point opencode at a dead port instead of falling back to direct OpenAI. That
+  # is deliberate, and it costs less than it sounds like — the fallback was
+  # already not real on either host. cloudbox has no OPENAI_API_KEY at all. On
+  # devbox the key is exported only by the interactive bashrc, NOT by the
+  # opencode-serve pool units, and sessions live in that pool — so a pool
+  # session going "direct" had no credential either. (Unverified: whether
+  # opencode serve can source the key from somewhere else entirely.) Either way
+  # astra/sol/terra/luna exist only on codex-lb and were dead regardless.
+  #
+  # A broken codex-lb is a thing to fix, not a thing to silently reroute around,
+  # and it now self-heals the moment the service comes back rather than needing
+  # a switch.
+  #
+  # Liveness is still PROBED, but only to report it. See the log line below.
+  # The `codexLbEnableMarker` edge is load-bearing on devbox, where that node
+  # CREATES the marker declaratively. Without it the two nodes are unordered and
+  # today's correct sequence is a toposort accident of alphabetical attribute
+  # order -- rename either one and a fresh devbox strips on its first switch.
+  # Naming a node that does not exist on a host is harmless (home-manager's DAG
+  # resolves `after` by name match, so a dangling name simply never matches), so
+  # this is safe on cloudbox where the marker is hand-made.
   home.activation.injectCodexLbBaseUrl = lib.mkIf (isDevbox || isCloudbox)
-    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+    (lib.hm.dag.entryAfter [ "mergeOpencode" "codexLbEnableMarker" ] ''
       set -euo pipefail
 
       runtime="$HOME/.config/opencode/opencode.json"
 
       export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$UID}"
       sc=/run/current-system/sw/bin/systemctl
+
+      # Decides the config. Order-independent.
+      clb_enabled=0
+      [[ -e "$HOME/.codex-lb/enabled" ]] && clb_enabled=1
+
+      # Reported only, never decisive — see the header. May legitimately read
+      # `failed`/`inactive` here on a switch that is about to start the unit.
       clb_state="$($sc --user is-active codex-lb.service 2>/dev/null || true)"
 
       openai_url=""
       openai_key=""
-      case "$clb_state" in
-        active|activating)
-          openai_url="http://127.0.0.1:2455/v1"
-          openai_key="sk-codex-lb-local" ;;
-      esac
+      if [[ "$clb_enabled" == 1 ]]; then
+        openai_url="http://127.0.0.1:2455/v1"
+        openai_key="sk-codex-lb-local"
+      fi
 
       if [[ -f "$runtime" ]]; then
         tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
@@ -2152,8 +2222,9 @@ in
       # Force apiKey mode: drop any .openai entry from the auth store so the
       # provider uses the throwaway local bearer instead of the user's own ChatGPT
       # token (which would fight codex-lb's server-side injection). Enforced on
-      # every switch while codex-lb is active, so a stray `opencode auth login`
-      # can't reintroduce oauth mode.
+      # every switch while the codex-lb MARKER exists (not merely while the
+      # service is up), so a stray `opencode auth login` can't reintroduce oauth
+      # mode. See the destructive-side-effect note in the header.
       if [[ -n "$openai_url" ]]; then
         auth="$HOME/.local/share/opencode/auth.json"
         if [[ -f "$auth" ]] && ${pkgs.jq}/bin/jq -e '.openai' "$auth" >/dev/null 2>&1; then
@@ -2165,24 +2236,58 @@ in
         fi
       fi
 
-      echo "codex-lb: openai -> ''${openai_url:-<direct OpenAI>} (codex-lb=$clb_state)" >&2
+      echo "codex-lb: openai -> ''${openai_url:-<direct OpenAI>} (marker=$clb_enabled, unit=''${clb_state:-unknown})" >&2
       if [[ -n "$openai_url" ]]; then
         echo "codex-lb: config written — restart your opencode serve(s) to apply (devbox: systemctl --user restart 'opencode-serve@*.service')" >&2
+        # Not an error: activation runs before sd-switch starts units, so a
+        # not-yet-active reading here is the NORMAL case on a switch that is
+        # about to start codex-lb. Say so, so nobody reads it as the old bug.
+        case "$clb_state" in
+          active|activating) ;;
+          # sd-switch will NOT start a unit that is already `failed` when its
+          # unit file has not changed (e.g. the start-limit burst was hit), so
+          # unlike `inactive` this one does not resolve itself.
+          failed) echo "codex-lb: unit is FAILED and this switch will not start it — run: systemctl --user reset-failed codex-lb.service && systemctl --user start codex-lb.service" >&2 ;;
+          *) echo "codex-lb: unit reads ''${clb_state:-unknown} right now — expected if this switch is about to start it; if openai/* still fails afterwards, check: systemctl --user status codex-lb" >&2 ;;
+        esac
       fi
     '');
 
-  # Darwin flavor of injectCodexLbBaseUrl. No systemctl on macOS, so detect
-  # "codex-lb is up" with a loopback port probe. No auto serve-restart: the Mac
-  # runs an opencode-serve POOL, so we write config + clear the auth entry and
-  # print the apply command; run `opencode-serve-pool-restart` to pick it up.
+  # Darwin flavor of injectCodexLbBaseUrl. Same predicate and the same reasoning
+  # as the NixOS flavor above — read that header, it is not repeated here.
+  #
+  # This one gated on a loopback port probe (`nc -z 127.0.0.1 2455`) — liveness
+  # at its most literal — and has the SAME shape of bug, not a worse one: this
+  # activation node runs before `setupLaunchAgents`, which is what boots the
+  # agent out and back in, so the probe samples PRE-switch state and a codex-lb
+  # that the switch is about to start reads as down. (An earlier draft of this
+  # comment claimed `RunAtLoad` additionally made the plist start concurrently
+  # with this script; review found that wrong — the load happens strictly after
+  # this node. The fix is unaffected, but the reasoning was.)
+  #
+  # The marker file is the same opt-in the launchd wrapper itself tests
+  # (`[ -e "$HOME/.codex-lb/enabled" ] || exit 0` in home.darwin.nix), so both
+  # flavors now agree on one predicate. Keep them agreeing.
+  #
+  # No auto serve-restart: the Mac runs an opencode-serve POOL, so we write
+  # config + clear the auth entry and print the apply command; run
+  # `opencode-serve-pool-restart` to pick it up.
   home.activation.injectCodexLbBaseUrlDarwin = lib.mkIf isDarwin
     (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
       set -euo pipefail
       runtime="$HOME/.config/opencode/opencode.json"
 
+      # Decides the config. Order- and race-independent.
+      clb_enabled=0
+      [[ -e "$HOME/.codex-lb/enabled" ]] && clb_enabled=1
+
+      # Reported only, never decisive.
+      clb_live="down"
+      /usr/bin/nc -z -G2 127.0.0.1 2455 2>/dev/null && clb_live="up"
+
       openai_url=""
       openai_key=""
-      if /usr/bin/nc -z -G2 127.0.0.1 2455 2>/dev/null; then
+      if [[ "$clb_enabled" == 1 ]]; then
         openai_url="http://127.0.0.1:2455/v1"
         openai_key="sk-codex-lb-local"
       fi
@@ -2213,7 +2318,7 @@ in
         fi
       fi
 
-      echo "codex-lb(darwin): openai -> ''${openai_url:-<direct OpenAI>}" >&2
+      echo "codex-lb(darwin): openai -> ''${openai_url:-<direct OpenAI>} (marker=$clb_enabled, port=$clb_live)" >&2
       [[ -n "$openai_url" ]] && echo "codex-lb(darwin): run 'opencode-serve-pool-restart' to apply to running serves" >&2 || true
     '');
 

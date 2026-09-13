@@ -3,9 +3,10 @@
 # personal ChatGPT *subscription* OAuth accounts, injects the active account's
 # token + chatgpt-account-id server-side, tracks per-account 5h/weekly quota, and
 # fails over between accounts. opencode's first-party `openai` provider is pointed
-# at it by `injectCodexLbBaseUrl` in opencode-config.nix (gated on this unit being
-# active), and the astra/sol/terra/luna subscription model catalog is injected
-# there.
+# at it by `injectCodexLbBaseUrl` in opencode-config.nix (gated on the
+# ~/.codex-lb/enabled opt-in marker below -- NOT on this unit being active, which
+# raced sd-switch and stripped the baseURL; bead workstation-k03x), and the
+# astra/sol/terra/luna subscription model catalog is injected there.
 #
 # HOSTS: devbox + cloudbox here (both NixOS/systemd). macOS runs codex-lb too,
 # but through a SEPARATE launchd flavor in users/dev/home.darwin.nix — this file
