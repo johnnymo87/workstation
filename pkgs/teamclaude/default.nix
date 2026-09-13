@@ -54,8 +54,26 @@
 # `switchThreshold` (and the per-bucket `switchThresholds` from #233) only feed
 # proactive utilization-based selection and have no effect on 429 handling.
 #
+# DOES UPSTREAM SUBSUME `balanced` YET? Checked at v1.1.20, answer is no. The
+# obvious candidate is #290 ("adaptive distribution using plan tier and live
+# congestion", v1.1.18), but its adaptive mode is consulted at exactly one call
+# site -- `_pickLeastLoaded` -- reachable only from `_selectForSession`, which
+# is gated on `distributeSessions`. WE RUN `distributeSessions: false`, so
+# upstream's adaptive is inert in our configuration. Upstream still has no
+# weekly-balance, margin, or `routingStrategy` logic anywhere on the
+# rotation-cursor path; the only mention is a comment noting that #176 proposes
+# a `routingStrategy` enum -- i.e. upstream treats our feature as an open
+# proposal. Re-run this check on every bump; the day it flips, retire the fork.
+#
+# One composition is accepted by config validation and NOT covered by tests:
+# `distributeSessions: "adaptive"` together with `routingStrategy: "balanced"`.
+# Coherent in principle (balanced's band floor bounds the set, adaptive scores
+# within it) but unheld by anything. Irrelevant while distributeSessions is
+# false; matters the day anyone turns adaptive on. Bead
+# claude-failover-proxy-ldc.
+#
 # To bump: pick a newer tag from https://github.com/KarpelesLab/teamclaude/tags,
-# rebase branch local/v1116-patches (or its successor) on it in the fork,
+# rebase branch feat/balanced-on-v1120 (or its successor) on it in the fork,
 # push, set `rev` to the new head, and refresh `src.hash` via
 #   nix store prefetch-file --json --unpack \
 #     https://github.com/johnnymo87/teamclaude/archive/<rev>.tar.gz | jq -r .hash
@@ -69,19 +87,24 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.16-balanced"; # upstream v1.1.16 + local patches + balanced port
+  version = "1.1.20-balanced"; # upstream v1.1.20 + local patches + balanced port
 
   src = fetchFromGitHub {
-    # SMALL FORK. Branch local/v1116-patches = upstream v1.1.16 (eed7b33) + the
-    # four self-contained commits below, PLUS the `balanced` routing port merged
-    # 2026-09-10 as 2fc0258 (PR johnnymo87/teamclaude#1, 15 commits).
+    # SMALL FORK. Branch feat/balanced-on-v1120 = upstream v1.1.20 (999eda4) +
+    # the four self-contained commits below, PLUS the `balanced` routing port,
+    # rebased 2026-09-13. 25 commits on top of v1.1.20.
     #
-    # THIS BUILD DEFAULTS TO `routingStrategy: "expiry"`, which is byte-for-byte
-    # the behaviour of the previous pin. Deploying it therefore changes NOTHING
-    # until ~/.config/teamclaude.json opts in with routingStrategy "balanced".
-    # That opt-in is a separate, deliberate act: it ends the expiryRouting era
-    # that Track A (bead claude-failover-proxy-1o1) is measuring, and that
-    # measurement cannot be re-run afterwards.
+    # THIS BUILD DEFAULTS TO `routingStrategy: "expiry"` — but READ THE NEXT
+    # PARAGRAPH BEFORE CONCLUDING A BUMP IS THEREFORE SAFE.
+    #
+    # The default is not what we run. cloudbox's ~/.config/teamclaude.json has
+    # `routingStrategy: "balanced"` (confirmed 2026-09-13, 4 accounts,
+    # quotaProbeSeconds 90, distributeSessions unset). The opt-in happened after
+    # the v1.1.16 pin landed, so the "deploying changes nothing" reassurance
+    # that was true for THAT bump is false for every bump after it: this one
+    # carries a `balanced` implementation rebased across ~60 upstream commits
+    # and four releases, and it goes live the moment the service restarts.
+    # Rollback item 1 below (drop the config key, no rebuild) is the fast exit.
     #
     # Balanced also makes `quotaProbeSeconds > 0` a FATAL startup requirement --
     # ranking by utilization removes drain's "unknown weekly ranks first"
@@ -105,23 +128,30 @@ stdenvNoCC.mkDerivation rec {
     #           exhausted-probe path can still reach it). Returns the reason
     #           'plan-less' since #262 made _isAvailable a wrapper over
     #           unavailableReason() (bead claude-failover-proxy-arj).
-    # 1412/1412 tests green on this rev (1345 on the previous pin, of which all
-    # 1345 still pass unmodified; upstream alone is 1331). One pre-existing
-    # upstream flake, unrelated: test/throttle-revalidation.test.js:74 races a
-    # 5 ms real-time window and fails ~1 run in 23 (bead
-    # claude-failover-proxy-fvb).
+    # 1870/1870 tests green on this rev (1412 on the previous pin). The
+    # throttle-revalidation flake below did not fire on this run.
+    #
+    # ONE REGRESSION WAS INTRODUCED BY THE REBASE AND FIXED IN IT (51d3aa6).
+    # Upstream #361 made `previewRouteIndex` provider-scoped; our balanced
+    # margin mirror kept passing `null` for `exclude`, so on a MIXED
+    # Anthropic+Codex fleet the preview ranked across providers and could name a
+    # Codex account while selection correctly stayed put. Display-only
+    # (TUI/dashboard), and unreachable on a single-provider fleet like ours --
+    # but it is the exact "our shape survived, upstream's changed underneath"
+    # failure a rebase of this size exists to catch. Covered by a test that
+    # fails without the fix.
     #
     # Rollback, cheapest first:
     #   1. CONFIG ONLY -- drop routingStrategy from ~/.config/teamclaude.json
     #      (or set it to "expiry"). No rebuild. This is the real rollback for
     #      anything balanced does wrong, and it is why the port ships behind a
     #      default rather than as a replacement.
-    #   2. PREVIOUS PIN = rev 770b2612546ebfb67b9aa7df5130462a984b1331, hash
-    #      sha256-7wxTjVdop0qApXNKQVERf9/tFZs9MLgkPfMoXCTMtNk=, version
-    #      "1.1.16-local4".
+    #   2. PREVIOUS PIN = rev 2fc0258715590215b77d4f2ee7f169b4789924c1, hash
+    #      sha256-FGgGmZ3RQ7leKZe7XKlNqZSjVX3ocjiizt3rS0hCKPs=, version
+    #      "1.1.16-balanced".
     #   3. STOCK upstream = owner "KarpelesLab", rev
-    #      eed7b330826ef07f2e8d90b2a8fb3cda900173cf (v1.1.16), its own hash,
-    #      version "1.1.16". Costs the four patches above; no config change.
+    #      999eda4 (v1.1.20), its own hash, version "1.1.20". Costs the four
+    #      patches AND balanced; no config change (we default to "expiry").
     # Previous pin (v1.1.13 + balanced routing, 34 days in production) =
     # rev 890108cb25c40ef779fe9ca8c305326e5a75f575, hash
     # sha256-wgPCwep9+M2LQkzfKyHt7vy5quYDi4S9ut6DdOEMy2w=, version
@@ -129,8 +159,8 @@ stdenvNoCC.mkDerivation rec {
     # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "2fc0258715590215b77d4f2ee7f169b4789924c1"; # local/v1116-patches
-    hash = "sha256-FGgGmZ3RQ7leKZe7XKlNqZSjVX3ocjiizt3rS0hCKPs=";
+    rev = "51d3aa6f42d0c9bb252fdead7c7d2a292f5c6ddb"; # feat/balanced-on-v1120
+    hash = "sha256-l2IU8NmMtQ6+7+O5IJ9cMsBN4xuJNHyOIqr4g/RLZe4=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
