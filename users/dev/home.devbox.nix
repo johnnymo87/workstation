@@ -1681,8 +1681,12 @@ down and its silence means nothing. This host has no second leg.
   # active account's OAuth token. devbox is the "play" box (no Vertex/aigateway),
   # so this is the personal-Claude analog of cloudbox's cfp router — minus the
   # budget gating, which is meaningless without Vertex spend to cap. opencode is
-  # pointed at it by `injectTeamclaudeBaseUrl` in opencode-config.nix (gated on
-  # this unit being active, with auto-fallback to direct Anthropic).
+  # pointed at it by `injectTeamclaudeBaseUrl` in opencode-config.nix. That gates
+  # on this config file having at least one ACCOUNT -- not on the unit being
+  # active, which raced sd-switch and stripped the baseURL (bead
+  # workstation-m55p), and not on mere file existence, which the next paragraph
+  # explains is not the same thing as "will run". There is no longer an
+  # auto-fallback to direct Anthropic when the unit is merely stopped.
   #
   # CONFIG IS RUNTIME STATE (NOT nix-managed): teamclaude reads + REWRITES
   # ~/.config/teamclaude.json (OAuth tokens auto-refresh + persist), so it must
@@ -1692,9 +1696,24 @@ down and its silence means nothing. This host has no second leg.
   #
   # SEED-FIRST: with zero accounts the server exits 1 ("No accounts configured")
   # and Restart=always would crash-loop. ConditionPathExists gates the unit on
-  # the config file so it stays inactive (not failed) until you've logged in; the
-  # StartLimit caps any residual loop (e.g. config present but empty). After
-  # `teamclaude login`, run `systemctl --user enable --now teamclaude`.
+  # the config file; the StartLimit caps the residual loop.
+  #
+  # BUT THAT GATE IS WEAKER THAN IT LOOKS, and this comment used to overstate it.
+  # "Stays inactive (not failed) until you have logged in" is FALSE: teamclaude's
+  # `loadOrCreateConfig()` writes a default config with `accounts: []` on almost
+  # any CLI invocation, and notably at the TOP of `teamclaude login` BEFORE the
+  # OAuth flow -- so an aborted login creates the file, satisfies
+  # ConditionPathExists, and the unit crash-loops to `failed` rather than staying
+  # inactive. `teamclaude remove` of the last account gets you there too.
+  # `teamclaude accounts` is the check; a zero-account config is the usual cause
+  # of a `failed` teamclaude.
+  #
+  # This is why injectTeamclaudeBaseUrl tests the accounts array rather than
+  # copying ConditionPathExists. Making the unit agree (an `ExecCondition=` that
+  # runs the same check, so a zero-account config is SKIPPED rather than failed)
+  # is filed separately.
+  #
+  # After `teamclaude login`, run `systemctl --user enable --now teamclaude`.
   #
   # BIND + AUTH: index.js listens on all interfaces (can't pass a host without
   # patching the checkout), but two backstops keep :3456 private — (1) devbox's
