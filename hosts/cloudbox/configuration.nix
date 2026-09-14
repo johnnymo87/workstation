@@ -3577,7 +3577,7 @@ EOF
       StateDirectory = "aigateway-canary";
       ExecStart = "${pkgs.writeShellScript "aigateway-canary" ''
         set -u
-        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.curl pkgs.findutils pkgs.docker ]}
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.findutils pkgs.docker ]}
 
         STATE=/var/lib/aigateway-canary
         UNIT=aigateway.service
@@ -3593,8 +3593,25 @@ EOF
 
         # The nightly reset stops and re-pulls this unit as collateral of the
         # serve-pool restart. Anything we observe mid-reset is noise.
+        #
+        # Probe the FLOCK, not the file. The lock file is a permanent artifact
+        # — reset-workspace creates it once and never unlinks it, so `[ -e ]`
+        # means "a reset has run at some point since boot", which on this host
+        # was 18 days ago. An existence check here disables the canary forever,
+        # silently, and that is not hypothetical: it is what the first version
+        # of this script did, and the bug surfaced only because the post-deploy
+        # verification stopped the gateway and watched the canary not fix it.
+        #
+        # fd-based form on purpose: `flock <file> <cmd>` execvp()s the command,
+        # which fails on this unit's minimal PATH and misreads as "lock held".
+        # Same shape as the frontdoor/plugin canaries above.
         if [ -e /tmp/reset-workspace.lock ]; then
-          exit 0
+          exec 9< /tmp/reset-workspace.lock
+          if ! flock -n -s 9; then
+            echo "reset-workspace in progress; skipping this run"
+            exit 0
+          fi
+          exec 9<&-
         fi
 
         # Shared escalating alerter (pkgs/opencode-drift-alert): throttles a
