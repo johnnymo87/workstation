@@ -6,6 +6,11 @@
 let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
+  # Persistent operator intent for the cloudbox aigateway. Shared with
+  # hosts/cloudbox/configuration.nix (the unit's ConditionPathExists and the
+  # canary) via a single-string file so the three readers cannot drift apart —
+  # see that file's header. Only consulted under isCloudbox.
+  aigatewayFlag = import ../../hosts/cloudbox/aigateway-flag.nix;
   devboxModel = "anthropic/claude-opus-5";
   # Compaction model for devbox: direct Anthropic Sonnet 5 (NOT Vertex).
   # Runs via the Claude Max subscription (teamclaude on devbox), so there is no
@@ -1761,7 +1766,7 @@ in
     '');
 
   # Inject (or strip) the aigateway baseURL override on cloudbox.
-  # Trigger: `aigateway.service` is currently active AND we have a
+  # Trigger: the aigateway INTENT FLAG exists AND we have a
   # GOOGLE_CLOUD_PROJECT secret. When both conditions hold: set both
   # `provider.google-vertex-anthropic.options.baseURL` (Claude) AND
   # `provider.google-vertex.options.baseURL` (Gemini) to URLs pointing
@@ -1776,13 +1781,16 @@ in
   # dollars). Verified live 2026-06-05 — see investigation report
   # docs/investigations/2026-06-05-vertex-gemini-surge/aigateway-cost-fix.md.
   #
-  # Why is-active and not is-enabled? NixOS unit files live in the
-  # read-only /etc/systemd/system (symlinks into the Nix store), so
-  # `systemctl enable/disable` fails ("Read-only file system") and
-  # `is-enabled` returns "linked" permanently. `is-active` is the signal
-  # the operator actually controls via `systemctl start`/`stop`.
-  # Persistence across reboot is not preserved (unit is wantedBy = [ ]) —
-  # explicit design choice for an opt-in tool.
+  # Why a flag and not `is-enabled` or `is-active`? NixOS unit files live in
+  # the read-only /etc/systemd/system (symlinks into the Nix store), so
+  # `is-enabled` returns "linked" permanently and can never be a signal. And
+  # `is-active` — which this used until 2026-09-13 — answers "is it up right
+  # now", not "does the operator want it up": anything that stops the unit
+  # silently re-points opencode at direct Vertex on the next switch. See the
+  # detailed rationale on the activation body below, and the long comment on
+  # systemd.services.aigateway in hosts/cloudbox/configuration.nix.
+  # The unit is now wantedBy = [ "multi-user.target" ], gated on the same
+  # flag, so intent DOES survive a reboot.
   #
   # The path shape MUST match what @ai-sdk/google-vertex/anthropic
   # generates by default — verified against
@@ -1800,14 +1808,31 @@ in
       mkdir -p "$(dirname "$hash_file")"
 
       # Provider routing toggles (DECOUPLED as of T13b / 8fe.14):
-      #   - gemini (google-vertex)            follows aigateway.service
+      #   - gemini (google-vertex)            follows the aigateway INTENT FLAG
       #   - claude (google-vertex-anthropic)  follows claude-failover-proxy.service
       #     (the cfp budget-gated Vertex<->Max failover router on :8789).
-      # `is-active` returns "active" once ExecStart succeeds (RemainAfterExit
-      # keeps that for the oneshot aigateway); "activating" is also treated as
-      # opt-in. Anything else (inactive/failed/unknown) means not running.
+      #
+      # INTENT, NOT LIVENESS (changed 2026-09-13, bd workstation-f794). This
+      # used to read `systemctl is-active aigateway.service`, which conflates
+      # "the operator wants the gateway" with "the gateway is up right now".
+      # That conflation has a nasty shape: the moment the gateway goes down,
+      # the next home-manager switch silently rewrites opencode to talk direct
+      # Vertex — and then the gateway coming back does NOT undo it, because
+      # nothing re-runs this activation. You get a ledger gap that outlives the
+      # outage and ends whenever someone happens to switch again.
+      #
+      # So: read the persistent flag. If the operator says the gateway should
+      # be up, point at it even if it is currently down. A down gateway is a
+      # LOUD failure (ECONNREFUSED on the first gemini turn) that
+      # aigateway-canary heals within a minute; a silent direct-Vertex
+      # fallback is a quiet failure that nobody notices and that costs the
+      # per-request attribution the gateway exists to collect.
+      #
+      # cfp keeps using is-active: it is a plain long-running service with no
+      # opt-in flag, so there the two questions genuinely coincide.
       sc=/run/current-system/sw/bin/systemctl
-      aigw_state="$($sc is-active aigateway.service 2>/dev/null || true)"
+      aigw_intent=no
+      [ -e ${aigatewayFlag} ] && aigw_intent=yes
       cfp_state="$($sc is-active claude-failover-proxy.service 2>/dev/null || true)"
 
       project=""
@@ -1826,10 +1851,9 @@ in
         # Shape differs from anthropic: v1beta1, publishers/google, NO trailing
         # /models (the @ai-sdk/google-vertex `getBaseURL` appends
         # /models/<id>:streamGenerateContent itself). Verified live 2026-06-05.
-        case "$aigw_state" in
-          active|activating)
-            gemini_url="http://localhost:8080/v1beta1/projects/$project/locations/global/publishers/google" ;;
-        esac
+        if [ "$aigw_intent" = yes ]; then
+          gemini_url="http://localhost:8080/v1beta1/projects/$project/locations/global/publishers/google"
+        fi
         # Claude: prefer the cfp router (:8789). It re-bases the incoming Vertex
         # path onto its CFP_AIGATEWAY_URL (:8080), so the upstream call is
         # byte-identical to hitting the aigateway directly (verified). Use
@@ -1842,10 +1866,9 @@ in
           active|activating)
             anthropic_url="http://127.0.0.1:8789/v1/projects/$project/locations/global/publishers/anthropic/models" ;;
           *)
-            case "$aigw_state" in
-              active|activating)
-                anthropic_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models" ;;
-            esac ;;
+            if [ "$aigw_intent" = yes ]; then
+              anthropic_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models"
+            fi ;;
         esac
       fi
 
@@ -1871,7 +1894,7 @@ in
         mv "$tmp" "$runtime"
       fi
 
-      echo "aigateway/cfp: claude -> ''${anthropic_url:-<direct Vertex>} (cfp=$cfp_state); gemini -> ''${gemini_url:-<direct Vertex>} (aigw=$aigw_state)" >&2
+      echo "aigateway/cfp: claude -> ''${anthropic_url:-<direct Vertex>} (cfp=$cfp_state); gemini -> ''${gemini_url:-<direct Vertex>} (aigw intent=$aigw_intent)" >&2
       new_hash="$(printf '%s\n%s' "$anthropic_url" "$gemini_url" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1)"
 
       # A provider's baseURL is read at provider init, so a changed URL only

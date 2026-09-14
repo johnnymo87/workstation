@@ -16,6 +16,61 @@
 let
   enableLgtm = true;  # AI-powered PR review daemon (flip to true to activate)
 
+  # Persistent operator intent for aigateway.service. The unit gates on this
+  # path (ConditionPathExists), the aigateway-canary decides whether a down
+  # gateway is a breakage or a legitimate opt-out from it, and the
+  # home-manager `injectAigatewayBaseUrl` activation reads it to decide
+  # whether opencode's gemini provider points at the gateway. One file, three
+  # readers, all agreeing — see the long comment on the unit below for why
+  # runtime state (`is-active`) could not be that signal, and the header of
+  # aigateway-flag.nix for why the path is not just a string literal here.
+  aigatewayFlag = import ./aigateway-flag.nix;
+
+  # Operator-facing enable/disable for the gateway (on the system path below).
+  # These exist so the intent flag and the unit state are always changed
+  # together — flipping one without the other is the confusion this whole
+  # arrangement is meant to end. Of the two mismatches, only one is benign:
+  #   flag set + unit stopped   -> canary starts it within a minute.
+  #   flag clear + unit running -> opencode is pointed at direct Vertex while a
+  #                                gateway burns CPU and collects no ledger,
+  #                                and nothing anywhere reports that.
+  aigatewayEnable = pkgs.writeShellScriptBin "aigateway-enable" ''
+    set -euo pipefail
+    # The directory is a dev-owned tmpfiles rule, created at boot, so the
+    # touch needs no privilege. It is deliberately NOT `mkdir -p`'d here:
+    # /var/lib is root-owned, so a dev-run mkdir would fail and abort under
+    # `set -e` rather than help. If the directory is missing, tmpfiles has not
+    # run and that is the thing to fix.
+    touch ${aigatewayFlag}
+    exec sudo systemctl start aigateway.service
+  '';
+  aigatewayDisable = pkgs.writeShellScriptBin "aigateway-disable" ''
+    set -euo pipefail
+    # Clear the flag BEFORE stopping. The canary acts only while the flag is
+    # present, so the reverse order races it into restarting what you just
+    # stopped — and it would be right to.
+    rm -f ${aigatewayFlag}
+    exec sudo systemctl stop aigateway.service
+  '';
+
+  # Health endpoint the canary probes. Spring Boot actuator, unauthenticated
+  # (verified 2026-09-13: `/` and `/v1beta1` return 401, this returns 200
+  # {"status":"UP"}). A TCP connect is NOT enough — the Spring listener binds
+  # before the app is serving, and the cfp canary already learned that lesson.
+  #
+  # The AGGREGATE endpoint, not /actuator/health/liveness. Liveness is only
+  # `livenessState` — it stays UP with the ledger's postgres dead, which is a
+  # state the canary's `compose stop` + `up --no-recreate` would actually heal
+  # (no recreate, so the ledger survives). The aggregate covers r2dbc, redis,
+  # ssl and diskSpace, and returns 503 when any is DOWN, which `curl -f`
+  # already treats as failure.
+  #
+  # Accepted false-positive vector: `diskSpace` goes DOWN under 10 MB free, so
+  # a full disk would make this restart a gateway that is not the problem. The
+  # 30-minute loop detection below caps that at one restart per ~33 min and
+  # pages instead, which is the right outcome for a full disk anyway.
+  aigatewayHealthUrl = "http://127.0.0.1:8080/actuator/health";
+
   # Author-side PR shepherd (see systemd.services.lgtm-shepherd below). A
   # separate flag from enableLgtm on purpose: the shepherd watches PRs *I*
   # authored and is a different blast radius from the reviewer that handles
@@ -3406,20 +3461,58 @@ EOF
   #     unit definition WITHOUT bouncing the live stateful stack; the new
   #     definition takes effect on the next reboot or manual restart.
   #
-  # Disabled by default — enable with `sudo systemctl enable --now
-  # aigateway.service`. The home-manager activation `injectAigatewayBaseUrl`
-  # keys off this unit's `is-active` state (NOT `is-enabled`, as this comment
-  # said until 2026-09-13) to decide whether to point opencode at the gateway.
-  # The distinction matters: unit files here are read-only symlinks into the Nix
-  # store, so `is-enabled` reports "linked" permanently and could never be the
-  # signal; `systemctl start`/`stop` is what an operator actually controls.
+  # OPERATOR INTENT IS A FILE, NOT A RUNTIME STATE (2026-09-13, bd
+  # workstation-f794). Enable with `aigateway-enable`, disable with
+  # `aigateway-disable` (both defined below); they touch/remove
+  # ${aigatewayFlag} and then start/stop the unit.
+  #
+  # Why a flag instead of `is-active`, which this unit used until 2026-09-13:
+  #
+  #   - `is-enabled` could never have been the signal: unit files here are
+  #     read-only symlinks into the Nix store, so it reports "linked" forever.
+  #   - `is-active` LOSES the intent the moment anything stops the unit. That
+  #     is not hypothetical: on 2026-09-13 a `nixos-rebuild switch` carrying
+  #     #510 (docker daemon loopback port defaults) changed docker.service.
+  #     switch-to-configuration STOPPED and then STARTED docker — a stop+start
+  #     pair, NOT a restart (socket-activated .service branch in
+  #     switch-to-configuration-ng). `Requires=docker.service` propagated the
+  #     stop to this unit, but stc only restarts units it stopped ITSELF, and
+  #     this one was a propagation victim rather than a member of
+  #     `units_to_stop`. With `wantedBy = [ ]` nothing else pulled it. Result:
+  #     2h13m of dead :8080 — every gemini turn failing ECONNREFUSED, and cfp's
+  #     Vertex leg (CFP_AIGATEWAY_URL, below) primed to take the Claude path
+  #     down too at the midnight budget reset.
+  #
+  #     Note what does NOT fix that: `partOf = [ "docker.service" ]`. PartOf
+  #     propagates stop/restart JOBS, and stc issued a stop and a start, not a
+  #     restart. (On a genuine `systemctl restart docker`, plain `Requires=`
+  #     already propagates the restart, so PartOf adds nothing there either.)
+  #
+  # With the flag + `wantedBy = [ "multi-user.target" ]`, stc's end-of-switch
+  # `start multi-user.target` re-pulls this unit after ANY propagated stop, and
+  # a reboot starts it without leaning on the serve units' `wants=`. When the
+  # flag is absent the unit stays `inactive` with `ConditionResult=no` — a
+  # condition failure is not a unit failure, so there is no restart loop and no
+  # noise on a host where the gateway was never deployed.
   systemd.services.aigateway = {
     description = "AI Gateway (local Anthropic-on-Vertex proxy)";
+    # NOT `sops-nix.service` — there is no such unit on this host (sops-nix
+    # installs secrets from an activation script; `systemctl show
+    # sops-nix.service` reports LoadState=not-found). An After= on a
+    # nonexistent unit is silently ignored, so adding it would buy nothing
+    # while reading like a boot-ordering guarantee. The ExecStart `cd
+    # "$(cat /run/secrets/...)"` fails loudly instead, and Restart=on-failure
+    # retries it — which IS the case that line covers.
     after = [ "docker.service" "network-online.target" ];
     wants = [ "network-online.target" ];
     requires = [ "docker.service" ];
-    # Disabled by default — operator opts in.
-    wantedBy = [ ];
+    # Opt-in, but the opt-in is the FLAG (unitConfig below), not the absence of
+    # a wantedBy. See the block comment above.
+    wantedBy = [ "multi-user.target" ];
+
+    unitConfig = {
+      ConditionPathExists = aigatewayFlag;
+    };
 
     # Path to the dev checkout (org-identifying directory name) lives in
     # the aigateway_dir sops secret; the bash shim resolves it at runtime.
@@ -3446,10 +3539,15 @@ EOF
       User = "dev";
       Group = "dev";
       # No WorkingDirectory — handled by `cd` in the shim.
-      # `docker compose up -d` returns once the stack is detached. The unit
-      # then "succeeds" — but we need it to stay active so `is-enabled` /
-      # `is-active` reflect operator intent. Type=oneshot + RemainAfterExit
-      # handles that.
+      # `docker compose up -d` returns once the stack is detached, so the unit
+      # needs RemainAfterExit to stay `active` and remain stoppable (ExecStop
+      # is the only thing that ever runs `compose stop`).
+      #
+      # What `active` does NOT mean: that the stack is healthy. The oneshot
+      # succeeded the moment compose detached, and the containers carry
+      # `RestartPolicy=no`, so a gateway container that dies or wedges leaves
+      # this unit reading `active` forever. That gap is what aigateway-canary
+      # (below) exists to close; do not read liveness off this unit.
       RemainAfterExit = true;
       # `cd "$(cat ...)"` resolves the compose dir at every start; the cd
       # fails loudly if the secret/path is missing. `--no-recreate` makes
@@ -3463,8 +3561,269 @@ EOF
       ExecStop = "${pkgs.bash}/bin/bash -c 'cd \"$(cat /run/secrets/aigateway_dir)\" && exec ${pkgs.docker}/bin/docker compose stop'";
       # Pulling base images on first boot can take a while.
       TimeoutStartSec = "10min";
+      # Covers an ExecStart that fails (dockerd not up yet, secret missing).
+      # It does NOT cover being stopped: a propagated stop exits `success`,
+      # and on-failure ignores success. The 2026-09-13 outage sat here for
+      # 2h13m with this line already in place. The flag + wantedBy above is
+      # what recovers that case; this only retries a genuinely failed start.
       Restart = "on-failure";
       RestartSec = 30;
+    };
+  };
+
+  # aigateway liveness canary. Modelled on claude-failover-proxy-canary below;
+  # read that one's comments for the forensics/loop-detection rationale, which
+  # is identical here. What differs, and why this unit is not a copy:
+  #
+  #   - INTENT IS THE FLAG. cfp is unconditionally supposed to be up, so its
+  #     canary treats `inactive` as an outage. The gateway is opt-in, so
+  #     `inactive` is only an outage when ${aigatewayFlag} exists. Without that
+  #     distinction this unit would either spam a host that opted out, or stay
+  #     silent through exactly the 2026-09-13 failure.
+  #   - IT STARTS, NOT ONLY RESTARTS. The failure mode being fixed is "stopped
+  #     and nothing ever started it again", so flag-present + not-active =>
+  #     `systemctl start`. That alone would have cut a 2h13m outage to <1min.
+  #   - IT PROBES HTTP, NOT TCP, and not `is-active` (see RemainAfterExit
+  #     above — `active` says nothing about the containers).
+  #   - IT HONOURS THE RESET LOCK, defensively rather than because a concrete
+  #     race is known. reset-workspace never names this unit or docker, and
+  #     the serves' `Wants=` only ever STARTS the gateway, so today the
+  #     nightly reset cannot produce a spurious alert here. The check costs
+  #     one flock probe and covers the case where the reset grows a step that
+  #     does touch the pool's dependencies. (The cfp canary makes the
+  #     opposite call and says so; both are defensible, and stating which one
+  #     this is matters more than the choice.)
+  systemd.services.aigateway-canary = {
+    description = "aigateway liveness canary (start/restart the gateway when operator intent says it should be up)";
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "aigateway-canary";
+      # A canary that can hang forever is not a canary. A timer will not start
+      # a unit that is still `activating`, so ONE hung pass ends supervision
+      # permanently and logs nothing while doing it. 900s (not a round
+      # multiple of the 60s period, so a chronically slow pass is visibly
+      # offset rather than aliasing into the schedule) is far above any
+      # legitimate pass, which is seconds.
+      TimeoutStartSec = 900;
+      ExecStart = "${pkgs.writeShellScript "aigateway-canary" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.systemd pkgs.util-linux pkgs.curl pkgs.findutils pkgs.docker ]}
+
+        STATE=/var/lib/aigateway-canary
+        UNIT=aigateway.service
+        FAILFILE="$STATE/fails"
+        WINDOW="$STATE/restart-window"
+
+        # ---- 0. Does the operator want this running at all? -----------------
+        # No flag => no opinion. Exit silently; this is the opted-out host.
+        if [ ! -e ${aigatewayFlag} ]; then
+          rm -f "$FAILFILE"
+          exit 0
+        fi
+
+        # Defensive: skip while a reset-workspace run holds its lock, so a
+        # future reset step that touches the pool's dependencies cannot race
+        # this canary. No such step exists today (see the unit comment).
+        #
+        # Probe the FLOCK, not the file. The lock file is a permanent artifact
+        # — reset-workspace creates it once and never unlinks it, so `[ -e ]`
+        # means "a reset has run at some point since boot", which on this host
+        # was 18 days ago. An existence check here disables the canary forever,
+        # silently, and that is not hypothetical: it is what the first version
+        # of this script did, and the bug surfaced only because the post-deploy
+        # verification stopped the gateway and watched the canary not fix it.
+        #
+        # fd-based form on purpose: `flock <file> <cmd>` execvp()s the command,
+        # which fails on this unit's minimal PATH and misreads as "lock held".
+        # Same shape as the frontdoor/plugin canaries above.
+        if [ -e /tmp/reset-workspace.lock ]; then
+          exec 9< /tmp/reset-workspace.lock
+          if ! flock -n -s 9; then
+            echo "reset-workspace in progress; skipping this run"
+            exit 0
+          fi
+          exec 9<&-
+        fi
+
+        # Shared escalating alerter (pkgs/opencode-drift-alert): throttles a
+        # repeat episode on exponential backoff rather than a flat TTL, which
+        # is the lesson from the 2026-07-26 frontdoor incident. arg1 is the
+        # per-condition state file, arg2 the signature that defines "same
+        # episode", arg4/arg5 the initial/max repeat interval. 900/14400 =>
+        # t=0, 15m, 45m, 1h45, ... capped at one page per 4h.
+        # It never exits non-zero, so a pigeon outage cannot fail this unit.
+        alert() {
+          ${driftAlert} "$STATE/alert-$1" "$2" "$3" 900 14400
+        }
+
+        # ---- 1. Intent says up. Is it? --------------------------------------
+        #
+        # NEVER FIGHT A JOB THAT IS ALREADY IN FLIGHT. Both transitional states
+        # mean systemd is mid-transaction on this unit, and a `systemctl start`
+        # in the default `replace` mode CANCELS the installed job — which is
+        # how a canary pass that lands during a `nixos-rebuild switch` could
+        # cancel stc's own `stop docker.service` and leave the docker config
+        # change silently unapplied, on exactly the code path this unit exists
+        # to protect. Wait a minute instead; whatever is happening will have
+        # settled, and if the outcome is "stopped" the next pass starts it.
+        ACTIVE=$(systemctl is-active "$UNIT" 2>/dev/null || true)
+        case "$ACTIVE" in
+          activating|deactivating|reloading)
+            echo "$UNIT is '$ACTIVE' (job in flight); leaving it alone this pass"
+            exit 0
+            ;;
+        esac
+        if [ "$ACTIVE" != "active" ]; then
+          # This is the 2026-09-13 case: stopped as collateral, nothing to
+          # restart it. Start rather than restart -- restart on an inactive
+          # oneshot works, but `start` is what this means and keeps the
+          # journal honest.
+          echo "intent flag present but $UNIT is '$ACTIVE'; starting"
+          # Signature is the bare condition, NOT the condition plus $ACTIVE:
+          # inactive/failed/unknown are the same outage, and folding the state
+          # string into the signature would restart the escalation clock (and
+          # fire a fresh page) on every transition within one episode.
+          alert down "down" "aigateway was '$ACTIVE' while ${aigatewayFlag} says it should be up; the canary is starting it.
+
+While it was down, every opencode gemini turn failed ECONNREFUSED on :8080, and
+cfp's Vertex leg had no backend (the Claude path only survives this while cfp is
+over budget and routing to Max).
+
+Most likely cause: something stopped it as collateral and nothing restarted it --
+a docker.service stop+start from nixos-rebuild is the known case (bd workstation-f794).
+
+Check:
+  systemctl status aigateway.service --no-pager
+  journalctl -u aigateway-canary.service -n 50 --no-pager"
+          # --job-mode=fail: refuse rather than cancel if some other actor
+          # already has a job queued on this unit (see the block comment
+          # above). --no-block so a slow first-boot `compose up` cannot hang
+          # this pass for the unit's whole 10-minute TimeoutStartSec.
+          systemctl start --no-block --job-mode=fail "$UNIT" \
+            || echo "start refused (another job is queued); retrying next pass"
+          rm -f "$FAILFILE" "$WINDOW"
+          exit 0
+        fi
+
+        # ---- 2. It claims active. Is it actually serving? -------------------
+        # 200 + a body we recognise. A bare status check would accept the
+        # 401 that every other path on :8080 returns, which is exactly the
+        # "listener up, app not serving" state we care about.
+        BODY=$(curl -fsS --max-time 5 ${aigatewayHealthUrl} 2>/dev/null || true)
+        case "$BODY" in
+          *'"status":"UP"'*)
+            # Healthy: clear the episode state, INCLUDING the alert files.
+            # driftAlert's backoff counter lives in those, and it only ever
+            # grows — leaving them behind means the second outage this host
+            # ever has opens at "alert #2, first reported 168h ago", the third
+            # opens at severity `error`, and a later one can be suppressed
+            # outright because the backoff interval has grown past it. The
+            # heal would still happen; the page would not. Same reset the
+            # plugin canary does.
+            rm -f "$FAILFILE" "$STATE"/alert-*
+            # Timestamp of the last observed-healthy pass. The loop detector
+            # below needs it to tell "the restart did not work" from "the
+            # restart worked and something ELSE broke 20 minutes later" --
+            # without it, any second incident inside the 30-minute window is
+            # misread as a loop and refused a restart it deserves.
+            date +%s > "$STATE/last-healthy"
+            exit 0
+            ;;
+        esac
+
+        FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+        echo "$FAILS" > "$FAILFILE"
+        echo "health probe failed ($FAILS consecutive); body='$BODY'"
+        # Three consecutive minutes before acting: a single miss is a restart,
+        # a GC pause, or a slow first request after idle.
+        if [ "$FAILS" -lt 3 ]; then
+          exit 0
+        fi
+
+        # ---- 3. Restart, with bounded forensics and loop detection ----------
+        TS=$(date +%Y%m%dT%H%M%S)
+        DUMP="$STATE/wedge-$TS"
+        mkdir -p "$DUMP"
+        ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs -r rm -rf || true
+
+        # Loop detection FIRST, so the page says which of the two situations
+        # this is before either of them touches dockerd.
+        PREV=$(cat "$WINDOW" 2>/dev/null || echo 0)
+        LASTOK=$(cat "$STATE/last-healthy" 2>/dev/null || echo 0)
+        NOW=$(date +%s)
+        RECENT=$(( NOW - PREV ))
+        # Looping means: we restarted recently AND it has not been healthy
+        # even once since that restart. The second clause is what keeps a
+        # genuine second incident inside the window from being refused.
+        LOOPING=no
+        [ "$PREV" -ne 0 ] && [ "$RECENT" -lt 1800 ] && [ "$LASTOK" -lt "$PREV" ] && LOOPING=yes
+
+        # ALERT BEFORE FORENSICS. The single most likely cause of a wedged
+        # gateway is a wedged dockerd, and every forensics command below talks
+        # to dockerd. Collecting first would mean the one failure mode most
+        # worth paging about is the one where the page never gets sent.
+        if [ "$LOOPING" = yes ]; then
+          alert loop "loop" "aigateway health is STILL failing ''${RECENT}s after the canary restarted it.
+
+Not restarting again -- a restart that did not help is not worth repeating every
+three minutes. This needs a human.
+
+Forensics (containers, gateway logs, stats): $DUMP
+  docker compose ps / docker logs dev-gateway-1"
+        else
+          alert wedge "wedge" "aigateway unit reads active but ${aigatewayHealthUrl} failed $FAILS consecutive probes; restarting it.
+
+The unit is Type=oneshot + RemainAfterExit, and the containers carry
+RestartPolicy=no, so a dead or wedged gateway container leaves the unit
+reporting 'active' with nothing supervising it. That is what this probe exists
+to catch.
+
+Forensics: $DUMP"
+        fi
+
+        # The interesting state is the containers', not the oneshot's (it has
+        # no MainPID to dump once compose has detached).
+        #
+        # Every one of these is wrapped in `timeout`: a wedged dockerd makes
+        # them block indefinitely, and this unit has no MainPID-based watchdog
+        # to notice. A hung oneshot would stop the timer from re-firing (a
+        # timer will not start a unit that is still activating), so ONE hang
+        # here permanently ends supervision — silently, because a hang logs
+        # nothing. `TimeoutStartSec` on the unit is the backstop; these are
+        # the belt.
+        timeout 30 docker ps -a --filter name=dev- --format '{{.Names}}\t{{.Status}}' \
+          > "$DUMP/containers" 2>&1 || true
+        timeout 30 docker logs --tail 200 dev-gateway-1 > "$DUMP/gateway.log" 2>&1 || true
+        timeout 30 docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}' \
+          > "$DUMP/stats" 2>&1 || true
+
+        # A restart that did not help is not worth repeating every three
+        # minutes; the page above is the deliverable in that case.
+        if [ "$LOOPING" = yes ]; then
+          echo "health still failing ''${RECENT}s after the last canary restart; NOT restarting again, forensics in $DUMP"
+          rm -f "$FAILFILE"
+          exit 0
+        fi
+
+        echo "restarting $UNIT (health probe failed x$FAILS); forensics in $DUMP"
+        # Same job-mode reasoning as the start above: refuse rather than
+        # cancel somebody else's in-flight job.
+        systemctl restart --no-block --job-mode=fail "$UNIT" \
+          || echo "restart refused (another job is queued); retrying next pass"
+        echo "$NOW" > "$WINDOW"
+        rm -f "$FAILFILE"
+      ''}";
+    };
+  };
+
+  systemd.timers.aigateway-canary = {
+    description = "Minutely aigateway liveness canary";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "2min";
+      OnUnitActiveSec = "1min";
+      AccuracySec = "10s";
+      Unit = "aigateway-canary.service";
     };
   };
 
@@ -4464,6 +4823,10 @@ EOF
 
   # System packages
   environment.systemPackages = with pkgs; [
+    # Gateway on/off switches — flag and unit flipped together. See their
+    # let-bindings at the top of this file for why you should not just
+    # `systemctl start aigateway` by hand.
+    aigatewayEnable aigatewayDisable
     git curl wget htop jq unzip
     ripgrep fd fzf
     gnumake gcc
@@ -4688,6 +5051,12 @@ EOF
     # large stale trees, so this should be inert either way.
     "d /tmp/opencode 0755 dev dev -"
     "d /tmp/opencode/slack-uploads 0755 dev dev -"
+    # Holds the aigateway operator-intent flag (${aigatewayFlag}). The
+    # directory must pre-exist the unit: ConditionPathExists is evaluated
+    # BEFORE StateDirectory= would create anything, so the unit cannot make
+    # its own gate. dev-owned so `aigateway-enable` needs no sudo for the
+    # touch (the systemctl start it does is a separate, already-sudo'd step).
+    "d /var/lib/aigateway 0755 dev dev -"
   ];
 
   # User account with stable UID/GID
