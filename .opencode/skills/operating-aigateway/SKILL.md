@@ -49,7 +49,10 @@ Use these rather than `systemctl start/stop`. Operator intent is the **flag**,
 not the unit's runtime state, and three things read it: the unit's
 `ConditionPathExists`, `aigateway-canary`, and the opencode routing activation.
 A bare `systemctl stop` leaves the flag set, so the canary restarts the gateway
-within a minute — correctly, since you never said you wanted it off.
+within a minute — correctly, since you never said you wanted it off. If the
+canary's pass lands while your stop job is still running you will see
+`Job for aigateway.service canceled` and the gateway will never go down at all.
+That is the system working; it is not an error to investigate.
 
 **Why intent is a file** (2026-09-13, bd `workstation-f794`). It used to be
 `systemctl is-active`, which cannot distinguish "the operator turned it off"
