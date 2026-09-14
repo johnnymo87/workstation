@@ -1223,6 +1223,7 @@ under epic `workstation-fsod`; the original epic `workstation-3umv` is closed.
 | Dark mode (`prefers-color-scheme`, true black) | #490 | `f3bbd3e` |
 | Stacked bars replacing the interpolated area | #496 | `2303ea6` |
 | Chart server as a declared user service | #497 | `ab240c1` |
+| Bucket cap + window-derived buckets | #499 | `30e140e` |
 
 Not mine but adjacent, and landed in the same window: `--tag` on
 `opencode-launch` (#491), a `--db`/`--tags-db` arg-order fix (#493), and a test
@@ -1289,19 +1290,71 @@ wanted**. Corrections now in force:
 
 ### Open follow-ups
 
-Both were found by the adversarial review of #496 and deliberately not fixed
-there. Full reproduction detail and fix shapes are in the bead notes.
+The two that motivated #499 are closed. What remains was found *during* that
+work and deliberately not folded into it. Reproduction detail is in the beads.
 
-- **`workstation-9e7j`** (ready) — bucket count is unbounded.
-  `?days=30&bucket=hour` is 532 bars at 1.0px in an ~850KB document; sub-pixel
-  segments render `height="0.0"`, which is both invisible *and* unhoverable.
-- **`workstation-6f0c`** (blocked by `9e7j`) — bars delete missing buckets
-  rather than showing a gap. Buckets come from observed rows, not the window,
-  so `?days=1` hourly rendered 19 bars for 48 hours with labels jumping
-  05 → 08 → 10. This half-undermines the honesty argument that motivated bars:
-  the area lied by interpolating *across* a missing day, bars lie by *deleting*
-  it. Ordered second because fixing it **raises** M by construction (a 30-day
-  hourly window becomes 720 slots), making `9e7j` strictly worse.
+- **`workstation-fsod.1`** — a corrupt `opencode.db` raises
+  `sqlite3.DatabaseError`, the **parent** of the `OperationalError` that
+  `handle_request` catches, so it escapes as a 500 instead of the intended
+  503. Found by #499's own cap-ordering test. Low priority: `socketserver`
+  catches per request, so the server survives.
+- **`workstation-fsod.2`** — `height="0.0"` is a **Y-axis** failure that the
+  X-axis bucket cap does not address. A segment whose dollars are tiny
+  relative to `y_max` renders at zero height at *any* bucket count, and a
+  zero-height rect is excluded from hit-testing. Same honesty objection, other
+  axis.
+- **`workstation-fsod.3`** — week bucketing, so windows past 183 days are
+  viewable rather than refused. Blocked on re-keying the coverage footer,
+  which joins CFP notional spend on **day** keys; week keys would silently
+  break that comparison. Trigger to build it: typing `days=365` more than once
+  after the 400.
 
-Also still open and explicitly out of scope for this plan:
-`workstation-xuq2` (oc-cost rate-book drift).
+Also still open and explicitly out of scope: `workstation-xuq2` (oc-cost
+rate-book drift), and the pre-existing full `SCAN message` that makes
+`days=183` take ~6.8s (the only index is `(session_id, time_created, id)`,
+useless for a bare time-range filter).
+
+### #499: what the cap and the bucket fix actually decided
+
+Two decisions worth not relitigating:
+
+**The cap refuses rather than coarsening.** Absent a `bucket` param,
+`choose_bucket()` already returns `day`, so an over-cap *hourly* request can
+only come from a caller who explicitly typed `bucket=hour`. Silently serving
+day buckets under a 200 discards the one parameter they deliberately
+overrode. Clamping `days` is worse still — it changes which dollars are on
+screen, so the total answers a different question than the one asked. The
+check lives in HTTP validation, **not** `load_aggregate`, because the CLI
+`report --days 365` shares that function and draws no bars.
+
+**`MAX_CHART_BUCKETS = 184` comes from geometry**: the plot is 710px and
+`bar_w = (710/M) * 0.78`, so 184 is the last count with a >=3px bar. It is
+deliberately not raised to admit `days=7&bucket=hour` (M=192, 2.88px) — 3px
+was the floor stated in advance, and bending it to fit one URL is how a cap
+creeps toward a number that protects bytes rather than legibility. The count
+is also an upper bound over the day rather than the live value, so a
+bookmarked URL cannot flip between 200 and 400 depending on the hour.
+
+**Two consequences are load-bearing and pinned by tests**: a zero-spend day is
+now a bucket, so it joins the day-keyed coverage footer (percentages drop,
+those days report 0.00 drift); and the window always contains now, so the
+current bucket is always marked partial rather than waiting for rows.
+
+### The review record, updated
+
+#499 makes it **five for five**: every chart change in this series shipped a
+green suite over something broken, and the adversarial review caught it each
+time. In #499 it found that the union I wrote to keep clock-skewed rows on the
+axis **reintroduced the exact gap the PR existed to remove** —
+`[T07, T08, T09, T15]` — because my contiguity test used a fixture without a
+future row. The fix is to extend the enumerated *range* to the newest row
+rather than union a key onto it.
+
+It also found two guards that could not fail: `partial_bucket`
+membership-vs-newest had no test distinguishing them, and the axis-spacing
+test had two data points, which yield a single interval that is uniform by
+construction. Correction 2 below now has a companion:
+
+5. **A fixture can make a guard vacuous without the assertion being wrong.**
+   Check that the *data* can express the failure, not just that the assertion
+   would catch it.
