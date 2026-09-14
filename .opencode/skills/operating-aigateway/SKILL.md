@@ -49,10 +49,10 @@ Use these rather than `systemctl start/stop`. Operator intent is the **flag**,
 not the unit's runtime state, and three things read it: the unit's
 `ConditionPathExists`, `aigateway-canary`, and the opencode routing activation.
 A bare `systemctl stop` leaves the flag set, so the canary restarts the gateway
-within a minute — correctly, since you never said you wanted it off. If the
-canary's pass lands while your stop job is still running you will see
-`Job for aigateway.service canceled` and the gateway will never go down at all.
-That is the system working; it is not an error to investigate.
+within a minute — correctly, since you never said you wanted it off. The stop
+itself always succeeds: the canary uses `--job-mode=fail` and skips any pass
+that finds the unit mid-transition, precisely so it can never cancel somebody
+else's job (a `nixos-rebuild switch` stopping docker, most of all).
 
 **Why intent is a file** (2026-09-13, bd `workstation-f794`). It used to be
 `systemctl is-active`, which cannot distinguish "the operator turned it off"
@@ -161,6 +161,14 @@ cp "bazel-bin/${GW#//}/server/server.jar" "$d/server.jar"
 cp "bazel-bin/${GW#//}/db/migrate.jar"     "$d/migrate.jar"
 docker compose -p dev up -d --build --no-deps migrate gateway
 ```
+
+> **You have about 3 minutes of unhealthiness before the canary intervenes.**
+> It restarts the stack after 3 consecutive failed health probes at 60s
+> spacing. A normal rebuild fits inside that; a slow build or a long migration
+> may not, and being `compose stop`ped mid-deploy is confusing rather than
+> harmful. Bracket a deploy you expect to be slow with `aigateway-disable` /
+> `aigateway-enable` — remembering that disabling also strips opencode's
+> routing on the next home-manager switch.
 
 Then confirm health is `UP` and a fresh request produces a populated ledger row.
 

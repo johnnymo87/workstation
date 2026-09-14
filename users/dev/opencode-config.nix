@@ -1766,7 +1766,7 @@ in
     '');
 
   # Inject (or strip) the aigateway baseURL override on cloudbox.
-  # Trigger: `aigateway.service` is currently active AND we have a
+  # Trigger: the aigateway INTENT FLAG exists AND we have a
   # GOOGLE_CLOUD_PROJECT secret. When both conditions hold: set both
   # `provider.google-vertex-anthropic.options.baseURL` (Claude) AND
   # `provider.google-vertex.options.baseURL` (Gemini) to URLs pointing
@@ -1781,13 +1781,16 @@ in
   # dollars). Verified live 2026-06-05 — see investigation report
   # docs/investigations/2026-06-05-vertex-gemini-surge/aigateway-cost-fix.md.
   #
-  # Why is-active and not is-enabled? NixOS unit files live in the
-  # read-only /etc/systemd/system (symlinks into the Nix store), so
-  # `systemctl enable/disable` fails ("Read-only file system") and
-  # `is-enabled` returns "linked" permanently. `is-active` is the signal
-  # the operator actually controls via `systemctl start`/`stop`.
-  # Persistence across reboot is not preserved (unit is wantedBy = [ ]) —
-  # explicit design choice for an opt-in tool.
+  # Why a flag and not `is-enabled` or `is-active`? NixOS unit files live in
+  # the read-only /etc/systemd/system (symlinks into the Nix store), so
+  # `is-enabled` returns "linked" permanently and can never be a signal. And
+  # `is-active` — which this used until 2026-09-13 — answers "is it up right
+  # now", not "does the operator want it up": anything that stops the unit
+  # silently re-points opencode at direct Vertex on the next switch. See the
+  # detailed rationale on the activation body below, and the long comment on
+  # systemd.services.aigateway in hosts/cloudbox/configuration.nix.
+  # The unit is now wantedBy = [ "multi-user.target" ], gated on the same
+  # flag, so intent DOES survive a reboot.
   #
   # The path shape MUST match what @ai-sdk/google-vertex/anthropic
   # generates by default — verified against
