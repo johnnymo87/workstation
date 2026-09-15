@@ -414,8 +414,10 @@
       # regression tripwires (the IFS tab-split read anti-pattern, the POST
       # /place fallback, and FRONTDOOR_URL/session vs the stale anchor).
       #
-      # Wired anyway, following the precedent set for lgtm-gh-mirror-tests in
-      # PR #370: leaving the file unwired ran the honest greps NOWHERE AT ALL.
+      # Wired anyway, following the precedent set by the lgtm-gh mirror suite in
+      # PR #370 (that mirror is gone -- its body was extracted to a real .sh
+      # file the tests execute, and the check is now lgtm-gh-source-tests):
+      # leaving the file unwired ran the honest greps NOWHERE AT ALL.
       # Execution and fidelity are orthogonal problems, and the *-mirror-tests
       # suffix exists so a green here cannot be misread as "production is
       # covered". Killing the mirror is tracked in workstation-dimz, which now
@@ -886,29 +888,24 @@
         touch $out
       '';
 
-      # lgtm-gh. NAMED "-mirror-" on purpose: 9 of its 15 assertions drive a
-      # COPY of the resolution logic that lives in pkgs/lgtm-gh/default.nix,
-      # not the shipped wrapper, so a green result here is NOT behavioural
-      # coverage of production. Do not read it as such.
+      # lgtm-gh, REAL BINARY. default.nix takes `{ pkgs }` and reads `pkgs.gh`,
+      # so overriding just that attribute yields the shipped wrapper with a
+      # stub CLI underneath it. The binary under test is the one that ships;
+      # only the `gh` it wraps is substituted.
       #
-      # It is wired anyway because the remaining 6 assertions grep the real
-      # default.nix and are the only live tripwire on it, and because the
-      # alternative (leave it unwired until the mirror is gone) runs those 6
-      # nowhere at all. The mirror exists because production cannot currently
-      # be intercepted -- writeShellApplication prepends its runtimeInputs to
-      # PATH, so a fake `gh` fixture loses to the pinned real one. Removing the
-      # mirror means overriding that input with a stub package and driving the
-      # real binary; that is workstation-dimz's job and its bead records this.
-      # lgtm-gh, REAL BINARY. Closes the gap the mirror suite documents below
-      # for the artifact-ledger behaviour: default.nix takes `{ pkgs }` and
-      # reads `pkgs.gh`, so overriding just that attribute yields the shipped
-      # wrapper with a stub CLI underneath it. The binary under test is the one
-      # that ships; only the `gh` it wraps is substituted, so unlike the mirror
-      # these assertions ARE production coverage.
+      # THE SIBLING SUITE IS NO LONGER A MIRROR. pkgs/lgtm-gh/test.sh used to
+      # drive a hand-copied COPY of the wrapper logic, because production could
+      # not be intercepted (writeShellApplication prepends its runtimeInputs to
+      # PATH, so a fake `gh` loses to the pinned real one). The body now lives
+      # in pkgs/lgtm-gh/lgtm-gh.sh, which default.nix reads verbatim and
+      # test.sh executes directly, so both suites are production coverage and
+      # there is no copy left to drift. This one still earns its keep: it is
+      # the only check that the DERIVATION -- runtime inputs, PATH, the built
+      # artifact -- behaves, rather than the source text.
       lgtm-gh-real-tests =
         let
           stubGh = devboxPkgs.writeShellScriptBin "gh" ''
-            { echo "GH_TOKEN=$GH_TOKEN"; echo "ARGS=$*"; } > "$GH_RECORD"
+            { echo "GH_TOKEN=$GH_TOKEN"; echo "ARGS=$*"; echo "GH_CONFIG_DIR=''${GH_CONFIG_DIR:-}"; echo "XDG_DATA_HOME=''${XDG_DATA_HOME:-}"; } > "$GH_RECORD"
             if [ -n "''${FAKE_GH_BODY:-}" ]; then printf '%s' "$FAKE_GH_BODY"; fi
             exit "''${FAKE_GH_RC:-0}"
           '';
@@ -930,7 +927,7 @@
           touch $out
         '';
 
-      lgtm-gh-mirror-tests = devboxPkgs.runCommand "lgtm-gh-mirror-tests" {
+      lgtm-gh-source-tests = devboxPkgs.runCommand "lgtm-gh-source-tests" {
         nativeBuildInputs = [
           # jq: the ledger assertions read it back. Without it here the suite
           # still passes on a dev box (jq is on the ambient PATH) and fails
@@ -946,18 +943,16 @@
           echo "GATE FAILURE: lgtm-gh suite did not reach its final pass line." >&2
           exit 1
         }
-        # Pinned like oc-cost: the 8 production-source greps are the only part
-        # of this suite that touches production, and a silent drop would leave
-        # a green check testing nothing but the mirror.
+        # Pinned like oc-cost: a silently dropped assertion would leave a
+        # green check testing less than it claims.
         #
-        # 15 -> 31 deliberately: +12 mirror assertions and +2 source greps for
-        # the review-artifact ledger, +2 source greps carried from before.
-        # For real coverage of that ledger see lgtm-gh-real-tests, which drives
-        # the SHIPPED binary; these mirror assertions are a design record, not
-        # evidence.
-        grep -q '^31 passed, 0 failed' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected '31 passed, 0 failed' (23 mirror + 8" >&2
-          echo "production-source greps). Update deliberately, in the same commit." >&2
+        # 31 -> 147 deliberately. The suite stopped being a mirror (it now runs
+        # lgtm-gh.sh, the real body), and gained the merge-policy cases: 92 of
+        # these 147 fail if the policy block is neutered, which is the number
+        # that makes them evidence rather than decoration.
+        grep -q '^147 passed, 0 failed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected '147 passed, 0 failed'." >&2
+          echo "Update deliberately, in the same commit." >&2
           exit 1
         }
         touch $out
