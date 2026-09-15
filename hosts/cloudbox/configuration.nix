@@ -491,8 +491,12 @@ in
         group = "dev";
         mode = "0400";
       };
-      # Bazel remote cache URL — the bucket name encodes the GCP project,
-      # so it lives in sops and is templated into ~/.bazelrc at activation.
+      # Bazel remote cache URL — the bucket name encodes the GCP project, so
+      # it lives in sops rather than in source. CURRENTLY UNUSED: ~/.bazelrc
+      # no longer sets --remote_cache at all (see users/dev/home.base.nix —
+      # the bucket was never reachable without --google_default_credentials,
+      # and setting an https cache there broke mono's gRPC remote downloader).
+      # Kept declared so restoring it needs no re-encryption; safe to drop.
       bazel_remote_cache_url = {
         owner = "dev";
         group = "dev";
