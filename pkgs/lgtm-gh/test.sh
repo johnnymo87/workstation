@@ -1,100 +1,28 @@
 #!/usr/bin/env bash
-# Unit tests for the lgtm-gh wrapper. Mirrors the resolution logic from
-# default.nix and exercises it directly against fixtures (with a fake `gh` on
-# PATH so no real GitHub call happens), plus a source-grep guard so the mirror
-# can't silently diverge from production.
+# Unit tests for the lgtm-gh wrapper. Runs the REAL wrapper body
+# (lgtm-gh.sh, which default.nix reads verbatim) against fixtures, with a fake
+# `gh` on PATH so no real GitHub call happens.
 # Run: bash test.sh
 
 set -o errexit -o nounset -o pipefail
 
-# Resolve this script's directory up front, before any `cd`, so the
-# production-source grep guard below can find default.nix next to it.
+# Resolve this script's directory up front, before any `cd`, so the script
+# under test and the packaging guard below can be found next to it.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ---- logic under test (mirror of default.nix) -------------------------------
+# ---- logic under test (THE REAL SOURCE) -------------------------------------
 #
 # lgtm-gh reads $PWD/.lgtm-reviewer (a single GitHub login), resolves that
 # login's PAT at $HOME/.config/lgtm/tokens/<login>.pat, and execs `gh` with
 # GH_TOKEN set to the PAT so the dispatched session acts as that identity.
-# This mirror returns (instead of exec/exit) so the harness can keep running;
-# the source-grep guard at the bottom asserts production uses exec/exit.
+#
+# This used to be a hand-copied MIRROR of the logic in default.nix, which the
+# file itself had to label "a design record, not evidence". The body now lives
+# in lgtm-gh.sh and default.nix reads it verbatim, so these assertions run
+# PRODUCTION SOURCE -- a subprocess, so its exec/exit are fine, with the fake
+# `gh` below winning on PATH because nothing has prepended a pinned one.
 lgtm_gh() {
-  local login_file token_file login ledger_dir ledger_file tmp rc
-  login_file="$PWD/.lgtm-reviewer"
-  [ -r "$login_file" ] || { echo "lgtm-gh: missing $login_file" >&2; return 1; }
-  login=$(tr -d '[:space:]' < "$login_file")
-  [ -n "$login" ] || { echo "lgtm-gh: empty $login_file" >&2; return 1; }
-  token_file="$HOME/.config/lgtm/tokens/$login.pat"
-  [ -r "$token_file" ] || { echo "lgtm-gh: missing $token_file for login=$login" >&2; return 1; }
-
-  ledger_dir="$HOME/.local/state/lgtm"
-  ledger_file="$ledger_dir/review-artifacts.jsonl"
-
-  matched_endpoint=""
-  is_review_post() {
-    local a endpoint="" posty=0 prev=""
-    for a in "$@"; do
-      case "$a" in
-        -f|-F|--field|--raw-field) posty=1 ;;
-        POST|post) if [ "$prev" = "-X" ] || [ "$prev" = "--method" ]; then posty=1; fi ;;
-      esac
-      case "$a" in
-        */pulls/*/reviews|*/pulls/*/comments|*/pulls/comments/*/replies)
-          endpoint="$a" ;;
-      esac
-      prev="$a"
-    done
-    if [ -n "$endpoint" ] && [ "$posty" -eq 1 ]; then
-      matched_endpoint="$endpoint"
-      return 0
-    fi
-    return 1
-  }
-
-  record_artifact() {
-    local endpoint="$1" body_file="$2" id kind ts
-    mkdir -p "$ledger_dir" 2>/dev/null || {
-      echo "lgtm-gh: cannot create $ledger_dir; artifact unrecorded (reads as human)" >&2
-      return 0
-    }
-    id="$(jq -r '.id? // empty' < "$body_file" 2>/dev/null || true)"
-    case "$id" in
-      ""|*[!0-9]*)
-        echo "lgtm-gh: no numeric id in response; artifact unrecorded (reads as human)" >&2
-        return 0 ;;
-    esac
-    case "$endpoint" in
-      */reviews)  kind="review" ;;
-      */replies)  kind="reply" ;;
-      *)          kind="comment" ;;
-    esac
-    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    jq -cn \
-      --arg ts "$ts" --arg login "$login" --arg endpoint "$endpoint" \
-      --arg kind "$kind" --argjson id "$id" \
-      '{ts:$ts, login:$login, endpoint:$endpoint, kind:$kind, id:$id}' \
-      >> "$ledger_file" 2>/dev/null \
-      || echo "lgtm-gh: ledger append failed; artifact unrecorded (reads as human)" >&2
-    return 0
-  }
-
-  if ! is_review_post "$@"; then
-    env GH_TOKEN="$(cat "$token_file")" gh "$@"
-    return $?
-  fi
-
-  tmp="$(mktemp 2>/dev/null)" || { env GH_TOKEN="$(cat "$token_file")" gh "$@"; return $?; }
-  rc=0
-  set +o errexit
-  env GH_TOKEN="$(cat "$token_file")" gh "$@" > "$tmp"
-  rc=$?
-  set -o errexit
-  cat "$tmp"
-  if [ "$rc" -eq 0 ]; then
-    record_artifact "$matched_endpoint" "$tmp"
-  fi
-  rm -f "$tmp"
-  return "$rc"
+  bash "$script_dir/lgtm-gh.sh" "$@"
 }
 
 # ---- test infrastructure ----------------------------------------------------
@@ -141,7 +69,7 @@ gh_record="$sandbox/gh-record"
 # path, so no amount of PATH in the check can fix it from outside.
 cat > "$fakebin/gh" <<EOF
 #!$BASH
-{ echo "GH_TOKEN=\$GH_TOKEN"; echo "ARGS=\$*"; } > "$gh_record"
+{ echo "GH_TOKEN=\$GH_TOKEN"; echo "ARGS=\$*"; echo "GH_CONFIG_DIR=\${GH_CONFIG_DIR:-}"; echo "XDG_DATA_HOME=\${XDG_DATA_HOME:-}"; } > "$gh_record"
 # FAKE_GH_BODY / FAKE_GH_RC let a test drive the response the wrapper parses.
 if [ -n "\${FAKE_GH_BODY:-}" ]; then printf '%s' "\$FAKE_GH_BODY"; fi
 exit "\${FAKE_GH_RC:-0}"
@@ -259,10 +187,202 @@ lgtm_gh pr view 123 >/dev/null
 assert_eq "0" "$([ -f "$ledger" ] && wc -l < "$ledger" || echo 0)" \
   "non-review call -> nothing recorded"
 
-# ---- production-source check (default.nix) ----------------------------------
+
+# ---- merge policy -----------------------------------------------------------
 #
-# Grep default.nix directly so a source-level regression trips before deploy
-# and the mirror above can't silently diverge from prod.
+# lgtm has two lanes. The REVIEW lane can no longer merge anything (lgtm#110
+# deleted its merge instruction). The ASSIST lane still merges, deliberately,
+# but ONLY in blueapron/culinary-operations-server and
+# blueapron/internal-frontends -- 15 merges on record, all COPS gem bumps.
+# Dependency bumps anywhere else (food-truck/mono above all) belong to the
+# goose lane, a different system.
+#
+# Before this, that was a property of PROMPT TEXT: the wrapper forwarded
+# `pr merge` unchanged, so a PR comment that talked a session into merging
+# simply worked. The assist lane is the one caller that MUST keep working, so
+# the allow cases below matter as much as the deny ones.
+
+printf 'Krosantos\n' > "$worktree/.lgtm-reviewer"
+denials="$HOME/.local/state/lgtm/merge-denials.jsonl"
+
+gh_ran() { [ -f "$gh_record" ] && echo yes || echo no; }
+
+assert_allowed() {
+  local msg="$1"; shift
+  rm -f "$gh_record"
+  lgtm_gh "$@" >/dev/null 2>&1 && rc=0 || rc=$?
+  assert_eq "0" "$rc" "ALLOW $msg -> exit 0"
+  assert_eq "yes" "$(gh_ran)" "ALLOW $msg -> gh was invoked"
+}
+
+assert_refused() {
+  local msg="$1"; shift
+  rm -f "$gh_record"
+  err="$(lgtm_gh "$@" 2>&1 1>/dev/null)" && rc=0 || rc=$?
+  assert_eq "3" "$rc" "DENY $msg -> exit 3"
+  assert_eq "no" "$(gh_ran)" "DENY $msg -> gh was never invoked"
+  assert_contains "$err" "lgtm-gh: refusing" "DENY $msg -> says it is refusing"
+}
+
+# --- pr merge: the assist lane's own call form (prompt.ts:260) ---------------
+assert_allowed "assist form, culinary-operations-server" \
+  pr merge 123 --repo blueapron/culinary-operations-server --auto --squash
+assert_allowed "assist form, internal-frontends" \
+  pr merge 123 --repo blueapron/internal-frontends --auto --squash
+assert_eq "ARGS=pr merge 123 --repo blueapron/internal-frontends --auto --squash" \
+  "$(sed -n 2p "$gh_record")" "ALLOW passes merge args through verbatim"
+
+assert_refused "mono" pr merge 4559 --repo food-truck/mono --auto --squash
+assert_refused "bare number, no --repo" pr merge 4559 --auto --squash
+
+# In gh a PR-URL selector WINS over --repo (finder.go:117-122), so trusting
+# --repo would resolve to an allowlisted repo while gh merged mono. And pflag
+# is last-wins on a repeated flag. Disagreement is refused, not ranked.
+assert_refused "PR URL says mono, --repo says allowlisted" \
+  pr merge https://github.com/food-truck/mono/pull/5 --repo blueapron/internal-frontends --auto
+assert_refused "repeated --repo, allowlisted then not" \
+  pr merge 5 --repo blueapron/internal-frontends --repo food-truck/mono
+assert_allowed "PR URL alone, allowlisted" \
+  pr merge https://github.com/blueapron/internal-frontends/pull/5 --squash
+
+# --disable-auto CANCELS an auto-merge; refusing a de-escalation would be
+# perverse, and gh forbids it alongside --auto/--admin (merge.go:129-133).
+assert_allowed "--disable-auto, even in mono" \
+  pr merge 5 --repo food-truck/mono --disable-auto
+
+# --- gh api: REST merge endpoints -------------------------------------------
+assert_refused "REST merge, -X PUT" api -X PUT repos/food-truck/mono/pulls/5/merge
+assert_refused "REST merge, attached -XPUT" api -XPUT repos/food-truck/mono/pulls/5/merge
+assert_refused "REST merge, --method=put" api --method=put repos/food-truck/mono/pulls/5/merge
+assert_refused "REST merge, query string on path" \
+  api -X PUT "repos/food-truck/mono/pulls/5/merge?foo=1"
+assert_refused "REST merge, --input (a POST with no -f)" \
+  api repos/food-truck/mono/pulls/5/merge --input /dev/null
+# The numeric-id route is real and carries no slug -- which is exactly why
+# "cannot resolve" has to refuse rather than fall through.
+assert_refused "REST merge via repositories/<id>/" api -X PUT repositories/12345/pulls/5/merge
+assert_refused "branch-merge endpoint" api repos/food-truck/mono/merges -f base=main -f head=topic
+assert_allowed "REST merge in an allowlisted repo" \
+  api -X PUT repos/blueapron/culinary-operations-server/pulls/5/merge
+assert_allowed "GET on the merge endpoint is a read" \
+  api repos/food-truck/mono/pulls/5/merge
+
+# --- gh api graphql ----------------------------------------------------------
+# These mutations carry a pull-request NODE ID, never a repo slug, so they can
+# never be scoped -- refused outright. lgtm's prompts contain no graphql.
+assert_refused "graphql enablePullRequestAutoMerge" \
+  api graphql -f 'query=mutation{enablePullRequestAutoMerge(input:{pullRequestId:"X"}){id}}'
+assert_refused "graphql mergePullRequest" \
+  api graphql -f 'query=mutation{mergePullRequest(input:{pullRequestId:"X"}){id}}'
+assert_refused "graphql enqueuePullRequest" \
+  api graphql -f 'query=mutation{enqueuePullRequest(input:{pullRequestId:"X"}){id}}'
+assert_refused "graphql query read from a file" api graphql -F query=@/dev/null
+assert_refused "graphql query read from --input" api graphql --input /dev/null
+assert_allowed "graphql read" api graphql -f 'query=query{viewer{login}}'
+
+# --- subcommands that would hide a merge from the parser ---------------------
+assert_refused "alias" alias set m "pr merge"
+assert_refused "extension" extension install someone/gh-merge
+
+# An alias that ALREADY exists expands inside gh, after this parser has run, so
+# gh is pinned at a config dir the wrapper owns rather than the user's.
+rm -f "$gh_record"
+lgtm_gh pr view 123 >/dev/null
+assert_contains "$(sed -n 3p "$gh_record")" "/.local/state/lgtm/gh-config" \
+  "gh runs against the wrapper's own GH_CONFIG_DIR"
+
+# --- shapes gh accepts that a naive scan does not (all confirmed against the
+# --- real gh 2.83.2 by review, each one a merge in mono that the wrapper
+# --- would otherwise have resolved to an allowlisted repo) -------------------
+
+# gh's ParseURL takes any http(s) URL and then normalises the host: lowercase,
+# `www.` stripped, port dropped (finder.go:306-333, repo.go:74-76). And the URL
+# selector BEATS --repo. So only a bare number or the exact canonical URL is
+# understood; everything else is unparseable and refuses.
+assert_refused "www. host in the PR URL" \
+  pr merge https://www.github.com/food-truck/mono/pull/5 --repo blueapron/internal-frontends --auto
+assert_refused "uppercase scheme in the PR URL" \
+  pr merge HTTPS://github.com/food-truck/mono/pull/5 --repo blueapron/internal-frontends --auto
+assert_refused "mixed-case host in the PR URL" \
+  pr merge https://GitHub.COM/food-truck/mono/pull/5 --repo blueapron/internal-frontends --auto
+assert_refused "port in the PR URL" \
+  pr merge https://github.com:443/food-truck/mono/pull/5 --repo blueapron/internal-frontends --auto
+# gh also accepts a BRANCH as the selector; this scan does not model that.
+assert_refused "branch name as the selector" \
+  pr merge some-branch --repo blueapron/internal-frontends --auto
+
+# A short CLUSTER hides a flag inside an argument this scan cannot decompose:
+# `-sR X` is `--squash --repo X`, and pflag is last-wins.
+assert_refused "short cluster smuggling a second --repo" \
+  pr merge 5 --repo blueapron/internal-frontends -sR food-truck/mono
+
+# `gh api`'s path is not reliably the first positional -- any value-taking flag
+# before it shifts what lands there. Classification is by SHAPE, not position.
+assert_refused "merge path behind -H (the form in every REST doc example)" \
+  api -X PUT -H "Accept: application/vnd.github+json" repos/food-truck/mono/pulls/5/merge
+assert_refused "merge path with -iXPUT (cluster carrying the method)" \
+  api -iXPUT repos/food-truck/mono/pulls/5/merge
+assert_refused "merge path with -iX PUT" \
+  api -iX PUT repos/food-truck/mono/pulls/5/merge
+assert_allowed "an allowlisted merge still works behind -H" \
+  api -X PUT -H "Accept: application/vnd.github+json" \
+  repos/blueapron/culinary-operations-server/pulls/5/merge
+
+# `gh api /graphql` and `gh api -H ... graphql` reach the same endpoint while
+# putting something other than the path first, so the mutation names are
+# matched against the query text regardless of the path argument.
+assert_refused "graphql via a leading-slash path" \
+  api /graphql -f 'query=mutation{mergePullRequest(input:{pullRequestId:"X"}){id}}'
+assert_refused "graphql with a header before the path" \
+  api -H "X: y" graphql -f 'query=mutation{mergePullRequest(input:{pullRequestId:"X"}){id}}'
+assert_refused "graphql mergeBranch (the twin of the /merges endpoint)" \
+  api graphql -f 'query=mutation{mergeBranch(input:{repositoryId:"X"}){id}}'
+
+# The repo of a merge comes from the MERGE PATH only. Otherwise a --template or
+# --jq value carrying an allowlisted slug would clear a merge aimed elsewhere.
+assert_refused "allowlisted slug in a -t value, merge aimed at a numeric-id route" \
+  api -X PUT -t repos/blueapron/internal-frontends/x repositories/12345/pulls/5/merge
+
+# gh extensions live under XDG_DATA_HOME, NOT GH_CONFIG_DIR (go-gh DataDir
+# ignores it), and `lgtm-gh <ext>` parses as no subcommand this file knows.
+rm -f "$gh_record"
+lgtm_gh pr view 123 >/dev/null
+assert_contains "$(sed -n 4p "$gh_record")" "/.local/state/lgtm/gh-data" \
+  "gh runs against the wrapper's own XDG_DATA_HOME"
+
+# The ledger's endpoint match is position-independent for the same reason the
+# merge one is. Missing here is the SAFE direction (unrecorded reads as human),
+# but a systematic miss on -H forms burns shepherd wakes.
+rm -f "$ledger"
+FAKE_GH_BODY='{"id":5150}' \
+  lgtm_gh api -X POST -H "Accept: application/vnd.github+json" \
+  repos/food-truck/mono/pulls/42/reviews -f event=COMMENT >/dev/null
+assert_eq "5150" "$(jq -r .id < "$ledger")" "review POST behind -H is still recorded"
+
+# A refusal must say WHY in the caller's own terms. "cannot determine the
+# target repository -- pass --repo" is wrong advice when --repo was already
+# passed, and wrong advice at a refusal is the moment a session starts looking
+# for another route.
+err="$(lgtm_gh pr merge some-branch --repo blueapron/internal-frontends 2>&1 1>/dev/null)" || true
+assert_contains "$err" "the PR selector is neither a bare number" \
+  "refusal names the actual reason, not a generic one"
+err="$(lgtm_gh api graphql --input /dev/null 2>&1 1>/dev/null)" || true
+assert_contains "$err" "not inline" "opaque graphql refusal names the actual reason"
+
+# --- the tripwire ------------------------------------------------------------
+rm -f "$denials"
+lgtm_gh pr merge 4559 --repo food-truck/mono --auto --squash >/dev/null 2>&1 || true
+assert_eq "1" "$([ -f "$denials" ] && wc -l < "$denials" || echo 0)" \
+  "a refusal is recorded once"
+assert_eq "food-truck/mono" "$(jq -r .repo < "$denials")" "denial records the repo"
+assert_eq "Krosantos" "$(jq -r .login < "$denials")" "denial records the acting login"
+
+# ---- packaging check (default.nix) ------------------------------------------
+#
+# Everything above runs lgtm-gh.sh directly, which proves the LOGIC but not
+# that the shipped derivation is built from that file. These greps pin the
+# wiring, so a default.nix that quietly reverted to an inline copy (or dropped
+# a runtime input the script needs) trips here rather than on cloudbox.
 default_nix="$script_dir/default.nix"
 if [ -f "$default_nix" ]; then
   grep_guard() {
@@ -274,14 +394,20 @@ if [ -f "$default_nix" ]; then
       fail=$((fail + 1))
     fi
   }
-  grep_guard '\.lgtm-reviewer' "source reads .lgtm-reviewer"
-  grep_guard '\.config/lgtm/tokens/' "source resolves token under ~/.config/lgtm/tokens"
-  grep_guard 'GH_TOKEN=' "source sets GH_TOKEN for gh"
-  grep_guard 'exec env GH_TOKEN' "source execs gh (replaces the wrapper process)"
-  grep_guard 'tr -d' "source strips whitespace from the login"
-  grep_guard 'exit 1' "source hard-errors (exit 1) on misconfiguration"
-  grep_guard 'review-artifacts\.jsonl' "source records artifacts to the ledger"
-  grep_guard 'reads as human' "source fails toward human on every record failure"
+  grep_guard 'builtins\.readFile \./lgtm-gh\.sh' "derivation is built from lgtm-gh.sh, not an inline copy"
+  grep_guard 'pkgs\.coreutils' "derivation pins coreutils (tr/cat/date/mktemp/mkdir)"
+  grep_guard 'pkgs\.gh' "derivation pins the gh it wraps"
+  grep_guard 'pkgs\.jq' "derivation pins jq (ledger + denial records)"
+
+  body_sh="$script_dir/lgtm-gh.sh"
+  if [ -f "$body_sh" ]; then
+    default_nix="$body_sh"  # reuse grep_guard against the body
+    grep_guard 'exec env GH_TOKEN' "body execs gh (replaces the wrapper process)"
+    grep_guard 'reads as human' "body fails toward human on every record failure"
+  else
+    printf 'FAIL  packaging check: lgtm-gh.sh not found next to test (%s)\n' "$body_sh"
+    fail=$((fail + 1))
+  fi
 else
   printf 'FAIL  production-source check: default.nix not found next to test (%s)\n' "$default_nix"
   fail=$((fail + 1))
