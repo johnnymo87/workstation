@@ -591,19 +591,34 @@ orderings **disagree at every position** — unsurprising, since v1.18.18 exists
 fix a 48-bit message-ID wrap. For the failing session the anchor sat 1744 back by
 `id` and **42 back by time**; `GET /session/<id>/message?limit=100` returns it.
 
-Corrected distribution over 66 sessions, ordered the way the store orders:
+**This correction was itself partly wrong, and was re-measured on 2026-09-15 after
+adversarial review.** The first pass changed BOTH the population and the sort key,
+then attributed the entire difference to the sort key. Re-measured across one
+fixed population — the 73 anchored sessions resolvable that day, both orderings,
+same rows:
 
-| | wrong (`ORDER BY id`) | correct (`time_created`) |
+| | `ORDER BY id` | `time_created` (what the store uses) |
 |---|---|---|
-| median | 192 | **39** |
-| p75 | 340 | 109 |
-| max | 498 | **381** |
-| within 100 | 27% | **74%** |
-| within 512 | — | **100%** |
+| median | 43 | **36** |
+| p75 | 152 | 87 |
+| p90 | 348 | 201 |
+| max | **1936** | **384** |
+| within 100 | 69% | **76%** |
+| within 512 | 95% | **100%** |
 
-So the deep-fetch work is justified for the **26%** outside the default window,
-not the 73% claimed, and `REACH_LIMIT = 512` is now *provably* sized rather than
-luckily sized. But it could never have fixed the reported failure.
+The orderings disagree on only **7 of 73** distances — but where they disagree
+they disagree enormously, and the maximum is the number a fetch limit is sized
+against. So **ordering governs the tail, not the median.** The original "median
+192 / 27% inside" came from a different population that cannot be reconstructed,
+and blaming it on the sort key was a second wrong answer that happened to point
+at a real defect.
+
+The deep-fetch work is justified for the **24%** outside the default window, not
+the 73% originally claimed, and `REACH_LIMIT = 512` clears the real maximum of
+384. It could never have fixed the reported failure either way.
+
+Any number quoted here should carry `n` and a date: this database grows, and the
+figures moved measurably between two measurements a day apart.
 
 ### The actual root cause: a cold-attach subscription race
 
@@ -650,6 +665,28 @@ the environment of what it launches:
 `OPENCODE_SCROLL_TO="<sid>:<msgid>"` → `oc-auto-attach` → nvim `jobstart` env →
 `Session()` reads it at setup, matches the sid, seeds `pendingScroll`, and
 deletes the variable so a remount cannot re-seed.
+
+**Shipped 2026-09-15** as `v1.18.18-patched.3` (opencode-patched#53) and
+workstation#527. Two defects were found by adversarial review before it landed,
+both confirmed empirically rather than argued:
+
+- **The variable leaked into tmux's global environment.** When `oc-auto-attach`
+  finds no tmux server it starts one, and tmux copies its whole environment into
+  the *global* environment, merging that into every window it creates thereafter.
+  A server started while the variable was set handed it to windows opened hours
+  later — a stale target for the session named in it, i.e. the silent wrong-jump
+  the qualification exists to prevent, made permanent instead of transient. Fixed
+  by `unset` immediately after capture.
+- **The success toast asserted a jump it had not observed.** It fired when the
+  *fetch* resolved, strictly before `scrollChildIntoView` ran, so a scroll that
+  landed nowhere was reported as "Jumped to unread message". It now claims only
+  the load.
+
+One residual is tracked rather than fixed (`workstation-3xx4`): on the cold path
+the scroll now runs in the first moments of process life, where the single 50ms
+wait for opentui layout is less certain than it was on the warm path. Not
+observed; if a real cold jump lands at the bottom, the fix is to make that wait
+observable rather than to lengthen the timer.
 
 `focus_here` / `switch_pane` keep a **single** POST with `force=true` — the TUI is
 already subscribed there — and the 0/300/900/2000 retry schedule is dropped. No
