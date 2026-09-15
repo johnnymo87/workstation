@@ -487,14 +487,16 @@ scrolled to **by any mechanism** — launch parameter, retention, or event. It
 degrades correctly (no scroll, land at bottom).
 
 > **CORRECTED 2026-09-04, after live testing. This paragraph was written as
-> though the ceiling were an edge case. It is the common case, and the feature
-> does nothing about three quarters of the time.**
+> though the ceiling were an edge case.**
 >
-> Measured over the 120 most recent non-mirror anchored events (118 resolvable
+> **⚠️ THE NUMBERS IN THIS BLOCK WERE WRONG. See the RETRACTION below before
+> believing anything here.** Retained rather than deleted because the reasoning
+> error is the useful part.
+>
+> ~~Measured over the 120 most recent non-mirror anchored events (118 resolvable
 > in `opencode.db`): the anchor sits a **median of 192 messages** from the end
 > of the transcript — p25 66, p75 340, max 498. **Only 32/118 (27%) fall within
-> the 100-message window.** The first two real user tests both missed, at 174
-> and 192 back.
+> the 100-message window.**~~
 >
 > The error was reasoning about the limit as though messages were conversational
 > turns. They are not. The anchor is the last *human* turn before a
@@ -550,10 +552,11 @@ degrades correctly (no scroll, land at bottom).
 > dialog all read the list tail, so a detached historical window would lie to all
 > of them.
 >
-> **Measured cost:** the deep fetch takes ~7.6s and moves ~5.2MiB on a real
-> 759-message session, against ~2.1s and ~1.2MiB for the ordinary one. Hence a
-> progress notice, and an explicit "too far back" notice on a miss — silence for
-> eight seconds is indistinguishable from the failure this change removes.
+> **Measured cost — ALSO WRONG, see the retraction.** ~~the deep fetch takes
+> ~7.6s and moves ~5.2MiB on a real 759-message session~~. That was a single
+> COLD-CACHE sample. Re-measured warm and repeatedly: `limit=512` is
+> **0.05–0.18s**, `limit=100` is 0.016s. The fetch is not the constraint, and the
+> 15s progress notice sized against 7.6s is therefore pointless.
 >
 > **The blocker adversarial review caught, worth remembering:** releasing the cap
 > via `on(() => route.sessionID)` is DEAD CODE. `app.tsx` mounts this route under
@@ -570,6 +573,105 @@ degrades correctly (no scroll, land at bottom).
 > bottom (`workstation-hswe`; the margin buys ~20, and a jumped session is
 > usually idle because the anchor is written when the agent *finishes*), and the
 > render cost is measured at the fetch but not at paint (`workstation-p267`).
+
+---
+
+## RETRACTION AND ROOT CAUSE (2026-09-14)
+
+**Every anchor-distance number above was computed with the wrong sort key, and
+the feature's real failure was never reach at all.** Found because the user
+noticed the picker said "7 unread" for a session I was claiming had 1744
+messages of unread work — the two could not both be true.
+
+### The measurement error
+
+I ordered messages by `id`. The server and the TUI store order by
+`time_created` (`compareMessage`, `sync.tsx:56`). On this database the two
+orderings **disagree at every position** — unsurprising, since v1.18.18 exists to
+fix a 48-bit message-ID wrap. For the failing session the anchor sat 1744 back by
+`id` and **42 back by time**; `GET /session/<id>/message?limit=100` returns it.
+
+Corrected distribution over 66 sessions, ordered the way the store orders:
+
+| | wrong (`ORDER BY id`) | correct (`time_created`) |
+|---|---|---|
+| median | 192 | **39** |
+| p75 | 340 | 109 |
+| max | 498 | **381** |
+| within 100 | 27% | **74%** |
+| within 512 | — | **100%** |
+
+So the deep-fetch work is justified for the **26%** outside the default window,
+not the 73% claimed, and `REACH_LIMIT = 512` is now *provably* sized rather than
+luckily sized. But it could never have fixed the reported failure.
+
+### The actual root cause: a cold-attach subscription race
+
+Door journal for the failing jump:
+
+```
+13:37:21.899  POST .../scroll-to-message  -> :4097  (prospective=true)
+13:37:22.143  POST .../scroll-to-message  -> :4097
+13:37:22.741  POST .../scroll-to-message  -> :4097
+13:37:23.841  POST .../scroll-to-message  -> :4097   <- last retry
+13:37:27.988  GET  /event                 -> :4097   <- TUI SUBSCRIBES, 4.1s later
+```
+
+The jump auto-attached a **new TUI process**. SSE does not replay, so all four
+events were published to a client that had not subscribed. No `pendingScroll`, no
+`reach`, no notice, viewport at the bottom — matching the report exactly,
+including the absence of any toast.
+
+This plan *named* the risk ("Cold attach slower than ~2 s lands at the bottom")
+and then sized the retry schedule for a mount race of a few hundred ms. The real
+gap is ~6s, and it is the **dominant** failure mode.
+
+### Retention was proposed, and vetoed
+
+The obvious fix — the serve retains the target with a TTL, the TUI consumes it on
+subscribe — was **rejected by adversarial review**, for reasons worth keeping:
+
+- It stores a copy of a value already in `pigeon-daemon.db`, then needs a TTL, a
+  consume path, a door row, a census bump and skew tolerance to deliver it.
+- Putting it in the shared routing DB trips a landmine: `serve-lease.patch` pins
+  `EXPECTED_DDL_CHECKSUM` over pigeon's `ROUTING_DDL`, so adding a table makes
+  every serve on an old binary throw `SchemaMismatchError` and breaks pool-wide
+  lease enforcement until a lock-step restart.
+- Serve-local memory is not a safe alternative: prospective/HRW divergence is
+  **common, not theoretical** — measured read-only against the live DB, 242/496
+  assignments differ from the HRW winner, with 418 reassignments in 7 days.
+
+### What replaces it: deliver at launch, not over the wire
+
+The picker already knows `desc.kind`, and on the cold path it is the thing
+*launching the process*. So it stops POSTing there and threads the target into
+the environment of what it launches:
+
+`OPENCODE_SCROLL_TO="<sid>:<msgid>"` → `oc-auto-attach` → nvim `jobstart` env →
+`Session()` reads it at setup, matches the sid, seeds `pendingScroll`, and
+deletes the variable so a remount cannot re-seed.
+
+`focus_here` / `switch_pane` keep a **single** POST with `force=true` — the TUI is
+already subscribed there — and the 0/300/900/2000 retry schedule is dropped. No
+stored state, no TTL, no consume endpoint, no expiry. The existing
+`pendingScroll` path and the deep-fetch `reach` are reused unchanged.
+
+**An env var, not a CLI flag** — and not only for the reason this plan already
+gave at line ~371. `oc-auto-attach`'s option loop `break`s on an unknown flag and
+the following `if [ $# -ne 1 ]` exits 1, so a new picker passing `--scroll-to` to
+an old build would **kill cold attach entirely** rather than merely lose the
+jump. An unknown env var degrades to "attach works, no scroll".
+
+### A bug this feature already shipped
+
+`POST /scroll-to-message` satisfies `isMutatingSessionRequest`, so the door
+**records sticky routing** to whichever serve it hit — but the path is not in
+`STATE_PINNING_SUFFIXES`, so it never *places* the session. On a cold jump it pins
+serve X for `stickyTtlMs`=30s while `/event` places on Y. A prompt inside that
+window follows sticky to X, whose `withSessionLease` finds no assignment and
+**fails open**, running the turn on X while the TUI watches Y — a silently frozen
+TUI. Tracked as `workstation-5obe`; the launch-time design removes it from the
+cold path for free by not POSTing there at all.
 >
 > **Do not simply raise the initial limit.** That would slow every session open
 > to serve a minority case, and at a p75 of 340 it would have to be raised far
