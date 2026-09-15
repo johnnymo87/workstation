@@ -850,13 +850,20 @@ in
         # over HTTP via OPENCODE_URL and opencode-launch is pure curl/jq — no
         # local opencode process inherits this env. The serve pool owns the DB
         # pin (see opencode-serve-pool env).
-        # When the agent submits APPROVE on a PR by one of these authors,
-        # Phase 4 of the review prompt instructs it to immediately enable
-        # GitHub auto-merge (gh pr merge --auto --squash) so dependency
-        # bumps don't sit approved-but-unmerged. Dependabot doesn't
-        # auto-merge itself; renovate is listed defensively in case scope
-        # expands. Mirror this list with lgtm.yml's `authors` allowlist.
-        "LGTM_AUTO_APPROVE_AUTHORS=dependabot[bot],renovate[bot]"
+        # NB: no LGTM_AUTO_APPROVE_AUTHORS. It used to carry
+        # "dependabot[bot],renovate[bot]" into the review prompt's Phase 4,
+        # which appended `lgtm-gh pr merge --auto --squash` after an APPROVE
+        # for a listed author. lgtm#110 deleted Phase 4 and the config field
+        # behind it: the REVIEW lane can no longer merge anything, for anyone,
+        # and `loadConfig()` produces no `autoApproveAuthors` property at all
+        # (pinned by lgtm's tests/config.test.ts). Setting it here did nothing
+        # but suggest a grant that no longer exists.
+        #
+        # Assist is the one lane that still merges, and it does NOT read this:
+        # its authority comes from ASSIST_REPO_ALLOWLIST in lgtm's
+        # src/discover.ts (blueapron/culinary-operations-server and
+        # blueapron/internal-frontends). Re-adding this variable would not
+        # widen that, and removing it does not narrow it.
       ];
       ExecStart = "${pkgs.writeShellScript "lgtm-run" ''
         set -euo pipefail
