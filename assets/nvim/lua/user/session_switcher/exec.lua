@@ -155,8 +155,8 @@ end
 --- A scroll target, when given, travels in the child's ENVIRONMENT rather than
 --- over the wire (workstation-swws). The cold path cannot use the SSE request the
 --- warm paths use: this call is what CREATES the TUI, so on the real failure the
---- four retries were all published 4.1s before the new process subscribed, and SSE
---- does not replay. An inherited environment variable waits as long as startup
+--- LAST of four retries was published 4.1s before the new process subscribed (the
+--- first, ~6s), and SSE does not replay. An inherited environment variable waits as long as startup
 --- takes, and oc-auto-attach forwards it down to the TUI.
 ---
 --- Deliberately an env var and NOT a CLI flag. oc-auto-attach's option loop breaks

@@ -303,6 +303,20 @@ ${builtins.readFile ./canonical-path.sh}
       fi
     fi
 
+    # UNSET IT NOW, having captured it. An exported variable reaches every
+    # descendant of this script, and one of those descendants may be a brand new
+    # TMUX SERVER -- which copies its whole environment into the GLOBAL environment
+    # and merges that into every window it creates from then on. Verified: a server
+    # started with this set hands the value to windows opened long afterwards, for
+    # the server's entire lifetime. A later attach to the same session would then
+    # find a stale target and jump to an anchor the user has long since read, which
+    # is the silent-wrong-jump failure this design exists to avoid, made permanent.
+    #
+    # The local `scroll_to` carries it from here on, and it reaches the TUI through
+    # the RPC payload rather than through inheritance. This also covers curl, nvim
+    # --remote-expr and every other child, none of which have any use for it.
+    unset OPENCODE_SCROLL_TO
+
     # Validate the tmux session name (tmux forbids '.' and ':'; this also
     # blocks any shell-interpolation hazard). target_session is always set
     # (defaults to `main`), so no empty-string guard is needed.
