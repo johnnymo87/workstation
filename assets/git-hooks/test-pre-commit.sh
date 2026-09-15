@@ -237,6 +237,157 @@ exit_code=$?
 set -e
 check "KNOWN BYPASS: rebase at primary root succeeds" "0" "$exit_code"
 
+# -----------------------------------------------------------------------------
+# Identity check (workstation-e2xj).
+#
+# The fixtures above cannot exercise it: this suite exports GIT_AUTHOR_EMAIL and
+# points GIT_CONFIG_GLOBAL at /dev/null, so every repo made by make_repo has NO
+# file identity and the check fails open. That is a real behaviour worth pinning
+# (test 9d), but it would also have left the check with ZERO coverage while all
+# eight tests above stayed green -- so these fixtures build their own global
+# config file and drop the environment identity.
+# -----------------------------------------------------------------------------
+ID_HOME="$TMP_DIR/idhome"
+mkdir -p "$ID_HOME"
+cat > "$ID_HOME/gitconfig" <<'EOF'
+[user]
+	email = real@example.com
+	name = Real Person
+EOF
+
+# make_id_repo <name> -- like make_repo, but with a FILE identity (via
+# GIT_CONFIG_GLOBAL) and no GIT_AUTHOR_* in the environment, and in a linked
+# worktree so the primary-root check cannot mask the identity result.
+make_id_repo() {
+  local r="$TMP_DIR/$1"
+  mkdir -p "$r"
+  env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    GIT_CONFIG_GLOBAL="$ID_HOME/gitconfig" git -C "$r" init -q -b main
+  env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    GIT_CONFIG_GLOBAL="$ID_HOME/gitconfig" git -C "$r" commit -q --allow-empty -m "initial commit"
+  git -C "$r" config core.hooksPath "$HOOK_DIR"
+  echo "$r"
+}
+
+# id_commit <repo> <extra git args...> -- commit with the file identity in
+# scope and no environment identity, so only what the caller passes can vary.
+id_commit() {
+  local r="$1"; shift
+  env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    GIT_CONFIG_GLOBAL="$ID_HOME/gitconfig" git -C "$r" "$@" 2>&1
+}
+
+# Test 9a: a plain commit under the file identity is ACCEPTED.
+r="$(make_id_repo idplain)"
+git -C "$r" worktree add -q "$TMP_DIR/idplain-wt" -b work >/dev/null 2>&1
+before="$(count "$TMP_DIR/idplain-wt")"
+set +e
+output="$(id_commit "$TMP_DIR/idplain-wt" commit -q --allow-empty -m "honest commit")"
+exit_code=$?
+set -e
+check "Identity: plain commit under file identity succeeds" "0" "$exit_code"
+check "Identity: plain commit landed" "$((before + 1))" "$(count "$TMP_DIR/idplain-wt")"
+
+# Test 9b: `-c user.email=` is REFUSED. This is the exact shape that put 21
+# `dev@localhost` commits on this repo's main.
+before="$(count "$TMP_DIR/idplain-wt")"
+set +e
+output="$(id_commit "$TMP_DIR/idplain-wt" -c user.email=dev@localhost -c user.name=dev \
+  commit -q --allow-empty -m "synthetic identity")"
+exit_code=$?
+set -e
+check "Identity: -c user.email commit rejected" "1" "$exit_code"
+check "Identity: -c user.email commit did not land" "$before" "$(count "$TMP_DIR/idplain-wt")"
+contains "Identity: refusal names the offending address" "refusing to commit as <dev@localhost>" "$output"
+contains "Identity: refusal lists the configured identity" "real@example.com" "$output"
+contains "Identity: refusal offers --amend --reset-author" "--amend --reset-author" "$output"
+contains "Identity: refusal names --no-verify as the hatch" "--no-verify" "$output"
+
+# Test 9c: the same injection through GIT_CONFIG_COUNT is also REFUSED.
+# `-c` is not the only channel into `command` scope, and an agent that finds the
+# flag blocked has an obvious next thing to try.
+set +e
+output="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.email GIT_CONFIG_VALUE_0=dev@localhost \
+  id_commit "$TMP_DIR/idplain-wt" commit -q --allow-empty -m "env-injected identity")"
+exit_code=$?
+set -e
+check "Identity: GIT_CONFIG_COUNT injection rejected" "1" "$exit_code"
+# Exit 1 alone is near-vacuous here: a malformed GIT_CONFIG_* env makes git exit
+# 128, which would pass the check above while proving nothing about this hook.
+contains "Identity: GIT_CONFIG_COUNT refusal came from this check" \
+  "refusing to commit as <dev@localhost>" "$output"
+
+# Test 9c2: the refusal must name the PRESERVE case and forbid "fixing" it.
+# An author email that is not in the config file is not necessarily synthetic --
+# amend/reword/cherry-pick carry the ORIGINAL author, so a colleague's address
+# trips this guard while being entirely correct. An agent told only about
+# --reset-author would rewrite their authorship onto the human, which is this
+# guard's own failure mode in reverse and worse (it is a live person's credit).
+contains "Identity: refusal names the preserved-author case" "belongs to SOMEONE ELSE" "$output"
+contains "Identity: refusal warns against --reset-author there" "would steal" "$output"
+
+# Test 9d: FAIL-OPEN when the repo has no file identity at all. A throwaway
+# `git init` fixture is exactly where an inline identity is the RIGHT answer,
+# and this is also why the eight tests above still pass unchanged.
+r="$(make_repo idnofile)"
+git -C "$r" worktree add -q "$TMP_DIR/idnofile-wt" -b work >/dev/null 2>&1
+before="$(count "$TMP_DIR/idnofile-wt")"
+set +e
+env -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_EMAIL GIT_CONFIG_GLOBAL=/dev/null \
+  git -C "$TMP_DIR/idnofile-wt" -c user.email=throwaway@example.com -c user.name=Throwaway \
+  commit -q --allow-empty -m "fixture commit" >/dev/null 2>&1
+exit_code=$?
+set -e
+check "Identity: fail-open with no file identity (throwaway repo)" "0" "$exit_code"
+check "Identity: throwaway commit landed" "$((before + 1))" "$(count "$TMP_DIR/idnofile-wt")"
+
+# Test 9e: a LOCAL file identity is accepted even when it differs from the
+# global one. mono commits as a work address while global is the personal one;
+# an allow-set of "global only" would have blocked every commit there.
+r="$(make_id_repo idlocal)"
+git -C "$r" config user.email local@example.com
+git -C "$r" worktree add -q "$TMP_DIR/idlocal-wt" -b work >/dev/null 2>&1
+before="$(count "$TMP_DIR/idlocal-wt")"
+set +e
+id_commit "$TMP_DIR/idlocal-wt" commit -q --allow-empty -m "local identity" >/dev/null
+exit_code=$?
+set -e
+check "Identity: local-scope identity accepted" "0" "$exit_code"
+check "Identity: local-scope commit landed" "$((before + 1))" "$(count "$TMP_DIR/idlocal-wt")"
+
+# Test 9g: KNOWN FALSE POSITIVE -- amending a commit authored by someone else
+# is REFUSED, because `git commit --amend` PRESERVES the original author and the
+# hook cannot tell a preserved colleague from an invented address. Pinned rather
+# than fixed: `--no-verify` is the hatch, and the refusal message is what has to
+# carry the distinction (asserted in 9c2). Narrowing the check to skip
+# "author == HEAD author" would also skip a second synthetic commit stacked on a
+# first one, which is the case this guard exists for.
+r="$(make_id_repo idforeign)"
+git -C "$r" worktree add -q "$TMP_DIR/idforeign-wt" -b work >/dev/null 2>&1
+id_commit "$TMP_DIR/idforeign-wt" commit -q --allow-empty --no-verify \
+  --author="Peer <peer@example.org>" -m "colleague's commit" >/dev/null
+check "Identity: fixture commit is authored by the colleague" "peer@example.org" \
+  "$(git -C "$TMP_DIR/idforeign-wt" log -1 --format='%ae')"
+set +e
+output="$(id_commit "$TMP_DIR/idforeign-wt" commit --amend --no-edit)"
+exit_code=$?
+set -e
+check "KNOWN FALSE POSITIVE: amending a colleague's commit is refused" "1" "$exit_code"
+contains "KNOWN FALSE POSITIVE: refusal names the colleague's address" \
+  "refusing to commit as <peer@example.org>" "$output"
+
+# Test 9f: KNOWN BYPASS -- `-c core.hooksPath=` disables the hook entirely, for
+# the identity check exactly as for the root check. Pinned so it is not
+# rediscovered as a surprise.
+before="$(count "$TMP_DIR/idplain-wt")"
+set +e
+id_commit "$TMP_DIR/idplain-wt" -c core.hooksPath=/dev/null \
+  -c user.email=dev@localhost -c user.name=dev commit -q --allow-empty -m "bypass" >/dev/null
+exit_code=$?
+set -e
+check "KNOWN BYPASS: -c core.hooksPath disables the identity check" "0" "$exit_code"
+check "KNOWN BYPASS: hooksPath-bypassed commit landed" "$((before + 1))" "$(count "$TMP_DIR/idplain-wt")"
+
 if [ "$fail" -eq 0 ]; then
   echo "=== All tests PASSED ==="
   exit 0

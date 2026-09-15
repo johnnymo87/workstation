@@ -748,8 +748,8 @@
         # inside ( ... ) subshells, so every failure was discarded and it always
         # exited 0. Assert the case COUNT as well as the banner, so a suite that
         # silently stops adjudicating cannot present as green again.
-        [ "$(grep -c '^ok: ' "$TMPDIR/out.txt")" = 19 ] || {
-          echo "GATE FAILURE: expected 19 'ok:' lines, got" \
+        [ "$(grep -c '^ok: ' "$TMPDIR/out.txt")" = 40 ] || {
+          echo "GATE FAILURE: expected 40 'ok:' lines, got" \
                "$(grep -c '^ok: ' "$TMPDIR/out.txt")." >&2
           exit 1
         }

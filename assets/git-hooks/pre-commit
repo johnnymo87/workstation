@@ -71,4 +71,101 @@ EOF
   exit 1
 fi
 
+# -----------------------------------------------------------------------------
+# Identity check: refuse an author email that came from the COMMAND LINE rather
+# than from a config file.
+#
+# Why: GitHub attributes a commit by its author email. Agent sessions were
+# committing as `git -c user.email=dev@localhost -c user.name=dev commit`, which
+# mints a synthetic identity nobody owns -- 21 such commits reached this repo's
+# main, and a squash merge only hides it when the PR is squashed by the repo
+# owner. The habit is legitimate in a throwaway `git init` repo (a test fixture
+# has no configured identity) and gets carried into a real repo from there.
+#
+# `git config --show-scope` is what distinguishes the two: `-c user.email=...`
+# and GIT_CONFIG_COUNT/KEY/VALUE injection both report scope `command`, while
+# anything written in a file reports local/global/system/worktree. So the
+# allow-set is "every user.email git can see in a FILE", which needs no
+# maintenance and stays correct for repos with a local identity (mono commits as
+# jonathan@food-truck.io, pigeon as the GitHub-verified address).
+#
+# Deliberately NOT covered, in descending order of how much it matters:
+#   - `-c core.hooksPath=/dev/null` disables this hook and the root check above.
+#   - HOME / XDG_CONFIG_HOME / GIT_CONFIG_GLOBAL redirection makes a fake file
+#     identity, which then passes.
+#   - rebase/cherry-pick/am do not run pre-commit, but they PRESERVE an existing
+#     author rather than minting one, so they propagate at worst.
+#   - merge mints a fresh author and does not run pre-commit. Closing that needs
+#     a pre-merge-commit hook, and test 7 pins the merge bypass as load-bearing
+#     for `git pull` at a deploy root.
+# All of these are bypasses for someone who wants one. This guard is aimed at a
+# habit, not an adversary.
+author_email="${GIT_AUTHOR_EMAIL:-}"
+if [ -z "$author_email" ]; then
+  # git commit exports GIT_AUTHOR_EMAIL into the hook environment in every case,
+  # including a plain commit, so the above is normally enough. This fallback is
+  # for any other caller of the hook.
+  ident="$(git var GIT_AUTHOR_IDENT 2>/dev/null || true)"
+  ident="${ident##*<}"
+  author_email="${ident%%>*}"
+fi
+
+file_emails=""
+while IFS=$'\t' read -r scope value; do
+  [ "$scope" = "command" ] && continue
+  [ -z "$value" ] && continue
+  file_emails+="$value"$'\n'
+done < <(git config --show-scope --get-all user.email 2>/dev/null)
+
+# Fail open: no author, or no file identity at all (a fresh `git init` fixture,
+# or a git too old for --show-scope). Refusing here would block the one case
+# where an inline identity is the right answer.
+if [ -z "$author_email" ] || [ -z "$file_emails" ]; then
+  exit 0
+fi
+
+identity_ok=0
+while IFS= read -r candidate; do
+  if [ -n "$candidate" ] && [ "$candidate" = "$author_email" ]; then
+    identity_ok=1
+  fi
+done <<<"$file_emails"
+
+if [ "$identity_ok" -eq 0 ]; then
+  cat >&2 <<EOF
+worktree-guard: refusing to commit as <$author_email>.
+That address is not any user.email configured in a file for this repo. It
+reached this commit from the command line (git -c user.email=... /
+GIT_CONFIG_KEY_n), from GIT_AUTHOR_EMAIL, from --author=, or from a commit whose
+author is being PRESERVED (amend, reword, cherry-pick). GitHub attributes
+commits by author email, so a synthetic one strips the human's authorship off
+work they own.
+
+Configured identities git can see here:
+$(while IFS= read -r candidate; do [ -n "$candidate" ] && echo "  $candidate"; done <<<"$file_emails")
+
+How to proceed, best option first:
+
+  1. That address belongs to SOMEONE ELSE and is correct -- you are amending,
+     rewording or cherry-picking their commit, or crediting them with --author=:
+         git commit --no-verify
+     Keep their authorship. Do NOT "fix" it; --reset-author here would steal
+     their credit, which is this guard's own failure mode in reverse. (A reword
+     mid-'rebase -i' gets no --no-verify slot: rerun the rebase under
+     'git -c core.hooksPath=/dev/null rebase ...'.)
+
+  2. It is a made-up address you supplied: drop the flags and let config answer:
+         git commit -m "..."
+     Setting an identity inline is only correct in a throwaway 'git init' repo,
+     which has no configured identity to find.
+
+  3. You already made a commit of YOUR OWN work under a made-up address:
+         git commit --amend --reset-author --no-edit
+
+  4. 'Author identity unknown' is what you are working around: STOP and report
+     it. It means the config is broken, and a made-up address hides the break.
+EOF
+  exit 1
+fi
+
 exit 0

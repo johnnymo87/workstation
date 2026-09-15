@@ -525,14 +525,19 @@ let
   # overcommit hooks and lgtm's post-merge hook, and fight opencode's husky.
   # See docs/plans/2026-08-11-worktree-guard-generalization-design.md section 3.1.
   #
-  # Three repos cover the actual write traffic; the other ~35 clones under
-  # ~/projects are read-only reference or short-lived. Add a fourth when a
-  # fourth misbehaves -- drift on unenrolled repos is caught by the detector
+  # These repos cover the actual write traffic; the other ~35 clones under
+  # ~/projects are read-only reference or short-lived. Add another when another
+  # misbehaves -- drift on unenrolled repos is caught by the detector
   # (workstation-v03j.9), not by this list.
   worktreeGuardRepos = [
     "mono" # work trunk; .agents/skills are served from the tree
     "pigeon" # pigeon-daemon runs tsx against the working tree, so root == prod
     "workstation" # this repo; was sitting on an unpushed main commit on 2026-08-11
+    # Agents commit here constantly (every opencode patch lands through it) and
+    # two `dev@localhost` commits reached its main, which is what the hook's
+    # identity check now refuses. Verified enrollable: no core.hooksPath and no
+    # real hooks in .git/hooks, so nothing is clobbered.
+    "opencode-patched"
   ];
 in
 {
