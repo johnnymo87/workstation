@@ -75,12 +75,18 @@ let
     };
   };
 
-  # shepherding-pull-requests has an executable monitoring python script
+  # shepherding-pull-requests has an executable monitoring python script plus
+  # reference files. SKILL.md links to the references, so omitting one here
+  # ships a skill whose links dangle at runtime -- mkSkill deploys SKILL.md only.
   shepherdingExtras = {
     ".config/opencode/skills/shepherding-pull-requests/monitor-pr.py" = {
       source = "${assetsPath}/opencode/skills/shepherding-pull-requests/monitor-pr.py";
       executable = true;
     };
+    ".config/opencode/skills/shepherding-pull-requests/reference/lgtm-review-mechanics.md".source =
+      "${assetsPath}/opencode/skills/shepherding-pull-requests/reference/lgtm-review-mechanics.md";
+    ".config/opencode/skills/shepherding-pull-requests/reference/retired-wake-scheduling.md".source =
+      "${assetsPath}/opencode/skills/shepherding-pull-requests/reference/retired-wake-scheduling.md";
   };
 
   # monitoring-deployments has an executable rollout-monitoring python script
