@@ -136,40 +136,45 @@ function M.open(opts)
             --
             -- The case neither signal can see -- reading a session and never typing --
             -- is covered by the explicit <C-r> gesture below, not by guessing here.
+            local anchor = row.anchor_msg_id
+            local has_anchor = anchor ~= nil and anchor ~= vim.NIL and anchor ~= ""
+
             if desc.kind == "focus_here" then
               exec.focus_here(desc)
             elseif desc.kind == "switch_pane" then
               exec.switch_pane(desc, client)
             elseif desc.kind == "attach" then
-              exec.attach(desc)
+              -- COLD path: hand the target to the launch itself (workstation-swws).
+              -- There is nothing subscribed to publish to yet -- this call is what
+              -- creates the TUI -- so the request the warm paths send would be
+              -- dropped, which is precisely the bug that was reported.
+              exec.attach(desc, { scroll_to_message_id = has_anchor and anchor or nil })
             elseif desc.kind == "refuse_dir_missing" then
               exec.refuse_dir_missing(desc)
             end
 
-            local anchor = row.anchor_msg_id
             -- ALLOWLIST, not "anything but refuse_dir_missing". A future descriptor
             -- kind should have to opt in to firing a scroll rather than inherit it
             -- by default; refuse_dir_missing deliberately does not navigate.
-            local navigates = desc.kind == "focus_here" or desc.kind == "switch_pane" or desc.kind == "attach"
-            if anchor and anchor ~= vim.NIL and anchor ~= "" and navigates then
-              -- Ignore all responses deliberately: the door 503s when pigeon is
-              -- down and may route to a prospective serve; both mean "no scroll",
-              -- both are rescued by a later attempt, neither is worth a feedback loop.
-              local schedule = {
-                { delay = 0, force = true },
-                { delay = 300, force = false },
-                { delay = 900, force = false },
-                { delay = 2000, force = false },
-              }
-              for _, attempt in ipairs(schedule) do
-                vim.defer_fn(function()
-                  exec.scroll_to_message({
-                    sid = row.id,
-                    message_id = anchor,
-                    force = attempt.force,
-                  }, opts)
-                end, attempt.delay)
-              end
+            --
+            -- `attach` is NOT in this list any more: it carries its target in the
+            -- launched process's environment instead. Leaving it here as well would
+            -- re-introduce a POST whose only effects are the ones we are removing --
+            -- a request nobody is subscribed to receive, and a front-door sticky
+            -- pin to a serve that may never own the session (workstation-5obe).
+            local navigates = desc.kind == "focus_here" or desc.kind == "switch_pane"
+            if has_anchor and navigates then
+              -- ONE request, not four. These targets are already subscribed, so the
+              -- retry schedule was only ever covering for the cold path -- which no
+              -- longer uses this route at all.
+              --
+              -- The response is ignored deliberately: the door 503s when pigeon is
+              -- down, which means "no scroll" and is not worth a feedback loop.
+              exec.scroll_to_message({
+                sid = row.id,
+                message_id = anchor,
+                force = true,
+              }, opts)
             end
           end)
         end)

@@ -152,14 +152,41 @@ end
 --- The keymap guard checks `oc-session-list` only, so `oc-auto-attach` may be absent.
 --- Missing binary is handled with a warning notification without throwing.
 ---
+--- A scroll target, when given, travels in the child's ENVIRONMENT rather than
+--- over the wire (workstation-swws). The cold path cannot use the SSE request the
+--- warm paths use: this call is what CREATES the TUI, so on the real failure the
+--- LAST of four retries was published 4.1s before the new process subscribed (the
+--- first, ~6s), and SSE does not replay. An inherited environment variable waits as long as startup
+--- takes, and oc-auto-attach forwards it down to the TUI.
+---
+--- Deliberately an env var and NOT a CLI flag. oc-auto-attach's option loop breaks
+--- on an unknown flag and its argument-count check then exits 1, so a new picker
+--- against an older oc-auto-attach would fail to attach AT ALL. An unknown env var
+--- is ignored, so the worst version-skew outcome is "attached, did not jump".
+---
 --- @param desc table { sid: string }
+--- @param opts table|nil { scroll_to_message_id?: string, system?: fun(cmd, opts) }
 --- @return boolean
-function M.attach(desc)
+function M.attach(desc, opts)
   if type(desc) ~= "table" or not desc.sid or desc.sid == "" then
     return false
   end
+  opts = (type(opts) == "table") and opts or {}
+
+  -- Session-qualified, because an environment variable is inherited by every
+  -- descendant: a bare message id would be claimed by whichever session read it
+  -- first, turning "no jump" into "jump in the wrong transcript".
+  local env = nil
+  local target = opts.scroll_to_message_id
+  if type(target) == "string" and target:match("^msg_[A-Za-z0-9]+$") then
+    env = { OPENCODE_SCROLL_TO = desc.sid .. ":" .. target }
+  end
+
   local ok, err_or_handle = pcall(function()
-    return vim.system({ "oc-auto-attach", desc.sid }, { stdin = false })
+    local sys = opts.system or vim.system
+    -- `env` MERGES into the inherited environment here (clear_env is not set);
+    -- replacing it would strip PATH and the attach would not find its binaries.
+    return sys({ "oc-auto-attach", desc.sid }, { stdin = false, env = env })
   end)
   if not ok then
     vim.notify(string.format("could not run oc-auto-attach: %s", tostring(err_or_handle)), vim.log.levels.WARN)

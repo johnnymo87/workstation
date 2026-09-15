@@ -275,6 +275,48 @@ ${builtins.readFile ./canonical-path.sh}
       exit 1
     fi
 
+    # workstation-swws: an OPTIONAL scroll target, inherited from the caller.
+    #
+    # Read from the ENVIRONMENT rather than taken as a flag, and that is load
+    # bearing for version skew: the option loop above breaks on an unknown flag and
+    # the argument-count check then exits 1, so a newer picker passing --scroll-to
+    # to this script would break attach ENTIRELY. An unknown env var is ignored by
+    # an older build, degrading to "attached, did not jump".
+    #
+    # Shape-checked like the sid, for the same reason: it is interpolated into a
+    # JSON payload that a Lua process decodes and hands to a child environment.
+    # Anything malformed is DROPPED rather than refused -- a bad scroll target is
+    # not a reason to refuse to attach, which is the whole point of this path.
+    # The value is SESSION-QUALIFIED (<sid>:<msgid>) the whole way down, which lets
+    # this script check that the target names the session it is actually attaching.
+    # An env var is inherited by every descendant, so an unqualified one could be
+    # picked up by an attach it was never meant for -- a jump in the wrong
+    # transcript, which is a silent wrong answer rather than a visible miss.
+    scroll_to=""
+    if [ -n "''${OPENCODE_SCROLL_TO:-}" ]; then
+      if ! [[ "$OPENCODE_SCROLL_TO" =~ ^ses_[A-Za-z0-9]+:msg_[A-Za-z0-9]+$ ]]; then
+        log "ignoring malformed OPENCODE_SCROLL_TO"
+      elif [ "''${OPENCODE_SCROLL_TO%%:*}" != "$sid" ]; then
+        log "ignoring OPENCODE_SCROLL_TO for a different session"
+      else
+        scroll_to="''${OPENCODE_SCROLL_TO#*:}"
+      fi
+    fi
+
+    # UNSET IT NOW, having captured it. An exported variable reaches every
+    # descendant of this script, and one of those descendants may be a brand new
+    # TMUX SERVER -- which copies its whole environment into the GLOBAL environment
+    # and merges that into every window it creates from then on. Verified: a server
+    # started with this set hands the value to windows opened long afterwards, for
+    # the server's entire lifetime. A later attach to the same session would then
+    # find a stale target and jump to an anchor the user has long since read, which
+    # is the silent-wrong-jump failure this design exists to avoid, made permanent.
+    #
+    # The local `scroll_to` carries it from here on, and it reaches the TUI through
+    # the RPC payload rather than through inheritance. This also covers curl, nvim
+    # --remote-expr and every other child, none of which have any use for it.
+    unset OPENCODE_SCROLL_TO
+
     # Validate the tmux session name (tmux forbids '.' and ':'; this also
     # blocks any shell-interpolation hazard). target_session is always set
     # (defaults to `main`), so no empty-string guard is needed.
@@ -593,8 +635,10 @@ ${builtins.readFile ./canonical-path.sh}
       --arg sid "$sid" \
       --arg dir "$session_dir" \
       --arg url "$FRONTDOOR_URL" \
+      --arg scroll_to "$scroll_to" \
       --argjson settle "$settle_secs" \
-      '{sid:$sid, dir:$dir, url:$url, settle_ms:($settle * 1000)}') "
+      '{sid:$sid, dir:$dir, url:$url, settle_ms:($settle * 1000)}
+       + (if $scroll_to == "" then {} else {scroll_to_message_id:$scroll_to} end)') "
 
     expr_open="luaeval(\"require('user.oc_auto_attach').open(vim.json.decode(_A))\", $(printf '%s' "$payload" | jq -Rs '.'))"
     expr_status="luaeval(\"require('user.oc_auto_attach').status(_A)\", \"$sid\")"

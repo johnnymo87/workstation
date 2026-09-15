@@ -2093,6 +2093,13 @@ end
 
 -- 71. INTEGRATION: jump on row with anchor schedules 4 attempts at 0 / 300 / 900 / 2000 ms with force=true on attempt 0 only.
 do
+  -- workstation-swws: the COLD path no longer POSTs at all.
+  --
+  -- It used to fire four times (0/300/900/2000ms) hoping a freshly-launched TUI
+  -- would be listening for one of them. Measured on the real failure, it was not:
+  -- the last retry landed 4.1s BEFORE the new process subscribed to /event, and
+  -- SSE does not replay. Retrying a broadcast nobody is receiving yet cannot be
+  -- fixed by retrying it faster, so the target now rides the attach itself.
   local deferred = {}
   local orig_defer = vim.defer_fn
   vim.defer_fn = function(fn, delay)
@@ -2106,8 +2113,12 @@ do
     return true
   end
 
+  local attach_calls = {}
   local orig_attach = exec.attach
-  exec.attach = function() return true end
+  exec.attach = function(desc, o)
+    table.insert(attach_calls, { desc = desc, opts = o })
+    return true
+  end
 
   local row = { id = "ses_scroll_1", directory = "/tmp/s1", anchor_msg_id = "msg_target_456" }
   local fake_ctrl = flow.new({
@@ -2121,29 +2132,63 @@ do
   selected_entry_stub = { value = row }
   recorded_select_default()
 
-  check(#deferred == 4, "4 scroll attempts scheduled via vim.defer_fn")
-  check(deferred[1].delay == 0, "attempt 0 delay is 0 ms")
-  check(deferred[2].delay == 300, "attempt 1 delay is 300 ms")
-  check(deferred[3].delay == 900, "attempt 2 delay is 900 ms")
-  check(deferred[4].delay == 2000, "attempt 3 delay is 2000 ms")
-
-  -- Execute the scheduled callbacks
-  for _, item in ipairs(deferred) do
-    item.fn()
-  end
-
-  check(#scroll_calls == 4, "4 scroll_to_message calls executed")
-  check(scroll_calls[1].payload.sid == "ses_scroll_1", "attempt 0 target sid matches row.id")
-  check(scroll_calls[1].payload.message_id == "msg_target_456", "attempt 0 message_id matches anchor_msg_id")
-  check(scroll_calls[1].payload.force == true, "attempt 0 has force = true (user's explicit jump)")
-
-  check(scroll_calls[2].payload.force == false, "attempt 1 has force = false (speculative retry)")
-  check(scroll_calls[3].payload.force == false, "attempt 2 has force = false (speculative retry)")
-  check(scroll_calls[4].payload.force == false, "attempt 3 has force = false (speculative retry)")
+  check(#scroll_calls == 0, "attach path fires NO scroll POST (the TUI is not listening yet)")
+  check(#deferred == 0, "attach path schedules no retries")
+  check(#attach_calls == 1, "exec.attach was dispatched once")
+  check(
+    attach_calls[1].opts ~= nil and attach_calls[1].opts.scroll_to_message_id == "msg_target_456",
+    "the anchor is handed to exec.attach, to travel in the launched process's environment"
+  )
 
   vim.defer_fn = orig_defer
   exec.scroll_to_message = orig_scroll
   exec.attach = orig_attach
+end
+
+-- 71b. INTEGRATION: the WARM paths still POST, once, with force.
+do
+  -- focus_here and switch_pane target a TUI that is ALREADY subscribed, so the
+  -- race that killed the cold path does not exist here and one request is enough.
+  for _, case in ipairs({
+    { kind = "focus_here", sid = "ses_warm_focus" },
+    { kind = "switch_pane", sid = "ses_warm_pane" },
+  }) do
+    local deferred = {}
+    local orig_defer = vim.defer_fn
+    vim.defer_fn = function(fn, delay) table.insert(deferred, { fn = fn, delay = delay }) end
+
+    local scroll_calls = {}
+    local orig_scroll = exec.scroll_to_message
+    exec.scroll_to_message = function(payload) table.insert(scroll_calls, payload) return true end
+
+    local orig_focus, orig_switch = exec.focus_here, exec.switch_pane
+    exec.focus_here = function() return true end
+    exec.switch_pane = function() return true end
+
+    local row = { id = case.sid, directory = "/tmp/w", anchor_msg_id = "msg_warm_1" }
+    local fake_ctrl = flow.new({
+      fetch = function(o, cb) cb({ rows = { row } }, nil) end,
+      locate = function(o, cb) cb({}) end,
+      decide = function() return { kind = case.kind, sid = case.sid, buffer = 5, tabpage = 1 } end,
+    })
+    recorded_pickers_new = {}
+    init_mod.open({ flow = fake_ctrl })
+    recorded_pickers_new[1].defaults.attach_mappings(602, function() end)
+    selected_entry_stub = { value = row }
+    recorded_select_default()
+    for _, item in ipairs(deferred) do item.fn() end
+
+    check(#scroll_calls == 1, case.kind .. ": exactly ONE scroll POST, not four")
+    check(scroll_calls[1] ~= nil and scroll_calls[1].force == true, case.kind .. ": the single POST forces")
+    check(
+      scroll_calls[1] ~= nil and scroll_calls[1].message_id == "msg_warm_1",
+      case.kind .. ": the POST carries the anchor"
+    )
+
+    vim.defer_fn = orig_defer
+    exec.scroll_to_message = orig_scroll
+    exec.focus_here, exec.switch_pane = orig_focus, orig_switch
+  end
 end
 
 -- 72. INTEGRATION: jump on row without anchor (nil, vim.NIL, empty string) fires NO scroll attempts.
@@ -2208,25 +2253,29 @@ do
   exec.refuse_dir_missing = orig_refuse
 end
 
--- 74. INTEGRATION: navigating descriptors (focus_here, switch_pane, attach) all fire the scroll attempts.
+-- 74. INTEGRATION: every navigating descriptor delivers the target -- by the route
+-- that can actually reach it. Warm kinds POST once; attach carries it in the launch.
 do
   local orig_defer = vim.defer_fn
   local orig_focus, orig_switch, orig_attach = exec.focus_here, exec.switch_pane, exec.attach
+  local orig_scroll = exec.scroll_to_message
 
   for _, kind in ipairs({ "focus_here", "switch_pane", "attach" }) do
     local deferred = {}
     vim.defer_fn = function(fn, delay)
       table.insert(deferred, { fn = fn, delay = delay })
     end
+    local scroll_calls, attach_opts = {}, nil
+    exec.scroll_to_message = function(payload) table.insert(scroll_calls, payload) return true end
     exec.focus_here = function() return true end
     exec.switch_pane = function() return true end
-    exec.attach = function() return true end
+    exec.attach = function(_, o) attach_opts = o return true end
 
-    local row = { id = "ses_nav_" .. kind, directory = "/tmp/nav", anchor_msg_id = "msg_nav_" .. kind }
+    local row = { id = "ses_nav_" .. kind, directory = "/tmp/nav", anchor_msg_id = "msg_nav" .. kind }
     local fake_ctrl = flow.new({
       fetch = function(o, cb) cb({ rows = { row } }, nil) end,
       locate = function(o, cb) cb({}) end,
-      decide = function() return { kind = kind, buffer = 1, tabpage = 1, pane = "%1", sock = "/tmp/s" } end,
+      decide = function() return { kind = kind, sid = row.id, buffer = 1, tabpage = 1, pane = "%1", sock = "/tmp/s" } end,
     })
 
     recorded_pickers_new = {}
@@ -2234,12 +2283,74 @@ do
     recorded_pickers_new[1].defaults.attach_mappings(604, function() end)
     selected_entry_stub = { value = row }
     recorded_select_default()
+    for _, item in ipairs(deferred) do item.fn() end
 
-    check(#deferred == 4, kind .. " schedules 4 scroll attempts")
+    -- The target is delivered EXACTLY ONCE per kind, by exactly one route. Asserting
+    -- both halves for every kind is what stops a future edit delivering it twice
+    -- (a POST *and* an env var) or not at all.
+    if kind == "attach" then
+      check(#scroll_calls == 0, kind .. " sends no POST")
+      check(
+        attach_opts ~= nil and attach_opts.scroll_to_message_id == "msg_nav" .. kind,
+        kind .. " carries the anchor into the launched environment"
+      )
+    else
+      check(#scroll_calls == 1, kind .. " sends exactly one POST")
+      check(scroll_calls[1].message_id == "msg_nav" .. kind, kind .. " POST carries the anchor")
+    end
   end
 
   vim.defer_fn = orig_defer
+  exec.scroll_to_message = orig_scroll
   exec.focus_here, exec.switch_pane, exec.attach = orig_focus, orig_switch, orig_attach
+end
+
+-- 75. UNIT: exec.attach puts a scroll target in the child environment (workstation-swws).
+do
+  local calls = {}
+  local fake_sys = function(argv, o)
+    table.insert(calls, { argv = argv, opts = o })
+    return { pid = 1, kill = function() end }
+  end
+
+  check(exec.attach({ sid = "ses_a1" }, { system = fake_sys }) == true, "attach with no target succeeds")
+  check(calls[1].opts.env == nil, "no target -> no env override at all (inherit unchanged)")
+  check(calls[1].argv[1] == "oc-auto-attach" and calls[1].argv[2] == "ses_a1", "argv is unchanged by this feature")
+
+  calls = {}
+  exec.attach({ sid = "ses_a2" }, { system = fake_sys, scroll_to_message_id = "msg_b2" })
+  check(calls[1].opts.env ~= nil, "with a target -> env is set")
+  check(
+    calls[1].opts.env.OPENCODE_SCROLL_TO == "ses_a2:msg_b2",
+    "env value is session-qualified, so an inherited var cannot jump the wrong session"
+  )
+  check(#calls[1].argv == 2, "the target rides the ENV, never argv -- an old oc-auto-attach must not see a new flag")
+  check(calls[1].opts.clear_env == nil, "env MERGES: clearing it would strip PATH from the attach")
+
+  -- Shape-checked before it is interpolated into a value another process parses.
+  for _, bad in ipairs({ "ses_nope", "../etc", "msg_has space", "", "msg_a;rm -rf /" }) do
+    calls = {}
+    exec.attach({ sid = "ses_a3" }, { system = fake_sys, scroll_to_message_id = bad })
+    check(calls[1].opts.env == nil, "rejected malformed target: " .. bad)
+  end
+
+  calls = {}
+  exec.attach({ sid = "ses_a4" }, { system = fake_sys, scroll_to_message_id = 12345 })
+  check(calls[1].opts.env == nil, "non-string target is rejected without throwing")
+
+  -- The pre-existing contract must survive the new parameter.
+  check(exec.attach(nil, { system = fake_sys }) == false, "nil desc still returns false")
+  check(exec.attach({ sid = "" }, { system = fake_sys }) == false, "empty sid still returns false")
+  -- opts is optional. Exercised against a STUBBED vim.system, never the real one:
+  -- oc-auto-attach is installed on this host, so an unstubbed call here would spawn
+  -- a production attach for a fabricated session on every run of the unit suite --
+  -- the precise hazard test 70 above was written to remove.
+  local orig_system = vim.system
+  local bare_calls = 0
+  vim.system = function() bare_calls = bare_calls + 1 return { pid = 1, kill = function() end } end
+  check(exec.attach({ sid = "ses_a5" }) == true, "opts is optional -- falls back to vim.system")
+  check(bare_calls == 1, "the fallback really is vim.system, called once")
+  vim.system = orig_system
 end
 
 print("LUA_TEST_OK " .. N)

@@ -33,7 +33,7 @@ function M.status(sid)
 end
 
 --- Open a new tab with `opencode attach` running in a terminal buffer.
---- @param opts table  { sid: string, dir: string, url: string, settle_ms?: number }
+--- @param opts table  { sid: string, dir: string, url: string, settle_ms?: number, scroll_to_message_id?: string }
 --- @return integer 1  (so --remote-expr has something to print)
 function M.open(opts)
   -- Validate synchronously so --remote-expr returns a meaningful status.
@@ -65,6 +65,23 @@ function M.open(opts)
     local uv = vim.uv or vim.loop
     local start_hr = uv.hrtime()
 
+    -- workstation-swws: hand the scroll target to the TUI in its ENVIRONMENT.
+    --
+    -- Not on the command line: `opencode attach` would reject an unknown flag, so a
+    -- newer helper against an older opencode would fail to attach at all instead of
+    -- merely failing to jump. Re-qualified with the sid here (the script strips it
+    -- after checking it) so the TUI can confirm the target is for the session it
+    -- actually opened -- an inherited variable otherwise applies to whoever reads it.
+    --
+    -- Shape-checked again rather than trusted: this crosses a process boundary, and
+    -- the previous validator is in a different language in a different package.
+    local job_env = nil
+    if type(opts.scroll_to_message_id) == "string"
+      and opts.scroll_to_message_id:match("^msg_[A-Za-z0-9]+$")
+    then
+      job_env = { OPENCODE_SCROLL_TO = opts.sid .. ":" .. opts.scroll_to_message_id }
+    end
+
     local job_id = vim.fn.jobstart({
       "opencode", "attach", opts.url,
       "--session", opts.sid,
@@ -72,6 +89,9 @@ function M.open(opts)
     }, {
       term = true,
       cwd = opts.dir,
+      -- Merges into the inherited environment (clear_env unset): replacing it would
+      -- strip PATH and the attach would not find the binary it is launching.
+      env = job_env,
       on_exit = function(_, exit_code, _)
         local elapsed_ms = (uv.hrtime() - start_hr) / 1e6
         if elapsed_ms < settle_threshold_ms then
