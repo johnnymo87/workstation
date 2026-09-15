@@ -91,14 +91,15 @@ and `<tool>_source_token`) cover it; if multiple, store a list and loop.
 
 ### 1b. Templating Secrets Into Config Files
 
-When a config file in `$HOME` (`~/.bazelrc`, `~/.npmrc`, etc.) needs an
+When a config file in `$HOME` (`~/.npmrc`, etc.) needs an
 org-identifying URL or hostname, **do not use `home.file.<path>`** — that
 embeds the value in the Nix store as a publicly-readable file. Instead, use
 a `home.activation.generate<File>` script that reads from sops/Keychain at
 activation time and writes the file directly.
 
-Pattern (see `home.activation.generateNpmrc` and `generateBazelrc` in
-`users/dev/home.base.nix` for working examples):
+Pattern (see `home.activation.generateNpmrc` in `users/dev/home.base.nix` for
+a working example; `generateBazelrc` beside it used to be a second one, but
+the secret it templated turned out to be dead config and was dropped):
 
 ```nix
 home.activation.generateFooConfig = lib.mkIf (isDarwin || isCloudbox)

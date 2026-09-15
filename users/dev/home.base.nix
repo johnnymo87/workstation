@@ -694,11 +694,11 @@ in
   ;
 
   # Bazel user config (~/.bazelrc) — work machines only
-  # Generated at activation time so the GCS remote-cache URL (which encodes
-  # the GCP project name) can be templated in from sops/Keychain instead of
-  # being hardcoded in source. Mirrors the generateNpmrc pattern below.
+  # Written at activation time rather than via home.file so the existing
+  # unmanaged ~/.bazelrc on live machines keeps being replaced in place
+  # instead of colliding with a store symlink.
   home.activation.generateBazelrc = lib.mkIf (isDarwin || isCloudbox) (lib.hm.dag.entryAfter [ "writeBoundary" ] (let
-    staticHeader = lib.concatStringsSep "\n" [
+    bazelrcText = lib.concatStringsSep "\n" ([
       "# Managed by home-manager — edits will be overwritten"
       ""
       "# Show test errors inline"
@@ -713,9 +713,28 @@ in
       "common --disk_cache ~/bazel-diskcache --repository_cache ~/bazel-cache/repository"
       "common --experimental_disk_cache_gc_max_size=5G"
       ""
-    ];
-    staticFooter = lib.concatStringsSep "\n" ([
-      "common --remote_upload_local_results"
+      "# There is deliberately NO --remote_cache here. Two independent reasons:"
+      "#"
+      "# 1. It BREAKS mono. mono/.bazelrc sets its own"
+      "#    `common --remote_cache=grpcs://remote.buildbuddy.io` plus a"
+      "#    `--remote_header` API key, and since food-truck/mono#4583 also"
+      "#    `common --experimental_remote_downloader=grpcs://remote.buildbuddy.io`."
+      "#    Bazel refuses that downloader unless the EFFECTIVE cache is gRPC:"
+      "#      ERROR: The remote downloader can only be used in combination with gRPC caching"
+      "#    The home rc is read AFTER the workspace rc (verified with"
+      "#    `bazel info --announce_rc`), so an https cache set here wins over mono's"
+      "#    grpcs one and every bazel invocation in mono dies before it starts —"
+      "#    `query` included, which is how lgtm and eng-agent-platform compute code"
+      "#    ownership. Silent wrong answers, not just slow builds."
+      "#"
+      "# 2. The GCS bucket it used to name never worked anyway. Bazel only uses"
+      "#    Application Default Credentials when --google_default_credentials is"
+      "#    passed; it never was, so every request went out anonymous and GCS"
+      "#    refused it 403 on BOTH read and write from the day it was added"
+      "#    (2026-04-10). It warmed nothing and served nothing for five months."
+      "#"
+      "# Leaving remote caching to the workspace rc is strictly better: mono gets"
+      "# the BuildBuddy cache it configures, and no working cache is given up."
       ""
       "# Reap idle Bazel servers after 15 min (default 3h) to free RAM across worktrees"
       "startup --max_idle_secs=900"
@@ -794,38 +813,10 @@ in
   in ''
     BAZELRC_PATH="$HOME/.bazelrc"
     rm -f "$BAZELRC_PATH"
-    REMOTE_CACHE_URL=""
 
-    ${if isCloudbox then ''
-      SECRET_PATH="/run/secrets/bazel_remote_cache_url"
-      if [ -r "$SECRET_PATH" ]; then
-        REMOTE_CACHE_URL=$(cat "$SECRET_PATH")
-      else
-        echo "Warning: bazel remote cache URL secret not found at $SECRET_PATH"
-      fi
-    '' else ''
-      if /usr/bin/security find-generic-password -s bazel-remote-cache-url -w >/dev/null 2>&1; then
-        REMOTE_CACHE_URL=$(/usr/bin/security find-generic-password -s bazel-remote-cache-url -w)
-      else
-        echo "Warning: bazel remote cache URL not found in macOS Keychain (bazel-remote-cache-url)"
-      fi
-    ''}
-
-    {
-      cat <<'STATIC_HEADER_EOF'
-${staticHeader}
-STATIC_HEADER_EOF
-      if [ -n "$REMOTE_CACHE_URL" ]; then
-        echo "# GCS remote cache — shared across worktrees and machines"
-        echo "# Local disk_cache is checked first (fast); remote is fallback + shared warming"
-        echo "common --remote_cache=$REMOTE_CACHE_URL"
-      else
-        echo "# Remote cache URL not available; skipping --remote_cache"
-      fi
-      cat <<'STATIC_FOOTER_EOF'
-${staticFooter}
-STATIC_FOOTER_EOF
-    } > "$BAZELRC_PATH"
+    cat > "$BAZELRC_PATH" <<'BAZELRC_EOF'
+${bazelrcText}
+BAZELRC_EOF
   ''));
 
   # Azure DevOps npm registry auth (~/.npmrc) — work machines only
