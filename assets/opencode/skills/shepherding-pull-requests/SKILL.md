@@ -5,18 +5,16 @@ description: Use when you are about to run `gh pr create`, immediately after it 
 
 # Shepherding Pull Requests
 
-> ## ⛔ DO NOT SCHEDULE WAKES FOR A PR — A DAEMON WATCHES NOW (2026-08-21, revised 2026-09-02)
+> ## ⛔ DO NOT SCHEDULE WAKES FOR A PR — A DAEMON WATCHES NOW
 >
-> **Do not call `swarm_schedule` for a PR. Not once, not with a long delay, not "just one to be safe."**
-> Self-scheduled wakes backed off 15m → 45m → 2h → 4h and ran all night, paying a cold turn per
-> check to nearly always learn nothing had changed. They are gone for good, not pending redesign.
+> **Do not call `swarm_schedule` for a PR. Not once, not with a long delay, not "just one to be
+> safe."** Self-scheduled wakes are gone for good, not pending redesign — see
+> [reference/retired-wake-scheduling.md](reference/retired-wake-scheduling.md) for the cost model
+> that killed them, which is still worth knowing.
 >
-> **What watches instead:** `lgtm-shepherd`, a systemd timer on cloudbox that sweeps open PRs every
-> **10 minutes**. It costs nothing when nothing is happening. (Design and rationale live in the
-> lgtm repo: `docs/plans/2026-08-21-author-side-shepherd-design.md`.)
->
-> **It wakes THIS SESSION, not only the human — that changed on 2026-08-28 and this banner said
-> otherwise until 2026-09-02.** Which of the two happens depends on the signal:
+> **What watches instead:** `lgtm-shepherd`, a systemd timer that sweeps open PRs every **10
+> minutes**. It costs nothing when nothing is happening. **It wakes THIS SESSION, not only the
+> human**, depending on the signal:
 >
 > | Signal | Where it goes |
 > |---|---|
@@ -24,34 +22,29 @@ description: Use when you are about to run `gh pr create`, immediately after it 
 > | `landable`, `idle` | one Telegram line to the human |
 >
 > Verify rather than trust this table: `LGTM_ENABLE_AGENT_ROUTING=1` on the service is the master
-> switch, and `journalctl -u lgtm-shepherd.service | grep 'routed to ses_'` shows the wakes actually
-> delivered (20 in the 24h before this edit).
+> switch, and on cloudbox `journalctl -u lgtm-shepherd.service | grep 'routed to ses_'` shows the wakes actually
+> delivered.
 >
 > **So when the tight loop has nothing left to do** — CI green, threads resolved, and the only thing
 > outstanding is a reviewer or the user's own merge — **report the current state in plain text and
 > end the turn.** Ending the turn is correct here; it is not you deciding the PR stopped being your
 > problem, and it is not the end of the PR's supervision either.
 >
-> **Be accurate about what happens next.** If the PR is quiet and merely
-> awaiting a reviewer, the shepherd tells the *human* and nothing wakes you. If a reviewer comes
-> back with threads, or CI goes red, or the branch conflicts, **the shepherd will wake you** — the
-> same session, in the same worktree, with a payload describing what it saw. Say which of those you
-> expect. Do not tell the user a daemon will finish the work; it will either notify them or hand the
-> work back to you.
->
-> Two consequences worth knowing before you hand off:
+> **Be accurate about what happens next.** A quiet PR merely awaiting a reviewer gets the *human* a
+> Telegram and wakes nobody. Threads, red CI, or a conflict wake **you** — same session, same
+> worktree, with a payload describing what it saw. Say which you expect. Do not tell the user a
+> daemon will finish the work; it will either notify them or hand the work back to you.
 >
 > - **The wake budget is finite and never resets.** 8 agent wakes per signal per PR (12 across all
 >   signals, 15 hard ceiling), refundable only by a wake that *shrinks* the conversation. When it
 >   runs out the PR becomes human-relay for the rest of its life, and the only trace is one
 >   `[wake-budget-exhausted]` log line. A PR that goes *quiet early* is the symptom.
 > - **Do not do the shepherd's job for it.** No self-scheduled wakes, and no re-requesting a
->   reviewer that the daemon already re-reviews on its own (see §"Re-requesting review").
+>   reviewer that the daemon already re-reviews on its own (§"Re-requesting review" says when that
+>   is and is not the case — it is conditional, not "never").
 >
-> Everything else in this skill still binds: pre-PR checks, replying to and resolving every thread,
-> and the tight 60-second loop while something is actually moving. Sections below that describe
-> scheduling wakes, backoff, cancel-and-reschedule, or the 20-hour staleness refresh are
-> **retired** — read them as history.
+> Everything else in this skill still binds: the pre-PR checks, replying to and resolving every
+> thread, and the tight 60-second loop while something is actually moving.
 
 A PR being open is not the end of the work — it's the middle of it. Opening the PR creates a coordination cost on the reviewer's plate; walking away mid-flight pushes the rest of that cost (chasing CI, addressing comments, re-requesting review) back onto the user. The job is to land the PR or hand it off with an honest, current status. Everything in this skill is in service of that disposition.
 
@@ -68,6 +61,14 @@ From that moment, without being asked:
 - **Before you consider the PR held, check that something is pending on someone.** A PR can be fully answered, green, and permanently stalled. → §"The stalled-but-healthy trap"
 
 Reporting a PR URL and treating the task as finished is the specific failure this skill exists to prevent.
+
+## Detailed references
+
+Everything needed for an ordinary PR is in this file. Two branches have detail worth keeping out
+of the way until they apply:
+
+- **Is this PR lgtm-bound, and must lgtm be re-requested?** → [reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md)
+- **The retired self-scheduled wake mechanism, and why it was removed** → [reference/retired-wake-scheduling.md](reference/retired-wake-scheduling.md)
 
 ## PR Lifecycle
 
@@ -251,7 +252,7 @@ The right framing: you're holding the PR until it's merged or until there's a re
 
 After creating the PR, enter the monitoring loop. There is no maximum number of iterations and no point at which an unmerged PR stops being yours.
 
-**But watching is not the same as polling.** The tight 60-second loop is the right instrument only while something is actively changing — CI running, threads to answer, a push in flight. Once CI is green and the only thing left is a reviewer who hasn't looked yet, the loop is burning turns to re-read a page that nobody has edited. At that point hand off to the watchdog (below): schedule a wake, end the turn, come back when there is plausibly something to see. What changes at CI-green is the *mechanism*, never the obligation.
+**But watching is not the same as polling.** The tight 60-second loop is the right instrument only while something is actively changing — CI running, threads to answer, a push in flight. Once CI is green and the only thing left is a reviewer who hasn't looked yet, the loop is burning turns to re-read a page that nobody has edited. At that point report the state and end the turn — see §"When the only thing left is waiting". `lgtm-shepherd` brings you back if anything needs you. What changes at CI-green is the *mechanism*, never the obligation.
 
 ### Tooling: monitor-pr.py
 
@@ -261,18 +262,18 @@ A companion script bundled with this skill does steps 1-4 of the loop body (slee
 python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py [PR]
 ```
 
-Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate -- Anthropic's prompt-cache TTL is 5 minutes, and a single bash call that blocks the model longer than that expires the warm cache. **While CI is still moving you are expected to re-invoke the script in a loop**; the script owns the within-60s pacing, you own the loop and the fix step. Once CI is green and only the reviewer is outstanding, stop looping and hand off to the watchdog.
+Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate -- Anthropic's prompt-cache TTL is 5 minutes, and a single bash call that blocks the model longer than that expires the warm cache. **While CI is still moving you are expected to re-invoke the script in a loop**; the script owns the within-60s pacing, you own the loop and the fix step. Once CI is green and only the reviewer is outstanding, stop looping, report the state and end the turn.
 
 | Exit code | Meaning | What to do |
 |---|---|---|
 | `0` | All exit conditions met | Done. PR is landable. |
 | `1` | Action needed (CI failed / unresolved threads / non-APPROVED review predates HEAD) | Read stdout for the specific action, do it (step 5 below), then re-invoke. |
 | `2` | Unrecoverable error (could not query GitHub) | Surface to user; don't silently retry. |
-| `3` | Budget elapsed, still idle-waiting (CI pending or lgtm-bound waiting on APPROVAL) | Re-invoke immediately **if CI is still moving**. If CI is green and you are only waiting on a reviewer, schedule a wake and end the turn — see "The watchdog" below. |
+| `3` | Budget elapsed, still idle-waiting (CI pending or lgtm-bound waiting on APPROVAL) | Re-invoke immediately **if CI is still moving**. If CI is green and you are only waiting on a reviewer, report the state and end the turn — see §"When the only thing left is waiting". |
 
-`--once` runs exactly one evaluation pass and never sleeps. Use it for watchdog wakes, where the session is awake only long enough to check state and then either act or reschedule. (It is equivalent to `--budget-seconds 0`, which already behaved this way; the flag exists to say so out loud and to print the right follow-up instruction.)
+`--once` runs exactly one evaluation pass and never sleeps. Use it when a shepherd wake has woken you and the session is awake only long enough to check state and then act. (It is equivalent to `--budget-seconds 0`, which already behaved this way; the flag exists to say so out loud and to print the right follow-up instruction.)
 
-`--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness -- checking both that the repo is listed AND that the PR's author is in an author allowlist (see "Once, before the loop" for why the second half is load-bearing) -- so the manual grep there can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
+`--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness -- checking both that the repo is listed AND that the PR's author is in an author allowlist (see [reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md) for why the second half is load-bearing) -- so the manual grep there can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
 
 **Prefer `auto`, and treat an override as a claim you owe evidence for.** The detector re-reads `lgtm.yml` on every run, so `auto` tracks config changes; a hardcoded `--lgtm-bound no` does not, and outlives whatever justified it. When you do override, the script now runs the detector anyway and labels the printed value `OVERRIDE ...` — warning on stderr when the two disagree. **A line reading `lgtm-bound: False` under an override is your own flag echoed back, never a confirmation of it.** If you are putting an override in a resumption prompt, quote the auto value beside it, because the post-compaction session cannot see how you derived it.
 
@@ -304,43 +305,22 @@ The temporal asymmetry is the trap. Gemini fires early, your inline-comment work
 
 On non-lgtm-bound repos (this workstation repo, personal projects, OSS), there is no second review coming. Gemini's review still doesn't gate, but neither does any other -- exit on CI green + inline threads resolved.
 
-### Once, before the loop: determine if this PR is lgtm-bound
+### Once, before the loop: is this PR lgtm-bound?
 
-`~/projects/lgtm` runs an AI review daemon on a configured set of repos. If this PR is in scope, you MUST wait for a non-bot reviewer (lgtm dispatches under a real human GitHub identity) to APPROVE before exiting -- CI green + comments resolved is necessary but not sufficient. lgtm typically dispatches within ~10 min of CI going green.
+`~/projects/lgtm` runs an AI review daemon on a configured set of repos. If this PR is in scope you
+MUST wait for a non-bot reviewer to APPROVE before exiting — CI green plus resolved comments is
+necessary but not sufficient. lgtm typically dispatches within ~10 min of CI going green.
 
-**Two conditions, and repo presence is only the first.** A PR is lgtm-bound iff the repo is listed AND the PR's **author** is admitted. The effective allowlist is `authors ∪ reviewers ∪ repos[R].authors` (plus `onRequestAuthors`, which is admitted only when an lgtm reviewer is explicitly requested). **`reviewers` is in that union** — lgtm treats its reviewer pool as implicitly-trusted authors, since they are already trusted enough to review as. Source of truth is `filterByAuthors` in `lgtm/src/discover.ts`; `monitor-pr.py` implements it, including the back-compat rule that no author config at all means no filtering.
+A PR is lgtm-bound iff **the repo is listed AND the PR's author is admitted**. `monitor-pr.py`
+implements the real rule (`--lgtm-bound auto`, the default); prefer it over reading `lgtm.yml`
+yourself, and treat a manual override as a claim you owe evidence for.
 
-```bash
-REPO=<owner>/<repo>; AUTHOR=$(gh pr view <n> --json author --jq .author.login)
-grep -qE "^  ${REPO}:" ~/projects/lgtm/lgtm.yml || echo "NOT lgtm-bound (repo not listed)"
-# Author admitted? Any of authors / reviewers / repo authors / onRequestAuthors.
-# Crude; prefer monitor-pr.py, which parses the sections properly.
-grep -qE "^  - ${AUTHOR}$|^      - ${AUTHOR}$" ~/projects/lgtm/lgtm.yml \
-  || echo "NOT lgtm-bound (author in no allowlist)"
-```
+**Fail toward lgtm-bound (keep waiting) when unsure.** Over-waiting is visible and interruptible; a
+wrong early exit looks like a decision and silently drops the PR.
 
-If `~/projects/lgtm/lgtm.yml` doesn't exist on this machine (e.g. devbox), treat the PR as **not lgtm-bound**.
-
-> ⚠ **DO NOT INFER LGTM-BOUNDNESS FROM CONFIG SHAPE — READ `discover.ts`, OR JUST WAIT LONGER.** This warning exists because the author of this very section got it wrong in the expensive direction and nearly shipped the error.
->
-> The reasoning went: *"my login appears in `lgtm.yml` only under `reviewers:`, never in an author list, and lgtm is my own daemon so it won't review my own PRs — therefore this PR can never be dispatched and polling is futile."* Structurally plausible, internally consistent, and **false**. `reviewers` is part of the author union, and the daemon dispatched **7 minutes after polling stopped**. The correct action had been to keep waiting; the "finding" was a false positive produced by reading config layout instead of the dispatch code.
->
-> **Recognising this trap is not the same as avoiding it** — it reads as familiar, and the familiarity is easy to mistake for having checked. Get the value rather than matching the shape: run `monitor-pr.py`, which prints the detection, or read `filterByAuthors`.
->
-> **The generalisable trap: a config file tells you what is configured, not what the program does with it.** `reviewers:` and `authors:` look like disjoint roles and are unioned one function call away. If you need to know whether a daemon will act, read the code that decides, or observe it — do not derive it from key names.
->
-> **What survives, and is why the author check is still here:** for an author in *none* of those lists, repo-presence alone is genuinely wrong, and the failure is asymmetric —
->
-> | filter wrong | consequence | cost |
-> |---|---|---|
-> | `paths:` | gate opens for other PRs; you over-wait on this one | **bounded** — user short-circuits |
-> | **`authors:`** | gate **never** opens for this author | **unbounded** — waits for an approval that cannot arrive |
->
-> A safety argument that holds for a bounded delay and gets silently reused for an unbounded one is its own defect class — which is why the check is worth having even though the case that prompted it turned out not to be an instance.
->
-> **Fail toward lgtm-bound (keep waiting) when unsure.** Over-waiting is visible and interruptible; a wrong early exit looks like a decision and silently drops the PR. Note this is the opposite of what an earlier draft of this section said.
-
-Cache the answer in a shell var (e.g. `LGTM_BOUND=yes`) for the loop.
+The full rule, the config-shape trap that produced a confident wrong answer once, and the
+failure-asymmetry argument behind that default: see
+[reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md).
 
 ### Loop body
 
@@ -373,61 +353,41 @@ Cache the answer in a shell var (e.g. `LGTM_BOUND=yes`) for the loop.
    - **Do not re-request or trigger-comment any bot.** Bots do not come back and should not be asked to.
    - **lgtm: check `reviewDecision` before deciding.** lgtm returns on its own once the head is settled — but only where GitHub reports `REVIEW_REQUIRED`. Anywhere else, re-request its login once. See §"Re-requesting review" for the check and why.
     - Go back to the 60-second sleep (step 1).
-6. **Otherwise** (nothing to fix this iteration), evaluate exit conditions. If they are unmet and the only thing outstanding is a reviewer who hasn't looked yet, leave the loop and hand off to the watchdog instead of sleeping again.
+6. **Otherwise** (nothing to fix this iteration), evaluate exit conditions. If they are unmet and the only thing outstanding is a reviewer who hasn't looked yet, leave the loop, report the state and end the turn instead of sleeping again — see §"When the only thing left is waiting".
 
 ### Re-requesting review
 
-**Re-request real people, and lgtm only where its sweep cannot reach you.** Bots come back on their own and chasing one is wasted motion; lgtm comes back on its own *under a precondition*, and that precondition is checkable in one call.
+**Re-request real people; leave automated reviewers alone.** After pushing fixes:
 
-| Reviewer | Re-request after you push fixes? | Why |
-|---|---|---|
-| A human colleague whose latest review is `COMMENTED` / `CHANGES_REQUESTED` | **Yes** | Nothing else re-notifies them. Answering a thread does not; a `COMMENTED` review means they are *not* satisfied and they will not know you are ready again. |
-| Anyone whose latest review is `APPROVED` | **No** | They signed off. Approval survives later pushes for inline-only fixes. |
-| A review bot (`user.type: "Bot"` — Gemini, claude, dependabot) | **No** | They review when the PR opens and have nothing to add on a second pass. |
-| **lgtm's dispatched reviewer** (`user.type: "User"`, a pool identity under a real human PAT) | **Depends on whether the head moved, and on `reviewDecision`** — see below | lgtm re-reviews by itself only when **the head has moved** past the one it reviewed *and* GitHub reports `REVIEW_REQUIRED`. If you answered its threads **without pushing**, or the repo never reports `REVIEW_REQUIRED`, re-request once. |
+| Reviewer | Re-request? |
+|---|---|
+| Human whose latest review is `COMMENTED` / `CHANGES_REQUESTED` | **Yes** — nothing else re-notifies them, and `COMMENTED` means they are not satisfied |
+| Anyone whose latest review is `APPROVED` | **No** — approval survives later pushes for inline-only fixes |
+| A review bot (`user.type: "Bot"`) | **No**, and never post a trigger comment (`/gemini review`) at one |
+| lgtm's dispatched reviewer (`user.type: "User"`) | **Conditional** — see the three cases below |
 
 ```bash
 gh pr edit <n> --repo <owner>/<repo> --add-reviewer <login>
 ```
 
-#### When lgtm comes back on its own, and when it cannot
+**The lgtm case turns on whether the head moved, not on `reviewDecision` alone:**
 
-Until 2026-09-02 the author *did* have to re-request lgtm, and this section said so. The reason was a structural gap, not a policy: once lgtm posted a review, that PR became invisible to every discovery lane it had. Tier 2 skips anything already dispatched, and tier 0 was populated entirely by `gh search prs user-review-requested:<pool login>` — and posting a review is precisely what *clears* a review request. So the "head changed, always re-review" branch was unreachable for every PR lgtm had ever looked at, and a human re-requesting by hand was the only way back in.
+- **You pushed, and `reviewDecision` is `REVIEW_REQUIRED`** → do **not** re-request. lgtm re-reviews a
+  settled head itself; a re-request just races the sweep.
+- **You pushed, and `reviewDecision` is empty or `CHANGES_REQUESTED`** → re-request **once**. That
+  sweep is structurally unable to see you and never will on this PR.
+- **You replied to its threads without pushing** → re-request **once, whatever `reviewDecision`
+  says.** A reply does not move the head, and nothing else reawakens lgtm; the PR sits at
+  `COMMENTED` until someone presses the button.
 
-Observed on `mono#4476`: lgtm reviewed one commit at 05:17Z, the author pushed at 08:47Z, and for the next nine hours every cycle logged the PR in scope and then dropped it.
+Use the exact login from the most recent non-bot review; lgtm's pool rotates but pins to the prior
+reviewer on re-review. **When `monitor-pr.py` says to re-request, it is right** — it keys on whether
+that reviewer has seen the current head.
 
-**Tier 0b closes that — on some repos.** lgtm re-reviews a dispatched PR once the head has moved past the one it reviewed *and* threads are clear *and* CI is green *and* GitHub reports `reviewDecision == "REVIEW_REQUIRED"`. Reaching that state is the useful thing you can do for lgtm. **But the fourth condition is not something you can reach; it is a property of the repo.** Check it:
-
-```bash
-gh pr view <n> --repo <owner>/<repo> --json reviewDecision -q .reviewDecision
-```
-
-- **`REVIEW_REQUIRED` and you pushed** — tier 0b can see you. Do not re-request lgtm. If it has not come back and the other three conditions hold, that is a bug in lgtm worth reporting, not a re-request worth sending.
-- **Empty (GitHub's null) or `CHANGES_REQUESTED`** — tier 0b **cannot** see you, and it never will on this PR. Re-request lgtm's login once (the exact login from its most recent review) and stop. This is not the retired chase-the-bot habit coming back; it is the one case the sweep is structurally unable to reach, and the re-request is the only way back in.
-- **You answered its threads without pushing** — tier 0b cannot see you either, whatever `reviewDecision` says. Its first gate is "the head moved past the one lgtm reviewed" (`settledRereview.ts`, refusal `head-already-reviewed`), and resolving a thread does not move the head. lgtm has exactly two reawaken inputs for a dispatched PR: a new head, or a review re-request newer than its last review (`discover.ts`, reasons `head-changed` / `review-rerequested`). There is no threads-resolved trigger. So when a pool reviewer left `COMMENTED` on informational threads and the right answer was a reply rather than a code change, re-request that login **once** — it is the designed signal for "I answered; look again", not a nag. The maven-renovate lane does this by construction (`lane-request-review.sh`, once per head), and on 2026-09-14 that was what turned two `COMMENTED` reviews into approvals on `mono#4580` and `#4582`; the same day a session that had internalised "never re-request the pool" flagged it as a violation. It was not.
-
-The line that separates the two, in one sentence: **a push is a signal lgtm already receives; a reply is not.**
-
-Why the field behaves that way: `reviewDecision` is only ever `REVIEW_REQUIRED` when the PR's *base branch* carries a review-required protection rule. Without one, GitHub reports the latest *decisive* review and null when there is none — and a `COMMENTED` review is not a decision. lgtm posts `COMMENTED` when it wants changes without blocking, so on such a repo its own review both clears the review request and nulls the field, and tier 0b's gate refuses forever. Measured on `food-truck/salmon-of-knowledge`, 2026-09-04:
-
-| PR | latest non-bot review | pending requests | `reviewDecision` |
-|---|---|---|---|
-| #194 | COMMENTED | 0 | *(null)* |
-| #193 | CHANGES_REQUESTED | 0 | CHANGES_REQUESTED |
-| #191 | APPROVED | 0 | APPROVED |
-| #38 | none | 0 | *(null)* |
-
-`salmon-of-knowledge#208` is the incident this paragraph exists for: CI green, all eight threads resolved, settled head — the exact state tier 0b is for — and an agent following the previous wording of this section waited on a lane that had never once fired on that repo (12 tier-0b firings in the surrounding week, every one on `mono`, `culinary-operations-server` or `internal-frontends`; zero on `salmon-of-knowledge` or `k8s-gitops`, which have **no** open PR reporting `REVIEW_REQUIRED`). What rescued it was tier 0, three minutes after a human re-requested by hand. That is the "stalled-but-healthy trap" below, reached by following this skill.
-
-**`monitor-pr.py` is the tiebreaker when the prose and the script disagree.** On #208 it said `Stale non-APPROVED review(s) from @jamesvec predate current HEAD. Re-request review:` — and it was right. The script keys on "has this reviewer seen the current head", which is the question that actually matters, and it does not carry the `REVIEW_REQUIRED` assumption this section used to. If it tells you to re-request, do it.
-
-The lgtm-side fix (admit a null decision after positively confirming no approval, and admit `CHANGES_REQUESTED` once the head has settled) is in the lgtm repo — see the `settledRereview.ts` header. Once that is deployed the precondition above relaxes, but a single re-request on a settled head stays harmless either way: tier 0 and tier 0b de-duplicate against each other, so the worst case is a race the sweep wins.
-
-#### Never use a bot's trigger comment either
-
-Do not post `/gemini review`, `@claude review`, or any equivalent. A session did exactly this on `mono#4476` on 2026-09-02, four minutes after being woken, because the wake payload it was reading told it to "use the bot's documented re-trigger comment" if a review request didn't take. That instruction was wrong and has been removed. The rule is the same for both mechanisms: **leave automated reviewers alone.**
-
-Note that a bot review you did *not* ask for is still real feedback. Address its threads on the merits like any other review; just don't summon it again.
+The lgtm case is genuinely conditional and has burned this skill in *both* directions — waiting
+forever on a sweep that could never fire, and re-requesting where the sweep already had it. The rule
+and the measured evidence: see
+[reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md).
 
 ### Exit condition
 
@@ -451,7 +411,7 @@ gh api repos/{owner}/{repo}/pulls/<n>/requested_reviewers --jq '[.users[].login]
 gh pr view <n> --json reviewDecision,mergeStateStatus -q '{d:.reviewDecision,m:.mergeStateStatus}'
 ```
 
-Empty reviewers **and** no approval (`reviewDecision` of `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or empty) means nothing is pending on anyone. **Before you report a PR as held and end the turn, confirm someone is on the hook** — a human with a live review request, or lgtm with a settled head it will pick up. That second one is conditional: lgtm picks up a settled head only where `reviewDecision` is `REVIEW_REQUIRED` (see §"When lgtm comes back on its own, and when it cannot"). If the field is empty or `CHANGES_REQUESTED`, nobody is on the hook until you re-request lgtm once. `salmon-of-knowledge#208` sat in exactly this state on 2026-09-04 with an agent waiting for a sweep that could not reach it. If neither is true, you are the only thing standing between that PR and indefinite silence.
+Empty reviewers **and** no approval (`reviewDecision` of `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or empty) means nothing is pending on anyone. **Before you report a PR as held and end the turn, confirm someone is on the hook** — a human with a live review request, or lgtm with a settled head it will pick up. That second one is conditional: lgtm picks up a settled head only where `reviewDecision` is `REVIEW_REQUIRED` (see [reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md)). If the field is empty or `CHANGES_REQUESTED`, nobody is on the hook until you re-request lgtm once. `salmon-of-knowledge#208` sat in exactly this state on 2026-09-04 with an agent waiting for a sweep that could not reach it. If neither is true, you are the only thing standing between that PR and indefinite silence.
 
 Note the shepherd does not rescue this either. `landable` requires an approval, so a stalled PR fails it and falls through to `idle`, which only tells the human — hours later, and only that "it has not moved."
 
@@ -463,98 +423,16 @@ An agent violated this on 2026-09-02, running `gh pr merge <n> --squash` on a PR
 
 An approved, green, mergeable PR is a *report*, not a cue to act: say it is ready and who needs to press the button.
 
-### The watchdog: what to do when the only thing left is waiting
+### When the only thing left is waiting
 
-> **⛔ RETIRED — see the banner at the top of this file.** Do not schedule wakes. Exit conditions
-> unmet, CI green, nothing to fix, no reviewer yet → **report state to the user and end the turn.**
-> The `lgtm-shepherd` timer watches the PR from there and tells the user if it stalls; it does not
-> wake you. The rest of this section is kept as history and does not describe current behaviour.
+Exit conditions unmet, CI green, nothing to fix, no reviewer yet → **report the state in plain text
+and end the turn.** Do not keep the 60-second loop running for hours, and do not schedule a wake.
+`lgtm-shepherd` takes it from there.
 
-Exit conditions unmet, CI green, nothing to fix, no reviewer yet. Do **not** keep the 60-second loop running for hours. Schedule a wake, end the turn, and let the wake bring you back.
-
-**Why the cutover happens exactly at CI-green.** A poll costs roughly a prompt-cache read per minute; a cold wake costs roughly a full cache write. Break-even is around twelve minutes. A wait you expect to measure in a minute or two (CI finishing, a push settling) should be polled through — the cache is warm and re-reading is nearly free. A wait measured in tens of minutes or hours (a human reviewer's queue) should be slept through, because polling it re-pays the read a hundred times to learn nothing.
-
-**Backoff schedule.** Each successive wake for the same PR waits longer, then caps:
-
-| Wake | Delay |
-|---|---|
-| 1st | 15m |
-| 2nd | 45m |
-| 3rd | 2h |
-| 4th and after | 4h (cap) |
-
-**Before you act on a wake, make sure another one is already queued.** The wake that woke you is spent — it is marked delivered the moment it lands, and nothing redelivers it. So from the instant you begin working, the PR is protected by nothing at all, and a context death or a serve restart mid-fix abandons it silently. That mid-response stall is the *original* failure this watchdog exists to prevent; a watchdog that guards only the idle state and not the working state has fixed the easy half.
-
-So the order on every wake is: **schedule the next wake first, then do the work, then cancel-and-replace when you know the outcome.** A safety net you have to survive the fall to deploy is not a safety net.
-
-**Then run one pass and branch on the exit code:**
-
-```bash
-python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py --once <PR>
-```
-
-| Exit | Meaning | Action |
-|---|---|---|
-| `0` | Exit conditions met | The PR is *landable*, which is not the same as landed — confirm with `gh pr view <n> --json state,mergedAt`. Once it is genuinely terminal, **cancel any pending wake** (see below) and report. If it is approved but not yet merged, that is still an open PR: keep the watchdog running until it actually lands. |
-| `1` | Action needed | Do step 5 — fix, reply and resolve every thread, push, re-request if the latest non-bot review is non-APPROVED. Then **return to the tight 60-second loop and reset the backoff to step 1.** Your push restarted CI, so something is moving again and the loop is the right instrument; re-enter the watchdog when CI is green and you are idle once more. |
-| `2` | Unrecoverable error, **or the PR was closed without merging** | Tell the user — this is not something to retry your way out of. Keep the safety-net wake queued unless the cause is terminal: a closed PR is terminal (cancel), but a `gh` timeout or a rate limit at hour six is not, and cancelling on it converts a transient blip into a silently abandoned PR. |
-| `3` | Idle, CI settled — genuinely waiting on a reviewer | Reschedule at the **next** backoff step. |
-| `4` | Idle, but CI is still moving | Do **not** back off. Return to the tight 60-second loop; CI churn resolves in minutes, and the warm cache is what pays for watching it. |
-
-**Keep exactly one wake outstanding per PR: cancel before you reschedule.** Rescheduling without cancelling leaves the old wake queued too, and the duplicates compound every cycle until a single PR is waking you on four different timers with four different backoff steps in their payloads, each disagreeing about which step is current. One wake per PR means the most recently scheduled one is always authoritative.
-
-**Handle the wake idempotently: verify, then act or no-op.** A duplicate can still reach you — a peer session may be shepherding the same branch, or a cancel may have raced a delivery. Always re-read current state before acting; never act on what the payload asserts. An agent that trusts the payload instead of checking will re-request a reviewer who already approved, which is exactly the noise the "don't re-request after APPROVED" rule exists to prevent.
-
-**Cancel the wake on any terminal state. This is correctness, not tidiness.** When the PR merges, the branch's worktree becomes a cleanup target — the nightly reset prunes merged worktrees. A wake still queued against that session then fires into a working directory that no longer exists, and **that failure is silent**: the daemon accepts the message, records it as delivered, injects it into the transcript, and the turn then produces nothing at all — no output, no tool call, no error, and nobody is alerted (`pigeon-s9d` in `scheduling-wakes`). You do not find out. Cancel before you consider the PR finished:
-
-```
-swarm_scheduled(action: "list")     # match on ref: "pr:<owner>/<repo>#<n>"
-swarm_scheduled(action: "cancel", msg_id: "<id>")
-```
-
-Match on the `ref` you set when scheduling — that is what makes this unambiguous when several PRs are in flight at once, and it is why the `ref` is worth setting. Cancel *every* match, not just the first. An empty list is a success, not a missed step: the wake that woke you is already delivered and needs no cancelling.
-
-Terminal means merged, closed, or the user explicitly telling you to stop. It does **not** mean "approved", and it does not mean you escalated to the user — reporting that a PR is stuck leaves it your problem until it lands.
-
-**Refresh a PR that is going stale.** The clock that matters is the PR's own `updatedAt`, not how long you have been waiting — read it, don't estimate it:
-
-```bash
-gh pr view <n> --json updatedAt -q .updatedAt
-```
-
-If that timestamp is roughly 20 hours old and there is **no review at all**, re-request the reviewer to bump it. This applies to lgtm-bound PRs specifically — it exists to beat the dispatcher's staleness cutoff, and on a repo with no such dispatcher it is just an unexplained 20-hour ping at a human. The review funnel drops PRs idle beyond 24 hours, permanently and silently: nothing errors, no component reports unhealthy, the PR simply stops being a candidate and waits forever. A single re-request resets the clock. Skip this once any non-bot review exists — then you are waiting on a verdict, not on discovery.
-
-**Escalate out loud at the cap — but do not stop watching.** The steps are cumulative, so reaching the 4h cap means roughly seven hours of waiting have already passed. At that point post a top-level comment on the PR summarising what is outstanding, and tell the user. Then **keep waking at the 4h cadence.**
-
-The escalation is the *report*, not the stopping. Handing the PR back silently and letting the timer lapse is the abandonment this skill exists to prevent; a reviewer who is simply asleep is the ordinary case, not an error, and a PR opened in the evening will routinely sit longer than seven hours through no fault of anyone. Only a terminal state, or the user telling you to stop, ends the watchdog.
-
-**Make the wake payload self-contained, but carry facts in it rather than procedure.** Per the `scheduling-wakes` skill, the session that receives it may have compacted away everything about why it exists, so it needs the PR URL, repo, branch, worktree path, backoff step, and a timestamp. It does *not* need the branch table — that is on disk at a stable path, and restating it means maintaining it in two places where the copies drift. That is exactly how an earlier draft of this section ended up telling the agent to sleep on exit 1 in the payload while the table said to keep polling.
-
-Name the worktree, but do not let the payload *depend* on it: give the repo root and branch too, so a woken session whose worktree was pruned can still re-establish where it is.
-
-**State the facts as counts with the query that produced them, never as a bare assertion.** "Unresolved threads exist" is unfalsifiable on arrival; `unresolved=0 of 0` plus the command that measured it can be checked in a single call, and — the part that matters — a zero cannot be quietly narrated as a non-zero. This is the difference between a payload the woken session can audit and one it can only obey.
-
-**That applies with more force to any message you send another session**, where the requirement is not a format but a prohibition: **do not assert that work exists unless you ran a command that says so, and quote it.** A wake is a note to yourself and its worst case is wasted effort; a `task.assign` telling a *peer* that a PR has unanswered comments commits someone else to acting on your claim.
-
-This is measured, not hypothetical. A session dispatched seven such messages while querying only `--json number,title,headRefName,state,mergeStateStatus,reviewDecision,autoMergeRequest` — no comments field, no `reviewThreads`, and not one `gh api ... comments` call in the whole session. Two of the seven PRs had never received a single review comment. It went undetected because it was right five times out of seven **by base rate** — most reviewed PRs do have comments — so it read as a working feature rather than an unfetched guess. All seven had zero unresolved threads, so even the "correct" dispatches asked for work already discharged. See `swarm-messaging` §"Never assert a checkable fact you did not fetch".
-
-```
-swarm_schedule(
-  after: "15m",
-  ref: "pr:<owner>/<repo>#<n>",
-  expires_in: "24h",
-  message: "Resume shepherding <owner>/<repo>#<n> — <url>.
-            Worktree <abs path> (if pruned: repo root <repo path>, branch <branch>).
-            Follow the `shepherding-pull-requests` skill, section 'The watchdog';
-            start by running monitor-pr.py --once <n> and branch on the exit code.
-            Backoff step 1 of 4 (next step: 45m).
-            State when scheduled (<timestamp>, verify before trusting):
-            CI green; reviewThreads unresolved=0 of 0; reviews=0; lgtm-bound <auto value>.
-            Premise check: gh pr view <n> --json state,reviewDecision,statusCheckRollup"
-)
-```
-
-Set `expires_in` generously. A wake defaults to expiring six hours after its delivery time, and a serve that is wedged for longer than that drops it with nothing left queued — the cap cadence alone can exceed the default.
+The tight loop is the right instrument only while something is actually changing — CI running, a
+push settling. The break-even against a cold wake is around twelve minutes, which is why a wait
+measured in a reviewer's queue should not be polled. The retired mechanism and that arithmetic:
+[reference/retired-wake-scheduling.md](reference/retired-wake-scheduling.md).
 
 ### Common mistakes
 
@@ -562,18 +440,14 @@ Set `expires_in` generously. A wake defaults to expiring six hours after its del
 - **Re-requesting review from a bot login.** Bots aren't on the lgtm reawaken loop; the request is wasted. Filter on `user.type != "Bot"` before re-requesting.
 - **Poking a bot with its trigger comment.** `/gemini review` and `@claude review` are the same mistake as re-requesting them, wearing a different hat — and they *work*, so unlike a wasted API call they produce real noise on the PR. Measured 2026-09-02 on `mono#4476`.
 - **Re-requesting lgtm where tier 0b can already see you.** Where `reviewDecision` is `REVIEW_REQUIRED` *and you pushed*, lgtm re-reviews a settled head itself; reaching that state is the useful action and the re-request just races the sweep.
-- **Not re-requesting lgtm after answering its threads without a push.** The quieter inverse: "never re-request the pool" remembered as a rule rather than as its reason. A reply does not move the head, and nothing else reawakens lgtm; the PR sits at `COMMENTED` until someone presses the button. See §"When lgtm comes back on its own, and when it cannot".
+- **Not re-requesting lgtm after answering its threads without a push.** The quieter inverse: "never re-request the pool" remembered as a rule rather than as its reason. A reply does not move the head, and nothing else reawakens lgtm; the PR sits at `COMMENTED` until someone presses the button. See [reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md).
 - **NOT re-requesting lgtm where tier 0b cannot see you.** The mirror image, and the more expensive one: on a repo whose base branch has no review-required rule, `reviewDecision` is empty after lgtm's `COMMENTED` review (or `CHANGES_REQUESTED` after its `REQUEST_CHANGES`), tier 0b refuses forever, and "never re-request lgtm" waits indefinitely. `salmon-of-knowledge#208`, 2026-09-04. Check the field; if it is not `REVIEW_REQUIRED`, re-request once. When `monitor-pr.py` says to re-request, it is right.
 - **Running `gh pr merge`.** Not yours. See §"Merging stays with the human" — and note that branch protection refusing your merge is not evidence you were allowed to try.
 - **Ending the turn on a PR with nobody pending on it.** Green plus every thread resolved plus zero requested reviewers is a stalled PR that looks finished. See §"The stalled-but-healthy trap".
 - **Telling the user "a daemon will pick this up" when it will only wake you.** The shepherd routes `needs_reply` / `ci_red` / `conflicted` back to *this session* and only Telegrams the human for `landable` / `idle`. Saying the wrong one leaves the user either ignoring a PR they now own or waiting on a handoff that is coming to you.
 - **Re-requesting review after an APPROVED.** If the latest non-bot review is already `APPROVED`, don't re-request when you push fixes for leftover inline threads. The reviewer signed off; pinging them again to re-confirm is noise. Re-request only when the latest non-bot review is `CHANGES_REQUESTED` or `COMMENTED`.
 - **Re-requesting from the wrong login.** lgtm's reviewer pool rotates, but on re-review it pins to the prior reviewer. Always use the exact login from the most recent non-bot review, not a hardcoded default.
-- **Using `sleep 300` while polling.** A 5-minute idle gap can expire Anthropic's prompt cache and force the next turn to re-send the full prompt. Use `sleep 60` for monitoring loops. (This is an argument against *medium* sleeps specifically. Once you've decided to wait tens of minutes, the cache is lost either way and the watchdog's scheduled wake is strictly cheaper than continuing to poll.)
-- **Ending the turn without scheduling a wake.** *(Retired. Ending the turn with an explicit state report is now correct: `lgtm-shepherd` watches the PR and tells the user if it stalls. The failure to avoid is no longer stopping — it is stopping **silently**, or implying something will resume the work automatically when only a notification is coming.)* Stopping used to be legitimate only if something would bring you back. Nothing runs between your turns — no timer, no hook, no notification. An unscheduled stop is indistinguishable from abandoning the PR, and it is the failure this skill exists to prevent, reached by a more comfortable route.
-- **Leaving a wake scheduled after the PR lands.** The merged branch's worktree gets pruned, and the orphaned wake fires into a directory that no longer exists — where it is accepted, marked delivered, and then does nothing at all, silently. Cancel on every terminal state.
-- **Doing the work with nothing queued behind you.** The wake that woke you is already spent. If you start fixing threads without having scheduled the next wake first, a context death mid-fix abandons the PR exactly as if there had been no watchdog — which is the failure the watchdog was built for. Schedule, then act, then cancel-and-replace.
-- **Re-invoking `--once` in a loop.** That is the 60-second poll with extra ceremony and a cold cache on every pass — strictly worse than either real option. If you are awake and still idle, reschedule and stop. If you expect an answer within a minute or two, use the normal loop.
+- **Using `sleep 300` while polling.** A 5-minute idle gap can expire Anthropic's prompt cache and force the next turn to re-send the full prompt. Use `sleep 60` for monitoring loops. (This is an argument against *medium* sleeps specifically. Once you've decided to wait tens of minutes, the cache is lost either way and ending the turn is strictly cheaper than continuing to poll.)
 - **Treating a wake payload as trustworthy state.** It records what was true when it was scheduled, possibly hours ago. Re-read CI, reviews, and threads before acting on any of it.
 - **Bundling sleep with the follow-up `gh` calls in one bash invocation.** Long chained one-liners that include `sleep` are a known hang risk in this environment (see AGENTS.md). Run `sleep 60` as its own tool call, then run the checks.
 - **Replying to inline comments without resolving them.** GitHub tracks thread resolution separately from the reply chain. A thread with five replies and no resolve still reads as unresolved in the diff UI. After every reply, call `resolveReviewThread`. See `reviewing-github-prs` §"Resolving review threads".
