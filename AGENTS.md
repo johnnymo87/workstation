@@ -44,9 +44,15 @@ work <slug>     # creates ~/projects/workstation/.worktrees/<slug> off origin/ma
 ```
 
 On **cloudbox**, a `pre-commit` hook refuses commits made at the primary root of
-`mono`, `pigeon` and `workstation` (enrolled in `users/dev/home.base.nix` via
-`worktreeGuardRepos`). On devbox and macOS the hook is not installed, so there
-the rule above is convention only — follow it anyway. If the hook blocks you:
+`mono`, `pigeon`, `workstation` and `opencode-patched` (enrolled in
+`users/dev/home.base.nix` via `worktreeGuardRepos`). The same hook also refuses
+an author email that is not configured in a config *file* — one supplied with
+`git -c user.email=` or `GIT_AUTHOR_EMAIL`, which is how 21 commits authored by
+`dev <dev@localhost>` reached this repo's main. Commit bare and let the config
+supply the identity; an inline identity belongs only in a throwaway `git init`
+fixture, where the hook fails open. On devbox and macOS the hook is not
+installed, so there both rules are convention only — follow them anyway. If the
+hook blocks you:
 
 1. **No local changes yet** — just `work <slug>` and commit there.
 2. **You already have uncommitted changes at the root** — copy them forward.

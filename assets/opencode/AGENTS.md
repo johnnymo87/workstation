@@ -222,6 +222,36 @@ forgets it. That guard is a backstop, not
 a license — the convention above binds all sessions and subagents regardless of
 which agent they run as.
 
+## Commit As The Human, Never As An Invented Identity
+
+**Run `git commit` bare. Never pass `-c user.email=` / `-c user.name=`, and never
+set `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, in a repo that has a remote.** The
+identity is the config's job, and it is configured on every host here.
+
+GitHub attributes a commit by its **author email**. An invented address —
+`dev@localhost`, `someone@github.com` — is owned by nobody, so the work shows up
+unattributed to the human who owns it, and no amount of correct commit message
+fixes that afterwards. Twenty-one such commits reached `workstation` main before
+anyone noticed, and they are now permanent: rewriting public trunk to fix
+attribution costs more than the attribution is worth.
+
+The one legitimate use is a **throwaway repo you just created with `git init`**
+(a test fixture in `$TMPDIR`), which genuinely has no configured identity. That
+is where the habit starts. It does not travel: when you move back to a real repo
+in the same turn, drop the flags.
+
+If git says **"Author identity unknown"** in a real repo, that is a broken
+config — stop and report it. Supplying a plausible-looking address silently
+converts a loud, fixable break into permanently mis-attributed history.
+
+**Structural enforcement:** on cloudbox the `pre-commit` hook (see
+`worktreeGuardRepos` in the workstation repo) refuses any author email that is
+not a `user.email` configured in a *file* — `git config --show-scope` reports
+command-line and env-injected values as scope `command`, and those are exactly
+what it rejects. It fails open where there is no file identity at all, so
+throwaway fixtures still work. devbox and macOS have no hook; there the rule
+above is convention only.
+
 ## Host Identification
 
 The `shell-env.ts` plugin injects `OPENCODE_HOSTNAME` into every bash tool

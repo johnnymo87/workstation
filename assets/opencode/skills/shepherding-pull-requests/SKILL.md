@@ -209,6 +209,19 @@ git rebase --onto origin/<trunk> <local-trunk> <your-branch>
 
 This replays only your branch-tip commits onto `origin/<trunk>`, dropping everything between `origin/<trunk>` and `<local-trunk>`.
 
+**Check the author of every commit, not just the messages.** GitHub attributes by author email, and a synthetic one (`dev@localhost`, `someone@github.com`) strips the human's authorship off work they own — permanently, once trunk is public.
+
+```bash
+git log origin/<trunk>..HEAD --format='%h %ae'
+```
+
+Every address should be one this repo has configured in a file (`git config --show-scope --get-all user.email`, ignoring rows whose scope is `command`) **or a real person's**. An unexpected address is one of two things, and they need opposite handling:
+
+- **A made-up address on your own work** (`dev@localhost`, `you@github.com`) — it came from a `-c user.email=` flag or `GIT_AUTHOR_EMAIL`. Fix it now with `git commit --amend --reset-author` (or a rebase with `--exec 'git commit --amend --reset-author --no-edit'` for more than one), and stop passing the flag.
+- **A colleague's address**, because you cherry-picked, amended or stacked on their commit, or credited them with `--author=`. **Leave it.** `--reset-author` there steals their authorship — the same harm as above, pointed the other way.
+
+Cloudbox's pre-commit hook refuses the first kind at commit time (`--no-verify` is the hatch for the second), but devbox and macOS have no hook — this check is what covers them.
+
 ### 3. Adversarial review of the change — by default, unasked
 
 Dispatch `adversarial-reviewer-fable` on the diff before `gh pr create`. This is a standing default like the post-PR ones: the user should never have to ask for it, and "the change looks straightforward to me" is not a reason to skip — that judgement is exactly what the review exists to check.
