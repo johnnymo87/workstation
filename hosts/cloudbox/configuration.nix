@@ -1080,10 +1080,34 @@ in
   # latency: a merge is noticed, and its rollout outcome reported, up to ten
   # minutes sooner. Sweeps with nothing in flight cost nothing (39 of the
   # first 44 were `tracked 0`), so the extra ticks are close to free.
+  # OFFSET FIVE MINUTES FROM lgtm-run, AND THAT IS LOAD-BEARING (lgtm-0re).
+  #
+  # Both timers run every ten minutes against the SAME GH_TOKEN, and lgtm-run
+  # goes first on the ten-minute boundary. It issues 8 `gh search` calls per
+  # cycle (tier 1: 2 orgs; tier 0: 2 orgs x 3 reviewers). Since lgtm-nwn the
+  # shepherd issues 6 of its own (3 owners x 2 discovery legs). Sharing a
+  # minute puts the shepherd's calls into an allowance lgtm-run has already
+  # spent.
+  #
+  # Measured on the live timer 2026-09-15, two consecutive sweeps, identical
+  # shape: 5 of 6 discovery legs returned HTTP 403 secondary rate limit. BOTH
+  # johnnymo87 legs failed every time, so the personal-repo merge notices that
+  # motivated lgtm-nwn were never once fetched. It is silent -- discovery fails
+  # soft per leg, so the sweep completes and reports `errors 0`.
+  #
+  # Note lgtm-run itself logged ZERO 403s in that window. It is not that the
+  # budget was already blown; lgtm-run consumed it successfully and left
+  # nothing 45 seconds later. A manual run at :44 -- four minutes clear of
+  # lgtm-run -- had all six legs succeed, which is the evidence this offset is
+  # built on.
+  #
+  # RandomizedDelaySec stays at 60: it spreads load without crossing back into
+  # lgtm-run's minute. Do NOT return this to `*:0/10` without re-measuring, and
+  # do not raise the jitter past ~4 minutes.
   systemd.timers.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnCalendar = "*:0/10";
+      OnCalendar = "*:5/10";
       Persistent = false;
       RandomizedDelaySec = 60;
     };
