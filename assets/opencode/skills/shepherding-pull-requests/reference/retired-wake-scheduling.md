@@ -21,11 +21,6 @@ only thing outstanding is a human reviewer.
 
 ### The watchdog: what to do when the only thing left is waiting
 
-> **⛔ RETIRED — see the banner at the top of this file.** Do not schedule wakes. Exit conditions
-> unmet, CI green, nothing to fix, no reviewer yet → **report state to the user and end the turn.**
-> The `lgtm-shepherd` timer watches the PR from there and tells the user if it stalls; it does not
-> wake you. The rest of this section is kept as history and does not describe current behaviour.
-
 Exit conditions unmet, CI green, nothing to fix, no reviewer yet. Do **not** keep the 60-second loop running for hours. Schedule a wake, end the turn, and let the wake bring you back.
 
 **Why the cutover happens exactly at CI-green.** A poll costs roughly a prompt-cache read per minute; a cold wake costs roughly a full cache write. Break-even is around twelve minutes. A wait you expect to measure in a minute or two (CI finishing, a push settling) should be polled through — the cache is warm and re-reading is nearly free. A wait measured in tens of minutes or hours (a human reviewer's queue) should be slept through, because polling it re-pays the read a hundred times to learn nothing.

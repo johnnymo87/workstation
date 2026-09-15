@@ -22,7 +22,7 @@ description: Use when you are about to run `gh pr create`, immediately after it 
 > | `landable`, `idle` | one Telegram line to the human |
 >
 > Verify rather than trust this table: `LGTM_ENABLE_AGENT_ROUTING=1` on the service is the master
-> switch, and `journalctl -u lgtm-shepherd.service | grep 'routed to ses_'` shows the wakes actually
+> switch, and on cloudbox `journalctl -u lgtm-shepherd.service | grep 'routed to ses_'` shows the wakes actually
 > delivered.
 >
 > **So when the tight loop has nothing left to do** — CI green, threads resolved, and the only thing
@@ -40,7 +40,8 @@ description: Use when you are about to run `gh pr create`, immediately after it 
 >   runs out the PR becomes human-relay for the rest of its life, and the only trace is one
 >   `[wake-budget-exhausted]` log line. A PR that goes *quiet early* is the symptom.
 > - **Do not do the shepherd's job for it.** No self-scheduled wakes, and no re-requesting a
->   reviewer that the daemon already re-reviews on its own.
+>   reviewer that the daemon already re-reviews on its own (§"Re-requesting review" says when that
+>   is and is not the case — it is conditional, not "never").
 >
 > Everything else in this skill still binds: the pre-PR checks, replying to and resolving every
 > thread, and the tight 60-second loop while something is actually moving.
@@ -251,7 +252,7 @@ The right framing: you're holding the PR until it's merged or until there's a re
 
 After creating the PR, enter the monitoring loop. There is no maximum number of iterations and no point at which an unmerged PR stops being yours.
 
-**But watching is not the same as polling.** The tight 60-second loop is the right instrument only while something is actively changing — CI running, threads to answer, a push in flight. Once CI is green and the only thing left is a reviewer who hasn't looked yet, the loop is burning turns to re-read a page that nobody has edited. At that point hand off to the watchdog (below): schedule a wake, end the turn, come back when there is plausibly something to see. What changes at CI-green is the *mechanism*, never the obligation.
+**But watching is not the same as polling.** The tight 60-second loop is the right instrument only while something is actively changing — CI running, threads to answer, a push in flight. Once CI is green and the only thing left is a reviewer who hasn't looked yet, the loop is burning turns to re-read a page that nobody has edited. At that point report the state and end the turn — see §"When the only thing left is waiting". `lgtm-shepherd` brings you back if anything needs you. What changes at CI-green is the *mechanism*, never the obligation.
 
 ### Tooling: monitor-pr.py
 
@@ -261,18 +262,18 @@ A companion script bundled with this skill does steps 1-4 of the loop body (slee
 python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py [PR]
 ```
 
-Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate -- Anthropic's prompt-cache TTL is 5 minutes, and a single bash call that blocks the model longer than that expires the warm cache. **While CI is still moving you are expected to re-invoke the script in a loop**; the script owns the within-60s pacing, you own the loop and the fix step. Once CI is green and only the reviewer is outstanding, stop looping and hand off to the watchdog.
+Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate -- Anthropic's prompt-cache TTL is 5 minutes, and a single bash call that blocks the model longer than that expires the warm cache. **While CI is still moving you are expected to re-invoke the script in a loop**; the script owns the within-60s pacing, you own the loop and the fix step. Once CI is green and only the reviewer is outstanding, stop looping, report the state and end the turn.
 
 | Exit code | Meaning | What to do |
 |---|---|---|
 | `0` | All exit conditions met | Done. PR is landable. |
 | `1` | Action needed (CI failed / unresolved threads / non-APPROVED review predates HEAD) | Read stdout for the specific action, do it (step 5 below), then re-invoke. |
 | `2` | Unrecoverable error (could not query GitHub) | Surface to user; don't silently retry. |
-| `3` | Budget elapsed, still idle-waiting (CI pending or lgtm-bound waiting on APPROVAL) | Re-invoke immediately **if CI is still moving**. If CI is green and you are only waiting on a reviewer, schedule a wake and end the turn — see "The watchdog" below. |
+| `3` | Budget elapsed, still idle-waiting (CI pending or lgtm-bound waiting on APPROVAL) | Re-invoke immediately **if CI is still moving**. If CI is green and you are only waiting on a reviewer, report the state and end the turn — see §"When the only thing left is waiting". |
 
-`--once` runs exactly one evaluation pass and never sleeps. Use it for watchdog wakes, where the session is awake only long enough to check state and then either act or reschedule. (It is equivalent to `--budget-seconds 0`, which already behaved this way; the flag exists to say so out loud and to print the right follow-up instruction.)
+`--once` runs exactly one evaluation pass and never sleeps. Use it when a shepherd wake has woken you and the session is awake only long enough to check state and then act. (It is equivalent to `--budget-seconds 0`, which already behaved this way; the flag exists to say so out loud and to print the right follow-up instruction.)
 
-`--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness -- checking both that the repo is listed AND that the PR's author is in an author allowlist (see "Once, before the loop" for why the second half is load-bearing) -- so the manual grep there can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
+`--lgtm-bound auto` (default) reads `~/projects/lgtm/lgtm.yml` to detect lgtm-boundness -- checking both that the repo is listed AND that the PR's author is in an author allowlist (see [reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md) for why the second half is load-bearing) -- so the manual grep there can be skipped when the script is in use. Use `--lgtm-bound yes` / `--lgtm-bound no` to override.
 
 **Prefer `auto`, and treat an override as a claim you owe evidence for.** The detector re-reads `lgtm.yml` on every run, so `auto` tracks config changes; a hardcoded `--lgtm-bound no` does not, and outlives whatever justified it. When you do override, the script now runs the detector anyway and labels the printed value `OVERRIDE ...` — warning on stderr when the two disagree. **A line reading `lgtm-bound: False` under an override is your own flag echoed back, never a confirmation of it.** If you are putting an override in a resumption prompt, quote the auto value beside it, because the post-compaction session cannot see how you derived it.
 
@@ -352,7 +353,7 @@ failure-asymmetry argument behind that default: see
    - **Do not re-request or trigger-comment any bot.** Bots do not come back and should not be asked to.
    - **lgtm: check `reviewDecision` before deciding.** lgtm returns on its own once the head is settled — but only where GitHub reports `REVIEW_REQUIRED`. Anywhere else, re-request its login once. See §"Re-requesting review" for the check and why.
     - Go back to the 60-second sleep (step 1).
-6. **Otherwise** (nothing to fix this iteration), evaluate exit conditions. If they are unmet and the only thing outstanding is a reviewer who hasn't looked yet, leave the loop and hand off to the watchdog instead of sleeping again.
+6. **Otherwise** (nothing to fix this iteration), evaluate exit conditions. If they are unmet and the only thing outstanding is a reviewer who hasn't looked yet, leave the loop, report the state and end the turn instead of sleeping again — see §"When the only thing left is waiting".
 
 ### Re-requesting review
 
@@ -363,11 +364,21 @@ failure-asymmetry argument behind that default: see
 | Human whose latest review is `COMMENTED` / `CHANGES_REQUESTED` | **Yes** — nothing else re-notifies them, and `COMMENTED` means they are not satisfied |
 | Anyone whose latest review is `APPROVED` | **No** — approval survives later pushes for inline-only fixes |
 | A review bot (`user.type: "Bot"`) | **No**, and never post a trigger comment (`/gemini review`) at one |
-| lgtm's dispatched reviewer (`user.type: "User"`) | **Conditional** — depends on `reviewDecision` |
+| lgtm's dispatched reviewer (`user.type: "User"`) | **Conditional** — see the three cases below |
 
 ```bash
 gh pr edit <n> --repo <owner>/<repo> --add-reviewer <login>
 ```
+
+**The lgtm case turns on whether the head moved, not on `reviewDecision` alone:**
+
+- **You pushed, and `reviewDecision` is `REVIEW_REQUIRED`** → do **not** re-request. lgtm re-reviews a
+  settled head itself; a re-request just races the sweep.
+- **You pushed, and `reviewDecision` is empty or `CHANGES_REQUESTED`** → re-request **once**. That
+  sweep is structurally unable to see you and never will on this PR.
+- **You replied to its threads without pushing** → re-request **once, whatever `reviewDecision`
+  says.** A reply does not move the head, and nothing else reawakens lgtm; the PR sits at
+  `COMMENTED` until someone presses the button.
 
 Use the exact login from the most recent non-bot review; lgtm's pool rotates but pins to the prior
 reviewer on re-review. **When `monitor-pr.py` says to re-request, it is right** — it keys on whether
@@ -436,7 +447,7 @@ measured in a reviewer's queue should not be polled. The retired mechanism and t
 - **Telling the user "a daemon will pick this up" when it will only wake you.** The shepherd routes `needs_reply` / `ci_red` / `conflicted` back to *this session* and only Telegrams the human for `landable` / `idle`. Saying the wrong one leaves the user either ignoring a PR they now own or waiting on a handoff that is coming to you.
 - **Re-requesting review after an APPROVED.** If the latest non-bot review is already `APPROVED`, don't re-request when you push fixes for leftover inline threads. The reviewer signed off; pinging them again to re-confirm is noise. Re-request only when the latest non-bot review is `CHANGES_REQUESTED` or `COMMENTED`.
 - **Re-requesting from the wrong login.** lgtm's reviewer pool rotates, but on re-review it pins to the prior reviewer. Always use the exact login from the most recent non-bot review, not a hardcoded default.
-- **Using `sleep 300` while polling.** A 5-minute idle gap can expire Anthropic's prompt cache and force the next turn to re-send the full prompt. Use `sleep 60` for monitoring loops. (This is an argument against *medium* sleeps specifically. Once you've decided to wait tens of minutes, the cache is lost either way and the watchdog's scheduled wake is strictly cheaper than continuing to poll.)
+- **Using `sleep 300` while polling.** A 5-minute idle gap can expire Anthropic's prompt cache and force the next turn to re-send the full prompt. Use `sleep 60` for monitoring loops. (This is an argument against *medium* sleeps specifically. Once you've decided to wait tens of minutes, the cache is lost either way and ending the turn is strictly cheaper than continuing to poll.)
 - **Treating a wake payload as trustworthy state.** It records what was true when it was scheduled, possibly hours ago. Re-read CI, reviews, and threads before acting on any of it.
 - **Bundling sleep with the follow-up `gh` calls in one bash invocation.** Long chained one-liners that include `sleep` are a known hang risk in this environment (see AGENTS.md). Run `sleep 60` as its own tool call, then run the checks.
 - **Replying to inline comments without resolving them.** GitHub tracks thread resolution separately from the reply chain. A thread with five replies and no resolve still reads as unresolved in the diff UI. After every reply, call `resolveReviewThread`. See `reviewing-github-prs` §"Resolving review threads".
