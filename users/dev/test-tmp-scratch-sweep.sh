@@ -146,10 +146,23 @@ for r in repo-dirty repo-unpushed repo-clean; do git_init "$root/$r"; done
 
 # "pushed" without a network: an adjacent bare repo is a real remote, and
 # `git log --branches --not --remotes` is exactly what the sweeper asks.
+#
+# ONE BARE REPO PER FIXTURE, deliberately. repo-clean and repo-unpushed used to
+# share a single origin.git, and that passed only by accident: both are 3MB of
+# zeroes committed by the same author with the same message, so as long as the
+# two `git_init` calls landed in the SAME SECOND the commits hashed identically
+# and the second push was a silent no-op fast-forward. Cross a second boundary --
+# which any change to this repo's source hash can do, by shifting when the
+# sandbox gets here -- and the second push is rejected non-fast-forward, `set -e`
+# kills the suite, and the failure reads as "another repository pushing to the
+# same ref" inside a hermetic sandbox, which is a deeply misleading sentence.
+# Separate remotes make the fixtures independent of the clock. Same shape as
+# detached-origin.git further down.
 git init --quiet --bare "$tmpdir/origin.git"
 git -C "$root/repo-clean" remote add origin "$tmpdir/origin.git"
 git -C "$root/repo-clean" push --quiet origin main
-git -C "$root/repo-unpushed" remote add origin "$tmpdir/origin.git"
+git init --quiet --bare "$tmpdir/unpushed-origin.git"
+git -C "$root/repo-unpushed" remote add origin "$tmpdir/unpushed-origin.git"
 git -C "$root/repo-unpushed" push --quiet origin main
 echo more > "$root/repo-unpushed/later"
 git -C "$root/repo-unpushed" -c user.email=t@t -c user.name=t add -A
