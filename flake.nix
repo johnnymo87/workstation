@@ -59,6 +59,11 @@
       beads = p.callPackage ./pkgs/beads { };
       caveman = p.callPackage ./pkgs/caveman { };
       claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
+      # Seeds the PRIVATE cfp release asset into the store on macOS, where no
+      # GITHUB_TOKEN reaches the builder. Exposed as its own output so it can be
+      # run BEFORE a rebuild -- the whole point is that the rebuild it unblocks
+      # cannot build it first. See pkgs/cfp-prefetch-darwin/default.nix.
+      cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
       clerk = p.callPackage ./pkgs/clerk { };
       # DevCycle CLI. Provides BOTH `dvc` (CLI, on PATH via home.base.nix) and
       # `dvc-mcp` (the local MCP server opencode-config.nix wires up), so the
@@ -784,6 +789,35 @@
         }
         grep -q '^OK$' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: oc-cost suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # The rewrite that keeps the cfp auto-bump from giving the darwin sources
+      # entry the LINUX asset id and hash. Gated here because the failure it
+      # prevents is invisible to every other check: the crossed hash MATCHES
+      # (it is the linux file's), CI only ever realises the aarch64-linux
+      # entry, and the first symptom is an exec-format respawn loop on a Mac.
+      # The suite's real-default.nix fixture is also what catches a reformat of
+      # that file breaking the block anchor, so it must run somewhere.
+      update-cfp-sources-tests = devboxPkgs.runCommand "update-cfp-sources-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 .github/scripts/test_update_cfp_sources.py 2>&1 | tee "$TMPDIR/out.txt"
+
+        # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
+        # also what a suite that silently stopped collecting tests prints.
+        grep -q '^Ran 6 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 6 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: update-cfp-sources suite did not report OK." >&2
           exit 1
         }
         touch $out
