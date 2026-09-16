@@ -571,6 +571,61 @@
         touch $out
       '';
 
+      # The per-host Bazel disk-cache policy in the generated ~/.bazelrc.
+      #
+      # WHAT IT PROTECTS. cloudbox runs with `common --disk_cache=` (off) and
+      # macOS keeps a populated one. That asymmetry is the whole point and it is
+      # fragile: both lines live in one builder, and the obvious "cleanup" is to
+      # hoist them back into the shared prefix -- which is where the --disk_cache
+      # line started, and is how the first draft of this change silently stripped
+      # the laptop's only offline cache.
+      #
+      # WHY THE SEAM IS A writeText AND NOT A home.file .source. Unlike
+      # disk-watch and disk-cleanup, the bazelrc is produced by a home.activation
+      # entry rather than a home.file, so there is no store path to point at. The
+      # check reads the activation script's own `.data` -- the exact text that
+      # gets heredoc'd to ~/.bazelrc -- and materialises it as a file for the
+      # suite. Same principle as the other SRC seams: the bytes under test are
+      # the bytes that ship, and the check's dependency graph does the evaluating.
+      #
+      # BOTH HOSTS ARE CHECKED AGAINST REAL EVALUATED OUTPUT, including Darwin.
+      # The note elsewhere in this file that darwinConfigurations "needs a macOS
+      # builder" is about BUILDING the activation package; EVALUATING one string
+      # attribute out of it works fine on aarch64-linux and costs seconds. A
+      # first draft of this check asserted the Darwin half against the Nix source
+      # text with an awk extractor, on the false assumption that evaluation was
+      # unavailable -- that extractor was keyed on `lib.optionals isDarwin [` and
+      # would have started matching the wrong block the moment a second such
+      # branch appeared above it. Evaluated bytes have no such failure mode.
+      bazelrc-disk-cache-tests = devboxPkgs.runCommand "bazelrc-disk-cache-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        BAZELRC_CLOUDBOX_SRC = devboxPkgs.writeText "cloudbox-bazelrc-activation"
+          self.homeConfigurations.cloudbox.config.home.activation.generateBazelrc.data;
+        BAZELRC_DARWIN_SRC = devboxPkgs.writeText "darwin-bazelrc-activation"
+          self.darwinConfigurations.${mac.hostname}
+            .config.home-manager.users.${mac.username}
+            .home.activation.generateBazelrc.data;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-bazelrc-disk-cache.sh 2>&1 | tee "$TMPDIR/bdc.txt"
+        grep -q '^18 passed, 0 failed' "$TMPDIR/bdc.txt" || {
+          echo "GATE FAILURE: bazelrc disk-cache suite did not reach its 18/0 tally." >&2
+          exit 1
+        }
+        # Same anti-vacuity pin as the disk-watch checks: the tally line is
+        # printed by the suite itself, so a suite truncated to two assertions
+        # would still print a truthful "2 passed, 0 failed".
+        [ "$(grep -c '^PASS  ' "$TMPDIR/bdc.txt")" = 18 ] || {
+          echo "GATE FAILURE: expected 18 'PASS' lines, got" \
+               "$(grep -c '^PASS  ' "$TMPDIR/bdc.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # Devbox's standalone /tmp scratch sweeper. Same SRC seam and same
       # anti-vacuity pin as the two checks above.
       #
