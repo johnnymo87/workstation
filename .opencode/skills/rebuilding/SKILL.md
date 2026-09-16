@@ -26,6 +26,49 @@ There are NixOS activation guards that will abort if you use the wrong target, b
 
 **macOS** uses `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (system + home combined).
 
+### macOS: seed the cfp asset FIRST, or the whole rebuild dies
+
+```bash
+cfp-prefetch-darwin        # idempotent; no-op when already seeded
+sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2
+```
+
+`claude-failover-proxy` is fetched from a **private** GitHub repo. cloudbox's
+nix-daemon carries a `GITHUB_TOKEN` (sops `EnvironmentFile`) so its fetch is
+unattended; this Mac has no such token anywhere the builder can see, and every
+obvious escape is closed — `sudo` strips the user's env, `--option impure-env`
+needs an experimental feature that is not enabled here, and `pkgs.fetchurl`
+ignores `nix.settings.netrc-file`.
+
+**An un-fetchable source fails the whole system build, not just cfp**, so
+skipping this step does not "leave cfp stale" — it leaves you unable to rebuild
+anything at all, with a 404 that reads like a network problem:
+
+```
+curl: (22) The requested URL returned error: 404
+error: cannot download claude-failover-proxy-<ver>-darwin-arm64 from any mirror
+```
+
+`cfp-prefetch-darwin` downloads the asset with the Keychain `github-api-token`
+and places it in the store under the exact name+hash the flake expects, which is
+all a fixed-output derivation needs to consider itself already built.
+
+**This re-arms on every cfp release.** The daily auto-bump PR merges a new
+version, and the next rebuild after that needs a fresh seed. It also re-arms
+whenever garbage collection reaps the seeded path, which is unrooted — and note
+a plain nixpkgs bump rebuilds cfp's wrapper too, so "I didn't touch cfp" is not
+a reason to skip it. Just run it before every macOS rebuild; it costs nothing
+when the asset is already present.
+
+Two footguns:
+
+- **First-ever deploy on a fresh Mac**: the helper is installed *by* the rebuild
+  it unblocks, so it is not on `PATH` yet. Use
+  `nix run ~/Code/workstation#cfp-prefetch-darwin` that one time.
+- **It defaults to `~/Code/workstation` regardless of your cwd.** If you are
+  deploying a worktree that bumps cfp, pass `--flake .` — otherwise it seeds the
+  version the main checkout wants and the rebuild still 404s on yours.
+
 ## Deploy From The Main Worktree, Never A Worktree Or Scratch Checkout
 
 Every command below says `cd ~/projects/workstation` and means it. **A deploy

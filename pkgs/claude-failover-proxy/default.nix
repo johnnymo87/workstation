@@ -37,6 +37,27 @@
 # which makes the EnvironmentFile token apply. With that in place a plain
 # `sudo nixos-rebuild switch` self-serves the private fetch -- no manual steps.
 #
+# == macOS has no such token, so the asset is PRE-SEEDED instead ==
+# The mechanism above depends on a GITHUB_TOKEN reaching the builder. On the Mac
+# nothing supplies one: the nix-daemon's LaunchDaemon plist carries no
+# environment, `sudo` strips the user's, and the two obvious escapes are both
+# closed -- `nix build --option impure-env` needs the `configurable-impure-env`
+# experimental feature (not enabled here), and pkgs.fetchurl ignores
+# `nix.settings.netrc-file` (see above). Because the fetch failure fails the
+# WHOLE system build, an un-fetchable asset bricks every `darwin-rebuild`, not
+# just cfp -- and the daily auto-bump PR re-arms that trap on each release.
+#
+# So on darwin the asset is placed in the store OUT OF BAND, before the build:
+#
+#   cfp-prefetch-darwin            # pkgs/cfp-prefetch-darwin, run before rebuild
+#
+# That works because a fixed-output derivation's output path is a function of
+# its `name` and `hash` ALONE -- not of the URL, the system, or how the bytes
+# arrived. `nix store add --mode flat --name <name> <file>` therefore lands on
+# exactly the path this fetchurl would produce, and Nix then treats the FOD as
+# already realised and never runs it. Verified with
+# `nix-store --print-fixed-path sha256 <hash> <name>`.
+#
 # == Why a wrapper instead of autoPatchelfHook ==
 # bun --compile produces a single-file executable that appends the JS bundle as
 # a trailer read by offset from EOF. patchelf rewrites the ELF and changes the
@@ -72,11 +93,28 @@ let
         echo "machine api.github.com login x-access-token password $GITHUB_TOKEN" > netrc
       '';
     };
+
+    "aarch64-darwin" = fetchurl {
+      name = "claude-failover-proxy-${version}-darwin-arm64";
+      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/562073205";
+      hash = "sha256-sfsAf8f11iBMNH63CTksEXmE6QBtpwh0fjFM/aG1YUk=";
+      curlOptsList = [ "-H" "Accept: application/octet-stream" ];
+      netrcImpureEnvVars = [ "GITHUB_TOKEN" ];
+      netrcPhase = ''
+        echo "machine api.github.com login x-access-token password $GITHUB_TOKEN" > netrc
+      '';
+    };
   };
 
   # Launch the pristine bun binary through the nix dynamic linker. glibc covers
   # every NEEDED lib (libc/libpthread/libdl/libm); stdenv.cc.cc.lib is added
   # defensively for any runtime dlopen of libstdc++/libgcc_s.
+  #
+  # LINUX ONLY. Both bindings force `glibc`'s outPath the moment they are
+  # evaluated, and glibc does not evaluate on darwin -- so they must stay behind
+  # `stdenv.isLinux` at every USE site, not merely be lazy here. The darwin
+  # artifact needs none of this: a Mach-O binary carries its own load commands
+  # and links against the system libSystem.
   libPath = lib.makeLibraryPath [ glibc stdenv.cc.cc.lib ];
   interpreter = "${glibc}/lib/ld-linux-aarch64.so.1";
 
@@ -87,28 +125,63 @@ stdenv.mkDerivation {
   inherit version;
 
   src = sources.${stdenv.hostPlatform.system}
-    or (throw "claude-failover-proxy: unsupported system ${stdenv.hostPlatform.system} (only aarch64-linux is released today)");
+    or (throw "claude-failover-proxy: unsupported system ${stdenv.hostPlatform.system} (released targets: aarch64-linux, aarch64-darwin)");
 
   # The "source" is a single binary; skip unpack.
   dontUnpack = true;
 
   # CRITICAL: never let the fixup phase run patchelf/strip on the bun binary --
-  # it corrupts the appended bundle trailer (see header comment).
+  # it corrupts the appended bundle trailer (see header comment). On darwin the
+  # trailer is a Mach-O __BUN segment rather than an appended ELF tail, but the
+  # rule holds for a second reason: the released artifact is adhoc/linker-signed
+  # (`codesign --verify --strict` passes), and strip would invalidate that
+  # signature. A plain `install` copy preserves it.
   dontFixup = true;
 
-  installPhase = ''
-    runHook preInstall
-    install -Dm755 "$src" "$out/libexec/claude-failover-proxy"
-    mkdir -p "$out/bin"
-    # printf (single-quoted format) keeps "$@" literal in the emitted script;
-    # nix interpolates the store paths, bash expands $out to bake the absolute
-    # libexec path.
-    printf '#!%s\nexec %s --library-path %s "%s/libexec/claude-failover-proxy" "$@"\n' \
-      "${stdenv.shell}" "${interpreter}" "${libPath}" "$out" \
-      > "$out/bin/claude-failover-proxy"
-    chmod +x "$out/bin/claude-failover-proxy"
-    runHook postInstall
-  '';
+  installPhase =
+    if stdenv.isLinux then ''
+      runHook preInstall
+
+      # Refuse a binary for the WRONG OS. The release has one asset per target
+      # and their hashes are bumped by an automated PR; a crossing there is
+      # self-consistent (the hash matches the file it names) so Nix cannot catch
+      # it, and the symptom is an exec-format error in a launchd/systemd respawn
+      # loop far from the cause. Four bytes here turn that into a build failure.
+      # ELF magic: 7f 45 4c 46.
+      magic="$(od -An -tx1 -N4 "$src" | tr -d ' \n')"
+      if [ "$magic" != "7f454c46" ]; then
+        echo "claude-failover-proxy: expected an ELF binary for ${stdenv.hostPlatform.system}, got magic $magic" >&2
+        echo "  The aarch64-linux sources entry is probably pointing at another target's asset." >&2
+        exit 1
+      fi
+
+      install -Dm755 "$src" "$out/libexec/claude-failover-proxy"
+      mkdir -p "$out/bin"
+      # printf (single-quoted format) keeps "$@" literal in the emitted script;
+      # nix interpolates the store paths, bash expands $out to bake the absolute
+      # libexec path.
+      printf '#!%s\nexec %s --library-path %s "%s/libexec/claude-failover-proxy" "$@"\n' \
+        "${stdenv.shell}" "${interpreter}" "${libPath}" "$out" \
+        > "$out/bin/claude-failover-proxy"
+      chmod +x "$out/bin/claude-failover-proxy"
+      runHook postInstall
+    '' else ''
+      runHook preInstall
+      # Same wrong-OS guard as the linux branch above, mirrored. Mach-O 64-bit
+      # little-endian magic is cf fa ed fe.
+      magic="$(od -An -tx1 -N4 "$src" | tr -d ' \n')"
+      if [ "$magic" != "cffaedfe" ]; then
+        echo "claude-failover-proxy: expected a Mach-O binary for ${stdenv.hostPlatform.system}, got magic $magic" >&2
+        echo "  The aarch64-darwin sources entry is probably pointing at another target's asset." >&2
+        exit 1
+      fi
+
+      # No ld.so shim on darwin: a Mach-O executable resolves libSystem through
+      # dyld on its own, and there is no interpreter to override. Install the
+      # released binary directly as $out/bin/claude-failover-proxy.
+      install -Dm755 "$src" "$out/bin/claude-failover-proxy"
+      runHook postInstall
+    '';
 
   doCheck = false;
 
@@ -118,6 +191,6 @@ stdenv.mkDerivation {
     license = licenses.mit;
     sourceProvenance = with sourceTypes; [ binaryNativeCode ];
     mainProgram = "claude-failover-proxy";
-    platforms = [ "aarch64-linux" ];
+    platforms = [ "aarch64-linux" "aarch64-darwin" ];
   };
 }

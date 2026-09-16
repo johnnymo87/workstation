@@ -69,9 +69,17 @@ let
   #      loop dies with an EMPTY response — the exact silent-failure the oracle
    #      subagent was hitting historically. devbox keeps the direct
    #      `anthropic/claude-opus-*` pin (it is the working primary there via
-   #      TeamClaude); macOS is left untouched (status
-  #      quo — its primary is Gemini and opus agents are rare there). This
-  #      mirrors the host-conditional primary `model =` below
+   #      TeamClaude).
+   #
+   #      macOS JOINED THIS BRANCH when cfp landed there. It used to be exempt
+   #      ("its primary is Gemini and opus agents are rare"), but the Mac now
+   #      hides the `anthropic` provider entirely (disabled_providers below), so
+   #      an agent left pinned to `anthropic/claude-opus-*` would reach a
+   #      provider that is not in the registry — the same empty-response
+   #      silent failure this rewrite exists to prevent. The Max pool is still
+   #      reached, just through cfp behind google-vertex-anthropic rather than
+   #      through a second, fallback-less lane. This
+   #      mirrors the host-conditional primary `model =` below
   #      (`if isCloudbox then vertexOpusModel else geminiModel`). The Vertex
   #      opus-5 model already carries its own `effort` setting from
   #      opencode.base.json, so no variant override is added here. (opus-4-7
@@ -87,15 +95,16 @@ let
         else
           src;
       afterOpus =
-        if isCloudbox then
+        if isCloudbox || isDarwin then
           pkgs.runCommand "${name}-opus-vertex.md" {} ''
             ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-opus-([0-9]+(?:-[0-9]+)*)|model: google-vertex-anthropic/claude-opus-''${1}\@default|' ${afterSonnet} > $out
           ''
         else
           afterSonnet;
-      # 3. fable -> Vertex Anthropic on cloudbox ONLY, mirroring the opus
-      #    rewrite above and for the same reason: cloudbox has no first-party
-      #    `anthropic/` auth (it routes Anthropic through Vertex/ADC), so an
+      # 3. fable -> Vertex Anthropic on cloudbox and macOS, mirroring the opus
+      #    rewrite above and for the same reason: neither host offers a usable
+      #    first-party `anthropic/` provider (cloudbox has no such auth at all;
+      #    macOS hides it via disabled_providers now that cfp fronts Claude), so an
       #    agent left pinned to `anthropic/claude-fable-5-1` reaches an unusable
       #    provider and the model loop dies with an empty response. The Vertex
       #    fable entry (`google-vertex-anthropic/claude-fable-5-1@default`)
@@ -106,7 +115,7 @@ let
       #    match against the 5.1 pin yields `claude-fable-5@default-1`, a
       #    provider/model pair that does not exist and fails at request time.
       afterFable =
-        if isCloudbox then
+        if isCloudbox || isDarwin then
           pkgs.runCommand "${name}-fable-vertex.md" {} ''
             ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-fable-([0-9]+(?:-[0-9]+)*)|model: google-vertex-anthropic/claude-fable-''${1}\@default|' ${afterOpus} > $out
           ''
@@ -622,6 +631,25 @@ let
         # injectCodexLbBaseUrl (gated on the ~/.codex-lb/enabled opt-in marker).
         openai = { models = codexLbModels; };
       };
+    })
+    // (lib.optionalAttrs isDarwin {
+      # ONE funnel for Claude on macOS. Before cfp there were two independent
+      # lanes to the same Max pool: `anthropic/*` -> teamclaude directly, and
+      # `google-vertex-anthropic/*` -> billed Vertex. The first has NO fallback —
+      # when the pool 429s, teamclaude retries the same account and the request
+      # hangs, which is exactly what happened on 2026-09-09 and is why that lane
+      # was abandoned mid-day after 223 messages.
+      #
+      # cfp supersedes it: it reaches the same rotator, but falls back to Vertex
+      # when Max refuses. Leaving `anthropic` in the picker would keep the
+      # fallback-less path one mis-click away, and a model choice persists into
+      # ~/.local/state/opencode/model.json and poisons later sessions (the same
+      # failure mode documented for the Vertex entries on devbox above).
+      #
+      # recursiveUpdate treats this list as a leaf and REPLACES it; base.json has
+      # no disabled_providers and the devbox/cloudbox branches are other hosts,
+      # so there is no union to worry about.
+      disabled_providers = [ "anthropic" ];
     })
     // (lib.optionalAttrs isCloudbox {
       # Cloudbox uses Vertex/ADC for Google models; hide the direct
@@ -2229,6 +2257,109 @@ in
 
       echo "teamclaude(darwin): anthropic -> ''${anthropic_url:-<direct Anthropic>} (marker=$tc_enabled, port=$tc_live)" >&2
       [[ -n "$anthropic_url" ]] && echo "teamclaude(darwin): run 'opencode-serve-pool-restart' to apply to running serves" >&2 || true
+    '');
+
+  # Point opencode's `google-vertex-anthropic` provider at the local cfp router
+  # (:8789) on macOS, so Claude traffic goes Max-first with a Vertex fallback
+  # instead of straight to work-billed Vertex.
+  #
+  # WHY THIS EXISTS SEPARATELY FROM THE TEAMCLAUDE BLOCK ABOVE. Those two blocks
+  # aim at different providers and only one of them is now reachable: `anthropic`
+  # is in `disabled_providers` on darwin (see the managed config above), so
+  # everything that block writes is INERT while that stays true.
+  #
+  # It is retained only so that removing `anthropic` from disabled_providers is a
+  # one-line rollback rather than a restoration project. Do NOT retain it for the
+  # reason an earlier draft of this comment gave -- that its dummy oauth
+  # credential still stops the @ex-machina plugin from refreshing and rotating
+  # teamclaude's grant family out from under it. Review checked that claim and it
+  # is false: opencode skips a disabled provider's plugin auth loader entirely,
+  # and the plugin's refresh lives inside the `fetch` that loader returns, so
+  # with no loader there is no refresh to suppress.
+  #
+  # cfp only accepts VERTEX-SHAPED paths (translate.ts MODEL_REGEX matches
+  # /models/<id>:rawPredict|streamRawPredict), which is exactly why the router
+  # sits behind google-vertex-anthropic and not behind `anthropic`. It cannot
+  # take Anthropic-native /v1/messages.
+  #
+  # PREDICATE IS THE MARKER, NOT LIVENESS -- same argument as the teamclaude and
+  # codex-lb blocks (beads workstation-k03x / workstation-m55p). A port probe
+  # would read the PRE-switch state, and a switch taken while cfp happened to be
+  # down would strip the baseURL and silently send every Claude turn direct to
+  # billed Vertex, which is precisely the state this change exists to end. The
+  # marker `teamclaude-seeded` is the right one because it is also what the cfp
+  # launchd agent gates on: if there is no Max pool, cfp does not start and there
+  # is nothing to point at.
+  #
+  # Unseeded => strip => direct Vertex. That is the status quo ante and is safe
+  # here ONLY because the Mac's Vertex leg is direct anyway (no aigateway, no
+  # tunnel by deliberate choice), so a strip loses the Max routing but not a cost
+  # ledger.
+  #
+  # GEMINI IS DELIBERATELY UNTOUCHED. cfp is anthropic-only and never routes
+  # gemini; google-vertex stays on its built-in direct path, which also keeps the
+  # Mac's PRIMARY model independent of whether cfp is healthy.
+  home.activation.injectCfpBaseUrlDarwin = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      cfp_enabled=0
+      if TEAMCLAUDE_CONFIG="$HOME/.config/teamclaude.json" \
+           ${localPkgs.teamclaude}/bin/teamclaude-seeded; then
+        cfp_enabled=1
+      fi
+
+      # Reported only, never decisive.
+      cfp_live="down"
+      /usr/bin/nc -z -G2 127.0.0.1 8789 2>/dev/null && cfp_live="up"
+
+      # macOS keeps this in the login Keychain; the NixOS hosts read it from
+      # /run/secrets/google_cloud_project.
+      project="$(/usr/bin/security find-generic-password -s google-cloud-project -w 2>/dev/null || true)"
+
+      anthropic_url=""
+      if [[ "$cfp_enabled" == 1 && -n "$project" ]]; then
+        # 127.0.0.1, not "localhost": cfp binds IPv4 and localhost may resolve
+        # to ::1. Trailing /models is required -- @ai-sdk/google-vertex appends
+        # only /<id>:streamRawPredict to it.
+        anthropic_url="http://127.0.0.1:8789/v1/projects/$project/locations/global/publishers/anthropic/models"
+      elif [[ "$cfp_enabled" == 1 ]]; then
+        echo "cfp(darwin): no google-cloud-project in Keychain; leaving claude on direct Vertex" >&2
+      fi
+
+      if [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+        ${pkgs.jq}/bin/jq --arg a "$anthropic_url" '
+            (if $a == "" then del(.provider."google-vertex-anthropic".options.baseURL)
+             else .provider."google-vertex-anthropic".options.baseURL = $a end)
+          | (if (.provider."google-vertex-anthropic".options // {}) == {}
+             then del(.provider."google-vertex-anthropic".options) else . end)
+          | (if (.provider."google-vertex-anthropic" // {}) == {}
+             then del(.provider."google-vertex-anthropic") else . end)
+          | (if (.provider // {}) == {} then del(.provider) else . end)' \
+          "$runtime" > "$tmp"
+        mv "$tmp" "$runtime"
+      fi
+
+      echo "cfp(darwin): claude -> ''${anthropic_url:-<direct Vertex>} (marker=$cfp_enabled, port=$cfp_live)" >&2
+
+      # The marker and the process can disagree, and only one direction hurts:
+      # config says :8789 while nothing listens there means every Claude request
+      # gets ECONNREFUSED. The launchd agent's StartInterval heals this within
+      # 30s, so this is a heads-up rather than an error -- but say it out loud,
+      # because the alternative is a silent outage whose cause (a first-ever
+      # `teamclaude login` after the agent had already exited 0) is days behind
+      # the symptom.
+      if [[ -n "$anthropic_url" && "$cfp_live" == "down" ]]; then
+        {
+          echo "cfp(darwin): WARNING - pointing opencode at :8789 but nothing is listening yet."
+          echo "cfp(darwin):   the agent retries every 30s; to apply immediately:"
+          echo "cfp(darwin):   launchctl kickstart -k gui/\$(id -u)/org.nix-community.home.claude-failover-proxy"
+        } >&2
+      fi
+
+      [[ -n "$anthropic_url" ]] && echo "cfp(darwin): run 'opencode-serve-pool-restart' to apply to running serves" >&2 || true
     '');
 
   # Point opencode's first-party `openai` provider at the local codex-lb rotator

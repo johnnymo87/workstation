@@ -54,6 +54,11 @@ lib.mkIf isDarwin {
     # `teamclaude login` / `teamclaude accounts`; the launchd agent below runs the
     # server. Nix-packaged (pkgs/teamclaude, platforms = unix), zero runtime deps.
     localPkgs.teamclaude
+    # Seeds the PRIVATE cfp release asset into the store. MUST be run before a
+    # `darwin-rebuild switch` that picks up a new cfp version, because this Mac
+    # has no GITHUB_TOKEN anywhere the builder can see and the failed fetch
+    # takes the whole system build down with it, not just cfp. Idempotent.
+    localPkgs.cfp-prefetch-darwin
     (pkgs.writeShellApplication {
       name = "pigeon-setup-secrets";
       text = ''
@@ -392,6 +397,132 @@ lib.mkIf isDarwin {
         KeepAlive = { SuccessfulExit = false; };
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/teamclaude.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/teamclaude.err.log";
+      };
+    };
+
+    # claude-failover-proxy (cfp) -- darwin/launchd flavor of the cloudbox
+    # systemd unit in hosts/cloudbox/configuration.nix.
+    #
+    # WHAT IT BUYS ON THIS MAC, specifically: measured over 30 days, every
+    # single day's Opus traffic here went out as
+    # `google-vertex-anthropic/claude-opus-5@default` -- 76-136 messages/day
+    # straight to work-billed Vertex. cfp puts the personal Max pool in front of
+    # that lane (CFP_OPUS_MAX_FIRST) while leaving Fable on Vertex, which is the
+    # cheaper tenant for each. Fable volume here is ~3 days in 14, far below the
+    # $100 gate, so the budget/enterprise machinery below essentially never
+    # fires on this host -- it is carried for parity with cloudbox, not because
+    # it binds.
+    #
+    # VERTEX LEG IS DIRECT, not via an aigateway. cloudbox points
+    # CFP_AIGATEWAY_URL at a loopback cost-capture proxy; a laptop has none, and
+    # tunnelling to cloudbox's was rejected deliberately -- this Mac must not
+    # depend on cloudbox at runtime. The cost is that Mac Claude traffic does
+    # not appear in that per-request ledger; cfp's own spend.json/stats.json
+    # still meter it, which is what the budget gate actually reads.
+    #
+    # An HTTPS upstream only works at all because of cfp's C1 fix (v0.9.3,
+    # `out.delete('host')` in sanitizeRequestHeaders): Bun's fetch honours a
+    # caller-supplied Host for TLS SNI, so forwarding the inbound
+    # `127.0.0.1:8789` made every HTTPS Vertex call fail certificate
+    # verification. Invisible on cloudbox, which only ever talks plaintext
+    # loopback. Do not "restore" header forwarding.
+    #
+    # The gate is `teamclaude-seeded`, the same marker binary the teamclaude
+    # agent above uses -- a liveness probe would be the wrong shape here (see
+    # the long comment there) and cfp without a Max pool is pointless anyway.
+    claude-failover-proxy = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${pkgs.writeShellScript "claude-failover-proxy-start" ''
+            set -u
+
+            # No Max pool -> nothing to fail over TO. Exit 0 ("nothing to do")
+            # rather than non-zero, which KeepAlive.SuccessfulExit=false would
+            # respawn every 10s forever.
+            ${localPkgs.teamclaude}/bin/teamclaude-seeded || exit 0
+
+            # cfp REQUIRES this to be non-empty (config.ts throws otherwise) and
+            # a throw here is exactly the unbounded-respawn shape described
+            # above, so validate before exec'ing rather than after.
+            #
+            # Loopback callers are in fact exempt from teamclaude's key check,
+            # so this is future-proofing against `proxy.trustLoopback: false`
+            # rather than something the request path needs today.
+            key="$(${pkgs.jq}/bin/jq -r '.proxy.apiKey // empty' \
+              "${config.home.homeDirectory}/.config/teamclaude.json" 2>/dev/null || true)"
+            if [ -z "$key" ]; then
+              echo "cfp: no .proxy.apiKey in teamclaude.json; not starting" >&2
+              exit 0
+            fi
+            export CFP_TEAMCLAUDE_API_KEY="$key"
+
+            exec ${localPkgs.claude-failover-proxy}/bin/claude-failover-proxy
+          ''}"
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          PATH = "/usr/bin:/bin";
+
+          # Pinned for the same reason the teamclaude agent and both activations
+          # pin it: this wrapper resolves `teamclaude-seeded` against a config
+          # path, and if any of those four sites resolved a DIFFERENT file they
+          # would disagree about whether a Max pool exists.
+          TEAMCLAUDE_CONFIG = "${config.home.homeDirectory}/.config/teamclaude.json";
+
+          CFP_LISTEN_HOST = "127.0.0.1";
+          CFP_LISTEN_PORT = "8789";
+          CFP_TEAMCLAUDE_URL = "http://127.0.0.1:3456";
+
+          # Direct Vertex. cfp re-bases the inbound Vertex-shaped path onto this
+          # origin and forwards the caller's Authorization verbatim, so
+          # opencode's own ADC credentials do the authenticating.
+          CFP_AIGATEWAY_URL = "https://aiplatform.googleapis.com";
+
+          # Family-aware inversion: Opus to Max ahead of Vertex, leaving the
+          # paid budget for Fable. Fable costs 2.0x Opus per dollar on Vertex
+          # but drains the Max 5h bucket ~4.5x faster per weighted token.
+          # ONLY the literal string "true" enables it (cfp warns and stays off
+          # for anything else -- note CFP_DISABLE_BILLING_HEADER in the same
+          # codebase uses "1", so the convention is not uniform). Roll back by
+          # setting this to "false" and rebuilding.
+          CFP_OPUS_MAX_FIRST = "true";
+
+          CFP_BUDGET_DOLLARS = "100";
+          CFP_IDLE_MIGRATE_SECONDS = "300";
+          CFP_RESET_HOUR = "0";
+
+          # PINNED, not inherited. cfp otherwise takes the system timezone
+          # (Intl.DateTimeFormat), and this machine travels -- a timezone change
+          # would silently move the ledger's day boundary, so the daily budget
+          # would reset early or late depending on where you opened the laptop.
+          CFP_TZ = "America/New_York";
+
+          CFP_STATE_PATH = "${config.home.homeDirectory}/.local/state/claude-failover-proxy/spend.json";
+
+          # CFP_ENTERPRISE_API_KEY is deliberately UNSET: the enterprise leg is
+          # only reached once Vertex is over budget, which at this host's
+          # measured volume never happens. cfp logs "enterprise tier: off" and
+          # degrades cleanly. Revisit if /stats ever shows overBudget: true.
+        };
+        RunAtLoad = true;
+        KeepAlive = { SuccessfulExit = false; };
+
+        # Retry every 30s so the agent SELF-HEALS after the pool is first seeded.
+        # Without this there is a real hole: the wrapper exits 0 when teamclaude
+        # is unseeded, home-manager skips re-bootstrapping an agent whose plist
+        # is unchanged, and nothing else starts it -- so the sequence
+        # `teamclaude login` -> `darwin-rebuild switch` would leave activation
+        # pointing opencode at :8789 (marker says seeded) while cfp is still not
+        # running, and every Claude request would get ECONNREFUSED until someone
+        # ran `launchctl kickstart` by hand. While unseeded this costs one exit-0
+        # wrapper run per 30s; once cfp is up, launchd will not start a second
+        # copy of a running agent. Same RunAtLoad+StartInterval combination the
+        # devbox-dev-tunnel agent uses.
+        StartInterval = 30;
+
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/claude-failover-proxy.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/claude-failover-proxy.err.log";
       };
     };
   } // (builtins.listToAttrs (lib.imap0 (i: port: {

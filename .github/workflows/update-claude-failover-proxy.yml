@@ -65,50 +65,70 @@ jobs:
             echo "Update available: $current -> $latest"
           fi
 
-      - name: Resolve asset id + hash
+      # Resolve BOTH released targets. cfp ships one asset per host that runs it
+      # (linux-arm64 = cloudbox, darwin-arm64 = the Mac) and default.nix has a
+      # `sources` entry per target, each with its OWN asset id and hash.
+      - name: Resolve asset ids + hashes
         if: steps.check.outputs.up_to_date == 'false'
         id: asset
         env:
           GH_TOKEN: ${{ secrets.CFP_READ_TOKEN }}
         run: |
+          set -euo pipefail
           tag="${{ steps.check.outputs.tag }}"
-          name="claude-failover-proxy-linux-arm64"
 
-          # Per-release numeric asset id (embedded in the API asset URL).
-          asset_id=$(gh api "repos/johnnymo87/claude-failover-proxy/releases/tags/${tag}" \
-            --jq ".assets[] | select(.name==\"${name}\") | .id")
-          if [ -z "$asset_id" ]; then
-            echo "asset ${name} not found on ${tag}" >&2
-            exit 1
-          fi
-          echo "asset_id=$asset_id" >> "$GITHUB_OUTPUT"
+          for target in linux-arm64 darwin-arm64; do
+            name="claude-failover-proxy-${target}"
 
-          # Authenticated download of the private asset (handles the S3 redirect),
-          # then compute the flat-file SRI hash fetchurl expects.
-          gh release download "$tag" \
-            --repo johnnymo87/claude-failover-proxy \
-            --pattern "$name" \
-            --output asset.bin --clobber
-          h=$(nix-prefetch-url "file://$PWD/asset.bin" 2>/dev/null)
-          sri=$(nix hash convert --hash-algo sha256 --to sri "$h")
-          echo "sri=$sri" >> "$GITHUB_OUTPUT"
-          echo "asset_id=$asset_id sri=$sri"
-          rm -f asset.bin
+            # Per-release numeric asset id (embedded in the API asset URL).
+            asset_id=$(gh api "repos/johnnymo87/claude-failover-proxy/releases/tags/${tag}" \
+              --jq ".assets[] | select(.name==\"${name}\") | .id")
+            if [ -z "$asset_id" ]; then
+              echo "asset ${name} not found on ${tag}" >&2
+              exit 1
+            fi
 
+            # Authenticated download of the private asset (handles the S3 redirect),
+            # then compute the flat-file SRI hash fetchurl expects.
+            gh release download "$tag" \
+              --repo johnnymo87/claude-failover-proxy \
+              --pattern "$name" \
+              --output asset.bin --clobber
+            h=$(nix-prefetch-url "file://$PWD/asset.bin" 2>/dev/null)
+            sri=$(nix hash convert --hash-algo sha256 --to sri "$h")
+            rm -f asset.bin
+
+            # UNDERSCORES, not the target's own dashes: `steps.x.outputs.a-b` is
+            # parsed as subtraction by the GitHub expression language.
+            key="${target//-/_}"
+            echo "${key}_asset_id=$asset_id" >> "$GITHUB_OUTPUT"
+            echo "${key}_sri=$sri" >> "$GITHUB_OUTPUT"
+            echo "${target}: asset_id=$asset_id sri=$sri"
+          done
+
+      # Rewrite each `sources` entry IN ITS OWN BLOCK.
+      #
+      # This used to be three unanchored `sed -i` calls over the whole file,
+      # which was correct only while exactly one target existed. With two, the
+      # url/hash substitutions rewrite EVERY match, so the darwin entry silently
+      # inherits the linux asset id and the linux hash -- and because that hash
+      # genuinely is the linux file's, nothing fails: Nix verifies it happily and
+      # installs an ELF as the darwin binary. The Mac then gets an exec format
+      # error and launchd respawns cfp every 10s forever. Anchoring per block is
+      # the whole point of this step; do not "simplify" it back to sed.
       - name: Update default.nix
         if: steps.check.outputs.up_to_date == 'false'
         run: |
-          file="pkgs/claude-failover-proxy/default.nix"
-          version="${{ steps.check.outputs.latest }}"
-          asset_id="${{ steps.asset.outputs.asset_id }}"
-          sri="${{ steps.asset.outputs.sri }}"
+          set -euo pipefail
+          python3 .github/scripts/update-cfp-sources.py \
+            --current "${{ steps.check.outputs.current }}" \
+            --version "${{ steps.check.outputs.latest }}" \
+            --linux-asset-id "${{ steps.asset.outputs.linux_arm64_asset_id }}" \
+            --linux-hash "${{ steps.asset.outputs.linux_arm64_sri }}" \
+            --darwin-asset-id "${{ steps.asset.outputs.darwin_arm64_asset_id }}" \
+            --darwin-hash "${{ steps.asset.outputs.darwin_arm64_sri }}"
 
-          sed -i "s|version = \"${{ steps.check.outputs.current }}\"|version = \"${version}\"|" "$file"
-          sed -i "s|releases/assets/[0-9][0-9]*|releases/assets/${asset_id}|" "$file"
-          sed -i "s|hash = \"sha256-[^\"]*\"|hash = \"${sri}\"|" "$file"
-
-          echo "Updated $file to ${version} (asset ${asset_id})"
-          git diff "$file"
+          git diff pkgs/claude-failover-proxy/default.nix
 
       - name: Create PR
         if: steps.check.outputs.up_to_date == 'false'
