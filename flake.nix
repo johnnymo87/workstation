@@ -1951,6 +1951,12 @@
       # tests are the two DIRECTIONS of the revision judgement (a stale status
       # tag must not hold a finished rollout open; a matching status tag must
       # not pass an old-revision pod), and losing either one still prints "OK".
+      #
+      # 18 -> 21 on 2026-09-16 with the restart-spike readiness gate, which
+      # added the same two-directions pair for the wedge predicate (a healthy
+      # pod that restarted earlier is NOT a wedge; an unready one with the same
+      # count still is) plus the sidecar-naming case. Losing either direction
+      # there prints "OK" too.
       monitor-rollout = devboxPkgs.runCommand "monitor-rollout-tests" {
         nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
       } ''
@@ -1962,8 +1968,8 @@
         python3 ${self}/assets/opencode/skills/monitoring-deployments/test_monitor_rollout.py 2>&1 \
           | tee "$TMPDIR/out.txt"
 
-        grep -q '^Ran 18 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 18 tests'. If you added or removed" >&2
+        grep -q '^Ran 21 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 21 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
