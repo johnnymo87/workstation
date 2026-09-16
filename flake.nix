@@ -347,6 +347,39 @@
         touch $out
       '';
 
+      # ---- pkgs/pressure-sampler (bead workstation-o5s1.11) ----------------
+      #
+      # The sampler had NO tests and ran in no check. It hardcoded the serve
+      # cgroups at system.slice/system-opencode*.slice; the serves moved to a
+      # root-level opencode.slice, the old cgroup stayed behind EMPTY, and the
+      # glob went on matching it. Nothing errored. Every serve-slice row from
+      # the move to 2026-09-16 recorded zeros -- 20-25 MB against four serves
+      # actually holding 19.0 GB -- and no per-serve row was emitted at all.
+      #
+      # The failure mode is the reason for the suite's shape: a cgroup path that
+      # is real, readable and WRONG yields confident, plausible, useless numbers.
+      # A suite that only asserted "does not crash" would have stayed green
+      # throughout, so the central test plants BOTH the ghost and the live slice
+      # and pins that the live one wins.
+      #
+      # The count is PINNED, following checks.oc-auto-attach: "ALL PASS" alone
+      # cannot distinguish a passing suite from one that silently stopped
+      # asserting, which is the same class of bug as the one under test.
+      pressure-sampler-tests = devboxPkgs.runCommand "pressure-sampler-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+                              devboxPkgs.gawk devboxPkgs.findutils ];
+        PRESSURE_SAMPLER_BIN = "${(localPkgsFor devboxSystem).pressure-sampler}/bin/pressure-sampler";
+      } ''
+        cd ${self}
+        bash pkgs/pressure-sampler/test-pressure-sampler.sh 2>&1 | tee "$TMPDIR/ps.txt"
+        grep -q '^ALL PASS (15 assertions)' "$TMPDIR/ps.txt" || {
+          echo "GATE FAILURE: pressure-sampler suite did not reach ALL PASS (15 assertions)." >&2
+          echo "If you added assertions, bump the pinned count here deliberately." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # ---------------------------------------------------------------------
       # workstation-dad9: five suites that existed and ran nowhere.
       #
