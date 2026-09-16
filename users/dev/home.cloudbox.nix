@@ -686,10 +686,121 @@ lib.mkIf isCloudbox {
     Unit = {
       Description = "Bazel builds, capped and held outside the opencode serve cgroup";
       Documentation = [ "https://github.com/johnnymo87/workstation/blob/main/pkgs/bazel-scope/default.nix" ];
+
+      # DO NOT REMOVE. Without this, the first switch that changes this unit
+      # KILLS EVERY RUNNING BUILD, unattended.
+      #
+      # This file had not changed since PR #312 (2026-08-04), so adding the IO
+      # settings below is the first diff the running slice has seen. sd-switch
+      # --dry-run against exactly that change reports:
+      #     Stopping units: bazel.slice
+      #     Starting units: bazel.slice
+      # and every scope systemd places in a slice gets an implicit
+      # Requires=<slice>, which propagates stop. So all run-*.scope under here
+      # take SIGTERM: in-flight builds fail and the resident server JVMs die.
+      # pull-workstation switches unattended roughly every 4h, and sampler rows
+      # show a >1 GB bazel scope present in ~56-59% of workday samples.
+      #
+      # keep-old is safe here because a slice carries no process of its own,
+      # and it is SUFFICIENT because cgroup attributes are re-realized on
+      # daemon-reload without a restart. Verified on a throwaway slice with a
+      # live child scope: changing the fragment to add IOReadBandwidthMax and
+      # running only `systemctl --user daemon-reload` took io.max from absent
+      # to `259:0 rbps=200000000`. That was checked rather than assumed,
+      # because "the setting is there but was never applied" is the exact
+      # failure mode the rest of this epic keeps running into.
+      X-SwitchMethod = "keep-old";
     };
     Slice = {
       MemoryMax = "16G";
       MemorySwapMax = "2G";
+
+      # ---- disk isolation (bead workstation-o5s1.4) ------------------------
+      #
+      # On 2026-09-15 this slice read 496 MB/s of a 500 MB/s host total while
+      # opencode.slice got 0.8 MB/s. The serves' main threads sat in
+      # rq_qos_wait and folio_wait_bit_common -- queued behind bazel at the
+      # block layer, and refaulting file pages that had been reclaimed out from
+      # under them. Memory isolation between these slices was real; disk
+      # isolation did not exist at all.
+      #
+      # IOWeight IS DELIBERATELY ABSENT AND MUST STAY ABSENT. It is the obvious
+      # knob and it does NOTHING on this host, which is worse than useless
+      # because it looks like a fix. cgroup-v2 io.weight is implemented by BFQ
+      # or blk-iocost; nvme0n1 runs scheduler [none] and iocost is disabled
+      # (io.cost.qos empty). Measured with a control: two cgroups reading
+      # different files with O_DIRECT concurrently, at a 1:100 weight ratio,
+      # moved 298/272 MB/s -- against 297/264 at equal weights, and the ~10%
+      # skew stayed with the same cgroup when the weights were REVERSED, which
+      # is what identifies it as rig asymmetry rather than a weak effect.
+      # Enabling iocost with ctrl=auto did not restore arbitration either. The
+      # io.weight file exists, reads "default 100", and accepts writes the
+      # whole time. File existence is not effect. checks.bazel-slice-io pins
+      # this absence so it cannot be helpfully re-added.
+      #
+      # io.max (this) is the one knob shown to work here: 488 MB/s uncapped ->
+      # 54.5 MB/s at a 50 MB/s cap -> 517 MB/s after revert. blk-throttle is
+      # independent of both the scheduler and iocost.
+      #
+      # WHY 200M IS NOT A TAX ON ORDINARY DAYS. From ~/metrics/pressure-v2-*.tsv,
+      # host io_rbytes deltas, 2026-09-12..15, n=21,736 samples at 16s:
+      #   p50=0  p90=7  p95=31  p99=108  p99.9=482  max=502 MB/s
+      #   >200 MB/s on 0.49% of samples -- and that window INCLUDES the
+      #   incident (500-534 MB/s sustained 23:53Z-02:27Z), which is most of the
+      #   tail.
+      #
+      # THREE CAVEATS ON THAT NUMBER, because it is doing a lot of work here.
+      #   (a) It is HOST-WIDE, and the cap applies to bazel alone. Host >= nvme
+      #       >= bazel, so 0.49% is an upper bound on how often this binds --
+      #       conservative, but it is not a measurement of bazel.
+      #   (b) The sampler SUMS io.stat across devices, and 252:0 is zram swap,
+      #       not a disk (~24% of lifetime "host reads"). The cap governs
+      #       259:0 only. Whoever re-sizes this must split by device first.
+      #       Both (a) and (b) exist because bazel.slice had no io.stat to
+      #       measure -- the io controller was never enabled, which is what
+      #       this change fixes. Re-derive from the bazel-slice rows once they
+      #       have data.
+      #   (c) blk-throttle enforces on ~20 ms slices while these samples are
+      #       16 s averages, so sub-sample bursts are throttled too. Pre-incident
+      #       single samples hit 328-345 MB/s (09-15 18:03Z, 18:21Z, 21:51Z,
+      #       22:51Z). Roughly, this adds ~3 s per GB read above 200 MB/s.
+      # (That series is a POSITIONAL TSV with a header. Parsing it as
+      # key=value returns a confident empty result rather than an error, which
+      # is how these numbers were first misread as "no data".)
+      #
+      # THE DEVICE. /dev/nvme0n1 is the whole disk (259:0), which is what blkcg
+      # attaches to; / and the bazel cache are on nvme0n1p2 (259:2).
+      #
+      # I first wrote here that naming the partition would be "silently never
+      # enforced". THAT IS FALSE and the check that enforced it has been
+      # removed. systemd resolves a device path to its whole disk before
+      # writing io.max, so all three spellings produce the identical
+      # `259:0 rbps=200000000`:
+      #     /dev/nvme0n1 200M    -> 259:0 rbps=200000000
+      #     /dev/nvme0n1p2 200M  -> 259:0 rbps=200000000
+      #     /home/dev 200M       -> 259:0 rbps=200000000
+      # Measured on this host, each applied at runtime and reverted. The whole
+      # disk is still the honest spelling, because it says what actually lands
+      # in io.max, but nothing breaks if someone writes it differently.
+      #
+      # What IS verified: a read inside the slice went 462 -> 206 MB/s under
+      # this setting and back to 513 on revert, and the limit applies to
+      # DESCENDANT cgroups -- that test ran in a `systemd-run --scope
+      # --slice=bazel` child, which is how every real build runs.
+      #
+      # Either IO setting makes systemd add `io` to user@1000.service's
+      # cgroup.subtree_control, which is what finally gives bazel.slice an
+      # io.stat -- so pressure-sampler's bazel io columns, blank until now,
+      # start carrying data as a side effect.
+      #
+      # IOAccounting is NOT load-bearing for the limit, and an earlier version
+      # of the guard below wrongly claimed it was. Verified: setting only
+      # IOReadBandwidthMax, with IOAccounting=no, still enabled `io` in the
+      # subtree and wrote `259:0 rbps=200000000`. It is kept because it is what
+      # makes `systemctl status` and systemd's own accounting report this
+      # slice's IO, which is worth having on the one cgroup we now police.
+      IOAccounting = true;
+      IOReadBandwidthMax = "/dev/nvme0n1 200M";
     };
   };
 

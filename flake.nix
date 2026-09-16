@@ -1236,6 +1236,78 @@
         touch $out
       '';
 
+      # ---- bazel.slice disk isolation (bead workstation-o5s1.4) ------------
+      #
+      # Pins the three properties that were each established by measurement on
+      # cloudbox, because each of them is individually easy to "helpfully" undo
+      # and none of them fails visibly when undone.
+      #
+      # The IOWeight assertion is the important one and it is a NEGATIVE. That
+      # knob is the obvious fix, it is what this bead originally proposed, and
+      # it does nothing here: io.weight needs BFQ or blk-iocost, nvme0n1 runs
+      # scheduler [none], and iocost is off. A 1:100 weight ratio moved nothing
+      # in a controlled test, in either direction, with or without iocost.
+      # Adding it back would look like an improvement, ship green, and change
+      # no bytes -- exactly the failure mode the rest of this epic is about.
+      bazel-slice-io = devboxPkgs.runCommand "bazel-slice-io-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
+        gen = self.homeConfigurations.cloudbox.activationPackage;
+      } ''
+        unit="$gen/home-files/.config/systemd/user/bazel.slice"
+        [ -e "$unit" ] || { echo "FAIL: no bazel.slice in the cloudbox generation"; exit 1; }
+
+        grep -q '^IOAccounting=' "$unit" || {
+          echo "FAIL: bazel.slice ships without IOAccounting. This is not what makes"
+          echo "      the limit work -- IOReadBandwidthMax alone enables the io"
+          echo "      controller (verified: with IOAccounting=no, io.max still read"
+          echo "      259:0 rbps=200000000). It is pinned because systemd's own"
+          echo "      accounting and \`systemctl status\` are worth having on the one"
+          echo "      cgroup we police."
+          exit 1
+        }
+
+        grep -q '^IOReadBandwidthMax=' "$unit" || {
+          echo "FAIL: bazel.slice ships without IOReadBandwidthMax; io.max is the only"
+          echo "      disk knob measured to work on this host."
+          exit 1
+        }
+
+        # NOTE: there is deliberately NO whole-disk-vs-partition assertion.
+        # An earlier version of this guard had one, on the theory that naming a
+        # partition yields a silently unenforced limit. That theory was wrong:
+        # systemd resolves the device path to its whole disk before writing
+        # io.max, and /dev/nvme0n1, /dev/nvme0n1p2 and /home/dev all produced
+        # an identical `259:0 rbps=200000000` on this host. A guard defending
+        # against an impossible failure is exactly the sort of confident,
+        # plausible, useless artifact this epic exists to remove.
+
+        grep -q '^X-SwitchMethod=keep-old' "$unit" || {
+          echo "FAIL: bazel.slice ships without X-SwitchMethod=keep-old."
+          echo "      Any change to this unit then makes sd-switch STOP the slice on"
+          echo "      the next unattended pull-workstation, and stop propagates to"
+          echo "      every run-*.scope in it via the implicit Requires= -- killing"
+          echo "      in-flight builds and the resident server JVMs. Confirmed by"
+          echo "      sd-switch --dry-run. Slices carry no process of their own, and"
+          echo "      cgroup attributes are re-realized on daemon-reload, so keep-old"
+          echo "      costs nothing and still applies the limit."
+          exit 1
+        }
+
+        if grep -q '^IOWeight=' "$unit"; then
+          echo "FAIL: bazel.slice sets IOWeight, which is INERT on this host."
+          echo "      cgroup-v2 io.weight is implemented by BFQ or blk-iocost;"
+          echo "      nvme0n1 runs scheduler [none] and iocost is disabled, so the"
+          echo "      file exists, accepts writes, and changes nothing. Measured:"
+          echo "      a 1:100 weight ratio moved 298/272 MB/s against 297/264 at"
+          echo "      equal weights, and the skew did not follow the weights."
+          echo "      Use IOReadBandwidthMax (blk-throttle), which is measured to work."
+          exit 1
+        fi
+
+        echo "ALL PASS (bazel slice io: read cap set, keep-old switch, no inert IOWeight)"
+        touch $out
+      '';
+
       # Same guard as bazel-slice-wiring, for the oc-scoped-shell wrapper.
       #
       # Worth restating why this needs its own check rather than review: the
