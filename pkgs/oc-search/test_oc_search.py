@@ -571,5 +571,250 @@ class MissingDatabaseTest(unittest.TestCase):
         self.assertIn("database not found", err.getvalue())
 
 
+class _ProbeCursor:
+    """Cursor wrapper that asks "could a checkpoint run right now?" after each
+    bulk fetch. fetchone() is deliberately NOT probed: the small metadata
+    queries complete on their own and say nothing about the scan loop."""
+
+    def __init__(self, cur, owner):
+        self._cur = cur
+        self._owner = owner
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+    def fetchall(self):
+        rows = self._cur.fetchall()
+        self._owner.probe()
+        return rows
+
+    def fetchmany(self, size=None):
+        rows = self._cur.fetchmany() if size is None else self._cur.fetchmany(size)
+        self._owner.probe()
+        return rows
+
+
+class _CheckpointProbe:
+    """Wraps the SOURCE connection handed to build_index.
+
+    Counts how many times the part-scan query is issued (one statement per
+    chunk is the property under test) and, after each bulk fetch, tries a real
+    wal_checkpoint(TRUNCATE) from a separate connection. A checkpoint cannot
+    pass a held WAL read mark, so `busy` is a direct measurement of whether the
+    source read transaction is still open.
+    """
+
+    # NB this also matches the AVG(len) disk-estimate sample, which uses the
+    # same WHERE. So the counts are one higher than the number of chunks: 8 for
+    # 12 rows at READ_CHUNK=2, and 2 (not 1) for a single long-lived cursor.
+    SCAN_SQL_FRAGMENT = "FROM part WHERE rowid > ?"
+
+    def __init__(self, conn, db_path):
+        self._conn = conn
+        self._db = db_path
+        self.scan_statements = 0
+        self.busy_results = []
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args, **kw):
+        if self.SCAN_SQL_FRAGMENT in sql:
+            self.scan_statements += 1
+        return _ProbeCursor(self._conn.execute(sql, *args, **kw), self)
+
+    def probe(self):
+        other = sqlite3.connect(self._db, timeout=0.25)
+        try:
+            busy, _, _ = other.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            self.busy_results.append(busy)
+        finally:
+            other.close()
+
+
+class SourceReadTransactionTest(unittest.TestCase):
+    """bead workstation-o5s1.3 -- the source WAL read mark must be released
+    between chunks.
+
+    THE INCIDENT (2026-09-15, epic workstation-o5s1): the scan was one
+    `src.execute(... LIMIT batch)` drained with fetchmany() inside the loop that
+    also did the index writes. An un-exhausted SQLite statement keeps its read
+    transaction open, so the read mark on opencode.db was pinned for the whole
+    batch -- 217-246s per run normally, and 87 minutes on the night the index
+    writes were starved of I/O by concurrent bazel builds. No checkpoint can
+    advance past a held read mark, so the WAL grew ~9 MB/min past 1 GB.
+
+    WHY THIS ASSERTS THE STATEMENT COUNT AND NOT ONLY THE CHECKPOINT. A revert
+    to the single long cursor would not reliably fail a checkpoint-only
+    assertion on a small fixture: fetchmany() returning fewer rows than asked
+    exhausts the statement, which releases the mark, so the probe would come
+    back clean for the wrong reason and the test would pass vacuously. The
+    number of scan statements is the structural fact -- one per chunk, or one
+    for the whole batch -- and it cannot be faked by fixture size.
+    """
+
+    def setUp(self):
+        self.f = Fixture()
+        # A read mark only exists in WAL mode; the default fixture is rollback.
+        # ASSERTED, not assumed: in rollback mode wal_checkpoint returns 0 for
+        # everything, so the checkpoint test below would pass vacuously and say
+        # nothing at all about read marks.
+        mode = self.f.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        self.assertEqual(mode, "wal", "fixture is not in WAL mode")
+        add_session(self.f.conn, "ses_a")
+        for i in range(12):
+            add_part(
+                self.f.conn, "ses_a", type="tool",
+                text=f"chunk{i} FbmEmployeeCutoffRepublish",
+            )
+        self.f.commit()
+
+    def tearDown(self):
+        self.f.close()
+
+    def _run_probed(self, read_chunk):
+        probe = _CheckpointProbe(oc_search.open_source(self.f.db), self.f.db)
+        saved = oc_search.READ_CHUNK
+        oc_search.READ_CHUNK = read_chunk
+        try:
+            res = oc_search.build_index(
+                probe, self.f.index, self.f.db,
+                rebuild=True, batch=1_000_000, progress=False,
+            )
+        finally:
+            oc_search.READ_CHUNK = saved
+            probe.close()
+        return probe, res
+
+    def test_one_scan_statement_per_chunk(self):
+        probe, res = self._run_probed(read_chunk=2)
+        self.assertEqual(res["indexed"], 12)
+        # 12 rows / 2 per chunk = 6 statements, plus one returning empty to end
+        # the loop, plus the AVG(len) sample = 8. A single long-lived cursor
+        # issues 2 (the scan and that same sample).
+        self.assertGreaterEqual(
+            probe.scan_statements, 6,
+            f"scan issued {probe.scan_statements} statement(s) for 12 rows at "
+            "READ_CHUNK=2 -- the loop is holding one cursor across the batch "
+            "again, which pins the source WAL read mark",
+        )
+
+    def test_a_checkpoint_can_run_between_chunks(self):
+        probe, _ = self._run_probed(read_chunk=2)
+        self.assertGreaterEqual(
+            len(probe.busy_results), 6, "probe never fired; the loop did not chunk"
+        )
+        self.assertEqual(
+            [b for b in probe.busy_results if b != 0], [],
+            "wal_checkpoint(TRUNCATE) reported busy between chunks -- the source "
+            "read transaction is still open, so the WAL cannot be reclaimed",
+        )
+
+    def test_the_rows_still_come_out_right(self):
+        """Chunking gives up snapshot isolation; it must not give up rows."""
+        self._run_probed(read_chunk=2)
+        rows = self.f.sessions("FbmEmployeeCutoffRepublish")
+        self.assertEqual({r["id"]: r["matches"] for r in rows}, {"ses_a": 12})
+
+    def test_rowid_reuse_between_chunks_forces_a_rebuild(self):
+        """The hazard chunking introduces, and the reason it is checked rather
+        than argued away.
+
+        `part` has a TEXT primary key, so its rowid is implicit and SQLite
+        reuses rowids below the maximum after deletes. On cloudbox max(rowid)
+        exceeds count(*) by ~466,000 and session deletes cascade routinely, so
+        this is a live condition, not a thought experiment.
+
+        The index normally sits at the head of the table, so a chunk boundary IS
+        the live max rowid. Delete the head rows between two chunk statements and
+        let new parts reuse those rowids, and chunk k has already indexed the OLD
+        contents of rows that now belong to somebody else while chunk k+1 reads
+        only past the boundary. index_validity() cannot see it: it checks the
+        FINAL watermark row, which is past the damage and perfectly consistent.
+
+        The old single-snapshot scan was immune, so this is a regression this
+        change had to pay for. The interleaving is injected through the probe, at
+        the one instant it matters -- between a chunk's fetch and the next.
+        """
+        # 12 rows at READ_CHUNK=2 = 6 chunks. Fire after the LAST of them, so
+        # the victim rows are already in the index when they are recycled. An
+        # earlier version of this test fired at chunk 3, before those rows had
+        # been read at all -- the next chunk then simply picked up the new
+        # contents, no damage occurred, and the test passed with or without the
+        # boundary check. A regression test that cannot fail is worse than none,
+        # because it certifies the thing it never examined.
+        victim_rowids = [
+            r[0] for r in self.f.conn.execute(
+                "SELECT rowid FROM part ORDER BY rowid DESC LIMIT 4"
+            ).fetchall()
+        ]
+
+        state = {"fired": False, "calls": 0}
+        outer = self
+
+        class ReuseProbe(_CheckpointProbe):
+            def probe(self):
+                state["calls"] += 1
+                if state["fired"] or state["calls"] < 6:
+                    return
+                state["fired"] = True
+                c = outer.f.conn
+                # Recycle the rowids the scan has just finished indexing...
+                for rid in victim_rowids:
+                    c.execute("DELETE FROM part WHERE rowid=?", (rid,))
+                for rid in victim_rowids:
+                    c.execute(
+                        "INSERT INTO part (rowid, id, message_id, session_id, "
+                        "time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)",
+                        (rid, f"prt_reused_{rid}", f"msg_reused_{rid}", "ses_a",
+                         BASE_MS, BASE_MS,
+                         json.dumps({"type": "tool", "text": "NEWCONTENT",
+                                     "id": f"prt_reused_{rid}"})),
+                    )
+                # ...and append past the boundary, so the scan keeps going and
+                # finishes on a watermark row that is perfectly consistent. That
+                # is what makes the corruption invisible to index_validity().
+                for k in (1, 2):
+                    add_part(c, "ses_a", type="tool", text=f"tail{k} NEWCONTENT")
+                c.commit()
+
+        probe = ReuseProbe(oc_search.open_source(self.f.db), self.f.db)
+        saved = oc_search.READ_CHUNK
+        oc_search.READ_CHUNK = 2
+        try:
+            oc_search.build_index(
+                probe, self.f.index, self.f.db,
+                rebuild=True, batch=1_000_000, progress=False,
+            )
+        finally:
+            oc_search.READ_CHUNK = saved
+            probe.close()
+
+        self.assertTrue(state["fired"], "the interleaving never happened")
+        # The index must agree with the database, not with what the database
+        # used to say. Without the boundary check the recycled rowids keep their
+        # pre-delete contents forever, and the tail scan cannot help because the
+        # watermark has already advanced past them.
+        truth = self.f.conn.execute(
+            "SELECT count(*) FROM part WHERE data LIKE '%NEWCONTENT%'"
+        ).fetchone()[0]
+        self.assertEqual(truth, 6)
+        rows = self.f.sessions("NEWCONTENT")
+        got = rows[0]["matches"] if rows else 0
+        self.assertEqual(got, truth, "index disagrees with the live database")
+
+    def test_batch_limit_still_bounds_the_work_when_chunked(self):
+        """The batch cap is enforced across chunks, not per chunk -- otherwise
+        --index-batch would silently mean something 'READ_CHUNK times bigger'."""
+        saved = oc_search.READ_CHUNK
+        oc_search.READ_CHUNK = 2
+        try:
+            res = self.f.build_index(rebuild=True, batch=5)
+        finally:
+            oc_search.READ_CHUNK = saved
+        self.assertEqual(res["indexed"], 5)
+        self.assertFalse(res["up_to_date"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
