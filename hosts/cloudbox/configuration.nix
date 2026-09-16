@@ -1682,6 +1682,11 @@ ${serveIdCase}
         # re-arms the alert and produces duplicate notifications.
         PROBED_COUNT=0
 
+        # Ports that answered THIS pass, for the stall probe at the end of this
+        # script. It probes only these, and that is a correctness requirement
+        # rather than an optimisation — see the deadline argument down there.
+        ALIVE_PORTS=""
+
         for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
           UNIT="opencode-serve@$PORT.service"
           FAILFILE="$STATE/$PORT.fails"
@@ -1747,6 +1752,7 @@ ${serveIdCase}
           if [ "$SERVE_ALIVE" -eq 1 ]; then
             rm -f "$FAILFILE"
             PROBED_COUNT=$((PROBED_COUNT + 1))
+            ALIVE_PORTS="''${ALIVE_PORTS:+$ALIVE_PORTS }$PORT"
 
             # Stale-binary drift detection for LIVE serves (2026-07-24 incident recovery).
             #
@@ -2021,6 +2027,269 @@ EOF
           # Do NOT clear on unverifiable passes (e.g. REF_PREFIX="" mid-home-manager-switch or all serves down),
           # as clearing on unknown state would re-arm the alert and cause duplicate notifications.
           rm -f "$STATE/drift-alerted" "$STATE/drift-pending" "$STATE/drift-first-seen"
+        fi
+
+        # ===================================================================
+        # STALL PROBE (bead workstation-o5s1.1). OBSERVABILITY ONLY.
+        # ===================================================================
+        #
+        # WHY EVERYTHING ABOVE THIS LINE WAS BLIND. On 2026-09-15 all four
+        # serves' main event loops stalled 1-2.6s on disk I/O every 10-30s, ~3%
+        # of trivial requests took >250ms, and EVERY canary probe passed. That is
+        # not a tuning miss, it is the instrument: a single fast GET
+        # /global/health proves the loop was free AT THAT INSTANT and nothing
+        # more, and a 7-consecutive-failure threshold over minutely samples
+        # cannot see a condition that resolves between samples. The pool was
+        # measurably degrading with a clean bill of health.
+        #
+        # IT MUST NEVER RESTART ANYTHING, and it is placed here — after every
+        # restart decision has already been made and acted on — so that is a
+        # structural property rather than a promise. A serve that is merely slow
+        # is worse off restarted: the restart orphans its in-flight turns, and
+        # the conditions that make it slow are the conditions that make the
+        # phantom rows expensive to clean up (see workstation-o5s1.2 and the
+        # earlyoom coupling in workstation-o5s1.5). Slow is a thing to report to
+        # a human, not a thing to page a machine about.
+        #
+        # TWO INSTRUMENTS, because they fail in opposite directions.
+        #
+        #   LATENCY tells you the user-visible cost but samples thinly: a 1.5s
+        #   stall once per 20s occupies ~7% of the timeline, so any given short
+        #   window often sees nothing. It is the number worth reporting and a
+        #   poor detector.
+        #
+        #   WCHAN is the detector. 20 reads of /proc/<mainpid>/wchan say what the
+        #   loop is doing rather than how fast it answered: `do_epoll_wait` is
+        #   idle and healthy (17-19 of 20 on all four serves once the host
+        #   recovered), while `folio_wait_bit_common` or `rq_qos_wait` recurring
+        #   with no return to epoll is the loop blocked on disk. It costs four
+        #   /proc reads per second and nothing at all on the serve. Note
+        #   /proc/<tid>/syscall is NOT readable here (yama ptrace_scope=1) while
+        #   wchan is — that asymmetry is why this is the wchan probe.
+        #
+        # COST, because a probe that only runs on a healthy host is worthless and
+        # this one runs on a sick one. ONE curl per serve issues 200 requests
+        # paced by `--rate 20/s`, i.e. a sample every 50ms across a 10s window,
+        # for a single fork. Serves are probed in PARALLEL, so the block is ~10s
+        # of a 60s timer regardless of pool size. The wchan loop runs alongside
+        # that curl rather than after it, so both instruments describe the same
+        # interval.
+        #
+        # AN EARLIER VERSION issued 20 bursts of 10 back-to-back requests and
+        # claimed the burst would catch stalls a spaced request would miss,
+        # because all 10 would queue behind a blocked loop. That was wrong and is
+        # recorded rather than quietly deleted: curl reuses ONE keep-alive
+        # connection and the requests are SERIAL, so only the request in flight
+        # when the stall begins absorbs it, and a 10-request burst spans ~5-10ms.
+        # Those 200 "samples" were therefore 20 independent instants wearing a
+        # bigger n, and the p99 computed from them was really a p95 of 20. The
+        # rate-paced form gives 200 genuinely spaced samples for the same fork.
+        #
+        # A HARD DEADLINE, because the probe must never compete with the canary's
+        # actual job. `--max-time` is PER TRANSFER, so a serve that accepts TCP
+        # and then never answers — the 2026-07-03 "alive but frozen" wedge, and
+        # every post-restart catalog burn — would cost 200 x 5s. Since this unit
+        # is a oneshot on a minutely timer, every minute the probe overruns is a
+        # liveness pass that never happens, and a wedged serve would take hours
+        # rather than ~7 minutes to reach THRESHOLD. The block's placement after
+        # the restart logic makes it harmless WITHIN a run; only the deadline
+        # makes it harmless ACROSS runs. Belt and braces: `timeout` bounds the
+        # whole curl, and only serves that answered health THIS pass are probed
+        # at all (ALIVE_PORTS) — a serve that is down or mid-restart belongs to
+        # the liveness leg, and the stall probe has nothing to say about it.
+        #
+        # `set -e` is not on in this script (see the forensics-retention note
+        # above), and this block runs last, so nothing here can abort the canary.
+        # OPENCODE_CANARY_STALL_FIXTURE is a TEST SEAM, not configuration. The
+        # unit sets no Environment=, so production is byte-identical to a plain
+        # mktemp. It exists because the branch that matters — the one that fires
+        # when a serve IS stalling — cannot be reached on a healthy host, and a
+        # WARNING nobody has ever seen fire is a WARNING nobody should trust. It
+        # points at a directory of pre-collected <port>.lat / <port>.wchan
+        # samples and skips collection; the analysis below is then the shipped
+        # analysis, not a copy of it.
+        STALL_COLLECT=1
+        STALL_DIR=''${OPENCODE_CANARY_STALL_FIXTURE:-}
+        if [ -n "$STALL_DIR" ]; then
+          STALL_COLLECT=0
+        else
+          STALL_DIR=$(mktemp -d /tmp/serve-stall-probe.XXXXXX 2>/dev/null || echo "")
+        fi
+        if [ -z "$STALL_DIR" ] || [ ! -d "$STALL_DIR" ]; then
+          echo "canary: WARNING could not create a temp dir for the stall probe — skipping it (liveness checks above are unaffected)" >&2
+        else
+          for PORT in $ALIVE_PORTS; do
+            [ "$STALL_COLLECT" = 1 ] || break
+            UNIT="opencode-serve@$PORT.service"
+            SPID=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null || echo 0)
+
+            (
+              LAT="$STALL_DIR/$PORT.lat"
+              WCH="$STALL_DIR/$PORT.wchan"
+              : > "$LAT"
+              : > "$WCH"
+              URL="http://127.0.0.1:$PORT/global/health"
+              # One -o per URL: curl sends any output it has no -o for to STDOUT,
+              # where it would interleave with the -w timings and corrupt every
+              # measurement below.
+              REQS=()
+              I=0
+              while [ "$I" -lt 200 ]; do
+                REQS+=(-o /dev/null "$URL")
+                I=$((I + 1))
+              done
+
+              # %{http_code} FIRST, and it is not decoration. A refused or reset
+              # connection completes in ~0.0001s and would otherwise enter the
+              # percentiles as an exceptionally FAST sample — so a serve that
+              # died mid-probe would produce a flawless bill of health, which is
+              # the one direction an instrument must never fail in. The analysis
+              # below keeps only answered requests in the timings and counts the
+              # rest separately.
+              #
+              # 14s deadline against a 10s nominal window: enough slack for the
+              # rate limiter to slip a little, far inside the 60s timer.
+              timeout 14 curl -s --rate 20/s --max-time 5 --connect-timeout 2 \
+                -w '%{http_code} %{time_total}\n' \
+                ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+                "''${REQS[@]}" >> "$LAT" 2>/dev/null &
+              CPID=$!
+
+              # wchan sampled ALONGSIDE the curl, and stopping as soon as it
+              # exits, so the two instruments cover the same interval whether
+              # that interval ran its full 10s or was cut short by the deadline.
+              R=0
+              while [ "$R" -lt 20 ] && kill -0 "$CPID" 2>/dev/null; do
+                R=$((R + 1))
+                if [ -n "$SPID" ] && [ "$SPID" != "0" ] && [ -r "/proc/$SPID/wchan" ]; then
+                  cat "/proc/$SPID/wchan" 2>/dev/null >> "$WCH"
+                  echo "" >> "$WCH"
+                fi
+                sleep 0.5
+              done
+              wait "$CPID" 2>/dev/null
+            ) &
+          done
+          wait
+
+          for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
+            LAT="$STALL_DIR/$PORT.lat"
+            WCH="$STALL_DIR/$PORT.wchan"
+            [ -f "$LAT" ] || continue
+
+            # Requests that did not get an HTTP answer are counted, never timed.
+            # 401 counts as answered for exactly the reason the liveness check
+            # above treats it as alive: the event loop produced it, which is what
+            # is being measured.
+            NFAIL=$(awk '$1 != "200" && $1 != "401" { c++ } END { print c + 0 }' "$LAT" 2>/dev/null || echo 0)
+            case "$NFAIL" in ""|*[!0-9]*) NFAIL=0 ;; esac
+
+            # Percentiles off a sorted stream rather than gawk's asort(), so this
+            # does not silently depend on which awk is on the PATH. Ranks are
+            # taken consistently (ceil(q*n), clamped), because a p50 and a p99
+            # computed by different rules invite exactly the kind of "why is p99
+            # below p50 on small n" question nobody should have to answer.
+            STALL_LINE=$(awk '$1 == "200" || $1 == "401" { print $2 }' "$LAT" 2>/dev/null |
+              sort -n | awk -v nfail="$NFAIL" '
+              { v[++n] = $1 + 0 }
+              END {
+                if (n == 0) { printf "n=0 fail=%d (no answered samples)", nfail; exit }
+                pi = int(n * 0.50); if (pi < 1) pi = 1; p50 = v[pi]
+                qi = int(n * 0.99); if (qi < 1) qi = 1; if (qi > n) qi = n; p99 = v[qi]
+                for (i = 1; i <= n; i++) {
+                  if (v[i] > 0.25) g250++
+                  if (v[i] > 1.0)  g1000++
+                }
+                printf "n=%d fail=%d p50=%.3fs p99=%.3fs max=%.3fs >250ms=%d >1s=%d",
+                       n, nfail, p50, p99, v[n], g250 + 0, g1000 + 0
+              }')
+
+            # FOUR CLASSES, and the splits are easy to get wrong in both
+            # directions.
+            #
+            # `0` means the task is RUNNABLE — on CPU, or queued for one. The
+            # first version of this counted it with the named blocking states,
+            # which made a busy but perfectly healthy serve read as "other=7",
+            # indistinguishable at a glance from what the probe hunts. But the
+            # correction has its own edge, and it is NOT "0 is the opposite of
+            # stalled": at load 205 a loop starved of CPU also shows `0`, and
+            # this instrument cannot tell that from useful work. The latency leg
+            # is the only detector for that half of the incident.
+            #
+            # The io set is matched as a PATTERN, not by equality against the two
+            # symbols this one incident happened to produce. WAL commits wait in
+            # jbd2_log_wait_commit / ext4_sync_file / file_write_and_wait_range,
+            # and the block layer also parks tasks in io_schedule, wbt_wait and
+            # blk_mq_get_tag. Under equality every one of those lands in `other`
+            # and warns about nothing, which is the failure mode of a detector
+            # written from a single sample.
+            WCHAN_LINE="wchan=unavailable"
+            if [ -s "$WCH" ]; then
+              WCHAN_LINE=$(awk '
+                NF {
+                  t++
+                  if ($1 == "do_epoll_wait") e++
+                  else if ($1 == "0") r++
+                  else if ($1 ~ /^(folio_wait_bit|wait_on_page_bit|rq_qos_wait|io_schedule|wbt_wait|blk_mq_get_tag|jbd2_log_wait_commit|ext4_sync_file|file_write_and_wait_range)/) io++
+                  else { o++; seen[$1]++ }
+                }
+                END {
+                  if (t == 0) { printf "wchan=unreadable"; exit }
+                  top = ""; topn = 0
+                  for (k in seen) if (seen[k] > topn) { topn = seen[k]; top = k }
+                  printf "wchan idle=%d run=%d io=%d/%d", e + 0, r + 0, io + 0, t
+                  if (o > 0) printf " other=%d top=%s(%d)", o, top, topn
+                }' "$WCH")
+            fi
+
+            OVER1=$(awk '{ for (i=1;i<=NF;i++) if ($i ~ /^>1s=/) { sub(/^>1s=/,"",$i); print $i + 0 } }' <<<"$STALL_LINE")
+            case "$OVER1" in ""|*[!0-9]*) OVER1=0 ;; esac
+            OVER250=$(awk '{ for (i=1;i<=NF;i++) if ($i ~ /^>250ms=/) { sub(/^>250ms=/,"",$i); print $i + 0 } }' <<<"$STALL_LINE")
+            case "$OVER250" in ""|*[!0-9]*) OVER250=0 ;; esac
+            IOBLOCK=$(awk 'NF && $1 ~ /^(folio_wait_bit|wait_on_page_bit|rq_qos_wait|io_schedule|wbt_wait|blk_mq_get_tag|jbd2_log_wait_commit|ext4_sync_file|file_write_and_wait_range)/ { c++ } END { print c + 0 }' "$WCH" 2>/dev/null || echo 0)
+            case "$IOBLOCK" in ""|*[!0-9]*) IOBLOCK=0 ;; esac
+
+            # WHY NOT io>=1. The bead's design says io "recurring with NO return
+            # to do_epoll_wait", not "seen once". This host's 9.5G DB working set
+            # no longer fits in page cache, so a single folio wait in 20 samples
+            # during an ordinary sqlite read is unremarkable and carries no
+            # user-visible cost. Warning on it would fire every few minutes, and
+            # this file already records what that costs (the workstation-bcmi
+            # note above): an operator who learns to skip the channel is worse
+            # off than one with no channel, because the throttle then suppresses
+            # the alert that mattered. 3 of 20 is "recurring"; 1 of 20 paired
+            # with a measured slow request is corroborated. Note the io=0 seen on
+            # a healthy pool was measured just after a reset, not under ordinary
+            # daytime load, so these thresholds deserve revisiting with a week of
+            # journal behind them.
+            IO_STALL=0
+            if [ "$IOBLOCK" -ge 3 ] || { [ "$IOBLOCK" -ge 1 ] && [ "$OVER250" -ge 1 ]; }; then
+              IO_STALL=1
+            fi
+
+            if [ "$OVER1" -gt 0 ] || [ "$IO_STALL" -eq 1 ]; then
+              echo "WARNING: opencode-serve@$PORT.service STALLING (not restarting — observability only): $STALL_LINE $WCHAN_LINE ioblock=$IOBLOCK"
+            elif [ "$NFAIL" -gt 0 ]; then
+              # Only serves that answered /global/health this pass are probed, so
+              # an unanswered request here is new information rather than a
+              # restatement of the liveness check. Distinct wording: this is not
+              # a slow serve, it is a serve that stopped answering.
+              echo "WARNING: opencode-serve@$PORT.service had $NFAIL unanswered request(s) during the stall probe (not restarting — observability only): $STALL_LINE $WCHAN_LINE"
+            else
+              echo "canary: opencode-serve@$PORT.service stall probe: $STALL_LINE $WCHAN_LINE"
+            fi
+          done
+
+          # `if`, NOT `[ ... ] && rm -rf ...`. This is the last statement in the
+          # script, so its status IS the unit's exit status, and a trailing `&&`
+          # whose test is false exits 1 — marking opencode-serve-canary.service
+          # FAILED on a run where nothing was wrong. Caught by the fixture tests,
+          # which are the only runs where the test is false; production always
+          # collects, so this would have been invisible here and would have
+          # surfaced only if the mktemp branch ever changed.
+          if [ "$STALL_COLLECT" = 1 ]; then
+            rm -rf "$STALL_DIR"
+          fi
         fi
       ''}";
     };
