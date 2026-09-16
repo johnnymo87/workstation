@@ -60,7 +60,7 @@ each target's deployment spec image and pod health.
 | Exit code | Meaning | What to do |
 |---|---|---|
 | `0` | All targets on the new tag, pods Running and pod-level `Ready` | Done. |
-| `1` | A new-revision pod is wedged — CrashLoopBackOff / image-pull error / restart spike in **any** of its containers, sidecars included | Read stdout (it names the container), investigate (step below), then re-invoke or escalate. |
+| `1` | A new-revision pod is wedged — CrashLoopBackOff / image-pull error in **any** of its containers (sidecars included), or a restart spike **on a pod that is still unready** | Read stdout (it names the container), investigate (step below), then re-invoke or escalate. |
 | `2` | Unrecoverable (gh/kubectl failed, unknown context, missing deployment) | Surface to user; don't silently retry. |
 | `3` | Still rolling (merge pending, spec not bumped, pods updating) | Re-invoke immediately. |
 | `4` | Deployed **as an ancestor** of a later commit, pods healthy (merge-queue batch — see below) | Done. Record the batch head as the deployed SHA, not yours. |
@@ -130,6 +130,12 @@ On exit `1` the script tells you *which* pod and *why*; deciding what to do is
 yours:
 
 - **CrashLoopBackOff / restart spike** → `kubectl --context <c> -n <ns> logs <pod>`
+  (A pod that is Ready **now** is never reported as a restart spike, however
+  high its restart count: `restartCount` is cumulative, so a noisy roll that
+  recovered is history rather than a wedge. Measured on mono#4613, where
+  eleven JVMs rolling at once in one UAT namespace starved each other past the
+  startup-probe budget, restarted, and came up clean — and the check called
+  that a wedge on pods it had just called healthy.)
   (add `--previous`) to find the crash. App bug introduced by the change → fix
   forward or roll back; surface the choice to the user.
 - **ImagePullBackOff / ErrImagePull** → the tag isn't in the registry. Usually

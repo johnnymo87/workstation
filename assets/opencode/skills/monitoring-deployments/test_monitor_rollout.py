@@ -263,6 +263,64 @@ class PodRevisionJudgement(unittest.TestCase):
         self.assertIn("ImagePullBackOff", p["wedge_reason"])
         self.assertIn("istio-proxy", p["wedge_reason"])
 
+    def test_a_healthy_pod_that_restarted_earlier_is_NOT_a_wedge(self):
+        # MEASURED, food-truck/mono#4613 (merged 2026-09-16T16:29Z): eleven BAF
+        # JVMs rolled at once in one UAT namespace and starved each other past
+        # the startup-probe budget -- `failed startup probe, will be restarted`
+        # -> SIGKILL, exitCode 137, NOT OOMKilled. They then came up clean.
+        # PROD ran the identical tag with restarts=0 throughout.
+        #
+        # restartCount is CUMULATIVE and never decreases, and this arm consulted
+        # neither readiness nor whether the restarts were still happening -- so
+        # the script printed, on adjacent lines about the same pod:
+        #
+        #   pod ...-pttlb: phase=Running ready=True restarts=4 ... <-- WEDGED
+        #   => UAT/ba-fulfillment-worker rolled out & healthy
+        #
+        # and `if wedged:` precedes the all-healthy branch, so the run exited 1
+        # (action needed) for a rollout that had entirely succeeded. A settled
+        # restart count on a pod that is Ready now is history, not a wedge.
+        p = get_pods([
+            pod(
+                "noisy-but-healthy",
+                containers=[container("app", LATER)],
+                statuses=[status("app", LATER, ready=True, restarts=4)],
+            )
+        ])[0]
+        self.assertTrue(p["ready"])
+        self.assertIsNone(p["wedge_reason"])
+
+    def test_a_restart_spike_on_an_UNREADY_pod_is_still_a_wedge(self):
+        # The arm exists for a crash that backoff has not yet labelled
+        # CrashLoopBackOff, where the pod is unready and the count is climbing.
+        # Gating on readiness must not weaken that.
+        p = get_pods([
+            pod(
+                "crashing",
+                containers=[container("app", LATER)],
+                statuses=[status("app", LATER, ready=False, restarts=4)],
+            )
+        ])[0]
+        self.assertIsNotNone(p["wedge_reason"])
+        self.assertIn("4 restarts", p["wedge_reason"])
+
+    def test_an_unready_sidecar_with_a_restart_spike_is_named(self):
+        # Multi-container: the pod is unready because of the sidecar, and the
+        # sidecar is the one with the spike. Readiness is a POD-level fact, so
+        # gating on it must not stop the reason naming the right container.
+        p = get_pods([
+            pod(
+                "sidecar-spiking",
+                containers=[container("app", LATER), container("istio-proxy", "1.20")],
+                statuses=[
+                    status("app", LATER, ready=True),
+                    status("istio-proxy", "1.20", ready=False, restarts=5),
+                ],
+            )
+        ])[0]
+        self.assertFalse(p["ready"])
+        self.assertIn("istio-proxy", p["wedge_reason"])
+
     def test_readiness_falls_back_to_the_container_when_conditions_are_absent(self):
         # A pod object truncated by a projection or an old API version still
         # has to yield an answer; fall back to the container we judged.

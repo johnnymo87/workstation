@@ -112,8 +112,20 @@ WEDGED_WAITING_REASONS = {
 }
 
 # Restart count on a NEW-revision pod above which we treat the rollout as
-# wedged rather than progressing. A healthy new pod starts cleanly; repeated
-# restarts mean a crash that backoff hasn't yet labeled CrashLoopBackOff.
+# wedged rather than progressing -- but ONLY while the pod is still unready.
+# A crash that backoff hasn't yet labeled CrashLoopBackOff leaves the pod
+# unready with the count climbing; a pod that is Ready NOW has finished
+# whatever it was doing, and restartCount is cumulative and never decreases,
+# so without the readiness gate that history is reported as a live wedge
+# forever.
+#
+# MEASURED, food-truck/mono#4613 (2026-09-16): eleven BAF JVMs rolled at once
+# in one UAT namespace, starved each other past the startup-probe budget
+# (`failed startup probe, will be restarted` -> SIGKILL, exitCode 137, not
+# OOMKilled), then came up clean. PROD ran the identical tag with restarts=0.
+# The script printed `<-- WEDGED (4 restarts...)` and `rolled out & healthy`
+# on adjacent lines about the same pod, and exited 1 for a rollout that had
+# entirely succeeded.
 RESTART_SPIKE_THRESHOLD = 3
 
 # Length of the short SHA we match image tags against. GitHub/most CI tag
@@ -414,16 +426,20 @@ def get_pods(target, selector):
         cstatus = cstatus or {}
 
         waiting = (cstatus.get("state", {}) or {}).get("waiting")
+        # POD-level readiness, computed once and shared: the restart-spike arm
+        # of wedge_reason asks "has this pod recovered", which is a fact about
+        # the pod a Service routes on, not about any one container.
+        ready = pod_ready(status, cstatus)
         pods.append({
             "name": (item.get("metadata", {}) or {}).get("name", "<unknown>"),
             "phase": status.get("phase"),
-            "ready": pod_ready(status, cstatus),
+            "ready": ready,
             "restarts": cstatus.get("restartCount", 0),
             "tag": tag,
             "status_tag": image_tag(cstatus.get("image", "")),
             "image_id": cstatus.get("imageID") or None,
             "waiting_reason": waiting.get("reason") if waiting else None,
-            "wedge_reason": wedge_reason(cstatuses),
+            "wedge_reason": wedge_reason(cstatuses, ready),
         })
     return pods
 
@@ -445,7 +461,7 @@ def pod_ready(status, cstatus):
     return bool(cstatus.get("ready", False))
 
 
-def wedge_reason(cstatuses):
+def wedge_reason(cstatuses, pod_is_ready):
     """Why this pod will not become ready on its own, or None.
 
     Scans EVERY container, not just the one whose image identifies the
@@ -453,11 +469,21 @@ def wedge_reason(cstatuses):
     reporting that as "pods updating" is the failure this script exists to
     delete: the caller idles until its horizon and then reports a timeout
     instead of the reason. The container is named, because "CrashLoopBackOff"
-    without it sends the reader to the wrong logs."""
+    without it sends the reader to the wrong logs.
+
+    `pod_is_ready` gates the RESTART-SPIKE arm only. The waiting-reason arm
+    stays unconditional: those states (CrashLoopBackOff, ImagePullBackOff,
+    ...) are why a pod cannot become ready, so a pod in one of them is not
+    ready by construction, and consulting readiness there would only add a way
+    to get it wrong. The restart arm is different in kind -- it infers a live
+    crash from a CUMULATIVE counter, which is only sound while the pod has not
+    yet recovered."""
     for c in cstatuses:
         reason = ((c.get("state", {}) or {}).get("waiting") or {}).get("reason")
         if reason in WEDGED_WAITING_REASONS:
             return f"{reason} in container {c.get('name', '<unnamed>')}"
+    if pod_is_ready:
+        return None
     for c in cstatuses:
         restarts = c.get("restartCount", 0)
         if restarts >= RESTART_SPIKE_THRESHOLD:
