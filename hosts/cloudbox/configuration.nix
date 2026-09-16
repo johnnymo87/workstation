@@ -2699,6 +2699,161 @@ Check:
           GATE="(json_extract(data, '\$.time.created') < $CUTOFF * 1000)"
         fi
 
+        # PHASE 0 — ensure the partial index phase 1 depends on (bead
+        # workstation-o5s1.2).
+        #
+        # MEASURED 2026-09-15: every run read 3.4-4.2 GB from disk, burned
+        # 11.5-17.0s CPU and peaked at 1.4-1.8G RSS, to find 0 candidates —
+        # because the phase 1 predicate is three json_extract() terms that no
+        # index could serve, so it full-scanned the 4GB message table every five
+        # minutes. Runs of 5m16 and 7m05 exceeded the 5-minute timer and chained
+        # back-to-back. On a host whose page cache had been squeezed to 3.6G that
+        # scan was entirely disk, queued behind bazel.
+        #
+        # The fix is selectivity, and it is enormous: of 587,482 message rows,
+        # 21 satisfy role=assistant AND no completed AND no error. A PARTIAL
+        # index over exactly that predicate, keyed on time_updated, turns the
+        # scan into a range search over a near-empty index.
+        #
+        # WHAT IT COSTS THE WRITE PATH, since that path belongs to the serves and
+        # not to us. Every INSERT/UPDATE of a message row now evaluates the three
+        # json_extract() terms to decide whether the row belongs in the index —
+        # measured at 3-5us per row over 20k inserts/updates of ~4KB rows, which
+        # is noise next to rewriting the row itself. The part worth stating is
+        # not the cost but the COUPLING: a partial index whose predicate calls
+        # json_extract() turns malformed `data` into a write ERROR rather than a
+        # quietly-stored bad row. That is unreachable today — drizzle's
+        # text({mode:"json"}) always stringifies, and the index building over all
+        # 587,482 existing rows proves none are malformed — but it is a
+        # constraint this repo has placed on a write path owned by another one,
+        # and a future writer that bypasses drizzle would meet it.
+        #
+        # THE QUERY TEXT IS DELIBERATELY UNCHANGED. SQLite uses a partial index
+        # when the query's WHERE clause provably implies the index's, which it
+        # does here by term-for-term expression equality. So nothing about the
+        # gate, its two branches, or its safety argument moves — every test in
+        # hosts/cloudbox/test-phantom-busy-sweeper.sh keeps pinning exactly what
+        # it pinned before. The corollary is the hazard: an edit that merely
+        # RESHAPES one of those three terms (reordering the operands of a
+        # comparison, hoisting a json_extract into a subexpression) silently
+        # stops implying the index WHERE, the plan reverts to SCAN, and the 4GB
+        # read comes back with no test failing and no log line changing. T10
+        # asserts the plan itself for that reason.
+        #
+        # WHY IT LIVES HERE rather than in an ExecStartPre or a one-shot: the
+        # index is not part of opencode's own schema, so a drizzle migration that
+        # rebuilds the message table drops it, and there is nothing to notice.
+        # Making the consumer responsible for its own index means the next run
+        # restores it. It also keeps the test harness — which runs THIS script
+        # against scratch databases — exercising the real thing.
+        #
+        # EXISTENCE IS PROBED READ-ONLY, and the probe is also what reads the
+        # stored definition (see the drift check below). `CREATE INDEX IF NOT
+        # EXISTS` against an index that already exists turns out NOT to take the
+        # write lock at all — verified against a connection holding BEGIN
+        # IMMEDIATE, it succeeds with .timeout 0 — so the read-only probe is
+        # belt-and-braces on phase 1's no-write-lock invariant (bead
+        # workstation-yvxh) rather than the thing that establishes it. It earns
+        # its place by making the MISSING case a decision instead of an action.
+        #
+        # THE BUILD IS THE DANGEROUS PART, AND THIS SCRIPT WILL NOT DO IT
+        # UNATTENDED ON A LIVE HOST. CREATE INDEX holds the write lock across a
+        # full scan of the message table: measured 3.764s against the production
+        # DB with a warm page cache and no load. The serves' busy_timeout is 5s.
+        # That margin only exists warm — the very runs this bead is about took
+        # 4.5s to 7m05 doing a comparable scan cold and under I/O contention, and
+        # at those durations every in-flight turn takes "database is locked".
+        # That is precisely the 2026-08-02 incident (workstation-yvxh) that phase
+        # 1's read-only connection was introduced to end, and building the index
+        # from a five-minute timer would reintroduce it through the back door.
+        #
+        # So the build is gated on being safe BY CONSTRUCTION — no live serve to
+        # block, or a DB small enough that the scan cannot approach the timeout —
+        # and otherwise the script reports and hands the operator the statement.
+        # The production index was built exactly that way: by hand, during a
+        # window verified write-quiet by watching opencode.db-wal hold a constant
+        # size for 60s.
+        #
+        # AN EARLIER VERSION OF THIS COMMENT CLAIMED the unattended branch was
+        # safe because it only fires "after a migration rebuilt the table, when
+        # the table is new and small". That was false and worth recording: a
+        # drizzle table rebuild copies every row forward (__new_message plus
+        # INSERT ... SELECT), so the scan is the full 587k rows. A restored or
+        # copied DB lands in the same branch for the same reason.
+        IDX=message_phantom_busy_idx
+        IDX_BODY="$IDX ON message(time_updated)
+          WHERE json_extract(data, '\$.role') = 'assistant'
+            AND json_extract(data, '\$.time.completed') IS NULL
+            AND json_extract(data, '\$.error') IS NULL"
+        IDX_SQL="CREATE INDEX IF NOT EXISTS $IDX_BODY;"
+
+        # sqlite stores a CREATE statement verbatim EXCEPT that it drops
+        # `IF NOT EXISTS` and the trailing semicolon, so the expected stored text
+        # is derivable rather than restated (verified byte-for-byte against the
+        # production index).
+        IDX_EXPECT="CREATE INDEX $IDX_BODY"
+
+        # COMPARED ON WHITESPACE-NORMALISED TEXT, because "verbatim" makes the
+        # naive comparison absurdly brittle: reindenting this nix file would
+        # change IDX_EXPECT while every deployed index kept the old text, and
+        # every sweeper run on every host would start reporting drift that does
+        # not exist. Caught by the test comparing the harness's index against one
+        # the shipped script built, which differed by leading spaces alone.
+        # Normalising keeps the check aimed at the predicate, which is the actual
+        # contract, and blind to layout, which is not.
+        normsql() {
+          printf '%s\n' "$1" | awk '{ $1=$1; printf "%s%s", sep, $0; sep=" " }'
+        }
+
+        if ! IDX_HAVE=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "file:$DB?mode=ro" "
+          SELECT sql FROM sqlite_master WHERE type='index' AND name='$IDX';
+        "); then
+          # Not fatal, and not silent. If sqlite_master is unreadable the
+          # candidate query below is about to fail too, and it IS fatal there.
+          # Claiming the index is present is the conservative lie: it costs a
+          # slow scan, where the other direction costs a write-lock build.
+          echo "sweeper: could not probe for $IDX — continuing without it (the scan will be slow)"
+          IDX_HAVE="$IDX_EXPECT"
+        fi
+
+        if [ -z "$IDX_HAVE" ]; then
+          # DB_BYTES gates the small-DB carve-out. A fresh install self-heals;
+          # anything of consequential size waits for a human. 256 MiB is chosen
+          # so the scan is ~0.2s at the measured throughput — two orders of
+          # magnitude inside the busy_timeout, not one.
+          DB_BYTES=$(stat -c%s "$DB" 2>/dev/null || echo 0)
+          case "$DB_BYTES" in ""|*[!0-9]*) DB_BYTES=0 ;; esac
+
+          if [ "$DRY" = 1 ]; then
+            # --dry-run must not write, and a build is the largest write this
+            # script can perform. An operator reaching for the "safe" flag to
+            # probe an unfamiliar DB is exactly who must not trigger it.
+            echo "sweeper: $IDX is MISSING — dry run, NOT building it. Statement: $IDX_SQL"
+          elif [ "$ACTIVE" -gt 0 ] && [ "$DB_BYTES" -gt 268435456 ]; then
+            echo "sweeper: $IDX is MISSING, $ACTIVE serve(s) are live and the DB is $DB_BYTES bytes — REFUSING to build it here. Building takes the write lock across a full scan and would stall every in-flight turn (bead workstation-yvxh). Build it by hand in a write-quiet window (watch opencode.db-wal hold a constant size): $IDX_SQL"
+          else
+            echo "sweeper: $IDX is MISSING and building is safe here (active serves: $ACTIVE, db bytes: $DB_BYTES) — building it now"
+            if sqlite3 -init /dev/null -cmd ".timeout 10000" "$DB" "$IDX_SQL"; then
+              echo "sweeper: $IDX built"
+            else
+              # Retrying every five minutes is acceptable ONLY because this
+              # branch is already gated to the drained-pool or small-DB case. A
+              # permanently failing build (one non-JSON `data` row is enough)
+              # would otherwise be a write-lock full scan on a loop forever.
+              echo "sweeper: $IDX build FAILED — continuing with a full scan (slow but correct)"
+            fi
+          fi
+        elif [ "$(normsql "$IDX_HAVE")" != "$(normsql "$IDX_EXPECT")" ]; then
+          # DEFINITION DRIFT. The probe keys on the NAME, so an index whose
+          # predicate no longer matches this script's would sit there forever
+          # looking present while phase 1 quietly reverts to a full scan — the
+          # name is not the contract, the predicate is. Reported rather than
+          # repaired: fixing it means DROP plus a rebuild, i.e. the write lock
+          # across a full scan, which is the operation this script has just
+          # finished refusing to perform unattended.
+          echo "sweeper: $IDX EXISTS BUT ITS DEFINITION HAS DRIFTED from this script's — phase 1 may be full-scanning. Drop it and rebuild by hand in a write-quiet window. Found: $IDX_HAVE"
+        fi
+
         # PHASE 1 — find candidates on a READ-ONLY connection.
         #
         # The scan itself was never the problem; holding the WAL write lock
@@ -2718,10 +2873,16 @@ Check:
         # The predicate is byte-identical to devbox's, including
         # json_extract(data,'$.time.created') where the indexed-looking
         # time_created column would do. They never disagree (verified 360314/
-        # 360314 rows) but the only index is (session_id, time_created, id) and
-        # this query has no session filter, so both variants full-scan and parity
-        # with the month-proven script costs nothing. Measured 1.8s on a 13GB DB.
+        # 360314 rows), and the choice is now moot for cost: neither variant can
+        # be served by (session_id, time_created, id) — this query has no session
+        # filter and the table has never been ANALYZEd, so there are no
+        # sqlite_stat1 rows for a skip-scan to be costed against — and the
+        # selectivity instead comes from the phase 0 partial index. Parity with
+        # the month-proven devbox script therefore still costs nothing.
         # Phase 2 repeats it verbatim so the two phases cannot drift apart.
+        #
+        # DO NOT RESHAPE THE THREE role/completed/error TERMS. They are what makes
+        # the phase 0 partial index applicable; see the hazard note there.
         #
         # `-cmd ".timeout N"`, not `PRAGMA busy_timeout=N;`: the pragma RETURNS A
         # ROW, so the old script has been logging a bare "10000" line to the

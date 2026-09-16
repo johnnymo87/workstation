@@ -59,7 +59,37 @@ NOW_MS=$(( $(date +%s) * 1000 ))
 STALE_UPD=$(( NOW_MS - 7200000 ))    # touched 2h ago -> passes the >30min gate
 FRESH_UPD=$NOW_MS                    # touched now    -> fails it
 
+# mkdb builds the schema in its PRODUCTION STEADY STATE, which since bead
+# workstation-o5s1.2 includes the sweeper's own partial index. That matters most
+# for T9: if fixtures lacked it, the sweeper's phase 0 would build it mid-test,
+# hold the write lock across a 595MB scan, and T9 would fail for a reason that
+# occurs exactly once in a real database's lifetime. T10 covers the build path
+# separately, on a DB deliberately created without it.
 mkdb() {
+  rm -f "$1" "$1-wal" "$1-shm"
+  "$SQLITE" "$1" "
+    PRAGMA journal_mode=WAL;
+    CREATE TABLE message (
+      id text PRIMARY KEY, session_id text NOT NULL,
+      time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
+    CREATE INDEX message_session_time_created_id_idx ON message (session_id, time_created, id);
+  " >/dev/null
+  mkidx "$1"
+}
+
+# The partial index, spelled the way the sweeper spells it.
+mkidx() {
+  "$SQLITE" "$1" "
+    CREATE INDEX IF NOT EXISTS message_phantom_busy_idx ON message(time_updated)
+      WHERE json_extract(data, '\$.role') = 'assistant'
+        AND json_extract(data, '\$.time.completed') IS NULL
+        AND json_extract(data, '\$.error') IS NULL;
+  " >/dev/null
+}
+
+# mkdb_noidx: the pre-o5s1.2 schema, i.e. what a fresh opencode DB looks like
+# before the sweeper has ever run against it.
+mkdb_noidx() {
   rm -f "$1" "$1-wal" "$1-shm"
   "$SQLITE" "$1" "
     PRAGMA journal_mode=WAL;
@@ -337,11 +367,153 @@ check "attribution 0"   "$(printf '%s' "$OUT" | grep -c 'stamped-gate ARMED: 0 r
 check "finalizes 0"     "$(printf '%s' "$OUT" | grep -c 'finalized 0 orphaned message(s)')" 1
 check "foreign error kept" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.error.name') FROM message WHERE id='msg_stamped_err';")" X
 
+# --- the partial index (bead workstation-o5s1.2) ------------------------------
+# MEASURED 2026-09-15: every sweeper run read 3.4-4.2 GB and burned 11.5-17.0s
+# CPU to find 0 candidates, because the three json_extract() terms in phase 1
+# cannot be served by (session_id, time_created, id) -- this query has no session
+# filter, and the table has never been ANALYZEd so a skip-scan has no stats to be
+# costed against. Runs of 5m16 and 7m05 overran the 5-minute timer and chained.
+#
+# The fix is a partial index over exactly those three terms. It is applicable
+# only because SQLite can prove the query's WHERE implies the index's, which
+# rests on the two being written the same way -- so the thing that must be
+# tested is THE PLAN, not the result. Every functional test in this file passes
+# identically whether the index is used or ignored; a reshaped predicate would
+# revert to a 4GB full scan with no output changing anywhere.
+echo "== T10b: a DB without the index gets one, and only then =="
+# The build branch. It is gated: the sweeper refuses to build unattended when a
+# serve is live AND the DB is over 256 MiB, because CREATE INDEX holds the write
+# lock across a full scan and that is the 2026-08-02 incident phase 1's
+# read-only connection exists to prevent. These fixtures are kilobytes, so they
+# take the small-DB carve-out and self-heal. T10c pins the refusal.
+DB="$LAB/t10b.db"; mkdb_noidx "$DB"
+addrow "$DB" msg_noidx "$OLD" "$STALE_UPD" NULL NULL
+check "index absent to begin with" \
+  "$("$SQLITE" "$DB" "SELECT count(*) FROM sqlite_master WHERE name='message_phantom_busy_idx';")" 0
+run "$DB"
+check "exit 0"                "$RC" 0
+check "says it was missing"   "$(printf '%s' "$OUT" | grep -c 'is MISSING and building is safe here')" 1
+check "says it was built"     "$(printf '%s' "$OUT" | grep -c 'message_phantom_busy_idx built')" 1
+check "index now present"     "$("$SQLITE" "$DB" "SELECT count(*) FROM sqlite_master WHERE name='message_phantom_busy_idx';")" 1
+check "still did its job"     "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
+# Second run must be silent about the index: nothing to build, no drift.
+run "$DB"
+check "second run says nothing about building" "$(printf '%s' "$OUT" | grep -c 'MISSING\|built\|DRIFTED')" 0
+
+echo "== T10c: --dry-run never builds the index =="
+# A build is the largest write this script can make, and an operator reaching for
+# the "safe" flag against an unfamiliar DB is exactly who must not trigger it.
+DB="$LAB/t10c.db"; mkdb_noidx "$DB"
+addrow "$DB" msg_dryidx "$OLD" "$STALE_UPD" NULL NULL
+run "$DB" --dry-run
+check "exit 0"              "$RC" 0
+check "says dry run"        "$(printf '%s' "$OUT" | grep -c 'dry run, NOT building it')" 1
+check "index NOT created"   "$("$SQLITE" "$DB" "SELECT count(*) FROM sqlite_master WHERE name='message_phantom_busy_idx';")" 0
+check "row NOT written"     "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NULL FROM message WHERE id='msg_dryidx';")" 1
+
+echo "== T10d: a DRIFTED index definition is reported, not silently tolerated =="
+# The probe keys on the NAME. An index whose predicate no longer matches phase 1
+# sits there looking present while the query full-scans -- the exact silent
+# reversion this whole bead is about, wearing the disguise of a healthy DB.
+DB="$LAB/t10d.db"; mkdb_noidx "$DB"
+"$SQLITE" "$DB" "CREATE INDEX message_phantom_busy_idx ON message(time_updated)
+  WHERE json_extract(data, '\$.role') = 'user';" >/dev/null
+addrow "$DB" msg_drift "$OLD" "$STALE_UPD" NULL NULL
+run "$DB"
+check "exit 0"            "$RC" 0
+check "reports drift"     "$(printf '%s' "$OUT" | grep -c 'DEFINITION HAS DRIFTED')" 1
+check "does not rebuild"  "$(printf '%s' "$OUT" | grep -c 'built')" 0
+check "still did its job" "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
+
+# mkidx (used by every other fixture) restates the script's index definition. If
+# the two drift, every fixture in this file would provoke the DRIFTED branch and
+# the suite would be testing a configuration production never sees. Compare the
+# stored SQL of a mkidx index against one the SHIPPED script built in T10b.
+# Compared whitespace-normalised, the same way the sweeper compares them: layout
+# is not the contract, the predicate is. The first version of this check was
+# exact and failed on leading spaces alone -- which is precisely the false drift
+# report the sweeper would have produced on every host after any reindent.
+normsql_t() { "$SQLITE" "$1" "SELECT sql FROM sqlite_master WHERE name='message_phantom_busy_idx';" |
+  awk '{ $1=$1; printf "%s%s", sep, $0; sep=" " }'; }
+DB="$LAB/t10e.db"; mkdb "$DB"
+check "test's mkidx matches the shipped index definition" \
+  "$(normsql_t "$DB")" "$(normsql_t "$LAB/t10b.db")"
+
+echo "== T10: phase 1 is driven by the partial index, not a full scan =="
+# The query is EXTRACTED FROM THE SHIPPED SCRIPT rather than restated here. A
+# copy would drift: someone reshapes a term in configuration.nix, production
+# silently reverts to SCAN, and a test asserting its own private copy of the
+# query still passes. Extracting means the reshape lands in what we plan.
+awk '/SELECT id FROM message/{f=1} f{print} /AND \$GATE;/{if(f) exit}' "$SWEEPER" > "$LAB/q.raw"
+if [ ! -s "$LAB/q.raw" ] || ! grep -q 'AND \$GATE;' "$LAB/q.raw"; then
+  bad "could not extract the phase 1 query from $SWEEPER -- T10 cannot check anything"
+else
+  ok "extracted the phase 1 query from the shipped script"
+  # Unescape the shell-level \$ the nix string carries, then substitute a
+  # representative gate. BOTH gate forms are exercised: the stamped/unstamped
+  # disjunction used when a pool serve is live, and the CUTOFF-only fallback used
+  # when none is. They take different paths through the optimiser and a fix that
+  # only preserved one would be a half fix.
+  IV_E="json_extract(data,'\$.serve.invocationId')"
+  STAMPED_E="($IV_E IS NOT NULL AND length($IV_E) = 32 AND $IV_E NOT GLOB '*[^0-9a-f]*')"
+  GATE_LIVE="( (NOT $STAMPED_E AND json_extract(data,'\$.time.created') < 1 * 1000) OR ($STAMPED_E AND $IV_E NOT IN ('$DEAD_IV')) )"
+  GATE_ONLY="(json_extract(data,'\$.time.created') < 1 * 1000)"
+
+  # PLAN AGAINST THE INDEX THE SHIPPED SCRIPT BUILT (t10b.db, from the test
+  # above), NOT one this file created. mkidx is a restatement of the script's
+  # IDX_SQL, so planning against a mkdb fixture would pass even if the script's
+  # index definition and its phase 1 predicate had drifted apart from each other
+  # -- the same "asserting a private copy" failure this test exists to prevent,
+  # one layer down. Using the script's own output closes that loop: the index and
+  # the query being checked for agreement both come from the artifact.
+  DB="$LAB/t10b.db"
+  plan_for() {
+    # SINGLE quotes: in double quotes bash collapses \$ before sed ever sees it,
+    # leaving sed the expression s/\\$/$/g -- an escaped backslash followed by an
+    # END-OF-LINE ANCHOR, which matches nothing here. The extraction then plans a
+    # query still containing '\$.role', which is not the production predicate and
+    # so does not imply the index WHERE. It failed loudly, which is the point of
+    # asserting the plan rather than the result.
+    sed 's/\\\$/$/g' "$LAB/q.raw" > "$LAB/q.sql"
+    awk -v g="$1" '{ gsub(/\$GATE/, g); print }' "$LAB/q.sql" > "$LAB/q.final"
+    "$SQLITE" "file:$DB?mode=ro" "EXPLAIN QUERY PLAN $(cat "$LAB/q.final")" 2>&1
+  }
+
+  for variant in live cutoff; do
+    case "$variant" in
+      live)   PLAN=$(plan_for "$GATE_LIVE") ;;
+      cutoff) PLAN=$(plan_for "$GATE_ONLY") ;;
+    esac
+    # Here-strings, not `printf ... | grep -q`: under pipefail an early-exiting
+    # grep -q closes the pipe, the writer takes EPIPE, and a MATCH reads as a
+    # miss. See the Pipefail Inversion Guard in AGENTS.md.
+    if grep -q 'message_phantom_busy_idx' <<<"$PLAN"; then
+      ok "gate=$variant: plan uses message_phantom_busy_idx"
+    else
+      bad "gate=$variant: plan does NOT use the partial index -- phase 1 is back to a full scan [$PLAN]"
+    fi
+    # Belt and braces: USING INDEX can appear alongside a SCAN of the table in a
+    # compound plan, and a SCAN of message is the exact regression.
+    if grep -qE '^[^|]*SCAN message([^_]|$)' <<<"$PLAN"; then
+      bad "gate=$variant: plan still contains SCAN message [$PLAN]"
+    else
+      ok "gate=$variant: no SCAN of message"
+    fi
+  done
+fi
+
 echo "== T9: REGRESSION -- a zero-candidate sweep must not block a concurrent writer =="
 # Fixture: all rows already completed, so 0 candidates -- exactly production,
 # where 173/173 runs matched nothing -- but large enough that a full scan is far
 # longer than the writer's busy_timeout.
-DB="$LAB/t9.db"; mkdb "$DB"
+# NOTE THE SCHEMA: the fixture starts WITHOUT the partial index, and gains it
+# below. That ordering is load-bearing since bead workstation-o5s1.2. The
+# positive control is the OLD unbounded UPDATE, whose predicate is exactly the
+# three terms the partial index covers -- so with the index already present it
+# would no longer scan, would no longer block, and would report "fixture too
+# small", quietly disarming the one check that stops T9 passing vacuously. The
+# control belongs on the pre-fix schema because that is what it is a control for.
+DB="$LAB/t9.db"; mkdb_noidx "$DB"
 "$SQLITE" "$DB" "
   WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<150000)
   INSERT INTO message SELECT 'msg_p'||i,'ses_test',$OLD,$STALE_UPD,
@@ -379,10 +551,31 @@ echo "  (control/old-shape: attempts=$CTRIES blocked=$CBLOCKED)"
 if [ "$CBLOCKED" -gt 0 ]; then ok "positive control: old unbounded UPDATE does block a writer at 0 matches"
 else bad "positive control did not block -- fixture too small, the result below is meaningless"; fi
 
-OPENCODE_SWEEPER_DB="$DB" "$SWEEPER" >/dev/null 2>&1 &
+# Bring the fixture up to the production schema before running the sweeper, so
+# phase 0 finds its index already there (T10b covers the build path). The two
+# scan numbers are reported, not asserted: this fixture is written immediately
+# before it is read, so it is page-cache warm and a wall-clock ratio here would
+# understate the win and flake besides. The non-flaky form of that assertion is
+# T10's plan check.
+mkidx "$DB"
+ISCAN=$( { TIMEFORMAT=%R; time "$SQLITE" "file:$DB?mode=ro" \
+  "SELECT id FROM message WHERE json_extract(data,'\$.role')='assistant'
+     AND json_extract(data,'\$.time.completed') IS NULL
+     AND json_extract(data,'\$.error') IS NULL
+     AND time_updated < (strftime('%s','now') - 1800) * 1000;" >/dev/null; } 2>&1 )
+echo "  (zero-candidate probe: ${SCAN}s unindexed (warm) vs ${ISCAN}s indexed)"
+
+OPENCODE_SWEEPER_DB="$DB" "$SWEEPER" >"$LAB/t9.out" 2>&1 &
 read -r TRIES BLOCKED <<<"$(hammer_while $!)"
 echo "  (sweeper: attempts=$TRIES blocked=$BLOCKED)"
 check "concurrent writer never blocked by sweeper" "$BLOCKED" 0
+# blocked=0 is only meaningful if the sweeper actually ran and the hammer
+# actually got swings in. Since the index cut this run from ~4s to ~0.1s the
+# window is 40x shorter, and a sweeper that exited instantly on an error would
+# hand back blocked=0 for free. Both floors are cheap; neither existed before.
+check "sweeper reported a real sweep" "$(grep -c 'finalized 0 orphaned message(s)' "$LAB/t9.out")" 1
+if [ "$TRIES" -ge 5 ]; then ok "hammer got $TRIES swings in (>=5, so blocked=0 means something)"
+else bad "hammer only got $TRIES swings -- blocked=0 is not evidence of anything"; fi
 
 echo
 echo "==== $PASS passed, $FAIL failed ===="
