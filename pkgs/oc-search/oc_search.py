@@ -99,10 +99,27 @@ MIN_FREE_BYTES = 5_000_000_000
 # journal_size_limit to actually claw the file back.
 COMMIT_EVERY = 10_000
 
+# Rows read from the SOURCE database per statement (bead workstation-o5s1.3).
+# This is not a buffer size, it is the unit of work over which the source's WAL
+# read mark is held: each chunk is a statement that runs to completion, so the
+# mark is released between chunks and checkpointing can advance. It was
+# previously the fetchmany() size of one long-lived cursor, which held the mark
+# for the entire batch instead. Keep it small enough that the pause between
+# releases stays short, and large enough that per-statement overhead stays
+# irrelevant against reading a ~4KB blob per row.
+READ_CHUNK = 2_000
+
 
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+
+
+def positive_int(raw: str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or greater, got {value}")
+    return value
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -157,7 +174,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--index-batch",
-        type=int,
+        # Positive only. Under the old single-cursor scan a non-positive value
+        # became SQL `LIMIT -1`, i.e. unlimited; the chunked loop reads it as
+        # `while n < 0` and indexes nothing at all, reporting up_to_date=False
+        # forever. Rejecting it is better than either reading, and better than
+        # silently changing what it means (bead workstation-o5s1.3).
+        type=positive_int,
         default=DEFAULT_INDEX_BATCH,
         metavar="N",
         help=f"Max tail rows folded in per --index run (default: {DEFAULT_INDEX_BATCH}).",
@@ -431,19 +453,114 @@ def build_index(
         # `type` is resolved by json_extract in SQL, exactly as the old
         # implementation filtered it: the field's position inside the blob
         # varies, so no cheaper string probe is safe.
-        cur = src.execute(
-            "SELECT rowid, id, session_id, time_created, "
-            "json_extract(data,'$.type') AS type, data FROM part "
-            "WHERE rowid > ? ORDER BY rowid LIMIT ?",
-            (watermark, batch),
-        )
+        #
+        # ONE STATEMENT PER CHUNK, NOT ONE CURSOR FETCHED IN CHUNKS.
+        # (bead workstation-o5s1.3; incident 2026-09-15, epic workstation-o5s1)
+        #
+        # This used to be a single `src.execute(... LIMIT batch)` whose cursor
+        # was drained with `fetchmany(READ_CHUNK)` inside the loop below. An
+        # un-exhausted SQLite statement keeps its READ TRANSACTION open, which
+        # pins the WAL read mark on the SOURCE database for as long as the
+        # cursor lives — and since the index writes happen inside that loop, the
+        # mark was held for the whole batch. No checkpoint can advance past a
+        # held read mark, so opencode.db's WAL grew ~9 MB/min, unbounded, for
+        # the duration of every index run.
+        #
+        # MEASURED: normally 217-246s per 200,000-row batch, which is already
+        # four minutes of blocked checkpointing every hour. On 2026-09-15, with
+        # the index writes starved of I/O by concurrent bazel builds, ONE run
+        # held it for 87 minutes (6m49s of CPU) and drove the WAL past 1 GB. The
+        # holder was visible as byte 127 of the opencode.db-shm inode in
+        # /proc/locks — byte 128 is the DMS lock every connection holds and is
+        # noise.
+        #
+        # Re-issuing the query per chunk and calling fetchall() lets each
+        # statement RUN TO COMPLETION, so the read transaction ends and the read
+        # mark is released between chunks. Checkpointing gets the gaps.
+        #
+        # THE DESTINATION CONNECTION ALREADY DID THIS, with the comment below
+        # explaining why one long transaction was wrong. The fix had been
+        # applied to the database being WRITTEN (this process's private index)
+        # and not to the one being READ — which is the one with ~15 concurrent
+        # writers and the only one where a held mark hurts anybody else.
+        #
+        # SNAPSHOT ISOLATION IS DELIBERATELY GIVEN UP. Chunks no longer see one
+        # consistent view of `part`, and that is sound here rather than merely
+        # tolerable: rows are append-mostly with increasing rowid and the
+        # watermark is monotonic, so a row inserted mid-run is picked up by the
+        # next run — which is already the normal case, since a batch that fills
+        # reports MORE REMAINS. A row deleted between chunks is skipped, which is
+        # correct, it is gone. A row updated between chunks is indexed in its
+        # newer form, which is what a search index wants. Anything not yet
+        # indexed is covered by the tail scan, the same mechanism that already
+        # covers an interrupted build. index_validity() separately catches the
+        # one case that does matter — a watermark row deleted out from under us
+        # — and forces a rebuild.
         n = 0
         last: tuple[int, str] | None = None
+        cursor_rowid = watermark
+        since_commit = 0
+        since_disk_check = 0
         t0 = time.monotonic()
-        while True:
-            rows = cur.fetchmany(2000)
+        while n < batch:
+            rows = src.execute(
+                "SELECT rowid, id, session_id, time_created, "
+                "json_extract(data,'$.type') AS type, data FROM part "
+                "WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (cursor_rowid, min(READ_CHUNK, batch - n)),
+            ).fetchall()
             if not rows:
                 break
+
+            # ROWID REUSE AT A CHUNK BOUNDARY (bead workstation-o5s1.3).
+            #
+            # This is the one hazard chunking introduces that the old
+            # single-snapshot scan could not have, and it is checked here rather
+            # than argued away. `part` has a TEXT primary key, so its rowid is
+            # implicit and SQLite REUSES rowids below the maximum after deletes.
+            # On cloudbox that is not hypothetical: max(rowid) exceeds count by
+            # ~466,000, and session deletion cascades to parts routinely.
+            #
+            # The index normally sits at the head of the table, so the boundary
+            # between two chunks is the live max rowid. If a session is deleted
+            # in the gap between two chunk statements and new parts reuse those
+            # rowids, chunk k has already indexed the OLD contents of rows that
+            # now belong to somebody else, and chunk k+1 reads only past the
+            # boundary. The result is permanently wrong — wrong session_id, stale
+            # text — and index_validity() does NOT catch it, because it only
+            # checks the FINAL watermark row, which is past the damage and
+            # perfectly consistent.
+            #
+            # index_validity()'s argument silently assumed the scan saw one
+            # snapshot. That was true before this change and is not true now, so
+            # the boundary needs its own check: re-read the previous chunk's last
+            # row and confirm it is still the same part. A mismatch means rowids
+            # moved under the scan, and the only safe answer is a rebuild — the
+            # same answer index_validity gives for the equivalent whole-index
+            # case. Cost is one primary-key lookup per 2,000 rows.
+            #
+            # Checked AFTER the fetch, not before, so that a delete landing in
+            # EITHER gap (before or after the new statement) is caught.
+            if last is not None:
+                still = src.execute(
+                    "SELECT id FROM part WHERE rowid=?", (last[0],)
+                ).fetchone()
+                if still is None or still[0] != last[1]:
+                    warn(
+                        "chunk boundary row changed under the scan "
+                        "(rowid reuse after a delete); rebuilding from scratch"
+                    )
+                    idx.close()
+                    return build_index(
+                        src,
+                        index_path,
+                        db_path,
+                        rebuild=True,
+                        batch=batch,
+                        progress=progress,
+                    )
+
+            cursor_rowid = int(rows[-1]["rowid"])
             payload = []
             metas = []
             for r in rows:
@@ -459,7 +576,18 @@ def build_index(
                 metas,
             )
             n += len(rows)
-            if last is not None and n % COMMIT_EVERY == 0:
+            since_commit += len(rows)
+            since_disk_check += len(rows)
+            # THRESHOLD CROSSING, NOT `n % COMMIT_EVERY == 0` (bead
+            # workstation-o5s1.3). The modulo form was safe only because
+            # fetchmany() on one snapshot returned a short batch exactly once, at
+            # the true end. Chunks can now be short mid-run — the scan catches
+            # the head of the table and rows land between two statements — after
+            # which `n` is permanently off-multiple and the periodic commit, the
+            # 5 GB disk guard and the progress line all go silent for the rest of
+            # the run. Silently losing the disk guard is the part that matters.
+            if last is not None and since_commit >= COMMIT_EVERY:
+                since_commit = 0
                 # Commit the watermark WITH the rows it describes, periodically.
                 # One transaction around the whole build would grow a WAL the
                 # size of the finished index (observed passing 900 MB inside two
@@ -469,7 +597,8 @@ def build_index(
                 set_meta(idx, "watermark_rowid", last[0])
                 set_meta(idx, "watermark_part_id", last[1])
                 idx.commit()
-            if n % 20_000 == 0:
+            if since_disk_check >= 20_000:
+                since_disk_check = 0
                 # The estimate above is an estimate. Bail out with a readable
                 # message rather than wedging the machine on a full disk.
                 if shutil.disk_usage(index_dir).free < MIN_FREE_BYTES:
