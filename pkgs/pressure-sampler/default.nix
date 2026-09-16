@@ -80,11 +80,22 @@
 # columns stay empty for them. They populate for the host and the system.slice
 # cgroups. Since this box's dominant stall IS io, delegating the io controller is
 # worth doing -- tracked separately.
-{ lib, writeShellApplication, coreutils, gawk }:
+{ lib, writeShellApplication, coreutils, gawk, findutils }:
 
 writeShellApplication {
   name = "pressure-sampler";
-  runtimeInputs = [ coreutils gawk ];
+  # findutils is required by the retention sweep at the bottom of this script.
+  # It was missing, and because that call ends in `2>/dev/null || true` the
+  # failure was swallowed: retention had NEVER run. Found 2026-09-16 with 11
+  # files older than RETENTION_DAYS=30 still present, back to 2026-08-06.
+  #
+  # The user manager's PATH is systemd's own bin directory and nothing else, and
+  # this unit sets no Environment=, so anything not in runtimeInputs is simply
+  # absent at runtime. Serve discovery below therefore uses bash globs rather
+  # than find -- not to avoid this dependency, which retention needs anyway, but
+  # because a discovery step that silently reports "nothing found" when its
+  # tooling is missing is the same failure this file exists to stop.
+  runtimeInputs = [ coreutils gawk findutils ];
   text = ''
     set -o errexit
     set -o nounset
@@ -169,6 +180,21 @@ writeShellApplication {
         "$(io_bytes "$cg" wbytes)"
     }
 
+    # A row with a subject and no measurements, used to record that something we
+    # expected to find was ABSENT. Emitting nothing would be indistinguishable
+    # from "it was there and idle", and that ambiguity is precisely what let the
+    # ghost serve cgroup go unnoticed for weeks. Width is derived from COLS so it
+    # cannot drift out of step with the schema.
+    emit_blank() { # <subject> <detail>
+      awk -v ts="$TS" -v s="$1" -v d="$2" -v cols="$COLS" '
+        BEGIN {
+          n = split(cols, a, "\t")
+          printf "%s\t%s\t%s", ts, s, d
+          for (i = 4; i <= n; i++) printf "\t"
+          printf "\n"
+        }'
+    }
+
     {
       # ---- host ------------------------------------------------------------
       # MemAvailable is the honest capacity number for right-sizing: MemFree
@@ -195,16 +221,69 @@ writeShellApplication {
         "$(io_bytes "$CGROUP_ROOT" wbytes)"
 
       # ---- opencode serves -------------------------------------------------
-      for cg in "$CGROUP_ROOT"/system.slice/system-opencode*.slice/opencode-serve@*.service; do
+      # LOCATE THE UNITS BY NAME. Do not hardcode the slice path.
+      #
+      # This previously globbed system.slice/system-opencode*.slice, which was
+      # correct when written (PR #312) and silently wrong from the moment the
+      # serves moved to a root-level opencode.slice. The old cgroup still EXISTS
+      # and is EMPTY, so the glob kept matching, `[ -d ]` kept succeeding, and
+      # every serve-slice row from the move until 2026-09-16 recorded zeros --
+      # 20-25 MB against four serves actually holding 19.0 GB -- while no
+      # per-serve row was emitted at all. Nothing errored, so nothing was
+      # noticed, and the epic that needed this series (workstation-o5s1) found
+      # it had no serve data for the incident it was trying to explain.
+      #
+      # A path that is real, readable, and wrong is the worst case for a
+      # sampler: it fails the one way that produces confident, plausible,
+      # useless numbers. Finding the units by name survives the next move, and
+      # the parent slice is derived from where they actually are rather than
+      # asserted a second time.
+      # Bash globs, not `find`: this must not depend on anything being on PATH.
+      # An earlier revision used `find` and was WORSE THAN THE BUG IT FIXED --
+      # findutils was not in runtimeInputs, the user manager's PATH is systemd's
+      # bin directory alone, so the shipped binary reported "no serves" on every
+      # tick with four serves running. Verified by running the built binary
+      # under `env -i PATH=/var/empty`. The suite missed it because the harness
+      # prepended a populated PATH; it now runs the sampler with an empty one.
+      #
+      # Unmatched globs stay literal and are filtered by `[ -d ]`, so no
+      # nullglob is needed. Depths 1-4 below the cgroup root cover the current
+      # layout (opencode.slice/opencode-serve.slice/UNIT), the legacy one
+      # (system.slice/system-opencode\x2dserve.slice/UNIT), and a future move
+      # under the user manager (user.slice/user-1000.slice/user@1000.service/
+      # X.slice/UNIT), which a maxdepth of 4 would have excluded.
+      serve_cgs=()
+      for cg in \
+        "$CGROUP_ROOT"/opencode-serve@*.service \
+        "$CGROUP_ROOT"/*/opencode-serve@*.service \
+        "$CGROUP_ROOT"/*/*/opencode-serve@*.service \
+        "$CGROUP_ROOT"/*/*/*/opencode-serve@*.service \
+        "$CGROUP_ROOT"/*/*/*/*/opencode-serve@*.service; do
         [ -d "$cg" ] || continue
-        port="''${cg##*@}"; port="''${port%%.service}"
-        emit_cgroup "serve" "$port" "$cg"
+        serve_cgs+=("$cg")
       done
-      # The parent slice: workstation-le0a wants an aggregate cap here and it is
-      # still MemoryMax=infinity, so record what the aggregate actually reaches.
-      for cg in "$CGROUP_ROOT"/system.slice/system-opencode*.slice; do
-        [ -d "$cg" ] && emit_cgroup "serve-slice" "-" "$cg"
-      done
+
+      if [ "''${#serve_cgs[@]}" -eq 0 ]; then
+        emit_blank "serve-missing" "-"
+        printf 'pressure-sampler: no opencode-serve@*.service cgroup under %s\n' "$CGROUP_ROOT" >&2
+      else
+        serve_parents=()
+        for cg in "''${serve_cgs[@]}"; do
+          port="''${cg##*@}"; port="''${port%%.service}"
+          emit_cgroup "serve" "$port" "$cg"
+          parent="''${cg%/*}"
+          seen=0
+          for p in ''${serve_parents[@]+"''${serve_parents[@]}"}; do
+            [ "$p" = "$parent" ] && { seen=1; break; }
+          done
+          [ "$seen" -eq 0 ] && serve_parents+=("$parent")
+        done
+        # The parent slice: workstation-le0a wants an aggregate cap here and it is
+        # still MemoryMax=infinity, so record what the aggregate actually reaches.
+        for parent in ''${serve_parents[@]+"''${serve_parents[@]}"}; do
+          emit_cgroup "serve-slice" "-" "$parent"
+        done
+      fi
 
       # ---- bazel -----------------------------------------------------------
       uid=$(id -u)
