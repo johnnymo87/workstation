@@ -179,6 +179,96 @@ function M.format(row, opts)
   }
 end
 
+--- SESSION-ID SEARCH MODE (workstation-4osz).
+---
+--- WHY THIS IS A PROMPT MODE AND NOT AN ORDINAL FIELD:
+--- The ORDINAL EXCLUSION above keeps the unread badge out of the ordinal
+--- because it contains digits, so typing "3" would match unread counts instead
+--- of titles. A session id is the same hazard, worse: `ses_` plus a long
+--- alphanumeric run present on EVERY row. Appending it would make nearly any
+--- query match nearly every row, and ordinary title search would quietly stop
+--- discriminating -- a regression nobody would attribute to this feature.
+---
+--- So the id is matched in a MODE instead: a prompt beginning with `ses_`
+--- matches ids; every other prompt is handed to telescope's own sorter,
+--- untouched.
+M.SESSION_ID_PREFIX = "ses_"
+
+--- Telescope's "filter this entry out" sentinel. Any score < 0 is dropped.
+M.ID_FILTERED = -1
+
+--- Decide whether a typed prompt is a session-id query, and normalise it.
+---
+--- PREFIX, not substring: a prompt that merely contains `ses_` (a title search
+--- like "my ses_ notes") must not flip the mode and blank the user's search.
+--- Case-sensitive: real ids are literally lowercase `ses_`, so an
+--- upper/mixed-case prompt is far more likely to be a title.
+---
+--- @param prompt string|nil The raw telescope prompt
+--- @return string|nil The trimmed query, or nil if this is an ordinary prompt
+function M.id_query(prompt)
+  if type(prompt) ~= "string" then
+    return nil
+  end
+  local trimmed = prompt:match("^%s*(.-)%s*$")
+  if trimmed:sub(1, #M.SESSION_ID_PREFIX) ~= M.SESSION_ID_PREFIX then
+    return nil
+  end
+  return trimmed
+end
+
+--- Extract the session id from a telescope entry (or a bare row).
+--- Never errors; returns nil for anything that is not a usable id.
+---
+--- @param entry table|nil
+--- @return string|nil
+function M.session_id_of(entry)
+  if type(entry) ~= "table" then
+    return nil
+  end
+  local row = entry.value
+  if type(row) ~= "table" then
+    row = entry
+  end
+  local id = row.id
+  if id == nil or id == vim.NIL or type(id) ~= "string" or id == "" then
+    return nil
+  end
+  return id
+end
+
+--- Score a session id against an id query, in telescope's convention:
+--- lower is better, and < 0 filters the row out entirely.
+---
+--- Substring rather than prefix-only, because a prefix IS a substring and the
+--- extra reach costs nothing in a mode where every candidate is an id.
+--- PARTIAL ids are the normal case -- nobody types a whole one -- so
+--- `ses_f73a` must find `ses_f73a030f3ffePG2zTAA5vhy30d`.
+---
+--- Earlier matches rank better. Every match scores strictly below 1, which is
+--- what keeps `picker_opts().tiebreak` reachable: EntryManager consults
+--- tiebreak only for scores under 1.
+---
+--- @param id string|nil
+--- @param query string|nil
+--- @return number
+function M.id_score(id, query)
+  if type(id) ~= "string" or type(query) ~= "string" or query == "" then
+    return M.ID_FILTERED
+  end
+  -- Plain find, NOT a Lua pattern: an id is user-pasted text and `-` is a Lua
+  -- quantifier, so a pattern match would silently match the wrong rows.
+  local idx = id:lower():find(query:lower(), 1, true)
+  if idx == nil then
+    return M.ID_FILTERED
+  end
+  local score = (idx - 1) / 1000
+  if score > 0.999 then
+    score = 0.999
+  end
+  return score
+end
+
 --- Compose warning lines from fetch result and error.
 ---
 --- Precedence:

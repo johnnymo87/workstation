@@ -87,10 +87,42 @@ local stub_action_state = {
   end,
 }
 
+-- Records every call that reaches the UNDERLYING telescope sorter. The
+-- session-id mode wraps that sorter, so the only way to prove "a non-ses_
+-- prompt behaves exactly as before" is to observe that the base functions are
+-- still reached, with their arguments intact, and that their return value is
+-- handed back unchanged.
+local sorter_calls = { scoring = {}, highlighter = {}, was_discarded = {}, mark_discarded = {} }
+local stub_sorter_discarded = false
+
 local stub_config = {
   values = {
     generic_sorter = function(opts)
-      return { id = "generic_sorter_stub", opts = opts }
+      return {
+        id = "generic_sorter_stub",
+        opts = opts,
+        -- Deliberately distinctive return values: a wrapper that "delegates"
+        -- by recomputing rather than by calling through would not produce them.
+        scoring_function = function(self, prompt, line, entry)
+          table.insert(sorter_calls.scoring, { self = self, prompt = prompt, line = line, entry = entry })
+          return 0.4242
+        end,
+        highlighter = function(self, prompt, display)
+          table.insert(sorter_calls.highlighter, { prompt = prompt, display = display })
+          return { { start = 1, finish = 2 } }
+        end,
+        -- Mirrors telescope's Sorter:_was_discarded / :_mark_discarded, which
+        -- are real and load-bearing: get_fzy_sorter sets `discard = true`, so a
+        -- row filtered out at prompt "s"/"se"/"ses" stays filtered for every
+        -- prompt that EXTENDS it -- including "ses_...".
+        _was_discarded = function(self, prompt, ordinal)
+          table.insert(sorter_calls.was_discarded, { prompt = prompt, ordinal = ordinal })
+          return stub_sorter_discarded
+        end,
+        _mark_discarded = function(self, prompt, ordinal)
+          table.insert(sorter_calls.mark_discarded, { prompt = prompt, ordinal = ordinal })
+        end,
+      }
     end,
   },
 }
@@ -2351,6 +2383,187 @@ do
   check(exec.attach({ sid = "ses_a5" }) == true, "opts is optional -- falls back to vim.system")
   check(bare_calls == 1, "the fallback really is vim.system, called once")
   vim.system = orig_system
+end
+
+-- =========================================================================
+-- 76-79. SESSION-ID MODE (workstation-4osz)
+-- =========================================================================
+-- An agent hands a human a session id to test with, and the picker has no way
+-- to reach it: the ordinal is title + directory basename only.
+--
+-- WHY THE ID IS NOT SIMPLY APPENDED TO THE ORDINAL. The ORDINAL EXCLUSION in
+-- spec.format already keeps the unread badge out because it contains digits.
+-- A session id is the same hazard an order of magnitude worse: `ses_` plus a
+-- long alphanumeric run on EVERY row, so almost any query would match almost
+-- every row and ordinary title search would quietly stop discriminating.
+--
+-- The shape is a PROMPT-PREFIX MODE instead: a prompt beginning with `ses_`
+-- matches session ids; every other prompt goes to the untouched telescope
+-- sorter. Tests 79a/79b are the half most likely to break and least likely to
+-- be noticed -- that the ordinary path is unchanged.
+
+-- 76. id_query: WHICH PROMPTS FLIP THE MODE. The predicate is the whole
+--     blast radius of the feature, so its boundaries are pinned.
+do
+  check(spec.SESSION_ID_PREFIX == "ses_", "the mode prefix is the literal session-id prefix")
+
+  check(spec.id_query("ses_f73a") == "ses_f73a", "a ses_-prefixed prompt is an id query")
+  check(spec.id_query("ses_") == "ses_", "the bare prefix is already id mode (it lists every session)")
+  check(spec.id_query("  ses_f73a  ") == "ses_f73a", "surrounding whitespace is trimmed off the query")
+
+  -- Everything below MUST stay in ordinary title mode.
+  check(spec.id_query("Alpha") == nil, "an ordinary title prompt is NOT an id query")
+  check(spec.id_query("3") == nil, "a digit prompt is NOT an id query")
+  check(spec.id_query("ses") == nil, "'ses' without the underscore is NOT an id query -- it is a plausible title fragment")
+  check(spec.id_query("_") == nil, "a bare underscore is NOT an id query")
+  check(spec.id_query("") == nil, "the empty prompt is NOT an id query (it must show everything)")
+  check(spec.id_query("   ") == nil, "a whitespace-only prompt is NOT an id query")
+  -- PREFIX, not substring: a title containing 'ses_' must not hijack the mode
+  -- and blank the user's own search.
+  check(spec.id_query("my ses_abc") == nil, "'ses_' in the MIDDLE of a prompt does not flip the mode")
+  -- Case-sensitive on the trigger: real ids are literally lowercase `ses_`, and
+  -- a case-insensitive trigger would swallow a title search for "SES_".
+  check(spec.id_query("SES_abc") == nil, "the trigger is case-sensitive (ids are literally lowercase)")
+  check(spec.id_query(nil) == nil, "nil prompt is not an id query")
+  check(spec.id_query(123) == nil, "non-string prompt is not an id query")
+end
+
+-- 77. session_id_of: reaching the id from a telescope entry.
+do
+  local row = { id = "ses_f73a030f3ffePG2zTAA5vhy30d", title = "T" }
+  check(spec.session_id_of({ value = row }) == row.id, "id is read from entry.value (the raw row)")
+  check(spec.session_id_of(row) == row.id, "a bare row also works (entry.value absent)")
+  check(spec.session_id_of(nil) == nil, "nil entry yields no id")
+  check(spec.session_id_of("ses_x") == nil, "non-table entry yields no id")
+  check(spec.session_id_of({ value = {} }) == nil, "row without an id yields nil")
+  check(spec.session_id_of({ value = { id = vim.NIL } }) == nil, "vim.NIL id yields nil (it is truthy and would misroute)")
+  check(spec.session_id_of({ value = { id = "" } }) == nil, "empty id yields nil")
+  check(spec.session_id_of({ value = { id = 12 } }) == nil, "non-string id yields nil")
+end
+
+-- 78. id_score: PARTIAL ids must work -- nobody types a whole one.
+do
+  local ID = "ses_f73a030f3ffePG2zTAA5vhy30d"
+  check(spec.ID_FILTERED == -1, "the filtered sentinel is telescope's -1 (any value < 0 is dropped)")
+
+  check(spec.id_score(ID, "ses_f73a") == 0, "the motivating case: a short prefix finds the full id, best score")
+  check(spec.id_score(ID, ID) == 0, "the whole id matches itself")
+  check(spec.id_score(ID, "ses_") == 0, "the bare prefix matches every id")
+
+  -- Discrimination, not just matching: the same query must REJECT a sibling id.
+  check(spec.id_score("ses_f73b030f3ffePG2zTAA5vhy30d", "ses_f73a") == spec.ID_FILTERED,
+    "a one-character-different id is filtered out (the query actually discriminates)")
+  check(spec.id_score(ID, "ses_zzzz") == spec.ID_FILTERED, "a non-matching query filters the row")
+
+  -- Ranking: an earlier match is a better (lower) score.
+  local early = spec.id_score("ses_abcdef", "ses_a")
+  local late = spec.id_score("ses_xxxxxses_a", "ses_a")
+  check(late > early, "a match further into the id scores worse than a prefix match")
+  check(late > 0, "a non-prefix match is not free")
+
+  -- Every score stays strictly below 1, which is what keeps the `tiebreak`
+  -- insurance in picker_opts reachable (EntryManager consults it only under 1).
+  check(early < 1 and late < 1, "matching scores are below 1 so tiebreak stays reachable")
+  local huge = string.rep("q", 4000) .. "ses_a"
+  local huge_score = spec.id_score(huge, "ses_a")
+  check(huge_score > 0 and huge_score < 1, "even a pathologically late match is clamped below 1, got " .. tostring(huge_score))
+
+  check(spec.id_score(ID, "SES_F73A") == 0, "id matching itself is case-insensitive (pasted ids vary in case)")
+  check(spec.id_score("ses_ABCdef", "ses_abc") == 0, "mixed-case id matches a lowercase query")
+
+  check(spec.id_score(nil, "ses_a") == spec.ID_FILTERED, "a row with no id is filtered, never errors")
+  check(spec.id_score(ID, "") == spec.ID_FILTERED, "an empty query filters rather than matching everything")
+  check(spec.id_score(ID, nil) == spec.ID_FILTERED, "a nil query filters")
+  -- The query is matched PLAINLY. Lua patterns in a pasted id ('-' is a Lua
+  -- quantifier) would otherwise match the wrong rows or error.
+  check(spec.id_score("ses_a-b", "ses_a-b") == 0, "the query is a plain find, not a Lua pattern")
+  check(spec.id_score("ses_axxb", "ses_a-b") == spec.ID_FILTERED, "'-' is literal, not a Lua quantifier")
+end
+
+-- 79. INIT WIRING: the sorter handed to pickers.new dispatches on the prompt.
+do
+  recorded_pickers_new = {}
+  sorter_calls = { scoring = {}, highlighter = {}, was_discarded = {}, mark_discarded = {} }
+  stub_sorter_discarded = false
+
+  local target = { id = "ses_f73a030f3ffePG2zTAA5vhy30d", title = "Alpha", directory = "/tmp/a" }
+  local other = { id = "ses_99999999999999999999999999", title = "Beta", directory = "/tmp/b" }
+
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb) cb({ rows = { target, other } }, nil) end,
+    locate = function(opts, cb) cb({}) end,
+  })
+  init_mod.open({ flow = fake_ctrl })
+
+  local sorter = recorded_pickers_new[1].defaults.sorter
+  check(type(sorter) == "table", "a sorter reached pickers.new")
+  check(sorter.id == "generic_sorter_stub", "it is still conf.generic_sorter, wrapped in place")
+  check(type(sorter.scoring_function) == "function", "the sorter has a scoring_function")
+
+  local e_target = { value = target, ordinal = "Alpha a" }
+  local e_other = { value = other, ordinal = "Beta b" }
+
+  -- 79a. ID MODE: scored against the id, and the base sorter is NOT consulted.
+  check(sorter.scoring_function(sorter, "ses_f73a", e_target.ordinal, e_target) == 0,
+    "ses_ prompt scores the matching row against its id")
+  check(sorter.scoring_function(sorter, "ses_f73a", e_other.ordinal, e_other) == spec.ID_FILTERED,
+    "ses_ prompt filters the non-matching row")
+  check(#sorter_calls.scoring == 0, "id mode never reaches the telescope sorter (the ordinal has no id in it)")
+
+  -- The id is NOT in the ordinal, so telescope's own sorter could not have
+  -- produced that match. This is the assertion that would fail if someone
+  -- 'simplified' the feature back into the ordinal.
+  check(e_target.ordinal:find("ses_", 1, true) == nil, "ORDINAL EXCLUSION holds: the id is absent from the ordinal")
+
+  -- 79b. NO REGRESSION: any other prompt delegates, arguments intact, return
+  --      value untouched.
+  local score = sorter.scoring_function(sorter, "Alpha", e_target.ordinal, e_target)
+  check(score == 0.4242, "a title prompt returns the BASE sorter's score verbatim")
+  check(#sorter_calls.scoring == 1, "a title prompt reaches the base sorter exactly once")
+  check(sorter_calls.scoring[1].prompt == "Alpha", "the base sorter receives the prompt unchanged")
+  check(sorter_calls.scoring[1].line == "Alpha a", "the base sorter receives the ordinal line unchanged")
+  check(sorter_calls.scoring[1].entry == e_target, "the base sorter receives the entry unchanged")
+  check(sorter_calls.scoring[1].self == sorter, "the base sorter is still called as a method on the sorter")
+
+  -- The exact hazard the ORDINAL EXCLUSION comment names: a digit query.
+  check(sorter.scoring_function(sorter, "3", e_target.ordinal, e_target) == 0.4242,
+    "a DIGIT prompt still goes to the base sorter, unchanged")
+  check(sorter_calls.scoring[2].prompt == "3", "the digit prompt reached the base sorter verbatim")
+  check(sorter.scoring_function(sorter, "", e_target.ordinal, e_target) == 0.4242,
+    "the empty prompt still goes to the base sorter")
+
+  -- 79c. HIGHLIGHTER: id mode highlights nothing (the id is not in the
+  --      displayed text, so base positions would land on arbitrary columns).
+  local hl = sorter.highlighter(sorter, "ses_f73a", "○ · Alpha │ a │ 3s")
+  check(type(hl) == "table" and #hl == 0, "id mode highlights nothing")
+  check(#sorter_calls.highlighter == 0, "id mode does not call the base highlighter")
+  local hl2 = sorter.highlighter(sorter, "Alpha", "○ · Alpha │ a │ 3s")
+  check(#hl2 == 1 and hl2[1].start == 1, "a title prompt gets the base highlighter's positions verbatim")
+  check(#sorter_calls.highlighter == 1, "a title prompt calls the base highlighter exactly once")
+
+  -- 79d. THE DISCARD TRAP. telescope's fzy sorter sets `discard = true`, and
+  --      Sorter:score consults _was_discarded BEFORE scoring_function. Typing
+  --      "s","e","s" filters nearly every row, and "ses_" only EXTENDS that
+  --      prompt, so the discard state is not reset -- id mode would score
+  --      nothing at all. A scoring_function-only wrapper passes every other
+  --      test here and still ships a feature that does nothing when typed.
+  stub_sorter_discarded = true
+  check(sorter._was_discarded(sorter, "ses_f73a", "Alpha a") == false,
+    "id mode ignores rows discarded by the earlier title-mode prompts")
+  check(#sorter_calls.was_discarded == 0, "id mode does not consult the base discard state")
+  check(sorter._was_discarded(sorter, "Alpha", "Alpha a") == true,
+    "a title prompt still honours the base discard state (the fast path is intact)")
+  check(#sorter_calls.was_discarded == 1, "a title prompt consults the base discard state exactly once")
+
+  -- ...and id mode must not POISON that state either, or a later title prompt
+  -- would inherit rows filtered for having the wrong id.
+  sorter._mark_discarded(sorter, "ses_f73a", "Alpha a")
+  check(#sorter_calls.mark_discarded == 0, "id mode records no discards")
+  sorter._mark_discarded(sorter, "Alpha", "Alpha a")
+  check(#sorter_calls.mark_discarded == 1, "a title prompt still records discards")
+  check(sorter_calls.mark_discarded[1].ordinal == "Alpha a", "the discard record carries the ordinal unchanged")
+
+  stub_sorter_discarded = false
 end
 
 print("LUA_TEST_OK " .. N)

@@ -58,6 +58,89 @@ local function make_finder(rows, opts)
   })
 end
 
+--- Make telescope's generic sorter answer `ses_...` prompts with SESSION IDs.
+---
+--- WHY A SORTER WRAPPER, and not the two alternatives:
+---
+--- - NOT the ordinal. spec.SESSION_ID_PREFIX documents why: the id would
+---   swamp title search on every row, exactly as the unread badge would.
+---
+--- - NOT `on_input_filter_cb`. That hook rewrites the prompt before sorting,
+---   but the thing being sorted is still the ordinal -- and the ordinal has no
+---   id in it, so no prompt rewrite can make an id match. The only way to use
+---   it would be to swap in a different finder per keystroke (`updated_finder`),
+---   which rebuilds entries and resets picker state on every character.
+---
+--- - A wrapper keeps the ORDINARY PATH BYTE FOR BYTE: a non-`ses_` prompt is
+---   handed to the very same function object, on the very same sorter, with
+---   the same arguments, and its return value is passed back untouched. There
+---   is no second implementation of title matching to drift.
+---
+--- THE DISCARD TRAP, which is why `scoring_function` alone is not enough:
+--- telescope's get_fzy_sorter sets `discard = true`, and `Sorter:score`
+--- consults `_was_discarded` BEFORE `scoring_function`. Typing `ses_` means
+--- passing through prompts "s", "se", "ses" -- each of which filters nearly
+--- every row and records it by ordinal -- and "ses_" only EXTENDS that prompt,
+--- so `_start` does not reset the discard set. Without the bypass below, the
+--- feature scores nothing at all the moment it is typed by hand, while passing
+--- every test that calls scoring_function directly.
+local function make_id_aware_sorter(sorter)
+  if type(sorter) ~= "table" then
+    return sorter
+  end
+
+  local base_scoring = sorter.scoring_function
+  local base_highlighter = sorter.highlighter
+  -- These two resolve through Sorter's metatable, not the instance; assigning
+  -- shadows them for this sorter only (it is freshly built per picker).
+  local base_was_discarded = sorter._was_discarded
+  local base_mark_discarded = sorter._mark_discarded
+
+  if type(base_scoring) == "function" then
+    sorter.scoring_function = function(self, prompt, line, entry, ...)
+      local query = spec.id_query(prompt)
+      if query then
+        return spec.id_score(spec.session_id_of(entry), query)
+      end
+      return base_scoring(self, prompt, line, entry, ...)
+    end
+  end
+
+  if type(base_highlighter) == "function" then
+    sorter.highlighter = function(self, prompt, display, ...)
+      -- The id is not in the displayed text, so base positions computed from a
+      -- `ses_...` prompt would underline arbitrary columns of the title.
+      if spec.id_query(prompt) then
+        return {}
+      end
+      return base_highlighter(self, prompt, display, ...)
+    end
+  end
+
+  if type(base_was_discarded) == "function" then
+    sorter._was_discarded = function(self, prompt, ordinal, ...)
+      if spec.id_query(prompt) then
+        return false
+      end
+      return base_was_discarded(self, prompt, ordinal, ...)
+    end
+  end
+
+  if type(base_mark_discarded) == "function" then
+    sorter._mark_discarded = function(self, prompt, ordinal, ...)
+      -- Symmetry with the bypass above: an id-mode miss must not poison the
+      -- discard set keyed by ordinal, or a later title prompt would inherit
+      -- rows filtered for having the wrong ID.
+      if spec.id_query(prompt) then
+        return
+      end
+      return base_mark_discarded(self, prompt, ordinal, ...)
+    end
+  end
+
+  return sorter
+end
+
 --- Open the session switcher Telescope picker.
 ---
 --- @param opts table|nil Options passed to telescope and flow controller
@@ -95,7 +178,7 @@ function M.open(opts)
     local picker_opts = vim.tbl_extend("force", spec.picker_opts(), {
       prompt_title = prompt_title,
       finder = make_finder(rows or {}, fmt_opts),
-      sorter = conf.generic_sorter(opts),
+      sorter = make_id_aware_sorter(conf.generic_sorter(opts)),
       attach_mappings = function(prompt_bufnr, map)
         actions.select_default:replace(function()
           -- READ THE SELECTION BEFORE CLOSING, NOT AFTER.
