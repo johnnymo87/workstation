@@ -97,6 +97,14 @@ def normalise_tag(tag: str) -> str:
         raise ValueError("tag must not be empty")
     if t.startswith("auto:"):
         raise ValueError("tag must not start with 'auto:'")
+    # A tag is a field in a tab-separated machine contract (`oc-tags which`),
+    # so an interior tab or newline would split one answer into phantom
+    # columns or a second line. oc-tags owns the tag namespace, so it owns the
+    # invariant here rather than asking every consumer to re-validate. Plain
+    # spaces go too: they make the `oc-tags set <tag>` line these tools print
+    # back at people unquotable.
+    if any(ch.isspace() or ord(ch) < 32 for ch in t):
+        raise ValueError("tag must not contain whitespace or control characters")
     return t
 
 
@@ -1214,6 +1222,15 @@ def build_parser() -> argparse.ArgumentParser:
     ls_p.add_argument("--counts", action="store_true", help="show session and directory counts")
     _add_db_options(ls_p)
 
+    # which
+    which_p = sub.add_parser("which", help="print the effective tag of a session")
+    which_p.add_argument(
+        "session_id",
+        nargs="?",
+        help="session id (defaults to $OPENCODE_SESSION_ID)",
+    )
+    _add_db_options(which_p)
+
     # rm
     rm_p = sub.add_parser("rm", help="remove a tag")
     rm_p.add_argument("--dir", metavar="PATH", help="directory pattern to remove")
@@ -1321,6 +1338,65 @@ def cmd_ls(args: argparse.Namespace) -> int:
             print("Sessions:")
             for s, t in s_tags.items():
                 print(f"  {s} -> {t}")
+    return 0
+
+
+def cmd_which(args: argparse.Namespace) -> int:
+    """Print the tag a session's dollars are billed to, and where it came from.
+
+    `ls` prints the raw mappings; it does not print the ANSWER, because the
+    answer needs precedence (session tag > longest matching dir glob > auto:).
+    Without this command a consumer has to reimplement that precedence, and a
+    second implementation drifts from the chart — the tag shown next to a
+    session would then disagree with the tag its dollars land under.
+
+    Output is one tab-separated line — tag, source, resolved root session id —
+    so it is parseable without a JSON dependency. The root id is included
+    because it is not always the id that was asked about: tags live on roots,
+    and a subagent resolves to its parent.
+    """
+    target_sid = (args.session_id or os.environ.get("OPENCODE_SESSION_ID") or "").strip()
+    if not target_sid:
+        sys.stderr.write("Error: no session ID provided and OPENCODE_SESSION_ID is not set\n")
+        return 1
+
+    # opencode.db supplies root resolution and the directory. Both are
+    # refinements: without it a session tag still resolves, and the fallback is
+    # the honest auto:no-dir rather than a wrong-but-plausible label. An absent
+    # or unreadable DB is therefore degraded, not fatal — the caller is often a
+    # notification path where one missing line beats an error.
+    root_sid = target_sid
+    directory: str | None = None
+    if os.path.exists(args.db):
+        try:
+            conn = connect_ro(args.db)
+            try:
+                s_rows = conn.execute("SELECT id, parent_id, directory FROM session").fetchall()
+                parents = {r[0]: r[1] for r in s_rows}
+                dirs = {r[0]: r[2] for r in s_rows}
+                root_sid = root_of(target_sid, parents)
+                directory = dirs.get(root_sid)
+            finally:
+                conn.close()
+        except Exception as e:
+            # stdout stays a parseable answer and the exit code stays 0 — the
+            # caller is a notification footer, and one missing line beats an
+            # error. But an unreadable DB and a genuinely untagged session
+            # otherwise produce byte-identical output, so say so on stderr.
+            sys.stderr.write(f"which: opencode.db unreadable ({e}); tag resolved without it\n")
+
+    with open_store(args.tags_db, readonly=True) as st:
+        s_tags = session_tags(st)
+        d_tags = dir_tags(st)
+
+    tag, source = effective_tag(
+        root_sid, directory, session_tag_map=s_tags, dir_tag_map=d_tags
+    )
+    # Belt to normalise_tag's braces: a row written before that validator
+    # existed can still hold a tab or a newline, and one such row would turn a
+    # three-field answer into five fields or two lines.
+    safe_tag = " ".join(tag.split()) or tag
+    print(f"{safe_tag}\t{source}\t{root_sid}")
     return 0
 
 
@@ -1461,7 +1537,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
 
-    if args.command in ("report", "top", "ls"):
+    if args.command in ("report", "top", "ls", "which"):
         try:
             if args.command == "report":
                 return cmd_report(args)
@@ -1469,6 +1545,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_top(args)
             elif args.command == "ls":
                 return cmd_ls(args)
+            elif args.command == "which":
+                return cmd_which(args)
         except BrokenPipeError:
             try:
                 devnull = os.open(os.devnull, os.O_WRONLY)
