@@ -505,10 +505,70 @@ let
   # the service happens to be up — so a stopped codex-lb makes these models fail
   # at request time rather than silently rerouting them. Injected on devbox AND
   # cloudbox; both run codex-lb.
-  # Subscription usage has no per-token billing, so cost is zeroed here (codex-lb's
-  # own dashboard tracks real spend). Effort defaults track each tier's role:
-  # Astra = most capable (high), Sol = frontier workhorse (high), Terra =
-  # balanced (medium), Luna = fast (low).
+  # Effort defaults track each tier's role: Astra = most capable (high), Sol =
+  # frontier workhorse (high), Terra = balanced (medium), Luna = fast (low).
+  #
+  # THESE MODELS CARRY LIST PRICE, NOT BILLED PRICE. This block used to zero
+  # `cost` on the argument that subscription usage has no per-token billing.
+  # That argument is about BILLING, and opencode's `cost` field is not a billing
+  # figure — it is what oc-tags charts as "per-tag LLM list-price consumption".
+  # Claude Opus 5 settles the question by precedent: it is also served by a
+  # subscription (claude-failover-proxy sends it to Max first), yet it records
+  # full list price. It IS declared (opencode.base.json:39) — but with `options`
+  # only and no `cost`, so it inherits models.dev. The zero here was therefore
+  # not a default we were stuck with; it was an explicit override of a catalog
+  # that already had the right number. Zeroing made two identical situations
+  # chart differently, and 6.3M tokens of real Astra work appeared as $0.00 —
+  # visible only as an "Unpriced: gpt-6-astra" footer note, i.e. loud but not
+  # counted. codex-lb's own dashboard remains the source of truth for ACTUAL
+  # spend; nothing here claims a subscription bills per token.
+  #
+  # Prices are models.dev's base tier, which is the SAME catalog opencode itself
+  # falls back to (cached at ~/.cache/opencode/models.json) — so they are quoted,
+  # not invented. Reconcile with:
+  #
+  #   curl -s https://models.dev/api.json \
+  #     | jq '.openai.models["gpt-6-astra"].cost'
+  #
+  # Base tier only, for two independent reasons: opencode's user-config merge
+  # reads exactly input/output/cache_read/cache_write and DROPS
+  # cost.tiers/context_over_200k, and the higher tier applies only when the raw
+  # input total STRICTLY exceeds 272000 — which is exactly `limit.context`
+  # below, and exactly what codex-lb serves, so it is unreachable anyway. The
+  # `openai/gpt-5.5` entry in opencode.base.json follows the same convention.
+  #
+  # `cache_write` is quoted for completeness and is inert: OpenAI does not bill
+  # cache writes and the Responses usage block never reports them, so every
+  # openai row in opencode.db has cache.write = 0. It is models.dev carrying an
+  # Anthropic-shaped field, not a cost we expect to pay. Do not "fix" it away —
+  # inheriting from models.dev would supply the same number.
+  #
+  # WHY LITERALS AND NOT SIMPLY DELETING `cost`. Deleting it WOULD inherit
+  # models.dev — a declared model resolves each absent cost field against the
+  # upstream entry (`P?.cost?.input ?? _?.cost?.input ?? 0`), and a custom
+  # baseURL does not change that. Verified against 1.18.18 end-to-end: with the
+  # attribute removed, a real `opencode run -m openai/gpt-6-astra` recorded
+  # $1.12658 on 112,633 input / 5 output, i.e. exactly the upstream 10/50.
+  #
+  # Deleting it here would nonetheless be a NO-OP on every host already
+  # deployed. mergeOpencode below merges `runtime * managed` and deliberately
+  # PRESERVES runtime-only keys, so a key the managed config stops mentioning
+  # survives in ~/.config/opencode/opencode.json forever — the same trap the
+  # caveman `instructions` strip further down exists to work around. Inheriting
+  # would mean adding a second targeted deletion to that activation, whose only
+  # gain over these literals is auto-tracking, and whose cost is a permanent
+  # rule that silently discards any future intentional price override.
+  #
+  # The trade accepted here: these four numbers go stale, silently, if OpenAI
+  # reprices. The reconcile command above is the mitigation; `cost` has no
+  # default in mkCodexLbModel so a NEW model at least cannot ship at $0.00 by
+  # omission. Flipping to inherit-plus-scrub is a defensible reversal — see
+  # workstation-iq35 for the analysis rather than re-deriving it.
+  #
+  # Effect is PROSPECTIVE. opencode bakes `cost` into each message row as it is
+  # written, so pre-existing rows keep their $0 forever and the chart's history
+  # does not move. A flat historical total after editing these numbers is
+  # correct, not a failed change.
   #
   # THIS CATALOG IS HAND-MAINTAINED AND WILL DRIFT. codex-lb re-fetches the real
   # catalog from upstream every 300s per account plan; opencode gets no such
@@ -532,13 +592,15 @@ let
   # /v1/models and opencode calls against it start failing. That is a codex-lb
   # degradation, not a subscription problem. `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION`
   # can pin it higher if this turns out to be flaky.
-  mkCodexLbModel = { name, effort }: {
-    inherit name;
+  # `cost` has deliberately NO default: a new codex-lb model added without a
+  # sourced price must fail at eval rather than ship silently at $0.00, which is
+  # the exact failure this block is fixing.
+  mkCodexLbModel = { name, effort, cost }: {
+    inherit name cost;
     reasoning = true;
     tool_call = true;
     attachment = true;
     release_date = "2026-06-01";
-    cost = { input = 0; output = 0; cache_read = 0; };
     limit = { context = 272000; output = 128000; };
     modalities = { input = [ "text" "image" ]; output = [ "text" ]; };
     options = {
@@ -547,11 +609,29 @@ let
       include = [ "reasoning.encrypted_content" ];
     };
   };
+  # Prices: models.dev base tier, $/Mtok. See the LIST-PRICE note above for why
+  # the higher (>272k context) tier is omitted and why these are not zero.
   codexLbModels = {
-    "gpt-6-astra" = mkCodexLbModel { name = "GPT-6 Astra"; effort = "high"; };
-    "gpt-5.6-sol" = mkCodexLbModel { name = "GPT-5.6 Sol"; effort = "high"; };
-    "gpt-5.6-terra" = mkCodexLbModel { name = "GPT-5.6 Terra"; effort = "medium"; };
-    "gpt-5.6-luna" = mkCodexLbModel { name = "GPT-5.6 Luna"; effort = "low"; };
+    "gpt-6-astra" = mkCodexLbModel {
+      name = "GPT-6 Astra";
+      effort = "high";
+      cost = { input = 10; output = 50; cache_read = 1; cache_write = 12.5; };
+    };
+    "gpt-5.6-sol" = mkCodexLbModel {
+      name = "GPT-5.6 Sol";
+      effort = "high";
+      cost = { input = 4; output = 20; cache_read = 0.4; cache_write = 5; };
+    };
+    "gpt-5.6-terra" = mkCodexLbModel {
+      name = "GPT-5.6 Terra";
+      effort = "medium";
+      cost = { input = 2; output = 12; cache_read = 0.2; cache_write = 2.5; };
+    };
+    "gpt-5.6-luna" = mkCodexLbModel {
+      name = "GPT-5.6 Luna";
+      effort = "low";
+      cost = { input = 0.2; output = 1.2; cache_read = 0.02; cache_write = 0.25; };
+    };
   };
 
   # Platform overlay:
