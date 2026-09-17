@@ -87,6 +87,7 @@ class TestGlobalDbFlagsBeforeSubcommand(unittest.TestCase):
         "set": ["mytag", "ses_x"],
         "ls": [],
         "rm": ["ses_x"],
+        "which": ["ses_x"],
         "report": [],
         "top": [],
         "serve": [],
@@ -948,6 +949,107 @@ class TestCli(unittest.TestCase):
         out = buf.getvalue()
         self.assertNotIn("/home/dev/projects/*", out)
         self.assertIn("'/home/dev/projects/mono'", out)
+
+    # ---- which -------------------------------------------------------
+    #
+    # `which` answers the question `ls` cannot: not "what mappings exist" but
+    # "what tag would this session's dollars be billed to". It exists so that
+    # consumers (pigeon's Telegram footer) do not reimplement effective_tag's
+    # precedence, which would drift from the chart.
+
+    def test_which_reports_manual_session_tag(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["which", "root_a", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a"])
+
+    def test_which_resolves_a_child_to_its_root(self):
+        # Tags live on roots, so a subagent session must answer with its root's
+        # tag rather than falling through to the auto: branch.
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["which", "kid_a", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a"])
+
+    def test_which_reports_a_dir_glob_as_manual(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/*", "mono-wt")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["which", "root_b", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["mono-wt", "manual", "root_b"])
+
+    def test_which_reports_auto_fallback(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["which", "root_a", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["auto:mono", "auto", "root_a"])
+
+    def test_which_unknown_session_still_answers(self):
+        # A session opencode.db has never heard of has no directory, so the
+        # only honest answer is the no-dir auto key. Exit 0: "not in the DB
+        # yet" is the normal state of a session seconds after creation, and a
+        # caller polling a brand-new session should not see an error.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["which", "ses_never_seen", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            buf.getvalue().strip().split("\t"), ["auto:no-dir", "auto", "ses_never_seen"]
+        )
+
+    def test_which_missing_opencode_db_degrades_to_session_tag(self):
+        # The session tag does not need opencode.db at all; only root
+        # resolution and the directory do. Losing the DB must not lose the tag.
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main([
+                "which", "root_a",
+                "--db", str(Path(self.tmp.name) / "absent.db"),
+                "--tags-db", self.tags_db,
+            ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a"])
+
+    def test_which_requires_a_session_id(self):
+        err = io.StringIO()
+        old_env = os.environ.get("OPENCODE_SESSION_ID")
+        try:
+            os.environ.pop("OPENCODE_SESSION_ID", None)
+            with contextlib.redirect_stderr(err):
+                rc = oc_tags.main(["which", "--db", self.db, "--tags-db", self.tags_db])
+            self.assertNotEqual(rc, 0)
+            self.assertIn("OPENCODE_SESSION_ID", err.getvalue())
+        finally:
+            if old_env is not None:
+                os.environ["OPENCODE_SESSION_ID"] = old_env
+
+    def test_which_falls_back_to_opencode_session_id_env(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+        buf = io.StringIO()
+        old_env = os.environ.get("OPENCODE_SESSION_ID")
+        try:
+            os.environ["OPENCODE_SESSION_ID"] = "kid_a"
+            with contextlib.redirect_stdout(buf):
+                rc = oc_tags.main(["which", "--db", self.db, "--tags-db", self.tags_db])
+            self.assertEqual(rc, 0)
+            self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a"])
+        finally:
+            if old_env is None:
+                os.environ.pop("OPENCODE_SESSION_ID", None)
+            else:
+                os.environ["OPENCODE_SESSION_ID"] = old_env
 
     def test_load_aggregate_helper(self):
         agg = oc_tags.load_aggregate(db_path=self.db, tags_db=self.tags_db, days=7)
