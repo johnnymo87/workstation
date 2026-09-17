@@ -371,6 +371,28 @@ class TestStore(unittest.TestCase):
             self.assertEqual(oc_tags.session_tags(st), {"ses_a": "billing"})
 
 
+class TestNormaliseTagRejectsWhitespace(unittest.TestCase):
+    """A tag is a column in a tab-separated machine contract (`oc-tags which`).
+
+    oc-tags owns the tag namespace, so it owns the invariant rather than asking
+    every consumer to re-validate. Interior whitespace also makes a tag
+    unquotable in the `oc-tags set` line the tools print back at people.
+    """
+
+    def test_interior_tab_or_newline_is_rejected(self):
+        for bad in ("bill\ting", "bill\ning", "bill\x00ing"):
+            with self.subTest(tag=bad):
+                with self.assertRaises(ValueError):
+                    oc_tags.normalise_tag(bad)
+
+    def test_interior_space_is_rejected(self):
+        with self.assertRaises(ValueError):
+            oc_tags.normalise_tag("two words")
+
+    def test_surrounding_whitespace_is_still_stripped(self):
+        self.assertEqual(oc_tags.normalise_tag("  Billing \n"), "billing")
+
+
 class TestEffectiveTag(unittest.TestCase):
     def test_session_tag_wins(self):
         self.assertEqual(
@@ -956,6 +978,37 @@ class TestCli(unittest.TestCase):
     # "what tag would this session's dollars be billed to". It exists so that
     # consumers (pigeon's Telegram footer) do not reimplement effective_tag's
     # precedence, which would drift from the chart.
+
+    def test_which_tolerates_a_legacy_whitespace_tag(self):
+        # normalise_tag now refuses these, but a row written before it did
+        # would still be there, and a tag containing a tab would split into
+        # phantom columns for a machine reader. Write one past the validator
+        # to prove the OUTPUT is one line of exactly three fields.
+        with oc_tags.open_store(self.tags_db) as st:
+            st.execute(
+                "INSERT INTO session_tag (session_id, tag, created_at) VALUES (?,?,?)",
+                ("root_a", "bill\ting\nx", 0),
+            )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["which", "root_a", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue().strip()
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(out.split("\t"), ["bill ing x", "manual", "root_a"])
+
+    def test_which_warns_on_stderr_when_opencode_db_is_unreadable(self):
+        # An unreadable DB and a genuinely untagged session produce the SAME
+        # stdout. stdout stays parseable and the exit code stays 0 — the
+        # difference goes to stderr, where ops can see it.
+        broken = Path(self.tmp.name) / "broken.db"
+        broken.write_text("this is not a sqlite database")
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["which", "root_a", "--db", str(broken), "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["auto:no-dir", "auto", "root_a"])
+        self.assertIn("opencode.db", err.getvalue())
 
     def test_which_reports_manual_session_tag(self):
         with oc_tags.open_store(self.tags_db) as st:

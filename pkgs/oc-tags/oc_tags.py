@@ -97,6 +97,14 @@ def normalise_tag(tag: str) -> str:
         raise ValueError("tag must not be empty")
     if t.startswith("auto:"):
         raise ValueError("tag must not start with 'auto:'")
+    # A tag is a field in a tab-separated machine contract (`oc-tags which`),
+    # so an interior tab or newline would split one answer into phantom
+    # columns or a second line. oc-tags owns the tag namespace, so it owns the
+    # invariant here rather than asking every consumer to re-validate. Plain
+    # spaces go too: they make the `oc-tags set <tag>` line these tools print
+    # back at people unquotable.
+    if any(ch.isspace() or ord(ch) < 32 for ch in t):
+        raise ValueError("tag must not contain whitespace or control characters")
     return t
 
 
@@ -1370,8 +1378,12 @@ def cmd_which(args: argparse.Namespace) -> int:
                 directory = dirs.get(root_sid)
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # stdout stays a parseable answer and the exit code stays 0 — the
+            # caller is a notification footer, and one missing line beats an
+            # error. But an unreadable DB and a genuinely untagged session
+            # otherwise produce byte-identical output, so say so on stderr.
+            sys.stderr.write(f"which: opencode.db unreadable ({e}); tag resolved without it\n")
 
     with open_store(args.tags_db, readonly=True) as st:
         s_tags = session_tags(st)
@@ -1380,7 +1392,11 @@ def cmd_which(args: argparse.Namespace) -> int:
     tag, source = effective_tag(
         root_sid, directory, session_tag_map=s_tags, dir_tag_map=d_tags
     )
-    print(f"{tag}\t{source}\t{root_sid}")
+    # Belt to normalise_tag's braces: a row written before that validator
+    # existed can still hold a tab or a newline, and one such row would turn a
+    # three-field answer into five fields or two lines.
+    safe_tag = " ".join(tag.split()) or tag
+    print(f"{safe_tag}\t{source}\t{root_sid}")
     return 0
 
 
