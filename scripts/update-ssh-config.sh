@@ -94,11 +94,53 @@ CLOUDBOX_IP=$(gcloud compute instances describe cloudbox \
     --zone=us-east1-b \
     --format='get(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null) || true
 if [ -z "$CLOUDBOX_IP" ] && [ -f "$SSH_CONFIG" ]; then
-    CLOUDBOX_IP=$(awk '/Host cloudbox$/{flag=1; next} flag && /HostName/{print $2; exit}' "$SSH_CONFIG" 2>/dev/null || true)
+    # Match `Host cloudbox` with or without the trailing IP alias -- the block
+    # emitted below is `Host cloudbox <IP>` (for mosh; see there), and anchoring
+    # on `cloudbox$` would stop matching the file this very script writes,
+    # silently disabling IP rediscovery exactly when gcloud auth has expired and
+    # this fallback is the only thing left.
+    CLOUDBOX_IP=$(awk '/^Host cloudbox( |$)/{flag=1; next} flag && /HostName/{print $2; exit}' "$SSH_CONFIG" 2>/dev/null || true)
 fi
 if [ -z "$CLOUDBOX_IP" ]; then
     echo "Warning: Could not get IP for cloudbox (gcloud not configured and no existing SSH config entry)"
     echo "Skipping cloudbox block"
+fi
+
+# --- IAP transport for cloudbox ---
+#
+# Every cloudbox host block reaches sshd through an IAP TCP forwarding tunnel
+# rather than dialling the public IP directly. This exists because the direct
+# path was gated by a GCP firewall rule pinned to this Mac's Cloudflare WARP
+# egress /32, and that egress ROTATES -- when it did, gclpr (2850), Chrome CDP
+# (9222/9223), chatgpt-relay (3033) and the Jenkins forward (8443) all went down
+# together, while ICMP kept answering because default-allow-icmp is 0.0.0.0/0.
+# IAP's source range (35.235.240.0/20) is fixed, so source IP stops mattering.
+#
+# Authenticated by a dedicated service account, NOT by your user credentials:
+# user creds are subject to the daily Google session-control reauth, so a
+# user-cred tunnel would break every morning -- which is the very thing the
+# forwarded CDP port exists to automate away. The SA lives in an isolated
+# CLOUDSDK_CONFIG so activating it cannot disturb your normal gcloud account.
+# It can do exactly two things: read this one instance, and open an IAP tunnel
+# to port 22 (an IAM condition, verified: port 4710 returns 4033 not-authorized).
+#
+# `--listen-on-stdin` is a HIDDEN flag -- it is absent from `gcloud compute
+# start-iap-tunnel --help` on 537.0.0, but it is real and is what `gcloud
+# compute ssh --tunnel-through-iap` uses internally. Verified working here.
+# Without it you would need a listening port plus nc, which races on startup.
+#
+# The gcloud path is the per-user profile symlink, deliberately NOT the
+# /nix/store path it points at: a store path baked into ~/.ssh/config would be
+# garbage-collected out from under the tunnel on the next GC.
+GCLOUD_BIN="/etc/profiles/per-user/$USER/bin/gcloud"
+IAP_CONFIG="$HOME/.config/gcloud-tunnel/config"
+IAP_PROXY="    ProxyCommand env CLOUDSDK_CONFIG=$IAP_CONFIG $GCLOUD_BIN compute start-iap-tunnel cloudbox 22 --listen-on-stdin --zone=us-east1-b --project=wonder-sandbox"
+
+if [ ! -d "$IAP_CONFIG" ]; then
+    echo "Warning: $IAP_CONFIG missing -- the IAP service account is not set up on this machine."
+    echo "         Emitting cloudbox blocks WITHOUT the IAP ProxyCommand; they will only work"
+    echo "         from an allowlisted source IP. See docs/plans/2026-09-17-iap-tunnel-cutover.md."
+    IAP_PROXY="    # ProxyCommand omitted: $IAP_CONFIG did not exist when this was generated"
 fi
 
 # Jenkins hostname for the cloudbox RemoteForward below. Org-identifying, so it
@@ -115,24 +157,50 @@ fi
 if [ -n "$CLOUDBOX_IP" ]; then
     read -r -d '' CLOUDBOX_BLOCK << EOF || true
 $CLOUDBOX_MARKER_START
-Host cloudbox
+# The IP literal is a deliberate second pattern, not redundancy. \`mosh\` under
+# --experimental-remote-ip=local (which the \`mosh\` alias forces; see
+# home.darwin.nix) REWRITES the host to the literal IP before exec'ing ssh, so a
+# block keyed only on the name would be skipped and mosh would silently take the
+# unproxied direct path -- the exact fragility this cutover removes.
+Host cloudbox $CLOUDBOX_IP
     HostName $CLOUDBOX_IP
     User dev
     ForwardAgent yes
     ServerAliveInterval 60
     ServerAliveCountMax 3
+$IAP_PROXY
+    # Pin the host identity to the IP no matter which of the two patterns above
+    # was used to get here, so every spelling shares one known_hosts entry.
+    HostKeyAlias $CLOUDBOX_IP
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
     RemoteForward 9223 localhost:9223
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 
+# IAP is the default transport; \`cloudbox-tunnel-direct\` is the same tunnel
+# dialled straight at the public IP, kept as a fallback for a Google-side IAP
+# outage. It only works from a source the firewall still allows -- today that is
+# the home ISP range (dev-ssh-client), i.e. WARP off -- so it is a real but
+# conditional escape hatch, not an equivalent path. The tunnel LaunchAgent
+# alternates between the two after repeated failures (home.darwin.nix).
+#
+# The ProxyCommand sits in its OWN stanza so the two hosts can SHARE the single
+# forward list below. ssh takes the first value it obtains for each option, so
+# cloudbox-tunnel picks up the proxy here and cloudbox-tunnel-direct does not,
+# while both then inherit one copy of the forwards. Duplicating that list would
+# let the two drift, and a forward that exists on only one path fails as a
+# mystery on whichever path nobody tested.
 Host cloudbox-tunnel
+$IAP_PROXY
+
+Host cloudbox-tunnel cloudbox-tunnel-direct
     HostName $CLOUDBOX_IP
     User dev
     ForwardAgent yes
     ServerAliveInterval 60
     ServerAliveCountMax 3
+    HostKeyAlias $CLOUDBOX_IP
     # mcp-remote OAuth callback (Atlassian instance)
     # Note: LocalForward 1455 (OpenCode OAuth) is owned exclusively by
     # devbox-tunnel; duplicating it here clashes under ExitOnForwardFailure.
@@ -172,6 +240,8 @@ Host cloudbox-cutover
     ForwardAgent yes
     ServerAliveInterval 60
     ServerAliveCountMax 3
+$IAP_PROXY
+    HostKeyAlias $CLOUDBOX_IP
     RemoteForward 2222 127.0.0.1:22
 
 # Chart tunnel: reaches cloudbox's loopback 4710, where \`oc-tags serve\` runs.
@@ -196,11 +266,21 @@ Host cloudbox-cutover
 # LaunchAgent's \`ssh -N\` opens no session channel to forward an agent over
 # anyway. Omitting it means an interactive \`ssh cloudbox-chart\` run while
 # debugging does not hand this Mac's SSH agent to a public-IP VM.
+#
+# This path pays the IAP ProxyCommand's startup (a gcloud process per
+# connection) on top of the ~0.5s the socket-activated \`ssh -W\` already costs,
+# because launchd spawns one ssh per accepted connection and each brings up its
+# own tunnel. Measured 2026-09-17, \`ssh ... true\` best of 3: direct 0.32s, IAP
+# 1.74s, so about +1.4s per connection. Accepted: the chart is opened by hand,
+# occasionally, and a chart that loads slower is better than one that stops
+# loading whenever the WARP egress rotates.
 Host cloudbox-chart
     HostName $CLOUDBOX_IP
     User dev
     ServerAliveInterval 60
     ServerAliveCountMax 3
+$IAP_PROXY
+    HostKeyAlias $CLOUDBOX_IP
     LocalForward 4710 127.0.0.1:4710
 $CLOUDBOX_MARKER_END
 EOF

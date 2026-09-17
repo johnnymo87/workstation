@@ -6,19 +6,91 @@ let
   servePool = (import ./serve-pool.nix).forHost.darwin;
   routingDbPath = "/Users/jonathan.mohrbacher/Code/pigeon/packages/daemon/data/pigeon-daemon.db";
 
-  sshTunnelCommand = host: ''
+  # Keepalive loop behind the tunnel LaunchAgents.
+  #
+  # `fallbackHost` is an alternate ssh host alias for the SAME tunnel on a
+  # different transport. cloudbox reaches sshd through an IAP ProxyCommand; if
+  # that keeps failing we alternate to the direct-to-public-IP alias, so a
+  # Google-side IAP outage degrades instead of taking the tunnel down. devbox
+  # has one transport and passes nothing.
+  #
+  # `iapConfig` is the isolated CLOUDSDK_CONFIG holding the tunnel service
+  # account, used only to tell an expired/broken credential apart from a network
+  # or transport fault.
+  #
+  # Failures are CLASSIFIED because the previous version could not say why it was
+  # retrying, and the outage that motivated this work (a rotated WARP egress IP
+  # silently blackholing the direct path) looked identical in the log to a laptop
+  # sleep. Nobody noticed for hours -- it surfaced as "copy-paste is broken".
+  # Hence also the notification: a tunnel that is down and not coming back should
+  # say so rather than retry into an unwatched log forever.
+  sshTunnelCommand = { host, fallbackHost ? null, iapConfig ? null }: ''
+    state_file="${config.home.homeDirectory}/Library/Logs/${host}.state"
+    fails=0
+    delay=10
+    target="${host}"
+
     while true; do
-      echo "$(${pkgs.coreutils}/bin/date -Is) starting ${host} tunnel" >&2
+      started=$(${pkgs.coreutils}/bin/date +%s)
+      echo "$(${pkgs.coreutils}/bin/date -Is) starting ${host} tunnel via $target" >&2
+      echo "$(${pkgs.coreutils}/bin/date -Is) connecting via $target" > "$state_file"
+
       ${pkgs.openssh}/bin/ssh \
         -N \
         -o ExitOnForwardFailure=yes \
         -o ServerAliveInterval=30 \
         -o ServerAliveCountMax=3 \
         -o IgnoreUnknown=UseKeychain \
-        ${host}
+        "$target"
       status=$?
-      echo "$(${pkgs.coreutils}/bin/date -Is) ${host} tunnel exited with status $status; retrying in 10s" >&2
-      ${pkgs.coreutils}/bin/sleep 10
+      elapsed=$(( $(${pkgs.coreutils}/bin/date +%s) - started ))
+
+      # A connection that stayed up a while was healthy, so its exit is an
+      # ordinary drop -- Mac sleep accounts for ~35 of these a day -- and must
+      # not inherit a long backoff or count toward the failure streak.
+      if [ "$elapsed" -ge 60 ]; then
+        fails=0
+        delay=10
+      else
+        fails=$(( fails + 1 ))
+      fi
+
+      # Ordered cheapest-and-most-likely first; each answer changes what a human
+      # would do next, which is the only reason to distinguish them.
+      if ! ${pkgs.curl}/bin/curl -s -m 10 -o /dev/null https://oauth2.googleapis.com/ ; then
+        class="network (no route to Google; laptop asleep, offline, or VPN down)"
+    ${lib.optionalString (iapConfig != null) ''
+      elif ! env CLOUDSDK_CONFIG="${iapConfig}" ${pkgs.google-cloud-sdk}/bin/gcloud auth print-access-token >/dev/null 2>&1; then
+        class="auth (IAP service-account credential is not usable; key may have expired)"
+    ''}
+      else
+        class="transport (network and credential fine; ssh/IAP itself failed)"
+      fi
+
+      echo "$(${pkgs.coreutils}/bin/date -Is) ${host} via $target exited status=$status after $elapsed""s; class=$class; consecutive=$fails; retry in $delay""s" >&2
+      echo "$(${pkgs.coreutils}/bin/date -Is) down via $target status=$status class=$class consecutive=$fails" > "$state_file"
+
+      # Notify once per streak, at the point where this stops looking transient.
+      if [ "$fails" -eq 3 ]; then
+        /usr/bin/osascript -e "display notification \"$class\" with title \"${host} is down\" subtitle \"3 consecutive failures via $target\"" >/dev/null 2>&1 || true
+      fi
+
+    ${lib.optionalString (fallbackHost != null) ''
+      # Alternate transports once a single failure is not explaining itself. Two
+      # failures is deliberately early: the fallback is cheap to try and the cost
+      # of staying on a dead transport is every forwarded service.
+      if [ "$fails" -ge 2 ]; then
+        if [ "$target" = "${host}" ]; then
+          target="${fallbackHost}"
+        else
+          target="${host}"
+        fi
+      fi
+    ''}
+
+      ${pkgs.coreutils}/bin/sleep "$delay"
+      delay=$(( delay * 2 ))
+      if [ "$delay" -gt 60 ]; then delay=60; fi
     done
   '';
 in
@@ -44,6 +116,45 @@ lib.mkIf isDarwin {
       name = "screenshot-to-devbox";
       text = builtins.readFile "${assetsPath}/scripts/screenshot-to-devbox.sh";
     })
+    # What the `mosh` alias actually runs. Exists to force
+    # --experimental-remote-ip=local.
+    #
+    # mosh 1.4.0 defaults to `proxy` mode, in which it injects its OWN
+    # `--fake-proxy` ProxyCommand onto the ssh COMMAND LINE. A command-line
+    # ProxyCommand beats ssh_config, so the IAP ProxyCommand on the cloudbox
+    # blocks is silently discarded and mosh dials the public IP directly -- it
+    # keeps working right up until the WARP egress rotates, then fails in a way
+    # that looks nothing like its cause. `local` mode leaves ssh_config alone.
+    #
+    # The catch, and the reason update-ssh-config.sh keys the cloudbox block on
+    # `cloudbox <IP>` rather than `cloudbox`: in `local` mode mosh resolves the
+    # host and hands ssh the literal IP, so a block keyed only on the name never
+    # matches. Rather than hardcode the IP here, ask ssh what it resolves to --
+    # `ssh -G` applies the real config, so this stays correct when the IP
+    # changes and works for any host alias, not just cloudbox.
+    (pkgs.writeShellScriptBin "mosh-via-ssh-config" ''
+      set -eu
+      # Option-shaped (or absent) first argument: the caller is driving mosh
+      # directly and knows what they want. Get out of the way.
+      case "''${1-}" in
+        -*|"") exec ${pkgs.mosh}/bin/mosh "$@" ;;
+      esac
+      host="$1"; shift
+      cfg=$(${pkgs.openssh}/bin/ssh -G "$host")
+      ip=$(${pkgs.gawk}/bin/awk '$1=="hostname"{print $2; exit}' <<<"$cfg")
+      user=$(${pkgs.gawk}/bin/awk '$1=="user"{print $2; exit}' <<<"$cfg")
+      if [ -z "$ip" ]; then
+        echo "mosh-via-ssh-config: ssh -G $host resolved no hostname" >&2
+        exit 1
+      fi
+      # MOSH_SERVER_NETWORK_TMOUT: reap servers abandoned by a client that never
+      # came back, each of which otherwise holds a pty and a UDP port forever.
+      exec ${pkgs.mosh}/bin/mosh \
+        --experimental-remote-ip=local \
+        --server="MOSH_SERVER_NETWORK_TMOUT=604800 mosh-server" \
+        "$user@$ip" "$@"
+    '')
+
     pkgs.google-cloud-sdk
     pkgs.cloudflared
     # Hetzner Cloud CLI: used by scripts/update-ssh-config.sh to resolve the
@@ -181,7 +292,7 @@ lib.mkIf isDarwin {
         ProgramArguments = [
           "/bin/sh"
           "-c"
-          (sshTunnelCommand "devbox-tunnel")
+          (sshTunnelCommand { host = "devbox-tunnel"; })
         ];
         RunAtLoad = true;
         KeepAlive = true;
@@ -198,7 +309,11 @@ lib.mkIf isDarwin {
         ProgramArguments = [
           "/bin/sh"
           "-c"
-          (sshTunnelCommand "cloudbox-tunnel")
+          (sshTunnelCommand {
+            host = "cloudbox-tunnel";
+            fallbackHost = "cloudbox-tunnel-direct";
+            iapConfig = "${config.home.homeDirectory}/.config/gcloud-tunnel/config";
+          })
         ];
         RunAtLoad = true;
         KeepAlive = true;
@@ -702,6 +817,8 @@ lib.mkIf isDarwin {
     ];
     shellAliases = {
       ssdb = "screenshot-to-devbox";
+      # Why `mosh` is not the real mosh here: see mosh-via-ssh-config.
+      mosh = "mosh-via-ssh-config";
     };
   };
 
