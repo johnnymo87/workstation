@@ -78,6 +78,11 @@ EMPTY_FORM_RE='^[[:space:]]*common[[:space:]]+--disk_cache=[[:space:]]*$'
 POPULATED_RE='^[[:space:]]*common[[:space:]]+--disk_cache[[:space:]=]+[^[:space:]]'
 REMOTE_CACHE_RE='^[[:space:]]*(common|build|test)[[:space:]]+--remote_cache'
 GC_TARGET_RE='^[[:space:]]*common[[:space:]]+--experimental_disk_cache_gc_max_size'
+# Must be scoped to `test`. As a `common` option it would also apply to `build`,
+# where --build_tests_only means "build nothing at all" unless the pattern
+# happens to contain tests -- a silent no-op build, not a smaller one.
+TESTS_ONLY_RE='^[[:space:]]*test[[:space:]]+--build_tests_only[[:space:]]*$'
+TESTS_ONLY_ANY_RE='^[[:space:]]*(common|build|test|startup)[[:space:]]+--build_tests_only'
 
 # --- Detector self-test ------------------------------------------------------
 #
@@ -117,6 +122,17 @@ assert_ok "self-test: disk_cache regex counts exactly one line in the on fixture
   "DISK_CACHE_RE mis-counts the on fixture" \
   -- test "$(count_matches "$DISK_CACHE_RE" "$WORK/fixture-on.rc")" = 1
 
+printf 'test --build_tests_only\n'   > "$WORK/fixture-tests-only.rc"
+printf 'common --build_tests_only\n' > "$WORK/fixture-tests-only-wrong-phase.rc"
+
+assert_ok "self-test: tests-only regex matches the test-phase fixture" \
+  "TESTS_ONLY_RE no longer recognises 'test --build_tests_only'" \
+  -- grep -Eq "$TESTS_ONLY_RE" "$WORK/fixture-tests-only.rc"
+
+assert_not "self-test: tests-only regex rejects a common-phase fixture" \
+  "TESTS_ONLY_RE matches 'common --build_tests_only', which would break plain builds" \
+  -- grep -Eq "$TESTS_ONLY_RE" "$WORK/fixture-tests-only-wrong-phase.rc"
+
 # --- Cloudbox: assertions against the real evaluated activation text ----------
 
 N_DISK="$(count_matches "$DISK_CACHE_RE" "$WORK/cloudbox.rc")"
@@ -150,6 +166,16 @@ assert_not "cloudbox rc carries no orphaned disk-cache GC target" \
   "--experimental_disk_cache_gc_max_size is inert once --disk_cache is empty; drop it" \
   -- grep -Eq "$GC_TARGET_RE" "$WORK/cloudbox.rc"
 
+# --build_tests_only: stops a wildcard `test` building the ~10 OCI image
+# packages nothing consumes (~5.9 GB/output base). Must be on `test` only.
+assert_ok "cloudbox rc restricts a wildcard test to tests and their deps" \
+  "test --build_tests_only went missing; wildcard tests rebuild 10 unused image packages" \
+  -- grep -Eq "$TESTS_ONLY_RE" "$WORK/cloudbox.rc"
+
+assert_ok "cloudbox rc scopes --build_tests_only to the test phase alone" \
+  "expected exactly 1 --build_tests_only line; as a common/build option it makes plain builds no-ops" \
+  -- test "$(count_matches "$TESTS_ONLY_ANY_RE" "$WORK/cloudbox.rc")" = 1
+
 # --- Darwin: assertions against the real evaluated activation text -----------
 #
 # This is the half that actually matters. cloudbox's change is the one being
@@ -180,6 +206,14 @@ assert_ok "darwin rc keeps the repository cache" \
 assert_not "darwin rc sets no --remote_cache" \
   "the home rc must not shadow the workspace's remote cache -- see workstation#530" \
   -- grep -Eq "$REMOTE_CACHE_RE" "$WORK/darwin.rc"
+
+# macOS must NOT get --build_tests_only. Same reasoning as the disk cache: the
+# justification is a swarm of agents that gate on the test suite and never boot a
+# binary. A human at a laptop does both, and the flag's silent skipping of
+# explicitly-named non-test targets is a far worse trap for someone typing by hand.
+assert_not "darwin rc has not inherited --build_tests_only" \
+  "macOS must keep a wildcard test building non-test targets; the cloudbox rationale is agent-specific" \
+  -- grep -Eq "$TESTS_ONLY_ANY_RE" "$WORK/darwin.rc"
 
 # The whole point of the split: the two hosts must not agree about this.
 assert_not "the two hosts' disk-cache policies have not been unified" \
