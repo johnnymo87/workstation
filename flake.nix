@@ -79,6 +79,7 @@
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-context = p.callPackage ./pkgs/oc-context { };
+      oc-attach-reap = p.callPackage ./pkgs/oc-attach-reap { };
       oc-search = p.callPackage ./pkgs/oc-search { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
       oc-mcp-enable = p.callPackage ./pkgs/oc-mcp-enable { };
@@ -342,6 +343,37 @@
         bash users/dev/test-pipefail-inversion.sh 2>&1 | tee "$TMPDIR/pi.txt"
         grep -q '^ALL PASS' "$TMPDIR/pi.txt" || {
           echo "GATE FAILURE: pipefail-inversion guard did not reach ALL PASS." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # ---- pkgs/oc-attach-reap (bead workstation-o5s1.14) ------------------
+      #
+      # This tool SENDS SIGTERM, so its suite is about the ways it could kill
+      # the wrong processes rather than about the happy path: a stale or
+      # unreadable oracle, a TUI on another door, a TUI a human is typing in,
+      # and a process whose age cannot be established. Each of those makes a
+      # live TUI look orphaned.
+      #
+      # The test COUNT is pinned. Most of these assertions describe REFUSALS,
+      # and a refusal test passes trivially if the tool stops doing anything at
+      # all, so "OK" on its own is close to meaningless here.
+      oc-attach-reap = devboxPkgs.runCommand "oc-attach-reap-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.bash devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        # Full path on purpose: users/dev/test-unwired-tests.sh looks for the
+        # repo-relative path here, so `cd` into the directory plus a bare
+        # filename reads to it as "nothing executes this file". The suite puts
+        # its own directory on sys.path, so running from the root works.
+        python3 pkgs/oc-attach-reap/test_oc_attach_reap.py 2>&1 | tee "$TMPDIR/reap.txt"
+        grep -q '^OK' "$TMPDIR/reap.txt" || {
+          echo "GATE FAILURE: oc-attach-reap suite did not pass." >&2
+          exit 1
+        }
+        grep -q '^Ran 18 tests' "$TMPDIR/reap.txt" || {
+          echo "GATE FAILURE: expected 18 tests; a suite that stops asserting still prints OK." >&2
           exit 1
         }
         touch $out

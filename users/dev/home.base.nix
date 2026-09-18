@@ -1348,6 +1348,67 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
     Install.WantedBy = [ "timers.target" ];
   };
 
+  # oc-attach-reap: close attach TUIs whose session no longer exists.
+  #
+  # opencode-launch opens one per session and nothing ever closed them, so they
+  # accumulated until the nightly reset. Measured on cloudbox 2026-09-18: 124
+  # attach processes, 60 of them pointing at sessions that no longer existed.
+  #
+  # The standing cost is not the whole harm. On 2026-09-15 a 34-session
+  # spin-up created ~7-8 GB of new TUIs in five minutes on a host with ~12 GB
+  # available; the kernel evicted ~12 GB of the coldest anon -- largely those
+  # OLD idle TUIs -- and host swap rose 17.17 -> 28.61 GB, stopping only when
+  # user-1000.slice hit its 24 GiB ceiling. Reaping the dead ones removes both
+  # the standing cost and the pool of cold anon a future burst pushes to swap.
+  #
+  # DEFAULT-ON, which is only defensible because the tool fails closed: a
+  # missing, corrupt or empty database, or an implausible orphan fraction, each
+  # make healthy TUIs look dead, and each makes it kill nothing and exit
+  # non-zero. See pkgs/oc-attach-reap/oc_attach_reap.py.
+  #
+  # The 10-minute grace period matters more than it looks: a TUI can exist
+  # before its session row is committed, and without it this races every launch
+  # it is supposed to be cleaning up after.
+  systemd.user.services.oc-attach-reap = lib.mkIf (!isDarwin) {
+    Unit.Description = "Close opencode attach TUIs whose session is gone";
+    Service = {
+      Type = "oneshot";
+      # The db path is DERIVED FROM THE SAME EXPRESSION as the OPENCODE_DB
+      # session variable above, never spelled again. A reaper whose oracle has
+      # drifted from the sessions being created is the one failure its guards
+      # cannot see: old sessions are present and new ones are absent, so each
+      # newly-launched live TUI looks orphaned while the orphan FRACTION stays
+      # tiny -- the guard is built for "the oracle is wrong about everything",
+      # and this is "the oracle is stale". Every new TUI would be killed at the
+      # 10-minute mark, forever, quietly.
+      ExecStart =
+        "${localPkgs.oc-attach-reap}/bin/oc-attach-reap"
+        + " --db ${config.home.sessionVariables.OPENCODE_DB}"
+        + " --grace-seconds 600";
+      # Never win a priority contest against the sessions it is tidying up after.
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      Environment = [ "HOME=%h" ];
+      # A refusal exits 3 and is whitelisted; a CRASH still exits 1 and stays
+      # red. An earlier version whitelisted 1 with the rationale that a failed
+      # oneshot would stop its timer -- that is false (OnUnitActiveSec is
+      # relative to the last activation regardless of outcome), and the real
+      # effect would have been to make an uncaught exception look like success,
+      # leaving the reaper inert and invisible to `systemctl --user --failed`.
+      SuccessExitStatus = [ 0 3 ];
+    };
+  };
+
+  systemd.user.timers.oc-attach-reap = lib.mkIf (!isDarwin) {
+    Unit.Description = "Sweep orphaned opencode attach TUIs every 15 minutes";
+    Timer = {
+      OnBootSec = "15min";
+      OnUnitActiveSec = "15min";
+      RandomizedDelaySec = "2min";
+    };
+    Install.WantedBy = [ "timers.target" ];
+  };
+
   # lgtm-sessions: list active OpenCode sessions dispatched by lgtm.
   # See lgtm-3j8 in ~/projects/lgtm beads tracker for design notes.
   home.file.".local/bin/lgtm-sessions" = {
