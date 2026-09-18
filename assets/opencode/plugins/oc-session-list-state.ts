@@ -194,18 +194,35 @@ export function buildUnreadMap(
     // language/repo with nothing tying them together.
     //
     // Pick the newest anchor AT OR BEFORE the oldest unread event -- not the
-    // oldest unread event that happens to carry one. Those coincide only while
-    // every event in a session shares one anchor, which is true today and stops
-    // being true as soon as anchors become per-event.
+    // oldest unread event that happens to carry one. The two diverge in exactly
+    // one case: the oldest unread event has a NULL anchor. Whenever it carries
+    // one, both forms pick that same row, however much anchors vary across the
+    // session -- and they do vary already (44 of 89 anchored sessions hold two
+    // or more distinct anchors, up to 12), because each event snapshots
+    // lastHumanMsgId at enqueue (app.ts:1111, :1276).
+    //
+    // LOAD-BEARING ASSUMPTION behind `<=`: an event's anchor marks the START of
+    // that event's turn. True of both writers today -- a stop/swarm row carries
+    // the prompt that began the turn, a mirror row carries its own message. If
+    // per-event anchors ever ship as the agent's FINAL message instead (one
+    // phrasing in workstation-ra44 says that; the agreed design says turn-start),
+    // `<=` has to become `<`, and the first test below would then be pinning the
+    // wrong answer.
     //
     // The direction is the whole point, and it is not symmetric. An anchor
     // BEFORE the unread content costs the reader some re-reading. An anchor
     // AFTER it drops them past things they have never seen, and the jump itself
     // implies everything above was read -- so the miss is invisible. pigeon
     // encodes the same asymmetry at
-    // packages/daemon/src/storage/repos.ts:197-204. Measured on the live
-    // ledger, the old form would have dropped one session past 14 of its 15
-    // unread events.
+    // packages/daemon/src/storage/repos.ts:197-204.
+    //
+    // The worst live case was a session whose old anchor sat past 14 of its 15
+    // unread events. That prefix of NULL anchors is a PRE-pigeon#149 artifact,
+    // though: since that landed, a session's anchor goes NULL -> set once and
+    // never back, so a NULL-anchored event after an anchored one now needs a
+    // session's first-ever user turn to fall mid-unread-run. Live count of that
+    // shape today: zero. This guard is therefore mostly for the per-event
+    // anchors still to come, not for a fire burning now.
     //
     // The inner query excludes mirror rows to match the unread count above it;
     // the outer one does NOT, because a mirror row is an excellent turn
