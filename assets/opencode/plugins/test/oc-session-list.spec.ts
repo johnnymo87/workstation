@@ -1987,6 +1987,112 @@ describe("buildUnreadMap & unread counts (Task 9)", () => {
     }
   });
 
+  // Both halves of the anchor subquery correlate on session_id, and NEITHER
+  // correlation was observable until this fixture existed: every other anchored
+  // fixture here uses a single session, so dropping either `session_id =`
+  // clause left the suite fully green. On the live ledger that mutant hands 157
+  // of 248 sessions an anchor belonging to a DIFFERENT session -- a jump into
+  // someone else's conversation. Two sessions, both anchored, different read
+  // watermarks, each asserting its own answer.
+  it("keeps each session's anchor to that session", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, 'msg_s1_first'),
+          (2, 'root_2', 'stop', 200, 'msg_s2_first'),
+          (3, 'root_1', 'stop', 300, NULL),
+          (4, 'root_2', 'stop', 400, NULL),
+          (5, 'root_1', 'stop', 500, 'msg_s1_later'),
+          (6, 'root_2', 'stop', 600, 'msg_s2_later');
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 1, 150),
+          ('root_2', 2, 250);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows)!;
+      // root_1: oldest unread is event 3; newest anchor at or before it is
+      // event 1's. root_2: oldest unread is event 4; newest anchor at or before
+      // it is event 2's. Crossing the correlation swaps or nulls these.
+      expect(unreadMap.get("root_1")!.anchor_msg_id).toBe("msg_s1_first");
+      expect(unreadMap.get("root_2")!.anchor_msg_id).toBe("msg_s2_first");
+      expect(unreadMap.get("root_1")!.unread).toBe(2);
+      expect(unreadMap.get("root_2")!.unread).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The INNER correlation needs its own fixture. In the two-session case above,
+  // dropping `e2.session_id = e.session_id` lowers the computed "oldest unread"
+  // to a foreign event, but that event falls outside the range the outer scan
+  // is deciding over, so both forms still answer identically and the mutant
+  // survives green. To see it, a foreign event must land strictly between the
+  // session's read watermark and its own oldest unread event, with one of the
+  // session's own anchors in between.
+  //
+  // root_1 has read through event 1. Its oldest unread is event 3, which is
+  // anchored, so the answer is msg_b. Uncorrelated, MIN() returns event 2 --
+  // root_2's -- and the outer scan drops back to msg_a, one turn too far.
+  it("computes the oldest unread from this session's events only", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, 'msg_a'),
+          (2, 'root_2', 'stop', 200, 'msg_other'),
+          (3, 'root_1', 'stop', 300, 'msg_b'),
+          (4, 'root_1', 'stop', 400, NULL);
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 1, 150),
+          ('root_2', 0, 50);
+      `);
+      db.close();
+
+      const unreadMap = buildUnreadMap(p, baseRows)!;
+      expect(unreadMap.get("root_1")!.unread).toBe(2); // events 3 and 4
+      expect(unreadMap.get("root_1")!.anchor_msg_id).toBe("msg_b");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The inner filter must stay `kind <> 'mirror'` -- the same predicate as the
+  // unread COUNT beside it -- rather than anything narrower like `kind =
+  // 'stop'`. Every other fixture makes the oldest unread event a stop row, so a
+  // narrowed filter passes them all while silently anchoring against the wrong
+  // event whenever a swarm or question row is the oldest unread thing.
+  it("treats a non-stop event as the oldest unread, matching the unread count", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, 'msg_turn_one'),
+          (2, 'root_1', 'swarm', 200, NULL),
+          (3, 'root_1', 'stop', 300, 'msg_turn_two');
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 1, 150);
+      `);
+      db.close();
+
+      const entry = buildUnreadMap(p, baseRows)!.get("root_1");
+      expect(entry!.unread).toBe(2); // the swarm row counts
+      // Oldest unread is the swarm row (2). A filter that only saw stop rows
+      // would call event 3 the oldest unread and answer msg_turn_two, landing
+      // past the swarm message.
+      expect(entry!.anchor_msg_id).toBe("msg_turn_one");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // Unread counting excludes mirror rows; anchor selection does not. If a
   // mirror row were the only unread thing, there is no unread to jump to.
   it("ignores a trailing mirror row when choosing the oldest unread event", () => {
