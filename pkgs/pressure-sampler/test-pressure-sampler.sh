@@ -337,7 +337,12 @@ mkcg "$umgr7/tmux-spawn-5fd961ee-c739-4613-9e14-7c9aa348b293.scope" 1514139648
 # and what tmux.devbox.nix does by running the server as a user service. A
 # depth-1 glob finds NOTHING in that arrangement, and because absence here is
 # deliberately silent, nobody would ever be told.
-mkcg "$umgr7/app.slice" 1
+mkcg "$umgr7/app.slice" 3683627008
+mkcg "$umgr7/oc.slice" 3414163456
+# A slice this suite has never heard of. Discovery must not be a hardcoded list,
+# or the next slice added to the user manager is invisible exactly the way
+# app.slice and oc.slice were.
+mkcg "$umgr7/brand-new.slice" 12345678
 mkcg "$umgr7/app.slice/app-tmux.slice" 1
 mkcg "$umgr7/app.slice/app-tmux.slice/tmux-spawn-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.scope" 900000000
 run_sampler "$root7" "$out7"
@@ -385,6 +390,37 @@ else
     ok "a user-manager aggregate row is emitted"
   else
     bad "no user-manager aggregate row; silence about children becomes undetectable"
+  fi
+  # Every .slice child gets a row, discovered rather than named. The
+  # user-manager aggregate told us a residual EXISTED; these say what is in it.
+  # On 2026-09-17 that residual was 6.25 GB and turned out to be app.slice plus
+  # oc.slice -- two populations that could have supplied most of the 2026-09-15
+  # swap jump and that nothing had ever recorded.
+  us7=$(awk -F'\t' '$2=="user-slice"{print $3}' "$tsv7" | sort -u | tr '\n' ' ')
+  if grep -q 'app.slice' <<<"$us7" && grep -q 'oc.slice' <<<"$us7"; then
+    ok "every .slice child of the user manager is sampled (found: $us7)"
+  else
+    bad "user-manager .slice children are not sampled" "found: '$us7'"
+  fi
+  # Discovered, not enumerated: a slice nobody wrote into this file must appear.
+  if grep -q 'brand-new.slice' <<<"$us7"; then
+    ok "an unfamiliar slice appears without anyone naming it"
+  else
+    bad "a new slice was not picked up; the list is hardcoded somewhere" "found: '$us7'"
+  fi
+  # DIRECT CHILDREN ONLY, pinned as a NEGATIVE. The residual arithmetic --
+  # user-manager minus the user-slice rows minus the tmux-scope rows -- is only
+  # valid if these rows do not overlap each other. Recursing would emit
+  # app-tmux.slice underneath app.slice, double-counting it, and the residual
+  # would go negative while looking like more coverage. Without this assertion
+  # both positive checks above pass just as happily for "$umgr"/* or a
+  # recursive walk.
+  if grep -q 'app-tmux' <<<"$us7" || grep -q 'tmux-spawn' <<<"$us7"; then
+    bad "user-slice rows recursed into nested cgroups" \
+        "that double-counts against the user-manager total and breaks the residual" \
+        "found: '$us7'"
+  else
+    ok "user-slice rows are direct children only (residual stays additive)"
   fi
   assert_width "$tsv7" "tmux scopes"
 fi

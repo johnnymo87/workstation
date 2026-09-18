@@ -318,6 +318,28 @@ writeShellApplication {
       # open" and "panes moved somewhere we do not look" are indistinguishable.
       emit_cgroup "user-manager" "-" "$umgr"
 
+      # Every .slice child, DISCOVERED rather than named. The aggregate above
+      # says a residual exists; these say what is in it.
+      #
+      # On 2026-09-17 that residual was 6.25 GB, and it turned out to be
+      # app.slice (memory.swap.peak 5.57 GB) and oc.slice/oc-agent.slice
+      # (swap.peak 2.00 GB, 21 oom_kills) -- two populations that
+      # between them could have supplied most of the 2026-09-15 swap jump of
+      # 11.43 GB, and that nothing had ever recorded. The jump was attributed to
+      # nothing for exactly this reason: the serves and bazel were both
+      # measurably pinned at their caps, and every remaining candidate was
+      # invisible.
+      #
+      # Globbed rather than enumerated on purpose. Naming app.slice and oc.slice
+      # would fix today's gap and recreate it the next time a slice is added --
+      # which is how oc.slice itself (added 2026-08-11) went unsampled for five
+      # weeks. There are five such children today and the set is stable, so the
+      # cardinality cost is negligible.
+      for cg in "$umgr"/*.slice; do
+        [ -d "$cg" ] || continue
+        emit_cgroup "user-slice" "''${cg##*/}" "$cg"
+      done
+
       # ---- tmux pane scopes (bead workstation-o5s1.13) ---------------------
       # tmux gives every spawned pane its own transient scope directly under the
       # user manager. On 2026-09-17 those scopes held 10.35 GB across 38 TUIs --
@@ -331,15 +353,22 @@ writeShellApplication {
       # had an alibi, which is the shape of an instrumentation gap rather than a
       # mystery.
       #
-      # THESE PANES ARE ONE CANDIDATE, NOT THE ANSWER. At least two other
-      # unsampled populations sit under the same user manager and could have
-      # supplied that swap: app.slice (memory.swap.peak 5.57 GB) and
-      # oc.slice/oc-agent.slice (swap.peak 2.00 GB, its cap; 21 oom_kills). A
-      # 9.6 GB burst in eight minutes fits one agent bash command under a 10G
-      # scope cap at least as well as it fits a pane leak. Sampling these rows
-      # is what will let the NEXT such jump be attributed; it does not
-      # retroactively convict anything. Rows for app.slice and oc-agent.slice
-      # are the obvious follow-up and are tracked on workstation-o5s1.13.
+      # THESE PANES ARE ONE CANDIDATE, NOT THE ANSWER. Two other populations
+      # under the same user manager could have supplied that swap: app.slice
+      # (memory.swap.peak 5.57 GB) and oc.slice/oc-agent.slice (swap.peak
+      # 2.000091 GB, 21 oom_kills).
+      #
+      # That oc-agent figure is worth reading precisely, because the obvious
+      # reading is wrong. oc-agent.slice's OWN swap cap is 4G
+      # (home.cloudbox.nix). 2.000091 GB is 2G plus 96 KB, and 2G is the
+      # PER-COMMAND ceiling oc-scoped-shell puts on each bash-tool scope
+      # (scopeMemorySwapMax). So that peak is one single agent command swapping
+      # until it hit its own limit -- which fits a 9.6 GB burst over eight
+      # minutes rather better than a gradual leak across 104 panes does.
+      # Nothing here convicts anything; these rows exist so the NEXT such jump
+      # is attributable. Both slices are sampled as of the user-slice loop
+      # above; per-scope rows for oc-agent are still open on
+      # workstation-o5s1.13.
       #
       # The scope name is tmux's, not ours -- nothing in this repo creates it --
       # so this matches a NAME PATTERN rather than a fixed path, and is emitted
