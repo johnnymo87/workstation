@@ -129,12 +129,17 @@ fi
 # compute ssh --tunnel-through-iap` uses internally. Verified working here.
 # Without it you would need a listening port plus nc, which races on startup.
 #
+# No --project flag: this repo is public and the project name is
+# org-identifying, so it stays out of the tree. The isolated CLOUDSDK_CONFIG
+# already carries `project` in its [core] section, which is where a
+# machine-local identifier belongs.
+#
 # The gcloud path is the per-user profile symlink, deliberately NOT the
 # /nix/store path it points at: a store path baked into ~/.ssh/config would be
 # garbage-collected out from under the tunnel on the next GC.
 GCLOUD_BIN="/etc/profiles/per-user/$USER/bin/gcloud"
 IAP_CONFIG="$HOME/.config/gcloud-tunnel/config"
-IAP_PROXY="    ProxyCommand env CLOUDSDK_CONFIG=$IAP_CONFIG $GCLOUD_BIN compute start-iap-tunnel cloudbox 22 --listen-on-stdin --zone=us-east1-b --project=wonder-sandbox"
+IAP_PROXY="    ProxyCommand env CLOUDSDK_CONFIG=$IAP_CONFIG $GCLOUD_BIN compute start-iap-tunnel cloudbox 22 --listen-on-stdin --zone=us-east1-b"
 
 if [ ! -d "$IAP_CONFIG" ]; then
     echo "Warning: $IAP_CONFIG missing -- the IAP service account is not set up on this machine."

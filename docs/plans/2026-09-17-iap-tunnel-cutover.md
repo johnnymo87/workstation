@@ -43,13 +43,17 @@ Notes learned the hard way:
   Project-level `compute.instances.list` was NOT needed and would have exposed
   metadata/startup scripts for every VM in the project.
 - Duplicate key material (`sa-credentials.json`, `sa-private.pem`, `sa-cert.pem`)
-  was deleted after activation. The only copy now lives in the isolated
-  `credentials.db`. At-rest protection is FileVault.
+  was deleted after activation. **Two copies remain inside the isolated config**,
+  not one as an earlier draft of this doc claimed: `credentials.db` and
+  `legacy_credentials/<sa>/adc.json`, which gcloud writes on activation and which
+  contains the `private_key` in cleartext. Both are 0600 inside a 0700 directory;
+  at-rest protection is FileVault. The rotation runbook must account for the
+  second copy.
 
 ### Acceptance tests already passing
 - positive: `CLOUDSDK_CONFIG=~/.config/gcloud-tunnel/config gcloud compute start-iap-tunnel cloudbox 22 --local-host-port=localhost:2224 --zone=us-east1-b --project=wonder-sandbox` → ssh through it returns `SA-TUNNEL-OK` / `cloudbox`
 - negative: same but port `4710` → `4033: 'not authorized'` (proves the IAM condition binds, not merely the role)
-- isolation: `env -u CLOUDSDK_CONFIG gcloud auth list` still shows `jmohrbacher@wonder.com` active
+- isolation: `env -u CLOUDSDK_CONFIG gcloud auth list` still shows the normal human account active, not the SA
 - key expiry: `gcloud iam service-accounts keys list --managed-by=user` shows `EXPIRES_AT 2026-12-16`
 
 ## Remaining work (Mac)

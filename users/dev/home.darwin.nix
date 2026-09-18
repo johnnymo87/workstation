@@ -41,16 +41,30 @@ let
         -o ServerAliveInterval=30 \
         -o ServerAliveCountMax=3 \
         -o IgnoreUnknown=UseKeychain \
+        -o ConnectTimeout=20 \
         "$target"
       status=$?
       elapsed=$(( $(${pkgs.coreutils}/bin/date +%s) - started ))
 
+      # ConnectTimeout above is load-bearing, not tidiness. A blocked path here
+      # is a silent DROP (the firewall has no reject rule), so without it ssh
+      # sits on the kernel connect timer -- net.inet.tcp.keepinit, 75s -- and
+      # every failed attempt would clear the 60s bar below, resetting the streak
+      # and the backoff forever. The loop would park on a dead transport,
+      # never reach 3, and never notify: a livelock in exactly the scenario the
+      # fallback exists for. 20s also bounds a hung IAP ProxyCommand, since
+      # ConnectTimeout covers the initial handshake and not just the TCP connect.
+      #
       # A connection that stayed up a while was healthy, so its exit is an
       # ordinary drop -- Mac sleep accounts for ~35 of these a day -- and must
       # not inherit a long backoff or count toward the failure streak.
       if [ "$elapsed" -ge 60 ]; then
         fails=0
         delay=10
+        # Return to the primary transport. Otherwise one long-lived fallback
+        # session leaves us parked on the fragile direct path indefinitely,
+        # with nothing left to trigger a switch back.
+        target="${host}"
       else
         fails=$(( fails + 1 ))
       fi
@@ -72,7 +86,15 @@ let
 
       # Notify once per streak, at the point where this stops looking transient.
       if [ "$fails" -eq 3 ]; then
-        /usr/bin/osascript -e "display notification \"$class\" with title \"${host} is down\" subtitle \"3 consecutive failures via $target\"" >/dev/null 2>&1 || true
+        # Do not swallow osascript's own failure. `display notification` posts
+        # as Script Editor and is silently dropped if that app's notifications
+        # are denied -- which would kill the loop's only human-facing signal
+        # with no trace. If it cannot notify, at least say so in the log.
+        if ! /usr/bin/osascript \
+            -e "display notification \"$class\" with title \"${host} is down\" subtitle \"3 consecutive failures via $target\"" \
+            >/dev/null 2>/tmp/${host}-osascript.err; then
+          echo "$(${pkgs.coreutils}/bin/date -Is) could not post notification: $(cat /tmp/${host}-osascript.err)" >&2
+        fi
       fi
 
     ${lib.optionalString (fallbackHost != null) ''
