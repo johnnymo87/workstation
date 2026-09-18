@@ -24,6 +24,14 @@ session-ses_*.md
 # Worktrees
 .worktrees/
 
+# Node / bun tooling run from the repo root or any package dir. Nix never
+# vendors these -- the derivations build node_modules from the lockfiles and
+# link it in (flake.nix:1816, :267) -- so nothing in the build depends on the
+# tree carrying one. The rule exists because `git add -A` does: a stray
+# `npx vitest run` at the root left node_modules/.vite/vitest/<hash>/results.json
+# staged during workstation-i0rz, and it reached a commit before being caught.
+node_modules/
+
 # Python
 __pycache__/
 *.pyc
