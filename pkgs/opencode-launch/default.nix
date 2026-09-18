@@ -274,6 +274,11 @@ pkgs.writeShellApplication {
         echo "                                 Applied after the launch succeeds and never"
         echo "                                 fails it; tag attribution is retroactive."
         echo "  --tmux-session <name>          Auto-attach in this tmux session (default: main)"
+        echo "  --no-attach                    Do not open an attach TUI for this session."
+        echo "                                 For automation that never reads one: each TUI"
+        echo "                                 costs ~240 MB in an uncapped tmux scope and is"
+        echo "                                 not reaped when the session ends. Also settable"
+        echo "                                 as OPENCODE_LAUNCH_NO_ATTACH=1."
         echo ""
         echo "Favorite Models:"
         echo "  - google-vertex/gemini-3.8-flash                  (Fast, reasoning-enabled)"
@@ -305,8 +310,13 @@ pkgs.writeShellApplication {
       # instead of whatever session tmux considers "current". --tmux-session
       # <name> overrides for dedicated background sessions (e.g. lgtm).
       tmux_session="main"
+      no_attach=0
       while [ $# -gt 0 ]; do
         case "$1" in
+          --no-attach)
+            no_attach=1
+            shift
+            ;;
           --model)
             if [ $# -lt 2 ] || [ -z "$2" ]; then
               echo "Error: --model requires provider/model" >&2
@@ -697,6 +707,30 @@ pkgs.writeShellApplication {
       # cleanup if it no-ops).
       launch_ok=1
 
+      # should_auto_attach <no_attach_flag> <env_value> -> 0 = attach, 1 = skip.
+      #
+      # The env var exists so a wrapper or a systemd Environment= line can opt
+      # out without touching the callee's argv. It is NOT because any caller is
+      # unable to pass the flag -- an earlier version of this comment claimed
+      # lgtm-run launches from the pigeon daemon and could not change its argv,
+      # and both halves were false: lgtm-run is a systemd unit in this repo
+      # (hosts/cloudbox/configuration.nix) and its argv is built by plain arrays
+      # in lgtm/src/{dispatch,gather}.ts. Passing --no-attach there is the
+      # cheaper fix and does not wait on a nixos-rebuild.
+      #
+      # Truthiness is an ALLOWLIST, not `[ -n "$VAR" ]`. A bare non-empty test
+      # would make OPENCODE_LAUNCH_NO_ATTACH=0 disable attaching for every
+      # launch on the box, which is the opposite of what anyone writing that
+      # would mean. Mirrored in test.sh; the grep below keeps them in lockstep.
+      should_auto_attach() {
+        local flag="$1" env="''${2:-}"
+        [ "$flag" = "1" ] && return 1
+        case "$env" in
+          1|true|TRUE|yes|YES|on|ON) return 1 ;;
+        esac
+        return 0
+      }
+
       # Auto-attach to nvim+tmux if we're on a host with a graphical workflow.
       # Detached from the launcher's SHELL SESSION so the launch returns
       # immediately and Ctrl+C on the launcher can't signal the child.
@@ -710,9 +744,19 @@ pkgs.writeShellApplication {
       # "Backgrounding Long-Running Processes" in assets/opencode/AGENTS.md and
       # the systemd-run re-exec in pkgs/reset-workspace/default.nix).
       #
-      # Missing oc-auto-attach (e.g. cloudbox headless) is silently tolerated.
+      # Missing oc-auto-attach is silently tolerated. NOTE this is not the
+      # cloudbox case, whatever the skill doc used to say: oc-auto-attach IS
+      # installed there, and 108 attach TUIs were live on 2026-09-18.
       # Log to /tmp/oc-auto-attach.log for debuggability.
-      if command -v oc-auto-attach >/dev/null 2>&1; then
+      if ! should_auto_attach "$no_attach" "''${OPENCODE_LAUNCH_NO_ATTACH:-}"; then
+        # Name WHICH one fired. A leaked env var would otherwise send whoever
+        # is wondering where their pane went looking through argv.
+        if [ "$no_attach" = "1" ]; then
+          echo "Auto-attach: skipped (--no-attach)" >&2
+        else
+          echo "Auto-attach: skipped (OPENCODE_LAUNCH_NO_ATTACH=''${OPENCODE_LAUNCH_NO_ATTACH:-})" >&2
+        fi
+      elif command -v oc-auto-attach >/dev/null 2>&1; then
         oc_attach_args=()
         if [ -n "$tmux_session" ]; then
           oc_attach_args+=(--tmux-session "$tmux_session")

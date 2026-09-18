@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# unwired-test(workstation-3g4j): named there as wanting the same treatment as reset-workspace/test.sh; read that bead first, it records an attempt that was backed out.
 # Unit tests for opencode-launch helper functions + pool-aware source guards.
 # Mirror the helpers from default.nix and exercise them directly.
 # Run: bash test.sh
@@ -651,6 +650,34 @@ if [ -f "$default_nix" ]; then
   else
     printf 'FAIL  success line must print oc-tags own output\n        in: %s\n' "$default_nix"; exit 1
   fi
+  # --no-attach must exist as a flag AND be honoured at the call site. The
+  # helper tests above exercise a MIRROR; without these the mirror could pass
+  # while production still attaches unconditionally.
+  if grep -q '^          --no-attach)' "$default_nix"; then
+    printf 'PASS  --no-attach is parsed as a flag\n'
+  else
+    printf 'FAIL  --no-attach must be parsed\n        in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q 'if ! should_auto_attach "\$no_attach"' "$default_nix"; then
+    printf 'PASS  the auto-attach call site is gated by should_auto_attach\n'
+  else
+    printf 'FAIL  auto-attach must be gated; an unparsed flag that changes nothing is worse than none\n        in: %s\n' "$default_nix"; exit 1
+  fi
+  # The env var is the half lgtm-run actually needs: it launches from the pigeon
+  # daemon and cannot easily change its argv.
+  if grep -q 'OPENCODE_LAUNCH_NO_ATTACH' "$default_nix"; then
+    printf 'PASS  OPENCODE_LAUNCH_NO_ATTACH is read by the source\n'
+  else
+    printf 'FAIL  OPENCODE_LAUNCH_NO_ATTACH must be honoured\n        in: %s\n' "$default_nix"; exit 1
+  fi
+  # Lockstep: the production allowlist must match the mirror above. A bare
+  # non-empty test would make =0 disable attaching everywhere.
+  if grep -q '1|true|TRUE|yes|YES|on|ON) return 1' "$default_nix"; then
+    printf 'PASS  production truthiness is an allowlist, matching the mirror\n'
+  else
+    printf 'FAIL  production must use the same allowlist as the mirror\n        in: %s\n' "$default_nix"; exit 1
+  fi
+
   # loud-fail: a work failure must abort, never silently launch at the root.
   if grep -q 'failed to create worktree' "$default_nix"; then
     printf 'PASS  source fails loudly on work failure (no silent root fallback)\n'
@@ -660,5 +687,52 @@ if [ -f "$default_nix" ]; then
 else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
 fi
+
+# ---- should_auto_attach (bead workstation-o5s1.14) --------------------------
+#
+# Every launched session used to get an `opencode attach` TUI unconditionally,
+# at ~240 MB, in a tmux scope with no memory cap, and nothing reaped it. On
+# 2026-09-15 a 34-session spin-up in five minutes created ~7-8 GB of new anon
+# that way and drove the host 11.43 GB into swap. Automation that never reads a
+# TUI should not create one.
+#
+# Mirror of the production helper; kept in lockstep by the source grep below.
+# (That lockstep is one-directional: the grep pins production against this
+# mirror, but the mirror can still drift. A shared sourced helper is the real
+# fix and is out of scope here.)
+should_auto_attach() { # <no_attach_flag> <env_value> -> 0 = attach, 1 = skip
+  local flag="$1" env="${2:-}"
+  [ "$flag" = "1" ] && return 1
+  case "$env" in
+    1|true|TRUE|yes|YES|on|ON) return 1 ;;
+  esac
+  return 0
+}
+
+check_attach() { # <desc> <expected: attach|skip> <flag> <env>
+  local desc="$1" want="$2" flag="$3" env="${4:-}" got
+  if should_auto_attach "$flag" "$env"; then got=attach; else got=skip; fi
+  if [ "$got" = "$want" ]; then
+    printf 'PASS  %s\n' "$desc"
+  else
+    printf 'FAIL  %s\n        want %s, got %s (flag=%s env=%s)\n' "$desc" "$want" "$got" "$flag" "$env"
+    exit 1
+  fi
+}
+
+check_attach "default launch still attaches"                 attach 0 ""
+check_attach "--no-attach skips the TUI"                     skip   1 ""
+check_attach "env OPENCODE_LAUNCH_NO_ATTACH=1 skips"         skip   0 "1"
+check_attach "env =true skips"                               skip   0 "true"
+check_attach "env =yes skips"                                skip   0 "yes"
+check_attach "env =on skips"                                 skip   0 "on"
+# The negative cases matter more than the positive ones: an env var that is set
+# but not truthy must NOT silently disable attaching for every launch on the
+# box, which is the failure mode of a naive `[ -n "$VAR" ]` test.
+check_attach "env =0 still attaches"                         attach 0 "0"
+check_attach "env =false still attaches"                     attach 0 "false"
+check_attach "env empty still attaches"                      attach 0 ""
+check_attach "env =no still attaches"                        attach 0 "no"
+check_attach "flag wins even when env is falsey"             skip   1 "0"
 
 echo "all opencode-launch helper tests passed"
