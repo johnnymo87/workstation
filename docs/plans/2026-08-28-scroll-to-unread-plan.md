@@ -866,3 +866,74 @@ epoch, not ISO).
   turns).
 - `workstation-jdbs`: the plugin's logs reach no file or journal, which is why
   hypothesis 3 above needed a correlational argument instead of a log line.
+
+
+---
+
+## LANDED AND ACCEPTED (2026-09-18)
+
+Confirmed by a real cold attach, which is what this was held open for. Deploy
+signals were never going to settle it: the one earlier user test *failed*, and
+that failure is what uncovered the missing anchors.
+
+**The test.** `ses_f73a030f3ffePG2zTAA5vhy30d` — 685 messages, anchor 391 from the
+bottom, 7 unread. Chosen so it could actually fail: 391 is far past the TUI's
+100-message fetch window (the original complaint), and 7 unread means the
+oldest-unread selection is exercised rather than trivially satisfied.
+
+**Corroborated, not just reported.** Process 394080 carried
+`OPENCODE_SCROLL_TO=ses_f73a030f3ffePG2zTAA5vhy30d:msg_0a20f1142001SuTEhDYWCKTRn4`
+— precisely the anchor predicted from the ledger *before* the test ran. Proven by
+that variable: selection and delivery. Reported by eye: the landing position.
+
+### What shipped
+
+| | |
+|---|---|
+| pigeon#149 | anchor written above `/mirror`'s injected-prompt early return |
+| workstation#551 + #552 | newest anchor **at or before** the oldest unread event |
+| opencode-patched#53 | cold-attach target delivered by env at launch |
+
+### Measured, not projected
+
+| kind | before | after |
+|---|---|---|
+| stop | 50% | **97%** |
+| swarm | 50% | **83%** |
+| overall | 54% | **94%** |
+| mirror | 100% | 100% — control, unmoved |
+
+The "35% → 92%" in pigeon#149's description was a *projection over sessions* and
+should not be quoted as a result. The table above is the result.
+
+### Step 3 was deliberately not built
+
+Its premise — a queued prompt advances the session anchor before `/stop` fires, so
+the jump lands past the reply it announces — does not survive measurement.
+**Across all 1291 anchored stop events, the count of anchors newer than the reply
+they announce is zero.** The queued-prompt *shape* occurs 2550 times, but the 11
+cases where a stop fired inside one have gaps of 12 minutes to 45 hours: turns
+that never got a reply, not queuing.
+
+The 8 events still unanchored are unanchorable **in principle** — 6 fired before
+their session's first recorded turn, 2 belong to sessions with no anchor yet.
+There is no turn to point at.
+
+Avoided: two repos, four `/stop` producers (three not at turn end), no
+turn-boundary marker in `MessageTail`, and a daemon idempotency early-return that
+ignores a corrected id on retry — to buy ~6% that is mostly unrecoverable, while
+introducing the per-event anchor variation `i0rz` exists to survive.
+
+**Reopen trigger:** re-run the direct check — for each anchored stop event, compare
+the anchor's `time_created` against the last assistant message before the event.
+Non-zero means the harm is real. Note `sent_at` is **milliseconds**; compared raw
+against a seconds constant it silently yields a plausible `0`, which it did once.
+
+### The habit that actually worked
+
+Three of this feature's wrong turns were numbers drawn from a population I had not
+checked: a 14%-vs-56% "race" that was a pure confound, a `0` that was a units
+artifact, and a merge reported complete when half of it never left the worktree.
+What caught them was verifying **by content on `origin/main` after merging**, and
+predicting what a measurement should show before running it. A green check proves
+the tree it ran on is consistent — not that it is the tree that merged.
