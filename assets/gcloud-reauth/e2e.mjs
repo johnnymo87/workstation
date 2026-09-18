@@ -22,6 +22,23 @@ const url = fs.readFileSync(process.argv[2], 'utf8').trim();
 const ALLOWED_AUTH_HOST = 'accounts.google.com';
 const ALLOWED_AUTH_PATH = '/o/oauth2/auth';
 const ALLOWED_CLIENT_ID = '32555940559.apps.googleusercontent.com';
+const ALLOWED_REDIRECT_URI = 'https://sdk.cloud.google.com/authcode.html';
+
+// Pinning the client is NOT enough on its own, because this harness auto-clicks
+// consent. A compromised remote can reuse gcloud's own (public) client_id with
+// its own PKCE verifier and simply ASK FOR MORE -- add Gmail, Drive or directory
+// scopes and the consent screen we click through grants them for your identity.
+// So the scope set is an allowlist too: exactly what gcloud requests, nothing
+// added. Captured 2026-09-18 from gcloud 537.0.0.
+const ALLOWED_SCOPES = new Set([
+  'openid',
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/cloud-platform',
+  'https://www.googleapis.com/auth/appengine.admin',
+  'https://www.googleapis.com/auth/sqlservice.login',
+  'https://www.googleapis.com/auth/compute',
+  'https://www.googleapis.com/auth/accounts.reauth',
+]);
 
 const validateAuthUrl = (raw) => {
   let u;
@@ -29,8 +46,25 @@ const validateAuthUrl = (raw) => {
   if (u.protocol !== 'https:') return `refusing non-https scheme ${u.protocol}`;
   if (u.host !== ALLOWED_AUTH_HOST) return `refusing unexpected host ${u.host}`;
   if (u.pathname !== ALLOWED_AUTH_PATH) return `refusing unexpected path ${u.pathname}`;
+
+  // A repeated parameter lets a caller show us one value and the server another,
+  // depending on whose precedence rule wins. Rather than depend on Google's
+  // (undocumented, unverified here), refuse any duplicate of a pinned key.
+  for (const k of ['client_id', 'redirect_uri', 'response_type', 'scope', 'code_challenge_method']) {
+    if (u.searchParams.getAll(k).length > 1) return `refusing duplicated ${k} parameter`;
+  }
+
   const cid = u.searchParams.get('client_id');
   if (cid !== ALLOWED_CLIENT_ID) return `refusing unexpected client_id ${cid}`;
+  const redir = u.searchParams.get('redirect_uri');
+  if (redir !== ALLOWED_REDIRECT_URI) return `refusing unexpected redirect_uri ${redir}`;
+  if (u.searchParams.get('response_type') !== 'code') return 'refusing non-code response_type';
+  if (u.searchParams.get('code_challenge_method') !== 'S256') return 'refusing non-S256 PKCE method';
+
+  const scopes = (u.searchParams.get('scope') || '').split(/\s+/).filter(Boolean);
+  if (scopes.length === 0) return 'refusing URL with no scopes';
+  const extra = scopes.filter((s) => !ALLOWED_SCOPES.has(s));
+  if (extra.length) return `refusing escalated scope(s): ${extra.join(', ')}`;
   return null;
 };
 

@@ -195,11 +195,31 @@ lib.mkIf isDarwin {
     (pkgs.writeShellApplication {
       name = "gcloud-reauth-refresh";
       runtimeInputs = [ pkgs.openssh pkgs.curl pkgs.coreutils pkgs.python3 pkgs.nodejs ];
+      # bashOptions WITHOUT errexit, deliberately. writeShellApplication defaults
+      # to `set -euo pipefail`, and both scripts are built on non-zero exits NOT
+      # aborting: every failure is meant to reach the logging/notify path at the
+      # bottom. Under errexit a failed ssh, an empty grep, or a node exit of 3
+      # kills the shell first, so the run ends with NO jsonl row and NO
+      # notification -- which is precisely the silent-failure class this whole
+      # change exists to remove, reintroduced by the packaging rather than the
+      # code. Keep nounset and pipefail; they are wanted.
+      bashOptions = [ "nounset" "pipefail" ];
+
       text = builtins.readFile "${assetsPath}/gcloud-reauth/refresh.sh";
     })
     (pkgs.writeShellApplication {
       name = "gcloud-reauth-idp-keepalive";
       runtimeInputs = [ pkgs.curl pkgs.coreutils pkgs.python3 pkgs.nodejs ];
+      # bashOptions WITHOUT errexit, deliberately. writeShellApplication defaults
+      # to `set -euo pipefail`, and both scripts are built on non-zero exits NOT
+      # aborting: every failure is meant to reach the logging/notify path at the
+      # bottom. Under errexit a failed ssh, an empty grep, or a node exit of 3
+      # kills the shell first, so the run ends with NO jsonl row and NO
+      # notification -- which is precisely the silent-failure class this whole
+      # change exists to remove, reintroduced by the packaging rather than the
+      # code. Keep nounset and pipefail; they are wanted.
+      bashOptions = [ "nounset" "pipefail" ];
+
       text = builtins.readFile "${assetsPath}/gcloud-reauth/keepalive.sh";
     })
 
@@ -272,7 +292,12 @@ lib.mkIf isDarwin {
             # A missing item is a broken refresher, not a quiet no-op.
             REAUTH_REMOTE="$(/usr/bin/security find-generic-password -s gcloud-reauth-remote -w 2>/dev/null)" || {
               echo "gcloud-reauth-refresh: Keychain item gcloud-reauth-remote missing" >&2; exit 1; }
-            export REAUTH_REMOTE
+            # e2e.mjs needs this to RECOGNISE the IdP: without it the host regex
+            # is a never-match, its sign-in-form detection degrades to a URL
+            # heuristic, and the stale-tab cleanup silently stops working.
+            IDP_ORIGIN="$(/usr/bin/security find-generic-password -s idp-origin -w 2>/dev/null)" || {
+              echo "gcloud-reauth-refresh: Keychain item idp-origin missing" >&2; exit 1; }
+            export REAUTH_REMOTE IDP_ORIGIN
             export REAUTH_NODE="${pkgs.nodejs}/bin/node"
             exec "${config.home.profileDirectory}/bin/gcloud-reauth-refresh"
           ''

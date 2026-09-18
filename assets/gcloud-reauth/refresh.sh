@@ -28,6 +28,11 @@
 
 set -uo pipefail
 
+# Writing the code to fd 3 after the remote session has died would otherwise
+# raise SIGPIPE and kill this script mid-flight -- silently, before it could log
+# or notify. Ignore it so the write merely fails and we handle it below.
+trap '' PIPE
+
 REMOTE="${REAUTH_REMOTE:?set REAUTH_REMOTE to the remote ssh host alias}"
 CDP_URL="${REAUTH_CDP_URL:-http://127.0.0.1:9223}"
 LIB="${REAUTH_HARNESS_DIR:-$HOME/.local/lib/gcloud-reauth}"
@@ -37,6 +42,21 @@ LOG="$STATE/refresh.jsonl"
 WORK="$STATE/run"
 
 mkdir -p "$STATE" "$WORK"
+
+# The two agents' intervals (8h and 90m) share a period of exactly 24h, so once
+# a day they fire in the same second. The refresh closes IdP tabs as it starts,
+# which would make a concurrent keepalive probe report a session that is
+# actually fine as missing -- a false "go and sign in" notification. mkdir is
+# the atomic primitive here; macOS has no flock(1).
+LOCK="$STATE/reauth.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  # Stale lock from a killed run should not wedge the refresher forever.
+  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+    rmdir "$LOCK" 2>/dev/null
+    mkdir "$LOCK" 2>/dev/null || true
+  fi
+fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -133,8 +153,10 @@ NODE_RC=$?
 
 # --- 4. hand the code back to the SAME still-open remote session ------------
 if [ -s authcode.txt ]; then
-  cat authcode.txt >&3
-  echo "" >&3
+  if ! { cat authcode.txt >&3 && echo "" >&3; }; then
+    abort_remote
+    finish "code_delivery_failed" "Obtained a code but the remote session was gone before it could be delivered" yes
+  fi
   exec 3>&-
   wait "$GPID" 2>/dev/null
 else

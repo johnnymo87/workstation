@@ -60,6 +60,15 @@ PY
   fi
 }
 
+# Defer to a refresh in progress: it drives the same browser and closes IdP
+# tabs, and it pokes the IdP session itself, so skipping is correct rather than
+# merely safe.
+LOCK="$STATE/reauth.lock"
+if [ -d "$LOCK" ]; then
+  record "skipped" "A refresh is running; it keeps the session warm on its own"
+  exit 0
+fi
+
 if ! timeout 10 curl -sf "$CDP_URL/json/version" -o /dev/null 2>/dev/null; then
   # The old version treated this as success. It is not: the isolated browser is
   # supposed to be running, and while it is not, the IdP session is silently
@@ -88,9 +97,17 @@ try:
 except Exception:
     print("unparseable|")
     raise SystemExit
+# An exception inside the probe leaves has_session null with an error set.
+# Mapping that to "no_session" would tell the human to go and sign in when the
+# real problem was a navigation timeout -- a wrong instruction is worse than a
+# vague one, because it burns the trust the notification depends on.
+err = row.get("error")
 has = row.get("has_session")
 secs = row.get("seconds_remaining")
-print(f"{'ok' if has else 'no_session'}|{secs if secs is not None else ''}")
+if err or has is None:
+    print(f"probe_error|{err or 'probe returned no verdict'}")
+else:
+    print(f"{'ok' if has else 'no_session'}|{secs if secs is not None else ''}")
 PY
 )"
 state="${verdict%%|*}"
@@ -102,6 +119,10 @@ case "$state" in
     ;;
   no_session)
     record "no_session" "No IdP session in the isolated browser. Sign in there; the reauth cannot run without it." yes
+    exit 1
+    ;;
+  probe_error)
+    record "probe_error" "Could not read the IdP session: $secs" yes
     exit 1
     ;;
   *)
