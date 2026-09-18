@@ -123,6 +123,17 @@ lib.mkIf isDarwin {
 
     # gclpr clipboard bridge trusted keys (macOS server)
     ".gclpr/trusted".text = "122dcc14fa37068a2d604a736279c32f9aa1a38958a76f292f61812421544670\n";
+
+    # gcloud reauth harness. These land on disk rather than being run from the
+    # nix store because node resolves `puppeteer-core` by walking up from the
+    # SCRIPT's directory, and the dependency is npm-installed next to them (see
+    # the activation script below). A store path has no such sibling.
+    ".local/lib/gcloud-reauth/e2e.mjs".source =
+      "${assetsPath}/gcloud-reauth/e2e.mjs";
+    ".local/lib/gcloud-reauth/idp-session-probe.mjs".source =
+      "${assetsPath}/gcloud-reauth/idp-session-probe.mjs";
+    ".local/lib/gcloud-reauth/package.json".source =
+      "${assetsPath}/gcloud-reauth/package.json";
   };
 
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
@@ -177,6 +188,21 @@ lib.mkIf isDarwin {
         "$user@$ip" "$@"
     '')
 
+    # Refresh the remote host's gcloud credential from here, and hold the IdP
+    # session warm. Packages rather than inline agent scripts so both are
+    # runnable by hand for verification -- which matters for the human-required
+    # path, whose whole job is to behave correctly on a day you cannot schedule.
+    (pkgs.writeShellApplication {
+      name = "gcloud-reauth-refresh";
+      runtimeInputs = [ pkgs.openssh pkgs.curl pkgs.coreutils pkgs.python3 pkgs.nodejs ];
+      text = builtins.readFile "${assetsPath}/gcloud-reauth/refresh.sh";
+    })
+    (pkgs.writeShellApplication {
+      name = "gcloud-reauth-idp-keepalive";
+      runtimeInputs = [ pkgs.curl pkgs.coreutils pkgs.python3 pkgs.nodejs ];
+      text = builtins.readFile "${assetsPath}/gcloud-reauth/keepalive.sh";
+    })
+
     pkgs.google-cloud-sdk
     pkgs.cloudflared
     # Hetzner Cloud CLI: used by scripts/update-ssh-config.sh to resolve the
@@ -223,6 +249,67 @@ lib.mkIf isDarwin {
 
   # Cloudflare Tunnel launchd agent with Keychain-sourced token
   launchd.agents = {
+    # Refresh the remote host's gcloud credential PROACTIVELY, every 8 hours.
+    #
+    # Not reactive. The previous design polled every 15 min and refreshed only
+    # after detecting failure, so the credential was always dead for some window
+    # first -- and when the detection itself failed silently, that window was
+    # ~14 hours. The reauth interval is ~17h, so refreshing on a timer whether
+    # or not it has expired removes the detection problem rather than improving
+    # it: no failure detector, no rate limiter, nothing to get subtly wrong.
+    #
+    # 8h rather than 12 buys two attempts inside one expiry window. Best-effort
+    # by design: a sleeping Mac simply misses its slot (launchd runs one missed
+    # StartInterval on wake), and the next slot picks it up.
+    gcloud-reauth-refresh = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh"
+          "-c"
+          ''
+            # Org-identifying values stay in Keychain: this repo is public.
+            # A missing item is a broken refresher, not a quiet no-op.
+            REAUTH_REMOTE="$(/usr/bin/security find-generic-password -s gcloud-reauth-remote -w 2>/dev/null)" || {
+              echo "gcloud-reauth-refresh: Keychain item gcloud-reauth-remote missing" >&2; exit 1; }
+            export REAUTH_REMOTE
+            export REAUTH_NODE="${pkgs.nodejs}/bin/node"
+            exec "${config.home.profileDirectory}/bin/gcloud-reauth-refresh"
+          ''
+        ];
+        RunAtLoad = false;  # do not fire a browser flow during a rebuild
+        StartInterval = 28800;  # 8h
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-refresh.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-refresh.err.log";
+      };
+    };
+
+    # Hold the IdP session warm. Separate from the refresher above because the
+    # IdP's timeout is IDLE-based and ~2h, which no 8-hourly job can satisfy.
+    # There must be exactly one thing poking this session; this is it.
+    gcloud-reauth-idp-keepalive = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh"
+          "-c"
+          ''
+            IDP_ORIGIN="$(/usr/bin/security find-generic-password -s idp-origin -w 2>/dev/null)" || {
+              echo "gcloud-reauth-idp-keepalive: Keychain item idp-origin missing" >&2; exit 1; }
+            IDP_SESSION_PATH="$(/usr/bin/security find-generic-password -s idp-session-path -w 2>/dev/null)" || {
+              echo "gcloud-reauth-idp-keepalive: Keychain item idp-session-path missing" >&2; exit 1; }
+            export IDP_ORIGIN IDP_SESSION_PATH
+            export REAUTH_NODE="${pkgs.nodejs}/bin/node"
+            exec "${config.home.profileDirectory}/bin/gcloud-reauth-idp-keepalive"
+          ''
+        ];
+        RunAtLoad = false;
+        StartInterval = 5400;  # 90 min, comfortably inside the ~2h idle timeout
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-keepalive.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-keepalive.err.log";
+      };
+    };
+
     cloudflared-ccr = {
       enable = true;
       config = {
@@ -878,6 +965,24 @@ lib.mkIf isDarwin {
 
     mkdir -p "${config.home.homeDirectory}/Code"
     ${lines}
+
+    # gcloud reauth harness dependencies. puppeteer-core must sit NEXT TO the
+    # .mjs files (node resolves from the script's directory), so it cannot be a
+    # nix store path and is npm-installed into the same dir home.file populates.
+    # Idempotent: npm no-ops when already satisfied.
+    if [ -f "${config.home.homeDirectory}/.local/lib/gcloud-reauth/package.json" ]; then
+      (cd "${config.home.homeDirectory}/.local/lib/gcloud-reauth" \
+        && PATH="${pkgs.nodejs}/bin:$PATH" ${pkgs.nodejs}/bin/npm install --no-audit --no-fund --silent) \
+        || echo "⚠ gcloud-reauth: npm install failed; the reauth harness will not run"
+    fi
+
+    # Keychain item naming the remote host the reauth drives (public repo).
+    if ! /usr/bin/security find-generic-password -s gcloud-reauth-remote -w >/dev/null 2>&1; then
+      echo ""
+      echo "⚠ Keychain item gcloud-reauth-remote not set. Run:"
+      echo "    security add-generic-password -a \"$USER\" -s gcloud-reauth-remote -w <ssh-host-alias>"
+      echo ""
+    fi
 
     # Post-clone: install pigeon dependencies
     if [ -d "${config.home.homeDirectory}/Code/pigeon" ] && [ ! -d "${config.home.homeDirectory}/Code/pigeon/node_modules" ]; then
