@@ -305,6 +305,27 @@ def enumerate_buckets(since_ms: int, until_ms: int, size: str, through_ms: int) 
 
 DEFAULT_OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 
+# Providers whose spend cfp actually meters. BOTH of the two cfp oracles --
+# the coverage/drift footer and the $195 cap-hit headline -- divide by, or
+# threshold against, a cfp figure that covers Claude and nothing else. A dollar
+# from any other provider in those numerators is comparing two different
+# universes: it inflates coverage and manufactures a drift warning that reads
+# as a pricing bug in the chart.
+#
+# This was unobservable until 2026-09-17, because every non-Claude model
+# recorded $0 (opencode-config.nix zeroed the codex-lb catalog). Pricing those
+# models made the missing filter reachable, not newly wrong -- the design has
+# said "Σ stored cost for Claude providers" since
+# docs/plans/2026-09-08-oc-tags-design.md:96; only the code disagreed.
+#
+# `anthropic` is listed as well as the Vertex flavour so that a host which ever
+# puts cfp in front of first-party Claude counts it. No host does today: cfp
+# fronts `google-vertex-anthropic` only, and devbox has no cfp at all (it uses
+# teamclaude), so on devbox cfp_spend_by_day returns empty and the two oracles
+# never render in the first place. Listing it costs nothing and removes a
+# silent-undercount trap if that changes.
+CLAUDE_PROVIDERS = frozenset({"anthropic", "google-vertex-anthropic"})
+
 
 @dataclass
 class Window:
@@ -330,6 +351,11 @@ class Aggregate:
     root_meta: dict = field(default_factory=dict)     # root_id -> {title, directory, tag, source}
     window: Window | None = None
     cap_hits: dict[str, str] = field(default_factory=dict)  # day -> "HH:MM"
+    # Per-ET-day list price for CLAUDE providers only. Separate from `series`
+    # because the two answer different questions: `series` is the chart (every
+    # provider), while this is the only thing comparable to cfp's
+    # notionalVertexCost, which covers Claude alone. See CLAUDE_PROVIDERS.
+    claude_day: dict[str, float] = field(default_factory=dict)
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -366,6 +392,7 @@ def aggregate(
                    time_created,
                    json_extract(data, '$.cost'),
                    json_extract(data, '$.modelID'),
+                   json_extract(data, '$.providerID'),
                    json_extract(data, '$.tokens.total'),
                    json_extract(data, '$.tokens.input'),
                    json_extract(data, '$.tokens.output'),
@@ -390,13 +417,18 @@ def aggregate(
     day_accum: dict[str, float] = collections.defaultdict(float)
     newest_row_ms = 0
 
-    for sid, ts, cost, model, total_tok, tin, tout, cread, cwrite in rows:
+    for sid, ts, cost, model, provider, total_tok, tin, tout, cread, cwrite in rows:
         cost = cost or 0.0
         dt = datetime.datetime.fromtimestamp(ts / 1000, ET)
         day_str = dt.strftime("%Y-%m-%d")
-        day_accum[day_str] += cost
-        if day_accum[day_str] >= 195.0 and day_str not in agg.cap_hits:
-            agg.cap_hits[day_str] = dt.strftime("%H:%M")
+        # Claude-only running total: the cap is a cfp BILLING cap, so dollars
+        # it cannot bill must not advance the estimated hit time, and the
+        # coverage/drift oracles need the same denominator-matching subset.
+        if provider in CLAUDE_PROVIDERS:
+            day_accum[day_str] += cost
+            agg.claude_day[day_str] = agg.claude_day.get(day_str, 0.0) + cost
+            if day_accum[day_str] >= 195.0 and day_str not in agg.cap_hits:
+                agg.cap_hits[day_str] = dt.strftime("%H:%M")
         root = root_of(sid, parents)
         if root not in tag_cache:
             tag, source = effective_tag(
@@ -997,7 +1029,10 @@ def render_svg(
     # Footer: coverage vs cfp notional, unpriced summary, and drift warning
     total_list = sum(agg.totals.values())
     matching_days = [b for b in agg.buckets if b in notional]
-    matching_list = sum(agg.series[t].get(d, 0.0) for t in agg.totals for d in matching_days)
+    # Claude only on BOTH sides -- notional covers no other provider, so an
+    # all-tag sum here would divide astra/gemini dollars by a Claude
+    # denominator. See CLAUDE_PROVIDERS.
+    matching_list = sum(agg.claude_day.get(d, 0.0) for d in matching_days)
     total_notional = sum(notional[b] for b in matching_days)
 
     if total_notional > 0:
@@ -1018,7 +1053,7 @@ def render_svg(
     for d in matching_days:
         n_val = notional[d]
         if n_val > 0:
-            d_list = sum(agg.series[t].get(d, 0.0) for t in agg.totals)
+            d_list = agg.claude_day.get(d, 0.0)
             ratio = d_list / n_val
             if ratio < 0.90 or ratio > 1.05:
                 drift_alerts.append(f"{d} ({ratio:.2f})")

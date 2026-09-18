@@ -924,8 +924,8 @@
 
         # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 172 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 172 tests'. If you added or removed" >&2
+        grep -q '^Ran 177 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 177 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

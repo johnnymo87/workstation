@@ -498,7 +498,7 @@ class TestBucketing(unittest.TestCase):
         self.assertEqual(oc_tags.choose_bucket(30), "day")
 
 
-def _fixture_db(path):
+def _fixture_db(path, cap_row: bool = False):
     conn = sqlite3.connect(path)
     conn.executescript(
         """
@@ -517,6 +517,9 @@ def _fixture_db(path):
         # dangling parent: parent row does not exist
         ("orphan", "deleted_parent", "/home/dev/projects/salmon", "orphan"),
         ("tmp_s", None, "/tmp/yt0p-verify", "throwaway"),
+        # non-Claude work, kept in its own session so provider-filter tests do
+        # not perturb the Claude-only expectations above
+        ("astra_s", None, "/home/dev/projects/astra", "astra subagent"),
     ]
     for sid, par, d, title in sessions:
         conn.execute(
@@ -555,6 +558,15 @@ def _fixture_db(path):
     # fallback to input+output+cache.read+cache.write = 200; model defaults to "unknown"
     msg("m10", "root_a", t, 0.0, model=None,
         tokens={"input": 50, "output": 50, "cache": {"read": 90, "write": 10}})
+    # Non-Claude row, priced. Belongs in the chart's tag totals but NOT in the
+    # cfp comparison: notionalVertexCost covers Claude alone, and this dollar
+    # amount alone would clear the $195 cap threshold.
+    msg("m11", "astra_s", t, 250.0, model="gpt-6-astra", provider="openai")
+    if cap_row:
+        # One Claude row large enough to cross the $195 cap on its own, an hour
+        # later, so the cap-hit TIME is unambiguous. Opt-in: every other test
+        # asserts against a fixture that never reaches the threshold.
+        msg("m12", "root_a", t + 3600 * 1000, 300.0)
     conn.commit()
     conn.close()
 
@@ -590,6 +602,38 @@ class TestAggregate(unittest.TestCase):
     def test_orphan_attributed_not_dropped(self):
         rows = self._agg()
         self.assertAlmostEqual(rows.totals["auto:salmon"], 0.25)
+
+    def test_claude_day_excludes_non_claude_providers(self):
+        """claude_day feeds coverage/drift, whose denominator is Claude-only cfp notional."""
+        rows = self._agg()
+        # Fixture Claude rows on 2026-09-08: 1.50 + 0.50 + 2.00 + 0.25 + 0.10
+        # (+ three $0 rows). The $99 user row and the $250 openai row are out.
+        self.assertAlmostEqual(rows.claude_day["2026-09-08"], 4.35)
+
+    def test_tag_totals_still_include_non_claude_providers(self):
+        """The chart itself is all-provider -- only the cfp comparison is Claude-only."""
+        rows = self._agg()
+        self.assertAlmostEqual(rows.totals["auto:astra"], 250.00)
+
+    def test_cap_hit_not_triggered_by_non_claude_dollars(self):
+        """The $195 cap is a cfp/Claude billing cap; astra list price cannot hit it."""
+        rows = self._agg()
+        self.assertNotIn("2026-09-08", rows.cap_hits)
+
+    def test_cap_hit_recorded_when_claude_dollars_cross_threshold(self):
+        """Paired with the negative above: an accumulator that never fires would pass that one alone."""
+        db = str(Path(self.tmp.name) / "cap.db")
+        _fixture_db(db, cap_row=True)
+        rows = oc_tags.aggregate(
+            db,
+            since_ms=1788874200000 - 86400 * 1000,
+            until_ms=1788874200000 + 86400 * 1000,
+            bucket="day",
+            session_tags={},
+            dir_tags={},
+        )
+        # $4.35 of Claude at 09:30 ET, then $300 at 10:30 ET crosses $195.
+        self.assertEqual(rows.cap_hits.get("2026-09-08"), "10:30")
 
     def test_manual_tag_applied(self):
         rows = self._agg(session_tags={"root_a": "billing"})
@@ -1234,6 +1278,11 @@ class TestRenderSvg(unittest.TestCase):
         }
         agg.totals = {"tag_a": 30.0, "tag_b": 20.0}
         agg.sources = {"tag_a": "manual", "tag_b": "auto"}
+        # Coverage and drift compare against cfp's notional, which is Claude
+        # only -- so they read claude_day, NOT the all-provider series. Here
+        # every dollar happens to be Claude, which is what makes the existing
+        # 100%-coverage expectations below hold.
+        agg.claude_day = {"2026-09-07": 15.0, "2026-09-08": 35.0}
         return agg
 
     def _hover_groups(self, svg):
@@ -1321,6 +1370,28 @@ class TestRenderSvg(unittest.TestCase):
         )
         svg = oc_tags.render_svg(agg, spend)
         self.assertIn("Drift warning", svg)
+
+    def test_render_svg_drift_ignores_non_claude_dollars(self):
+        """A non-Claude model must not move the ratio against a Claude-only denominator.
+
+        cfp's notionalVertexCost covers Claude alone. Counting openai/codex-lb
+        list price in the numerator manufactures drift that reads as a pricing
+        bug. Before codex-lb models were priced this was unobservable, because
+        every non-Claude row recorded $0.
+        """
+        agg = self._sample_agg()
+        # $500 of astra on 2026-09-07: in the all-provider series, absent from
+        # claude_day. Ratio must stay 15/15 = 1.00, not 515/15.
+        agg.series["astra_work"] = {"2026-09-07": 500.0}
+        agg.totals["astra_work"] = 500.0
+        agg.sources["astra_work"] = "manual"
+        spend = oc_tags.CfpSpend(
+            metered={"2026-09-07": 15.0},
+            notional={"2026-09-07": 15.0},
+        )
+        svg = oc_tags.render_svg(agg, spend)
+        self.assertNotIn("Drift warning", svg)
+        self.assertIn("Coverage: 100.0% vs CFP notional ($15.00 / $15.00", svg)
 
     def test_render_svg_coverage_ratio_excludes_unmatched_buckets_and_discloses_count(self):
         agg = self._sample_agg()
