@@ -124,16 +124,6 @@ lib.mkIf isDarwin {
     # gclpr clipboard bridge trusted keys (macOS server)
     ".gclpr/trusted".text = "122dcc14fa37068a2d604a736279c32f9aa1a38958a76f292f61812421544670\n";
 
-    # gcloud reauth harness. These land on disk rather than being run from the
-    # nix store because node resolves `puppeteer-core` by walking up from the
-    # SCRIPT's directory, and the dependency is npm-installed next to them (see
-    # the activation script below). A store path has no such sibling.
-    ".local/lib/gcloud-reauth/e2e.mjs".source =
-      "${assetsPath}/gcloud-reauth/e2e.mjs";
-    ".local/lib/gcloud-reauth/idp-session-probe.mjs".source =
-      "${assetsPath}/gcloud-reauth/idp-session-probe.mjs";
-    ".local/lib/gcloud-reauth/package.json".source =
-      "${assetsPath}/gcloud-reauth/package.json";
   };
 
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
@@ -991,15 +981,26 @@ lib.mkIf isDarwin {
     mkdir -p "${config.home.homeDirectory}/Code"
     ${lines}
 
-    # gcloud reauth harness dependencies. puppeteer-core must sit NEXT TO the
-    # .mjs files (node resolves from the script's directory), so it cannot be a
-    # nix store path and is npm-installed into the same dir home.file populates.
-    # Idempotent: npm no-ops when already satisfied.
-    if [ -f "${config.home.homeDirectory}/.local/lib/gcloud-reauth/package.json" ]; then
-      (cd "${config.home.homeDirectory}/.local/lib/gcloud-reauth" \
-        && PATH="${pkgs.nodejs}/bin:$PATH" ${pkgs.nodejs}/bin/npm install --no-audit --no-fund --silent) \
-        || echo "⚠ gcloud-reauth: npm install failed; the reauth harness will not run"
-    fi
+    # gcloud reauth harness: COPIED, deliberately not home.file-symlinked.
+    #
+    # node resolves a bare import like `puppeteer-core` by walking up from the
+    # file's REALPATH, so a symlink into the nix store sends it hunting for
+    # node_modules under /nix/store and it never finds the one npm put next to
+    # the link. Tried it that way first: the probe died with ERR_MODULE_NOT_FOUND
+    # on the first run after switching. Real files keep resolution local.
+    #
+    # `cp` unconditionally so an edit to the asset actually lands, and npm
+    # install afterwards (idempotent; no-ops when already satisfied).
+    reauthLib="${config.home.homeDirectory}/.local/lib/gcloud-reauth"
+    mkdir -p "$reauthLib"
+    cp -f "${assetsPath}/gcloud-reauth/e2e.mjs" \
+          "${assetsPath}/gcloud-reauth/idp-session-probe.mjs" \
+          "${assetsPath}/gcloud-reauth/package.json" \
+          "$reauthLib/"
+    chmod u+w "$reauthLib"/*.mjs "$reauthLib/package.json"
+    (cd "$reauthLib" \
+      && PATH="${pkgs.nodejs}/bin:$PATH" ${pkgs.nodejs}/bin/npm install --no-audit --no-fund --silent) \
+      || echo "⚠ gcloud-reauth: npm install failed; the reauth harness will not run"
 
     # Keychain item naming the remote host the reauth drives (public repo).
     if ! /usr/bin/security find-generic-password -s gcloud-reauth-remote -w >/dev/null 2>&1; then
