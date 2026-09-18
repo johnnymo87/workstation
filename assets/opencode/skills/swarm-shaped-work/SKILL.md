@@ -82,8 +82,16 @@ by construction. Give each worker a distinct slug (its role/ticket) to avoid
 collisions. The worktree is reclaimed automatically once its branch merges (the
 nightly `reset-workspace` runs `work --prune-merged`).
 
+**Pass `--no-attach` for workers.** Each launched session otherwise opens an
+`opencode attach` TUI costing ~240 MB, in a tmux scope with no memory cap and
+no reaper. Nobody watches a swarm worker's pane. A 34-session spin-up on
+2026-09-15 created ~7–8 GB of TUIs in five minutes and drove cloudbox 11.4 GB
+into swap; the host stopped swapping only because it hit a 24 GiB ceiling.
+Workers still report normally without one — notification comes from the plugin
+inside `opencode serve`, not from the TUI.
+
 ```bash
-opencode-launch --worktree be-proj-1234 <worker-dir> "$(cat <<'PROMPT'
+opencode-launch --no-attach --worktree be-proj-1234 <worker-dir> "$(cat <<'PROMPT'
 You are the BE worker for PROJ-1234. Your slice: implement the GraphQL
 endpoints for X. You are in a fresh worktree off trunk — commit here and open
 a PR from this branch when done.

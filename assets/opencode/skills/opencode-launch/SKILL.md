@@ -305,9 +305,19 @@ For this to work, **you must run nvim via `nvims` (not `nvim`) inside tmux.**
 `nvims` is a tiny wrapper that injects `--listen /tmp/nvim-${TMUX_PANE#%}.sock`
 so external tools can find your nvim. The socket goes away when nvim exits.
 
-Cloudbox and other headless hosts skip auto-attach silently — `opencode-launch`
-checks `command -v oc-auto-attach` and no-ops if missing. Pigeon's `/launch`
-handler does the same.
+`opencode-launch` checks `command -v oc-auto-attach` and no-ops if it is
+missing. Pigeon's `/launch` handler does the same.
+
+**This does NOT make auto-attach free on cloudbox.** An earlier version of this
+page said cloudbox "skips auto-attach silently"; that was wrong. `oc-auto-attach`
+is installed there, and on 2026-09-18 cloudbox had **108 live `opencode attach`
+processes**, each ~240 MB, in tmux scopes with no memory cap and no reaper.
+
+**If nothing will read the TUI, pass `--no-attach`** (or set
+`OPENCODE_LAUNCH_NO_ATTACH=1`). A 34-session spin-up on 2026-09-15 created
+~7–8 GB of TUIs in five minutes and pushed the host 11.4 GB into swap. Sessions
+still notify on completion without a TUI — the pigeon plugin runs inside
+`opencode serve`, not in the attach process.
 
 If something goes wrong and you don't see a tab open, check
 `/tmp/oc-auto-attach.log` for the per-invocation trace.

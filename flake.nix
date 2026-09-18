@@ -347,6 +347,43 @@
         touch $out
       '';
 
+      # ---- pkgs/opencode-launch (bead workstation-o5s1.14) -----------------
+      #
+      # 111 assertions that ran NOWHERE. The file carried an
+      # unwired-test(workstation-3g4j) marker, but that bead is about
+      # reset-workspace/test.sh, whose two SIGPIPE assertions are genuinely
+      # sandbox-hostile. This suite has no such obstacle and was simply never
+      # wired; removing the marker and adding the check took one attempt.
+      #
+      # It matters now because the --no-attach gate added for
+      # workstation-o5s1.14 is asserted here. The helper assertions exercise a
+      # MIRROR of the production function, so on their own they could pass
+      # while the shipped launcher still attached unconditionally; the
+      # source-grep guards in the same file pin the real call site. Both halves
+      # are worthless unexecuted.
+      opencode-launch-tests = devboxPkgs.runCommand "opencode-launch-tests" {
+        nativeBuildInputs = with devboxPkgs; [ bash coreutils gnugrep gnused gawk jq ];
+      } ''
+        cd ${self}
+        bash pkgs/opencode-launch/test.sh 2>&1 | tee "$TMPDIR/ol.txt"
+        grep -q '^all opencode-launch helper tests passed' "$TMPDIR/ol.txt" || {
+          echo "GATE FAILURE: opencode-launch suite did not reach its final line." >&2
+          exit 1
+        }
+        # COUNT IS PINNED, following checks.oc-pool-attach. The banner alone is
+        # a vacuous-green path here: test.sh has two SKIP fall-throughs that
+        # still reach it -- jq absent, and default.nix not found beside the
+        # test. The second skips EVERY source-grep guard, which is precisely
+        # the set that pins the production call site.
+        got=$(grep -c '^PASS' "$TMPDIR/ol.txt")
+        [ "$got" = "111" ] || {
+          echo "GATE FAILURE: expected 111 PASS lines, got $got." >&2
+          echo "If you added assertions, bump this deliberately." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # ---- pkgs/pressure-sampler (bead workstation-o5s1.11) ----------------
       #
       # The sampler had NO tests and ran in no check. It hardcoded the serve
