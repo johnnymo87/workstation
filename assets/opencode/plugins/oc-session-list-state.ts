@@ -192,14 +192,40 @@ export function buildUnreadMap(
     // NOTE: kind <> 'mirror' duplicates pigeon's UNCOUNTED_KINDS
     // (packages/daemon/src/storage/session-events-repo.ts:14) in another
     // language/repo with nothing tying them together.
+    //
+    // Pick the newest anchor AT OR BEFORE the oldest unread event -- not the
+    // oldest unread event that happens to carry one. Those coincide only while
+    // every event in a session shares one anchor, which is true today and stops
+    // being true as soon as anchors become per-event.
+    //
+    // The direction is the whole point, and it is not symmetric. An anchor
+    // BEFORE the unread content costs the reader some re-reading. An anchor
+    // AFTER it drops them past things they have never seen, and the jump itself
+    // implies everything above was read -- so the miss is invisible. pigeon
+    // encodes the same asymmetry at
+    // packages/daemon/src/storage/repos.ts:197-204. Measured on the live
+    // ledger, the old form would have dropped one session past 14 of its 15
+    // unread events.
+    //
+    // The inner query excludes mirror rows to match the unread count above it;
+    // the outer one does NOT, because a mirror row is an excellent turn
+    // boundary (it carries its own message id) even though it is never itself
+    // counted as unread.
+    //
+    // With nothing unread the inner MIN() is NULL, `id <= NULL` is NULL, and no
+    // row qualifies -- which is the wanted answer, not an accident worth
+    // "fixing" with COALESCE.
     const anchorSubquery = hasAnchor
-      ? `(SELECT e2.anchor_msg_id
-            FROM session_events e2
-           WHERE e2.session_id = e.session_id
-             AND e2.id > COALESCE(r.last_read_id, 0)
-             AND e2.kind <> 'mirror'
-             AND e2.anchor_msg_id IS NOT NULL
-           ORDER BY e2.id ASC
+      ? `(SELECT e3.anchor_msg_id
+            FROM session_events e3
+           WHERE e3.session_id = e.session_id
+             AND e3.anchor_msg_id IS NOT NULL
+             AND e3.id <= (SELECT MIN(e2.id)
+                             FROM session_events e2
+                            WHERE e2.session_id = e.session_id
+                              AND e2.id > COALESCE(r.last_read_id, 0)
+                              AND e2.kind <> 'mirror')
+           ORDER BY e3.id DESC
            LIMIT 1) AS anchor_msg_id`
       : `NULL AS anchor_msg_id`;
 

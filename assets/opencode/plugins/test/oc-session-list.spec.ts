@@ -1866,7 +1866,18 @@ describe("buildUnreadMap & unread counts (Task 9)", () => {
     }
   });
 
-  it("extracts oldest uncleared non-mirror non-null anchor_msg_id", () => {
+  // The anchor must land AT OR BEFORE the oldest unread event, never after it.
+  // Landing after it means the reader is dropped PAST content they have not
+  // seen, with the jump itself implying everything above was read. Landing
+  // early only costs them re-reading. pigeon encodes the same asymmetry at
+  // packages/daemon/src/storage/repos.ts:197-204.
+  //
+  // This fixture is the bug that motivated the change (workstation-i0rz):
+  // event 3 is unread and unanchored, event 4 is unread and anchored. Taking
+  // the oldest ANCHORED unread event picks 4 and steps over 3. Measured on the
+  // live ledger, one session would have been dropped past 14 of its 15 unread
+  // events this way.
+  it("takes the newest anchor at or before the oldest unread event, not the oldest anchored unread event", () => {
     const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
     try {
       const p = join(dir, "routing.db");
@@ -1888,11 +1899,118 @@ describe("buildUnreadMap & unread counts (Task 9)", () => {
       const entry = unreadMap!.get("root_1");
       expect(entry).toBeDefined();
       expect(entry!.unread).toBe(3); // events 3, 4, 5 (2 is mirror, 1 is cleared)
-      expect(entry!.anchor_msg_id).toBe("msg_oldest_unread"); // event 4 is oldest uncleared non-mirror with non-null anchor
+      // Oldest unread is event 3. The newest anchor at or before it is event
+      // 2's -- a mirror row, which is EXCLUDED from the unread count but is a
+      // perfectly good turn boundary, and is the closest safe landing point.
+      expect(entry!.anchor_msg_id).toBe("msg_mirror");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // Guards the direction of the scan. Taking the OLDEST anchor at or before the
+  // oldest unread event would also never skip, so a "safe" implementation can
+  // pass the test above while dropping the reader needlessly far back -- here,
+  // at the very start of a long session instead of one turn back.
+  it("takes the NEWEST safe anchor, not merely a safe one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, 'msg_ancient'),
+          (2, 'root_1', 'stop', 200, 'msg_recent'),
+          (3, 'root_1', 'stop', 300, NULL);
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 2, 250);
+      `);
+      db.close();
+
+      const entry = buildUnreadMap(p, baseRows)!.get("root_1");
+      expect(entry!.unread).toBe(1); // only event 3
+      expect(entry!.anchor_msg_id).toBe("msg_recent"); // event 2, not event 1
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // When nothing at or before the oldest unread event carries an anchor, the
+  // honest answer is no anchor. The tempting fallback -- reach forward to a
+  // later anchor, which is what the old query effectively did -- is the skip
+  // this change exists to prevent. No jump leaves the reader at the bottom,
+  // which is the ordinary state; a wrong jump silently buries unread content.
+  it("returns null rather than reaching forward to an anchor after the oldest unread event", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, NULL),
+          (2, 'root_1', 'stop', 200, 'msg_later');
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 0, 50);
+      `);
+      db.close();
+
+      const entry = buildUnreadMap(p, baseRows)!.get("root_1");
+      expect(entry!.unread).toBe(2);
+      expect(entry!.anchor_msg_id).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A session with everything read has no oldest-unread event to anchor
+  // against. The subquery's inner MIN() is NULL there, and `id <= NULL` must
+  // not silently become `id <= 0` or match every row.
+  it("yields no anchor when there is nothing unread", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, 'msg_a'),
+          (2, 'root_1', 'stop', 200, 'msg_b');
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 2, 250);
+      `);
+      db.close();
+
+      const entry = buildUnreadMap(p, baseRows)!.get("root_1");
+      expect(entry!.unread).toBe(0);
+      expect(entry!.anchor_msg_id).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Unread counting excludes mirror rows; anchor selection does not. If a
+  // mirror row were the only unread thing, there is no unread to jump to.
+  it("ignores a trailing mirror row when choosing the oldest unread event", () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
+    try {
+      const p = join(dir, "routing.db");
+      const db = createTestRoutingDbWithAnchor(p);
+      db.exec(`
+        INSERT INTO session_events (id, session_id, kind, sent_at, anchor_msg_id) VALUES
+          (1, 'root_1', 'stop', 100, 'msg_a'),
+          (2, 'root_1', 'mirror', 200, 'msg_mirror_unread');
+        INSERT INTO session_reads (session_id, last_read_id, updated_at) VALUES
+          ('root_1', 1, 150);
+      `);
+      db.close();
+
+      const entry = buildUnreadMap(p, baseRows)!.get("root_1");
+      expect(entry!.unread).toBe(0); // the only uncleared row is a mirror
+      expect(entry!.anchor_msg_id).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 
   it("missing anchor_msg_id column degrades to anchor_msg_id: null with unread counts intact", () => {
     const dir = mkdtempSync(join(tmpdir(), "oc-unread-"));
