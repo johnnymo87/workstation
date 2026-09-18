@@ -56,6 +56,7 @@ M.ATTENTION = { error = true, blocked = true }
 --- @param opts table|nil Options:
 ---   facet?: "all"|"attached"|"detached" (default "all")
 ---   blocked_pierces?: boolean (default true)
+---   hide_automated?: boolean (default true) -- see the drop site below
 ---   is_live?: fun(hit): boolean  -- injection seam; defaults to discovery.is_live
 --- @return table[] Array of annotated row shallow copies
 --- @return integer Count of automated rows dropped from the fetched window
@@ -74,6 +75,21 @@ function M.build(rows, hits, opts)
     blocked_pierces = true
   end
 
+  -- OFF ONLY FOR AN EXPLICIT LOOKUP BY SESSION ID (workstation-iplu).
+  --
+  -- The no-automated rule keeps the BROWSING list human-scale. It has no claim
+  -- on a lookup by id: typing an id is a specific request for one session, and
+  -- dropping it would fail silently -- an empty picker is indistinguishable
+  -- from "no such session". 1345 of 7353 roots on this host are automated, and
+  -- an id handed over by an agent is disproportionately likely to be one.
+  --
+  -- Defaults to true, and only an explicit `false` turns it off, so every
+  -- existing caller is unaffected.
+  local hide_automated = opts.hide_automated
+  if hide_automated == nil then
+    hide_automated = true
+  end
+
   local out = {}
   local hidden = 0
 
@@ -88,7 +104,7 @@ function M.build(rows, hits, opts)
       --
       -- Only `automated == true` drops. A missing or false field keeps the row,
       -- so an unreadable session_origin shows everything rather than hiding it.
-      if row.automated == true then
+      if hide_automated and row.automated == true then
         hidden = hidden + 1
       else
         local hit = safe_hits[row.id]

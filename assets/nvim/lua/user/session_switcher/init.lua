@@ -158,14 +158,92 @@ function M.open(opts)
   -- 200), and scoping it here rather than to the CLI default leaves ad-hoc CLI
   -- use unchanged.
   local flow_opts = vim.tbl_extend("force", opts, {
-    fetch_opts = vim.tbl_extend("force", { limit = 200 }, opts.fetch_opts or {}),
+    fetch_opts = vim.tbl_extend("force", { limit = spec.WINDOW_LIMIT }, opts.fetch_opts or {}),
   })
   local controller = opts.flow or flow.new(flow_opts)
+
+  -- A caller-supplied limit still means something. Every refresh now passes an
+  -- explicit window override, and an override wins over the controller's own
+  -- fetch_opts -- so without threading it through here, the merge above would
+  -- be a comment describing a value nothing reads.
+  local base_limit = type(opts.fetch_opts) == "table" and opts.fetch_opts.limit or nil
+
+  -- THE FETCH WINDOW IS A FUNCTION OF THE PROMPT, NOT A ONE-SHOT LATCH
+  -- (workstation-iplu). `id_mode` is the LAST SEEN mode, and every refresh --
+  -- including <C-f> and <M-r> -- reads it. A latch would look identical until
+  -- the user cycled facets during an id search, at which point the row they
+  -- were looking at would vanish with the prompt still reading `ses_...`.
+  local id_mode = false
+  -- Set once attach_mappings runs (before any keystroke can arrive), so the
+  -- in-place refresh below has a picker to talk to.
+  local prompt_bufnr_ref = nil
+  -- Last rendered warning/hidden values, so the title cue applied at the
+  -- KEYSTROKE does not have to throw away what the title already said.
+  local last_warnings, last_hidden = {}, nil
+
+  local function apply_title()
+    local picker = prompt_bufnr_ref and action_state.get_current_picker(prompt_bufnr_ref)
+    if not picker then
+      return
+    end
+    local title = spec.prompt_title(current_facet, last_warnings, last_hidden, id_mode)
+    picker.prompt_title = title
+    if picker.prompt_border and picker.prompt_border.change_title then
+      picker.prompt_border:change_title(title)
+    end
+  end
+
+  -- ONE refresh implementation, used by every in-place update.
+  --
+  -- This was briefly duplicated for the mark-read gesture and the copies had
+  -- ALREADY drifted in the first commit -- one called exec.notify_warnings and
+  -- the other did not, with nothing recording whether that was deliberate. It
+  -- now also carries the window decision, which is a second reason there must
+  -- be exactly one of it.
+  local function refresh_in_place()
+    controller:refresh(current_facet, function(new_rows, new_result, new_err, new_hidden)
+      local new_warnings = spec.warning_lines(new_result, new_err)
+      exec.notify_warnings(new_warnings)
+      last_warnings, last_hidden = new_warnings, new_hidden
+
+      local current_picker = prompt_bufnr_ref and action_state.get_current_picker(prompt_bufnr_ref)
+      if current_picker then
+        apply_title()
+        local new_fmt_opts = vim.tbl_extend("force", opts, { now = os.time() * 1000 })
+        current_picker:refresh(make_finder(new_rows or {}, new_fmt_opts), { reset_prompt = false })
+      end
+    end, spec.window_opts(id_mode, base_limit))
+  end
+
+  -- TRANSITION DETECTOR, NOT A FILTER.
+  --
+  -- telescope consumes `on_input_filter_cb`'s return value SYNCHRONOUSLY
+  -- (Picker:_get_next_filtered_prompt), so its `updated_finder` is unusable
+  -- here: cli.fetch is async by contract and must stay that way. This hook is
+  -- therefore only used to notice the mode changing; the swap happens later,
+  -- from the fetch callback, via picker:refresh.
+  --
+  -- It MUST key on the transition rather than on "the prompt is an id":
+  -- picker:refresh(..., { reset_prompt = false }) re-enters _on_lines, which
+  -- calls this hook again with the same prompt, so the latter would refetch
+  -- forever.
+  local function on_prompt_changed(prompt)
+    local wants_id = spec.id_query(prompt) ~= nil
+    if wants_id == id_mode then
+      return
+    end
+    id_mode = wants_id
+    -- Before the fetch, not after: the widened fetch takes ~400ms during which
+    -- the picker still shows the old rows.
+    apply_title()
+    refresh_in_place()
+  end
 
   controller:refresh(current_facet, function(rows, result, err, hidden)
     local warning_lines = spec.warning_lines(result, err)
     exec.notify_warnings(warning_lines)
-    local prompt_title = spec.prompt_title(current_facet, warning_lines, hidden)
+    last_warnings, last_hidden = warning_lines, hidden
+    local prompt_title = spec.prompt_title(current_facet, warning_lines, hidden, id_mode)
 
     -- ONE clock read for the whole render, not one per row. spec.format falls
     -- back to its own os.time() when `now` is absent, which would let rows
@@ -179,7 +257,15 @@ function M.open(opts)
       prompt_title = prompt_title,
       finder = make_finder(rows or {}, fmt_opts),
       sorter = make_id_aware_sorter(conf.generic_sorter(opts)),
+      on_input_filter_cb = function(prompt)
+        on_prompt_changed(prompt)
+        -- Nothing is returned on purpose: see on_prompt_changed. Returning an
+        -- `updated_finder` here is the shape this hook advertises and the one
+        -- it cannot support for an async fetch.
+        return nil
+      end,
       attach_mappings = function(prompt_bufnr, map)
+        prompt_bufnr_ref = prompt_bufnr
         actions.select_default:replace(function()
           -- READ THE SELECTION BEFORE CLOSING, NOT AFTER.
           --
@@ -262,28 +348,8 @@ function M.open(opts)
           end)
         end)
 
-        -- ONE refresh implementation, used by every in-place update.
-        --
-        -- This was briefly duplicated for the mark-read gesture and the copies had
-        -- ALREADY drifted in the first commit -- one called exec.notify_warnings and
-        -- the other did not, with nothing recording whether that was deliberate.
-        local function refresh_in_place()
-          controller:refresh(current_facet, function(new_rows, new_result, new_err, new_hidden)
-            local new_warnings = spec.warning_lines(new_result, new_err)
-            exec.notify_warnings(new_warnings)
-            local new_title = spec.prompt_title(current_facet, new_warnings, new_hidden)
-
-            local current_picker = action_state.get_current_picker(prompt_bufnr)
-            if current_picker then
-              current_picker.prompt_title = new_title
-              if current_picker.prompt_border and current_picker.prompt_border.change_title then
-                current_picker.prompt_border:change_title(new_title)
-              end
-              local new_fmt_opts = vim.tbl_extend("force", opts, { now = os.time() * 1000 })
-              current_picker:refresh(make_finder(new_rows or {}, new_fmt_opts), { reset_prompt = false })
-            end
-          end)
-        end
+        -- refresh_in_place lives in M.open's scope now, because the prompt
+        -- hook needs it too and there must be exactly one of it.
 
         local function cycle_facet()
           current_facet = next_facet(current_facet)
@@ -355,7 +421,10 @@ function M.open(opts)
 
     local picker = pickers.new(opts, picker_opts)
     picker:find()
-  end)
+    -- The open fetch goes through the same window decision as every later
+    -- refresh, so there is one place the window is chosen rather than two that
+    -- can disagree.
+  end, spec.window_opts(id_mode, base_limit))
 end
 
 return M

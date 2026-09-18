@@ -477,4 +477,54 @@ do
   check(out[2].id == "ses_y", "second survivor is ses_y")
 end
 
+-- 33. `hide_automated = false` KEEPS automated rows (workstation-iplu).
+--
+-- The picker's session-id search widens the fetch window so an id handed over
+-- by an agent can actually be found. Hard-dropping automated rows would defeat
+-- that for exactly the ids an agent is most likely to hand over -- 1345 of
+-- 7353 roots on this host are automated -- and it would fail SILENTLY, as an
+-- empty picker indistinguishable from "no such session".
+--
+-- Typing a session id is an explicit, specific request for ONE session. The
+-- no-automated rule exists to keep the browsing list human-scale; it has no
+-- claim on a lookup by id.
+do
+  local auto = make_row("ses_auto", "idle")
+  auto.automated = true
+  local human = make_row("ses_human", "idle")
+
+  -- The DEFAULT is unchanged, and that is the half most worth pinning: every
+  -- existing caller passes no such option.
+  local out_default, hidden_default = model.build({ auto, human }, {}, { facet = "all" })
+  check(#out_default == 1, "default still drops automated rows")
+  check(hidden_default == 1, "default still counts the drop as hidden")
+
+  local out_explicit, hidden_explicit = model.build({ auto, human }, {}, { facet = "all", hide_automated = true })
+  check(#out_explicit == 1, "hide_automated=true is the same as the default")
+  check(hidden_explicit == 1, "hide_automated=true still reports the hidden count")
+
+  local out_wide, hidden_wide = model.build({ auto, human }, {}, { facet = "all", hide_automated = false })
+  check(#out_wide == 2, "hide_automated=false keeps the automated row, got " .. #out_wide)
+  check(out_wide[1].id == "ses_auto", "the automated row keeps its arrival position")
+  check(out_wide[2].id == "ses_human", "the human row is still there too")
+  -- `hidden` must report what was HIDDEN, not what was automated. prompt_title
+  -- renders it as "N hidden", so a non-zero count while nothing is hidden is a
+  -- lie the user cannot check.
+  check(hidden_wide == 0, "nothing is hidden, so the hidden count is 0, got " .. tostring(hidden_wide))
+
+  -- An automated row that is ALSO errored/blocked must not be dropped either:
+  -- the pierce-ordering test (27) proves automated beats pierce, and the whole
+  -- point here is that an explicit id lookup beats automated.
+  local auto_err = make_row("ses_auto_err", "error")
+  auto_err.automated = true
+  local out_err, hidden_err = model.build({ auto_err }, {}, { facet = "all", hide_automated = false })
+  check(#out_err == 1, "an errored automated row is reachable when hide_automated=false")
+  check(hidden_err == 0, "and is not counted as hidden")
+
+  -- A non-boolean must not be read as "false" by accident: only an explicit
+  -- `false` widens. Anything else keeps the safe default.
+  local out_nil = model.build({ auto, human }, {}, { facet = "all", hide_automated = nil })
+  check(#out_nil == 1, "hide_automated=nil falls back to the default (drop)")
+end
+
 print("LUA_TEST_OK " .. N)

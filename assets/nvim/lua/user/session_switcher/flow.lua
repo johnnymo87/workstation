@@ -76,9 +76,20 @@ Controller.__index = Controller
 --- On fetch error: If the generation is still current, cb is still invoked with
 --- `(nil, nil, err)` so warnings and error banners surface (Contract 4).
 ---
+--- PER-REFRESH OVERRIDES (workstation-iplu):
+--- The session-id search widens the fetch window while the prompt is an id
+--- query and narrows it again when it is not, so the window is a property of
+--- THIS refresh rather than of the controller. Routing it through here rather
+--- than rebuilding a controller is what buys it the generation guard above:
+--- leave id mode before the wide reply lands and the leave-refresh bumps the
+--- token, so the stale wide reply is dropped instead of repainting the picker
+--- with 7000 rows the user is no longer searching.
+---
 --- @param facet string "all" | "attached" | "detached"
 --- @param cb fun(rows: table[]|nil, result: table|nil, err: table|nil, hidden: integer|nil)
-function Controller:refresh(facet, cb)
+--- @param overrides table|nil { fetch_opts?: table, build_opts?: table } for
+---        this call only -- never stored, so the next refresh is unaffected.
+function Controller:refresh(facet, cb, overrides)
   if type(cb) ~= "function" then
     return
   end
@@ -86,7 +97,18 @@ function Controller:refresh(facet, cb)
   self.generation = self.generation + 1
   local gen = self.generation
 
-  local fetch_opts = vim.tbl_extend("force", { fold = true }, self.opts.fetch_opts or {})
+  overrides = (type(overrides) == "table") and overrides or {}
+
+  -- `fold = true` is re-applied AFTER the overrides, not before: it is not a
+  -- default to be tuned but the thing that makes rows carry `dir_missing` and
+  -- `effective_state`. A flat fetch would leave act.decide's dir-gone guard
+  -- reading a field that is not there, and attach into a deleted worktree.
+  local fetch_opts = vim.tbl_extend(
+    "force",
+    self.opts.fetch_opts or {},
+    overrides.fetch_opts or {},
+    { fold = true }
+  )
 
   self.fetch(fetch_opts, function(result, err)
     -- Re-check generation after fetch returns (Hop 1)
@@ -107,7 +129,8 @@ function Controller:refresh(facet, cb)
         return
       end
 
-      local built_rows, hidden = self.build(rows, hits, { facet = facet })
+      local build_opts = vim.tbl_extend("force", { facet = facet }, overrides.build_opts or {})
+      local built_rows, hidden = self.build(rows, hits, build_opts)
       cb(built_rows, result, nil, hidden)
     end)
   end)
