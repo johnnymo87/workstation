@@ -269,6 +269,54 @@ function M.id_score(id, query)
   return score
 end
 
+--- How many root trees the picker asks the CLI for, per mode.
+---
+--- THE WINDOW IS PART OF THE FEATURE, NOT A TUNING CONSTANT (workstation-iplu).
+--- Matching an id against the ORDINARY window filters rows that were fetched
+--- for browsing; it does not FIND a session. The one the user actually tried
+--- ranked 281st of 7353 roots, so no row existed to match and the search
+--- returned nothing -- which is backwards, because an agent hands over an id
+--- precisely when the session is not recent enough to be in front of you.
+M.WINDOW_LIMIT = 200
+--- Deliberately larger than the fleet (7353 roots here), so it means "all of
+--- them" and does not quietly become a new, higher cutoff as the fleet grows.
+--- Measured cost of the widest fetch on a 13 GB opencode.db: 0.34s, 5.5 MB of
+--- JSON, ~70 ms to decode and format -- paid once per mode entry.
+M.ID_WINDOW_LIMIT = 100000
+
+--- Per-refresh fetch/build overrides for the current prompt mode.
+---
+--- NOTE WHAT IS ABSENT: `fold`. flow.lua forces `fold = true` on every fetch
+--- and id mode does NOT lift it. Flat rows carry no `dir_missing` or
+--- `effective_state`, 47% of roots on this host are `dir_missing`, and
+--- act.decide's dir-gone guard reads exactly that field -- so a flat wide
+--- fetch would trade "cannot find the session" for "attaches into a deleted
+--- worktree and hangs". The price is that CHILD sessions (folded into their
+--- root) stay unreachable by id; that needs a CLI that can annotate without
+--- folding, and is tracked separately.
+---
+--- THE FACET STILL FILTERS IN ID MODE, and that is a decision. It looks like
+--- the same case as `hide_automated` and is not: the facet is a scope the user
+--- turned on with a deliberate keystroke and can read in the prompt title, so
+--- an id search that comes back empty under `attached` is explained on screen.
+--- Automated-hiding is neither chosen nor visible, which is why only that one
+--- is lifted here.
+---
+--- @param id_mode boolean
+--- @param base_limit integer|nil Caller-supplied ordinary window, if any. The
+---        WIDE window ignores it on purpose -- a caller's smaller limit would
+---        silently reinstate exactly the cutoff this whole mode exists to
+---        escape.
+--- @return table { fetch_opts: table, build_opts: table }
+function M.window_opts(id_mode, base_limit)
+  local wide = id_mode == true
+  local narrow = (type(base_limit) == "number" and base_limit > 0) and base_limit or M.WINDOW_LIMIT
+  return {
+    fetch_opts = { limit = wide and M.ID_WINDOW_LIMIT or narrow },
+    build_opts = { hide_automated = not wide },
+  }
+end
+
 --- Compose warning lines from fetch result and error.
 ---
 --- Precedence:
@@ -331,10 +379,17 @@ end
 ---        WINDOW -- not a fleet-wide total. Its job is attribution: it explains
 ---        why a short list is short, so an empty picker is never mistaken for a
 ---        broken tool. Wording it as a total would make it a lie.
+--- @param id_search boolean|nil True while the prompt is a session-id query.
+---        Applied at the KEYSTROKE that enters the mode, not when the widened
+---        fetch lands ~400ms later -- during that gap the picker still shows
+---        the old rows, and with no cue that reads as the picker being broken.
 --- @return string
-function M.prompt_title(facet, warning_lines, hidden)
+function M.prompt_title(facet, warning_lines, hidden, id_search)
   local f = (facet and facet ~= "" and facet ~= vim.NIL) and tostring(facet) or "all"
   local base = string.format("Sessions (%s)", f)
+  if id_search == true then
+    base = base .. " · id search"
+  end
   if type(hidden) == "number" and hidden > 0 then
     base = string.format("%s · %d hidden", base, hidden)
   end

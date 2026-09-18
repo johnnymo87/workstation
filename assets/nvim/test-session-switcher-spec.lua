@@ -2566,4 +2566,272 @@ do
   stub_sorter_discarded = false
 end
 
+-- =========================================================================
+-- 80-85. THE FETCH WINDOW FOLLOWS THE PROMPT (workstation-iplu)
+-- =========================================================================
+-- Shipping 76-79 was not enough, and the way it fell short is the interesting
+-- part: id search FILTERED the fetched window, it did not FIND a session.
+--
+-- The picker fetches `--fold --limit 200` -- the 200 most recent ROOT TREES.
+-- The session the user actually tried (ses_f73a030f3ffePG2zTAA5vhy30d, real,
+-- human, a root, last active 2026-09-15) ranks 281st of 7353 roots, so no row
+-- existed for the matcher to match and a full-id search returned nothing.
+--
+-- That is backwards for the motivating case: an agent hands over an id
+-- PRECISELY BECAUSE the session is not in front of you, and "not in front of
+-- you" correlates with "not recent".
+
+-- 80. window_opts: the pure window decision.
+do
+  check(spec.WINDOW_LIMIT == 200, "the ordinary window is 200 root trees")
+  check(spec.ID_WINDOW_LIMIT > spec.WINDOW_LIMIT, "the id window is wider than the ordinary one")
+
+  local narrow = spec.window_opts(false)
+  check(type(narrow) == "table", "window_opts returns a table")
+  check(narrow.fetch_opts.limit == spec.WINDOW_LIMIT, "ordinary mode asks for the ordinary limit")
+  check(narrow.build_opts.hide_automated == true, "ordinary mode still hides automated rows")
+
+  local wide = spec.window_opts(true)
+  check(wide.fetch_opts.limit == spec.ID_WINDOW_LIMIT, "id mode asks for the wide limit")
+  -- Typing an id is a specific request for ONE session. Hiding it because it
+  -- happens to be automated fails silently -- an empty picker reads as "no
+  -- such session".
+  check(wide.build_opts.hide_automated == false, "id mode stops hiding automated rows")
+
+  -- `--fold` IS NOT TURNED OFF HERE, and that is a decision, not an oversight.
+  -- Flat rows carry no `dir_missing`/`effective_state`, and 3467 of 7354 roots
+  -- on this host have dir_missing=true, so flat rows would defeat act.decide's
+  -- dir_missing guard and attach into a pruned worktree -- which hangs. The
+  -- cost is that CHILD sessions stay unreachable by id (they are folded into
+  -- their root), tracked separately.
+  check(wide.fetch_opts.fold == nil, "window_opts does not touch fold (flow forces it on)")
+
+  -- A CALLER-SUPPLIED LIMIT STILL MEANS SOMETHING in the ordinary window.
+  -- Every refresh passes an override and an override beats the controller's
+  -- own fetch_opts, so without this the caller's value would be merged into a
+  -- controller that never reads it -- dead config that still looks live.
+  check(spec.window_opts(false, 42).fetch_opts.limit == 42, "a caller's ordinary limit is honoured")
+  check(spec.window_opts(false, nil).fetch_opts.limit == spec.WINDOW_LIMIT, "no caller limit -> the default")
+  check(spec.window_opts(false, 0).fetch_opts.limit == spec.WINDOW_LIMIT, "a nonsense limit falls back to the default")
+  check(spec.window_opts(false, "50").fetch_opts.limit == spec.WINDOW_LIMIT, "a non-number limit falls back to the default")
+  -- ...but it must NOT reach the wide window: a caller's smaller limit would
+  -- silently reinstate the very cutoff this mode exists to escape.
+  check(spec.window_opts(true, 42).fetch_opts.limit == spec.ID_WINDOW_LIMIT, "a caller's limit cannot narrow the ID window")
+
+  -- THE FACET IS NOT LIFTED, unlike hide_automated. It is a scope the user
+  -- turned on deliberately and can read in the prompt title, so an empty id
+  -- search under `attached` is explained on screen; automated-hiding is
+  -- neither chosen nor visible.
+  check(wide.build_opts.facet == nil, "id mode does not override the facet")
+end
+
+-- 81. prompt_title says when id search is on.
+do
+  local plain = spec.prompt_title("all", {}, nil, false)
+  check(plain == "Sessions (all)", "an ordinary title is unchanged, got " .. plain)
+  check(spec.prompt_title("all", {}, nil) == "Sessions (all)", "the 4th argument is optional")
+
+  local id = spec.prompt_title("all", {}, nil, true)
+  check(id ~= plain, "id mode changes the title")
+  check(id:find("id", 1, true) ~= nil, "the title says it is searching ids, got " .. id)
+  -- The cue must not eat the two things the title already owed the user.
+  local both = spec.prompt_title("attached", { "w1", "w2" }, 7, true)
+  check(both:find("attached", 1, true) ~= nil, "the facet survives the id cue")
+  check(both:find("7 hidden", 1, true) ~= nil, "the hidden count survives the id cue")
+  check(both:find("⚠ 2", 1, true) ~= nil, "the warning count survives the id cue")
+end
+
+-- 82. FLOW: per-refresh overrides, so the window can change without rebuilding
+--     the controller (and so it inherits the generation-token race guard).
+do
+  local seen_fetch, seen_build = nil, nil
+  local ctrl = flow.new({
+    fetch_opts = { limit = 200, custom = "kept" },
+    fetch = function(o, cb) seen_fetch = o; cb({ rows = { { id = "a" } } }, nil) end,
+    locate = function(o, cb) cb({}) end,
+    build = function(rows, hits, o) seen_build = o; return rows, 0 end,
+  })
+
+  ctrl:refresh("all", function() end)
+  check(seen_fetch.limit == 200, "with no overrides the controller's own fetch_opts are used")
+  check(seen_fetch.fold == true, "fold is still forced on")
+  check(seen_build.hide_automated == nil, "with no overrides build gets no hide_automated")
+
+  ctrl:refresh("attached", function() end, {
+    -- `fold = false` is passed ON PURPOSE. fold=true must be applied AFTER the
+    -- overrides, not before, or a caller could turn it off -- and flat rows
+    -- carry no `dir_missing`, which is the field act.decide consults before
+    -- attaching. Asserting fold==true against an override that never mentions
+    -- fold proves nothing: it passes whichever order the merge uses.
+    fetch_opts = { limit = 100000, fold = false },
+    build_opts = { hide_automated = false },
+  })
+  check(seen_fetch.limit == 100000, "an override replaces the limit, got " .. tostring(seen_fetch.limit))
+  check(seen_fetch.custom == "kept", "unrelated controller fetch_opts survive the override")
+  check(seen_fetch.fold == true, "an override asking for fold=false is REFUSED, got " .. tostring(seen_fetch.fold))
+  check(seen_build.hide_automated == false, "build_opts reach model.build")
+  check(seen_build.facet == "attached", "the facet still reaches build alongside the overrides")
+
+  -- The caller's override table must not be mutated, and must not leak into
+  -- the NEXT refresh.
+  ctrl:refresh("all", function() end)
+  check(seen_fetch.limit == 200, "the next refresh is back to the controller's own limit")
+  check(seen_build.hide_automated == nil, "the next refresh carries no stale build override")
+end
+
+-- 83. INIT: entering id mode widens the fetch; leaving it narrows again.
+do
+  recorded_pickers_new = {}
+  local fetches = {}
+  local builds = {}
+  local rows = { { id = "ses_f73a030f3ffePG2zTAA5vhy30d", title = "Pause UOM validation", directory = "/tmp/m" } }
+
+  local ctrl = flow.new({
+    fetch = function(o, cb) table.insert(fetches, o); cb({ rows = rows }, nil) end,
+    locate = function(o, cb) cb({}) end,
+    build = function(r, h, o) table.insert(builds, o); return r, 0 end,
+  })
+
+  init_mod.open({ flow = ctrl })
+  local merged = recorded_pickers_new[1].defaults
+  merged.attach_mappings(83, function() end)
+
+  check(type(merged.on_input_filter_cb) == "function", "the picker gets an on_input_filter_cb")
+  check(#fetches == 1, "opening fetched once")
+  check(fetches[1].limit == spec.WINDOW_LIMIT, "the first fetch uses the ordinary window")
+
+  -- `updated_finder` CANNOT be used here: telescope consumes the cb's return
+  -- value synchronously (Picker:_get_next_filtered_prompt), and cli.fetch is
+  -- async by contract. The cb is a transition DETECTOR; the swap happens later
+  -- via picker:refresh. So it must return nothing that telescope would act on.
+  local ret = merged.on_input_filter_cb("Alpha")
+  check(ret == nil or ret.updated_finder == nil, "the cb never returns an updated_finder")
+  check(#fetches == 1, "an ordinary prompt does NOT refetch")
+
+  merged.on_input_filter_cb("ses_")
+  check(#fetches == 2, "entering id mode refetches, got " .. #fetches)
+  check(fetches[2].limit == spec.ID_WINDOW_LIMIT, "the id-mode fetch is the WIDE one")
+  check(fetches[2].fold == true, "the wide fetch still folds (dir_missing must survive)")
+  check(builds[#builds].hide_automated == false, "the wide build stops hiding automated rows")
+
+  -- RE-ENTRANCY: picker:refresh(..., {reset_prompt=false}) re-enters
+  -- _on_lines, which calls this cb again with the SAME prompt. Detecting on
+  -- "the prompt is an id" rather than on the TRANSITION would refetch forever.
+  merged.on_input_filter_cb("ses_")
+  merged.on_input_filter_cb("ses_f73a")
+  merged.on_input_filter_cb("ses_f73a030f3ffePG2zTAA5vhy30d")
+  check(#fetches == 2, "further id keystrokes do NOT refetch, got " .. #fetches)
+
+  -- LEAVING MUST NARROW. Staying wide would silently run ordinary title search
+  -- over 7353 rows instead of 200 -- different ranking, different hidden
+  -- count, and no way for the user to tell.
+  merged.on_input_filter_cb("Alpha")
+  check(#fetches == 3, "leaving id mode refetches")
+  check(fetches[3].limit == spec.WINDOW_LIMIT, "leaving id mode restores the ordinary window")
+  check(builds[#builds].hide_automated == true, "leaving id mode hides automated rows again")
+
+  -- And it is a mode, not a latch: it can be entered again.
+  merged.on_input_filter_cb("ses_b")
+  check(#fetches == 4 and fetches[4].limit == spec.ID_WINDOW_LIMIT, "id mode can be re-entered")
+end
+
+-- 83b. INIT: a caller's fetch_opts.limit reaches the actual fetch.
+--
+-- Not a hypothetical: once every refresh passes an explicit window override,
+-- and overrides beat the controller's own fetch_opts, a caller-supplied limit
+-- becomes dead config that still LOOKS live -- merged into a controller that
+-- never reads it.
+do
+  recorded_pickers_new = {}
+  local fetches = {}
+  local ctrl = flow.new({
+    fetch = function(o, cb) table.insert(fetches, o); cb({ rows = {} }, nil) end,
+    locate = function(o, cb) cb({}) end,
+  })
+
+  init_mod.open({ flow = ctrl, fetch_opts = { limit = 17 } })
+  local merged = recorded_pickers_new[1].defaults
+  merged.attach_mappings(831, function() end)
+  check(fetches[1].limit == 17, "the caller's limit is what actually gets fetched, got " .. tostring(fetches[1].limit))
+
+  merged.on_input_filter_cb("ses_f73a")
+  check(fetches[2].limit == spec.ID_WINDOW_LIMIT, "id mode still widens past the caller's limit")
+  merged.on_input_filter_cb("Alpha")
+  check(fetches[3].limit == 17, "leaving id mode returns to the caller's limit, not the default")
+end
+
+-- 84. INIT: <C-f> and <M-r> refresh IN THE CURRENT MODE.
+--
+-- THE SILENT REVERT. Both gestures route through the one refresh
+-- implementation. If that implementation hardcodes the ordinary window, then
+-- cycling the facet while an id search is on would drop the row the user is
+-- looking at -- "the session disappeared when I pressed <C-f>" -- with the
+-- prompt still reading `ses_...` and nothing to explain it.
+do
+  recorded_pickers_new = {}
+  local fetches = {}
+  local maps = {}
+  local ctrl = flow.new({
+    fetch = function(o, cb) table.insert(fetches, o); cb({ rows = {} }, nil) end,
+    locate = function(o, cb) cb({}) end,
+  })
+
+  init_mod.open({ flow = ctrl })
+  local merged = recorded_pickers_new[1].defaults
+  current_picker_stub = recorded_pickers_new[1]
+  merged.attach_mappings(84, function(_modes, key, fn) maps[key] = fn end)
+
+  merged.on_input_filter_cb("ses_f73a")
+  check(fetches[#fetches].limit == spec.ID_WINDOW_LIMIT, "id mode is on")
+
+  local ctrl_f = maps["<C-f>"]
+  check(type(ctrl_f) == "function", "<C-f> is mapped")
+  ctrl_f()
+  check(fetches[#fetches].limit == spec.ID_WINDOW_LIMIT, "<C-f> during an id search KEEPS the wide window")
+  check(#fetches >= 3, "<C-f> did refresh")
+
+  -- ...and the facet cycle still happened, rather than being swallowed.
+  check(recorded_pickers_new[1].prompt_title:find("attached", 1, true) ~= nil,
+    "the facet still advanced to 'attached', got " .. tostring(recorded_pickers_new[1].prompt_title))
+  check(recorded_pickers_new[1].prompt_title:find("id", 1, true) ~= nil,
+    "and the title still says id search is on")
+
+  merged.on_input_filter_cb("Alpha")
+  local before = #fetches
+  ctrl_f()
+  check(fetches[#fetches].limit == spec.WINDOW_LIMIT, "<C-f> outside id mode uses the ordinary window")
+  check(#fetches > before, "<C-f> refreshed in ordinary mode too")
+end
+
+-- 85. INIT: the title cue is applied at the KEYSTROKE, not when the fetch lands.
+--
+-- The wide fetch takes ~400ms on this host and the picker shows the OLD rows
+-- until it lands. Without an immediate cue that reads as the picker being
+-- broken, which is exactly when a user gives up and presses <Esc>.
+do
+  recorded_pickers_new = {}
+  local pending = nil
+  local ctrl = flow.new({
+    -- Never calls back: this is the in-flight window, and the assertion is
+    -- about what the user sees DURING it.
+    fetch = function(o, cb) pending = cb end,
+    locate = function(o, cb) cb({}) end,
+  })
+
+  init_mod.open({ flow = ctrl })
+  pending({ rows = {} }, nil)
+  local picker = recorded_pickers_new[1]
+  local merged = picker.defaults
+  current_picker_stub = picker
+  merged.attach_mappings(85, function() end)
+  local title_before = picker.prompt_title
+
+  pending = nil
+  merged.on_input_filter_cb("ses_f73a")
+  check(pending ~= nil, "the wide fetch is in flight")
+  check(picker.prompt_title ~= title_before, "the title changed before the fetch came back")
+  check(picker.prompt_title:find("id", 1, true) ~= nil,
+    "the in-flight title says id search is on, got " .. tostring(picker.prompt_title))
+end
+
 print("LUA_TEST_OK " .. N)
