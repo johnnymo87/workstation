@@ -65,6 +65,120 @@ window a peer picks the item up in.
 
 **Rule of thumb**: If resuming after 2 weeks would be hard without bd, use bd.
 
+## Running a Whole Project on Beads
+
+Worth the setup when tasks outnumber the sessions that will run them and the
+dependencies are real — roughly eight or more, or any project handed to workers
+who start cold. Below that, an epic with a few children and no ceremony is fine.
+
+The failure this avoids: a plan document that says "do T3 after T6", which is
+wrong the moment anything slips and which an appointed session cannot check.
+
+```bash
+bd create --title="<project>" --type=epic ...       # the epic
+bd create --parent=<epic> --title="T1 ..." ...      # one child per task
+bd dep add <child> <blocker>                        # the REAL dependencies
+bd ready --parent=<epic>                            # the only entry point
+```
+
+### `bd ready` is the answer to "what's next" — don't write that answer anywhere else
+
+Wire dependencies from the design, not from the order you wrote the tasks in.
+Then `bd ready --parent=<epic>` lists what can start and `bd blocked --parent=<epic>`
+says what is waiting on what, and neither can go stale.
+
+Two rules keep it that way:
+
+- **Want to start something `bd ready` omits? The graph is wrong.** Split the
+  bead or drop the dependency — never launch around it. A bead covering two
+  halves with different blockers is the usual cause: one cross-repo piece that
+  could start cold, welded to a piece that could not.
+- **"Do this one first" is a priority, not prose.** `bd ready` sorts by `-p`.
+  A sentence in the runbook saying which ready task matters most is the same
+  staleness you just designed out.
+
+`bd ready` hides `in_progress`, so claimed work correctly disappears from it.
+
+### Close at merge, not at PR-open
+
+A code task is done when its PR **merges**. Closing when the PR opens releases
+dependents whose worktrees then branch off a trunk that lacks the prerequisite —
+and the breakage lands in the next task, not the one that caused it. Workers own
+shepherding to merge, then `bd close --reason`.
+
+### The runbook: where it goes, and how to revise it without wiping it
+
+A project needs a page of prose a cold session reads first: how to launch a
+worker, the standing rules, what is deliberately not tracked. Put it in the
+epic's **`design`** field. `notes` is the append-only operational log (`bd note`,
+or `bd update --append-notes`); design is authored content.
+
+**Every `bd update` field flag REPLACES.** `--design` and `--description` carry
+the same hazard as `--notes` (see "Never Write Notes With `bd update --notes`"
+below), and the Quick Command Reference's `bd update <id> --design "..."` idiom
+will silently wipe a runbook.
+
+**The sharper rule: never put `$(...)` inside a replace-semantics flag.** If the
+substitution fails it expands to empty and the flag cheerfully writes nothing,
+with an ordinary success line. That is not hypothetical — it happened while
+writing this section: a `bd update --description "$(...)"` whose subshell raised
+a `KeyError` blanked a 1,025-character epic description. Recovered from
+`bd history --json`, which carries the full prior object.
+
+Use the file-taking form, from a file you have just read back:
+
+```bash
+bd update <id> --design-file runbook.md    # no substitution, no empty-write
+```
+
+**Or keep the runbook in the repo** and have the epic point at it. That buys git
+history, PR review and no one-command wipe, at the cost of a second place to
+look. Prefer it when the project already has a plan document in the tree and the
+runbook will rarely change; prefer `design` when the runbook is short and the
+bead should be self-contained for a session that has not cloned anything.
+
+### The runbook explains how to launch, never what is next
+
+Anything ordering-shaped belongs to the graph. The runbook covers only what
+beads cannot:
+
+- **A decision procedure**, top-down, so an appointed session need not judge
+  where to start: open PR with unresolved threads → belongs to its authoring
+  session; ready task → launch one; ready empty but tasks open → something
+  in flight is blocking, report rather than force.
+- **How to launch a worker** — command, worktree convention, model, and what
+  every prompt must carry given the worker starts cold.
+- **Standing rules**: never merge, never work at a shared repo root, one live
+  session per worktree, no destructive git outside your own worktree.
+- **What is NOT a bead and cannot be** — cross-team dependencies no session can
+  discharge alone, deliberately-unset dates, adjacent defects out of scope.
+  Without that list a diligent session will try one of them.
+- **A task graph for orientation only**, labelled as such, so a surprising
+  `bd ready` answer can be sanity-checked rather than second-guessed.
+
+### Each child must be launchable cold
+
+The child is the worker's whole briefing. Title plus "see the plan" is not
+enough — the worker cannot tell which parts of that section are load-bearing.
+Include the spec path **and section**, where to read it from if it is not merged
+yet, the two or three traps specific to that task, and a scope fence: *implement
+only this; if you find work belonging to another task, file a bead and leave it.*
+
+Tell workers that a discovered bead needs `--parent=<epic>` and its dependencies
+wired. Filed loose, it is invisible to `bd ready --parent` and falls off the
+board.
+
+### Claiming, and the launcher/worker race
+
+Claim per "Claim Before You Start" above, then `bd note` the session id so the
+next appointed session can tell in-flight from unstarted. **Decide whether the
+launcher or the worker claims — not both.** `--claim` is actor-keyed and a
+second actor gets an error; it only looks idempotent when both resolve to the
+same git identity.
+
+**If the launch fails after the claim, unclaim it.** A claimed bead with no
+session behind it blocks everything downstream and reads as progress.
+
 ## Quick Command Reference
 
 ```bash
