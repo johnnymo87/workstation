@@ -287,7 +287,8 @@ writeShellApplication {
 
       # ---- bazel -----------------------------------------------------------
       uid=$(id -u)
-      bslice="$CGROUP_ROOT/user.slice/user-$uid.slice/user@$uid.service/bazel.slice"
+      umgr="$CGROUP_ROOT/user.slice/user-$uid.slice/user@$uid.service"
+      bslice="$umgr/bazel.slice"
       emit_cgroup "bazel-slice" "-" "$bslice"
       for cg in "$bslice"/*.scope; do
         [ -d "$cg" ] || continue
@@ -307,10 +308,88 @@ writeShellApplication {
         fi
         emit_cgroup "bazel-scope" "$scope|$ws" "$cg"
       done
+
+      # ---- user manager aggregate -----------------------------------------
+      # The total for user@1000.service, so the sampled children can be checked
+      # against it. The residual -- this total minus the children we sample --
+      # is the only way anyone notices a population we are NOT sampling, which
+      # on 2026-09-15 was the entire problem. It is also what makes the silent
+      # absence of tmux rows below survivable: without this row, "no panes are
+      # open" and "panes moved somewhere we do not look" are indistinguishable.
+      emit_cgroup "user-manager" "-" "$umgr"
+
+      # ---- tmux pane scopes (bead workstation-o5s1.13) ---------------------
+      # tmux gives every spawned pane its own transient scope directly under the
+      # user manager. On 2026-09-17 those scopes held 10.35 GB across 38 TUIs --
+      # the largest identifiable consumer under user@1000.service -- with
+      # MemoryMax=infinity and no presence in any time series.
+      #
+      # That blind spot is why the 2026-09-15 host swap jump of 11.43 GB could
+      # not be attributed. The serves were measurably pinned at their 1G cap
+      # (<=0.35 GB of the jump) and bazel at its 2G cap (<=0.27 GB), so ~10.8 GB
+      # came from populations nothing sampled. Everything that WAS instrumented
+      # had an alibi, which is the shape of an instrumentation gap rather than a
+      # mystery.
+      #
+      # THESE PANES ARE ONE CANDIDATE, NOT THE ANSWER. At least two other
+      # unsampled populations sit under the same user manager and could have
+      # supplied that swap: app.slice (memory.swap.peak 5.57 GB) and
+      # oc.slice/oc-agent.slice (swap.peak 2.00 GB, its cap; 21 oom_kills). A
+      # 9.6 GB burst in eight minutes fits one agent bash command under a 10G
+      # scope cap at least as well as it fits a pane leak. Sampling these rows
+      # is what will let the NEXT such jump be attributed; it does not
+      # retroactively convict anything. Rows for app.slice and oc-agent.slice
+      # are the obvious follow-up and are tracked on workstation-o5s1.13.
+      #
+      # The scope name is tmux's, not ours -- nothing in this repo creates it --
+      # so this matches a NAME PATTERN rather than a fixed path, and is emitted
+      # one row per scope with the scope in `detail` so growth stays visible
+      # after aggregation.
+      #
+      # NAMED FOR WHAT IT MEASURES, NOT FOR WHAT WE EXPECT TO FIND IN IT. These
+      # are tmux PANE scopes: measured on 2026-09-17 they hold opencode attach
+      # wrappers, and also nvim and bash. An earlier draft called the subject
+      # "tui-scope", which would have quietly invited a future reader to report
+      # "the TUIs use 16.79 GB" when some of that is an editor. A row labelled
+      # with an assumption is how an instrument aimed at one subject gets read
+      # as evidence about another.
+      #
+      # DELIBERATELY SILENT WHEN THERE ARE NONE, unlike the serve case above. No
+      # attach TUI is a perfectly ordinary state -- nobody has a pane open -- so
+      # a marker row would fire constantly and teach everyone to ignore markers.
+      # Zero SERVES means the pool is down or we are reading the wrong cgroup,
+      # which is worth shouting about. The asymmetry is the point; the test suite
+      # pins both halves so neither gets "made consistent" later.
+      # DEPTH MATTERS, and depth 1 alone is wrong. tmux sets each pane scope's
+      # Slice= from the tmux SERVER's slice (compat/systemd.c, via
+      # sd_pid_get_user_slice), falling back to app-tmux.slice when the server
+      # was started from outside the user session. Two live paths do exactly
+      # that: oc-auto-attach runs `tmux new-session` from pigeon-daemon.service
+      # (User=dev, /system.slice/...), and tmux.devbox.nix runs the server as a
+      # user service. Either puts every pane at
+      # $umgr/app.slice/app-tmux.slice/tmux-spawn-*.scope instead. A depth-1
+      # glob finds nothing there -- and since absence is deliberately silent
+      # below, nobody would be told. That is the ghost-cgroup failure again,
+      # one directory deeper.
+      for cg in "$umgr"/tmux-spawn-*.scope \
+                "$umgr"/*/tmux-spawn-*.scope \
+                "$umgr"/*/*/tmux-spawn-*.scope; do
+        [ -d "$cg" ] || continue
+        emit_cgroup "tmux-scope" "''${cg##*/}" "$cg"
+      done
     } >> "$OUT"
 
-    # Daily files, pruned. ~10 rows/tick at 15s is ~8MB/day; unbounded that is a
-    # disk problem within a quarter, and this box has had disk pressure before.
+    # Daily files, pruned. This was "~10 rows/tick, ~8MB/day" when written; with
+    # per-pane rows it is ~27 rows/tick today, measured at ~236 B per tmux row,
+    # so each open pane costs ~1.3 MB/day and 17 panes adds ~22 MB/day. At 50
+    # panes that is ~64 MB/day, i.e. ~2 GB over the 30-day retention -- fine
+    # against 63G free, but worth re-checking if the pane count grows.
+    # Sampler runtime also went 0.32s -> 0.92s at 17 scopes (~35 ms/scope).
+    #
+    # NOTE this retention sweep did not run at all until 2026-09-16: findutils
+    # was missing from runtimeInputs and the failure was swallowed by
+    # `2>/dev/null || true`. So this is the first change to add volume to a file
+    # set that is actually being pruned.
     find "$OUT_DIR" -maxdepth 1 -name 'pressure-v*-*.tsv' -mtime "+$RETENTION_DAYS" -delete 2>/dev/null || true
   '';
 

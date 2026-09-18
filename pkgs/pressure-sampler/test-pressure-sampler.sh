@@ -311,6 +311,118 @@ else
   bad "retention deleted a RECENT file"
 fi
 
+# =================================================================================================
+# 7. ATTACH TUIs (bead workstation-o5s1.13). tmux puts every spawned pane in its own
+#    transient tmux-spawn-<uuid>.scope directly under the user manager. On
+#    2026-09-17 those scopes held 10.35 GB across 38 TUIs -- the single largest
+#    identifiable consumer under user@1000.service -- with MemoryMax=infinity and
+#    no presence in any time series. The 2026-09-15 host swap jump of 11.43 GB
+#    could not be attributed because of exactly this blind spot: serves (<=0.35 GB)
+#    and bazel (<=0.27 GB) were both measurably pinned at their caps, and the
+#    ~10.8 GB remainder came from a population nothing sampled.
+# =================================================================================================
+root7="$tmpdir/cg7"; out7="$tmpdir/out7"
+uid7="$(id -u)"
+umgr7="$root7/user.slice/user-$uid7.slice/user@$uid7.service"
+mkcg "$root7" 100 1000
+mkcg "$root7/user.slice" 1
+mkcg "$root7/user.slice/user-$uid7.slice" 1
+mkcg "$umgr7" 1
+mkcg "$umgr7/tmux-spawn-e621090f-77a0-4213-9326-5046b50791a5.scope" 6357421056
+mkcg "$umgr7/tmux-spawn-5fd961ee-c739-4613-9e14-7c9aa348b293.scope" 1514139648
+# NESTED. tmux sets each pane scope's Slice= from the tmux SERVER's slice
+# (compat/systemd.c, sd_pid_get_user_slice), falling back to app-tmux.slice when
+# the server was started from outside the user session -- which is exactly what
+# oc-auto-attach does via pigeon-daemon.service (User=dev, /system.slice/...),
+# and what tmux.devbox.nix does by running the server as a user service. A
+# depth-1 glob finds NOTHING in that arrangement, and because absence here is
+# deliberately silent, nobody would ever be told.
+mkcg "$umgr7/app.slice" 1
+mkcg "$umgr7/app.slice/app-tmux.slice" 1
+mkcg "$umgr7/app.slice/app-tmux.slice/tmux-spawn-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.scope" 900000000
+run_sampler "$root7" "$out7"
+tsv7="$(find "$out7" -name 'pressure-v2-*.tsv' | head -1)"
+if [ -z "$tsv7" ]; then
+  bad "no output in tmux-scope scenario"
+else
+  subs7="$(subjects "$tsv7")"
+  if grep -q 'tmux-scope' <<<"$subs7"; then
+    ok "tmux pane scopes are sampled at all"
+  else
+    bad "tmux-spawn scopes are not sampled" "subjects: $subs7"
+  fi
+  n7=$(awk -F'\t' '$2=="tmux-scope"' "$tsv7" | wc -l)
+  if [ "$n7" -eq 3 ]; then
+    ok "one row per tmux-spawn scope, including nested ones (got $n7)"
+  else
+    bad "wrong number of tmux-scope rows" "got $n7, want 3 (one is nested under app-tmux.slice)"
+  fi
+  got="$(field "$tsv7" tmux-scope mem_current)"
+  if [ "$got" = "6357421056" ] || [ "$got" = "1514139648" ]; then
+    ok "tmux-scope mem_current reflects the real cgroup ($got)"
+  else
+    bad "tmux-scope mem_current wrong" "got: '$got'"
+  fi
+  # The detail column must identify WHICH scope, or the rows cannot be told
+  # apart and per-TUI growth is invisible.
+  d7=$(awk -F'\t' '$2=="tmux-scope"{print $3}' "$tsv7" | sort -u | wc -l)
+  if [ "$d7" -eq 3 ]; then
+    ok "each tmux-scope row is identified by its own scope in the detail column"
+  else
+    bad "tmux-scope rows are not distinguishable" "distinct detail values: $d7, want 3"
+  fi
+  if awk -F'\t' '$2=="tmux-scope"{if($3 !~ /^tmux-spawn-.*\.scope$/) bad=1} END{exit bad+0}' "$tsv7"; then
+    ok "tmux-scope detail is the bare scope name, not a path"
+  else
+    bad "tmux-scope detail is not a bare scope name"
+  fi
+  # The aggregate. This is what makes the silence in scenario 8 survivable:
+  # compare the user-manager total against the sum of its sampled children, and
+  # a growing residual says an unsampled population exists. Without it, "no tmux
+  # panes" and "tmux moved somewhere we do not look" are indistinguishable --
+  # which is the exact failure this suite exists for.
+  if grep -q 'user-manager' <<<"$subs7"; then
+    ok "a user-manager aggregate row is emitted"
+  else
+    bad "no user-manager aggregate row; silence about children becomes undetectable"
+  fi
+  assert_width "$tsv7" "tmux scopes"
+fi
+
+# =================================================================================================
+# 8. NO TUIs must be SILENT. This is the deliberate opposite of the serve case,
+#    and it is pinned so nobody makes it symmetrical "for consistency". Zero
+#    attach TUIs is a legitimate state -- nobody has a tmux pane open -- whereas
+#    zero serves means the pool is down or we are reading the wrong cgroup. A
+#    marker here would fire constantly and train everyone to ignore markers.
+# =================================================================================================
+root8="$tmpdir/cg8"; out8="$tmpdir/out8"
+uid8="$(id -u)"
+mkcg "$root8" 100 1000
+mkcg "$root8/user.slice" 1
+mkcg "$root8/user.slice/user-$uid8.slice" 1
+mkcg "$root8/user.slice/user-$uid8.slice/user@$uid8.service" 1
+mkcg "$root8/opencode.slice" 1
+mkcg "$root8/opencode.slice/opencode-serve.slice" 1
+mkcg "$root8/opencode.slice/opencode-serve.slice/opencode-serve@4096.service" 5000000000
+run_sampler "$root8" "$out8"
+tsv8="$(find "$out8" -name 'pressure-v2-*.tsv' | head -1)"
+if [ -n "$tsv8" ]; then
+  subs8="$(subjects "$tsv8")"
+  if grep -q 'tmux' <<<"$subs8"; then
+    bad "absence of tmux panes emitted some tmux-ish row" \
+        "zero panes is a legitimate state; a marker here is noise, not signal" \
+        "subjects: $subs8"
+  else
+    ok "absence of attach TUIs is silent in the series (no marker)"
+  fi
+  if grep -qi 'tmux' <<<"$(cat "$tmpdir/err" 2>/dev/null || true)"; then
+    bad "absence of TUIs warned on stderr" "stderr: $(cat "$tmpdir/err")"
+  else
+    ok "absence of attach TUIs is silent on stderr"
+  fi
+fi
+
 # --- summary -------------------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -eq 0 ]; then
