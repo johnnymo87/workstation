@@ -788,3 +788,81 @@ is this repo's stated convention.
 **End-to-end, by the user, once deployed**: a session with unread work, jumped to
 from the picker, lands at the first unread turn rather than the bottom — and
 jumping to a session with no unread lands at the bottom exactly as today.
+
+
+---
+
+## THE ANCHOR WAS THE REAL BUG (2026-09-16 → 09-18)
+
+The cold-attach fix above shipped, and the first real test of it failed: a jump to
+a session showing 6 unread loaded at the bottom. It had not failed. **No jump was
+attempted, because that session had no anchor** — and neither did two thirds of
+the others.
+
+### How three explanations died in a row
+
+1. *"You never typed in that session."* **False** — 17 user messages. I checked one
+   empty field and invented a story that fit.
+2. *"Its daemon row was reaped, taking the anchor with it."* **True but partial** —
+   the row is dated 09-07, the turns 08-31. Real, and it accounts for 49 of 155.
+3. *"A timing race: the launch prompt beats parentage discovery."* **False, and it
+   was a confound.** `opencode-launch` registers its own launch prompt as
+   *injected*; `sendPrompt` registers every Telegram reply; swarm messages carry an
+   envelope. "First message within 5s of creation" simply selects sessions whose
+   every turn is one of those. My 14%-vs-56% split was measuring the selection, not
+   a race.
+
+Adversarial review classified every user message in the no-anchor sessions: 367
+swarm, 276 Telegram, 144 hook injections, 135 launch prompts, **15 unexplained
+across 4 sessions**. There was no race to find.
+
+### The actual cause, and the one-line fix
+
+`/mirror` wrote the anchor *below* its injected-prompt early return. The reasoning —
+"an injected prompt is not evidence a human was present" — is true and answers the
+**wrong question**. Presence decides whether to CLEAR a badge. An anchor says where
+a turn *begins*, and an injected turn begins somewhere just as surely as a typed
+one. One branch was answering both.
+
+Fixed in pigeon#149 by hoisting the anchor write above that return, with
+`markAllRead` deliberately left below and **two tests pinning that split
+independently** — hoisting the clear alongside it is the tidying edit a future
+reader will make, and it would mark badges read that nobody saw, unrecoverably
+(the watermark only moves forward).
+
+Whitespace-only turns stay excluded, now for a different reason: a blank turn has
+no renderable box, so an anchor on it resolves to nothing and would replace a
+usable older anchor with a target that lands at the bottom.
+
+### Deployed 2026-09-18 10:09:54 EDT, with a baseline instead of a claim
+
+The daemon execs from the primary checkout, so deploying is `git pull` there plus a
+root restart. Anchored share of `session_events` **before** that moment:
+
+| kind | anchored |
+|---|---|
+| mirror | 220/220 (100%) — control; carries its own id |
+| stop | 1219/2397 (50%) |
+| swarm | 380/751 (50%) |
+| question | 21/36 (58%) |
+| **overall** | **1840/3404 (54%)** |
+
+Rows written after should trend toward ~100% for stop/swarm/question. **The
+"35% → 92%" figure in the PR is a projection, not evidence** — only post-restart
+rows can settle it. Split on `sent_at >= 1789740594` (epoch seconds; the column is
+epoch, not ISO).
+
+### What this leaves
+
+- `workstation-i0rz` (**next**): the picker takes the oldest *anchored* unread
+  event, skipping older unanchored ones. Near-harmless while anchors are
+  per-session constant; the moment they become per-event, each gap lets a jump land
+  **past** unread content — violating the deliberate fail-early-never-skip property
+  at `repos.ts:197-204`. Must land *before* per-event anchors.
+- `workstation-ra44` step 3: plugin-supplied per-turn anchors, which additionally
+  survive row reaping. Turn-start, not the agent's final message — and snapshotted
+  at the user→assistant transition, since opencode creates the user row when a
+  prompt *arrives*, so a queued prompt would otherwise anchor too late (~4% of
+  turns).
+- `workstation-jdbs`: the plugin's logs reach no file or journal, which is why
+  hypothesis 3 above needed a correlational argument instead of a log line.
