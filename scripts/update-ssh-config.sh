@@ -54,7 +54,13 @@ Host devbox
     ServerAliveCountMax 3
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
-    RemoteForward 9223 localhost:9223
+    # NOTE: RemoteForward 9223 (Chrome DevTools for the isolated gcloud profile)
+    # was deliberately REMOVED. It let a remote host drive a local browser that
+    # holds a live SSO session, unauthenticated, at any hour -- and those hosts
+    # run agents with shell access. The gcloud reauth that needed it now runs
+    # from the Mac outward (users/dev/home.darwin.nix, gcloud-reauth-refresh),
+    # so nothing remote needs a handle on a browser here. Do not re-add it.
+    # 9222 stays: it is a different profile, used deliberately.
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 
@@ -73,7 +79,13 @@ Host devbox-tunnel
     LocalForward 1455 localhost:1455
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
-    RemoteForward 9223 localhost:9223
+    # NOTE: RemoteForward 9223 (Chrome DevTools for the isolated gcloud profile)
+    # was deliberately REMOVED. It let a remote host drive a local browser that
+    # holds a live SSO session, unauthenticated, at any hour -- and those hosts
+    # run agents with shell access. The gcloud reauth that needed it now runs
+    # from the Mac outward (users/dev/home.darwin.nix, gcloud-reauth-refresh),
+    # so nothing remote needs a handle on a browser here. Do not re-add it.
+    # 9222 stays: it is a different profile, used deliberately.
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
@@ -179,7 +191,13 @@ $IAP_PROXY
     HostKeyAlias $CLOUDBOX_IP
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
-    RemoteForward 9223 localhost:9223
+    # NOTE: RemoteForward 9223 (Chrome DevTools for the isolated gcloud profile)
+    # was deliberately REMOVED. It let a remote host drive a local browser that
+    # holds a live SSO session, unauthenticated, at any hour -- and those hosts
+    # run agents with shell access. The gcloud reauth that needed it now runs
+    # from the Mac outward (users/dev/home.darwin.nix, gcloud-reauth-refresh),
+    # so nothing remote needs a handle on a browser here. Do not re-add it.
+    # 9222 stays: it is a different profile, used deliberately.
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 
@@ -212,7 +230,13 @@ Host cloudbox-tunnel cloudbox-tunnel-direct
     LocalForward 3334 localhost:3334
     # Chrome DevTools Protocol (one port per project, each needs its own Chrome instance)
     RemoteForward 9222 localhost:9222
-    RemoteForward 9223 localhost:9223
+    # NOTE: RemoteForward 9223 (Chrome DevTools for the isolated gcloud profile)
+    # was deliberately REMOVED. It let a remote host drive a local browser that
+    # holds a live SSO session, unauthenticated, at any hour -- and those hosts
+    # run agents with shell access. The gcloud reauth that needed it now runs
+    # from the Mac outward (users/dev/home.darwin.nix, gcloud-reauth-refresh),
+    # so nothing remote needs a handle on a browser here. Do not re-add it.
+    # 9222 stays: it is a different profile, used deliberately.
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
