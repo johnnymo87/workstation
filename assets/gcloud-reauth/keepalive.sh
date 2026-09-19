@@ -78,14 +78,19 @@ if ! timeout 10 curl -sf "$CDP_URL/json/version" -o /dev/null 2>/dev/null; then
 fi
 
 # stdout only: the probe prints its JSON verdict there, and folding stderr in
-# would hand unparseable noise to the reader below.
+# would hand unparseable noise to the reader below. stderr goes to a file rather
+# than /dev/null so a crash that never reaches the verdict -- a missing harness
+# file, a puppeteer/Chrome mismatch -- is diagnosable. Discarding it produced a
+# bare "exited 1" with no clue that the cause was ERR_MODULE_NOT_FOUND.
+probe_err="$STATE/probe.err"
 out="$(IDP_LOG="$STATE/idp-session.jsonl" IDP_SESSION_PATH="$SESSION_PATH" \
        REAUTH_CDP_URL="$CDP_URL" \
-       timeout 120 "$NODE" "$LIB/idp-session-probe.mjs" "$ORIGIN" 2>/dev/null)"
+       timeout 120 "$NODE" "$LIB/idp-session-probe.mjs" "$ORIGIN" 2>"$probe_err")"
 probe_rc=$?
 
 if [ "$probe_rc" -ne 0 ]; then
-  record "probe_failed" "IdP session probe exited $probe_rc" yes
+  why="$(tail -1 "$probe_err" 2>/dev/null)"
+  record "probe_failed" "IdP session probe exited $probe_rc${why:+: $why}" yes
   exit 1
 fi
 

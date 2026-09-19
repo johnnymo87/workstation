@@ -103,7 +103,10 @@ const log = (...a) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s]`
 // not found'. Measured side by side against a real OAuth page: foreground 1.1s
 // OK, background failed. This flow runs only when a reauth is actually due
 // (~once a day), so a brief focus steal is an acceptable price for a path that
-// works. Do not reintroduce the background variant without measuring it.
+// works. Do not reintroduce the background variant HERE without measuring it.
+// It IS used by idp-session-probe.mjs (see bg-page.mjs): that path loads one
+// static asset and runs every 90 minutes, and was measured separately. Finding
+// createTarget in this tree is therefore not evidence that this note is stale.
 if (urlRejection) {
   // Refuse BEFORE connecting to the browser -- a rejected URL must not so much
   // as open a tab in a profile holding a live session.

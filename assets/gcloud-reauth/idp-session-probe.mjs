@@ -17,6 +17,7 @@
 import puppeteer from 'puppeteer-core';
 import fs from 'fs';
 import os from 'os';
+import { newBackgroundPage } from './bg-page.mjs';
 
 const CDP_URL = process.env.REAUTH_CDP_URL || 'http://127.0.0.1:9223';
 const ORIGIN = process.argv[2] || process.env.IDP_ORIGIN;
@@ -41,14 +42,25 @@ const row = {
   expires_at: null,
   seconds_remaining: null,
   login: null,
+  page_mode: null,
   error: null,
 };
 
 let browser;
 try {
-  browser = await puppeteer.connect({ browserURL: CDP_URL, defaultViewport: null });
+  // protocolTimeout well under the wrapper's `timeout 120`: a stall must surface
+  // as a logged error with the page closed, not as an outside SIGTERM that skips
+  // the finally block and leaves a tab behind every 90 minutes.
+  browser = await puppeteer.connect({
+    browserURL: CDP_URL,
+    defaultViewport: null,
+    protocolTimeout: 60000,
+  });
   row.reachable = true;
-  const page = await browser.newPage();
+  // Background target, not newPage(): this runs every 90 minutes and must never
+  // raise the Chrome window while someone is working. See bg-page.mjs.
+  const { page, mode } = await newBackgroundPage(browser);
+  row.page_mode = mode;
   try {
     // about:blank cannot make a same-origin credentialed request; land on the
     // origin first, then fetch. This is a GET of a read-only endpoint.
