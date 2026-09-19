@@ -995,6 +995,7 @@ lib.mkIf isDarwin {
     mkdir -p "$reauthLib"
     cp -f "${assetsPath}/gcloud-reauth/e2e.mjs" \
           "${assetsPath}/gcloud-reauth/idp-session-probe.mjs" \
+          "${assetsPath}/gcloud-reauth/bg-page.mjs" \
           "${assetsPath}/gcloud-reauth/package.json" \
           "$reauthLib/"
     chmod u+w "$reauthLib"/*.mjs "$reauthLib/package.json"
