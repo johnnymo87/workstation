@@ -1,12 +1,50 @@
 # OpenCode system-wide skills deployment
 # Deploys skills to ~/.config/opencode/skills/ where OpenCode auto-discovers them
 # Skills are tool-agnostic workflows usable from any project
-{ config, lib, pkgs, localPkgs, assetsPath, isDarwin, isCloudbox, ... }:
+{ config, lib, pkgs, localPkgs, assetsPath, isDarwin, isDevbox, isCloudbox, ... }:
 
 let
+  # Devbox defaults its adversarial reviewer to the astra twin (gpt-6-astra via
+  # codex-lb) rather than the fable one — see the matching caution rewrite in
+  # opencode-config.nix and the host policy in
+  # .opencode/skills/opencode-agents/SKILL.md. The pre-PR dispatch instruction
+  # lives in prose, so it is rendered per host HERE rather than written as an
+  # "if you are on devbox..." conditional in the source. Each host's deployed
+  # file then names exactly one agent and the reader never evaluates a
+  # hostname mid-dispatch.
+  #
+  # Every assertion below is match-or-die, for the same reason mkAgentVariant's
+  # are: a silent no-op ships advice pointing at the wrong model forever, and
+  # nothing downstream would notice.
+  #
+  #   -0777       true slurp. `-0` alone means NUL-delimited records, which is
+  #               only incidentally equivalent on markdown.
+  #   $n == 1     exactly one, not "at least one". A SECOND mention of the fable
+  #               handle in this file would be differently intended (a fallback
+  #               instruction, a comparison) and must fail the build rather than
+  #               be silently inverted into "fall back to astra".
+  #   length      -p never runs the body on empty input, so a truncated or
+  #               missing source would emit an empty SKILL.md and exit 0 — the
+  #               die is unreachable in precisely the worst case. END catches it.
+  astraShepherdingSkill = pkgs.runCommand "shepherding-pull-requests-astra-SKILL.md" {} ''
+    ${pkgs.perl}/bin/perl -0777 -pe '
+      our $n += (s!adversarial-reviewer-fable!adversarial-reviewer-astra!g);
+      our $seen = 1;
+      die "astraShepherdingSkill: expected exactly 1 adversarial-reviewer-fable reference, found $n\n"
+        unless $n == 1;
+      END {
+        die "astraShepherdingSkill: source SKILL.md was empty\n" unless $seen;
+      }
+    ' ${assetsPath}/opencode/skills/shepherding-pull-requests/SKILL.md > $out
+  '';
+
+  mkSkillSource = name:
+    if isDevbox && name == "shepherding-pull-requests"
+    then astraShepherdingSkill
+    else "${assetsPath}/opencode/skills/${name}/SKILL.md";
+
   mkSkill = name: {
-    ".config/opencode/skills/${name}/SKILL.md".source =
-      "${assetsPath}/opencode/skills/${name}/SKILL.md";
+    ".config/opencode/skills/${name}/SKILL.md".source = mkSkillSource name;
   };
 
   mkSkills = names:

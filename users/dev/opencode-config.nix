@@ -131,8 +131,10 @@ let
   # `(fable-5-1 model)` token in their description. It rewrites only:
   #   - the model pin (fable-5-1 -> modelPin)
   #   - the `(fable-5-1 model)` description token -> `(modelTag model)`
-  #   - appends an opt-in CAUTION so the orchestrator does NOT auto-select the
-  #     twin; the `-fable` handle stays the default.
+  #   - appends a `caution` sentence to the description. By default that is an
+  #     opt-in CAUTION so the orchestrator does NOT auto-select the twin and the
+  #     `-fable` handle stays the default; devbox overrides it for
+  #     adversarial-reviewer, where the twin IS the default.
   # The result is fed through patchAgent for host rewrites. For an `openai/`
   # pin every patchAgent branch is a no-op, which is correct — codex-lb serves
   # that pin identically on both hosts.
@@ -179,7 +181,17 @@ let
   # (`description: "..."` / `>-`): appending to those produces either broken
   # YAML or text outside the scalar, and the failure mode of broken agent
   # frontmatter is the racy skip-to-stub described above.
-  mkAgentVariant = { base, slug, modelPin, modelTag }: src:
+  # `caution` is the sentence appended to the description. It defaults to the
+  # opt-in CAUTION that keeps the `-fable` handle the default; devbox overrides
+  # it for adversarial-reviewer, where astra IS the default (see the call site).
+  #
+  # It is INTERPOLATED INTO PERL SOURCE, not passed as data. The current values
+  # are plain prose, but a future one containing `!` (the s/// delimiter),
+  # `$`, `@` or a backslash would be interpreted rather than inserted. The
+  # colon-space guard below catches the YAML half of that, not the perl half.
+  mkAgentVariant = { base, slug, modelPin, modelTag,
+                     caution ? "CAUTION — use this ${modelTag} variant ONLY when the user explicitly asks for it; otherwise default to ${base}-fable"
+                   }: src:
     pkgs.runCommand "${base}-${slug}-src.md" {} ''
       # Delimiter is `!`, not `|`: the description guard's character class
       # contains a literal `|` (the YAML block-scalar marker it must reject),
@@ -191,7 +203,7 @@ let
           or die "mkAgentVariant: no anthropic/claude-fable-* pin found in ${base} source\n";
         s!\(fable-[0-9]+(?:-[0-9]+)* model\)!(${modelTag} model)!
           or die "mkAgentVariant: no (fable-N model) token found in ${base} description\n";
-        s!^(description: [^"'"'"'>|].*)$!$1. CAUTION — use this ${modelTag} variant ONLY when the user explicitly asks for it; otherwise default to ${base}-fable!m
+        s!^(description: [^"'"'"'>|].*)$!$1. ${caution}!m
           or die "mkAgentVariant: ${base} has no plain unquoted description: scalar to append to\n";
       ' ${src} > $out
 
@@ -218,7 +230,30 @@ let
   # (see the codex-lb model-catalog note further down for why astra in
   # particular can vanish). A call to @oracle-astra with codex-lb down fails at
   # request time rather than at build time.
-  mkAstraVariant = base: mkAgentVariant { inherit base; slug = "astra"; modelPin = "openai/gpt-6-astra"; modelTag = "gpt-6-astra"; };
+  mkAstraVariant = { caution ? null }: base:
+    mkAgentVariant ({
+      inherit base;
+      slug = "astra";
+      modelPin = "openai/gpt-6-astra";
+      modelTag = "gpt-6-astra";
+    } // lib.optionalAttrs (caution != null) { inherit caution; });
+
+  # Devbox inverts the default for the adversarial reviewer only — astra is THE
+  # reviewer there, for plan-time pressure-tests and the standing pre-PR diff
+  # review alike. Deliberately wider than the pre-PR skill alone: two defaults
+  # that differ by review mode is a seam nobody holds at dispatch time. The
+  # matching prose lands via opencode-skills.nix (pre-PR dispatch line) and
+  # .opencode/skills/opencode-agents/SKILL.md (host policy).
+  #
+  # oracle-astra keeps the opt-in CAUTION on every host, and cloudbox's
+  # adversarial twin keeps it too. Consequence worth naming: with astra as the
+  # standing reviewer, a dead codex-lb blocks adversarial review on devbox —
+  # the skill says stop and report rather than fall back silently.
+  #
+  # No colon-space anywhere in this string (the build-time guard below enforces
+  # it) and no perl metacharacter (see mkAgentVariant's note).
+  devboxAdversarialCaution =
+    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-fable for every adversarial review, plan-time and pre-PR alike";
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -832,7 +867,11 @@ in
    #                     because cloudbox has no first-party Anthropic auth.
    #   @<base>-astra  -> openai/gpt-6-astra via codex-lb (mkAstraVariant).
    #                     Carries an opt-in CAUTION in its description so the
-   #                     orchestrator does not reach for it on its own.
+   #                     orchestrator does not reach for it on its own — EXCEPT
+   #                     adversarial-reviewer on devbox, where that sentence is
+   #                     inverted and astra is the standing default
+   #                     (devboxAdversarialCaution above). That is the one place
+   #                     the two hosts' astra output differs.
    #                     patchAgent is a no-op for an `openai/` pin.
    #
    # THE ASTRA TWINS ARE GATED TO devbox + cloudbox, matching the hosts where
@@ -854,12 +893,16 @@ in
    xdg.configFile."opencode/agents/adversarial-reviewer-fable.md".source =
      patchAgent "adversarial-reviewer-fable" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
    xdg.configFile."opencode/agents/adversarial-reviewer-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
-     source = patchAgent "adversarial-reviewer-astra" (mkAstraVariant "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer.md");
+     source = patchAgent "adversarial-reviewer-astra" (
+       mkAstraVariant
+         { caution = if isDevbox then devboxAdversarialCaution else null; }
+         "adversarial-reviewer"
+         "${assetsPath}/opencode/agents/adversarial-reviewer.md");
    };
    xdg.configFile."opencode/agents/oracle-fable.md".source =
      patchAgent "oracle-fable" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/oracle-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
-     source = patchAgent "oracle-astra" (mkAstraVariant "oracle" "${assetsPath}/opencode/agents/oracle.md");
+     source = patchAgent "oracle-astra" (mkAstraVariant {} "oracle" "${assetsPath}/opencode/agents/oracle.md");
    };
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";

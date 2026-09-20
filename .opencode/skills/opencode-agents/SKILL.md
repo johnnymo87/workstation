@@ -32,9 +32,9 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 ### adversarial-reviewer-fable (subagent)
 **Purpose:** Skeptical, adversarial review of a **design / plan / approach before it's built** — hunts flaws, wrong assumptions, missing cases, hazards, and better alternatives. Also runs in **pre-PR mode** on a finished diff, where it reviews the thinking behind the change (load-bearing assumptions, failure/rollback/migration cases) rather than its line-level correctness; that dispatch is a standing default, see `shepherding-pull-requests` §Pre-PR Checks step 3.
-**Model:** `claude-fable-5-1`, pinned in `assets/opencode/agents/adversarial-reviewer.md`. The **default** variant. A second variant `adversarial-reviewer-astra` pins `openai/gpt-6-astra` from the same source, with an opt-in `CAUTION` — see "The astra twins" below. Same `-fable`-suffix rationale as oracle above.
+**Model:** `claude-fable-5-1`, pinned in `assets/opencode/agents/adversarial-reviewer.md`. The default variant **on cloudbox and macOS**. A second variant `adversarial-reviewer-astra` pins `openai/gpt-6-astra` from the same source; it carries an opt-in `CAUTION` on cloudbox but is the **default on devbox** — see "The astra twins" below. Same `-fable`-suffix rationale as oracle above.
 **Model routing:** host-correct, same as oracle — source pins `anthropic/`, cloudbox gets the Vertex rewrite via `patchAgent`.
-**A note on the pre-PR default:** `shepherding-pull-requests` dispatches `adversarial-reviewer-fable` by default. That default is unchanged — do **not** silently substitute the astra twin into it. A cross-model second opinion on a diff is a thing you can ask for; it is not the standing behaviour.
+**A note on the pre-PR default — it is host-dependent.** `shepherding-pull-requests` dispatches `adversarial-reviewer-fable` on cloudbox and macOS, and `adversarial-reviewer-astra` on devbox. You do not have to work this out: the skill text is rendered per host at deploy time by `users/dev/opencode-skills.nix`, so the copy you load names the right one. What remains banned on every host is **substituting the other twin yourself** because you prefer it — and, on devbox, treating a failed astra dispatch (codex-lb down) as the review having happened. Stop and report instead; the skill says so.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
 **When to use:** You have a design or plan and want it pressure-tested *before* writing code; you want the uncomfortable "this is solving the wrong problem" read. No CAUTION any more — reach for it directly.
 **Key trait:** Grounds every claim in the actual code/artifact (`file:line`, never fabricates); distinguishes verified findings from suspicions; reports verdict → confirmed-sound → flaws-by-severity → missing cases → concrete recommendations.
@@ -46,7 +46,9 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 **What they are for:** a genuinely different model's read on the same question. Both agents exist to be a second opinion, and a second opinion from the same model family is worth less than one from outside it. Reach for the astra twin when the fable answer feels like it might be a house style rather than a conclusion.
 
-**They are opt-in, deliberately.** The generated `description:` carries a `CAUTION` telling the orchestrator to default to the `-fable` handle. Do not auto-select them.
+**They are opt-in, deliberately — with one host-scoped exception.** The generated `description:` carries a `CAUTION` telling the orchestrator to default to the `-fable` handle. Do not auto-select them.
+
+The exception: **on devbox, `adversarial-reviewer-astra` is the default adversarial reviewer**, plan-time and pre-PR alike. `mkAgentVariant` takes a `caution` parameter (`users/dev/opencode-config.nix`, `devboxAdversarialCaution`) and devbox passes an inverted sentence for that one agent. `oracle-astra` keeps the opt-in CAUTION everywhere, and cloudbox's adversarial twin keeps it too — so "astra is opt-in" remains the rule, with exactly one documented hole in it. Consequence to hold: with astra standing rather than optional on devbox, a dead codex-lb blocks adversarial review there. The policy is stop-and-report, never a silent fallback to fable.
 
 **Devbox and cloudbox only.** They are gated to the hosts where the codex-lb subscription model catalog is injected into opencode's `openai` provider — which is *not* the same as the hosts that run codex-lb. macOS runs codex-lb (launchd flavor in `home.darwin.nix`) and has its `openai` baseURL redirected to it, but never gets the catalog, so `gpt-6-astra` is not selectable there. Rather than ship a handle that always fails, the twins are simply absent on macOS.
 
@@ -99,8 +101,13 @@ lands on a model it can actually call:
 
 No branch matches an `openai/` pin, and that is correct rather than an omission:
 codex-lb serves the same model id on every host it runs on, so the
-`-astra` twins pass through `patchAgent` unmodified. Their build output is
-identical on devbox and cloudbox.
+`-astra` twins pass through `patchAgent` unmodified.
+
+Their build output is nevertheless **not** identical across the two hosts, for a
+reason upstream of `patchAgent`: devbox's `adversarial-reviewer-astra` gets an
+inverted `caution` from `mkAgentVariant` (astra is the default reviewer there).
+`oracle-astra` is byte-identical on both. If you are diffing store paths to
+check a change, that one description line is the expected difference.
 
 When adding an Anthropic-pinned agent, pin it to `anthropic/claude-<model>` in
 the source file and let `patchAgent` handle cloudbox — do **not** hardcode the
