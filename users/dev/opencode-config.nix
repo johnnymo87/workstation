@@ -252,8 +252,14 @@ let
   #
   # No colon-space anywhere in this string (the build-time guard below enforces
   # it) and no perl metacharacter (see mkAgentVariant's note).
+  # The unavailability policy is carried HERE, not only in the skills, because
+  # the description is the only part of this policy that reaches a caller in
+  # some other repo. The deployed stop-and-report text lives under §Pre-PR
+  # Checks in shepherding-pull-requests, and the all-review version lives in
+  # this repo's own .opencode skill — a plan-time dispatch from anywhere else
+  # loads neither, and would otherwise be free to invent a silent fallback.
   devboxAdversarialCaution =
-    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-fable for every adversarial review, plan-time and pre-PR alike";
+    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-fable for every adversarial review, plan-time and pre-PR alike. If this variant is unreachable, stop and report it — do not silently fall back to the fable twin, and do not count a failed dispatch as a review that happened";
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
