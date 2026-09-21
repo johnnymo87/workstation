@@ -1058,30 +1058,77 @@ lib.mkMerge [
       #
       # 4c-1 IS A DIFFERENT PROBLEM FROM 4c-2..4 -- a bug, not accumulation.
       # Testcontainers containers are supposed to be reaped by `ryuk`, its
-      # sidecar, when a test run dies abnormally. Ryuk works on this host and
-      # is not disabled for the node suites (dockerd's journal shows
-      # testcontainers-ryuk-* containers being created routinely, and the node
-      # client only honours TESTCONTAINERS_RYUK_DISABLED, which is set
-      # nowhere). It nonetheless failed to reap on 2026-09-14: ten `redis:7-
-      # alpine` and two more containers from that one afternoon were still
-      # RUNNING seven days later, holding memory on a box that OOMs, each one
-      # pinning an image against 4c-3. The bytes are trivial (~33 kB of
-      # writable layer); the resident memory and the pinned images are not.
+      # sidecar, when a test run dies abnormally. Twelve of them from a single
+      # afternoon (2026-09-14) were still RUNNING seven days later, holding
+      # memory on a box that OOMs, each one pinning an image against 4c-3.
       #
-      # So this sweep is a BACKSTOP for a reaper that can itself die, keyed on
-      # the label testcontainers stamps on everything it creates. It is not a
+      # THE CAUSE WAS NOT TESTCONTAINERS, and the first two explanations
+      # reached for it were both wrong. An orphaned bridge interface,
+      # br-934b036cef30, was left DOWN on this host holding a route for
+      # 172.17.0.0/16 -- docker0's own subnet -- ahead of docker0's:
+      #
+      #   172.17.0.0/16 dev br-934b036cef30 ... src 172.17.0.1 linkdown
+      #   172.17.0.0/16 dev docker0         ... src 172.17.0.1
+      #   $ ip route get 172.17.0.2   ->   dev br-934b036cef30
+      #
+      # With net.ipv4.conf.all.ignore_routes_with_linkdown=0 the dead route
+      # wins, so every packet from the host to a default-bridge container was
+      # black-holed. Ryuk lives on the default bridge. It STARTED fine, which
+      # is what made this hard to see: the test client's TCP connect to the
+      # published port was accepted by docker-proxy and then never answered,
+      # so the client proceeded, created its containers, and ryuk timed out
+      # with clients=0 and reaped nothing. dockerd's journal records the step
+      # change exactly: 451 `removed containers=1` lines up to 2026-09-10
+      # 16:08 and not one since -- the dockerd restart on 2026-09-13 19:02 is
+      # what re-added docker0's route BEHIND the orphan's.
+      #
+      # The bridge was deleted on 2026-09-21 and ryuk verified working again
+      # (a client connects, registers its label filter, and disconnects). It
+      # is a host-state fix with nothing to express in Nix; it is written down
+      # here because the NEXT person to see leaked testcontainers will
+      # otherwise re-derive "testcontainers is flaky" from the same symptoms.
+      # If they recur, check `ip route get 172.17.0.2` FIRST.
+      #
+      # So this sweep is a BACKSTOP for a reaper that can be prevented from
+      # doing its job by something entirely outside it, keyed on the label
+      # testcontainers stamps on everything it creates. It is not a
       # replacement for ryuk and must not be read as one: ryuk reaps in
       # seconds, this reaps after a day.
       #
-      # The compose-label check inside it is the guard that makes it safe. A
-      # container can carry both labels, and the aigateway dev stack
-      # (dev-postgres-1, dev-gateway-1, dev-redis-1) is somebody's actual
-      # development environment running in the same daemon. Compose ownership
-      # wins: if both labels are present, leave it alone and say so.
+      # COMPOSE OWNERSHIP WINS, IN ALL THREE CONTAINER/IMAGE STEPS. The
+      # aigateway dev stack (dev-postgres-1, dev-gateway-1, dev-redis-1) is
+      # somebody's actual development environment running in the same daemon,
+      # and its Postgres data lives in an ANONYMOUS volume -- there is no
+      # `volumes:` key in its compose file, so the ledger is bound to the
+      # container, not to a named volume. Its RestartPolicy is `no`. So if
+      # that stack is ever down for longer than DOCKER_CONTAINER_AGE_HOURS --
+      # which the operating skill explicitly supports, via a flag that turns
+      # it off -- a plain `container prune` would delete dev-postgres-1, its
+      # volume would dangle unbound, and the next `compose up --no-recreate`
+      # would build a fresh Postgres on a fresh volume. No volume is deleted
+      # and the ledger is gone anyway. That is why 4c-2 and 4c-3 carry
+      # `label!=com.docker.compose.project` rather than relying on the
+      # containers happening to be running at 03:00.
+      #
+      # THE IMAGE PRUNE IS GATED ON DISK PRESSURE, and that gate is not
+      # timidity. Once ryuk is reaping properly, no testcontainer exists at
+      # 03:00, so every test base image is unreferenced -- and their upstream
+      # creation dates are ancient (redis:7-alpine 2026-08-18, postgres:16-
+      # alpine 2026-04-21), so no value of `until` protects them. A nightly
+      # `-a` would therefore re-pull the whole test image set every morning,
+      # for ~15 agent sessions behind one NAT address, and any private-
+      # registry image would come back as "pull access denied" for whichever
+      # session's ECR token had expired. Above the threshold that trade is
+      # obviously worth it; below it there is nothing to buy.
       DOCKER_TESTCONTAINER_AGE_HOURS=''${DOCKER_TESTCONTAINER_AGE_HOURS:-24}
       DOCKER_CONTAINER_AGE_HOURS=''${DOCKER_CONTAINER_AGE_HOURS:-168}
       DOCKER_IMAGE_AGE_HOURS=''${DOCKER_IMAGE_AGE_HOURS:-336}
       DOCKER_BUILD_CACHE_AGE_HOURS=''${DOCKER_BUILD_CACHE_AGE_HOURS:-168}
+      # Root-filesystem percentage at or above which the image prune escalates
+      # from dangling-only to `-a`. The box was at 81% after the by-hand
+      # reclaim and 87-99% on an ordinary working day, so 70 is a line it
+      # crosses when it is genuinely accumulating and not otherwise.
+      DOCKER_IMAGE_PRUNE_ALL_PCT=''${DOCKER_IMAGE_PRUNE_ALL_PCT:-70}
 
       # Run one prune and report what it reclaimed. Never fails the script: a
       # docker hiccup at 03:00 must not abort the steps after it.
@@ -1160,7 +1207,13 @@ lib.mkMerge [
               continue
               ;;
           esac
-          if "$docker_bin" rm -f "$id" >/dev/null 2>&1; then
+          # -v, not just -f. Every testcontainers redis carries an anonymous
+          # /data volume; without -v this sweep would convert a running leak
+          # into a permanently dangling volume that the no-volume-prune line
+          # then guarantees nobody ever reclaims. `rm -v` removes only THAT
+          # container's anonymous volumes -- exactly what ryuk itself does
+          # (v=1 in its own remove call) -- and touches no named volume.
+          if "$docker_bin" rm -fv "$id" >/dev/null 2>&1; then
             log "Removed leaked testcontainer $id (''${age_hours}h old)"
           else
             log "WARN: failed to remove leaked testcontainer $id"
@@ -1171,14 +1224,34 @@ lib.mkMerge [
         # 4c-2. Stopped containers. Before images, per ORDER above.
         docker_prune_step "stopped containers" \
           "$docker_bin" container prune -f \
-          --filter "until=''${DOCKER_CONTAINER_AGE_HOURS}h"
+          --filter "until=''${DOCKER_CONTAINER_AGE_HOURS}h" \
+          --filter 'label!=com.docker.compose.project'
 
-        # 4c-3. Unreferenced images. -a because a merely-dangling prune leaves
-        # the 98% behind: these are tagged images nothing references, not
-        # untagged layers.
-        docker_prune_step "images" \
-          "$docker_bin" image prune -af \
-          --filter "until=''${DOCKER_IMAGE_AGE_HOURS}h"
+        # 4c-3. Unreferenced images. `-a` only under disk pressure: without it
+        # a merely-dangling prune leaves the 98% behind, since these are
+        # tagged images nothing references rather than untagged layers -- but
+        # with it unconditionally, every test base image is re-pulled daily.
+        # See the gate's rationale above the knobs.
+        local root_pct
+        root_pct=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9' || true)
+        if [ -z "$root_pct" ]; then
+          # Cannot measure -> escalate. The failure this whole section exists
+          # for is a disk at zero bytes free; the cost of being wrong in the
+          # other direction is a re-pull.
+          log "WARN: could not read root filesystem usage; pruning images as if under pressure"
+          root_pct=100
+        fi
+        if [ "$root_pct" -ge "$DOCKER_IMAGE_PRUNE_ALL_PCT" ]; then
+          docker_prune_step "images (all unreferenced, root at ''${root_pct}%)" \
+            "$docker_bin" image prune -af \
+            --filter "until=''${DOCKER_IMAGE_AGE_HOURS}h" \
+            --filter 'label!=com.docker.compose.project'
+        else
+          docker_prune_step "images (dangling only, root at ''${root_pct}%)" \
+            "$docker_bin" image prune -f \
+            --filter "until=''${DOCKER_IMAGE_AGE_HOURS}h" \
+            --filter 'label!=com.docker.compose.project'
+        fi
 
         # 4c-4. Build cache. Small here (51 MB) and cheap to lose.
         docker_prune_step "build cache" \

@@ -197,6 +197,18 @@ exit 0
 FAKE
 chmod +x "$fakedir/docker"
 
+# A `df` stub, so the disk-pressure gate on the image prune is exercised at a
+# chosen percentage rather than at whatever the machine running the suite
+# happens to be at -- which would make the gate's two branches untestable on
+# one host and flaky across hosts.
+printf '#!%s\n' "$(command -v bash)" > "$fakedir/df"
+cat >> "$fakedir/df" <<'FAKEDF'
+[ "${FAKE_DF_BROKEN:-0}" = 1 ] && exit 1
+printf 'Use%%\n%s%%\n' "${FAKE_ROOT_PCT:-90}"
+exit 0
+FAKEDF
+chmod +x "$fakedir/df"
+
 # Prove the stub runs before any assertion depends on it. A stub that cannot
 # exec makes `docker info` fail, which the script correctly answers by
 # skipping -- and every behavioural assertion below then fails while blaming
@@ -226,6 +238,7 @@ run_harness() {
     DOCKER_CALL_LOG="$calls" \
     DOCKER_RM_LOG="$rm_log" \
     FAKE_DOCKER_CONTAINERS="$fixture" \
+    FAKE_ROOT_PCT=90 \
     "$@" \
     "$harness" > "$out" 2>&1 || true
 }
@@ -325,6 +338,35 @@ if grep -qE '^image prune -af .*--filter until=' "$calls"; then
   pass "prunes images with -a and an until filter"
 else
   fail "prunes images with -a and an until filter" \
+       "calls: $(tr '\n' ' ' < "$calls")"
+fi
+
+# THE SECOND HALF OF "COMPOSE OWNERSHIP WINS". 4c-1's per-container check
+# protects only containers carrying BOTH labels; the bulk prunes need their
+# own exclusion or they delete a compose stack that is merely stopped. The
+# aigateway dev stack's Postgres keeps its ledger in an ANONYMOUS volume, so
+# deleting the container orphans the data even though no volume is pruned.
+if grep -q "^container prune .*label!=com.docker.compose.project" "$calls"; then
+  pass "excludes compose-owned containers from the bulk container prune"
+else
+  fail "excludes compose-owned containers from the bulk container prune" \
+       "calls: $(tr '\n' ' ' < "$calls")"
+fi
+
+if grep -q "^image prune .*label!=com.docker.compose.project" "$calls"; then
+  pass "excludes compose-owned images from the image prune"
+else
+  fail "excludes compose-owned images from the image prune" \
+       "calls: $(tr '\n' ' ' < "$calls")"
+fi
+
+# Every testcontainers redis carries an anonymous /data volume. Without -v the
+# sweep converts a running leak into a dangling volume that the standing
+# no-volume-prune rule then guarantees nobody ever reclaims.
+if grep -q '^rm -fv ' "$calls"; then
+  pass "removes a leaked container's anonymous volumes with it (rm -fv)"
+else
+  fail "removes a leaked container's anonymous volumes with it (rm -fv)" \
        "calls: $(tr '\n' ' ' < "$calls")"
 fi
 
@@ -453,6 +495,52 @@ if grep -q 'image prune -af .*until=9999h' "$calls"; then
   pass "DOCKER_IMAGE_AGE_HOURS reaches the image prune filter"
 else
   fail "DOCKER_IMAGE_AGE_HOURS reaches the image prune filter" \
+       "calls: $(tr '\n' ' ' < "$calls")"
+fi
+
+# ---------------------------------------------------------------------------
+# The disk-pressure gate on the image prune.
+#
+# WHY THIS IS GATED AT ALL. Once ryuk reaps properly, no testcontainer exists
+# at 03:00, so every test base image is unreferenced -- and their upstream
+# creation dates are years old, so no `until` value protects them. An
+# ungated `-a` re-pulls the whole test image set every morning for ~15
+# sessions behind one NAT address. Above the threshold that is worth it;
+# below it there is nothing to buy.
+# ---------------------------------------------------------------------------
+run_harness "$fixture" FAKE_ROOT_PCT=45
+if grep -qE '^image prune -f ' "$calls" && ! grep -qE '^image prune -af' "$calls"; then
+  pass "below the threshold, prunes dangling images only (no -a)"
+else
+  fail "below the threshold, prunes dangling images only (no -a)" \
+       "calls: $(tr '\n' ' ' < "$calls")"
+fi
+
+run_harness "$fixture" FAKE_ROOT_PCT=70
+if grep -qE '^image prune -af' "$calls"; then
+  pass "at exactly the threshold, escalates to -a (the boundary is >=)"
+else
+  fail "at exactly the threshold, escalates to -a (the boundary is >=)" \
+       "calls: $(tr '\n' ' ' < "$calls")"
+fi
+
+# Fail-safe direction: the failure this section exists for is a disk at zero
+# bytes free, and the cost of escalating wrongly is a re-pull. So an
+# unmeasurable disk escalates, loudly.
+run_harness "$fixture" FAKE_DF_BROKEN=1
+if grep -qE '^image prune -af' "$calls" && \
+   grep -q 'could not read root filesystem usage' "$out"; then
+  pass "an unreadable df escalates to -a, and says so"
+else
+  fail "an unreadable df escalates to -a, and says so" \
+       "output: $(tr '\n' ' ' < "$out")" "calls: $(tr '\n' ' ' < "$calls")"
+fi
+
+run_harness "$fixture" DOCKER_IMAGE_PRUNE_ALL_PCT=99 FAKE_ROOT_PCT=90
+if grep -qE '^image prune -f ' "$calls"; then
+  pass "DOCKER_IMAGE_PRUNE_ALL_PCT is honoured from the environment"
+else
+  fail "DOCKER_IMAGE_PRUNE_ALL_PCT is honoured from the environment" \
        "calls: $(tr '\n' ' ' < "$calls")"
 fi
 
