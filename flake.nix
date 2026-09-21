@@ -72,6 +72,7 @@
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
       worktree-guard-hook = p.callPackage ./pkgs/worktree-guard-hook { };
+      goose = p.callPackage ./pkgs/goose { };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
