@@ -8,9 +8,12 @@ cloudbox. Every command here runs from your laptop.
 
 **Symptoms this runbook covers:** SSH to `34.24.187.96` **times out** rather than being
 refused (GCP drops rather than rejects), launchd tunnels flap and reconnect forever, and it
-works from home with WARP **off** but not with WARP **on**. The usual cause is that
-Wonder's dedicated Zero Trust egress IP rotated or was deprovisioned, so your traffic no
-longer matches `dev-ssh-warp`.
+works from home with WARP **off** but not with WARP **on**.
+
+> **Current as of 2026-09-20: there is no WARP allowlist rule.** `dev-ssh-warp` was deleted
+> on 2026-09-17, so direct SSH from **any** WARP vnet is expected to time out — that is now
+> the normal state, not a lockout. Use IAP (§1.2). The rest of this runbook keeps describing
+> the rule because recreating it is a live option; see §5.
 
 ---
 
@@ -35,6 +38,16 @@ In order. Stop at the first one that works.
 
    ```bash
    gcloud compute firewall-rules update dev-ssh-warp --source-ranges=<NEW_IP>/32
+   ```
+
+   **This fails with `resource not found` today** — the rule was deleted 2026-09-17. To
+   restore the WARP path, create it rather than update it:
+
+   ```bash
+   gcloud compute firewall-rules create dev-ssh-warp --project=wonder-sandbox \
+     --network=default --priority=900 --direction=INGRESS --action=ALLOW \
+     --rules=tcp:22,udp:60000-61000 --target-tags=dev-ssh \
+     --source-ranges=<NEW_IP>/32 --enable-logging
    ```
 
 4. **Full rollback**, if you need the door open now and cannot diagnose:
@@ -68,7 +81,7 @@ rule sat at `0.0.0.0/0` for weeks without ever producing a finding.
 ## 3. The rules
 
 GCP project `wonder-sandbox`, network `default`. Verified against the live project
-2026-09-13; re-read rather than trusting this table if it matters:
+2026-09-20; re-read rather than trusting this table if it matters:
 
 ```bash
 gcloud compute firewall-rules list --project=wonder-sandbox \
@@ -79,7 +92,7 @@ gcloud compute firewall-rules list --project=wonder-sandbox \
 | Rule | Allow | Source | Target tag | Pri | Logs |
 |---|---|---|---|---|---|
 | `dev-ssh-client` | `tcp:22`, `udp:60000-61000` | `147.185.152.0/21` (home ISP, Honest Networks) | `dev-ssh` | 900 | on |
-| `dev-ssh-warp` | `tcp:22`, `udp:60000-61000` | `104.30.135.170/32` (Wonder ZT **dedicated** egress) | `dev-ssh` | 900 | on |
+| `dev-ssh-warp` | `tcp:22`, `udp:60000-61000` | `104.30.135.170/32` (Wonder ZT **dedicated** egress) — **rule DELETED 2026-09-17** | `dev-ssh` | 900 | on |
 | `dev-ssh-iap` | `tcp:22` | `35.235.240.0/20` | `dev-ssh` | 900 | on |
 | `allow-iap-ssh` | `tcp:22` | `35.235.240.0/20` | **none** | 900 | on |
 | `allow-mosh` | `udp:60000-61000` | `0.0.0.0/0` | **none** | 1000 | off |
@@ -107,7 +120,7 @@ Instance: `cloudbox`, zone `us-east1-b`, tag `dev-ssh`, external IP `34.24.187.9
 | From | Direct SSH / scp / tunnels | Mosh |
 |---|---|---|
 | Home, WARP off | works | works |
-| WARP 'Blue Apron' vnet | works | works |
+| WARP 'Blue Apron' vnet | **no since 2026-09-17 (`dev-ssh-warp` deleted) — use IAP** | works |
 | WARP Azure DEV/QA, Azure PROD, Default | **no — use IAP** | existing sessions keep working |
 
 Those three vnets share a rotating pool IP that cannot be allowlisted. Existing mosh
@@ -118,7 +131,14 @@ bootstrap to go over the IAP tunnel in §1.2.
 
 ## 5. Open action (human)
 
-Ask whoever administers **wondergroup** Zero Trust for the full list of the org's dedicated
-egress IPs — Zero Trust dashboard → **Address space → Leased IPs** — and add all of them to
-`dev-ssh-warp`. Today the rule holds a single `/32`, so a colo failover to a secondary
-dedicated IP causes a silent lockout with no signal other than the timeout in the header.
+**Decide whether WARP-direct SSH is wanted at all.** `dev-ssh-warp` was deleted on
+2026-09-17 (audit log: `v1.compute.firewalls.delete`, `jmohrbacher@wonder.com`). Firewall
+logs for the week to 2026-09-20 show SSH arriving over IAP (48 hits) and from the home ISP
+range (2 hits) and nothing else, so nothing was depending on it at the time.
+
+- **If IAP is enough**, this is settled — delete this section and the `dev-ssh-warp` rows above.
+- **If the WARP path should come back**, recreate it with §1.3's `create` command, and ask
+  whoever administers **wondergroup** Zero Trust for the full list of the org's dedicated
+  egress IPs — Zero Trust dashboard → **Address space → Leased IPs** — and allowlist *all*
+  of them. The old rule held a single `/32`, so a colo failover to a secondary dedicated IP
+  caused a silent lockout with no signal other than the timeout in the header.
