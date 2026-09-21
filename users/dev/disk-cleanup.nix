@@ -1075,6 +1075,322 @@ lib.mkMerge [
     };
   };
 
+  # ==========================================================================
+  # bazel-reap: ORPHANED output bases, during the day.
+  #
+  # WHAT THE NIGHTLY ALREADY DOES, so this is not confused with it.
+  # cleanup_bazel 3a above purges EVERY output base unconditionally, skipping
+  # only ones whose server PID is alive. It is deliberately not orphan-aware --
+  # see its own comment, and the 2026-04-29 design doc. That is correct at
+  # 03:00, when nobody is working. It is not something you can run at 14:00.
+  #
+  # So the gap is the other 23 hours. WHAT THAT GAP IS ACTUALLY WORTH, measured
+  # rather than assumed, because the first version of this comment guessed and
+  # guessed high:
+  #
+  #   Bazel names an output base md5(workspace path) -- verified against the
+  #   live base. Mapping every base the nightly removed between 2026-09-17 and
+  #   09-21 back to a path, 31 of 39 belonged to a workspace that STILL EXISTS.
+  #   This reaper would have kept all 31. Only 8 were orphans it could touch,
+  #   and four of those were under 2 MB. Upper bound on what it could have
+  #   reclaimed: roughly 3 GB/day on a 393 GB disk.
+  #
+  # THIS IS HYGIENE, NOT A DISK LEVER, and the comment says so because the
+  # temptation to re-promote it is real -- I did exactly that on 2026-09-21,
+  # reasoning that since base COUNT had risen from 1-15 to 17-20 a night, more
+  # bases must mean more orphans. That inference is wrong: more bases means
+  # more CONCURRENT LIVE WORKTREES, which is the population this reaper is
+  # specifically built not to touch. bead workstation-o5s1.9 had already
+  # recorded the correct read on 09-16 ("6 of 8 bases belong to LIVE
+  # worktrees... reaping is hygiene") and the reversal should not have happened.
+  #
+  # For scale, on 2026-09-21 with the box at 87%: all of bazel is 13 GB of the
+  # 327 GB in use (~/.cache/bazel 11G, ~/bazel-cache 1.7G). The drivers are
+  # elsewhere -- ~/projects 90G, /var 75G, /nix 48G, /tmp 41G. Anyone arriving
+  # here to solve a disk-full problem should start there, not with this file.
+  #
+  # NOTE THE POLICY INTERACTION, which cuts the yield further: the obvious
+  # orphan source is "agent finishes a PR and runs `git worktree remove`", but
+  # ~/.config/opencode/AGENTS.md explicitly BANS that -- an open PR keeps its
+  # worktree until merged. So the mechanism that would generate orphans during
+  # the day is partly suppressed by convention, which is consistent with the
+  # 8-in-39 measurement above.
+  #
+  # IT IS STILL WORTH THE ~120 LINES, on three grounds and no more than three:
+  # the deletion path is a strict subset of the nightly's (below), so the added
+  # risk is near zero; 3 GB/day arriving hours earlier is free once written;
+  # and the journal lines it emits are the only ongoing measurement of the
+  # orphan rate anyone has. If that rate is ever observed to be ~0 for a month,
+  # delete this whole block rather than tuning it.
+  #
+  # WHY THIS IS SAFE TO RUN HOURLY WHEN THE NIGHTLY IS NOT. This reaper's test
+  # is a STRICT SUBSET of the nightly's: it requires the recorded workspace to
+  # be GONE *and* the server to be dead, where the nightly requires only the
+  # latter. Every base this removes is one the nightly would also have removed,
+  # just sooner. There is no case where bazel-reap deletes something
+  # disk-cleanup would have kept.
+  #
+  # CONSERVATISM IS FREE HERE, which is the property that shapes the whole
+  # script. Anything ambiguous -- no marker, unreadable marker, probe failure,
+  # rate limit hit -- is KEPT, because the nightly is a guaranteed backstop a
+  # few hours away. A wrong "keep" costs one night of disk. A wrong "reap"
+  # costs a running build. Those are not symmetric, so every branch below fails
+  # towards keeping.
+  #
+  # THREE THINGS MEASURED ON CLOUDBOX 2026-09-21 that the code depends on:
+  #
+  #   1. `rm -rf` ALONE CANNOT DELETE A BASE. Bazel leaves external-repo dirs
+  #      read-only -- 319 of them in the single live base at the time -- and
+  #      rm exits 1 having deleted everything it could reach. Verified on a
+  #      fixture: 7 entries of residue. `chmod -R u+w` first fixes it, and
+  #      every file in a real base is owned by dev, so no sudo is required.
+  #      (The nightly uses `sudo rm -rf`, which also works, via
+  #      CAP_DAC_OVERRIDE. A timer that fires every 15 minutes is not a thing
+  #      to hand root, and it does not need it.)
+  #
+  #   2. THAT FAILED rm DESTROYS THE EVIDENCE FOR ITS OWN RETRY. On the same
+  #      fixture the partial delete removed DO_NOT_BUILD_HERE and server/
+  #      before hitting the read-only tree. A base in that state can never be
+  #      classified again: "no marker" is indistinguishable from "reaper died
+  #      here", so a conservative test keeps it forever. This is not
+  #      hypothetical -- it is what the manual reap on 2026-09-16 left behind.
+  #
+  #      Hence RENAME-THEN-DELETE. The base is moved to a `_reaping-` sibling
+  #      (rename(2), same directory, atomic) while its evidence is still
+  #      intact, and only then chmod'd and removed. After the rename the tree
+  #      is unambiguously garbage: a later pass retries it without needing to
+  #      classify anything, and the nightly's own glob sweeps it as a backstop
+  #      because the prefix is deliberately NOT dot-hidden (`*` skips dotfiles;
+  #      a `.reaping-` name would be invisible to the very backstop it needs).
+  #      This is a deviation from the bead's "capture the workspace path before
+  #      deleting" -- it achieves the same thing without a sidecar file that
+  #      could itself be lost.
+  #
+  #   3. A BASE WITH A LIVE WORKSPACE IS NOT REAPED EVEN IF ITS SERVER IS DEAD,
+  #      which is the whole reason the marker is consulted at all. Bazel
+  #      servers idle out after max_idle_secs, which home.base.nix sets to 900
+  #      (15 minutes), so a worktree someone is actively working in has no
+  #      server for most of its life. The single live base on the box at the
+  #      time of writing was exactly that: workspace present, no server pid --
+  #      the nightly would delete it at 03:00 and this reaper will not.
+  #
+  # WHY NO GUARD 4 (the opencode session table) HERE, since the bead asks for
+  # it and its absence would otherwise look like an oversight. GUARD 4 exists
+  # because a live opencode session holds NO /proc handle in its worktree, so
+  # /proc-based liveness would delete a live session's directory. This reaper
+  # never decides whether a worktree is alive -- it asks only whether the
+  # directory EXISTS. A session whose directory still exists protects its base
+  # through that existence alone, and a session whose directory is already gone
+  # is already dead by the time we look (see the
+  # reviving-worktree-orphaned-sessions skill). The existence test subsumes the
+  # session table rather than ignoring it.
+  home.file.".local/bin/bazel-reap" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      # NOTE: `set -e` is deliberately absent, for the same reason disk-watch
+      # omits it. This is a janitor on a 15-minute timer; a non-zero exit puts
+      # the unit into `failed`, a state nobody reads, and stops the NEXT pass
+      # from being scheduled cleanly. Every step degrades to a log line.
+      set -uo pipefail
+
+      PATH="${lib.makeBinPath [ pkgs.coreutils ]}:$PATH"
+
+      # Seams. Nothing shipped overrides these; the suite does.
+      BASE="''${BAZEL_REAP_BASE:-$HOME/.cache/bazel/_bazel_$(whoami)}"
+      # Rehearsal: classify exactly as a real pass would, delete nothing, and
+      # say "would reap". Same seam and same rationale as TMP_SCRATCH_DRY_RUN.
+      DRY_RUN="''${BAZEL_REAP_DRY_RUN:-}"
+      # Bases per pass. A base is 3 GB of small files and the box can be at
+      # single-digit GB free with live builds running; unbounded deletion is an
+      # I/O storm in the same class as the nix GC that disk-watch refuses to
+      # automate. Four per pass at four passes an hour is 48 GB/hour of
+      # headroom, far above the observed fill rate, while never monopolising
+      # the disk. Anything over the limit is simply left for the next pass.
+      MAX_PER_PASS="''${BAZEL_REAP_MAX:-4}"
+
+      # Staging prefix. NOT dot-prefixed: see the header. Must not collide with
+      # a bazel md5 base name, which is 32 hex characters.
+      TRASH_PREFIX="_reaping-"
+
+      log() { printf '[bazel-reap] %s\n' "$*"; }
+
+      [ -d "$BASE" ] || exit 0
+
+      reaped=0
+      freed_kb=0
+
+      # chmod-then-rm, the only sequence that actually empties a base. Returns
+      # non-zero if anything survived, in which case the caller leaves the
+      # staged directory for a later pass rather than pretending success.
+      purge_tree() {
+        local tree="$1"
+        chmod -R u+w "$tree" 2>/dev/null || true
+        rm -rf "$tree" 2>/dev/null
+        [ ! -e "$tree" ]
+      }
+
+      # --- 1. Finish what an earlier pass started. -------------------------
+      # Staged trees are garbage by construction, so this needs no liveness
+      # reasoning at all -- that decision was made before the rename.
+      for tree in "$BASE"/"$TRASH_PREFIX"*; do
+        [ -d "$tree" ] || continue
+        if purge_tree "$tree"; then
+          log "purged staged leftover $(basename "$tree")"
+        else
+          log "WARN: staged leftover $(basename "$tree") did not fully delete; will retry"
+        fi
+      done
+
+      # --- 2. Classify each output base. -----------------------------------
+      for entry in "$BASE"/*; do
+        [ -d "$entry" ] || continue
+        name=$(basename "$entry")
+
+        case "$name" in
+          # install/ is Bazel's own installer cache, shared by every workspace
+          # and not owned by any of them; cache/ is the repository cache. The
+          # nightly skips install/ for the same reason. Neither has a marker,
+          # so both would be KEPT by the test below anyway -- they are named
+          # here so that intent is explicit rather than incidental.
+          install|cache) continue ;;
+          "$TRASH_PREFIX"*) continue ;;
+        esac
+
+        marker="$entry/DO_NOT_BUILD_HERE"
+        # Absent or empty marker: cannot classify. This is the state a failed
+        # delete leaves behind (measured -- see header note 2), so it must
+        # NEVER be read as "orphan". The nightly clears these.
+        if [ ! -s "$marker" ]; then
+          log "keep $name (no workspace marker; leaving to the nightly)"
+          continue
+        fi
+
+        workspace=$(head -1 "$marker" 2>/dev/null) || workspace=""
+        if [ -z "$workspace" ]; then
+          log "keep $name (workspace marker unreadable)"
+          continue
+        fi
+
+        # THE FIRST HALF OF THE ORPHAN TEST. Existence, not liveness -- see the
+        # header on why that is deliberate and why it subsumes GUARD 4. A
+        # worktree deleted and recreated at the same path reads as live and is
+        # kept, which is the safe direction.
+        if [ -e "$workspace" ]; then
+          log "keep $name (workspace live: $workspace)"
+          continue
+        fi
+
+        # THE SECOND HALF. A live server pins the base regardless of what
+        # happened to the directory. PID reuse can only cause a false
+        # "alive" here, which over-keeps.
+        pid_file="$entry/server/server.pid.txt"
+        if [ -f "$pid_file" ]; then
+          server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+          if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+            log "keep $name (server pid $server_pid alive despite missing workspace)"
+            continue
+          fi
+        fi
+
+        # --- orphan ---
+        if [ "$reaped" -ge "$MAX_PER_PASS" ]; then
+          log "rate limit reached ($MAX_PER_PASS this pass); $name waits for the next one"
+          break
+        fi
+
+        if [ -n "$DRY_RUN" ]; then
+          size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1)
+          case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
+          log "would reap $name ($((size_kb / 1024)) MB, workspace gone: $workspace)"
+          reaped=$((reaped + 1))
+          freed_kb=$((freed_kb + size_kb))
+          continue
+        fi
+
+        # Re-check immediately before the rename, with NOTHING slow in
+        # between -- the measurement moved below the rename precisely so this
+        # window is microseconds rather than however long `du` takes on 3 GB of
+        # small files. Closing it entirely would need a lock; the loss if we do
+        # race is a cold rebuild, not anyone's work.
+        if [ -e "$workspace" ]; then
+          log "keep $name (workspace reappeared during scan: $workspace)"
+          continue
+        fi
+
+        staged="$BASE/$TRASH_PREFIX$name.$$"
+        if ! mv "$entry" "$staged" 2>/dev/null; then
+          log "WARN: could not stage $name for deletion; skipping"
+          continue
+        fi
+
+        # Past this point the base is gone from Bazel's view and the tree is
+        # unambiguously garbage, so a failure here is a retry, not a puzzle --
+        # and measuring it here rather than before the rename costs nothing
+        # while removing the race above.
+        reaped=$((reaped + 1))
+        size_kb=$(du -sk "$staged" 2>/dev/null | cut -f1)
+        case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
+        if purge_tree "$staged"; then
+          log "reaped $name ($((size_kb / 1024)) MB, workspace gone: $workspace)"
+          freed_kb=$((freed_kb + size_kb))
+        else
+          log "WARN: staged $name but could not fully delete it; will retry next pass"
+        fi
+      done
+
+      if [ "$reaped" -gt 0 ]; then
+        verb="would free"
+        [ -z "$DRY_RUN" ] && verb="freed"
+        log "$reaped orphaned output base(s), $verb $((freed_kb / 1024)) MB"
+      fi
+
+      exit 0
+    '';
+  };
+
+  systemd.user.services.bazel-reap = {
+    Unit = {
+      Description = "Reap orphaned Bazel output bases";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "%h/.local/bin/bazel-reap";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      # Nice=19 is real. IOSchedulingClass is set for consistency with the
+      # sibling units and is a NO-OP on this host: /sys/block/nvme0n1/queue/
+      # scheduler reads `[none]`, and ionice classes are only honoured by BFQ
+      # and CFQ. So do not read this as disk isolation -- the actual bound on
+      # I/O is MAX_PER_PASS. The nightly logs ~10s to delete a 3 GB base, so a
+      # full pass is a few tens of seconds of I/O.
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      Environment = [
+        "HOME=%h"
+        "PATH=/run/current-system/sw/bin"
+      ];
+    };
+  };
+
+  systemd.user.timers.bazel-reap = {
+    Unit = {
+      Description = "Reap orphaned Bazel output bases timer";
+    };
+    Timer = {
+      # Same shape as disk-watch, and for the same reason: OnUnitActiveSec is
+      # measured from the last activation and a unit that has never run has
+      # none, so OnStartupSec supplies the first. Persistent= is omitted
+      # because replaying a missed pass is meaningless -- the next pass
+      # re-derives everything from the filesystem.
+      OnStartupSec = "10min";
+      OnUnitActiveSec = "15min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   })
 
   # ==========================================================================

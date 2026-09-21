@@ -699,6 +699,34 @@
       # unavailable -- that extractor was keyed on `lib.optionals isDarwin [` and
       # would have started matching the wrong block the moment a second such
       # branch appeared above it. Evaluated bytes have no such failure mode.
+      # bazel-reap deletes multi-gigabyte trees on a 15-minute timer, on a box
+      # a dozen agent sessions share. Same SRC seam as the two checks above,
+      # for the same sandbox reason.
+      bazel-reaper-tests = devboxPkgs.runCommand "bazel-reaper-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+          devboxPkgs.findutils
+        ];
+        BAZEL_REAP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/bazel-reap".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-bazel-reaper.sh 2>&1 | tee "$TMPDIR/br.txt"
+        grep -q '^=== 23 passed, 0 failed ===' "$TMPDIR/br.txt" || {
+          echo "GATE FAILURE: bazel-reap suite did not reach its 23/0 tally." >&2
+          exit 1
+        }
+        # Same anti-vacuity pin as its neighbours: the tally is printed by the
+        # suite, so a suite gutted to three assertions still prints a truthful
+        # "3 passed, 0 failed". The count is what makes deletion visible.
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 23 ] || {
+          echo "GATE FAILURE: expected 23 'PASS' lines, got" \
+               "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       bazelrc-disk-cache-tests = devboxPkgs.runCommand "bazelrc-disk-cache-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
