@@ -348,6 +348,43 @@
         touch $out
       '';
 
+      # ---- pkgs/astra-probe -------------------------------------------------
+      #
+      # astra-probe gates the DEFAULT adversarial reviewer on devbox, so its
+      # failure mode is a false GREEN: print "astra UP" at a broken codex-lb and
+      # the caller dispatches into an empty review it will read as "no findings".
+      # The first draft did exactly that -- `.accounts[]` iterates a JSON OBJECT
+      # as happily as an array, so a reshaped response printed UP. That is the
+      # regression this suite is here for, and most cases below are malformed or
+      # drifted payloads rather than happy paths.
+      #
+      # It runs the SHIPPED executable (ASTRA_PROBE_BIN below), not a copy of the
+      # jq logic -- a mirror suite could pass while the installed script kept the
+      # bug. The fixtures are throwaway loopback HTTP servers, so no subscription,
+      # network or live codex-lb is involved; that the probe honours CODEX_LB_URL
+      # is the only reason it is testable at all.
+      #
+      # The count is PINNED, following checks.oc-attach-reap: most assertions
+      # here describe REFUSALS (must not say UP), and a refusal test passes
+      # trivially if the probe stops classifying at all, so "OK" alone is close
+      # to meaningless.
+      astra-probe-tests = devboxPkgs.runCommand "astra-probe-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+        ASTRA_PROBE_BIN = "${devboxPkgs.callPackage ./pkgs/astra-probe { }}/bin/astra-probe";
+      } ''
+        cd ${self}
+        python3 pkgs/astra-probe/test_astra_probe.py 2>&1 | tee "$TMPDIR/astra.txt"
+        grep -q '^OK' "$TMPDIR/astra.txt" || {
+          echo "GATE FAILURE: astra-probe suite did not pass." >&2
+          exit 1
+        }
+        grep -q '^Ran 19 tests' "$TMPDIR/astra.txt" || {
+          echo "GATE FAILURE: expected 19 tests; a suite that stops asserting still prints OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # ---- pkgs/oc-attach-reap (bead workstation-o5s1.14) ------------------
       #
       # This tool SENDS SIGTERM, so its suite is about the ways it could kill
