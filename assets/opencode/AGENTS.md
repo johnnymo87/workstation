@@ -297,8 +297,9 @@ skill. Load it before touching Jenkins.
 ## On cloudbox, `bazel test` does not build non-test targets
 
 cloudbox's generated `~/.bazelrc` carries `test --build_tests_only` (it cut
-upload volume 83% per invocation by not building 52 OCI image tarballs nobody
-tests). The flag is **cloudbox-only** — macOS deliberately does not have it.
+upload volume 83% per invocation — 144.3 MB to 24.2 MB — by not building the 10
+of 12 OCI image tarballs that nothing tests). The flag is **cloudbox-only** —
+macOS deliberately does not have it.
 
 The hazard is not that it skips things. It is that it skips them **silently,
 with exit 0**, when you name a non-test target alongside a test:

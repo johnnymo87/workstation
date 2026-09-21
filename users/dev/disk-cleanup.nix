@@ -1084,13 +1084,44 @@ lib.mkMerge [
   # see its own comment, and the 2026-04-29 design doc. That is correct at
   # 03:00, when nobody is working. It is not something you can run at 14:00.
   #
-  # So the gap is the other 23 hours, and it is a real one. A worktree removed
-  # at 10:00 (an agent finishing a PR, `git worktree remove`) orphans its
-  # output base instantly, and that base then sits until 03:00 the next
-  # morning. Measured 2026-09-21: bases run 2967-3677 MB each, and the box
-  # reaped 17-20 of them a night while sitting at 89% on an ordinary afternoon.
-  # On 2026-09-16 it reached 99% (4.8G free) mid-afternoon and a human had to
-  # clear it by hand.
+  # So the gap is the other 23 hours. WHAT THAT GAP IS ACTUALLY WORTH, measured
+  # rather than assumed, because the first version of this comment guessed and
+  # guessed high:
+  #
+  #   Bazel names an output base md5(workspace path) -- verified against the
+  #   live base. Mapping every base the nightly removed between 2026-09-17 and
+  #   09-21 back to a path, 31 of 39 belonged to a workspace that STILL EXISTS.
+  #   This reaper would have kept all 31. Only 8 were orphans it could touch,
+  #   and four of those were under 2 MB. Upper bound on what it could have
+  #   reclaimed: roughly 3 GB/day on a 393 GB disk.
+  #
+  # THIS IS HYGIENE, NOT A DISK LEVER, and the comment says so because the
+  # temptation to re-promote it is real -- I did exactly that on 2026-09-21,
+  # reasoning that since base COUNT had risen from 1-15 to 17-20 a night, more
+  # bases must mean more orphans. That inference is wrong: more bases means
+  # more CONCURRENT LIVE WORKTREES, which is the population this reaper is
+  # specifically built not to touch. bead workstation-o5s1.9 had already
+  # recorded the correct read on 09-16 ("6 of 8 bases belong to LIVE
+  # worktrees... reaping is hygiene") and the reversal should not have happened.
+  #
+  # For scale, on 2026-09-21 with the box at 87%: all of bazel is 13 GB of the
+  # 327 GB in use (~/.cache/bazel 11G, ~/bazel-cache 1.7G). The drivers are
+  # elsewhere -- ~/projects 90G, /var 75G, /nix 48G, /tmp 41G. Anyone arriving
+  # here to solve a disk-full problem should start there, not with this file.
+  #
+  # NOTE THE POLICY INTERACTION, which cuts the yield further: the obvious
+  # orphan source is "agent finishes a PR and runs `git worktree remove`", but
+  # ~/.config/opencode/AGENTS.md explicitly BANS that -- an open PR keeps its
+  # worktree until merged. So the mechanism that would generate orphans during
+  # the day is partly suppressed by convention, which is consistent with the
+  # 8-in-39 measurement above.
+  #
+  # IT IS STILL WORTH THE ~120 LINES, on three grounds and no more than three:
+  # the deletion path is a strict subset of the nightly's (below), so the added
+  # risk is near zero; 3 GB/day arriving hours earlier is free once written;
+  # and the journal lines it emits are the only ongoing measurement of the
+  # orphan rate anyone has. If that rate is ever observed to be ~0 for a month,
+  # delete this whole block rather than tuning it.
   #
   # WHY THIS IS SAFE TO RUN HOURLY WHEN THE NIGHTLY IS NOT. This reaper's test
   # is a STRICT SUBSET of the nightly's: it requires the recorded workspace to
@@ -1137,8 +1168,11 @@ lib.mkMerge [
   #
   #   3. A BASE WITH A LIVE WORKSPACE IS NOT REAPED EVEN IF ITS SERVER IS DEAD,
   #      which is the whole reason the marker is consulted at all. Bazel
-  #      servers idle out after 5 minutes; a worktree someone is actively
-  #      working in has no server for most of its life.
+  #      servers idle out after max_idle_secs, which home.base.nix sets to 900
+  #      (15 minutes), so a worktree someone is actively working in has no
+  #      server for most of its life. The single live base on the box at the
+  #      time of writing was exactly that: workspace present, no server pid --
+  #      the nightly would delete it at 03:00 and this reaper will not.
   #
   # WHY NO GUARD 4 (the opencode session table) HERE, since the bead asks for
   # it and its absence would otherwise look like an oversight. GUARD 4 exists
@@ -1265,21 +1299,20 @@ lib.mkMerge [
           break
         fi
 
-        size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1)
-        case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
-
         if [ -n "$DRY_RUN" ]; then
+          size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1)
+          case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
           log "would reap $name ($((size_kb / 1024)) MB, workspace gone: $workspace)"
           reaped=$((reaped + 1))
           freed_kb=$((freed_kb + size_kb))
           continue
         fi
 
-        # Re-check immediately before the rename. `du` on a 3 GB tree is not
-        # instant, and a worktree recreated at this path during that window
-        # would have bazel adopting this very base. Narrowing the window is
-        # cheap; closing it entirely is not possible without a lock, and the
-        # loss if we do race is a cold rebuild, not anyone's work.
+        # Re-check immediately before the rename, with NOTHING slow in
+        # between -- the measurement moved below the rename precisely so this
+        # window is microseconds rather than however long `du` takes on 3 GB of
+        # small files. Closing it entirely would need a lock; the loss if we do
+        # race is a cold rebuild, not anyone's work.
         if [ -e "$workspace" ]; then
           log "keep $name (workspace reappeared during scan: $workspace)"
           continue
@@ -1292,8 +1325,12 @@ lib.mkMerge [
         fi
 
         # Past this point the base is gone from Bazel's view and the tree is
-        # unambiguously garbage, so a failure here is a retry, not a puzzle.
+        # unambiguously garbage, so a failure here is a retry, not a puzzle --
+        # and measuring it here rather than before the rename costs nothing
+        # while removing the race above.
         reaped=$((reaped + 1))
+        size_kb=$(du -sk "$staged" 2>/dev/null | cut -f1)
+        case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
         if purge_tree "$staged"; then
           log "reaped $name ($((size_kb / 1024)) MB, workspace gone: $workspace)"
           freed_kb=$((freed_kb + size_kb))
@@ -1321,8 +1358,12 @@ lib.mkMerge [
       ExecStart = "%h/.local/bin/bazel-reap";
       StandardOutput = "journal";
       StandardError = "journal";
-      # Same posture as the other two: this is housekeeping and must never
-      # compete with a live build for CPU or disk.
+      # Nice=19 is real. IOSchedulingClass is set for consistency with the
+      # sibling units and is a NO-OP on this host: /sys/block/nvme0n1/queue/
+      # scheduler reads `[none]`, and ionice classes are only honoured by BFQ
+      # and CFQ. So do not read this as disk isolation -- the actual bound on
+      # I/O is MAX_PER_PASS. The nightly logs ~10s to delete a 3 GB base, so a
+      # full pass is a few tens of seconds of I/O.
       Nice = 19;
       IOSchedulingClass = "idle";
       Environment = [
