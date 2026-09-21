@@ -874,6 +874,74 @@ lib.mkIf isCloudbox {
       fi
     '';
 
+  # ~/.testcontainers.properties: drop `ryuk.disabled=true`, ONCE.
+  #
+  # WHAT RYUK IS. Testcontainers starts a sidecar container (`ryuk`) that holds
+  # an open socket to the test process and deletes every container carrying
+  # that run's session label the moment the socket closes. It is the ONLY
+  # thing that cleans up after a test run that dies abnormally -- killed,
+  # OOMed, or swept by the nightly reset, all of which are routine here.
+  #
+  # WHAT WAS FOUND, 2026-09-21. This file on cloudbox contained:
+  #
+  #     #Modified by Testcontainers
+  #     docker.client.strategy=org.testcontainers.dockerclient.UnixSocketClientProviderStrategy
+  #     ryuk.disabled=true
+  #
+  # The first two lines are written by testcontainers itself. The third was a
+  # hand edit, added 2026-09-17 by an agent session that had hit
+  # `Can not connect to Ryuk at localhost:<port> ... Connection reset` in a
+  # bazel test log, confirmed that TESTCONTAINERS_RYUK_DISABLED=true made the
+  # test pass, and made the workaround permanent.
+  #
+  # IT WAS A REASONABLE WORKAROUND FOR A REAL BUG, and the bug was not in
+  # testcontainers. An orphaned DOWN bridge interface held a route for
+  # docker0's own subnet ahead of docker0, black-holing every packet from the
+  # host to a default-bridge container -- which is where ryuk runs. The full
+  # diagnosis, the evidence, and what to check if it recurs are in
+  # disk-cleanup.nix section 4c-1, beside the sweeper that backstops it.
+  #
+  # ORDER MATTERS, AND THIS BLOCK IS THE SECOND HALF. The bridge was deleted
+  # and ryuk verified reachable (a client connects, registers its label
+  # filter, disconnects) BEFORE this was written. Shipping it while the
+  # routing bug was live would have re-broken mono's Java testcontainers
+  # suites and started a tug-of-war: agent re-adds the line, next
+  # home-manager switch strips it.
+  #
+  # SCOPE, WHICH IS NARROWER THAN IT LOOKS. This property is read by the JAVA
+  # client only, so it governs mono's Kotlin/Java suites. The NODE client
+  # (testcontainers 11.11.0, used by salmon-of-knowledge) reads this file for
+  # docker.host/tls settings ONLY and honours nothing but the
+  # TESTCONTAINERS_RYUK_DISABLED environment variable, which is set nowhere on
+  # this host. So this line never explained the twelve node containers that
+  # leaked on 2026-09-14; the routing bug explained both.
+  #
+  # ONE-SHOT, VIA A STAMP. The removal fixes an edit that is now obsolete.
+  # A REAPPEARANCE is somebody's live decision -- most likely an agent hitting
+  # a ryuk problem this block cannot see -- and silently reverting that every
+  # rebuild is how a tug-of-war starts. So it runs once, then warns.
+  #
+  # WHY AN ACTIVATION EDIT AND NOT home.file. Testcontainers WRITES this file
+  # (that is what the "#Modified by Testcontainers" header is), so making it a
+  # read-only store symlink would break the client's own config caching. This
+  # removes one line and touches nothing else.
+  home.activation.enableTestcontainersRyuk =
+    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      props="$HOME/.testcontainers.properties"
+      stamp="$HOME/.local/state/workstation/ryuk-disabled-removed"
+      ryuk_line='^[[:space:]]*ryuk\.disabled[[:space:]]*=[[:space:]]*true[[:space:]]*$'
+      if [ -f "$props" ] && ${pkgs.gnugrep}/bin/grep -qE "$ryuk_line" "$props"; then
+        if [ -e "$stamp" ]; then
+          echo "NOTE: $props re-adds ryuk.disabled=true; leaving it alone (already removed once, see $stamp). If ryuk is broken again, check \`ip route get 172.17.0.2\` before working around it." >&2
+        else
+          run ${pkgs.gnused}/bin/sed -i -E "/$ryuk_line/d" "$props"
+          run ${pkgs.coreutils}/bin/mkdir -p "$(dirname "$stamp")"
+          run ${pkgs.coreutils}/bin/touch "$stamp"
+          echo "NOTE: removed ryuk.disabled=true from $props; testcontainers' reaper is enabled again." >&2
+        fi
+      fi
+    '';
+
   systemd.user.services.ensure-projects = {
     Unit = {
       Description = "Ensure declared dev projects are present in ~/projects";

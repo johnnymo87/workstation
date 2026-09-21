@@ -963,6 +963,13 @@ lib.mkMerge [
         sudo find /tmp -maxdepth 1 -name "pip-*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
         sudo find /tmp -maxdepth 1 -name "pyright-*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
         sudo find /tmp -maxdepth 1 -name "fp-digest-*" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+        # nx's native file cache: 173 dirs / 1.83 GB on cloudbox 2026-09-21,
+        # 144 of them older than a week. cleanup_tmp_scratch below cannot see
+        # these -- each is far under its 100 MB per-entry floor, which is a
+        # floor on purpose (it is what stops an age-and-size sweep from
+        # chewing through small live scratch). A known cache name is exactly
+        # the case that floor should not apply to, so it goes here instead.
+        sudo find /tmp -maxdepth 1 -name "nx-native-file-cache-*" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
         cleanup_tmp_scratch
 
@@ -1005,6 +1012,256 @@ lib.mkMerge [
       PYEOF
       }
 
+      # --- 4c. Docker reclamation ---
+      #
+      # MEASURED ON CLOUDBOX 2026-09-21, at 100% full with zero bytes free:
+      #
+      #   TYPE           TOTAL  ACTIVE  SIZE      RECLAIMABLE
+      #   Images           328       7  68.79GB   67.78GB (98%)
+      #   Local Volumes     30      15   2.78GB    2.52GB (90%)
+      #   Build Cache       40       0  51.09MB   51.09MB
+      #
+      # /var/lib/docker was 69 GB of the 75 GB in /var. A by-hand
+      # `docker image prune -a` + `builder prune -a` reclaimed 67 GB and took
+      # the box from 98% to 81%. Nothing in this file touched docker before
+      # this section existed, so that by-hand reclaim had no successor and the
+      # pile simply restarted.
+      #
+      # THE PREDICATE, AND WHY IT IS NOT A BLANKET PRUNE. A bare
+      # `docker image prune -a` on a box shared by ~15 concurrent agent
+      # sessions deletes the image somebody built twenty minutes ago and is
+      # mid-task on. `--filter until=<age>` is the whole reason this is safe to
+      # automate: it is evaluated against the image's CREATION time, so a
+      # locally-built image is protected for DOCKER_IMAGE_AGE_HOURS after it is
+      # built, which covers the mid-task case that matters.
+      #
+      # State the cost of that predicate plainly, because the option name
+      # oversells it: `until` is creation time, NOT last-used time. A base
+      # image pulled two months ago and used every day is still older than the
+      # cutoff and WILL be pruned whenever no container references it. That
+      # costs a re-pull, which is the deliberate trade -- docker exposes no
+      # last-used timestamp to filter on, so the alternative is not a better
+      # predicate, it is no automation at all.
+      #
+      # ORDER IS LOAD-BEARING. A stopped container pins its image, so pruning
+      # containers first is what makes their images prunable in the same run.
+      # Reversing these two steps silently under-reclaims -- by 21 images on
+      # the day this was written, one per leaked `bufbuild/buf` run.
+      #
+      # VOLUMES ARE NEVER TOUCHED, not even with an `until` filter. 15 of the
+      # 30 on this box were in use and volumes hold real data (the aigateway
+      # dev stack's Postgres among them); an unreferenced volume is also the
+      # normal resting state of a database between `compose down` and the next
+      # `compose up`. Reclaiming 2.5 GB is not worth a class of deletion whose
+      # failure mode is unrecoverable. If volumes ever matter, that is a human
+      # decision, not a nightly one.
+      #
+      # 4c-1 IS A DIFFERENT PROBLEM FROM 4c-2..4 -- a bug, not accumulation.
+      # Testcontainers containers are supposed to be reaped by `ryuk`, its
+      # sidecar, when a test run dies abnormally. Twelve of them from a single
+      # afternoon (2026-09-14) were still RUNNING seven days later, holding
+      # memory on a box that OOMs, each one pinning an image against 4c-3.
+      #
+      # THE CAUSE WAS NOT TESTCONTAINERS, and the first two explanations
+      # reached for it were both wrong. An orphaned bridge interface,
+      # br-934b036cef30, was left DOWN on this host holding a route for
+      # 172.17.0.0/16 -- docker0's own subnet -- ahead of docker0's:
+      #
+      #   172.17.0.0/16 dev br-934b036cef30 ... src 172.17.0.1 linkdown
+      #   172.17.0.0/16 dev docker0         ... src 172.17.0.1
+      #   $ ip route get 172.17.0.2   ->   dev br-934b036cef30
+      #
+      # With net.ipv4.conf.all.ignore_routes_with_linkdown=0 the dead route
+      # wins, so every packet from the host to a default-bridge container was
+      # black-holed. Ryuk lives on the default bridge. It STARTED fine, which
+      # is what made this hard to see: the test client's TCP connect to the
+      # published port was accepted by docker-proxy and then never answered,
+      # so the client proceeded, created its containers, and ryuk timed out
+      # with clients=0 and reaped nothing. dockerd's journal records the step
+      # change exactly: 451 `removed containers=1` lines up to 2026-09-10
+      # 16:08 and not one since -- the dockerd restart on 2026-09-13 19:02 is
+      # what re-added docker0's route BEHIND the orphan's.
+      #
+      # The bridge was deleted on 2026-09-21 and ryuk verified working again
+      # (a client connects, registers its label filter, and disconnects). It
+      # is a host-state fix with nothing to express in Nix; it is written down
+      # here because the NEXT person to see leaked testcontainers will
+      # otherwise re-derive "testcontainers is flaky" from the same symptoms.
+      # If they recur, check `ip route get 172.17.0.2` FIRST.
+      #
+      # So this sweep is a BACKSTOP for a reaper that can be prevented from
+      # doing its job by something entirely outside it, keyed on the label
+      # testcontainers stamps on everything it creates. It is not a
+      # replacement for ryuk and must not be read as one: ryuk reaps in
+      # seconds, this reaps after a day.
+      #
+      # COMPOSE OWNERSHIP WINS, IN ALL THREE CONTAINER/IMAGE STEPS. The
+      # aigateway dev stack (dev-postgres-1, dev-gateway-1, dev-redis-1) is
+      # somebody's actual development environment running in the same daemon,
+      # and its Postgres data lives in an ANONYMOUS volume -- there is no
+      # `volumes:` key in its compose file, so the ledger is bound to the
+      # container, not to a named volume. Its RestartPolicy is `no`. So if
+      # that stack is ever down for longer than DOCKER_CONTAINER_AGE_HOURS --
+      # which the operating skill explicitly supports, via a flag that turns
+      # it off -- a plain `container prune` would delete dev-postgres-1, its
+      # volume would dangle unbound, and the next `compose up --no-recreate`
+      # would build a fresh Postgres on a fresh volume. No volume is deleted
+      # and the ledger is gone anyway. That is why 4c-2 and 4c-3 carry
+      # `label!=com.docker.compose.project` rather than relying on the
+      # containers happening to be running at 03:00.
+      #
+      # THE IMAGE PRUNE IS GATED ON DISK PRESSURE, and that gate is not
+      # timidity. Once ryuk is reaping properly, no testcontainer exists at
+      # 03:00, so every test base image is unreferenced -- and their upstream
+      # creation dates are ancient (redis:7-alpine 2026-08-18, postgres:16-
+      # alpine 2026-04-21), so no value of `until` protects them. A nightly
+      # `-a` would therefore re-pull the whole test image set every morning,
+      # for ~15 agent sessions behind one NAT address, and any private-
+      # registry image would come back as "pull access denied" for whichever
+      # session's ECR token had expired. Above the threshold that trade is
+      # obviously worth it; below it there is nothing to buy.
+      DOCKER_TESTCONTAINER_AGE_HOURS=''${DOCKER_TESTCONTAINER_AGE_HOURS:-24}
+      DOCKER_CONTAINER_AGE_HOURS=''${DOCKER_CONTAINER_AGE_HOURS:-168}
+      DOCKER_IMAGE_AGE_HOURS=''${DOCKER_IMAGE_AGE_HOURS:-336}
+      DOCKER_BUILD_CACHE_AGE_HOURS=''${DOCKER_BUILD_CACHE_AGE_HOURS:-168}
+      # Root-filesystem percentage at or above which the image prune escalates
+      # from dangling-only to `-a`. The box was at 81% after the by-hand
+      # reclaim and 87-99% on an ordinary working day, so 70 is a line it
+      # crosses when it is genuinely accumulating and not otherwise.
+      DOCKER_IMAGE_PRUNE_ALL_PCT=''${DOCKER_IMAGE_PRUNE_ALL_PCT:-70}
+
+      # Run one prune and report what it reclaimed. Never fails the script: a
+      # docker hiccup at 03:00 must not abort the steps after it.
+      docker_prune_step() {
+        local what="$1"; shift
+        local out reclaimed
+        if out=$("$@" 2>&1); then
+          # Two shapes on purpose: container/image prune say "Total reclaimed
+          # space: N", `builder prune` says "Total:\tN". Verified against moby
+          # 28.5.2 on this host; matching only the first silently reported
+          # every build-cache prune as "nothing reclaimed".
+          reclaimed=$(grep -E '^Total( reclaimed space)?:' <<<"$out" || true)
+          log "Docker $what pruned: ''${reclaimed:-nothing reclaimed}"
+        else
+          log "WARN: docker $what prune failed: $out"
+        fi
+      }
+
+      cleanup_docker() {
+        local docker_bin
+        # DOCKER_BIN is a test seam, in the same spirit as TMP_SCRATCH_ROOTS:
+        # nothing shipped sets it, the suite does. It is not a convenience --
+        # without it the suite's "docker is not installed" case would fall
+        # through to the absolute path below and drive the REAL daemon on
+        # cloudbox, deleting real containers to prove a negative.
+        docker_bin=''${DOCKER_BIN:-}
+        [ -n "$docker_bin" ] || docker_bin=$(command -v docker 2>/dev/null || true)
+        # The unit's PATH (see systemd.user.services.disk-cleanup below)
+        # carries /run/current-system/sw/bin, but the script's own PATH prefix
+        # does not, so do not depend on the lookup alone.
+        [ -n "$docker_bin" ] || docker_bin=/run/current-system/sw/bin/docker
+        if [ ! -x "$docker_bin" ]; then
+          log "Docker not installed; skipping docker reclamation"
+          return 0
+        fi
+        if ! "$docker_bin" info >/dev/null 2>&1; then
+          log "WARN: docker daemon unreachable; skipping docker reclamation"
+          return 0
+        fi
+
+        log "Reclaiming docker storage..."
+
+        # 4c-1. Leaked testcontainers, running or not.
+        #
+        # AGED BY HAND, not by `--filter until=`. The three prunes below all
+        # accept that filter; `docker ps` does NOT -- moby 28.5.2 on this host
+        # answers `invalid filter 'until'` and exits 1, despite `until` being
+        # listed for ps in docker's own filtering docs. Under `set -e` inside a
+        # process substitution that is a silently empty list, i.e. a sweep that
+        # reports success and sweeps nothing. So the age test is explicit, and
+        # a container whose creation time cannot be parsed is KEPT.
+        local id info created labels created_epoch age_hours now
+        now=$(date +%s)
+        while read -r id; do
+          [ -n "$id" ] || continue
+          info=$("$docker_bin" inspect "$id" \
+            --format '{{.Created}}|{{json .Config.Labels}}' 2>/dev/null || true)
+          if [ -z "$info" ]; then
+            log "WARN: skipping $id, docker inspect returned nothing"
+            continue
+          fi
+          created=''${info%%|*}
+          labels=''${info#*|}
+          created_epoch=$(date -d "$created" +%s 2>/dev/null || echo 0)
+          if [ "''${created_epoch:-0}" -le 0 ]; then
+            log "WARN: skipping $id, unparseable creation time: $created"
+            continue
+          fi
+          age_hours=$(( (now - created_epoch) / 3600 ))
+          if [ "$age_hours" -lt "$DOCKER_TESTCONTAINER_AGE_HOURS" ]; then
+            continue
+          fi
+          case "$labels" in
+            *com.docker.compose.project*)
+              log "WARN: skipping $id, carries a compose label as well as a testcontainers one"
+              continue
+              ;;
+          esac
+          # -v, not just -f. Every testcontainers redis carries an anonymous
+          # /data volume; without -v this sweep would convert a running leak
+          # into a permanently dangling volume that the no-volume-prune line
+          # then guarantees nobody ever reclaims. `rm -v` removes only THAT
+          # container's anonymous volumes -- exactly what ryuk itself does
+          # (v=1 in its own remove call) -- and touches no named volume.
+          if "$docker_bin" rm -fv "$id" >/dev/null 2>&1; then
+            log "Removed leaked testcontainer $id (''${age_hours}h old)"
+          else
+            log "WARN: failed to remove leaked testcontainer $id"
+          fi
+        done < <("$docker_bin" ps -aq \
+                   --filter label=org.testcontainers=true 2>/dev/null || true)
+
+        # 4c-2. Stopped containers. Before images, per ORDER above.
+        docker_prune_step "stopped containers" \
+          "$docker_bin" container prune -f \
+          --filter "until=''${DOCKER_CONTAINER_AGE_HOURS}h" \
+          --filter 'label!=com.docker.compose.project'
+
+        # 4c-3. Unreferenced images. `-a` only under disk pressure: without it
+        # a merely-dangling prune leaves the 98% behind, since these are
+        # tagged images nothing references rather than untagged layers -- but
+        # with it unconditionally, every test base image is re-pulled daily.
+        # See the gate's rationale above the knobs.
+        local root_pct
+        root_pct=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9' || true)
+        if [ -z "$root_pct" ]; then
+          # Cannot measure -> escalate. The failure this whole section exists
+          # for is a disk at zero bytes free; the cost of being wrong in the
+          # other direction is a re-pull.
+          log "WARN: could not read root filesystem usage; pruning images as if under pressure"
+          root_pct=100
+        fi
+        if [ "$root_pct" -ge "$DOCKER_IMAGE_PRUNE_ALL_PCT" ]; then
+          docker_prune_step "images (all unreferenced, root at ''${root_pct}%)" \
+            "$docker_bin" image prune -af \
+            --filter "until=''${DOCKER_IMAGE_AGE_HOURS}h" \
+            --filter 'label!=com.docker.compose.project'
+        else
+          docker_prune_step "images (dangling only, root at ''${root_pct}%)" \
+            "$docker_bin" image prune -f \
+            --filter "until=''${DOCKER_IMAGE_AGE_HOURS}h" \
+            --filter 'label!=com.docker.compose.project'
+        fi
+
+        # 4c-4. Build cache. Small here (51 MB) and cheap to lose.
+        docker_prune_step "build cache" \
+          "$docker_bin" builder prune -f \
+          --filter "until=''${DOCKER_BUILD_CACHE_AGE_HOURS}h"
+
+        # NO `docker volume prune`, and no `system prune --volumes`. See above.
+        log "Docker reclamation complete"
+      }
+
       # --- 5. OpenCode WAL checkpoint ---
       cleanup_opencode_wal() {
         local db="$HOME/.local/share/opencode/opencode.db"
@@ -1029,6 +1286,7 @@ lib.mkMerge [
       cleanup_worktrees
       cleanup_bazel
       cleanup_caches
+      cleanup_docker
       cleanup_opencode_wal
 
       log "Disk after:  $(df -h / | tail -1 | awk '{print $3, "used,", $4, "free,", $5}')"
