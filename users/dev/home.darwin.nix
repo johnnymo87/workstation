@@ -239,6 +239,7 @@ lib.mkIf isDarwin {
           "pigeon-ccr-api-key"
           "pigeon-telegram-bot-token"
           "pigeon-telegram-chat-id"
+          "pigeon-goose-acp-token"
         )
 
         for name in "''${secrets[@]}"; do
@@ -342,6 +343,52 @@ lib.mkIf isDarwin {
       };
     };
 
+    # Goose ACP server launchd agent — persistent headless serve for pigeon
+    goose-serve = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh" "-c"
+          ''
+            if [ ! -x "${config.home.homeDirectory}/.local/bin/goose" ]; then
+              echo "goose binary not found at ${config.home.homeDirectory}/.local/bin/goose; skipping" >&2
+              exit 0
+            fi
+            SEC="/usr/bin/security"
+            SECRET="$($SEC find-generic-password -s pigeon-goose-acp-token -w 2>/dev/null || true)"
+            if [ -z "$SECRET" ]; then
+              echo "pigeon-goose-acp-token not found in Keychain; exiting" >&2
+              exit 1
+            fi
+            export GOOSE_SERVER__SECRET_KEY="$SECRET"
+            export GOOSE_MODE="auto"
+            export GOOSE_DISABLE_KEYRING="true"
+            GCP_PROJECT="$($SEC find-generic-password -s google-cloud-project -w 2>/dev/null || true)"
+            [ -n "$GCP_PROJECT" ] && export GCP_PROJECT_ID="$GCP_PROJECT"
+            export GCP_LOCATION="global"
+            cd "${config.home.homeDirectory}"
+            exec "${config.home.homeDirectory}/.local/bin/goose" serve --port 4080
+          ''
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          PATH = lib.concatStringsSep ":" [
+            "${config.home.homeDirectory}/.local/bin"
+            "${config.home.homeDirectory}/.nix-profile/bin"
+            "/run/current-system/sw/bin"
+            "/usr/bin"
+            "/bin"
+            "/usr/sbin"
+            "/sbin"
+          ];
+        };
+        RunAtLoad = true;
+        KeepAlive = true;
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/goose-serve.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/goose-serve.err.log";
+      };
+    };
+
     # Pigeon daemon launchd agent — secrets from macOS Keychain
     # Run `pigeon-setup-secrets` once in a terminal to populate Keychain
     pigeon-daemon = {
@@ -355,6 +402,7 @@ lib.mkIf isDarwin {
             export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
             export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
             export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
+            export PIGEON_GOOSE_ACP_TOKEN="$($SEC find-generic-password -s pigeon-goose-acp-token -w 2>/dev/null || true)"
             cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
             exec ${pkgs.nodejs}/bin/node \
               "${config.home.homeDirectory}/Code/pigeon/node_modules/tsx/dist/cli.mjs" \
@@ -370,6 +418,7 @@ lib.mkIf isDarwin {
           PIGEON_SERVE_ENDPOINTS = servePool.endpointsCsv;
           PIGEON_SERVE_LIVENESS = "self";
           PIGEON_DAEMON_DB_PATH = routingDbPath;
+          PIGEON_GOOSE_ACP_URL = "ws://127.0.0.1:4080/acp";
           # workstation-debug: widen the heartbeat-staleness window before a serve
           # is flagged "dead". opencode serve is single-threaded; a CPU-heavy turn
           # (or GC/swap stall) blocks its event loop and starves the 5s heartbeat

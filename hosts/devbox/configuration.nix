@@ -170,6 +170,12 @@ in
         group = "dev";
         mode = "0400";
       };
+      pigeon_goose_acp_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+        restartUnits = [ "goose-serve.service" "pigeon-daemon.service" ];
+      };
       # Cloudflare Queue ID (used by my-podcasts-consumer)
       cloudflare_queue_id = {
         owner = "dev";
@@ -300,8 +306,8 @@ in
   systemd.services.pigeon-daemon = {
     description = "Pigeon daemon service";
     wantedBy = [ "multi-user.target" ];
-    wants = [ "network-online.target" ];
-    after = [ "network-online.target" ];
+    wants = [ "network-online.target" "goose-serve.service" ];
+    after = [ "network-online.target" "goose-serve.service" ];
 
     path = [ pkgs.nodejs pkgs.bash pkgs.coreutils pkgs.neovim ];
 
@@ -330,6 +336,8 @@ in
         "PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}"
         "PIGEON_SERVE_LIVENESS=self"
         "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
+        # Goose ACP server endpoint for pigeon goose runner
+        "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4080/acp"
         # workstation-debug: widen the heartbeat-staleness window before a serve
         # is flagged "dead". opencode serve is single-threaded; a CPU-heavy turn
         # (or GC/swap stall) blocks its event loop and starves the 5s heartbeat
@@ -348,6 +356,7 @@ in
         export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
         export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
+        [ -f /run/secrets/pigeon_goose_acp_token ] && export PIGEON_GOOSE_ACP_TOKEN="$(cat /run/secrets/pigeon_goose_acp_token)"
         # Arms the daemon's bearer auth. Without this the daemon answers EVERY
         # route unauthenticated (auth.ts:6 short-circuits on a falsy token), and
         # on 2026-09-12 it was doing so to the public internet through this
@@ -443,6 +452,38 @@ in
       # which CHANGES ON EVERY REBUILD -- so `journalctl -t pigeon-daemon` has
       # never worked, and no identifier-based filter could survive a deploy.
       SyslogIdentifier = "pigeon-daemon";
+    };
+  };
+
+  systemd.services.goose-serve = {
+    description = "Goose ACP server";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+
+    unitConfig = {
+      ConditionPathExists = "/home/dev/.local/bin/goose";
+    };
+
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev";
+      Environment = [
+        "HOME=/home/dev"
+        "GOOSE_MODE=auto"
+        "GOOSE_DISABLE_KEYRING=true"
+        "PATH=/home/dev/.local/bin:/home/dev/.nix-profile/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+      ];
+      ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
+        set -euo pipefail
+        export GOOSE_SERVER__SECRET_KEY="$(cat /run/secrets/pigeon_goose_acp_token)"
+        export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
+        exec /home/dev/.local/bin/goose serve --port 4080
+      ''}";
+      Restart = "on-failure";
+      RestartSec = 5;
     };
   };
 
