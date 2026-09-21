@@ -230,13 +230,17 @@ Dispatch `adversarial-reviewer-fable` on the diff before `gh pr create`. This is
 
 **If that reviewer's model is unreachable, stop and report to the user.** The astra twin in particular can be present-but-dead — it is only reachable while `codex-lb.service` is up, its upstream model-catalog refresh is healthy, *and* a pooled account still has 5h-window quota left. It fails at **request** time rather than at build time. That failure is not a review. Two things it must not become: silently falling back to the other twin (which hides a broken codex-lb for as long as nobody looks), or counting the failed dispatch as the step having happened. Say the reviewer is unavailable, say the diff is unreviewed, and let the user decide whether to wait, fix it, or waive it.
 
-**An empty astra result is the failure, not a terse review.** When the subagent's turn dies on an API error, the Task tool hands you a task_result that is simply empty with state `completed` — no error text reaches you. Treat "astra returned nothing" as "astra was unreachable" and check before re-dispatching, because on devbox/cloudbox there is one pooled subscription account and a single large review can exhaust its 5h window, after which every dispatch returns empty until the reset:
+**An empty result is never a review.** The Task tool returns the last text part of the child session, or `""` — so a subagent whose turn died on an API error and one that simply produced no text are indistinguishable from the caller's side, and no error text reaches you either way. What you know on an empty result is only this: **no usable review was obtained, cause unknown.** Do not record the step as done, and do not substitute the other twin.
+
+What to do instead, in order: run the probe (below) to rule out the common codex-lb causes; if it says UP, open the child session and read what actually happened there. On devbox/cloudbox the pooled subscription is the usual culprit — a few large reviews can exhaust the 5h window, after which every dispatch returns empty until the reset.
 
 ```bash
-astra-probe    # exit 0 "astra UP: ..." / exit 1 "astra DOWN: <why, incl. reset time>"
+astra-probe    # 0 = UP, 1 = DOWN (named cause, incl. reset times), 2 = UNKNOWN (unclassifiable)
 ```
 
-Run it before dispatching astra, not only after an empty result. `curl localhost:2455/health` is not a substitute — it answers `{"status":"ok"}` while every account is rate-limited.
+Run it *before* dispatching astra, not only after an empty result. Read its verdicts asymmetrically: **DOWN is authoritative** — it names a condition that does block — while **UP means "nothing known to be blocking", not a guarantee**, since the real routing path also weighs error backoff, per-account model eligibility and remaining budget, and another caller can drain the window between probe and dispatch. **UNKNOWN means codex-lb answered something the probe cannot classify** (schema drift, an HTTP error); treat that as "go look", not as an outage.
+
+`curl localhost:2455/health` is not a substitute — it answers `{"status":"ok"}` while every account is rate-limited.
 
 **When to skip.** Decide mechanically, not by feel:
 
