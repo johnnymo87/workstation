@@ -6,6 +6,47 @@ let
   servePool = (import ./serve-pool.nix).forHost.darwin;
   routingDbPath = "/Users/jonathan.mohrbacher/Code/pigeon/packages/daemon/data/pigeon-daemon.db";
 
+  # frontdoor darwin convergence (workstation-r7uh) -- the opaque single-port
+  # reverse proxy for the serve pool. Same callPackage cloudbox
+  # (hosts/cloudbox/configuration.nix, a SYSTEM service) and devbox
+  # (users/dev/home.devbox.nix, a systemd.user service) use; here it is a
+  # launchd agent, because that is what darwin's pool is.
+  #
+  # WHY: darwin was the LAST doorless host, and Phase 9 made that fatal rather
+  # than merely inconsistent. Every shipped consumer defaults
+  # FRONTDOOR_URL=http://127.0.0.1:4700 (home.base.nix:1428,
+  # pkgs/opencode-launch, pkgs/oc-pool-attach, pkgs/oc-auto-attach), and on
+  # darwin nothing listened there. The symptom found in the wild was
+  # oc-auto-attach polling GET :4700/session/<id>, classifying the connect
+  # refusal (HTTP 000) as a TRANSIENT wait rather than an absent door, and
+  # burning its full 30s window before reporting "session not ready after 30s"
+  # -- about a session that was perfectly healthy on :4096. The attach target
+  # itself (`opencode attach $FRONTDOOR_URL`) and opencode-launch's front-door
+  # health check were broken the same way, silently, since Phase 9.
+  #
+  # The alternative considered and rejected was a host-conditional
+  # FRONTDOOR_URL default (darwin -> the :4096 anchor). That would have to be
+  # repeated in four packages, and it preserves the doorless-host class this
+  # repo has been retiring one host at a time. devbox hit this exact bug and
+  # fixed it by deploying the door (home.devbox.nix:26-30); the disposition
+  # table calls convergence "a named successor decision, not an omission"
+  # (docs/plans/2026-07-26-phase9-consumer-disposition.md §D). This is that
+  # successor decision for darwin.
+  opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
+
+  # Shared canary alert helper (pigeon /alert -> Telegram), same package
+  # cloudbox and devbox use. Shipping the drift DETECTOR without the
+  # ESCALATION half is a known, twice-repeated failure here: cloudbox
+  # 2026-07-24 and devbox 2026-07-29/30 each logged drift for hours into a log
+  # nobody reads while every mutating request failed. Do not split them.
+  driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+
+  # launchd label for a home-manager agent, as bootstrapped into
+  # ~/Library/LaunchAgents. Used by the canary to restart the door and to read
+  # back the plist launchd would start it from.
+  frontdoorLabel = "org.nix-community.home.opencode-frontdoor";
+  frontdoorPlist = "${config.home.homeDirectory}/Library/LaunchAgents/${frontdoorLabel}.plist";
+
   # Keepalive loop behind the tunnel LaunchAgents.
   #
   # `fallbackHost` is an alternate ssh host alias for the SAME tunnel on a
@@ -413,7 +454,7 @@ lib.mkIf isDarwin {
           HOME = config.home.homeDirectory;
           NODE_ENV = "production";
           CCR_MACHINE_ID = "macbook";
-          # frontdoor-exempt(D2): no front door on darwin; :4096 is the only endpoint that exists
+          # frontdoor-exempt(D2): pigeon is the router the door depends on; door->pigeon->door is a startup cycle
           OPENCODE_URL = "http://127.0.0.1:4096";
           PIGEON_SERVE_ENDPOINTS = servePool.endpointsCsv;
           PIGEON_SERVE_LIVENESS = "self";
@@ -839,6 +880,318 @@ lib.mkIf isDarwin {
 
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/claude-failover-proxy.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/claude-failover-proxy.err.log";
+      };
+    };
+
+    # opencode-frontdoor (darwin convergence, workstation-r7uh). Binds
+    # 127.0.0.1:4700. See the long rationale at the `opencode-frontdoor` binding
+    # in the `let` above for why darwin gets a door rather than a host-special
+    # FRONTDOOR_URL default.
+    #
+    # NO ORDERING DEPENDENCY on the serve pool, and none is needed: launchd has
+    # no After= analog, and the door is stateless and degrades-to-anchor (:4096)
+    # while pigeon (:4731) or the pool is still coming up. KeepAlive is the
+    # Restart=always analog. Unlike the systemd hosts there is deliberately NO
+    # X-SwitchMethod=keep-old equivalent -- home-manager's setupLaunchAgents
+    # bootouts and re-bootstraps an agent whose plist CHANGED, so a switch that
+    # does not alter this plist leaves the running door untouched (which is the
+    # property keep-old buys there), and a switch that does alter it applies
+    # immediately. The cost is that a door-affecting switch drops in-flight SSE
+    # legs; the benefit is that darwin cannot accumulate the stale-door drift
+    # that keep-old made possible on cloudbox and devbox.
+    #
+    # Note the skew direction is INVERTED from devbox's, and the canary's drift
+    # text says so. This plist embeds ${opencode-frontdoor}, so any nixpkgs bump
+    # that moves the door's closure restarts it on switch -- whereas the serve
+    # plists below exec `opencode` off the stable profile path, so an opencode
+    # bump does NOT restart them. Darwin's skew risk is therefore door-new /
+    # serve-old, not the door-stale / serves-fresh that keep-old produces
+    # elsewhere.
+    #
+    # The canary below still catches the two ways this can go wrong anyway: a
+    # failed BOOTOUT pages as version drift, and a failed BOOTSTRAP pages as
+    # installed-but-not-loaded. Activation treats neither as an error.
+    opencode-frontdoor = {
+      enable = true;
+      config = {
+        ProgramArguments = [ "${opencode-frontdoor}/bin/opencode-frontdoor" ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          FRONTDOOR_PORT = "4700";
+          PIGEON_DAEMON_URL = "http://127.0.0.1:4731";
+          # frontdoor-exempt(C12): the door's own upstream anchor -- it cannot route through itself.
+          OPENCODE_ANCHOR_URL = "http://127.0.0.1:4096";
+          # Builtins-only app (nothing reads NODE_ENV today) -- set for
+          # convention/consistency with the other two hosts.
+          NODE_ENV = "production";
+        };
+        RunAtLoad = true;
+        KeepAlive = true;
+        # The door doubles connection count (client socket + upstream socket per
+        # proxied request); raise the fd ceiling well above launchd's default.
+        SoftResourceLimits = { NumberOfFiles = 65536; };
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/opencode-frontdoor.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/opencode-frontdoor.err.log";
+      };
+    };
+
+    # opencode-frontdoor's own liveness canary. Port of the cloudbox SYSTEM
+    # oneshot / devbox systemd.user oneshot to launchd (StartInterval=60 is the
+    # OnCalendar=minutely analog). Same decision table, so that a reader of any
+    # of the three can read the other two:
+    #
+    #   no HTTP response x2  -> door-side wedge      -> forensics + restart
+    #   503 + anchor healthy x2 -> door-side sickness -> forensics + restart
+    #   503 + anchor also down  -> real backend outage -> leave the door alone
+    #   200 + version drift x2  -> PAGE a human (never auto-restart)
+    #
+    # Two host-specific departures, both forced:
+    #
+    # 1. FORENSICS. There is no /proc on darwin, so the cgroup/wchan/thread
+    #    dumps have no analog. `sample` is the closest equivalent that works on
+    #    a wedged JS loop without privileges, and it is what actually answers
+    #    "where was it stuck" for a node process. It is bounded to 3s so the
+    #    canary cannot itself become the thing that overruns.
+    #
+    # 2. NO reset-workspace LOCK GUARD. The other two hosts skip a run while
+    #    /tmp/reset-workspace.lock is held, because a deliberate pool bounce
+    #    makes the door legitimately 503 and would be misread as sickness.
+    #    reset-workspace is Linux-only (home.base.nix:645-650 gates it on
+    #    isLinux), so darwin has no analogous lock to check.
+    #
+    #    Darwin is NOT bounce-free, though -- `opencode-serve-pool-restart`
+    #    below does exactly that by hand. What makes the missing guard safe is
+    #    narrower than "no bounces happen": the door's /healthz is `pigeon ||
+    #    anchor` (pkgs/opencode-frontdoor/src/healthz.ts), so a SERVE-only bounce
+    #    still answers 200 and the sickness branch cannot fire at all. The guard
+    #    becomes necessary the day anything here bounces PIGEON alongside the
+    #    serves, or reset-workspace is ported. Port it WITH them; the failure
+    #    mode is a canary restart stacked on top of a deliberate reset.
+    opencode-frontdoor-canary = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${pkgs.writeShellScript "opencode-frontdoor-canary" ''
+            set -u
+            # A launchd agent's PATH is minimal -- be explicit. /bin and
+            # /usr/bin are appended for launchctl and sample, which are OS
+            # binaries with no nixpkgs equivalent.
+            export PATH="${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.findutils ]}:/bin:/usr/bin"
+            STATE=/tmp/opencode-frontdoor-canary
+            mkdir -p "$STATE"
+            LABEL=${frontdoorLabel}
+            PLIST=${frontdoorPlist}
+            PORT=4700
+            DOMAIN="gui/$(id -u)"
+            FAILFILE="$STATE/fails"
+            SICKFILE="$STATE/sick"
+
+            # Only police the door when it's supposed to be up. An agent nobody
+            # asked to run must not accrue failures. But "not loaded" splits into
+            # two cases that look identical to launchctl and are opposite in
+            # meaning, and conflating them reintroduces exactly the silent dead
+            # :4700 this whole change exists to kill:
+            #
+            #   plist ABSENT  -> nobody asked for a door here. Clear and exit.
+            #   plist PRESENT -> home-manager installed it and the bootstrap did
+            #                    not take. setupLaunchAgents installs the plist
+            #                    BEFORE bootstrapping and runs under `set +e`
+            #                    ("continue processing even if this agent
+            #                    fails"), so a failed bootstrap leaves precisely
+            #                    this state and activation reports success.
+            #
+            # Note the asymmetry with the drift branch, which is easy to get
+            # backwards: a failed BOOTOUT pages as drift (old process still
+            # serving, new plist installed), a failed BOOTSTRAP cannot -- there
+            # is no process to report a stale version. Only this branch sees it.
+            AGENT_STATE=$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)
+            if [ -z "$AGENT_STATE" ]; then
+              rm -f "$FAILFILE" "$SICKFILE"
+              if [ ! -f "$PLIST" ]; then
+                rm -f "$STATE/notloaded" "$STATE/notloaded-alerted"
+                exit 0
+              fi
+              NOTLOADED=$(( $(cat "$STATE/notloaded" 2>/dev/null || echo 0) + 1 ))
+              echo "$NOTLOADED" > "$STATE/notloaded"
+              echo "WARNING: $PLIST is installed but $LABEL is not loaded ($NOTLOADED/2 consecutive)"
+              # Dampened to 2 minutely passes: home-manager's own bootout ->
+              # install -> bootstrap window is ~1-2s, so a switch in flight
+              # cannot page.
+              if [ "$NOTLOADED" -ge 2 ]; then
+                NOTLOADED_TEXT=$(cat <<EOF
+opencode-frontdoor is NOT RUNNING on the Mac, and nothing is listening on :4700.
+
+home-manager installed its launchd plist but the bootstrap did not take, which activation does not treat as a failure. Every opencode client defaults FRONTDOOR_URL to http://127.0.0.1:4700 -- attach, oc-auto-attach and opencode-launch are all broken until this is fixed, and oc-auto-attach will fail by STALLING for 30s rather than by saying anything useful.
+
+To fix, run:
+launchctl bootstrap gui/\$(id -u) $PLIST
+
+If that errors, boot it out first and retry:
+launchctl bootout gui/\$(id -u)/$LABEL
+launchctl bootstrap gui/\$(id -u) $PLIST
+
+Plist: $PLIST
+EOF
+)
+                ${driftAlert} "$STATE/notloaded-alerted" "notloaded|$PLIST" "$NOTLOADED_TEXT" 900 14400
+              fi
+              exit 0
+            fi
+            rm -f "$STATE/notloaded" "$STATE/notloaded-alerted"
+            PID=$(printf '%s' "$AGENT_STATE" | sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)
+
+            capture_and_restart() {
+              reason="''${1:-unknown}"
+              TS=$(date +%Y%m%dT%H%M%S)
+              DUMP="$STATE/wedge-$TS"
+              mkdir -p "$DUMP"
+              # Bound persistent forensics: keep only the 10 newest wedge dumps.
+              ls -dt "$STATE"/wedge-* 2>/dev/null | tail -n +11 | xargs rm -rf 2>/dev/null || true
+
+              printf '%s\n' "$AGENT_STATE" > "$DUMP/launchctl-print" 2>/dev/null || true
+              if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+                ps -o pid,stat,%cpu,%mem,rss,etime,command -p "$PID" > "$DUMP/ps" 2>/dev/null || true
+                # 3s user-space sample. The one thing that can tell a wedged JS
+                # event loop from a merely busy one, and the /proc-free analog of
+                # the wchan/thread dumps the systemd hosts take.
+                sample "$PID" 3 -file "$DUMP/sample.txt" >/dev/null 2>&1 || true
+              fi
+
+              echo "RESTARTING $LABEL (reason: $reason, pid=$PID); forensics in $DUMP"
+              # -k SIGKILLs the existing process first; a wedged loop will not
+              # answer a polite stop, which is the case this branch exists for.
+              #
+              # BOUNDED. `kickstart -k` blocks until launchd has restarted the
+              # job, and inside a ThrottleInterval that has been observed here to
+              # take ~2 minutes (see the note on opencode-serve-pool-restart
+              # below, where the same timeout is called load-bearing). Unbounded,
+              # this canary run would still be sitting here when the next
+              # StartInterval fires.
+              timeout 15 launchctl kickstart -k "$DOMAIN/$LABEL" || true
+              rm -f "$FAILFILE" "$SICKFILE"
+            }
+
+            BODY_FILE=$(mktemp)
+            trap 'rm -f "$BODY_FILE"' EXIT
+
+            # Probe /healthz WITHOUT -f, capturing body + HTTP status. --max-time
+            # 5s MUST stay above the door's FRONTDOOR_ROUTE_TIMEOUT_MS (3000ms),
+            # or a healthy-but-degraded 503 is misread as a wedge.
+            HTTP_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o "$BODY_FILE" -w "%{http_code}" "http://127.0.0.1:$PORT/healthz")
+            CURL_EXIT=$?
+
+            # 1. No HTTP response (frozen loop / dead process)
+            if [ "$CURL_EXIT" -ne 0 ] || [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" -eq 0 ]; then
+              rm -f "$SICKFILE"
+              THRESHOLD=2
+              FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
+              echo "$FAILS" > "$FAILFILE"
+              echo "WARNING: $LABEL failed /healthz ($FAILS/$THRESHOLD consecutive timeouts/failures)"
+              if [ "$FAILS" -ge "$THRESHOLD" ]; then
+                capture_and_restart "no response"
+              fi
+              exit 0
+            fi
+
+            # 2. HTTP 200 -> healthy (+ version-drift check)
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              rm -f "$FAILFILE" "$SICKFILE"
+              RUNNING_VER=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$BODY_FILE" | sed -n 's/.*"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/p')
+              # The darwin analog of `systemctl show -p ExecStart`: the plist in
+              # ~/Library/LaunchAgents is what launchd would start, and
+              # home-manager's setupLaunchAgents installs it there on every
+              # switch that changes it. Read at RUNTIME rather than baking
+              # ''${opencode-frontdoor} into this script, deliberately -- a baked
+              # path makes a stale canary compare stale-against-stale and report
+              # a reassuring "no drift", which is the exact failure class this
+              # check exists to catch.
+              INSTALLED_PATH=$(grep -o '/nix/store/[^< ]*opencode-frontdoor[^< ]*' "$PLIST" 2>/dev/null | head -1)
+
+              # Both sides must be KNOWN before comparing (cloudbox bead
+              # workstation-bcmi). An unparseable side must never alert: this
+              # branch PAGES, so a parse failure would page forever about a
+              # perfectly healthy door.
+              if [ -z "$RUNNING_VER" ]; then
+                echo "WARNING: could not parse version from /healthz response"
+              elif [ -z "$INSTALLED_PATH" ]; then
+                echo "WARNING: could not parse the frontdoor store path out of $PLIST; treating as unknown (no alert)"
+              else
+                case "$INSTALLED_PATH" in
+                  "$RUNNING_VER"*)
+                    # Clear throttle + dampener ONLY on confirmed resolution.
+                    # Do NOT clear on an unparseable probe: unknown state can
+                    # flap and would storm.
+                    rm -f "$STATE/drift-alerted" "$STATE/drift-pending"
+                    ;;
+                  *)
+                    echo "WARNING: version drift: running=$RUNNING_VER installed=$INSTALLED_PATH"
+                    DRIFT_PENDING=$(( $(cat "$STATE/drift-pending" 2>/dev/null || echo 0) + 1 ))
+                    echo "$DRIFT_PENDING" > "$STATE/drift-pending"
+
+                    # Dampened to 2 consecutive minutely passes so a switch that
+                    # is mid-bootstrap (plist already installed, process not yet
+                    # replaced) can't page.
+                    if [ "$DRIFT_PENDING" -ge 2 ]; then
+                      DRIFT_TEXT=$(cat <<EOF
+opencode-frontdoor is running stale code on the Mac.
+
+To fix, run:
+launchctl kickstart -k gui/\$(id -u)/$LABEL
+
+IMPORTANT: Also check the serve pool. Restarting only the front door creates dangerous version skew if the serves remain on old code -- an old serve 404s the door's session-scoped routes. Both are launchd agents; \`launchctl kickstart -k\` each of org.nix-community.home.opencode-serve-0/-1 too if they are also stale.
+
+If a kickstart does not clear this, the installed plist itself is stale (home-manager's bootstrap failed). Re-run: sudo darwin-rebuild switch --flake ~/Code/workstation#\$(hostname -s)
+
+Running store path: $RUNNING_VER
+Installed store path: $INSTALLED_PATH
+
+Note: restarting opencode-frontdoor drops in-flight SSE legs, so pick an appropriate moment.
+EOF
+)
+                      # Auto-restart is intentionally omitted, matching cloudbox
+                      # and devbox: restarting the door drops all in-flight SSE
+                      # connections, and restarting it ALONE manufactures exactly
+                      # the door/serve skew warned about above. A human decides.
+                      # Backoff base 15m, cap 4h.
+                      ${driftAlert} "$STATE/drift-alerted" "$RUNNING_VER|$INSTALLED_PATH" "$DRIFT_TEXT" 900 14400
+                    fi
+                    ;;
+                esac
+              fi
+              exit 0
+            fi
+
+            # 3. HTTP 503 -> cross-probe the anchor (:4096) directly
+            if [ "$HTTP_CODE" -eq 503 ]; then
+              # frontdoor-exempt(C13): cross-probe the anchor directly, so a door 503 can be
+              # distinguished from a genuinely sick pool.
+              ANCHOR_CODE=$(curl -s --max-time 5 --connect-timeout 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:4096/global/health")
+              if [ "$ANCHOR_CODE" -eq 200 ]; then
+                rm -f "$FAILFILE"
+                SICK_THRESHOLD=2
+                SICK=$(( $(cat "$SICKFILE" 2>/dev/null || echo 0) + 1 ))
+                echo "$SICK" > "$SICKFILE"
+                echo "WARNING: door reports 503 but anchor healthy directly ($SICK/$SICK_THRESHOLD consecutive): door-side sickness"
+                if [ "$SICK" -ge "$SICK_THRESHOLD" ]; then
+                  capture_and_restart "door-side sickness (anchor healthy but door reports 503)"
+                fi
+              else
+                rm -f "$FAILFILE" "$SICKFILE"
+                echo "both backends genuinely down (anchor unreachable directly too, status=$ANCHOR_CODE); door alive, not restarting"
+              fi
+              exit 0
+            fi
+
+            # 4. Any other status -> loop alive, log it
+            echo "WARNING: unexpected /healthz HTTP status: $HTTP_CODE (loop alive, not restarting)"
+            rm -f "$FAILFILE" "$SICKFILE"
+            exit 0
+          ''}"
+        ];
+        RunAtLoad = false;
+        StartInterval = 60;
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/opencode-frontdoor-canary.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/opencode-frontdoor-canary.err.log";
       };
     };
   } // (builtins.listToAttrs (lib.imap0 (i: port: {

@@ -146,21 +146,37 @@ Each row states the mechanism that makes the door wrong. None may be "cleaned up
 | C9 | `hosts/cloudbox/configuration.nix:529`, `hosts/devbox/configuration.nix:269` (`PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}`) | `exempt-control` | Pigeon's own data-plane fan-out: it must address **every** serve to route, health-check and reconcile them. Same control-plane rationale as C1, of which this is the other half — C1 covered only pigeon's `OPENCODE_URL`. **Was omitted from the first version of this table and invisible to the first guard**; found by adversarial review. |
 | C10 | `users/dev/home.devbox.nix` (devbox door `OPENCODE_ANCHOR_URL`) | `exempt-infra` | Devbox analogue of C3: the door's **own** upstream, tautologically not through itself. Arrived with the devbox door in #217, which is also what falsified D1's "no door on devbox". |
 | C11 | `users/dev/home.devbox.nix` (devbox frontdoor canary anchor cross-probe) | `exempt-infra` | Devbox analogue of C4: probes `:4096/global/health` directly so a door `503` can be told apart from a genuinely sick pool. Through the door the canary could not distinguish *door down* from *pool down*, which is the one thing it exists to do. |
+| C12 | `users/dev/home.darwin.nix` (darwin door `OPENCODE_ANCHOR_URL`) | `exempt-infra` | Darwin analogue of C3/C10: the door's **own** upstream, tautologically not through itself. Arrived with the darwin door (`workstation-r7uh`), which is also what falsified D2's "no door on darwin". |
+| C13 | `users/dev/home.darwin.nix` (darwin frontdoor canary anchor cross-probe) | `exempt-infra` | Darwin analogue of C4/C11: probes `:4096/global/health` directly so a door `503` can be told apart from a genuinely sick pool. |
 
 ## D. Other hosts (`host-scoped`)
 
-`opencode-frontdoor` is deployed on **cloudbox only** (`rg -l opencode-frontdoor`
-→ `hosts/cloudbox/configuration.nix`, `users/dev/home.cloudbox.nix`,
-`users/dev/home.base.nix`).
+`opencode-frontdoor` is now deployed on **every host**: cloudbox
+(`hosts/cloudbox/configuration.nix`, system service), devbox
+(`users/dev/home.devbox.nix`, `systemd.user` service) and darwin
+(`users/dev/home.darwin.nix`, launchd agent). This section is therefore
+**historical**: there is no longer a doorless host, and no row here may be cited
+to justify a new direct-to-serve call on the grounds that some host lacks a
+door.
 
 | # | Site | Disposition |
 |---|---|---|
 | D1 | `hosts/devbox/configuration.nix` | `host-scoped` — superseded by C1 now that devbox runs a door. Row retained for historical legibility; no site cites D1. |
-| D2 | `users/dev/home.darwin.nix:124` | `host-scoped` — no door on darwin. |
+| D2 | `users/dev/home.darwin.nix` (pigeon-daemon `OPENCODE_URL=:4096`) | `exempt-control` — **rewritten**. Was `host-scoped`, "no door on darwin"; that justification died with `workstation-r7uh`, which deployed the door here (C12/C13). The site stays exempt for C1's reason instead: pigeon is the router the door depends on, so door→pigeon→door is a startup cycle. |
 
 The shared defaults in `home.base.nix:1163,1169` (`OPENCODE_URL:-:4096`,
-`FRONTDOOR_URL:-:4700`) are cross-host and must stay parameterised. Convergence
-is a named successor decision, not an omission.
+`FRONTDOOR_URL:-:4700`) are cross-host and must stay parameterised.
+
+**Convergence is complete.** It was a named successor decision, not an omission,
+and darwin was the last host to take it — late enough that the `:4700` default
+had silently been wrong there since Phase 9: `oc-auto-attach` polled a port
+nothing listened on, read the connect refusal as a transient stall, and spent
+its whole 30s budget before reporting "session not ready" about a healthy
+session. The attach target and `opencode-launch`'s health check were broken the
+same way. **The lesson to keep: a host-scoped exemption for a missing component
+is a liability with a timer on it.** Every consumer default silently assumes the
+component exists, and nothing fails loudly on the host where it does not — so
+the debt is paid, eventually, in a misleading error message.
 
 ---
 
