@@ -310,6 +310,32 @@ Host cloudbox-chart
     ServerAliveCountMax 3
 $IAP_PROXY
     HostKeyAlias $CLOUDBOX_IP
+    # RIDE THE TUNNEL'S CONNECTION; NEVER CREATE ONE.
+    #
+    # Socket activation spawns one ssh -W per accepted connection. That was
+    # cheap when each was a 0.32s TCP connect, but each now starts a gcloud
+    # process for the IAP tunnel, and a browser opens several connections at
+    # once. Measured: six concurrent ones ALL failed at the agent's 10s timeout
+    # with "timed out during banner exchange", where one alone took 3s. The
+    # chart was simply broken by the IAP cutover.
+    #
+    # ControlMaster=no is load-bearing and is NOT the same as omitting it: it
+    # still REUSES the socket at ControlPath, it only refuses to CREATE one.
+    # Creating one here is what must be avoided -- under inetd this process's
+    # stdio IS the browser's socket, and a ControlPersist master forked from it
+    # inherits that socket and wedges the very request that started it. Measured
+    # exactly that: cold, the page hung and returned nothing; with a master
+    # already up, six parallel requests all returned 200 in under 1.2s.
+    #
+    # The master is created and owned by the chart's OWN launchd agent, on a
+    # dedicated path. Deliberately NOT shared with the cloudbox-tunnel
+    # connection: making that connection the master coupled the chart to the
+    # thing the whole machine depends on, and ControlMaster=auto there made the
+    # tunnel ATTACH to whatever stale master already existed rather than become
+    # one -- so killing an unrelated leftover took the tunnel's multiplexing
+    # with it. The chart is not worth that blast radius.
+    ControlMaster no
+    ControlPath ~/.ssh/cm-chart-%r@%h:%p
     LocalForward 4710 127.0.0.1:4710
 $CLOUDBOX_MARKER_END
 EOF
