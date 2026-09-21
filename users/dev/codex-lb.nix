@@ -159,6 +159,27 @@
 # in its firewall. opencode connects via 127.0.0.1 (auth-exempt on codex-lb), so
 # no proxy API key is needed locally.
 #
+# QUOTA EXHAUSTION LOOKS LIKE A TRANSPORT BUG, AND `astra-probe` EXISTS FOR IT.
+# When the only pooled account's 5h ("primary") window hits 100%, codex-lb marks
+# it `rate_limited`, the load balancer hard-blocks that status
+# (app/core/balancer/logic.py ~:598), and the proxy answers
+# `502 stream_incomplete "Upstream websocket closed before response.completed"`.
+# That message names the WebSocket, so it reads like the aiohttp-private-internals
+# fragility documented above — it is not. Tell them apart by the response headers
+# codex-lb attaches: `x-codex-primary-used-percent: 100.0` plus
+# `x-codex-primary-reset-at: <epoch>` means quota, not transport.
+#
+# Why this matters beyond codex-lb: on devbox `adversarial-reviewer-astra` is the
+# DEFAULT adversarial reviewer, and opencode's Task tool surfaces a subagent whose
+# turn died on an API error as a task_result that is simply EMPTY, state
+# "completed". So a quota-exhausted astra presents to the dispatching agent as "the
+# reviewer returned nothing" with no error anywhere in its view. Observed
+# 2026-09-21: one large review at 06:55 EDT burned the last of a 225-credit primary
+# window; every dispatch after it returned empty until the 11:55 EDT reset.
+#
+# `astra-probe` (below) is the one-line pre-dispatch check. `/health` is NOT that
+# check — it returns `{"status":"ok"}` while every account is rate-limited.
+#
 # TELEMETRY IS ON BY DEFAULT upstream and is turned OFF here. codex-lb ships an
 # anonymous-telemetry reporter that starts with the app and announces itself in
 # the log ("Anonymous telemetry is active; ... disable with
@@ -204,6 +225,71 @@ lib.mkIf (isDevbox || isCloudbox) {
       WantedBy = [ "default.target" ];
     };
   };
+
+  # `astra-probe` — pre-dispatch reachability check for openai/gpt-6-astra.
+  #
+  # Exit 0 + "astra UP: ..." means a dispatch can be expected to return a review;
+  # exit 1 + "astra DOWN: <why>" means it will come back empty. Run it BEFORE
+  # dispatching @adversarial-reviewer-astra / @oracle-astra, and again when a
+  # dispatch returns nothing — an empty task_result is the only symptom the
+  # dispatching agent ever sees (see the quota note at the top of this file).
+  #
+  # Three independent ways astra is unreachable, checked in the order that
+  # produces the most specific message:
+  #   1. codex-lb is not answering at all (unit down / port moved).
+  #   2. codex-lb is up but gpt-6-astra is missing from /v1/models — the
+  #      model-catalog-refresh degradation documented in opencode-config.nix,
+  #      where a failed Codex-version lookup drops the slug entirely.
+  #   3. codex-lb is up and serving the catalog but every account is
+  #      non-`active` (rate_limited, quota_exceeded, paused, reauth_required,
+  #      deactivated). `active` is the criterion because the load balancer hard-
+  #      blocks the other five; "eligible" in the dashboard's sense is weaker
+  #      and would report UP for an account the balancer refuses to select.
+  #
+  # Deliberately NOT a real inference request: a live call would be the truest
+  # test but spends a 5h-window credit every time it is run, on a probe whose
+  # whole point is to be cheap enough to run before every dispatch.
+  home.packages = [
+    (pkgs.writeShellApplication {
+      name = "astra-probe";
+      runtimeInputs = [ pkgs.curl pkgs.jq ];
+      text = ''
+        base="''${CODEX_LB_URL:-http://127.0.0.1:2455}"
+
+        # curl's own stderr is discarded on purpose: the probe's contract is one
+        # line of output, and every transport failure has the same next step.
+        if ! accounts=$(curl -fsS --max-time 5 "$base/api/accounts" 2>/dev/null); then
+          echo "astra DOWN: codex-lb not answering at $base (systemctl --user status codex-lb)"
+          exit 1
+        fi
+
+        if ! models=$(curl -fsS --max-time 5 "$base/v1/models" 2>/dev/null); then
+          echo "astra DOWN: codex-lb answered /api/accounts but not /v1/models at $base"
+          exit 1
+        fi
+
+        if ! jq -e '[.data[].id] | index("gpt-6-astra")' >/dev/null <<<"$models"; then
+          echo "astra DOWN: gpt-6-astra absent from codex-lb model catalog (refresh unhealthy)"
+          exit 1
+        fi
+
+        active=$(jq -r '[.accounts[] | select(.status == "active")] | length' <<<"$accounts")
+        if [ "$active" -gt 0 ]; then
+          echo "astra UP: $active active codex-lb account(s)"
+          exit 0
+        fi
+
+        detail=$(jq -r '
+          if (.accounts | length) == 0 then "no accounts configured"
+          else [.accounts[]
+                | "\(.displayName // .accountId): \(.status), primary \(.usage.primaryRemainingPercent // "?")% left, resets \(.resetAtPrimary // "?")"]
+               | join("; ")
+          end' <<<"$accounts")
+        echo "astra DOWN: no dispatchable codex-lb account -- $detail"
+        exit 1
+      '';
+    })
+  ];
 
   # devbox is already bootstrapped (account seeded, service running), so keep it
   # enabled by ensuring the opt-in marker exists. Runs before reloadSystemd so the
