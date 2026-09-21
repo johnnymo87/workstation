@@ -174,6 +174,7 @@ in
         owner = "dev";
         group = "dev";
         mode = "0400";
+        restartUnits = [ "goose-serve.service" "pigeon-daemon.service" ];
       };
       # Cloudflare Queue ID (used by my-podcasts-consumer)
       cloudflare_queue_id = {
@@ -460,7 +461,9 @@ in
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
 
-    path = [ pkgs.bash pkgs.coreutils ];
+    unitConfig = {
+      ConditionPathExists = "/home/dev/.local/bin/goose";
+    };
 
     serviceConfig = {
       Type = "simple";
@@ -471,7 +474,7 @@ in
         "HOME=/home/dev"
         "GOOSE_MODE=auto"
         "GOOSE_DISABLE_KEYRING=true"
-        "PATH=/home/dev/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+        "PATH=/home/dev/.local/bin:/home/dev/.nix-profile/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin"
       ];
       ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
         set -euo pipefail

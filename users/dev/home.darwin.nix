@@ -350,6 +350,10 @@ lib.mkIf isDarwin {
         ProgramArguments = [
           "/bin/sh" "-c"
           ''
+            if [ ! -x "${config.home.homeDirectory}/.local/bin/goose" ]; then
+              echo "goose binary not found at ${config.home.homeDirectory}/.local/bin/goose; skipping" >&2
+              exit 0
+            fi
             SEC="/usr/bin/security"
             SECRET="$($SEC find-generic-password -s pigeon-goose-acp-token -w 2>/dev/null || true)"
             if [ -z "$SECRET" ]; then
