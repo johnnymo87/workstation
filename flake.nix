@@ -595,6 +595,40 @@
         touch $out
       '';
 
+      # disk-cleanup's docker reclamation step (section 4c). Same SRC seam and
+      # same anti-vacuity pin as its worktree sibling above.
+      #
+      # WHY IT IS WORTH ITS OWN CHECK. The step runs `rm -f` on containers and
+      # `image prune -a` against a daemon that also hosts somebody's running
+      # development stack, at 03:00, unattended. Its keep-guards were each
+      # written against a container that exists on cloudbox today, and the
+      # suite's six mutation-verified assertions were each confirmed to FAIL
+      # under a mutation that disables the guard they cover.
+      disk-cleanup-docker-tests = devboxPkgs.runCommand "disk-cleanup-docker-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.python3
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        DISK_CLEANUP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/disk-cleanup".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-disk-cleanup-docker.sh 2>&1 | tee "$TMPDIR/dcd.txt"
+        grep -q '^=== 23 passed, 0 failed ===' "$TMPDIR/dcd.txt" || {
+          echo "GATE FAILURE: disk-cleanup docker suite did not reach its 23/0 tally." >&2
+          exit 1
+        }
+        # Pinned, following checks.oc-auto-attach: the tally is printed by the
+        # suite, so one gutted to three assertions still prints a truthful
+        # "3 passed, 0 failed". The count is what makes deletion visible.
+        [ "$(grep -c '^PASS  ' "$TMPDIR/dcd.txt")" = 23 ] || {
+          echo "GATE FAILURE: expected 23 'PASS' lines, got" \
+               "$(grep -c '^PASS  ' "$TMPDIR/dcd.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # Same seam and same reason as disk-cleanup-worktree-tests above: the suite
       # would otherwise `nix eval` its own subject, which a build sandbox cannot
       # do. DISK_WATCH_SRC hands it the exact file home-manager deploys, so the

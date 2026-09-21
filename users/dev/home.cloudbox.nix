@@ -874,6 +874,61 @@ lib.mkIf isCloudbox {
       fi
     '';
 
+  # ~/.testcontainers.properties: drop `ryuk.disabled=true`.
+  #
+  # WHAT RYUK IS. Testcontainers starts a sidecar container (`ryuk`) that holds
+  # an open socket to the test process and deletes every container carrying
+  # that run's session label the moment the socket closes. It is the ONLY
+  # thing that cleans up after a test run that dies abnormally -- killed,
+  # OOMed, or swept by the nightly reset, all of which are routine here.
+  #
+  # WHAT WAS FOUND, 2026-09-21. This file on cloudbox contained:
+  #
+  #     #Modified by Testcontainers
+  #     docker.client.strategy=org.testcontainers.dockerclient.UnixSocketClientProviderStrategy
+  #     ryuk.disabled=true
+  #
+  # The first two lines are written by testcontainers itself. The third is not:
+  # it is a hand edit, in an untracked machine-local file, with no
+  # corresponding change anywhere in ~/projects and no session transcript
+  # explaining it. So it is treated as accidental. If it turns out to be
+  # deliberate, delete this block rather than working around it -- and write
+  # the reason down where the next person will find it.
+  #
+  # SCOPE, WHICH IS NARROWER THAN IT LOOKS. This property is read by the JAVA
+  # client only, so it governs mono's Kotlin/Java testcontainers suites. The
+  # NODE client (testcontainers 11.11.0, used by salmon-of-knowledge) reads
+  # this file for docker.host/tls settings ONLY and honours nothing but the
+  # TESTCONTAINERS_RYUK_DISABLED environment variable, which is set nowhere on
+  # this host. That matters for attribution: the twelve node containers that
+  # leaked on 2026-09-14 and were still RUNNING a week later were NOT caused by
+  # this line, and removing it will not fix that class. dockerd's journal shows
+  # ryuk starting normally for those runs, so that is a ryuk that died, not a
+  # ryuk that was switched off. disk-cleanup's section 4c backstops it.
+  #
+  # RYUK WORKS HERE -- verified directly rather than assumed, since "it is
+  # disabled because it cannot start" was the competing hypothesis:
+  #   $ docker run -d --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  #       -p 127.0.0.1:18080:8080 testcontainers/ryuk:0.11.0
+  #   level=INFO msg=starting connection_timeout=1m0s reconnection_timeout=10s
+  #   level=INFO msg=Started address=[::]:8080
+  # and it self-removed on its connection timeout.
+  #
+  # WHY AN ACTIVATION EDIT AND NOT home.file. Testcontainers WRITES this file
+  # (that is what the "#Modified by Testcontainers" header is), so making it a
+  # read-only store symlink would break the client's own config caching. This
+  # removes one line, touches nothing else, and no-ops when the line is absent.
+  home.activation.enableTestcontainersRyuk =
+    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      props="$HOME/.testcontainers.properties"
+      if [ -f "$props" ] && ${pkgs.gnugrep}/bin/grep -qE \
+           '^[[:space:]]*ryuk\.disabled[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$props"; then
+        run ${pkgs.gnused}/bin/sed -i -E \
+          '/^[[:space:]]*ryuk\.disabled[[:space:]]*=[[:space:]]*true[[:space:]]*$/d' "$props"
+        echo "NOTE: removed ryuk.disabled=true from $props; testcontainers' reaper is enabled again." >&2
+      fi
+    '';
+
   systemd.user.services.ensure-projects = {
     Unit = {
       Description = "Ensure declared dev projects are present in ~/projects";
