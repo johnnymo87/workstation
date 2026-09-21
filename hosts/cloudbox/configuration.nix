@@ -412,17 +412,32 @@ in
         group = "dev";
         mode = "0400";
       };
-      # Shared secret between goose-serve and the pigeon daemon's goose runner.
-      # It is goose's GOOSE_SERVER__SECRET_KEY on one side and pigeon's
-      # PIGEON_GOOSE_ACP_TOKEN on the other, so the two units MUST be restarted
-      # together -- a rotation that bounces only one leaves pigeon holding a
-      # stale token and every ACP connect fails 401. restartUnits makes that
-      # automatic and is the one legitimate auto-bounce of goose-serve.
+      # Shared secret between goose-serve and the pigeon daemon's goose runner:
+      # goose's GOOSE_SERVER__SECRET_KEY on one side, pigeon's
+      # PIGEON_GOOSE_ACP_TOKEN on the other. They must never disagree, because
+      # a mismatch is not a degraded state -- pigeon's ACP preflight treats 401
+      # as PERMANENT and never retries, so every goose launch stays dead until
+      # a human intervenes.
+      #
+      # DELIBERATELY NO restartUnits, which is not the obvious choice and was
+      # wrong in the first draft of this file. sops-nix writes changed secrets'
+      # units to /run/nixos/activation-restart-list, but
+      # switch-to-configuration skips any unit carrying
+      # X-RestartIfChanged=false -- which goose-serve sets, below, so it does
+      # NOT survive a turn in flight. Listing both units here would therefore
+      # restart pigeon-daemon ONLY, handing it a new token while goose-serve
+      # kept the old key: precisely the split-brain the listing appears to
+      # prevent. Half an automatic restart is worse than none.
+      #
+      # ROTATING THIS SECRET is therefore a manual, two-unit operation, and
+      # order does not matter because they are broken until both are done:
+      #   sudo systemctl restart goose-serve pigeon-daemon
+      # Do it in a window: goose 1.48.0 has no cancel, so bouncing the serve
+      # kills any in-flight turn without reporting it.
       pigeon_goose_acp_token = {
         owner = "dev";
         group = "dev";
         mode = "0400";
-        restartUnits = [ "goose-serve.service" "pigeon-daemon.service" ];
       };
       # aigateway dev-checkout path (org-identifying directory name, treated as a secret to keep it out of public source)
       aigateway_dir = {
@@ -571,10 +586,21 @@ in
   #
   #  2. There is NO ConditionPathExists. A false Condition is a SILENT skip:
   #     systemd marks the unit "done", does not restart it, and raises nothing.
-  #     Pigeon would then advertise goose as launchable (it only checks its own
-  #     env) and every ACP connect would fail ECONNREFUSED with no alarm
-  #     anywhere -- the exact green-and-wrong shape this whole bead exists to
-  #     fix. The preflight below fails LOUDLY instead.
+  #     A preflight that exits non-zero is better -- but BE HONEST ABOUT HOW
+  #     MUCH better, because an earlier draft of this comment claimed it "fails
+  #     LOUDLY" and that is the same overclaim this file already had to retract
+  #     for teamclaude (see the StartLimitBurst note further down). With
+  #     Restart=always and RestartSec=5 the unit loops in
+  #     `activating (auto-restart)` forever: it never reaches `failed`, so it
+  #     never appears in `systemctl --failed` and never trips anything watching
+  #     for a failed unit. What the preflight actually buys is a journal entry
+  #     naming the cause, on a loop, instead of a unit that sits "done" and
+  #     says nothing. That is a real improvement in diagnosis and NOT an alarm.
+  #
+  #     Either way pigeon still advertises goose while the serve is down --
+  #     its gate reads its own env, not the serve's health -- so the genuine
+  #     fix for the advertise-while-dead window belongs on the pigeon side.
+  #     Tracked separately; do not mistake this unit for having closed it.
   #
   #  3. Restart=always, not on-failure. systemd counts death by SIGTERM/SIGINT
   #     as a CLEAN exit, so an external `kill` (or an OOM sweep) under
@@ -604,13 +630,25 @@ in
     # turn dies silently rather than reporting. So do NOT let an unrelated
     # rebuild restart this; restart it deliberately, in a window:
     #   sudo systemctl restart goose-serve
-    # (Secret rotation is the exception: sops restartUnits bounces it on
-    # purpose, because a stale token is a total outage anyway.)
+    #
+    # This is also why the shared ACP secret above carries no restartUnits:
+    # this very line is what would make such a listing fire for pigeon-daemon
+    # but NOT for this unit, rotating one side of a shared secret. See the
+    # comment on pigeon_goose_acp_token for the full reasoning.
     restartIfChanged = false;
 
-    # goose's bundled `developer` extension spawns shells for its tools, so it
-    # needs a real PATH rather than systemd's minimal default.
-    path = [ pkgs.bash pkgs.coreutils pkgs.git pkgs.ripgrep ];
+    # goose's bundled `developer` extension spawns shells for its tools, and
+    # those tools inherit THIS process's PATH -- pigeon's ACP client does not
+    # send goose/useLoginShellPath, so nothing recovers a login PATH later.
+    #
+    # An explicit short list here (bash/coreutils/git/ripgrep) looks tidy and is
+    # a trap: it silently removes ssh, nix, node, gh, bd, sudo and python from
+    # every tool call the agent makes. The session would handshake fine and die
+    # on its first real command -- "accepted, then dead", the shape this whole
+    # effort exists to eliminate. Use the same full path the opencode serves
+    # use (see opencode-serve@ below), wrappers first so setuid binaries
+    # resolve before their plain counterparts.
+    path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" "/home/dev/.local" ];
 
     serviceConfig = {
       Type = "simple";
@@ -627,6 +665,13 @@ in
         # Overrides GOOSE_MODE: smart_approve in the user's config.yaml.
         "GOOSE_MODE=auto"
         "GOOSE_DISABLE_KEYRING=true"
+        # Pin the provider by ENV rather than trusting the user's config file.
+        # goose resolves GOOSE_PROVIDER above the file's `active_provider` key,
+        # so this makes an interactive `goose configure` -- which rewrites that
+        # file -- unable to repoint the serve at a different backend. Strictly
+        # better than detecting the drift and refusing to start, which is what
+        # the first draft did.
+        "GOOSE_PROVIDER=gcp_vertex_ai"
         "GCP_LOCATION=global"
         "GOOGLE_APPLICATION_CREDENTIALS=/home/dev/.config/gcloud/application_default_credentials.json"
       ];
@@ -658,19 +703,24 @@ in
         GCP_PROJECT_ID="$(read_secret /run/secrets/google_cloud_project)"
         export GOOSE_SERVER__SECRET_KEY GCP_PROJECT_ID
 
-        # Loud preflight, standing in for the ConditionPathExists we do not
-        # want. The config root is imperative state this unit cannot generate;
-        # if it is missing or has been pointed at another provider, the serve
-        # would still START and fail only on the first real turn -- minutes or
-        # hours later, inside a user's launch. Fail now, in the journal, with
-        # the reason.
+        # Preflight for the imperative state this unit CANNOT generate. Each
+        # check is here because its absence fails late -- on the first real
+        # turn, inside a user's launch, minutes or hours after a green start --
+        # rather than at startup where the journal will name it.
+        #
+        # The provider itself is no longer checked: GOOSE_PROVIDER above
+        # overrides the file outright, so there is nothing to drift.
         cfg="$HOME/.config/goose/config.yaml"
         if [ ! -r "$cfg" ]; then
-          echo "goose-serve: $cfg missing or unreadable; goose cannot resolve a provider" >&2
+          echo "goose-serve: $cfg missing or unreadable; goose cannot resolve its extensions" >&2
           exit 1
         fi
-        if ! grep -q '^active_provider: gcp_vertex_ai$' "$cfg"; then
-          echo "goose-serve: $cfg does not select gcp_vertex_ai; refusing to start with an unexpected provider" >&2
+        # Vertex authenticates with ambient application-default credentials.
+        # Absent, goose starts happily and every turn fails to authenticate.
+        adc="$HOME/.config/gcloud/application_default_credentials.json"
+        if [ ! -r "$adc" ]; then
+          echo "goose-serve: $adc missing or unreadable; Vertex turns will fail to authenticate" >&2
+          echo "goose-serve: re-create it with: gcloud auth application-default login" >&2
           exit 1
         fi
 
@@ -795,27 +845,36 @@ in
         export CCR_WORKER_URL="$(cat /run/secrets/ccr_worker_url)"
         export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
-        # Must match goose-serve's GOOSE_SERVER__SECRET_KEY -- same sops
-        # secret, and sops restartUnits bounces both units together on
-        # rotation so they can never disagree.
+        # Must match goose-serve's GOOSE_SERVER__SECRET_KEY. Same sops secret,
+        # but NOT auto-restarted on rotation -- see pigeon_goose_acp_token
+        # above -- so rotating it means restarting both units by hand.
         #
         # Guarded rather than a bare `export X="$(cat ...)"`, which does NOT
-        # abort under `set -e` (export returns 0 whatever the substitution did).
-        # An empty token here is the worst failure shape available: pigeon's
-        # capability gate keys off PIGEON_GOOSE_ACP_URL alone, so it would keep
-        # advertising `goose` as launchable while every ACP connect got 401 --
-        # a launch accepted and then silently dead, which is exactly what this
-        # work exists to eliminate. Fail at startup instead.
-        if [ ! -r /run/secrets/pigeon_goose_acp_token ]; then
-          echo "pigeon-daemon: /run/secrets/pigeon_goose_acp_token missing or unreadable" >&2
-          exit 1
+        # abort under `set -e` (export returns 0 whatever the substitution did,
+        # verified on bash 5.3). An empty token is the worst shape available:
+        # pigeon's capability gate keys off PIGEON_GOOSE_ACP_URL alone, so it
+        # would keep advertising `goose` as launchable while every ACP connect
+        # got 401 -- and pigeon treats 401 as permanent, so it never retries.
+        #
+        # DEGRADE, do not die. An earlier draft exited 1 here, which was the
+        # wrong trade twice over: pigeon is the router every session depends
+        # on, and this is a GOOSE-only secret, so a missing goose token would
+        # have taken down opencode routing too -- contradicting the
+        # wants-not-requires choice made deliberately above. Dropping the URL
+        # instead makes the daemon advertise `opencode` only, which is the
+        # truthful answer, and leaves everything else working.
+        if [ -r /run/secrets/pigeon_goose_acp_token ]; then
+          PIGEON_GOOSE_ACP_TOKEN="$(cat /run/secrets/pigeon_goose_acp_token)"
+          if [ -n "$PIGEON_GOOSE_ACP_TOKEN" ]; then
+            export PIGEON_GOOSE_ACP_TOKEN
+          else
+            echo "pigeon-daemon: /run/secrets/pigeon_goose_acp_token is EMPTY; disabling the goose backend" >&2
+            unset PIGEON_GOOSE_ACP_TOKEN PIGEON_GOOSE_ACP_URL
+          fi
+        else
+          echo "pigeon-daemon: /run/secrets/pigeon_goose_acp_token missing or unreadable; disabling the goose backend" >&2
+          unset PIGEON_GOOSE_ACP_URL
         fi
-        PIGEON_GOOSE_ACP_TOKEN="$(cat /run/secrets/pigeon_goose_acp_token)"
-        if [ -z "$PIGEON_GOOSE_ACP_TOKEN" ]; then
-          echo "pigeon-daemon: /run/secrets/pigeon_goose_acp_token is empty" >&2
-          exit 1
-        fi
-        export PIGEON_GOOSE_ACP_TOKEN
           export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
           # dx8p Stage 1: ARMS pigeon's auth. Until this line exists, checkAuth's
           # falsy-token branch keeps every route anonymous (back-compat). Once it

@@ -20,12 +20,24 @@
 #      query-parameter auth, and the session-id format are all facts about
 #      1.48.0 that the pigeon side depends on; a silent bump would invalidate
 #      them without anything failing loudly.
-#   2. goose keeps session state in a sqlite DB (~/.local/share/goose/
-#      sessions.db). A version jump can panic on a stale schema -- and since
-#      goose-serve runs Restart=always, that turns into a crash loop rather
-#      than a clean stop. Bumping is therefore a deploy action: back the DB up
-#      first, then bump, then watch the unit.
+#   2. goose keeps session state in a sqlite DB at
+#      ~/.local/share/goose/sessions/sessions.db. A version jump can panic on a
+#      stale schema -- and since goose-serve runs Restart=always, that turns
+#      into a crash loop rather than a clean stop. There is already a
+#      sessions.pre-1.46-backup-* directory beside it from exactly such a
+#      migration. Bumping is therefore a deploy action: back the DB up first,
+#      then bump, then watch the unit.
 # Treat this file as the place a human decides to move, deliberately.
+#
+# KNOWN GAP, deliberately not closed here. The hand-installed
+# /home/dev/.local/bin/goose still exists and is what a human gets
+# interactively, and it shares ~/.local/share/goose/sessions/sessions.db with
+# the serve. So packaging pins the SERVE's provenance while a second,
+# unmanaged copy keeps write access to the same state -- and the first version
+# drift between them is precisely the stale-schema panic described above.
+# Closing it means installing this package for the user and removing the
+# hand-installed binary, which is a deploy action on every host rather than a
+# nix change; tracked separately.
 { lib
 , stdenv
 , fetchurl
@@ -38,6 +50,10 @@ let
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
   # against, and is what was already installed on both Linux hosts.
+  #
+  # Both NixOS hosts here are aarch64, so the x86_64 entry builds nowhere
+  # today. It is kept because the hash is verified and a wrong-arch throw at
+  # eval time is a worse failure than a pinned line nobody uses.
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
