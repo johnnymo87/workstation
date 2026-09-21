@@ -17,9 +17,10 @@ let
   # per-token cost. Cheaper/faster than Opus for one-shot summarization while
   # staying off the Vertex path.
   sonnetModel = "anthropic/claude-sonnet-5";
-  # Cloudbox default: Opus over Vertex (no Claude Max subscription here, unlike
-  # devbox). Carries its own medium thinking effort from opencode.base.json's
-  # google-vertex-anthropic model options, so no variant override is needed.
+  # Cloudbox and macOS default: Opus over Vertex (macOS routes via cfp to Max pool
+  # with fallback to Vertex; cloudbox routes via Vertex directly). Carries its own
+  # medium thinking effort from opencode.base.json's google-vertex-anthropic model
+  # options, so no variant override is needed.
   vertexOpusModel = "google-vertex-anthropic/claude-opus-5@default";
   geminiModel = "google-vertex/gemini-3.8-flash";
   geminiVariant = "high";
@@ -79,8 +80,8 @@ let
    #      silent failure this rewrite exists to prevent. The Max pool is still
    #      reached, just through cfp behind google-vertex-anthropic rather than
    #      through a second, fallback-less lane. This
-   #      mirrors the host-conditional primary `model =` below
-  #      (`if isCloudbox then vertexOpusModel else geminiModel`). The Vertex
+   #      mirrors the primary `model =` below
+   #      (`vertexOpusModel`). The Vertex
   #      opus-5 model already carries its own `effort` setting from
   #      opencode.base.json, so no variant override is added here. (opus-4-7
   #      and opus-4-8 have no provider-level model entry anymore, and no agent
@@ -740,11 +741,9 @@ let
       shell = "${localPkgs.oc-scoped-shell}/bin/oc-scoped-shell";
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
-      # Default model differs by host:
-      #   - cloudbox -> Vertex Opus 5 (interactive primary model). The plan-
-      #     execution subagents + compaction stay on cheap Gemini Flash below.
-      #   - macOS    -> Gemini 3.8 Flash with high thinking (unchanged).
-      model = if isCloudbox then vertexOpusModel else geminiModel;
+      # Primary model: Vertex Opus 5 on both cloudbox and macOS. The plan-
+      # execution subagents + compaction stay on cheap Gemini Flash below.
+      model = vertexOpusModel;
       agent = {
         # Route the built-in `compaction` agent to Gemini 3.8 Flash. This is the
         # cheap fix for compaction cost on Opus-heavy sessions: Opus pays
@@ -762,12 +761,6 @@ let
         # per compaction). Open as of 2026-05-27, not yet merged. If/when it
         # lands upstream, revisit whether this override is still needed.
         compaction.model = geminiModel;
-      } // lib.optionalAttrs isDarwin {
-        # Gemini-native high thinking for the build/plan agents on macOS only.
-        # Cloudbox defaults to Opus, which uses opencode.base.json's shared
-        # build/plan `variant: medium`, so it gets no Gemini-style override.
-        build.variant = geminiVariant;
-        plan.variant = geminiVariant;
       };
       provider = (opencodeBase.provider or {}) // {
         "google-vertex" = (opencodeBase.provider."google-vertex" or {}) // {
