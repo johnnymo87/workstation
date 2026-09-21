@@ -228,7 +228,15 @@ Dispatch `adversarial-reviewer-fable` on the diff before `gh pr create`. This is
 
 **The handle named above is the one for this host — in the deployed copy.** It is rendered per host at deploy time (`users/dev/opencode-skills.nix`), so the copy under `~/.config/opencode/skills/` names the reviewer this machine actually defaults to, and loading the skill normally gets you that copy. **The workstation repo's source asset is not rendered** and always names the fable twin; if you are reading this out of a checkout (grep, code search, a PR diff), it is telling you the majority-host default, not necessarily yours. Check the deployed file, or `~/.config/opencode/agents/adversarial-reviewer-astra.md`, whose description states whether astra is the default on this host. What is banned on every host is substituting the other twin because you prefer it.
 
-**If that reviewer's model is unreachable, stop and report to the user.** The astra twin in particular can be present-but-dead — it is only reachable while `codex-lb.service` is up *and* its upstream model-catalog refresh is healthy, and it fails at **request** time with an empty or errored response rather than at build time. That failure is not a review. Two things it must not become: silently falling back to the other twin (which hides a broken codex-lb for as long as nobody looks), or counting the failed dispatch as the step having happened. Say the reviewer is unavailable, say the diff is unreviewed, and let the user decide whether to wait, fix it, or waive it.
+**If that reviewer's model is unreachable, stop and report to the user.** The astra twin in particular can be present-but-dead — it is only reachable while `codex-lb.service` is up, its upstream model-catalog refresh is healthy, *and* a pooled account still has 5h-window quota left. It fails at **request** time rather than at build time. That failure is not a review. Two things it must not become: silently falling back to the other twin (which hides a broken codex-lb for as long as nobody looks), or counting the failed dispatch as the step having happened. Say the reviewer is unavailable, say the diff is unreviewed, and let the user decide whether to wait, fix it, or waive it.
+
+**An empty astra result is the failure, not a terse review.** When the subagent's turn dies on an API error, the Task tool hands you a task_result that is simply empty with state `completed` — no error text reaches you. Treat "astra returned nothing" as "astra was unreachable" and check before re-dispatching, because on devbox/cloudbox there is one pooled subscription account and a single large review can exhaust its 5h window, after which every dispatch returns empty until the reset:
+
+```bash
+astra-probe    # exit 0 "astra UP: ..." / exit 1 "astra DOWN: <why, incl. reset time>"
+```
+
+Run it before dispatching astra, not only after an empty result. `curl localhost:2455/health` is not a substitute — it answers `{"status":"ok"}` while every account is rate-limited.
 
 **When to skip.** Decide mechanically, not by feel:
 
