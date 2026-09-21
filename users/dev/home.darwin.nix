@@ -543,15 +543,43 @@ lib.mkIf isDarwin {
     cloudbox-chart-tunnel = {
       enable = true;
       config = {
+        # Ensure a multiplexing master exists, THEN forward this connection over
+        # it. Both halves are necessary and the order matters.
+        #
+        # Why a master at all: the IAP cutover turned each accepted connection
+        # from a 0.32s TCP dial into a gcloud process (~2-3s). A page load opens
+        # several at once, and six concurrent ones ALL failed at the old 10s
+        # budget with "timed out during banner exchange" where one alone took
+        # 3s. They also leaked: three gcloud processes were left reparented to
+        # launchd after the ssh that spawned them was killed.
+        #
+        # Why the master is created HERE and not by ssh itself: under inetd this
+        # process's stdin/stdout IS the browser's socket, and a ControlPersist
+        # master forked by the forwarding ssh inherits that socket and wedges
+        # the request that created it -- cold page loads hung and returned
+        # nothing, while the same page was instant once a master already
+        # existed. Creating it as a separate, fully redirected command is what
+        # keeps the browser's socket out of the master's hands.
+        #
+        # -O check is cheap and idempotent, so this costs one extra process on
+        # a warm path and pays for itself many times over on a cold one.
         ProgramArguments = [
-          "${pkgs.openssh}/bin/ssh"
-          "-o" "BatchMode=yes"          # no tty here; a prompt would hang the browser's connection
-          "-o" "ConnectTimeout=10"
-          "-o" "IgnoreUnknown=UseKeychain"  # parity with sshTunnelCommand: nix ssh aborts on unknown
-                                            # config keys, so this keeps a future UseKeychain line in
-                                            # the ssh config from killing the chart but not the tunnels
-          "-W" "127.0.0.1:4710"
-          "cloudbox-chart"
+          "/bin/sh"
+          "-c"
+          ''
+            ssh="${pkgs.openssh}/bin/ssh"
+            host=cloudbox-chart
+            # ControlPath comes from the ssh config (dedicated to the chart, NOT
+            # shared with the always-on tunnel -- coupling them made a stale
+            # leftover able to take the tunnel's multiplexing down with it).
+            if ! "$ssh" -O check "$host" >/dev/null 2>&1; then
+              "$ssh" -o BatchMode=yes -o ConnectTimeout=30 -o IgnoreUnknown=UseKeychain \
+                     -o ControlMaster=yes -o ControlPersist=10m -N -f "$host" \
+                     </dev/null >/dev/null 2>&1 || true
+            fi
+            exec "$ssh" -o BatchMode=yes -o ConnectTimeout=30 -o IgnoreUnknown=UseKeychain \
+                        -W 127.0.0.1:4710 "$host"
+          ''
         ];
         inetdCompatibility = { Wait = false; };
         Sockets = {
