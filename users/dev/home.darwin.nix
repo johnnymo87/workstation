@@ -898,8 +898,19 @@ lib.mkIf isDarwin {
     # property keep-old buys there), and a switch that does alter it applies
     # immediately. The cost is that a door-affecting switch drops in-flight SSE
     # legs; the benefit is that darwin cannot accumulate the stale-door drift
-    # that keep-old made possible on cloudbox and devbox. The canary below still
-    # pages on drift, because a bootstrap can fail.
+    # that keep-old made possible on cloudbox and devbox.
+    #
+    # Note the skew direction is INVERTED from devbox's, and the canary's drift
+    # text says so. This plist embeds ${opencode-frontdoor}, so any nixpkgs bump
+    # that moves the door's closure restarts it on switch -- whereas the serve
+    # plists below exec `opencode` off the stable profile path, so an opencode
+    # bump does NOT restart them. Darwin's skew risk is therefore door-new /
+    # serve-old, not the door-stale / serves-fresh that keep-old produces
+    # elsewhere.
+    #
+    # The canary below still catches the two ways this can go wrong anyway: a
+    # failed BOOTOUT pages as version drift, and a failed BOOTSTRAP pages as
+    # installed-but-not-loaded. Activation treats neither as an error.
     opencode-frontdoor = {
       enable = true;
       config = {
@@ -945,10 +956,17 @@ lib.mkIf isDarwin {
     # 2. NO reset-workspace LOCK GUARD. The other two hosts skip a run while
     #    /tmp/reset-workspace.lock is held, because a deliberate pool bounce
     #    makes the door legitimately 503 and would be misread as sickness.
-    #    reset-workspace is Linux-only (home.base.nix:648-652 gates it on
-    #    pkgs.stdenv.isLinux), so darwin has no such window. If reset-workspace
-    #    is ever ported here, port the guard WITH it -- the failure mode is a
-    #    restart stacked on top of a reset.
+    #    reset-workspace is Linux-only (home.base.nix:645-650 gates it on
+    #    isLinux), so darwin has no analogous lock to check.
+    #
+    #    Darwin is NOT bounce-free, though -- `opencode-serve-pool-restart`
+    #    below does exactly that by hand. What makes the missing guard safe is
+    #    narrower than "no bounces happen": the door's /healthz is `pigeon ||
+    #    anchor` (pkgs/opencode-frontdoor/src/healthz.ts), so a SERVE-only bounce
+    #    still answers 200 and the sickness branch cannot fire at all. The guard
+    #    becomes necessary the day anything here bounces PIGEON alongside the
+    #    serves, or reset-workspace is ported. Port it WITH them; the failure
+    #    mode is a canary restart stacked on top of a deliberate reset.
     opencode-frontdoor-canary = {
       enable = true;
       config = {
@@ -968,14 +986,58 @@ lib.mkIf isDarwin {
             FAILFILE="$STATE/fails"
             SICKFILE="$STATE/sick"
 
-            # Only police the door when it's supposed to be up. An agent that is
-            # booted out (deliberately, or mid-switch) resets the counters rather
-            # than accruing failures against a thing nobody asked to run.
+            # Only police the door when it's supposed to be up. An agent nobody
+            # asked to run must not accrue failures. But "not loaded" splits into
+            # two cases that look identical to launchctl and are opposite in
+            # meaning, and conflating them reintroduces exactly the silent dead
+            # :4700 this whole change exists to kill:
+            #
+            #   plist ABSENT  -> nobody asked for a door here. Clear and exit.
+            #   plist PRESENT -> home-manager installed it and the bootstrap did
+            #                    not take. setupLaunchAgents installs the plist
+            #                    BEFORE bootstrapping and runs under `set +e`
+            #                    ("continue processing even if this agent
+            #                    fails"), so a failed bootstrap leaves precisely
+            #                    this state and activation reports success.
+            #
+            # Note the asymmetry with the drift branch, which is easy to get
+            # backwards: a failed BOOTOUT pages as drift (old process still
+            # serving, new plist installed), a failed BOOTSTRAP cannot -- there
+            # is no process to report a stale version. Only this branch sees it.
             AGENT_STATE=$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)
             if [ -z "$AGENT_STATE" ]; then
               rm -f "$FAILFILE" "$SICKFILE"
+              if [ ! -f "$PLIST" ]; then
+                rm -f "$STATE/notloaded" "$STATE/notloaded-alerted"
+                exit 0
+              fi
+              NOTLOADED=$(( $(cat "$STATE/notloaded" 2>/dev/null || echo 0) + 1 ))
+              echo "$NOTLOADED" > "$STATE/notloaded"
+              echo "WARNING: $PLIST is installed but $LABEL is not loaded ($NOTLOADED/2 consecutive)"
+              # Dampened to 2 minutely passes: home-manager's own bootout ->
+              # install -> bootstrap window is ~1-2s, so a switch in flight
+              # cannot page.
+              if [ "$NOTLOADED" -ge 2 ]; then
+                NOTLOADED_TEXT=$(cat <<EOF
+opencode-frontdoor is NOT RUNNING on the Mac, and nothing is listening on :4700.
+
+home-manager installed its launchd plist but the bootstrap did not take, which activation does not treat as a failure. Every opencode client defaults FRONTDOOR_URL to http://127.0.0.1:4700 -- attach, oc-auto-attach and opencode-launch are all broken until this is fixed, and oc-auto-attach will fail by STALLING for 30s rather than by saying anything useful.
+
+To fix, run:
+launchctl bootstrap gui/\$(id -u) $PLIST
+
+If that errors, boot it out first and retry:
+launchctl bootout gui/\$(id -u)/$LABEL
+launchctl bootstrap gui/\$(id -u) $PLIST
+
+Plist: $PLIST
+EOF
+)
+                ${driftAlert} "$STATE/notloaded-alerted" "notloaded|$PLIST" "$NOTLOADED_TEXT" 900 14400
+              fi
               exit 0
             fi
+            rm -f "$STATE/notloaded" "$STATE/notloaded-alerted"
             PID=$(printf '%s' "$AGENT_STATE" | sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)
 
             capture_and_restart() {
@@ -998,7 +1060,14 @@ lib.mkIf isDarwin {
               echo "RESTARTING $LABEL (reason: $reason, pid=$PID); forensics in $DUMP"
               # -k SIGKILLs the existing process first; a wedged loop will not
               # answer a polite stop, which is the case this branch exists for.
-              launchctl kickstart -k "$DOMAIN/$LABEL" || true
+              #
+              # BOUNDED. `kickstart -k` blocks until launchd has restarted the
+              # job, and inside a ThrottleInterval that has been observed here to
+              # take ~2 minutes (see the note on opencode-serve-pool-restart
+              # below, where the same timeout is called load-bearing). Unbounded,
+              # this canary run would still be sitting here when the next
+              # StartInterval fires.
+              timeout 15 launchctl kickstart -k "$DOMAIN/$LABEL" || true
               rm -f "$FAILFILE" "$SICKFILE"
             }
 
