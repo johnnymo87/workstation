@@ -10,10 +10,16 @@ cloudbox. Every command here runs from your laptop.
 refused (GCP drops rather than rejects), launchd tunnels flap and reconnect forever, and it
 works from home with WARP **off** but not with WARP **on**.
 
-> **Current as of 2026-09-20: there is no WARP allowlist rule.** `dev-ssh-warp` was deleted
-> on 2026-09-17, so direct SSH from **any** WARP vnet is expected to time out — that is now
-> the normal state, not a lockout. Use IAP (§1.2). The rest of this runbook keeps describing
-> the rule because recreating it is a live option; see §5.
+> **IAP is the transport. There is no WARP allowlist rule and there will not be one.**
+> `dev-ssh-warp` pinned a Cloudflare WARP egress `/32` that **rotates** — on 2026-09-15 it
+> went `104.30.135.170 → 104.28.172.151` and took every forward down at once, while ICMP
+> kept working and made the diagnosis misleading. The rule was deleted 2026-09-17 as the
+> final step of the IAP cutover (`docs/plans/2026-09-17-iap-tunnel-cutover.md`, PR #545).
+> IAP's source range `35.235.240.0/20` never rotates.
+>
+> So: **direct SSH from a WARP vnet timing out is the designed behaviour, not a lockout.**
+> Do not recreate the rule to "fix" it — that reintroduces the exact fragility the cutover
+> removed. Go to §1.2.
 
 ---
 
@@ -33,22 +39,30 @@ In order. Stop at the first one that works.
    ssh -p 2222 dev@localhost
    ```
 
-3. **Re-point the WARP rule at the new egress IP.** Once you are in by any route, find the
-   address your WARP traffic now leaves from and update the rule:
+3. **If IAP itself is what broke**, the firewall is not your problem — check these in order,
+   because the failure is almost certainly auth, not network:
 
-   ```bash
-   gcloud compute firewall-rules update dev-ssh-warp --source-ranges=<NEW_IP>/32
-   ```
+   - **Has the tunnel service-account key expired?** It is USER_PROVIDED with a 90-day life
+     and **expires 2026-12-16T22:32:47Z**. This is the single most likely future cause of a
+     total lockout, because IAP is now the only routine path in.
 
-   **This fails with `resource not found` today** — the rule was deleted 2026-09-17. To
-   restore the WARP path, create it rather than update it:
+     ```bash
+     CLOUDSDK_CONFIG=~/.config/gcloud-tunnel/config \
+       gcloud iam service-accounts keys list --managed-by=user \
+       --iam-account=cloudbox-iap-tunnel@wonder-sandbox.iam.gserviceaccount.com
+     ```
 
-   ```bash
-   gcloud compute firewall-rules create dev-ssh-warp --project=wonder-sandbox \
-     --network=default --priority=900 --direction=INGRESS --action=ALLOW \
-     --rules=tcp:22,udp:60000-61000 --target-tags=dev-ssh \
-     --source-ranges=<NEW_IP>/32 --enable-logging
-   ```
+   - **Is the isolated config intact?** The SA lives in `~/.config/gcloud-tunnel/config`
+     (0700), deliberately separate from your human gcloud account:
+
+     ```bash
+     CLOUDSDK_CONFIG=~/.config/gcloud-tunnel/config gcloud auth list
+     ```
+
+   - **Did you just change an IAM binding?** Propagation takes ~60–90s and a fresh binding
+     returns `4033 'not authorized'` until it lands. Wait before chasing a second cause.
+
+   Fall back to §1.1 (WARP off, from home) while you fix it — that path does not touch IAP.
 
 4. **Full rollback**, if you need the door open now and cannot diagnose:
 
@@ -92,53 +106,59 @@ gcloud compute firewall-rules list --project=wonder-sandbox \
 | Rule | Allow | Source | Target tag | Pri | Logs |
 |---|---|---|---|---|---|
 | `dev-ssh-client` | `tcp:22`, `udp:60000-61000` | `147.185.152.0/21` (home ISP, Honest Networks) | `dev-ssh` | 900 | on |
-| `dev-ssh-warp` | `tcp:22`, `udp:60000-61000` | `104.30.135.170/32` (Wonder ZT **dedicated** egress) — **rule DELETED 2026-09-17** | `dev-ssh` | 900 | on |
 | `dev-ssh-iap` | `tcp:22` | `35.235.240.0/20` | `dev-ssh` | 900 | on |
 | `allow-iap-ssh` | `tcp:22` | `35.235.240.0/20` | **none** | 900 | on |
 | `allow-mosh` | `udp:60000-61000` | `0.0.0.0/0` | **none** | 1000 | off |
 | `default-allow-ssh` | `tcp:22` | `0.0.0.0/0` | none | 65534 | **DISABLED** |
 
-Two of these are load-bearing in non-obvious ways:
+There was a sixth rule, `dev-ssh-warp`, pinned to a Cloudflare WARP dedicated egress `/32`.
+It was deleted 2026-09-17 by the IAP cutover and **is not coming back** — see the note at
+the top.
+
+Three of these are load-bearing in non-obvious ways:
 
 - **`allow-iap-ssh` is untagged and network-wide on purpose.** It duplicates `dev-ssh-iap`
   so that IAP break-glass still works if the instance loses its `dev-ssh` tag. Do not
   "deduplicate" it.
+- **`dev-ssh-client` is the only non-IAP way in.** Now that the WARP rule is gone, this
+  home-ISP range is what `cloudbox-tunnel-direct` and §1.1 rely on when IAP is down. It
+  looks like a leftover of the old pinned-IP scheme. It is not — keep it.
 - **`default-allow-ssh` is disabled, not deleted.** That is what makes step 1.4 a one-liner.
   Delete it only after about a week of stable operation.
-
-The `104.30.135.170` dedicated IP is only active on the **'Blue Apron'** WARP virtual
-network. That vnet is described as legacy, so it may be retired someday — and a Cloudflare
-org can hold a secondary dedicated IP in another city that traffic fails over to, which
-would look exactly like the lockout symptoms above.
 
 Instance: `cloudbox`, zone `us-east1-b`, tag `dev-ssh`, external IP `34.24.187.96`.
 
 ---
 
-## 4. Known gap — which vnets work
+## 4. Which network you are on no longer matters
 
-| From | Direct SSH / scp / tunnels | Mosh |
+Since the cutover, every routine path goes through IAP, so the old per-vnet table is moot —
+the answer is the same from everywhere:
+
+| From | SSH / scp / tunnels | Mosh |
 |---|---|---|
-| Home, WARP off | works | works |
-| WARP 'Blue Apron' vnet | **no since 2026-09-17 (`dev-ssh-warp` deleted) — use IAP** | works |
-| WARP Azure DEV/QA, Azure PROD, Default | **no — use IAP** | existing sessions keep working |
+| Any network, WARP on or off | via IAP ProxyCommand (`~/.ssh/config`) | works |
+| Home ISP, WARP off | also works direct (`dev-ssh-client`) — the IAP-outage fallback | works |
 
-Those three vnets share a rotating pool IP that cannot be allowlisted. Existing mosh
-sessions survive a vnet switch, but starting a **new** one from them needs its SSH
-bootstrap to go over the IAP tunnel in §1.2.
+**Direct SSH to `34.24.187.96` from a WARP vnet does not work and is not meant to.** No
+WARP egress, dedicated or pooled, is allowlisted.
+
+Mosh is the one place a raw path still exists, and it is fine: the bootstrap is TCP:22
+through the IAP ProxyCommand like everything else, while the UDP data packets go direct to
+the instance IP under `allow-mosh` — which is why §2 says not to narrow that rule.
 
 ---
 
-## 5. Open action (human)
+## 5. Open actions (human)
 
-**Decide whether WARP-direct SSH is wanted at all.** `dev-ssh-warp` was deleted on
-2026-09-17 (audit log: `v1.compute.firewalls.delete`, `jmohrbacher@wonder.com`). Firewall
-logs for the week to 2026-09-20 show SSH arriving over IAP (48 hits) and from the home ISP
-range (2 hits) and nothing else, so nothing was depending on it at the time.
+1. **Rotate the IAP tunnel service-account key before 2026-12-16T22:32:47Z.** IAP is now the
+   only routine way in, so an expired key is a full lockout with §1.1 (home ISP, WARP off)
+   as the sole fallback. Note the rotation touches **two** cleartext copies of the private
+   key inside `~/.config/gcloud-tunnel/config` — `credentials.db` and
+   `legacy_credentials/<sa>/adc.json` — not one; see
+   `docs/plans/2026-09-17-iap-tunnel-cutover.md`.
 
-- **If IAP is enough**, this is settled — delete this section and the `dev-ssh-warp` rows above.
-- **If the WARP path should come back**, recreate it with §1.3's `create` command, and ask
-  whoever administers **wondergroup** Zero Trust for the full list of the org's dedicated
-  egress IPs — Zero Trust dashboard → **Address space → Leased IPs** — and allowlist *all*
-  of them. The old rule held a single `/32`, so a colo failover to a secondary dedicated IP
-  caused a silent lockout with no signal other than the timeout in the header.
+2. **Decide whether to delete `default-allow-ssh`.** It has been disabled, not deleted,
+   since 2026-09-13 specifically so §1.4 stays a one-liner. Week-long firewall logs to
+   2026-09-20 show SSH arriving only over IAP (48 hits) and from the home ISP range (2
+   hits). Deleting it removes the break-glass in §1.4, so it is a real trade, not cleanup.
