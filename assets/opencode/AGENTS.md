@@ -294,6 +294,30 @@ and must not do, and the org-specific facts (hostname, job folders, contacts;
 fetched from Confluence into `INTERNAL.md`) — is in the `reading-jenkins-builds`
 skill. Load it before touching Jenkins.
 
+## On cloudbox, `bazel test` does not build non-test targets
+
+cloudbox's generated `~/.bazelrc` carries `test --build_tests_only` (it cut
+upload volume 83% per invocation by not building 52 OCI image tarballs nobody
+tests). The flag is **cloudbox-only** — macOS deliberately does not have it.
+
+The hazard is not that it skips things. It is that it skips them **silently,
+with exit 0**, when you name a non-test target alongside a test:
+
+```bash
+bazel test //foo:broken //foo:SomeTest   # exit 0. SomeTest ran. `broken` was NEVER BUILT.
+```
+
+Measured on Bazel 8.5.1: with the flag, a genrule that fails to build produces
+no error, no warning, and a green result. Without it, the same command fails
+with `ERROR: Executing genrule //foo:broken failed`. Naming a non-test target
+*alone* is not silent — that exits 4 with "No test targets were found" — so the
+trap is specifically the mixed invocation, which is the common one.
+
+This is an agent problem more than a human one: the failure mode is reporting
+that you verified a target you never built. **To build something, use `bazel
+build`.** To force the old behaviour for one command, pass
+`--build_tests_only=false`.
+
 ## Backgrounding Long-Running Processes
 
 A bare `nohup ... &` can die when the parent shell is interrupted. To detach a
