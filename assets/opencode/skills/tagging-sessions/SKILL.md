@@ -24,8 +24,14 @@ oc-tags top --days 7 --min 20  # most expensive UNTAGGED root sessions
 oc-tags report --days 7        # dollars by tag
 ```
 
-Tags attach to **root** sessions; subagent spend rolls up to its root. A session
-with no tag reports as `auto:<directory basename>`.
+Tags attach to **root** sessions; subagent spend rolls up to its root, and
+`set` / `which` from a subagent act on its root. A session with no tag reports
+as an `auto:` fallback derived from its directory — `auto:<repo>` at a repo
+root, `auto:<repo>/<worktree>` in a worktree, `auto:tmp` under `/tmp`. Those
+look like branch names by construction; that is the fallback, not a mistag.
+
+Launching sessions? `opencode-launch --tag` writes the same tag and follows the
+same rules below.
 
 ## Tagging the session you are in
 
@@ -34,6 +40,10 @@ with `oc-tags which`; if it already has a tag, leave it. If the work does not
 obviously match an existing tag, **do not tag it and do not invent a tag** —
 mention it to the user instead. An untagged session is visible as a to-do; a
 mistagged one is invisible.
+
+**No `INTERNAL.md` here** (devbox, or a work host whose Confluence fetch has
+never succeeded): there is no vocabulary to choose from, so don't tag — tell
+the user. `oc-tags ls` is not a substitute; it lists retired tags too.
 
 ## Naming
 
@@ -74,7 +84,14 @@ A new or renamed tag is a change to the Confluence page, not just an
    looks wrong.
 2. **`auto:` tags are a to-do, not a category.** Seeing one in a report means
    a session needs tagging — or needs the user to say what it was.
-3. **Retagging is destructive.** `oc-tags set` is an upsert with no history.
+3. **No directory patterns on worktrees.** `oc-tags top` will suggest
+   `oc-tags set --dir '<repo>/.worktrees/*' <tag>` whenever several untagged
+   sessions share a prefix. Don't. A pattern covers every *future* session
+   under it, whatever it turns out to be, and takes them all out of `top` — the
+   detector goes blind for that path permanently. Use `--dir` only for a
+   directory that is by definition one program forever (a dedicated repo), and
+   otherwise tag sessions one at a time.
+4. **Retagging is destructive.** `oc-tags set` is an upsert with no history.
    Before any bulk retag, snapshot the store and save the report you are about
    to change:
    ```bash
@@ -84,7 +101,7 @@ A new or renamed tag is a change to the Confluence page, not just an
    Classify with a dry run first, print the plan, and leave anything ambiguous
    untouched. Substring rules misfire (`pack` matches `package`); use word
    boundaries.
-4. **Spend is a coverage detector, not a ranking.** It measures one person's
+5. **Spend is a coverage detector, not a ranking.** It measures one person's
    LLM iteration over a short window — not effort, not value, not what anyone
    else cares about. Use it to find work with no tracker home. Do not use it to
    size or prioritise programs, and do not put the dollar figures in front of
