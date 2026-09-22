@@ -425,6 +425,18 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
         self.assertEqual(e["input"], 5.0)
         self.assertNotIn("tier", e)  # Vertex current-gen opus is FLAT
 
+    def test_opus_5_5_priced_exactly_not_by_opus_5_prefix(self):
+        # "claude-opus-5-5".startswith("claude-opus-5"), so without its own row
+        # the longest-prefix fallback would price it at opus-5's 5/25.
+        for prov, mid in (("anthropic", "claude-opus-5-5"),
+                          ("google-vertex-anthropic", "claude-opus-5-5@default")):
+            e = oc_cost.rate_for(prov, mid)
+            self.assertIsNotNone(e, prov)
+            self.assertEqual(e["input"], 4, prov)
+            self.assertEqual(e["output"], 20, prov)
+            self.assertEqual(e["cache_read"], 0.20, prov)
+            self.assertEqual(e["cache_write"], 5, prov)
+
     def test_rate_for_unknown_returns_none(self):
         self.assertIsNone(oc_cost.rate_for("openai", "totally-unknown"))
 

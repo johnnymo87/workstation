@@ -38,6 +38,10 @@ RATES: dict[tuple[str, str], object] = {
     #     current gen). models.dev's >200K Vertex tier is a parsing artifact. ---
     ("anthropic", "claude-opus-4-7"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-opus-5"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    # claude-opus-5-5 (released 2026-09-22) is CHEAPER than opus-5: 4/20, cache
+    # 0.20/5. The explicit row matters — rate_for's longest-prefix fallback would
+    # otherwise match "claude-opus-5" and silently overprice it by 25%.
+    ("anthropic", "claude-opus-5-5"):            {"input": 4, "output": 20, "cache_read": 0.20, "cache_write": 5},
     ("anthropic", "claude-opus-4-8"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-opus-4-6"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-sonnet-4-6"):            {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
@@ -55,6 +59,8 @@ RATES: dict[tuple[str, str], object] = {
     ("anthropic", "claude-fable-5"):               {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5},
     ("google-vertex-anthropic", "claude-opus-4-7"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-5"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
+    # Vertex resells opus-5-5 at Anthropic's standard list (4/20, cache 0.20/5).
+    ("google-vertex-anthropic", "claude-opus-5-5"): {"input": 4, "output": 20, "cache_read": 0.20, "cache_write": 5},
     ("google-vertex-anthropic", "claude-opus-4-8"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-4-6"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-sonnet-4-6"): {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},

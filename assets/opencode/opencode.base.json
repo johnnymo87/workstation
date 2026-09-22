@@ -36,7 +36,7 @@
         "chunkTimeout": 600000
       },
       "models": {
-        "claude-opus-5": {
+        "claude-opus-5-5": {
           "options": {
             "thinking": {
               "type": "adaptive",
@@ -87,7 +87,7 @@
         "chunkTimeout": 600000
       },
       "models": {
-        "claude-opus-5@default": {
+        "claude-opus-5-5@default": {
           "options": {
             "thinking": {
               "type": "adaptive",

@@ -11,7 +11,7 @@ let
   # canary) via a single-string file so the three readers cannot drift apart —
   # see that file's header. Only consulted under isCloudbox.
   aigatewayFlag = import ../../hosts/cloudbox/aigateway-flag.nix;
-  devboxModel = "anthropic/claude-opus-5";
+  devboxModel = "anthropic/claude-opus-5-5";
   # Compaction model for devbox: direct Anthropic Sonnet 5 (NOT Vertex).
   # Runs via the Claude Max subscription (teamclaude on devbox), so there is no
   # per-token cost. Cheaper/faster than Opus for one-shot summarization while
@@ -21,7 +21,7 @@ let
   # with fallback to Vertex; cloudbox routes via Vertex directly). Carries its own
   # medium thinking effort from opencode.base.json's google-vertex-anthropic model
   # options, so no variant override is needed.
-  vertexOpusModel = "google-vertex-anthropic/claude-opus-5@default";
+  vertexOpusModel = "google-vertex-anthropic/claude-opus-5-5@default";
   geminiModel = "google-vertex/gemini-3.8-flash";
   geminiVariant = "high";
   gemini38FlashModel = {
@@ -82,10 +82,10 @@ let
    #      through a second, fallback-less lane. This
    #      mirrors the primary `model =` below
    #      (`vertexOpusModel`). The Vertex
-  #      opus-5 model already carries its own `effort` setting from
-  #      opencode.base.json, so no variant override is added here. (opus-4-7
-  #      and opus-4-8 have no provider-level model entry anymore, and no agent
-  #      is pinned to either as of 2026-07-28.)
+  #      opus-5-5 model already carries its own `effort` setting from
+  #      opencode.base.json, so no variant override is added here. (opus-4-7,
+  #      opus-4-8 and opus-5 have no provider-level model entry anymore, and no
+  #      agent is pinned to any of them as of 2026-09-22.)
   patchAgent = name: src:
     let
       afterSonnet =
@@ -782,7 +782,7 @@ let
       shell = "${localPkgs.oc-scoped-shell}/bin/oc-scoped-shell";
     })
     // (lib.optionalAttrs (isDarwin || isCloudbox) {
-      # Primary model: Vertex Opus 5 on both cloudbox and macOS. The plan-
+      # Primary model: Vertex Opus 5.5 on both cloudbox and macOS. The plan-
       # execution subagents + compaction stay on cheap Gemini Flash below.
       model = vertexOpusModel;
       agent = {
