@@ -190,12 +190,12 @@ hook refuses commits there, so writable work started at the root gets stuck at
 commit time with nowhere to land.
 
 ```bash
-# writable worker: isolated in ~/projects/mono/.worktrees/cops-1234 off trunk
-opencode-launch --worktree cops-1234 ~/projects/mono "implement the X importer"
+# writable worker: isolated in ~/projects/mono/.worktrees/proj-1234 off trunk
+opencode-launch --worktree proj-1234 ~/projects/mono "implement the X importer"
 
 # read-only session (review / coordinate / "what does this do?"): NO --worktree,
 # so it gets the clean current trunk to read.
-opencode-launch ~/projects/mono "what does the FBM importer do?"
+opencode-launch ~/projects/mono "what does the catalog importer do?"
 ```
 
 What it does, in order:
@@ -229,9 +229,14 @@ Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos wit
 consumption to that work.
 
 ```bash
-opencode-launch --tag fbm-migration ~/projects/mono "port the last two callers"
-opencode-launch --tag deploy-triage --worktree ops-991 ~/projects/mono "fix the rollout"
+opencode-launch --tag late-deliveries ~/projects/mono "port the last two callers"
+opencode-launch --tag late-deliveries --worktree ops-991 ~/projects/mono "fix the rollout"
 ```
+
+**Which tag** is not this skill's call. Load `tagging-sessions`: the tag must be
+one already in its `INTERNAL.md` tag list, and if none clearly fits, **omit
+`--tag`** — the `auto:` fallback then marks the session as a to-do, whereas an
+invented tag hides it. The examples above are illustrative, not vocabulary.
 
 Three things about the oc-tags model make this worth using:
 
@@ -244,10 +249,10 @@ Three things about the oc-tags model make this worth using:
   unrelated thing ever done at that root, and that is where most of the dollars
   sit. The launcher knows what the session is for; without `--tag` that knowledge
   is thrown away and reconstructed by hand later.
-- **With `--worktree` it is optional.** That launch already gets
-  `auto:<repo>/<slug>`, which is usually decent. `--tag` earns its keep there
-  when several worktrees are one project and should add up to a single line on
-  the chart — tag them all the same thing.
+- **With `--worktree` it matters just as much.** That launch gets
+  `auto:<repo>/<slug>`, which names a branch, not the work: twelve worktrees on
+  one program become twelve lines on the chart and no total. When the program
+  has a tag, pass it to every worker in the swarm.
 
 Behaviour:
 
@@ -273,13 +278,13 @@ Behaviour:
   happy path measures ~130ms. Spinning up a swarm runs `opencode-launch` N times
   serially, so a wedged tag DB costs up to 10s × N — annoying, never fatal.
 - The tag is stored lower-cased (`oc-tags`' `normalise_tag`), so `--tag
-  FBM-Migration` charts as `fbm-migration`. The launcher prints oc-tags' own
+  Late-Deliveries` charts as `late-deliveries`. The launcher prints oc-tags' own
   confirmation line rather than echoing your spelling back, so what you read is
   what the chart will show.
 
 Forgot to pass it? Nothing is lost — tag afterwards with
-`oc-tags set <tag> <session-id>`, or cover a whole directory at once with
-`oc-tags set --dir '/home/dev/projects/mono/.worktrees/fbm-*' fbm`.
+`oc-tags set <tag> <session-id>`. Avoid `oc-tags set --dir` on worktree globs
+even when `oc-tags top` suggests one; `tagging-sessions` explains why.
 
 ## Auto-Attach to nvim+tmux
 

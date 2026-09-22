@@ -72,6 +72,10 @@ let
     "shepherding-pull-requests"
     "swarm-messaging"
     "swarm-shaped-work"
+    # Cross, not work-only: the naming policy applies to any host running
+    # oc-tags (all three). Only its INTERNAL.md tag list is work-only, and the
+    # Confluence fetch below is already gated to macOS + cloudbox.
+    "tagging-sessions"
     "using-chatgpt-relay"
     "using-gws"
   ];
@@ -187,6 +191,7 @@ let
     { pageId = "5386600450"; skillName = "escalating-azure-aks-rbac"; fileName = "INTERNAL.md"; }
     { pageId = "5398265910"; skillName = "monitoring-deployments"; fileName = "INTERNAL.md"; }
     { pageId = "5667029033"; skillName = "reading-jenkins-builds"; fileName = "INTERNAL.md"; }
+    { pageId = "5713231984"; skillName = "tagging-sessions"; fileName = "INTERNAL.md"; }
   ];
 
   # Activation script: fetch Confluence pages into skill directories
