@@ -511,8 +511,11 @@ let
     # constant. Diagnose from the stored `error` on the assistant message in
     # opencode.db before suspecting agent config; the fix is a pin bump here.
     #
-    # 1.8.4 verified to report CLAUDE_CODE_VERSION 2.1.258 (>= the floor below).
-    "@ex-machina/opencode-anthropic-auth" = "1.8.4";
+    # 1.8.5 verified to report CLAUDE_CODE_VERSION 2.1.280 (>= the floor below).
+    # It exists FOR claude-opus-5-5: upstream PR #266 bumped the reported version
+    # from 2.1.258 solely to unlock that model, so the pin moves in the same
+    # commit as the opus-5-5 model pins — 1.8.4 would 400 on every primary turn.
+    "@ex-machina/opencode-anthropic-auth" = "1.8.5";
     "opencode-beads" = "0.8.0";
   };
 
@@ -1086,7 +1089,7 @@ in
 
     # Minimum Claude Code version the pinned anthropic-auth plugin must report.
     # Asserted at activation; see the assertion block below for why.
-    claudeCodeVersionFloor = "2.1.251";
+    claudeCodeVersionFloor = "2.1.280";
   in lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     set -euo pipefail
     export PATH="${pkgs.nodejs}/bin:${pkgs.jq}/bin:${pkgs.coreutils}/bin:${pkgs.gnused}/bin:$PATH"
@@ -1188,7 +1191,8 @@ in
     # is spent suspecting agent config. One line at switch time replaces it.
     #
     # The floor moves on Anthropic's schedule, not ours: it is whatever the
-    # newest model we pin an agent to demands. 2.1.251 is claude-fable-5-1's.
+    # newest model we pin an agent to demands. 2.1.280 is claude-opus-5-5's
+    # (the primary model on every host); 2.1.251 was claude-fable-5-1's.
     cc_floor='${claudeCodeVersionFloor}'
     auth_pkg="@ex-machina/opencode-anthropic-auth"
 

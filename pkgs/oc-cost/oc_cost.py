@@ -38,9 +38,10 @@ RATES: dict[tuple[str, str], object] = {
     #     current gen). models.dev's >200K Vertex tier is a parsing artifact. ---
     ("anthropic", "claude-opus-4-7"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-opus-5"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
-    # claude-opus-5-5 (released 2026-09-22) is CHEAPER than opus-5: 4/20, cache
-    # 0.20/5. The explicit row matters — rate_for's longest-prefix fallback would
-    # otherwise match "claude-opus-5" and silently overprice it by 25%.
+    # claude-opus-5-5 (released 2026-09-22) is CHEAPER than opus-5: 4/20, with a
+    # 0.05x cache read (0.20) and a 5.00 5m-write. Source: anthropic.com/pricing,
+    # fetched 2026-09-22. The explicit row matters — rate_for's longest-prefix
+    # fallback would otherwise match "claude-opus-5" and silently overprice by 25%.
     ("anthropic", "claude-opus-5-5"):            {"input": 4, "output": 20, "cache_read": 0.20, "cache_write": 5},
     ("anthropic", "claude-opus-4-8"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-opus-4-6"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
