@@ -190,12 +190,12 @@ hook refuses commits there, so writable work started at the root gets stuck at
 commit time with nowhere to land.
 
 ```bash
-# writable worker: isolated in ~/projects/mono/.worktrees/cops-1234 off trunk
-opencode-launch --worktree cops-1234 ~/projects/mono "implement the X importer"
+# writable worker: isolated in ~/projects/mono/.worktrees/proj-1234 off trunk
+opencode-launch --worktree proj-1234 ~/projects/mono "implement the X importer"
 
 # read-only session (review / coordinate / "what does this do?"): NO --worktree,
 # so it gets the clean current trunk to read.
-opencode-launch ~/projects/mono "what does the FBM importer do?"
+opencode-launch ~/projects/mono "what does the catalog importer do?"
 ```
 
 What it does, in order:
