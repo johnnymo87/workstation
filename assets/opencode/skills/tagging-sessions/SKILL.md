@@ -31,7 +31,10 @@ root, `auto:<repo>/<worktree>` in a worktree, `auto:tmp` under `/tmp`. Those
 look like branch names by construction; that is the fallback, not a mistag.
 
 Launching sessions? `opencode-launch --tag` writes the same tag and follows the
-same rules below.
+same rules below. Without `--tag`, a launch copies the launcher's tag onto the
+child (so will Telegram `/launch` from a session's topic or reply, once pigeon
+ships it) — only an explicit session tag, never a dir glob or `auto:`. Check
+your own tag before spinning up unrelated work, and pass `--tag auto` to opt out.
 
 ## Tagging the session you are in
 
