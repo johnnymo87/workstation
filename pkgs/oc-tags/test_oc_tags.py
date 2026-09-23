@@ -478,6 +478,50 @@ class TestEffectiveTag(unittest.TestCase):
         )
 
 
+class TestEffectiveTagKind(unittest.TestCase):
+    # effective_tag_kind adds a third field that effective_tag's 'manual'
+    # deliberately conflates: WHICH manual source answered. Launch-time tag
+    # inheritance copies only an explicit session tag -- a dir glob describes
+    # a place, not the work -- so it needs the two told apart.
+
+    def test_session_tag_is_kind_session(self):
+        self.assertEqual(
+            oc_tags.effective_tag_kind(
+                "ses_a", "/home/dev/projects/mono",
+                session_tag_map={"ses_a": "billing"},
+                dir_tag_map={"/home/dev/projects/mono": "monorepo"},
+            ),
+            ("billing", "manual", "session"),
+        )
+
+    def test_dir_glob_is_kind_dir(self):
+        self.assertEqual(
+            oc_tags.effective_tag_kind(
+                "ses_a", "/home/dev/projects/mono/.worktrees/fbm-webhook-res",
+                session_tag_map={},
+                dir_tag_map={"/home/dev/projects/mono/.worktrees/fbm-*": "fbm"},
+            ),
+            ("fbm", "manual", "dir"),
+        )
+
+    def test_fallback_is_kind_auto(self):
+        self.assertEqual(
+            oc_tags.effective_tag_kind("ses_a", "/home/dev/projects/mono", {}, {}),
+            ("auto:mono", "auto", "auto"),
+        )
+
+    def test_effective_tag_is_the_first_two_fields(self):
+        # effective_tag's (tag, source) contract is unchanged for every caller.
+        cases = [
+            ("ses_a", "/x", {"ses_a": "t"}, {}),
+            ("ses_a", "/x", {}, {"/x": "d"}),
+            ("ses_a", "/x", {}, {}),
+            ("ses_a", None, {}, {}),
+        ]
+        for c in cases:
+            self.assertEqual(oc_tags.effective_tag(*c), oc_tags.effective_tag_kind(*c)[:2])
+
+
 class TestBucketing(unittest.TestCase):
     def test_hour_bucket_et(self):
         # 2026-09-08T13:30:00Z == 09:30 ET (EDT, UTC-4)
@@ -1027,7 +1071,7 @@ class TestCli(unittest.TestCase):
         # normalise_tag now refuses these, but a row written before it did
         # would still be there, and a tag containing a tab would split into
         # phantom columns for a machine reader. Write one past the validator
-        # to prove the OUTPUT is one line of exactly three fields.
+        # to prove the OUTPUT is one line of exactly four fields.
         with oc_tags.open_store(self.tags_db) as st:
             st.execute(
                 "INSERT INTO session_tag (session_id, tag, created_at) VALUES (?,?,?)",
@@ -1039,7 +1083,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         out = buf.getvalue().strip()
         self.assertEqual(len(out.splitlines()), 1)
-        self.assertEqual(out.split("\t"), ["bill ing x", "manual", "root_a"])
+        self.assertEqual(out.split("\t"), ["bill ing x", "manual", "root_a", "session"])
 
     def test_which_warns_on_stderr_when_opencode_db_is_unreadable(self):
         # An unreadable DB and a genuinely untagged session produce the SAME
@@ -1051,7 +1095,7 @@ class TestCli(unittest.TestCase):
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
             rc = oc_tags.main(["which", "root_a", "--db", str(broken), "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
-        self.assertEqual(buf.getvalue().strip().split("\t"), ["auto:no-dir", "auto", "root_a"])
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["auto:no-dir", "auto", "root_a", "auto"])
         self.assertIn("opencode.db", err.getvalue())
 
     def test_which_reports_manual_session_tag(self):
@@ -1061,7 +1105,7 @@ class TestCli(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             rc = oc_tags.main(["which", "root_a", "--db", self.db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
-        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a"])
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a", "session"])
 
     def test_which_resolves_a_child_to_its_root(self):
         # Tags live on roots, so a subagent session must answer with its root's
@@ -1072,7 +1116,7 @@ class TestCli(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             rc = oc_tags.main(["which", "kid_a", "--db", self.db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
-        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a"])
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a", "session"])
 
     def test_which_reports_a_dir_glob_as_manual(self):
         with oc_tags.open_store(self.tags_db) as st:
@@ -1081,14 +1125,52 @@ class TestCli(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             rc = oc_tags.main(["which", "root_b", "--db", self.db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
-        self.assertEqual(buf.getvalue().strip().split("\t"), ["mono-wt", "manual", "root_b"])
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["mono-wt", "manual", "root_b", "dir"])
 
     def test_which_reports_auto_fallback(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = oc_tags.main(["which", "root_a", "--db", self.db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
-        self.assertEqual(buf.getvalue().strip().split("\t"), ["auto:mono", "auto", "root_a"])
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["auto:mono", "auto", "root_a", "auto"])
+
+    def _which_fields(self, *argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            # DB flags go BEFORE the subcommand so a `--` in argv (which ends
+            # option parsing) cannot swallow them as positionals.
+            rc = oc_tags.main(["--db", self.db, "--tags-db", self.tags_db, "which", *argv])
+        self.assertEqual(rc, 0)
+        return buf.getvalue().strip().split("\t")
+
+    def test_which_column_two_is_unchanged_by_the_kind_column(self):
+        # Column 2 is a deployed contract: pigeon's tag-resolver parseWhich
+        # reads it, and pigeon deploys separately from oc-tags. A session tag
+        # and a dir glob must BOTH still say 'manual' there; the distinction
+        # lives only in the additive column 4.
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/*", "mono-wt")
+        sess = self._which_fields("root_a")
+        glob = self._which_fields("root_b")
+        self.assertEqual(sess[:3], ["billing", "manual", "root_a"])
+        self.assertEqual(glob[:3], ["mono-wt", "manual", "root_b"])
+        self.assertEqual((sess[3], glob[3]), ("session", "dir"))
+
+    def test_which_kind_session_for_a_child_of_a_tagged_root(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+        self.assertEqual(self._which_fields("kid_a"), ["billing", "manual", "root_a", "session"])
+
+    def test_which_kind_auto_for_untagged(self):
+        self.assertEqual(self._which_fields("root_a")[3], "auto")
+
+    def test_which_accepts_double_dash_before_the_session_id(self):
+        # opencode-launch calls `oc-tags which -- "$OPENCODE_SESSION_ID"` so a
+        # hostile id can never be read as a flag.
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "root_a", "billing")
+        self.assertEqual(self._which_fields("--", "root_a"), ["billing", "manual", "root_a", "session"])
 
     def test_which_unknown_session_still_answers(self):
         # A session opencode.db has never heard of has no directory, so the
@@ -1100,7 +1182,7 @@ class TestCli(unittest.TestCase):
             rc = oc_tags.main(["which", "ses_never_seen", "--db", self.db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
         self.assertEqual(
-            buf.getvalue().strip().split("\t"), ["auto:no-dir", "auto", "ses_never_seen"]
+            buf.getvalue().strip().split("\t"), ["auto:no-dir", "auto", "ses_never_seen", "auto"]
         )
 
     def test_which_missing_opencode_db_degrades_to_session_tag(self):
@@ -1116,7 +1198,7 @@ class TestCli(unittest.TestCase):
                 "--tags-db", self.tags_db,
             ])
         self.assertEqual(rc, 0)
-        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a"])
+        self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a", "session"])
 
     def test_which_requires_a_session_id(self):
         err = io.StringIO()
@@ -1141,7 +1223,7 @@ class TestCli(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 rc = oc_tags.main(["which", "--db", self.db, "--tags-db", self.tags_db])
             self.assertEqual(rc, 0)
-            self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a"])
+            self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a", "session"])
         finally:
             if old_env is None:
                 os.environ.pop("OPENCODE_SESSION_ID", None)

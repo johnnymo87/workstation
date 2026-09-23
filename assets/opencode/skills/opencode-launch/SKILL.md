@@ -27,8 +27,9 @@ opencode-launch --mcp slack ~/projects/pigeon "summarize the last hour of #incid
 2. Creates a new session via `POST /session`
 3. Sends the prompt via `POST /session/{id}/prompt_async`
 4. Prints the session ID and commands to attach or kill
-5. With `--tag`, tags the session for `oc-tags` cost reporting (best-effort,
-   after the launch — see below)
+5. With `--tag`, tags the session for `oc-tags` cost reporting; without it,
+   inherits the launcher's explicit session tag, if any (best-effort, after the
+   launch — see below)
 
 The session runs headless. The pigeon plugin inside the session auto-registers
 with the daemon, so you will receive Telegram notifications for stop/question events.
@@ -281,6 +282,42 @@ Behaviour:
   Late-Deliveries` charts as `late-deliveries`. The launcher prints oc-tags' own
   confirmation line rather than echoing your spelling back, so what you read is
   what the chart will show.
+
+### Inheritance: no `--tag` means "same tag as me"
+
+Launched from inside a session (`$OPENCODE_SESSION_ID` set — every agent bash
+call), a launch **without `--tag` inherits the launcher's tag**. A swarm spun
+up from a tagged session therefore lands on the program's tag without passing
+`--tag` to every worker.
+
+- **Only an explicit session tag is inherited.** The launcher's tag must come
+  from `oc-tags set` (`oc-tags which` column 4 = `session`). A directory glob
+  describes a place, not the work, and an `auto:` fallback was never chosen by
+  anyone, so neither is passed on; the child keeps its own `auto:` fallback.
+- **`--tag <t>` always wins**, and no lookup is done.
+- **`--tag auto` opts out** (any case, exactly `auto`): no lookup, the child
+  stays on its `auto:` fallback. Use it when the worker's job is unrelated to
+  yours — a mislabel is worse than an untagged session.
+- **It is loud.** Success prints oc-tags' own line plus the source, e.g.
+  `Tagged session 'ses_child' as 'billing' (inherited from ses_root)`. `ses_root`
+  is the launcher's ROOT session (tags live on roots).
+- **It is a copy**, a plain `oc-tags set` on the child. Retagging the launcher
+  later does not follow; fix children one at a time.
+- **Best-effort, like `--tag`.** It runs after the prompt is sent, bounded by a
+  4s `timeout` on `oc-tags which` plus the usual 10s on `oc-tags set` (the
+  prompt is already sent, so this only holds up the launcher's own output). A missing `oc-tags`, a failure, a timeout,
+  an older 3-column `oc-tags`, or an inherited tag that fails the `--tag` rules
+  each print a `Note:` on stderr; the launch itself is never affected.
+- The auto-attach TUI is spawned with `OPENCODE_SESSION_ID` scrubbed from its
+  environment, so an attach that (re)starts the tmux server cannot plant the
+  agent's id in tmux's global env for every later pane to inherit.
+
+Telegram `/launch` gets the same rule from pigeon (a separate pigeon change that may
+not be deployed yet). It inherits from the session whose topic it was typed in or
+whose notification it replies to (no opt-out syntax; `/launch` in General
+inherits nothing). See
+`docs/plans/2026-09-23-launch-tag-inheritance-design.md` in the workstation
+repo.
 
 Forgot to pass it? Nothing is lost — tag afterwards with
 `oc-tags set <tag> <session-id>`. Avoid `oc-tags set --dir` on worktree globs

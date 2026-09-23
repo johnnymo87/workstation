@@ -591,7 +591,7 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source must call oc-tags set <tag> <session-id>\n        not found in: %s\n' "$default_nix"; exit 1
   fi
   # Validation must happen before the session is created, so a typo costs nothing.
-  validate_line="$(grep -n 'if ! validate_tag' "$default_nix" | head -1 | cut -d: -f1)"
+  validate_line="$(grep -n 'if ! validate_tag "\$tag"' "$default_nix" | head -1 | cut -d: -f1)"
   if [ -n "$validate_line" ] && [ -n "$create_line" ] && [ "$validate_line" -lt "$create_line" ]; then
     printf 'PASS  tag is validated before the session is created\n'
   else
@@ -645,7 +645,9 @@ if [ -f "$default_nix" ]; then
   # oc-tags lowercases the tag (normalise_tag), so the launcher must print
   # oc-tags' own line rather than echoing back what the human typed -- otherwise
   # "--tag FBM-Migration" reports a tag the chart will never show.
-  if grep -A30 'apply_session_tag()' "$default_nix" | grep -q "printf '%s\\\\n' \"\$out\""; then
+  # (The suffix is empty for an explicit --tag; inherit_launcher_tag passes
+  # " (inherited from <root>)", appended to oc-tags' line, not replacing it.)
+  if grep -A30 'apply_session_tag()' "$default_nix" | grep -q "printf '%s%s\\\\n' \"\$out\" \"\$suffix\""; then
     printf 'PASS  success line comes from oc-tags, not from the launcher\n'
   else
     printf 'FAIL  success line must print oc-tags own output\n        in: %s\n' "$default_nix"; exit 1
@@ -734,5 +736,262 @@ check_attach "env =false still attaches"                     attach 0 "false"
 check_attach "env empty still attaches"                      attach 0 ""
 check_attach "env =no still attaches"                        attach 0 "no"
 check_attach "flag wins even when env is falsey"             skip   1 "0"
+
+# ---- launch tag inheritance (docs/plans/2026-09-23-launch-tag-inheritance-design.md)
+#
+# Unlike the mirrors above, these run the PRODUCTION functions: each one is cut
+# out of default.nix and nix-unescaped (''${ -> ${), so there is no mirror to
+# drift. oc-tags and oc-auto-attach are fakes that log their argv/env.
+#
+# Rules under test: only an explicit SESSION tag (which column 4 == session)
+# is inherited; an explicit --tag wins with no lookup; `--tag auto` opts out;
+# every failure path is a Note on stderr and a 0 return, never a failed launch.
+if [ ! -f "$default_nix" ]; then
+  printf 'SKIP  tag inheritance tests (default.nix not next to test)\n'
+  echo "all opencode-launch helper tests passed"
+  exit 0
+fi
+
+extract_fn() { # <name>: print the function's source from default.nix, nix-unescaped
+  awk -v start="      $1() {" '$0 == start { p = 1 } p { print } p && $0 == "      }" { exit }' "$default_nix" \
+    | sed "s/''\\\${/\${/g"
+}
+
+for fn in validate_tag apply_session_tag is_inherit_optout inherit_launcher_tag tag_launched_session spawn_auto_attach; do
+  src="$(extract_fn "$fn")"
+  if [ -z "$src" ] || ! grep -q "^      }$" <<<"$src"; then
+    printf 'FAIL  extract %s() from default.nix\n' "$fn"; exit 1
+  fi
+  if grep -q "''" <<<"$src"; then
+    printf 'FAIL  %s() still carries a nix escape after unescaping\n' "$fn"; exit 1
+  fi
+  if [ "$fn" = spawn_auto_attach ]; then
+    # Keep the test's attach log out of the real /tmp (and the nix sandbox,
+    # which has no /tmp at all).
+    spawn_src="$src"
+    continue
+  fi
+  eval "$src"
+  printf 'PASS  extracted production %s() from default.nix\n' "$fn"
+done
+
+inh_tmp="$(mktemp -d)"
+trap 'rm -rf "$inh_tmp"' EXIT
+bash_bin="$(command -v bash)"
+export FAKE_LOG="$inh_tmp/oc-tags.log" FAKE_WHICH=""
+cat >"$inh_tmp/fake-oc-tags" <<EOF
+#!$bash_bin
+printf '%s\n' "\$*" >>"\$FAKE_LOG"
+case "\$1" in
+  which)
+    case "\$FAKE_WHICH" in
+      hang) exec sleep 30 ;;
+      fail) exit 3 ;;
+      *) printf '%b\n' "\$FAKE_WHICH" ;;
+    esac ;;
+  set) printf "Tagged session '%s' as '%s'\n" "\$4" "\$3" ;;
+esac
+EOF
+chmod +x "$inh_tmp/fake-oc-tags"
+
+# run_tag <desc>: run tag_launched_session with the caller's globals; capture
+# stdout (out), stderr (err), return code, and what the fake oc-tags saw (calls).
+run_tag() {
+  local rc=0
+  : >"$FAKE_LOG"
+  out="$(tag_launched_session 2>"$inh_tmp/err")" || rc=$?
+  err="$(cat "$inh_tmp/err")"
+  calls="$(cat "$FAKE_LOG")"
+  if [ "$rc" -ne 0 ]; then
+    printf 'FAIL  %s: tag_launched_session returned %s (must never fail a launch)\n' "$1" "$rc"; exit 1
+  fi
+}
+expect_no_set() { # <desc>
+  if grep -q '^set ' <<<"$calls"; then
+    printf 'FAIL  %s: oc-tags set was called\n        calls: %s\n' "$1" "$calls"; exit 1
+  fi
+  printf 'PASS  %s\n' "$1"
+}
+expect_note() { # <desc> <substring>
+  if grep -q '^Note: tag not inherited' <<<"$err" && grep -qF -- "$2" <<<"$err"; then
+    printf 'PASS  %s\n' "$1"
+  else
+    printf 'FAIL  %s\n        stderr: %s\n' "$1" "$err"; exit 1
+  fi
+}
+
+OC_TAGS_BIN="$inh_tmp/fake-oc-tags"
+session_id="ses_child"
+tag=""
+no_inherit=0
+export OPENCODE_SESSION_ID="ses_parent"
+
+FAKE_WHICH='billing\tmanual\tses_root\tsession'
+run_tag "session kind"
+assert_eq "Tagged session 'ses_child' as 'billing' (inherited from ses_root)" "$out" \
+  "inherit: kind=session -> tag copied, loud line names the root it came from"
+assert_eq "$(printf 'which -- ses_parent\nset -- billing ses_child')" "$calls" \
+  "inherit: which is asked about the LAUNCHER, set targets the CHILD (tag first)"
+assert_eq "" "$err" "inherit: kind=session success is quiet on stderr"
+
+FAKE_WHICH='mono-wt\tmanual\tses_root\tdir'
+run_tag "dir kind"
+assert_eq "" "$out$err" "inherit: kind=dir -> silent"
+expect_no_set "inherit: kind=dir (a glob describes a place) -> not inherited"
+
+FAKE_WHICH='auto:mono\tauto\tses_root\tauto'
+run_tag "auto kind"
+assert_eq "" "$out$err" "inherit: kind=auto -> silent"
+expect_no_set "inherit: kind=auto (fallback) -> not inherited"
+
+FAKE_WHICH='billing\tmanual\tses_root'
+run_tag "3 columns"
+expect_no_set "inherit: 3-column which (old oc-tags) -> not inherited"
+expect_note "inherit: 3-column which -> Note" "no kind column"
+
+FAKE_WHICH='billing\tmanual\tses_root\tsession\tfuture'
+run_tag "5 columns"
+assert_eq "Tagged session 'ses_child' as 'billing' (inherited from ses_root)" "$out" \
+  "inherit: a trailing extra column is tolerated"
+
+FAKE_WHICH='billing\tmanual\tses_root\tbogus'
+run_tag "unknown kind"
+expect_no_set "inherit: unknown kind -> not inherited"
+expect_note "inherit: unknown kind -> Note" "unknown tag kind 'bogus'"
+
+FAKE_WHICH=''
+run_tag "empty output"
+expect_no_set "inherit: empty which output -> not inherited"
+expect_note "inherit: empty which output -> Note" "no kind column"
+
+FAKE_WHICH='fail'
+run_tag "which fails"
+expect_no_set "inherit: which exits non-zero -> launch ok, nothing set"
+expect_note "inherit: which exits non-zero -> Note with the exit code" "exit 3"
+
+FAKE_WHICH='hang'
+export OPENCODE_LAUNCH_TAG_WHICH_TIMEOUT=1
+t0=$SECONDS
+run_tag "which hangs"
+elapsed=$((SECONDS - t0))
+unset OPENCODE_LAUNCH_TAG_WHICH_TIMEOUT
+expect_no_set "inherit: which hangs -> launch ok, nothing set"
+expect_note "inherit: which hangs -> Note names the timeout" "timed out after 1s"
+if [ "$elapsed" -le 5 ]; then
+  printf 'PASS  inherit: a hung which is bounded by the timeout (%ss)\n' "$elapsed"
+else
+  printf 'FAIL  inherit: a hung which took %ss (timeout 1s)\n' "$elapsed"; exit 1
+fi
+
+FAKE_WHICH='-evil\tmanual\tses_root\tsession'
+run_tag "invalid inherited tag"
+expect_no_set "inherit: tag failing validate_tag -> not applied"
+expect_note "inherit: tag failing validate_tag -> Note" "not a valid launch tag"
+
+OC_TAGS_BIN="$inh_tmp/no-such-oc-tags"
+FAKE_WHICH='billing\tmanual\tses_root\tsession'
+run_tag "binary missing"
+expect_note "inherit: oc-tags binary missing -> Note" "not found on PATH"
+OC_TAGS_BIN="$inh_tmp/fake-oc-tags"
+
+tag="explicit"
+run_tag "explicit tag"
+assert_eq "set -- explicit ses_child" "$calls" "explicit --tag wins: set called, which NEVER called"
+assert_eq "Tagged session 'ses_child' as 'explicit'" "$out" "explicit --tag: no inheritance suffix"
+tag=""
+
+no_inherit=1
+run_tag "--tag auto"
+assert_eq "" "$calls" "--tag auto: which never called, nothing tagged"
+no_inherit=0
+
+unset OPENCODE_SESSION_ID
+run_tag "no launcher"
+assert_eq "" "$calls" "no OPENCODE_SESSION_ID: which never called"
+export OPENCODE_SESSION_ID=""
+run_tag "empty launcher"
+assert_eq "" "$calls" "empty OPENCODE_SESSION_ID: which never called"
+export OPENCODE_SESSION_ID="ses_parent"
+
+check_optout() { # <arg> <want: yes|no>
+  local got=no
+  if is_inherit_optout "$1"; then got=yes; fi
+  assert_eq "$2" "$got" "is_inherit_optout '$1' -> $2"
+}
+check_optout auto yes
+check_optout AUTO yes
+check_optout Auto yes
+check_optout "auto:mono" no
+check_optout autox no
+check_optout billing no
+check_optout "" no
+
+# The opt-out must be consumed before validate_tag runs on the argument, and
+# inheritance must run from the same post-prompt point as the explicit tag.
+optout_line="$(grep -n 'is_inherit_optout "\$tag"' "$default_nix" | head -1 | cut -d: -f1)"
+if [ -n "$optout_line" ] && [ -n "$validate_line" ] && [ "$optout_line" -lt "$validate_line" ]; then
+  printf 'PASS  --tag auto is consumed before validate_tag\n'
+else
+  printf 'FAIL  --tag auto must be handled before validate_tag (optout@%s validate@%s)\n' "$optout_line" "$validate_line"; exit 1
+fi
+call_line="$(grep -n '^      tag_launched_session$' "$default_nix" | head -1 | cut -d: -f1)"
+if [ -n "$call_line" ] && [ "$call_line" -gt "$ok_line" ] && [ "$call_line" -gt "$prompt_line" ]; then
+  printf 'PASS  tagging/inheritance runs after launch_ok=1 and prompt_async\n'
+else
+  printf 'FAIL  tag_launched_session must run after launch_ok and the prompt (call@%s)\n' "$call_line"; exit 1
+fi
+if grep -q 'timeout "\$secs" "\$bin" which -- "\$launcher"' "$default_nix"; then
+  printf 'PASS  which is time-bounded and guards the id with --\n'
+else
+  printf 'FAIL  which must be called as timeout "$secs" "$bin" which -- "$launcher"\n'; exit 1
+fi
+
+# ---- oc-auto-attach spawn scrubs the launcher's OPENCODE_SESSION_ID ---------
+#
+# The first attach after a tmux server restart starts the server, and tmux
+# copies the spawning env into its GLOBAL env. Every later pane would then
+# carry a dead session's id and silently inherit its tag.
+if [ "$(grep -c 'oc-auto-attach ' "$default_nix" | tr -d ' ')" -ge 1 ] \
+   && ! grep -E 'setsid nohup +oc-auto-attach' "$default_nix" >/dev/null; then
+  printf 'PASS  no unscrubbed setsid nohup oc-auto-attach spawn remains\n'
+else
+  printf 'FAIL  an oc-auto-attach spawn without env -u OPENCODE_SESSION_ID remains\n'; exit 1
+fi
+mkdir -p "$inh_tmp/bin"
+cat >"$inh_tmp/bin/oc-auto-attach" <<EOF
+#!$bash_bin
+env >"$inh_tmp/attach.env.tmp"
+printf '%s\n' "\$*" >"$inh_tmp/attach.args"
+mv "$inh_tmp/attach.env.tmp" "$inh_tmp/attach.env"
+EOF
+chmod +x "$inh_tmp/bin/oc-auto-attach"
+att_log="$inh_tmp/attach.log"
+eval "${spawn_src//\/tmp\/oc-auto-attach.log/$att_log}"
+printf 'PASS  extracted production spawn_auto_attach() from default.nix\n'
+if command -v setsid >/dev/null 2>&1; then
+  export INHERIT_TEST_MARK=present
+  oc_attach_args=(--tmux-session main)
+  PATH="$inh_tmp/bin:$PATH" spawn_auto_attach
+  for _ in $(seq 1 100); do
+    [ -f "$inh_tmp/attach.env" ] && break
+    sleep 0.1
+  done
+  attach_env="$(cat "$inh_tmp/attach.env" 2>/dev/null || true)"
+  if grep -q '^INHERIT_TEST_MARK=present$' <<<"$attach_env"; then
+    printf 'PASS  spawned oc-auto-attach env was captured (positive control)\n'
+  else
+    printf 'FAIL  spawned oc-auto-attach did not run or env not captured\n'; exit 1
+  fi
+  if grep -q '^OPENCODE_SESSION_ID=' <<<"$attach_env"; then
+    printf 'FAIL  oc-auto-attach spawn env still carries OPENCODE_SESSION_ID\n'; exit 1
+  else
+    printf 'PASS  oc-auto-attach spawn env lacks OPENCODE_SESSION_ID\n'
+  fi
+  assert_eq "--tmux-session main ses_child" "$(cat "$inh_tmp/attach.args")" \
+    "oc-auto-attach still gets its args and the CHILD session id"
+  unset INHERIT_TEST_MARK
+else
+  printf 'FAIL  setsid not on PATH; the spawn test cannot run\n'; exit 1
+fi
 
 echo "all opencode-launch helper tests passed"
