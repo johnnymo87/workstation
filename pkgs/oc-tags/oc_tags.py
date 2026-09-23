@@ -183,19 +183,25 @@ def rm_dir_tag(conn, pattern: str) -> bool:
     return conn.execute("DELETE FROM dir_tag WHERE pattern=?", (p,)).rowcount > 0
 
 
-def effective_tag(
+def effective_tag_kind(
     session_id: str,
     directory: str | None,
     session_tag_map: dict[str, str],
     dir_tag_map: dict[str, str],
-) -> tuple[str, str]:
-    """Resolve a ROOT session's tag. Returns (tag, source) where source is
-    'manual' or 'auto'. `oc-tags top` treats 'auto' as untagged so the
-    backlog stays visible rather than hidden behind a plausible label.
+) -> tuple[str, str, str]:
+    """Resolve a ROOT session's tag. Returns (tag, source, kind).
+
+    source is 'manual' or 'auto' -- the value `effective_tag` has always
+    returned, and what `oc-tags which` prints in column 2.
+    kind says WHICH rule answered: 'session' (an explicit session tag),
+    'dir' (the longest matching dir glob) or 'auto' (the directory-derived
+    fallback). 'manual' covers both 'session' and 'dir'; launch-time tag
+    inheritance needs them apart, because a glob describes a place rather
+    than the work and must not be copied onto a child session.
     """
     tag = session_tag_map.get(session_id)
     if tag:
-        return tag, "manual"
+        return tag, "manual", "session"
     if directory:
         d_norm = directory.rstrip("/") or "/"
         matches = [
@@ -205,8 +211,25 @@ def effective_tag(
         if matches:
             # Longest pattern wins: specific beats general. Tie-break lexicographically.
             best = max(matches, key=lambda p: (len(p), p))
-            return dir_tag_map[best], "manual"
-    return auto_key(directory), "auto"
+            return dir_tag_map[best], "manual", "dir"
+    return auto_key(directory), "auto", "auto"
+
+
+def effective_tag(
+    session_id: str,
+    directory: str | None,
+    session_tag_map: dict[str, str],
+    dir_tag_map: dict[str, str],
+) -> tuple[str, str]:
+    """Resolve a ROOT session's tag. Returns (tag, source) where source is
+    'manual' or 'auto'. `oc-tags top` treats 'auto' as untagged so the
+    backlog stays visible rather than hidden behind a plausible label.
+    See effective_tag_kind when you need to tell a session tag from a glob.
+    """
+    tag, source, _kind = effective_tag_kind(
+        session_id, directory, session_tag_map, dir_tag_map
+    )
+    return tag, source
 
 
 ET = zoneinfo.ZoneInfo("America/New_York")
@@ -1385,10 +1408,19 @@ def cmd_which(args: argparse.Namespace) -> int:
     second implementation drifts from the chart — the tag shown next to a
     session would then disagree with the tag its dollars land under.
 
-    Output is one tab-separated line — tag, source, resolved root session id —
-    so it is parseable without a JSON dependency. The root id is included
-    because it is not always the id that was asked about: tags live on roots,
-    and a subagent resolves to its parent.
+    Output is one tab-separated line — tag, source, resolved root session id,
+    kind — so it is parseable without a JSON dependency. The root id is
+    included because it is not always the id that was asked about: tags live
+    on roots, and a subagent resolves to its parent.
+
+    source (column 2) is 'manual' or 'auto' and is a FROZEN contract: pigeon's
+    footer resolver (tag-resolver.ts parseWhich) reads it and deploys
+    separately. kind (column 4) was added after, additively: 'session' (an
+    explicit session tag), 'dir' (a dir glob) or 'auto' (the fallback).
+    opencode-launch and pigeon /launch inherit a parent's tag only when kind
+    is 'session'. A consumer that sees only three columns is talking to an
+    older oc-tags and must treat the kind as unknown (do not inherit).
+    Readers must tolerate further trailing columns.
     """
     target_sid = (args.session_id or os.environ.get("OPENCODE_SESSION_ID") or "").strip()
     if not target_sid:
@@ -1424,14 +1456,14 @@ def cmd_which(args: argparse.Namespace) -> int:
         s_tags = session_tags(st)
         d_tags = dir_tags(st)
 
-    tag, source = effective_tag(
+    tag, source, kind = effective_tag_kind(
         root_sid, directory, session_tag_map=s_tags, dir_tag_map=d_tags
     )
     # Belt to normalise_tag's braces: a row written before that validator
     # existed can still hold a tab or a newline, and one such row would turn a
-    # three-field answer into five fields or two lines.
+    # four-field answer into six fields or two lines.
     safe_tag = " ".join(tag.split()) or tag
-    print(f"{safe_tag}\t{source}\t{root_sid}")
+    print(f"{safe_tag}\t{source}\t{root_sid}\t{kind}")
     return 0
 
 
