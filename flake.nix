@@ -432,7 +432,9 @@
       # source-grep guards in the same file pin the real call site. Both halves
       # are worthless unexecuted.
       opencode-launch-tests = devboxPkgs.runCommand "opencode-launch-tests" {
-        nativeBuildInputs = with devboxPkgs; [ bash coreutils gnugrep gnused gawk jq ];
+        # util-linux: setsid, for the oc-auto-attach spawn test (the production
+        # spawn_auto_attach runs against a fake to prove the env scrub).
+        nativeBuildInputs = with devboxPkgs; [ bash coreutils gnugrep gnused gawk jq util-linux ];
       } ''
         cd ${self}
         bash pkgs/opencode-launch/test.sh 2>&1 | tee "$TMPDIR/ol.txt"
@@ -446,8 +448,8 @@
         # test. The second skips EVERY source-grep guard, which is precisely
         # the set that pins the production call site.
         got=$(grep -c '^PASS' "$TMPDIR/ol.txt")
-        [ "$got" = "111" ] || {
-          echo "GATE FAILURE: expected 111 PASS lines, got $got." >&2
+        [ "$got" = "158" ] || {
+          echo "GATE FAILURE: expected 158 PASS lines, got $got." >&2
           echo "If you added assertions, bump this deliberately." >&2
           exit 1
         }

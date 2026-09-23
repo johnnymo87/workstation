@@ -215,8 +215,12 @@ pkgs.writeShellApplication {
       # positional boundary even though validate_tag already rejects a leading
       # "-". oc-tags resolves the id to its ROOT session, which for a
       # just-created session is itself.
+      #
+      # Optional $1 is a suffix appended to oc-tags' success line, used by
+      # inherit_launcher_tag to say where an inherited tag came from. It is
+      # printed only on success, so a failed set never claims an inheritance.
       apply_session_tag() {
-        local bin="''${OC_TAGS_BIN:-oc-tags}" out rc=0 reason
+        local bin="''${OC_TAGS_BIN:-oc-tags}" suffix="''${1:-}" out rc=0 reason
         if ! command -v "$bin" >/dev/null 2>&1; then
           echo "Note: tag '$tag' not applied: '$bin' not found on PATH (session $session_id keeps its auto: tag)" >&2
           return 0
@@ -241,8 +245,87 @@ pkgs.writeShellApplication {
         # lowercases via normalise_tag, so "--tag FBM-Migration" is stored (and
         # charted) as "fbm-migration"; a self-reported "Tag: FBM-Migration"
         # would name something the chart never shows.
-        printf '%s\n' "$out"
+        printf '%s%s\n' "$out" "$suffix"
         return 0
+      }
+
+      # is_inherit_optout <tag-arg>
+      #
+      # `--tag auto` (any case, exactly "auto") means "do not inherit the
+      # launcher's tag; leave this session on its auto: fallback". It is
+      # checked BEFORE validate_tag, which still rejects "auto:<anything>":
+      # the bare word is an instruction, the prefix is oc-tags' namespace.
+      is_inherit_optout() {
+        [ "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" = "auto" ]
+      }
+
+      # inherit_launcher_tag
+      #
+      # A session launched BY a session (swarm workers, follow-ups) inherits
+      # the launcher's tag, so it lands on its program's line on the chart
+      # instead of an auto: fallback someone has to fix by hand later.
+      # Design: docs/plans/2026-09-23-launch-tag-inheritance-design.md.
+      #
+      # The launcher is $OPENCODE_SESSION_ID. Only an EXPLICIT session tag is
+      # inherited (`oc-tags which` column 4 == "session"): a dir glob
+      # describes a place rather than the work, and an auto: fallback is not a
+      # tag anyone chose. Inheritance is a COPY -- a normal `oc-tags set` --
+      # so retagging the launcher later does not touch its children.
+      #
+      # Same contract as apply_session_tag, and runs at the same point (after
+      # the prompt): best-effort, time-bounded, returns 0 on every path. A
+      # missing binary, a non-zero exit, a timeout, an old 3-column oc-tags
+      # or a tag that fails validate_tag each print a Note on stderr and leave
+      # the child on auto:. kind dir/auto is the normal "nothing to inherit"
+      # case and is silent. Success is LOUD: oc-tags' own line plus
+      # "(inherited from <root>)", so a wrong inheritance is visible.
+      #
+      # Reads $OPENCODE_SESSION_ID and $session_id; sets caller-scoped $tag.
+      # stderr of `which` is discarded: on success it may carry a benign
+      # "opencode.db unreadable" warning, and on failure the exit code is the
+      # reason. `--` keeps a hostile id from being read as a flag.
+      inherit_launcher_tag() {
+        local bin="''${OC_TAGS_BIN:-oc-tags}" launcher="''${OPENCODE_SESSION_ID:-}"
+        local secs="''${OPENCODE_LAUNCH_TAG_WHICH_TIMEOUT:-4}"
+        local out rc=0 reason line w_tag="" w_root="" w_kind=""
+        [ -n "$launcher" ] || return 0
+        if ! command -v "$bin" >/dev/null 2>&1; then
+          echo "Note: tag not inherited from $launcher: '$bin' not found on PATH (session $session_id keeps its auto: tag)" >&2
+          return 0
+        fi
+        out="$(timeout "$secs" "$bin" which -- "$launcher" 2>/dev/null)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          if [ "$rc" -eq 124 ]; then
+            reason="timed out after ''${secs}s"
+          else
+            reason="exit $rc"
+          fi
+          echo "Note: tag not inherited from $launcher: 'oc-tags which' failed ($reason); session $session_id keeps its auto: tag" >&2
+          return 0
+        fi
+        line="''${out%%$'\n'*}"
+        IFS=$'\t' read -r w_tag _ w_root w_kind _ <<<"$line" || true
+        if [ -z "$w_kind" ]; then
+          # An oc-tags older than the kind column prints 3 fields. It cannot
+          # tell a session tag from a dir glob, so do not guess.
+          echo "Note: tag not inherited from $launcher: 'oc-tags which' printed no kind column (oc-tags older than this launcher?)" >&2
+          return 0
+        fi
+        case "$w_kind" in
+          session) ;;
+          dir|auto) return 0 ;;
+          *)
+            echo "Note: tag not inherited from $launcher: unknown tag kind '$w_kind'" >&2
+            return 0
+            ;;
+        esac
+        if ! validate_tag "$w_tag"; then
+          echo "Note: tag not inherited from $launcher: its tag '$w_tag' is not a valid launch tag; session $session_id keeps its auto: tag" >&2
+          return 0
+        fi
+        [ -n "$w_root" ] || w_root="$launcher"
+        tag="$w_tag"
+        apply_session_tag " (inherited from $w_root)"
       }
 
       usage() {
@@ -273,6 +356,12 @@ pkgs.writeShellApplication {
         echo "                                 a single line on the chart."
         echo "                                 Applied after the launch succeeds and never"
         echo "                                 fails it; tag attribution is retroactive."
+        echo "                                 Without --tag, a launch from inside a session"
+        echo "                                 (\$OPENCODE_SESSION_ID set) INHERITS that"
+        echo "                                 session's tag -- but only an explicit session"
+        echo "                                 tag, never a dir glob or auto: fallback. The"
+        echo "                                 inherited tag is printed with its source."
+        echo "  --tag auto                     Do not inherit; keep the auto: fallback."
         echo "  --tmux-session <name>          Auto-attach in this tmux session (default: main)"
         echo "  --no-attach                    Do not open an attach TUI for this session."
         echo "                                 For automation that never reads one: each TUI"
@@ -304,6 +393,7 @@ pkgs.writeShellApplication {
       model_spec=""
       worktree_slug=""
       tag=""
+      no_inherit=0
       mcp_servers=()
       # Default the auto-attach target to the user's primary `main` tmux
       # session so headless launches (no $TMUX) land deterministically there
@@ -442,6 +532,14 @@ pkgs.writeShellApplication {
           echo "Error: --model must be provider/model" >&2
           exit 1
         fi
+      fi
+
+      # `--tag auto` is the inheritance opt-out, not a tag: consume it here,
+      # before validate_tag (which rejects auto:* and would reject nothing
+      # useful about the bare word).
+      if [ -n "$tag" ] && is_inherit_optout "$tag"; then
+        no_inherit=1
+        tag=""
       fi
 
       # Validate --tag up front -- before the health check, the session, and any
@@ -748,6 +846,18 @@ pkgs.writeShellApplication {
       # cloudbox case, whatever the skill doc used to say: oc-auto-attach IS
       # installed there, and 108 attach TUIs were live on 2026-09-18.
       # Log to /tmp/oc-auto-attach.log for debuggability.
+      #
+      # `env -u OPENCODE_SESSION_ID` scrubs the LAUNCHER's session id. When
+      # the launcher is an agent session, that id is in our env, and if this
+      # attach is the one that (re)starts the tmux server -- the first attach
+      # after a tmux server restart -- tmux captures it into its GLOBAL
+      # environment. Every later pane then inherits a dead session's id, and a
+      # human `opencode-launch` (or bare `oc-tags set`) from those panes would
+      # silently inherit the wrong tag. The attach itself never needs it.
+      # ''${arr[@]+"..."} guards the empty-array expansion under `set -u`.
+      spawn_auto_attach() {
+        setsid nohup env -u OPENCODE_SESSION_ID oc-auto-attach ''${oc_attach_args[@]+"''${oc_attach_args[@]}"} "$session_id" </dev/null >>/tmp/oc-auto-attach.log 2>&1 & disown
+      }
       if ! should_auto_attach "$no_attach" "''${OPENCODE_LAUNCH_NO_ATTACH:-}"; then
         # Name WHICH one fired. A leaked env var would otherwise send whoever
         # is wondering where their pane went looking through argv.
@@ -761,18 +871,27 @@ pkgs.writeShellApplication {
         if [ -n "$tmux_session" ]; then
           oc_attach_args+=(--tmux-session "$tmux_session")
         fi
-        # ''${arr[@]+"..."} guards the empty-array expansion under `set -u`.
-        setsid nohup oc-auto-attach ''${oc_attach_args[@]+"''${oc_attach_args[@]}"} "$session_id" </dev/null >>/tmp/oc-auto-attach.log 2>&1 & disown
+        spawn_auto_attach
       fi
 
       echo "Session launched: $session_id"
       echo "Directory: $directory"
+      # tag_launched_session: an explicit --tag wins and no lookup is done;
+      # otherwise, unless `--tag auto` opted out, inherit the launcher's
+      # explicit session tag. Defined here, beside its only call, and after
+      # launch_ok=1 on purpose (the source guards in test.sh pin that order).
+      tag_launched_session() {
+        if [ -n "$tag" ]; then
+          apply_session_tag
+        elif [ "$no_inherit" != "1" ] && [ -n "''${OPENCODE_SESSION_ID:-}" ]; then
+          inherit_launcher_tag
+        fi
+        return 0
+      }
       # LAST, and after the auto-attach hand-off above, so nothing about the
-      # launch waits on a sqlite write. apply_session_tag prints "Tag: <tag>" on
-      # success and warns without failing otherwise.
-      if [ -n "$tag" ]; then
-        apply_session_tag
-      fi
+      # launch waits on a sqlite write. apply_session_tag prints oc-tags' own
+      # confirmation on success and warns without failing otherwise.
+      tag_launched_session
       echo ""
       # Attach hint rides the door, matching what oc-pool-attach/oc-auto-attach
       # actually do. Printing $serve_url here taught the human the pool's
