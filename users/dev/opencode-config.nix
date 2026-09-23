@@ -2005,8 +2005,17 @@ in
         # Shape differs from anthropic: v1beta1, publishers/google, NO trailing
         # /models (the @ai-sdk/google-vertex `getBaseURL` appends
         # /models/<id>:streamGenerateContent itself). Verified live 2026-06-05.
+        #
+        # 127.0.0.1, NEVER "localhost". The gateway publishes on IPv4 loopback
+        # only (#510), so [::1]:8080 is free for anything else to take, and
+        # `kubectl port-forward 8080:8080` does exactly that. "localhost" then
+        # resolves to ::1 some of the time, and those calls reach whatever is
+        # on the other end of the forward. On 2026-09-23 that was a PROD
+        # ba-fulfillment-worker pod: Gemini calls (bearer token and prompt
+        # included) went to it and came back as Spring 404s. Nothing reached
+        # the ledger, and lgtm gather sessions failed intermittently.
         if [ "$aigw_intent" = yes ]; then
-          gemini_url="http://localhost:8080/v1beta1/projects/$project/locations/global/publishers/google"
+          gemini_url="http://127.0.0.1:8080/v1beta1/projects/$project/locations/global/publishers/google"
         fi
         # Claude: prefer the cfp router (:8789). It re-bases the incoming Vertex
         # path onto its CFP_AIGATEWAY_URL (:8080), so the upstream call is
@@ -2021,7 +2030,7 @@ in
             anthropic_url="http://127.0.0.1:8789/v1/projects/$project/locations/global/publishers/anthropic/models" ;;
           *)
             if [ "$aigw_intent" = yes ]; then
-              anthropic_url="http://localhost:8080/v1/projects/$project/locations/global/publishers/anthropic/models"
+              anthropic_url="http://127.0.0.1:8080/v1/projects/$project/locations/global/publishers/anthropic/models"
             fi ;;
         esac
       fi
