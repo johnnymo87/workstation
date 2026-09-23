@@ -33,7 +33,7 @@ The GCP project is read from the `google_cloud_project` secret (never hardcoded)
 | Lifecycle | `aigateway-enable` / `aigateway-disable` — **not** bare `systemctl start`, see "Turning it on and off" |
 | Intent flag | `/var/lib/aigateway/enabled` (`hosts/cloudbox/aigateway-flag.nix`) — the unit's `ConditionPathExists`, and what the canary and opencode routing both read |
 | Liveness | `aigateway-canary.service` + minutely timer; forensics in `/var/lib/aigateway-canary/wedge-*` |
-| Health | `curl -s localhost:8080/actuator/health` → `{"status":"UP"}` (unauthenticated; so is `/actuator/health/liveness`, which the canary probes. Every other path on :8080 returns 401 — a TCP check is not a health check) |
+| Health | `curl -s 127.0.0.1:8080/actuator/health` → `{"status":"UP"}` (unauthenticated; so is `/actuator/health/liveness`, which the canary probes. Every other path on :8080 returns 401 — a TCP check is not a health check) |
 | Ledger | db `aigateway`, user `aigateway`, in `dev-postgres-1`; table `gateway_request_log` |
 | opencode routing | `home.activation.injectAigatewayBaseUrl` in `users/dev/opencode-config.nix` |
 | Gateway code | `$GW/server/{PriceTable,UsageParser,ProxyController}.kt`; migrations in `$GW/db/migrations/` |
@@ -95,11 +95,19 @@ Facts worth keeping, because each of them defeats an obvious "fix":
 `google_cloud_project` secret. When enabled it sets two baseURLs (with the
 project baked into the path):
 
-- `provider.google-vertex-anthropic.options.baseURL` → `http://localhost:8080/v1/projects/$p/locations/global/publishers/anthropic/models`
-- `provider.google-vertex.options.baseURL` (gemini) → `http://localhost:8080/v1beta1/projects/$p/locations/global/publishers/google` (note `v1beta1`, no trailing `/models`)
+- `provider.google-vertex-anthropic.options.baseURL` → `http://127.0.0.1:8080/v1/projects/$p/locations/global/publishers/anthropic/models`
+- `provider.google-vertex.options.baseURL` (gemini) → `http://127.0.0.1:8080/v1beta1/projects/$p/locations/global/publishers/google` (note `v1beta1`, no trailing `/models`)
 
 When the flag is absent OR the secret is missing, it strips both → opencode hits
 Vertex directly.
+
+**Always `127.0.0.1`, never `localhost`.** The gateway publishes on IPv4
+loopback only, which leaves `[::1]:8080` free, and `kubectl port-forward
+8080:8080` binds it. Once that happens, `localhost` resolves to `::1` some of
+the time, and requests go through the forward instead of the gateway. The
+symptom is a Spring-shaped `{"timestamp",...,"status":404,"path":...}` error
+that has **no matching ledger row**. Check with `ss -tlnp | grep ':8080 '`: the
+gateway should be the only listener.
 
 Note the deliberate asymmetry: **flag set but gateway currently down still
 points opencode at :8080.** That is a loud failure (ECONNREFUSED on the first
