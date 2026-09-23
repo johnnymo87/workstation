@@ -304,15 +304,16 @@ up from a tagged session therefore lands on the program's tag without passing
 - **It is a copy**, a plain `oc-tags set` on the child. Retagging the launcher
   later does not follow; fix children one at a time.
 - **Best-effort, like `--tag`.** It runs after the prompt is sent, bounded by a
-  4s `timeout` on `oc-tags which`. A missing `oc-tags`, a failure, a timeout,
+  4s `timeout` on `oc-tags which` plus the usual 10s on `oc-tags set` (the
+  prompt is already sent, so this only holds up the launcher's own output). A missing `oc-tags`, a failure, a timeout,
   an older 3-column `oc-tags`, or an inherited tag that fails the `--tag` rules
   each print a `Note:` on stderr; the launch itself is never affected.
 - The auto-attach TUI is spawned with `OPENCODE_SESSION_ID` scrubbed from its
   environment, so an attach that (re)starts the tmux server cannot plant the
   agent's id in tmux's global env for every later pane to inherit.
 
-Telegram `/launch` gets the same rule from pigeon, a separate change that may
-not be deployed yet: it inherits from the session whose topic it was typed in or
+Telegram `/launch` gets the same rule from pigeon (a separate pigeon change that may
+not be deployed yet). It inherits from the session whose topic it was typed in or
 whose notification it replies to (no opt-out syntax; `/launch` in General
 inherits nothing). See
 `docs/plans/2026-09-23-launch-tag-inheritance-design.md` in the workstation
