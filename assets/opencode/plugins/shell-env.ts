@@ -60,7 +60,7 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
     // (~/projects/yt-to-lichess). devbox-only secret; absent elsewhere.
     ["lichess_pat", "LICHESS_PAT"],
     // TypeSafe AI API key (jev decision model); typesafe-sdk reads
-    // TYPESAFE_API_KEY by default. Declared on devbox; cloudbox to follow.
+    // TYPESAFE_API_KEY by default. Declared on devbox and cloudbox.
     // Inert on any host without /run/secrets/typesafe_api_key.
     ["typesafe_api_key", "TYPESAFE_API_KEY"],
     ["atlassian_api_token", "ATLASSIAN_API_TOKEN"],

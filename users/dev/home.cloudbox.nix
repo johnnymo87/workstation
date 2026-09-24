@@ -372,6 +372,12 @@ lib.mkIf isCloudbox {
       export GOOGLE_GENERATIVE_AI_API_KEY="$(cat /run/secrets/gemini_api_key)"
     fi
 
+    # TypeSafe AI API key (jev decision model); typesafe-sdk reads
+    # TYPESAFE_API_KEY by default. Mirrors the row in shell-env.ts.
+    if [ -r /run/secrets/typesafe_api_key ]; then
+      export TYPESAFE_API_KEY="$(cat /run/secrets/typesafe_api_key)"
+    fi
+
     # Atlassian API token for nvim Atlassian commands
     if [ -r /run/secrets/atlassian_api_token ]; then
       export ATLASSIAN_API_TOKEN="$(cat /run/secrets/atlassian_api_token)"

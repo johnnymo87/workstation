@@ -309,6 +309,15 @@ in
         group = "dev";
         mode = "0400";
       };
+      # TypeSafe AI API key (jev decision model). Read by typesafe-sdk as
+      # TYPESAFE_API_KEY; exported in home.cloudbox.nix and shell-env.ts.
+      # Work host: TypeSafe offers Zero Data Retention only on enterprise
+      # plans, so anything sent from here is retained under their DPA.
+      typesafe_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # GitHub API token (for gh CLI, GH_TOKEN)
       github_api_token = {
         owner = "dev";
