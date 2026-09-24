@@ -91,8 +91,18 @@ CREATE TABLE IF NOT EXISTS dir_tag (
 """
 
 
+_warned_retired_dir_tags = False
+
+
 def warn_retired_dir_tags(conn) -> None:
-    """Warn to stderr if the legacy dir_tag table exists and has rows."""
+    """Warn to stderr if the legacy dir_tag table exists and has rows.
+
+    At most once per process: `serve` resolves tags on every request, and one
+    line per chart fetch would flood its journal.
+    """
+    global _warned_retired_dir_tags
+    if _warned_retired_dir_tags:
+        return
     try:
         cur = conn.execute(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='dir_tag'"
@@ -103,6 +113,7 @@ def warn_retired_dir_tags(conn) -> None:
         count_row = conn.execute("SELECT count(*) FROM dir_tag").fetchone()
         count = count_row[0] if count_row else 0
         if count > 0:
+            _warned_retired_dir_tags = True
             sys.stderr.write(
                 f"Warning: tags.db has {count} retired directory rule(s) in dir_tag; "
                 f"they are ignored. Convert them to session tags (see pkgs/oc-tags/README.md).\n"

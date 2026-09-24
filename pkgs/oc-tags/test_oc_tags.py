@@ -2078,9 +2078,28 @@ class TestRetiredDirTagWarning(unittest.TestCase):
         self.db = str(Path(self.tmp.name) / "opencode.db")
         _fixture_db(self.db)
         self.tags_db = str(Path(self.tmp.name) / "tags.db")
+        # The warning is once per process; each test is its own "process".
+        oc_tags._warned_retired_dir_tags = False
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_warning_is_emitted_once_per_process(self):
+        # serve resolves on every request; one line per chart fetch would
+        # flood its journal.
+        with oc_tags.open_store(self.tags_db) as st:
+            st.execute(
+                "INSERT INTO dir_tag (pattern, tag, created_at) VALUES (?, ?, ?)",
+                ("/home/dev/projects/mono", "monorepo", 0),
+            )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(3):
+                status, _, _ = oc_tags.handle_request(
+                    "/", "", db_path=self.db, tags_db=self.tags_db, cfp_dir=self.tmp.name,
+                )
+                self.assertEqual(status, 200)
+        self.assertEqual(err.getvalue().count("retired directory rule"), 1)
 
     def test_non_empty_dir_tag_ignored_and_warns_on_which(self):
         with oc_tags.open_store(self.tags_db) as st:

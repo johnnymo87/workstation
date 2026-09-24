@@ -234,7 +234,7 @@ assert_tag_rejected() {
 }
 
 assert_tag_ok "billing" "a plain tag"
-assert_tag_ok "fbm-migration" "a hyphenated tag"
+assert_tag_ok "billing-job" "a hyphenated tag"
 assert_tag_ok "team/infra" "a slash-namespaced tag"
 assert_tag_ok "v1.2_x" "dots and underscores"
 assert_tag_ok "epic:swarm" "an interior colon"
@@ -644,7 +644,7 @@ if [ -f "$default_nix" ]; then
   fi
   # oc-tags lowercases the tag (normalise_tag), so the launcher must print
   # oc-tags' own line rather than echoing back what the human typed -- otherwise
-  # "--tag FBM-Migration" reports a tag the chart will never show.
+  # "--tag Billing-Job" reports a tag the chart will never show.
   # (The suffix is empty for an explicit --tag; inherit_launcher_tag passes
   # " (inherited from <root>)", appended to oc-tags' line, not replacing it.)
   if grep -A30 'apply_session_tag()' "$default_nix" | grep -q "printf '%s%s\\\\n' \"\$out\" \"\$suffix\""; then

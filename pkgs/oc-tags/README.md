@@ -22,4 +22,8 @@ oc-tags serve                   # then, from the Mac, just open
 
 ### Directory rules (removed)
 
-Directory rules (`dir_tag`, `oc-tags set --dir`) were removed; precedence is session tag > `auto:`. If `oc-tags` warns about retired rules in `dir_tag`, convert each matching session to an explicit `oc-tags set <tag> <session>` after snapshotting `tags.db`, then delete the rows from `dir_tag`.
+Directory rules (`dir_tag`, `oc-tags set --dir`) were removed; precedence is session tag > `auto:`. If `oc-tags` warns about retired rules in `dir_tag`, convert each matching session to an explicit `oc-tags set <tag> <session>` after snapshotting `tags.db`, then delete the rows:
+
+```bash
+python3 -c "import sqlite3,os; c=sqlite3.connect(os.path.expanduser('~/.local/share/oc-tags/tags.db')); c.execute('DELETE FROM dir_tag'); c.commit()"
+```

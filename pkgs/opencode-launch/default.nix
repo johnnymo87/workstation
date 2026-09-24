@@ -380,7 +380,7 @@ pkgs.writeShellApplication {
         echo "  opencode-launch --model google-vertex/gemini-3.8-flash \"run pytest and fix any errors\""
         echo "  opencode-launch --model google-vertex-anthropic/claude-opus-4-7@default ~/projects/pigeon \"review the PR\""
         echo "  opencode-launch --mcp slack ~/projects/pigeon \"summarize #incidents today\""
-        echo "  opencode-launch --tag fbm-migration ~/projects/mono \"port the last two callers\""
+        echo "  opencode-launch --tag billing-job ~/projects/mono \"port the last two callers\""
         exit "$exit_code"
       }
 

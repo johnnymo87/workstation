@@ -258,8 +258,8 @@ Behaviour:
 
 - The tag is validated **before** anything is created: it must start with a
   letter or digit and use only `[A-Za-z0-9._:/-]`, 64 characters max. The
-  leading-alphanumeric rule is what blocks argument injection (a tag named
-  `--dir` that oc-tags' argparse would read as a flag). `auto:` is rejected —
+  leading-alphanumeric rule is what blocks argument injection (a tag starting
+  with `-` that oc-tags' argparse would read as a flag). `auto:` is rejected —
   it is reserved for the fallback. ASCII means ASCII: the check runs under
   `LC_ALL=C`, because under the ambient `en_US.UTF-8` bash's `[A-Za-z0-9]`
   matches accented letters and `épic` would otherwise slip through here while
