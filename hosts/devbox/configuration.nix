@@ -230,6 +230,13 @@ in
         group = "dev";
         mode = "0400";
       };
+      # TypeSafe AI API key (jev decision model). Read by typesafe-sdk as
+      # TYPESAFE_API_KEY; exported in home.devbox.nix and shell-env.ts.
+      typesafe_api_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };

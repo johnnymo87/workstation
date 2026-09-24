@@ -366,6 +366,12 @@ lib.mkIf isDevbox {
       export LICHESS_PAT="$(cat /run/secrets/lichess_pat)"
     fi
 
+    # TypeSafe AI API key (jev decision model); typesafe-sdk reads
+    # TYPESAFE_API_KEY by default. Mirrors the row in shell-env.ts.
+    if [ -r /run/secrets/typesafe_api_key ]; then
+      export TYPESAFE_API_KEY="$(cat /run/secrets/typesafe_api_key)"
+    fi
+
     # OpenAI API key (for tec-codex embeddings via text-embedding-3-small)
     if [ -r /run/secrets/openai_api_key ]; then
       export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
