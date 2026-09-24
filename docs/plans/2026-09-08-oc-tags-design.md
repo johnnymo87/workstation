@@ -118,6 +118,8 @@ available later without a schema change. Case-normalised on write.
 
 ### Effective tag precedence
 
+> **Superseded (2026-09-24):** directory rules (`dir_tag`, `oc-tags set --dir`) were removed. Precedence is now session tag > `auto:`. The table is kept but no longer read.
+
 1. `session_tag` for the root session, if present (manual, wins)
 2. `dir_tag` pattern matching the root session's `directory` (manual, durable,
    covers past and future sessions in one write)

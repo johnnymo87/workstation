@@ -15,7 +15,6 @@ import collections
 import contextlib
 import datetime
 from dataclasses import dataclass, field
-import fnmatch
 import html
 import http.server
 import json
@@ -83,12 +82,44 @@ CREATE TABLE IF NOT EXISTS session_tag (
     tag        TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+-- Retired, no longer read; kept so a rollback loses nothing.
 CREATE TABLE IF NOT EXISTS dir_tag (
     pattern    TEXT PRIMARY KEY,
     tag        TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
 """
+
+
+_warned_retired_dir_tags = False
+
+
+def warn_retired_dir_tags(conn) -> None:
+    """Warn to stderr if the legacy dir_tag table exists and has rows.
+
+    At most once per process: `serve` resolves tags on every request, and one
+    line per chart fetch would flood its journal.
+    """
+    global _warned_retired_dir_tags
+    if _warned_retired_dir_tags:
+        return
+    try:
+        cur = conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='dir_tag'"
+        )
+        row = cur.fetchone()
+        if not row or row[0] == 0:
+            return
+        count_row = conn.execute("SELECT count(*) FROM dir_tag").fetchone()
+        count = count_row[0] if count_row else 0
+        if count > 0:
+            _warned_retired_dir_tags = True
+            sys.stderr.write(
+                f"Warning: tags.db has {count} retired directory rule(s) in dir_tag; "
+                f"they are ignored. Convert them to session tags (see pkgs/oc-tags/README.md).\n"
+            )
+    except sqlite3.OperationalError:
+        pass
 
 
 def normalise_tag(tag: str) -> str:
@@ -155,63 +186,29 @@ def set_session_tag(conn, session_id: str, tag: str) -> None:
     )
 
 
-def set_dir_tag(conn, pattern: str, tag: str) -> None:
-    p = (pattern or "").strip()
-    if not p:
-        raise ValueError("pattern must not be empty")
-    conn.execute(
-        "INSERT INTO dir_tag(pattern, tag, created_at) VALUES (?,?,?) "
-        "ON CONFLICT(pattern) DO UPDATE SET tag=excluded.tag, created_at=excluded.created_at",
-        (p, normalise_tag(tag), int(time.time() * 1000)),
-    )
-
-
 def session_tags(conn) -> dict[str, str]:
     return dict(conn.execute("SELECT session_id, tag FROM session_tag"))
-
-
-def dir_tags(conn) -> dict[str, str]:
-    return dict(conn.execute("SELECT pattern, tag FROM dir_tag ORDER BY pattern"))
 
 
 def rm_session_tag(conn, session_id: str) -> bool:
     return conn.execute("DELETE FROM session_tag WHERE session_id=?", (session_id,)).rowcount > 0
 
 
-def rm_dir_tag(conn, pattern: str) -> bool:
-    p = (pattern or "").strip()
-    return conn.execute("DELETE FROM dir_tag WHERE pattern=?", (p,)).rowcount > 0
-
-
 def effective_tag_kind(
     session_id: str,
     directory: str | None,
     session_tag_map: dict[str, str],
-    dir_tag_map: dict[str, str],
 ) -> tuple[str, str, str]:
     """Resolve a ROOT session's tag. Returns (tag, source, kind).
 
     source is 'manual' or 'auto' -- the value `effective_tag` has always
     returned, and what `oc-tags which` prints in column 2.
-    kind says WHICH rule answered: 'session' (an explicit session tag),
-    'dir' (the longest matching dir glob) or 'auto' (the directory-derived
-    fallback). 'manual' covers both 'session' and 'dir'; launch-time tag
-    inheritance needs them apart, because a glob describes a place rather
-    than the work and must not be copied onto a child session.
+    kind says WHICH rule answered: 'session' (an explicit session tag)
+    or 'auto' (the directory-derived fallback).
     """
     tag = session_tag_map.get(session_id)
     if tag:
         return tag, "manual", "session"
-    if directory:
-        d_norm = directory.rstrip("/") or "/"
-        matches = [
-            p for p in dir_tag_map
-            if fnmatch.fnmatch(d_norm, p.rstrip("/") or "/")
-        ]
-        if matches:
-            # Longest pattern wins: specific beats general. Tie-break lexicographically.
-            best = max(matches, key=lambda p: (len(p), p))
-            return dir_tag_map[best], "manual", "dir"
     return auto_key(directory), "auto", "auto"
 
 
@@ -219,15 +216,14 @@ def effective_tag(
     session_id: str,
     directory: str | None,
     session_tag_map: dict[str, str],
-    dir_tag_map: dict[str, str],
 ) -> tuple[str, str]:
     """Resolve a ROOT session's tag. Returns (tag, source) where source is
     'manual' or 'auto'. `oc-tags top` treats 'auto' as untagged so the
     backlog stays visible rather than hidden behind a plausible label.
-    See effective_tag_kind when you need to tell a session tag from a glob.
+    See effective_tag_kind when you need the resolution kind ('session' or 'auto').
     """
     tag, source, _kind = effective_tag_kind(
-        session_id, directory, session_tag_map, dir_tag_map
+        session_id, directory, session_tag_map
     )
     return tag, source
 
@@ -398,7 +394,6 @@ def aggregate(
     until_ms: int,
     bucket: str,
     session_tags: dict[str, str],
-    dir_tags: dict[str, str],
     now_ms: int | None = None,
 ) -> Aggregate:
     conn = connect_ro(db_path)
@@ -455,7 +450,7 @@ def aggregate(
         root = root_of(sid, parents)
         if root not in tag_cache:
             tag, source = effective_tag(
-                root, dirs.get(root), session_tag_map=session_tags, dir_tag_map=dir_tags
+                root, dirs.get(root), session_tag_map=session_tags
             )
             tag_cache[root] = (tag, source)
             agg.root_meta[root] = {
@@ -542,11 +537,10 @@ def load_aggregate(
 ) -> Aggregate:
     win = calculate_window(days, now_ms=now_ms)
     s_tags = {}
-    d_tags = {}
     if os.path.exists(tags_db):
         with open_store(tags_db, readonly=True) as st:
+            warn_retired_dir_tags(st)
             s_tags = session_tags(st)
-            d_tags = dir_tags(st)
 
     b = bucket if bucket is not None else choose_bucket(days)
     if not os.path.exists(db_path):
@@ -560,7 +554,6 @@ def load_aggregate(
         until_ms=win.until_ms,
         bucket=b,
         session_tags=s_tags,
-        dir_tags=d_tags,
         now_ms=win.now_ms,
     )
     agg.window = win
@@ -1269,15 +1262,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     # set
-    set_p = sub.add_parser("set", help="tag a session or directory pattern")
-    set_p.add_argument("--dir", metavar="PATH", help="directory pattern to tag")
-    set_p.add_argument("target", nargs="?", help="tag (or tag when --dir is used)")
+    set_p = sub.add_parser("set", help="tag a session")
+    set_p.add_argument("target", nargs="?", help="tag")
     set_p.add_argument("session_id", nargs="?", help="optional session id")
     _add_db_options(set_p)
 
     # ls
     ls_p = sub.add_parser("ls", help="list tags")
-    ls_p.add_argument("--counts", action="store_true", help="show session and directory counts")
+    ls_p.add_argument("--counts", action="store_true", help="show session counts")
     _add_db_options(ls_p)
 
     # which
@@ -1291,7 +1283,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # rm
     rm_p = sub.add_parser("rm", help="remove a tag")
-    rm_p.add_argument("--dir", metavar="PATH", help="directory pattern to remove")
     rm_p.add_argument("target", nargs="?", help="session id to remove")
     _add_db_options(rm_p)
 
@@ -1316,20 +1307,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_set(args: argparse.Namespace) -> int:
-    if args.dir:
-        tag = args.target
-        if not tag:
-            sys.stderr.write("Error: tag is required\n")
-            return 1
-        try:
-            with open_store(args.tags_db) as st:
-                set_dir_tag(st, args.dir, tag)
-        except ValueError as e:
-            sys.stderr.write(f"Error: {e}\n")
-            return 1
-        print(f"Tagged dir pattern '{args.dir.strip()}' as '{normalise_tag(tag)}'")
-        return 0
-
     tag = args.target
     if not tag:
         sys.stderr.write("Error: tag is required\n")
@@ -1370,32 +1347,26 @@ def cmd_set(args: argparse.Namespace) -> int:
 
 def cmd_ls(args: argparse.Namespace) -> int:
     with open_store(args.tags_db, readonly=True) as conn:
+        warn_retired_dir_tags(conn)
         s_tags = session_tags(conn)
-        d_tags = dir_tags(conn)
 
     if args.counts:
-        all_tags = sorted(set(s_tags.values()) | set(d_tags.values()))
+        all_tags = sorted(set(s_tags.values()))
         if not all_tags:
             print("No tags defined.")
             return 0
         s_counts = collections.Counter(s_tags.values())
-        d_counts = collections.Counter(d_tags.values())
-        print(f"{'tag':<36} {'sessions':>10} {'dirs':>8}")
-        print("-" * 56)
+        print(f"{'tag':<36} {'sessions':>10}")
+        print("-" * 47)
         for t in all_tags:
-            print(f"{t:<36} {s_counts[t]:>10} {d_counts[t]:>8}")
+            print(f"{t:<36} {s_counts[t]:>10}")
     else:
-        if not d_tags and not s_tags:
+        if not s_tags:
             print("No tags defined.")
             return 0
-        if d_tags:
-            print("Directory patterns:")
-            for p, t in d_tags.items():
-                print(f"  {p} -> {t}")
-        if s_tags:
-            print("Sessions:")
-            for s, t in s_tags.items():
-                print(f"  {s} -> {t}")
+        print("Sessions:")
+        for s, t in s_tags.items():
+            print(f"  {s} -> {t}")
     return 0
 
 
@@ -1403,7 +1374,7 @@ def cmd_which(args: argparse.Namespace) -> int:
     """Print the tag a session's dollars are billed to, and where it came from.
 
     `ls` prints the raw mappings; it does not print the ANSWER, because the
-    answer needs precedence (session tag > longest matching dir glob > auto:).
+    answer needs precedence (session tag > auto: fallback).
     Without this command a consumer has to reimplement that precedence, and a
     second implementation drifts from the chart — the tag shown next to a
     session would then disagree with the tag its dollars land under.
@@ -1416,7 +1387,7 @@ def cmd_which(args: argparse.Namespace) -> int:
     source (column 2) is 'manual' or 'auto' and is a FROZEN contract: pigeon's
     footer resolver (tag-resolver.ts parseWhich) reads it and deploys
     separately. kind (column 4) was added after, additively: 'session' (an
-    explicit session tag), 'dir' (a dir glob) or 'auto' (the fallback).
+    explicit session tag) or 'auto' (the fallback).
     opencode-launch and pigeon /launch inherit a parent's tag only when kind
     is 'session'. A consumer that sees only three columns is talking to an
     older oc-tags and must treat the kind as unknown (do not inherit).
@@ -1453,11 +1424,11 @@ def cmd_which(args: argparse.Namespace) -> int:
             sys.stderr.write(f"which: opencode.db unreadable ({e}); tag resolved without it\n")
 
     with open_store(args.tags_db, readonly=True) as st:
+        warn_retired_dir_tags(st)
         s_tags = session_tags(st)
-        d_tags = dir_tags(st)
 
     tag, source, kind = effective_tag_kind(
-        root_sid, directory, session_tag_map=s_tags, dir_tag_map=d_tags
+        root_sid, directory, session_tag_map=s_tags
     )
     # Belt to normalise_tag's braces: a row written before that validator
     # existed can still hold a tab or a newline, and one such row would turn a
@@ -1468,15 +1439,6 @@ def cmd_which(args: argparse.Namespace) -> int:
 
 
 def cmd_rm(args: argparse.Namespace) -> int:
-    if args.dir:
-        with open_store(args.tags_db) as st:
-            deleted = rm_dir_tag(st, args.dir)
-        if deleted:
-            print(f"Removed dir tag for '{args.dir.strip()}'")
-            return 0
-        sys.stderr.write(f"Error: no dir tag found for '{args.dir.strip()}'\n")
-        return 1
-
     if args.target:
         with open_store(args.tags_db) as st:
             deleted = rm_session_tag(st, args.target)
@@ -1486,7 +1448,7 @@ def cmd_rm(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Error: no session tag found for '{args.target}'\n")
         return 1
 
-    sys.stderr.write("Error: specify session-id or --dir <path>\n")
+    sys.stderr.write("Error: specify session-id\n")
     return 1
 
 
@@ -1554,41 +1516,6 @@ def cmd_top(args: argparse.Namespace) -> int:
         d_str = f"${dollars:,.2f}"
         t_disp = title if len(title) <= 40 else title[:37] + "..."
         print(f"{d_str:>10}  {root_id:<32}  {t_disp:<40}  {directory}")
-
-    # Detect shared directory prefixes among untagged roots (>= 3 roots)
-    _home = os.path.expanduser("~").rstrip("/")
-    _WORKSPACE_CONTAINERS = {"/", "/tmp", "/home/dev/projects", "/home/dev/Code"}
-    if _home:
-        _WORKSPACE_CONTAINERS.update({_home, f"{_home}/projects", f"{_home}/Code"})
-
-    prefix_counts: dict[str, set[str]] = collections.defaultdict(set)
-    for _, root_id, _, directory in untagged:
-        if not directory:
-            continue
-        d_norm = directory.rstrip("/")
-        if _WORKTREE_MARKER in d_norm:
-            head, _, _ = d_norm.partition(_WORKTREE_MARKER)
-            pat = f"{head}{_WORKTREE_MARKER}*"
-            prefix_counts[pat].add(root_id)
-        else:
-            parent = posixpath.dirname(d_norm)
-            if parent and parent not in _WORKSPACE_CONTAINERS:
-                pat = f"{parent}/*"
-                prefix_counts[pat].add(root_id)
-        prefix_counts[d_norm].add(root_id)
-
-    hints = []
-    seen_roots: set[str] = set()
-    for pat, roots in sorted(prefix_counts.items(), key=lambda item: (-len(item[1]), -len(item[0]))):
-        if len(roots) >= 3 and not roots.issubset(seen_roots):
-            hints.append((pat, len(roots)))
-            seen_roots.update(roots)
-
-    if hints:
-        print()
-        for pat, count in hints:
-            print(f"Hint: {count} untagged roots share directory prefix '{pat}'. Cover them with:")
-            print(f"  oc-tags set --dir '{pat}' <tag>")
 
     return 0
 

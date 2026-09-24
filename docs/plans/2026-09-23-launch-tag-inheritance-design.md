@@ -2,6 +2,10 @@
 
 **Status:** approved 2026-09-23 (user + adversarial-reviewer-fable, approve-with-changes folded in)
 
+> **Superseded in part (2026-09-24):** oc-tags directory rules were removed, so
+> `oc-tags which` now reports kind `session` or `auto` only. The `dir` kind
+> below is historical; the launcher still tolerates it from an older oc-tags.
+
 ## Goal
 
 A session launched by something that carries an explicit oc-tags tag inherits

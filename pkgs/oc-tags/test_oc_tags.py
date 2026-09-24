@@ -190,8 +190,8 @@ class TestGlobalDbFlagsBeforeSubcommand(unittest.TestCase):
 class TestAutoKey(unittest.TestCase):
     def test_worktree_keeps_slug(self):
         self.assertEqual(
-            oc_tags.auto_key("/home/dev/projects/mono/.worktrees/fbm-transform-evidence"),
-            "auto:mono/fbm-transform-evidence",
+            oc_tags.auto_key("/home/dev/projects/workstation/.worktrees/billing-evidence"),
+            "auto:workstation/billing-evidence",
         )
 
     def test_primary_root(self):
@@ -311,23 +311,6 @@ class TestStore(unittest.TestCase):
             with self.assertRaises(ValueError):
                 oc_tags.set_session_tag(st, "ses_a", "  AUTO:foo  ")
 
-    def test_empty_pattern_rejected(self):
-        with oc_tags.open_store(self.path) as st:
-            with self.assertRaises(ValueError):
-                oc_tags.set_dir_tag(st, "   ", "tag")
-            with self.assertRaises(ValueError):
-                oc_tags.set_dir_tag(st, "", "tag")
-
-    def test_dir_tags_ordered_by_pattern(self):
-        with oc_tags.open_store(self.path) as st:
-            oc_tags.set_dir_tag(st, "zzz", "t1")
-            oc_tags.set_dir_tag(st, "aaa", "t2")
-            oc_tags.set_dir_tag(st, "mmm", "t3")
-            self.assertEqual(
-                list(oc_tags.dir_tags(st).keys()),
-                ["aaa", "mmm", "zzz"],
-            )
-
     def test_concurrency_pragmas(self):
         with oc_tags.open_store(self.path) as st:
             mode = st.execute("PRAGMA journal_mode").fetchone()[0]
@@ -343,26 +326,12 @@ class TestStore(unittest.TestCase):
         with oc_tags.open_store(self.path) as st:
             self.assertEqual(oc_tags.session_tags(st), {})
 
-    def test_dir_tag_roundtrip(self):
-        with oc_tags.open_store(self.path) as st:
-            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/fbm-*", "fbm")
-            self.assertEqual(
-                oc_tags.dir_tags(st),
-                {"/home/dev/projects/mono/.worktrees/fbm-*": "fbm"},
-            )
-
     def test_rm_session_tag(self):
         with oc_tags.open_store(self.path) as st:
             oc_tags.set_session_tag(st, "ses_a", "billing")
             self.assertTrue(oc_tags.rm_session_tag(st, "ses_a"))
             self.assertEqual(oc_tags.session_tags(st), {})
             self.assertFalse(oc_tags.rm_session_tag(st, "ses_a"))
-
-    def test_rm_dir_tag_strips_whitespace(self):
-        with oc_tags.open_store(self.path) as st:
-            oc_tags.set_dir_tag(st, "  /home/dev/projects/mono  ", "mono")
-            self.assertTrue(oc_tags.rm_dir_tag(st, "   /home/dev/projects/mono   \n"))
-            self.assertEqual(oc_tags.dir_tags(st), {})
 
     def test_schema_created_idempotently(self):
         with oc_tags.open_store(self.path) as st:
@@ -397,126 +366,45 @@ class TestEffectiveTag(unittest.TestCase):
     def test_session_tag_wins(self):
         self.assertEqual(
             oc_tags.effective_tag(
-                "ses_a", "/home/dev/projects/mono",
+                "ses_a", "/home/dev/projects/workstation",
                 session_tag_map={"ses_a": "billing"},
-                dir_tag_map={"/home/dev/projects/mono": "monorepo"},
             ),
             ("billing", "manual"),
         )
 
-    def test_dir_pattern_next(self):
-        self.assertEqual(
-            oc_tags.effective_tag(
-                "ses_a", "/home/dev/projects/mono/.worktrees/fbm-webhook-res",
-                session_tag_map={},
-                dir_tag_map={"/home/dev/projects/mono/.worktrees/fbm-*": "fbm"},
-            ),
-            ("fbm", "manual"),
-        )
-
     def test_auto_fallback(self):
         self.assertEqual(
-            oc_tags.effective_tag("ses_a", "/home/dev/projects/mono", {}, {}),
-            ("auto:mono", "auto"),
-        )
-
-    def test_longest_pattern_wins(self):
-        # Specific beats general, so a broad `mono/*` rule never shadows a
-        # narrow one added later.
-        self.assertEqual(
-            oc_tags.effective_tag(
-                "ses_a", "/home/dev/projects/mono/.worktrees/fbm-webhook-res",
-                session_tag_map={},
-                dir_tag_map={
-                    "/home/dev/projects/mono/*": "mono-all",
-                    "/home/dev/projects/mono/.worktrees/fbm-*": "fbm",
-                },
-            ),
-            ("fbm", "manual"),
-        )
-
-    def test_pattern_tie_break_deterministic(self):
-        # Two equal-length patterns matching the same directory.
-        # Alphabetical tie-break: max(matches, key=lambda p: (len(p), p))
-        # 'dir/*/sub' vs '*/dir/sub' - length 9.
-        # 'dir/*/sub' > '*/dir/sub', so 'dir/*/sub' must win.
-        self.assertEqual(
-            oc_tags.effective_tag(
-                "ses_a", "dir/dir/sub",
-                session_tag_map={},
-                dir_tag_map={
-                    "*/dir/sub": "first",
-                    "dir/*/sub": "second",
-                },
-            ),
-            ("second", "manual"),
-        )
-
-    def test_trailing_slash_normalization(self):
-        # Trailing slash on directory matches pattern without trailing slash
-        self.assertEqual(
-            oc_tags.effective_tag(
-                "ses_a", "/home/dev/projects/mono/",
-                session_tag_map={},
-                dir_tag_map={"/home/dev/projects/mono": "mono-tag"},
-            ),
-            ("mono-tag", "manual"),
-        )
-        # Trailing slash on pattern matches directory without trailing slash
-        self.assertEqual(
-            oc_tags.effective_tag(
-                "ses_a", "/home/dev/projects/mono",
-                session_tag_map={},
-                dir_tag_map={"/home/dev/projects/mono/": "mono-tag"},
-            ),
-            ("mono-tag", "manual"),
+            oc_tags.effective_tag("ses_a", "/home/dev/projects/workstation", {}),
+            ("auto:workstation", "auto"),
         )
 
     def test_no_directory(self):
         self.assertEqual(
-            oc_tags.effective_tag("ses_a", None, {}, {}), ("auto:no-dir", "auto")
+            oc_tags.effective_tag("ses_a", None, {}), ("auto:no-dir", "auto")
         )
 
 
 class TestEffectiveTagKind(unittest.TestCase):
-    # effective_tag_kind adds a third field that effective_tag's 'manual'
-    # deliberately conflates: WHICH manual source answered. Launch-time tag
-    # inheritance copies only an explicit session tag -- a dir glob describes
-    # a place, not the work -- so it needs the two told apart.
-
     def test_session_tag_is_kind_session(self):
         self.assertEqual(
             oc_tags.effective_tag_kind(
-                "ses_a", "/home/dev/projects/mono",
+                "ses_a", "/home/dev/projects/workstation",
                 session_tag_map={"ses_a": "billing"},
-                dir_tag_map={"/home/dev/projects/mono": "monorepo"},
             ),
             ("billing", "manual", "session"),
         )
 
-    def test_dir_glob_is_kind_dir(self):
-        self.assertEqual(
-            oc_tags.effective_tag_kind(
-                "ses_a", "/home/dev/projects/mono/.worktrees/fbm-webhook-res",
-                session_tag_map={},
-                dir_tag_map={"/home/dev/projects/mono/.worktrees/fbm-*": "fbm"},
-            ),
-            ("fbm", "manual", "dir"),
-        )
-
     def test_fallback_is_kind_auto(self):
         self.assertEqual(
-            oc_tags.effective_tag_kind("ses_a", "/home/dev/projects/mono", {}, {}),
-            ("auto:mono", "auto", "auto"),
+            oc_tags.effective_tag_kind("ses_a", "/home/dev/projects/workstation", {}),
+            ("auto:workstation", "auto", "auto"),
         )
 
     def test_effective_tag_is_the_first_two_fields(self):
-        # effective_tag's (tag, source) contract is unchanged for every caller.
         cases = [
-            ("ses_a", "/x", {"ses_a": "t"}, {}),
-            ("ses_a", "/x", {}, {"/x": "d"}),
-            ("ses_a", "/x", {}, {}),
-            ("ses_a", None, {}, {}),
+            ("ses_a", "/x", {"ses_a": "t"}),
+            ("ses_a", "/x", {}),
+            ("ses_a", None, {}),
         ]
         for c in cases:
             self.assertEqual(oc_tags.effective_tag(*c), oc_tags.effective_tag_kind(*c)[:2])
@@ -624,14 +512,13 @@ class TestAggregate(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _agg(self, session_tags=None, dir_tags=None):
+    def _agg(self, session_tags=None):
         return oc_tags.aggregate(
             self.db,
             since_ms=1788874200000 - 86400 * 1000,
             until_ms=1788874200000 + 86400 * 1000,
             bucket="day",
             session_tags=session_tags or {},
-            dir_tags=dir_tags or {},
         )
 
     def test_child_cost_rolls_up_to_root(self):
@@ -674,7 +561,6 @@ class TestAggregate(unittest.TestCase):
             until_ms=1788874200000 + 86400 * 1000,
             bucket="day",
             session_tags={},
-            dir_tags={},
         )
         # $4.35 of Claude at 09:30 ET, then $300 at 10:30 ET crosses $195.
         self.assertEqual(rows.cap_hits.get("2026-09-08"), "10:30")
@@ -729,7 +615,6 @@ class TestAggregate(unittest.TestCase):
             until_ms=t + 86400 * 1000,
             bucket="day",
             session_tags={},
-            dir_tags={},
             now_ms=t,
         )
         self.assertEqual(agg_now.partial_bucket, "2026-09-08")
@@ -741,7 +626,6 @@ class TestAggregate(unittest.TestCase):
             until_ms=t + 86400 * 1000,
             bucket="day",
             session_tags={},
-            dir_tags={},
             now_ms=t + 10 * 86400 * 1000,  # 10 days later
         )
         self.assertIsNone(agg_past.partial_bucket)
@@ -834,32 +718,27 @@ class TestCli(unittest.TestCase):
             if old_env is not None:
                 os.environ["OPENCODE_SESSION_ID"] = old_env
 
-    def test_set_dir_tag(self):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = oc_tags.main([
-                "set", "--dir", "/home/dev/projects/mono/.worktrees/*", "mono-wt",
-                "--tags-db", self.tags_db,
-            ])
-        self.assertEqual(rc, 0)
-        with oc_tags.open_store(self.tags_db) as st:
-            self.assertEqual(
-                oc_tags.dir_tags(st),
-                {"/home/dev/projects/mono/.worktrees/*": "mono-wt"},
-            )
+    def test_set_dir_rejected(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["set", "--dir", "/path", "billing", "--tags-db", self.tags_db])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("unrecognized arguments", err.getvalue())
 
-    def test_rm_dir_tag(self):
-        with oc_tags.open_store(self.tags_db) as st:
-            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/*", "mono-wt")
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = oc_tags.main([
-                "rm", "--dir", "/home/dev/projects/mono/.worktrees/*",
-                "--tags-db", self.tags_db,
-            ])
-        self.assertEqual(rc, 0)
-        with oc_tags.open_store(self.tags_db) as st:
-            self.assertEqual(oc_tags.dir_tags(st), {})
+    def test_rm_dir_rejected(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["rm", "--dir", "/path", "--tags-db", self.tags_db])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("unrecognized arguments", err.getvalue())
+
+    def test_rm_without_target_gives_specify_session_id_error(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["rm", "--tags-db", self.tags_db])
+        self.assertEqual(rc, 1)
+        self.assertIn("specify session-id\n", err.getvalue())
+        self.assertNotIn("--dir", err.getvalue())
 
     def test_rm_session_tag(self):
         with oc_tags.open_store(self.tags_db) as st:
@@ -874,7 +753,7 @@ class TestCli(unittest.TestCase):
     def test_ls_without_counts_and_with_counts(self):
         with oc_tags.open_store(self.tags_db) as st:
             oc_tags.set_session_tag(st, "root_a", "billing")
-            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/*", "mono-wt")
+            oc_tags.set_session_tag(st, "root_b", "infra")
 
         # Without --counts
         buf = io.StringIO()
@@ -884,7 +763,9 @@ class TestCli(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("root_a", out)
         self.assertIn("billing", out)
-        self.assertIn("mono-wt", out)
+        self.assertIn("root_b", out)
+        self.assertIn("infra", out)
+        self.assertNotIn("Directory patterns:", out)
 
         # With --counts
         buf_counts = io.StringIO()
@@ -893,8 +774,10 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         out_counts = buf_counts.getvalue()
         self.assertIn("tag", out_counts)
+        self.assertIn("sessions", out_counts)
+        self.assertNotIn("dirs", out_counts)
         self.assertIn("billing", out_counts)
-        self.assertIn("mono-wt", out_counts)
+        self.assertIn("infra", out_counts)
 
     def test_report_output_table(self):
         buf = io.StringIO()
@@ -967,99 +850,6 @@ class TestCli(unittest.TestCase):
         self.assertIn("root_a", out_min)
         self.assertNotIn("orphan", out_min)
 
-    def test_top_dir_hint_for_shared_prefix(self):
-        # Add 3 sessions sharing a directory prefix
-        conn = sqlite3.connect(self.db)
-        t = 1788874200000
-        for i in range(3):
-            sid = f"wt_{i}"
-            conn.execute(
-                "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
-                (sid, None, f"/home/dev/projects/mono/.worktrees/pr-{i}", f"PR {i}", t, t),
-            )
-            data = {"role": "assistant", "cost": 1.00, "modelID": "m", "tokens": {"input": 1, "output": 1}}
-            conn.execute(
-                "INSERT INTO message VALUES (?,?,?,?)",
-                (f"m_wt_{i}", sid, t, json.dumps(data)),
-            )
-        conn.commit()
-        conn.close()
-
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
-        self.assertEqual(rc, 0)
-        out = buf.getvalue()
-        self.assertIn("--dir", out)
-        self.assertIn("/home/dev/projects/mono/.worktrees/*", out)
-
-    def test_top_dir_hint_worktree_ranking_not_skewed_by_double_counting(self):
-        conn = sqlite3.connect(self.db)
-        t = 1788874200000
-        # Repo A: 3 worktree sessions
-        for i in range(3):
-            sid = f"repoA_{i}"
-            conn.execute(
-                "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
-                (sid, None, f"/home/dev/projects/repoA/.worktrees/wt-{i}", f"RepoA {i}", t, t),
-            )
-            data = {"role": "assistant", "cost": 1.00, "modelID": "m", "tokens": {"input": 1, "output": 1}}
-            conn.execute(
-                "INSERT INTO message VALUES (?,?,?,?)",
-                (f"m_repoA_{i}", sid, t, json.dumps(data)),
-            )
-        # Repo B: 4 worktree sessions
-        for i in range(4):
-            sid = f"repoB_{i}"
-            conn.execute(
-                "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
-                (sid, None, f"/home/dev/projects/repoB/.worktrees/wt-{i}", f"RepoB {i}", t, t),
-            )
-            data = {"role": "assistant", "cost": 1.00, "modelID": "m", "tokens": {"input": 1, "output": 1}}
-            conn.execute(
-                "INSERT INTO message VALUES (?,?,?,?)",
-                (f"m_repoB_{i}", sid, t, json.dumps(data)),
-            )
-        conn.commit()
-        conn.close()
-
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
-        self.assertEqual(rc, 0)
-        out = buf.getvalue()
-        # Repo B (4 roots) must appear before Repo A (3 roots) in hints
-        pos_b = out.find("/home/dev/projects/repoB/.worktrees/*")
-        pos_a = out.find("/home/dev/projects/repoA/.worktrees/*")
-        self.assertNotEqual(pos_b, -1)
-        self.assertNotEqual(pos_a, -1)
-        self.assertLess(pos_b, pos_a)
-
-    def test_top_dir_hint_primary_root_does_not_hint_parent_container(self):
-        conn = sqlite3.connect(self.db)
-        t = 1788874200000
-        for i in range(3):
-            sid = f"mono_{i}"
-            conn.execute(
-                "INSERT INTO session VALUES (?,?,?,?,0,?,?)",
-                (sid, None, "/home/dev/projects/mono", f"Mono {i}", t, t),
-            )
-            data = {"role": "assistant", "cost": 1.00, "modelID": "m", "tokens": {"input": 1, "output": 1}}
-            conn.execute(
-                "INSERT INTO message VALUES (?,?,?,?)",
-                (f"m_mono_{i}", sid, t, json.dumps(data)),
-            )
-        conn.commit()
-        conn.close()
-
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
-        self.assertEqual(rc, 0)
-        out = buf.getvalue()
-        self.assertNotIn("/home/dev/projects/*", out)
-        self.assertIn("'/home/dev/projects/mono'", out)
-
     # ---- which -------------------------------------------------------
     #
     # `which` answers the question `ls` cannot: not "what mappings exist" but
@@ -1118,15 +908,6 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(buf.getvalue().strip().split("\t"), ["billing", "manual", "root_a", "session"])
 
-    def test_which_reports_a_dir_glob_as_manual(self):
-        with oc_tags.open_store(self.tags_db) as st:
-            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/*", "mono-wt")
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = oc_tags.main(["which", "root_b", "--db", self.db, "--tags-db", self.tags_db])
-        self.assertEqual(rc, 0)
-        self.assertEqual(buf.getvalue().strip().split("\t"), ["mono-wt", "manual", "root_b", "dir"])
-
     def test_which_reports_auto_fallback(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1143,19 +924,12 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         return buf.getvalue().strip().split("\t")
 
-    def test_which_column_two_is_unchanged_by_the_kind_column(self):
-        # Column 2 is a deployed contract: pigeon's tag-resolver parseWhich
-        # reads it, and pigeon deploys separately from oc-tags. A session tag
-        # and a dir glob must BOTH still say 'manual' there; the distinction
-        # lives only in the additive column 4.
+    def test_which_column_two_is_manual_for_session_tag(self):
         with oc_tags.open_store(self.tags_db) as st:
             oc_tags.set_session_tag(st, "root_a", "billing")
-            oc_tags.set_dir_tag(st, "/home/dev/projects/mono/.worktrees/*", "mono-wt")
         sess = self._which_fields("root_a")
-        glob = self._which_fields("root_b")
         self.assertEqual(sess[:3], ["billing", "manual", "root_a"])
-        self.assertEqual(glob[:3], ["mono-wt", "manual", "root_b"])
-        self.assertEqual((sess[3], glob[3]), ("session", "dir"))
+        self.assertEqual(sess[3], "session")
 
     def test_which_kind_session_for_a_child_of_a_tagged_root(self):
         with oc_tags.open_store(self.tags_db) as st:
@@ -2166,7 +1940,6 @@ class TestWindowDerivedBuckets(unittest.TestCase):
             until_ms=self.now + until_off_h * 3600 * 1000,
             bucket=bucket,
             session_tags={},
-            dir_tags={},
             now_ms=self.now if now is None else now,
         )
 
@@ -2297,6 +2070,142 @@ class TestWindowDerivedBuckets(unittest.TestCase):
         self.assertGreater(len(hours), 2)
         steps = {b - a for a, b in zip(hours, hours[1:])}
         self.assertEqual(len(steps), 1, f"labels not evenly spaced: {labels}")
+
+
+class TestRetiredDirTagWarning(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "opencode.db")
+        _fixture_db(self.db)
+        self.tags_db = str(Path(self.tmp.name) / "tags.db")
+        # The warning is once per process; each test is its own "process".
+        oc_tags._warned_retired_dir_tags = False
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_warning_is_emitted_once_per_process(self):
+        # serve resolves on every request; one line per chart fetch would
+        # flood its journal.
+        with oc_tags.open_store(self.tags_db) as st:
+            st.execute(
+                "INSERT INTO dir_tag (pattern, tag, created_at) VALUES (?, ?, ?)",
+                ("/home/dev/projects/mono", "monorepo", 0),
+            )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(3):
+                status, _, _ = oc_tags.handle_request(
+                    "/", "", db_path=self.db, tags_db=self.tags_db, cfp_dir=self.tmp.name,
+                )
+                self.assertEqual(status, 200)
+        self.assertEqual(err.getvalue().count("retired directory rule"), 1)
+
+    def test_non_empty_dir_tag_ignored_and_warns_on_which(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            st.execute(
+                "INSERT INTO dir_tag (pattern, tag, created_at) VALUES (?, ?, ?)",
+                ("/home/dev/projects/mono", "monorepo", 0),
+            )
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["which", "root_a", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            buf.getvalue().strip().split("\t"),
+            ["auto:mono", "auto", "root_a", "auto"],
+        )
+        self.assertIn(
+            "Warning: tags.db has 1 retired directory rule(s) in dir_tag; they are ignored. Convert them to session tags (see pkgs/oc-tags/README.md).\n",
+            err.getvalue(),
+        )
+
+    def test_non_empty_dir_tag_warns_on_report(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            st.execute(
+                "INSERT INTO dir_tag (pattern, tag, created_at) VALUES (?, ?, ?)",
+                ("/home/dev/projects/mono", "monorepo", 0),
+            )
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["report", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "Warning: tags.db has 1 retired directory rule(s) in dir_tag; they are ignored. Convert them to session tags (see pkgs/oc-tags/README.md).\n",
+            err.getvalue(),
+        )
+
+    def test_non_empty_dir_tag_warns_on_top(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            st.execute(
+                "INSERT INTO dir_tag (pattern, tag, created_at) VALUES (?, ?, ?)",
+                ("/home/dev/projects/mono", "monorepo", 0),
+            )
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "Warning: tags.db has 1 retired directory rule(s) in dir_tag; they are ignored. Convert them to session tags (see pkgs/oc-tags/README.md).\n",
+            err.getvalue(),
+        )
+
+    def test_non_empty_dir_tag_warns_on_ls(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            st.execute(
+                "INSERT INTO dir_tag (pattern, tag, created_at) VALUES (?, ?, ?)",
+                ("/home/dev/projects/mono", "monorepo", 0),
+            )
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["ls", "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "Warning: tags.db has 1 retired directory rule(s) in dir_tag; they are ignored. Convert them to session tags (see pkgs/oc-tags/README.md).\n",
+            err.getvalue(),
+        )
+
+    def test_non_empty_dir_tag_warns_on_serve_aggregation(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            st.execute(
+                "INSERT INTO dir_tag (pattern, tag, created_at) VALUES (?, ?, ?)",
+                ("/home/dev/projects/mono", "monorepo", 0),
+            )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status, _, _ = oc_tags.handle_request(
+                "/",
+                "",
+                db_path=self.db,
+                tags_db=self.tags_db,
+                cfp_dir=self.tmp.name,
+            )
+        self.assertEqual(status, 200)
+        self.assertIn(
+            "Warning: tags.db has 1 retired directory rule(s) in dir_tag; they are ignored. Convert them to session tags (see pkgs/oc-tags/README.md).\n",
+            err.getvalue(),
+        )
+
+    def test_empty_dir_tag_produces_no_warning(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            pass
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["which", "root_a", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("Warning: tags.db has", err.getvalue())
+
+    def test_absent_dir_tag_table_produces_no_warning(self):
+        conn = sqlite3.connect(self.tags_db)
+        conn.execute("CREATE TABLE session_tag (session_id TEXT PRIMARY KEY, tag TEXT, created_at INTEGER)")
+        conn.commit()
+        conn.close()
+
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["which", "root_a", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("Warning: tags.db has", err.getvalue())
 
 
 # Without this guard, `python3 test_oc_tags.py` imports the module, defines

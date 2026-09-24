@@ -33,7 +33,7 @@ look like branch names by construction; that is the fallback, not a mistag.
 Launching sessions? `opencode-launch --tag` writes the same tag and follows the
 same rules below. Without `--tag`, a launch copies the launcher's tag onto the
 child (so will Telegram `/launch` from a session's topic or reply, once pigeon
-ships it) — only an explicit session tag, never a dir glob or `auto:`. Check
+ships it) — only an explicit session tag, never an `auto:` fallback. Check
 your own tag before spinning up unrelated work, and pass `--tag auto` to opt out.
 
 ## Tagging the session you are in
@@ -87,14 +87,7 @@ A new or renamed tag is a change to the Confluence page, not just an
    looks wrong.
 2. **`auto:` tags are a to-do, not a category.** Seeing one in a report means
    a session needs tagging — or needs the user to say what it was.
-3. **No directory patterns on worktrees.** `oc-tags top` will suggest
-   `oc-tags set --dir '<repo>/.worktrees/*' <tag>` whenever several untagged
-   sessions share a prefix. Don't. A pattern covers every *future* session
-   under it, whatever it turns out to be, and takes them all out of `top` — the
-   detector goes blind for that path permanently. Use `--dir` only for a
-   directory that is by definition one program forever (a dedicated repo), and
-   otherwise tag sessions one at a time.
-4. **Retagging is destructive.** `oc-tags set` is an upsert with no history.
+3. **Retagging is destructive.** `oc-tags set` is an upsert with no history.
    Before any bulk retag, snapshot the store and save the report you are about
    to change:
    ```bash
@@ -104,7 +97,7 @@ A new or renamed tag is a change to the Confluence page, not just an
    Classify with a dry run first, print the plan, and leave anything ambiguous
    untouched. Substring rules misfire (`pack` matches `package`); use word
    boundaries.
-5. **Spend is a coverage detector, not a ranking.** It measures one person's
+4. **Spend is a coverage detector, not a ranking.** It measures one person's
    LLM iteration over a short window — not effort, not value, not what anyone
    else cares about. Use it to find work with no tracker home. Do not use it to
    size or prioritise programs, and do not put the dollar figures in front of

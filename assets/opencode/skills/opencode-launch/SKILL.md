@@ -244,8 +244,7 @@ Three things about the oc-tags model make this worth using:
 - **It is an override, not a creation.** Every session *always* has exactly one
   tag; an untagged one falls back to a directory-derived `auto:` tag
   (`auto:mono`, `auto:mono/some-worktree`). `--tag` converts the session off
-  that fallback. Precedence: explicit session tag > directory glob (longest
-  pattern wins) > `auto:`.
+  that fallback. Precedence: explicit session tag > `auto:`.
 - **A repo ROOT launch is where it pays.** `auto:mono` lumps together every
   unrelated thing ever done at that root, and that is where most of the dollars
   sit. The launcher knows what the session is for; without `--tag` that knowledge
@@ -259,8 +258,8 @@ Behaviour:
 
 - The tag is validated **before** anything is created: it must start with a
   letter or digit and use only `[A-Za-z0-9._:/-]`, 64 characters max. The
-  leading-alphanumeric rule is what blocks argument injection (a tag named
-  `--dir` that oc-tags' argparse would read as a flag). `auto:` is rejected —
+  leading-alphanumeric rule is what blocks argument injection (a tag starting
+  with `-` that oc-tags' argparse would read as a flag). `auto:` is rejected —
   it is reserved for the fallback. ASCII means ASCII: the check runs under
   `LC_ALL=C`, because under the ambient `en_US.UTF-8` bash's `[A-Za-z0-9]`
   matches accented letters and `épic` would otherwise slip through here while
@@ -291,9 +290,9 @@ up from a tagged session therefore lands on the program's tag without passing
 `--tag` to every worker.
 
 - **Only an explicit session tag is inherited.** The launcher's tag must come
-  from `oc-tags set` (`oc-tags which` column 4 = `session`). A directory glob
-  describes a place, not the work, and an `auto:` fallback was never chosen by
-  anyone, so neither is passed on; the child keeps its own `auto:` fallback.
+  from `oc-tags set` (`oc-tags which` column 4 = `session`). An `auto:` fallback
+  was never chosen by anyone, so it is not passed on; the child keeps its own
+  `auto:` fallback.
 - **`--tag <t>` always wins**, and no lookup is done.
 - **`--tag auto` opts out** (any case, exactly `auto`): no lookup, the child
   stays on its `auto:` fallback. Use it when the worker's job is unrelated to
@@ -320,8 +319,7 @@ inherits nothing). See
 repo.
 
 Forgot to pass it? Nothing is lost — tag afterwards with
-`oc-tags set <tag> <session-id>`. Avoid `oc-tags set --dir` on worktree globs
-even when `oc-tags top` suggests one; `tagging-sessions` explains why.
+`oc-tags set <tag> <session-id>`.
 
 ## Auto-Attach to nvim+tmux
 

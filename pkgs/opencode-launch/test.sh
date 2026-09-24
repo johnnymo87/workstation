@@ -59,7 +59,7 @@ resolve_model_id() {
 # at the bottom. Rules match pigeon's isValidTag (packages/worker/src/tag-command.ts,
 # packages/daemon/src/worker/tag-ingest.ts), which is already shipped and reviewed:
 #   - first character alphanumeric, which is what actually rules out the argument
-#     -injection hazard (a tag named "--dir" that argparse would read as a flag);
+#     -injection hazard (a tag starting with '-' that argparse would read as a flag);
 #     shell metacharacters are NOT a hazard because we pass argv, never a string
 #   - the rest from [A-Za-z0-9._:/-], max 64 characters total
 #   - no "auto:" prefix (case-insensitive): oc-tags reserves that for its
@@ -234,7 +234,7 @@ assert_tag_rejected() {
 }
 
 assert_tag_ok "billing" "a plain tag"
-assert_tag_ok "fbm-migration" "a hyphenated tag"
+assert_tag_ok "billing-job" "a hyphenated tag"
 assert_tag_ok "team/infra" "a slash-namespaced tag"
 assert_tag_ok "v1.2_x" "dots and underscores"
 assert_tag_ok "epic:swarm" "an interior colon"
@@ -644,7 +644,7 @@ if [ -f "$default_nix" ]; then
   fi
   # oc-tags lowercases the tag (normalise_tag), so the launcher must print
   # oc-tags' own line rather than echoing back what the human typed -- otherwise
-  # "--tag FBM-Migration" reports a tag the chart will never show.
+  # "--tag Billing-Job" reports a tag the chart will never show.
   # (The suffix is empty for an explicit --tag; inherit_launcher_tag passes
   # " (inherited from <root>)", appended to oc-tags' line, not replacing it.)
   if grep -A30 'apply_session_tag()' "$default_nix" | grep -q "printf '%s%s\\\\n' \"\$out\" \"\$suffix\""; then
