@@ -19,6 +19,7 @@ Secrets are managed with sops-nix using age encryption. They're encrypted in the
 | `ccr_api_key` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
 | `telegram_bot_token` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
 | `telegram_chat_id` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
+| `typesafe_api_key` | TypeSafe AI (jev decision model) via `typesafe-sdk`. devbox and cloudbox, each in its own `secrets/<host>.yaml` (neither host can encrypt to the other's file). On cloudbox (a work host) data sent is retained under TypeSafe's DPA; ZDR is enterprise-only. | Exported as `TYPESAFE_API_KEY` in bash and by `shell-env.ts` |
 | `dd_pat` | Datadog CLI (dd-cli) + MCP — Personal Access Token (Bearer auth) | Exported as `DD_PAT` in bash |
 
 ## How Secrets Flow

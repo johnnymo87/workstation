@@ -122,6 +122,13 @@ describe("shell-env plugin: sops secret injection", () => {
     expect(env.GITHUB_API_TOKEN).toBe("gh-token")
   })
 
+  it("exports the TypeSafe API key as TYPESAFE_API_KEY", async () => {
+    withSecrets({ "/run/secrets/typesafe_api_key": "ts-key" })
+    const env = await runHook({ sessionID: "ses_abc" })
+    expect(env.TYPESAFE_API_KEY).toBe("ts-key")
+    expect(env).not.toHaveProperty("TYPESAFE_BASE_URL")
+  })
+
   it("trims trailing whitespace/newlines from secret file contents", async () => {
     withSecrets({ "/run/secrets/jenkins_api_token": "  jenkins-token\n" })
     const env = await runHook({ sessionID: "ses_abc" })
