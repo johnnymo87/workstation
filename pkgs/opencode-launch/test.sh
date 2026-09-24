@@ -59,7 +59,7 @@ resolve_model_id() {
 # at the bottom. Rules match pigeon's isValidTag (packages/worker/src/tag-command.ts,
 # packages/daemon/src/worker/tag-ingest.ts), which is already shipped and reviewed:
 #   - first character alphanumeric, which is what actually rules out the argument
-#     -injection hazard (a tag named "--dir" that argparse would read as a flag);
+#     -injection hazard (a tag starting with '-' that argparse would read as a flag);
 #     shell metacharacters are NOT a hazard because we pass argv, never a string
 #   - the rest from [A-Za-z0-9._:/-], max 64 characters total
 #   - no "auto:" prefix (case-insensitive): oc-tags reserves that for its

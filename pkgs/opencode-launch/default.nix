@@ -166,9 +166,9 @@ pkgs.writeShellApplication {
       # isValidTag (packages/worker/src/tag-command.ts,
       # packages/daemon/src/worker/tag-ingest.ts):
       #   - first character alphanumeric. That is what rules out the REAL hazard,
-      #     argument injection: a tag named "--dir" would be read by oc-tags'
-      #     argparse as a flag. Shell metacharacters are NOT the hazard -- we
-      #     always pass argv, never build a command string.
+      #     argument injection: a tag starting with '-' would be read as a
+      #     flag. Shell metacharacters are NOT the hazard -- we always pass
+      #     argv, never build a command string.
       #   - remaining characters from [A-Za-z0-9._:/-], 64 characters max.
       #   - no "auto:" prefix (case-insensitive). oc-tags reserves that for its
       #     directory-derived fallback and rejects it at write time anyway, but
@@ -242,8 +242,8 @@ pkgs.writeShellApplication {
           return 0
         fi
         # Print oc-tags' OWN line rather than echoing back "$tag". oc-tags
-        # lowercases via normalise_tag, so "--tag FBM-Migration" is stored (and
-        # charted) as "fbm-migration"; a self-reported "Tag: FBM-Migration"
+        # lowercases via normalise_tag, so "--tag Billing-Job" is stored (and
+        # charted) as "billing-job"; a self-reported "Tag: Billing-Job"
         # would name something the chart never shows.
         printf '%s%s\n' "$out" "$suffix"
         return 0
@@ -267,10 +267,9 @@ pkgs.writeShellApplication {
       # Design: docs/plans/2026-09-23-launch-tag-inheritance-design.md.
       #
       # The launcher is $OPENCODE_SESSION_ID. Only an EXPLICIT session tag is
-      # inherited (`oc-tags which` column 4 == "session"): a dir glob
-      # describes a place rather than the work, and an auto: fallback is not a
-      # tag anyone chose. Inheritance is a COPY -- a normal `oc-tags set` --
-      # so retagging the launcher later does not touch its children.
+      # inherited (`oc-tags which` column 4 == "session"): an auto: fallback
+      # is not a tag anyone chose. Inheritance is a COPY -- a normal `oc-tags
+      # set` -- so retagging the launcher later does not touch its children.
       #
       # Same contract as apply_session_tag, and runs at the same point (after
       # the prompt): best-effort, time-bounded, returns 0 on every path. A
@@ -307,7 +306,7 @@ pkgs.writeShellApplication {
         IFS=$'\t' read -r w_tag _ w_root w_kind _ <<<"$line" || true
         if [ -z "$w_kind" ]; then
           # An oc-tags older than the kind column prints 3 fields. It cannot
-          # tell a session tag from a dir glob, so do not guess.
+          # tell a session tag from an auto: fallback, so do not guess.
           echo "Note: tag not inherited from $launcher: 'oc-tags which' printed no kind column (oc-tags older than this launcher?)" >&2
           return 0
         fi
@@ -359,7 +358,7 @@ pkgs.writeShellApplication {
         echo "                                 Without --tag, a launch from inside a session"
         echo "                                 (\$OPENCODE_SESSION_ID set) INHERITS that"
         echo "                                 session's tag -- but only an explicit session"
-        echo "                                 tag, never a dir glob or auto: fallback. The"
+        echo "                                 tag, never an auto: fallback. The"
         echo "                                 inherited tag is printed with its source."
         echo "  --tag auto                     Do not inherit; keep the auto: fallback."
         echo "  --tmux-session <name>          Auto-attach in this tmux session (default: main)"
