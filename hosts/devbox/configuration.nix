@@ -258,13 +258,22 @@ in
   # outbound (`pigeon/packages/daemon/src/index.ts:183`). Nothing is pushed in.
   #
   # What the tunnel actually serves is dashboard-managed and invisible to this
-  # repo, but it is readable at runtime without any Cloudflare credential:
-  #   curl -s http://127.0.0.1:20241/config | jq '.config.ingress'
-  # As of 2026-09-12 that is `boldco.mohrbacher.dev -> http://localhost:3000`
-  # plus a `http_status:404` catch-all. Prefer that command over the dashboard;
-  # the API token in sops is 1001-denied on /cfd_tunnel/{id}/configurations.
+  # repo. As of 2026-09-24 it is:
+  #   boldco.mohrbacher.dev -> http://localhost:3000
+  #   coffee.mohrbacher.dev -> http://127.0.0.1:18473
+  #   http_status:404 catch-all
+  # Every origin here must also be allowlisted in nixos-fw-cflared-lo below, or
+  # it fails closed with 502.
+  #
+  # Reading it: `curl -s http://127.0.0.1:20241/config` USED to work without a
+  # credential, but now times out -- cloudflared's replies to your curl leave
+  # on `lo` toward an ephemeral port, and nixos-fw-cflared-lo rejects them. Do
+  # not open ephemeral ports to fix a diagnostic. Read it from the dashboard
+  # (Zero Trust -> Networks -> Tunnels -> devbox) or with a token holding
+  # Cloudflare Tunnel: Read. The API token in sops is 1001-denied on
+  # /cfd_tunnel/{id}/configurations.
   systemd.services.cloudflared-tunnel = {
-    description = "Cloudflare Tunnel (boldco public hostname)";
+    description = "Cloudflare Tunnel (devbox: boldco + coffee)";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
@@ -1121,13 +1130,13 @@ in
   # `/injected-prompts` (prompt injection into an opencode session running as
   # dev, with docker group and passwordless sudo) to the internet.
   #
-  # Deliberately a DEFAULT-DENY with a single allowlisted port, not a block on
-  # 4731. Blocking the one known-bad port requires a new rule for every future
+  # Deliberately a DEFAULT-DENY with allowlisted ports, not a block on 4731.
+  # Blocking the one known-bad port requires a new rule for every future
   # ingress rule someone adds in the dashboard; default-deny means a new ingress
-  # rule pointing anywhere else fails CLOSED. The live ingress list is readable
-  # without a Cloudflare credential:
-  #   curl -s http://127.0.0.1:20241/config | jq '.config.ingress'
-  # Keep the allowlist below in sync with it. Today: boldco -> localhost:3000.
+  # rule pointing anywhere else fails CLOSED (as a 502). Keep the allowlist
+  # below in sync with the live ingress list (see the cloudflared-tunnel unit
+  # above for how to read it). Today: boldco -> localhost:3000 and
+  # coffee -> 127.0.0.1:18473.
   #
   # `-o lo` rather than `-d 127.0.0.1/8`: the loopback INTERFACE also carries
   # traffic addressed to this host's own public IP (the hairpin path that made
@@ -1156,12 +1165,31 @@ in
   # a matching `-p tcp` (invalid: the reset reject type requires tcp) did
   # exactly this, and the box sat fully unfirewalled until it was noticed.
   #
-  # Hence two structural defences below:
-  #   1. Each group is wrapped in `{ ...; } || echo WARNING >&2`. Under `set -e`
-  #      a failure inside the group aborts the GROUP, runs the echo, and lets
-  #      the script continue to enable the firewall. A broken defence-in-depth
-  #      rule must never cost us the primary firewall.
-  #   2. Rules live in their own chains, filled with flush-then-append. No
+  # Hence three structural defences below:
+  #   1. Each group is ONE explicit `&&` chain, followed by `|| { fallback }`.
+  #      A failing command stops its group, the fallback runs, and the script
+  #      continues on to enable the firewall. A broken defence-in-depth rule
+  #      must never cost us the primary firewall.
+  #
+  #      The `&&` is load-bearing. The previous form, `{ a; b; c; } || echo`,
+  #      did NOT do this: bash disables `set -e` for every command inside a
+  #      compound that is the left operand of `||`. A failing `a` was ignored,
+  #      `b` and `c` still ran, the group exited with `c`'s status, and the
+  #      warning never printed. Reproduce with
+  #        bash -e -c '{ false; echo continued; } || echo WARNING'
+  #      which prints "continued" and no warning. Every command in the fallback
+  #      carries `|| true` for the same reason in reverse: the fallback is NOT
+  #      exempt from `set -e`, and a failure there would abort the script.
+  #   2. Fallbacks ATTEMPT to fail closed. An aborted group can leave its chain
+  #      flushed without its terminal REJECT/DROP while a hook still jumps to
+  #      it; the chain then falls through and the protection is simply gone
+  #      (cloudflared reaches every loopback port; published container ports
+  #      are reachable from the internet). So each fallback re-adds the
+  #      terminal deny and the hook, then CHECKS both and prints CRITICAL if
+  #      either is missing. Recovery is best-effort, not guaranteed -- the
+  #      CRITICAL line is how you find out. `journalctl -u firewall` after a
+  #      switch; a WARNING there means a group failed even if the unit is green.
+  #   3. Rules live in their own chains, filled with flush-then-append. No
   #      `-I <index>` arithmetic (which breaks as soon as rule counts change)
   #      and no per-rule `-C` probe: `-F` then `-A` is idempotent by
   #      construction, so a firewall reload cannot stack duplicates.
@@ -1170,36 +1198,80 @@ in
   # present does not imply it did:
   #   sudo iptables -S INPUT | grep -q 'j nixos-fw' && echo ENABLED || echo OPEN
   networking.firewall.extraCommands = ''
-    {
-      iptables -w -N nixos-fw-docker-ext 2>/dev/null || true
-      iptables -w -F nixos-fw-docker-ext
-      iptables -w -A nixos-fw-docker-ext -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
-      iptables -w -A nixos-fw-docker-ext -j DROP
+    # Fallback fails CLOSED like the cloudflared ones: it tries to leave a
+    # terminal DROP and the hook in place. If the conntrack RETURN is what
+    # failed, containers lose inbound replies on enp1s0 (their outbound
+    # internet breaks) -- loud and safe, versus 0.0.0.0-published container
+    # ports open to the internet. The final check reports whether that
+    # actually worked, since every recovery step is best-effort.
+    { iptables -w -N nixos-fw-docker-ext 2>/dev/null || true; } \
+      && iptables -w -F nixos-fw-docker-ext \
+      && iptables -w -A nixos-fw-docker-ext -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN \
+      && iptables -w -A nixos-fw-docker-ext -j DROP \
+      && { iptables -w -N DOCKER-USER 2>/dev/null || true; } \
+      && { iptables -w -C DOCKER-USER -i enp1s0 -j nixos-fw-docker-ext 2>/dev/null \
+           || iptables -w -I DOCKER-USER 1 -i enp1s0 -j nixos-fw-docker-ext; } \
+      || {
+        echo "WARNING: docker external-ingress rules failed to apply; attempting fail-closed recovery" >&2 || true
+        iptables -w -N nixos-fw-docker-ext 2>/dev/null || true
+        iptables -w -C nixos-fw-docker-ext -j DROP 2>/dev/null \
+          || iptables -w -A nixos-fw-docker-ext -j DROP || true
+        iptables -w -N DOCKER-USER 2>/dev/null || true
+        iptables -w -C DOCKER-USER -i enp1s0 -j nixos-fw-docker-ext 2>/dev/null \
+          || iptables -w -I DOCKER-USER 1 -i enp1s0 -j nixos-fw-docker-ext || true
+        { iptables -w -C nixos-fw-docker-ext -j DROP 2>/dev/null \
+            && iptables -w -C DOCKER-USER -i enp1s0 -j nixos-fw-docker-ext 2>/dev/null; } \
+          || echo "CRITICAL: docker external-ingress recovery FAILED; published container ports may be internet-reachable" >&2 || true
+      }
 
-      iptables -w -N DOCKER-USER 2>/dev/null || true
-      iptables -w -C DOCKER-USER -i enp1s0 -j nixos-fw-docker-ext 2>/dev/null \
-        || iptables -w -I DOCKER-USER 1 -i enp1s0 -j nixos-fw-docker-ext
-    } || echo "WARNING: docker external-ingress rules failed to apply" >&2
+    # IPv4 allowlist, one ACCEPT per tunnel ingress rule (see comment above):
+    #   3000  boldco.mohrbacher.dev  -> http://localhost:3000
+    #   18473 coffee.mohrbacher.dev  -> http://127.0.0.1:18473
+    # coffee is pinned to 127.0.0.1 in BOTH the ingress rule and here, so it is
+    # deliberately absent from the IPv6 chain below: cloudflared never dials
+    # ::1 for a numeric IPv4 origin. 18473 rather than a common port like 8080
+    # because this matches a PORT, not a process: if coffee is down, whatever
+    # else binds the port is what coffee.mohrbacher.dev serves.
+    { iptables -w -N nixos-fw-cflared-lo 2>/dev/null || true; } \
+      && iptables -w -F nixos-fw-cflared-lo \
+      && iptables -w -A nixos-fw-cflared-lo -p tcp --dport 3000 -j ACCEPT \
+      && iptables -w -A nixos-fw-cflared-lo -d 127.0.0.1/32 -p tcp --dport 18473 -j ACCEPT \
+      && iptables -w -A nixos-fw-cflared-lo -p tcp -j REJECT --reject-with tcp-reset \
+      && iptables -w -A nixos-fw-cflared-lo -j REJECT \
+      && { iptables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
+           || iptables -w -I OUTPUT 1 -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo; } \
+      || {
+        echo "WARNING: cloudflared v4 loopback rules failed to apply; attempting fail-closed recovery" >&2 || true
+        iptables -w -N nixos-fw-cflared-lo 2>/dev/null || true
+        iptables -w -F nixos-fw-cflared-lo || true
+        iptables -w -A nixos-fw-cflared-lo -j REJECT || true
+        iptables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
+          || iptables -w -I OUTPUT 1 -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo \
+          || true
+        { iptables -w -C nixos-fw-cflared-lo -j REJECT 2>/dev/null \
+            && iptables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null; } \
+          || echo "CRITICAL: cloudflared v4 recovery FAILED; the tunnel may reach any loopback port" >&2 || true
+      }
 
-    {
-      iptables -w -N nixos-fw-cflared-lo 2>/dev/null || true
-      iptables -w -F nixos-fw-cflared-lo
-      iptables -w -A nixos-fw-cflared-lo -p tcp --dport 3000 -j ACCEPT
-      iptables -w -A nixos-fw-cflared-lo -p tcp -j REJECT --reject-with tcp-reset
-      iptables -w -A nixos-fw-cflared-lo -j REJECT
-      iptables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
-        || iptables -w -I OUTPUT 1 -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo
-    } || echo "WARNING: cloudflared v4 loopback rules failed to apply" >&2
-
-    {
-      ip6tables -w -N nixos-fw-cflared-lo 2>/dev/null || true
-      ip6tables -w -F nixos-fw-cflared-lo
-      ip6tables -w -A nixos-fw-cflared-lo -p tcp --dport 3000 -j ACCEPT
-      ip6tables -w -A nixos-fw-cflared-lo -p tcp -j REJECT --reject-with tcp-reset
-      ip6tables -w -A nixos-fw-cflared-lo -j REJECT
-      ip6tables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
-        || ip6tables -w -I OUTPUT 1 -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo
-    } || echo "WARNING: cloudflared v6 loopback rules failed to apply" >&2
+    { ip6tables -w -N nixos-fw-cflared-lo 2>/dev/null || true; } \
+      && ip6tables -w -F nixos-fw-cflared-lo \
+      && ip6tables -w -A nixos-fw-cflared-lo -p tcp --dport 3000 -j ACCEPT \
+      && ip6tables -w -A nixos-fw-cflared-lo -p tcp -j REJECT --reject-with tcp-reset \
+      && ip6tables -w -A nixos-fw-cflared-lo -j REJECT \
+      && { ip6tables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
+           || ip6tables -w -I OUTPUT 1 -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo; } \
+      || {
+        echo "WARNING: cloudflared v6 loopback rules failed to apply; attempting fail-closed recovery" >&2 || true
+        ip6tables -w -N nixos-fw-cflared-lo 2>/dev/null || true
+        ip6tables -w -F nixos-fw-cflared-lo || true
+        ip6tables -w -A nixos-fw-cflared-lo -j REJECT || true
+        ip6tables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
+          || ip6tables -w -I OUTPUT 1 -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo \
+          || true
+        { ip6tables -w -C nixos-fw-cflared-lo -j REJECT 2>/dev/null \
+            && ip6tables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null; } \
+          || echo "CRITICAL: cloudflared v6 recovery FAILED; the tunnel may reach any loopback port" >&2 || true
+      }
   '';
 
   # Verifying this from the host itself does not work. Connecting to the
@@ -1220,11 +1292,20 @@ in
   # says nothing. `curl -X POST https://<host>/swarm/send -d '{}'` must return
   # 502 (origin unreachable, this rule) or 401 (armed daemon), never 400.
   #
-  # And check EVERY connector. This tunnel has more than one (devbox and
-  # cloudbox share a token), Cloudflare load-balances between them, and a fix
-  # applied to one origin leaves the hostname answering from the other. A single
-  # probe has a coin-flip chance of testing the wrong box; repeat it ~8 times
-  # and look at the distribution, not one result.
+  # For coffee, the equivalent is `curl https://coffee.mohrbacher.dev/api/auth/me`:
+  # 401 JSON means the origin is reachable (unauthenticated, as expected); 502
+  # means this rule, or the stack, is blocking it. Also check a port that is
+  # listening but NOT allowlisted is refused as the cloudflared user, e.g.
+  #   sudo -u cloudflared curl -s -m 3 http://127.0.0.1:<port>/ ; echo $?
+  # must print 7 (connection refused), proving the default-deny still bites.
+  #
+  # Check which connectors exist before trusting a single probe. When a tunnel
+  # has more than one, Cloudflare load-balances between them and a fix applied
+  # to one origin leaves the hostname answering from the other; repeat a probe
+  # ~8 times and look at the distribution. As of 2026-09-24 the `devbox` tunnel
+  # has exactly one connector, this box (cloudbox's was removed; see
+  # hosts/cloudbox/configuration.nix). Re-check rather than trust that:
+  #   GET /accounts/<acct>/cfd_tunnel/<id>/connections
   # Every line here is `|| true`: firewall-stop also runs under `bash -e`, and a
   # failed stop leaves the tree in a half-torn-down state.
   networking.firewall.extraStopCommands = ''
