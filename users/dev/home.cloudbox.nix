@@ -32,6 +32,15 @@ let
   agentSliceName = "oc-agent";
   bazelScope = pkgs.callPackage ../../pkgs/bazel-scope {
     sliceName = bazelSliceName;
+    # Concurrency gate (workstation-o5s1.19): at most this many build/test/
+    # coverage clients at once, host-wide. Sized against bazel.slice's 16G below:
+    # an ACTIVE build scope averaged ~3.7G anon and an IDLE server ~2.35G
+    # (pressure-sampler, 2026-09-10..26), so two active builds (~7.4G) leave
+    # ~8.6G for idle servers and page cache. Three would leave ~5G, which idle
+    # servers alone exceeded in a few hundred samples. Raising this trades
+    # queueing for thrash; read that bead first. Events:
+    #   journalctl --user -t bazel-gate
+    maxConcurrentBuilds = 2;
   };
 
   # Memory + PSI sampler. Separate from the S2 series on purpose -- see the long
@@ -681,7 +690,8 @@ lib.mkIf isCloudbox {
   # OOM killer only fires when reclaim stops making progress, and refaulting a
   # sliver of file cache counts as progress for a long time. So the real trade
   # here is "slow, then failed", and the cause is too many concurrent JVMs. The
-  # fix being pursued is a concurrency gate in the shim (workstation-o5s1.19).
+  # shim now gates concurrent builds (maxConcurrentBuilds on bazelScope above,
+  # workstation-o5s1.19). It does NOT bound idle server JVMs, which hold no slot.
   #
   # INSTRUMENT TRAP, recorded because it produced a wrong conclusion that nearly
   # shipped in this very comment: memory.events.LOCAL counts oom_kill only for
