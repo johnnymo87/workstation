@@ -32,8 +32,8 @@
 # tools every step (opencode-patched permission-refresh-per-step.patch,
 # >= 1.18.18-patched.5). Before that patch a busy session kept the ruleset it
 # started the run with, so a grant after an earlier --revoke was invisible
-# until the run ended. Running Task subagents do NOT see it: a child copies
-# its parent's ruleset when it is created.
+# until the run ended. Task subagents never see it: a child copies only its
+# parent's deny/external_directory rules at creation, not allows.
 pkgs.writeShellApplication {
   name = "oc-mcp-enable";
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.coreutils ];
@@ -46,7 +46,7 @@ pkgs.writeShellApplication {
         echo "       oc-mcp-enable --status <session-id>"
         echo ""
         echo "Grant an MCP server's tools to an ALREADY-RUNNING opencode session."
-        echo "Takes effect on that session's next step, even mid-turn (not in already-running subagents)."
+        echo "Takes effect on that session's next step, even mid-turn (not in its Task subagents)."
         echo ""
         echo "Options:"
         echo "  -h, --help      Show this help message"
@@ -228,7 +228,7 @@ pkgs.writeShellApplication {
         echo "Note: the MCP server stays CONNECTED (shared per-directory); only this session is denied."
       else
         echo "Granted ''${servers[*]} tools to session $session_id"
-        echo "Takes effect on that session's next step, even mid-turn (not in already-running subagents)."
+        echo "Takes effect on that session's next step, even mid-turn (not in its Task subagents)."
       fi
     '';
 }

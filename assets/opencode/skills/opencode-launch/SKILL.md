@@ -127,14 +127,17 @@ turn. Verified on cloudbox 2026-09-26: a busy session holding
 successfully on the very next step.
 
 This relies on opencode-patched's `permission-refresh-per-step.patch`
-(1.18.18-patched.5 and later). On older builds a run kept the ruleset it started
+(1.18.18-patched.5 and later, and only once the serve has restarted onto it). On
+older builds a run kept the ruleset it started
 with, and a prompt sent to a busy session joins that run rather than starting a
 new one — so a grant following an earlier `--revoke` stayed invisible
 ("Model tried to call unavailable tool …") until the run ended.
 
-One gap remains: a Task **subagent that is already running** does not see the
-grant, because a child copies its parent's ruleset when it is created. The next
-subagent spawned after the grant does.
+**Task subagents never get the grant.** A child session copies only its
+parent's `deny` (and `external_directory`) rules when it is created
+(`deriveSubagentSessionPermission`), never its `allow` rules — so the grant does
+not reach it, while an earlier `--revoke`'s deny does. The main session is the
+one that can call the tools; to give a subagent Slack, grant its own session id.
 
 It does exactly two HTTP calls through the front door, and **both are required**:
 
