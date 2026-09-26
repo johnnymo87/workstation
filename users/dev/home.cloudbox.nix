@@ -666,20 +666,42 @@ lib.mkIf isCloudbox {
   #
   # SIZING. One active build <=10G (the scope cap) + resident idle server JVMs of
   # other workspaces (~2.4G measured across two on a single serve) + headroom for
-  # a second build spinning up => 16G. A genuinely concurrent second full build
-  # will hit this cap; the kernel then kills the fattest JVM inside the slice and
-  # that build fails. That is the intended trade on a 62G box whose swap is
-  # already saturated -- budgeting 2x10G here would just relocate the OOM to the
-  # host, where OOMScoreAdjust=500 makes the serves the preferred victim.
+  # a second build spinning up => 16G. Budgeting 2x10G here would relocate the
+  # pressure to the host, where OOMScoreAdjust=500 makes the serves the
+  # preferred victim.
   #
-  # MemorySwapMax bounds swap churn: swap on this host is already fully consumed,
-  # and an unbounded build would thrash it host-wide before ever reaching
-  # memory.max. Deliberately NO MemoryHigh -- throttling reclaim against a
-  # saturated swap device stalls builds for minutes, which is worse than a clean
-  # kill and much harder to diagnose.
+  # WHAT HAPPENS AT THIS CAP -- measured 2026-09-25. It DOES kill: this slice's
+  # hierarchical memory.events reads oom_kill=75, and the kernel log shows 25
+  # kills whose oom_memcg is this slice itself (3 more came from the per-scope
+  # 10G cap). But it thrashes FIRST, often for a long time. On 2026-09-15 it
+  # sat at anon 16.64G against this cap with file cache down to ~300M,
+  # re-reading its own outputs at ~270 MB/s for about 2.5 hours, killing JVMs
+  # intermittently (oom_kill 55 -> 71) rather than once and cleanly. The kernel
+  # OOM killer only fires when reclaim stops making progress, and refaulting a
+  # sliver of file cache counts as progress for a long time. So the real trade
+  # here is "slow, then failed", and the cause is too many concurrent JVMs. The
+  # fix being pursued is a concurrency gate in the shim (workstation-o5s1.19).
   #
-  # The serve units are in /system.slice/system-opencode\x2dserve.slice/..., a
-  # different cgroup subtree, so a memcg OOM in here cannot reach them.
+  # INSTRUMENT TRAP, recorded because it produced a wrong conclusion that nearly
+  # shipped in this very comment: memory.events.LOCAL counts oom_kill only for
+  # processes directly in this cgroup, and this slice holds NONE directly --
+  # every JVM lives in a child run-*.scope. So memory.events.local oom_kill is
+  # structurally always 0 here, and reading it says "never killed anything".
+  # Read memory.events (hierarchical), or the kernel log's oom_memcg= field.
+  #
+  # MemorySwapMax bounds swap churn: an unbounded build would thrash swap
+  # host-wide before ever reaching memory.max. There is deliberately still NO
+  # MemoryHigh, originally because throttling reclaim against a saturated swap
+  # device stalls builds for minutes. Note that premise was written when swap
+  # was saturated at rest; it is usually not now. Whether to add MemoryHigh,
+  # lower the cap, or raise it is an OPEN, DEFERRED decision
+  # (workstation-o5s1.10), postponed until o5s1.19 has run through a heavy build
+  # day. Do not change it without reading that bead.
+  #
+  # The serve units live in a ROOT-LEVEL /opencode.slice/opencode-serve.slice/
+  # (they moved there from /system.slice/system-opencode\x2dserve.slice/, which
+  # still exists and is empty), a different cgroup subtree from this one, so a
+  # memcg OOM in here cannot reach them.
   #
   # NOTE the new neighbours. This slice nests under user-1000.slice, so builds
   # that used to sit in system.slice now also count against that slice's
