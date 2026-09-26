@@ -56,6 +56,14 @@
 #     for bazel.slice, `max` mixes its own 16G cap with children hitting their 10G
 #     one (931513 vs 645632 local when first measured), and only the local counter
 #     separates them.
+#     BUT ev_oom_local IS STRUCTURALLY ZERO ON A SLICE. The kernel charges
+#     oom_kill to the VICTIM's own cgroup, and a slice holds no processes
+#     directly (bazel.slice's cgroup.procs is empty; every JVM is in a child
+#     scope). So a slice's ev_oom_local reads 0 no matter how many kills its cap
+#     caused. It was read as "the 16G cap has never killed anything" on
+#     workstation-o5s1.10 while the hierarchical ev_oom_kill read 75. Use
+#     ev_oom_kill for slices, and `oom_memcg=` in the kernel log to learn whose
+#     limit triggered a kill -- neither counter says that.
 #  c) HOST cpu_full_us IS DEFINED AS ALWAYS ZERO. /proc/pressure/cpu has no
 #     meaningful `full` at system level. The column exists for shape; ignore it.
 #     Per-cgroup cpu.pressure `full` IS meaningful.
@@ -108,11 +116,47 @@ writeShellApplication {
 
     mkdir -p "$OUT_DIR"
     TS=$(date -u +%s)
-    OUT="$OUT_DIR/pressure-v2-$(date -u -d "@$TS" +%Y-%m-%d).tsv"
+    OUT="$OUT_DIR/pressure-v3-$(date -u -d "@$TS" +%Y-%m-%d).tsv"
 
     # Schema version is in the FILENAME, not just here: samples.tsv/-v2/-v3 taught
     # us that a series whose shape changed silently becomes unreadable later.
-    COLS="ts	subject	detail	mem_current	mem_peak	mem_max	anon	file	kernel	slab	pagetables	shmem	swap	ev_max	ev_oom_kill	ev_max_local	ev_oom_local	cpu_usage_us	cpu_some_us	cpu_full_us	mem_some_us	mem_full_us	io_some_us	io_full_us	io_rbytes	io_wbytes"
+    #
+    # v3 (workstation-o5s1.16) = v2's 26 columns, unchanged and in order, plus
+    # five appended. Readers must still go by NAME; appending only means an ad
+    # hoc positional reader of v2 does not silently mis-shift on v3. A v2 file
+    # for the deploy day is left exactly as it was, never extended.
+    #
+    #   swap_peak     memory.swap.peak. v2 had swap CURRENT only, so the 11.43 GB
+    #                 jump of 2026-09-15 was attributed by reading peaks out of
+    #                 cgroupfs by hand. DIES WITH A TRANSIENT SCOPE -- for a bazel
+    #                 or oc-agent scope, only the last tick's value survives.
+    #   swap_max      memory.swap.max: THIS cgroup's own swap cap. Often `max`
+    #                 while an ANCESTOR's cap binds -- see swap_ev_max.
+    #   swap_ev_max   memory.swap.events `max`: swap-outs by this cgroup (or a
+    #                 descendant) refused because SOME swap.max on the path to
+    #                 the root was reached -- the smallest one, not necessarily
+    #                 this row's. There is no .local variant. So a row reading
+    #                 swap_max=max with swap_ev_max=58.9M is not a paradox: the
+    #                 binding cap is user-$uid.slice's 24G, which is why that
+    #                 cgroup has its own row (uid-slice).
+    #   swap_ev_fail  memory.swap.events `fail`: swap-outs that failed for any
+    #                 reason (the page stayed resident). fail - max ~= refused
+    #                 because system swap itself was full. Cumulative, so both
+    #                 record a squeeze that started and ended between ticks.
+    #   ev_high       memory.events `high`: throttles by THIS cgroup's own
+    #                 memory.high, plus its descendants' own, summed upward.
+    #                 THE MIRROR IMAGE OF THE oom_kill TRAP: a scope throttled
+    #                 by its PARENT's MemoryHigh reads ev_high=0 on the scope's
+    #                 row; the throttle shows only on the parent's. This is the
+    #                 "slow before failed" regime a MemoryHigh on bazel.slice
+    #                 (workstation-o5s1.10) would create -- read the slice row.
+    #                 Like every slice counter it keeps dead children's events
+    #                 (trap b): app.slice read 1771 on 2026-09-26 with its own
+    #                 high=max and every live child at 0.
+    #
+    # Blank, never 0, when the file is absent. A structurally-zero counter read
+    # as "never happened" is how this epic got "the cap never killed anything".
+    COLS="ts	subject	detail	mem_current	mem_peak	mem_max	anon	file	kernel	slab	pagetables	shmem	swap	ev_max	ev_oom_kill	ev_max_local	ev_oom_local	cpu_usage_us	cpu_some_us	cpu_full_us	mem_some_us	mem_full_us	io_some_us	io_full_us	io_rbytes	io_wbytes	swap_peak	swap_max	swap_ev_max	swap_ev_fail	ev_high"
     if [ ! -f "$OUT" ]; then
       printf '%s\n' "$COLS" > "$OUT"
     fi
@@ -153,7 +197,7 @@ writeShellApplication {
     emit_cgroup() { # <subject> <detail> <cgroup path>
       local subj="$1" detail="$2" cg="$3"
       [ -d "$cg" ] || return 0
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$TS" "$subj" "$detail" \
         "$(cgfield "$cg/memory.current")" \
         "$(cgfield "$cg/memory.peak")" \
@@ -177,7 +221,12 @@ writeShellApplication {
         "$(psi_total "$cg/io.pressure" some)" \
         "$(psi_total "$cg/io.pressure" full)" \
         "$(io_bytes "$cg" rbytes)" \
-        "$(io_bytes "$cg" wbytes)"
+        "$(io_bytes "$cg" wbytes)" \
+        "$(cgfield "$cg/memory.swap.peak")" \
+        "$(cgfield "$cg/memory.swap.max")" \
+        "$(evfield "$cg/memory.swap.events" max)" \
+        "$(evfield "$cg/memory.swap.events" fail)" \
+        "$(evfield "$cg/memory.events" high)"
     }
 
     # A row with a subject and no measurements, used to record that something we
@@ -207,7 +256,7 @@ writeShellApplication {
       # idle+iowait, scaled by USER_HZ (100 on this kernel). Same units as a
       # cgroup's cpu.stat usage_usec, so host and cgroup rows are comparable.
       cpu_busy_us=$(awk '/^cpu /{idle=$5+$6; tot=0; for(i=2;i<=NF;i++) tot+=$i; printf "%d", (tot-idle)*10000; exit}' "$PROC_ROOT/stat")
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$TS" "host" "-" \
         "$(( mem_total - mem_avail ))" "" "$mem_total" "" "" "" "" "" "" "$swap_used" "" "" "" "" \
         "$cpu_busy_us" \
@@ -218,7 +267,8 @@ writeShellApplication {
         "$(psi_total "$PROC_ROOT/pressure/io" some)" \
         "$(psi_total "$PROC_ROOT/pressure/io" full)" \
         "$(io_bytes "$CGROUP_ROOT" rbytes)" \
-        "$(io_bytes "$CGROUP_ROOT" wbytes)"
+        "$(io_bytes "$CGROUP_ROOT" wbytes)" \
+        "" "" "" "" ""
 
       # ---- opencode serves -------------------------------------------------
       # LOCATE THE UNITS BY NAME. Do not hardcode the slice path.
@@ -318,6 +368,20 @@ writeShellApplication {
       # open" and "panes moved somewhere we do not look" are indistinguishable.
       emit_cgroup "user-manager" "-" "$umgr"
 
+      # ---- the per-UID login slice (bead workstation-o5s1.16) --------------
+      # user-$uid.slice, ONE LEVEL ABOVE the user manager. It holds the cap
+      # that actually binds swap for everything under this user:
+      # MemorySwapMax=24G (hosts/cloudbox/configuration.nix), and the only
+      # MemoryHigh in the user tree. On 2026-09-26 it read swap.peak ==
+      # swap.max == 24 GiB, i.e. the cap had been reached, while the
+      # user-manager row below it reads swap_max=max. Without this row, every
+      # swap_ev_max in the user tree counts refusals against a cap that is
+      # nowhere in the series -- 58.9M "hits" against an apparently infinite
+      # limit. It also carries swap the user manager does not: that day
+      # 7.79 GB here vs 6.18 GB in user@1000.service, the difference charged
+      # to login session scopes, live and dead.
+      emit_cgroup "uid-slice" "user-$uid.slice" "''${umgr%/*}"
+
       # Every .slice child, DISCOVERED rather than named. The aggregate above
       # says a residual exists; these say what is in it.
       #
@@ -338,6 +402,50 @@ writeShellApplication {
       for cg in "$umgr"/*.slice; do
         [ -d "$cg" ] || continue
         emit_cgroup "user-slice" "''${cg##*/}" "$cg"
+      done
+
+      # ---- app.slice units (bead workstation-o5s1.16) ----------------------
+      # app.slice is not one population. On 2026-09-26 it held ten unrelated
+      # units -- postgres (cops-pg14), codex-lb, gnome-keyring, bcserve3,
+      # opencode-llm-audit, oc-tags-serve, ... -- and read memory.swap.peak
+      # 6.56 GB. A user-slice row saying "app.slice swapped 6.56 GB" just
+      # repeats the attribution question one level down, so each DIRECT child
+      # gets its own row.
+      #
+      # A BREAKDOWN OF the app.slice user-slice row, not additional to it --
+      # the same relationship slab has to kernel. Do not add these to the
+      # user-slice rows when computing the user-manager residual.
+      #
+      # EXPECT A LARGE mem_current RESIDUAL HERE, AND DO NOT CHASE IT. On
+      # 2026-09-26 app.slice read 24.56 GB against ~0.3 GB across its units:
+      # 21.99 GB `file` (20.9 GB of it inactive) and 2.26 GB slab, charged to
+      # a slice with ZERO direct processes. That is page cache and dentries
+      # left by units that have exited (the kernel reparents a dead child's
+      # charges to its parent) -- reclaimable, not a hidden consumer. SWAP,
+      # by contrast, attributed completely that day: the units summed to the
+      # slice's 5.28 GB, 4.59 GB of it in bcserve3 on 188 MB resident. So read
+      # this breakdown for swap and anon; for file, the slice row is the truth.
+      #
+      # Direct children only. app-tmux.slice, when present, is one row here;
+      # the pane scopes inside it already have their own tmux-scope rows, and
+      # recursing would emit them twice.
+      #
+      # Discovered, not named, for the reason given on the user-slice loop.
+      # About ten units are stable, but app.slice is also the DEFAULT slice
+      # for user transients -- every oc-scoped-shell probe scope and every
+      # `systemd-run --user --unit=` job lands here -- so the row count tracks
+      # agent activity on a swarm day, and a millisecond-lived probe can
+      # vanish mid-row and leave some fields blank. That is the same class as
+      # short bazel scopes and is accepted: those transients are exactly the
+      # population nobody would think to name. Silent when app.slice is
+      # absent: that is an ordinary state, like no tmux panes.
+      #
+      # Every child DIRECTORY, not a suffix list: in cgroupfs the only
+      # subdirectories are child cgroups, and a list of *.service/*.scope/
+      # *.slice would already have missed dbus.socket, which is live there.
+      for cg in "$umgr"/app.slice/*; do
+        [ -d "$cg" ] || continue
+        emit_cgroup "app-unit" "''${cg##*/}" "$cg"
       done
 
       # ---- tmux pane scopes (bead workstation-o5s1.13) ---------------------
@@ -414,6 +522,12 @@ writeShellApplication {
     # panes that is ~64 MB/day, i.e. ~2 GB over the 30-day retention -- fine
     # against 63G free, but worth re-checking if the pane count grows.
     # Sampler runtime also went 0.32s -> 0.92s at 17 scopes (~35 ms/scope).
+    #
+    # v3 (2026-09-26, measured live): 27 -> 37 rows/tick, mostly the ~11
+    # app-unit rows, and 0.85s -> 1.42s per tick -- ~9% of one core at a 15s
+    # cadence, under Nice=10 and idle IO. The cost is ~30 forks per row (one
+    # awk/tr per field); one awk per cgroup would cut it by an order of
+    # magnitude, tracked separately rather than rewritten under the rehearsal.
     #
     # NOTE this retention sweep did not run at all until 2026-09-16: findutils
     # was missing from runtimeInputs and the failure was swallowed by
