@@ -164,7 +164,10 @@ let
       # Release lags the client's exit by at most one watcher poll (1s).
       #
       # FAIRNESS. Waiters queue on $GATE_DIR/turnstile first, and only the one
-      # holding it polls for a slot. Without that, a newcomer arriving as a slot
+      # holding it polls for a slot. That is FIFO-biased, not strict FIFO (an
+      # flock release wakes every blocked waiter), but a newcomer can no longer
+      # jump the queue ahead of anyone already in it. Without it, a newcomer
+      # arriving as a slot
       # frees has the same odds as a build that has waited 25 minutes, and under
       # exactly the sustained swarm load this gate is for, old waiters starve
       # into the overflow below.
@@ -177,7 +180,11 @@ let
       #     as long as the target runs, which for a dev server is forever. So the
       #     BUILD half of a `bazel run` is ungated too -- a known hole.
       #   * A client killed without its server being told (SIGKILL of the agent's
-      #     process group) leaves the server finishing the build slot-less.
+      #     process group) leaves the server finishing the build slot-less. A
+      #     group SIGTERM frees the slot at once too, while bazel's cancel can
+      #     take a few more seconds to wind the actions down.
+      #   * Conversely a STOPPED client (Ctrl-Z), or a zombie whose parent never
+      #     reaps it, still passes the watcher's `kill -0` and keeps its slot.
       #   * Two clients of ONE workspace each take a slot, though bazel runs them
       #     one at a time on that workspace's server.
       #
