@@ -5731,8 +5731,15 @@ EOF
   # usually stuck behind a stalled event loop anyway. Its own runaway is bounded
   # by the serve unit's MemoryMax, which does not need earlyoom's help.
   # Kill order now: agent-spawned work (bazel/java/node/tests, adj 500, most
-  # also +300) -> user services in app.slice (adj 200) -> the serves and the
-  # rest of the system (adj 0) -> sshd/systemd (--avoid).
+  # also +300) -> system services that are `node` (+300: opencode-frontdoor,
+  # pigeon-daemon, teamclaude -- intended: stateless, back in seconds) -> user
+  # services in app.slice (adj 200) -> the serves and the rest of the system
+  # (adj 0) -> sshd/systemd (--avoid).
+  #
+  # The serves stay out of --prefer only because their comm is
+  # `.opencode-wrapp` (makeWrapper's `.opencode-wrapped`, truncated to 15
+  # chars). If opencode ever ships as a bare `bun`/`node` + script, the
+  # serves silently re-match `node|bun` below and get the +300 back.
   services.earlyoom = {
     enable = true;
     freeMemThreshold = 10;       # SIGTERM when <10% RAM free (~3.2 GB)
