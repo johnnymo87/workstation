@@ -186,6 +186,12 @@ sed -e "s|^REAL_BAZEL=.*|REAL_BAZEL=\"$WORK/stub-bazel\"|" \
     "$SHIM" > "$WORK/shim"
 chmod +x "$WORK/shim"
 
+# Same shim, but running INSIDE a bazel.slice scope -- i.e. spawned by a build.
+mkdir -p "$WORK/inslice/proc/self"
+printf '0::/user.slice/user-1000.slice/user@1000.service/bazel.slice/run-p1.scope\n' > "$WORK/inslice/proc/self/cgroup"
+sed -e "s|^PROC_ROOT=.*|PROC_ROOT=\"$WORK/inslice/proc\"|" "$WORK/shim" > "$WORK/shim-inslice"
+chmod +x "$WORK/shim-inslice"
+
 # Same shim, but its cgroup holds no bazel server.
 sed -e "s|^PROC_ROOT=.*|PROC_ROOT=\"$WORK/noserver/proc\"|" \
     -e "s|^CGROUP_ROOT=.*|CGROUP_ROOT=\"$WORK/noserver/cg\"|" \
@@ -247,8 +253,8 @@ xdg=$(grep '^SDRUN_XDG:' "$WORK/log1" || true)
 # false-passed the first time it ran.
 check "shim exports XDG_RUNTIME_DIR before calling systemd-run" "SDRUN_XDG: /run/user/" "$xdg"
 
-# A build is GATED, so it took this path with the slot held: the shim did not
-# exec, and a dozen redirections sit between bazel and the caller. Any of them
+# A build is GATED, so it went through the slot machinery, a watcher fork and
+# a dozen fd redirections before reaching bazel. Any of them
 # could swallow bazel's output without failing a single argv assertion above.
 check  "bazel's stderr reaches the caller"       "STUB_BAZEL_STDERR" "$(cat "$WORK/log1.err")"
 check  "a build takes a gate slot"               "JOURNAL: acquired slot=0 waited=0 cmd=build" "$(cat "$WORK/log1")"
@@ -329,6 +335,13 @@ slot_free() { # slot_free <n>: true iff nobody holds slot n
   flock -n "$GATE/slot.$1" true
 }
 
+# The slot is held by a watcher that polls every second for the client to be
+# gone, so release lags the shim's exit by up to ~1s. Allow 3.
+slot_frees() { # slot_frees <n>
+  for _ in $(seq 1 30); do slot_free "$1" && return 0; sleep 0.1; done
+  return 1
+}
+
 # Hold slot 0 from outside for <secs>, the way a running build would. Waits
 # until the lock is actually held before returning, so the test cannot race it.
 hold_slot() { # hold_slot <secs>
@@ -342,9 +355,9 @@ hold_slot() { # hold_slot <secs>
 
 # A slot is released when the build ends -- including when it FAILS.
 BAZEL_RC=3 run_shim "$WORK/g0" build //r
-if slot_free 0; then ok "slot is released after the build exits (rc=$RC)"; else bad "slot 0 still held after the shim exited"; fi
+if slot_frees 0; then ok "slot is released after the build exits (rc=$RC)"; else bad "slot 0 still held 3s after the shim exited"; fi
 
-# The exit code survives the gated (non-exec) path too.
+# The exit code survives the gated path too.
 [[ "$RC" == 3 ]] && ok "gated path propagates bazel's exit code" || bad "expected exit 3 on the gated path, got $RC"
 
 # Startup options before the command do not hide it from the gate.
@@ -356,13 +369,13 @@ hold_slot 20
 run_shim "$WORK/g2" query //...
 refute "query is not gated"               "JOURNAL:" "$(cat "$WORK/g2")"
 check  "query still runs"                 "BAZEL_ARGV: query //..." "$(cat "$WORK/g2")"
-refute "query prints no wait message"     "waiting for a build slot" "$(cat "$WORK/g2.err")"
+refute "query prints no wait message"     "for a build slot" "$(cat "$WORK/g2.err")"
 run_shim "$WORK/g2r" run //srv
 refute "run is not gated (its client execs the target)" "JOURNAL:" "$(cat "$WORK/g2r")"
 
 # Overflow: every slot held past the max wait -> the build still runs, loudly.
 TEST_GATE_MAX_WAIT=2 run_shim "$WORK/g3" build //o
-check "a waiter says what it is waiting for"           "waiting for a build slot" "$(cat "$WORK/g3.err")"
+check "a waiter says what it is waiting for"           "for a build slot" "$(cat "$WORK/g3.err")"
 check "the wait message names the current holder"      "cwd=/elsewhere"           "$(cat "$WORK/g3.err")"
 check "after the max wait the build runs anyway"       "BAZEL_ARGV: build //o"    "$(cat "$WORK/g3")"
 check "and says so on stderr"                          "running UNGATED"          "$(cat "$WORK/g3.err")"
@@ -400,6 +413,39 @@ r1=$(overlap 1)
 rm -f "$GATE"/slot.*
 r2=$(overlap 2)
 [[ "$r2" == yes ]] && ok "control: two slots let them overlap, so the detector works" || bad "control: two slots did not overlap (got: $r2)"
+
+# FAIRNESS. A is already waiting when B arrives; when the slot frees, A must
+# get it. Without the turnstile both poll independently and B wins about half
+# the time. (Held 5s so B's silent 2s turnstile grace expires while A is
+# still at the head of the line, and B has to say it is waiting.)
+hold_slot 5
+fa="$WORK/fair-a"; fb="$WORK/fair-b"; : > "$fa"; : > "$fb"
+env -u XDG_RUNTIME_DIR STUB_LOG="$fa" STUB_BAZEL_SLEEP=1 "$WORK/shim" build //A >/dev/null 2>&1 &
+pa=$!
+sleep 1.5
+env -u XDG_RUNTIME_DIR STUB_LOG="$fb" STUB_BAZEL_SLEEP=1 "$WORK/shim" build //B >/dev/null 2>"$fb.err" &
+pb=$!
+wait "$pa" "$pb" "$HOLDER" || true
+sa=$(awk '/^START/{print $2}' "$fa"); sb=$(awk '/^START/{print $2}' "$fb")
+if [[ -n "$sa" && -n "$sb" ]] && (( sa < sb )); then ok "the earlier waiter gets the slot first"; else bad "fairness: A start=$sa, B start=$sb"; fi
+check "a waiter behind another says it is in line" "waiting in line" "$(cat "$fb.err")"
+
+# A bazel spawned BY a build (a test shelling out to bazel) must not queue for a
+# slot its own outer build is holding.
+hold_slot 20
+run_shim_as() { # run_shim_as <shim> <log> args...
+  local sh="$1" log="$2"; shift 2
+  : > "$log"
+  set +e
+  env -u XDG_RUNTIME_DIR STUB_LOG="$log" TEST_GATE_MAX_WAIT=2 "$sh" "$@" > "$log.out" 2> "$log.err"
+  RC=$?
+  set -e
+}
+run_shim_as "$WORK/shim-inslice" "$WORK/g6" build //nested
+check  "a build inside bazel.slice skips the gate"   "JOURNAL: nested cmd=build" "$(cat "$WORK/g6")"
+refute "and does not wait"                           "for a build slot" "$(cat "$WORK/g6.err")"
+check  "and still runs"                              "BAZEL_ARGV: build //nested" "$(cat "$WORK/g6")"
+kill "$HOLDER" 2>/dev/null || true; wait "$HOLDER" 2>/dev/null || true
 
 # Gate dir unusable (here: a regular file sits where the directory should be).
 rm -rf "$GATE"; : > "$GATE"
