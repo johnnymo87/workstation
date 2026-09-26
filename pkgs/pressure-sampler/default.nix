@@ -130,14 +130,29 @@ writeShellApplication {
     #                 jump of 2026-09-15 was attributed by reading peaks out of
     #                 cgroupfs by hand. DIES WITH A TRANSIENT SCOPE -- for a bazel
     #                 or oc-agent scope, only the last tick's value survives.
-    #   swap_max      memory.swap.max, the cap swap_peak is measured against.
-    #   swap_ev_max   memory.swap.events `max`: allocations that hit swap.max.
-    #   swap_ev_fail  memory.swap.events `fail`: swap-outs that FAILED against it
-    #                 (the page stayed resident instead). Cumulative, so it
-    #                 records a squeeze that started and ended between ticks.
-    #   ev_high       memory.events `high`: MemoryHigh throttling, i.e. the
+    #   swap_max      memory.swap.max: THIS cgroup's own swap cap. Often `max`
+    #                 while an ANCESTOR's cap binds -- see swap_ev_max.
+    #   swap_ev_max   memory.swap.events `max`: swap-outs by this cgroup (or a
+    #                 descendant) refused because SOME swap.max on the path to
+    #                 the root was reached -- the smallest one, not necessarily
+    #                 this row's. There is no .local variant. So a row reading
+    #                 swap_max=max with swap_ev_max=58.9M is not a paradox: the
+    #                 binding cap is user-$uid.slice's 24G, which is why that
+    #                 cgroup has its own row (uid-slice).
+    #   swap_ev_fail  memory.swap.events `fail`: swap-outs that failed for any
+    #                 reason (the page stayed resident). fail - max ~= refused
+    #                 because system swap itself was full. Cumulative, so both
+    #                 record a squeeze that started and ended between ticks.
+    #   ev_high       memory.events `high`: throttles by THIS cgroup's own
+    #                 memory.high, plus its descendants' own, summed upward.
+    #                 THE MIRROR IMAGE OF THE oom_kill TRAP: a scope throttled
+    #                 by its PARENT's MemoryHigh reads ev_high=0 on the scope's
+    #                 row; the throttle shows only on the parent's. This is the
     #                 "slow before failed" regime a MemoryHigh on bazel.slice
-    #                 (workstation-o5s1.10) would create. Hierarchical.
+    #                 (workstation-o5s1.10) would create -- read the slice row.
+    #                 Like every slice counter it keeps dead children's events
+    #                 (trap b): app.slice read 1771 on 2026-09-26 with its own
+    #                 high=max and every live child at 0.
     #
     # Blank, never 0, when the file is absent. A structurally-zero counter read
     # as "never happened" is how this epic got "the cap never killed anything".
@@ -353,6 +368,20 @@ writeShellApplication {
       # open" and "panes moved somewhere we do not look" are indistinguishable.
       emit_cgroup "user-manager" "-" "$umgr"
 
+      # ---- the per-UID login slice (bead workstation-o5s1.16) --------------
+      # user-$uid.slice, ONE LEVEL ABOVE the user manager. It holds the cap
+      # that actually binds swap for everything under this user:
+      # MemorySwapMax=24G (hosts/cloudbox/configuration.nix), and the only
+      # MemoryHigh in the user tree. On 2026-09-26 it read swap.peak ==
+      # swap.max == 24 GiB, i.e. the cap had been reached, while the
+      # user-manager row below it reads swap_max=max. Without this row, every
+      # swap_ev_max in the user tree counts refusals against a cap that is
+      # nowhere in the series -- 58.9M "hits" against an apparently infinite
+      # limit. It also carries swap the user manager does not: that day
+      # 7.79 GB here vs 6.18 GB in user@1000.service, the difference charged
+      # to login session scopes, live and dead.
+      emit_cgroup "uid-slice" "user-$uid.slice" "''${umgr%/*}"
+
       # Every .slice child, DISCOVERED rather than named. The aggregate above
       # says a residual exists; these say what is in it.
       #
@@ -402,10 +431,14 @@ writeShellApplication {
       # recursing would emit them twice.
       #
       # Discovered, not named, for the reason given on the user-slice loop.
-      # The set is ~10-12 stable units; the transient ones that also appear
-      # (a probe scope, a mock server) are exactly the kind of population
-      # nobody would think to name. Silent when app.slice is absent: that is
-      # an ordinary state, like no tmux panes.
+      # About ten units are stable, but app.slice is also the DEFAULT slice
+      # for user transients -- every oc-scoped-shell probe scope and every
+      # `systemd-run --user --unit=` job lands here -- so the row count tracks
+      # agent activity on a swarm day, and a millisecond-lived probe can
+      # vanish mid-row and leave some fields blank. That is the same class as
+      # short bazel scopes and is accepted: those transients are exactly the
+      # population nobody would think to name. Silent when app.slice is
+      # absent: that is an ordinary state, like no tmux panes.
       #
       # Every child DIRECTORY, not a suffix list: in cgroupfs the only
       # subdirectories are child cgroups, and a list of *.service/*.scope/

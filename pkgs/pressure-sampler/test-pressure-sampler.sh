@@ -485,6 +485,8 @@ umgr9="$root9/user.slice/user-$uid9.slice/user@$uid9.service"
 mkcg "$root9" 100 1000
 mkcg "$root9/user.slice" 1
 mkcg "$root9/user.slice/user-$uid9.slice" 1
+printf '25769803776' > "$root9/user.slice/user-$uid9.slice/memory.swap.max"
+printf 'high 0\nmax 58901013\nfail 59107813\n' > "$root9/user.slice/user-$uid9.slice/memory.swap.events"
 mkcg "$umgr9" 1
 b9="$umgr9/bazel.slice"
 mkcg "$b9" 7000000000
@@ -524,6 +526,19 @@ else
     ok "host swap_peak is blank (there is no host-level swap high-water)"
   else
     bad "host swap_peak invented a value" "got: '$got'"
+  fi
+  # THE CAP THAT BINDS IS ONE LEVEL ABOVE THE USER MANAGER. swap.events `max`
+  # is charged to the cgroup that tried to swap, for a refusal by ANY ancestor's
+  # swap.max. On 2026-09-26 user@1000.service read swap_max=max with 58.9M
+  # `max` events: the binding 24G cap was on user-1000.slice, which v3 did not
+  # sample until an adversarial review found it. Without this row the series
+  # counts refusals against a cap it never shows.
+  got="$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++){if($i=="swap_max")m=i;if($i=="swap_ev_max")e=i};next}
+                    $2=="uid-slice"{print $3"|"$m"|"$e}' "$tsv9")"
+  if [ "$got" = "user-$uid9.slice|25769803776|58901013" ]; then
+    ok "the per-UID slice holding the binding swap cap has its own row"
+  else
+    bad "uid-slice row missing or wrong" "got: '$got' want user-$uid9.slice|25769803776|58901013"
   fi
   assert_width "$tsv9" "swap counters"
 fi

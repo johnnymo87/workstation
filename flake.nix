@@ -481,8 +481,8 @@
       } ''
         cd ${self}
         bash pkgs/pressure-sampler/test-pressure-sampler.sh 2>&1 | tee "$TMPDIR/ps.txt"
-        grep -q '^ALL PASS (45 assertions)' "$TMPDIR/ps.txt" || {
-          echo "GATE FAILURE: pressure-sampler suite did not reach ALL PASS (45 assertions)." >&2
+        grep -q '^ALL PASS (46 assertions)' "$TMPDIR/ps.txt" || {
+          echo "GATE FAILURE: pressure-sampler suite did not reach ALL PASS (46 assertions)." >&2
           echo "If you added assertions, bump the pinned count here deliberately." >&2
           exit 1
         }
