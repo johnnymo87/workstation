@@ -170,6 +170,11 @@ let
   # and the backoff/severity rationale now live in that package's header comment.
   driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
 
+  # Pool-canary account classification (HEALTHY / SERVING), shared by
+  # teamclaude-pool-canary and teamclaude-relogin-reminder. Tested by
+  # hosts/cloudbox/test-teamclaude-healthy.sh (checks.teamclaude-healthy).
+  teamclaudeHealthyJq = ./teamclaude-healthy.jq;
+
   # Drift canary (workstation-4ze8), layer 2 for the stale-deploy gate. The
   # library holds the predicates; the runner is a FILE rather than shell inside
   # this module so pkgs/hm-deploy-canary-sh/test-behaviour.sh can drive it
@@ -3827,7 +3832,7 @@ Check:
         # Only police a unit that is supposed to be up (mirrors the frontdoor
         # canary). An intentional stop must not page.
         if [ "$(systemctl is-active teamclaude.service)" != "active" ]; then
-          rm -f "$PENDING" "$STATE/degraded-alerted"
+          rm -f "$PENDING" "$STATE/degraded-alerted" "$STATE/exhausted-pending"
           exit 0
         fi
 
@@ -3840,41 +3845,31 @@ Check:
         fi
 
         TOTAL=$(jq -r '(.accounts // []) | length' "$BODY" 2>/dev/null || echo "")
-        # HEALTHY excludes PLAN-LESS accounts, not just dead ones.
+        # HEALTHY counts accounts that do NOT need a human; SERVING counts the
+        # ones that can take a request right now. The difference is accounts
+        # that are merely SPENT (throttled, with a quota reset ahead) -- the
+        # routine condition the router exists to absorb, which the canary used
+        # to count as degraded: 2026-09-10 13:05-16:15 EDT logged 39
+        # consecutive "pool degraded" warnings for one account sitting at
+        # u5h=1.00, which recovered by itself (bead claude-failover-proxy-w1w).
         #
-        # An account whose Max subscription lapses keeps its OAuth grant, so it
-        # reports status=active forever while returning no quota at all. That is
-        # a third state between alive and dead, and everything here used to read
-        # it as healthy: johnnymo87 sat in the roster like that from 2026-08-28
-        # and was only noticed on 09-04, in passing, by the operator. For six
-        # days the fleet was 4 accounts while every instrument said 5.
+        # Still NOT healthy, so still alerting exactly as before: disabled,
+        # status=error (dead OAuth grant), and PLAN-LESS (lapsed subscription:
+        # status=active forever with no quota -- johnnymo87, 2026-08-28..09-04;
+        # workstation PR #465). The 2-pass dampening still absorbs the
+        # one-sample all-null blip a weekly window roll produces.
         #
-        # Discriminator: all three quota buckets unreported AND no 5h
-        # consumption. Unreported-ness alone is NOT enough -- a healthy account
-        # reports a null unified7d for long stretches (johnnymo872 did for ~1620
-        # samples in July 2026) while its Fable and 5h buckets stay live.
-        #
-        # The $reporting fallback is a guard against the global case: if the
-        # quota API stops reporting for EVERYONE, that is an upstream outage,
-        # not simultaneous cancellations, so fall back to the plain active
-        # count rather than declaring the whole fleet plan-less at 3am.
-        #
-        # No new alert path: a plan-less account simply stops counting toward
-        # HEALTHY, so the existing alert-on-decrease fires. The 2-pass dampening
-        # also absorbs the one-sample all-null blip that a weekly window roll
-        # produces (observed on johnnymo872 at 2026-08-05T08:00).
-        HEALTHY=$(jq -r '
-          ( [ (.accounts // [])[]
-              | select(.disabled != true and .status == "active") ] ) as $active
-          | ( [ $active[] | select( ((.quota.unified7d) != null)
-                                 or ((.quota.unified7dFable) != null)
-                                 or (((.quota.unified5h) // 0) > 0) ) ] ) as $reporting
-          | (if ($reporting | length) == 0 then ($active | length) else ($reporting | length) end)
-        ' "$BODY" 2>/dev/null || echo "")
+        # The full definition, its backstop for a throttle no quota reset
+        # explains, and the global-outage guard live in teamclaude-healthy.jq,
+        # shared with the relogin reminder below and tested (against real
+        # samples from both incidents) by test-teamclaude-healthy.sh.
+        HEALTHY=""; SERVING=""
+        read -r HEALTHY SERVING < <(jq -r -f ${teamclaudeHealthyJq} "$BODY" 2>/dev/null || true)
 
         # Both sides must be KNOWN before comparing.
         case "$TOTAL" in ""|*[!0-9]*) echo "WARNING: could not parse account total (unknown; not alerting)"; exit 0 ;; esac
         case "$HEALTHY" in ""|*[!0-9]*) echo "WARNING: could not parse healthy count (unknown; not alerting)"; exit 0 ;; esac
+        case "$SERVING" in ""|*[!0-9]*) echo "WARNING: could not parse serving count (unknown; not alerting)"; exit 0 ;; esac
         if [ "$TOTAL" -eq 0 ]; then
           echo "WARNING: status reported zero accounts (unknown; not alerting)"
           exit 0
@@ -3896,10 +3891,20 @@ Check:
         #
         # Sampled on EVERY pass, including healthy ones: the healthy days are
         # the baseline. ~250B/pass at 5-minutely => ~72KB/day, trimmed to ~30d.
+        #
+        # `healthy` keeps its ORIGINAL meaning (plain count of enabled,
+        # status=active accounts) so the series stays comparable across its
+        # whole history; it is NOT the number the canary alerts on. That one is
+        # recorded beside it as `canary_healthy`, with `canary_serving`, so a
+        # reader joining this series against the canary journal can see the
+        # exact values the gate compared (bead claude-failover-proxy-mbt).
         SAMPLES="$STATE/quota-samples.jsonl"
-        if jq -c --arg ts "$(date -Is)" '{
+        if jq -c --arg ts "$(date -Is)" \
+              --argjson canary_healthy "$HEALTHY" --argjson canary_serving "$SERVING" '{
               ts: $ts,
               healthy: ([(.accounts // [])[] | select(.disabled != true and .status == "active")] | length),
+              canary_healthy: $canary_healthy,
+              canary_serving: $canary_serving,
               roster: ((.accounts // []) | length),
               current: (.currentAccount // null),
               accounts: [(.accounts // [])[] | {
@@ -3987,6 +3992,48 @@ Check:
               fi
               ;;
           esac
+        fi
+
+        # WHOLE POOL SPENT: a capacity notice, not a page.
+        #
+        # One spent account is silent now (see HEALTHY above). EVERY healthy
+        # account spent at once is different: nothing is broken and no human
+        # can fix it, but all Max traffic is spilling to the paid fallback until
+        # the first reset, and that costs real money -- on 2026-09-10 all four
+        # were throttled 13:50-14:25 EDT, inside the window that ran Vertex to
+        # $372 against a $100/day budget. So: at most ONE notice per day
+        # (date-stamped signature, TTL 0), after the same 2-consecutive
+        # dampening. Replayed over all history since 2026-07-26 this condition
+        # occurred on exactly two days (08-05, 09-10).
+        #
+        # Blind spot, stated so nobody over-reads the silence: this sees only
+        # per-ACCOUNT status. TeamClaude also refuses per MODEL FAMILY (a spent
+        # Fable weekly bucket leaves the account "active" but unusable for
+        # Fable), so the router can be out for some requests while this reads
+        # SERVING > 0. The router's own view is cfp's maxHealthyAccounts.
+        EXHAUSTED="$STATE/exhausted-pending"
+        if [ "$SERVING" -eq 0 ] && [ "$HEALTHY" -gt 0 ]; then
+          EX_N=$(( $(cat "$EXHAUSTED" 2>/dev/null || echo 0) + 1 ))
+          echo "$EX_N" > "$EXHAUSTED"
+          echo "NOTE: every healthy account is spent: 0 serving, $HEALTHY waiting on a quota reset ($EX_N/2 consecutive)"
+          if [ "$EX_N" -ge 2 ]; then
+            EXHAUSTED_TEXT=$(cat <<EOF
+TeamClaude Max pool fully SPENT (capacity notice - nothing is broken).
+
+All $HEALTHY healthy accounts are throttled on quota at once, so Max traffic is
+going to the paid fallback until the first one resets. Every account will
+recover on its own; there is nothing to log in to or fix.
+
+This is sent at most once a day. If it recurs often, the pool is undersized
+for the load.
+
+Detail: curl -s localhost:3456/teamclaude/status | jq '[.accounts[] | {name, status, u5h: .quota.unified5h, u7d: .quota.unified7d}]'
+EOF
+)
+            ${driftAlert} "$STATE/exhausted-notified" "exhausted-$(date +%Y-%m-%d)" "$EXHAUSTED_TEXT" 0
+          fi
+        else
+          rm -f "$EXHAUSTED"
         fi
 
         if [ "$HEALTHY" -ge "$EXPECTED_HEALTHY" ]; then
@@ -4083,17 +4130,10 @@ EOF
         DRIFT=""
         if [ -f "$BODY" ]; then
           ROSTER=$(jq -r '(.accounts // [])[] | "  - \(.name // "?"): \(.status // "?")"' "$BODY" 2>/dev/null || echo "  (roster unavailable)")
-            # Same plan-less-aware count as the canary above; see the long
-          # comment there. A lapsed subscription reports status=active with no
-          # quota, and must not be counted as a healthy account.
-          HEALTHY=$(jq -r '
-            ( [ (.accounts // [])[]
-                | select(.disabled != true and .status == "active") ] ) as $active
-            | ( [ $active[] | select( ((.quota.unified7d) != null)
-                                   or ((.quota.unified7dFable) != null)
-                                   or (((.quota.unified5h) // 0) > 0) ) ] ) as $reporting
-            | (if ($reporting | length) == 0 then ($active | length) else ($reporting | length) end)
-          ' "$BODY" 2>/dev/null || echo "")
+          # The SAME count the canary above compares (same file, not a copy):
+          # plan-less and dead accounts excluded, merely-spent ones included.
+          HEALTHY=""; SERVING=""
+          read -r HEALTHY SERVING < <(jq -r -f ${teamclaudeHealthyJq} "$BODY" 2>/dev/null || true)
           # BOTH sides must be known before comparing. Concatenating them into
           # one glob would let an empty operand through on the digits of the
           # other, and `[ "" -ne 5 ]` is a runtime error, not a false.

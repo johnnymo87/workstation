@@ -489,6 +489,25 @@
         touch $out
       '';
 
+      # TeamClaude pool-canary classification (bead claude-failover-proxy-w1w).
+      # Tests the SAME jq file the cloudbox canary and relogin reminder load
+      # (hosts/cloudbox/teamclaude-healthy.jq), against synthetic states and a
+      # replay of real samples from the 2026-09-07 blip and 2026-09-10 storm.
+      # Count pinned, following checks.pressure-sampler-tests.
+      teamclaude-healthy-tests = devboxPkgs.runCommand "teamclaude-healthy-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+                              devboxPkgs.gawk devboxPkgs.jq ];
+      } ''
+        cd ${self}
+        bash hosts/cloudbox/test-teamclaude-healthy.sh 2>&1 | tee "$TMPDIR/th.txt"
+        grep -q '^ALL PASS (24 assertions)' "$TMPDIR/th.txt" || {
+          echo "GATE FAILURE: teamclaude-healthy suite did not reach ALL PASS (24 assertions)." >&2
+          echo "If you added assertions, bump the pinned count here deliberately." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # ---------------------------------------------------------------------
       # workstation-dad9: five suites that existed and ran nowhere.
       #
