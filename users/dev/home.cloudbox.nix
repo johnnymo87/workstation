@@ -667,8 +667,9 @@ lib.mkIf isCloudbox {
   # SIZING. One active build <=10G (the scope cap) + resident idle server JVMs of
   # other workspaces (~2.4G measured across two on a single serve) + headroom for
   # a second build spinning up => 16G. Budgeting 2x10G here would relocate the
-  # pressure to the host, where OOMScoreAdjust=500 makes the serves the
-  # preferred victim.
+  # pressure to the host, where earlyoom starts killing (the serves are no
+  # longer its preferred victim since workstation-o5s1.5, but host-wide kills
+  # are still indiscriminate compared with a kill scoped to this slice).
   #
   # WHAT HAPPENS AT THIS CAP -- measured 2026-09-25. It DOES kill: this slice's
   # hierarchical memory.events reads oom_kill=75, and the kernel log shows 25

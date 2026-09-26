@@ -6,6 +6,9 @@
 , scopeMemorySwapMax ? "2G"
 , scopeOOMPolicy ? "continue"
 , sliceName ? "oc-agent"
+  # Floor for the payload's oom_score_adj (workstation-o5s1.5). See the comment
+  # at the point of use.
+, oomScoreAdjFloor ? 500
 }:
 
 let
@@ -21,6 +24,26 @@ let
       SCOPE_MEMORY_SWAP_MAX="${scopeMemorySwapMax}"
       SCOPE_OOM_POLICY="${scopeOOMPolicy}"
       SLICE_NAME="${sliceName}"
+      OOM_SCORE_ADJ_FLOOR="${toString oomScoreAdjFloor}"
+
+      # Make agent-spawned work MORE killable than the serve that spawned it
+      # (workstation-o5s1.5). oom_score_adj is inherited across fork, so without
+      # this every bash-tool command -- bazel JVMs, test runners, an agent's
+      # postgres -- carries the serve's own value, and the serve cannot be made
+      # a less-preferred OOM victim than its own children. The serve unit now
+      # runs at 0; this puts everything it spawns through here back at 500,
+      # which is exactly where it sat before, so nothing but the serve moves.
+      #
+      # RAISE ONLY, never lower: an unprivileged process may always raise its own
+      # value but not lower it, and a caller that already asked to be killed
+      # first should stay that way. Done before the probe so both the scoped
+      # path and the degrade path get it; `exec` preserves it. Never fatal and
+      # never noisy -- output here is prepended to every command's output.
+      cur_adj=""
+      if { read -r cur_adj < /proc/self/oom_score_adj; } 2>/dev/null \
+        && [ "$cur_adj" -lt "$OOM_SCORE_ADJ_FLOOR" ] 2>/dev/null; then
+        { echo "$OOM_SCORE_ADJ_FLOOR" > /proc/self/oom_score_adj; } 2>/dev/null || true
+      fi
 
       # Set XDG_RUNTIME_DIR to /run/user/<uid> when unset.
       # MEASURED: this is UNSET in the bash environment under `opencode serve`

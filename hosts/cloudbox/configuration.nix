@@ -1707,7 +1707,20 @@ ${serveIdCase}
       # serve for everyone on that member.
       MemoryMax = "14G";
       MemorySwapMax = "1G";
-      OOMScoreAdjust = "500";
+      # 0, NOT 500 (workstation-o5s1.5). At 500 the four serves were the top
+      # four oom_score entries on the whole host, i.e. earlyoom's and the
+      # kernel's FIRST victims -- the most stateful process on the box (a kill
+      # orphans every in-flight turn on that member), killed in exactly the
+      # state where its JS-level SIGTERM handler cannot run (see
+      # TimeoutStopSec below). The per-serve runaway is already bounded by
+      # MemoryMax above; host-level OOM ranking should not ALSO single it out.
+      #
+      # Everything the serve spawns through its bash tool is put back at 500 by
+      # pkgs/oc-scoped-shell (the adj is inherited across fork, so without that
+      # the serve's children would drop to 0 with it). Processes the serve
+      # spawns directly -- LSPs, local MCP servers -- inherit 0; earlyoom's
+      # --prefer still ranks them (node) ahead of the serve itself.
+      OOMScoreAdjust = "0";
       Restart = "always";
       RestartSec = 10;
       # A wedged serve's SIGTERM handler is a JS-level `process.once` that a
@@ -5704,11 +5717,29 @@ EOF
   # earlyoom: last-resort killer when memory is critically low.
   # Swap threshold set to 100% (always true) so earlyoom triggers on
   # RAM alone — our failure mode exhausts RAM while swap has headroom.
-  # Kill order: opencode/bazel/java/node first (--prefer, +100 oom_score),
-  # then everything else by RSS, then sshd/systemd
-  # last (--avoid, -100 oom_score, plus OOMScoreAdjust=-1000).
-  # opencode is in --prefer because it's the known memory leak leader
-  # and has OOMScoreAdjust=500 + cgroup caps as additional backstops.
+  #
+  # Victim selection (earlyoom 1.8.2, kill.c): the kernel's /proc/<pid>/oom_score
+  # (which already folds in oom_score_adj), +300 for a --prefer match on the
+  # process NAME (comm), -300 for --avoid; highest wins; oom_score_adj=-1000 is
+  # never picked. So --prefer is a bias on top of the adj, not an override.
+  #
+  # The opencode serves (comm `.opencode-wrapp`) are deliberately NOT in
+  # --prefer any more, and run at OOMScoreAdjust=0 while everything their bash
+  # tool spawns runs at 500 (workstation-o5s1.5). A serve is the most stateful
+  # process on the box: killing it orphans every in-flight turn on that member,
+  # and under the pressure that gets earlyoom to act, its SIGTERM handler is
+  # usually stuck behind a stalled event loop anyway. Its own runaway is bounded
+  # by the serve unit's MemoryMax, which does not need earlyoom's help.
+  # Kill order now: agent-spawned work (bazel/java/node/tests, adj 500, most
+  # also +300) -> system services that are `node` (+300: opencode-frontdoor,
+  # pigeon-daemon, teamclaude -- intended: stateless, back in seconds) -> user
+  # services in app.slice (adj 200) -> the serves and the rest of the system
+  # (adj 0) -> sshd/systemd (--avoid).
+  #
+  # The serves stay out of --prefer only because their comm is
+  # `.opencode-wrapp` (makeWrapper's `.opencode-wrapped`, truncated to 15
+  # chars). If opencode ever ships as a bare `bun`/`node` + script, the
+  # serves silently re-match `node|bun` below and get the +300 back.
   services.earlyoom = {
     enable = true;
     freeMemThreshold = 10;       # SIGTERM when <10% RAM free (~3.2 GB)
@@ -5717,7 +5748,7 @@ EOF
     freeSwapKillThreshold = 100; # Always true — trigger on RAM alone
     reportInterval = 15;
     extraArgs = [
-      "--prefer" "(^|/)(\\.opencode-wrapp|node|bun|bazel|java|kotlin-language-server|docker)$"
+      "--prefer" "(^|/)(node|bun|bazel|java|kotlin-language-server|docker)$"
       "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|agetty|dhcpcd)$"
     ];
   };
