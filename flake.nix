@@ -1362,7 +1362,8 @@
       # still installs, still runs builds, and still charges every one of them to
       # the serve. There is no symptom until the next OOM kill.
       bazel-scope-shim = devboxPkgs.runCommand "bazel-scope-shim-guard" {
-        nativeBuildInputs = [ devboxPkgs.bash ];
+        # util-linux: the gate tests hold and probe slots with flock(1).
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.util-linux ];
         BAZEL_SCOPE_SHIM_BIN = "${(localPkgsFor devboxSystem).bazel-scope}/bin/bazel";
       } ''
         cd ${self}

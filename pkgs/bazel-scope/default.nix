@@ -50,6 +50,13 @@
   # source of truth, and the generation check in flake.nix that asserts the shim's
   # --slice= names a slice unit that actually ships.
 , sliceName ? "bazel"
+  # Concurrency gate (bead workstation-o5s1.19): how many build/test/coverage
+  # invocations may run at once, host-wide. See the gate section of the script
+  # for what it bounds and, as importantly, what it does not. The caller sizes
+  # this against the slice cap; the default is only for `nix build`.
+, maxConcurrentBuilds ? 2
+  # How long a gated invocation waits for a slot before running anyway, loudly.
+, gateMaxWaitSecs ? 1800
 }:
 
 let
@@ -68,6 +75,13 @@ let
       SYSTEMD_RUN="${pkgs.systemd}/bin/systemd-run"
       SCOPE_MEMORY_MAX="${scopeMemoryMax}"
       SLICE_NAME="${sliceName}"
+      FLOCK="${pkgs.util-linux}/bin/flock"
+      SLEEP="${pkgs.coreutils}/bin/sleep"
+      MKDIR="${pkgs.coreutils}/bin/mkdir"
+      SYSTEMD_CAT="${pkgs.systemd}/bin/systemd-cat"
+      GATE_SLOTS="${toString maxConcurrentBuilds}"
+      GATE_MAX_WAIT_SECS="${toString gateMaxWaitSecs}"
+      GATE_POLL_SECS="2"
       # Filesystem roots, named so the test can point them at a fixture tree.
       # There is deliberately no env-var override: the SHIPPED script must have no
       # branch a caller could use to escape the scope or skip the cleanup.
@@ -103,7 +117,9 @@ let
       # environment of actions and tests, so a test that shells out to bazel will
       # NOT see this variable and will open a scope of its own. That is benign --
       # the new scope still lands in the same capped slice -- but do not read this
-      # guard as a hard guarantee of one-scope-per-build.
+      # guard as a hard guarantee of one-scope-per-build. Such a nested build also
+      # queues for a gate slot (step 2b), which is why that gate cannot block
+      # forever.
       if [ "''${BAZEL_SCOPE_SHIM_ACTIVE:-}" = "1" ]; then
         exec "$REAL_BAZEL" "$@"
       fi
@@ -120,6 +136,153 @@ let
         XDG_RUNTIME_DIR="/run/user/''${UID}"
         export XDG_RUNTIME_DIR
       fi
+      GATE_DIR="''${XDG_RUNTIME_DIR}/bazel-gate"
+
+      # ---- 2b. Concurrency gate (bead workstation-o5s1.19) --------------------
+      #
+      # WHY. bazel.slice (16G, users/dev/home.cloudbox.nix) was sized for ONE
+      # active build plus idle servers. On 2026-09-15 five-plus workspaces built
+      # at once, the slice sat at its cap with anon ~16.6G and file cache down to
+      # ~300M, re-reading its own outputs at ~270 MB/s for ~2.5h and OOM-killing
+      # JVMs intermittently. Pressure-sampler rows 2026-09-10..26: in samples
+      # where slice anon exceeded 13G, 2-5 scopes were actively burning CPU at
+      # ~3.7G anon each. The slice cap cannot fix that -- it only decides who
+      # dies -- so this bounds the NUMBER of concurrent builds instead.
+      #
+      # WHAT IT BOUNDS. At most GATE_SLOTS build/test/coverage CLIENTS run at once
+      # host-wide. A slot is an flock on $GATE_DIR/slot.N, held by THIS shell for
+      # the client's lifetime and released by the kernel when this shell exits,
+      # however it exits -- so a killed build cannot leak a slot.
+      #
+      # WHAT IT DOES NOT BOUND, and the gaps are deliberate:
+      #   * Idle server JVMs. A workspace's server outlives its build for
+      #     --max_idle_secs (900s) at ~2.35G anon (sampler mean), holding no slot.
+      #   * Other commands. query/cquery/info/fetch are ungated. `run` is ungated
+      #     because its client EXECS the target in place: a slot would be held for
+      #     as long as the target runs, which for a dev server is forever.
+      #   * A client killed without its server being told (SIGKILL of the agent's
+      #     process group) leaves the server finishing the build slot-less.
+      #   * Two clients of ONE workspace each take a slot, though bazel runs them
+      #     one at a time on that workspace's server.
+      #
+      # WAIT, THEN RUN ANYWAY. After GATE_MAX_WAIT_SECS a waiter proceeds
+      # ungated, loudly, and logs `overflow` to the journal. Blocking forever is
+      # worse: a test that shells out to bazel gets a SCRUBBED environment, so
+      # the loop guard above cannot see it, and it would wait for a slot its own
+      # outer build holds. Same philosophy as the degrade path below: a
+      # degraded build beats no build, but never a quiet one.
+      #
+      # EVERY child is started with the slot fd CLOSED (with_gate_fd_closed).
+      # Otherwise the bazel client could hand it to the server JVM it forks,
+      # which would then hold the slot for up to max_idle_secs after the build.
+      #
+      # EVENTS go to the user journal: journalctl --user -t bazel-gate. The
+      # workstation-o5s1.10 decision is waiting on exactly that data.
+      GATE_FD=""
+      GATE_SLOT=""
+      GATE_CMD=""
+
+      gate_log() {
+        printf '%s\n' "$*" | "$SYSTEMD_CAT" -t bazel-gate 2>/dev/null || true
+      }
+
+      # The bazel command: the first argument that is not a startup option.
+      # A startup option written with a SEPARATE value (`--output_base /x`) makes
+      # this return the value, which matches no gated command and so fails OPEN
+      # (ungated, as before this gate existed), never closed.
+      bazel_command() {
+        local a
+        for a in "$@"; do
+          case "$a" in
+            -*) continue ;;
+            *) printf '%s' "$a"; return 0 ;;
+          esac
+        done
+        return 0
+      }
+
+      # Run "$@" with the slot fd closed in the child only.
+      with_gate_fd_closed() {
+        if [ -n "$GATE_FD" ]; then
+          "$@" {GATE_FD}>&-
+        else
+          "$@"
+        fi
+      }
+
+      gate_try_acquire() {
+        local j i fd start
+        start=$((RANDOM % GATE_SLOTS))
+        for ((j = 0; j < GATE_SLOTS; j++)); do
+          i=$(( (start + j) % GATE_SLOTS ))
+          # <> opens without truncating, and creates the file if missing.
+          # The braces matter: `exec {fd}<>f 2>/dev/null` would apply the
+          # 2>/dev/null to THIS SHELL permanently and swallow bazel's stderr.
+          { exec {fd}<>"$GATE_DIR/slot.$i"; } 2>/dev/null || return 1
+          if "$FLOCK" -n "$fd" 2>/dev/null; then
+            GATE_FD=$fd
+            GATE_SLOT=$i
+            printf 'pid=%s since=%(%F %T)T cmd=%s cwd=%s\n' "$$" -1 "$GATE_CMD" "$PWD" \
+              > "$GATE_DIR/slot.$i.info" 2>/dev/null || true
+            return 0
+          fi
+          exec {fd}>&-
+        done
+        return 1
+      }
+
+      # Last recorded holder of each slot whose recorded pid is still alive.
+      gate_holders() {
+        local f line pid
+        for f in "$GATE_DIR"/slot.*.info; do
+          [ -r "$f" ] || continue
+          line=$(< "$f") || continue
+          pid=''${line#pid=}; pid=''${pid%% *}
+          if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            printf 'bazel-scope-shim:   %s\n' "$line"
+          fi
+        done
+      }
+
+      gate_enter() {
+        local started waited next_report
+        if ! "$MKDIR" -p "$GATE_DIR" 2>/dev/null; then
+          echo "bazel-scope-shim: WARNING: cannot create $GATE_DIR; running WITHOUT the concurrency gate (workstation-o5s1.19)." >&2
+          gate_log "ungated reason=no-gate-dir cmd=$GATE_CMD cwd=$PWD"
+          return 0
+        fi
+        if gate_try_acquire; then
+          gate_log "acquired slot=$GATE_SLOT waited=0 cmd=$GATE_CMD cwd=$PWD"
+          return 0
+        fi
+        started=$SECONDS
+        echo "bazel-scope-shim: waiting for a build slot: at most $GATE_SLOTS builds run at once on this host, to keep bazel.slice out of memory thrash (workstation-o5s1.19). Held by:" >&2
+        gate_holders >&2
+        gate_log "wait cmd=$GATE_CMD cwd=$PWD"
+        next_report=$((started + 300))
+        while (( SECONDS - started < GATE_MAX_WAIT_SECS )); do
+          "$SLEEP" "$GATE_POLL_SECS"
+          if gate_try_acquire; then
+            waited=$((SECONDS - started))
+            echo "bazel-scope-shim: got build slot $GATE_SLOT after ''${waited}s." >&2
+            gate_log "acquired slot=$GATE_SLOT waited=$waited cmd=$GATE_CMD cwd=$PWD"
+            return 0
+          fi
+          if (( SECONDS >= next_report )); then
+            echo "bazel-scope-shim: still waiting for a build slot ($((SECONDS - started))s). Held by:" >&2
+            gate_holders >&2
+            next_report=$((next_report + 300))
+          fi
+        done
+        echo "bazel-scope-shim: WARNING: no build slot after ''${GATE_MAX_WAIT_SECS}s; running UNGATED. If many builds are doing this, bazel.slice is about to thrash." >&2
+        gate_log "overflow waited=$((SECONDS - started)) cmd=$GATE_CMD cwd=$PWD"
+        return 0
+      }
+
+      GATE_CMD=$(bazel_command "$@")
+      case "$GATE_CMD" in
+        build|test|coverage) gate_enter ;;
+      esac
 
       # ---- 3. Canary ---------------------------------------------------------
       # Creating a transient unit can fail even when systemd-run and the user
@@ -137,7 +300,7 @@ let
       # If the canary passes but the real invocation fails, we do NOT fall back:
       # that failure is loud (systemd-run's own exit code and stderr), and a
       # silent unscoped build is precisely what this shim exists to prevent.
-      if "$SYSTEMD_RUN" --user --scope --collect --quiet -- true 2>/dev/null; then
+      if with_gate_fd_closed "$SYSTEMD_RUN" --user --scope --collect --quiet -- true 2>/dev/null; then
         # --collect: GC the scope once it empties. The scope outlives this client
         #   by design -- the server JVM stays in it until --max_idle_secs (900s).
         # No --unit=: the auto-generated run-pNNN.scope name is unique ENOUGH
@@ -168,12 +331,20 @@ let
         #   i.e. `$$` collapses to `$` and `''${...}` is substituted or errors.
         #   Any bazel flag or target pattern containing those was silently
         #   mangled before this flag was added (workstation-yt0p).
-        exec "$SYSTEMD_RUN" --user --scope --collect --quiet \
-          --expand-environment=no \
-          --slice="$SLICE_NAME" \
-          -p MemoryMax="$SCOPE_MEMORY_MAX" \
-          -p OOMPolicy=continue \
-          -- "$REAL_BAZEL" "$@"
+        scope_argv=("$SYSTEMD_RUN" --user --scope --collect --quiet
+          --expand-environment=no
+          --slice="$SLICE_NAME"
+          -p MemoryMax="$SCOPE_MEMORY_MAX"
+          -p OOMPolicy=continue
+          -- "$REAL_BAZEL" "$@")
+        # Ungated: exec, exactly as before the gate existed. Gated: this shell
+        # must stay alive, because it IS the slot holder (step 2b).
+        if [ -z "$GATE_FD" ]; then
+          exec "''${scope_argv[@]}"
+        fi
+        rc=0
+        with_gate_fd_closed "''${scope_argv[@]}" || rc=$?
+        exit "$rc"
       fi
 
       # ---- 4. Degrade --------------------------------------------------------
@@ -184,7 +355,7 @@ let
       echo "bazel-scope-shim: WARNING: if that cgroup is an opencode serve, an OOM here kills every session on it (workstation-mqp3)." >&2
 
       rc=0
-      "$REAL_BAZEL" "$@" || rc=$?
+      with_gate_fd_closed "$REAL_BAZEL" "$@" || rc=$?
 
       # A degraded build may fork a server JVM into OUR cgroup, where it then
       # lives for max_idle_secs (900s). Because the server -- not the client --
@@ -210,7 +381,7 @@ let
       # is discarded) after the build has already finished.
       if bazel_server_in_own_cgroup; then
         echo "bazel-scope-shim: shutting down the bazel server left in this cgroup by the unscoped build." >&2
-        "$REAL_BAZEL" --noblock_for_lock shutdown >/dev/null 2>&1 || true
+        with_gate_fd_closed "$REAL_BAZEL" --noblock_for_lock shutdown >/dev/null 2>&1 || true
       fi
 
       exit "$rc"
