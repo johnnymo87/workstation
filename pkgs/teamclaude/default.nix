@@ -51,6 +51,9 @@
 # #137/#156/#165, and our own bead claude-failover-proxy-be0. The hop is bounded
 # to one on purpose: if the second account is throttled too the limit is almost
 # certainly per egress IP, and rotating further only pays cold caches.
+# v1.1.21 (#431) adds one more step for a HEADERLESS 429 after the hop: if the
+# hopped-to account refuses too, it waits 2s and retries once there before the
+# 429 reaches the client (TEAMCLAUDE_HEADERLESS_429_RETRY_DELAY_MS; 0 = off).
 # `switchThreshold` (and the per-bucket `switchThresholds` from #233) only feed
 # proactive utilization-based selection and have no effect on 429 handling.
 #
