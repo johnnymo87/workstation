@@ -37,7 +37,7 @@
 # store, and wrap `src/index.js` with a pinned node. No node_modules, no bundler.
 #
 # NODE FLOOR: upstream raised `engines.node` to >=20 in v1.1.9 (#128 fixed a
-# Node-18 stream crash); still >=20.0.0 at v1.1.16. The generic `nodejs` attr
+# Node-18 stream crash); still >=20.0.0 at v1.1.21. The generic `nodejs` attr
 # resolves to 22.x in our pinned nixpkgs, so this is satisfied — but if that
 # attr is ever pinned downward, teamclaude breaks at runtime, not at build time.
 #
@@ -51,10 +51,14 @@
 # #137/#156/#165, and our own bead claude-failover-proxy-be0. The hop is bounded
 # to one on purpose: if the second account is throttled too the limit is almost
 # certainly per egress IP, and rotating further only pays cold caches.
+# v1.1.21 (#431) adds one more step for a HEADERLESS 429 after the hop: if the
+# hopped-to account refuses too, it waits 2s and retries once there before the
+# 429 reaches the client (TEAMCLAUDE_HEADERLESS_429_RETRY_DELAY_MS; 0 = off).
 # `switchThreshold` (and the per-bucket `switchThresholds` from #233) only feed
 # proactive utilization-based selection and have no effect on 429 handling.
 #
-# DOES UPSTREAM SUBSUME `balanced` YET? Checked at v1.1.20, answer is no. The
+# DOES UPSTREAM SUBSUME `balanced` YET? Checked at v1.1.20 and again at
+# v1.1.21 (2026-09-26), answer is no. The
 # obvious candidate is #290 ("adaptive distribution using plan tier and live
 # congestion", v1.1.18), but its adaptive mode is consulted at exactly one call
 # site -- `_pickLeastLoaded` -- reachable only from `_selectForSession`, which
@@ -73,7 +77,7 @@
 # claude-failover-proxy-ldc.
 #
 # To bump: pick a newer tag from https://github.com/KarpelesLab/teamclaude/tags,
-# rebase branch feat/balanced-on-v1120 (or its successor) on it in the fork,
+# rebase branch feat/balanced-on-v1121 (or its successor) on it in the fork,
 # push, set `rev` to the new head, and refresh `src.hash` via
 #   nix store prefetch-file --json --unpack \
 #     https://github.com/johnnymo87/teamclaude/archive/<rev>.tar.gz | jq -r .hash
@@ -87,23 +91,25 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.20-balanced"; # upstream v1.1.20 + local patches + balanced port
+  version = "1.1.21-balanced"; # upstream v1.1.21 + local patches + balanced port
 
   src = fetchFromGitHub {
-    # SMALL FORK. Branch feat/balanced-on-v1120 = upstream v1.1.20 (999eda4) +
+    # SMALL FORK. Branch feat/balanced-on-v1121 = upstream v1.1.21 (3d5bb6f) +
     # the four self-contained commits below, PLUS the `balanced` routing port,
-    # rebased 2026-09-13. 25 commits on top of v1.1.20.
+    # rebased 2026-09-26 (previously on v1.1.20, 2026-09-13). 26 commits on top
+    # of v1.1.21.
     #
     # THIS BUILD DEFAULTS TO `routingStrategy: "expiry"` — but READ THE NEXT
     # PARAGRAPH BEFORE CONCLUDING A BUMP IS THEREFORE SAFE.
     #
     # The default is not what we run. cloudbox's ~/.config/teamclaude.json has
-    # `routingStrategy: "balanced"` (confirmed 2026-09-13, 4 accounts,
-    # quotaProbeSeconds 90, distributeSessions unset). The opt-in happened after
+    # `routingStrategy: "balanced"` (confirmed 2026-09-13 and again 2026-09-26:
+    # 4 accounts, quotaProbeSeconds 90, distributeSessions unset, proxy.mcp
+    # unset). The opt-in happened after
     # the v1.1.16 pin landed, so the "deploying changes nothing" reassurance
     # that was true for THAT bump is false for every bump after it: this one
-    # carries a `balanced` implementation rebased across ~60 upstream commits
-    # and four releases, and it goes live the moment the service restarts.
+    # carries a `balanced` implementation rebased across upstream's commits,
+    # and it goes live the moment the service restarts.
     # Rollback item 1 below (drop the config key, no rebuild) is the fast exit.
     #
     # Balanced also makes `quotaProbeSeconds > 0` a FATAL startup requirement --
@@ -112,26 +118,42 @@ stdenvNoCC.mkDerivation rec {
     # account's quota is ever learned. Our config has 90.
     #
     # The four pre-existing patches, in order:
-    #   d5bddec fix(routing): advisor-model family check in _selectNext's
+    #   f61b023 fix(routing): advisor-model family check in _selectNext's
     #           resurrect fallback (upstream checks _routeAllows only; a
     #           resurrect could land on an account whose advisor family bucket
     #           is spent). One line. Not filed upstream yet.
-    #   333b313 feat(oauth): log the FIELD NAMES of a token-refresh response,
+    #   99e7e92 feat(oauth): log the FIELD NAMES of a token-refresh response,
     #           once per shape.
-    #   2f1a5c4 feat(oauth): log refresh_token_expires_in on EVERY refresh --
+    #   cf44305 feat(oauth): log refresh_token_expires_in on EVERY refresh --
     #           the ~30d grant lifetime that kills accounts without warning is
     #           reported by the endpoint and upstream discards it (bead xyq).
-    #   770b261 fix(routing): plan-less gating -- an account whose subscription
+    #   184e0cc fix(routing): plan-less gating -- an account whose subscription
     #           lapsed keeps its OAuth grant, reports status=active and NO
     #           quota, and was never gated. Sustained over 3 silent probes,
     #           self-disabling when the whole fleet is silent, soft (the
     #           exhausted-probe path can still reach it). Returns the reason
     #           'plan-less' since #262 made _isAvailable a wrapper over
-    #           unavailableReason() (bead claude-failover-proxy-arj).
-    # 1870/1870 tests green on this rev (1412 on the previous pin). The
-    # throttle-revalidation flake below did not fire on this run.
+    #           unavailableReason() (bead claude-failover-proxy-arj). Not
+    #           filed upstream: we never captured what a lapsed account's
+    #           request returns, and upstream #193 (v1.1.14) already benches an
+    #           account for 5 min on a 403 oauth_not_allowed_for_organization,
+    #           which #468 reports for a past_due subscription. Our gate is the
+    #           proactive complement; unconfirmed whether it is still needed.
+    # 2268/2268 tests green on this rev (1870 on the previous pin).
     #
-    # ONE REGRESSION WAS INTRODUCED BY THE REBASE AND FIXED IN IT (51d3aa6).
+    # v1.1.21 added `tsc` over src/ to upstream CI (#371). Our balanced code
+    # carried 7 diagnostics under it; bf29fca adds JSDoc casts only (no
+    # behaviour change). tsc and eslint are clean on this rev.
+    #
+    # The v1.1.20 -> v1.1.21 rebase had one textual conflict (constructor
+    # JSDoc) and was reviewed for "our shape survived, upstream's changed
+    # underneath" drift; nothing reachable in our config. The one non-obvious
+    # item: a plan-less account makes #429's synthetic-429 retry-after fall
+    # back to 60s when the rest of the fleet is exhausted (pre-existing, only
+    # while a lapsed account is configured).
+    #
+    # AT THE v1.1.20 BUMP, ONE REGRESSION WAS INTRODUCED BY THE REBASE AND
+    # FIXED IN IT (51d3aa6; 09fa838 on this branch).
     # Upstream #361 made `previewRouteIndex` provider-scoped; our balanced
     # margin mirror kept passing `null` for `exclude`, so on a MIXED
     # Anthropic+Codex fleet the preview ranked across providers and could name a
@@ -146,11 +168,14 @@ stdenvNoCC.mkDerivation rec {
     #      (or set it to "expiry"). No rebuild. This is the real rollback for
     #      anything balanced does wrong, and it is why the port ships behind a
     #      default rather than as a replacement.
-    #   2. PREVIOUS PIN = rev 2fc0258715590215b77d4f2ee7f169b4789924c1, hash
+    #   2. PREVIOUS PIN = rev 51d3aa6f42d0c9bb252fdead7c7d2a292f5c6ddb, hash
+    #      sha256-l2IU8NmMtQ6+7+O5IJ9cMsBN4xuJNHyOIqr4g/RLZe4=, version
+    #      "1.1.20-balanced" (branch feat/balanced-on-v1120). Before that:
+    #      rev 2fc0258715590215b77d4f2ee7f169b4789924c1, hash
     #      sha256-FGgGmZ3RQ7leKZe7XKlNqZSjVX3ocjiizt3rS0hCKPs=, version
     #      "1.1.16-balanced".
     #   3. STOCK upstream = owner "KarpelesLab", rev
-    #      999eda4 (v1.1.20), its own hash, version "1.1.20". Costs the four
+    #      3d5bb6f (v1.1.21), its own hash, version "1.1.21". Costs the four
     #      patches AND balanced; no config change (we default to "expiry").
     # Previous pin (v1.1.13 + balanced routing, 34 days in production) =
     # rev 890108cb25c40ef779fe9ca8c305326e5a75f575, hash
@@ -159,8 +184,8 @@ stdenvNoCC.mkDerivation rec {
     # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "51d3aa6f42d0c9bb252fdead7c7d2a292f5c6ddb"; # feat/balanced-on-v1120
-    hash = "sha256-l2IU8NmMtQ6+7+O5IJ9cMsBN4xuJNHyOIqr4g/RLZe4=";
+    rev = "bf29fca5d1445d0372c54740cacde99668d83938"; # feat/balanced-on-v1121
+    hash = "sha256-ArYh97z6KvkjupY3x7maY3u5HNtQH0f8F1vnwGu2Pac=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
