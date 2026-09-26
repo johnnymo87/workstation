@@ -14,9 +14,12 @@
 #      one.
 #
 # Samples do not record reset timestamps, so the replay synthesizes them from
-# TeamClaude's own invariant: it nulls a bucket's utilization AND reset
-# together on the first status read after the reset passes, so a non-null
-# utilization implies a reset still ahead.
+# TeamClaude's own contract: a throttle is armed only by an upstream quota 429,
+# whose headers set utilization and reset together, and both are nulled
+# together on the first status read after the reset passes. So on a THROTTLED
+# account a non-null bucket utilization implies that bucket's reset is still
+# ahead. (Not true of idle accounts -- an untouched 5h window reads u5h=0 with
+# no reset -- but those are active, and the filter ignores resets for them.)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,8 +80,12 @@ check "plan-less active account is NOT healthy" "3 3" \
 check "plan-less throttled account is NOT healthy" "3 3" \
   "$(printf '%s\n' "$OK1" "$OK2" "$OK3" "$(acct d throttled null null null null null)" | body | run)"
 
-check "backstop: throttled, reporting, but no reset ahead is NOT healthy" "3 3" \
-  "$(printf '%s\n' "$OK1" "$OK2" "$OK3" "$(acct d throttled 1.0 0.3 0.3 null null)" | body | run)"
+check "throttled, reporting, no reset timestamp at all is trusted (post-reset hold tail)" "4 3" \
+  "$(printf '%s\n' "$OK1" "$OK2" "$OK3" "$(acct d throttled null null 0.3 null null)" | body | run)"
+
+check "backstop: a Fable reset still ahead keeps a stale-5h throttled account healthy" "4 3" \
+  "$(printf '%s\n' "$OK1" "$OK2" "$OK3" \
+     "$(acct d throttled 1.0 null 0.3 "$PAST" null | jq -c --argjson r "$AHEAD" '.quota.unified7dFableReset = $r')" | body | run)"
 
 check "backstop: throttled with every reset long past is NOT healthy" "3 3" \
   "$(printf '%s\n' "$OK1" "$OK2" "$OK3" "$(acct d throttled 1.0 0.3 0.3 "$PAST" "$PAST")" | body | run)"

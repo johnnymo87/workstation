@@ -4010,9 +4010,15 @@ Check:
         # per-ACCOUNT status. TeamClaude also refuses per MODEL FAMILY (a spent
         # Fable weekly bucket leaves the account "active" but unusable for
         # Fable), so the router can be out for some requests while this reads
-        # SERVING > 0. The router's own view is cfp's maxHealthyAccounts.
+        # SERVING > 0. Likewise TeamClaude's other refusals (its own local
+        # quota threshold, pause, entitlement) leave status=active. The
+        # router's own view is cfp's maxHealthyAccounts.
+        #
+        # Gated on the pool being at its high-water mark: with an account also
+        # DEAD, the degraded page below is the one that matters, and this
+        # notice's "nothing is broken" would be false.
         EXHAUSTED="$STATE/exhausted-pending"
-        if [ "$SERVING" -eq 0 ] && [ "$HEALTHY" -gt 0 ]; then
+        if [ "$SERVING" -eq 0 ] && [ "$HEALTHY" -gt 0 ] && [ "$HEALTHY" -ge "$EXPECTED_HEALTHY" ]; then
           EX_N=$(( $(cat "$EXHAUSTED" 2>/dev/null || echo 0) + 1 ))
           echo "$EX_N" > "$EXHAUSTED"
           echo "NOTE: every healthy account is spent: 0 serving, $HEALTHY waiting on a quota reset ($EX_N/2 consecutive)"

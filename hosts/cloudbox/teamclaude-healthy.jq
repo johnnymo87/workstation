@@ -22,8 +22,8 @@
 #     a null unified7d for long stretches while its Fable and 5h buckets stay
 #     live -- hence the three-way OR in reports_quota;
 #   - a THROTTLED account with no quota readings (same plan-less signature);
-#   - a THROTTLED account with no general-bucket reset still ahead (the
-#     backstop -- see below).
+#   - a THROTTLED account whose quota resets have ALL passed (the backstop --
+#     see below).
 #
 # Why throttled counts as healthy (bead claude-failover-proxy-w1w). An account
 # that spent its 5h (or 7d) allowance is the routine condition the router
@@ -32,17 +32,32 @@
 # warnings for it; it cleared on its own when the window rolled. Nothing a
 # human could do would have helped.
 #
-# The backstop. TeamClaude only reports "throttled" while its hold
-# (rateLimitedUntil, capped at 1h, re-armed by each fresh upstream quota 429)
-# is ahead, and it nulls a bucket's utilization and reset timestamp on the
-# first status read after that reset passes (_clearExpiredQuotas). So a
-# throttled account that still holds a 5h or 7d reset timestamp in the future
-# is "spent, recovers at that time". One that is throttled with NO such reset
-# -- every bucket it was spending has already reset, or never reported one --
-# is being refused for a reason its quota does not explain, and that is worth
-# a human's look. $grace only absorbs clock skew between TeamClaude's clock and
-# ours; it is not a tolerance window.
+# The backstop: throttled well past its reset. A throttled account counts as
+# recovering unless every reset timestamp it reports (5h, 7d, Fable 7d) is
+# more than $grace in the past -- i.e. its buckets should have refilled and it
+# is still being refused, which no quota explains.
 #
+# How much that can catch, stated plainly so its silence is not over-read:
+# against CURRENT TeamClaude, very little. TeamClaude only reports
+# "throttled" while its hold (rateLimitedUntil, capped at 1h) is ahead; the
+# hold is re-armed only by a fresh upstream quota 429, which also refreshes the
+# utilization and reset from the same response headers; and it nulls a
+# bucket's utilization AND reset together on the first status read after that
+# reset passes (_clearExpiredQuotas). So a passed reset normally never reaches
+# us. The backstop is a guard against TeamClaude drifting from that contract,
+# not a detector of upstream anomalies: an account upstream keeps rejecting on
+# its 5h bucket after that bucket's declared reset still reads healthy for as
+# long as it reports ANY reset ahead -- up to a week, via its 7d reset.
+#
+# A throttled account reporting NO reset timestamp at all is trusted, on
+# purpose. That is the normal shape of the up-to-1h tail after a 5h reset
+# passes (bucket nulled, hold not yet expired), and treating it as broken
+# would page, after the 2-pass dampening, for an account minutes from
+# recovering -- the exact class this filter exists to stop. A throttled
+# account with no quota at all is still excluded, by reports_quota.
+#
+# $grace only absorbs clock skew between TeamClaude's clock and ours.
+
 # The global-outage guard is unchanged from PR #465: if the quota API stops
 # reporting for EVERYONE, that is an upstream outage, not simultaneous
 # cancellations, so SERVING falls back to the plain active count rather than
@@ -62,9 +77,9 @@ def reports_quota:
     | select(.status == "throttled")
     | select(reports_quota)
     | select(
-        ( [ .quota.unified5hReset, .quota.unified7dReset ]
+        ( [ .quota.unified5hReset, .quota.unified7dReset, .quota.unified7dFableReset ]
           | map(select(type == "number")) | max ) as $reset
-        | $reset != null and $reset > ($now_ms - $grace_ms)
+        | $reset == null or $reset > ($now_ms - $grace_ms)
       )
   ] as $recovering
 # The guard keys on "nobody ENABLED reports quota", not "no active account

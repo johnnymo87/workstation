@@ -500,8 +500,8 @@
       } ''
         cd ${self}
         bash hosts/cloudbox/test-teamclaude-healthy.sh 2>&1 | tee "$TMPDIR/th.txt"
-        grep -q '^ALL PASS (24 assertions)' "$TMPDIR/th.txt" || {
-          echo "GATE FAILURE: teamclaude-healthy suite did not reach ALL PASS (24 assertions)." >&2
+        grep -q '^ALL PASS (25 assertions)' "$TMPDIR/th.txt" || {
+          echo "GATE FAILURE: teamclaude-healthy suite did not reach ALL PASS (25 assertions)." >&2
           echo "If you added assertions, bump the pinned count here deliberately." >&2
           exit 1
         }
