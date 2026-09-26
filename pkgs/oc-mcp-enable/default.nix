@@ -16,7 +16,7 @@
 #      per-DIRECTORY InstanceState on the OWNING serve process -- the sessionID
 #      in the path is a routing key (it tells the front door which serve owns
 #      the session, and supplies the directory). Connecting alone is what puts
-#      the server's tools into the candidate tool set for the next prompt.
+#      the server's tools into the candidate tool set for the next step.
 #
 #   2. PATCH /session/<id>  {"permission": [{permission:"<server>_*",
 #                                            pattern:"*", action:"allow"}]}
@@ -27,8 +27,13 @@
 #      deprecated `tools` map on a prompt body, which REPLACES it wholesale.
 #      Later rules win (findLast), which is also what makes --revoke work.
 #
-# The grant takes effect on the session's NEXT prompt (tools are resolved per
-# message), which is exactly the swarm case: enable, then swarm_send.
+# The grant takes effect on the session's NEXT STEP (next model call), even
+# mid-turn: the run loop re-reads session.permission and the connected MCP
+# tools every step (opencode-patched permission-refresh-per-step.patch,
+# >= 1.18.18-patched.5). Before that patch a busy session kept the ruleset it
+# started the run with, so a grant after an earlier --revoke was invisible
+# until the run ended. Task subagents never see it: a child copies only its
+# parent's deny/external_directory rules at creation, not allows.
 pkgs.writeShellApplication {
   name = "oc-mcp-enable";
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.coreutils ];
@@ -41,7 +46,7 @@ pkgs.writeShellApplication {
         echo "       oc-mcp-enable --status <session-id>"
         echo ""
         echo "Grant an MCP server's tools to an ALREADY-RUNNING opencode session."
-        echo "Takes effect on that session's NEXT prompt (e.g. the next swarm_send)."
+        echo "Takes effect on that session's next step, even mid-turn (not in its Task subagents)."
         echo ""
         echo "Options:"
         echo "  -h, --help      Show this help message"
@@ -223,7 +228,7 @@ pkgs.writeShellApplication {
         echo "Note: the MCP server stays CONNECTED (shared per-directory); only this session is denied."
       else
         echo "Granted ''${servers[*]} tools to session $session_id"
-        echo "Takes effect on that session's NEXT prompt (e.g. the next swarm_send)."
+        echo "Takes effect on that session's next step, even mid-turn (not in its Task subagents)."
       fi
     '';
 }
