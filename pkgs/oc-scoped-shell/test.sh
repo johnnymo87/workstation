@@ -195,6 +195,55 @@ fi
 err_content="$(cat "$err_log")"
 check "degrade path emits warning on stderr" "oc-scoped-shell: WARNING:" "$err_content"
 
+# E. oom_score_adj floor (workstation-o5s1.5)
+#
+# The shipped floor is 500, but asserting "payload reads 500" would pass
+# vacuously wherever the caller ALREADY runs at 500 -- which is exactly the
+# pre-fix state on cloudbox, where every serve child inherited 500. So the
+# harness substitutes a floor one above whatever this process currently has,
+# guaranteeing the assertion can only pass if the wrapper actually wrote it.
+echo "== oom_score_adj floor =="
+
+floor_line=$(grep -m1 '^OOM_SCORE_ADJ_FLOOR=' "$wrapper_bin" || true)
+check "shipped wrapper sets OOM_SCORE_ADJ_FLOOR=500" 'OOM_SCORE_ADJ_FLOOR="500"' "$floor_line"
+
+cur_adj="$(cat /proc/self/oom_score_adj)"
+if [ "$cur_adj" -ge 999 ]; then
+  bad "cannot test the oom_score_adj floor: this process already runs at $cur_adj"
+else
+  test_floor=$((cur_adj + 1))
+  floor_wrapper="$tmp_dir/floor-wrapper"
+  sed -e "s|^OOM_SCORE_ADJ_FLOOR=.*|OOM_SCORE_ADJ_FLOOR=\"$test_floor\"|" \
+      "$test_wrapper" > "$floor_wrapper"
+  chmod +x "$floor_wrapper"
+
+  export STUB_PROBE_RC=0
+  err_log_floor="$tmp_dir/stderr-floor.log"
+  out="$("$floor_wrapper" -c 'cat /proc/self/oom_score_adj' 2>"$err_log_floor")"
+  check "scoped path: payload runs at the floor (caller $cur_adj -> $test_floor)" "$test_floor" "$out"
+  if [ ! -s "$err_log_floor" ]; then
+    ok "scoped path: raising oom_score_adj writes nothing to stderr"
+  else
+    bad "scoped path: raising oom_score_adj wrote to stderr: $(cat "$err_log_floor")"
+  fi
+
+  export STUB_PROBE_RC=1
+  out="$("$floor_wrapper" -c 'cat /proc/self/oom_score_adj' 2>/dev/null)"
+  check "degrade path: payload runs at the floor" "$test_floor" "$out"
+  export STUB_PROBE_RC=0
+
+  # Never LOWER: a caller already above the floor keeps its value. The caller
+  # raises itself first (always permitted unprivileged), then execs the wrapper.
+  above=$((test_floor + 1))
+  out="$(bash -c 'echo "$1" > /proc/self/oom_score_adj; exec "$2" -c "cat /proc/self/oom_score_adj"' \
+    _ "$above" "$floor_wrapper")"
+  if [ "$out" = "$above" ]; then
+    ok "caller above the floor ($above) is not lowered"
+  else
+    bad "caller above the floor ($above) came out at: $out"
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "oc-scoped-shell tests FAILED" >&2
   exit 1
