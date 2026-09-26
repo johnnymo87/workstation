@@ -117,12 +117,24 @@ oc-mcp-enable --status <session-id>          # what's connected + the ruleset
 oc-mcp-enable --revoke <session-id> slack    # take it away again
 ```
 
-**The grant takes effect on that session's NEXT prompt.** Tools are resolved per
-message, so the sequence is: `oc-mcp-enable <worker>
-slack` → then `swarm_send` the actual instruction. Verified end to end on
-cloudbox 2026-08-05: a running session that answered "NONE" to "what slack tools
-do you have?" gained the full `slack-ro_*` set and successfully executed
-`slack-ro_channels_me` on a pigeon-delivered `swarm_send` — no relaunch.
+**The grant takes effect on that session's next step — the next model call —
+even in the middle of a turn.** The run loop re-reads `session.permission` and
+the connected MCP tools every step, so the usual sequence (`oc-mcp-enable
+<worker> slack` → `swarm_send` the instruction) works whether the worker is idle
+or busy, and a session can grant itself and call the tool later in the same
+turn. Verified on cloudbox 2026-09-26: a busy session holding
+`deny slack-ro_*` was granted slack-ro mid-run and called `slack-ro_channels_me`
+successfully on the very next step.
+
+This relies on opencode-patched's `permission-refresh-per-step.patch`
+(1.18.18-patched.5 and later). On older builds a run kept the ruleset it started
+with, and a prompt sent to a busy session joins that run rather than starting a
+new one — so a grant following an earlier `--revoke` stayed invisible
+("Model tried to call unavailable tool …") until the run ended.
+
+One gap remains: a Task **subagent that is already running** does not see the
+grant, because a child copies its parent's ruleset when it is created. The next
+subagent spawned after the grant does.
 
 It does exactly two HTTP calls through the front door, and **both are required**:
 
