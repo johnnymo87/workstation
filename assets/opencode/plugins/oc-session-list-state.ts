@@ -311,6 +311,9 @@ export function buildUnreadMap(
 //
 // NOTE: The literal "lgtm" is written by /home/dev/projects/lgtm/src/dispatch.ts
 // and renaming it there silently un-hides every review session (the tripwire will fire).
+// Likewise "my-podcasts-pipeline" is written by
+// /home/dev/projects/my-podcasts/pipeline/opencode_client.py (headless daily-job
+// sessions, declared with notify_policy "none").
 //
 // Why an allowlist rather than "any row in session_origin":
 // `origin` is free-form TEXT in pigeon with no enum, and `notify_policy: "all"` is a
@@ -322,7 +325,7 @@ export function buildUnreadMap(
 // With a single set, the first new automation that someone decides should stay visible
 // would warn on every picker open forever, training the eye to ignore warnings.
 // `KNOWN_VISIBLE_ORIGINS` is the explicit acknowledgement channel.
-export const HIDDEN_ORIGINS: ReadonlySet<string> = new Set(["lgtm"]);
+export const HIDDEN_ORIGINS: ReadonlySet<string> = new Set(["lgtm", "my-podcasts-pipeline"]);
 export const KNOWN_VISIBLE_ORIGINS: ReadonlySet<string> = new Set([]);
 export type OriginMap = Map<string, string>;
 
