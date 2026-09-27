@@ -943,15 +943,18 @@ in
     # opencode loads every .ts/.js there as a plugin (a .js.map is ignored --
     # self-compact's has sat there for months). One file avoids both.
     #
-    # Cloudbox-only, deliberately: this writes state for the serve pool, and the
-    # pool (opencode-serve@{4096..4099}) exists only here. The plugin no-ops
-    # elsewhere anyway — it stays inert unless OPENCODE_SERVE_ID is set AND
-    # /proc/self/cmdline shows a real `serve` — but there is no reason to ship a
-    # writer to hosts with nothing to write about.
-    xdg.configFile."opencode/plugins/session-state.js" = lib.mkIf isCloudbox {
+    # NixOS hosts only: this writes state for the serve pool, which exists on
+    # both cloudbox (opencode-serve@{4096..4099}) and devbox (@{4096,4097}; see
+    # users/dev/serve-pool.nix). It was once cloudbox-only on the belief that the
+    # pool lived only there; devbox then ran a pool with no writer, and every
+    # oc-session-list call there warned "no live writer is reporting". The
+    # plugin no-ops elsewhere anyway — it stays inert unless OPENCODE_SERVE_ID
+    # is set AND /proc/self/cmdline shows a real `serve` — but there is no
+    # reason to ship a writer to hosts with nothing to write about.
+    xdg.configFile."opencode/plugins/session-state.js" = lib.mkIf (isDevbox || isCloudbox) {
       source = "${localPkgs.session-state-plugin}/session-state.js";
     };
-    xdg.configFile."opencode/plugins/session-state.js.map" = lib.mkIf isCloudbox {
+    xdg.configFile."opencode/plugins/session-state.js.map" = lib.mkIf (isDevbox || isCloudbox) {
       source = "${localPkgs.session-state-plugin}/session-state.js.map";
     };
 
