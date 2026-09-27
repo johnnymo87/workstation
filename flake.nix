@@ -2064,7 +2064,7 @@
           expects=''${expects:-0}
           case "$f" in
             test/oc-session-list.spec.ts)
-              expected_expects=355
+              expected_expects=371
               ;;
             *)
               echo "GATE FAILURE: unrecognised spec file $f has no pinned expect() count in flake.nix." >&2
@@ -2231,6 +2231,10 @@
         # this check green over nothing -- the store-prefix lesson.
         grep -q '^PASS: --with-state distinguishes nodata' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: the nodata-vs-idle assertion did not run." >&2
+          exit 1
+        }
+        grep -q '^PASS: --ids resolves child->root' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the --ids stage did not run." >&2
           exit 1
         }
         grep -q '^ALL PASS (oc-session-list)' "$TMPDIR/out.txt" || {

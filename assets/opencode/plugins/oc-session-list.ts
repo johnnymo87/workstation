@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { queryBaseList, queryTreesForSessions } from "./oc-session-list-base.js";
+import { queryBaseList, queryTreesForIds, queryTreesForSessions } from "./oc-session-list-base.js";
 import { queryWithState, runOrphanGc } from "./oc-session-list-state.js";
 import { foldRows } from "./oc-session-list-fold.js";
 
@@ -12,6 +12,13 @@ export interface CliOptions {
   fold: boolean;
   gc: boolean;
   help: boolean;
+  /**
+   * `--ids a,b,c`: resolve exactly these sessions' root trees instead of the
+   * recency window. null = flag absent (normal listing). An empty array means
+   * the flag was given with nothing in it, and yields an empty list -- never a
+   * fall back to the recency window, which would answer a different question.
+   */
+  ids: string[] | null;
 }
 
 export function parseCliArgs(args: string[]): CliOptions {
@@ -28,6 +35,9 @@ export function parseCliArgs(args: string[]): CliOptions {
   let fold = false;
   let gc = false;
   let help = false;
+  let ids: string[] | null = null;
+  const splitIds = (v: string): string[] =>
+    v.split(",").map((s) => s.trim()).filter((s) => s !== "");
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -63,6 +73,10 @@ export function parseCliArgs(args: string[]): CliOptions {
       overlayDir = arg.slice(14);
     } else if (arg === "--gc") {
       gc = true;
+    } else if (arg === "--ids") {
+      ids = splitIds(args[++i] ?? "");
+    } else if (arg.startsWith("--ids=")) {
+      ids = splitIds(arg.slice(6));
     }
   }
 
@@ -71,7 +85,7 @@ export function parseCliArgs(args: string[]): CliOptions {
   // meaningless. Fall back to the default rather than surprising the caller.
   if (!Number.isFinite(limit) || limit <= 0) limit = 50;
 
-  return { limit, dbPath, routingDbPath, overlayDir, withState, fold, gc, help };
+  return { limit, dbPath, routingDbPath, overlayDir, withState, fold, gc, help, ids };
 }
 
 export function printHelp(): void {
@@ -87,6 +101,9 @@ Options:
   --routing-db <path>   Path to pigeon-daemon.db (default: $OPENCODE_ROUTING_DB, else $HOME/projects/pigeon/packages/daemon/data/pigeon-daemon.db)
   --overlay-dir <path> Directory containing session-state overlays (default: $HOME/.local/share/opencode/session-state.d)
   --gc                 Perform orphan GC on dead overlay files older than 10 minutes
+  --ids <id,...>       Resolve exactly these sessions (a child id brings its whole root tree;
+                       archived and unknown ids are dropped). Replaces the recency window:
+                       --limit is ignored and --fold adds no overlay union.
   --help, -h           Show this help message
 `);
 }
@@ -110,18 +127,28 @@ export function main(args: string[] = process.argv.slice(2)): void {
 
   try {
     const db = new Database(options.dbPath, { readonly: true });
-    const baseRows = queryBaseList(db, { limit: options.limit });
+    const warn = (msg: string) => console.error(`oc-session-list: ${msg}`);
+    // --ids REPLACES the recency window rather than filtering it: the caller
+    // (the stall-watch picker) names sessions precisely because most of them
+    // fall outside any window, so applying --limit would drop the rows it came
+    // for. For the same reason the --fold overlay union is off in ids mode --
+    // the answer is the set that was asked for, not that set plus whatever
+    // else is attention-worthy right now.
+    const idsMode = options.ids !== null;
+    const baseRows = idsMode
+      ? queryTreesForIds(db, options.ids ?? [], warn)
+      : queryBaseList(db, { limit: options.limit });
 
     if (options.withState) {
       const rowsWithState = queryWithState(baseRows, {
         routingDbPath: options.routingDbPath,
-        onWarn: (msg: string) => console.error(`oc-session-list: ${msg}`),
+        onWarn: warn,
         overlayDir: options.overlayDir,
         // The union only makes sense when we are folding to roots: it exists so
         // an attention-worthy row outside the recency window still reaches the
         // picker. Wiring it here (not inside queryWithState) keeps the DB handle
         // where it belongs and leaves the plain --with-state shape untouched.
-        ...(options.fold ? { unionLookup: (sids: string[]) => queryTreesForSessions(db, sids) } : {}),
+        ...(options.fold && !idsMode ? { unionLookup: (sids: string[]) => queryTreesForSessions(db, sids) } : {}),
       });
       const out = options.fold ? foldRows(rowsWithState) : rowsWithState;
       console.log(JSON.stringify(out, null, 2));
