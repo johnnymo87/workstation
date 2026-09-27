@@ -57,7 +57,6 @@
       bb = p.callPackage ./pkgs/bb { };
       pressure-sampler = p.callPackage ./pkgs/pressure-sampler { };
       beads = p.callPackage ./pkgs/beads { };
-      caveman = p.callPackage ./pkgs/caveman { };
       claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
       # Seeds the PRIVATE cfp release asset into the store on macOS, where no
       # GITHUB_TOKEN reaches the builder. Exposed as its own output so it can be
@@ -1139,63 +1138,6 @@
         bash pkgs/opencode-serve-auth-sh/test.sh 2>&1 | tee "$TMPDIR/out.txt"
         grep -q '^all opencode-serve-auth-sh tests passed' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: serve-auth suite did not reach its final pass line." >&2
-          exit 1
-        }
-        touch $out
-      '';
-
-      # caveman's compaction exemption, driven against the SHIPPED plugin.js.
-      #
-      # This one already ran in CI, via pkgs/caveman/default.nix's
-      # installCheckPhase inside the home closures -- so its unwired-test marker
-      # was a false "not covered" claim. The guard rejects checkPhase as
-      # evidence anyway (oc-session-list), and prescribes exactly this remedy:
-      # "add a thin checks.* entry that runs the same script". Both now run. The
-      # duplication is deliberate: the installCheckPhase gates `nix build
-      # .#caveman`, home switches and the auto-bump PRs at artifact-build time,
-      # while this makes the coverage legible to the guard and to a reader.
-      caveman-exemption = devboxPkgs.runCommand "caveman-exemption-tests" {
-        nativeBuildInputs = [ devboxPkgs.nodejs_22 ];
-      } ''
-        cd ${self}
-        # Load-bearing, and copied from the installCheckPhase: unset, the test
-        # falls back to `process.cwd()/exemption-scratch`, and with `cd ${self}`
-        # that is the read-only store -- EACCES before a single assertion runs.
-        export TEST_SCRATCH="$TMPDIR/caveman-exemption-scratch"
-        export HOME="$TMPDIR"
-        node pkgs/caveman/exemption-test.js \
-          ${(localPkgsFor devboxSystem).caveman}/plugin/plugin.js 2>&1 \
-          | tee "$TMPDIR/out.txt"
-        grep -q '^OK: compaction exemption verified' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: caveman exemption test did not reach its OK line." >&2
-          exit 1
-        }
-        touch $out
-      '';
-
-      # caveman's prompt-toggle strictness, driven against the SHIPPED
-      # plugin.js. Same duplication rationale as caveman-exemption above: this
-      # also runs in the derivation's installCheckPhase, and is mirrored here so
-      # the coverage is legible.
-      #
-      # The property: a deliberate command toggles caveman, prose that merely
-      # mentions the command does not. Worth a gate because the flag is
-      # host-global and its writes are unlogged -- a regression reconfigures
-      # every concurrent session on the machine and leaves no trace.
-      caveman-toggle = devboxPkgs.runCommand "caveman-toggle-tests" {
-        nativeBuildInputs = [ devboxPkgs.nodejs_22 ];
-      } ''
-        cd ${self}
-        # Load-bearing (see caveman-exemption): unset, the test falls back to
-        # `process.cwd()/toggle-scratch`, which under `cd ${self}` is the
-        # read-only store -- EACCES before a single assertion runs.
-        export TEST_SCRATCH="$TMPDIR/caveman-toggle-scratch"
-        export HOME="$TMPDIR"
-        node pkgs/caveman/toggle-test.js \
-          ${(localPkgsFor devboxSystem).caveman}/plugin/plugin.js 2>&1 \
-          | tee "$TMPDIR/out.txt"
-        grep -q '^OK: prompt-toggle strictness verified' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: caveman toggle test did not reach its OK line." >&2
           exit 1
         }
         touch $out

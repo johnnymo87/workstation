@@ -690,25 +690,8 @@ let
   # provider options stay there because OpenCode defaults GPT-5.x to medium
   # reasoning unless a variant or model option overrides it.
   opencodeOverlay =
-    # caveman (pkgs/caveman), all hosts. opencode's local-plugin auto-discovery
-    # globs `{plugin,plugins}/*.{ts,js}` — ONE level deep, files only. caveman
-    # must ship as a DIRECTORY (plugin.js needs caveman-config.cjs as a real
-    # sibling), so auto-discovery can never see it and an explicit entry is
-    # required. A relative path here resolves against the config file's
-    # directory (not $PWD) and is NOT sent to npm — verified against 1.17.13,
-    # which reports it back as
-    # file:///home/dev/.config/opencode/plugins/caveman/plugin.js. Because the
-    # directory cannot match the auto-discovery glob, there is exactly one load
-    # and no duplicate. `recursiveUpdate` REPLACES lists, hence base ++ append.
-    #
-    # NOTE: there is deliberately NO `instructions` entry for caveman's
-    # ruleset. `instructions` is global and reaches every agent INCLUDING
-    # compaction/summary, and opencode offers no per-agent scoping for it.
-    # The ruleset is instead pushed through the plugin's own
-    # experimental.chat.system.transform hook, which pkgs/caveman patches to
-    # skip compaction. See pkgs/caveman/compaction-exemption.js.
     {
-      plugin = pluginSpecs ++ [ "./plugins/caveman/plugin.js" ];
+      plugin = pluginSpecs;
     }
     // (lib.optionalAttrs isDevbox {
       model = devboxModel;
@@ -972,36 +955,6 @@ in
       source = "${localPkgs.session-state-plugin}/session-state.js.map";
     };
 
-    # caveman: symlink the whole DIRECTORY, never the individual files.
-    # opencode resolves a plugin entry through realpathSync before importing
-    # it, so plugin.js sees import.meta.url as its /nix/store path and looks
-    # for caveman-config.cjs next to itself IN THE STORE. Per-file
-    # xdg.configFile entries would put each file in a different store path and
-    # the sibling lookup would throw at import — and opencode swallows that:
-    # `opencode debug info` still lists the plugin and opencode.log stays
-    # empty. pkgs/caveman's installCheckPhase asserts the three siblings; this
-    # symlink is the other half of the contract. The only observable proof it
-    # actually loaded is ~/.config/opencode/.caveman-active appearing after a
-    # fresh session starts.
-    # Deployed on all three hosts (cloudbox, devbox, macOS). Nothing here is
-    # host-specific: the payload is pure prompt/skill/command text plus a
-    # plugin that only touches ~/.config/opencode, so there is no MCP, secret,
-    # or model dependency to gate on.
-    xdg.configFile."opencode/plugins/caveman".source = "${localPkgs.caveman}/plugin";
-
-    # caveman slash commands. caveman-stats is deliberately absent — see the
-    # exclusion notes in pkgs/caveman/default.nix.
-    xdg.configFile."opencode/commands/caveman.md".source =
-      "${localPkgs.caveman}/commands/caveman.md";
-    xdg.configFile."opencode/commands/caveman-commit.md".source =
-      "${localPkgs.caveman}/commands/caveman-commit.md";
-    xdg.configFile."opencode/commands/caveman-compress.md".source =
-      "${localPkgs.caveman}/commands/caveman-compress.md";
-    xdg.configFile."opencode/commands/caveman-help.md".source =
-      "${localPkgs.caveman}/commands/caveman-help.md";
-    xdg.configFile."opencode/commands/caveman-review.md".source =
-      "${localPkgs.caveman}/commands/caveman-review.md";
-
     xdg.configFile."opencode/plugins/opencode-pigeon.ts".source =
       config.lib.file.mkOutOfStoreSymlink (
         if isDarwin
@@ -1059,7 +1012,8 @@ in
     # machine that applied the earlier version still has the entry in its
     # runtime opencode.json, and without this it would survive every future
     # switch and silently re-introduce the exact leak the exemption exists to
-    # prevent (see pkgs/caveman/compaction-exemption.js).
+    # prevent. (caveman itself has since been removed entirely; this strip
+    # stays so hosts carrying the stale entry still get cleaned.)
     #
     # Deliberately narrow: only caveman rule paths are dropped, so unrelated
     # user-added instructions are preserved. The key is removed entirely when
