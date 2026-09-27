@@ -1512,8 +1512,8 @@
           echo "GATE FAILURE: session_switcher lua suite did not reach its final pass line." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 7 ] || {
-          echo "GATE FAILURE: expected 7 'PASS  ' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 8 ] || {
+          echo "GATE FAILURE: expected 8 'PASS  ' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/out.txt")." >&2
           exit 1
         }
@@ -1535,6 +1535,10 @@
         }
         grep -q '^PASS  stallwatch_picker\.model unit tests (87 assertions via nvim -l)' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: stallwatch_picker.model did not report expected 87 assertions." >&2
+          exit 1
+        }
+        grep -q '^PASS  stallwatch_picker\.spec unit tests (98 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.spec did not report expected 98 assertions." >&2
           exit 1
         }
         touch $out
