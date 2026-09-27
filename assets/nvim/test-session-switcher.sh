@@ -256,6 +256,15 @@ spec_out="$(nvim --clean -l assets/nvim/test-session-switcher-spec.lua 2>&1 || t
 spec_count="$(parse_lua_ok "$spec_out" "session_switcher.spec unit tests")" || exit 1
 printf 'PASS  session_switcher.spec unit tests (%s assertions via nvim -l)\n' "$spec_count"
 
+# stall-watch picker (workstation-p8ch). Same harness, same gate: it reuses the
+# switcher's cli/spec/flow/dispatch, so a switcher change that breaks it fails
+# this same check. One literal line per unit, NOT a loop over "$unit": the
+# reachability guard (users/dev/test-unwired-tests.sh) only credits a runner
+# followed by a literal path, so a loop would report every unit as unwired.
+swm_out="$(nvim --clean -l assets/nvim/test-stallwatch-picker-model.lua 2>&1 || true)"
+swm_count="$(parse_lua_ok "$swm_out" "stallwatch_picker.model unit tests")" || exit 1
+printf 'PASS  stallwatch_picker.model unit tests (%s assertions via nvim -l)\n' "$swm_count"
+
 # --- Cross-language contract: the state vocabulary must not DRIFT. -----------
 #
 # oc-session-list-fold.ts owns `effective_state`; model.lua mirrors the list in
