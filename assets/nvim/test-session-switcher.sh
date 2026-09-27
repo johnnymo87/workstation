@@ -178,22 +178,23 @@ cat >"$lua_file" <<'LUA'
   check(vim.tbl_contains(folded, "--fold"), "fold=true -> argv contains --fold")
   check(not vim.tbl_contains(cli.build_argv({}), "--fold"), "fold unset -> argv omits --fold")
 
-  -- 10c. `--ids` (workstation-p8ch): comma-joined, and OMITTED when empty --
-  --      an empty `--ids ""` would ask the CLI for nothing in a way that reads
-  --      like a request for everything.
+  -- 10c. `--ids` (workstation-p8ch): comma-joined. When opts.ids is a table
+  --      and no valid ids survive, emit `--ids=` so the CLI parses an empty set []
+  --      rather than falling back to the recency window. nil opts.ids omits --ids entirely.
   local with_ids = cli.build_argv({ fold = true, ids = { "ses_x", "ses_y" } })
   local at = vim.fn.index(with_ids, "--ids")
   check(at >= 0 and with_ids[at + 2] == "ses_x,ses_y", "ids -> --ids ses_x,ses_y")
-  check(not vim.tbl_contains(cli.build_argv({ ids = {} }), "--ids"), "empty ids -> no --ids")
+  check(vim.tbl_contains(cli.build_argv({ ids = {} }), "--ids="), "empty ids -> --ids=")
+  check(not vim.tbl_contains(cli.build_argv({}), "--ids") and not vim.tbl_contains(cli.build_argv({}), "--ids="), "nil ids -> no --ids")
 
   -- 10d. `--ids` filtering: only non-empty strings, no leading '-', no ',' --
   local mixed_ids = cli.build_argv({ ids = { "ses_1", "-flag", "has,comma", "", 123, "ses_2" } })
   local at_mixed = vim.fn.index(mixed_ids, "--ids")
   check(at_mixed >= 0 and mixed_ids[at_mixed + 2] == "ses_1,ses_2", "invalid ids filtered out: non-strings, empty, leading dash, comma")
-  check(not vim.tbl_contains(cli.build_argv({ ids = { "-bad", "--all" } }), "--ids"), "leading dash ids only -> no --ids")
-  check(not vim.tbl_contains(cli.build_argv({ ids = { "foo,bar" } }), "--ids"), "comma ids only -> no --ids")
-  check(not vim.tbl_contains(cli.build_argv({ ids = { "" } }), "--ids"), "empty string id -> no --ids")
-  check(not vim.tbl_contains(cli.build_argv({ ids = { 123, false } }), "--ids"), "non-string ids only -> no --ids")
+  check(vim.tbl_contains(cli.build_argv({ ids = { "-bad", "--all" } }), "--ids="), "leading dash ids only -> --ids=")
+  check(vim.tbl_contains(cli.build_argv({ ids = { "foo,bar" } }), "--ids="), "comma ids only -> --ids=")
+  check(vim.tbl_contains(cli.build_argv({ ids = { "" } }), "--ids="), "empty string id -> --ids=")
+  check(vim.tbl_contains(cli.build_argv({ ids = { 123, false } }), "--ids="), "non-string ids only -> --ids=")
 
   -- 11. Callback runs on the main loop, where vim API calls are legal.
   --     vim.system's on_exit fires in a fast event context; forgetting

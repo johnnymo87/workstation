@@ -100,12 +100,16 @@ function M.build_argv(opts)
   end
   -- `--ids` (workstation-p8ch) asks for exactly these sessions' root trees,
   -- bypassing the recency window. Only non-empty strings not starting with '-'
-  -- and containing no ',' are included. If none remain, `--ids` is omitted.
+  -- and containing no ',' are included. When opts.ids is a table but no valid
+  -- ids survive, emit `--ids=` so the CLI parses an empty set [] instead of
+  -- falling back to the recency window. nil opts.ids omits --ids entirely.
   if type(opts.ids) == "table" then
     local valid_ids = M.filter_valid_ids(opts.ids)
     if #valid_ids > 0 then
       table.insert(argv, "--ids")
       table.insert(argv, table.concat(valid_ids, ","))
+    else
+      table.insert(argv, "--ids=")
     end
   end
   return argv
