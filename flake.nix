@@ -2064,7 +2064,7 @@
           expects=''${expects:-0}
           case "$f" in
             test/oc-session-list.spec.ts)
-              expected_expects=371
+              expected_expects=379
               ;;
             *)
               echo "GATE FAILURE: unrecognised spec file $f has no pinned expect() count in flake.nix." >&2

@@ -110,7 +110,14 @@ export function queryTreesForIds(
   sessionIds: string[],
   onWarn?: (msg: string) => void,
 ): SessionRow[] {
-  let ids = [...new Set(sessionIds.filter((s) => typeof s === "string" && s !== ""))];
+  let ids = [
+    ...new Set(
+      sessionIds
+        .filter((s) => typeof s === "string")
+        .map((s) => s.trim())
+        .filter((s) => s !== ""),
+    ),
+  ];
   if (ids.length > IDS_CAP) {
     onWarn?.(`--ids named ${ids.length} sessions; only the first ${IDS_CAP} were resolved`);
     ids = ids.slice(0, IDS_CAP);

@@ -74,9 +74,13 @@ export function parseCliArgs(args: string[]): CliOptions {
     } else if (arg === "--gc") {
       gc = true;
     } else if (arg === "--ids") {
-      ids = splitIds(args[++i] ?? "");
+      const next = args[i + 1];
+      const val = next && !next.startsWith("-") ? args[++i] : "";
+      const parsed = splitIds(val);
+      ids = ids === null ? parsed : [...ids, ...parsed];
     } else if (arg.startsWith("--ids=")) {
-      ids = splitIds(arg.slice(6));
+      const parsed = splitIds(arg.slice(6));
+      ids = ids === null ? parsed : [...ids, ...parsed];
     }
   }
 

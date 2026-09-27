@@ -2515,6 +2515,18 @@ describe("--ids: explicit session set", () => {
     expect(parseCliArgs(["--ids"]).ids).toEqual([]);
   });
 
+  it("accumulates repeated --ids and --ids= flags", () => {
+    expect(parseCliArgs(["--ids", "a,b", "--ids", "c"]).ids).toEqual(["a", "b", "c"]);
+    expect(parseCliArgs(["--ids=a,b", "--ids=c"]).ids).toEqual(["a", "b", "c"]);
+    expect(parseCliArgs(["--ids", "a", "--ids=b,c"]).ids).toEqual(["a", "b", "c"]);
+  });
+
+  it("bare --ids followed by another flag does not consume the next flag", () => {
+    const parsed = parseCliArgs(["--ids", "--fold"]);
+    expect(parsed.ids).toEqual([]);
+    expect(parsed.fold).toBe(true);
+  });
+
   it("a child id brings its whole root tree; archived and unknown ids are dropped", () => {
     const db = createTestDb();
     insert(db, "root_a", null, 100);
@@ -2552,13 +2564,24 @@ describe("--ids: explicit session set", () => {
     expect(queryTreesForSessions(db, ids).length).toBe(IDS_CHUNK);
   });
 
-  it("warns, rather than truncating silently, past IDS_CAP", () => {
+  it("trims whitespace from ids inside queryTreesForIds", () => {
+    const db = createTestDb();
+    insert(db, "trim_me", null, 100);
+    const rows = queryTreesForIds(db, ["  trim_me  ", "   "]);
+    expect(rows.map((r) => r.id)).toEqual(["trim_me"]);
+  });
+
+  it("warns, rather than truncating silently, past IDS_CAP, and drops excess ids", () => {
     const db = createTestDb();
     const ids = Array.from({ length: IDS_CAP + 1 }, (_, i) => `x_${i}`);
+    insert(db, ids[0], null, 100);
+    insert(db, ids[IDS_CAP], null, 200);
     const warnings: string[] = [];
-    queryTreesForIds(db, ids, (m) => warnings.push(m));
+    const rows = queryTreesForIds(db, ids, (m) => warnings.push(m));
     expect(warnings.length).toBe(1);
     expect(warnings[0]).toContain(String(IDS_CAP));
+    expect(rows.map((r) => r.id)).toContain(ids[0]);
+    expect(rows.map((r) => r.id)).not.toContain(ids[IDS_CAP]);
   });
 });
 
