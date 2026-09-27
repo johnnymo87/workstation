@@ -194,6 +194,23 @@ grep -q '"id": "never_existed"' <<<"$JSON_IDS_OUT" \
 [ "$(grep -c '"id": ' <<<"$JSON_IDS_OUT")" = 2 ] \
   || fail "--ids should yield exactly 2 root rows (root_1, old_root)"
 
+bun -e '
+const rows = JSON.parse(process.argv[1]);
+const r1 = rows.find(r => r.id === "root_1");
+const ro = rows.find(r => r.id === "old_root");
+if (!r1 || JSON.stringify(r1.matched_ids) !== JSON.stringify(["child_1"])) {
+  console.error("root_1 missing or wrong matched_ids:", r1);
+  process.exit(1);
+}
+if (!ro || JSON.stringify(ro.matched_ids) !== JSON.stringify(["old_root"])) {
+  console.error("old_root missing or wrong matched_ids:", ro);
+  process.exit(1);
+}
+' "$JSON_IDS_OUT" || fail "--ids root rows missing expected matched_ids"
+
+grep -q '"matched_ids"' <<<"$JSON_FOLD_OUT" \
+  && fail "non-ids mode emitted matched_ids -- should only be present in --ids mode"
+
 JSON_EMPTY_OUT="$("$BIN" --db "$TEST_DB" --ids "" 2>/dev/null)" || fail "--ids '' failed"
 [ "$(tr -d '[:space:]' <<<"$JSON_EMPTY_OUT")" = "[]" ] \
   || fail "--ids with an empty list must print [] -- not fall back to the recency window"

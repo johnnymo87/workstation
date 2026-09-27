@@ -222,4 +222,63 @@ do
   check(#model.union_ids(doc, nil) == 5, "no tagged map -> item ids only")
 end
 
+-- 8. SUBAGENT CHILD -> ROOT mapping via matched_ids.
+do
+  local cli_root = {
+    id = "ses_root_1",
+    title = "Root Session",
+    directory = "/proj/root",
+    effective_state = "working",
+    matched_ids = { "ses_child_1", "ses_child_2" },
+  }
+  local idx = model.index_rows({ cli_root })
+  check(idx["ses_child_1"] == cli_root, "child_1 maps to root row")
+  check(idx["ses_child_2"] == cli_root, "child_2 maps to root row")
+  check(idx["ses_root_1"] == cli_root, "fallback: root id maps to root row")
+
+  -- Fallback when matched_ids is missing or empty
+  local cli_plain = { id = "ses_plain_root", title = "Plain" }
+  local idx_plain = model.index_rows({ cli_plain, { id = "ses_empty_matched", matched_ids = {} } })
+  check(idx_plain["ses_plain_root"] == cli_plain, "missing matched_ids falls back to id")
+  check(idx_plain["ses_empty_matched"].id == "ses_empty_matched", "empty matched_ids falls back to id")
+
+  -- Flagged rows: items naming child sessions and/or root session map to root row,
+  -- deduped to the single root row, id = root id, title/dir/state from CLI root row,
+  -- badge = most urgent, items attached = union.
+  local item_info = { kind = "info", text = "Info for child 1", sessions = { { id = "ses_child_1", title = "Child 1 Title" } } }
+  local item_blocker = { kind = "blocker", text = "Blocker for child 2", sessions = { { id = "ses_child_2", title = "Child 2 Title" } } }
+  local item_multi = { kind = "decision", text = "Decision naming both", sessions = { { id = "ses_child_1" }, { id = "ses_root_1" } } }
+  local item_unjoined = { kind = "error", text = "Error for unjoined", sessions = { { id = "ses_unjoined_child", title = "Unjoined Child", directory_exists = false } } }
+
+  local prog = {
+    items = { item_info, item_blocker, item_multi, item_unjoined },
+  }
+  local fl_sub = model.flagged_rows(prog, idx)
+  check(#fl_sub == 2, "2 rows: 1 deduped joined root + 1 unjoined, got " .. #fl_sub)
+
+  local root_row = fl_sub[1]
+  check(root_row.id == "ses_root_1", "row id is root id, got " .. tostring(root_row.id))
+  check(root_row.title == "Root Session", "title comes from CLI root row")
+  check(root_row.directory == "/proj/root", "directory comes from CLI root row")
+  check(root_row.effective_state == "working", "state comes from CLI root row")
+  check(root_row.joined == true, "joined is true")
+  check(root_row.badge_kind == "decision", "most urgent badge wins (decision over blocker, info)")
+  check(#root_row.items == 3, "items attached is union of items without duplication, got " .. #root_row.items)
+  check(root_row.items[1] == item_info and root_row.items[2] == item_blocker and root_row.items[3] == item_multi, "items in appearance order")
+
+  local unjoined_row = fl_sub[2]
+  check(unjoined_row.id == "ses_unjoined_child", "unjoined row id preserved")
+  check(unjoined_row.joined == false, "unjoined row joined is false")
+  check(unjoined_row.title == "Unjoined Child", "unjoined row title from item")
+  check(unjoined_row.dir_missing == true, "unjoined dir_missing preserved")
+  check(#unjoined_row.items == 1 and unjoined_row.items[1] == item_unjoined, "unjoined items attached")
+
+  -- All view partition and dedupe must use root ids:
+  -- root_row is already in fl_sub, so cli_root in cli_rows must be deduped (placed in head, not duplicated in tail).
+  local all_sub = model.all_rows(fl_sub, { cli_root }, { "ses_root_1" })
+  check(#all_sub == 2, "all view has exactly 2 rows (flagged root + unjoined), got " .. #all_sub)
+  check(all_sub[1] == root_row, "flagged root placed first")
+  check(all_sub[2] == unjoined_row, "unjoined placed after")
+end
+
 print("LUA_TEST_OK " .. N)

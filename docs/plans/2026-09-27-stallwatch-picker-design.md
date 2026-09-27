@@ -88,9 +88,7 @@ waits on I/O or races an in-flight callback.
   tag. A *stable partition* of one CLI result -- flagged first, then the rest,
   each in `oc-session-list` order. This is a partition, not a re-sort, so the
   CLI still owns ordering.
-- Subagents are never shown: `oc-session-list --ids` resolves a child id to
-  its root tree and folds it (see Components); the picker does no child->root
-  mapping itself. (No item names a child today.)
+- Subagents are never shown: if an item names a child session, `oc-session-list --ids` annotates the folded root row with `matched_ids` containing the requested ids that resolved into its tree. The picker indexes root rows by `matched_ids`, displaying the launching root session for child items and attaching all child items to the root row.
 - `<CR>` jumps using the switcher's existing decision/exec path: focus the tab
   here, switch tmux pane to the nvim that has it, or `oc-auto-attach` a new
   tab. A missing directory refuses with a warning.

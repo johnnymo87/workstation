@@ -16,6 +16,12 @@ export interface SessionRow {
    * level (caught by mutation testing, 2026-07-31).
    */
   root_id: string;
+  /**
+   * Only present in --ids mode on root rows: the requested session ids
+   * (after trim/dedupe) that resolved into this root's tree (including the
+   * root id itself if requested).
+   */
+  matched_ids?: string[];
 }
 
 export interface BaseListOptions {
@@ -126,6 +132,24 @@ export function queryTreesForIds(
   for (let i = 0; i < ids.length; i += IDS_CHUNK) {
     for (const row of queryTreesForSessions(db, ids.slice(i, i + IDS_CHUNK))) {
       if (!byId.has(row.id)) byId.set(row.id, row);
+    }
+  }
+  const matchedByRoot = new Map<string, string[]>();
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (row) {
+      let list = matchedByRoot.get(row.root_id);
+      if (!list) {
+        list = [];
+        matchedByRoot.set(row.root_id, list);
+      }
+      list.push(id);
+    }
+  }
+  for (const [rootId, matched] of matchedByRoot) {
+    const rootRow = byId.get(rootId);
+    if (rootRow) {
+      rootRow.matched_ids = matched;
     }
   }
   return [...byId.values()].sort(

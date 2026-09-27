@@ -2583,5 +2583,34 @@ describe("--ids: explicit session set", () => {
     expect(rows.map((r) => r.id)).toContain(ids[0]);
     expect(rows.map((r) => r.id)).not.toContain(ids[IDS_CAP]);
   });
+
+  it("annotates root rows with matched_ids for child and root ids, and survives fold", () => {
+    const db = createTestDb();
+    insert(db, "root_1", null, 100);
+    insert(db, "child_1", "root_1", 200);
+    insert(db, "child_2", "root_1", 300);
+    insert(db, "other_root", null, 400);
+
+    const rows = queryTreesForIds(db, [" child_1 ", "child_1", "child_2", "other_root", "unknown_id"]);
+    const root1 = rows.find((r) => r.id === "root_1");
+    const otherRoot = rows.find((r) => r.id === "other_root");
+    const child1 = rows.find((r) => r.id === "child_1");
+
+    expect(root1?.matched_ids).toEqual(["child_1", "child_2"]);
+    expect(otherRoot?.matched_ids).toEqual(["other_root"]);
+    expect(child1?.matched_ids).toBeUndefined();
+
+    const stateRows = queryWithState(rows, { overlayDir: "/tmp" });
+    const folded = foldRows(stateRows);
+    const foldedRoot1 = folded.find((r) => r.id === "root_1");
+    expect(foldedRoot1?.matched_ids).toEqual(["child_1", "child_2"]);
+  });
+
+  it("omits matched_ids in queryBaseList (not in --ids mode)", () => {
+    const db = createTestDb();
+    insert(db, "root_1", null, 100);
+    const rows = queryBaseList(db);
+    expect(rows[0].matched_ids).toBeUndefined();
+  });
 });
 

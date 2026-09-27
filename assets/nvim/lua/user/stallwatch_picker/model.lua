@@ -178,12 +178,23 @@ function M.program_rows(doc)
   return out
 end
 
---- id -> CLI row, for the left-join.
+--- requested-id -> CLI root row, for the left-join.
+--- Maps each id in row.matched_ids to row, falling back to row.id.
 function M.index_rows(rows)
   local by_id = {}
   for _, r in ipairs(list(rows)) do
     if type(r) == "table" and nonempty(r.id) then
-      by_id[r.id] = r
+      local matched = list(r.matched_ids)
+      if #matched > 0 then
+        for _, mid in ipairs(matched) do
+          if nonempty(mid) then
+            by_id[mid] = r
+          end
+        end
+      end
+      if not by_id[r.id] then
+        by_id[r.id] = r
+      end
     end
   end
   return by_id
@@ -191,13 +202,15 @@ end
 
 --- Screen 2 flagged view: ITEM-DRIVEN rows.
 ---
---- Built from items[].sessions and LEFT-JOINED to CLI rows by id. A session
---- the CLI did not return (archived, deleted, filtered) still gets a row from
---- item data alone -- that is the whole reason the rows are item-driven.
+--- Built from items[].sessions and LEFT-JOINED to CLI rows by id (via index_rows).
+--- If an item names a child session, index_rows maps it to its root row.
+--- A session the CLI did not return (archived, deleted, filtered) still gets
+--- a row from item data alone -- that is the whole reason the rows are item-driven.
 ---
 --- Order: first appearance while walking items in contract order, which is
---- already most-urgent-first. A session named by several items appears ONCE,
---- carrying every item that names it and the most urgent kind as its badge.
+--- already most-urgent-first. Several item sessions resolving to the same root
+--- appear ONCE as the root row, carrying the union of items naming it or any of
+--- its matched children, with the most urgent kind as its badge.
 ---
 --- Joined rows are a shallow copy of the CLI row (so act.decide and the jump
 --- dispatch see every field they normally do: id, dir_missing, directory,
@@ -218,9 +231,10 @@ function M.flagged_rows(prow, by_id)
       for _, s in ipairs(list(item.sessions)) do
         local sid = type(s) == "table" and nonempty(s.id)
         if sid then
-          local row = seen[sid]
+          local cli = type(by_id[sid]) == "table" and by_id[sid] or nil
+          local key = cli and nonempty(cli.id) or sid
+          local row = seen[key]
           if not row then
-            local cli = type(by_id[sid]) == "table" and by_id[sid] or nil
             if cli then
               row = vim.tbl_extend("force", {}, cli)
               row.joined = true
@@ -236,12 +250,14 @@ function M.flagged_rows(prow, by_id)
             local ikind = nonempty(item.kind)
             row.badge_kind = ikind
             row.items = {}
-            seen[sid] = row
+            seen[key] = row
             table.insert(out, row)
           elseif M.kind_rank(nonempty(item.kind)) < M.kind_rank(row.badge_kind) then
             row.badge_kind = nonempty(item.kind)
           end
-          table.insert(row.items, item)
+          if not vim.tbl_contains(row.items, item) then
+            table.insert(row.items, item)
+          end
         end
       end
     end
