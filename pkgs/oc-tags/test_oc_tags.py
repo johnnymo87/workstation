@@ -88,6 +88,7 @@ class TestGlobalDbFlagsBeforeSubcommand(unittest.TestCase):
         "ls": [],
         "rm": ["ses_x"],
         "which": ["ses_x"],
+        "sessions": ["mytag"],
         "report": [],
         "top": [],
         "serve": [],
@@ -1019,6 +1020,58 @@ class TestCli(unittest.TestCase):
         with contextlib.redirect_stdout(BrokenPipeWriter()):
             rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
+
+
+class TestSessionsSubcommand(unittest.TestCase):
+    """`oc-tags sessions <tag>` (workstation-p8ch): newline-separated ids."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tags_db = str(Path(self.tmp.name) / "tags.db")
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "ses_fixture_b", "alpha")
+            oc_tags.set_session_tag(st, "ses_fixture_a", "alpha")
+            oc_tags.set_session_tag(st, "ses_fixture_c", "beta")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["sessions", *argv, "--tags-db", self.tags_db])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_lists_only_that_tags_ids_sorted_one_per_line(self):
+        rc, out, _ = self._run("alpha")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "ses_fixture_a\nses_fixture_b\n")
+
+    def test_unknown_tag_is_empty_output_exit_zero(self):
+        rc, out, err = self._run("gamma")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+
+    def test_tag_is_normalised_like_set(self):
+        rc, out, _ = self._run("  BETA ")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "ses_fixture_c\n")
+
+    def test_missing_tags_db_is_empty_not_an_error(self):
+        missing = str(Path(self.tmp.name) / "nope" / "tags.db")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = oc_tags.main(["sessions", "alpha", "--tags-db", missing])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "")
+        self.assertFalse(os.path.exists(missing), "a read must not create tags.db")
+
+    def test_invalid_tag_exits_nonzero(self):
+        rc, out, err = self._run("auto:x")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        self.assertIn("auto:", err)
 
 
 class TestCfp(unittest.TestCase):

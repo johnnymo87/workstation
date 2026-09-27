@@ -14,6 +14,7 @@ oc-tags top --days 7            # find what to tag
 oc-tags set billing             # tag the current session
 oc-tags which ses_abc123        # tag / source / root-id / kind, tab-separated
                                 # (kind = session|auto; source stays manual|auto)
+oc-tags sessions billing        # root session ids carrying a tag, one per line
 oc-tags report --days 7
 oc-tags serve                   # then, from the Mac, just open
                                 # http://127.0.0.1:4710 -- the socket-activated

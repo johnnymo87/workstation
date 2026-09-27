@@ -190,6 +190,16 @@ def session_tags(conn) -> dict[str, str]:
     return dict(conn.execute("SELECT session_id, tag FROM session_tag"))
 
 
+def tagged_sessions(conn, tag: str) -> list[str]:
+    """Session ids carrying exactly `tag`, sorted (deterministic output)."""
+    return [
+        r[0]
+        for r in conn.execute(
+            "SELECT session_id FROM session_tag WHERE tag=? ORDER BY session_id", (tag,)
+        )
+    ]
+
+
 def rm_session_tag(conn, session_id: str) -> bool:
     return conn.execute("DELETE FROM session_tag WHERE session_id=?", (session_id,)).rowcount > 0
 
@@ -1286,6 +1296,13 @@ def build_parser() -> argparse.ArgumentParser:
     rm_p.add_argument("target", nargs="?", help="session id to remove")
     _add_db_options(rm_p)
 
+    # sessions
+    sessions_p = sub.add_parser(
+        "sessions", help="print the root session ids carrying a tag, one per line"
+    )
+    sessions_p.add_argument("tag", help="tag to list")
+    _add_db_options(sessions_p)
+
     # report
     rep = sub.add_parser("report", help="text table of dollars by tag by day")
     rep.add_argument("--days", type=int, default=14, help="number of days to report")
@@ -1438,6 +1455,31 @@ def cmd_which(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """Print the session ids tagged `args.tag`, one per line.
+
+    A MACHINE CONTRACT (the nvim stall-watch picker reads it): bare ids,
+    newline-separated, nothing else on stdout. An unknown tag -- or no tags.db
+    at all -- is an empty answer with exit 0, not an error: "nobody carries
+    this tag" is a legitimate state. Only an invalid tag exits non-zero.
+
+    Tags are stored on ROOT sessions (`set` resolves a subagent to its root),
+    so these are root ids. This reads tags.db only; resolving an id to its
+    tree is oc-session-list's job (`--ids`), not this tool's.
+    """
+    try:
+        tag = normalise_tag(args.tag)
+    except ValueError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 1
+    with open_store(args.tags_db, readonly=True) as st:
+        warn_retired_dir_tags(st)
+        ids = tagged_sessions(st, tag)
+    for sid in ids:
+        print(sid)
+    return 0
+
+
 def cmd_rm(args: argparse.Namespace) -> int:
     if args.target:
         with open_store(args.tags_db) as st:
@@ -1531,7 +1573,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
 
-    if args.command in ("report", "top", "ls", "which"):
+    if args.command in ("report", "top", "ls", "which", "sessions"):
         try:
             if args.command == "report":
                 return cmd_report(args)
@@ -1541,6 +1583,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_ls(args)
             elif args.command == "which":
                 return cmd_which(args)
+            elif args.command == "sessions":
+                return cmd_sessions(args)
         except BrokenPipeError:
             try:
                 devnull = os.open(os.devnull, os.O_WRONLY)
