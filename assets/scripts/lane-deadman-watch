@@ -127,8 +127,10 @@ healthy() {
 }
 
 if [ -n "$STALE_SECONDS" ]; then
-  if ! [[ "$STALE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-    alarm "$LABEL LANE_STALE_SECONDS is misconfigured (\"$STALE_SECONDS\"): must be a positive integer. Treating as failed."
+  # At most 10 digits: an unbounded value overflows bash arithmetic, the `-gt` below errors, the
+  # `if` reads false, and the pass reports HEALTHY -- the one way this file must never fail.
+  if ! [[ "$STALE_SECONDS" =~ ^[1-9][0-9]{0,9}$ ]]; then
+    alarm "$LABEL LANE_STALE_SECONDS is misconfigured (\"$STALE_SECONDS\"): must be a positive integer of at most 10 digits. Treating as failed."
     exit 1
   fi
 fi
@@ -259,7 +261,7 @@ fi
 if [ -n "$STALE_SECONDS" ]; then
   age=$((NOW_EPOCH - LAST_EPOCH))
   if [ "$age" -gt "$STALE_SECONDS" ]; then
-    alarm "$LABEL has not succeeded for ${age}s (threshold ${STALE_SECONDS}s). Last success: $RAW. It is not failing -- it is not running, or it is running and quietly matching nothing, which no failure hook can see."
+    alarm "$LABEL has not succeeded for ${age}s (threshold ${STALE_SECONDS}s). Last success: $RAW. Either it is not running at all, or every run in that window failed or quietly matched nothing -- a subject that records only success cannot tell those apart, so check its journal."
     exit 1
   fi
   healthy "OK: $LABEL last succeeded $RAW (age ${age}s, threshold ${STALE_SECONDS}s)."

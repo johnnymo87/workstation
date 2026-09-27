@@ -351,7 +351,9 @@ check "interval mode exact boundary stays quiet" quiet "$(verdict)"
 
 # 27. Invalid LANE_STALE_SECONDS: non-numeric, 0, and -5 -> alarm and exit 1.
 echo "2026-09-26T09:00:00Z" > "$DEADMAN"
-for bad in "not-a-number" "0" "-5"; do
+# 99999999999999999999 overflows bash arithmetic; `[ -gt ]` would then error, the if would be
+# false, and the watcher would report HEALTHY -- fail-open. So it must be rejected up front.
+for bad in "not-a-number" "0" "-5" "07200" "99999999999999999999"; do
   STALE_SECONDS_OVERRIDE="$bad" run_watch "2026-09-26T10:00:00Z"; rc=$?
   check "invalid LANE_STALE_SECONDS ($bad) alarms" alarm "$(stale_verdict)"
   [ "$rc" -ne 0 ] || { echo "FAIL: invalid LANE_STALE_SECONDS ($bad) must exit non-zero"; failures=$((failures + 1)); }
