@@ -208,7 +208,31 @@ do
   check(vim.api.nvim_buf_get_name(buf) ~= path and not vim.api.nvim_buf_get_name(buf):find(path, 1, true), "buffer NOT named after the private path")
   check(vim.fn.bufnr(path) == -1, "no buffer was :edit'ed for the path")
   check(vim.wo.winbar:find("stall-watch digest", 1, true) ~= nil, "title shows in the winbar")
-  vim.cmd("bwipeout! " .. buf)
+  local q_map = vim.fn.maparg("q", "n", false, true)
+  check(q_map.buffer == 1 and q_map.rhs == "<cmd>close<CR>", "buffer-local q mapped to <cmd>close<CR>")
+  local win_count = #vim.api.nvim_list_wins()
+  vim.cmd("normal q")
+  check(#vim.api.nvim_list_wins() == win_count - 1, "q closes the digest window")
+  check(not vim.api.nvim_buf_is_valid(buf), "closing wipes the digest buffer")
+
+  local orig_uv = vim.uv
+  local orig_loop = vim.loop
+  local loop_called = false
+  vim.uv = nil
+  vim.loop = {
+    fs_stat = function(p)
+      loop_called = true
+      return orig_uv.fs_stat(p)
+    end,
+  }
+  local buf_loop = init.show_digest(path)
+  check(loop_called, "fs_stat falls back to vim.loop when vim.uv is nil")
+  if buf_loop and vim.api.nvim_buf_is_valid(buf_loop) then
+    vim.cmd("bwipeout! " .. buf_loop)
+  end
+  vim.uv = orig_uv
+  vim.loop = orig_loop
+
   local seen
   local orig = vim.notify
   vim.notify = function(msg) seen = msg end

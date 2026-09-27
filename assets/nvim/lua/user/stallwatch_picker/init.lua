@@ -58,7 +58,7 @@ function M.show_digest(path)
     vim.notify("stall-watch: could not read the digest", vim.log.levels.WARN)
     return nil
   end
-  local stat = vim.uv.fs_stat(path)
+  local stat = (vim.uv or vim.loop).fs_stat(path)
   local mtime_ms = stat and (stat.mtime.sec * 1000) or nil
   vim.cmd("botright new")
   local buf = vim.api.nvim_get_current_buf()
@@ -68,6 +68,7 @@ function M.show_digest(path)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
   vim.wo.winbar = spec.digest_title(mtime_ms, now_ms())
+  vim.keymap.set("n", "q", "<cmd>close<CR>", { buffer = buf, silent = true, nowait = true })
   return buf
 end
 
