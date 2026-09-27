@@ -153,12 +153,19 @@ function M.fetch(opts, cb)
   -- without this pcall the picker would die of an uncaught exception instead of
   -- reporting "the CLI is not installed".
   local spawned, err_or_handle = pcall(system, argv, { text = true }, function(out)
-    if out.code ~= 0 then
+    if (out.signal and out.signal ~= 0) or (out.code and out.code ~= 0) then
+      local message
+      if out.signal and out.signal ~= 0 then
+        message = string.format("%s killed by signal %d", argv[1], out.signal)
+      else
+        message = string.format("%s exited %d", argv[1], out.code)
+      end
       settle(nil, {
         kind = "exit",
         code = out.code,
+        signal = out.signal,
         stderr = out.stderr or "",
-        message = string.format("%s exited %d", argv[1], out.code),
+        message = message,
       })
       return
     end

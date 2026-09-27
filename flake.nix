@@ -1541,8 +1541,8 @@
           echo "GATE FAILURE: stallwatch_picker.spec did not report expected 111 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  stallwatch_picker\.source unit tests (64 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: stallwatch_picker.source did not report expected 64 assertions." >&2
+        grep -q '^PASS  stallwatch_picker\.source unit tests (83 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.source did not report expected 83 assertions." >&2
           exit 1
         }
         touch $out

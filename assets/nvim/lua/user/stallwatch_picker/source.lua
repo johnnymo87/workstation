@@ -105,8 +105,15 @@ function M.decode_items(out)
   if is_obj and doc.error ~= nil then
     return nil, { kind = "error", message = "stall-watch: " .. tostring(doc.error) }
   end
-  if out.code ~= 0 then
-    local msg = trim(out.stderr) or string.format("read command exited %s", tostring(out.code))
+  if (out.signal and out.signal ~= 0) or (out.code and out.code ~= 0) then
+    local msg
+    if out.signal and out.signal ~= 0 then
+      local s = string.format("read command killed by signal %s", tostring(out.signal))
+      local err_txt = trim(out.stderr)
+      msg = err_txt and string.format("%s: %s", s, err_txt) or s
+    else
+      msg = trim(out.stderr) or string.format("read command exited %s", tostring(out.code))
+    end
     return nil, { kind = "exit", message = "stall-watch: " .. msg }
   end
   if not is_obj then
@@ -214,10 +221,14 @@ function M.fetch(opts, cb)
       return step3()
     end
     for _, tag in ipairs(tags) do
-      M.run(system, { "oc-tags", "sessions", tag }, opts.tags_timeout_ms or M.TAGS_TIMEOUT_MS, function(tout, terr)
+      M.run(system, { "oc-tags", "sessions", "--", tag }, opts.tags_timeout_ms or M.TAGS_TIMEOUT_MS, function(tout, terr)
         if terr then
           table.insert(warnings, string.format("oc-tags sessions failed for a program (%s)", terr.message))
-        elseif tout.code ~= 0 then
+        elseif tout.signal and tout.signal ~= 0 then
+          local s = string.format("oc-tags sessions killed by signal %s", tostring(tout.signal))
+          local err_txt = trim(tout.stderr)
+          table.insert(warnings, err_txt and string.format("%s: %s", s, err_txt) or s)
+        elseif tout.code and tout.code ~= 0 then
           table.insert(warnings, string.format("oc-tags sessions exited %s: %s", tostring(tout.code), trim(tout.stderr) or ""))
         else
           tagged[tag] = M.parse_ids(tout.stdout)

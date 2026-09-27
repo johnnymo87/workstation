@@ -30,13 +30,17 @@ local ROWS = vim.json.encode({
 local function router(replies, calls)
   return function(argv, _o, on_exit)
     table.insert(calls, argv)
-    local key = argv[1] == "oc-tags" and ("oc-tags:" .. argv[3]) or argv[1]
+    local key = argv[1] == "oc-tags" and ("oc-tags:" .. (argv[3] == "--" and argv[4] or argv[3])) or argv[1]
     local r = replies[key]
     if r == "raise" then error("ENOENT: no such file or directory") end
     if r ~= "hang" then
       r = r or { 0, "", "" }
+      local code = r[1] or 0
+      local stdout = r[2] or ""
+      local stderr = r[3] or ""
+      local sig = r.signal or 0
       vim.schedule(function()
-        on_exit({ code = r[1], signal = 0, stdout = r[2] or "", stderr = r[3] or "" })
+        on_exit({ code = code, signal = sig, stdout = stdout, stderr = stderr })
       end)
     end
     return { pid = 1, kill = function() end }
@@ -79,6 +83,9 @@ do
   check(#snap.rows == 2, "CLI rows carried")
   check(#snap.warnings == 0, "no warnings")
   check(calls[1][1] == ITEMS and calls[1][2] == "--json", "step 1 runs the read command with --json")
+  local tags_argv
+  for _, c in ipairs(calls) do if c[1] == "oc-tags" then tags_argv = c break end end
+  check(tags_argv ~= nil and tags_argv[2] == "sessions" and tags_argv[3] == "--", "oc-tags runs with sessions -- <tag>")
   local list_argv
   for _, c in ipairs(calls) do if c[1] == "oc-session-list" then list_argv = c end end
   check(list_argv ~= nil, "step 3 ran oc-session-list exactly via cli.fetch")
@@ -101,6 +108,13 @@ end
 do
   local _, err = collect({ [ITEMS] = { 2, "", "Traceback: something broke\n" } })
   check(err.kind == "exit" and err.message:find("Traceback: something broke", 1, true) ~= nil, "stderr surfaced")
+end
+
+-- 4b. Signal-killed read command -> exit-style error naming the signal.
+do
+  local snap, err = collect({ [ITEMS] = { 0, "", "", signal = 9 } })
+  check(snap == nil and err.kind == "exit", "signal killed read command -> kind=exit")
+  check(err.message:find("signal 9", 1, true) ~= nil, "signal message names signal 9")
 end
 
 -- 5. Timeout -> "stall-watch busy, retry".
@@ -145,6 +159,36 @@ do
   check(#snap.warnings == 1 and snap.warnings[1]:find("oc-tags", 1, true) ~= nil, "warning names oc-tags")
 end
 
+-- 10b. oc-tags timeout -> snapshot still delivered with warning, join completes.
+do
+  local r = vim.deepcopy(HAPPY)
+  r["oc-tags:alpha"] = "hang"
+  local snap, err = collect(r)
+  check(err == nil and snap ~= nil, "oc-tags timeout is not fatal")
+  check(#snap.tagged.alpha == 0, "timed out program has no tagged ids")
+  check(#snap.warnings == 1 and snap.warnings[1]:find("did not respond within", 1, true) ~= nil, "warning names timeout")
+end
+
+-- 10c. oc-tags spawn failure (ENOENT) -> snapshot still delivered with warning, join completes.
+do
+  local r = vim.deepcopy(HAPPY)
+  r["oc-tags:alpha"] = "raise"
+  local snap, err = collect(r)
+  check(err == nil and snap ~= nil, "oc-tags spawn failure is not fatal")
+  check(#snap.tagged.alpha == 0, "failed spawn program has no tagged ids")
+  check(#snap.warnings == 1 and snap.warnings[1]:find("could not run oc-tags", 1, true) ~= nil, "warning names spawn failure")
+end
+
+-- 10d. oc-tags killed by signal -> warning names signal.
+do
+  local r = vim.deepcopy(HAPPY)
+  r["oc-tags:alpha"] = { 0, "", "", signal = 15 }
+  local snap, err = collect(r)
+  check(err == nil and snap ~= nil, "oc-tags signal kill is not fatal")
+  check(#snap.tagged.alpha == 0, "signal killed program has no tagged ids")
+  check(#snap.warnings == 1 and snap.warnings[1]:find("signal 15", 1, true) ~= nil, "warning names signal 15")
+end
+
 -- 11. oc-session-list fails -> snapshot with no rows, with a warning.
 do
   local r = vim.deepcopy(HAPPY)
@@ -152,6 +196,15 @@ do
   local snap, err = collect(r)
   check(err == nil and #snap.rows == 0, "CLI failure -> empty rows, not an error")
   check(#snap.warnings == 1 and snap.warnings[1]:find("oc-session-list failed", 1, true) ~= nil, "warning names oc-session-list")
+end
+
+-- 11b. CLI killed by signal -> snapshot with no rows, warning naming signal.
+do
+  local r = vim.deepcopy(HAPPY)
+  r["oc-session-list"] = { 0, "", "", signal = 9 }
+  local snap, err = collect(r)
+  check(err == nil and #snap.rows == 0, "CLI signal failure -> empty rows")
+  check(#snap.warnings == 1 and snap.warnings[1]:find("signal 9", 1, true) ~= nil, "warning names signal 9")
 end
 
 -- 12. CLI exit 0 + stderr -> rows AND the stderr lines as warnings.
