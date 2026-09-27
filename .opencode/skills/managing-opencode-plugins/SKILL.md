@@ -85,7 +85,7 @@ read it:
 
 1. **`pluginSpecs`** — rewrites `opencode.base.json`'s bare `plugin` entries
    into `<pkg>@<version>` for the generated `opencode.json`. Entries with no
-   pin (e.g. `./plugins/caveman/plugin.js`) pass through untouched. Pins are
+   pin (e.g. a relative `./plugins/<name>/plugin.js`) pass through untouched. Pins are
    asserted to be **exact** versions at eval time; a range or a dist-tag
    would re-create the churn described above and is rejected.
 2. **The activation**, which:
