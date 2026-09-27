@@ -17,18 +17,29 @@ M.SEP = "│"
 M.NOT_ARMED_MARK = "[log-only]"
 M.NOT_ENABLED_MARK = "[disabled]"
 
+local function oneline(s)
+  if type(s) == "string" then
+    return (s:gsub("[\r\n]+", " "))
+  end
+  return nil
+end
+
 local function nonempty(s)
   if type(s) == "string" and s ~= "" then
-    return s
+    local cleaned = oneline(s)
+    if cleaned:match("%S") then
+      return cleaned
+    end
   end
   return nil
 end
 
 local function basename(dir)
-  if not nonempty(dir) then
+  local d = nonempty(dir)
+  if not d then
     return "(no dir)"
   end
-  local cleaned = dir:gsub("/+$", "")
+  local cleaned = d:gsub("/+$", "")
   if cleaned == "" then
     return "/"
   end
@@ -92,8 +103,9 @@ end
 --- a dead source", which is a different statement.
 function M.session_display(row, now_ms)
   row = type(row) == "table" and row or {}
-  local glyph = row.joined and ss_spec.glyph_of(row) or " "
-  local age = row.joined and ss_spec.idle_age(row.lastActivity, now_ms) or ""
+  local joined = row.joined == true
+  local glyph = joined and ss_spec.glyph_of(row) or " "
+  local age = joined and ss_spec.idle_age(row.lastActivity, now_ms) or ""
   local title = nonempty(row.title) or nonempty(row.id) or "(untitled)"
   local lead = { glyph }
   local badge = M.badge(row)

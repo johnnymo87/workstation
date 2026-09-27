@@ -55,6 +55,11 @@ do
   check(spec.program_ordinal({ tag = vim.NIL }) == "", "vim.NIL tag ordinal -> empty string")
   check(spec.program_ordinal({ tag = 123 }) == "", "non-string tag ordinal -> empty string")
 
+  -- Multi-line tag has newlines collapsed to a single space.
+  local ml_prog = spec.program_display({ tag = "alpha\ncore\r\nservice", counts = { total = 0, by_kind = {} } }, NOW)
+  check(ml_prog == "alpha core service · 0 open", "multi-line tag has newlines collapsed, got: " .. ml_prog)
+  check(not ml_prog:find("[\r\n]"), "program_display contains no newlines")
+
   check(spec.counts_text(nil) == "0 open", "nil counts -> 0 open")
   check(spec.counts_text(vim.NIL) == "0 open", "vim.NIL counts -> 0 open")
   check(spec.counts_text({ total = vim.NIL, by_kind = vim.NIL }) == "0 open", "vim.NIL fields in counts -> 0 open")
@@ -93,6 +98,24 @@ do
   check(spec.badge(nil) == "", "nil badge -> empty")
   check(spec.badge(vim.NIL) == "", "vim.NIL badge -> empty")
   check(spec.badge({ badge_kind = vim.NIL }) == "", "vim.NIL badge_kind -> empty")
+
+  -- Multi-line title in session_display has newlines collapsed to a single space.
+  local ml_sess = spec.session_display({ id = "s1", title = "First line\nSecond line\r\nThird line", directory = "/x/y" }, NOW)
+  check(ml_sess:find("First line Second line Third line", 1, true) ~= nil,
+    "multi-line session title has newlines collapsed, got: " .. ml_sess)
+  check(not ml_sess:find("[\r\n]"), "session_display contains no newlines")
+
+  -- row.joined == true check (vim.NIL is truthy, must be treated as unjoined).
+  local nil_joined = spec.session_display({
+    id = "s_nil_joined",
+    joined = vim.NIL,
+    lastActivity = NOW,
+    effective_state = "blocked",
+  }, NOW)
+  check(not nil_joined:find(ss_spec.GLYPHS.blocked, 1, true), "joined = vim.NIL does not render state glyph")
+  check(not nil_joined:find(ss_spec.GLYPHS.unknown, 1, true), "joined = vim.NIL does not render unknown glyph")
+  check(not nil_joined:find("?", 1, true), "joined = vim.NIL does not render ? age")
+  check(nil_joined == "  s_nil_joined │ (no dir) │", "joined = vim.NIL treated as unjoined, got: " .. nil_joined)
 end
 
 -- 3. PREVIEWERS.
@@ -137,7 +160,30 @@ do
   check(spec.item_marks(vim.NIL) == "", "vim.NIL item_marks")
   check(spec.item_marks({ status = "changed", what_changed = vim.NIL }) == "(changed)", "changed without what_changed")
   check(spec.item_marks({ status = "changed", what_changed = "" }) == "(changed)", "changed with empty what_changed")
+  check(spec.item_marks({ status = "changed", what_changed = "text\nreworded\r\nagain" })
+    == "(changed: text reworded again)", "multi-line what_changed has newlines collapsed")
   check(spec.item_marks({ stale = vim.NIL }) == "", "stale vim.NIL -> no mark")
+
+  local ml_prev = spec.program_preview_lines({
+    items = {
+      {
+        kind = "decision",
+        text = "Item with multi-line what_changed",
+        status = "changed",
+        what_changed = "split\nover\r\nlines",
+        sessions = {
+          { id = "ses_ml", title = "Multi\nLine\r\nSession Title" },
+        },
+      },
+    },
+  })
+  check(ml_prev[1]:find("%(changed: split over lines%)") ~= nil,
+    "multi-line what_changed in preview line, got: " .. ml_prev[1])
+  check(ml_prev[2] == "    - Multi Line Session Title",
+    "multi-line session title in preview line, got: " .. ml_prev[2])
+  for _, l in ipairs(ml_prev) do
+    check(not l:find("[\r\n]"), "no preview line contains carriage return or newline")
+  end
 end
 
 -- 4. TITLES.
