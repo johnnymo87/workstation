@@ -44,7 +44,7 @@ end
 --    Contract drift must be a deliberate fixture edit, not a silent blank.
 do
   local function present(node, segs, i)
-    if i > #segs then return node ~= nil end
+    if i > #segs then return node ~= nil and node ~= vim.NIL end
     local seg = segs[i]
     local each = seg:sub(-2) == "[]"
     local key = each and seg:sub(1, -3) or seg
@@ -63,6 +63,7 @@ do
     local segs = vim.split(path, ".", { plain = true })
     check(present(doc, segs, 1), "fixture carries a non-null value for read field " .. path)
   end
+  check(not present({ a = vim.NIL }, { "a" }, 1), "present rejects vim.NIL")
 end
 
 -- 2. KIND ORDER mirrors the contract, and unknown kinds rank last.
@@ -84,6 +85,12 @@ do
   check(model.iso_ms("2024-03-01T00:00:00+00:00") == 1709251200000, "leap-year March 1st")
   check(model.iso_ms(nil) == nil, "nil -> nil")
   check(model.iso_ms("yesterday") == nil, "garbage -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00123+00:00") == nil, "fraction without dot -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00.+00:00") == nil, "dot without digits -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00.abc+00:00") == nil, "malformed fractional -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00+25:00") == nil, "malformed timezone offset hour -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00+00:60") == nil, "malformed timezone offset minute -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00trailing") == nil, "trailing garbage -> nil")
 end
 
 -- 4. PROGRAM ROWS keep source order and carry counts.
@@ -102,6 +109,28 @@ do
   check(#model.program_rows(nil) == 0, "nil doc -> zero rows")
   local odd = model.program_rows({ programs = { { tag = "alpha" } } })
   check(#odd == 1 and odd[1].counts.total == 0 and #odd[1].items == 0, "missing items tolerated")
+
+  -- Non-boolean armed/enabled normalized to nil.
+  local bool_test = model.program_rows({ programs = {
+    { tag = "gamma", armed = "yes", enabled = vim.NIL },
+    { tag = "delta", armed = 1, enabled = 0 },
+    { tag = "epsilon", armed = true, enabled = false },
+  } })
+  check(bool_test[1].armed == nil and bool_test[1].enabled == nil, "string/vim.NIL armed/enabled -> nil")
+  check(bool_test[2].armed == nil and bool_test[2].enabled == nil, "number armed/enabled -> nil")
+  check(bool_test[3].armed == true and bool_test[3].enabled == false, "boolean armed/enabled preserved")
+
+  -- Defensively tolerate vim.NIL and non-table values in program_rows.
+  check(#model.program_rows(vim.NIL) == 0, "vim.NIL doc -> zero rows")
+  check(#model.program_rows({ programs = vim.NIL }) == 0, "vim.NIL programs -> zero rows")
+  check(#model.program_rows({ programs = { vim.NIL, "string", 123 } }) == 0, "non-table programs -> zero rows")
+
+  -- Counts only table items.
+  local c = model.counts({ items = { "not a table", vim.NIL, 42, { kind = "decision" }, { kind = vim.NIL } } })
+  check(c.total == 2, "counts only table items in total, got " .. c.total)
+  check(#c.by_kind == 2 and c.by_kind[1].kind == "decision" and c.by_kind[1].n == 1
+    and c.by_kind[2].kind == "unknown" and c.by_kind[2].n == 1,
+    "by_kind counts only table items")
 end
 
 -- 5. FLAGGED ROWS: item-driven, deduped, most urgent badge, left-join.
@@ -146,6 +175,23 @@ do
   local sparse = model.flagged_rows({ items = { { sessions = { { id = "ses_fixture_s" }, {}, { id = "" } } } } }, {})
   check(#sparse == 1 and sparse[1].title == "ses_fixture_s", "missing kind/title/directory tolerated; empty ids skipped")
   check(sparse[1].dir_missing == false, "missing directory_exists is not treated as gone")
+
+  -- Defensively tolerate vim.NIL and non-table values in flagged_rows.
+  local fl = model.flagged_rows({ items = {
+    vim.NIL,
+    "string",
+    { kind = vim.NIL, sessions = {
+      vim.NIL,
+      "str",
+      { id = "ses_nil", directory = vim.NIL, title = vim.NIL },
+    } },
+  } }, { ses_nil = "not_a_table", other = vim.NIL })
+  check(#fl == 1, "flagged_rows skips non-tables")
+  check(fl[1].id == "ses_nil", "id preserved")
+  check(fl[1].directory == nil, "directory normalized to nil when vim.NIL")
+  check(fl[1].badge_kind == nil, "badge_kind normalized to nil when vim.NIL")
+  check(fl[1].joined == false, "invalid cli entry treated as unjoined")
+  check(fl[1].title == "ses_nil", "title falls back to id")
 end
 
 -- 6. ALL VIEW: stable partition of the CLI result.
@@ -157,6 +203,14 @@ do
   check(all[1] == flagged[2], "flagged rows are the same objects in both views")
   local none = model.all_rows(flagged, {}, TAGGED.alpha)
   check(ids(none) == ids(flagged), "CLI failed -> all view degrades to the flagged rows")
+
+  -- Defensively tolerate non-table / non-nonempty-id elements in flagged, cli_rows, tagged_ids.
+  local mixed_flagged = { vim.NIL, "str", { id = "" }, { id = "f1" } }
+  local mixed_cli = { vim.NIL, "str", { id = "" }, { id = "f1", title = "F1" }, { id = "t1", title = "T1" } }
+  local mixed_tagged = { vim.NIL, 42, "", "t1" }
+  local mixed_all = model.all_rows(mixed_flagged, mixed_cli, mixed_tagged)
+  check(ids(mixed_all) == "f1,t1", "all_rows guards non-table/non-nonempty-id elements, got " .. ids(mixed_all))
+  check(#model.all_rows(vim.NIL, vim.NIL, vim.NIL) == 0, "all_rows handles vim.NIL inputs without crash")
 end
 
 -- 7. UNION of ids for the one oc-session-list call.

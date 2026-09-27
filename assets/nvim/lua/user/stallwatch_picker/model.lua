@@ -8,6 +8,9 @@
 -- Everything here is a pure function of that snapshot, so moving between
 -- screens never waits on I/O.
 --
+-- Note: JSON nulls are normalised to Lua nil at the boundary (source.lua luanil);
+-- the model still tolerates vim.NIL defensively.
+--
 -- PURE: MUST NOT require telescope.* or plenary.*. No vim.system, no vim.fn,
 -- no vim.api, no vim.notify. CI loads this under `nvim --clean -l`.
 
@@ -74,12 +77,23 @@ function M.iso_ms(s)
   if type(s) ~= "string" then
     return nil
   end
-  local y, mo, d, h, mi, sec, frac, tz =
-    s:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)[T ](%d%d):(%d%d):(%d%d)(%.?%d*)(.*)$")
+  local y, mo, d, h, mi, sec, rest =
+    s:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)[T ](%d%d):(%d%d):(%d%d)(.*)$")
   if not y then
     return nil
   end
+  local frac, tz = "", rest
+  if rest:sub(1, 1) == "." then
+    frac, tz = rest:match("^(%.%d+)(.*)$")
+    if not frac then
+      return nil
+    end
+  end
   y, mo, d = tonumber(y), tonumber(mo), tonumber(d)
+  local ih, imi, isec = tonumber(h), tonumber(mi), tonumber(sec)
+  if mo < 1 or mo > 12 or d < 1 or d > 31 or ih > 23 or imi > 59 or isec > 60 then
+    return nil
+  end
   -- days_from_civil (H. Hinnant), valid for the proleptic Gregorian calendar.
   local yy = (mo <= 2) and (y - 1) or y
   local era = math.floor(yy / 400)
@@ -88,17 +102,21 @@ function M.iso_ms(s)
   local doy = math.floor((153 * mp + 2) / 5) + d - 1
   local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
   local days = era * 146097 + doe - 719468
-  local secs = days * 86400 + tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(sec)
+  local secs = days * 86400 + ih * 3600 + imi * 60 + isec
   if tz ~= "" and tz ~= "Z" then
     local sign, oh, om = tz:match("^([+-])(%d%d):?(%d%d)$")
     if not sign then
       return nil
     end
-    local off = tonumber(oh) * 3600 + tonumber(om) * 60
+    local ioh, iom = tonumber(oh), tonumber(om)
+    if ioh > 23 or iom > 59 then
+      return nil
+    end
+    local off = ioh * 3600 + iom * 60
     secs = (sign == "+") and (secs - off) or (secs + off)
   end
   local ms = 0
-  if frac ~= "" and frac ~= "." then
+  if frac ~= "" then
     ms = math.floor(tonumber("0" .. frac) * 1000)
   end
   return secs * 1000 + ms
@@ -110,9 +128,13 @@ end
 function M.counts(program)
   local items = list(type(program) == "table" and program.items)
   local n = {}
+  local total = 0
   for _, it in ipairs(items) do
-    local k = (type(it) == "table" and nonempty(it.kind)) or "unknown"
-    n[k] = (n[k] or 0) + 1
+    if type(it) == "table" then
+      total = total + 1
+      local k = nonempty(it.kind) or "unknown"
+      n[k] = (n[k] or 0) + 1
+    end
   end
   local by_kind = {}
   for _, k in ipairs(M.KIND_ORDER) do
@@ -126,7 +148,7 @@ function M.counts(program)
   for _, k in ipairs(rest) do
     table.insert(by_kind, { kind = k, n = n[k] })
   end
-  return { total = #items, by_kind = by_kind }
+  return { total = total, by_kind = by_kind }
 end
 
 --- Screen 1 rows: one per program, in the READ COMMAND'S ORDER (stable
@@ -136,10 +158,17 @@ function M.program_rows(doc)
   local out = {}
   for _, p in ipairs(list(type(doc) == "table" and doc.programs)) do
     if type(p) == "table" then
+      local armed, enabled = nil, nil
+      if type(p.armed) == "boolean" then
+        armed = p.armed
+      end
+      if type(p.enabled) == "boolean" then
+        enabled = p.enabled
+      end
       table.insert(out, {
         tag = nonempty(p.tag) or "(unnamed)",
-        armed = p.armed,
-        enabled = p.enabled,
+        armed = armed,
+        enabled = enabled,
         last_tick_ms = M.iso_ms(p.last_tick_activity),
         items = list(p.items),
         counts = M.counts(p),
@@ -191,7 +220,7 @@ function M.flagged_rows(prow, by_id)
         if sid then
           local row = seen[sid]
           if not row then
-            local cli = by_id[sid]
+            local cli = type(by_id[sid]) == "table" and by_id[sid] or nil
             if cli then
               row = vim.tbl_extend("force", {}, cli)
               row.joined = true
@@ -199,17 +228,18 @@ function M.flagged_rows(prow, by_id)
               row = {
                 id = sid,
                 title = nonempty(s.title) or sid,
-                directory = s.directory,
+                directory = nonempty(s.directory),
                 dir_missing = s.directory_exists == false,
                 joined = false,
               }
             end
-            row.badge_kind = item.kind
+            local ikind = nonempty(item.kind)
+            row.badge_kind = ikind
             row.items = {}
             seen[sid] = row
             table.insert(out, row)
-          elseif M.kind_rank(item.kind) < M.kind_rank(row.badge_kind) then
-            row.badge_kind = item.kind
+          elseif M.kind_rank(nonempty(item.kind)) < M.kind_rank(row.badge_kind) then
+            row.badge_kind = nonempty(item.kind)
           end
           table.insert(row.items, item)
         end
@@ -232,15 +262,21 @@ end
 function M.all_rows(flagged, cli_rows, tagged_ids)
   local flagged_by_id = {}
   for _, f in ipairs(list(flagged)) do
-    flagged_by_id[f.id] = f
+    local fid = type(f) == "table" and nonempty(f.id)
+    if fid then
+      flagged_by_id[fid] = f
+    end
   end
   local tagged = {}
   for _, sid in ipairs(list(tagged_ids)) do
-    tagged[sid] = true
+    local tsid = nonempty(sid)
+    if tsid then
+      tagged[tsid] = true
+    end
   end
   local head, tail, placed = {}, {}, {}
   for _, r in ipairs(list(cli_rows)) do
-    local sid = type(r) == "table" and r.id
+    local sid = type(r) == "table" and nonempty(r.id)
     if sid and flagged_by_id[sid] then
       table.insert(head, flagged_by_id[sid])
       placed[sid] = true
@@ -252,7 +288,8 @@ function M.all_rows(flagged, cli_rows, tagged_ids)
     end
   end
   for _, f in ipairs(list(flagged)) do
-    if not placed[f.id] then
+    local fid = type(f) == "table" and nonempty(f.id)
+    if fid and not placed[fid] then
       table.insert(head, f)
     end
   end
@@ -279,8 +316,8 @@ function M.union_ids(doc, tagged)
     end
   end
   for _, p in ipairs(list(type(doc) == "table" and doc.programs)) do
-    local tag = type(p) == "table" and p.tag
-    for _, sid in ipairs(list(type(tagged) == "table" and tagged[tag])) do
+    local tag = type(p) == "table" and nonempty(p.tag)
+    for _, sid in ipairs(list(type(tagged) == "table" and tag and tagged[tag])) do
       add(sid)
     end
   end
