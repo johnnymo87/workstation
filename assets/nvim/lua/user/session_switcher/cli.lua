@@ -74,6 +74,14 @@ function M.build_argv(opts)
     table.insert(argv, "--limit")
     table.insert(argv, tostring(opts.limit))
   end
+  -- `--ids` (workstation-p8ch) asks for exactly these sessions' root trees,
+  -- bypassing the recency window. An EMPTY list is omitted rather than sent
+  -- as `--ids ""`: the caller asked for nothing, and the stall-watch source
+  -- skips the call entirely in that case.
+  if type(opts.ids) == "table" and #opts.ids > 0 then
+    table.insert(argv, "--ids")
+    table.insert(argv, table.concat(opts.ids, ","))
+  end
   return argv
 end
 

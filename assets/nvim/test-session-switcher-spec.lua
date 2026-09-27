@@ -2834,4 +2834,19 @@ do
     "the in-flight title says id search is on, got " .. tostring(picker.prompt_title))
 end
 
+-- DISPATCH IS PUBLIC (workstation-p8ch). The stall-watch picker jumps through
+-- init_mod.dispatch rather than a copy of the <CR> handler, so pin that it is
+-- exported and routes through the exec module table (stubs still intercept).
+do
+  check(type(init_mod.dispatch) == "function", "session_switcher exports dispatch")
+  local orig_switch = exec.switch_pane
+  local got_client
+  exec.switch_pane = function(_desc, client) got_client = client; return true end
+  init_mod.dispatch({ kind = "switch_pane", pane = "%9" }, { id = "ses_dispatch" }, "client_dispatch", {})
+  exec.switch_pane = orig_switch
+  check(got_client == "client_dispatch", "dispatch hands switch_pane the client it was given")
+  local ok = pcall(init_mod.dispatch, nil, nil, nil, nil)
+  check(ok, "dispatch(nil, ...) is a no-op, not an error")
+end
+
 print("LUA_TEST_OK " .. N)

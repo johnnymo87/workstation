@@ -1517,8 +1517,8 @@
                "$(grep -c '^PASS  ' "$TMPDIR/out.txt")." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.cli unit tests (31 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.cli did not report expected 31 assertions." >&2
+        grep -q '^PASS  session_switcher\.cli unit tests (33 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.cli did not report expected 33 assertions." >&2
           exit 1
         }
         grep -q '^PASS  session_switcher\.discovery + \.rpc unit tests (69 assertions via nvim -l)' "$TMPDIR/out.txt" || {
@@ -1529,8 +1529,8 @@
           echo "GATE FAILURE: session_switcher.model did not report expected 114 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (656 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 656 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (659 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 659 assertions." >&2
           exit 1
         }
         touch $out
