@@ -269,6 +269,10 @@ sws_out="$(nvim --clean -l assets/nvim/test-stallwatch-picker-spec.lua 2>&1 || t
 sws_count="$(parse_lua_ok "$sws_out" "stallwatch_picker.spec unit tests")" || exit 1
 printf 'PASS  stallwatch_picker.spec unit tests (%s assertions via nvim -l)\n' "$sws_count"
 
+swsrc_out="$(nvim --clean -l assets/nvim/test-stallwatch-picker-source.lua 2>&1 || true)"
+swsrc_count="$(parse_lua_ok "$swsrc_out" "stallwatch_picker.source unit tests")" || exit 1
+printf 'PASS  stallwatch_picker.source unit tests (%s assertions via nvim -l)\n' "$swsrc_count"
+
 # --- Cross-language contract: the state vocabulary must not DRIFT. -----------
 #
 # oc-session-list-fold.ts owns `effective_state`; model.lua mirrors the list in

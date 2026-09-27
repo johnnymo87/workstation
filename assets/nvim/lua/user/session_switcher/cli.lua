@@ -57,6 +57,30 @@ local M = {}
 M.CMD = "oc-session-list"
 M.DEFAULT_TIMEOUT_MS = 5000
 
+--- Whether a session ID is valid for CLI querying.
+--- Reused by stallwatch_picker/source.lua to ensure we never invoke
+--- oc-session-list when all candidate IDs are dropped.
+--- @param id any
+--- @return boolean
+function M.is_valid_id(id)
+  return type(id) == "string" and id ~= "" and id:sub(1, 1) ~= "-" and not id:find(",", 1, true)
+end
+
+--- Filter a list of session IDs to only valid ones.
+--- @param ids table|nil
+--- @return string[]
+function M.filter_valid_ids(ids)
+  local valid_ids = {}
+  if type(ids) == "table" then
+    for _, id in ipairs(ids) do
+      if M.is_valid_id(id) then
+        table.insert(valid_ids, id)
+      end
+    end
+  end
+  return valid_ids
+end
+
 --- Build the argv for the CLI invocation.
 --- @param opts table
 --- @return string[]
@@ -78,12 +102,7 @@ function M.build_argv(opts)
   -- bypassing the recency window. Only non-empty strings not starting with '-'
   -- and containing no ',' are included. If none remain, `--ids` is omitted.
   if type(opts.ids) == "table" then
-    local valid_ids = {}
-    for _, id in ipairs(opts.ids) do
-      if type(id) == "string" and id ~= "" and id:sub(1, 1) ~= "-" and not id:find(",", 1, true) then
-        table.insert(valid_ids, id)
-      end
-    end
+    local valid_ids = M.filter_valid_ids(opts.ids)
     if #valid_ids > 0 then
       table.insert(argv, "--ids")
       table.insert(argv, table.concat(valid_ids, ","))
