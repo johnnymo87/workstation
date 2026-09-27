@@ -5,7 +5,7 @@
 
 let
   # Devbox defaults its adversarial reviewer to the astra twin (gpt-6-astra via
-  # codex-lb) rather than the fable one — see the matching caution rewrite in
+  # codex-lb) rather than the opus one — see the matching caution rewrite in
   # opencode-config.nix and the host policy in
   # .opencode/skills/opencode-agents/SKILL.md. The pre-PR dispatch instruction
   # lives in prose, so it is rendered per host HERE rather than written as an
@@ -19,7 +19,7 @@ let
   #
   #   -0777       true slurp. `-0` alone means NUL-delimited records, which is
   #               only incidentally equivalent on markdown.
-  #   $n == 1     exactly one, not "at least one". A SECOND mention of the fable
+  #   $n == 1     exactly one, not "at least one". A SECOND mention of the opus
   #               handle in this file would be differently intended (a fallback
   #               instruction, a comparison) and must fail the build rather than
   #               be silently inverted into "fall back to astra".
@@ -28,9 +28,9 @@ let
   #               die is unreachable in precisely the worst case. END catches it.
   astraShepherdingSkill = pkgs.runCommand "shepherding-pull-requests-astra-SKILL.md" {} ''
     ${pkgs.perl}/bin/perl -0777 -pe '
-      our $n += (s!adversarial-reviewer-fable!adversarial-reviewer-astra!g);
+      our $n += (s!adversarial-reviewer-opus!adversarial-reviewer-astra!g);
       our $seen = 1;
-      die "astraShepherdingSkill: expected exactly 1 adversarial-reviewer-fable reference, found $n\n"
+      die "astraShepherdingSkill: expected exactly 1 adversarial-reviewer-opus reference, found $n\n"
         unless $n == 1;
       END {
         die "astraShepherdingSkill: source SKILL.md was empty\n" unless $seen;
