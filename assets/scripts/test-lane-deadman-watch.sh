@@ -31,6 +31,13 @@
 #                               A date-derived signature would make every pass a new episode:
 #                               dedup never matches, backoff never engages, and it decays into a
 #                               flat daily nag that never escalates.
+# 24. interval fresh         -> quiet and exit 0 when age < threshold.
+# 25. interval stale         -> alarms and exits 1 when age > threshold.
+# 26. interval boundary      -> quiet when age == threshold.
+# 27. interval invalid cfg   -> non-numeric, 0, -5 alarm and exit 1.
+# 28. interval weekend       -> Saturday with 3h-old success alarms, bypassing weekday logic.
+# 29. interval gate outranks -> absent expect file stays silent even with garbage LANE_STALE_SECONDS.
+# 30. interval future-dated  -> alarms when timestamp is in the future.
 #
 # The suite drives the SCRIPT AS DEPLOYED via env seams -- never by sourcing internals -- so a
 # pinned-PATH bug (a binary the source uses but the unit does not provide) can still be caught.
@@ -113,6 +120,7 @@ run_watch() {
   LANE_CADENCE_UNIT="${CADENCE_UNIT_OVERRIDE-testlane.timer}" \
   LANE_CADENCE_QUERY_CMD="$CADENCE_CMD" \
   LANE_CADENCE_ALERT_STATE="$TMP/alert.state.cadence" \
+  LANE_STALE_SECONDS="${STALE_SECONDS_OVERRIDE-}" \
   WATCHDOG_NOW="$now" \
   bash "$WATCH" > "$TMP/out.log" 2>&1
   return $?
@@ -310,5 +318,66 @@ run_watch "2026-08-17T21:00:00-04:00"; check "unqueryable is-active alarms" alar
 #     satisfied by anything less.
 echo "enabled active" > "$CADENCE_STATE_FILE"
 run_watch "2026-08-17T21:00:00-04:00"; check "enabled AND active stays quiet" quiet "$(verdict)"
+
+echo
+
+# ---------------------------------------------------------------------------------------------
+# INTERVAL MODE (LANE_STALE_SECONDS)
+#
+# A sub-daily, 7-day cadence cannot be counted in weekday slots. When LANE_STALE_SECONDS is set,
+# staleness is elapsed seconds: NOW_EPOCH - LAST_EPOCH > LANE_STALE_SECONDS.
+# ---------------------------------------------------------------------------------------------
+
+# 24. Interval fresh: 1h old success with 2h (7200s) threshold -> quiet, exit 0.
+echo "2026-09-26T09:00:00Z" > "$DEADMAN"
+STALE_SECONDS_OVERRIDE=7200 run_watch "2026-09-26T10:00:00Z"; rc=$?
+check "interval mode fresh success stays quiet" quiet "$(verdict)"
+[ "$rc" -eq 0 ] || { echo "FAIL: interval mode fresh success must exit 0"; failures=$((failures + 1)); }
+
+# 25. Interval stale: 7201s old success with 7200s threshold -> alarm, exit 1.
+echo "2026-09-26T08:00:00Z" > "$DEADMAN"
+STALE_SECONDS_OVERRIDE=7200 run_watch "2026-09-26T10:00:01Z"; rc=$?
+check "interval mode stale alarms" alarm "$(stale_verdict)"
+[ "$rc" -ne 0 ] || { echo "FAIL: interval mode stale must exit non-zero"; failures=$((failures + 1)); }
+if [ -s "$ALERT_LOG" ] && ! grep -q "has not succeeded for 7201s (threshold 7200s)" "$ALERT_LOG"; then
+  echo "FAIL: interval alarm text must report age and threshold"; failures=$((failures + 1))
+fi
+
+# 26. Exact boundary: age == threshold (7200s) -> quiet, exit 0.
+echo "2026-09-26T08:00:00Z" > "$DEADMAN"
+STALE_SECONDS_OVERRIDE=7200 run_watch "2026-09-26T10:00:00Z"; rc=$?
+check "interval mode exact boundary stays quiet" quiet "$(verdict)"
+[ "$rc" -eq 0 ] || { echo "FAIL: interval boundary must exit 0"; failures=$((failures + 1)); }
+
+# 27. Invalid LANE_STALE_SECONDS: non-numeric, 0, and -5 -> alarm and exit 1.
+echo "2026-09-26T09:00:00Z" > "$DEADMAN"
+for bad in "not-a-number" "0" "-5"; do
+  STALE_SECONDS_OVERRIDE="$bad" run_watch "2026-09-26T10:00:00Z"; rc=$?
+  check "invalid LANE_STALE_SECONDS ($bad) alarms" alarm "$(stale_verdict)"
+  [ "$rc" -ne 0 ] || { echo "FAIL: invalid LANE_STALE_SECONDS ($bad) must exit non-zero"; failures=$((failures + 1)); }
+  if [ -s "$ALERT_LOG" ] && ! grep -qi "misconfigured" "$ALERT_LOG"; then
+    echo "FAIL: invalid LANE_STALE_SECONDS ($bad) alert text must mention misconfigured"; failures=$((failures + 1))
+  fi
+done
+
+# 28. Weekend: Saturday "now" with a 3h-old success (10800s > 7200s) -> alarm and exit 1.
+# Proves weekday-slot logic is bypassed (in weekday logic Saturday is not counted).
+echo "2026-09-26T07:00:00Z" > "$DEADMAN"
+STALE_SECONDS_OVERRIDE=7200 run_watch "2026-09-26T10:00:00Z"; rc=$?
+check "interval mode alarms on weekend (bypassing weekday logic)" alarm "$(stale_verdict)"
+[ "$rc" -ne 0 ] || { echo "FAIL: interval mode on weekend must exit non-zero"; failures=$((failures + 1)); }
+
+# 29. Expectation gate outranks interval mode: absent expect file stays silent even with garbage config.
+rm -f "$EXPECT"
+STALE_SECONDS_OVERRIDE="garbage-value" run_watch "2026-09-26T10:00:00Z"; rc=$?
+check "absent expect file stays silent even with garbage LANE_STALE_SECONDS" quiet "$(verdict)"
+[ "$rc" -eq 0 ] || { echo "FAIL: absent expect file must exit 0"; failures=$((failures + 1)); }
+touch "$EXPECT"
+
+# 30. Future-dated timestamp in interval mode -> alarm and exit 1.
+echo "2026-09-26T12:00:00Z" > "$DEADMAN"
+STALE_SECONDS_OVERRIDE=7200 run_watch "2026-09-26T10:00:00Z"; rc=$?
+check "future-dated timestamp in interval mode alarms" alarm "$(stale_verdict)"
+[ "$rc" -ne 0 ] || { echo "FAIL: future-dated timestamp in interval mode must exit non-zero"; failures=$((failures + 1)); }
 
 if [ "$failures" -eq 0 ]; then echo "All lane-deadman-watch tests passed."; else echo "$failures test(s) FAILED."; exit 1; fi

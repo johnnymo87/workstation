@@ -35,11 +35,17 @@
 # DST-fragile. This counts missed 16:00 slots instead, stepping day by day through local midnight
 # so DST transitions cannot introduce an off-by-one.
 #
+# INTERVAL MODE (LANE_STALE_SECONDS). A sub-daily, 7-day cadence (e.g. every 15 min, all week)
+# cannot be counted in weekday slots. When LANE_STALE_SECONDS is set and non-empty, staleness is
+# measured as elapsed seconds: NOW_EPOCH - LAST_EPOCH > LANE_STALE_SECONDS. LANE_SLOT_HOUR and
+# LANE_STALE_SLOTS are ignored.
+#
 # Env seams (all optional; the unit supplies them):
 #   LANE_DEADMAN_FILE  timestamp file the lane rewrites on real success   (required)
 #   LANE_EXPECT_FILE   expectation gate; absent -> silent exit 0          (required)
 #   LANE_STALE_SLOTS   missed slots before alarming        (default 3)
 #   LANE_SLOT_HOUR     hour of the lane's daily run, local (default 16)
+#   LANE_STALE_SECONDS elapsed seconds before alarming; overrides weekday slots (optional)
 #   LANE_LABEL         name used in the alert text         (default "lane")
 #   LANE_HINT          actionable hint appended to alerts  (default "")
 #   LANE_ALERT_CMD     alert helper; receives STATE SIG TEXT INITIAL MAX
@@ -67,6 +73,7 @@ LABEL="${LANE_LABEL:-lane}"
 HINT="${LANE_HINT:-}"
 ALERT_CMD="${LANE_ALERT_CMD:-}"
 ALERT_STATE="${LANE_ALERT_STATE:-$HOME/.local/state/lane-deadman-watch.alert}"
+STALE_SECONDS="${LANE_STALE_SECONDS:-}"
 
 log() { echo "[lane-deadman-watch] $*"; }
 
@@ -118,6 +125,13 @@ healthy() {
   [ -n "$ALERT_STATE" ] && rm -f "$ALERT_STATE"
   exit "$OVERALL_RC"
 }
+
+if [ -n "$STALE_SECONDS" ]; then
+  if ! [[ "$STALE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    alarm "$LABEL LANE_STALE_SECONDS is misconfigured (\"$STALE_SECONDS\"): must be a positive integer. Treating as failed."
+    exit 1
+  fi
+fi
 
 # ---------------------------------------------------------------------------------------------
 # CADENCE ASSERTION -- "is the thing that is SUPPOSED to run it still armed to run it?"
@@ -240,6 +254,15 @@ fi
 if [ "$LAST_EPOCH" -gt "$NOW_EPOCH" ]; then
   alarm "$LABEL reports a success in the FUTURE ($RAW). Clock skew, or the file was touched by hand. Treating as failed rather than trusting it, because a future timestamp would otherwise silence this check indefinitely."
   exit 1
+fi
+
+if [ -n "$STALE_SECONDS" ]; then
+  age=$((NOW_EPOCH - LAST_EPOCH))
+  if [ "$age" -gt "$STALE_SECONDS" ]; then
+    alarm "$LABEL has not succeeded for ${age}s (threshold ${STALE_SECONDS}s). Last success: $RAW. It is not failing -- it is not running, or it is running and quietly matching nothing, which no failure hook can see."
+    exit 1
+  fi
+  healthy "OK: $LABEL last succeeded $RAW (age ${age}s, threshold ${STALE_SECONDS}s)."
 fi
 
 # Count missed run slots: weekdays after the last success whose local run hour has already
