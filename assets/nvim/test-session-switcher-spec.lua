@@ -2842,9 +2842,51 @@ do
   local orig_switch = exec.switch_pane
   local got_client
   exec.switch_pane = function(_desc, client) got_client = client; return true end
-  init_mod.dispatch({ kind = "switch_pane", pane = "%9" }, { id = "ses_dispatch" }, "client_dispatch", {})
+  local ok_sw, err_sw = pcall(init_mod.dispatch, { kind = "switch_pane", pane = "%9" }, { id = "ses_dispatch" }, "client_dispatch", {})
   exec.switch_pane = orig_switch
+  check(ok_sw, "dispatch switch_pane succeeded: " .. tostring(err_sw))
   check(got_client == "client_dispatch", "dispatch hands switch_pane the client it was given")
+
+  -- Anchor branch: kind == "attach" passes scroll_to_message_id to exec.attach
+  local orig_attach = exec.attach
+  local orig_scroll = exec.scroll_to_message
+  local got_attach_opts
+  local scroll_called = false
+  exec.attach = function(_desc, o) got_attach_opts = o; return true end
+  exec.scroll_to_message = function() scroll_called = true; return true end
+  local ok_att, err_att = pcall(init_mod.dispatch, { kind = "attach" }, { id = "ses_att", anchor_msg_id = "msg_att" }, nil, {})
+  exec.attach = orig_attach
+  exec.scroll_to_message = orig_scroll
+  check(ok_att, "dispatch attach with anchor succeeded: " .. tostring(err_att))
+  check(got_attach_opts ~= nil and got_attach_opts.scroll_to_message_id == "msg_att",
+    "attach with anchor passes scroll_to_message_id to exec.attach")
+  check(not scroll_called, "attach does not invoke scroll_to_message")
+
+  -- Anchor branch: warm kind (focus_here) invokes exec.scroll_to_message with sid, message_id, force=true
+  local orig_focus = exec.focus_here
+  local got_scroll_args, got_scroll_opts
+  exec.focus_here = function(_desc) return true end
+  exec.scroll_to_message = function(args, o) got_scroll_args = args; got_scroll_opts = o; return true end
+  local ok_focus, err_focus = pcall(init_mod.dispatch, { kind = "focus_here" }, { id = "ses_warm", anchor_msg_id = "msg_warm" }, nil, { frontdoor_url = "http://fake" })
+  exec.focus_here = orig_focus
+  exec.scroll_to_message = orig_scroll
+  check(ok_focus, "dispatch focus_here with anchor succeeded: " .. tostring(err_focus))
+  check(got_scroll_args ~= nil and got_scroll_args.sid == "ses_warm" and got_scroll_args.message_id == "msg_warm" and got_scroll_args.force == true,
+    "warm kind (focus_here) calls exec.scroll_to_message with sid, message_id, force=true")
+  check(got_scroll_opts ~= nil and got_scroll_opts.frontdoor_url == "http://fake",
+    "warm kind hands scroll_to_message the opts it was given")
+
+  -- Anchor branch: warm kind (switch_pane) invokes exec.scroll_to_message with sid, message_id, force=true
+  local got_sw_scroll
+  exec.switch_pane = function(_desc, _c) return true end
+  exec.scroll_to_message = function(args) got_sw_scroll = args; return true end
+  local ok_sw2, err_sw2 = pcall(init_mod.dispatch, { kind = "switch_pane", pane = "%2" }, { id = "ses_sw2", anchor_msg_id = "msg_sw2" }, "c", {})
+  exec.switch_pane = orig_switch
+  exec.scroll_to_message = orig_scroll
+  check(ok_sw2, "dispatch switch_pane with anchor succeeded: " .. tostring(err_sw2))
+  check(got_sw_scroll ~= nil and got_sw_scroll.sid == "ses_sw2" and got_sw_scroll.message_id == "msg_sw2" and got_sw_scroll.force == true,
+    "warm kind (switch_pane) calls exec.scroll_to_message with sid, message_id, force=true")
+
   local ok = pcall(init_mod.dispatch, nil, nil, nil, nil)
   check(ok, "dispatch(nil, ...) is a no-op, not an error")
 end

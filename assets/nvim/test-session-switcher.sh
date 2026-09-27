@@ -186,6 +186,15 @@ cat >"$lua_file" <<'LUA'
   check(at >= 0 and with_ids[at + 2] == "ses_x,ses_y", "ids -> --ids ses_x,ses_y")
   check(not vim.tbl_contains(cli.build_argv({ ids = {} }), "--ids"), "empty ids -> no --ids")
 
+  -- 10d. `--ids` filtering: only non-empty strings, no leading '-', no ',' --
+  local mixed_ids = cli.build_argv({ ids = { "ses_1", "-flag", "has,comma", "", 123, "ses_2" } })
+  local at_mixed = vim.fn.index(mixed_ids, "--ids")
+  check(at_mixed >= 0 and mixed_ids[at_mixed + 2] == "ses_1,ses_2", "invalid ids filtered out: non-strings, empty, leading dash, comma")
+  check(not vim.tbl_contains(cli.build_argv({ ids = { "-bad", "--all" } }), "--ids"), "leading dash ids only -> no --ids")
+  check(not vim.tbl_contains(cli.build_argv({ ids = { "foo,bar" } }), "--ids"), "comma ids only -> no --ids")
+  check(not vim.tbl_contains(cli.build_argv({ ids = { "" } }), "--ids"), "empty string id -> no --ids")
+  check(not vim.tbl_contains(cli.build_argv({ ids = { 123, false } }), "--ids"), "non-string ids only -> no --ids")
+
   -- 11. Callback runs on the main loop, where vim API calls are legal.
   --     vim.system's on_exit fires in a fast event context; forgetting
   --     vim.schedule makes any API call in the picker raise E5560.

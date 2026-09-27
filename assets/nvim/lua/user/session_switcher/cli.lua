@@ -75,12 +75,19 @@ function M.build_argv(opts)
     table.insert(argv, tostring(opts.limit))
   end
   -- `--ids` (workstation-p8ch) asks for exactly these sessions' root trees,
-  -- bypassing the recency window. An EMPTY list is omitted rather than sent
-  -- as `--ids ""`: the caller asked for nothing, and the stall-watch source
-  -- skips the call entirely in that case.
-  if type(opts.ids) == "table" and #opts.ids > 0 then
-    table.insert(argv, "--ids")
-    table.insert(argv, table.concat(opts.ids, ","))
+  -- bypassing the recency window. Only non-empty strings not starting with '-'
+  -- and containing no ',' are included. If none remain, `--ids` is omitted.
+  if type(opts.ids) == "table" then
+    local valid_ids = {}
+    for _, id in ipairs(opts.ids) do
+      if type(id) == "string" and id ~= "" and id:sub(1, 1) ~= "-" and not id:find(",", 1, true) then
+        table.insert(valid_ids, id)
+      end
+    end
+    if #valid_ids > 0 then
+      table.insert(argv, "--ids")
+      table.insert(argv, table.concat(valid_ids, ","))
+    end
   end
   return argv
 end
