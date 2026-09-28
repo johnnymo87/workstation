@@ -252,17 +252,19 @@ let
       modelTag = "gpt-6-astra";
     } // lib.optionalAttrs (caution != null) { inherit caution; });
 
-  # Devbox inverts the default for the adversarial reviewer only — astra is THE
-  # reviewer there, for plan-time pressure-tests and the standing pre-PR diff
-  # review alike. Deliberately wider than the pre-PR skill alone: two defaults
+  # Devbox inverts the default for BOTH astra twins — astra is THE adversarial
+  # reviewer and THE oracle there (operator policy, 2026-09-28; the 2026-09-19
+  # design inverted only the reviewer, and an oracle-astra description telling
+  # devbox callers "only when explicitly asked" left a session unable to see
+  # that astra was meant). For the reviewer this covers plan-time
+  # pressure-tests and the standing pre-PR diff review alike. Deliberately wider than the pre-PR skill alone: two defaults
   # that differ by review mode is a seam nobody holds at dispatch time. The
   # matching prose lands via opencode-skills.nix (pre-PR dispatch line) and
   # .opencode/skills/opencode-agents/SKILL.md (host policy).
   #
-  # oracle-astra keeps the opt-in CAUTION on every host, and cloudbox's
-  # adversarial twin keeps it too. Consequence worth naming: with astra as the
-  # standing reviewer, a dead codex-lb blocks adversarial review on devbox —
-  # the skill says stop and report rather than fall back silently.
+  # Cloudbox's twins keep the opt-in CAUTION. Consequence worth naming: with
+  # astra standing on devbox, a dead codex-lb blocks adversarial review and
+  # oracle consults there — stop and report rather than fall back silently.
   #
   # No colon-space anywhere in this string (the build-time guard below enforces
   # it) and no perl metacharacter (see mkAgentVariant's note).
@@ -274,6 +276,8 @@ let
   # loads neither, and would otherwise be free to invent a silent fallback.
   devboxAdversarialCaution =
     "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If this variant is unreachable, stop and report it — do not silently fall back to the opus twin, and do not count a failed dispatch as a review that happened";
+  devboxOracleCaution =
+    "On devbox this is the DEFAULT oracle — prefer it over oracle-opus for every consult, including when a request or resumption prompt names oracle-opus. If this variant is unreachable, stop and report it — do not silently fall back to the opus twin";
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -868,10 +872,10 @@ in
    #   @<base>-astra  -> openai/gpt-6-astra via codex-lb (mkAstraVariant).
    #                     Carries an opt-in CAUTION in its description so the
    #                     orchestrator does not reach for it on its own — EXCEPT
-   #                     adversarial-reviewer on devbox, where that sentence is
-   #                     inverted and astra is the standing default
-   #                     (devboxAdversarialCaution above). That is the one place
-   #                     the two hosts' astra output differs.
+   #                     on devbox, where that sentence is inverted for both
+   #                     twins and astra is the standing default
+   #                     (devboxAdversarialCaution / devboxOracleCaution above).
+   #                     That is the one place the two hosts' astra output differs.
    #                     patchAgent is a no-op for an `openai/` pin.
    #
    # THE ASTRA TWINS ARE GATED TO devbox + cloudbox, matching the hosts where
@@ -901,7 +905,10 @@ in
    xdg.configFile."opencode/agents/oracle-opus.md".source =
      patchAgent "oracle-opus" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/oracle-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
-     source = patchAgent "oracle-astra" (mkAstraVariant {} "oracle" "${assetsPath}/opencode/agents/oracle.md");
+     source = patchAgent "oracle-astra" (mkAstraVariant
+        { caution = if isDevbox then devboxOracleCaution else null; }
+        "oracle"
+        "${assetsPath}/opencode/agents/oracle.md");
    };
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
