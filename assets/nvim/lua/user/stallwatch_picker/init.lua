@@ -35,8 +35,18 @@ local source = require("user.stallwatch_picker.source")
 
 local M = {}
 
-local function set_preview(bufnr, lines)
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+--- Fill the preview buffer and soft-wrap its window. Item text is prose
+--- (1-2 sentences), so an unwrapped preview cuts most of it off at the right
+--- edge. linebreak wraps at word boundaries; breakindent keeps a wrapped
+--- continuation under its own line's indent.
+local function set_preview(state, lines)
+  vim.api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
+  local win = state.winid
+  if win and vim.api.nvim_win_is_valid(win) then
+    vim.wo[win].wrap = true
+    vim.wo[win].linebreak = true
+    vim.wo[win].breakindent = true
+  end
 end
 
 local function now_ms()
@@ -99,7 +109,7 @@ function M.programs(state, select_tag)
     previewer = previewers.new_buffer_previewer({
       title = "Open items",
       define_preview = function(self, entry)
-        set_preview(self.state.bufnr, spec.program_preview_lines(entry.value))
+        set_preview(self.state, spec.program_preview_lines(entry.value))
       end,
     }),
     attach_mappings = function(prompt_bufnr, map)
@@ -151,7 +161,7 @@ function M.sessions(state, prow, view)
     previewer = previewers.new_buffer_previewer({
       title = "Items naming this session",
       define_preview = function(self, entry)
-        set_preview(self.state.bufnr, spec.session_preview_lines(entry.value))
+        set_preview(self.state, spec.session_preview_lines(entry.value))
       end,
     }),
     attach_mappings = function(prompt_bufnr, map)
