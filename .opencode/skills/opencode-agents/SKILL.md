@@ -23,7 +23,7 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 **Purpose:** Read-only strategic technical advisor — architecture, debugging, high-stakes decisions.
 **Model:** `claude-opus-5-5` at `variant: high`, pinned in the agent's own source (`assets/opencode/agents/oracle.md`). This is the **default** variant. The `variant: high` line matters: the provider-level default for opus-5-5 is `effort: medium` (`opencode.base.json`), which is right for the primary session and too shallow for an advisor.
 **History:** was `oracle-fable` on `claude-fable-5-1` until 2026-09-26; moved to Opus at the user's request and the handle renamed with it, since a suffix naming the wrong model is worse than a rename.
-**Second variant — `oracle-astra`:** same prompt body, pinned to `openai/gpt-6-astra`, generated at build time by `mkAstraVariant` from the same source file. It carries an opt-in `CAUTION` in its description, so reach for it **only when explicitly asked**. See "The astra twins" below.
+**Second variant — `oracle-astra`:** same prompt body, pinned to `openai/gpt-6-astra`, generated at build time by `mkAstraVariant` from the same source file. On cloudbox it carries an opt-in `CAUTION` in its description, so reach for it **only when explicitly asked**; on devbox it is **the default oracle**. See "The astra twins" below.
 **Why the source file has no suffix:** it is named for the agent, because it is the source of two pins.
 **Model routing:** host-correct — the source pins `anthropic/claude-opus-5-5`, and on cloudbox and macOS `patchAgent`'s `afterOpus` branch rewrites it to `google-vertex-anthropic/claude-opus-5-5@default`, because neither has a usable first-party Anthropic provider. That rewrite captures the version rather than matching a literal. devbox keeps the direct `anthropic/` pin.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
@@ -34,7 +34,7 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 **Purpose:** Skeptical, adversarial review of a **design / plan / approach before it's built** — hunts flaws, wrong assumptions, missing cases, hazards, and better alternatives. Also runs in **pre-PR mode** on a finished diff, where it reviews the thinking behind the change (load-bearing assumptions, failure/rollback/migration cases) rather than its line-level correctness; that dispatch is a standing default, see `shepherding-pull-requests` §Pre-PR Checks step 3.
 **Model:** `claude-opus-5-5` at `variant: high`, pinned in `assets/opencode/agents/adversarial-reviewer.md` (was `adversarial-reviewer-fable` / `claude-fable-5-1` until 2026-09-26 — same history as oracle above). The default variant **on cloudbox and macOS**. A second variant `adversarial-reviewer-astra` pins `openai/gpt-6-astra` from the same source; it carries an opt-in `CAUTION` on cloudbox but is the **default on devbox** — see "The astra twins" below.
 **Model routing:** host-correct, same as oracle — source pins `anthropic/`, cloudbox gets the Vertex rewrite via `patchAgent`.
-**A note on the pre-PR default — it is host-dependent.** `shepherding-pull-requests` dispatches `adversarial-reviewer-opus` on cloudbox and macOS, and `adversarial-reviewer-astra` on devbox. You do not have to work this out: the skill text is rendered per host at deploy time by `users/dev/opencode-skills.nix`, so the copy you load names the right one. What remains banned on every host is **substituting the other twin yourself** because you prefer it — and, on devbox, treating a failed astra dispatch (codex-lb down) as the review having happened. Stop and report instead; the skill says so.
+**A note on the pre-PR default — it is host-dependent.** `shepherding-pull-requests` dispatches `adversarial-reviewer-opus` on cloudbox and macOS, and `adversarial-reviewer-astra` on devbox. You do not have to work this out: the skill text is rendered per host at deploy time by `users/dev/opencode-skills.nix`, so the copy you load names the right one. What remains banned on every host is **substituting the other twin yourself** because you prefer it — treating a failed dispatch as the review having happened. On devbox, a failed or unavailable astra falls back to the opus twin, and the fallback is announced. On cloudbox and macOS, an unavailable opus means stop and report. The skill says both.
 **Tools:** read, glob, grep, bash, webfetch, websearch, codesearch (no write/edit/task)
 **When to use:** You have a design or plan and want it pressure-tested *before* writing code; you want the uncomfortable "this is solving the wrong problem" read. No CAUTION any more — reach for it directly.
 **Key trait:** Grounds every claim in the actual code/artifact (`file:line`, never fabricates); distinguishes verified findings from suspicions; reports verdict → confirmed-sound → flaws-by-severity → missing cases → concrete recommendations.
@@ -46,9 +46,9 @@ Depends on `OPENCODE_ENABLE_EXA=1` (set in both home.devbox.nix and home.darwin.
 
 **What they are for:** a genuinely different model's read on the same question. Both agents exist to be a second opinion, and a second opinion from the same model family is worth less than one from outside it. Reach for the astra twin when the opus answer feels like it might be a house style rather than a conclusion.
 
-**They are opt-in, deliberately — with one host-scoped exception.** The generated `description:` carries a `CAUTION` telling the orchestrator to default to the `-opus` handle. Do not auto-select them.
+**They are opt-in, deliberately — except on devbox.** The generated `description:` carries a `CAUTION` telling the orchestrator to default to the `-opus` handle. Do not auto-select them.
 
-The exception: **on devbox, `adversarial-reviewer-astra` is the default adversarial reviewer**, plan-time and pre-PR alike. `mkAgentVariant` takes a `caution` parameter (`users/dev/opencode-config.nix`, `devboxAdversarialCaution`) and devbox passes an inverted sentence for that one agent. `oracle-astra` keeps the opt-in CAUTION everywhere, and cloudbox's adversarial twin keeps it too — so "astra is opt-in" remains the rule, with exactly one documented hole in it. Consequence to hold: with astra standing rather than optional on devbox, a dead codex-lb blocks adversarial review there. The policy is stop-and-report, never a silent fallback to opus.
+The exception: **on devbox, both astra twins are the defaults** — `adversarial-reviewer-astra` for every adversarial review (plan-time and pre-PR), `oracle-astra` for every oracle consult. `mkAgentVariant` takes a `caution` parameter (`users/dev/opencode-config.nix`, `devboxAdversarialCaution` / `devboxOracleCaution`) and devbox passes an inverted sentence for each. Cloudbox's twins keep the opt-in CAUTION. (The reviewer was inverted 2026-09-19; the oracle followed 2026-09-28 after a devbox session, told "oracle-opus", read oracle-astra's opt-in CAUTION and could not tell astra was intended.) **The `-opus` twin is the base default on every host, and devbox's astra preference falls back to it.** When astra is not listed, `astra-probe` says DOWN, or the dispatch errors or returns empty, the caller dispatches `-opus` (or `-fable` on a serve that predates the 2026-09-28 rename) and says so in one clause. A dead codex-lb therefore degrades devbox to opus rather than blocking it. There is no reverse fallback: cloudbox never falls back from opus to astra. The fallback was stop-and-report until 2026-09-28.
 
 **Devbox and cloudbox only.** They are gated to the hosts where the codex-lb subscription model catalog is injected into opencode's `openai` provider — which is *not* the same as the hosts that run codex-lb. macOS runs codex-lb (launchd flavor in `home.darwin.nix`) and has its `openai` baseURL redirected to it, but never gets the catalog, so `gpt-6-astra` is not selectable there. Rather than ship a handle that always fails, the twins are simply absent on macOS.
 
@@ -59,6 +59,12 @@ curl -s localhost:2455/v1/models | jq -r '.data[].id' | grep astra
 ```
 
 **Cost:** the ChatGPT subscription is flat-rate, so an astra call costs nothing on the aigateway ledger — unlike an opus call, which is a real line item. It spends 5h/weekly subscription quota instead, visible on codex-lb's own dashboard at `127.0.0.1:2455`. That makes astra the *cheaper* second opinion in dollar terms; it is not the reason to prefer it, but it is a reason not to avoid it.
+
+### The fable twins (`oracle-fable`, `adversarial-reviewer-fable`) — cloudbox only
+
+Same prompt bodies, pinned to `claude-fable-5-1`: the model these agents ran on before the 2026-09-28 move to Opus. They are generated by `mkFableVariant` in `users/dev/opencode-config.nix` and rewritten to `google-vertex-anthropic/claude-fable-5-1@default` by `patchAgent`. That provider entry carries `effort: high`, so the source's dropped `variant: high` loses nothing. They are **opt-in on cloudbox**: the description carries the default CAUTION, so dispatch them only when the user asks for fable. Devbox and macOS don't deploy them.
+
+**Name overlap with stale serves.** A serve started before the rename lists the *old default* `-fable` handles (no CAUTION) and no `-opus`. The rule in the user-level `AGENTS.md` is this: if `-opus` is listed, `-fable` is the opt-in twin; if `-opus` is absent, `-fable` is the default slot.
 
 **If these twins are ever removed, delete `mkAgentVariant` with them.** The builder was deleted once before (2026-09-01) on the explicit reasoning that an unevaluated nix builder gets no build coverage and rots silently — which is how a literal `claude-fable-5` bug survived in the live rewrite path. That reasoning still holds; the builder is only safe to keep while something evaluates it.
 
@@ -93,8 +99,8 @@ lands on a model it can actually call:
   devbox keeps the direct pin (its working primary via TeamClaude). This is the
   branch that fires today (oracle-opus, adversarial-reviewer-opus).
 - **fable-N → `google-vertex-anthropic/claude-fable-N@default`**, same hosts,
-  same reason. Currently dormant — no shipped agent pins fable since
-  2026-09-26. Both branches **capture the version** rather than matching a
+  same reason. Fires for cloudbox's opt-in `oracle-fable` /
+  `adversarial-reviewer-fable` twins (below). Both branches **capture the version** rather than matching a
   literal — a literal `claude-fable-5` match against a `claude-fable-5-1` pin
   yields `claude-fable-5@default-1`, a model that does not exist and fails at
   *request* time, not build time.
@@ -104,10 +110,10 @@ codex-lb serves the same model id on every host it runs on, so the
 `-astra` twins pass through `patchAgent` unmodified.
 
 Their build output is nevertheless **not** identical across the two hosts, for a
-reason upstream of `patchAgent`: devbox's `adversarial-reviewer-astra` gets an
-inverted `caution` from `mkAgentVariant` (astra is the default reviewer there).
-`oracle-astra` is byte-identical on both. If you are diffing store paths to
-check a change, that one description line is the expected difference.
+reason upstream of `patchAgent`: both devbox astra twins get an
+inverted `caution` from `mkAgentVariant` (astra is the default there). If you
+are diffing store paths to check a change, that one description line per twin
+is the expected difference.
 
 When adding an Anthropic-pinned agent, pin it to `anthropic/claude-<model>` in
 the source file and let `patchAgent` handle cloudbox — do **not** hardcode the

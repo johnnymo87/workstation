@@ -112,10 +112,8 @@ let
       #    provider and the model loop dies with an empty response. The Vertex
       #    fable entry (`google-vertex-anthropic/claude-fable-5-1@default`)
       #    carries its own high `effort` from opencode.base.json, so no variant
-      #    override is added here. No-op on agents that don't pin fable —
-      #    which, since oracle and adversarial-reviewer moved to opus
-      #    (2026-09-26), is every shipped agent. Kept as a guard for a future
-      #    fable pin rather than deleted; it is still evaluated on every build.
+      #    override is added here. Fires for cloudbox's opt-in `-fable` twins
+      #    (mkFableVariant); a no-op on every other shipped agent.
       #
       #    The version is CAPTURED, not hardcoded — a literal `claude-fable-5`
       #    match against the 5.1 pin yields `claude-fable-5@default-1`, a
@@ -252,28 +250,55 @@ let
       modelTag = "gpt-6-astra";
     } // lib.optionalAttrs (caution != null) { inherit caution; });
 
-  # Devbox inverts the default for the adversarial reviewer only — astra is THE
-  # reviewer there, for plan-time pressure-tests and the standing pre-PR diff
-  # review alike. Deliberately wider than the pre-PR skill alone: two defaults
+  # The fable twin: claude-fable-5-1, the previous base model of oracle and
+  # adversarial-reviewer (the `-opus` handles were `-fable` until 2026-09-28).
+  # CLOUDBOX ONLY, and always opt-in: it carries the default CAUTION so the
+  # orchestrator reaches for it only when the user names fable. The pin is the
+  # first-party `anthropic/` id on purpose; patchAgent's afterFable branch
+  # rewrites it to `google-vertex-anthropic/claude-fable-5-1@default`, whose
+  # provider entry carries its own high `effort` (opencode.base.json), so the
+  # source's dropped `variant: high` loses nothing.
+  #
+  # Re-deploying a `-fable` handle overlaps with a stale serve's pre-rename
+  # `-fable` (the old DEFAULT, no CAUTION). assets/opencode/AGENTS.md tells
+  # callers how to tell them apart: `-opus` listed means `-fable` is this
+  # opt-in twin; `-opus` absent means the serve predates the rename.
+  mkFableVariant = base:
+    mkAgentVariant {
+      inherit base;
+      slug = "fable";
+      modelPin = "anthropic/claude-fable-5-1";
+      modelTag = "fable-5-1";
+    };
+
+  # Devbox inverts the default for BOTH astra twins — astra is THE adversarial
+  # reviewer and THE oracle there (operator policy, 2026-09-28; the 2026-09-19
+  # design inverted only the reviewer, and an oracle-astra description telling
+  # devbox callers "only when explicitly asked" left a session unable to see
+  # that astra was meant). For the reviewer this covers plan-time
+  # pressure-tests and the standing pre-PR diff review alike. Deliberately wider than the pre-PR skill alone: two defaults
   # that differ by review mode is a seam nobody holds at dispatch time. The
   # matching prose lands via opencode-skills.nix (pre-PR dispatch line) and
   # .opencode/skills/opencode-agents/SKILL.md (host policy).
   #
-  # oracle-astra keeps the opt-in CAUTION on every host, and cloudbox's
-  # adversarial twin keeps it too. Consequence worth naming: with astra as the
-  # standing reviewer, a dead codex-lb blocks adversarial review on devbox —
-  # the skill says stop and report rather than fall back silently.
+  # Cloudbox's twins keep the opt-in CAUTION. The `-opus` twin is the base
+  # default on every host, and devbox's astra preference falls back to it
+  # (operator policy, 2026-09-28) when astra is unlisted, probed DOWN, or its
+  # dispatch errors/returns empty — announced, never silent. Before that the
+  # policy was stop-and-report, which made a dead codex-lb block review.
   #
   # No colon-space anywhere in this string (the build-time guard below enforces
   # it) and no perl metacharacter (see mkAgentVariant's note).
   # The unavailability policy is carried HERE, not only in the skills, because
   # the description is the only part of this policy that reaches a caller in
-  # some other repo. The deployed stop-and-report text lives under §Pre-PR
+  # some other repo. The deployed fallback text lives under §Pre-PR
   # Checks in shepherding-pull-requests, and the all-review version lives in
   # this repo's own .opencode skill — a plan-time dispatch from anywhere else
-  # loads neither, and would otherwise be free to invent a silent fallback.
+  # loads neither, and would otherwise stop, or fall back without saying so.
   devboxAdversarialCaution =
-    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If this variant is unreachable, stop and report it — do not silently fall back to the opus twin, and do not count a failed dispatch as a review that happened";
+    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If astra-probe says DOWN, or a dispatch to this variant errors or returns empty, fall back to adversarial-reviewer-opus and say so — a failed astra dispatch is not a review";
+  devboxOracleCaution =
+    "On devbox this is the DEFAULT oracle — prefer it over oracle-opus for every consult, including when a request or resumption prompt names oracle-opus. If astra-probe says DOWN, or a dispatch to this variant errors or returns empty, fall back to oracle-opus and say so";
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -868,10 +893,10 @@ in
    #   @<base>-astra  -> openai/gpt-6-astra via codex-lb (mkAstraVariant).
    #                     Carries an opt-in CAUTION in its description so the
    #                     orchestrator does not reach for it on its own — EXCEPT
-   #                     adversarial-reviewer on devbox, where that sentence is
-   #                     inverted and astra is the standing default
-   #                     (devboxAdversarialCaution above). That is the one place
-   #                     the two hosts' astra output differs.
+   #                     on devbox, where that sentence is inverted for both
+   #                     twins and astra is the standing default
+   #                     (devboxAdversarialCaution / devboxOracleCaution above).
+   #                     That is the one place the two hosts' astra output differs.
    #                     patchAgent is a no-op for an `openai/` pin.
    #
    # THE ASTRA TWINS ARE GATED TO devbox + cloudbox, matching the hosts where
@@ -888,7 +913,9 @@ in
    #
    # The deployed FILE carries a model suffix while the SOURCE does not: the
    # source is named for the agent because it feeds two pins. home-manager
-   # removes the old `-fable` files on switch since nothing declares them.
+   # removes the old `-fable` files on switch where nothing declares them
+   # (devbox, macOS). Cloudbox re-declares `-fable` as an opt-in fable-5-1 twin
+   # (mkFableVariant above).
    xdg.configFile."opencode/agents/adversarial-reviewer-opus.md".source =
      patchAgent "adversarial-reviewer-opus" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
    xdg.configFile."opencode/agents/adversarial-reviewer-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
@@ -898,10 +925,21 @@ in
          "adversarial-reviewer"
          "${assetsPath}/opencode/agents/adversarial-reviewer.md");
    };
+   xdg.configFile."opencode/agents/adversarial-reviewer-fable.md" = lib.mkIf isCloudbox {
+     source = patchAgent "adversarial-reviewer-fable" (
+       mkFableVariant "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer.md");
+   };
+   xdg.configFile."opencode/agents/oracle-fable.md" = lib.mkIf isCloudbox {
+     source = patchAgent "oracle-fable" (
+       mkFableVariant "oracle" "${assetsPath}/opencode/agents/oracle.md");
+   };
    xdg.configFile."opencode/agents/oracle-opus.md".source =
      patchAgent "oracle-opus" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/oracle-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
-     source = patchAgent "oracle-astra" (mkAstraVariant {} "oracle" "${assetsPath}/opencode/agents/oracle.md");
+     source = patchAgent "oracle-astra" (mkAstraVariant
+        { caution = if isDevbox then devboxOracleCaution else null; }
+        "oracle"
+        "${assetsPath}/opencode/agents/oracle.md");
    };
    xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
