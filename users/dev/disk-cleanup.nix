@@ -570,18 +570,52 @@ lib.mkMerge [
       SESSION_DB="$HOME/.local/share/opencode/opencode.db"
       SESSION_ACTIVE_DAYS=7
 
+      # GUARD 1c: a session that still owes an OPEN PR is not gone, however
+      # long it has been idle.
+      #
+      # The 7-day window above reads an idle session as abandoned. That is
+      # wrong for a session that opened a PR still under review: the PR's
+      # reviewer can come back any time, and lgtm-shepherd wakes the AUTHOR
+      # session to answer -- but it refuses to wake one whose directory is
+      # gone (a woken orphan answers with empty turns and looks like it
+      # worked), and falls back to a Telegram to the human. Measured
+      # 2026-09-27/28: this sweep kept internal-frontends/cops-6764-fe-plan
+      # on the 25th and 26th, removed it on the 27th as "16 days old" (its
+      # session idle since the 19th), and on the 28th that session's PR,
+      # internal-frontends#1573, got CHANGES_REQUESTED with nobody left to
+      # answer it.
+      #
+      # PR -> session comes from lgtm's shepherd attribution cache, which it
+      # rebuilds every sweep from opencode.db itself. Open-ness comes from
+      # GitHub, NOT from the shepherd's per-PR state files: those deliberately
+      # outlive a merge while a rollout is tracked (lgtm shepherdRun.ts), so
+      # "a state file exists" does not mean "the PR is open".
+      #
+      # Fail-closed like the rest of this guard: a cache that exists but will
+      # not parse, or a `gh` that cannot answer, keeps the tree for tonight.
+      # A MISSING cache is not an error -- no lgtm, no attributions.
+      #
+      # NOT covered: a session that started at a repo ROOT and cd'd into a
+      # worktree records the root as its directory, so no worktree names it.
+      # That is not the orphan failure (its directory still exists), just a
+      # tree this guard cannot see.
+      LGTM_ATTRIBUTION_CACHE="''${LGTM_STATE_DIR:-$HOME/.local/state/lgtm}/shepherd/attribution-cache.json"
+
       session_owns_worktree() {
         local path="$1" verdict=""
 
         [ -f "$SESSION_DB" ] || return 1
 
-        verdict=$(python3 - "$SESSION_DB" "$path" "$SESSION_ACTIVE_DAYS" <<'PYEOF' 2>/dev/null
+        verdict=$(python3 - "$SESSION_DB" "$path" "$SESSION_ACTIVE_DAYS" "$LGTM_ATTRIBUTION_CACHE" <<'PYEOF' 2>/dev/null
+      import json
       import os
       import sqlite3
+      import subprocess
       import sys
       import time
 
       db_path, wt_path, active_days = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      cache_path = sys.argv[4]
       cutoff_ms = int((time.time() - active_days * 86400) * 1000)
 
       candidates = {wt_path.rstrip("/") or "/"}
@@ -595,22 +629,108 @@ lib.mkMerge [
           # never be disturbed by a cleanup probe.
           con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=10)
           placeholders = ",".join("?" for _ in candidates)
-          row = con.execute(
-              "select id from session where directory in (%s) and time_updated >= ? limit 1"
+          # Every session in the tree, not only recent ones: an idle one is
+          # still an owner if it opened a PR that is open (GUARD 1c).
+          rows = con.execute(
+              "select id, time_updated from session where directory in (%s)"
               % placeholders,
-              (*sorted(candidates), cutoff_ms),
-          ).fetchone()
+              tuple(sorted(candidates)),
+          ).fetchall()
       except Exception as exc:
           print("PROBE-FAILED: %s" % exc)
-      else:
-          print("SESSION %s" % row[0] if row else "FREE")
+          sys.exit(0)
+
+      recent = [sid for sid, updated in rows if updated >= cutoff_ms]
+      if recent:
+          print("SESSION %s" % recent[0])
+          sys.exit(0)
+      if not rows or not os.path.exists(cache_path):
+          print("FREE")
+          sys.exit(0)
+
+      ids = {sid for sid, _ in rows}
+      try:
+          with open(cache_path) as fh:
+              cache = json.load(fh)
+      except Exception as exc:
+          print("PROBE-FAILED: attribution cache unreadable: %s" % exc)
+          sys.exit(0)
+      # A format this code does not know is NOT fail-closed: that would pin
+      # every idle tree on the host the night lgtm ships a v2. It proceeds as
+      # if there were no cache -- today's pre-guard behaviour -- but loudly,
+      # so the guard cannot go quietly inert.
+      entries = cache.get("entries") if isinstance(cache, dict) else None
+      if not isinstance(cache, dict) or cache.get("version") != 1 or not isinstance(entries, dict):
+          print("FREE-UNRECOGNISED-CACHE version=%r" % (
+              cache.get("version") if isinstance(cache, dict) else type(cache).__name__))
+          sys.exit(0)
+
+      # ROOT is the load-bearing id: it is the session lgtm-shepherd wakes,
+      # so "the root of an open PR sits here" is exactly the condition for a
+      # wake to work. ORIGIN (the session that actually ran `gh pr create`,
+      # a subagent for some PRs) is belt-and-braces: on cloudbox 2026-09-28
+      # it matched no tree the root did not already match.
+      #
+      # Newest PR first: a busy session owns many (the one behind the
+      # 2026-09-27 incident owned 8, the open one sorting last by number),
+      # and its open PR is usually its latest -- fewer `gh` calls.
+      owned = sorted({
+          (e.get("repo"), e.get("prNumber"))
+          for e in entries.values()
+          if isinstance(e, dict)
+          and (e.get("rootSessionId") in ids or e.get("originSessionId") in ids)
+          and e.get("repo") and e.get("prNumber")
+      }, key=lambda rn: rn[1], reverse=True)
+      gh_timeout = float(os.environ.get("DISK_CLEANUP_GH_TIMEOUT") or 30)
+      for repo, number in owned:
+          try:
+              res = subprocess.run(
+                  ["gh", "pr", "view", str(number), "--repo", repo,
+                   "--json", "state", "-q", ".state"],
+                  capture_output=True, text=True, timeout=gh_timeout,
+              )
+          except Exception as exc:
+              print("PROBE-FAILED: gh pr view %s#%s: %s" % (repo, number, exc))
+              sys.exit(0)
+          if res.returncode != 0:
+              # The PR number does not exist in a repo this token CAN see: a
+              # definite answer, and it is "not open". Without this, one such
+              # entry pins its tree forever.
+              if "Could not resolve to a PullRequest" in res.stderr:
+                  continue
+              # Deliberately NOT extended to "Could not resolve to a
+              # Repository". GitHub answers that for a repo this token cannot
+              # SEE as well as for a deleted one, so reading it as "not open"
+              # would let a lapsed SSO authorization reap the trees of sessions
+              # whose PRs are very much open. Stays unknown: kept, and named in
+              # the log every night until a human deletes it.
+              print("PROBE-FAILED: gh pr view %s#%s exited %d: %s" % (
+                  repo, number, res.returncode, res.stderr.strip()[:160]))
+              sys.exit(0)
+          if res.stdout.strip() == "OPEN":
+              print("OPEN-PR %s#%s" % (repo, number))
+              sys.exit(0)
+      print("FREE")
       PYEOF
       ) || verdict=""
 
         case "$verdict" in
           SESSION\ *) return 0 ;;
+          OPEN-PR\ *)
+            # Named, because it is the one keep reason a human may want to
+            # act on: a PR still open weeks later is a PR someone forgot.
+            log "INFO: idle session in $path still owns open PR ''${verdict#OPEN-PR }"
+            return 0
+            ;;
           FREE)       return 1 ;;
-          *)          return 2 ;;
+          FREE-UNRECOGNISED-CACHE\ *)
+            log "WARN: lgtm attribution cache at $LGTM_ATTRIBUTION_CACHE has an unrecognised format (''${verdict#FREE-UNRECOGNISED-CACHE }); the open-PR guard is INACTIVE for $path"
+            return 1
+            ;;
+          *)
+            [ -n "$verdict" ] && log "WARN: session probe for $path: $verdict"
+            return 2
+            ;;
         esac
       }
 
