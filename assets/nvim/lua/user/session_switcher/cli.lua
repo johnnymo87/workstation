@@ -57,6 +57,30 @@ local M = {}
 M.CMD = "oc-session-list"
 M.DEFAULT_TIMEOUT_MS = 5000
 
+--- Whether a session ID is valid for CLI querying.
+--- Reused by stallwatch_picker/source.lua to ensure we never invoke
+--- oc-session-list when all candidate IDs are dropped.
+--- @param id any
+--- @return boolean
+function M.is_valid_id(id)
+  return type(id) == "string" and id ~= "" and id:sub(1, 1) ~= "-" and not id:find(",", 1, true)
+end
+
+--- Filter a list of session IDs to only valid ones.
+--- @param ids table|nil
+--- @return string[]
+function M.filter_valid_ids(ids)
+  local valid_ids = {}
+  if type(ids) == "table" then
+    for _, id in ipairs(ids) do
+      if M.is_valid_id(id) then
+        table.insert(valid_ids, id)
+      end
+    end
+  end
+  return valid_ids
+end
+
 --- Build the argv for the CLI invocation.
 --- @param opts table
 --- @return string[]
@@ -73,6 +97,20 @@ function M.build_argv(opts)
   if opts.limit then
     table.insert(argv, "--limit")
     table.insert(argv, tostring(opts.limit))
+  end
+  -- `--ids` (workstation-p8ch) asks for exactly these sessions' root trees,
+  -- bypassing the recency window. Only non-empty strings not starting with '-'
+  -- and containing no ',' are included. When opts.ids is a table but no valid
+  -- ids survive, emit `--ids=` so the CLI parses an empty set [] instead of
+  -- falling back to the recency window. nil opts.ids omits --ids entirely.
+  if type(opts.ids) == "table" then
+    local valid_ids = M.filter_valid_ids(opts.ids)
+    if #valid_ids > 0 then
+      table.insert(argv, "--ids")
+      table.insert(argv, table.concat(valid_ids, ","))
+    else
+      table.insert(argv, "--ids=")
+    end
   end
   return argv
 end
@@ -119,12 +157,19 @@ function M.fetch(opts, cb)
   -- without this pcall the picker would die of an uncaught exception instead of
   -- reporting "the CLI is not installed".
   local spawned, err_or_handle = pcall(system, argv, { text = true }, function(out)
-    if out.code ~= 0 then
+    if (out.signal and out.signal ~= 0) or (out.code and out.code ~= 0) then
+      local message
+      if out.signal and out.signal ~= 0 then
+        message = string.format("%s killed by signal %d", argv[1], out.signal)
+      else
+        message = string.format("%s exited %d", argv[1], out.code)
+      end
       settle(nil, {
         kind = "exit",
         code = out.code,
+        signal = out.signal,
         stderr = out.stderr or "",
-        message = string.format("%s exited %d", argv[1], out.code),
+        message = message,
       })
       return
     end

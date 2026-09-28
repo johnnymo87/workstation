@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { queryBaseList, queryTreesForSessions } from "../oc-session-list-base.js";
+import { IDS_CAP, IDS_CHUNK, queryBaseList, queryTreesForIds, queryTreesForSessions } from "../oc-session-list-base.js";
 import { main, parseCliArgs } from "../oc-session-list.js";
 import {
   attentionCandidates,
@@ -2494,3 +2494,123 @@ describe("annotate rows with origin and automated (Task 2)", () => {
     }
   });
 });
+
+// --ids (workstation-p8ch): an explicit id set instead of the recency window.
+describe("--ids: explicit session set", () => {
+  function insert(db: Database, id: string, parent: string | null, updated: number, archived: number | null = null) {
+    db.query(
+      `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated, time_archived)
+       VALUES (?, 'p1', ?, ?, '/proj', ?, '1.0', 1, ?, ?)`,
+    ).run(id, parent, id, `Title ${id}`, updated, archived);
+  }
+
+  it("parses --ids <csv> and --ids=<csv>, trimming and dropping empties", () => {
+    expect(parseCliArgs(["--ids", "a, b,,c"]).ids).toEqual(["a", "b", "c"]);
+    expect(parseCliArgs(["--ids=x,y"]).ids).toEqual(["x", "y"]);
+  });
+
+  it("absent flag is null (normal listing); present-but-empty is an empty set", () => {
+    expect(parseCliArgs([]).ids).toBeNull();
+    expect(parseCliArgs(["--ids", ""]).ids).toEqual([]);
+    expect(parseCliArgs(["--ids"]).ids).toEqual([]);
+  });
+
+  it("accumulates repeated --ids and --ids= flags", () => {
+    expect(parseCliArgs(["--ids", "a,b", "--ids", "c"]).ids).toEqual(["a", "b", "c"]);
+    expect(parseCliArgs(["--ids=a,b", "--ids=c"]).ids).toEqual(["a", "b", "c"]);
+    expect(parseCliArgs(["--ids", "a", "--ids=b,c"]).ids).toEqual(["a", "b", "c"]);
+  });
+
+  it("bare --ids followed by another flag does not consume the next flag", () => {
+    const parsed = parseCliArgs(["--ids", "--fold"]);
+    expect(parsed.ids).toEqual([]);
+    expect(parsed.fold).toBe(true);
+  });
+
+  it("a child id brings its whole root tree; archived and unknown ids are dropped", () => {
+    const db = createTestDb();
+    insert(db, "root_a", null, 100);
+    insert(db, "kid_a", "root_a", 200);
+    insert(db, "gone_a", null, 300, 301);
+    const rows = queryTreesForIds(db, ["kid_a", "gone_a", "never_existed"]);
+    expect(rows.map((r) => r.id).sort()).toEqual(["kid_a", "root_a"]);
+    expect(rows.every((r) => r.root_id === "root_a")).toBe(true);
+  });
+
+  it("is NOT bounded by the recency window", () => {
+    const db = createTestDb();
+    insert(db, "old_root", null, 1);
+    for (let i = 0; i < 5; i++) insert(db, `new_${i}`, null, 1000 + i);
+    expect(queryBaseList(db, { limit: 2 }).map((r) => r.id)).not.toContain("old_root");
+    expect(queryTreesForIds(db, ["old_root"]).map((r) => r.id)).toEqual(["old_root"]);
+  });
+
+  it("resolves more than one chunk of ids, deduped, newest first", () => {
+    const db = createTestDb();
+    const n = IDS_CHUNK + 50;
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = `r_${String(i).padStart(4, "0")}`;
+      insert(db, id, null, i);
+      ids.push(id);
+    }
+    // The same id twice, straddling the chunk boundary, must still yield one row.
+    const rows = queryTreesForIds(db, [...ids, ids[0]]);
+    expect(rows.length).toBe(n);
+    expect(new Set(rows.map((r) => r.id)).size).toBe(n);
+    expect(rows[0].id).toBe(ids[n - 1]);
+    expect(rows[n - 1].id).toBe(ids[0]);
+    // The single-call helper silently keeps 200: that is why the loop exists.
+    expect(queryTreesForSessions(db, ids).length).toBe(IDS_CHUNK);
+  });
+
+  it("trims whitespace from ids inside queryTreesForIds", () => {
+    const db = createTestDb();
+    insert(db, "trim_me", null, 100);
+    const rows = queryTreesForIds(db, ["  trim_me  ", "   "]);
+    expect(rows.map((r) => r.id)).toEqual(["trim_me"]);
+  });
+
+  it("warns, rather than truncating silently, past IDS_CAP, and drops excess ids", () => {
+    const db = createTestDb();
+    const ids = Array.from({ length: IDS_CAP + 1 }, (_, i) => `x_${i}`);
+    insert(db, ids[0], null, 100);
+    insert(db, ids[IDS_CAP], null, 200);
+    const warnings: string[] = [];
+    const rows = queryTreesForIds(db, ids, (m) => warnings.push(m));
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain(String(IDS_CAP));
+    expect(rows.map((r) => r.id)).toContain(ids[0]);
+    expect(rows.map((r) => r.id)).not.toContain(ids[IDS_CAP]);
+  });
+
+  it("annotates root rows with matched_ids for child and root ids, and survives fold", () => {
+    const db = createTestDb();
+    insert(db, "root_1", null, 100);
+    insert(db, "child_1", "root_1", 200);
+    insert(db, "child_2", "root_1", 300);
+    insert(db, "other_root", null, 400);
+
+    const rows = queryTreesForIds(db, [" child_1 ", "child_1", "child_2", "other_root", "unknown_id"]);
+    const root1 = rows.find((r) => r.id === "root_1");
+    const otherRoot = rows.find((r) => r.id === "other_root");
+    const child1 = rows.find((r) => r.id === "child_1");
+
+    expect(root1?.matched_ids).toEqual(["child_1", "child_2"]);
+    expect(otherRoot?.matched_ids).toEqual(["other_root"]);
+    expect(child1?.matched_ids).toBeUndefined();
+
+    const stateRows = queryWithState(rows, { overlayDir: "/tmp" });
+    const folded = foldRows(stateRows);
+    const foldedRoot1 = folded.find((r) => r.id === "root_1");
+    expect(foldedRoot1?.matched_ids).toEqual(["child_1", "child_2"]);
+  });
+
+  it("omits matched_ids in queryBaseList (not in --ids mode)", () => {
+    const db = createTestDb();
+    insert(db, "root_1", null, 100);
+    const rows = queryBaseList(db);
+    expect(rows[0].matched_ids).toBeUndefined();
+  });
+});
+

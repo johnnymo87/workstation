@@ -166,4 +166,54 @@ grep -q '"effective_state"' <<<"$JSON_LIVE_OUT" \
   && fail "--with-state alone emitted row-model fields -- the flag is not gating anything"
 pass "--fold folds descendants into one root row and leaves --with-state untouched"
 
+# --- Stage 6: --ids (workstation-p8ch), end to end through the BUILT binary. ---
+#
+# The bun tests cover queryTreesForIds; this proves the flag is wired in the
+# shipped artifact and REPLACES the recency window rather than filtering it.
+# old_root is older than every other root, so `--limit 1` alone cannot reach it.
+bun -e '
+import { Database } from "bun:sqlite";
+const db = new Database("'$TEST_DB'");
+db.exec(`INSERT INTO session VALUES ("old_root", "p1", NULL, "old-root", "/proj", "Old Root", "1.0", 1, 1, NULL);`);
+'
+JSON_IDS_OUT="$("$BIN" --db "$TEST_DB" --with-state --fold --limit 1 \
+  --ids child_1,archived_1,old_root,never_existed \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list --ids failed on fixture DB"
+
+grep -q '"id": "root_1"' <<<"$JSON_IDS_OUT" \
+  || fail "--ids child_1 did not resolve to its root row root_1"
+grep -q '"id": "old_root"' <<<"$JSON_IDS_OUT" \
+  || fail "--ids was truncated by --limit 1 (old_root is outside the recency window)"
+grep -q '"id": "child_1"' <<<"$JSON_IDS_OUT" \
+  && fail "--ids --fold emitted a CHILD as its own row"
+grep -q '"id": "archived_1"' <<<"$JSON_IDS_OUT" \
+  && fail "--ids resurrected an ARCHIVED session"
+grep -q '"id": "never_existed"' <<<"$JSON_IDS_OUT" \
+  && fail "--ids invented a row for an unknown id"
+[ "$(grep -c '"id": ' <<<"$JSON_IDS_OUT")" = 2 ] \
+  || fail "--ids should yield exactly 2 root rows (root_1, old_root)"
+
+bun -e '
+const rows = JSON.parse(process.argv[1]);
+const r1 = rows.find(r => r.id === "root_1");
+const ro = rows.find(r => r.id === "old_root");
+if (!r1 || JSON.stringify(r1.matched_ids) !== JSON.stringify(["child_1"])) {
+  console.error("root_1 missing or wrong matched_ids:", r1);
+  process.exit(1);
+}
+if (!ro || JSON.stringify(ro.matched_ids) !== JSON.stringify(["old_root"])) {
+  console.error("old_root missing or wrong matched_ids:", ro);
+  process.exit(1);
+}
+' "$JSON_IDS_OUT" || fail "--ids root rows missing expected matched_ids"
+
+grep -q '"matched_ids"' <<<"$JSON_FOLD_OUT" \
+  && fail "non-ids mode emitted matched_ids -- should only be present in --ids mode"
+
+JSON_EMPTY_OUT="$("$BIN" --db "$TEST_DB" --ids "" 2>/dev/null)" || fail "--ids '' failed"
+[ "$(tr -d '[:space:]' <<<"$JSON_EMPTY_OUT")" = "[]" ] \
+  || fail "--ids with an empty list must print [] -- not fall back to the recency window"
+pass "--ids resolves child->root, drops archived/unknown, ignores --limit"
+
 echo "ALL PASS (oc-session-list)"

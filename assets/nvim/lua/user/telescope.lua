@@ -41,4 +41,19 @@ vim.keymap.set("n", "<leader>fs", function()
   require("user.session_switcher").open()
 end, { desc = "OC sessions" })
 
+-- Stall-watch programs picker (workstation-p8ch). Registered ONLY when the
+-- private read command is executable on this host: unlike <leader>fs, which is
+-- always bound and explains itself, a host without the stall-watcher gets no
+-- key at all (design: "the keymap is registered only if the command is
+-- executable"). Checked once, at startup; set $STALLWATCH_ITEMS_CMD to point
+-- it elsewhere.
+do
+  local ok, sw_source = pcall(require, "user.stallwatch_picker.source")
+  if ok and sw_source.available() then
+    vim.keymap.set("n", "<leader>fp", function()
+      require("user.stallwatch_picker").open()
+    end, { desc = "Stall-watch programs" })
+  end
+end
+
 require("telescope").load_extension("fzy_native")

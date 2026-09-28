@@ -141,6 +141,82 @@ local function make_id_aware_sorter(sorter)
   return sorter
 end
 
+--- Carry out an accept-time action descriptor from flow:accept.
+---
+--- Extracted from M.open's <CR> handler unchanged so the stall-watch picker
+--- (workstation-p8ch) jumps through the SAME code rather than a copy that
+--- could drift. Every exec.* call goes through the module table, so tests that
+--- stub exec.focus_here / switch_pane / attach / scroll_to_message still
+--- intercept it.
+---
+--- @param desc table|nil descriptor from act.decide
+--- @param row table the displayed row that was accepted
+--- @param client string|nil tmux client captured at picker OPEN (Contract 9)
+--- @param opts table|nil picker opts (frontdoor_url etc. for scroll_to_message)
+function M.dispatch(desc, row, client, opts)
+  row = (type(row) == "table") and row or {}
+  if not desc or type(desc) ~= "table" then
+    return
+  end
+  -- JUMPING DELIBERATELY CLEARS NOTHING.
+  --
+  -- This used to fire a watermark write whenever a jump succeeded. It was
+  -- wrong for a reason no amount of care in THIS function could fix: the
+  -- stated purpose of a jump is often to PEEK -- to look at a session and
+  -- decide you are not ready to read it. Clearing on that destroys the
+  -- record of where you had stopped, and the watermark is a MAX() upsert,
+  -- so it cannot be moved back.
+  --
+  -- Clearing now follows evidence of PRESENCE instead, and lives in the
+  -- pigeon daemon where the evidence actually is (pigeon #131): a human
+  -- authoring a turn, or resolving a question, in either the TUI or
+  -- Telegram. Asking a follow-up question is close to proof you read what
+  -- came before it. Arriving somewhere is not.
+  --
+  -- The case neither signal can see -- reading a session and never typing --
+  -- is covered by the explicit <C-r> gesture below, not by guessing here.
+  local anchor = row.anchor_msg_id
+  local has_anchor = anchor ~= nil and anchor ~= vim.NIL and anchor ~= ""
+
+  if desc.kind == "focus_here" then
+    exec.focus_here(desc)
+  elseif desc.kind == "switch_pane" then
+    exec.switch_pane(desc, client)
+  elseif desc.kind == "attach" then
+    -- COLD path: hand the target to the launch itself (workstation-swws).
+    -- There is nothing subscribed to publish to yet -- this call is what
+    -- creates the TUI -- so the request the warm paths send would be
+    -- dropped, which is precisely the bug that was reported.
+    exec.attach(desc, { scroll_to_message_id = has_anchor and anchor or nil })
+  elseif desc.kind == "refuse_dir_missing" then
+    exec.refuse_dir_missing(desc)
+  end
+
+  -- ALLOWLIST, not "anything but refuse_dir_missing". A future descriptor
+  -- kind should have to opt in to firing a scroll rather than inherit it
+  -- by default; refuse_dir_missing deliberately does not navigate.
+  --
+  -- `attach` is NOT in this list any more: it carries its target in the
+  -- launched process's environment instead. Leaving it here as well would
+  -- re-introduce a POST whose only effects are the ones we are removing --
+  -- a request nobody is subscribed to receive, and a front-door sticky
+  -- pin to a serve that may never own the session (workstation-5obe).
+  local navigates = desc.kind == "focus_here" or desc.kind == "switch_pane"
+  if has_anchor and navigates then
+    -- ONE request, not four. These targets are already subscribed, so the
+    -- retry schedule was only ever covering for the cold path -- which no
+    -- longer uses this route at all.
+    --
+    -- The response is ignored deliberately: the door 503s when pigeon is
+    -- down, which means "no scroll" and is not worth a feedback loop.
+    exec.scroll_to_message({
+      sid = row.id,
+      message_id = anchor,
+      force = true,
+    }, opts)
+  end
+end
+
 --- Open the session switcher Telescope picker.
 ---
 --- @param opts table|nil Options passed to telescope and flow controller
@@ -285,66 +361,7 @@ function M.open(opts)
           end
           local row = entry.value or entry
           controller:accept(row, function(desc)
-            if not desc or type(desc) ~= "table" then
-              return
-            end
-            -- JUMPING DELIBERATELY CLEARS NOTHING.
-            --
-            -- This used to fire a watermark write whenever a jump succeeded. It was
-            -- wrong for a reason no amount of care in THIS function could fix: the
-            -- stated purpose of a jump is often to PEEK -- to look at a session and
-            -- decide you are not ready to read it. Clearing on that destroys the
-            -- record of where you had stopped, and the watermark is a MAX() upsert,
-            -- so it cannot be moved back.
-            --
-            -- Clearing now follows evidence of PRESENCE instead, and lives in the
-            -- pigeon daemon where the evidence actually is (pigeon #131): a human
-            -- authoring a turn, or resolving a question, in either the TUI or
-            -- Telegram. Asking a follow-up question is close to proof you read what
-            -- came before it. Arriving somewhere is not.
-            --
-            -- The case neither signal can see -- reading a session and never typing --
-            -- is covered by the explicit <C-r> gesture below, not by guessing here.
-            local anchor = row.anchor_msg_id
-            local has_anchor = anchor ~= nil and anchor ~= vim.NIL and anchor ~= ""
-
-            if desc.kind == "focus_here" then
-              exec.focus_here(desc)
-            elseif desc.kind == "switch_pane" then
-              exec.switch_pane(desc, client)
-            elseif desc.kind == "attach" then
-              -- COLD path: hand the target to the launch itself (workstation-swws).
-              -- There is nothing subscribed to publish to yet -- this call is what
-              -- creates the TUI -- so the request the warm paths send would be
-              -- dropped, which is precisely the bug that was reported.
-              exec.attach(desc, { scroll_to_message_id = has_anchor and anchor or nil })
-            elseif desc.kind == "refuse_dir_missing" then
-              exec.refuse_dir_missing(desc)
-            end
-
-            -- ALLOWLIST, not "anything but refuse_dir_missing". A future descriptor
-            -- kind should have to opt in to firing a scroll rather than inherit it
-            -- by default; refuse_dir_missing deliberately does not navigate.
-            --
-            -- `attach` is NOT in this list any more: it carries its target in the
-            -- launched process's environment instead. Leaving it here as well would
-            -- re-introduce a POST whose only effects are the ones we are removing --
-            -- a request nobody is subscribed to receive, and a front-door sticky
-            -- pin to a serve that may never own the session (workstation-5obe).
-            local navigates = desc.kind == "focus_here" or desc.kind == "switch_pane"
-            if has_anchor and navigates then
-              -- ONE request, not four. These targets are already subscribed, so the
-              -- retry schedule was only ever covering for the cold path -- which no
-              -- longer uses this route at all.
-              --
-              -- The response is ignored deliberately: the door 503s when pigeon is
-              -- down, which means "no scroll" and is not worth a feedback loop.
-              exec.scroll_to_message({
-                sid = row.id,
-                message_id = anchor,
-                force = true,
-              }, opts)
-            end
+            M.dispatch(desc, row, client, opts)
           end)
         end)
 

@@ -16,6 +16,12 @@ export interface SessionRow {
    * level (caught by mutation testing, 2026-07-31).
    */
   root_id: string;
+  /**
+   * Only present in --ids mode on root rows: the requested session ids
+   * (after trim/dedupe) that resolved into this root's tree (including the
+   * root id itself if requested).
+   */
+  matched_ids?: string[];
 }
 
 export interface BaseListOptions {
@@ -82,6 +88,73 @@ export function queryTreesForSessions(db: Database, sessionIds: string[]): Sessi
   `);
 
   return query.all(...capped);
+}
+
+/** Chunk size for `queryTreesForIds`: queryTreesForSessions' own per-statement cap. */
+export const IDS_CHUNK = 200;
+/** Hard cap on one `--ids` request. Past it the tail is dropped LOUDLY (onWarn). */
+export const IDS_CAP = 2000;
+
+/**
+ * `oc-session-list --ids`: the FULL root trees of an explicit set of session
+ * ids, independent of the recency window.
+ *
+ * A thin loop over queryTreesForSessions, so it inherits both of that
+ * function's properties -- archived stays gone, a child id brings its whole
+ * tree -- instead of re-deriving them. The loop exists because that function
+ * silently keeps only the first 200 ids of a call: fine for its overlay-union
+ * caller, wrong for a caller that names its set explicitly (a program's tagged
+ * sessions plus its item sessions can exceed 200). Each statement stays
+ * bounded at IDS_CHUNK; the whole request is capped at IDS_CAP, and exceeding
+ * the cap WARNS rather than truncating in silence.
+ *
+ * Rows are deduped by id (two chunks can name members of one tree) and
+ * returned newest-first, the order a single queryTreesForSessions call uses.
+ */
+export function queryTreesForIds(
+  db: Database,
+  sessionIds: string[],
+  onWarn?: (msg: string) => void,
+): SessionRow[] {
+  let ids = [
+    ...new Set(
+      sessionIds
+        .filter((s) => typeof s === "string")
+        .map((s) => s.trim())
+        .filter((s) => s !== ""),
+    ),
+  ];
+  if (ids.length > IDS_CAP) {
+    onWarn?.(`--ids named ${ids.length} sessions; only the first ${IDS_CAP} were resolved`);
+    ids = ids.slice(0, IDS_CAP);
+  }
+  const byId = new Map<string, SessionRow>();
+  for (let i = 0; i < ids.length; i += IDS_CHUNK) {
+    for (const row of queryTreesForSessions(db, ids.slice(i, i + IDS_CHUNK))) {
+      if (!byId.has(row.id)) byId.set(row.id, row);
+    }
+  }
+  const matchedByRoot = new Map<string, string[]>();
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (row) {
+      let list = matchedByRoot.get(row.root_id);
+      if (!list) {
+        list = [];
+        matchedByRoot.set(row.root_id, list);
+      }
+      list.push(id);
+    }
+  }
+  for (const [rootId, matched] of matchedByRoot) {
+    const rootRow = byId.get(rootId);
+    if (rootRow) {
+      rootRow.matched_ids = matched;
+    }
+  }
+  return [...byId.values()].sort(
+    (a, b) => b.time_updated - a.time_updated || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
 }
 
 export function queryBaseList(db: Database, options?: BaseListOptions): SessionRow[] {

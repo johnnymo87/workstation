@@ -178,6 +178,24 @@ cat >"$lua_file" <<'LUA'
   check(vim.tbl_contains(folded, "--fold"), "fold=true -> argv contains --fold")
   check(not vim.tbl_contains(cli.build_argv({}), "--fold"), "fold unset -> argv omits --fold")
 
+  -- 10c. `--ids` (workstation-p8ch): comma-joined. When opts.ids is a table
+  --      and no valid ids survive, emit `--ids=` so the CLI parses an empty set []
+  --      rather than falling back to the recency window. nil opts.ids omits --ids entirely.
+  local with_ids = cli.build_argv({ fold = true, ids = { "ses_x", "ses_y" } })
+  local at = vim.fn.index(with_ids, "--ids")
+  check(at >= 0 and with_ids[at + 2] == "ses_x,ses_y", "ids -> --ids ses_x,ses_y")
+  check(vim.tbl_contains(cli.build_argv({ ids = {} }), "--ids="), "empty ids -> --ids=")
+  check(not vim.tbl_contains(cli.build_argv({}), "--ids") and not vim.tbl_contains(cli.build_argv({}), "--ids="), "nil ids -> no --ids")
+
+  -- 10d. `--ids` filtering: only non-empty strings, no leading '-', no ',' --
+  local mixed_ids = cli.build_argv({ ids = { "ses_1", "-flag", "has,comma", "", 123, "ses_2" } })
+  local at_mixed = vim.fn.index(mixed_ids, "--ids")
+  check(at_mixed >= 0 and mixed_ids[at_mixed + 2] == "ses_1,ses_2", "invalid ids filtered out: non-strings, empty, leading dash, comma")
+  check(vim.tbl_contains(cli.build_argv({ ids = { "-bad", "--all" } }), "--ids="), "leading dash ids only -> --ids=")
+  check(vim.tbl_contains(cli.build_argv({ ids = { "foo,bar" } }), "--ids="), "comma ids only -> --ids=")
+  check(vim.tbl_contains(cli.build_argv({ ids = { "" } }), "--ids="), "empty string id -> --ids=")
+  check(vim.tbl_contains(cli.build_argv({ ids = { 123, false } }), "--ids="), "non-string ids only -> --ids=")
+
   -- 11. Callback runs on the main loop, where vim API calls are legal.
   --     vim.system's on_exit fires in a fast event context; forgetting
   --     vim.schedule makes any API call in the picker raise E5560.
@@ -238,6 +256,27 @@ printf 'PASS  session_switcher.model unit tests (%s assertions via nvim -l)\n' "
 spec_out="$(nvim --clean -l assets/nvim/test-session-switcher-spec.lua 2>&1 || true)"
 spec_count="$(parse_lua_ok "$spec_out" "session_switcher.spec unit tests")" || exit 1
 printf 'PASS  session_switcher.spec unit tests (%s assertions via nvim -l)\n' "$spec_count"
+
+# stall-watch picker (workstation-p8ch). Same harness, same gate: it reuses the
+# switcher's cli/spec/flow/dispatch, so a switcher change that breaks it fails
+# this same check. One literal line per unit, NOT a loop over "$unit": the
+# reachability guard (users/dev/test-unwired-tests.sh) only credits a runner
+# followed by a literal path, so a loop would report every unit as unwired.
+swm_out="$(nvim --clean -l assets/nvim/test-stallwatch-picker-model.lua 2>&1 || true)"
+swm_count="$(parse_lua_ok "$swm_out" "stallwatch_picker.model unit tests")" || exit 1
+printf 'PASS  stallwatch_picker.model unit tests (%s assertions via nvim -l)\n' "$swm_count"
+
+sws_out="$(nvim --clean -l assets/nvim/test-stallwatch-picker-spec.lua 2>&1 || true)"
+sws_count="$(parse_lua_ok "$sws_out" "stallwatch_picker.spec unit tests")" || exit 1
+printf 'PASS  stallwatch_picker.spec unit tests (%s assertions via nvim -l)\n' "$sws_count"
+
+swsrc_out="$(nvim --clean -l assets/nvim/test-stallwatch-picker-source.lua 2>&1 || true)"
+swsrc_count="$(parse_lua_ok "$swsrc_out" "stallwatch_picker.source unit tests")" || exit 1
+printf 'PASS  stallwatch_picker.source unit tests (%s assertions via nvim -l)\n' "$swsrc_count"
+
+swi_out="$(nvim --clean -l assets/nvim/test-stallwatch-picker-init.lua 2>&1 || true)"
+swi_count="$(parse_lua_ok "$swi_out" "stallwatch_picker.init unit tests")" || exit 1
+printf 'PASS  stallwatch_picker.init unit tests (%s assertions via nvim -l)\n' "$swi_count"
 
 # --- Cross-language contract: the state vocabulary must not DRIFT. -----------
 #

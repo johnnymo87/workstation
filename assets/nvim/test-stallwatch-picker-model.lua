@@ -1,0 +1,284 @@
+-- Unit tests for stallwatch_picker/model.lua (pure).
+-- Driven via `nvim --clean -l assets/nvim/test-stallwatch-picker-model.lua`.
+--
+-- SYNTHETIC DATA ONLY. This repo is public and the stall-watcher is private:
+-- programs are `alpha`/`beta`, text is invented, ids are ses_fixture_*.
+
+local N = 0
+local function check(cond, msg) N = N + 1; assert(cond, msg) end
+
+local model = loadfile("assets/nvim/lua/user/stallwatch_picker/model.lua")()
+
+local function read_fixture()
+  local f = assert(io.open("assets/nvim/stallwatch-picker-fixture.json", "r"))
+  local s = f:read("*a")
+  f:close()
+  -- Same decode options source.lua uses: JSON null -> Lua nil.
+  return vim.json.decode(s, { luanil = { object = true } })
+end
+
+local doc = read_fixture()
+
+-- CLI rows, in oc-session-list order. ses_fixture_arch (archived) and
+-- ses_fixture_gone (deleted) are ABSENT, exactly as the CLI drops them.
+-- ses_fixture_a2 is automated (lgtm origin): it must still appear.
+local CLI_ROWS = {
+  { id = "ses_fixture_t1", title = "Tagged one", directory = "/fixture/alpha/t1", effective_state = "idle", lastActivity = 1000, dir_missing = false, automated = false },
+  { id = "ses_fixture_a2", title = "A2 from CLI", directory = "/fixture/alpha/two", effective_state = "working", lastActivity = 2000, dir_missing = false, automated = true, anchor_msg_id = "msg_fixture1" },
+  { id = "ses_fixture_a1", title = "A1 from CLI", directory = "/fixture/alpha/one", effective_state = "blocked", lastActivity = 3000, dir_missing = true, automated = false },
+  { id = "ses_fixture_b1", title = "B1 from CLI", directory = "/fixture/beta/one", effective_state = "idle", lastActivity = 4000, dir_missing = false, automated = false },
+  { id = "ses_fixture_t2", title = "Tagged two", directory = "/fixture/alpha/t2", effective_state = "idle", lastActivity = 5000, dir_missing = false, automated = false },
+}
+local TAGGED = {
+  alpha = { "ses_fixture_t1", "ses_fixture_a1", "ses_fixture_t2" },
+  beta = { "ses_fixture_b1" },
+}
+
+local function ids(rows)
+  local out = {}
+  for _, r in ipairs(rows) do table.insert(out, r.id) end
+  return table.concat(out, ",")
+end
+
+-- 1. FIELD PRESENCE: every field the picker reads exists in the fixture.
+--    Contract drift must be a deliberate fixture edit, not a silent blank.
+do
+  local function present(node, segs, i)
+    if i > #segs then return node ~= nil and node ~= vim.NIL end
+    local seg = segs[i]
+    local each = seg:sub(-2) == "[]"
+    local key = each and seg:sub(1, -3) or seg
+    local child = type(node) == "table" and node[key] or nil
+    if each then
+      if type(child) ~= "table" then return false end
+      for _, el in ipairs(child) do
+        if present(el, segs, i + 1) then return true end
+      end
+      return false
+    end
+    return present(child, segs, i + 1)
+  end
+  check(#model.READS > 0, "model.READS is non-empty")
+  for _, path in ipairs(model.READS) do
+    local segs = vim.split(path, ".", { plain = true })
+    check(present(doc, segs, 1), "fixture carries a non-null value for read field " .. path)
+  end
+  check(not present({ a = vim.NIL }, { "a" }, 1), "present rejects vim.NIL")
+end
+
+-- 2. KIND ORDER mirrors the contract, and unknown kinds rank last.
+do
+  check(table.concat(model.KIND_ORDER, ">") == "decision>blocker>error>stalled>follow_up>declared_wait>info",
+    "KIND_ORDER is the contract order")
+  check(model.kind_rank("decision") < model.kind_rank("info"), "decision outranks info")
+  check(model.kind_rank("brand_new_kind") > model.kind_rank("info"), "unknown kind ranks after info")
+  check(model.kind_rank(nil) > model.kind_rank("info"), "nil kind ranks after info")
+end
+
+-- 3. ISO timestamps -> epoch ms, independent of the local zone.
+do
+  check(model.iso_ms("2026-01-01T00:00:00+00:00") == 1767225600000, "UTC midnight")
+  check(model.iso_ms("2026-01-01T00:00:00Z") == 1767225600000, "Z suffix")
+  check(model.iso_ms("2026-01-01T02:00:00+02:00") == 1767225600000, "positive offset")
+  check(model.iso_ms("2025-12-31T19:00:00-05:00") == 1767225600000, "negative offset")
+  check(model.iso_ms("2026-01-01T00:00:00.250000+00:00") == 1767225600250, "fractional seconds")
+  check(model.iso_ms("2024-03-01T00:00:00+00:00") == 1709251200000, "leap-year March 1st")
+  check(model.iso_ms(nil) == nil, "nil -> nil")
+  check(model.iso_ms("yesterday") == nil, "garbage -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00123+00:00") == nil, "fraction without dot -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00.+00:00") == nil, "dot without digits -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00.abc+00:00") == nil, "malformed fractional -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00+25:00") == nil, "malformed timezone offset hour -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00+00:60") == nil, "malformed timezone offset minute -> nil")
+  check(model.iso_ms("2026-01-01T00:00:00trailing") == nil, "trailing garbage -> nil")
+end
+
+-- 4. PROGRAM ROWS keep source order and carry counts.
+local prows = model.program_rows(doc)
+do
+  check(#prows == 2, "two programs")
+  check(prows[1].tag == "alpha" and prows[2].tag == "beta", "source order kept (alpha, beta)")
+  check(prows[1].counts.total == 4, "alpha has 4 open items")
+  local kinds = {}
+  for _, kn in ipairs(prows[1].counts.by_kind) do table.insert(kinds, kn.kind .. "=" .. kn.n) end
+  check(table.concat(kinds, ",") == "decision=1,blocker=1,follow_up=1,info=1", "alpha counts in kind order, got " .. table.concat(kinds, ","))
+  check(prows[1].last_tick_ms == model.iso_ms("2026-01-01T11:48:00.000000+00:00"), "last tick parsed")
+  check(prows[2].last_tick_ms == nil, "null last tick -> nil, not a crash")
+  check(prows[2].armed == false and prows[2].enabled == false, "armed/enabled carried")
+  check(#model.program_rows({ version = 1, programs = {} }) == 0, "zero programs -> zero rows")
+  check(#model.program_rows(nil) == 0, "nil doc -> zero rows")
+  local odd = model.program_rows({ programs = { { tag = "alpha" } } })
+  check(#odd == 1 and odd[1].counts.total == 0 and #odd[1].items == 0, "missing items tolerated")
+
+  -- Non-boolean armed/enabled normalized to nil.
+  local bool_test = model.program_rows({ programs = {
+    { tag = "gamma", armed = "yes", enabled = vim.NIL },
+    { tag = "delta", armed = 1, enabled = 0 },
+    { tag = "epsilon", armed = true, enabled = false },
+  } })
+  check(bool_test[1].armed == nil and bool_test[1].enabled == nil, "string/vim.NIL armed/enabled -> nil")
+  check(bool_test[2].armed == nil and bool_test[2].enabled == nil, "number armed/enabled -> nil")
+  check(bool_test[3].armed == true and bool_test[3].enabled == false, "boolean armed/enabled preserved")
+
+  -- Defensively tolerate vim.NIL and non-table values in program_rows.
+  check(#model.program_rows(vim.NIL) == 0, "vim.NIL doc -> zero rows")
+  check(#model.program_rows({ programs = vim.NIL }) == 0, "vim.NIL programs -> zero rows")
+  check(#model.program_rows({ programs = { vim.NIL, "string", 123 } }) == 0, "non-table programs -> zero rows")
+
+  -- Counts only table items.
+  local c = model.counts({ items = { "not a table", vim.NIL, 42, { kind = "decision" }, { kind = vim.NIL } } })
+  check(c.total == 2, "counts only table items in total, got " .. c.total)
+  check(#c.by_kind == 2 and c.by_kind[1].kind == "decision" and c.by_kind[1].n == 1
+    and c.by_kind[2].kind == "unknown" and c.by_kind[2].n == 1,
+    "by_kind counts only table items")
+end
+
+-- 5. FLAGGED ROWS: item-driven, deduped, most urgent badge, left-join.
+local by_id = model.index_rows(CLI_ROWS)
+local flagged = model.flagged_rows(prows[1], by_id)
+do
+  check(ids(flagged) == "ses_fixture_a1,ses_fixture_a2,ses_fixture_arch,ses_fixture_gone",
+    "flagged order = first appearance in contract-ordered items, got " .. ids(flagged))
+  local a1 = flagged[1]
+  check(a1.badge_kind == "decision", "a1 named by decision+blocker -> decision badge")
+  check(#a1.items == 2, "a1 carries both items")
+  check(a1.joined == true and a1.title == "A1 from CLI", "a1 joined: CLI title wins")
+  check(a1.effective_state == "blocked", "a1 joined: CLI state")
+  check(a1.dir_missing == true, "a1 joined: CLI dir_missing wins over directory_exists")
+  local a2 = flagged[2]
+  check(a2.automated == true, "automated (lgtm) session still appears in flagged view")
+  check(a2.anchor_msg_id == "msg_fixture1", "joined row keeps every CLI field (anchor for the jump)")
+  local arch = flagged[3]
+  check(arch.joined == false, "archived (CLI-dropped) session still rendered from item data")
+  check(arch.title == "Fixture archived", "unjoined: item title")
+  check(arch.dir_missing == false, "unjoined: directory_exists=true -> not missing")
+  local gone = flagged[4]
+  check(gone.title == "ses_fixture_gone", "unjoined + empty item title -> id")
+  check(gone.dir_missing == true, "unjoined: directory_exists=false -> dir_missing")
+  check(gone.effective_state == nil and gone.lastActivity == nil, "unjoined: no state/age invented")
+  check(CLI_ROWS[3].items == nil and CLI_ROWS[3].badge_kind == nil, "join copies; CLI rows not mutated")
+
+  -- Badge precedence regardless of item order.
+  local rev = model.flagged_rows({ items = {
+    { kind = "info", sessions = { { id = "ses_fixture_x" } } },
+    { kind = "error", sessions = { { id = "ses_fixture_x" } } },
+    { kind = "stalled", sessions = { { id = "ses_fixture_x" } } },
+  } }, {})
+  check(#rev == 1 and rev[1].badge_kind == "error", "error beats stalled beats info")
+
+  -- A session tagged to ANOTHER program still appears if this program's item names it.
+  local beta_flagged = model.flagged_rows(prows[2], by_id)
+  check(ids(beta_flagged) == "ses_fixture_b1,ses_fixture_a2", "beta flags a2 (tagged alpha)")
+  check(#model.flagged_rows(prows[2], nil) == 2, "no CLI rows at all -> flagged view still built")
+
+  -- Missing optional fields tolerated.
+  local sparse = model.flagged_rows({ items = { { sessions = { { id = "ses_fixture_s" }, {}, { id = "" } } } } }, {})
+  check(#sparse == 1 and sparse[1].title == "ses_fixture_s", "missing kind/title/directory tolerated; empty ids skipped")
+  check(sparse[1].dir_missing == false, "missing directory_exists is not treated as gone")
+
+  -- Defensively tolerate vim.NIL and non-table values in flagged_rows.
+  local fl = model.flagged_rows({ items = {
+    vim.NIL,
+    "string",
+    { kind = vim.NIL, sessions = {
+      vim.NIL,
+      "str",
+      { id = "ses_nil", directory = vim.NIL, title = vim.NIL },
+    } },
+  } }, { ses_nil = "not_a_table", other = vim.NIL })
+  check(#fl == 1, "flagged_rows skips non-tables")
+  check(fl[1].id == "ses_nil", "id preserved")
+  check(fl[1].directory == nil, "directory normalized to nil when vim.NIL")
+  check(fl[1].badge_kind == nil, "badge_kind normalized to nil when vim.NIL")
+  check(fl[1].joined == false, "invalid cli entry treated as unjoined")
+  check(fl[1].title == "ses_nil", "title falls back to id")
+end
+
+-- 6. ALL VIEW: stable partition of the CLI result.
+do
+  local all = model.all_rows(flagged, CLI_ROWS, TAGGED.alpha)
+  check(ids(all) == "ses_fixture_a2,ses_fixture_a1,ses_fixture_arch,ses_fixture_gone,ses_fixture_t1,ses_fixture_t2",
+    "flagged (CLI order, then unjoined) | rest (CLI order), got " .. ids(all))
+  check(all[5].badge_kind == nil and #all[5].items == 0, "unflagged rows carry no badge")
+  check(all[1] == flagged[2], "flagged rows are the same objects in both views")
+  local none = model.all_rows(flagged, {}, TAGGED.alpha)
+  check(ids(none) == ids(flagged), "CLI failed -> all view degrades to the flagged rows")
+
+  -- Defensively tolerate non-table / non-nonempty-id elements in flagged, cli_rows, tagged_ids.
+  local mixed_flagged = { vim.NIL, "str", { id = "" }, { id = "f1" } }
+  local mixed_cli = { vim.NIL, "str", { id = "" }, { id = "f1", title = "F1" }, { id = "t1", title = "T1" } }
+  local mixed_tagged = { vim.NIL, 42, "", "t1" }
+  local mixed_all = model.all_rows(mixed_flagged, mixed_cli, mixed_tagged)
+  check(ids(mixed_all) == "f1,t1", "all_rows guards non-table/non-nonempty-id elements, got " .. ids(mixed_all))
+  check(#model.all_rows(vim.NIL, vim.NIL, vim.NIL) == 0, "all_rows handles vim.NIL inputs without crash")
+end
+
+-- 7. UNION of ids for the one oc-session-list call.
+do
+  local u = model.union_ids(doc, TAGGED)
+  check(table.concat(u, ",") ==
+    "ses_fixture_a1,ses_fixture_a2,ses_fixture_arch,ses_fixture_gone,ses_fixture_b1,ses_fixture_t1,ses_fixture_t2",
+    "union: item ids then tagged ids, deduped, got " .. table.concat(u, ","))
+  check(#model.union_ids(doc, nil) == 5, "no tagged map -> item ids only")
+end
+
+-- 8. SUBAGENT CHILD -> ROOT mapping via matched_ids.
+do
+  local cli_root = {
+    id = "ses_root_1",
+    title = "Root Session",
+    directory = "/proj/root",
+    effective_state = "working",
+    matched_ids = { "ses_child_1", "ses_child_2" },
+  }
+  local idx = model.index_rows({ cli_root })
+  check(idx["ses_child_1"] == cli_root, "child_1 maps to root row")
+  check(idx["ses_child_2"] == cli_root, "child_2 maps to root row")
+  check(idx["ses_root_1"] == cli_root, "fallback: root id maps to root row")
+
+  -- Fallback when matched_ids is missing or empty
+  local cli_plain = { id = "ses_plain_root", title = "Plain" }
+  local idx_plain = model.index_rows({ cli_plain, { id = "ses_empty_matched", matched_ids = {} } })
+  check(idx_plain["ses_plain_root"] == cli_plain, "missing matched_ids falls back to id")
+  check(idx_plain["ses_empty_matched"].id == "ses_empty_matched", "empty matched_ids falls back to id")
+
+  -- Flagged rows: items naming child sessions and/or root session map to root row,
+  -- deduped to the single root row, id = root id, title/dir/state from CLI root row,
+  -- badge = most urgent, items attached = union.
+  local item_info = { kind = "info", text = "Info for child 1", sessions = { { id = "ses_child_1", title = "Child 1 Title" } } }
+  local item_blocker = { kind = "blocker", text = "Blocker for child 2", sessions = { { id = "ses_child_2", title = "Child 2 Title" } } }
+  local item_multi = { kind = "decision", text = "Decision naming both", sessions = { { id = "ses_child_1" }, { id = "ses_root_1" } } }
+  local item_unjoined = { kind = "error", text = "Error for unjoined", sessions = { { id = "ses_unjoined_child", title = "Unjoined Child", directory_exists = false } } }
+
+  local prog = {
+    items = { item_info, item_blocker, item_multi, item_unjoined },
+  }
+  local fl_sub = model.flagged_rows(prog, idx)
+  check(#fl_sub == 2, "2 rows: 1 deduped joined root + 1 unjoined, got " .. #fl_sub)
+
+  local root_row = fl_sub[1]
+  check(root_row.id == "ses_root_1", "row id is root id, got " .. tostring(root_row.id))
+  check(root_row.title == "Root Session", "title comes from CLI root row")
+  check(root_row.directory == "/proj/root", "directory comes from CLI root row")
+  check(root_row.effective_state == "working", "state comes from CLI root row")
+  check(root_row.joined == true, "joined is true")
+  check(root_row.badge_kind == "decision", "most urgent badge wins (decision over blocker, info)")
+  check(#root_row.items == 3, "items attached is union of items without duplication, got " .. #root_row.items)
+  check(root_row.items[1] == item_info and root_row.items[2] == item_blocker and root_row.items[3] == item_multi, "items in appearance order")
+
+  local unjoined_row = fl_sub[2]
+  check(unjoined_row.id == "ses_unjoined_child", "unjoined row id preserved")
+  check(unjoined_row.joined == false, "unjoined row joined is false")
+  check(unjoined_row.title == "Unjoined Child", "unjoined row title from item")
+  check(unjoined_row.dir_missing == true, "unjoined dir_missing preserved")
+  check(#unjoined_row.items == 1 and unjoined_row.items[1] == item_unjoined, "unjoined items attached")
+
+  -- All view partition and dedupe must use root ids:
+  -- root_row is already in fl_sub, so cli_root in cli_rows must be deduped (placed in head, not duplicated in tail).
+  local all_sub = model.all_rows(fl_sub, { cli_root }, { "ses_root_1" })
+  check(#all_sub == 2, "all view has exactly 2 rows (flagged root + unjoined), got " .. #all_sub)
+  check(all_sub[1] == root_row, "flagged root placed first")
+  check(all_sub[2] == unjoined_row, "unjoined placed after")
+end
+
+print("LUA_TEST_OK " .. N)

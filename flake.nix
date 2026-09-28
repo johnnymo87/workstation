@@ -1114,8 +1114,8 @@
 
         # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 181 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 181 tests'. If you added or removed" >&2
+        grep -q '^Ran 186 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 186 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
@@ -1512,13 +1512,13 @@
           echo "GATE FAILURE: session_switcher lua suite did not reach its final pass line." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 6 ] || {
-          echo "GATE FAILURE: expected 6 'PASS  ' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 10 ] || {
+          echo "GATE FAILURE: expected 10 'PASS  ' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/out.txt")." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.cli unit tests (31 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.cli did not report expected 31 assertions." >&2
+        grep -q '^PASS  session_switcher\.cli unit tests (39 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.cli did not report expected 39 assertions." >&2
           exit 1
         }
         grep -q '^PASS  session_switcher\.discovery + \.rpc unit tests (69 assertions via nvim -l)' "$TMPDIR/out.txt" || {
@@ -1529,8 +1529,24 @@
           echo "GATE FAILURE: session_switcher.model did not report expected 114 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (656 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 656 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (668 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 668 assertions." >&2
+          exit 1
+        }
+        grep -q '^PASS  stallwatch_picker\.model unit tests (109 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.model did not report expected 109 assertions." >&2
+          exit 1
+        }
+        grep -q '^PASS  stallwatch_picker\.spec unit tests (111 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.spec did not report expected 111 assertions." >&2
+          exit 1
+        }
+        grep -q '^PASS  stallwatch_picker\.source unit tests (83 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.source did not report expected 83 assertions." >&2
+          exit 1
+        }
+        grep -q '^PASS  stallwatch_picker\.init unit tests (48 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.init did not report expected 48 assertions." >&2
           exit 1
         }
         touch $out
@@ -2064,7 +2080,7 @@
           expects=''${expects:-0}
           case "$f" in
             test/oc-session-list.spec.ts)
-              expected_expects=355
+              expected_expects=384
               ;;
             *)
               echo "GATE FAILURE: unrecognised spec file $f has no pinned expect() count in flake.nix." >&2
@@ -2231,6 +2247,10 @@
         # this check green over nothing -- the store-prefix lesson.
         grep -q '^PASS: --with-state distinguishes nodata' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: the nodata-vs-idle assertion did not run." >&2
+          exit 1
+        }
+        grep -q '^PASS: --ids resolves child->root' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the --ids stage did not run." >&2
           exit 1
         }
         grep -q '^ALL PASS (oc-session-list)' "$TMPDIR/out.txt" || {

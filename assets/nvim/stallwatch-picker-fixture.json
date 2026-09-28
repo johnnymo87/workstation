@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "generated_at": "2026-01-01T12:00:00.000000+00:00",
+  "latest_digest": "/nonexistent/stallwatch-fixture/digest.txt",
+  "programs": [
+    {
+      "tag": "alpha",
+      "armed": true,
+      "enabled": true,
+      "last_tick_activity": "2026-01-01T11:48:00.000000+00:00",
+      "items": [
+        {
+          "program": "alpha",
+          "fingerprint": "fp-alpha-decision",
+          "kind": "decision",
+          "text": "Pick option one or option two for the widget.",
+          "status": "new",
+          "what_changed": null,
+          "stale": false,
+          "first_seen": "2026-01-01T10:00:00.000000+00:00",
+          "updated_at": "2026-01-01T11:00:00.000000+00:00",
+          "last_sent": null,
+          "shadow_last_sent": "2026-01-01T11:00:00.000000+00:00",
+          "sessions": [
+            { "id": "ses_fixture_a1", "directory": "/fixture/alpha/one", "title": "Fixture A1 (item title)", "directory_exists": true },
+            { "id": "ses_fixture_a2", "directory": "/fixture/alpha/two", "title": "Fixture A2 (item title)", "directory_exists": true }
+          ]
+        },
+        {
+          "program": "alpha",
+          "fingerprint": "fp-alpha-blocker",
+          "kind": "blocker",
+          "text": "Waiting on a credential for the gadget.",
+          "status": "changed",
+          "what_changed": "text reworded",
+          "stale": true,
+          "first_seen": "2026-01-01T09:00:00.000000+00:00",
+          "updated_at": "2026-01-01T11:30:00.000000+00:00",
+          "last_sent": null,
+          "shadow_last_sent": null,
+          "sessions": [
+            { "id": "ses_fixture_a1", "directory": "/fixture/alpha/one", "title": "Fixture A1 (item title)", "directory_exists": true }
+          ]
+        },
+        {
+          "program": "alpha",
+          "fingerprint": "fp-alpha-follow",
+          "kind": "follow_up",
+          "text": "Archived session still has an open thread.",
+          "status": "new",
+          "what_changed": null,
+          "stale": false,
+          "first_seen": "2026-01-01T08:00:00.000000+00:00",
+          "updated_at": "2026-01-01T08:00:00.000000+00:00",
+          "last_sent": null,
+          "shadow_last_sent": null,
+          "sessions": [
+            { "id": "ses_fixture_arch", "directory": "/fixture/alpha/arch", "title": "Fixture archived", "directory_exists": true }
+          ]
+        },
+        {
+          "program": "alpha",
+          "fingerprint": "fp-alpha-info",
+          "kind": "info",
+          "text": "A deleted session was mentioned.\nSecond line of the note.",
+          "status": "new",
+          "what_changed": null,
+          "stale": false,
+          "first_seen": "2026-01-01T07:00:00.000000+00:00",
+          "updated_at": "2026-01-01T07:00:00.000000+00:00",
+          "last_sent": null,
+          "shadow_last_sent": null,
+          "sessions": [
+            { "id": "ses_fixture_gone", "directory": "/fixture/alpha/gone", "title": "", "directory_exists": false }
+          ]
+        }
+      ]
+    },
+    {
+      "tag": "beta",
+      "armed": false,
+      "enabled": false,
+      "last_tick_activity": null,
+      "items": [
+        {
+          "program": "beta",
+          "fingerprint": "fp-beta-stalled",
+          "kind": "stalled",
+          "text": "Beta session idle for a while.",
+          "status": "new",
+          "what_changed": null,
+          "stale": false,
+          "first_seen": "2026-01-01T06:00:00.000000+00:00",
+          "updated_at": "2026-01-01T06:00:00.000000+00:00",
+          "last_sent": null,
+          "shadow_last_sent": null,
+          "sessions": [
+            { "id": "ses_fixture_b1", "directory": "/fixture/beta/one", "title": "Fixture B1 (item title)", "directory_exists": true },
+            { "id": "ses_fixture_a2", "directory": "/fixture/alpha/two", "title": "Fixture A2 (item title)", "directory_exists": true }
+          ]
+        }
+      ]
+    }
+  ]
+}
