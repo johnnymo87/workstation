@@ -85,7 +85,9 @@ let
   #      opus-5-5 model already carries its own `effort` setting from
   #      opencode.base.json, so no variant override is added here. (opus-4-7,
   #      opus-4-8 and opus-5 have no provider-level model entry anymore, and no
-  #      agent is pinned to any of them as of 2026-09-22.)
+  #      agent is pinned to any of them as of 2026-09-22.) This is the branch
+  #      that fires for oracle-opus and adversarial-reviewer-opus; their own
+  #      `variant: high` line passes through untouched.
   patchAgent = name: src:
     let
       afterSonnet =
@@ -110,7 +112,10 @@ let
       #    provider and the model loop dies with an empty response. The Vertex
       #    fable entry (`google-vertex-anthropic/claude-fable-5-1@default`)
       #    carries its own high `effort` from opencode.base.json, so no variant
-      #    override is added here. No-op on agents that don't pin fable.
+      #    override is added here. No-op on agents that don't pin fable —
+      #    which, since oracle and adversarial-reviewer moved to opus
+      #    (2026-09-26), is every shipped agent. Kept as a guard for a future
+      #    fable pin rather than deleted; it is still evaluated on every build.
       #
       #    The version is CAPTURED, not hardcoded — a literal `claude-fable-5`
       #    match against the 5.1 pin yields `claude-fable-5@default-1`, a
@@ -128,13 +133,17 @@ let
   # mkAgentVariant: build a model-pinned twin of an agent from the SAME source
   # body at build time, so a shared prompt has one source of truth and no
   # hand-maintained copy to drift. Used for oracle and adversarial-reviewer,
-  # whose sources pin `anthropic/claude-fable-5-1` and carry a
-  # `(fable-5-1 model)` token in their description. It rewrites only:
-  #   - the model pin (fable-5-1 -> modelPin)
-  #   - the `(fable-5-1 model)` description token -> `(modelTag model)`
+  # whose sources pin `anthropic/claude-opus-5-5` (plus `variant: high`) and
+  # carry an `(opus-5-5 model)` token in their description. It rewrites only:
+  #   - the model pin (opus-5-5 -> modelPin)
+  #   - drops the source's `variant:` line, which names an effort tier of the
+  #     SOURCE model and is not the twin's to inherit (the twin model carries
+  #     its own default effort at provider level). This one substitution is
+  #     allowed to miss: a source with no variant line has nothing to drop.
+  #   - the `(opus-5-5 model)` description token -> `(modelTag model)`
   #   - appends a `caution` sentence to the description. By default that is an
   #     opt-in CAUTION so the orchestrator does NOT auto-select the twin and the
-  #     `-fable` handle stays the default; devbox overrides it for
+  #     `-opus` handle stays the default; devbox overrides it for
   #     adversarial-reviewer, where the twin IS the default.
   # The result is fed through patchAgent for host rewrites. For an `openai/`
   # pin every patchAgent branch is a no-op, which is correct — codex-lb serves
@@ -153,7 +162,9 @@ let
   # #444 also predicted this moment and paid for it in advance: it kept the
   # `-fable` suffix on the deployed handles even when nothing needed
   # disambiguating, precisely so re-introducing a second model would be purely
-  # additive. It is. No handle renames here.
+  # additive. It was — until 2026-09-26, when the base model itself moved from
+  # fable to opus and the handles were renamed `-fable` -> `-opus` with it
+  # (a suffix naming the wrong model is worse than a rename).
   #
   # IMPORTANT: the appended text must NOT contain a colon-space (": "). opencode
   # parses agent frontmatter with gray-matter/js-yaml (packages/opencode/src/
@@ -165,7 +176,8 @@ let
   # (mode=all, model=null) that silently runs the CALLER's model instead of the
   # pinned one — i.e. the failure is a silent wrong-model, not an error. The
   # em-dashes below are load-bearing for that reason.
-  # EVERY SUBSTITUTION IS VERSION-AGNOSTIC AND DIES IF IT DOES NOT MATCH.
+  # EVERY SUBSTITUTION IS VERSION-AGNOSTIC AND DIES IF IT DOES NOT MATCH
+  # (except the `variant:` drop, noted above).
   # Both properties are load-bearing and were added after review caught the
   # first draft repeating #443's exact mistake. That draft matched the literal
   # `claude-fable-5-1`; bump the source to fable-5-2 and all three matches miss,
@@ -183,7 +195,7 @@ let
   # YAML or text outside the scalar, and the failure mode of broken agent
   # frontmatter is the racy skip-to-stub described above.
   # `caution` is the sentence appended to the description. It defaults to the
-  # opt-in CAUTION that keeps the `-fable` handle the default; devbox overrides
+  # opt-in CAUTION that keeps the `-opus` handle the default; devbox overrides
   # it for adversarial-reviewer, where astra IS the default (see the call site).
   #
   # It is INTERPOLATED INTO PERL SOURCE, not passed as data. The current values
@@ -191,7 +203,7 @@ let
   # `$`, `@` or a backslash would be interpreted rather than inserted. The
   # colon-space guard below catches the YAML half of that, not the perl half.
   mkAgentVariant = { base, slug, modelPin, modelTag,
-                     caution ? "CAUTION — use this ${modelTag} variant ONLY when the user explicitly asks for it; otherwise default to ${base}-fable"
+                     caution ? "CAUTION — use this ${modelTag} variant ONLY when the user explicitly asks for it; otherwise default to ${base}-opus"
                    }: src:
     pkgs.runCommand "${base}-${slug}-src.md" {} ''
       # Delimiter is `!`, not `|`: the description guard's character class
@@ -200,10 +212,11 @@ let
       # so `s|...[^"'"'"'>|]...|` terminates early and dies with a syntax error.
       # Nothing substituted here contains `!`.
       ${pkgs.perl}/bin/perl -0pe '
-        s!model: anthropic/claude-fable-[0-9]+(?:-[0-9]+)*!model: ${modelPin}!
-          or die "mkAgentVariant: no anthropic/claude-fable-* pin found in ${base} source\n";
-        s!\(fable-[0-9]+(?:-[0-9]+)* model\)!(${modelTag} model)!
-          or die "mkAgentVariant: no (fable-N model) token found in ${base} description\n";
+        s!model: anthropic/claude-opus-[0-9]+(?:-[0-9]+)*!model: ${modelPin}!
+          or die "mkAgentVariant: no anthropic/claude-opus-* pin found in ${base} source\n";
+        s!^variant: [^\n]*\n!!m;
+        s!\(opus-[0-9]+(?:-[0-9]+)* model\)!(${modelTag} model)!
+          or die "mkAgentVariant: no (opus-N model) token found in ${base} description\n";
         s!^(description: [^"'"'"'>|].*)$!$1. ${caution}!m
           or die "mkAgentVariant: ${base} has no plain unquoted description: scalar to append to\n";
       ' ${src} > $out
@@ -225,7 +238,7 @@ let
   # ChatGPT subscription through codex-lb on 127.0.0.1:2455. Deployed on devbox
   # and cloudbox (both run codex-lb); patchAgent is a pass-through for the pin.
   #
-  # Unlike the fable twins this one can be present-but-dead: the agent file is
+  # Unlike the opus twins this one can be present-but-dead: the agent file is
   # built unconditionally, while the model behind it exists only while
   # codex-lb.service is up AND codex-lb's upstream catalog refresh is healthy
   # (see the codex-lb model-catalog note further down for why astra in
@@ -260,7 +273,7 @@ let
   # this repo's own .opencode skill — a plan-time dispatch from anywhere else
   # loads neither, and would otherwise be free to invent a silent fallback.
   devboxAdversarialCaution =
-    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-fable for every adversarial review, plan-time and pre-PR alike. If this variant is unreachable, stop and report it — do not silently fall back to the fable twin, and do not count a failed dispatch as a review that happened";
+    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If this variant is unreachable, stop and report it — do not silently fall back to the opus twin, and do not count a failed dispatch as a review that happened";
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -845,11 +858,13 @@ in
    # oracle and adversarial-reviewer each ship as TWO model-pinned twins,
    # generated from one prompt source per agent so the body cannot drift:
    #
-   #   @<base>-fable  -> claude-fable-5-1, straight from the source file.
-   #                     THE DEFAULT. On cloudbox patchAgent's afterFable branch
-   #                     rewrites the `anthropic/` pin to
-   #                     `google-vertex-anthropic/claude-fable-5-1@default`,
-   #                     because cloudbox has no first-party Anthropic auth.
+   #   @<base>-opus   -> claude-opus-5-5 at `variant: high`, straight from the
+   #                     source file. THE DEFAULT. On cloudbox and macOS
+   #                     patchAgent's afterOpus branch rewrites the `anthropic/`
+   #                     pin to `google-vertex-anthropic/claude-opus-5-5@default`,
+   #                     because neither has a usable first-party Anthropic
+   #                     provider. (Was `-fable` / claude-fable-5-1 until
+   #                     2026-09-26.)
    #   @<base>-astra  -> openai/gpt-6-astra via codex-lb (mkAstraVariant).
    #                     Carries an opt-in CAUTION in its description so the
    #                     orchestrator does not reach for it on its own — EXCEPT
@@ -871,12 +886,11 @@ in
    # because it also adds sol/terra/luna to the macOS picker and nothing on this
    # box can test it.
    #
-   # The deployed FILE keeps the `-fable` suffix while the SOURCE does not. That
-   # asymmetry is deliberate and predates the astra twin: the suffix was held as
-   # a compat hook precisely so a second model could be added without renaming a
-   # handle that call sites and skill docs already reference.
-   xdg.configFile."opencode/agents/adversarial-reviewer-fable.md".source =
-     patchAgent "adversarial-reviewer-fable" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
+   # The deployed FILE carries a model suffix while the SOURCE does not: the
+   # source is named for the agent because it feeds two pins. home-manager
+   # removes the old `-fable` files on switch since nothing declares them.
+   xdg.configFile."opencode/agents/adversarial-reviewer-opus.md".source =
+     patchAgent "adversarial-reviewer-opus" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
    xdg.configFile."opencode/agents/adversarial-reviewer-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
      source = patchAgent "adversarial-reviewer-astra" (
        mkAstraVariant
@@ -884,8 +898,8 @@ in
          "adversarial-reviewer"
          "${assetsPath}/opencode/agents/adversarial-reviewer.md");
    };
-   xdg.configFile."opencode/agents/oracle-fable.md".source =
-     patchAgent "oracle-fable" "${assetsPath}/opencode/agents/oracle.md";
+   xdg.configFile."opencode/agents/oracle-opus.md".source =
+     patchAgent "oracle-opus" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/oracle-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
      source = patchAgent "oracle-astra" (mkAstraVariant {} "oracle" "${assetsPath}/opencode/agents/oracle.md");
    };

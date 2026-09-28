@@ -1,7 +1,8 @@
 ---
-description: Adversarial design/plan reviewer (fable-5-1 model) — pressure-tests a proposed design, plan, or approach before it's built, AND reviews a finished diff before a PR is opened (pre-PR mode), hunting flaws, wrong assumptions, missing cases, hazards, and better alternatives
+description: Adversarial design/plan reviewer (opus-5-5 model) — pressure-tests a proposed design, plan, or approach before it's built, AND reviews a finished diff before a PR is opened (pre-PR mode), hunting flaws, wrong assumptions, missing cases, hazards, and better alternatives
 mode: subagent
-model: anthropic/claude-fable-5-1
+model: anthropic/claude-opus-5-5
+variant: high
 permission:
   read: allow
   glob: allow

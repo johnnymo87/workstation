@@ -1,7 +1,8 @@
 ---
-description: Read-only strategic technical advisor (fable-5-1 model) — architecture, debugging, high-stakes decisions
+description: Read-only strategic technical advisor (opus-5-5 model) — architecture, debugging, high-stakes decisions
 mode: subagent
-model: anthropic/claude-fable-5-1
+model: anthropic/claude-opus-5-5
+variant: high
 permission:
   read: allow
   glob: allow
