@@ -112,10 +112,8 @@ let
       #    provider and the model loop dies with an empty response. The Vertex
       #    fable entry (`google-vertex-anthropic/claude-fable-5-1@default`)
       #    carries its own high `effort` from opencode.base.json, so no variant
-      #    override is added here. No-op on agents that don't pin fable —
-      #    which, since oracle and adversarial-reviewer moved to opus
-      #    (2026-09-26), is every shipped agent. Kept as a guard for a future
-      #    fable pin rather than deleted; it is still evaluated on every build.
+      #    override is added here. Fires for cloudbox's opt-in `-fable` twins
+      #    (mkFableVariant); a no-op on every other shipped agent.
       #
       #    The version is CAPTURED, not hardcoded — a literal `claude-fable-5`
       #    match against the 5.1 pin yields `claude-fable-5@default-1`, a
@@ -251,6 +249,27 @@ let
       modelPin = "openai/gpt-6-astra";
       modelTag = "gpt-6-astra";
     } // lib.optionalAttrs (caution != null) { inherit caution; });
+
+  # The fable twin: claude-fable-5-1, the previous base model of oracle and
+  # adversarial-reviewer (the `-opus` handles were `-fable` until 2026-09-28).
+  # CLOUDBOX ONLY, and always opt-in: it carries the default CAUTION so the
+  # orchestrator reaches for it only when the user names fable. The pin is the
+  # first-party `anthropic/` id on purpose; patchAgent's afterFable branch
+  # rewrites it to `google-vertex-anthropic/claude-fable-5-1@default`, whose
+  # provider entry carries its own high `effort` (opencode.base.json), so the
+  # source's dropped `variant: high` loses nothing.
+  #
+  # Re-deploying a `-fable` handle overlaps with a stale serve's pre-rename
+  # `-fable` (the old DEFAULT, no CAUTION). assets/opencode/AGENTS.md tells
+  # callers how to tell them apart: `-opus` listed means `-fable` is this
+  # opt-in twin; `-opus` absent means the serve predates the rename.
+  mkFableVariant = base:
+    mkAgentVariant {
+      inherit base;
+      slug = "fable";
+      modelPin = "anthropic/claude-fable-5-1";
+      modelTag = "fable-5-1";
+    };
 
   # Devbox inverts the default for BOTH astra twins — astra is THE adversarial
   # reviewer and THE oracle there (operator policy, 2026-09-28; the 2026-09-19
@@ -894,7 +913,9 @@ in
    #
    # The deployed FILE carries a model suffix while the SOURCE does not: the
    # source is named for the agent because it feeds two pins. home-manager
-   # removes the old `-fable` files on switch since nothing declares them.
+   # removes the old `-fable` files on switch where nothing declares them
+   # (devbox, macOS). Cloudbox re-declares `-fable` as an opt-in fable-5-1 twin
+   # (mkFableVariant above).
    xdg.configFile."opencode/agents/adversarial-reviewer-opus.md".source =
      patchAgent "adversarial-reviewer-opus" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
    xdg.configFile."opencode/agents/adversarial-reviewer-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
@@ -903,6 +924,14 @@ in
          { caution = if isDevbox then devboxAdversarialCaution else null; }
          "adversarial-reviewer"
          "${assetsPath}/opencode/agents/adversarial-reviewer.md");
+   };
+   xdg.configFile."opencode/agents/adversarial-reviewer-fable.md" = lib.mkIf isCloudbox {
+     source = patchAgent "adversarial-reviewer-fable" (
+       mkFableVariant "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer.md");
+   };
+   xdg.configFile."opencode/agents/oracle-fable.md" = lib.mkIf isCloudbox {
+     source = patchAgent "oracle-fable" (
+       mkFableVariant "oracle" "${assetsPath}/opencode/agents/oracle.md");
    };
    xdg.configFile."opencode/agents/oracle-opus.md".source =
      patchAgent "oracle-opus" "${assetsPath}/opencode/agents/oracle.md";
