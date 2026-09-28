@@ -125,6 +125,20 @@ do
   check(lines[1]:find("^%[decision%]") ~= nil, "program previewer renders items")
 end
 
+-- previewers soft-wrap long item text at word boundaries (both screens).
+do
+  local buf = vim.api.nvim_create_buf(false, true)
+  local win = vim.api.nvim_open_win(buf, false, { relative = "editor", row = 0, col = 0, width = 20, height = 5 })
+  vim.wo[win].wrap = false
+  s1.defaults.previewer.define_preview({ state = { bufnr = buf, winid = win } }, { value = s1.defaults.finder.results[1] })
+  check(vim.wo[win].wrap == true, "program preview window wraps")
+  check(vim.wo[win].linebreak == true, "program preview wraps at word boundaries")
+  -- no winid (or a dead one) must not error
+  local ok = pcall(s1.defaults.previewer.define_preview, { state = { bufnr = buf } }, { value = s1.defaults.finder.results[1] })
+  check(ok, "preview without a window does not error")
+  vim.api.nvim_win_close(win, true)
+end
+
 -- 2. <CR> on a program -> close, then (scheduled) Screen 2 flagged view.
 local m1 = mappings_of(s1, 11)
 check(m1["<C-d>"] ~= nil, "Screen 1 maps <C-d>")
