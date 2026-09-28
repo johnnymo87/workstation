@@ -1,7 +1,7 @@
 ---
 description: Implementation subagent for plan execution — implements a single task from a plan with TDD, self-review, and commit
 mode: subagent
-model: anthropic/claude-sonnet-5
+model: anthropic/claude-sonnet-5-5
 # Vertex Gemini validates function declarations strictly and rejects the WHOLE
 # request (HTTP 400) if any tool's JSON schema is non-conforming. Two shipped
 # MCP servers trip it: datadog_* (anyOf with sibling keys) and pagerduty_*
