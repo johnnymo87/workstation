@@ -12,7 +12,7 @@ Their nix wiring is in `users/dev/opencode-config.nix`.
 
 ### librarian (subagent)
 **Purpose:** Documentation and OSS research — finds official docs, examples, and best practices.
-**Model:** claude-sonnet-5
+**Model:** claude-sonnet-5-5
 **Tools:** webfetch, websearch, codesearch, bash (for `gh`), read/glob/grep
 **When to use:** Unfamiliar library, need API docs, want to find how an OSS project handles something.
 **Workflow:** Discovery (Exa codesearch/websearch) -> Retrieval (webfetch) -> GitHub (gh CLI). Every claim cites a source.
@@ -88,7 +88,7 @@ reach the first-party `anthropic/` provider. `patchAgent` in
 `users/dev/opencode-config.nix` rewrites the pin at deploy time so each host
 lands on a model it can actually call:
 
-- **sonnet-5 → Gemini 3.8 Flash** on macOS + cloudbox (the cheap plan-execution
+- **sonnet-N → Gemini 3.8 Flash** on macOS + cloudbox (the cheap plan-execution
   / research subagents: implementer, spec-reviewer, code-reviewer, librarian).
 - **opus-N → `google-vertex-anthropic/claude-opus-N@default`** on **cloudbox
   and macOS**. Cloudbox has no working first-party `anthropic/` auth (it routes

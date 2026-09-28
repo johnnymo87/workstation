@@ -12,11 +12,11 @@ let
   # see that file's header. Only consulted under isCloudbox.
   aigatewayFlag = import ../../hosts/cloudbox/aigateway-flag.nix;
   devboxModel = "anthropic/claude-opus-5-5";
-  # Compaction model for devbox: direct Anthropic Sonnet 5 (NOT Vertex).
+  # Compaction model for devbox: direct Anthropic Sonnet 5.5 (NOT Vertex).
   # Runs via the Claude Max subscription (teamclaude on devbox), so there is no
   # per-token cost. Cheaper/faster than Opus for one-shot summarization while
   # staying off the Vertex path.
-  sonnetModel = "anthropic/claude-sonnet-5";
+  sonnetModel = "anthropic/claude-sonnet-5-5";
   # Cloudbox and macOS default: Opus over Vertex (macOS routes via cfp to Max pool
   # with fallback to Vertex; cloudbox routes via Vertex directly). Carries its own
   # medium thinking effort from opencode.base.json's google-vertex-anthropic model
@@ -59,7 +59,7 @@ let
   # Patch agent model pins so each host resolves to a model it can actually
   # reach. Two independent, order-independent rewrites:
   #
-  #   1. sonnet-5 -> Gemini 3.8 Flash on the Gemini-for-agents hosts (macOS +
+  #   1. sonnet-N -> Gemini 3.8 Flash on the Gemini-for-agents hosts (macOS +
   #      cloudbox). These are the cheap plan-execution / research subagents;
   #      Gemini uses Gemini-native thinking levels, so add `variant: high`.
   #
@@ -93,7 +93,7 @@ let
       afterSonnet =
         if useGeminiForAgents then
           pkgs.runCommand "${name}-gemini.md" {} ''
-            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-5|model: ${geminiModel}\nvariant: ${geminiVariant}|' ${src} > $out
+            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-[0-9]+(?:-[0-9]+)*|model: ${geminiModel}\nvariant: ${geminiVariant}|' ${src} > $out
           ''
         else
           src;
@@ -733,12 +733,12 @@ let
     }
     // (lib.optionalAttrs isDevbox {
       model = devboxModel;
-      # Route the built-in `compaction` agent to Sonnet 5 on devbox.
+      # Route the built-in `compaction` agent to Sonnet 5.5 on devbox.
       # Without this, compaction inherits opencode.base.json's top-level default
       # (openai/gpt-5.5), which is billed per-token AND hits OpenAI usage caps —
       # leaving sessions stuck retrying "usage limit reached" forever (the
       # cloudbox/darwin branch routes compaction to cheap Gemini Flash instead).
-      # On devbox Sonnet 5 runs via the Claude Max subscription
+      # On devbox Sonnet 5.5 runs via the Claude Max subscription
       # (teamclaude), so there is no per-token cost; Vertex Gemini Flash isn't
       # available here anyway. Sonnet (vs. the interactive Opus default) is
       # plenty for one-shot summarization.

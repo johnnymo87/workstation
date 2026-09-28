@@ -52,6 +52,11 @@ RATES: dict[tuple[str, str], object] = {
     # promo is Anthropic-API-only; the Vertex route below charges standard.
     # TODO(2026-08-31): bump these to 3/15/0.30/3.75.
     ("anthropic", "claude-sonnet-5"):              {"input": 2, "output": 10, "cache_read": 0.20, "cache_write": 2.5},
+    # claude-sonnet-5-5 (released 2026-09-28): standard 2/10, cache 0.20/2.5.
+    # Explicit row so it does not inherit the sonnet-5 row (and its TODO) via
+    # rate_for's longest-prefix fallback. Source: platform.claude.com pricing,
+    # fetched 2026-09-28.
+    ("anthropic", "claude-sonnet-5-5"):            {"input": 2, "output": 10, "cache_read": 0.20, "cache_write": 2.5},
     # claude-fable-5 (Fable 5, 1M ctx, new tokenizer): flagship tier with NO
     # introductory promo (unlike sonnet-5) — flat 10/50, cache 1/12.5 (5m write).
     # Export-controlled 2026-06, access restored 2026-07-01. Vertex resells at the
