@@ -103,15 +103,24 @@ means dispatch `oracle-astra`. The exceptions, which you honor on every host:
 the human deliberately picked the model ("use opus, not astra"), or asked for
 both twins (independent opinions) — then dispatch exactly what they named.
 
-**If the named handle is "Unknown agent type" but the host default for that
-role is listed, dispatch the default — don't stop.** A serve loads its agent
-list once at startup, so after a `home-manager switch` a long-running serve can
-offer handles (e.g. `-fable`) that no longer match the files on disk or these
-docs. If the host default itself is not listed, stop and report: the other twin
-being listed does not authorize a fallback, and a stale `-fable` handle is not
-an alias for `-opus` (check its model before assuming anything). Never write a
-suffixed handle into a resumption prompt from memory — write the role, or the
-handle the Task tool actually lists.
+**If the named handle is "Unknown agent type", map it to the host default —
+don't stop.** A serve loads its agent list once at startup, so after a
+`home-manager switch` a long-running serve can offer handles that no longer
+match the files on disk or these docs, and vice versa. `-fable` and `-opus` are
+the **same default slot** under its old and new name (renamed 2026-09-28, same
+prompt, model moved from fable-5-1 to opus-5-5), so:
+
+- Named `-opus`, serve lists only `-fable` (serve predates the rename):
+  dispatch `-fable`. On devbox dispatch the astra twin instead, as above.
+- Named `-fable`, serve lists `-opus`: dispatch `-opus` (or astra on devbox).
+
+The fable-5-1 model is still configured on every host, so a stale `-fable`
+handle works; it just runs the older model. Say so in one clause if that
+matters to the answer. If no handle for the role's default slot is listed,
+stop and report: the *other twin* being listed (astra on cloudbox, opus on
+devbox) does not authorize a fallback. Never write a suffixed handle into a
+resumption prompt from memory — write the role, or the handle the Task tool
+actually lists.
 
 ## Reporting to Humans
 
