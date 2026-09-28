@@ -89,37 +89,40 @@ nobody's. If you find a third, add a row here rather than following it.
 
 ## Oracle and Adversarial Reviewer: Which Handle, Per Host
 
-| Host | Oracle | Adversarial reviewer |
-|---|---|---|
-| devbox | `oracle-astra` | `adversarial-reviewer-astra` |
-| cloudbox | `oracle-opus` | `adversarial-reviewer-opus` |
-| macOS | `oracle-opus` | `adversarial-reviewer-opus` (no astra twins deployed) |
+**The `-opus` handle is the base default on every host.** A host may prefer a
+box-specific twin on top of it, and that twin falls back to `-opus`:
 
-**On devbox, a request naming the opus handle means the role.** Humans, older
-prompts and your own resumption prompt say "oracle-opus" or
-"adversarial-reviewer-opus" out of habit, and the suffix has been renamed more
-than once (`-fable` → `-opus`, 2026-09-28). On devbox, "consult oracle-opus"
-means dispatch `oracle-astra`. The exceptions, which you honor on every host:
-the human deliberately picked the model ("use opus, not astra"), or asked for
-both twins (independent opinions) — then dispatch exactly what they named.
+| Host | Oracle | Adversarial reviewer | Falls back to |
+|---|---|---|---|
+| devbox | `oracle-astra` | `adversarial-reviewer-astra` | the `-opus` twin |
+| cloudbox | `oracle-opus` | `adversarial-reviewer-opus` | — (stop and report) |
+| macOS | `oracle-opus` | `adversarial-reviewer-opus` | — (no astra twins deployed) |
 
-**If the named handle is "Unknown agent type", map it to the host default —
-don't stop.** A serve loads its agent list once at startup, so after a
-`home-manager switch` a long-running serve can offer handles that no longer
-match the files on disk or these docs, and vice versa. `-fable` and `-opus` are
-the **same default slot** under its old and new name (renamed 2026-09-28, same
-prompt, model moved from fable-5-1 to opus-5-5), so:
+**Falling back (devbox).** Dispatch the `-opus` twin instead of astra when
+astra is not in the Task tool's list, `astra-probe` says DOWN, or the astra
+dispatch errors or returns empty (an empty result is no review, so it does not
+count as one). The fallback is not silent: say in one clause that astra was
+unavailable and opus answered. If the `-opus` twin is unavailable too, stop and
+report. There is no reverse fallback: on cloudbox a dead `-opus` does not
+authorize astra, which stays opt-in there.
 
-- Named `-opus`, serve lists only `-fable` (serve predates the rename):
-  dispatch `-fable`. On devbox dispatch the astra twin instead, as above.
-- Named `-fable`, serve lists `-opus`: dispatch `-opus` (or astra on devbox).
+**`-fable` is the old name of the `-opus` slot** (renamed 2026-09-28, same
+prompt, model moved from fable-5-1 to opus-5-5). A serve loads its agent list
+once at startup, so one started before a `home-manager switch` can list `-fable`
+where the docs say `-opus`, or the reverse. Treat them as one slot. Dispatch
+whichever of the two the Task tool actually lists. fable-5-1 is still configured
+on every host, so a stale `-fable` handle works; it just runs the older model.
+An "Unknown agent type" for a handle in this slot is a naming mismatch, not a
+reason to stop.
 
-The fable-5-1 model is still configured on every host, so a stale `-fable`
-handle works; it just runs the older model. Say so in one clause if that
-matters to the answer. If no handle for the role's default slot is listed,
-stop and report: the *other twin* being listed (astra on cloudbox, opus on
-devbox) does not authorize a fallback. Never write a suffixed handle into a
-resumption prompt from memory — write the role, or the handle the Task tool
+**A handle named in a request is a role.** Humans, older prompts and your own
+resumption prompt say "oracle-opus" or "adversarial-reviewer-fable" out of
+habit. Dispatch the host's preferred handle for that role, as above. On devbox,
+"consult oracle-opus" means `oracle-astra`, falling back to opus. The
+exceptions, honored on every host: the human deliberately picked the model
+("use opus, not astra"), or asked for both twins (independent opinions). Then
+dispatch exactly what they named. Never write a suffixed handle into a
+resumption prompt from memory. Write the role, or the handle the Task tool
 actually lists.
 
 ## Reporting to Humans

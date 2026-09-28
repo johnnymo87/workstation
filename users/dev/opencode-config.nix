@@ -262,22 +262,24 @@ let
   # matching prose lands via opencode-skills.nix (pre-PR dispatch line) and
   # .opencode/skills/opencode-agents/SKILL.md (host policy).
   #
-  # Cloudbox's twins keep the opt-in CAUTION. Consequence worth naming: with
-  # astra standing on devbox, a dead codex-lb blocks adversarial review and
-  # oracle consults there — stop and report rather than fall back silently.
+  # Cloudbox's twins keep the opt-in CAUTION. The `-opus` twin is the base
+  # default on every host, and devbox's astra preference falls back to it
+  # (operator policy, 2026-09-28) when astra is unlisted, probed DOWN, or its
+  # dispatch errors/returns empty — announced, never silent. Before that the
+  # policy was stop-and-report, which made a dead codex-lb block review.
   #
   # No colon-space anywhere in this string (the build-time guard below enforces
   # it) and no perl metacharacter (see mkAgentVariant's note).
   # The unavailability policy is carried HERE, not only in the skills, because
   # the description is the only part of this policy that reaches a caller in
-  # some other repo. The deployed stop-and-report text lives under §Pre-PR
+  # some other repo. The deployed fallback text lives under §Pre-PR
   # Checks in shepherding-pull-requests, and the all-review version lives in
   # this repo's own .opencode skill — a plan-time dispatch from anywhere else
-  # loads neither, and would otherwise be free to invent a silent fallback.
+  # loads neither, and would otherwise stop, or fall back without saying so.
   devboxAdversarialCaution =
-    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If this variant is unreachable, stop and report it — do not silently fall back to the opus twin, and do not count a failed dispatch as a review that happened";
+    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If astra-probe says DOWN, or a dispatch to this variant errors or returns empty, fall back to adversarial-reviewer-opus and say so — a failed astra dispatch is not a review";
   devboxOracleCaution =
-    "On devbox this is the DEFAULT oracle — prefer it over oracle-opus for every consult, including when a request or resumption prompt names oracle-opus. If this variant is unreachable, stop and report it — do not silently fall back to the opus twin";
+    "On devbox this is the DEFAULT oracle — prefer it over oracle-opus for every consult, including when a request or resumption prompt names oracle-opus. If astra-probe says DOWN, or a dispatch to this variant errors or returns empty, fall back to oracle-opus and say so";
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
