@@ -95,19 +95,23 @@ nobody's. If you find a third, add a row here rather than following it.
 | cloudbox | `oracle-opus` | `adversarial-reviewer-opus` |
 | macOS | `oracle-opus` | `adversarial-reviewer-opus` (no astra twins deployed) |
 
-**A handle named in a request is a role, not a model choice.** Humans, older
+**On devbox, a request naming the opus handle means the role.** Humans, older
 prompts and your own resumption prompt say "oracle-opus" or
-"adversarial-reviewer-fable" out of habit; the suffixes have been renamed more
-than once (`-fable` → `-opus`, 2026-09-28). Dispatch the host default above for
-that role unless the human explicitly asked for a particular *model* ("use
-opus, not astra"). On devbox, "consult oracle-opus" means `oracle-astra`.
+"adversarial-reviewer-opus" out of habit, and the suffix has been renamed more
+than once (`-fable` → `-opus`, 2026-09-28). On devbox, "consult oracle-opus"
+means dispatch `oracle-astra`. The exceptions, which you honor on every host:
+the human deliberately picked the model ("use opus, not astra"), or asked for
+both twins (independent opinions) — then dispatch exactly what they named.
 
-**If the named handle is "Unknown agent type", map it — don't stop.** A serve
-loads its agent list once at startup, so after a `home-manager switch` a
-long-running serve can offer handles (e.g. `-fable`) that no longer match the
-files on disk or the docs. Pick the host default for the role from what the
-Task tool actually lists; if neither twin of that role is listed, then stop and
-report. Never write a stale suffix into a resumption prompt — write the role.
+**If the named handle is "Unknown agent type" but the host default for that
+role is listed, dispatch the default — don't stop.** A serve loads its agent
+list once at startup, so after a `home-manager switch` a long-running serve can
+offer handles (e.g. `-fable`) that no longer match the files on disk or these
+docs. If the host default itself is not listed, stop and report: the other twin
+being listed does not authorize a fallback, and a stale `-fable` handle is not
+an alias for `-opus` (check its model before assuming anything). Never write a
+suffixed handle into a resumption prompt from memory — write the role, or the
+handle the Task tool actually lists.
 
 ## Reporting to Humans
 
