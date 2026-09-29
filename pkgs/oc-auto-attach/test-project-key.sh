@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=85
+EXPECTED_ASSERTIONS=87
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -785,6 +785,29 @@ if [ -f "$lua_source" ]; then
       last_opts1.on_exit(100, 0, "exit")
       assert(M.status("ses_test1") == "failed", "pre-settle exit -> status failed")
       assert(vim.api.nvim_buf_get_name(last_buf1):find("%[FAILED%]"), "pre-settle exit -> buffer renamed [FAILED]")
+      assert(type(M.errors.ses_test1) == "string" and M.errors.ses_test1:find("code 0"),
+        "workstation-u8xx: full failure text retained in M.errors")
+
+      -- workstation-u8xx: the attach must not inherit BUN_INSPECT, and must
+      -- keep nvim default job-env policy (no clear_env).
+      local last_cmd3, last_opts3
+      vim.fn.jobstart = function(cmd, opts) last_cmd3 = cmd; last_opts3 = opts; return 102 end
+      M.open({sid="ses_test3", dir=".", url="http://127.0.0.1:4096"})
+      vim.wait(100, function() return last_cmd3 ~= nil end)
+      assert(last_cmd3[1] == "env" and last_cmd3[2] == "-u" and last_cmd3[3] == "BUN_INSPECT"
+        and last_cmd3[4] == "opencode", "attach argv starts with env -u BUN_INSPECT opencode")
+      assert(not last_opts3.clear_env, "attach does not use clear_env")
+
+      -- workstation-u8xx: notify must never exceed v:echospace (hit-enter
+      -- blocks RPC), and must stay silent when there is no room.
+      local shown = {}
+      vim.notify = function(msg) shown[#shown + 1] = msg end
+      local long = string.rep("x", 200)
+      M._safe_notify(long, vim.log.levels.ERROR)
+      assert(#shown == 1 and vim.fn.strdisplaywidth(shown[1]) <= vim.v.echospace,
+        "safe_notify truncates to echospace (" .. tostring(vim.v.echospace) .. ")")
+      M._safe_notify(string.rep("\u{754c}", 200), vim.log.levels.ERROR)
+      assert(vim.fn.strdisplaywidth(shown[2]) <= vim.v.echospace, "safe_notify measures display width")
 
       local last_opts2, last_buf2
       vim.fn.jobstart = function(cmd, opts)
@@ -964,7 +987,7 @@ if [ -f "$prod_src" ]; then
   # --listen, so Step 5 times out (exit 4). Both halves are needed: -e NVIM=
   # covers the pane we spawn, and `env -u NVIM` keeps it out of the global
   # environment of a server that new-session STARTS (seen 2026-09-29).
-  if [[ "$prod_text" == *"-e NVIM="* && "$prod_text" == *"env -u NVIM tmux new-session"* ]]; then
+  if [[ "$prod_text" == *"-e NVIM="* && "$prod_text" == *"env -u NVIM -u BUN_INSPECT tmux new-session"* ]]; then
     pass 'spawned panes and freshly-started servers do not inherit the caller NVIM'
   else
     printf 'FAIL  default.nix lets the caller NVIM leak into spawned panes / a new server\n'
@@ -980,6 +1003,31 @@ if [ -f "$prod_src" ]; then
     pass 'readiness verifies the answering nvim belongs to our pane and server'
   else
     printf 'FAIL  readiness probe does not verify pane/server identity of the answering nvim\n'
+    exit 1
+  fi
+
+  # workstation-dkmi: an unreachable socket whose path a live tmux server
+  # still LISTENS on is recovered with SIGUSR1 to THAT pid only (a broadcast
+  # can make an unrelated server unlink a live socket), and a known owner
+  # that will not recover fails closed instead of starting a second server.
+  if [[ "$prod_text" == *"ss -xlpH"* && "$prod_text" == *'kill -USR1 "$pid"'* \
+        && "$prod_text" == *"recover_orphaned_server; then"* && "$prod_text" == *"exit 9"* \
+        && "$prod_text" != *"pkill -USR1"* ]]; then
+    pass 'orphaned tmux server is recovered by targeted SIGUSR1, else fail closed'
+  else
+    printf 'FAIL  orphaned-server recovery missing, broadcast, or not fail-closed\n'
+    exit 1
+  fi
+
+  # workstation-u8xx: every open/status RPC is bounded (an nvim at a hit-enter
+  # prompt does not serve RPC), and a timed-out outcome is reported as unknown
+  # (exit 8) instead of being retried or declared settled.
+  if [[ "$prod_text" == *'timeout 10 nvim --server "$sock" --remote-expr "$expr_open"'* \
+        && "$prod_text" == *'timeout 2 nvim --server "$sock" --remote-expr "$expr_status"'* \
+        && "$prod_text" == *"outcome=unknown"* && "$prod_text" == *"exit 8"* ]]; then
+    pass 'open/status RPCs are bounded and a timeout is an unknown outcome'
+  else
+    printf 'FAIL  open/status RPCs unbounded, or timeouts not treated as unknown\n'
     exit 1
   fi
 

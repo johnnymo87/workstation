@@ -24,6 +24,33 @@ local M = {}
 
 local statuses = {}
 
+-- Full text of the last failure per sid. The visible notify below may be
+-- truncated (or suppressed) to fit the command line; this keeps the whole
+-- diagnostic somewhere non-blocking: `:lua =require("user.oc_auto_attach").errors`.
+M.errors = {}
+
+--- Notify without ever raising a hit-enter prompt (workstation-u8xx).
+---
+--- A message wider than the command line wraps and stops nvim at "Press
+--- ENTER". While it waits there nvim does not serve RPC, and oc-auto-attach
+--- polls status() over RPC -- so a failure message in a narrow pane (a
+--- freshly created detached tmux server is 80 columns) hung the caller
+--- forever. Truncate to v:echospace (screen cells free on the command line),
+--- measured in DISPLAY width, and show nothing at all when there is no room.
+local function safe_notify(msg, level)
+  local room = tonumber(vim.v.echospace) or 0
+  if room < 12 then return end
+  if vim.fn.strdisplaywidth(msg) > room then
+    local cut = room - 3
+    while cut > 0 and vim.fn.strdisplaywidth(vim.fn.strcharpart(msg, 0, cut)) > room - 3 do
+      cut = cut - 1
+    end
+    msg = vim.fn.strcharpart(msg, 0, cut) .. "..."
+  end
+  vim.notify(msg, level)
+end
+M._safe_notify = safe_notify
+
 --- Query attach status for a session ID.
 --- @param sid string
 --- @return string "running" | "failed" | "exited" | "unknown"
@@ -39,15 +66,15 @@ function M.open(opts)
   -- Validate synchronously so --remote-expr returns a meaningful status.
   if type(opts) ~= "table" then return 0 end
   if type(opts.sid) ~= "string" or not opts.sid:match("^ses_[A-Za-z0-9]+$") then
-    vim.notify("oc_auto_attach: invalid sid", vim.log.levels.ERROR)
+    safe_notify("oc_auto_attach: invalid sid", vim.log.levels.ERROR)
     return 0
   end
   if type(opts.dir) ~= "string" or vim.fn.isdirectory(opts.dir) == 0 then
-    vim.notify("oc_auto_attach: invalid or missing dir", vim.log.levels.ERROR)
+    safe_notify("oc_auto_attach: invalid or missing dir", vim.log.levels.ERROR)
     return 0
   end
   if type(opts.url) ~= "string" or opts.url == "" then
-    vim.notify("oc_auto_attach: invalid url", vim.log.levels.ERROR)
+    safe_notify("oc_auto_attach: invalid url", vim.log.levels.ERROR)
     return 0
   end
 
@@ -82,7 +109,14 @@ function M.open(opts)
       job_env = { OPENCODE_SCROLL_TO = opts.sid .. ":" .. opts.scroll_to_message_id }
     end
 
+    -- `env -u BUN_INSPECT`, not clear_env + a filtered vim.fn.environ(): the
+    -- latter bypasses nvim's own terminal-job env policy (TERM, COLORTERM,
+    -- COLUMNS, VIMRUNTIME, NVIM). BUN_INSPECT is opencode-serve's inspector
+    -- address (ws://127.0.0.1:1<port>/debug); it leaks into tmux servers
+    -- started from an opencode bash tool, and an attach that inherits it dies
+    -- with EADDRINUSE on that port (workstation-u8xx).
     local job_id = vim.fn.jobstart({
+      "env", "-u", "BUN_INSPECT",
       "opencode", "attach", opts.url,
       "--session", opts.sid,
       "--dir", opts.dir,
@@ -99,16 +133,12 @@ function M.open(opts)
           if vim.api.nvim_buf_is_valid(buf) then
             pcall(vim.api.nvim_buf_set_name, buf, "[FAILED] " .. opts.sid)
           end
-          vim.notify(
-            "oc_auto_attach: attach job exited prematurely for " .. opts.sid .. " (code " .. tostring(exit_code) .. ")",
-            vim.log.levels.ERROR
-          )
+          M.errors[opts.sid] = "attach job exited prematurely for " .. opts.sid
+            .. " (code " .. tostring(exit_code) .. "); see the [FAILED] tab"
+          safe_notify("oc attach failed (code " .. tostring(exit_code) .. "): " .. opts.sid, vim.log.levels.ERROR)
         else
           statuses[opts.sid] = "exited"
-          vim.notify(
-            "oc_auto_attach: attach job ended for " .. opts.sid,
-            vim.log.levels.INFO
-          )
+          safe_notify("oc attach ended: " .. opts.sid, vim.log.levels.INFO)
         end
       end,
     })
@@ -118,7 +148,8 @@ function M.open(opts)
       if vim.api.nvim_buf_is_valid(buf) then
         pcall(vim.api.nvim_buf_set_name, buf, "[FAILED] " .. opts.sid)
       end
-      vim.notify("oc_auto_attach: failed to start attach job for " .. opts.sid, vim.log.levels.ERROR)
+      M.errors[opts.sid] = "failed to start attach job for " .. opts.sid .. " (jobstart=" .. tostring(job_id) .. ")"
+      safe_notify("oc attach did not start: " .. opts.sid, vim.log.levels.ERROR)
     end
   end)
 
