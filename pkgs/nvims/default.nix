@@ -91,11 +91,18 @@ pkgs.writeShellApplication {
       # the OTHER server. rm -f'ing it would orphan that nvim's RPC endpoint.
       # A dead socket refuses the connection at once, so this costs ~nothing
       # in the common stale case; `timeout` bounds a wedged-but-alive one.
+      #
+      # Fail SAFE: only a confirmed "connection refused" counts as stale.
+      # A timeout (a SIGSTOPped or busy nvim), a non-nvim listener, or any
+      # other surprise is treated as held, because unlinking a live owner's
+      # socket is unrecoverable and skipping cleanup of a dead one is not.
       if [ -S "$sock" ]; then
-        if [ "$(timeout 2 nvim --server "$sock" --remote-expr 1 </dev/null 2>/dev/null)" = "1" ]; then
-          sock_state=live
-        else
+        probe_rc=0
+        probe_out="$(timeout 2 nvim --server "$sock" --remote-expr 1 </dev/null 2>&1)" || probe_rc=$?
+        if [ "$probe_rc" -ne 124 ] && [[ "$probe_out" == *"connection refused"* ]]; then
           sock_state=stale
+        else
+          sock_state=live
         fi
       fi
     fi

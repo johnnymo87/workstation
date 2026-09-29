@@ -84,6 +84,7 @@ if [ -f "$default_nix" ]; then
   want_grep "source documents the nesting-guard fix"   'workstation-8iqt'
   want_grep "source dispatches on the plan"            'nvim_listen_plan "$in_tmux"'
   want_grep "source probes liveness before rm"         '--remote-expr 1'
+  want_grep "source only rm's on a confirmed refusal"  '*"connection refused"*'
   want_grep "source maps a live pane socket to DEFAULT" 'live)  printf '"'"'DEFAULT'
 else
   echo "SKIP: source guards (default.nix not next to test)"

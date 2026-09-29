@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=84
+EXPECTED_ASSERTIONS=85
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -968,6 +968,18 @@ if [ -f "$prod_src" ]; then
     pass 'spawned panes and freshly-started servers do not inherit the caller NVIM'
   else
     printf 'FAIL  default.nix lets the caller NVIM leak into spawned panes / a new server\n'
+    exit 1
+  fi
+
+  # Pane ids are per tmux server, so with two servers /tmp/nvim-<pane>.sock can
+  # be answered by an editor in the OTHER server. Readiness must check the
+  # answering nvim's pane AND server pid, or we attach into the wrong editor
+  # and report success.
+  if [[ "$prod_text" == *"vim.env.TMUX_PANE"* && "$prod_text" == *"vim.env.TMUX or"* \
+        && "$prod_text" == *"display-message -p -t \"\$pane_id\" '#{pid}'"* ]]; then
+    pass 'readiness verifies the answering nvim belongs to our pane and server'
+  else
+    printf 'FAIL  readiness probe does not verify pane/server identity of the answering nvim\n'
     exit 1
   fi
 
