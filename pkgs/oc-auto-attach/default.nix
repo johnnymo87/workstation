@@ -517,18 +517,34 @@ ${builtins.readFile ./canonical-path.sh}
       # There is deliberately no `-e PATH=` here. tmux overrides it with the
       # client's PATH at spawn time (verified on 3.6a; test-project-key.sh pins
       # the behavior), which is why repair_path exists at all.
+      #
+      # NVIM is blanked for a different reason: nvims treats a live $NVIM as
+      # "I am nested inside another nvim's :terminal" and then deliberately
+      # does NOT claim /tmp/nvim-<pane>.sock -- so Step 5 below waits 15s for
+      # a socket that will never exist and exits 4. We are often run from
+      # inside nvim (a :terminal, or jobstart from the user's editor), and
+      # when the tmux server has to be created here it adopts OUR environment
+      # as its global one, so every later pane would inherit that NVIM too.
+      # Seen 2026-09-29: the server's socket had vanished, new-session started
+      # a fresh server from inside nvim-1, and the new pane's nvim came up
+      # without --listen. Empty is enough: nvims tests [ -n "$NVIM" ].
       pane_guard_env=(
         -e __NIXOS_SET_ENVIRONMENT_DONE=
         -e __ETC_PROFILE_DONE=
         -e __ETC_PROFILE_SOURCED=
         -e __HM_SESS_VARS_SOURCED=
+        -e NVIM=
       )
       if tmux has-session -t "=$target_session" 2>/dev/null; then
         pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
           "''${pane_guard_env[@]}" \
           -t "$target_session:" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
       else
-        pane_id="$(tmux new-session -d -P -F '#{pane_id}' \
+        # `env -u NVIM`: this client may START the server, which then keeps
+        # our environment as its global one. Keep the caller's nvim out of
+        # it, so windows the user opens later in this server are not born
+        # "nested" either (the -e above only covers this one pane).
+        pane_id="$(env -u NVIM tmux new-session -d -P -F '#{pane_id}' \
           "''${pane_guard_env[@]}" \
           -s "$target_session" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
       fi
@@ -591,19 +607,53 @@ ${builtins.readFile ./canonical-path.sh}
     # Timeout bumped 5s -> 15s for the same load reason as Step 1: under
     # contention nvim startup plus helper-module load can take longer than
     # 5s, which surfaced as "nvim not ready" misfires in the log.
+    #
+    # IDENTITY, not just liveness. Pane ids are unique only within ONE tmux
+    # server, so while a second server is running (the main server's socket
+    # vanished and something started a fresh one -- seen 2026-09-29) both
+    # hand out %0, %1, ... and $sock can be answered by an nvim in the OTHER
+    # server. Its helper loads fine, so a liveness-only check would open this
+    # session in an unrelated editor and report success. So the probe also
+    # returns the answering nvim's $TMUX_PANE and the server pid from its
+    # $TMUX ("<socket>,<server-pid>,<idx>"), and we require both to match the
+    # pane we chose. A mismatch is conclusive -- that owner will not change
+    # while we wait -- so we fail closed immediately (exit 4).
+    expected_server_pid="$(tmux display-message -p -t "$pane_id" '#{pid}' 2>/dev/null || true)"
+    ready_rc=0
     # shellcheck disable=SC2016
-    if ! timeout 15 bash -c '
-      sock="$1"
+    ready_seen="$(timeout 15 bash -c '
+      sock="$1"; want_pane="$2"; want_pid="$3"
       # Fractional `sleep` for pacing -- see Step 1 for why we dropped the
       # `exec 9<> <(:)` + `read -t` fd trick (macOS EACCES on /dev/fd RW).
-      until [ -S "$sock" ] && \
-            nvim --server "$sock" --remote-expr \
-              "luaeval(\"pcall(require, '"'"'user.oc_auto_attach'"'"') and 1 or 0\")" \
-              </dev/null 2>/dev/null | grep -qx 1
-      do
+      while :; do
+        if [ -S "$sock" ]; then
+          # Lua long-bracket strings ([[...]]) avoid a single-quote escaping
+          # maze inside this single-quoted bash -c body.
+          got="$(nvim --server "$sock" --remote-expr \
+            "luaeval(\"(pcall(require, [[user.oc_auto_attach]]) and [[1]] or [[0]]) .. [[|]] .. (vim.env.TMUX_PANE or [[]]) .. [[|]] .. (vim.env.TMUX or [[]])\")" \
+            </dev/null 2>/dev/null || true)"
+          case "$got" in
+            1\|*)
+              rest="''${got#1|}"
+              got_pane="''${rest%%|*}"
+              got_tmux="''${rest#*|}"
+              got_pid="''${got_tmux#*,}"; got_pid="''${got_pid%%,*}"
+              if [ "$got_pane" = "$want_pane" ] && [ "$got_pid" = "$want_pid" ]; then
+                exit 0
+              fi
+              printf "%s" "$got_pane server-pid=$got_pid"
+              exit 7
+              ;;
+          esac
+        fi
         sleep 0.2
       done
-    ' _ "$sock"; then
+    ' _ "$sock" "$pane_id" "$expected_server_pid")" || ready_rc=$?
+    if [ "$ready_rc" -eq 7 ]; then
+      log "nvim at $sock belongs to pane $ready_seen, not $pane_id server-pid=$expected_server_pid (a second tmux server reusing pane ids?); refusing to attach there"
+      exit 4
+    fi
+    if [ "$ready_rc" -ne 0 ]; then
       log "nvim at $sock not ready (or helper not loaded) after 15s; giving up"
       exit 4
     fi

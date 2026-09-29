@@ -19,7 +19,7 @@
 set -o errexit -o nounset -o pipefail
 
 # ---- helper under test (mirror of default.nix) ------------------------------
-# nvim_listen_plan <in_tmux> <nested> <sock_exists>: decide how `nvims` should
+# nvim_listen_plan <in_tmux> <nested> <sock_state>: decide how `nvims` should
 # start nvim's RPC server. Pure (all environment/filesystem state passed as
 # args) so it is unit-testable without tmux, nvim, or a real socket.
 #
@@ -27,7 +27,9 @@ set -o errexit -o nounset -o pipefail
 #   nested       "1" if running inside a LIVE parent nvim's :terminal (its
 #                $NVIM resolves to a live socket). A nested nvims must NOT claim
 #                the pane socket -- clobbering it (rm -f) orphans the parent.
-#   sock_exists  "1" if the target pane socket path already exists (as a socket)
+#   sock_state   "" (nothing at the pane path), "stale" (socket file nobody
+#                answers on), "live" (an nvim answers -- e.g. the same pane id
+#                in a SECOND tmux server; pane ids are per-server)
 #
 # Prints exactly one token:
 #   DEFAULT          exec nvim                        (no --listen injection)
@@ -35,10 +37,14 @@ set -o errexit -o nounset -o pipefail
 #   RM_THEN_LISTEN   rm -f <sock>; exec nvim --listen (stale file from a
 #                                                      SIGKILL'd previous nvim)
 nvim_listen_plan() {
-  local in_tmux="$1" nested="$2" sock_exists="$3"
+  local in_tmux="$1" nested="$2" sock_state="$3"
   if [ "$in_tmux" != "1" ]; then printf 'DEFAULT\n'; return; fi
   if [ "$nested" = "1" ]; then printf 'DEFAULT\n'; return; fi
-  if [ "$sock_exists" = "1" ]; then printf 'RM_THEN_LISTEN\n'; else printf 'LISTEN\n'; fi
+  case "$sock_state" in
+    stale) printf 'RM_THEN_LISTEN\n' ;;
+    live)  printf 'DEFAULT\n' ;;
+    *)     printf 'LISTEN\n' ;;
+  esac
 }
 
 fail=0
@@ -49,18 +55,22 @@ check() { # check <desc> <expected> <actual>
 
 # Outside tmux: never inject --listen, regardless of other state.
 check "no tmux -> DEFAULT (no sock)"        "DEFAULT" "$(nvim_listen_plan "" "" "")"
-check "no tmux -> DEFAULT (sock present)"    "DEFAULT" "$(nvim_listen_plan "" "" "1")"
-check "no tmux -> DEFAULT (even if nested)"  "DEFAULT" "$(nvim_listen_plan "" "1" "1")"
+check "no tmux -> DEFAULT (sock present)"    "DEFAULT" "$(nvim_listen_plan "" "" "stale")"
+check "no tmux -> DEFAULT (even if nested)"  "DEFAULT" "$(nvim_listen_plan "" "1" "live")"
 
 # In tmux, top-level (not nested): preserve the pre-fix behavior.
 check "tmux, free path -> LISTEN"            "LISTEN"          "$(nvim_listen_plan "1" "" "")"
-check "tmux, stale sock -> RM_THEN_LISTEN"   "RM_THEN_LISTEN"  "$(nvim_listen_plan "1" "" "1")"
+check "tmux, stale sock -> RM_THEN_LISTEN"   "RM_THEN_LISTEN"  "$(nvim_listen_plan "1" "" "stale")"
+# Same pane id, live nvim behind it (a second tmux server reuses %0, %1, ...):
+# must NOT rm the other server's editor socket.
+check "tmux, live sock -> DEFAULT (do NOT evict another server's nvim)" \
+  "DEFAULT" "$(nvim_listen_plan "1" "" "live")"
 
 # In tmux, nested inside a live nvim: the regression guard. Must DEFAULT so we
 # never rm -f / steal the parent's pane socket. This is the workstation-8iqt fix.
 check "tmux, nested, free path -> DEFAULT"   "DEFAULT" "$(nvim_listen_plan "1" "1" "")"
 check "tmux, nested, sock present -> DEFAULT (do NOT rm a live parent socket)" \
-  "DEFAULT" "$(nvim_listen_plan "1" "1" "1")"
+  "DEFAULT" "$(nvim_listen_plan "1" "1" "live")"
 
 # ---- source guards (default.nix) --------------------------------------------
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,6 +83,9 @@ if [ -f "$default_nix" ]; then
   want_grep "source defines nvim_listen_plan"          'nvim_listen_plan() {'
   want_grep "source documents the nesting-guard fix"   'workstation-8iqt'
   want_grep "source dispatches on the plan"            'nvim_listen_plan "$in_tmux"'
+  want_grep "source probes liveness before rm"         '--remote-expr 1'
+  want_grep "source only rm's on a confirmed refusal"  '*"connection refused"*'
+  want_grep "source maps a live pane socket to DEFAULT" 'live)  printf '"'"'DEFAULT'
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi

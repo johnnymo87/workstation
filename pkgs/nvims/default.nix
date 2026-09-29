@@ -39,20 +39,25 @@ pkgs.writeShellApplication {
       esac
     done
 
-    # nvim_listen_plan <in_tmux> <nested> <sock_exists>: decide how to start
+    # nvim_listen_plan <in_tmux> <nested> <sock_state>: decide how to start
     # nvim's RPC server. Pure (all env/filesystem state passed as args) so it
     # is unit-testable without tmux/nvim/a real socket. Mirrored by test.sh.
     #
     #   in_tmux      "1" if $TMUX_PANE is set (we have a deterministic pane key)
     #   nested       "1" if running inside a LIVE parent nvim's :terminal
-    #   sock_exists  "1" if the pane socket path already exists (as a socket)
+    #   sock_state   "" (no socket at the pane path), "stale" (a socket file
+    #                nobody answers on), or "live" (an nvim answers on it)
     #
     # Prints one token: DEFAULT | LISTEN | RM_THEN_LISTEN (see dispatch below).
     nvim_listen_plan() {
-      local in_tmux="$1" nested="$2" sock_exists="$3"
+      local in_tmux="$1" nested="$2" sock_state="$3"
       if [ "$in_tmux" != "1" ]; then printf 'DEFAULT\n'; return; fi
       if [ "$nested" = "1" ]; then printf 'DEFAULT\n'; return; fi
-      if [ "$sock_exists" = "1" ]; then printf 'RM_THEN_LISTEN\n'; else printf 'LISTEN\n'; fi
+      case "$sock_state" in
+        stale) printf 'RM_THEN_LISTEN\n' ;;
+        live)  printf 'DEFAULT\n' ;;
+        *)     printf 'LISTEN\n' ;;
+      esac
     }
 
     # Detect nesting (workstation-8iqt). A parent nvim exports $NVIM (its own
@@ -72,17 +77,37 @@ pkgs.writeShellApplication {
 
     in_tmux=""
     sock=""
-    sock_exists=""
+    sock_state=""
     if [ -n "''${TMUX_PANE:-}" ]; then
       in_tmux=1
       key="''${TMUX_PANE#%}"
       sock="/tmp/nvim-''${key}.sock"
-      # Only treat it as a reusable pane socket if it IS a socket (defensive
-      # against weird path collisions).
-      [ -S "$sock" ] && sock_exists=1
+      # Only treat it as a pane socket if it IS a socket (defensive against
+      # weird path collisions). Then ASK whether something answers on it
+      # before calling it stale: pane ids are only unique within ONE tmux
+      # server, so when two servers are running (e.g. the main server's
+      # socket was unlinked and a second one got started, seen 2026-09-29)
+      # both hand out %0, %1, ... and this path can belong to a live nvim in
+      # the OTHER server. rm -f'ing it would orphan that nvim's RPC endpoint.
+      # A dead socket refuses the connection at once, so this costs ~nothing
+      # in the common stale case; `timeout` bounds a wedged-but-alive one.
+      #
+      # Fail SAFE: only a confirmed "connection refused" counts as stale.
+      # A timeout (a SIGSTOPped or busy nvim), a non-nvim listener, or any
+      # other surprise is treated as held, because unlinking a live owner's
+      # socket is unrecoverable and skipping cleanup of a dead one is not.
+      if [ -S "$sock" ]; then
+        probe_rc=0
+        probe_out="$(timeout 2 nvim --server "$sock" --remote-expr 1 </dev/null 2>&1)" || probe_rc=$?
+        if [ "$probe_rc" -ne 124 ] && [[ "$probe_out" == *"connection refused"* ]]; then
+          sock_state=stale
+        else
+          sock_state=live
+        fi
+      fi
     fi
 
-    case "$(nvim_listen_plan "$in_tmux" "$nested" "$sock_exists")" in
+    case "$(nvim_listen_plan "$in_tmux" "$nested" "$sock_state")" in
       RM_THEN_LISTEN)
         # Stale socket left behind by a previous SIGKILL'd nvim in this pane.
         rm -f "$sock"
@@ -92,8 +117,12 @@ pkgs.writeShellApplication {
         exec nvim --listen "$sock" "$@"
         ;;
       *)
-        # DEFAULT: outside tmux, or nested inside a live nvim -- let nvim pick
-        # its own default server address (don't touch the pane socket).
+        # DEFAULT: outside tmux, nested inside a live nvim, or the pane path
+        # is held by a live nvim we must not evict -- let nvim pick its own
+        # default server address (don't touch the pane socket).
+        if [ "$sock_state" = "live" ] && [ "$nested" != "1" ]; then
+          printf 'nvims: %s is held by another live nvim (a second tmux server?); not claiming it -- oc-auto-attach cannot reach this nvim\n' "$sock" >&2
+        fi
         exec nvim "$@"
         ;;
     esac

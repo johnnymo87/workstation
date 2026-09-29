@@ -2260,7 +2260,7 @@
         touch $out
       '';
 
-      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is an 83-assertion
+      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is an 85-assertion
       # suite covering project_key/window_name derivation, pool-aware serve
       # resolution, the tmux window/session name collision that once leaked
       # `main`'s panes into confined sessions, and an `nvim -l` unit test of the
@@ -2305,8 +2305,8 @@
         # Assert the assertions RAN, not merely that the script exited 0 -- the
         # store-prefix / oc-session-list-bin lesson. The count is the gate: any
         # block that goes dark changes it.
-        grep -q '^ALL PASS (oc-auto-attach): 83 assertions' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: the suite did not report its full 83-assertion tally." >&2
+        grep -q '^ALL PASS (oc-auto-attach): 85 assertions' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the suite did not report its full 85-assertion tally." >&2
           echo "If you deliberately changed coverage, update EXPECTED_ASSERTIONS in" >&2
           echo "pkgs/oc-auto-attach/test-project-key.sh and this gate together." >&2
           exit 1
