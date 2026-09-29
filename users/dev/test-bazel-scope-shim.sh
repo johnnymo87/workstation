@@ -23,7 +23,7 @@
 #     fully back -- invisibly. This is the highest-value assertion in the file.
 #   * The degrade path must shut the server down afterwards. A raw bazel run forks
 #     a server JVM INTO THE SERVE CGROUP where it then lives for max_idle_secs
-#     (900s), so every LATER build -- even ones whose clients scoped correctly --
+#     (300s), so every LATER build -- even ones whose clients scoped correctly --
 #     charges its memory to the serve, because build actions are spawned by the
 #     server, not the client. One degraded invocation would otherwise poison the
 #     workspace until the server idles out.

@@ -174,7 +174,8 @@ let
       #
       # WHAT IT DOES NOT BOUND, and the gaps are deliberate:
       #   * Idle server JVMs. A workspace's server outlives its build for
-      #     --max_idle_secs (900s) at ~2.35G anon (sampler mean), holding no slot.
+      #     --max_idle_secs (300s on cloudbox since workstation-o5s1.31) at
+      #     ~2.35G anon (sampler mean), holding no slot.
       #   * Other commands. query/cquery/info/fetch are ungated. `run` is ungated
       #     because its client EXECS the target in place: a slot would be held for
       #     as long as the target runs, which for a dev server is forever. So the
@@ -405,7 +406,7 @@ let
       # silent unscoped build is precisely what this shim exists to prevent.
       if "$SYSTEMD_RUN" --user --scope --collect --quiet -- true 2>/dev/null; then
         # --collect: GC the scope once it empties. The scope outlives this client
-        #   by design -- the server JVM stays in it until --max_idle_secs (900s).
+        #   by design -- the server JVM stays in it until --max_idle_secs (300s).
         # No --unit=: the auto-generated run-pNNN.scope name is unique ENOUGH
         #   here. A stable per-workspace name would COLLIDE with the still-alive
         #   scope of the resident server on the very next build, and systemd-run
@@ -453,7 +454,7 @@ let
       "$REAL_BAZEL" "$@" || rc=$?
 
       # A degraded build may fork a server JVM into OUR cgroup, where it then
-      # lives for max_idle_secs (900s). Because the server -- not the client --
+      # lives for max_idle_secs (300s). Because the server -- not the client --
       # spawns build actions, that one lingering server would charge EVERY later
       # build of this workspace to our cgroup even if those clients scoped
       # correctly. So it has to go.
