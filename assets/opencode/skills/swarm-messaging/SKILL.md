@@ -1,6 +1,6 @@
 ---
 name: swarm-messaging
-description: Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
+description: Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
 ---
 
 # Swarm Messaging
@@ -99,7 +99,8 @@ Summarizing for a human who is watching the swarm.
 ## The coordinator role is BANNED
 
 **Do not appoint a coordinator. Do not accept the role. Do not launch a session
-whose job is to route messages between other sessions.**
+whose job is to route messages between other sessions.** (The human's
+`stall-watch` delegated answers described below are not a coordinator.)
 
 A coordinator is a session that holds shared context, turns direction into
 `task.assign` messages, aggregates worker reports, and owns the upward channel
@@ -135,6 +136,32 @@ Why it is banned, mechanically:
 **The human is the coordinator.** That role is filled. If a decision is needed
 that only a human can make, the session that needs it asks the human directly —
 one message, no relay.
+
+### Delegated answers: stall-watch
+
+The human runs a scheduled watcher, `stall-watch`, over their sessions. When a
+worker has ended its turn waiting on a decision and has made its own
+recommendation, stall-watch may (using its judgment of whether the human would
+be glad not to be asked) send it a swarm message from `stall-watch` with kind
+`decision.answer` accepting that recommendation on the human's behalf.
+
+This is the human's standing, sanctioned arrangement, not a coordinator: it only
+accepts the recipient's own recommendation (never invents or overrides), holds
+no shared context, assigns no work, and every answer is recorded and shown to
+the human (who also sees a notice in that session's Telegram thread and can
+countermand).
+
+What a worker should understand:
+
+- **It is stall-watch acting for the human, not the human.** It is not the
+  human's approval for anything that needs them personally (merging, posting to
+  Slack, anything the worker's own rules reserve for the human) — ask the human
+  for those as usual.
+- **Record it as delegated.** Record the decision as "stall-watch accepted my
+  recommendation for <the human>", not as the human's approval.
+- **The human's word wins.** If the human has answered in the session since,
+  the human's word wins.
+- **Don't reply to stall-watch;** it cannot receive messages.
 
 ### If a swarm genuinely needs shared arbitration
 
@@ -263,6 +290,7 @@ Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, 
 - `result` — a finished deliverable / report
 - `clarification.request` — needs an answer to proceed
 - `clarification.reply` — answers a `request`
+- `decision.answer` — stall-watch accepting a worker's recommendation on the human's behalf
 - `artifact.handoff` — pointer to a file, PR, or diff
 
 ### Priority and threading
@@ -368,7 +396,7 @@ On terminal failure the daemon sends a `delivery.failed` message **back to you**
 - **Don't** ack, heartbeat, or ping. If a message carries no decision, no new evidence and no changed instruction, it shouldn't exist.
 - **Don't** split one report into several sends to keep each one short. Count is the cost, not length.
 - **Don't** paraphrase a swarm message to a human who can already see it — point at it in one sentence.
-- **Don't** appoint, accept, or route through a coordinator. Report your own work to the human yourself, once, when it is done.
+- **Don't** appoint, accept, or route through a coordinator (stall-watch's delegated answers are not one). Report your own work to the human yourself, once, when it is done.
 - **Don't** POST to `opencode serve`'s `/session/<id>/prompt_async` directly for cross-session messaging. That route races (concurrent calls from different `x-opencode-directory` headers bypass the per-session busy guard, producing 400 "does not support assistant message prefill" from Anthropic). Always use `swarm_send`.
 - **Don't** write the `<swarm_message>` envelope into your `message` — pigeon adds it. Pre-wrapping is rejected (the close tag is forbidden in payloads) and double-wraps confuse receivers. Send only the raw payload.
 - **Don't** paste a received envelope back verbatim as your reply — send only the new payload.
