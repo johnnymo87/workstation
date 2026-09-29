@@ -9,7 +9,7 @@ pkgs.writeShellApplication {
     coreutils      # timeout
     gawk           # awk (used in the "find existing window by name" branch)
     util-linux     # flock
-  ];
+  ] ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.iproute2;  # ss: orphaned-server detection
   text = ''
     # oc-auto-attach <session-id>
     #
@@ -467,6 +467,118 @@ ${builtins.readFile ./canonical-path.sh}
     fi
     log "project_key=$project_key window_name=$window_name"
 
+    # Step 2.5: recover an ORPHANED tmux server before deciding a new one is
+    # needed (workstation-dkmi).
+    #
+    # Seen 2026-09-29: the user's long-lived server kept running after its
+    # socket FILE vanished. Every tmux client then saw "no server", so the
+    # create branch below started a SECOND server -- pane ids repeat across
+    # servers (%0, %1 ...), their panes' nvim sockets collide, and the user's
+    # real windows became invisible. A tmux server recreates its socket on
+    # SIGUSR1, which is how it was fixed by hand.
+    #
+    # Recovery must target the server that OWNS OUR socket path, not every
+    # tmux process: on SIGUSR1 a server unconditionally unlinks and rebinds
+    # its path, so signalling the wrong one can steal a live socket. On Linux
+    # a listening AF_UNIX socket keeps its bound path even after unlink, so
+    # `ss -xlp` identifies the owner positively. If an owner is known and does
+    # not come back, we FAIL CLOSED rather than start a competing server. If
+    # no process owns the path, it is a genuine no-server and we create one as
+    # before. Where `ss` is unavailable (macOS) orphans cannot be identified
+    # and behavior is unchanged.
+    #
+    # Serialized with the pane scan + create below, so two concurrent callers
+    # cannot both decide to create (or both recover) at once.
+    tmux_socket_path() {
+      # Mirrors tmux's own resolution: $TMUX's socket first, else
+      # $TMUX_TMPDIR (default /tmp), realpath'd, + /tmux-<uid>/default.
+      if [ -n "''${TMUX:-}" ] && [ "''${TMUX#,}" = "$TMUX" ]; then
+        printf '%s\n' "''${TMUX%%,*}"
+        return 0
+      fi
+      local dir="''${TMUX_TMPDIR:-/tmp}"
+      dir="$(realpath -- "$dir" 2>/dev/null || printf '%s' "$dir")"
+      printf '%s/tmux-%s/default\n' "''${dir%/}" "$(id -u)"
+    }
+    # socket_listener_pids <path>: print the pids LISTENING on <path>.
+    #   0  printed >=1 pid, and every matching listener had an owner shown
+    #   2  detection unavailable on this platform (no ss: macOS)
+    #   3  no process listens on <path> (genuinely no server)
+    #   4  could not tell: ss failed, or a matching listener had no owner
+    #      info. Ambiguous, so the caller must NOT treat it as "no server".
+    socket_listener_pids() {
+      command -v ss >/dev/null 2>&1 || return 2
+      local out rows
+      out="$(ss -xlpH 2>/dev/null)" || return 4
+      rows="$(awk -v p="$1" '$5 == p' <<< "$out")"
+      [ -z "$rows" ] && return 3
+      if grep -qv 'pid=[0-9]' <<< "$rows"; then return 4; fi
+      grep -o 'pid=[0-9]*' <<< "$rows" | cut -d= -f2 | sort -u
+    }
+    # Every tmux probe here is bounded: a server whose event loop is stopped
+    # would otherwise hang us (and everyone queued on the create lock).
+    tmux_reachable() {
+      local rc=0
+      timeout 2 tmux list-sessions >/dev/null 2>&1 || rc=$?
+      return "$rc"
+    }
+    recover_orphaned_server() {
+      local rc=0 path pids pid n deadline
+      tmux_reachable || rc=$?
+      [ "$rc" -eq 0 ] && return 0
+      if [ "$rc" -eq 124 ]; then
+        log "tmux server is not responding (list-sessions timed out); refusing to start another"
+        return 1
+      fi
+      path="$(tmux_socket_path)"
+      rc=0
+      pids="$(socket_listener_pids "$path")" || rc=$?
+      case "$rc" in
+        0) ;;
+        2) log "no tmux server reachable at $path (orphan detection unavailable here)"; return 0 ;;
+        3) return 0 ;;
+        *) log "no tmux server reachable at $path and its listener could not be identified; refusing to start another server"; return 1 ;;
+      esac
+      n="$(grep -c . <<< "$pids" || true)"
+      if [ "$n" -gt 1 ]; then
+        log "several processes ($(tr '\n' ' ' <<< "$pids")) listen on $path but none is reachable; refusing to start another tmux server. Recover one with: kill -USR1 <pid>"
+        return 1
+      fi
+      pid="$pids"
+      case "$(cat "/proc/$pid/comm" 2>/dev/null || true)" in
+        tmux*) ;;
+        *)
+          log "pid $pid listens on $path but is not tmux; refusing to start another server there"
+          return 1
+          ;;
+      esac
+      log "tmux server pid $pid still listens on $path but its socket is unreachable; sending SIGUSR1 to recreate it"
+      kill -USR1 "$pid" 2>/dev/null || true
+      deadline=$(( SECONDS + 5 ))
+      while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ "$(timeout 1 tmux list-sessions -F '#{pid}' 2>/dev/null | head -n1 || true)" = "$pid" ]; then
+          log "recovered orphaned tmux server pid $pid"
+          return 0
+        fi
+        sleep 0.2
+      done
+      log "tmux server pid $pid did not recover $path; refusing to start a second server. Try: kill -USR1 $pid"
+      return 1
+    }
+
+    # Fail closed on the lock too: proceeding unlocked is exactly the
+    # concurrent create/recover this lock exists to prevent, and the holder
+    # is bounded (every tmux probe above has a timeout), so a 30s wait
+    # means something is genuinely stuck.
+    exec 201>/tmp/oc-auto-attach.create.lock
+    if ! flock -w 30 201; then
+      log "could not acquire /tmp/oc-auto-attach.create.lock within 30s; another oc-auto-attach is stuck deciding whether to create a tmux server. Not proceeding."
+      exit 9
+    fi
+    if ! recover_orphaned_server; then
+      exit 9
+    fi
+
     # Step 3: find an existing tmux pane that's running nvim with cwd
     # equal to (or a descendant of) project_key. Prefer exact match.
     pane_id=""
@@ -544,7 +656,10 @@ ${builtins.readFile ./canonical-path.sh}
         # our environment as its global one. Keep the caller's nvim out of
         # it, so windows the user opens later in this server are not born
         # "nested" either (the -e above only covers this one pane).
-        pane_id="$(env -u NVIM tmux new-session -d -P -F '#{pane_id}' \
+        # BUN_INSPECT likewise: it is opencode-serve's inspector address and
+        # rides in from an opencode bash tool; any `opencode attach` that
+        # inherits it dies with EADDRINUSE (workstation-u8xx).
+        pane_id="$(env -u NVIM -u BUN_INSPECT tmux new-session -d -P -F '#{pane_id}' \
           "''${pane_guard_env[@]}" \
           -s "$target_session" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
       fi
@@ -555,6 +670,9 @@ ${builtins.readFile ./canonical-path.sh}
       pane_cmd="nvim"
       log "created pane $pane_id in session $target_session (window $window_name)"
     fi
+
+    # Pane chosen or created: release the Step 2.5 lock.
+    exec 201>&-
 
     # Step 3.5: Decide what to do with $pane_id based on its foreground.
     #
@@ -705,7 +823,21 @@ ${builtins.readFile ./canonical-path.sh}
         backoff=$(( backoff * 2 ))
       fi
 
-      if ! nvim --server "$sock" --remote-expr "$expr_open" </dev/null >/dev/null; then
+      # Every RPC below is bounded (workstation-u8xx). An nvim stopped at a
+      # hit-enter prompt, or otherwise wedged, does not serve RPC, and an
+      # unbounded --remote-expr then hangs this script forever.
+      #
+      # A TIMED-OUT open is an UNKNOWN outcome, not a failure: open() may
+      # already have scheduled the tab and started the attach, and it is not
+      # idempotent, so retrying could stack a second attach on the first.
+      # Only a confirmed failure (RPC refused, or status "failed") retries.
+      open_rc=0
+      timeout 10 nvim --server "$sock" --remote-expr "$expr_open" </dev/null >/dev/null || open_rc=$?
+      if [ "$open_rc" -eq 124 ]; then
+        log "open RPC to $sock timed out; outcome unknown (a tab may have opened), not retrying"
+        exit 8
+      fi
+      if [ "$open_rc" -ne 0 ]; then
         log "nvim RPC call failed; attempt $attempt/$max_attempts"
         if [ "$attempt" -ge "$max_attempts" ]; then
           exit 5
@@ -718,39 +850,62 @@ ${builtins.readFile ./canonical-path.sh}
       # Step 7: Wait for attach job to settle.
       # Settle window derivation:
       # it is 5000 ms + margin because that is the deadline the failure itself races, NOT the 12 s that happened to work empirically.
+      #
+      # Success needs POSITIVE evidence from a status read (workstation-u8xx).
+      # This used to declare success once elapsed >= settle_secs no matter
+      # what the reads said, so bounding the reads alone would have turned a
+      # hang into a false success. Now:
+      #   running, at/after the settle deadline -> settled
+      #   exited  -> settled: the helper only reports "exited" for a job that
+      #              outlived its settle threshold (else it says "failed"),
+      #              so the attach worked and the user has since closed it
+      #   failed  -> confirmed failure (retryable)
+      #   anything else (timeout, RPC error, "unknown", an older helper with
+      #              no status()) -> no evidence; each such read clears the
+      #              last one, and reaching wait_timeout without evidence is
+      #              an UNKNOWN outcome (not retried: the attach may be live)
 
       log "waiting up to ''${settle_secs}s for attach to settle..."
 
       start_time="$SECONDS"
-      settled=0
+      outcome=""
 
       while :; do
+        status="$(timeout 2 nvim --server "$sock" --remote-expr "$expr_status" </dev/null 2>/dev/null || true)"
         elapsed=$(( SECONDS - start_time ))
 
-        if [ "$elapsed" -ge "$settle_secs" ]; then
-          settled=1
-          break
-        fi
+        case "$status" in
+          failed)
+            log "attach job for $sid exited prematurely (failed) during settle window"
+            outcome=failed
+            ;;
+          exited)
+            outcome=settled
+            ;;
+          running)
+            if [ "$elapsed" -ge "$settle_secs" ]; then outcome=settled; fi
+            ;;
+        esac
+        [ -n "$outcome" ] && break
 
         if [ "$elapsed" -ge "$wait_timeout" ]; then
-          log "attach for $sid timed out waiting to settle after ''${wait_timeout}s"
-          break
-        fi
-
-        status="$(nvim --server "$sock" --remote-expr "$expr_status" </dev/null 2>/dev/null || true)"
-
-        if [ "$status" = "failed" ] || [ "$status" = "exited" ]; then
-          log "attach job for $sid exited prematurely ($status) during settle window"
+          outcome=unknown
           break
         fi
 
         sleep 0.2
       done
 
-      if [ "$settled" -eq 1 ]; then
-        log "tab opened and attach settled in pane $pane_id for $sid"
-        exit 0
-      fi
+      case "$outcome" in
+        settled)
+          log "tab opened and attach settled in pane $pane_id for $sid"
+          exit 0
+          ;;
+        unknown)
+          log "could not confirm attach for $sid within ''${wait_timeout}s (nvim not answering status, or helper lacks status()); not retrying"
+          exit 8
+          ;;
+      esac
 
       if [ "$attempt" -ge "$max_attempts" ]; then
         log "attach failed to settle after $max_attempts attempts"
