@@ -731,11 +731,18 @@ lib.mkIf isCloudbox {
   # MemorySwapMax bounds swap churn: an unbounded build would thrash swap
   # host-wide before ever reaching memory.max. There is deliberately still NO
   # MemoryHigh, originally because throttling reclaim against a saturated swap
-  # device stalls builds for minutes. Note that premise was written when swap
-  # was saturated at rest; it is usually not now. Whether to add MemoryHigh,
-  # lower the cap, or raise it is an OPEN, DEFERRED decision
-  # (workstation-o5s1.10), postponed until o5s1.19 has run through a heavy build
-  # day. Do not change it without reading that bead.
+  # device stalls builds for minutes.
+  #
+  # DECIDED 2026-09-29 (Jonathan, workstation-o5s1.10): keep 16G / 2G swap /
+  # no MemoryHigh. The host's swap is no longer saturated at rest, but THIS
+  # slice's own 2G swap allowance was full in every thrash episode measured
+  # after the o5s1.19 gate, which is exactly when MemoryHigh would throttle.
+  # And the gate already did most of the work: seconds with slice
+  # memory.pressure full > 10% went from 6348 (2026-09-15/16 incident) to 124
+  # on 2026-09-28 (500 gated builds), with the serves at 0 memory stall
+  # throughout. What remains is idle resident servers (workstation-o5s1.31)
+  # and single ~9G build trees, which the 10G per-scope cap already bounds.
+  # Revisit only with new pressure-sampler evidence; the numbers are on that bead.
   #
   # The serve units live in a ROOT-LEVEL /opencode.slice/opencode-serve.slice/
   # (they moved there from /system.slice/system-opencode\x2dserve.slice/, which
