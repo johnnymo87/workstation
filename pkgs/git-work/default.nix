@@ -178,7 +178,8 @@ EOF
       sql_path="''${wt//\'/\'\'}"
       # Read-only: a live serve is writing this database. substr() rather than
       # LIKE because worktree names are full of '_', a LIKE wildcard.
-      if ! out="$(sqlite3 -readonly "$PRUNE_SESSION_DB" \
+      # .timeout: a WAL reader can briefly see SQLITE_BUSY during a checkpoint.
+      if ! out="$(sqlite3 -readonly -cmd '.timeout 5000' "$PRUNE_SESSION_DB" \
         "select id from session
            where (directory = '$sql_path'
                   or substr(directory, 1, length('$sql_path') + 1) = '$sql_path' || '/')
