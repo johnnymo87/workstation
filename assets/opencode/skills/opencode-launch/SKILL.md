@@ -41,9 +41,13 @@ the session, `opencode-launch` resolves the model id against the serve's
 `GET /config/providers` catalog:
 
 - **Bare id → auto-resolved.** A suffix-less id like
-  `google-vertex-anthropic/claude-opus-5` is expanded to the unique registered
-  id (`…/claude-opus-5@default`) and a `Note:` line is printed. This is why a
+  `google-vertex-anthropic/claude-opus-5-5` is expanded to the unique registered
+  id (`…/claude-opus-5-5@default`) and a `Note:` line is printed. This is why a
   bare id no longer silently launches a dead session.
+
+> **Opus means Opus 5.5:** `claude-opus-5-5`, not `claude-opus-5`. Both are
+> registered, so `claude-opus-5` resolves cleanly and launches on the older
+> model with no warning.
 - **Unknown / ambiguous id → loud pre-launch error (exit 1).** No orphan session
   is created; the error lists the provider's available models.
 - **Catalog unreachable → degrade.** The id is sent as-given (pre-resolution
