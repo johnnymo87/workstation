@@ -35,7 +35,7 @@ nix run nixpkgs#sqlite -- "$DB" "select directory from session where id='$S';"
 ls -ld "$(nix run nixpkgs#sqlite -- "$DB" "select directory from session where id='$S';")"
 
 # 2. Confirm the failure mode in the log (not just that it is quiet)
-grep -a "$S" ~/.local/share/opencode/log/opencode.log | grep -a -E "ERROR|loop" | tail -5
+grep -ahs "$S" ~/.local/share/opencode/log/opencode.log.1 ~/.local/share/opencode/log/opencode.log | grep -a -E "ERROR|loop" | tail -5
 ```
 
 Also recover the session's last real output, so you know what it was doing:
@@ -96,7 +96,7 @@ Measured on cloudbox, two deaths of the same session, two different causes — s
 
 | Deleter | Evidence to check | Note |
 |---|---|---|
-| **The session itself** | `grep -a "worktree remove" ~/.local/share/opencode/log/opencode.log` — the `run=` id is the session's own | It ran `git worktree remove` on the tree it was sitting in. |
+| **The session itself** | `grep -ahs "worktree remove" ~/.local/share/opencode/log/opencode.log{.1,}` — the `run=` id is the session's own | It ran `git worktree remove` on the tree it was sitting in. |
 | **`disk-cleanup.service`** | `journalctl --user -u disk-cleanup \| grep -i worktree` | Nightly, walks `<repo>/.worktrees/*/` in **every** repo under `~/projects`. Removes merged worktrees; until the live-session guard landed, being *clean* was what made you collectable. Never touches a primary checkout. |
 | **`reset-workspace`** (nightly) | its log lines name the repo | `work --prune-merged`, **`~/projects/mono` only**. Do not blame it for another repo — that hardcoded root is the fastest way to falsify the guess. |
 

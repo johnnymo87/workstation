@@ -1408,10 +1408,17 @@ lib.mkMerge [
       # file keeps its inode alive, frees nothing, and keeps being written.
       # Truncating in place is safe because every writer opened it O_APPEND
       # (checked via /proc/<pid>/fdinfo flags: all writers had 02000 set): the
-      # next write reseeks to the new EOF, so there is no sparse hole. The one
-      # reader, opencode-llm-audit's `tail --follow=descriptor`, notices the
-      # truncation and carries on from the start. Lines written between the
-      # tail -c and the truncate are lost; that window is milliseconds.
+      # next write reseeks to the new EOF, so there is no sparse hole.
+      #
+      # Two readers, both truncation-aware: opencode-llm-audit's
+      # `tail --follow=descriptor` notices and carries on from the start, and
+      # the plugin canary (pkgs/opencode-plugin-canary-sh) sees size < its
+      # offset and RESETs. The canary is why this truncates to ZERO rather than
+      # "keeping the last N M in place": a live file left above its 8 MiB INIT
+      # cap lands in INIT_OVERSIZE and pages. Lines written between the tail -c
+      # and the truncate are lost; that window is milliseconds. opencode.log.1
+      # begins mid-line; nothing parses it, and the alert/skill grep commands
+      # read .1 before the live file.
       rotate_opencode_log() {
         local f="$HOME/.local/share/opencode/log/opencode.log"
         local max=$((512 * 1024 * 1024)) keep=$((64 * 1024 * 1024))

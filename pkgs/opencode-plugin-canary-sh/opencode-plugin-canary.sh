@@ -208,10 +208,12 @@ plugin_canary_file_id() {
 # with leg A covering the LOUD shape meanwhile.
 #
 # RESET covers both rotation shapes: a move-and-recreate changes the inode, while
-# a copy-truncate keeps the inode and drops the size below our offset. No rotation
-# is configured for this file today; it is handled because a stale offset pointing
-# past EOF would otherwise silently read nothing forever, which is indistinguishable
-# from health.
+# a copy-truncate keeps the inode and drops the size below our offset. The nightly
+# disk-cleanup copy-truncates this file past 512M (section 6, workstation-o5s1.6),
+# so RESET is a live path, not a hypothetical: a stale offset pointing past EOF
+# would otherwise silently read nothing forever, which is indistinguishable from
+# health. That rotation must truncate to (near) ZERO: anything left above the
+# 8 MiB INIT cap lands in INIT_OVERSIZE and pages.
 plugin_canary_window_action() {
   local stored_id="$1" stored_off="$2" cur_id="$3" cur_size="$4"
   local max_reset="${5:-8388608}"

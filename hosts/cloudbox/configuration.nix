@@ -2761,7 +2761,7 @@ this is the one probe that can prove it.
 Failed $FAILS consecutive passes (~$FAILS min).
 
 Check:
-  grep -E '^timestamp=[^ ]+ level=ERROR .*failed to load plugin' /home/dev/.local/share/opencode/log/opencode.log | tail -5
+  grep -hsE '^timestamp=[^ ]+ level=ERROR .*failed to load plugin' /home/dev/.local/share/opencode/log/opencode.log.1 /home/dev/.local/share/opencode/log/opencode.log | tail -5
   curl -s $DOOR/experimental/tool/ids | jq .
 EOF
 )"
@@ -2778,7 +2778,7 @@ threw -- so the serve loses its provider catalog and can run NO prompt at all.
 Failed $FAILS consecutive passes (~$FAILS min).
 
 Check:
-  grep -E '^timestamp=[^ ]+ level=ERROR .*(failed to load plugin|hook)' /home/dev/.local/share/opencode/log/opencode.log | tail -20
+  grep -hsE '^timestamp=[^ ]+ level=ERROR .*(failed to load plugin|hook)' /home/dev/.local/share/opencode/log/opencode.log.1 /home/dev/.local/share/opencode/log/opencode.log | tail -20
   curl -s -o /dev/null -w '%{http_code}\n' $DOOR/config/providers
 EOF
 )"
