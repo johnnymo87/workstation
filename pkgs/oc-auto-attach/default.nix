@@ -517,18 +517,34 @@ ${builtins.readFile ./canonical-path.sh}
       # There is deliberately no `-e PATH=` here. tmux overrides it with the
       # client's PATH at spawn time (verified on 3.6a; test-project-key.sh pins
       # the behavior), which is why repair_path exists at all.
+      #
+      # NVIM is blanked for a different reason: nvims treats a live $NVIM as
+      # "I am nested inside another nvim's :terminal" and then deliberately
+      # does NOT claim /tmp/nvim-<pane>.sock -- so Step 5 below waits 15s for
+      # a socket that will never exist and exits 4. We are often run from
+      # inside nvim (a :terminal, or jobstart from the user's editor), and
+      # when the tmux server has to be created here it adopts OUR environment
+      # as its global one, so every later pane would inherit that NVIM too.
+      # Seen 2026-09-29: the server's socket had vanished, new-session started
+      # a fresh server from inside nvim-1, and the new pane's nvim came up
+      # without --listen. Empty is enough: nvims tests [ -n "$NVIM" ].
       pane_guard_env=(
         -e __NIXOS_SET_ENVIRONMENT_DONE=
         -e __ETC_PROFILE_DONE=
         -e __ETC_PROFILE_SOURCED=
         -e __HM_SESS_VARS_SOURCED=
+        -e NVIM=
       )
       if tmux has-session -t "=$target_session" 2>/dev/null; then
         pane_id="$(tmux new-window -d -P -F '#{pane_id}' \
           "''${pane_guard_env[@]}" \
           -t "$target_session:" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
       else
-        pane_id="$(tmux new-session -d -P -F '#{pane_id}' \
+        # `env -u NVIM`: this client may START the server, which then keeps
+        # our environment as its global one. Keep the caller's nvim out of
+        # it, so windows the user opens later in this server are not born
+        # "nested" either (the -e above only covers this one pane).
+        pane_id="$(env -u NVIM tmux new-session -d -P -F '#{pane_id}' \
           "''${pane_guard_env[@]}" \
           -s "$target_session" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
       fi
