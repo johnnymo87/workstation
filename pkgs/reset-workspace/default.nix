@@ -992,10 +992,11 @@ EOF2
     # `work` worktree and leaves the worktree+branch behind on the happy path.
     # reset-workspace is the named pruning OWNER for that lifecycle (design M1c):
     # `work --prune-merged` reclaims only worktrees whose branch is fully merged
-    # into origin/<trunk> AND whose tree is clean, so an in-flight session's
-    # worktree (unmerged or dirty) is never removed -- no live-session probe
-    # needed. v1 scope: the mono primary root, where the read-only-main guard
-    # lives and churn matters. Best-effort: a failure here never fails the reset.
+    # into origin/<trunk> AND whose tree is clean AND that is past a 3-day
+    # grace period AND that no recent opencode session sits in. (Merged+clean
+    # alone was not enough: a fresh branch with no commits reads as merged, and
+    # that removed four live sessions' worktrees on 2026-09-29.) v1 scope: the
+    # mono primary root, where the read-only-main guard lives and churn matters. Best-effort: a failure here never fails the reset.
     # Moved before Step 5 so a pool-death restart/health failure cannot skip it.
     # (`work` is found on the inherited PATH, not runtimeInputs.)
     update_sentinel "started" "prune"

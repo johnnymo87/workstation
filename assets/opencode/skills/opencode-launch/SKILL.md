@@ -231,8 +231,13 @@ What it does, in order:
 
 Lifecycle: a successful `--worktree` launch keeps its worktree. It's reclaimed
 automatically once the branch merges into trunk — the nightly `reset-workspace`
-runs `work --prune-merged`, which removes only merged-into-trunk **and** clean
-worktrees (in-flight/dirty ones are always kept). To prune on demand:
+runs `work --prune-merged`, which removes a worktree only if it is merged into
+trunk, clean, **older than 3 days**, and not the directory of an opencode session
+updated in the last 7 days. "Merged" alone protects nothing: a branch with no
+commits of its own is a trunk ancestor from birth, which is how four live
+sessions lost their worktrees on 2026-09-29. A session idle for more than 7 days
+in a 3-day-old, commit-less, clean worktree is still reclaimable; commit
+something if it must survive. To prune on demand:
 `cd <repo> && work --prune-merged`.
 
 Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos with
