@@ -13,7 +13,7 @@ This skill is the cheat sheet. Read it before writing any Slack message.
 
 The MCP authenticates with the human's `xoxp` User OAuth token, so **every message posts under their name and avatar**. Read one back and it reports their `UserName`, distinguished only by a `BotName` field almost nobody looks at. Three consequences.
 
-**Disclose authorship.** Words you composed end with a signature — `— Claude`, or whichever agent you are. Words the human dictated go out verbatim and unsigned. Skip the "I am an AI assistant acting on behalf of" preamble; the signature is the disclosure. Without it, referring to the account owner in the third person reads as them talking about themselves.
+**Disclose authorship.** Words you composed end with the signature `— Claude`, exactly that and nothing more — not `— Claude (drafted for <name>)`, not `— Claude, drafted for <name>`, no name of the human, no qualifier. The post already appears under their name, so naming them again is redundant. Words the human dictated go out verbatim and unsigned. Skip the "I am an AI assistant acting on behalf of" preamble; the signature is the disclosure. Without it, referring to the account owner in the third person reads as them talking about themselves.
 
 **Show the human the draft first.** The first post into a channel or thread, and anything that commits them to something, gets approved before it goes out — notifications carry the full text and cannot be recalled. Once they have approved a thread's shape or said "go ahead", later replies in it do not need re-approval. Reply in-thread (`thread_ts`) unless told otherwise: a top-level post notifies the entire channel. Never `<!here>` or `<!channel>` unasked.
 
