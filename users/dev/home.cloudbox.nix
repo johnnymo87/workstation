@@ -897,6 +897,27 @@ lib.mkIf isCloudbox {
     };
   };
 
+  # A kernel OOM kill inside a tmux pane must kill THAT process, not the pane.
+  #
+  # tmux puts every pane in its own transient tmux-spawn-<uuid>.scope, and
+  # systemd's default OOMPolicy=stop stops the whole unit after an oom_kill in
+  # it: the shell, nvim (unsaved buffers), the scrollback, an attach TUI. That
+  # was moot while every pane ran at oom_score_adj=-1000; workstation-o5s1.29
+  # (hosts/cloudbox/configuration.nix, the sshd block) makes panes killable,
+  # so this is its companion. earlyoom's SIGTERM/SIGKILL is not an oom_kill
+  # event and never triggered the policy either way.
+  #
+  # A prefix drop-in does apply to TRANSIENT scopes: verified 2026-09-29 by
+  # probing a scratch prefix -- `systemd-run --user --scope --unit=zzprobe-1`
+  # read OOMPolicy=continue with the drop-in and OOMPolicy=stop without it.
+  # It also reaches scopes that ALREADY exist, at the next user-manager
+  # daemon-reload (same probe, drop-in added under a live scope).
+  xdg.configFile."systemd/user/tmux-spawn-.scope.d/oom-policy.conf".text = ''
+    # Managed by home-manager (workstation-o5s1.29). See users/dev/home.cloudbox.nix.
+    [Scope]
+    OOMPolicy=continue
+  '';
+
   # Repoint the legacy hand-made ~/.local/bin/bazel symlink at the shim.
   #
   # It predates this repo's management of bazel (created by hand in 2026-04) and

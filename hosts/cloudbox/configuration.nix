@@ -5753,10 +5753,38 @@ EOF
     };
   };
 
-  # Protect sshd from OOM killer — always the last thing to die.
+  # sshd's LISTENER is protected from the OOM killer by sshd itself, not by
+  # systemd. Do NOT add OOMScoreAdjust = "-1000" here (workstation-o5s1.29).
+  #
+  # OpenSSH is built with LINUX_OOM_ADJUST: at startup the listener saves its
+  # inherited oom_score_adj and sets itself to -1000 (platform_pre_listen ->
+  # oom_adjust_setup), and every connection child writes the SAVED value back
+  # before becoming sshd-session (platform_post_fork_child ->
+  # oom_adjust_restore). Setting -1000 in systemd makes the saved value -1000,
+  # so every login shell, the tmux server started from it, and every pane
+  # under that -- attach TUIs, nvim, test runners -- ran at -1000: immune to
+  # both the kernel OOM killer and earlyoom (which skips -1000 outright).
+  # 2026-09-26 snapshot: 44 such processes. It is also the likely source of
+  # the -1000 on the vitest workers in the 2026-08-11 investigation (20,621
+  # "no killable processes" kernel lines) -- inferred, not traced; that
+  # journal has rotated.
+  #
+  # Killable panes need the companion setting in users/dev/home.cloudbox.nix
+  # (tmux-spawn-.scope.d, OOMPolicy=continue): every tmux pane is its own
+  # tmux-spawn-*.scope, and systemd's default OOMPolicy=stop would otherwise
+  # tear down the WHOLE pane -- shell, nvim with unsaved buffers, scrollback
+  # -- after a kernel OOM kill of any one process in it.
+  #
+  # Verified 2026-09-29 with a throwaway sshd on 127.0.0.1:2222 (same binary),
+  # control vs change, reading /proc/*/oom_score_adj:
+  #   with OOMScoreAdjust=-1000: listener -1000, sshd-session -1000, shell -1000, tmux pane -1000
+  #   without it:                listener -1000, sshd-session 0,     shell 0,     tmux pane 0
+  # So removing this keeps the lockout guard (the listener) and returns
+  # sessions to the default. If you ever see the LISTENER at 0, the binary
+  # lost LINUX_OOM_ADJUST -- check `strings $(which sshd) | grep oom_adjust`.
+  #
   # CPUWeight > default (100) ensures SSH remains responsive under load.
   systemd.services.sshd.serviceConfig = {
-    OOMScoreAdjust = "-1000";
     CPUWeight = 200;
   };
 
@@ -5779,8 +5807,17 @@ EOF
   # Kill order now: agent-spawned work (bazel/java/node/tests, adj 500, most
   # also +300) -> system services that are `node` (+300: opencode-frontdoor,
   # pigeon-daemon, teamclaude -- intended: stateless, back in seconds) -> user
-  # services in app.slice (adj 200) -> the serves and the rest of the system
-  # (adj 0) -> sshd/systemd (--avoid).
+  # services in app.slice (adj 200) -> the serves, the interactive tier and the
+  # rest of the system (adj 0) -> systemd & co (--avoid) -> the sshd listener
+  # (-1000, which sshd sets on itself; see the sshd block below).
+  #
+  # The interactive tier is everything under tmux: attach TUIs, nvim, pane
+  # shells. It sat at -1000 (unkillable) until workstation-o5s1.29, and is at 0
+  # only in panes of a tmux server started from an ssh session opened after
+  # that change. At 0 it is killable, NOT preferred: attach TUIs (~300-440 MB)
+  # still rank below the serves (~2 GB) on oom_score. The --avoid `sshd`
+  # pattern does not match the `sshd-session` comm; those are a few MB and
+  # effectively never chosen.
   #
   # The serves stay out of --prefer only because their comm is
   # `.opencode-wrapp` (makeWrapper's `.opencode-wrapped`, truncated to 15
