@@ -148,11 +148,15 @@ be glad not to be asked) send it a swarm message from `stall-watch` with kind
 This is the human's standing, sanctioned arrangement, not a coordinator: it only
 accepts the recipient's own recommendation (never invents or overrides), holds
 no shared context, assigns no work, and every answer is recorded and shown to
-the human (who also sees a notice in that session's Telegram thread and can
-countermand).
+the human (who usually also sees a notice in that session's Telegram thread and
+can countermand).
 
 What a worker should understand:
 
+- **It can only say yes to what you proposed.** Check that the quoted
+  recommendation is really your own and still current. If it isn't — it picked
+  the wrong branch of a hedged answer, or you have since changed your mind —
+  don't act on it; ask the human instead.
 - **It is stall-watch acting for the human, not the human.** It is not the
   human's approval for anything that needs them personally (merging, posting to
   Slack, anything the worker's own rules reserve for the human) — ask the human
