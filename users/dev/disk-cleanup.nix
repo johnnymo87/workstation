@@ -1398,6 +1398,46 @@ lib.mkMerge [
         fi
       }
 
+      # --- 6. OpenCode log rotation (workstation-o5s1.6) ---
+      # ~/.local/share/opencode/log/opencode.log is shared by every serve and
+      # never rotated by opencode: it reached 1.2G on 2026-09-15 and grows
+      # ~70 KiB/min on a working day.
+      #
+      # Copy-truncate, NEVER rm or mv. Every process holds it open (16 fds on
+      # 2026-09-29: the serves plus attach TUIs), so an unlinked or renamed
+      # file keeps its inode alive, frees nothing, and keeps being written.
+      # Truncating in place is safe because every writer opened it O_APPEND
+      # (checked via /proc/<pid>/fdinfo flags: all writers had 02000 set): the
+      # next write reseeks to the new EOF, so there is no sparse hole.
+      #
+      # Two readers, both truncation-aware: opencode-llm-audit's
+      # `tail --follow=descriptor` notices and carries on from the start, and
+      # the plugin canary (pkgs/opencode-plugin-canary-sh) sees size < its
+      # offset and RESETs. The canary is why this truncates to ZERO rather than
+      # "keeping the last N M in place": a live file left above its 8 MiB INIT
+      # cap lands in INIT_OVERSIZE and pages. Lines written between the tail -c
+      # and the truncate are lost; that window is milliseconds. opencode.log.1
+      # begins mid-line; nothing parses it, and the alert/skill grep commands
+      # read .1 before the live file.
+      rotate_opencode_log() {
+        local f="$HOME/.local/share/opencode/log/opencode.log"
+        local max=$((512 * 1024 * 1024)) keep=$((64 * 1024 * 1024))
+        [ -f "$f" ] || return 0
+        local size
+        size=$(stat -c %s "$f" 2>/dev/null) || return 0
+        if [ "$size" -le "$max" ]; then
+          log "opencode.log is $((size / 1048576))M, under $((max / 1048576))M; not rotating"
+          return 0
+        fi
+        tail -c "$keep" "$f" > "$f.1.tmp" && mv -f "$f.1.tmp" "$f.1" || {
+          log "WARN: could not save the tail of opencode.log; not truncating"
+          rm -f "$f.1.tmp"
+          return 0
+        }
+        truncate -s 0 "$f"
+        log "opencode.log was $((size / 1048576))M: last $((keep / 1048576))M kept in opencode.log.1, truncated in place"
+      }
+
       # --- Main ---
       log "Starting disk cleanup..."
       log "Disk before: $(df -h / | tail -1 | awk '{print $3, "used,", $4, "free,", $5}')"
@@ -1408,6 +1448,7 @@ lib.mkMerge [
       cleanup_caches
       cleanup_docker
       cleanup_opencode_wal
+      rotate_opencode_log
 
       log "Disk after:  $(df -h / | tail -1 | awk '{print $3, "used,", $4, "free,", $5}')"
       log "Disk cleanup complete"
