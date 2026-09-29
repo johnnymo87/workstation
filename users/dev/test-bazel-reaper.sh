@@ -34,7 +34,7 @@
 #      marker as an orphan would delete a partially-reaped base's neighbours.
 #
 #   3. Bazel servers idle out after max_idle_secs, which home.base.nix sets to
-#      900 (15 minutes), so a worktree that someone is actively working in has
+#      300 on cloudbox (5 minutes), so a worktree that someone is actively working in has
 #      NO server for most of its life. That is why the workspace-existence half
 #      of the test carries the weight, and why
 #      test_keeps_live_workspace_without_server is the single most important
@@ -123,8 +123,8 @@ test_keeps_live_workspace_without_server() {
   mkdir -p "$wt"
   make_base "$root" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$wt" >/dev/null
   # No server/server.pid.txt at all: this is the steady state of a worktree
-  # somebody is working in, because bazel servers idle out after 15 minutes
-  # (startup --max_idle_secs=900 in home.base.nix). Observed on the real box.
+  # somebody is working in, because bazel servers idle out after 5 minutes
+  # (startup --max_idle_secs=300 on cloudbox, in home.base.nix). Observed on the real box.
   out="$(run_reaper "$root")"
   check "live workspace survives" \
     "$([ -d "$root/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ] && echo yes || echo no)"

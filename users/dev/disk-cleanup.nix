@@ -1587,9 +1587,9 @@ lib.mkMerge [
   #
   #   3. A BASE WITH A LIVE WORKSPACE IS NOT REAPED EVEN IF ITS SERVER IS DEAD,
   #      which is the whole reason the marker is consulted at all. Bazel
-  #      servers idle out after max_idle_secs, which home.base.nix sets to 900
-  #      (15 minutes), so a worktree someone is actively working in has no
-  #      server for most of its life. The single live base on the box at the
+  #      servers idle out after max_idle_secs, which home.base.nix sets to 300
+  #      on cloudbox (5 minutes), so a worktree someone is actively working
+  #      in has no server for most of its life. The single live base on the box at the
   #      time of writing was exactly that: workspace present, no server pid --
   #      the nightly would delete it at 03:00 and this reaper will not.
   #

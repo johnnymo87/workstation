@@ -215,6 +215,24 @@ assert_not "darwin rc has not inherited --build_tests_only" \
   "macOS must keep a wildcard test building non-test targets; the cloudbox rationale is agent-specific" \
   -- grep -Eq "$TESTS_ONLY_ANY_RE" "$WORK/darwin.rc"
 
+# --- Idle server window (workstation-o5s1.31) --------------------------------
+#
+# Same failure shape as the disk cache: a per-host split that "tidying" would
+# collapse. cloudbox reaps idle servers at 300s because every one of them sits in
+# bazel.slice's shared 16G cap; the laptop has no such cap and keeps 900s.
+# Exactly one line per host -- a second startup line would silently win or lose
+# depending on its order, which is not a thing to leave to rc-file position.
+IDLE_RE='^[[:space:]]*startup[[:space:]]+--max_idle_secs='
+idle_values() { grep -E "$IDLE_RE" "$1" | sed -E 's/.*--max_idle_secs=([0-9]+).*/\1/' | tr '\n' ' ' || true; }
+
+assert_ok "cloudbox rc reaps idle bazel servers after exactly 300s, once" \
+  "expected one 'startup --max_idle_secs=300', got: [$(idle_values "$WORK/cloudbox.rc")]" \
+  -- test "$(idle_values "$WORK/cloudbox.rc")" = "300 "
+
+assert_ok "darwin rc keeps the 900s idle window, once" \
+  "expected one 'startup --max_idle_secs=900', got: [$(idle_values "$WORK/darwin.rc")]" \
+  -- test "$(idle_values "$WORK/darwin.rc")" = "900 "
+
 # The whole point of the split: the two hosts must not agree about this.
 assert_not "the two hosts' disk-cache policies have not been unified" \
   "cloudbox and macOS render the same --disk_cache line; the split was collapsed" \

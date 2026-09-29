@@ -861,15 +861,15 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-bazelrc-disk-cache.sh 2>&1 | tee "$TMPDIR/bdc.txt"
-        grep -q '^23 passed, 0 failed' "$TMPDIR/bdc.txt" || {
-          echo "GATE FAILURE: bazelrc disk-cache suite did not reach its 23/0 tally." >&2
+        grep -q '^25 passed, 0 failed' "$TMPDIR/bdc.txt" || {
+          echo "GATE FAILURE: bazelrc disk-cache suite did not reach its 25/0 tally." >&2
           exit 1
         }
         # Same anti-vacuity pin as the disk-watch checks: the tally line is
         # printed by the suite itself, so a suite truncated to two assertions
         # would still print a truthful "2 passed, 0 failed".
-        [ "$(grep -c '^PASS  ' "$TMPDIR/bdc.txt")" = 23 ] || {
-          echo "GATE FAILURE: expected 23 'PASS' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/bdc.txt")" = 25 ] || {
+          echo "GATE FAILURE: expected 25 'PASS' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/bdc.txt")." >&2
           exit 1
         }
