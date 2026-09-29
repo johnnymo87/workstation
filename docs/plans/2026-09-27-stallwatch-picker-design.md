@@ -67,8 +67,9 @@ waits on I/O or races an in-flight callback.
   item for older snapshots) -- as `[kind] text` with `new`/`changed`/`stale`
   marks and the titles of its sessions, then `why: <top_reason>` when present,
   then `+N more open (M new)` (M = other items that are new or changed). This
-  mirrors the Telegram digest; the other items are reachable per session on
-  Screen 2.
+  mirrors the Telegram digest's layout. M uses item `status`, so it can differ
+  from the digest's own count, which tracks what was already sent. The other
+  items are reachable per session on Screen 2.
 - Moving the cursor is the "flip between programs".
 - `<CR>` opens Screen 2 for that program.
 - `<C-d>` shows `latest_digest` in a scratch buffer (`nofile`, `nomodifiable`,

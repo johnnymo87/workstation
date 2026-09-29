@@ -147,6 +147,8 @@ do
   check(pl[2] == "    - G", "top item's session listed")
   check(pl[3] == "why: Unblocks two others", "why line, newlines collapsed, got: " .. tostring(pl[3]))
   check(pl[#pl] == "+2 more open", "no fresh others -> no (M new), got: " .. pl[#pl])
+  local bl = spec.program_preview_lines(prows[2])
+  check(bl[#bl] == "why: Synthetic reason: oldest ask in the program.", "fixture beta: why line from top_reason, got: " .. bl[#bl])
   local solo = spec.program_preview_lines({ items = { { kind = "info", text = "Only." } } })
   check(#solo == 1 and solo[1] == "[info] Only.", "single item -> no more line")
 
