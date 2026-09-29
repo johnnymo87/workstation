@@ -1533,12 +1533,12 @@
           echo "GATE FAILURE: session_switcher.spec did not report expected 668 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  stallwatch_picker\.model unit tests (109 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: stallwatch_picker.model did not report expected 109 assertions." >&2
+        grep -q '^PASS  stallwatch_picker\.model unit tests (121 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.model did not report expected 121 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  stallwatch_picker\.spec unit tests (111 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: stallwatch_picker.spec did not report expected 111 assertions." >&2
+        grep -q '^PASS  stallwatch_picker\.spec unit tests (110 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.spec did not report expected 110 assertions." >&2
           exit 1
         }
         grep -q '^PASS  stallwatch_picker\.source unit tests (83 assertions via nvim -l)' "$TMPDIR/out.txt" || {

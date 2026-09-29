@@ -281,4 +281,36 @@ do
   check(all_sub[2] == unjoined_row, "unjoined placed after")
 end
 
+-- TOP ITEM: stall-watch's pick, with fallbacks for older snapshots.
+do
+  local i1 = { fingerprint = "fp-t1", kind = "decision", sessions = { { id = "ses_fixture_t_a" } } }
+  local i2 = { fingerprint = "fp-t2", kind = "info", top = true, sessions = { { id = "ses_fixture_t_b" } } }
+  local i3 = { fingerprint = "fp-t3", kind = "info", sessions = { { id = "ses_fixture_t_c" } } }
+  check(model.top_item({ i1, i2, i3 }, "fp-t3") == i3, "top_fingerprint wins")
+  check(model.top_item({ i1, i2, i3 }, nil) == i2, "no fingerprint -> item.top")
+  check(model.top_item({ i1, i2, i3 }, "fp-missing") == i2, "unmatched fingerprint -> item.top")
+  check(model.top_item({ i1, i3 }, vim.NIL) == i1, "older snapshot -> first item")
+  check(model.top_item({ vim.NIL, i3 }, nil) == i3, "non-table items skipped")
+  check(model.top_item({}, "fp-t1") == nil and model.top_item(vim.NIL) == nil, "no items -> nil")
+
+  local prow = model.program_rows({ programs = { {
+    tag = "gamma", top_fingerprint = "fp-t3", top_reason = "because", items = { i1, i2, i3 } } } })[1]
+  check(prow.top == i3 and prow.top_reason == "because", "program row carries top + reason")
+  check(model.program_rows({ programs = { { tag = "g", top_reason = vim.NIL, items = { i1 } } } })[1].top_reason == nil,
+    "null top_reason -> nil")
+
+  local fl = model.flagged_rows(prow, {})
+  check(ids(fl) == "ses_fixture_t_c,ses_fixture_t_a,ses_fixture_t_b", "top session sorted first, rest in item order, got " .. ids(fl))
+  check(fl[1].has_top == true and fl[2].has_top == nil, "only the top row is marked")
+  local cli = {
+    { id = "ses_fixture_t_a" }, { id = "ses_fixture_t_x" }, { id = "ses_fixture_t_b" }, { id = "ses_fixture_t_c" },
+  }
+  local fl2 = model.flagged_rows(prow, model.index_rows(cli))
+  local all = model.all_rows(fl2, cli, { "ses_fixture_t_x" })
+  check(ids(all) == "ses_fixture_t_c,ses_fixture_t_a,ses_fixture_t_b,ses_fixture_t_x",
+    "all view: top first, flagged in CLI order, then tagged, got " .. ids(all))
+  local noprow = model.flagged_rows({ items = { i1, i3 } }, {})
+  check(ids(noprow) == "ses_fixture_t_a,ses_fixture_t_c", "no top on the row -> order untouched")
+end
+
 print("LUA_TEST_OK " .. N)
