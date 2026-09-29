@@ -1012,6 +1012,7 @@ if [ -f "$prod_src" ]; then
   # that will not recover fails closed instead of starting a second server.
   if [[ "$prod_text" == *"ss -xlpH"* && "$prod_text" == *'kill -USR1 "$pid"'* \
         && "$prod_text" == *"recover_orphaned_server; then"* && "$prod_text" == *"exit 9"* \
+        && "$prod_text" == *'timeout 2 tmux list-sessions'* && "$prod_text" == *'4  could not tell'* \
         && "$prod_text" != *"pkill -USR1"* ]]; then
     pass 'orphaned tmux server is recovered by targeted SIGUSR1, else fail closed'
   else

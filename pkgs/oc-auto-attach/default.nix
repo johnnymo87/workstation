@@ -500,23 +500,46 @@ ${builtins.readFile ./canonical-path.sh}
       dir="$(realpath -- "$dir" 2>/dev/null || printf '%s' "$dir")"
       printf '%s/tmux-%s/default\n' "''${dir%/}" "$(id -u)"
     }
-    # Prints pids LISTENING on <path> (one per line, possibly none).
-    # Returns 2 when detection is unavailable on this platform.
+    # socket_listener_pids <path>: print the pids LISTENING on <path>.
+    #   0  printed >=1 pid, and every matching listener had an owner shown
+    #   2  detection unavailable on this platform (no ss: macOS)
+    #   3  no process listens on <path> (genuinely no server)
+    #   4  could not tell: ss failed, or a matching listener had no owner
+    #      info. Ambiguous, so the caller must NOT treat it as "no server".
     socket_listener_pids() {
       command -v ss >/dev/null 2>&1 || return 2
-      ss -xlpH 2>/dev/null | awk -v p="$1" '$5 == p' \
-        | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true
+      local out rows
+      out="$(ss -xlpH 2>/dev/null)" || return 4
+      rows="$(awk -v p="$1" '$5 == p' <<< "$out")"
+      [ -z "$rows" ] && return 3
+      if grep -qv 'pid=[0-9]' <<< "$rows"; then return 4; fi
+      grep -o 'pid=[0-9]*' <<< "$rows" | cut -d= -f2 | sort -u
+    }
+    # Every tmux probe here is bounded: a server whose event loop is stopped
+    # would otherwise hang us (and everyone queued on the create lock).
+    tmux_reachable() {
+      local rc=0
+      timeout 2 tmux list-sessions >/dev/null 2>&1 || rc=$?
+      return "$rc"
     }
     recover_orphaned_server() {
-      tmux list-sessions >/dev/null 2>&1 && return 0
-      local path pids pid n
+      local rc=0 path pids pid n deadline
+      tmux_reachable || rc=$?
+      [ "$rc" -eq 0 ] && return 0
+      if [ "$rc" -eq 124 ]; then
+        log "tmux server is not responding (list-sessions timed out); refusing to start another"
+        return 1
+      fi
       path="$(tmux_socket_path)"
-      pids="$(socket_listener_pids "$path")" || {
-        log "no tmux server reachable at $path (orphan detection unavailable here)"
-        return 0
-      }
+      rc=0
+      pids="$(socket_listener_pids "$path")" || rc=$?
+      case "$rc" in
+        0) ;;
+        2) log "no tmux server reachable at $path (orphan detection unavailable here)"; return 0 ;;
+        3) return 0 ;;
+        *) log "no tmux server reachable at $path and its listener could not be identified; refusing to start another server"; return 1 ;;
+      esac
       n="$(grep -c . <<< "$pids" || true)"
-      [ "$n" -eq 0 ] && return 0
       if [ "$n" -gt 1 ]; then
         log "several processes ($(tr '\n' ' ' <<< "$pids")) listen on $path but none is reachable; refusing to start another tmux server. Recover one with: kill -USR1 <pid>"
         return 1
@@ -531,8 +554,9 @@ ${builtins.readFile ./canonical-path.sh}
       esac
       log "tmux server pid $pid still listens on $path but its socket is unreachable; sending SIGUSR1 to recreate it"
       kill -USR1 "$pid" 2>/dev/null || true
-      for _ in $(seq 1 25); do
-        if [ "$(tmux list-sessions -F '#{pid}' 2>/dev/null | head -n1)" = "$pid" ]; then
+      deadline=$(( SECONDS + 5 ))
+      while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ "$(timeout 1 tmux list-sessions -F '#{pid}' 2>/dev/null | head -n1 || true)" = "$pid" ]; then
           log "recovered orphaned tmux server pid $pid"
           return 0
         fi
@@ -542,9 +566,14 @@ ${builtins.readFile ./canonical-path.sh}
       return 1
     }
 
+    # Fail closed on the lock too: proceeding unlocked is exactly the
+    # concurrent create/recover this lock exists to prevent, and the holder
+    # is bounded (every tmux probe above has a timeout), so a 30s wait
+    # means something is genuinely stuck.
     exec 201>/tmp/oc-auto-attach.create.lock
     if ! flock -w 30 201; then
-      log "warning: could not acquire /tmp/oc-auto-attach.create.lock within 30s; proceeding unlocked"
+      log "could not acquire /tmp/oc-auto-attach.create.lock within 30s; another oc-auto-attach is stuck deciding whether to create a tmux server. Not proceeding."
+      exit 9
     fi
     if ! recover_orphaned_server; then
       exit 9
