@@ -5753,10 +5753,30 @@ EOF
     };
   };
 
-  # Protect sshd from OOM killer — always the last thing to die.
+  # sshd's LISTENER is protected from the OOM killer by sshd itself, not by
+  # systemd. Do NOT add OOMScoreAdjust = "-1000" here (workstation-o5s1.29).
+  #
+  # OpenSSH is built with LINUX_OOM_ADJUST: at startup the listener saves its
+  # inherited oom_score_adj and sets itself to -1000 (platform_pre_listen ->
+  # oom_adjust_setup), and every connection child writes the SAVED value back
+  # before becoming sshd-session (platform_post_fork_child ->
+  # oom_adjust_restore). Setting -1000 in systemd makes the saved value -1000,
+  # so every login shell, the tmux server started from it, and every pane
+  # under that -- attach TUIs, nvim, test runners -- ran at -1000: immune to
+  # both the kernel OOM killer and earlyoom (which skips -1000 outright).
+  # 2026-09-26 snapshot: 44 such processes. It also cost the 2026-08-11
+  # investigation 20,621 "no killable processes" kernel lines.
+  #
+  # Verified 2026-09-29 with a throwaway sshd on 127.0.0.1:2222 (same binary),
+  # control vs change, reading /proc/*/oom_score_adj:
+  #   with OOMScoreAdjust=-1000: listener -1000, sshd-session -1000, shell -1000, tmux pane -1000
+  #   without it:                listener -1000, sshd-session 0,     shell 0,     tmux pane 0
+  # So removing this keeps the lockout guard (the listener) and returns
+  # sessions to the default. If you ever see the LISTENER at 0, the binary
+  # lost LINUX_OOM_ADJUST -- check `strings $(which sshd) | grep oom_adjust`.
+  #
   # CPUWeight > default (100) ensures SSH remains responsive under load.
   systemd.services.sshd.serviceConfig = {
-    OOMScoreAdjust = "-1000";
     CPUWeight = 200;
   };
 
