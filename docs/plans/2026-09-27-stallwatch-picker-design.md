@@ -62,9 +62,14 @@ waits on I/O or races an in-flight callback.
 - Rows keep the read command's order (stable between opens, so cursor
   restore is meaningful); urgency is shown in the row text, not by re-sorting.
 - Zero programs: a notification ("no programs registered"), not an empty picker.
-- Previewer: that program's open items in contract order, each `[kind] text`,
-  marking `new`/`changed` (with `what_changed`) and `stale`, and listing the
-  titles of the sessions each item names.
+- Previewer: ONLY the program's top item (revised 2026-09-29) -- the one the
+  stall-watcher picked (`top_fingerprint`, else `item.top`, else the first
+  item for older snapshots) -- as `[kind] text` with `new`/`changed`/`stale`
+  marks and the titles of its sessions, then `why: <top_reason>` when present,
+  then `+N more open (M new)` (M = other items that are new or changed). This
+  mirrors the Telegram digest's layout. M uses item `status`, so it can differ
+  from the digest's own count, which tracks what was already sent. The other
+  items are reachable per session on Screen 2.
 - Moving the cursor is the "flip between programs".
 - `<CR>` opens Screen 2 for that program.
 - `<C-d>` shows `latest_digest` in a scratch buffer (`nofile`, `nomodifiable`,
@@ -74,7 +79,9 @@ waits on I/O or races an in-flight callback.
 
 ### Screen 2 -- Sessions of one program
 
-- **Flagged view (default):** the sessions named by the program's items.
+- **Flagged view (default):** the sessions named by the program's items,
+  with the session holding the top item sorted first (also first in the All
+  view) so `<CR>` jumps straight to it.
   Rows are **item-driven**: built from `items[].sessions`, then left-joined to
   `oc-session-list` rows by id for state glyph and age. So a flagged session
   still appears when it is archived, automated (lgtm origin -- the automated

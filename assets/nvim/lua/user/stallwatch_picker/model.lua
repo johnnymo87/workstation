@@ -38,6 +38,10 @@ M.READS = {
   "programs[].armed",
   "programs[].enabled",
   "programs[].last_tick_activity",
+  "programs[].top_fingerprint",
+  "programs[].top_reason",
+  "programs[].items[].fingerprint",
+  "programs[].items[].top",
   "programs[].items[].kind",
   "programs[].items[].text",
   "programs[].items[].status",
@@ -154,6 +158,10 @@ end
 --- Screen 1 rows: one per program, in the READ COMMAND'S ORDER (stable
 --- between opens, so cursor restore by position is meaningful). Urgency is
 --- carried in the row text, never by re-sorting.
+---
+--- Each row also carries `top`, the ONE item stall-watch wants the human to
+--- look at (see M.top_item), and `top_reason`, why it was picked (nil when
+--- the pick came from the fallback order).
 function M.program_rows(doc)
   local out = {}
   for _, p in ipairs(list(type(doc) == "table" and doc.programs)) do
@@ -172,10 +180,33 @@ function M.program_rows(doc)
         last_tick_ms = M.iso_ms(p.last_tick_activity),
         items = list(p.items),
         counts = M.counts(p),
+        top = M.top_item(p.items, p.top_fingerprint),
+        top_reason = nonempty(p.top_reason),
       })
     end
   end
   return out
+end
+
+--- The program's top item: the item whose fingerprint is the program's
+--- `top_fingerprint`, else the item marked `top = true`, else -- for
+--- snapshots that predate those additive fields -- the first item in
+--- contract order. nil when there are no items.
+function M.top_item(items, top_fingerprint)
+  local fp = nonempty(top_fingerprint)
+  local first, marked
+  for _, it in ipairs(list(items)) do
+    if type(it) == "table" then
+      if fp and it.fingerprint == fp then
+        return it
+      end
+      first = first or it
+      if not marked and it.top == true then
+        marked = it
+      end
+    end
+  end
+  return marked or first
 end
 
 --- requested-id -> CLI root row, for the left-join.
@@ -258,11 +289,30 @@ function M.flagged_rows(prow, by_id)
           if not vim.tbl_contains(row.items, item) then
             table.insert(row.items, item)
           end
+          if type(prow) == "table" and item == prow.top then
+            row.has_top = true
+          end
         end
       end
     end
   end
-  return out
+  return M.top_first(out)
+end
+
+--- Move the row holding the program's top item to the front, so the
+--- picker's default selection -- and <CR> -- lands on it. The order of the
+--- other rows is untouched.
+function M.top_first(rows)
+  for i, r in ipairs(rows) do
+    if type(r) == "table" and r.has_top == true then
+      if i > 1 then
+        table.remove(rows, i)
+        table.insert(rows, 1, r)
+      end
+      break
+    end
+  end
+  return rows
 end
 
 --- Screen 2 all view: a STABLE PARTITION of the one CLI result.
@@ -309,6 +359,7 @@ function M.all_rows(flagged, cli_rows, tagged_ids)
       table.insert(head, f)
     end
   end
+  M.top_first(head)
   vim.list_extend(head, tail)
   return head
 end

@@ -173,9 +173,11 @@ local function item_lines(lines, item, with_sessions)
   end
 end
 
---- Screen 1 previewer: the program's open items in contract order, each
---- `[kind] text` with new/changed/stale marks and the titles of the sessions
---- it names. Item text is split on newlines (nvim_buf_set_lines rejects them).
+--- Screen 1 previewer: ONLY the program's top item -- its `[kind] text`
+--- with marks, the sessions it names, and `why: <top_reason>` when present --
+--- then one `+N more open (M new)` line, M counting the other items whose
+--- status is new/changed. Mirrors the Telegram digest: the human reads one
+--- ask per program; the rest are a count, reachable per session on Screen 2.
 function M.program_preview_lines(prow)
   local raw_items = type(prow) == "table" and prow.items
   local items = {}
@@ -187,12 +189,29 @@ function M.program_preview_lines(prow)
   if #items == 0 then
     return { "(no open items)" }
   end
+  local top = prow.top
+  if not vim.tbl_contains(items, top) then
+    top = items[1]
+  end
   local lines = {}
-  for i, item in ipairs(items) do
-    if i > 1 then
-      table.insert(lines, "")
+  item_lines(lines, top, true)
+  local why = nonempty(prow.top_reason)
+  if why then
+    table.insert(lines, "why: " .. why)
+  end
+  local more, fresh = 0, 0
+  for _, it in ipairs(items) do
+    if it ~= top then
+      more = more + 1
+      if it.status == "new" or it.status == "changed" then
+        fresh = fresh + 1
+      end
     end
-    item_lines(lines, item, true)
+  end
+  if more > 0 then
+    table.insert(lines, "")
+    table.insert(lines, fresh > 0 and string.format("+%d more open (%d new)", more, fresh)
+      or string.format("+%d more open", more))
   end
   return lines
 end

@@ -78,6 +78,8 @@
     },
     {
       "tag": "beta",
+      "top_fingerprint": "fp-beta-stalled",
+      "top_reason": "Synthetic reason: oldest ask in the program.",
       "armed": false,
       "enabled": false,
       "last_tick_activity": null,
@@ -85,6 +87,7 @@
         {
           "program": "beta",
           "fingerprint": "fp-beta-stalled",
+          "top": true,
           "kind": "stalled",
           "text": "Beta session idle for a while.",
           "status": "new",

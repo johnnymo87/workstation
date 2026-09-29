@@ -120,20 +120,46 @@ end
 
 -- 3. PREVIEWERS.
 do
+  -- Fixture predates top_fingerprint/top: falls back to the first item.
   local lines = spec.program_preview_lines(prows[1])
   local text = table.concat(lines, "\n")
-  check(lines[1] == "[decision] Pick option one or option two for the widget. (new)", "first item line, got: " .. lines[1])
-  check(text:find("    - Fixture A1 (item title)", 1, true) ~= nil, "names the sessions' titles")
-  check(text:find("[blocker] Waiting on a credential for the gadget. (changed: text reworded) (stale)", 1, true) ~= nil,
-    "changed + what_changed + stale marks")
-  check(text:find("[info] A deleted session was mentioned.\n       Second line of the note. (new)", 1, true) ~= nil,
-    "multi-line text split and indented; marks on the last line")
-  check(text:find("    - ses_fixture_gone", 1, true) ~= nil, "empty session title -> id in preview")
+  check(lines[1] == "[decision] Pick option one or option two for the widget. (new)", "fallback top = first item, got: " .. lines[1])
+  check(text:find("    - Fixture A1 (item title)", 1, true) ~= nil, "top item names its sessions")
+  check(not text:find("[blocker]", 1, true) and not text:find("[info]", 1, true), "only the top item is shown")
+  check(not text:find("why:", 1, true), "no top_reason -> no why line")
+  check(lines[#lines] == "+3 more open (3 new)", "more line counts new+changed others, got: " .. lines[#lines])
+  check(lines[#lines - 1] == "", "blank line before the more line")
   for _, l in ipairs(lines) do
     check(not l:find("\n", 1, true), "no preview line contains a newline")
   end
-  local p1, p2 = text:find("[decision]", 1, true), text:find("[info]", 1, true)
-  check(p1 < p2, "items in contract order")
+
+  -- stall-watch's pick wins over contract order; why line shown.
+  local picked = model.program_rows({ programs = { {
+    tag = "gamma", top_fingerprint = "fp-g2", top_reason = "Unblocks\ntwo others",
+    items = {
+      { fingerprint = "fp-g1", kind = "decision", text = "First.", status = "still_open", sessions = {} },
+      { fingerprint = "fp-g2", kind = "info", text = "Picked.", status = "still_open", top = true,
+        sessions = { { id = "ses_fixture_g", title = "G" } } },
+      { fingerprint = "fp-g3", kind = "info", text = "Third.", status = "still_open", sessions = {} },
+    } } } })[1]
+  local pl = spec.program_preview_lines(picked)
+  check(pl[1] == "[info] Picked.", "top_fingerprint item shown first, got: " .. pl[1])
+  check(pl[2] == "    - G", "top item's session listed")
+  check(pl[3] == "why: Unblocks two others", "why line, newlines collapsed, got: " .. tostring(pl[3]))
+  check(pl[#pl] == "+2 more open", "no fresh others -> no (M new), got: " .. pl[#pl])
+  local bl = spec.program_preview_lines(prows[2])
+  check(bl[#bl] == "why: Synthetic reason: oldest ask in the program.", "fixture beta: why line from top_reason, got: " .. bl[#bl])
+  local solo = spec.program_preview_lines({ items = { { kind = "info", text = "Only." } } })
+  check(#solo == 1 and solo[1] == "[info] Only.", "single item -> no more line")
+
+  local s0 = spec.session_preview_lines(flagged[1])
+  local stext = table.concat(s0, "\n")
+  check(stext:find("[blocker] Waiting on a credential for the gadget. (changed: text reworded) (stale)", 1, true) ~= nil,
+    "changed + what_changed + stale marks")
+  local gone_row
+  for _, r in ipairs(flagged) do if r.id == "ses_fixture_gone" then gone_row = r end end
+  check(table.concat(spec.session_preview_lines(gone_row), "\n"):find("[info] A deleted session was mentioned.\n       Second line of the note. (new)", 1, true) ~= nil,
+    "multi-line text split and indented; marks on the last line")
   check(spec.program_preview_lines({ items = {} })[1] == "(no open items)", "empty program preview")
 
   local s = spec.session_preview_lines(flagged[1])
