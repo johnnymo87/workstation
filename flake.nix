@@ -688,6 +688,33 @@
         touch $out
       '';
 
+      # disk-cleanup's opencode.log rotation (section 6, workstation-o5s1.6).
+      # It truncates a file ~16 live serves hold open; the suite pins the
+      # properties that make that safe (same inode, O_APPEND writer lands at
+      # offset 0, with a control proving the hole check can fail). Mutations
+      # checked 2026-09-29: mv-and-recreate fails 2 assertions, skipping the
+      # tail save fails 2.
+      disk-cleanup-logrotate-tests = devboxPkgs.runCommand "disk-cleanup-logrotate-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.python3
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        DISK_CLEANUP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/disk-cleanup".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-disk-cleanup-logrotate.sh 2>&1 | tee "$TMPDIR/dcl.txt"
+        grep -q '^=== 8 passed, 0 failed ===' "$TMPDIR/dcl.txt" || {
+          echo "GATE FAILURE: logrotate suite did not reach its 8/0 tally." >&2
+          exit 1
+        }
+        [ "$(grep -c '^PASS  ' "$TMPDIR/dcl.txt")" = 8 ] || {
+          echo "GATE FAILURE: expected 8 'PASS' lines." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # Same seam and same reason as disk-cleanup-worktree-tests above: the suite
       # would otherwise `nix eval` its own subject, which a build sandbox cannot
       # do. DISK_WATCH_SRC hands it the exact file home-manager deploys, so the
