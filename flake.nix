@@ -1226,7 +1226,7 @@
       git-work-tests = devboxPkgs.runCommand "git-work-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.coreutils
-          devboxPkgs.gnugrep devboxPkgs.gnused
+          devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.sqlite
         ];
         # The built script under test. Also proves the derivation still exposes
         # bin/work, which the suite would otherwise discover only at runtime.

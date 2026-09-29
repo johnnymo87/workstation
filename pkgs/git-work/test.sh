@@ -345,9 +345,12 @@ cd "$fresh_clone"
 "$work_script" --no-fetch prune-dirty-c >/dev/null 2>&1
 echo "dirty" > "$fresh_clone/.worktrees/prune-dirty-c/uncommitted.txt"
 
+# Grace 0 and no session DB: this test is about the merged/dirty contract only;
+# the grace and session guards have their own tests below.
 set +e
 output_stderr="$(mktemp)"
-"$work_script" --prune-merged >"$output_stderr" 2>&1
+WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db \
+  "$work_script" --prune-merged >"$output_stderr" 2>&1
 rc=$?
 set -e
 prune_out="$(cat "$output_stderr")"
@@ -359,6 +362,80 @@ check "--prune-merged KEPT dirty worktree C" "1" "$([ -d "$fresh_clone/.worktree
 # The removed branch should also be gone
 check "--prune-merged deleted branch for A" "0" "$(git -C "$fresh_clone" rev-parse --verify refs/heads/prune-merged-a >/dev/null 2>&1 && echo 1 || echo 0)"
 check "--prune-merged kept branch for B" "1" "$(git -C "$fresh_clone" rev-parse --verify refs/heads/prune-unmerged-b >/dev/null 2>&1 && echo 1 || echo 0)"
+
+# Test 9b: GRACE PERIOD. A fresh worktree with no commits reads as "merged"
+# (its tip IS origin/main). With the default grace it must be KEPT: this is
+# exactly how the nightly reset removed four live sessions' worktrees on
+# 2026-09-29. Past the grace (0 days) the same tree goes.
+cd "$fresh_clone"
+"$work_script" --no-fetch grace-fresh >/dev/null 2>&1
+prune_out="$(WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db "$work_script" --prune-merged 2>&1)"
+check "grace: default grace KEPT fresh merged+clean worktree" "1" "$([ -d "$fresh_clone/.worktrees/grace-fresh" ] && echo 1 || echo 0)"
+check "grace: kept branch too" "1" "$(git -C "$fresh_clone" rev-parse --verify refs/heads/grace-fresh >/dev/null 2>&1 && echo 1 || echo 0)"
+if [[ "$prune_out" == *"grace-fresh (created 0h ago, within 3d grace period)"* ]]; then
+  echo "PASS: grace: keep reason logged"
+else
+  echo "FAIL: grace: keep reason not logged. Got: [$prune_out]"; fail=1
+fi
+WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db "$work_script" --prune-merged >/dev/null 2>&1
+check "grace: past grace, merged+clean worktree REMOVED" "0" "$([ -d "$fresh_clone/.worktrees/grace-fresh" ] && echo 1 || echo 0)"
+
+# Test 9c: age comes from worktree CREATION, not branch commit dates. A fresh
+# branch's commits are trunk's, which can be arbitrarily old; the grace must
+# still hold.
+cd "$fresh_clone"
+GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" \
+  git commit --allow-empty -m "ancient trunk commit" >/dev/null
+git push -q origin main
+"$work_script" --no-fetch grace-oldtrunk >/dev/null 2>&1
+WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db "$work_script" --prune-merged >/dev/null 2>&1
+check "grace: ancient trunk commit does not age a fresh worktree" "1" "$([ -d "$fresh_clone/.worktrees/grace-oldtrunk" ] && echo 1 || echo 0)"
+WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db "$work_script" --prune-merged >/dev/null 2>&1
+
+# Test 9d: invalid grace value fails loudly instead of pruning with a bad cutoff.
+set +e
+bad_out="$(WORK_PRUNE_GRACE_DAYS=three "$work_script" --prune-merged 2>&1)"; rc=$?
+set -e
+check "grace: non-integer WORK_PRUNE_GRACE_DAYS exits non-zero" "1" "$rc"
+
+# Test 9e: LIVE SESSION guard. A session updated recently whose directory is the
+# worktree (or under it) keeps it even past the grace; a stale one does not; an
+# unreadable DB keeps everything (fail safe).
+cd "$fresh_clone"
+sess_db="$tmpdir/opencode.db"
+now_ms=$(( $(date +%s) * 1000 ))
+old_ms=$(( ($(date +%s) - 30 * 86400) * 1000 ))
+"$work_script" --no-fetch sess_live >/dev/null 2>&1
+"$work_script" --no-fetch sess-sub >/dev/null 2>&1
+"$work_script" --no-fetch sess-stale >/dev/null 2>&1
+"$work_script" --no-fetch wild_card >/dev/null 2>&1
+wt_live="$(realpath "$fresh_clone/.worktrees/sess_live")"
+wt_sub="$(realpath "$fresh_clone/.worktrees/sess-sub")"
+wt_stale="$(realpath "$fresh_clone/.worktrees/sess-stale")"
+sqlite3 "$sess_db" "create table session (id text primary key, directory text not null, time_updated integer not null);
+  insert into session values ('ses_live', '$wt_live', $now_ms);
+  insert into session values ('ses_sub', '$wt_sub/pkgs/foo', $now_ms);
+  insert into session values ('ses_stale', '$wt_stale', $old_ms);
+  insert into session values ('ses_wild', '$fresh_clone/.worktrees/wildXcard/sub', $now_ms);"
+prune_out="$(WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB="$sess_db" "$work_script" --prune-merged 2>&1)"
+check "session: recent session's worktree KEPT" "1" "$([ -d "$wt_live" ] && echo 1 || echo 0)"
+check "session: session in a SUBDIR keeps the worktree" "1" "$([ -d "$wt_sub" ] && echo 1 || echo 0)"
+check "session: stale session does not pin the worktree" "0" "$([ -d "$wt_stale" ] && echo 1 || echo 0)"
+# The '_' in wild_card must not act as a LIKE wildcard matching wildXcard/sub.
+check "session: '_' is not a wildcard (wild_card removed)" "0" "$([ -d "$fresh_clone/.worktrees/wild_card" ] && echo 1 || echo 0)"
+if [[ "$prune_out" == *"sess_live (opencode session ses_live lives here)"* ]]; then
+  echo "PASS: session: keep reason names the session"
+else
+  echo "FAIL: session: keep reason missing. Got: [$prune_out]"; fail=1
+fi
+echo "not a database" > "$tmpdir/broken.db"
+prune_out="$(WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB="$tmpdir/broken.db" "$work_script" --prune-merged 2>&1)"
+check "session: unreadable DB keeps the worktree (fail safe)" "1" "$([ -d "$wt_live" ] && echo 1 || echo 0)"
+if [[ "$prune_out" == *"session probe failed"* ]]; then
+  echo "PASS: session: probe failure logged"
+else
+  echo "FAIL: session: probe failure not logged. Got: [$prune_out]"; fail=1
+fi
 
 # Test 10: slug path-traversal guard (the worktree dir name must stay under
 # .worktrees/). A '..' slug must be rejected loudly and create nothing.

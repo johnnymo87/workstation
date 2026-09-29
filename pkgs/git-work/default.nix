@@ -6,6 +6,7 @@ pkgs.writeShellApplication {
     git
     coreutils
     gnused
+    sqlite
   ];
   text = ''
     # work - a repo-agnostic git-worktree helper
@@ -48,7 +49,10 @@ Options:
               Sweep .worktrees/*: remove every worktree whose branch is fully
               merged into origin/<trunk> AND whose working tree is clean, then
               delete its branch. Never touches dirty or unmerged worktrees, the
-              primary root, or the current worktree. Ignores <slug>.
+              primary root, the current worktree, a worktree created within
+              the grace period (WORK_PRUNE_GRACE_DAYS, default 3), or one that
+              an opencode session updated within WORK_PRUNE_SESSION_ACTIVE_DAYS
+              (default 7) has as its directory. Takes no <slug>.
   -h, --help  Show this help message.
 
 Notes:
@@ -124,6 +128,70 @@ EOF
       return 0
     }
 
+    # ---- --prune-merged guards ------------------------------------------------
+    #
+    # "Merged" is ambiguous for a branch with no commits of its own: `work`
+    # branches it off origin/<trunk>, so its tip is a trunk ancestor from the
+    # moment it exists, and a clean tree is the normal state of a session that
+    # is still reading code. The nightly reset (03:01, 2026-09-29) removed four
+    # such worktrees out from under live opencode sessions, all created the
+    # previous day. A session whose directory vanishes does not error; it
+    # answers every later prompt with nothing (reviving-worktree-orphaned-
+    # sessions skill). Two guards close that:
+    #
+    #   GRACE PERIOD: nothing created within PRUNE_GRACE_DAYS is eligible.
+    #   LIVE SESSION: nothing that a session updated within
+    #     PRUNE_SESSION_ACTIVE_DAYS has as its directory is eligible
+    #     (mirrors disk-cleanup's GUARD 1b).
+    #
+    # Both fail safe: a probe that cannot answer keeps the worktree. A stale
+    # worktree costs disk until tomorrow's sweep; a deleted one costs a session.
+    PRUNE_GRACE_DAYS="''${WORK_PRUNE_GRACE_DAYS:-3}"
+    PRUNE_SESSION_ACTIVE_DAYS="''${WORK_PRUNE_SESSION_ACTIVE_DAYS:-7}"
+    PRUNE_SESSION_DB="''${WORK_PRUNE_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
+
+    # Seconds since the worktree was CREATED. Measured from the ctime of the
+    # `gitdir` file in its admin dir (<common>/worktrees/<name>/gitdir), which
+    # `git worktree add` writes once and only `git worktree move`/`repair`
+    # rewrite (a moved tree restarting its grace is the safe direction). NOT
+    # the admin directory itself, whose ctime changes on every index write,
+    # and NOT the branch's commit dates, which for a fresh branch are trunk's.
+    # Fails (non-zero) if the file cannot be found or stat'ed.
+    worktree_age_seconds() {
+      local wt="$1" admin created now
+      admin="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+      [ -f "$admin/gitdir" ] || return 1
+      created="$(stat -c %Z "$admin/gitdir" 2>/dev/null)" || return 1
+      now="$(date +%s)"
+      printf '%s\n' "$(( now > created ? now - created : 0 ))"
+    }
+
+    # Is <wt> (or a directory under it) the directory of an opencode session
+    # updated within PRUNE_SESSION_ACTIVE_DAYS? An opencode session's working
+    # directory is a row in opencode.db, not any process's cwd, so /proc cannot
+    # answer this. 0 = yes (prints the session id), 1 = no, 2 = probe failed
+    # (prints the error). A MISSING db means no opencode here: answers no.
+    session_owner() {
+      local wt="$1" cutoff_ms sql_path out
+      [ -f "$PRUNE_SESSION_DB" ] || return 1
+      cutoff_ms=$(( ($(date +%s) - PRUNE_SESSION_ACTIVE_DAYS * 86400) * 1000 ))
+      sql_path="''${wt//\'/\'\'}"
+      # Read-only: a live serve is writing this database. substr() rather than
+      # LIKE because worktree names are full of '_', a LIKE wildcard.
+      if ! out="$(sqlite3 -readonly "$PRUNE_SESSION_DB" \
+        "select id from session
+           where (directory = '$sql_path'
+                  or substr(directory, 1, length('$sql_path') + 1) = '$sql_path' || '/')
+             and time_updated >= $cutoff_ms
+           order by time_updated desc limit 1;" 2>&1)"; then
+        printf '%s\n' "$out" | head -1
+        return 2
+      fi
+      [ -n "$out" ] || return 1
+      printf '%s\n' "$out"
+      return 0
+    }
+
     # --prune-merged: remove every worktree under <root>/.worktrees/ whose branch
     # is fully merged into origin/<trunk> and whose working tree is clean, then
     # delete that branch. This is the pruning OWNER named in the Phase 3.5 design
@@ -132,10 +200,16 @@ EOF
     #   - the primary root or the current worktree
     #   - a worktree with uncommitted/untracked changes (status --porcelain)
     #   - a branch with commits not yet in origin/<trunk> (not an ancestor)
-    # so an active session's worktree (which has unmerged work) is protected, and
-    # we don't need a live-session probe here.
+    #   - a worktree created within PRUNE_GRACE_DAYS, or one a recent opencode
+    #     session has as its directory (see the guards above). Unmerged-or-dirty
+    #     alone did NOT protect active sessions: a fresh branch with no commits
+    #     reads as merged.
     prune_merged() {
       local no_fetch="''${1:-0}" trunk_override="''${2:-}"
+      local v
+      for v in "$PRUNE_GRACE_DAYS" "$PRUNE_SESSION_ACTIVE_DAYS"; do
+        [[ "$v" =~ ^[0-9]+$ ]] || die "WORK_PRUNE_GRACE_DAYS / WORK_PRUNE_SESSION_ACTIVE_DAYS must be non-negative integers (got '$v')"
+      done
       local root
       root="$(resolve_primary_root "$PWD")"
 
@@ -202,6 +276,25 @@ EOF
       # Never remove the current worktree or a detached one.
       [ "$real_wt" != "$self" ] || { log "prune-merged: keep $wt_path (current worktree)"; return 1; }
       [ -n "$wt_branch" ] || { log "prune-merged: keep $wt_path (detached HEAD)"; return 1; }
+      # Grace period: never remove a worktree created less than PRUNE_GRACE_DAYS
+      # ago. See worktree_age_seconds for why "merged" alone is not enough.
+      local age
+      if ! age="$(worktree_age_seconds "$real_wt")"; then
+        log "prune-merged: keep $wt_path (could not determine worktree age)"
+        return 1
+      fi
+      if [ "$age" -lt $((PRUNE_GRACE_DAYS * 86400)) ]; then
+        log "prune-merged: keep $wt_path (created $((age / 3600))h ago, within ''${PRUNE_GRACE_DAYS}d grace period)"
+        return 1
+      fi
+      # Never remove a worktree a recent opencode session has as its directory.
+      local owner="" owner_rc=0
+      owner="$(session_owner "$real_wt")" || owner_rc=$?
+      case "$owner_rc" in
+        0) log "prune-merged: keep $wt_path (opencode session $owner lives here)"; return 1 ;;
+        1) : ;;
+        *) log "prune-merged: keep $wt_path (session probe failed: $owner)"; return 1 ;;
+      esac
       # Never remove a dirty worktree.
       if [ -n "$(git -C "$real_wt" status --porcelain 2>/dev/null)" ]; then
         log "prune-merged: keep $wt_path (uncommitted changes)"
