@@ -243,6 +243,9 @@ do
   check(fresh.default_selection_index == nil and fresh.selection_strategy == nil, "first open: no forced selection")
   check(spec.programs_picker_opts(prows, "no-such").default_selection_index == nil, "unknown tag -> no index")
   check(spec.sessions_picker_opts().sorting_strategy == "descending", "Screen 2 uses the same ordering controls")
+  check(spec.programs_picker_opts(prows, nil).wrap_results == true, "Screen 1 wraps result rows")
+  check(spec.sessions_picker_opts().wrap_results == true, "Screen 2 wraps result rows")
+  check(require("user.session_switcher.spec").picker_opts().wrap_results == nil, "switcher opts untouched")
 
   -- Hardening: nil/vim.NIL options handling.
   check(spec.programs_picker_opts(nil, nil).sorting_strategy == "descending", "nil prows picker opts")

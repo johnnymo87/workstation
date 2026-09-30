@@ -291,8 +291,17 @@ end
 --- is empty. Under the default "reset" telescope re-applies the index on
 --- every keystroke, pinning the cursor to a row position a filter has
 --- already emptied.
-function M.programs_picker_opts(prows, select_tag)
+--- Both screens word-wrap result rows (telescope's `wrap_results`): program
+--- and session rows carry counts, titles and directories that routinely run
+--- past a half-width results pane. <leader>fs is not changed.
+local function base_opts()
   local opts = ss_spec.picker_opts()
+  opts.wrap_results = true
+  return opts
+end
+
+function M.programs_picker_opts(prows, select_tag)
+  local opts = base_opts()
   local idx = M.selection_index(prows, select_tag)
   if idx then
     opts.default_selection_index = idx
@@ -302,7 +311,7 @@ function M.programs_picker_opts(prows, select_tag)
 end
 
 function M.sessions_picker_opts()
-  return ss_spec.picker_opts()
+  return base_opts()
 end
 
 return M
