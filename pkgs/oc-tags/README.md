@@ -21,6 +21,22 @@ oc-tags serve                   # then, from the Mac, just open
                                 # cloudbox-chart-tunnel LaunchAgent connects on demand
 ```
 
+### Goose spend source
+
+In addition to opencode sessions, `oc-tags` reads Goose sessions from `~/.local/share/goose/sessions/sessions.db` (override with `--goose-db`). If the database does not exist or is unreadable, it is silently skipped.
+
+- **Ledger cost and pricing**: Spend is read from `usage_ledger`. When cost is recorded in the ledger, that cost is used. When cost is null, it is calculated from model rates using cache-adjusted token counts (in goose, `input_tokens` includes cache read and write tokens; uncached input is `input - cache_read - cache_write`).
+- **Session IDs**: Goose sessions are identified by `goose:<id>`. Child sessions roll up to their root session via `parent_session_id`.
+- **Tag resolution**: Explicit session tags in `tags.db` take precedence. Untagged roots fall back to `auto:goose/<slug>`, where slug is the recipe title (from `recipe_json`), session name, or session type.
+- **Bulk tagging by directory**:
+
+```bash
+oc-tags set alpha-runs --goose-dir /path/to/project
+oc-tags set alpha-runs --goose-dir /path/to/dir1 --goose-dir /path/to/dir2 --since 1788874200000
+```
+
+`--goose-dir` performs a one-shot write to `tags.db` for all matching goose sessions whose working directory matches (path-normalised) and whose `created_at` timestamp is at or after `--since` (if provided). It is a one-shot operation that writes session tags, not a stored directory rule.
+
 ### Directory rules (removed)
 
 Directory rules (`dir_tag`, `oc-tags set --dir`) were removed; precedence is session tag > `auto:`. If `oc-tags` warns about retired rules in `dir_tag`, convert each matching session to an explicit `oc-tags set <tag> <session>` after snapshotting `tags.db`, then delete the rows:
