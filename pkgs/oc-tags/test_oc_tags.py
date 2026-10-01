@@ -2319,6 +2319,65 @@ class TestGoosePricingAndRates(unittest.TestCase):
         self.assertEqual(cost, 0.0)
         self.assertTrue(unpriced)
 
+    def test_dated_gemini_rates(self):
+        # Through 2026-12-31: introductory rate 0.75 / 3.75
+        rate_2026 = oc_tags.goose_rate_for("gemini-3.6-flash", day="2026-09-08")
+        self.assertIsNotNone(rate_2026)
+        self.assertEqual(rate_2026["input"], 0.75)
+        self.assertEqual(rate_2026["output"], 3.75)
+        self.assertEqual(rate_2026["cache_read"], 0.075)
+
+        # From 2027-01-01: standard rate 1.50 / 7.50
+        rate_2027 = oc_tags.goose_rate_for("gemini-3.6-flash", day="2027-01-01")
+        self.assertIsNotNone(rate_2027)
+        self.assertEqual(rate_2027["input"], 1.50)
+        self.assertEqual(rate_2027["output"], 7.50)
+        self.assertEqual(rate_2027["cache_read"], 0.15)
+
+
+class TestGooseRateDrift(unittest.TestCase):
+    """Assert GOOSE_MODEL_RATES stays in sync with pkgs/oc-cost/oc_cost.py."""
+
+    def setUp(self):
+        import importlib.util
+        oc_cost_path = Path(__file__).resolve().parent.parent / "oc-cost" / "oc_cost.py"
+        spec = importlib.util.spec_from_file_location("oc_cost", str(oc_cost_path))
+        self.oc_cost = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.oc_cost)
+
+    def test_every_goose_model_matches_oc_cost(self):
+        dates = ["2026-09-08", "2027-01-02"]
+        for model in oc_tags.GOOSE_MODEL_RATES:
+            for d in dates:
+                goose_rate = oc_tags.goose_rate_for(model, day=d)
+                self.assertIsNotNone(goose_rate, f"No goose rate for {model} on {d}")
+
+                # Match in oc-cost under google-vertex, google-vertex-anthropic, or anthropic
+                if ("google-vertex", model) in self.oc_cost.RATES:
+                    cost_rate = self.oc_cost.rate_for("google-vertex", model, day=d)
+                elif ("google-vertex-anthropic", model) in self.oc_cost.RATES:
+                    cost_rate = self.oc_cost.rate_for("google-vertex-anthropic", model, day=d)
+                else:
+                    cost_rate = self.oc_cost.rate_for("anthropic", model, day=d)
+                self.assertIsNotNone(cost_rate, f"oc-cost has no rate for {model} on {d}")
+
+                self.assertEqual(
+                    goose_rate["input"], cost_rate["input"],
+                    f"input rate mismatch for {model} on {d}: {goose_rate['input']} vs {cost_rate['input']}"
+                )
+                self.assertEqual(
+                    goose_rate["output"], cost_rate["output"],
+                    f"output rate mismatch for {model} on {d}: {goose_rate['output']} vs {cost_rate['output']}"
+                )
+                self.assertEqual(
+                    goose_rate["cache_read"], cost_rate["cache_read"],
+                    f"cache_read rate mismatch for {model} on {d}: {goose_rate['cache_read']} vs {cost_rate['cache_read']}"
+                )
+                self.assertEqual(
+                    goose_rate["cache_write"], cost_rate.get("cache_write", 0),
+                    f"cache_write rate mismatch for {model} on {d}: {goose_rate['cache_write']} vs {cost_rate.get('cache_write', 0)}"
+                )
+
 
 class TestGooseSlug(unittest.TestCase):
     def test_slug_from_recipe_title(self):
@@ -2433,6 +2492,13 @@ def _fixture_goose_db(path: str) -> None:
         "INSERT INTO usage_ledger (session_id, created_timestamp, model, input_tokens, output_tokens, cost) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         ("root_2", now_s - 30 * 86400, "claude-opus-5-5", 5000, 2000, 99.0),
+    )
+
+    # unreferenced session (no usage ledger rows)
+    conn.execute(
+        "INSERT INTO sessions (id, name, session_type, working_dir, created_at, provider_name, recipe_json, parent_session_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("unref_s", "Unreferenced Session", "user", "/home/dev/projects/unreferenced", "2026-09-08 13:30:00", "gcp_vertex_ai", None, None),
     )
     conn.commit()
     conn.close()
@@ -2604,6 +2670,21 @@ class TestGooseAggregate(unittest.TestCase):
         self.assertEqual(meta["title"], "Alpha Run")
         self.assertEqual(meta["directory"], "/home/dev/projects/alpha")
         self.assertEqual(meta["source"], "auto")
+
+    def test_aggregate_restricts_sessions_to_referenced_in_window(self):
+        since_ms = FIXTURE_NOW_MS - 86400 * 1000
+        until_ms = FIXTURE_NOW_MS + 86400 * 1000
+        agg = oc_tags.aggregate(
+            self.empty_opencode_db,
+            since_ms=since_ms,
+            until_ms=until_ms,
+            bucket="day",
+            session_tags={},
+            goose_db_path=self.goose_db,
+            now_ms=FIXTURE_NOW_MS,
+        )
+        # unref_s has no usage ledger rows in the window and should not be loaded into root_meta
+        self.assertNotIn("goose:unref_s", agg.root_meta)
 
 
 class TestGooseCliCommands(unittest.TestCase):
@@ -2794,6 +2875,143 @@ class TestGooseCliCommands(unittest.TestCase):
         self.assertIn("goose:root_2", out)
         self.assertIn("Beta Task", out)
         self.assertIn("/home/dev/projects/beta", out)
+
+
+class TestGooseFailureHandling(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.tags_db = os.path.join(self.td.name, "tags.db")
+        self.opencode_db = os.path.join(self.td.name, "opencode.db")
+        self.bad_goose_db = os.path.join(self.td.name, "bad_goose.db")
+        self.missing_goose_db = os.path.join(self.td.name, "missing_goose.db")
+
+        # Create corrupted / invalid schema sqlite file: table usage_ledger is missing
+        conn = sqlite3.connect(self.bad_goose_db)
+        conn.execute("CREATE TABLE wrong_table (id INTEGER PRIMARY KEY);")
+        conn.commit()
+        conn.close()
+
+        # Valid empty opencode db
+        conn2 = sqlite3.connect(self.opencode_db)
+        conn2.executescript(
+            """
+            CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+            """
+        )
+        conn2.commit()
+        conn2.close()
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_corrupted_goose_db_records_warning_in_aggregate(self):
+        agg = oc_tags.aggregate(
+            self.opencode_db,
+            since_ms=FIXTURE_NOW_MS - 1000,
+            until_ms=FIXTURE_NOW_MS + 1000,
+            bucket="day",
+            session_tags={},
+            goose_db_path=self.bad_goose_db,
+            now_ms=FIXTURE_NOW_MS,
+        )
+        self.assertTrue(any("goose usage not counted:" in w for w in agg.warnings))
+
+    def test_corrupted_goose_db_emits_warning_in_report_and_top(self):
+        err_rep = io.StringIO()
+        out_rep = io.StringIO()
+        with contextlib.redirect_stderr(err_rep), contextlib.redirect_stdout(out_rep):
+            rc = oc_tags.main([
+                "report",
+                "--days", "2",
+                "--tags-db", self.tags_db,
+                "--goose-db", self.bad_goose_db,
+                "--db", self.opencode_db,
+            ])
+        self.assertEqual(rc, 0)
+        self.assertIn("goose usage not counted:", err_rep.getvalue())
+
+        err_top = io.StringIO()
+        out_top = io.StringIO()
+        with contextlib.redirect_stderr(err_top), contextlib.redirect_stdout(out_top):
+            rc2 = oc_tags.main([
+                "top",
+                "--days", "2",
+                "--tags-db", self.tags_db,
+                "--goose-db", self.bad_goose_db,
+                "--db", self.opencode_db,
+            ])
+        self.assertEqual(rc2, 0)
+        self.assertIn("goose usage not counted:", err_top.getvalue())
+
+    def test_corrupted_goose_db_renders_warning_in_svg_footer(self):
+        agg = oc_tags.load_aggregate(
+            db_path=self.opencode_db,
+            tags_db=self.tags_db,
+            goose_db=self.bad_goose_db,
+            days=2,
+            now_ms=FIXTURE_NOW_MS,
+        )
+        # Add a dummy bucket and series so SVG actually renders instead of "No data in window"
+        agg.buckets = ["2026-09-08"]
+        agg.totals = {"sample": 10.0}
+        agg.series = {"sample": {"2026-09-08": 10.0}}
+        svg = oc_tags.render_svg(agg, {})
+        self.assertIn("goose usage not counted:", svg)
+
+    def test_set_goose_dir_corrupted_db_fails_nonzero(self):
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            rc = oc_tags.main([
+                "set", "alpha-runs",
+                "--goose-dir", "/home/dev/projects/alpha",
+                "--tags-db", self.tags_db,
+                "--goose-db", self.bad_goose_db,
+                "--db", self.opencode_db,
+            ])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("Error:", err.getvalue())
+
+    def test_missing_goose_db_stays_completely_silent(self):
+        err_rep = io.StringIO()
+        out_rep = io.StringIO()
+        with contextlib.redirect_stderr(err_rep), contextlib.redirect_stdout(out_rep):
+            agg = oc_tags.aggregate(
+                self.opencode_db,
+                since_ms=FIXTURE_NOW_MS - 1000,
+                until_ms=FIXTURE_NOW_MS + 1000,
+                bucket="day",
+                session_tags={},
+                goose_db_path=self.missing_goose_db,
+                now_ms=FIXTURE_NOW_MS,
+            )
+            self.assertEqual(len(agg.warnings), 0)
+
+            rc = oc_tags.main([
+                "report",
+                "--days", "2",
+                "--tags-db", self.tags_db,
+                "--goose-db", self.missing_goose_db,
+                "--db", self.opencode_db,
+            ])
+            self.assertEqual(rc, 0)
+        self.assertEqual(err_rep.getvalue(), "")
+
+        # set --goose-dir with missing goose db exits 0 and prints tagged 0
+        buf = io.StringIO()
+        err_set = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err_set):
+            rc_set = oc_tags.main([
+                "set", "alpha-runs",
+                "--goose-dir", "/home/dev/projects/alpha",
+                "--tags-db", self.tags_db,
+                "--goose-db", self.missing_goose_db,
+                "--db", self.opencode_db,
+            ])
+        self.assertEqual(rc_set, 0)
+        self.assertEqual(buf.getvalue().strip(), "tagged 0 goose session(s) as alpha-runs")
+        self.assertEqual(err_set.getvalue(), "")
 
 
 # Without this guard, `python3 test_oc_tags.py` imports the module, defines
