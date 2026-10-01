@@ -1150,8 +1150,8 @@
 
         # The count is PINNED, following checks.oc-tags-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 95 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 95 tests'. If you added or removed" >&2
+        grep -q '^Ran 96 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 96 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

@@ -2674,7 +2674,18 @@ class TestCLI(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr), \
                 mock.patch("sys.stdin", io.StringIO("y\n")), \
-                mock.patch.object(oc_revive, "get_git_common_dir", self._boom):
+                mock.patch.object(oc_revive, "apply_revive", self._boom):
+            rc = oc_revive.main([sid])
+        self.assertEqual(rc, 1)
+        self.assertIn("Plan for session", stdout.getvalue())  # the plan ran; apply raised
+        self.assertIn("boom from git", stderr.getvalue())
+
+    def test_cli_interactive_plan_stage_called_process_error_is_reported_not_raised(self):
+        sid = "ses_cli_cpe_ip"
+        self._add_session(sid, os.path.join(self.worktrees_dir, "cli-cpe-ip"))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr), \
+                mock.patch.object(oc_revive, "plan_revive", self._boom):
             rc = oc_revive.main([sid])
         self.assertEqual(rc, 1)
         self.assertIn("boom from git", stderr.getvalue())
