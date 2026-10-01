@@ -3147,6 +3147,9 @@ do
     { "repo relative", function(p) p.repo = "projects/x"; p.candidates[1].path = "projects/x/.worktrees/a" end },
     { "path outside .worktrees", function(p) p.candidates[1].path = "/tmp/evil" end },
     { "path in another repo's .worktrees", function(p) p.candidates[1].path = "/home/dev/projects/mono/.worktrees/x" end },
+    -- Longer than the prefix and slash-free past it, so ONLY the prefix check
+    -- can reject it (the two cases above are also caught by the leaf checks).
+    { "long path outside the repo", function(p) p.candidates[1].path = "/tmp/" .. string.rep("a", 100) end },
     { "path nested below .worktrees", function(p) p.candidates[1].path = MERGED_DEAD:gsub("cops%-6757%-step3$", "") .. "a/b" end },
     { "path is the .worktrees dir itself", function(p) p.candidates[1].path = "/home/dev/projects/culinary-operations-server/.worktrees/" end },
     { "path leaf ..", function(p) p.candidates[1].path = "/home/dev/projects/culinary-operations-server/.worktrees/.." end },
@@ -3177,7 +3180,7 @@ do
     check(ok and r == nil, "offers rejects: " .. c[1])
     n = n + 1
   end
-  check(n == #cases and n == 26, "all 26 revivable rejection cases ran")
+  check(n == #cases and n == 27, "all 27 revivable rejection cases ran")
 
   local bcases = {
     { "resume absent", function(p) p.resume = nil end },
