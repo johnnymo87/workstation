@@ -20,6 +20,7 @@ import http.server
 import json
 import os
 import posixpath
+import re
 import sqlite3
 import sys
 import time
@@ -53,6 +54,85 @@ def auto_key(directory: str | None) -> str:
         return f"auto:{posixpath.basename(head) or (head.strip('/') or 'root')}".lower()
     base = posixpath.basename(d) or (d.strip("/") or "root")
     return f"auto:{base}".lower()
+
+
+def slugify(text: str) -> str:
+    """Slugify text to lower-case hyphen-separated alphanumeric + ._"""
+    s = (text or "").strip().lower()
+    s = re.sub(r"[^\w.-]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s
+
+
+def goose_slug(
+    recipe_json: str | None = None,
+    name: str | None = None,
+    session_type: str | None = None,
+    recipe_title: str | None = None,
+) -> str:
+    """Derive auto tag slug for a goose root session:
+    recipe title (slugified) else session name (slugified) else session_type (slugified) else 'session'.
+    """
+    if recipe_title and isinstance(recipe_title, str):
+        s = slugify(recipe_title)
+        if s:
+            return s
+    if recipe_json and isinstance(recipe_json, str):
+        s_raw = recipe_json.strip()
+        if s_raw.startswith("{"):
+            try:
+                data = json.loads(s_raw)
+                if isinstance(data, dict):
+                    title = data.get("title")
+                    if title and isinstance(title, str):
+                        s = slugify(title)
+                        if s:
+                            return s
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+    if name:
+        s = slugify(name)
+        if s:
+            return s
+    if session_type:
+        s = slugify(session_type)
+        if s:
+            return s
+    return "session"
+
+
+def goose_auto_key(
+    recipe_json: str | None = None,
+    name: str | None = None,
+    session_type: str | None = None,
+    recipe_title: str | None = None,
+) -> str:
+    return f"auto:goose/{goose_slug(recipe_json, name, session_type, recipe_title=recipe_title)}"
+
+
+def _parse_goose_created_at_ms(val: str | int | float | None) -> int | None:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return int(val if val > 1e11 else val * 1000)
+    if isinstance(val, str):
+        val = val.strip()
+        if not val:
+            return None
+        try:
+            num = float(val)
+            return int(num if num > 1e11 else num * 1000)
+        except ValueError:
+            pass
+        try:
+            dt = datetime.datetime.fromisoformat(val.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            pass
+    return None
+
 
 
 def root_of(session_id: str, parents: dict[str, str | None]) -> str:
@@ -333,6 +413,98 @@ def enumerate_buckets(since_ms: int, until_ms: int, size: str, through_ms: int) 
 
 
 DEFAULT_OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
+DEFAULT_GOOSE_DB = os.path.expanduser("~/.local/share/goose/sessions/sessions.db")
+
+# Rate table for pricing uncosted goose usage_ledger rows ($ per million tokens).
+# Source of truth: pkgs/oc-cost/oc_cost.py RATES.
+GEMINI_FLASH_PHASES: list[dict[str, float | str]] = [
+    {"from": "0001-01-01", "input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0},
+    {"from": "2027-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 0.0},
+]
+
+GOOSE_MODEL_RATES: dict[str, object] = {
+    # Anthropic Claude
+    "claude-opus-5-5":   {"input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 5.0},
+    "claude-opus-5":     {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-7":   {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-8":   {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-6":   {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "cache_read": 0.20, "cache_write": 2.5},
+    "claude-sonnet-5":   {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-fable-5":    {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.5},
+    # Google Gemini
+    "gemini-3.5-flash":  {"input": 1.5, "output": 9.0, "cache_read": 0.15, "cache_write": 1.5},
+    "gemini-3.6-flash":  GEMINI_FLASH_PHASES,
+    "gemini-3.7-flash":  GEMINI_FLASH_PHASES,
+    "gemini-3.8-flash":  GEMINI_FLASH_PHASES,
+}
+
+
+def goose_rate_for(model: str | None, day: str | None = None) -> dict[str, float] | None:
+    if not model:
+        return None
+    base = model.split("@", 1)[0]
+    entry = None
+    if base in GOOSE_MODEL_RATES:
+        entry = GOOSE_MODEL_RATES[base]
+    else:
+        best: str | None = None
+        for key in GOOSE_MODEL_RATES:
+            if base.startswith(key):
+                if best is None or len(key) > len(best):
+                    best = key
+        if best:
+            entry = GOOSE_MODEL_RATES[best]
+    if entry is None:
+        return None
+    if isinstance(entry, list):
+        target = day or datetime.date.today().isoformat()
+        cur = entry[0]
+        for phase in entry:
+            if phase.get("from", "") <= target:
+                cur = phase
+            else:
+                break
+        return cur
+    return entry
+
+
+def compute_goose_cost(
+    model: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    ledger_cost: float | None,
+    day: str | None = None,
+) -> tuple[float, bool]:
+    """Returns (cost, is_unpriced).
+
+    If ledger_cost is present (not None), it is used directly.
+    Otherwise, computes cost using rate table and goose cache semantics:
+    goose input_tokens includes cache_read and cache_write, so
+    uncached_input = max(0, input_tokens - cache_read - cache_write).
+    If model has no known rate, returns (0.0, True).
+    """
+    if ledger_cost is not None:
+        return float(ledger_cost), False
+    rate = goose_rate_for(model, day=day)
+    if rate is None:
+        return 0.0, True
+    cread = cache_read_tokens or 0
+    cwrite = cache_write_tokens or 0
+    inp = input_tokens or 0
+    uncached_input = max(0, inp - cread - cwrite)
+    out = output_tokens or 0
+    cost = (
+        uncached_input * rate["input"]
+        + out * rate["output"]
+        + cread * rate["cache_read"]
+        + cwrite * rate["cache_write"]
+    ) / 1_000_000.0
+    return cost, False
+
 
 # Providers whose spend cfp actually meters. BOTH of the two cfp oracles --
 # the coverage/drift footer and the $195 cap-hit headline -- divide by, or
@@ -385,6 +557,7 @@ class Aggregate:
     # provider), while this is the only thing comparable to cfp's
     # notionalVertexCost, which covers Claude alone. See CLAUDE_PROVIDERS.
     claude_day: dict[str, float] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -405,41 +578,104 @@ def aggregate(
     bucket: str,
     session_tags: dict[str, str],
     now_ms: int | None = None,
+    goose_db_path: str | None = None,
 ) -> Aggregate:
-    conn = connect_ro(db_path)
-    conn.execute("BEGIN")
-    try:
-        s_rows = conn.execute("SELECT id, parent_id, directory, title FROM session").fetchall()
-        parents = {r[0]: r[1] for r in s_rows}
-        dirs = {r[0]: r[2] for r in s_rows}
-        titles = {r[0]: r[3] for r in s_rows}
-
-        rows = conn.execute(
-            """
-            SELECT session_id,
-                   time_created,
-                   json_extract(data, '$.cost'),
-                   json_extract(data, '$.modelID'),
-                   json_extract(data, '$.providerID'),
-                   json_extract(data, '$.tokens.total'),
-                   json_extract(data, '$.tokens.input'),
-                   json_extract(data, '$.tokens.output'),
-                   json_extract(data, '$.tokens.cache.read'),
-                   json_extract(data, '$.tokens.cache.write')
-              FROM message
-             WHERE time_created >= ? AND time_created < ?
-               AND json_extract(data, '$.role') = 'assistant'
-             ORDER BY time_created ASC
-            """,
-            (since_ms, until_ms),
-        ).fetchall()
-    finally:
-        try:
-            conn.rollback()
-        finally:
-            conn.close()
-
     agg = Aggregate()
+    rows = []
+    parents: dict[str, str | None] = {}
+    dirs: dict[str, str | None] = {}
+    titles: dict[str, str | None] = {}
+
+    if os.path.exists(db_path):
+        conn = connect_ro(db_path)
+        conn.execute("BEGIN")
+        try:
+            s_rows = conn.execute("SELECT id, parent_id, directory, title FROM session").fetchall()
+            parents = {r[0]: r[1] for r in s_rows}
+            dirs = {r[0]: r[2] for r in s_rows}
+            titles = {r[0]: r[3] for r in s_rows}
+
+            rows = conn.execute(
+                """
+                SELECT session_id,
+                       time_created,
+                       json_extract(data, '$.cost'),
+                       json_extract(data, '$.modelID'),
+                       json_extract(data, '$.providerID'),
+                       json_extract(data, '$.tokens.total'),
+                       json_extract(data, '$.tokens.input'),
+                       json_extract(data, '$.tokens.output'),
+                       json_extract(data, '$.tokens.cache.read'),
+                       json_extract(data, '$.tokens.cache.write')
+                  FROM message
+                 WHERE time_created >= ? AND time_created < ?
+                   AND json_extract(data, '$.role') = 'assistant'
+                 ORDER BY time_created ASC
+                """,
+                (since_ms, until_ms),
+            ).fetchall()
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+
+    g_s_rows = []
+    g_ledger_rows = []
+    if goose_db_path and os.path.exists(goose_db_path):
+        try:
+            g_conn = connect_ro(goose_db_path)
+            g_conn.execute("BEGIN")
+            try:
+                since_s = since_ms // 1000
+                until_s = (until_ms + 999) // 1000
+                g_ledger_rows = g_conn.execute(
+                    """
+                    SELECT session_id,
+                           created_timestamp,
+                           model,
+                           input_tokens,
+                           output_tokens,
+                           total_tokens,
+                           cache_read_tokens,
+                           cache_write_tokens,
+                           cost,
+                           cost_source
+                      FROM usage_ledger
+                     WHERE created_timestamp >= ? AND created_timestamp < ?
+                     ORDER BY created_timestamp ASC
+                    """,
+                    (since_s, until_s),
+                ).fetchall()
+
+                if g_ledger_rows:
+                    g_s_rows = g_conn.execute(
+                        """
+                        WITH RECURSIVE needed_sessions(id) AS (
+                            SELECT DISTINCT session_id FROM usage_ledger
+                             WHERE created_timestamp >= ? AND created_timestamp < ?
+                            UNION
+                            SELECT s.parent_session_id FROM sessions s
+                            JOIN needed_sessions n ON s.id = n.id
+                            WHERE s.parent_session_id IS NOT NULL
+                        )
+                        SELECT s.id, s.parent_session_id, s.working_dir, s.name, s.session_type,
+                               json_extract(s.recipe_json, '$.title'), s.provider_name
+                          FROM sessions s
+                          JOIN needed_sessions n ON s.id = n.id
+                        """,
+                        (since_s, until_s),
+                    ).fetchall()
+            finally:
+                try:
+                    g_conn.rollback()
+                finally:
+                    g_conn.close()
+        except Exception as e:
+            agg.warnings.append(f"goose usage not counted: {e}")
+            g_s_rows = []
+            g_ledger_rows = []
+
     tag_cache: dict[str, tuple[str, str]] = {}
     per_bucket = collections.defaultdict(lambda: collections.defaultdict(float))
     day_accum: dict[str, float] = collections.defaultdict(float)
@@ -489,6 +725,76 @@ def aggregate(
             u = agg.unpriced.setdefault(model_key, {"messages": 0, "tokens": 0})
             u["messages"] += 1
             u["tokens"] += toks
+
+    if g_ledger_rows:
+        g_parents = {r[0]: r[1] for r in g_s_rows}
+        g_dirs = {r[0]: r[2] for r in g_s_rows}
+        g_names = {r[0]: r[3] for r in g_s_rows}
+        g_types = {r[0]: r[4] for r in g_s_rows}
+        g_titles = {r[0]: r[5] for r in g_s_rows}
+        g_providers = {r[0]: r[6] for r in g_s_rows}
+
+        for sid, created_ts, model, in_tok, out_tok, total_tok, cread_tok, cwrite_tok, ledger_cost, cost_source in g_ledger_rows:
+            ts = created_ts * 1000
+            if ts < since_ms or ts >= until_ms:
+                continue
+
+            root_id = root_of(sid, g_parents)
+            root = f"goose:{root_id}"
+
+            if root not in tag_cache:
+                if root in session_tags:
+                    tag = session_tags[root]
+                    source = "manual"
+                else:
+                    r_title = g_titles.get(root_id)
+                    r_name = g_names.get(root_id)
+                    r_type = g_types.get(root_id)
+                    tag = goose_auto_key(recipe_title=r_title, name=r_name, session_type=r_type)
+                    source = "auto"
+                tag_cache[root] = (tag, source)
+
+                r_title = g_titles.get(root_id) or g_names.get(root_id) or g_types.get(root_id) or ""
+                agg.root_meta[root] = {
+                    "title": r_title,
+                    "directory": g_dirs.get(root_id),
+                    "tag": tag,
+                    "source": source,
+                }
+
+            tag, source = tag_cache[root]
+            agg.sources[tag] = source
+
+            dt = datetime.datetime.fromtimestamp(ts / 1000, ET)
+            day_str = dt.strftime("%Y-%m-%d")
+
+            cost, is_unpriced = compute_goose_cost(
+                model=model,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                cache_read_tokens=cread_tok,
+                cache_write_tokens=cwrite_tok,
+                ledger_cost=ledger_cost,
+                day=day_str,
+            )
+
+            cread = cread_tok or 0
+            cwrite = cwrite_tok or 0
+            inp = in_tok or 0
+            uncached_in = max(0, inp - cread - cwrite)
+            tout = out_tok or 0
+            toks = int(uncached_in + tout + cread + cwrite)
+
+            if cost == 0 and toks > 0 and is_unpriced:
+                model_key = model or "unknown"
+                u = agg.unpriced.setdefault(model_key, {"messages": 0, "tokens": 0})
+                u["messages"] += 1
+                u["tokens"] += toks
+
+            key = bucket_key(ts, bucket)
+            newest_row_ms = max(newest_row_ms, ts)
+            per_bucket[tag][key] += cost
+            agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
 
     now_epoch_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     # Enumerate THROUGH the newest observed row, not merely up to now, so a
@@ -544,6 +850,7 @@ def load_aggregate(
     days: int = 14,
     bucket: str | None = None,
     now_ms: int | None = None,
+    goose_db: str = DEFAULT_GOOSE_DB,
 ) -> Aggregate:
     win = calculate_window(days, now_ms=now_ms)
     s_tags = {}
@@ -553,7 +860,9 @@ def load_aggregate(
             s_tags = session_tags(st)
 
     b = bucket if bucket is not None else choose_bucket(days)
-    if not os.path.exists(db_path):
+    has_opencode = os.path.exists(db_path)
+    has_goose = bool(goose_db and os.path.exists(goose_db))
+    if not has_opencode and not has_goose:
         agg = Aggregate()
         agg.window = win
         return agg
@@ -565,6 +874,7 @@ def load_aggregate(
         bucket=b,
         session_tags=s_tags,
         now_ms=win.now_ms,
+        goose_db_path=goose_db,
     )
     agg.window = win
     return agg
@@ -1090,9 +1400,16 @@ def render_svg(
     )
     if drift_alerts:
         drift_msg = f"⚠️ Drift warning: per-day coverage ratio outside 0.90–1.05: {', '.join(drift_alerts)}"
+        footer_y += 16
         svg_parts.append(
-            f'  <text x="{plot_x}" y="{footer_y + 16}" class="drift" font-size="11" font-weight="600">{html.escape(drift_msg)}</text>'
+            f'  <text x="{plot_x}" y="{footer_y}" class="drift" font-size="11" font-weight="600">{html.escape(drift_msg)}</text>'
         )
+    if agg.warnings:
+        for w in agg.warnings:
+            footer_y += 16
+            svg_parts.append(
+                f'  <text x="{plot_x}" y="{footer_y}" class="drift" font-size="11" font-weight="600">⚠️ {html.escape(w)}</text>'
+            )
 
     # Tooltips must be the last painted thing in the document, or the legend
     # (drawn at x >= 825) covers any tooltip near the right edge.
@@ -1111,6 +1428,7 @@ def handle_request(
     tags_db: str = DEFAULT_TAGS_DB,
     cfp_dir: str = CFP_DIR,
     now_ms: int | None = None,
+    goose_db: str = DEFAULT_GOOSE_DB,
 ) -> tuple[int, str, str]:
     if path == "/healthz":
         return (200, "text/plain; charset=utf-8", "ok\n")
@@ -1190,6 +1508,7 @@ def handle_request(
             days=days,
             bucket=bucket,
             now_ms=now_ms,
+            goose_db=goose_db,
         )
         spend = cfp_spend_by_day(cfp_dir)
         svg = render_svg(agg, spend, hide=hide, top_n=top_n)
@@ -1198,7 +1517,12 @@ def handle_request(
         return (503, "text/plain; charset=utf-8", f"Database error: {e}\n")
 
 
-def make_handler(db_path: str, tags_db: str, cfp_dir: str):
+def make_handler(
+    db_path: str,
+    tags_db: str,
+    cfp_dir: str = CFP_DIR,
+    goose_db: str = DEFAULT_GOOSE_DB,
+):
     class OcTagsHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             pr = urllib.parse.urlparse(self.path)
@@ -1208,6 +1532,7 @@ def make_handler(db_path: str, tags_db: str, cfp_dir: str):
                 db_path=db_path,
                 tags_db=tags_db,
                 cfp_dir=cfp_dir,
+                goose_db=goose_db,
             )
             body_bytes = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(status)
@@ -1228,7 +1553,10 @@ def make_handler(db_path: str, tags_db: str, cfp_dir: str):
 def cmd_serve(args: argparse.Namespace) -> int:
     host = args.host
     port = args.port
-    server = http.server.HTTPServer((host, port), make_handler(args.db, args.tags_db, CFP_DIR))
+    server = http.server.HTTPServer(
+        (host, port),
+        make_handler(args.db, args.tags_db, CFP_DIR, getattr(args, "goose_db", DEFAULT_GOOSE_DB)),
+    )
     print(f"Serving oc-tags chart on http://{host}:{port}/ (Ctrl+C to stop)")
     try:
         server.serve_forever()
@@ -1240,7 +1568,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _add_db_options(parser: argparse.ArgumentParser) -> None:
-    """Attach --db/--tags-db to a SUBparser without clobbering the parent's value.
+    """Attach --db/--tags-db/--goose-db to a SUBparser without clobbering parent's value.
 
     default=SUPPRESS is the whole point (workstation-ueaf). A subparser writes
     its defaults into the same namespace the parent already populated, so
@@ -1260,6 +1588,9 @@ def _add_db_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--tags-db", default=argparse.SUPPRESS, help="path to tags.db"
     )
+    parser.add_argument(
+        "--goose-db", default=argparse.SUPPRESS, help="path to goose sessions.db"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1268,6 +1599,7 @@ def build_parser() -> argparse.ArgumentParser:
     # The parent owns the real defaults; every subparser SUPPRESSes its own.
     p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
     p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
+    p.add_argument("--goose-db", default=DEFAULT_GOOSE_DB, help="path to goose sessions.db")
 
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -1275,6 +1607,19 @@ def build_parser() -> argparse.ArgumentParser:
     set_p = sub.add_parser("set", help="tag a session")
     set_p.add_argument("target", nargs="?", help="tag")
     set_p.add_argument("session_id", nargs="?", help="optional session id")
+    set_p.add_argument(
+        "--goose-dir",
+        action="append",
+        dest="goose_dir",
+        default=[],
+        help="tag goose sessions matching this directory",
+    )
+    set_p.add_argument(
+        "--since",
+        type=int,
+        default=None,
+        help="minimum created_at epoch ms for goose sessions",
+    )
     _add_db_options(set_p)
 
     # ls
@@ -1328,6 +1673,46 @@ def cmd_set(args: argparse.Namespace) -> int:
     if not tag:
         sys.stderr.write("Error: tag is required\n")
         return 1
+    try:
+        norm = normalise_tag(tag)
+    except ValueError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 1
+
+    goose_dirs = getattr(args, "goose_dir", None) or []
+    if goose_dirs:
+        norm_dirs = {os.path.normpath(os.path.abspath(os.path.expanduser(d))) for d in goose_dirs}
+        since_ms = getattr(args, "since", None)
+        matching_ids = []
+
+        goose_db = getattr(args, "goose_db", DEFAULT_GOOSE_DB)
+        if goose_db and os.path.exists(goose_db):
+            try:
+                g_conn = connect_ro(goose_db)
+                try:
+                    rows = g_conn.execute("SELECT id, working_dir, created_at FROM sessions").fetchall()
+                    for sid, wdir, cat in rows:
+                        if not wdir:
+                            continue
+                        if os.path.normpath(os.path.abspath(os.path.expanduser(wdir))) not in norm_dirs:
+                            continue
+                        if since_ms is not None:
+                            cat_ms = _parse_goose_created_at_ms(cat)
+                            if cat_ms is not None and cat_ms < since_ms:
+                                continue
+                        matching_ids.append(f"goose:{sid}")
+                finally:
+                    g_conn.close()
+            except Exception as e:
+                sys.stderr.write(f"Error: {e}\n")
+                return 1
+
+        with open_store(args.tags_db) as st:
+            for gid in matching_ids:
+                set_session_tag(st, gid, norm)
+
+        print(f"tagged {len(matching_ids)} goose session(s) as {norm}")
+        return 0
 
     target_sid = args.session_id or os.environ.get("OPENCODE_SESSION_ID")
     if not target_sid:
@@ -1335,7 +1720,21 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 1
 
     root_sid = target_sid
-    if os.path.exists(args.db):
+    if target_sid.startswith("goose:"):
+        goose_sid = target_sid[len("goose:"):]
+        goose_db = getattr(args, "goose_db", DEFAULT_GOOSE_DB)
+        if goose_db and os.path.exists(goose_db):
+            try:
+                g_conn = connect_ro(goose_db)
+                try:
+                    s_rows = g_conn.execute("SELECT id, parent_session_id FROM sessions").fetchall()
+                    parents = {r[0]: r[1] for r in s_rows}
+                    root_sid = f"goose:{root_of(goose_sid, parents)}"
+                finally:
+                    g_conn.close()
+            except Exception:
+                pass
+    elif os.path.exists(args.db):
         try:
             conn = connect_ro(args.db)
             try:
@@ -1349,12 +1748,11 @@ def cmd_set(args: argparse.Namespace) -> int:
 
     try:
         with open_store(args.tags_db) as st:
-            set_session_tag(st, root_sid, tag)
+            set_session_tag(st, root_sid, norm)
     except ValueError as e:
         sys.stderr.write(f"Error: {e}\n")
         return 1
 
-    norm = normalise_tag(tag)
     if root_sid != target_sid:
         print(f"Tagged root session '{root_sid}' (resolved from '{target_sid}') as '{norm}'")
     else:
@@ -1415,13 +1813,72 @@ def cmd_which(args: argparse.Namespace) -> int:
         sys.stderr.write("Error: no session ID provided and OPENCODE_SESSION_ID is not set\n")
         return 1
 
+    root_sid = target_sid
+    directory: str | None = None
+    if target_sid.startswith("goose:"):
+        goose_sid = target_sid[len("goose:"):]
+        goose_db = getattr(args, "goose_db", DEFAULT_GOOSE_DB)
+        g_name = ""
+        g_type = ""
+        g_title = ""
+        if goose_db and os.path.exists(goose_db):
+            try:
+                conn = connect_ro(goose_db)
+                try:
+                    s_rows = conn.execute(
+                        """
+                        WITH RECURSIVE ancestry(id, parent_session_id) AS (
+                            SELECT id, parent_session_id FROM sessions WHERE id = ?
+                            UNION ALL
+                            SELECT s.id, s.parent_session_id FROM sessions s
+                            JOIN ancestry a ON s.id = a.parent_session_id
+                        )
+                        SELECT s.id, s.parent_session_id, s.working_dir, s.name, s.session_type,
+                               json_extract(s.recipe_json, '$.title')
+                          FROM sessions s
+                          JOIN ancestry a ON s.id = a.id
+                        """,
+                        (goose_sid,),
+                    ).fetchall()
+                    parents = {r[0]: r[1] for r in s_rows}
+                    dirs = {r[0]: r[2] for r in s_rows}
+                    names = {r[0]: r[3] for r in s_rows}
+                    types = {r[0]: r[4] for r in s_rows}
+                    titles = {r[0]: r[5] for r in s_rows}
+
+                    root_raw = root_of(goose_sid, parents)
+                    root_sid = f"goose:{root_raw}"
+                    directory = dirs.get(root_raw)
+                    g_name = names.get(root_raw) or ""
+                    g_type = types.get(root_raw) or ""
+                    g_title = titles.get(root_raw) or ""
+                finally:
+                    conn.close()
+            except Exception as e:
+                sys.stderr.write(f"which: goose-db unreadable ({e}); tag resolved without it\n")
+
+        with open_store(args.tags_db, readonly=True) as st:
+            warn_retired_dir_tags(st)
+            s_tags = session_tags(st)
+
+        if root_sid in s_tags:
+            tag = s_tags[root_sid]
+            source = "manual"
+            kind = "session"
+        else:
+            tag = goose_auto_key(recipe_title=g_title, name=g_name, session_type=g_type)
+            source = "auto"
+            kind = "auto"
+
+        safe_tag = " ".join(tag.split()) or tag
+        print(f"{safe_tag}\t{source}\t{root_sid}\t{kind}")
+        return 0
+
     # opencode.db supplies root resolution and the directory. Both are
     # refinements: without it a session tag still resolves, and the fallback is
     # the honest auto:no-dir rather than a wrong-but-plausible label. An absent
     # or unreadable DB is therefore degraded, not fatal — the caller is often a
     # notification path where one missing line beats an error.
-    root_sid = target_sid
-    directory: str | None = None
     if os.path.exists(args.db):
         try:
             conn = connect_ro(args.db)
@@ -1495,7 +1952,15 @@ def cmd_rm(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    agg = load_aggregate(db_path=args.db, tags_db=args.tags_db, days=args.days)
+    agg = load_aggregate(
+        db_path=args.db,
+        tags_db=args.tags_db,
+        days=args.days,
+        goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
+    )
+    for w in agg.warnings:
+        sys.stderr.write(f"{w}\n")
+
     win = agg.window
     since_str = win.since_str if win else ""
     until_str = win.until_str if win else ""
@@ -1538,7 +2003,14 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_top(args: argparse.Namespace) -> int:
-    agg = load_aggregate(db_path=args.db, tags_db=args.tags_db, days=args.days)
+    agg = load_aggregate(
+        db_path=args.db,
+        tags_db=args.tags_db,
+        days=args.days,
+        goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
+    )
+    for w in agg.warnings:
+        sys.stderr.write(f"{w}\n")
 
     untagged = []
     for root_id, dollars in agg.root_totals.items():

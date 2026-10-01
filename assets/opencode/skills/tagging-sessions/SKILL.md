@@ -19,6 +19,7 @@ policy still applies; there is just no org tag list to pick from.
 oc-tags which                  # this session's effective tag ($OPENCODE_SESSION_ID)
 oc-tags set <tag>              # tag this session
 oc-tags set <tag> <session>    # tag another root session
+oc-tags set <tag> --goose-dir <dir> # tag goose sessions by working directory
 oc-tags ls --counts            # every tag in use, with session counts
 oc-tags top --days 7 --min 20  # most expensive UNTAGGED root sessions
 oc-tags report --days 7        # dollars by tag
@@ -29,6 +30,9 @@ Tags attach to **root** sessions; subagent spend rolls up to its root, and
 as an `auto:` fallback derived from its directory — `auto:<repo>` at a repo
 root, `auto:<repo>/<worktree>` in a worktree, `auto:tmp` under `/tmp`. Those
 look like branch names by construction; that is the fallback, not a mistag.
+Untagged goose sessions report as `auto:goose/<slug>` (derived from recipe
+title, session name, or session type). Tag goose runs with
+`oc-tags set <tag> --goose-dir <dir>` (optionally with `--since <epoch_ms>`).
 
 Launching sessions? `opencode-launch --tag` writes the same tag and follows the
 same rules below. Without `--tag`, a launch copies the launcher's tag onto the
