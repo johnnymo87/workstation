@@ -107,12 +107,15 @@ def get_worktree_entries(repo: str) -> list[dict[str, Any]]:
             current["path"] = line[len("worktree ") :].strip()
             current["branch"] = None
             current["prunable"] = False
+            current["locked"] = False
         elif line.startswith("HEAD "):
             current["head"] = line[len("HEAD ") :].strip()
         elif line.startswith("branch refs/heads/"):
             current["branch"] = line[len("branch refs/heads/") :].strip()
         elif line.startswith("prunable"):
             current["prunable"] = True
+        elif line.startswith("locked"):
+            current["locked"] = True
     if current:
         entries.append(current)
     return entries
@@ -870,7 +873,7 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                         break
 
             reason = blocking_reason or "no_candidates: zero branch candidates survive validation"
-            return {
+            result: dict[str, Any] = {
                 "revivable": False,
                 "reason": reason,
                 "sid": sid,
@@ -878,10 +881,13 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                 "repo": repo_dir,
                 "snapshot": snapshot,
                 "candidates": [],
-                # Structured twin of the prose "To resume, run: ..." command, for machine consumers
-                # (the nvim picker). Present only when the blocking worktree is resumable.
-                "resume": resume_args,
             }
+            if resume_args is not None:
+                # Structured twin of the prose "To resume, run: ..." command, for machine consumers
+                # (the nvim picker). The key is ABSENT, never null, when there is nothing to resume:
+                # vim.json.decode turns null into a truthy vim.NIL.
+                result["resume"] = resume_args
+            return result
 
         return {
             "revivable": True,
@@ -970,8 +976,10 @@ def verify_worktree_after_failed_add(
 
     tail = _tail(stderr)
     if (
-        entry is not None
+        returncode > 0  # a signal-killed git (negative rc) may have left a partial checkout
+        and entry is not None
         and not entry.get("prunable")
+        and not entry.get("locked")  # git drops its "initializing" lock BEFORE running the hook
         and entry.get("branch") == branch
         and entry.get("head") == expect_tip
         and os.path.isdir(target_p)
@@ -989,15 +997,31 @@ def verify_worktree_after_failed_add(
     if entry is not None or os.path.exists(target_p):
         found = (
             f"branch {entry.get('branch')!r} at {entry.get('head')}"
+            + (", locked" if entry.get("locked") else "")
             if entry is not None
             else "not a registered worktree"
         )
+        # This apply created P moments ago (Step 2 proved it absent), nothing references it and no
+        # move or ledger write has happened, so removing it is safe. Leaving it would let the next
+        # plan offer it as a one-keypress resume of exactly the state refused here.
+        rm = subprocess.run(
+            ["git", "-C", repo, "worktree", "remove", "--force", "--force", target_p],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if rm.returncode == 0 and not os.path.exists(target_p):
+            cleanup = f"The half-made worktree at '{target_p}' was removed."
+        else:
+            cleanup = (
+                f"Removing the half-made worktree failed ({_tail(rm.stderr, lines=2)}); inspect "
+                f"'{target_p}' and remove it with `git -C {shlex.quote(repo)} worktree remove "
+                f"--force --force {shlex.quote(target_p)}`."
+            )
         raise ReviveError(
             f"worktree add failed (exit {returncode}) and left '{target_p}' in an unexpected state "
             f"({found}; expected branch '{branch}' at {expect_tip}). No move was attempted and the "
-            f"session is unchanged. Inspect '{target_p}', remove it with "
-            f"`git -C {shlex.quote(repo)} worktree remove --force {shlex.quote(target_p)}`, "
-            f"then re-run `oc-revive {sid}`.\n  git said: {tail}"
+            f"session is unchanged. {cleanup} Then re-run `oc-revive {sid}`.\n  git said: {tail}"
         )
     raise ReviveError(
         f"worktree add failed (exit {returncode}); no worktree was created, no move was attempted, "
@@ -1230,7 +1254,10 @@ def apply_revive(
                     add_res = subprocess.run(
                         ["git", "-C", repo, "worktree", "add", target_p, branch],
                         capture_output=True,
-                        text=True,
+                        # Hook output is operator-facing only; never let a non-UTF-8 byte crash a
+                        # revive whose worktree already exists.
+                        encoding="utf-8",
+                        errors="replace",
                     )
                     if add_res.returncode != 0:
                         # git returns a failing post-checkout hook's status even though the worktree

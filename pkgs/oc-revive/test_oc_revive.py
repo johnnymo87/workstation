@@ -705,7 +705,7 @@ class TestPlan(unittest.TestCase):
         self.assertIn(prior_wt, reason2)
         self.assertIn("ses_holder", reason2)
         self.assertNotIn("To resume, run:", reason2)
-        self.assertIsNone(plan2["resume"])  # held by another session: nothing to resume
+        self.assertNotIn("resume", plan2)  # held by another session: key absent (never null)
 
     def test_snapshot_reporting(self):
         import hashlib
@@ -1075,9 +1075,15 @@ class TestApply(unittest.TestCase):
             )
         msg = str(ctx.exception)
         self.assertIn("worktree add", msg)
-        self.assertIn(new_path, msg)  # tells the operator the worktree was left in place
+        self.assertIn(new_path, msg)
+        self.assertIn("was removed", msg)
         self.assertEqual(len(self.door.move_calls), 0)
         self.assertNotIn(new_path, self._ledger_text())
+        # The refused worktree must not survive to be offered as a one-keypress resume.
+        self.assertFalse(os.path.exists(new_path))
+        self.assertNotIn(new_path, oc_revive.get_git_worktrees(self.repo))
+        plan = oc_revive.plan_revive(sid, db_path=self.db_path)
+        self.assertNotIn("resume", plan)
 
     def test_apply_raises_when_hook_fails_and_worktree_is_on_another_branch(self):
         sid = "ses_hook_fail_bad_branch"
@@ -1101,6 +1107,56 @@ class TestApply(unittest.TestCase):
                 frontdoor_url=self.door_url,
             )
         self.assertEqual(len(self.door.move_calls), 0)
+
+    def test_apply_refuses_and_removes_worktree_left_locked_by_a_failing_hook(self):
+        sid = "ses_hook_locked"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-hooklock")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-hooklock")
+        new_path = os.path.join(self.worktrees_dir, "feat-hooklock-r1700000000")
+        # Stands in for git's own "initializing" lock left by a git killed mid-checkout.
+        self._install_post_checkout_hook('git worktree lock --reason initializing "$PWD"\nexit 1\n')
+        self.door.move_status = 204
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid, branch="feat-hooklock", path=new_path, action="add",
+                expect_tip=tip_sha, expect_old_dir=dead_dir,
+                db_path=self.db_path, frontdoor_url=self.door_url,
+            )
+        self.assertIn("locked", str(ctx.exception))
+        self.assertFalse(os.path.exists(new_path))  # removal needs --force --force on a locked worktree
+        self.assertEqual(len(self.door.move_calls), 0)
+
+    def test_verify_refuses_a_signal_killed_add_even_if_the_worktree_looks_right(self):
+        self._commit_branch("feat-sig")
+        tip_sha = subprocess.run(["git", "rev-parse", "feat-sig"], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
+        p = os.path.join(self.worktrees_dir, "feat-sig-r1700000000")
+        subprocess.run(["git", "worktree", "add", p, "feat-sig"], cwd=self.repo, check=True, capture_output=True)
+        with self.assertRaises(oc_revive.ReviveError):
+            oc_revive.verify_worktree_after_failed_add(self.repo, "ses_sig", p, "feat-sig", tip_sha, -9, "")
+        # Control: the same state with a positive (hook) exit status is accepted.
+        subprocess.run(["git", "worktree", "add", p, "feat-sig"], cwd=self.repo, check=True, capture_output=True)
+        with mock.patch("sys.stderr", io.StringIO()):
+            oc_revive.verify_worktree_after_failed_add(self.repo, "ses_sig", p, "feat-sig", tip_sha, 1, "")
+
+    def test_apply_survives_non_utf8_hook_output(self):
+        sid = "ses_hook_bytes"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-hookbytes")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-hookbytes")
+        new_path = os.path.join(self.worktrees_dir, "feat-hookbytes-r1700000000")
+        self._install_post_checkout_hook("printf '\\377\\376 bad bytes\\n' >&2\nexit 127\n")
+        self.door.move_status = 204
+        self.door.on_prompt_async = self._landing_notice(sid)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            res = oc_revive.apply_revive(
+                sid=sid, branch="feat-hookbytes", path=new_path, action="add",
+                expect_tip=tip_sha, expect_old_dir=dead_dir,
+                db_path=self.db_path, frontdoor_url=self.door_url,
+            )
+        self.assertTrue(res["ok"])
+        self.assertIn("bad bytes", stderr.getvalue())
 
     def test_apply_prints_interruption_resume_label_not_reconcile_before_move(self):
         sid = "ses_label"
