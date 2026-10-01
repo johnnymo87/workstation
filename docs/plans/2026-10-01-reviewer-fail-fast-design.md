@@ -106,7 +106,17 @@ neither errored nor returned.
      - any partial text, labelled TRUNCATED;
      - the fallback to `<base>-opus` for `-astra`/`-fable`, or generic advice for
        other agents (no invented twins).
-   - **If the lookup fails:** the output is left untouched (fail-open).
+   - **If the lookup fails:** the output is left untouched (fail-open). The same
+     applies when the hook itself throws, when `output` is undefined (the
+     slash-command subtask failure path; a throw there would re-run the
+     subtask), and when the result is over the 50 KB / 2000-line tool-output cap
+     (upstream truncates it before the hook runs, so the block regex misses).
+   - **Fallback advice:** an `-opus` twin's failure gets "do not substitute;
+     stop and report", because it *is* the fallback. Other agents get "report
+     the failure".
+   - **Known gap:** the before-hook's refusal is a clean tool error on the normal
+     Task path, but on the slash-command subtask path it would surface as a
+     defect. No command is bound to an `-astra` agent today.
 
 Both hooks are verified end to end on a throwaway `opencode serve`, which uses
 loopback `ctx.client`, unlike in-process `opencode run`:

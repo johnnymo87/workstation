@@ -151,6 +151,25 @@ describe("tool.execute.after (surface the child's error)", () => {
     expect(out.output).not.toContain("code-opus")
   })
 
+  it("tells a failed -opus twin's parent to stop and report, not to substitute another agent", async () => {
+    const { hooks } = hooksWith({ lastMessage: async () => erroredAssistant("boom") })
+    const out = taskOutput("")
+    await hooks["tool.execute.after"]!(afterInput("adversarial-reviewer-opus"), out)
+
+    expect(out.output).toContain('state="error"')
+    expect(out.output).toMatch(/Do not substitute another agent/)
+    expect(out.output).toMatch(/stop and report/i)
+    expect(out.output).not.toMatch(/another agent suited/)
+  })
+
+  it("never throws, even when called with an undefined output (subtask failure path)", async () => {
+    const { deps, hooks } = hooksWith({ lastMessage: async () => erroredAssistant("boom") })
+    await expect(
+      hooks["tool.execute.after"]!(afterInput("adversarial-reviewer-astra"), undefined as never),
+    ).resolves.toBeUndefined()
+    expect(deps.lastMessage).not.toHaveBeenCalled()
+  })
+
   it("leaves a healthy result untouched", async () => {
     const { hooks } = hooksWith({
       lastMessage: async () => ({ info: { role: "assistant" }, parts: [{ type: "text", text: "ok" }] }),

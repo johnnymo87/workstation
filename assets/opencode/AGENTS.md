@@ -121,7 +121,8 @@ every client timeout. Elapsed time is not evidence of a hang: about 1 in 5
 healthy astra reviews run longer than 15 minutes, and some run for hours. The
 dispatching agent is blocked inside the call and cannot act anyway. The signal
 is lack of **progress**: the child session has gained no new parts for 15+
-minutes, or its status is `retry`. Whoever notices that (the human, or a
+minutes (in 30 days of astra children the largest within-turn gap was under
+5), or its status *stays* `retry` across several attempts. Whoever notices that (the human, or a
 watcher) aborts the child, and the parent then falls back as for an error.
 
 **`-fable` means one of two things, and the list tells you which.** It was

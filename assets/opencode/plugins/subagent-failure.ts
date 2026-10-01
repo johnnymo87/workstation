@@ -63,9 +63,13 @@ function errorText(error: unknown): string {
 
 function fallbackAdvice(agent: string): string {
   const twin = fallbackAgent(agent)
-  return twin
-    ? `Dispatch "${twin}" with the same prompt instead, and say in one clause that ${agent} was unavailable.`
-    : `Retry with another agent suited to this role, or report the failure; do not proceed as if it had answered.`
+  if (twin) return `Dispatch "${twin}" with the same prompt instead, and say in one clause that ${agent} was unavailable.`
+  // The -opus twin IS the fallback. Its failure means stop-and-report
+  // (assets/opencode/AGENTS.md); suggesting "another agent" would steer the
+  // parent back to astra (devbox) or to an opt-in twin (cloudbox).
+  if (agent.endsWith("-opus"))
+    return `Do not substitute another agent. Stop and report that this ${agent} dispatch did not happen.`
+  return `Report the failure; do not proceed as if it had answered.`
 }
 
 const TASK_BLOCK = /^<task id="([^"]+)" state="completed">\n(?:<summary>[\s\S]*?<\/summary>\n)?<task_result>\n([\s\S]*)\n<\/task_result>\n<\/task>$/
@@ -98,39 +102,55 @@ function makeHooks(deps: Deps) {
       input: { tool: string; sessionID?: string; callID?: string; args: any },
       output: { title: string; output: string; metadata: any },
     ) => {
-      if (input.tool !== "task") return
-      if (output.metadata?.background === true) return
-      const sessionID = output.metadata?.sessionId
-      if (typeof sessionID !== "string") return
-      const m = TASK_BLOCK.exec(output.output ?? "")
-      if (!m) return
-
-      let last: ChildMessage | undefined
+      // `output` is undefined on the slash-command subtask path when the task
+      // itself failed (prompt.ts handleSubtask). A throw here becomes an Effect
+      // defect that aborts handleSubtask before it finishes the message, so the
+      // subtask re-runs. Hence the guard, and the catch-all: fail-open must
+      // cover this hook's own bugs, not just the lookup.
+      if (input?.tool !== "task" || !output) return
       try {
-        last = await deps.lastMessage(sessionID)
+        await rewriteFailedTask(input, output)
       } catch {
-        return // fail open
+        // fail open
       }
-      if (!last || last.info?.role !== "assistant" || !last.info.error) return
-
-      const agent = typeof input.args?.subagent_type === "string" ? input.args.subagent_type : "the subagent"
-      const model = output.metadata?.model
-      const modelRef = model?.providerID && model?.modelID ? ` (${model.providerID}/${model.modelID})` : ""
-      const partial = m[2].trim()
-
-      output.output = [
-        `<task id="${m[1]}" state="error">`,
-        "<task_error>",
-        `Subagent "${agent}"${modelRef} FAILED: its model call errored: ${errorText(last.info.error)}`,
-        partial
-          ? "This is NOT a result: the text below is TRUNCATED output from before the failure. Do not treat it as a complete review or answer."
-          : "This is NOT a result. It produced no output; do not treat it as a review or answer.",
-        fallbackAdvice(agent),
-        ...(partial ? ["--- truncated partial output ---", partial] : []),
-        "</task_error>",
-        "</task>",
-      ].join("\n")
     },
+  }
+
+  async function rewriteFailedTask(
+    input: { args: any },
+    output: { title: string; output: string; metadata: any },
+  ) {
+    if (output.metadata?.background === true) return
+    const sessionID = output.metadata?.sessionId
+    if (typeof sessionID !== "string") return
+    const m = TASK_BLOCK.exec(output.output ?? "")
+    if (!m) return
+
+    let last: ChildMessage | undefined
+    try {
+      last = await deps.lastMessage(sessionID)
+    } catch {
+      return // fail open
+    }
+    if (!last || last.info?.role !== "assistant" || !last.info.error) return
+
+    const agent = typeof input.args?.subagent_type === "string" ? input.args.subagent_type : "the subagent"
+    const model = output.metadata?.model
+    const modelRef = model?.providerID && model?.modelID ? ` (${model.providerID}/${model.modelID})` : ""
+    const partial = m[2].trim()
+
+    output.output = [
+      `<task id="${m[1]}" state="error">`,
+      "<task_error>",
+      `Subagent "${agent}"${modelRef} FAILED: its model call errored: ${errorText(last.info.error)}`,
+      partial
+        ? "This is NOT a result: the text below is TRUNCATED output from before the failure. Do not treat it as a complete review or answer."
+        : "This is NOT a result. It produced no output; do not treat it as a review or answer.",
+      fallbackAdvice(agent),
+      ...(partial ? ["--- truncated partial output ---", partial] : []),
+      "</task_error>",
+      "</task>",
+    ].join("\n")
   }
 }
 
