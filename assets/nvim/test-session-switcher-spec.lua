@@ -2917,23 +2917,40 @@ do
   end
   local system_calls = {}
   local orig_system = vim.system
+  local dir = "/tmp/vanished_tree"
+  local sid = "ses_synctest123"
+
   vim.system = function(cmd, opts, on_exit)
     table.insert(system_calls, { cmd = cmd, opts = opts, on_exit = on_exit })
+    on_exit({
+      code = 0,
+      stdout = vim.json.encode({
+        revivable = true,
+        sid = sid,
+        candidates = {
+          { branch = "branch-sync", tip_short = "abcdef1", source = "slug", merged = false },
+        },
+      }),
+    })
     return { pid = 1 }
   end
   local orig_schedule = vim.schedule
   local scheduled = {}
   vim.schedule = function(fn) table.insert(scheduled, fn) end
 
-  local dir = "/tmp/vanished_tree"
-  local sid = "ses_synctest123"
   local res = exec.refuse_dir_missing({ directory = dir, sid = sid })
   check(res == true, "refuse_dir_missing returns true")
-  check(#notifications == 1, "refusal notify fires synchronously, exactly once")
-  check(notifications[1].level == vim.log.levels.WARN, "refusal notify is WARN")
+  check(#notifications == 1, "refusal notify count is exactly 1 right after refuse_dir_missing returns")
+  check(notifications[1].level == vim.log.levels.WARN, "first notification is WARN")
   check(notifications[1].msg == string.format("session directory '%s' no longer exists on disk; session is read-only", dir),
-    "refusal notify text is byte-identical to today's exact format")
+    "first notification is the byte-identical refusal")
   check(#system_calls == 1, "vim.system was called")
+  check(#scheduled == 1, "one scheduled callback queued")
+
+  scheduled[1]()
+  check(#notifications == 2, "after draining schedule queue hint is notification #2")
+  check(notifications[2].level == vim.log.levels.INFO, "notification #2 is INFO level")
+  check(notifications[2].msg:find("branch-sync", 1, true) ~= nil, "notification #2 is the expected hint")
 
   vim.notify = orig_notify
   vim.system = orig_system
@@ -3249,18 +3266,26 @@ do
   check(refusal_count == 1, "refusal notify emitted")
 
   local bad_results = {
-    { desc = "non-zero code", res = { code = 1, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"b","tip_short":"t","source":"s"}]}' } },
+    { desc = "non-zero code", res = { code = 1, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"b","tip_short":"1a2b","source":"s"}]}' } },
     { desc = "code 124 timeout", res = { code = 124, signal = 15, stdout = "" } },
     { desc = "stdout nil", res = { code = 0, stdout = nil } },
     { desc = "stdout not json", res = { code = 0, stdout = "not json" } },
     { desc = "stdout null", res = { code = 0, stdout = "null" } },
     { desc = "stdout []", res = { code = 0, stdout = "[]" } },
     { desc = "stdout scalar number", res = { code = 0, stdout = "123" } },
-    { desc = "sid mismatch", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_other","candidates":[{"branch":"b","tip_short":"t","source":"s"}]}' } },
+    { desc = "sid mismatch", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_other","candidates":[{"branch":"b","tip_short":"1a2b","source":"s"}]}' } },
     { desc = "candidates empty while revivable=true", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[]}' } },
-    { desc = "candidate with non-string branch", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":123,"tip_short":"t","source":"s"}]}' } },
+    { desc = "candidate not a table (string)", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":["not a table"]}' } },
+    { desc = "candidate not a table (number)", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[123]}' } },
+    { desc = "candidate with non-string branch", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":123,"tip_short":"1a2b","source":"s"}]}' } },
     { desc = "candidate with non-string tip_short", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"b","tip_short":123,"source":"s"}]}' } },
-    { desc = "candidate with non-string source", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"b","tip_short":"t","source":false}]}' } },
+    { desc = "candidate with non-string source", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"b","tip_short":"1a2b","source":false}]}' } },
+    { desc = "branch empty string", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"","tip_short":"1a2b","source":"s"}]}' } },
+    { desc = "branch containing newline", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat\\nbar","tip_short":"1a2b","source":"s"}]}' } },
+    { desc = "branch containing space", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat bar","tip_short":"1a2b","source":"s"}]}' } },
+    { desc = "branch containing backtick", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat`bar","tip_short":"1a2b","source":"s"}]}' } },
+    { desc = "tip_short zz", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat","tip_short":"zz","source":"s"}]}' } },
+    { desc = "source with space", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat","tip_short":"1a2b","source":"a b"}]}' } },
   }
 
   for _, test_case in ipairs(bad_results) do
@@ -3271,23 +3296,52 @@ do
     check(#notifications == refusal_count, "no notifications emitted for " .. test_case.desc)
   end
 
-  -- Case where one candidate is invalid and one candidate is valid
+  -- Finding 1: Any malformed candidate in a multi-candidate plan makes the WHOLE hint silent
+  -- Case A: 2 candidates, one with non-string branch -> NO hint at all
   scheduled = {}
   local mixed_plan = {
     revivable = true,
     sid = sid,
     candidates = {
-      { branch = 123, tip_short = "t1", source = "s1" },
-      { branch = "valid_branch", tip_short = "t2", source = "s2" },
+      { branch = 123, tip_short = "1a2b", source = "s1" },
+      { branch = "valid_branch", tip_short = "3c4d", source = "s2" },
     },
   }
   local ok = pcall(last_on_exit, { code = 0, stdout = vim.json.encode(mixed_plan) })
-  check(ok == true, "on_exit does not throw for mixed candidates")
+  check(ok == true, "on_exit does not throw for plan with malformed candidate")
   for _, fn in ipairs(scheduled) do fn() end
-  check(#notifications == refusal_count + 1, "emitted 1 hint for mixed candidates")
-  local msg = notifications[#notifications].msg
-  check(msg:find("valid_branch", 1, true) ~= nil, "hint contains valid candidate")
-  check(msg:find("candidates disagree", 1, true) == nil, "only 1 usable candidate so no disagree line")
+  check(#notifications == refusal_count, "no hint emitted when any candidate has non-string branch")
+
+  -- Case B: 2 candidates, one not a table -> NO hint at all
+  scheduled = {}
+  local mixed_table_plan = {
+    revivable = true,
+    sid = sid,
+    candidates = {
+      "not a table",
+      { branch = "valid_branch", tip_short = "3c4d", source = "s2" },
+    },
+  }
+  local ok_tbl = pcall(last_on_exit, { code = 0, stdout = vim.json.encode(mixed_table_plan) })
+  check(ok_tbl == true, "on_exit does not throw for plan with non-table candidate")
+  for _, fn in ipairs(scheduled) do fn() end
+  check(#notifications == refusal_count, "no hint emitted when any candidate is not a table")
+
+  -- Finding 2: Positive test with a realistic branch containing "/" and "." (e.g. "feat/x.y-2") that DOES produce the hint
+  scheduled = {}
+  local pos_plan = {
+    revivable = true,
+    sid = sid,
+    candidates = {
+      { branch = "feat/x.y-2", tip_short = "8fbddc6", source = "bash-evidence", merged = false },
+    },
+  }
+  local ok_pos = pcall(last_on_exit, { code = 0, stdout = vim.json.encode(pos_plan) })
+  check(ok_pos == true, "on_exit does not throw for realistic branch feat/x.y-2")
+  for _, fn in ipairs(scheduled) do fn() end
+  check(#notifications == refusal_count + 1, "realistic branch feat/x.y-2 produces hint notification")
+  local pos_msg = notifications[#notifications].msg
+  check(pos_msg:find("feat/x.y-2 @ 8fbddc6 (bash-evidence)", 1, true) ~= nil, "hint contains exact formatted candidate line")
 
   vim.notify = orig_notify
   vim.system = orig_system

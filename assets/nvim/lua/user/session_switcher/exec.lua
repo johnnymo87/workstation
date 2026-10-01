@@ -234,17 +234,23 @@ function M.refuse_dir_missing(desc)
         if plan.revivable == true and type(plan.candidates) == "table" and #plan.candidates > 0 then
           local candidate_lines = {}
           for _, cand in ipairs(plan.candidates) do
-            if type(cand) == "table"
-              and type(cand.branch) == "string"
-              and type(cand.tip_short) == "string"
-              and type(cand.source) == "string"
+            if type(cand) ~= "table"
+              or type(cand.branch) ~= "string"
+              or cand.branch == ""
+              or cand.branch:find("[%s%c`]") ~= nil
+              or type(cand.tip_short) ~= "string"
+              or cand.tip_short:match("^%x+$") == nil
+              or type(cand.source) ~= "string"
+              or cand.source:match("^[%w%-]+$") == nil
             then
-              local line = string.format("  branch %s @ %s (%s)", cand.branch, cand.tip_short, cand.source)
-              if cand.merged == true then
-                line = line .. " [merged]"
-              end
-              table.insert(candidate_lines, line)
+              return
             end
+
+            local line = string.format("  branch %s @ %s (%s)", cand.branch, cand.tip_short, cand.source)
+            if cand.merged == true then
+              line = line .. " [merged]"
+            end
+            table.insert(candidate_lines, line)
           end
           if #candidate_lines == 0 then
             return
