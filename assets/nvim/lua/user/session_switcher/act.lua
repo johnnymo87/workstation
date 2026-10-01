@@ -66,6 +66,7 @@ function M.decide(row, hit, opts)
     return {
       kind = "refuse_dir_missing",
       directory = safe_row.directory,
+      sid = safe_row.id,
     }
   end
 

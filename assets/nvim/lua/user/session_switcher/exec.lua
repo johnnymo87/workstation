@@ -195,14 +195,22 @@ function M.attach(desc, opts)
   return true
 end
 
---- Refuse navigation to a session whose target directory is missing on disk.
+--- Refuse navigation to a session whose target directory is missing on disk,
+--- and asynchronously query oc-revive for a recovery hint.
 ---
 --- WHY THIS MATTERS:
 --- Attaching to a pruned worktree or deleted directory allows the TUI to render history,
 --- but the session can NEVER complete a turn — user messages hang indefinitely with no error.
 --- Refusing upfront and visibly warning the user prevents the silent turn hang.
 ---
---- @param desc table { directory?: string }
+--- REVIVE HINT (ASYNC & SILENT ON FAILURE):
+--- When desc.sid is valid (^ses_[%w]+$), we spawn `oc-revive plan <sid>` in the background
+--- to check if the session can be revived or if revive is blocked by an existing worktree.
+--- The hint is purely advisory and emitted via vim.schedule; failure to spawn, non-zero exit,
+--- timeout, parse errors, or unhandled reasons are completely silent so the synchronous
+--- refusal remains fast, reliable, and noise-free.
+---
+--- @param desc table { directory?: string, sid?: string }
 --- @return boolean
 function M.refuse_dir_missing(desc)
   local dir = (type(desc) == "table" and desc.directory) and desc.directory or "(unknown)"
@@ -210,6 +218,76 @@ function M.refuse_dir_missing(desc)
     string.format("session directory '%s' no longer exists on disk; session is read-only", dir),
     vim.log.levels.WARN
   )
+
+  local sid = (type(desc) == "table" and type(desc.sid) == "string") and desc.sid or nil
+  if sid and sid:match("^ses_[%w]+$") then
+    local on_exit = function(result)
+      pcall(function()
+        if type(result) ~= "table" or result.code ~= 0 or type(result.stdout) ~= "string" then
+          return
+        end
+        local ok, plan = pcall(vim.json.decode, result.stdout)
+        if not ok or type(plan) ~= "table" or plan.sid ~= sid then
+          return
+        end
+
+        if plan.revivable == true and type(plan.candidates) == "table" and #plan.candidates > 0 then
+          local candidate_items = {}
+          for _, cand in ipairs(plan.candidates) do
+            if type(cand) ~= "table"
+              or type(cand.branch) ~= "string"
+              or cand.branch == ""
+              or cand.branch:find("[%s%c`]") ~= nil
+              or type(cand.tip_short) ~= "string"
+              or cand.tip_short:match("^%x+$") == nil
+              or type(cand.source) ~= "string"
+              or cand.source:match("^[%w%-]+$") == nil
+            then
+              return
+            end
+
+            table.insert(candidate_items, cand)
+          end
+          if #candidate_items == 0 then
+            return
+          end
+
+          local msg
+          if #candidate_items == 1 then
+            local cand = candidate_items[1]
+            local merged_suffix = (cand.merged == true) and ", merged" or ""
+            msg = string.format("revivable: run `oc-revive %s` (branch %s @ %s, %s%s)", sid, cand.branch, cand.tip_short, cand.source, merged_suffix)
+          else
+            local rendered_cands = {}
+            for _, cand in ipairs(candidate_items) do
+              local merged_suffix = (cand.merged == true) and ", merged" or ""
+              table.insert(rendered_cands, string.format("%s @ %s, %s%s", cand.branch, cand.tip_short, cand.source, merged_suffix))
+            end
+            msg = string.format(
+              "revivable: run `oc-revive %s` (%d candidates disagree, it will ask: %s)",
+              sid,
+              #candidate_items,
+              table.concat(rendered_cands, "; ")
+            )
+          end
+
+          vim.schedule(function()
+            pcall(vim.notify, msg, vim.log.levels.INFO)
+          end)
+        elseif plan.revivable ~= true and type(plan.reason) == "string" and plan.reason:find("blocked_by_worktree:", 1, true) == 1 then
+          local msg = string.format("revive blocked: a revive worktree for this branch already exists; run `oc-revive %s` for details", sid)
+          vim.schedule(function()
+            pcall(vim.notify, msg, vim.log.levels.WARN)
+          end)
+        end
+      end)
+    end
+
+    pcall(function()
+      vim.system({ "oc-revive", "plan", sid }, { text = true, stdin = false, timeout = 5000 }, on_exit)
+    end)
+  end
+
   return true
 end
 
