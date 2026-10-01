@@ -2950,7 +2950,9 @@ do
   scheduled[1]()
   check(#notifications == 2, "after draining schedule queue hint is notification #2")
   check(notifications[2].level == vim.log.levels.INFO, "notification #2 is INFO level")
-  check(notifications[2].msg:find("branch-sync", 1, true) ~= nil, "notification #2 is the expected hint")
+  local expected_hint = "revivable: run `oc-revive " .. sid .. "` (branch branch-sync @ abcdef1, slug)"
+  check(notifications[2].msg == expected_hint, "notification #2 matches exact one-line hint format")
+  check(notifications[2].msg:find("\n", 1, true) == nil, "hint contains no newline")
 
   vim.notify = orig_notify
   vim.system = orig_system
@@ -3082,8 +3084,9 @@ do
   scheduled = {}
   check(#notifications == 2, "exactly one extra notify emitted after schedule")
   check(notifications[2].level == vim.log.levels.INFO, "extra notify is INFO level")
-  local expected_msg1 = "revivable: run `oc-revive " .. sid .. "`\n  branch feature-xyz @ a1b2c3d (slug)"
+  local expected_msg1 = "revivable: run `oc-revive " .. sid .. "` (branch feature-xyz @ a1b2c3d, slug)"
   check(notifications[2].msg == expected_msg1, "extra notify matches exact format for single unmerged candidate")
+  check(notifications[2].msg:find("\n", 1, true) == nil, "single unmerged hint contains no newline")
 
   -- Case 2: merged single candidate
   local sid2 = "ses_revmerged2"
@@ -3102,8 +3105,9 @@ do
   scheduled = {}
   check(#notifications == 4, "total 4 notifications (2 refusal + 2 hints)")
   check(notifications[4].level == vim.log.levels.INFO, "merged hint is INFO level")
-  local expected_msg2 = "revivable: run `oc-revive " .. sid2 .. "`\n  branch feature-abc @ deadbee (bash-evidence) [merged]"
-  check(notifications[4].msg == expected_msg2, "extra notify matches exact format with [merged] suffix")
+  local expected_msg2 = "revivable: run `oc-revive " .. sid2 .. "` (branch feature-abc @ deadbee, bash-evidence, merged)"
+  check(notifications[4].msg == expected_msg2, "extra notify matches exact format with merged suffix")
+  check(notifications[4].msg:find("\n", 1, true) == nil, "single merged hint contains no newline")
 
   vim.notify = orig_notify
   vim.system = orig_system
@@ -3144,11 +3148,9 @@ do
 
   check(#notifications == 2, "refusal + disagree hint")
   check(notifications[2].level == vim.log.levels.INFO, "hint is INFO level")
-  local expected = "revivable: run `oc-revive " .. sid .. "`\n"
-    .. "  branch path-ownership @ 8fbddc6 (slug)\n"
-    .. "  branch partc-pr1 @ 48f662f (bash-evidence) [merged]\n"
-    .. "  candidates disagree; oc-revive will ask which to use"
+  local expected = "revivable: run `oc-revive " .. sid .. "` (2 candidates disagree, it will ask: path-ownership @ 8fbddc6, slug; partc-pr1 @ 48f662f, bash-evidence, merged)"
   check(notifications[2].msg == expected, "extra notify matches format for disagreeing candidates")
+  check(notifications[2].msg:find("\n", 1, true) == nil, "disagree hint contains no newline")
 
   vim.notify = orig_notify
   vim.system = orig_system
@@ -3376,7 +3378,133 @@ do
   for _, fn in ipairs(scheduled) do fn() end
   check(#notifications == refusal_count + 1, "realistic branch feat/x.y-2 produces hint notification")
   local pos_msg = notifications[#notifications].msg
-  check(pos_msg:find("feat/x.y-2 @ 8fbddc6 (bash-evidence)", 1, true) ~= nil, "hint contains exact formatted candidate line")
+  local expected_pos = "revivable: run `oc-revive " .. sid .. "` (branch feat/x.y-2 @ 8fbddc6, bash-evidence)"
+  check(pos_msg == expected_pos, "hint matches exact one-line format")
+  check(pos_msg:find("\n", 1, true) == nil, "realistic branch hint contains no newline")
+
+  vim.notify = orig_notify
+  vim.system = orig_system
+  vim.schedule = orig_schedule
+end
+
+-- =========================================================================
+-- 86k. REAL-OUTPUT FIXTURE TEST: verbatim oc-revive plan JSON payloads
+-- =========================================================================
+-- Captured from the real CLI on 2026-10-01.
+-- WHY THIS TEST EXISTS:
+-- Unit tests using vim.json.encode from clean Lua tables omit JSON nulls
+-- (which decode to vim.NIL), extra metadata fields (subject, tip_ct, action,
+-- path, snapshot), and real-world payload shapes. A schema drift or parser
+-- incompatibility in oc-revive would silently kill the hint with all other tests green.
+do
+  local notifications = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level)
+    table.insert(notifications, { msg = msg, level = level })
+  end
+  local last_on_exit = nil
+  local orig_system = vim.system
+  vim.system = function(cmd, opts, on_exit)
+    last_on_exit = on_exit
+    return { pid = 1 }
+  end
+  local scheduled = {}
+  local orig_schedule = vim.schedule
+  vim.schedule = function(fn) table.insert(scheduled, fn) end
+
+  -- Fixture 1: real2.json (2 candidates disagree, unmerged)
+  local real2_json = [==[{
+  "revivable": true,
+  "reason": null,
+  "sid": "ses_f8bbbea3fffez8Hy1VTopE8f8l",
+  "dead_dir": "/home/dev/projects/lgtm/.worktrees/path-ownership",
+  "repo": "/home/dev/projects/lgtm",
+  "snapshot": {
+    "exists": true,
+    "path": "/home/dev/.local/share/opencode/snapshot/9caca9e807cd5576dde27b8796dec81751ae0397/9100c4e5cb865e1fea368e2d1ac6281d01088eb2"
+  },
+  "candidates": [
+    {
+      "branch": "path-ownership",
+      "source": "slug",
+      "tip": "8fbddc67501a811ee41b9ceafbe68c8e1f632a57",
+      "tip_short": "8fbddc6",
+      "subject": "config: require ratnikov for mono-infra-owned changes (lgtm-1rm)",
+      "tip_ct": "2026-09-06T10:29:45-04:00",
+      "merged": false,
+      "action": "add",
+      "path": "/home/dev/projects/lgtm/.worktrees/path-ownership-r1790873395"
+    },
+    {
+      "branch": "partc-pr1",
+      "source": "bash-evidence",
+      "tip": "48f662f423bf118c6400b7594add7320039635cd",
+      "tip_short": "48f662f",
+      "subject": "Part C PR-1: close the untested bound, and four hazards adversarial review found",
+      "tip_ct": "2026-09-16T13:16:33-04:00",
+      "merged": false,
+      "action": "add",
+      "path": "/home/dev/projects/lgtm/.worktrees/path-ownership-r1790873395"
+    }
+  ]
+}]==]
+
+  local sid_real2 = "ses_f8bbbea3fffez8Hy1VTopE8f8l"
+  exec.refuse_dir_missing({ directory = "/home/dev/projects/lgtm/.worktrees/path-ownership", sid = sid_real2 })
+  check(#notifications == 1, "real2 refusal notification emitted")
+  check(type(last_on_exit) == "function", "real2 on_exit was captured")
+
+  last_on_exit({ code = 0, stdout = real2_json })
+  check(#scheduled == 1, "real2 scheduled callback queued")
+  scheduled[1]()
+  scheduled = {}
+
+  check(#notifications == 2, "real2 produced hint notification #2")
+  check(notifications[2].level == vim.log.levels.INFO, "real2 hint is INFO level")
+  local expected_real2 = "revivable: run `oc-revive " .. sid_real2 .. "` (2 candidates disagree, it will ask: path-ownership @ 8fbddc6, slug; partc-pr1 @ 48f662f, bash-evidence)"
+  check(notifications[2].msg == expected_real2, "real2 hint matches exact one-line text")
+  check(notifications[2].msg:find("\n", 1, true) == nil, "real2 hint contains no newline")
+
+  -- Fixture 2: realmerged.json (1 candidate, merged)
+  local realmerged_json = [==[{
+  "revivable": true,
+  "reason": null,
+  "sid": "ses_f966a4af3ffeIXwkQcs07oAfBL",
+  "dead_dir": "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3",
+  "repo": "/home/dev/projects/culinary-operations-server",
+  "snapshot": {
+    "exists": true,
+    "path": "/home/dev/.local/share/opencode/snapshot/d981ea548afe1bf9602880546657408142aa557d/2c611a4c4da5686d714ed85ed7d9b74551e78bf0"
+  },
+  "candidates": [
+    {
+      "branch": "cops-6757-step3",
+      "source": "slug",
+      "tip": "59c9409ac39be5d024bd88a5fcc5f67b6a99da1e",
+      "tip_short": "59c9409ac",
+      "subject": "[COPS-6757] Record the alerting as shipped and the roster sentinel trap (#4694)",
+      "tip_ct": "2026-09-03T19:21:49-04:00",
+      "merged": true,
+      "action": "add",
+      "path": "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3-r1790873396"
+    }
+  ]
+}]==]
+
+  local sid_realmerged = "ses_f966a4af3ffeIXwkQcs07oAfBL"
+  exec.refuse_dir_missing({ directory = "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3", sid = sid_realmerged })
+  check(#notifications == 3, "realmerged refusal notification emitted")
+
+  last_on_exit({ code = 0, stdout = realmerged_json })
+  check(#scheduled == 1, "realmerged scheduled callback queued")
+  scheduled[1]()
+  scheduled = {}
+
+  check(#notifications == 4, "realmerged produced hint notification #4")
+  check(notifications[4].level == vim.log.levels.INFO, "realmerged hint is INFO level")
+  local expected_realmerged = "revivable: run `oc-revive " .. sid_realmerged .. "` (branch cops-6757-step3 @ 59c9409ac, slug, merged)"
+  check(notifications[4].msg == expected_realmerged, "realmerged hint matches exact one-line text")
+  check(notifications[4].msg:find("\n", 1, true) == nil, "realmerged hint contains no newline")
 
   vim.notify = orig_notify
   vim.system = orig_system

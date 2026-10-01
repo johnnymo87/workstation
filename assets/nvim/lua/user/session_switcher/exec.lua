@@ -232,7 +232,7 @@ function M.refuse_dir_missing(desc)
         end
 
         if plan.revivable == true and type(plan.candidates) == "table" and #plan.candidates > 0 then
-          local candidate_lines = {}
+          local candidate_items = {}
           for _, cand in ipairs(plan.candidates) do
             if type(cand) ~= "table"
               or type(cand.branch) ~= "string"
@@ -246,27 +246,31 @@ function M.refuse_dir_missing(desc)
               return
             end
 
-            local line = string.format("  branch %s @ %s (%s)", cand.branch, cand.tip_short, cand.source)
-            if cand.merged == true then
-              line = line .. " [merged]"
-            end
-            table.insert(candidate_lines, line)
+            table.insert(candidate_items, cand)
           end
-          if #candidate_lines == 0 then
+          if #candidate_items == 0 then
             return
           end
 
-          local lines = {
-            string.format("revivable: run `oc-revive %s`", sid),
-          }
-          for _, cline in ipairs(candidate_lines) do
-            table.insert(lines, cline)
-          end
-          if #candidate_lines > 1 then
-            table.insert(lines, "  candidates disagree; oc-revive will ask which to use")
+          local msg
+          if #candidate_items == 1 then
+            local cand = candidate_items[1]
+            local merged_suffix = (cand.merged == true) and ", merged" or ""
+            msg = string.format("revivable: run `oc-revive %s` (branch %s @ %s, %s%s)", sid, cand.branch, cand.tip_short, cand.source, merged_suffix)
+          else
+            local rendered_cands = {}
+            for _, cand in ipairs(candidate_items) do
+              local merged_suffix = (cand.merged == true) and ", merged" or ""
+              table.insert(rendered_cands, string.format("%s @ %s, %s%s", cand.branch, cand.tip_short, cand.source, merged_suffix))
+            end
+            msg = string.format(
+              "revivable: run `oc-revive %s` (%d candidates disagree, it will ask: %s)",
+              sid,
+              #candidate_items,
+              table.concat(rendered_cands, "; ")
+            )
           end
 
-          local msg = table.concat(lines, "\n")
           vim.schedule(function()
             pcall(vim.notify, msg, vim.log.levels.INFO)
           end)
