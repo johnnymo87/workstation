@@ -200,61 +200,129 @@ end
 -- is running neither prompts again nor starts a second apply.
 M.revive_inflight = {}
 
+-- The prompt arrives asynchronously, once `oc-revive plan` returns (~0.2-1.4 s).
+-- If by then the human has moved on -- another window, another mode, or simply
+-- too long -- a confirm would swallow keystrokes meant for something else, and
+-- any stray `r` among them would accept. So it is shown only if nothing has
+-- changed since the Enter; otherwise the human is told to press Enter again.
+M.PROMPT_WINDOW_MS = 3000
+
+--- Snapshot of where the human is. A seam so tests can move them.
+--- @return table|nil { win, mode, t }
+function M.ui_state()
+  local ok, st = pcall(function()
+    return {
+      win = vim.api.nvim_get_current_win(),
+      mode = vim.api.nvim_get_mode().mode,
+      t = vim.uv.hrtime() / 1e6,
+    }
+  end)
+  return ok and st or nil
+end
+
 --- Show the confirm prompt. A seam so tests can answer it.
 --- @return integer chosen button index, 0 on Esc
 function M.confirm(message, choices, default)
+  -- Discard typeahead first: keys typed before the prompt existed are not
+  -- answers to it.
+  pcall(function()
+    while vim.fn.getchar(0) ~= 0 do
+    end
+  end)
   local ok, choice = pcall(vim.fn.confirm, message, choices, default, "Question")
   return (ok and type(choice) == "number") and choice or 0
 end
 
+local function float_config(title)
+  local width = math.max(40, math.min(110, math.floor(vim.o.columns * 0.8)))
+  local height = math.max(8, math.min(20, math.floor(vim.o.lines * 0.5)))
+  return {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = math.floor((vim.o.lines - height) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    style = "minimal",
+    border = "rounded",
+    title = title,
+    title_pos = "center",
+  }
+end
+
 --- Run argv in a floating terminal and report its exit code.
 ---
---- On exit 0 the float closes itself. On any other code it STAYS OPEN with the
---- output visible, and `q` closes it: oc-revive's failure text is the only place
---- the human learns what happened and what to run next.
+--- On exit 0 the float closes itself. On any other code it STAYS OPEN (and is
+--- re-opened if the human hid it) with the output scrolled to the end, and `q`
+--- closes it: oc-revive's failure text is the only place the human learns what
+--- happened and what to run next.
+---
+--- `q` WHILE RUNNING ONLY HIDES THE WINDOW. Deleting a terminal buffer makes
+--- nvim SIGHUP, then SIGTERM, then SIGKILL its job, and oc-revive's signal
+--- handling for the move cannot survive the SIGKILL. The buffer is
+--- bufhidden=hide, so hiding leaves the job running to completion.
 ---
 --- @param argv string[]
 --- @param on_done fun(code: integer)
 --- @return boolean started
 function M.run_in_float(argv, on_done)
   local buf, win
+  local running = true
+  local function hide()
+    if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+  end
+  local function close()
+    hide()
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+  end
+  -- Only touch the mode when the float is where the human is: :stopinsert also
+  -- leaves Terminal mode, and would yank them out of whatever they are typing.
+  local function stopinsert_if_here()
+    if win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_get_current_win() == win then
+      pcall(vim.cmd, "stopinsert")
+    end
+  end
   local ok, err = pcall(function()
     buf = vim.api.nvim_create_buf(false, true)
-    local width = math.max(40, math.min(110, math.floor(vim.o.columns * 0.8)))
-    local height = math.max(8, math.min(20, math.floor(vim.o.lines * 0.5)))
-    win = vim.api.nvim_open_win(buf, true, {
-      relative = "editor",
-      width = width,
-      height = height,
-      row = math.floor((vim.o.lines - height) / 2),
-      col = math.floor((vim.o.columns - width) / 2),
-      style = "minimal",
-      border = "rounded",
-      title = " oc-revive ",
-      title_pos = "center",
-    })
-    local function close()
-      if win and vim.api.nvim_win_is_valid(win) then
-        pcall(vim.api.nvim_win_close, win, true)
+    vim.bo[buf].bufhidden = "hide"
+    win = vim.api.nvim_open_win(buf, true, float_config(" oc-revive (q hides; it keeps running) "))
+    vim.keymap.set("n", "q", function()
+      if running then
+        hide()
+      else
+        close()
       end
-      if buf and vim.api.nvim_buf_is_valid(buf) then
-        pcall(vim.api.nvim_buf_delete, buf, { force = true })
-      end
-    end
-    vim.keymap.set("n", "q", close, { buffer = buf, nowait = true, desc = "close oc-revive output" })
+    end, { buffer = buf, nowait = true, desc = "hide/close oc-revive output" })
     local job = vim.fn.jobstart(argv, {
       term = true,
       on_exit = function(_, code)
         vim.schedule(function()
+          running = false
           if code == 0 then
-            pcall(vim.cmd, "stopinsert")
+            stopinsert_if_here()
             close()
-          elseif win and vim.api.nvim_win_is_valid(win) then
-            pcall(vim.api.nvim_win_set_config, win, {
-              title = string.format(" oc-revive exited %d: press q to close ", code),
-              title_pos = "center",
-            })
-            pcall(vim.cmd, "stopinsert")
+          elseif buf and vim.api.nvim_buf_is_valid(buf) then
+            local title = string.format(" oc-revive exited %d: press q to close ", code)
+            if win and vim.api.nvim_win_is_valid(win) then
+              pcall(vim.api.nvim_win_set_config, win, { title = title, title_pos = "center" })
+            else
+              local reopened, w = pcall(vim.api.nvim_open_win, buf, true, float_config(title))
+              win = reopened and w or nil
+            end
+            if win and vim.api.nvim_win_is_valid(win) then
+              -- A Normal-mode terminal does not follow output: put the cursor on
+              -- the last non-empty line so the error itself is on screen.
+              local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+              local last = #lines
+              while last > 1 and lines[last] == "" do
+                last = last - 1
+              end
+              pcall(vim.api.nvim_win_set_cursor, win, { math.max(last, 1), 0 })
+            end
+            stopinsert_if_here()
           end
           on_done(code)
         end)
@@ -266,9 +334,7 @@ function M.run_in_float(argv, on_done)
     end
   end)
   if not ok then
-    if win and vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
+    close()
     vim.notify("could not start oc-revive: " .. tostring(err), vim.log.levels.ERROR)
     return false
   end
@@ -329,8 +395,10 @@ end
 --- Spawn failure, non-zero exit, timeout, unparseable JSON, or a plan that fails
 --- revive.offers validation are all silent, so the refusal stays the whole story
 --- whenever there is nothing safe to offer. An actionable plan gets a confirm
---- prompt (default Cancel) on the main loop; accepting runs oc-revive in a
---- floating terminal (M.offer_revive).
+--- prompt (default Cancel) on the main loop, unless the human has moved on in
+--- the meantime (M.PROMPT_WINDOW_MS); accepting runs oc-revive in a floating
+--- terminal (M.offer_revive). A blocked plan that cannot be resumed from here
+--- keeps #620's one-line WARN.
 ---
 --- @param desc table { directory?: string, sid?: string, title?: string, live_pane?: boolean }
 --- @return boolean
@@ -343,6 +411,7 @@ function M.refuse_dir_missing(desc)
 
   local sid = (type(desc) == "table" and type(desc.sid) == "string") and desc.sid or nil
   if sid and sid:match("^ses_[%w]+$") then
+    local before = M.ui_state()
     local on_exit = function(result)
       -- FAST CONTEXT: vim.system callbacks may not call vim.fn or open
       -- windows, so everything past validation goes through vim.schedule.
@@ -357,9 +426,25 @@ function M.refuse_dir_missing(desc)
         local revive = require("user.session_switcher.revive")
         local offers = revive.offers(plan, sid, desc.directory)
         if not offers then
+          if revive.blocked(plan, sid, desc.directory) then
+            local msg = string.format(
+              "revive blocked: a revive worktree for this branch already exists; run `oc-revive %s` for details",
+              sid
+            )
+            vim.schedule(function()
+              pcall(vim.notify, msg, vim.log.levels.WARN)
+            end)
+          end
           return
         end
         vim.schedule(function()
+          local now = M.ui_state()
+          if not before or not now or now.win ~= before.win or now.mode ~= before.mode
+            or (now.t - before.t) > M.PROMPT_WINDOW_MS
+          then
+            pcall(vim.notify, sid .. " can be revived: press Enter on it in the picker again", vim.log.levels.INFO)
+            return
+          end
           pcall(M.offer_revive, desc, offers)
         end)
       end)

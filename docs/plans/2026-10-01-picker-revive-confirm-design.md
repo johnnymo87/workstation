@@ -14,7 +14,10 @@ Both pickers (the session switcher and the stall-watch picker) accept a row thro
 2. `oc-revive plan <sid>` runs in the background (`vim.system`, 5 s timeout). Any failure, timeout,
    unparseable output, or a plan that fails validation stays silent, as before.
 3. If the plan is actionable, a `vim.fn.confirm` prompt appears. **Cancel is the default**, and Esc
-   cancels too.
+   cancels too. Typeahead is discarded first. The prompt arrives asynchronously, so it is shown only
+   if the window and mode are unchanged since the Enter and under 3 s have passed. Otherwise a
+   prompt could swallow keys typed elsewhere, and a stray `r` would accept. In that case the picker
+   says "press Enter on it in the picker again".
    - **Revivable, one candidate.** Shows the session title, the branch and short commit, the commit
      subject and date, the new directory, a warning if the branch is already merged (the worktree is
      swept about 7 days after the session goes idle), and "uncommitted files are NOT carried over".
@@ -23,10 +26,16 @@ Both pickers (the session switcher and the stall-watch picker) accept a row thro
      `&2 <branch>`), then `&Cancel`.
    - **Blocked by an unfinished earlier revive** (`blocked_by_worktree:` plus the structured
      `plan.resume` from #622). Buttons: `&Resume`, `&Cancel`.
+     When there is no resumable `plan.resume` (the worktree is held by another session, or an
+     `oc-revive` without #622), #620's one-line WARN is kept: "revive blocked: … run `oc-revive <sid>`
+     for details". This change therefore depends on #622 being deployed for the Resume button.
 4. On accept, a floating terminal runs `oc-revive apply …` (or `oc-revive resume …`). The argv is
    built only from plan fields, never from prose, and the user sees the real output.
    - **Exit 0:** the float closes and the session opens via `oc-auto-attach`.
-   - **Non-zero:** the float stays open showing the output, and `q` closes it. `apply` returns 1 for
+   - **Non-zero:** the float stays open, scrolled to the last line of output, and `q` closes it.
+   - **`q` while running only hides the float.** Deleting a terminal buffer makes nvim SIGHUP, then
+     SIGTERM, then SIGKILL the job, and `oc-revive` cannot survive a SIGKILL mid-move. A hidden run
+     carries on, and the float reappears if it then fails. `apply` returns 1 for
      a clean refusal, an ambiguous move, and a partial success (moved, notice failed). So the picker
      does not branch on the code; it shows the output. Re-running is safe because `resume` after a
      move is idempotent.

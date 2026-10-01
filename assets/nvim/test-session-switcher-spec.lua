@@ -3269,10 +3269,13 @@ local function rig()
   R.float_ok = true
   exec.run_in_float = function(argv, done) table.insert(R.floats, { argv = argv, done = done }); return R.float_ok end
   exec.attach = function(d) table.insert(R.attaches, d); return true end
+  R.orig.ui_state = exec.ui_state
+  exec.ui_state = function() return { win = 1, mode = "n", t = 0 } end
   function R.drain() local q = R.sched; R.sched = {}; for _, fn in ipairs(q) do fn() end end
   function R.restore()
     vim.notify, vim.system, vim.schedule = R.orig.notify, R.orig.system, R.orig.schedule
     exec.confirm, exec.run_in_float, exec.attach = R.orig.confirm, R.orig.float, R.orig.attach
+    exec.ui_state = R.orig.ui_state
     exec.revive_inflight = {}
   end
   return R
@@ -3476,6 +3479,103 @@ do
   check(started == false, "a missing binary reports not-started")
   check(#floats() == 0, "a missing binary leaves no float behind")
   check(#errs == 1 and errs[1].l == vim.log.levels.ERROR, "a missing binary is reported as an error")
+end
+
+
+-- 86q. The prompt is shown only if the human has not moved on since the Enter.
+do
+  local function run(second)
+    local R = rig()
+    local calls = 0
+    exec.ui_state = function()
+      calls = calls + 1
+      if calls == 1 then return { win = 1, mode = "n", t = 1000 } end
+      return second
+    end
+    exec.refuse_dir_missing(MERGED_DESC)
+    R.sys[1].on_exit({ code = 0, stdout = REALMERGED_JSON })
+    R.answer = 1
+    R.drain()
+    local out = { confirms = #R.confirms, floats = #R.floats, last = R.notes[#R.notes] }
+    R.restore()
+    return out
+  end
+  local same = run({ win = 1, mode = "n", t = 1000 + exec.PROMPT_WINDOW_MS - 1 })
+  check(same.confirms == 1, "unchanged window/mode within the window: prompt shown")
+  for _, c in ipairs({
+    { "another window", { win = 2, mode = "n", t = 1100 } },
+    { "another mode", { win = 1, mode = "t", t = 1100 } },
+    { "too late", { win = 1, mode = "n", t = 1000 + exec.PROMPT_WINDOW_MS + 1 } },
+    { "state unavailable", nil },
+  }) do
+    local o = run(c[2])
+    check(o.confirms == 0 and o.floats == 0, "moved on (" .. c[1] .. "): no prompt, nothing runs")
+    check(o.last and o.last.level == vim.log.levels.INFO and o.last.msg:find("press Enter on it in the picker again", 1, true) ~= nil,
+      "moved on (" .. c[1] .. "): told to press Enter again")
+  end
+end
+
+-- 86r. Blocked but not resumable from here keeps #620's one-line WARN.
+do
+  local R = rig()
+  exec.refuse_dir_missing(MERGED_DESC)
+  local p = vim.json.decode(BLOCKED_JSON)
+  p.resume = nil -- e.g. the worktree is held by another session
+  R.sys[1].on_exit({ code = 0, stdout = vim.json.encode(p) })
+  check(#R.sched == 1, "blocked without resume: one WARN scheduled")
+  R.drain()
+  check(#R.confirms == 0, "blocked without resume: no prompt")
+  local last = R.notes[#R.notes]
+  check(last.level == vim.log.levels.WARN and last.msg ==
+    "revive blocked: a revive worktree for this branch already exists; run `oc-revive " .. MERGED_SID .. "` for details",
+    "blocked without resume: exact #620 text")
+  check(last.msg:find("\n", 1, true) == nil, "blocked WARN is one line")
+  R.restore()
+  check(revive.blocked(vim.json.decode(BLOCKED_JSON), "ses_other", MERGED_DEAD) == false, "blocked(): another session's plan is not ours")
+  check(revive.blocked(vim.json.decode(REALMERGED_JSON), MERGED_SID, MERGED_DEAD) == false, "blocked(): a revivable plan is not blocked")
+end
+
+-- 86s. REAL float: q while running HIDES and the job runs to completion; a
+-- failure re-opens the float scrolled to the error.
+do
+  local function floats()
+    local out = {}
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_config(w).relative ~= "" then table.insert(out, w) end
+    end
+    return out
+  end
+  local function press_q()
+    local fl = floats()
+    vim.api.nvim_set_current_win(fl[1])
+    vim.fn.maparg("q", "n", false, true).callback()
+  end
+  local marker = vim.fn.tempname()
+  local done, code = false, nil
+  exec.run_in_float({ "sh", "-c", "sleep 0.4; echo finished > " .. marker .. "; exit 0" }, function(c) done, code = true, c end)
+  press_q()
+  check(#floats() == 0, "q while running hides the float")
+  vim.wait(10000, function() return done end, 20)
+  check(code == 0, "the hidden job ran to completion (not killed): code " .. tostring(code))
+  check(vim.fn.filereadable(marker) == 1, "the hidden job's work actually happened")
+  check(#floats() == 0, "success after hiding leaves nothing open")
+
+  done, code = false, nil
+  exec.run_in_float({ "sh", "-c", "sleep 0.3; i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; echo LAST-ERROR-LINE; exit 2" },
+    function(c) done, code = true, c end)
+  press_q()
+  check(#floats() == 0, "hidden before the failure")
+  vim.wait(10000, function() return done end, 20)
+  check(code == 2, "failure code reported")
+  local fl = floats()
+  check(#fl == 1, "a failure re-opens the hidden float")
+  local buf = vim.api.nvim_win_get_buf(fl[1])
+  local row = vim.api.nvim_win_get_cursor(fl[1])[1]
+  check(vim.api.nvim_buf_get_lines(buf, row - 1, row, false)[1] == "LAST-ERROR-LINE", "cursor is on the last output line, so the error is visible")
+  check(vim.inspect(vim.api.nvim_win_get_config(fl[1]).title):find("exited 2", 1, true) ~= nil, "re-opened float names the exit code")
+  press_q()
+  check(#floats() == 0, "q after exit closes it")
+  check(not vim.api.nvim_buf_is_valid(buf), "q after exit deletes the buffer")
 end
 
 print("LUA_TEST_OK " .. N)

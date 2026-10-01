@@ -167,6 +167,21 @@ function M.offers(plan, sid, dead_dir)
   return nil
 end
 
+--- True when the plan says an earlier revive's worktree blocks this one but
+--- offers() found nothing resumable (held by another session, an oc-revive
+--- without structured resume, or a resume that failed validation). The caller
+--- shows #620's one-line WARN for this case rather than nothing.
+function M.blocked(plan, sid, dead_dir)
+  return type(plan) == "table"
+    and valid_sid(sid)
+    and plan.sid == sid
+    and is_str(dead_dir)
+    and plan.dead_dir == dead_dir
+    and plan.revivable ~= true
+    and type(plan.reason) == "string"
+    and plan.reason:find("blocked_by_worktree:", 1, true) == 1
+end
+
 local function rel(path, repo)
   local prefix = repo:gsub("/+$", "") .. "/"
   if path:sub(1, #prefix) == prefix then
