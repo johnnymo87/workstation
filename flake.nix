@@ -84,6 +84,7 @@
       oc-cost = p.callPackage ./pkgs/oc-cost { };
       oc-mcp-enable = p.callPackage ./pkgs/oc-mcp-enable { };
       oc-scoped-shell = p.callPackage ./pkgs/oc-scoped-shell { };
+      oc-revive = p.callPackage ./pkgs/oc-revive { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       oc-tags = p.callPackage ./pkgs/oc-tags { };
       oc-throwaway-serve = p.callPackage ./pkgs/oc-throwaway-serve { };
@@ -1125,6 +1126,75 @@
           echo "GATE FAILURE: update-cfp-sources suite did not report OK." >&2
           exit 1
         }
+        touch $out
+      '';
+
+      # oc-revive's suite: hermetic -- stdlib unittest over a temp sqlite fixture
+      # built with the real `session`/`message`/`part` column set, throwaway git
+      # repos under $TMPDIR, and a fake front door on http.server in a thread.
+      # It never touches the real opencode.db and makes no network calls.
+      #
+      # `git` is a genuine dependency, not a convenience: the path-selection and
+      # branch-candidate rules are tested against real `git worktree list`
+      # output and real commit graphs. HOME must be writable because git refuses
+      # to run without one, and the fixtures set user.email/user.name LOCALLY
+      # per throwaway repo (the one context where an inline identity is correct).
+      oc-revive-tests = devboxPkgs.runCommand "oc-revive-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.git devboxPkgs.gnugrep ];
+        OC_REVIVE_BIN = "${(localPkgsFor devboxSystem).oc-revive}/bin/oc-revive";
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 pkgs/oc-revive/test_oc_revive.py 2>&1 | tee "$TMPDIR/out.txt"
+
+        # The count is PINNED, following checks.oc-tags-tests. "OK" alone is
+        # also what a suite that silently stopped collecting tests prints.
+        grep -q '^Ran 87 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 87 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: oc-revive suite did not report OK." >&2
+          exit 1
+        }
+
+        # Verify installed entrypoint runs under a deliberately minimal PATH
+        # (proving makeWrapperArgs prefixes PATH with git and python).
+        PATH=/dev/null "$OC_REVIVE_BIN" --help > "$TMPDIR/help.txt" 2>&1 || {
+          echo "GATE FAILURE: installed oc-revive --help failed with minimal PATH" >&2
+          cat "$TMPDIR/help.txt" >&2
+          exit 1
+        }
+        grep -q "usage: oc-revive" "$TMPDIR/help.txt" || {
+          echo "GATE FAILURE: oc-revive --help output missing usage line" >&2
+          exit 1
+        }
+
+        # Build throwaway git repo and fixture DB so plan invokes git under minimal PATH
+        git init "$TMPDIR/repo"
+        git -C "$TMPDIR/repo" config user.email "test@example.com"
+        git -C "$TMPDIR/repo" config user.name "Test"
+        git -C "$TMPDIR/repo" commit --allow-empty -m "initial"
+
+        python3 -c "import sqlite3, os; conn = sqlite3.connect('$TMPDIR/fixture.db'); conn.execute('CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, slug TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, agent TEXT, model TEXT)'); conn.execute('CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)'); conn.execute('CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)'); conn.execute('INSERT INTO session (id, project_id, directory, time_created, time_updated) VALUES (?, ?, ?, ?, ?)', ('ses_throwaway', 'proj1', os.environ['TMPDIR'] + '/repo/.worktrees/x', 1000, 1000)); conn.commit()"
+        PATH=/dev/null "$OC_REVIVE_BIN" plan ses_throwaway --db "$TMPDIR/fixture.db" > "$TMPDIR/plan.json" 2>&1 || {
+          echo "GATE FAILURE: installed oc-revive plan failed with minimal PATH" >&2
+          cat "$TMPDIR/plan.json" >&2
+          exit 1
+        }
+        grep -q '"revivable": false' "$TMPDIR/plan.json" || {
+          echo "GATE FAILURE: expected '\"revivable\": false' in plan output, got:" >&2
+          cat "$TMPDIR/plan.json" >&2
+          exit 1
+        }
+        grep -q 'no_candidates' "$TMPDIR/plan.json" || {
+          echo "GATE FAILURE: expected 'no_candidates' in plan output (proving git was invoked), got:" >&2
+          cat "$TMPDIR/plan.json" >&2
+          exit 1
+        }
+
         touch $out
       '';
 
