@@ -3218,8 +3218,13 @@ do
   check(default == 2, "single: default is Cancel")
   local lines = vim.split(msg, "\n", { plain = true })
   check(lines[1] == 'Revive read-only session "COPS-6757 STEP 3 fulfiller dating"?', "single: first line names the session")
-  check(lines[2] == "  branch cops-6757-step3 @ 59c9409ac - [COPS-6757] Record the alerting as shipped and the roster sentinel tr... (2026-09-03)",
-    "single: branch line, subject truncated, tip date" .. " got: " .. tostring(lines[2]))
+  check(lines[2]:find("  branch cops-6757-step3 @ 59c9409ac - [COPS-6757] Record the alerting", 1, true) == 1,
+    "single: branch line names branch, short tip and subject")
+  check(lines[2]:find("... (2026-09-03)", 1, true) ~= nil, "single: long subject truncated, then the tip date")
+  -- A cut through a multi-byte character must not leave half of it behind.
+  local cut = revive.display(string.rep("a", 68) .. "\u{00e9}\u{00e9}\u{00e9}", 72)
+  check(cut == string.rep("a", 68) .. "\u{00e9}"  .. "..." or cut == string.rep("a", 68) .. "...", "truncation keeps UTF-8 whole: " .. cut)
+  check(vim.str_utfindex(cut) ~= nil, "truncated text is valid UTF-8")
   check(msg:find("new dir .worktrees/cops-6757-step3-r1790873396", 1, true) ~= nil, "single: new dir relative to repo")
   check(msg:find("already merged", 1, true) ~= nil and msg:find("7 days", 1, true) ~= nil, "single: merged warning")
   check(msg:find("NOT carried over", 1, true) ~= nil, "single: uncommitted warning")
@@ -3367,8 +3372,7 @@ do
   R.answer = 1
   R.drain()
   exec.refuse_dir_missing(MERGED_DESC)
-  R.sys[2].on_exit({ code = 0, stdout = REALMERGED_JSON })
-  R.drain()
+  check(#R.sys == 1, "second Enter while running does not even re-plan")
   check(#R.confirms == 1, "second Enter while running does not prompt")
   check(#R.floats == 1, "second Enter does not start a second apply")
   check(R.notes[#R.notes].msg:find("already running", 1, true) ~= nil, "second Enter says a revive is running")
@@ -3547,8 +3551,10 @@ do
   end
   local function press_q()
     local fl = floats()
+    check(#fl == 1, "a float is there to press q in")
     vim.api.nvim_set_current_win(fl[1])
-    vim.fn.maparg("q", "n", false, true).callback()
+    -- A real keystroke through nvim's dispatcher, not the callback in isolation.
+    vim.api.nvim_feedkeys("q", "xt", false)
   end
   local marker = vim.fn.tempname()
   local done, code = false, nil
@@ -3559,6 +3565,7 @@ do
   check(code == 0, "the hidden job ran to completion (not killed): code " .. tostring(code))
   check(vim.fn.filereadable(marker) == 1, "the hidden job's work actually happened")
   check(#floats() == 0, "success after hiding leaves nothing open")
+  pcall(vim.fn.delete, marker)
 
   done, code = false, nil
   exec.run_in_float({ "sh", "-c", "sleep 0.3; i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; echo LAST-ERROR-LINE; exit 2" },

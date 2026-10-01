@@ -11,7 +11,9 @@
 -- ERROR SURFACING:
 -- Every `vim.system` call is `pcall`'d because `vim.system` raises synchronously
 -- on missing binaries (ENOENT) rather than calling back.
--- NONE of the functions throw; all return a boolean success indicator.
+-- NONE of the functions throw. Side-effect functions return a boolean success
+-- indicator; the revive helpers (confirm, ui_state, offer_revive) return what
+-- their docs say.
 --
 -- Must NOT require telescope.* or plenary.* at any level.
 
@@ -289,7 +291,8 @@ function M.run_in_float(argv, on_done)
     buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = "hide"
     win = vim.api.nvim_open_win(buf, true, float_config(" oc-revive (q hides; it keeps running) "))
-    vim.keymap.set("n", "q", function()
+    -- Terminal mode too: apply never reads stdin, so q is never input to it.
+    vim.keymap.set({ "n", "t" }, "q", function()
       if running then
         hide()
       else
@@ -347,6 +350,9 @@ end
 --- @param desc table refusal descriptor { sid, directory, title?, live_pane? }
 --- @param result table from revive.offers
 function M.offer_revive(desc, result)
+  if type(desc) ~= "table" or type(desc.sid) ~= "string" or type(result) ~= "table" then
+    return
+  end
   local revive = require("user.session_switcher.revive")
   local sid = desc.sid
   if M.revive_inflight[sid] then
@@ -411,6 +417,11 @@ function M.refuse_dir_missing(desc)
 
   local sid = (type(desc) == "table" and type(desc.sid) == "string") and desc.sid or nil
   if sid and sid:match("^ses_[%w]+$") then
+    if M.revive_inflight[sid] then
+      -- No second plan while an apply holds the repo lock.
+      vim.notify("a revive of " .. sid .. " is already running", vim.log.levels.INFO)
+      return true
+    end
     local before = M.ui_state()
     local on_exit = function(result)
       -- FAST CONTEXT: vim.system callbacks may not call vim.fn or open

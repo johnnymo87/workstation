@@ -34,7 +34,8 @@ function M.display(s, max)
   end
   local out = s:gsub("%c", " ")
   if #out > max then
-    out = out:sub(1, max - 3) .. "..."
+    -- Byte slice, then drop a split UTF-8 sequence at the cut.
+    out = out:sub(1, max - 3):gsub("[\192-\255][\128-\191]*$", "") .. "..."
   end
   return out
 end
