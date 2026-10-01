@@ -107,6 +107,8 @@ def get_worktree_entries(repo: str) -> list[dict[str, Any]]:
             current["path"] = line[len("worktree ") :].strip()
             current["branch"] = None
             current["prunable"] = False
+        elif line.startswith("HEAD "):
+            current["head"] = line[len("HEAD ") :].strip()
         elif line.startswith("branch refs/heads/"):
             current["branch"] = line[len("branch refs/heads/") :].strip()
         elif line.startswith("prunable"):
@@ -817,6 +819,7 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                 raw_branches.append(evidence[0])
 
             blocking_reason = None
+            resume_args: dict[str, str] | None = None
             for b in raw_branches:
                 if b in branch_to_wt:
                     wt_p = branch_to_wt[b]
@@ -851,6 +854,13 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                             if db_path:
                                 resume_parts.extend(["--db", shlex.quote(db_path)])
                             resume_cmd = " ".join(resume_parts)
+                            if tip:
+                                resume_args = {
+                                    "branch": b,
+                                    "path": wt_p,
+                                    "expect_tip": tip,
+                                    "expect_old_dir": dead_dir,
+                                }
                             blocking_reason = (
                                 f"blocked_by_worktree: branch '{b}' is checked out at '{wt_p}' from a prior revive attempt. "
                                 f"Resume this worktree rather than creating a new one. "
@@ -868,6 +878,9 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                 "repo": repo_dir,
                 "snapshot": snapshot,
                 "candidates": [],
+                # Structured twin of the prose "To resume, run: ..." command, for machine consumers
+                # (the nvim picker). Present only when the blocking worktree is resumable.
+                "resume": resume_args,
             }
 
         return {
@@ -920,6 +933,81 @@ def rollback_if_safe(
         capture_output=True,
     )
     return True
+
+
+def _tail(text: str | bytes | None, lines: int = 5, limit: int = 600) -> str:
+    """Last few lines of a subprocess stream, for operator-facing messages."""
+    if text is None:
+        return ""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    out = "\n".join(text.strip().splitlines()[-lines:])
+    return out[-limit:]
+
+
+def verify_worktree_after_failed_add(
+    repo: str,
+    sid: str,
+    target_p: str,
+    branch: str,
+    expect_tip: str,
+    returncode: int,
+    stderr: str,
+) -> None:
+    """After `git worktree add` exited non-zero, continue only if git lists P on refs/heads/<branch>
+    at expect_tip (the failure was a post-checkout hook). Otherwise raise ReviveError carrying git's
+    stderr. Nothing has been recorded or moved yet at this point, so the error path is clean."""
+    target_real = os.path.realpath(target_p)
+    entry = None
+    try:
+        for e in get_worktree_entries(repo):
+            e_p = e.get("path")
+            if e_p and (e_p == target_p or os.path.realpath(e_p) == target_real):
+                entry = e
+                break
+    except subprocess.CalledProcessError:
+        entry = None
+
+    tail = _tail(stderr)
+    if (
+        entry is not None
+        and not entry.get("prunable")
+        and entry.get("branch") == branch
+        and entry.get("head") == expect_tip
+        and os.path.isdir(target_p)
+    ):
+        print(
+            f"WARNING: git worktree add exited {returncode}, most likely a failing post-checkout hook, "
+            f"but the worktree at '{target_p}' is on '{branch}' at {expect_tip[:9]}; continuing.\n"
+            f"  Hook output (tail):\n    " + tail.replace("\n", "\n    ") + "\n"
+            f"  Any setup that hook does was skipped; run it inside the repo's dev shell if you need it.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+
+    if entry is not None or os.path.exists(target_p):
+        found = (
+            f"branch {entry.get('branch')!r} at {entry.get('head')}"
+            if entry is not None
+            else "not a registered worktree"
+        )
+        raise ReviveError(
+            f"worktree add failed (exit {returncode}) and left '{target_p}' in an unexpected state "
+            f"({found}; expected branch '{branch}' at {expect_tip}). No move was attempted and the "
+            f"session is unchanged. Inspect '{target_p}', remove it with "
+            f"`git -C {shlex.quote(repo)} worktree remove --force {shlex.quote(target_p)}`, "
+            f"then re-run `oc-revive {sid}`.\n  git said: {tail}"
+        )
+    raise ReviveError(
+        f"worktree add failed (exit {returncode}); no worktree was created, no move was attempted, "
+        f"and the session is unchanged.\n  git said: {tail}"
+    )
+
+
+def _cpe_message(e: subprocess.CalledProcessError) -> str:
+    cmd = e.cmd if isinstance(e.cmd, str) else " ".join(str(c) for c in e.cmd)
+    return f"git command failed (exit {e.returncode}): {cmd}\n  {_tail(e.stderr) or _tail(e.output)}"
 
 
 def apply_revive(
@@ -1139,11 +1227,18 @@ def apply_revive(
                     )
 
                     # Step 4: git worktree add P B (no -b, no --force)
-                    subprocess.run(
+                    add_res = subprocess.run(
                         ["git", "-C", repo, "worktree", "add", target_p, branch],
-                        check=True,
                         capture_output=True,
+                        text=True,
                     )
+                    if add_res.returncode != 0:
+                        # git returns a failing post-checkout hook's status even though the worktree
+                        # was fully created (overcommit without ruby outside its devenv exits 127).
+                        # Accept the worktree only if git lists exactly what we asked for.
+                        verify_worktree_after_failed_add(
+                            repo, sid, target_p, branch, expect_tip, add_res.returncode, add_res.stderr or ""
+                        )
                     created = True
 
             reconcile_parts = [
@@ -1189,7 +1284,11 @@ def apply_revive(
                     # Record in attempted-path ledger BEFORE POST
                     record_attempted_path(repo, target_p, sid)
                     # Write resume command to stderr BEFORE POST
-                    print(f"To reconcile, run:\n  {reconcile_cmd}", file=sys.stderr, flush=True)
+                    print(
+                        f"If this is interrupted before it finishes, resume with:\n  {reconcile_cmd}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
                     # Step 5: The move POST $DOOR/session/<sid>/move
                     move_url = f"{door_url.rstrip('/')}/session/{sid}/move"
@@ -1455,6 +1554,9 @@ def main(argv: list[str] | None = None) -> int:
         except (sqlite3.Error, OSError) as e:
             print(f"Error opening database: {e}", file=sys.stderr)
             return 2
+        except subprocess.CalledProcessError as e:
+            print(f"Error: {_cpe_message(e)}", file=sys.stderr)
+            return 1
         if not plan["revivable"]:
             print(f"Session '{extra_args.sid}' cannot be revived: {plan['reason']}")
             return 0
@@ -1529,6 +1631,9 @@ def main(argv: list[str] | None = None) -> int:
         except ReviveError as e:
             print(f"Revival failed: {e}", file=sys.stderr)
             return 1
+        except subprocess.CalledProcessError as e:
+            print(f"Revival failed: {_cpe_message(e)}", file=sys.stderr)
+            return 1
 
     try:
         args = parser.parse_args(argv)
@@ -1540,6 +1645,9 @@ def main(argv: list[str] | None = None) -> int:
             plan = plan_revive(args.sid, db_path=args.db)
         except (sqlite3.Error, OSError) as e:
             print(f"Error opening database: {e}", file=sys.stderr)
+            return 2
+        except subprocess.CalledProcessError as e:
+            print(f"Error: {_cpe_message(e)}", file=sys.stderr)
             return 2
         print(json.dumps(plan, indent=2))
         return 0
@@ -1571,6 +1679,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         except ReviveError as e:
             print(f"Error: {e}", file=sys.stderr)
+            return 1
+        except subprocess.CalledProcessError as e:
+            print(f"Error: {_cpe_message(e)}", file=sys.stderr)
             return 1
 
     parser.print_help(sys.stderr)

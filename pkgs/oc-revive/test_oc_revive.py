@@ -676,6 +676,19 @@ class TestPlan(unittest.TestCase):
         self.assertIn("--expect-tip", reason)
         self.assertIn("--expect-old-dir", reason)
         self.assertIn(dead_dir, reason)
+        # Structured resume args for machine consumers (the nvim picker must not scrape the prose).
+        tip = subprocess.run(["git", "rev-parse", f"refs/heads/{base_slug}"], cwd=self.repo,
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(plan["resume"], {
+            "branch": base_slug,
+            "path": prior_wt,
+            "expect_tip": tip,
+            "expect_old_dir": dead_dir,
+        })
+        # The structured fields and the prose command describe the same invocation.
+        prose_cmd = reason.split("To resume, run: ", 1)[1]
+        self.assertIn(f"--expect-tip {shlex.quote(tip)}", prose_cmd)
+        self.assertIn(f"--path {shlex.quote(prior_wt)}", prose_cmd)
 
         # Case 2: A session row DOES reference prior_wt
         cur = self.db_conn.cursor()
@@ -692,6 +705,7 @@ class TestPlan(unittest.TestCase):
         self.assertIn(prior_wt, reason2)
         self.assertIn("ses_holder", reason2)
         self.assertNotIn("To resume, run:", reason2)
+        self.assertIsNone(plan2["resume"])  # held by another session: nothing to resume
 
     def test_snapshot_reporting(self):
         import hashlib
@@ -946,6 +960,174 @@ class TestApply(unittest.TestCase):
         self.assertTrue(notice_body["parts"][0]["synthetic"])
         self.assertEqual(notice_body["parts"][0]["metadata"]["source"], "oc-revive")
         self.assertIn(f"oc-revive-marker: {sid} {new_path}", notice_body["parts"][0]["text"])
+
+    # --- workstation-6lnw.6: post-checkout hook failures during `git worktree add` ---
+
+    def _install_post_checkout_hook(self, body: str):
+        git_common = oc_revive.get_git_common_dir(self.repo)
+        hooks = os.path.join(git_common, "hooks")
+        os.makedirs(hooks, exist_ok=True)
+        hook = os.path.join(hooks, "post-checkout")
+        with open(hook, "w") as f:
+            f.write("#!/bin/sh\n" + body)
+        os.chmod(hook, 0o755)
+
+    def _ledger_text(self) -> str:
+        ledger = os.path.join(oc_revive.get_git_common_dir(self.repo), "oc-revive.attempted")
+        if not os.path.exists(ledger):
+            return ""
+        with open(ledger, encoding="utf-8") as f:
+            return f.read()
+
+    def _landing_notice(self, sid: str):
+        def on_prompt(path, body):
+            text = body["parts"][0]["text"]
+            c = sqlite3.connect(self.db_path)
+            c.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+                ("prt_notice_" + sid, "msg_notice_" + sid, sid, 2000, 2000, json.dumps({"type": "text", "text": text})),
+            )
+            c.commit()
+            c.close()
+        return on_prompt
+
+    def test_apply_continues_with_warning_when_post_checkout_hook_fails_but_worktree_is_verified(self):
+        sid = "ses_hook_fail_ok"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-hook")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-hook")
+        new_path = os.path.join(self.worktrees_dir, "feat-hook-r1700000000")
+        # Mimics overcommit without ruby on PATH: the worktree is fully created, then the hook exits 127.
+        self._install_post_checkout_hook("echo 'env: ruby: No such file or directory' >&2\nexit 127\n")
+        self.door.move_status = 204
+        self.door.on_prompt_async = self._landing_notice(sid)
+
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            res = oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-hook",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertTrue(res["ok"])
+        self.assertTrue(os.path.isdir(new_path))
+        self.assertEqual(len(self.door.move_calls), 1)
+        err = stderr.getvalue()
+        self.assertIn("WARNING", err)
+        self.assertIn("post-checkout", err)
+        self.assertIn("ruby: No such file or directory", err)
+        self.assertIn(new_path, self._ledger_text())
+
+    def test_apply_raises_revive_error_with_git_stderr_when_worktree_add_fails_without_a_worktree(self):
+        sid = "ses_add_fail"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-addfail")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-addfail")
+        # The branch is already checked out elsewhere, so `git worktree add` refuses without creating anything.
+        other = os.path.join(self.tmpdir.name, "elsewhere")
+        subprocess.run(["git", "worktree", "add", other, "feat-addfail"], cwd=self.repo, check=True, capture_output=True)
+        new_path = os.path.join(self.worktrees_dir, "feat-addfail-r1700000000")
+        self.door.move_status = 204
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-addfail",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        msg = str(ctx.exception)
+        self.assertIn("worktree add", msg)
+        self.assertIn("already", msg)  # git's own stderr is carried
+        self.assertEqual(len(self.door.move_calls), 0)
+        self.assertNotIn(new_path, self._ledger_text())
+        self.assertFalse(os.path.exists(new_path))
+
+    def test_apply_raises_when_hook_fails_and_worktree_head_is_not_expect_tip(self):
+        sid = "ses_hook_fail_bad_head"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-hookhead")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-hookhead")
+        new_path = os.path.join(self.worktrees_dir, "feat-hookhead-r1700000000")
+        # A hook that moves HEAD and then fails: the worktree exists but does not match the plan.
+        self._install_post_checkout_hook("git commit -q --allow-empty -m hook-commit >/dev/null 2>&1\nexit 1\n")
+        self.door.move_status = 204
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-hookhead",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        msg = str(ctx.exception)
+        self.assertIn("worktree add", msg)
+        self.assertIn(new_path, msg)  # tells the operator the worktree was left in place
+        self.assertEqual(len(self.door.move_calls), 0)
+        self.assertNotIn(new_path, self._ledger_text())
+
+    def test_apply_raises_when_hook_fails_and_worktree_is_on_another_branch(self):
+        sid = "ses_hook_fail_bad_branch"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-hookbr")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-hookbr")
+        new_path = os.path.join(self.worktrees_dir, "feat-hookbr-r1700000000")
+        # Same tip, different branch: only the branch check can catch this.
+        self._install_post_checkout_hook("git checkout -q -b hook-other >/dev/null 2>&1\nexit 1\n")
+        self.door.move_status = 204
+
+        with self.assertRaises(oc_revive.ReviveError):
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-hookbr",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertEqual(len(self.door.move_calls), 0)
+
+    def test_apply_prints_interruption_resume_label_not_reconcile_before_move(self):
+        sid = "ses_label"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-label")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-label")
+        new_path = os.path.join(self.worktrees_dir, "feat-label-r1700000000")
+        self.door.move_status = 204
+        self.door.on_prompt_async = self._landing_notice(sid)
+
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            res = oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-label",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertTrue(res["ok"])
+        err = stderr.getvalue()
+        self.assertNotIn("To reconcile", err)
+        self.assertIn("If this is interrupted", err)
+        self.assertIn("--resume", err)
 
     def test_apply_door_400_rolls_back(self):
         sid = "ses_apply_400"
@@ -2464,6 +2646,50 @@ class TestCLI(unittest.TestCase):
             f"--expect-old-dir {shlex.quote(dead_dir)}"
         )
         self.assertIn(expected_reconcile, combined)
+
+    def _boom(self, *a, **k):
+        raise subprocess.CalledProcessError(128, ["git", "rev-parse", "--git-common-dir"], output="", stderr="fatal: boom from git\n")
+
+    def test_cli_apply_called_process_error_is_reported_not_raised(self):
+        sid = "ses_cli_cpe"
+        dead_dir = os.path.join(self.worktrees_dir, "cli-cpe")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("cli-cpe")
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr), mock.patch.object(oc_revive, "get_git_common_dir", self._boom):
+            rc = oc_revive.main([
+                "apply", sid, "--branch", "cli-cpe",
+                "--path", os.path.join(self.worktrees_dir, "cli-cpe-r1700000000"),
+                "--expect-tip", tip_sha, "--expect-old-dir", dead_dir,
+            ])
+        self.assertEqual(rc, 1)
+        self.assertIn("boom from git", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_cli_interactive_called_process_error_is_reported_not_raised(self):
+        sid = "ses_cli_cpe_i"
+        dead_dir = os.path.join(self.worktrees_dir, "cli-cpe-i")
+        self._add_session(sid, dead_dir)
+        self._commit_branch("cli-cpe-i")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr), \
+                mock.patch("sys.stdin", io.StringIO("y\n")), \
+                mock.patch.object(oc_revive, "get_git_common_dir", self._boom):
+            rc = oc_revive.main([sid])
+        self.assertEqual(rc, 1)
+        self.assertIn("boom from git", stderr.getvalue())
+
+    def test_cli_plan_called_process_error_is_reported_not_raised(self):
+        sid = "ses_cli_cpe_p"
+        dead_dir = os.path.join(self.worktrees_dir, "cli-cpe-p")
+        self._add_session(sid, dead_dir)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr), \
+                mock.patch.object(oc_revive, "plan_revive", self._boom):
+            rc = oc_revive.main(["plan", sid])
+        self.assertEqual(rc, 2)
+        self.assertEqual(stdout.getvalue(), "")  # no half-written JSON for the picker to parse
+        self.assertIn("boom from git", stderr.getvalue())
 
     def test_cli_interactive_declined(self):
         sid = "ses_cli_decline"
