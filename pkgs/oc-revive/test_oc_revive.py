@@ -1107,6 +1107,9 @@ class TestApply(unittest.TestCase):
                 frontdoor_url=self.door_url,
             )
         self.assertEqual(len(self.door.move_calls), 0)
+        self.assertFalse(os.path.exists(new_path))
+        self.assertNotIn(new_path, oc_revive.get_git_worktrees(self.repo))
+        self.assertNotIn(new_path, self._ledger_text())
 
     def test_apply_refuses_and_removes_worktree_left_locked_by_a_failing_hook(self):
         sid = "ses_hook_locked"
@@ -1134,10 +1137,14 @@ class TestApply(unittest.TestCase):
         subprocess.run(["git", "worktree", "add", p, "feat-sig"], cwd=self.repo, check=True, capture_output=True)
         with self.assertRaises(oc_revive.ReviveError):
             oc_revive.verify_worktree_after_failed_add(self.repo, "ses_sig", p, "feat-sig", tip_sha, -9, "")
+        self.assertFalse(os.path.exists(p))
         # Control: the same state with a positive (hook) exit status is accepted.
         subprocess.run(["git", "worktree", "add", p, "feat-sig"], cwd=self.repo, check=True, capture_output=True)
-        with mock.patch("sys.stderr", io.StringIO()):
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
             oc_revive.verify_worktree_after_failed_add(self.repo, "ses_sig", p, "feat-sig", tip_sha, 1, "")
+        self.assertIn("WARNING", stderr.getvalue())
+        self.assertNotIn("Hook output", stderr.getvalue())  # no empty header when the hook said nothing
 
     def test_apply_survives_non_utf8_hook_output(self):
         sid = "ses_hook_bytes"

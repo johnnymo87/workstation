@@ -106,6 +106,7 @@ def get_worktree_entries(repo: str) -> list[dict[str, Any]]:
                 current = {}
             current["path"] = line[len("worktree ") :].strip()
             current["branch"] = None
+            current["head"] = None
             current["prunable"] = False
             current["locked"] = False
         elif line.startswith("HEAD "):
@@ -975,6 +976,7 @@ def verify_worktree_after_failed_add(
         entry = None
 
     tail = _tail(stderr)
+    git_said = f"\n  git said: {tail}" if tail else ""
     if (
         returncode > 0  # a signal-killed git (negative rc) may have left a partial checkout
         and entry is not None
@@ -987,8 +989,8 @@ def verify_worktree_after_failed_add(
         print(
             f"WARNING: git worktree add exited {returncode}, most likely a failing post-checkout hook, "
             f"but the worktree at '{target_p}' is on '{branch}' at {expect_tip[:9]}; continuing.\n"
-            f"  Hook output (tail):\n    " + tail.replace("\n", "\n    ") + "\n"
-            f"  Any setup that hook does was skipped; run it inside the repo's dev shell if you need it.",
+            + (f"  Hook output (tail):\n    " + tail.replace("\n", "\n    ") + "\n" if tail else "")
+            + "  Any setup that hook does was skipped; run it inside the repo's dev shell if you need it.",
             file=sys.stderr,
             flush=True,
         )
@@ -1013,25 +1015,32 @@ def verify_worktree_after_failed_add(
         if rm.returncode == 0 and not os.path.exists(target_p):
             cleanup = f"The half-made worktree at '{target_p}' was removed."
         else:
-            cleanup = (
-                f"Removing the half-made worktree failed ({_tail(rm.stderr, lines=2)}); inspect "
-                f"'{target_p}' and remove it with `git -C {shlex.quote(repo)} worktree remove "
-                f"--force --force {shlex.quote(target_p)}`."
-            )
+            rm_tail = _tail(rm.stderr, lines=2)
+            why = f" ({rm_tail})" if rm_tail else ""
+            if entry is not None:
+                advice = (
+                    f"inspect '{target_p}' and remove it with `git -C {shlex.quote(repo)} worktree "
+                    f"remove --force --force {shlex.quote(target_p)}`."
+                )
+            else:
+                # git does not know it as a worktree, so `git worktree remove` would fail the same way.
+                advice = f"'{target_p}' is not a registered worktree; inspect it and delete the directory by hand."
+            cleanup = f"Removing the half-made worktree failed{why}; {advice}"
         raise ReviveError(
             f"worktree add failed (exit {returncode}) and left '{target_p}' in an unexpected state "
             f"({found}; expected branch '{branch}' at {expect_tip}). No move was attempted and the "
-            f"session is unchanged. {cleanup} Then re-run `oc-revive {sid}`.\n  git said: {tail}"
+            f"session is unchanged. {cleanup} Then re-run `oc-revive {sid}`.{git_said}"
         )
     raise ReviveError(
         f"worktree add failed (exit {returncode}); no worktree was created, no move was attempted, "
-        f"and the session is unchanged.\n  git said: {tail}"
+        f"and the session is unchanged.{git_said}"
     )
 
 
 def _cpe_message(e: subprocess.CalledProcessError) -> str:
     cmd = e.cmd if isinstance(e.cmd, str) else " ".join(str(c) for c in e.cmd)
-    return f"git command failed (exit {e.returncode}): {cmd}\n  {_tail(e.stderr) or _tail(e.output)}"
+    details = _tail(e.stderr) or _tail(e.output)
+    return f"git command failed (exit {e.returncode}): {cmd}" + (f"\n  {details}" if details else "")
 
 
 def apply_revive(
@@ -1264,7 +1273,8 @@ def apply_revive(
                         # was fully created (overcommit without ruby outside its devenv exits 127).
                         # Accept the worktree only if git lists exactly what we asked for.
                         verify_worktree_after_failed_add(
-                            repo, sid, target_p, branch, expect_tip, add_res.returncode, add_res.stderr or ""
+                            repo, sid, target_p, branch, expect_tip, add_res.returncode,
+                            add_res.stderr or add_res.stdout or "",
                         )
                     created = True
 
