@@ -3585,4 +3585,8 @@ do
   check(not vim.api.nvim_buf_is_valid(buf), "q after exit deletes the buffer")
 end
 
-print("LUA_TEST_OK " .. N)
+-- Leading newline: headless nvim writes notify messages to stderr WITHOUT a
+-- trailing newline, and once the real-float tests have fed keys the last one
+-- is left unterminated, so the token would otherwise share its line and the
+-- harness's ^LUA_TEST_OK parse would miss it.
+print("\nLUA_TEST_OK " .. N)
