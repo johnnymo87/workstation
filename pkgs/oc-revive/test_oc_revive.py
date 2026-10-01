@@ -20,6 +20,7 @@ import oc_revive
 def init_test_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL;")
     cur.execute("""
         CREATE TABLE session (
             id TEXT PRIMARY KEY,
@@ -364,6 +365,26 @@ class TestBranchCandidates(unittest.TestCase):
         candidates = oc_revive.find_branch_candidates(self.repo, sid, dead_dir, self.db_conn)
         self.assertEqual(len(candidates), 0)
 
+    def test_branch_in_prunable_worktree_not_counted_as_checked_out(self):
+        import shutil
+        sid = "ses_prunable_wt"
+        # Create a linked worktree checking out feat-prunable
+        wt_path = os.path.join(self.worktrees_dir, "feat-prunable")
+        subprocess.run(["git", "worktree", "add", "-b", "feat-prunable", wt_path, "main"], cwd=self.repo, check=True, capture_output=True)
+        # Delete worktree directory with rm -rf (simulated by shutil.rmtree)
+        shutil.rmtree(wt_path)
+        # Verify git worktree list --porcelain marks it prunable
+        res = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True)
+        self.assertIn("prunable", res.stdout)
+
+        dead_dir = wt_path
+        self._add_session(sid, dead_dir)
+
+        # Must NOT count as checked out; feat-prunable must be accepted as a candidate!
+        candidates = oc_revive.find_branch_candidates(self.repo, sid, dead_dir, self.db_conn)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["branch"], "feat-prunable")
+
     def test_last_bash_evidence_picked(self):
         sid = "ses_last_evidence"
         dead_dir = os.path.join(self.worktrees_dir, "random-slug")
@@ -420,6 +441,29 @@ class TestPlan(unittest.TestCase):
         cur.execute(
             "INSERT INTO session (id, project_id, parent_id, directory, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)",
             (sid, project_id, parent_id, dead_dir, 1000, 1000),
+        )
+        self.db_conn.commit()
+
+    def _commit_branch(self, branch: str, msg: str = "A commit") -> str:
+        main_tip = subprocess.run(["git", "rev-parse", "main"], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
+        tree = subprocess.run(["git", "rev-parse", "main^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
+        commit_res = subprocess.run(
+            ["git", "commit-tree", tree, "-p", main_tip, "-m", msg],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        commit_sha = commit_res.stdout.strip()
+        subprocess.run(["git", "update-ref", f"refs/heads/{branch}", commit_sha], cwd=self.repo, check=True, capture_output=True)
+        return commit_sha
+
+    def _add_part(self, pid: str, mid: str, sid: str, t_created: int, t_updated: int, data: dict):
+        import json
+        cur = self.db_conn.cursor()
+        cur.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+            (pid, mid, sid, t_created, t_updated, json.dumps(data)),
         )
         self.db_conn.commit()
 
@@ -513,6 +557,35 @@ class TestPlan(unittest.TestCase):
         with mock.patch.dict(os.environ, {"OPENCODE_BUSY_THRESHOLD_SECONDS": "60"}):
             self.assertTrue(oc_revive.is_session_busy(self.db_conn, sid_env))
 
+    def test_is_session_busy_measured_by_max_time_updated_across_messages_parts_and_children(self):
+        sid = "ses_busy_liveness"
+        # Incomplete assistant message created 700s ago
+        t_created = int((time.time() - 700) * 1000)
+        self._add_message("msg_liveness", sid, role="assistant", completed=False, t=t_created)
+
+        # But a part for this session was updated 20s ago
+        t_recent = int((time.time() - 20) * 1000)
+        self._add_part("prt_liveness", "msg_liveness", sid, t_created, t_recent, {"type": "step", "status": "running"})
+
+        # Must be busy because part was updated recently!
+        self.assertTrue(oc_revive.is_session_busy(self.db_conn, sid))
+
+        # Now test child session liveness:
+        sid_parent = "ses_parent_liveness"
+        self._add_session(sid_parent, os.path.join(self.worktrees_dir, "parent-wt"))
+        self._add_message("msg_parent", sid_parent, role="assistant", completed=False, t=t_created)
+
+        sid_child = "ses_child_liveness"
+        self._add_session(sid_child, os.path.join(self.worktrees_dir, "child-wt"), parent_id=sid_parent)
+        # Child session has a message updated 20s ago
+        self._add_message("msg_child", sid_child, role="assistant", completed=True, t=t_created)
+        cur = self.db_conn.cursor()
+        cur.execute("UPDATE message SET time_updated = ? WHERE id = ?", (t_recent, "msg_child"))
+        self.db_conn.commit()
+
+        # Parent session must be busy because its child session was updated recently!
+        self.assertTrue(oc_revive.is_session_busy(self.db_conn, sid_parent))
+
     def test_is_session_busy_trailing_user_not_busy(self):
         sid = "ses_trailing_user"
         # Trailing user message must NOT be treated as busy (deliberate false negative)
@@ -553,6 +626,40 @@ class TestPlan(unittest.TestCase):
         plan = oc_revive.plan_revive(sid, db_path=self.db_path)
         self.assertFalse(plan["revivable"])
         self.assertTrue(plan["reason"].startswith("no_candidates:"))
+
+    def test_plan_blocked_by_prior_revive_worktree_distinct_reason(self):
+        sid = "ses_blocked_wt"
+        base_slug = "feat-blocked"
+        dead_dir = os.path.join(self.worktrees_dir, base_slug)
+        self._add_session(sid, dead_dir)
+        self._commit_branch(base_slug)
+
+        # Create a prior revive worktree matching <base>-r\d{10} holding base_slug
+        prior_wt = os.path.join(self.worktrees_dir, f"{base_slug}-r1700000000")
+        subprocess.run(["git", "worktree", "add", prior_wt, base_slug], cwd=self.repo, check=True, capture_output=True)
+
+        # Case 1: No session row references prior_wt
+        plan = oc_revive.plan_revive(sid, db_path=self.db_path)
+        self.assertFalse(plan["revivable"])
+        reason = plan["reason"]
+        self.assertFalse(reason.startswith("no_candidates:"))
+        self.assertIn(prior_wt, reason)
+        self.assertIn("session row references it: False", reason)
+
+        # Case 2: A session row DOES reference prior_wt
+        cur = self.db_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, project_id, directory, time_created, time_updated) VALUES (?, ?, ?, ?, ?)",
+            ("ses_holder", "proj_test", prior_wt, 1000, 1000),
+        )
+        self.db_conn.commit()
+
+        plan2 = oc_revive.plan_revive(sid, db_path=self.db_path)
+        self.assertFalse(plan2["revivable"])
+        reason2 = plan2["reason"]
+        self.assertFalse(reason2.startswith("no_candidates:"))
+        self.assertIn(prior_wt, reason2)
+        self.assertIn("session row references it: True", reason2)
 
     def test_snapshot_reporting(self):
         import hashlib
@@ -602,6 +709,19 @@ class FakeDoorHandler(http.server.BaseHTTPRequestHandler):
             server.move_calls.append({"path": self.path, "body": parsed, "raw": body})
             if server.on_move:
                 server.on_move(self.path, parsed)
+            if server.move_status == 204 and isinstance(parsed, dict) and "destination" in parsed:
+                dest = parsed["destination"].get("directory")
+                if server.auto_update_door_get and dest and isinstance(server.get_response_data, dict):
+                    server.get_response_data["directory"] = dest
+                if server.auto_update_db and dest and server.db_path:
+                    try:
+                        c = sqlite3.connect(server.db_path)
+                        sid = self.path.split("/session/")[1].split("/")[0]
+                        c.execute("UPDATE session SET directory = ? WHERE id = ?", (dest, sid))
+                        c.commit()
+                        c.close()
+                    except Exception:
+                        pass
             if server.move_status == 0:  # simulate connection drop
                 self.close_connection = True
                 return
@@ -649,6 +769,9 @@ class FakeDoor(http.server.HTTPServer):
         self.prompt_async_status = 204
         self.on_prompt_async: Any = None
         self.on_move: Any = None
+        self.auto_update_door_get = True
+        self.auto_update_db = True
+        self.db_path: str | None = None
         self.thread = threading.Thread(target=self.serve_forever)
         self.thread.daemon = True
         self.thread.start()
@@ -668,6 +791,7 @@ class TestApply(unittest.TestCase):
         self.db_path = os.path.join(self.tmpdir.name, "opencode.db")
         self.db_conn = init_test_db(self.db_path)
         self.door = FakeDoor()
+        self.door.db_path = self.db_path
         self.door_url = f"http://127.0.0.1:{self.door.server_port}"
         os.environ["OPENCODE_FRONTDOOR_URL"] = self.door_url
         os.environ["OPENCODE_DB"] = self.db_path
@@ -689,6 +813,7 @@ class TestApply(unittest.TestCase):
             (sid, "proj_1", dead_dir, 1000, 1000),
         )
         self.db_conn.commit()
+        self.door.get_response_data = {"id": sid, "directory": dead_dir}
 
     def _add_user_message(self, sid: str, agent: str | None = None, model: dict | None = None):
         import json
@@ -743,7 +868,6 @@ class TestApply(unittest.TestCase):
 
         new_path = os.path.join(self.worktrees_dir, "my-feat-r1700000000")
         self.door.move_status = 204
-        self.door.get_response_data = {"id": sid, "directory": new_path}
 
         # Simulate door/serve landing the notice in DB upon prompt_async
         def on_prompt(path, body):
@@ -816,6 +940,35 @@ class TestApply(unittest.TestCase):
         self.assertIn("Door returned 400", str(ctx.exception))
         # Worktree must have been rolled back (removed)!
         self.assertFalse(os.path.exists(new_path))
+
+    def test_apply_relayed_upstream_4xx_keeps_tree(self):
+        sid = "ses_apply_relayed_400"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-relayed-400")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-relayed-400")
+        new_path = os.path.join(self.worktrees_dir, "feat-relayed-400-r1700000000")
+
+        self.door.move_status = 400
+        # Relayed upstream error body from opencode upstream MoveSessionError
+        self.door.move_body = json.dumps({
+            "name": "MoveSessionError",
+            "message": "DestinationProjectMismatch",
+        })
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-relayed-400",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertIn("MoveSessionError", str(ctx.exception))
+        # Worktree must be KEPT on disk (no rollback)!
+        self.assertTrue(os.path.isdir(new_path))
 
     def test_apply_door_500_no_rollback(self):
         sid = "ses_apply_500"
@@ -899,6 +1052,7 @@ class TestApply(unittest.TestCase):
         new_path = os.path.join(self.worktrees_dir, "feat-old-get-r1700000000")
 
         self.door.move_status = 204
+        self.door.auto_update_door_get = False
         self.door.get_response_data = {"id": sid, "directory": dead_dir}  # still old dir!
 
         with self.assertRaises(oc_revive.ReviveError) as ctx:
@@ -1003,7 +1157,6 @@ class TestApply(unittest.TestCase):
         new_path = os.path.join(self.worktrees_dir, "feat-no-model-r1700000000")
 
         self.door.move_status = 204
-        self.door.get_response_data = {"id": sid, "directory": new_path}
 
         oc_revive.apply_revive(
             sid=sid,
@@ -1077,6 +1230,52 @@ class TestApply(unittest.TestCase):
         self.assertEqual(len(self.door.prompt_async_calls), 0)
         self.assertFalse(os.path.exists(new_path))
 
+    def test_apply_schema_drift_door_directory_mismatch(self):
+        sid = "ses_schema_drift"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-schema-drift")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-schema-drift")
+        new_path = os.path.join(self.worktrees_dir, "feat-schema-drift-r1700000000")
+
+        # Door reports a different directory than expect_old_dir (or missing directory)
+        self.door.get_response_data = {"id": sid, "directory": "/unexpected/drift/dir"}
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-schema-drift",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertIn("door", str(ctx.exception).lower())
+        self.assertEqual(len(self.door.move_calls), 0)
+        self.assertFalse(os.path.exists(new_path))
+
+    def test_apply_refuses_when_expect_old_dir_equals_path(self):
+        sid = "ses_same_dir"
+        target_path = os.path.join(self.worktrees_dir, "feat-same-dir")
+        self._add_session(sid, target_path)
+        tip_sha = self._commit_branch("feat-same-dir")
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-same-dir",
+                path=target_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=target_path,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertIn("expect_old_dir", str(ctx.exception).lower())
+        self.assertEqual(len(self.door.move_calls), 0)
+        self.assertEqual(len(self.door.prompt_async_calls), 0)
+
     def test_apply_refuses_session_busy_after_plan(self):
         sid = "ses_apply_busy"
         dead_dir = os.path.join(self.worktrees_dir, "feat-apply-busy")
@@ -1148,6 +1347,37 @@ class TestApply(unittest.TestCase):
         self.assertIn(sha1_dead, notice_text)
         self.assertNotIn(sha1_p, notice_text)
 
+    def test_apply_step8_db_reread_failure(self):
+        sid = "ses_step8_db_revert"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-step8-revert")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-step8-revert")
+        new_path = os.path.join(self.worktrees_dir, "feat-step8-revert-r1700000000")
+        self.door.move_status = 204
+
+        # Simulate upstream race: concurrent turn's patch writes back old directory before Step 8
+        def on_prompt(path, body):
+            thread_conn = sqlite3.connect(self.db_path)
+            cur = thread_conn.cursor()
+            cur.execute("UPDATE session SET directory = ? WHERE id = ?", (dead_dir, sid))
+            thread_conn.commit()
+            thread_conn.close()
+
+        self.door.on_prompt_async = on_prompt
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-step8-revert",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertIn("database", str(ctx.exception).lower())
+
     def test_apply_step_8_p_missing_on_disk_aborts(self):
         import shutil
         sid = "ses_step8_missing"
@@ -1155,9 +1385,7 @@ class TestApply(unittest.TestCase):
         self._add_session(sid, dead_dir)
         tip_sha = self._commit_branch("feat-step8")
         new_path = os.path.join(self.worktrees_dir, "feat-step8-r1700000000")
-
         self.door.move_status = 204
-        self.door.get_response_data = {"id": sid, "directory": new_path}
 
         # Simulate race condition: nightly sweeper removes P before Step 8
         def on_prompt(path, body):
@@ -1185,9 +1413,7 @@ class TestApply(unittest.TestCase):
         self._add_session(sid, dead_dir)
         tip_sha = self._commit_branch("feat-sigterm")
         new_path = os.path.join(self.worktrees_dir, "feat-sigterm-r1700000000")
-
         self.door.move_status = 204
-        self.door.get_response_data = {"id": sid, "directory": new_path}
 
         signal_delivered = False
 
@@ -1225,6 +1451,88 @@ class TestApply(unittest.TestCase):
             self.assertTrue(parent_sigterm_called)
         finally:
             signal.signal(signal.SIGTERM, prev_handler)
+
+    def test_apply_signal_handling_before_and_during_post(self):
+        sid = "ses_sigint_post"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-sigint")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-sigint")
+        new_path = os.path.join(self.worktrees_dir, "feat-sigint-r1700000000")
+        self.door.move_status = 204
+
+        signal_delivered = False
+
+        def on_move(path, body):
+            nonlocal signal_delivered
+            signal_delivered = True
+            # Deliver SIGINT during Step 5 move POST
+            os.kill(os.getpid(), signal.SIGINT)
+
+        self.door.on_move = on_move
+
+        parent_sigint_called = False
+
+        def parent_handler(signum, frame):
+            nonlocal parent_sigint_called
+            parent_sigint_called = True
+
+        prev_handler = signal.signal(signal.SIGINT, parent_handler)
+        stderr = io.StringIO()
+        try:
+            with mock.patch("sys.stderr", stderr):
+                res = oc_revive.apply_revive(
+                    sid=sid,
+                    branch="feat-sigint",
+                    path=new_path,
+                    action="add",
+                    expect_tip=tip_sha,
+                    expect_old_dir=dead_dir,
+                    db_path=self.db_path,
+                    frontdoor_url=self.door_url,
+                )
+            self.assertTrue(signal_delivered)
+            self.assertTrue(res["ok"])
+            self.assertEqual(len(self.door.move_calls), 1)
+            self.assertEqual(len(self.door.prompt_async_calls), 1)
+            self.assertTrue(os.path.isdir(new_path))
+            self.assertTrue(parent_sigint_called)
+            # Must print copy-pasteable reconcile command on exit after signal received
+            expected_reconcile = (
+                f"oc-revive apply {sid} --branch feat-sigint --path {new_path} "
+                f"--action add --expect-tip {tip_sha} --expect-old-dir {dead_dir}"
+            )
+            self.assertIn(expected_reconcile, stderr.getvalue())
+        finally:
+            signal.signal(signal.SIGINT, prev_handler)
+
+    def test_apply_ambiguous_outcomes_print_reconcile_command(self):
+        sid = "ses_apply_ambig"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-ambig")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-ambig")
+        new_path = os.path.join(self.worktrees_dir, "feat-ambig-r1700000000")
+
+        self.door.move_status = 504
+        self.door.get_response_data = {"id": sid, "directory": dead_dir}
+
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            with self.assertRaises(oc_revive.ReviveError):
+                oc_revive.apply_revive(
+                    sid=sid,
+                    branch="feat-ambig",
+                    path=new_path,
+                    action="add",
+                    expect_tip=tip_sha,
+                    expect_old_dir=dead_dir,
+                    db_path=self.db_path,
+                    frontdoor_url=self.door_url,
+                )
+        expected_reconcile = (
+            f"oc-revive apply {sid} --branch feat-ambig --path {new_path} "
+            f"--action add --expect-tip {tip_sha} --expect-old-dir {dead_dir}"
+        )
+        self.assertIn(expected_reconcile, stderr.getvalue())
 
     def test_apply_flock_bounded(self):
         sid = "ses_flock"
@@ -1284,7 +1592,6 @@ class TestApply(unittest.TestCase):
         self.assertIn("Action 'reuse' not permitted", str(ctx.exception))
 
     def test_db_never_written_during_apply(self):
-        import hashlib
         sid = "ses_db_ro"
         dead_dir = os.path.join(self.worktrees_dir, "feat-ro")
         self._add_session(sid, dead_dir)
@@ -1292,26 +1599,34 @@ class TestApply(unittest.TestCase):
         new_path = os.path.join(self.worktrees_dir, "feat-ro-r1700000000")
 
         self.door.move_status = 204
-        self.door.get_response_data = {"id": sid, "directory": new_path}
 
-        with open(self.db_path, "rb") as f:
-            hash_before = hashlib.sha256(f.read()).hexdigest()
+        executed_statements = []
+        original_get_db = oc_revive.get_db_connection
 
-        oc_revive.apply_revive(
-            sid=sid,
-            branch="feat-ro",
-            path=new_path,
-            action="add",
-            expect_tip=tip_sha,
-            expect_old_dir=dead_dir,
-            db_path=self.db_path,
-            frontdoor_url=self.door_url,
-        )
+        def spy_get_db(db_path=None):
+            conn = original_get_db(db_path)
+            # Verify the connection is read-only: write attempts are refused by SQLite
+            with self.assertRaises(sqlite3.OperationalError):
+                conn.execute("UPDATE session SET title = 'mutated' WHERE id = 'x'")
+            conn.set_trace_callback(lambda sql: executed_statements.append(sql.strip()))
+            return conn
 
-        with open(self.db_path, "rb") as f:
-            hash_after = hashlib.sha256(f.read()).hexdigest()
+        with mock.patch("oc_revive.get_db_connection", side_effect=spy_get_db):
+            res = oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-ro",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
 
-        self.assertEqual(hash_before, hash_after)
+        self.assertTrue(res["ok"])
+        self.assertTrue(len(executed_statements) > 0)
+        for stmt in executed_statements:
+            self.assertTrue(stmt.upper().startswith("SELECT"), f"Non-SELECT statement executed: {stmt}")
 
 
 class TestConstants(unittest.TestCase):
@@ -1357,6 +1672,7 @@ class TestCLI(unittest.TestCase):
         self.db_path = os.path.join(self.tmpdir.name, "opencode.db")
         self.db_conn = init_test_db(self.db_path)
         self.door = FakeDoor()
+        self.door.db_path = self.db_path
         self.door_url = f"http://127.0.0.1:{self.door.server_port}"
         os.environ["OPENCODE_FRONTDOOR_URL"] = self.door_url
         os.environ["OPENCODE_DB"] = self.db_path
@@ -1377,6 +1693,7 @@ class TestCLI(unittest.TestCase):
             (sid, "proj_1", dead_dir, 1000, 1000),
         )
         self.db_conn.commit()
+        self.door.get_response_data = {"id": sid, "directory": dead_dir}
 
     def _commit_branch(self, branch: str, msg: str = "A commit") -> str:
         main_tip = subprocess.run(["git", "rev-parse", "main"], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
@@ -1407,6 +1724,13 @@ class TestCLI(unittest.TestCase):
         self.assertTrue(parsed["revivable"])
         self.assertEqual(parsed["sid"], sid)
 
+    def test_cli_plan_unopenable_db_exits_2(self):
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main(["plan", "ses_test", "--db", "/nonexistent/path/db.sqlite"])
+        self.assertEqual(rc, 2)
+        self.assertIn("unable to open database file", stderr.getvalue().lower())
+
     def test_cli_plan_unrevivable_exits_0(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -1425,7 +1749,6 @@ class TestCLI(unittest.TestCase):
         new_path = os.path.join(self.worktrees_dir, "cli-apply-feat-r1700000000")
 
         self.door.move_status = 204
-        self.door.get_response_data = {"id": sid, "directory": new_path}
 
         stdout = io.StringIO()
         with mock.patch("sys.stdout", stdout):
@@ -1459,6 +1782,44 @@ class TestCLI(unittest.TestCase):
             ])
         self.assertEqual(rc, 2)
         self.assertIn("--expect-old-dir", stderr.getvalue())
+
+    def test_cli_apply_notice_send_failure_reports_partial_success_and_reconcile(self):
+        sid = "ses_cli_notice_fail"
+        dead_dir = os.path.join(self.worktrees_dir, "cli-notice-fail")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("cli-notice-fail")
+        new_path = os.path.join(self.worktrees_dir, "cli-notice-fail-r1700000000")
+
+        self.door.move_status = 204
+        self.door.prompt_async_status = 500  # Notice send fails
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main([
+                "apply",
+                sid,
+                "--branch",
+                "cli-notice-fail",
+                "--path",
+                new_path,
+                "--action",
+                "add",
+                "--expect-tip",
+                tip_sha,
+                "--expect-old-dir",
+                dead_dir,
+            ])
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn("Successfully revived", stdout.getvalue())
+        combined = stdout.getvalue() + stderr.getvalue()
+        self.assertIn("Partial success", combined)
+        self.assertIn("notice", combined.lower())
+        expected_reconcile = (
+            f"oc-revive apply {sid} --branch cli-notice-fail --path {new_path} "
+            f"--action add --expect-tip {tip_sha} --expect-old-dir {dead_dir}"
+        )
+        self.assertIn(expected_reconcile, combined)
 
     def test_cli_interactive_declined(self):
         sid = "ses_cli_decline"

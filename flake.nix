@@ -1141,6 +1141,7 @@
       # per throwaway repo (the one context where an inline identity is correct).
       oc-revive-tests = devboxPkgs.runCommand "oc-revive-tests" {
         nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.git devboxPkgs.gnugrep ];
+        OC_REVIVE_BIN = "${(localPkgsFor devboxSystem).oc-revive}/bin/oc-revive";
       } ''
         cd ${self}
         export HOME="$TMPDIR"
@@ -1149,8 +1150,8 @@
 
         # The count is PINNED, following checks.oc-tags-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 56 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 56 tests'. If you added or removed" >&2
+        grep -q '^Ran 67 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 67 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
@@ -1158,6 +1159,32 @@
           echo "GATE FAILURE: oc-revive suite did not report OK." >&2
           exit 1
         }
+
+        # Verify installed entrypoint runs under a deliberately minimal PATH
+        # (proving makeWrapperArgs prefixes PATH with git and python).
+        PATH=/dev/null "$OC_REVIVE_BIN" --help > "$TMPDIR/help.txt" 2>&1 || {
+          echo "GATE FAILURE: installed oc-revive --help failed with minimal PATH" >&2
+          cat "$TMPDIR/help.txt" >&2
+          exit 1
+        }
+        grep -q "usage: oc-revive" "$TMPDIR/help.txt" || {
+          echo "GATE FAILURE: oc-revive --help output missing usage line" >&2
+          exit 1
+        }
+
+        # Build throwaway fixture DB with python3 and run plan
+        python3 -c "import sqlite3; conn = sqlite3.connect('$TMPDIR/fixture.db'); conn.execute('CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, slug TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, agent TEXT, model TEXT)'); conn.commit()"
+        PATH=/dev/null "$OC_REVIVE_BIN" plan ses_throwaway --db "$TMPDIR/fixture.db" > "$TMPDIR/plan.json" 2>&1 || {
+          echo "GATE FAILURE: installed oc-revive plan failed with minimal PATH" >&2
+          cat "$TMPDIR/plan.json" >&2
+          exit 1
+        }
+        grep -q '"revivable": false' "$TMPDIR/plan.json" || {
+          echo "GATE FAILURE: expected '\"revivable\": false' in plan output, got:" >&2
+          cat "$TMPDIR/plan.json" >&2
+          exit 1
+        }
+
         touch $out
       '';
 

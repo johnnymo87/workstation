@@ -1,5 +1,7 @@
 { lib
 , python3
+, git
+, makeWrapper
 }:
 
 python3.pkgs.buildPythonApplication {
@@ -10,6 +12,12 @@ python3.pkgs.buildPythonApplication {
   src = ./.;
 
   dontBuild = true;
+
+  nativeBuildInputs = [ makeWrapper ];
+
+  makeWrapperArgs = [
+    "--prefix" "PATH" ":" "${git}/bin"
+  ];
 
   installPhase = ''
     runHook preInstall

@@ -76,8 +76,8 @@ def get_git_worktrees(repo: str) -> set[str]:
     return paths
 
 
-def get_checked_out_branches(repo: str) -> set[str]:
-    """Return branch names currently checked out in any worktree (including root)."""
+def get_worktree_entries(repo: str) -> list[dict[str, Any]]:
+    """Parse git worktree list --porcelain into a list of entry dicts."""
     res = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         cwd=repo,
@@ -85,11 +85,47 @@ def get_checked_out_branches(repo: str) -> set[str]:
         text=True,
         check=True,
     )
-    branches = set()
+    entries: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
     for line in res.stdout.splitlines():
-        if line.startswith("branch refs/heads/"):
-            branches.add(line[len("branch refs/heads/") :].strip())
+        line = line.strip()
+        if not line:
+            if current:
+                entries.append(current)
+                current = {}
+            continue
+        if line.startswith("worktree "):
+            if current:
+                entries.append(current)
+                current = {}
+            current["path"] = line[len("worktree ") :].strip()
+            current["branch"] = None
+            current["prunable"] = False
+        elif line.startswith("branch refs/heads/"):
+            current["branch"] = line[len("branch refs/heads/") :].strip()
+        elif line.startswith("prunable"):
+            current["prunable"] = True
+    if current:
+        entries.append(current)
+    return entries
+
+
+def get_checked_out_branches(repo: str) -> set[str]:
+    """Return branch names currently checked out in any non-prunable worktree (including root)."""
+    branches = set()
+    for entry in get_worktree_entries(repo):
+        if not entry.get("prunable") and entry.get("branch"):
+            branches.add(entry["branch"])
     return branches
+
+
+def get_branch_to_active_worktree(repo: str) -> dict[str, str]:
+    """Return a mapping of branch name -> active (non-prunable) worktree path."""
+    mapping: dict[str, str] = {}
+    for entry in get_worktree_entries(repo):
+        if not entry.get("prunable") and entry.get("branch") and entry.get("path"):
+            mapping[entry["branch"]] = entry["path"]
+    return mapping
 
 
 def get_trunk_branch(repo: str) -> str | None:
@@ -445,20 +481,44 @@ def is_session_busy(
     if completed or error or finish:
         return False
 
-    # Incomplete assistant message: check staleness window
-    created_raw = raw_time_created
-    if created_raw is None:
-        created_raw = time_info.get("created")
+    # Incomplete assistant message: check staleness window using max(time_updated)
+    # across that session's messages and parts — and its children's.
+    cur.execute(
+        """
+        WITH RECURSIVE sids(id) AS (
+            VALUES (?)
+            UNION ALL
+            SELECT s.id FROM session s JOIN sids ON s.parent_id = sids.id
+        )
+        SELECT MAX(tu) FROM (
+            SELECT MAX(time_updated) AS tu FROM message WHERE session_id IN (SELECT id FROM sids)
+            UNION ALL
+            SELECT MAX(time_updated) AS tu FROM part WHERE session_id IN (SELECT id FROM sids)
+        )
+        """,
+        (sid,),
+    )
+    max_tu_row = cur.fetchone()
+    max_tu = max_tu_row[0] if max_tu_row else None
 
-    if created_raw is not None:
-        created_sec = created_raw / 1000.0 if created_raw > 1e11 else float(created_raw)
+    if max_tu is not None:
+        last_activity_raw = max_tu
     else:
-        created_sec = 0.0
+        last_activity_raw = raw_time_created
+        if last_activity_raw is None:
+            last_activity_raw = time_info.get("created")
+
+    if last_activity_raw is not None:
+        last_activity_sec = (
+            last_activity_raw / 1000.0 if last_activity_raw > 1e11 else float(last_activity_raw)
+        )
+    else:
+        last_activity_sec = 0.0
 
     curr_time = now if now is not None else time.time()
     thresh = threshold_seconds if threshold_seconds is not None else get_busy_threshold_seconds()
 
-    age = curr_time - created_sec
+    age = curr_time - last_activity_sec
     # If younger than threshold, it is considered active/busy.
     # If older, it is an abandoned turn and thus NOT busy.
     if age < thresh:
@@ -470,7 +530,9 @@ def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
     """Open opencode.db read-only with a 10s timeout."""
     path = db_path or os.environ.get("OPENCODE_DB", DEFAULT_DB_PATH)
     expanded = os.path.abspath(os.path.expanduser(path))
-    return sqlite3.connect(f"file:{expanded}?mode=ro", uri=True, timeout=10)
+    conn = sqlite3.connect(f"file:{expanded}?mode=ro", uri=True, timeout=10)
+    conn.isolation_level = None
+    return conn
 
 
 def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
@@ -608,9 +670,33 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
         # Branch candidates
         candidates = find_branch_candidates(repo_dir, sid, dead_dir, conn)
         if not candidates:
+            # Check if blocked by a prior revive worktree matching <base>-r\d{10}
+            base = compute_base_slug(os.path.basename(dead_dir))
+            pattern = rf"^{re.escape(base)}-r\d{{10}}$"
+            branch_to_wt = get_branch_to_active_worktree(repo_dir)
+
+            slug_branch = sanitize_slug(os.path.basename(dead_dir))
+            evidence = extract_last_commit_evidence(conn, sid)
+            raw_branches = [slug_branch]
+            if evidence and evidence[0] not in raw_branches:
+                raw_branches.append(evidence[0])
+
+            blocking_reason = None
+            for b in raw_branches:
+                if b in branch_to_wt:
+                    wt_p = branch_to_wt[b]
+                    if re.match(pattern, os.path.basename(wt_p)):
+                        is_ref = is_path_referenced_in_db(conn, wt_p)
+                        blocking_reason = (
+                            f"blocked_by_worktree: branch '{b}' is checked out at '{wt_p}' "
+                            f"(session row references it: {is_ref})"
+                        )
+                        break
+
+            reason = blocking_reason or "no_candidates: zero branch candidates survive validation"
             return {
                 "revivable": False,
-                "reason": "no_candidates: zero branch candidates survive validation",
+                "reason": reason,
                 "sid": sid,
                 "dead_dir": dead_dir,
                 "repo": repo_dir,
@@ -701,6 +787,10 @@ def apply_revive(
             raise ReviveError(f"Session '{sid}' is a child session (parent_id={parent_id})")
 
         target_p = os.path.normpath(os.path.abspath(path))
+        if os.path.realpath(expect_old_dir) == os.path.realpath(target_p):
+            raise ReviveError(
+                f"Invalid arguments: expect_old_dir '{expect_old_dir}' cannot be identical to target path '{target_p}'"
+            )
         wt_dir = os.path.dirname(target_p)
         repo = os.path.dirname(wt_dir)
 
@@ -752,6 +842,18 @@ def apply_revive(
 
             created = False
             if not already_moved:
+                # Schema-drift tripwire: require door's GET /session/<sid> to report directory == expect_old_dir
+                try:
+                    door_sess = fetch_door_session(door_url, sid)
+                except Exception as e:
+                    raise ReviveError(f"Failed to query session from door at {door_url}: {e}")
+                door_dir = door_sess.get("directory")
+                door_dir_real = os.path.realpath(door_dir) if door_dir else None
+                if door_dir != expect_old_dir and (not door_dir_real or door_dir_real != expect_old_real):
+                    raise ReviveError(
+                        f"Door reports session directory '{door_dir}', expected '{expect_old_dir}'"
+                    )
+
                 # Check busy inside the lock
                 if is_session_busy(conn, sid):
                     raise ReviveError(f"busy_session: session '{sid}' has an unfinalized assistant turn in progress")
@@ -794,45 +896,81 @@ def apply_revive(
                 )
                 created = True
 
-                # Step 5: The move POST $DOOR/session/<sid>/move
-                move_url = f"{door_url.rstrip('/')}/session/{sid}/move"
-                move_payload = json.dumps({"destination": {"directory": target_p}}).encode("utf-8")
-                move_req = urllib.request.Request(
-                    move_url,
-                    data=move_payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
+            reconcile_cmd = (
+                f"oc-revive apply {sid} --branch {branch} --path {target_p} "
+                f"--action add --expect-tip {expect_tip} --expect-old-dir {expect_old_dir}"
+            )
+            post_sent = False
+            reconcile_printed = False
 
-                move_status = None
-                move_err_msg = ""
+            def print_reconcile() -> None:
+                nonlocal reconcile_printed
+                if post_sent and not reconcile_printed:
+                    print(f"To reconcile, run:\n  {reconcile_cmd}", file=sys.stderr)
+                    reconcile_printed = True
+
+            # Steps 5-8 must survive SIGTERM, SIGINT, SIGHUP
+            received_signal: int | None = None
+
+            def handle_signal(signum: int, frame: Any) -> None:
+                nonlocal received_signal
+                received_signal = signum
+
+            old_handlers = {}
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                 try:
-                    with urllib.request.urlopen(move_req, timeout=MOVE_TIMEOUT_SECONDS) as resp:
-                        move_status = resp.status
-                except urllib.error.HTTPError as e:
-                    move_status = e.code
-                    try:
-                        move_err_msg = e.read().decode("utf-8")
-                    except Exception:
-                        pass
-                except Exception as e:
-                    move_status = 599
-                    move_err_msg = str(e)
+                    old_handlers[sig] = signal.signal(sig, handle_signal)
+                except (ValueError, OSError):
+                    pass
 
-                if move_status and 400 <= move_status < 500:
-                    rollback_if_safe(repo, target_p, conn, sid, door_url)
-                    raise ReviveError(f"Door returned {move_status}: {move_err_msg}")
-
-            # Steps 6-8 must survive SIGTERM
-            term_received = False
-
-            def handle_sigterm(signum: int, frame: Any) -> None:
-                nonlocal term_received
-                term_received = True
-
-            old_sigterm = signal.signal(signal.SIGTERM, handle_sigterm)
             try:
                 if not already_moved:
+                    # Step 5: The move POST $DOOR/session/<sid>/move
+                    move_url = f"{door_url.rstrip('/')}/session/{sid}/move"
+                    move_payload = json.dumps({"destination": {"directory": target_p}}).encode("utf-8")
+                    move_req = urllib.request.Request(
+                        move_url,
+                        data=move_payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    post_sent = True
+                    move_status = None
+                    move_err_msg = ""
+                    try:
+                        with urllib.request.urlopen(move_req, timeout=MOVE_TIMEOUT_SECONDS) as resp:
+                            move_status = resp.status
+                    except urllib.error.HTTPError as e:
+                        move_status = e.code
+                        try:
+                            move_err_msg = e.read().decode("utf-8")
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        move_status = 599
+                        move_err_msg = str(e)
+
+                    if move_status and 400 <= move_status < 500:
+                        is_door_generated = False
+                        try:
+                            err_obj = json.loads(move_err_msg)
+                            if isinstance(err_obj, dict) and err_obj.get("error") in ("bad_request", "payload_too_large"):
+                                is_door_generated = True
+                        except Exception:
+                            pass
+
+                        if is_door_generated:
+                            rollback_if_safe(repo, target_p, conn, sid, door_url)
+                            raise ReviveError(f"Door returned {move_status}: {move_err_msg}")
+                        else:
+                            raise ReviveError(f"Upstream returned {move_status}: {move_err_msg}")
+
+                    if move_status != 204:
+                        raise ReviveError(
+                            f"Move outcome ambiguous: door returned {move_status}: {move_err_msg}"
+                        )
+
                     # Step 6: Verify GET $DOOR/session/<sid> -> directory == P
                     verified = False
                     try:
@@ -848,6 +986,8 @@ def apply_revive(
                         )
 
                 # Step 7: Notice
+                notice_sent = True
+                notice_error = None
                 marker = f"oc-revive-marker: {sid} {target_p}"
                 cur.execute(
                     "SELECT data FROM part WHERE session_id = ? AND instr(data, ?) > 0",
@@ -918,7 +1058,9 @@ def apply_revive(
                         with urllib.request.urlopen(prompt_req, timeout=15):
                             pass
                     except Exception as e:
-                        print(f"WARNING: failed to send notice to {prompt_url}: {e}")
+                        print(f"WARNING: failed to send notice to {prompt_url}: {e}", file=sys.stderr)
+                        notice_sent = False
+                        notice_error = str(e)
                     else:
                         # Confirm it LANDED by re-reading session parts for the marker
                         landed = False
@@ -936,7 +1078,17 @@ def apply_revive(
                         if not landed:
                             print(f"WARNING: notice sent to {sid} but not yet confirmed in parts")
 
-                # Step 8: Assert P still exists on disk
+                # Step 8: Re-read DB row to ensure move was not undone, and assert P exists on disk
+                cur.execute("SELECT directory FROM session WHERE id = ?", (sid,))
+                db_row = cur.fetchone()
+                db_dir = db_row[0] if db_row else None
+                target_p_real = os.path.realpath(target_p)
+                db_dir_real = os.path.realpath(db_dir) if db_dir else None
+                if db_dir != target_p and (not db_dir_real or db_dir_real != target_p_real):
+                    raise ReviveError(
+                        f"Step 8 verification failed: session directory in database is '{db_dir}', expected '{target_p}'"
+                    )
+
                 if not os.path.isdir(target_p):
                     raise ReviveError(f"Target path '{target_p}' is missing on disk after move")
 
@@ -945,11 +1097,21 @@ def apply_revive(
                     "sid": sid,
                     "path": target_p,
                     "branch": branch,
+                    "notice_sent": notice_sent,
+                    "notice_error": notice_error,
+                    "reconcile_cmd": reconcile_cmd,
                 }
             finally:
-                signal.signal(signal.SIGTERM, old_sigterm)
-                if term_received:
-                    os.kill(os.getpid(), signal.SIGTERM)
+                if sys.exc_info()[0] is not None:
+                    print_reconcile()
+                for sig, old_h in old_handlers.items():
+                    try:
+                        signal.signal(sig, old_h)
+                    except (ValueError, OSError):
+                        pass
+                if received_signal is not None:
+                    print_reconcile()
+                    os.kill(os.getpid(), received_signal)
 
         finally:
             if locked:
@@ -1005,7 +1167,11 @@ def main(argv: list[str] | None = None) -> int:
         except SystemExit as e:
             return e.code if isinstance(e.code, int) else 2
 
-        plan = plan_revive(extra_args.sid, db_path=extra_args.db)
+        try:
+            plan = plan_revive(extra_args.sid, db_path=extra_args.db)
+        except (sqlite3.Error, OSError) as e:
+            print(f"Error opening database: {e}", file=sys.stderr)
+            return 2
         if not plan["revivable"]:
             print(f"Session '{extra_args.sid}' cannot be revived: {plan['reason']}")
             return 0
@@ -1067,6 +1233,14 @@ def main(argv: list[str] | None = None) -> int:
                 db_path=extra_args.db,
                 frontdoor_url=extra_args.frontdoor_url,
             )
+            if not res.get("notice_sent", True):
+                print(
+                    f"Partial success: session '{extra_args.sid}' moved to {res['path']}, "
+                    f"but notice failed to send to agent: {res.get('notice_error', 'unknown error')}",
+                    file=sys.stderr,
+                )
+                print(f"To reconcile, run:\n  {res['reconcile_cmd']}", file=sys.stderr)
+                return 1
             print(f"Successfully revived session '{extra_args.sid}' at {res['path']}")
             return 0
         except ReviveError as e:
@@ -1079,7 +1253,11 @@ def main(argv: list[str] | None = None) -> int:
         return e.code if isinstance(e.code, int) else 2
 
     if args.command == "plan":
-        plan = plan_revive(args.sid, db_path=args.db)
+        try:
+            plan = plan_revive(args.sid, db_path=args.db)
+        except (sqlite3.Error, OSError) as e:
+            print(f"Error opening database: {e}", file=sys.stderr)
+            return 2
         print(json.dumps(plan, indent=2))
         return 0
 
@@ -1095,6 +1273,14 @@ def main(argv: list[str] | None = None) -> int:
                 db_path=args.db,
                 frontdoor_url=args.frontdoor_url,
             )
+            if not res.get("notice_sent", True):
+                print(
+                    f"Partial success: session '{args.sid}' moved to {res['path']}, "
+                    f"but notice failed to send to agent: {res.get('notice_error', 'unknown error')}",
+                    file=sys.stderr,
+                )
+                print(f"To reconcile, run:\n  {res['reconcile_cmd']}", file=sys.stderr)
+                return 1
             print(f"Successfully revived session '{args.sid}' at {res['path']}")
             return 0
         except ReviveError as e:
