@@ -11,7 +11,7 @@ import {
   EXPECTED_CONSTRAINT_CENSUS,
 } from '../src/route-gate.js';
 import { ROUTE_DISPOSITIONS, getRouteDisposition, type RouteDisposition } from '../src/routes.dispositions.js';
-import { ROUTE_CLASSIFICATION_TABLE, DOOR_ALIASES } from '../src/routes.classification.js';
+import { ROUTE_CLASSIFICATION_TABLE, DOOR_ALIASES, type RouteClassificationEntry } from '../src/routes.classification.js';
 import { dispatch, classify } from '../src/dispatch.js';
 
 describe('Route Classification Gate (Check A)', () => {
@@ -835,6 +835,32 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       expect(result.error).toContain('Check E');
       expect(result.checkEViolations).toBeDefined();
       expect(result.checkEViolations.some((v: string) => v.includes('/session/{sessionID}/unknown_alias'))).toBe(true);
+    });
+
+    test('fully synthetic classification table with no door-alias row and no injected doorAliases does not report Check E violation', () => {
+      const doc = {
+        paths: {
+          '/test/synthetic': {
+            get: {
+              responses: {
+                '200': { description: 'ok' },
+              },
+            },
+          },
+        },
+      };
+      const syntheticTable: RouteClassificationEntry[] = [
+        { method: 'GET', path: '/test/synthetic', class: 'global-ro' },
+      ];
+      const result = checkDocRoutes(doc, {
+        minRoutes: 1,
+        routeClassificationTable: syntheticTable,
+        routeDispositions: {},
+        classDispositions: {},
+        htmlGuardExemptRoutes: [],
+      });
+      expect(result.checkEViolations).toEqual([]);
+      expect(result.error ?? '').not.toContain('Check E');
     });
   });
 });

@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
+import fs from "node:fs";
 import { identify } from "./identity.js";
 import { dispatch } from "./dispatch.js";
 import { getRouteDisposition, OPERATOR_RUNBOOK } from "./routes.dispositions.js";
@@ -557,7 +558,7 @@ async function handleMoveSession(
   res: ServerResponse,
   ctx: ProxyContext,
   url: URL,
-): Promise<{ sid: string | null; target: string }> {
+): Promise<{ sid: string | null; target: string; reason?: string }> {
   // 1. extractSessionIdFromPath(url.pathname); !sid || !SID_REGEX.test(sid) -> 400
   const sid = extractSessionIdFromPath(url.pathname);
   if (!sid || !SID_REGEX.test(sid)) {
@@ -591,9 +592,7 @@ async function handleMoveSession(
     return { sid, target: "" };
   }
 
-  // 4. Shape validation only (the door does not interpret the path's meaning):
-  // Note: the door does NOT stat the path or check it is inside a repo. That is
-  // the helper's job; the door's contract is shape + routing only.
+  // 4. Shape validation:
   if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "bad_request", message: "Request body must be an object" }));
@@ -694,7 +693,47 @@ async function handleMoveSession(
     return { sid, target: "" };
   }
 
-  // 5. resolveOwner(sid, ctx.config, ctx.deps) (read-only; it only GETs pigeon /route and may walk parentage).
+  // 5. Verify destination directory exists and is a directory.
+  // Must use async fs.promises.stat: the door is a single-threaded proxy for all pool
+  // traffic and must never execute a blocking syscall.
+  //
+  // Ordering and rationale:
+  // This check is performed BEFORE resolveOwner and before forwarding upstream.
+  // A 400 returned here guarantees "the move definitely did not happen" (no upstream
+  // state mutation, no Moved event published). Checking as late in validation as possible
+  // also shrinks the window in which a concurrent sweeper could delete the directory
+  // between creation and the move.
+  //
+  // Why stat instead of lstat:
+  // fs.promises.stat follows symlinks. A worktree or project path reachable through a
+  // symlinked directory is legitimate, so symlink targets must be resolved and checked
+  // for directory status. Do NOT change this to lstat.
+  let stats: fs.Stats;
+  try {
+    stats = await fs.promises.stat(dir);
+  } catch {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_request",
+        message: "destination.directory does not exist or is not readable",
+      })
+    );
+    return { sid, target: "" };
+  }
+
+  if (!stats.isDirectory()) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_request",
+        message: "destination.directory is not a directory",
+      })
+    );
+    return { sid, target: "" };
+  }
+
+  // 6. resolveOwner(sid, ctx.config, ctx.deps) (read-only; it only GETs pigeon /route and may walk parentage).
   const resolved = await resolveOwner(sid, ctx.config, ctx.deps);
   // Rationale: an active owner must receive it so the Moved event reaches an
   // attached TUI's serve; for every other reason (prospective / not-routed / pigeon down)
@@ -702,7 +741,7 @@ async function handleMoveSession(
   // because that is an HRW guess and routing a mutation there is what 5obe punished.
   const target = resolved.reason === "active" ? resolved.url : ctx.config.anchorUrl;
 
-  // 6. boundedFetch(`${stripTrailingSlashes(target)}/experimental/control-plane/move-session`, {...})
+  // 7. boundedFetch(`${stripTrailingSlashes(target)}/experimental/control-plane/move-session`, {...})
   const forwardHeaders: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -726,7 +765,7 @@ async function handleMoveSession(
     fetchImpl: ctx.deps?.fetch,
   });
 
-  // 7. Response mapping (be exhaustive; a test per row):
+  // 8. Response mapping (be exhaustive; a test per row):
   if (!result.ok) {
     if (result.timedOut) {
       res.writeHead(504, { "Content-Type": "application/json" });
@@ -740,7 +779,7 @@ async function handleMoveSession(
       res.writeHead(502, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "bad_gateway", message: "Failed to connect to target serve" }));
     }
-    return { sid, target };
+    return { sid, target, reason: resolved.reason };
   }
 
   const response = result.response!;
@@ -759,14 +798,14 @@ async function handleMoveSession(
       })
     );
     discardBody(response);
-    return { sid, target };
+    return { sid, target, reason: resolved.reason };
   }
 
   if (response.status === 204) {
     res.writeHead(204);
     res.end();
     discardBody(response);
-    return { sid, target };
+    return { sid, target, reason: resolved.reason };
   }
 
   if (response.status >= 200 && response.status < 300) {
@@ -778,9 +817,12 @@ async function handleMoveSession(
       })
     );
     discardBody(response);
-    return { sid, target };
+    return { sid, target, reason: resolved.reason };
   }
 
+  // Defensive branch: boundedFetch does not pass a `redirect` option, and undici
+  // follows redirects by default, so a 3xx response is unreachable in production.
+  // Kept defensively to guarantee a redirect cannot be blindly relayed or swallowed.
   if (response.status >= 300 && response.status < 400) {
     res.writeHead(502, { "Content-Type": "application/json" });
     res.end(
@@ -790,7 +832,7 @@ async function handleMoveSession(
       })
     );
     discardBody(response);
-    return { sid, target };
+    return { sid, target, reason: resolved.reason };
   }
 
   if (response.status >= 400 && response.status < 600) {
@@ -798,7 +840,7 @@ async function handleMoveSession(
     const responseHeaders = forwardableResponseHeaders(response.headers);
     res.writeHead(response.status, responseHeaders);
     res.end(upstreamBody);
-    return { sid, target };
+    return { sid, target, reason: resolved.reason };
   }
 
   // Any other status: 502
@@ -810,7 +852,7 @@ async function handleMoveSession(
     })
   );
   discardBody(response);
-  return { sid, target };
+  return { sid, target, reason: resolved.reason };
 }
 
 export async function handleRequest(
@@ -829,6 +871,7 @@ export async function handleRequest(
   // rather than something that has to be inferred from pigeon state after the fact.
   let viaParent: boolean | undefined;
   let routingSid: string | null | undefined;
+  let reason: string | undefined;
 
   const method = req.method || "GET";
   const url = new URL(req.url || "", "http://internal");
@@ -850,6 +893,7 @@ export async function handleRequest(
       degraded,
       viaParent,
       routingSid,
+      reason,
       status: res.statusCode || 200,
       durationMs,
       method,
@@ -1016,6 +1060,7 @@ export async function handleRequest(
       const resVal = await handleMoveSession(req, res, ctx, url);
       sid = resVal.sid;
       target = resVal.target;
+      reason = resVal.reason;
       return;
     }
 

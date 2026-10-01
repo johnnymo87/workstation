@@ -755,7 +755,8 @@ export function checkDocRoutes(
   // Check E: Door Alias Invariants
   // (1) and (2) are gated on `usingRealTables` because ~7 existing tests inject tiny synthetic docs with
   // `routeDispositions: {}` and expect `passed === true`, and those docs legitimately do not declare
-  // `move-session`. (3) is table-only, so it runs unconditionally.
+  // `move-session`. (3) is table-only, gated on `usingRealTables || options.doorAliases !== undefined`
+  // so a synthetic classificationTable does not spuriously conflict with the production DOOR_ALIASES registry.
   // The authoritative CLI path passes no overrides so (1)+(2) always run there.
   const checkEViolations: string[] = [];
 
@@ -786,40 +787,44 @@ export function checkDocRoutes(
     }
   }
 
-  // 3. Registry <-> table agreement (table-only, runs unconditionally)
-  const tableDoorAliases = classificationTable.filter((e) => e.class === 'door-alias');
-  for (const alias of doorAliases) {
-    const aParts = alias.alias.trim().split(/\s+/);
-    const aMethod = aParts[0].toUpperCase();
-    const aNormPath = normalizeTemplatePath(aParts.slice(1).join(' '));
-
-    const foundInTable = classificationTable.some(
-      (e) =>
-        e.class === 'door-alias' &&
-        e.method.toUpperCase() === aMethod &&
-        normalizeTemplatePath(e.path) === aNormPath
-    );
-    if (!foundInTable) {
-      checkEViolations.push(
-        `Door alias "${alias.alias}" has no matching "door-alias" row in ROUTE_CLASSIFICATION_TABLE`
-      );
-    }
-  }
-
-  for (const entry of tableDoorAliases) {
-    const eMethod = entry.method.toUpperCase();
-    const eNormPath = normalizeTemplatePath(entry.path);
-
-    const foundInAliases = doorAliases.some((alias) => {
+  // 3. Registry <-> table agreement
+  // Gated on `usingRealTables || options.doorAliases !== undefined`: a synthetic classificationTable
+  // that carries no door aliases would otherwise spuriously fail against the production DOOR_ALIASES registry.
+  if (usingRealTables || options.doorAliases !== undefined) {
+    const tableDoorAliases = classificationTable.filter((e) => e.class === 'door-alias');
+    for (const alias of doorAliases) {
       const aParts = alias.alias.trim().split(/\s+/);
       const aMethod = aParts[0].toUpperCase();
       const aNormPath = normalizeTemplatePath(aParts.slice(1).join(' '));
-      return aMethod === eMethod && aNormPath === eNormPath;
-    });
-    if (!foundInAliases) {
-      checkEViolations.push(
-        `ROUTE_CLASSIFICATION_TABLE row "${entry.method} ${entry.path}" with class "door-alias" is missing from DOOR_ALIASES`
+
+      const foundInTable = classificationTable.some(
+        (e) =>
+          e.class === 'door-alias' &&
+          e.method.toUpperCase() === aMethod &&
+          normalizeTemplatePath(e.path) === aNormPath
       );
+      if (!foundInTable) {
+        checkEViolations.push(
+          `Door alias "${alias.alias}" has no matching "door-alias" row in ROUTE_CLASSIFICATION_TABLE`
+        );
+      }
+    }
+
+    for (const entry of tableDoorAliases) {
+      const eMethod = entry.method.toUpperCase();
+      const eNormPath = normalizeTemplatePath(entry.path);
+
+      const foundInAliases = doorAliases.some((alias) => {
+        const aParts = alias.alias.trim().split(/\s+/);
+        const aMethod = aParts[0].toUpperCase();
+        const aNormPath = normalizeTemplatePath(aParts.slice(1).join(' '));
+        return aMethod === eMethod && aNormPath === eNormPath;
+      });
+      if (!foundInAliases) {
+        checkEViolations.push(
+          `ROUTE_CLASSIFICATION_TABLE row "${entry.method} ${entry.path}" with class "door-alias" is missing from DOOR_ALIASES`
+        );
+      }
     }
   }
 

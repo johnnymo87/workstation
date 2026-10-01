@@ -627,4 +627,25 @@ describe('RequestLogger summary line', () => {
 
     expect(lines.filter((l) => l.includes('request_summary'))).toHaveLength(0);
   });
+
+  test('log includes reason when present and omits when undefined', () => {
+    const lines: string[] = [];
+    const logger = new RequestLogger({ sink: (l) => lines.push(l) });
+    const entry: RequestLogEntry = {
+      ...base,
+      class: 'door-alias',
+      action: 'move-session',
+      reason: 'not-routed',
+    };
+    logger.log(entry);
+    expect(lines).toHaveLength(1);
+    const parsedWithReason = JSON.parse(lines[0]);
+    expect(parsedWithReason.reason).toBe('not-routed');
+
+    lines.length = 0;
+    logger.log({ ...base });
+    expect(lines).toHaveLength(1);
+    const parsedWithoutReason = JSON.parse(lines[0]);
+    expect(parsedWithoutReason.reason).toBeUndefined();
+  });
 });

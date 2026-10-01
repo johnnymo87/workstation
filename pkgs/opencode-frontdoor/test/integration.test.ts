@@ -3,6 +3,7 @@ import http from "node:http";
 import zlib from "node:zlib";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import type { AddressInfo } from "node:net";
 import { createFrontDoor } from "../src/server.js";
 import { resetPoolCursor } from "../src/proxy.js";
@@ -2981,12 +2982,27 @@ describe("FrontDoor Integration", () => {
   });
 
   describe("move-session (POST /session/{sessionID}/move)", () => {
+    let validMoveDir: string;
+    let filePathAsDir: string;
+
+    beforeAll(() => {
+      validMoveDir = fs.mkdtempSync(path.join(os.tmpdir(), "frontdoor-move-dir-"));
+      filePathAsDir = path.join(validMoveDir, "file-not-dir");
+      fs.writeFileSync(filePathAsDir, "hello");
+    });
+
+    afterAll(() => {
+      if (validMoveDir && fs.existsSync(validMoveDir)) {
+        fs.rmSync(validMoveDir, { recursive: true, force: true });
+      }
+    });
+
     test("5obe guard, prospective: move on ses_prospective -> forwarded to anchor, not portA; no placement; no sticky", async () => {
       const now = Date.now();
       const res = await makeRequest("POST", "/session/ses_prospective/move", {
         "Content-Type": "application/json",
       }, JSON.stringify({
-        destination: { directory: "/abs/path/dest" }
+        destination: { directory: validMoveDir }
       }));
       expect(res.status).toBe(204);
       expect(moveSessionCalls.length).toBe(1);
@@ -3007,7 +3023,7 @@ describe("FrontDoor Integration", () => {
       const res = await makeRequest("POST", `/session/${sid}/move`, {
         "Content-Type": "application/json",
       }, JSON.stringify({
-        destination: { directory: "/abs/path/dest" }
+        destination: { directory: validMoveDir }
       }));
       expect(res.status).toBe(204);
       expect(moveSessionCalls.length).toBe(1);
@@ -3024,7 +3040,7 @@ describe("FrontDoor Integration", () => {
       const res = await makeRequest("POST", "/session/ses_active_b/move", {
         "Content-Type": "application/json",
       }, JSON.stringify({
-        destination: { directory: "/abs/path/dest" }
+        destination: { directory: validMoveDir }
       }));
       expect(res.status).toBe(204);
       expect(moveSessionCalls.length).toBe(1);
@@ -3035,7 +3051,7 @@ describe("FrontDoor Integration", () => {
       const res = await makeRequest("POST", "/session/ses_a/move", {
         "Content-Type": "application/json",
       }, JSON.stringify({
-        destination: { directory: "/abs/path/exact_wire" }
+        destination: { directory: validMoveDir }
       }));
       expect(res.status).toBe(204);
       expect(moveSessionCalls.length).toBe(1);
@@ -3044,7 +3060,7 @@ describe("FrontDoor Integration", () => {
       const parsedBody = JSON.parse(call.body);
       expect(Object.keys(parsedBody).sort()).toEqual(["destination", "sessionID"]);
       expect(parsedBody.sessionID).toBe("ses_a");
-      expect(parsedBody.destination).toEqual({ directory: "/abs/path/exact_wire" });
+      expect(parsedBody.destination).toEqual({ directory: validMoveDir });
       expect(call.headers["content-type"]).toBe("application/json");
     });
 
@@ -3140,6 +3156,40 @@ describe("FrontDoor Integration", () => {
         expect(res.status).toBe(400);
         expect(moveSessionCalls.length).toBe(0);
       });
+
+      test("rejects missing destination directory", async () => {
+        const missingDir = path.join(validMoveDir, "nonexistent-dir");
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: missingDir } }));
+        expect(res.status).toBe(400);
+        expect(moveSessionCalls.length).toBe(0);
+        const parsed = JSON.parse(res.body);
+        expect(parsed.error).toBe("bad_request");
+        expect(parsed.message).toBe("destination.directory does not exist or is not readable");
+      });
+
+      test("rejects destination that is a file", async () => {
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: filePathAsDir } }));
+        expect(res.status).toBe(400);
+        expect(moveSessionCalls.length).toBe(0);
+        const parsed = JSON.parse(res.body);
+        expect(parsed.error).toBe("bad_request");
+        expect(parsed.message).toBe("destination.directory is not a directory");
+      });
+
+      test("rejects destination containing a NUL byte", async () => {
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: "/tmp/a\u0000b" } }));
+        expect(res.status).toBe(400);
+        expect(moveSessionCalls.length).toBe(0);
+        const parsed = JSON.parse(res.body);
+        expect(parsed.error).toBe("bad_request");
+        expect(parsed.message).toBe("destination.directory does not exist or is not readable");
+      });
     });
 
     test("413 on a >16 KiB body", async () => {
@@ -3151,6 +3201,44 @@ describe("FrontDoor Integration", () => {
       expect(moveSessionCalls.length).toBe(0);
     });
 
+    test("destination is an existing directory -> still forwards", async () => {
+      const res = await makeRequest("POST", "/session/ses_a/move", {
+        "Content-Type": "application/json",
+      }, JSON.stringify({
+        destination: { directory: validMoveDir }
+      }));
+      expect(res.status).toBe(204);
+      expect(moveSessionCalls.length).toBe(1);
+    });
+
+    test("logged entry carries reason for active and not-routed moves", async () => {
+      // 1. active owner
+      loggedLines = [];
+      pigeonSessionOwners["ses_active_logged"] = `http://127.0.0.1:${portB}`;
+      const resActive = await makeRequest("POST", "/session/ses_active_logged/move", {
+        "Content-Type": "application/json",
+      }, JSON.stringify({ destination: { directory: validMoveDir } }));
+      expect(resActive.status).toBe(204);
+      await new Promise<void>((resolve) => setTimeout(resolve, 15));
+      const activeLog = loggedLines.find((entry) => entry.sid === "ses_active_logged" && entry.action === "move-session");
+      expect(activeLog).toBeDefined();
+      expect(activeLog.reason).toBe("active");
+      expect(activeLog.degraded).toBe(false);
+
+      // 2. not-routed (pigeon returns 404 -> falls back to anchor)
+      loggedLines = [];
+      pigeonSessionOwners["ses_not_routed_logged"] = 404;
+      const resNotRouted = await makeRequest("POST", "/session/ses_not_routed_logged/move", {
+        "Content-Type": "application/json",
+      }, JSON.stringify({ destination: { directory: validMoveDir } }));
+      expect(resNotRouted.status).toBe(204);
+      await new Promise<void>((resolve) => setTimeout(resolve, 15));
+      const notRoutedLog = loggedLines.find((entry) => entry.sid === "ses_not_routed_logged" && entry.action === "move-session");
+      expect(notRoutedLog).toBeDefined();
+      expect(notRoutedLog.reason).toBe("not-routed");
+      expect(notRoutedLog.degraded).toBe(false);
+    });
+
     describe("upstream response mapping", () => {
       test("204 -> 204 with empty body", async () => {
         moveSessionHandler = async (_serve, _req, _body, res) => {
@@ -3160,7 +3248,7 @@ describe("FrontDoor Integration", () => {
         };
         const res = await makeRequest("POST", "/session/ses_a/move", {
           "Content-Type": "application/json",
-        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        }, JSON.stringify({ destination: { directory: validMoveDir } }));
         expect(res.status).toBe(204);
         expect(res.body).toBe("");
       });
@@ -3173,7 +3261,7 @@ describe("FrontDoor Integration", () => {
         };
         const res = await makeRequest("POST", "/session/ses_a/move", {
           "Content-Type": "application/json",
-        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        }, JSON.stringify({ destination: { directory: validMoveDir } }));
         expect(res.status).toBe(400);
         expect(JSON.parse(res.body)).toEqual({ error: "directory_does_not_exist" });
       });
@@ -3186,7 +3274,7 @@ describe("FrontDoor Integration", () => {
         };
         const res = await makeRequest("POST", "/session/ses_a/move", {
           "Content-Type": "application/json",
-        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        }, JSON.stringify({ destination: { directory: validMoveDir } }));
         expect(res.status).toBe(502);
         expect(JSON.parse(res.body).error).toBe("bad_gateway");
         expect(JSON.parse(res.body).message).toContain("Unexpected upstream status");
@@ -3200,7 +3288,7 @@ describe("FrontDoor Integration", () => {
         };
         const res = await makeRequest("POST", "/session/ses_a/move", {
           "Content-Type": "application/json",
-        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        }, JSON.stringify({ destination: { directory: validMoveDir } }));
         expect(res.status).toBe(500);
         expect(JSON.parse(res.body)).toEqual({ error: "internal_failure" });
       });
@@ -3214,7 +3302,7 @@ describe("FrontDoor Integration", () => {
         };
         const res = await makeRequest("POST", "/session/ses_a/move", {
           "Content-Type": "application/json",
-        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        }, JSON.stringify({ destination: { directory: validMoveDir } }));
         expect(res.status).toBe(502);
         expect(testMetrics.htmlPoisonBlocked).toBe(poisonBefore + 1);
         expect(JSON.parse(res.body).error).toBe("bad_gateway");
@@ -3227,7 +3315,7 @@ describe("FrontDoor Integration", () => {
         };
         const res = await makeRequest("POST", "/session/ses_a/move", {
           "Content-Type": "application/json",
-        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        }, JSON.stringify({ destination: { directory: validMoveDir } }));
         expect(res.status).toBe(504);
         expect(JSON.parse(res.body).error).toBe("gateway_timeout");
         expect(JSON.parse(res.body).message).toContain("Move outcome unknown; re-read the session before any cleanup.");
