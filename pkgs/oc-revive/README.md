@@ -21,5 +21,5 @@ oc-revive plan <session_id>
 oc-revive <session_id>
 
 # Machine apply interface (called by interactive mode)
-oc-revive apply <session_id> --branch <branch> --path <path> --action add --expect-tip <sha>
+oc-revive apply <session_id> --branch <branch> --path <path> --action add --expect-tip <sha> --expect-old-dir <dead_dir>
 ```

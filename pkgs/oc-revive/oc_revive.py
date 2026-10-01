@@ -26,8 +26,23 @@ DEFAULT_FRONTDOOR_URL = "http://127.0.0.1:4700"
 # forwarding it runs owner resolution which in worst-case takes ~15s (pigeon retry + root walk).
 # Hence a client timeout strictly >= 90s is required so the client never times out
 # while the door is still awaiting upstream resolution.
-MOVE_TIMEOUT_SECONDS = 90
+DOOR_FORWARD_TIMEOUT_SECONDS = 60
+DOOR_RESOLVE_WORST_CASE_SECONDS = 15
+TIMEOUT_MARGIN_SECONDS = 15
+MOVE_TIMEOUT_SECONDS = (
+    DOOR_FORWARD_TIMEOUT_SECONDS + DOOR_RESOLVE_WORST_CASE_SECONDS + TIMEOUT_MARGIN_SECONDS
+)
 LOCK_TIMEOUT_SECONDS = 15
+
+
+def get_lock_timeout_seconds() -> float:
+    val = os.environ.get("OPENCODE_LOCK_TIMEOUT_SECONDS")
+    if val:
+        try:
+            return float(val)
+        except ValueError:
+            pass
+    return float(LOCK_TIMEOUT_SECONDS)
 
 
 class ReviveError(Exception):
@@ -353,12 +368,36 @@ def find_branch_candidates(
     return candidates
 
 
-def is_session_busy(conn: sqlite3.Connection, sid: str) -> bool:
+DEFAULT_BUSY_THRESHOLD_SECONDS = 600
+
+
+def get_busy_threshold_seconds() -> float:
+    val = os.environ.get("OPENCODE_BUSY_THRESHOLD_SECONDS") or os.environ.get("OPENCODE_BUSY_THRESHOLD")
+    if val:
+        try:
+            return float(val)
+        except ValueError:
+            pass
+    return float(DEFAULT_BUSY_THRESHOLD_SECONDS)
+
+
+def is_session_busy(
+    conn: sqlite3.Connection,
+    sid: str,
+    threshold_seconds: float | None = None,
+    now: float | None = None,
+) -> bool:
     """Detect if the session is currently busy mid-turn.
+
+    CHEAP GUARD, NOT A PROOF OF IDLENESS:
+    This check is a cheap heuristic guard against reviving a session while a turn
+    is actively being processed. It does NOT prove that a session is truly idle or
+    that a turn will not be initiated immediately after checking.
 
     WHAT THIS DETECTOR PROVES:
     - If the newest message for this session has role='assistant' and has no completion
       timestamp (time.completed is null/absent), no error, and no finish status recorded,
+      AND the message was created recently (younger than threshold_seconds, default 600s),
       the database reflects an active assistant turn that has not concluded.
 
     WHAT THIS DETECTOR DOES NOT PROVE:
@@ -367,27 +406,62 @@ def is_session_busy(conn: sqlite3.Connection, sid: str) -> bool:
     - It does NOT prove that an idle session will remain idle (a new turn could arrive right after
       the check).
     - It does NOT see in-flight turns before their initial message row is committed to SQLite.
+
+    DELIBERATE FALSE NEGATIVES:
+    - Incomplete assistant message older than the staleness threshold (default 600s):
+      Treated as an abandoned turn (e.g. serve died mid-turn). Allowing revival prevents
+      permanent deadlocks where an orphaned session can never be revived.
+    - Trailing role='user' message:
+      On a dead session (whose git worktree directory was deleted), a trailing user message
+      typically means the prompt returned 204 and no assistant reply ever came — which is
+      the dead state itself, NOT an in-flight live turn. Treating it as busy would permanently
+      refuse revival of such sessions (measured 2/3684 dead sessions in this state on 2026-10-01).
+      A genuinely in-flight user turn is near-impossible on a session whose cwd is already gone,
+      because new turns cannot start there. DO NOT "fix" this by marking role='user' as busy.
     """
     cur = conn.cursor()
     cur.execute(
-        "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
+        "SELECT time_created, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
         (sid,),
     )
     row = cur.fetchone()
     if not row:
         return False
+    raw_time_created, data_raw = row
     try:
-        data = json.loads(row[0])
+        data = json.loads(data_raw)
     except Exception:
         return False
 
-    if data.get("role") == "assistant":
-        time_info = data.get("time") or {}
-        completed = time_info.get("completed")
-        error = data.get("error")
-        finish = data.get("finish")
-        if not completed and not error and not finish:
-            return True
+    # Do NOT treat trailing role='user' as busy (see DELIBERATE FALSE NEGATIVES above).
+    if data.get("role") != "assistant":
+        return False
+
+    time_info = data.get("time") or {}
+    completed = time_info.get("completed")
+    error = data.get("error")
+    finish = data.get("finish")
+    if completed or error or finish:
+        return False
+
+    # Incomplete assistant message: check staleness window
+    created_raw = raw_time_created
+    if created_raw is None:
+        created_raw = time_info.get("created")
+
+    if created_raw is not None:
+        created_sec = created_raw / 1000.0 if created_raw > 1e11 else float(created_raw)
+    else:
+        created_sec = 0.0
+
+    curr_time = now if now is not None else time.time()
+    thresh = threshold_seconds if threshold_seconds is not None else get_busy_threshold_seconds()
+
+    age = curr_time - created_sec
+    # If younger than threshold, it is considered active/busy.
+    # If older, it is an abandoned turn and thus NOT busy.
+    if age < thresh:
+        return True
     return False
 
 
@@ -601,6 +675,7 @@ def apply_revive(
     path: str,
     action: str,
     expect_tip: str,
+    expect_old_dir: str,
     db_path: str | None = None,
     frontdoor_url: str | None = None,
 ) -> dict[str, Any]:
@@ -613,13 +688,13 @@ def apply_revive(
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, project_id, parent_id, directory FROM session WHERE id = ?",
+            "SELECT id, project_id, parent_id FROM session WHERE id = ?",
             (sid,),
         )
         row = cur.fetchone()
         if not row:
             raise ReviveError(f"Session '{sid}' not found in database")
-        _id, project_id, parent_id, curr_dir = row
+        _id, project_id, parent_id = row
 
         if parent_id is not None:
             raise ReviveError(f"Session '{sid}' is a child session (parent_id={parent_id})")
@@ -643,6 +718,7 @@ def apply_revive(
         lock_path = os.path.join(git_common, "oc-revive.lock")
 
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        lock_timeout = get_lock_timeout_seconds()
         start_lock = time.time()
         locked = False
         try:
@@ -651,22 +727,34 @@ def apply_revive(
                     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     locked = True
                 except (BlockingIOError, OSError):
-                    if time.time() - start_lock > LOCK_TIMEOUT_SECONDS:
+                    if time.time() - start_lock > lock_timeout:
                         raise ReviveError(f"Timed out waiting for lock on {lock_path}")
                     time.sleep(0.05)
 
             # Step 1: Idempotent retry check
             cur.execute("SELECT directory FROM session WHERE id = ?", (sid,))
-            fresh_dir = cur.fetchone()[0]
+            fresh_row = cur.fetchone()
+            fresh_dir = fresh_row[0] if fresh_row else None
 
-            already_moved = (fresh_dir == target_p)
-            if not already_moved and curr_dir and fresh_dir != curr_dir:
+            target_p_real = os.path.realpath(target_p)
+            expect_old_real = os.path.realpath(expect_old_dir) if expect_old_dir else None
+            fresh_real = os.path.realpath(fresh_dir) if fresh_dir else None
+
+            if fresh_dir == target_p or (fresh_real and fresh_real == target_p_real):
+                already_moved = True
+            elif fresh_dir == expect_old_dir or (fresh_real and fresh_real == expect_old_real):
+                already_moved = False
+            else:
                 raise ReviveError(
-                    f"Session directory changed unexpectedly from '{curr_dir}' to '{fresh_dir}'"
+                    f"directory-mismatch: session directory '{fresh_dir}' is neither target path '{target_p}' nor expected old directory '{expect_old_dir}'"
                 )
 
             created = False
             if not already_moved:
+                # Check busy inside the lock
+                if is_session_busy(conn, sid):
+                    raise ReviveError(f"busy_session: session '{sid}' has an unfinalized assistant turn in progress")
+
                 # Step 2: Re-validate inside the lock
                 if os.path.exists(target_p):
                     raise ReviveError(f"plan-changed: target path '{target_p}' already exists on disk")
@@ -787,12 +875,12 @@ def apply_revive(
                         "OPENCODE_SNAPSHOT_DIR",
                         os.path.expanduser("~/.local/share/opencode/snapshot"),
                     )
-                    sha1_dead = hashlib.sha1((curr_dir or "").encode("utf-8")).hexdigest()
+                    sha1_dead = hashlib.sha1(expect_old_dir.encode("utf-8")).hexdigest()
                     snapshot_path = os.path.join(snapshot_base, project_id or "", sha1_dead)
 
                     notice_text = (
                         f"Notice: Working directory has moved to {target_p}.\n"
-                        f"The previous working directory ({curr_dir}) was deleted and must NOT be cd'd into, "
+                        f"The previous working directory ({expect_old_dir}) was deleted and must NOT be cd'd into, "
                         f"mkdir'd, or recreated (recreating it creates zombie sessions for any siblings).\n"
                         f"Branch: {branch} (tip: {expect_tip}).\n"
                         f"Uncommitted work was NOT carried over; opencode snapshot reference: {snapshot_path}.\n"
@@ -898,6 +986,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Action (only 'add' is supported in v1)",
     )
     apply_p.add_argument("--expect-tip", required=True, help="Expected tip commit SHA")
+    apply_p.add_argument("--expect-old-dir", required=True, help="Expected dead directory")
     apply_p.add_argument("--db", help="Path to opencode.db")
     apply_p.add_argument("--frontdoor-url", help="Frontdoor URL")
 
@@ -973,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
                 path=chosen_cand["path"],
                 action=chosen_cand["action"],
                 expect_tip=chosen_cand["tip"],
+                expect_old_dir=plan["dead_dir"],
                 db_path=extra_args.db,
                 frontdoor_url=extra_args.frontdoor_url,
             )
@@ -1000,6 +1090,7 @@ def main(argv: list[str] | None = None) -> int:
                 path=args.path,
                 action=args.action,
                 expect_tip=args.expect_tip,
+                expect_old_dir=args.expect_old_dir,
                 db_path=args.db,
                 frontdoor_url=args.frontdoor_url,
             )
