@@ -11,7 +11,7 @@ import {
   EXPECTED_CONSTRAINT_CENSUS,
 } from '../src/route-gate.js';
 import { ROUTE_DISPOSITIONS, getRouteDisposition, type RouteDisposition } from '../src/routes.dispositions.js';
-import { ROUTE_CLASSIFICATION_TABLE, DOOR_ALIASES, type RouteClassificationEntry } from '../src/routes.classification.js';
+import { ROUTE_CLASSIFICATION_TABLE, DOOR_ALIASES, type RouteEntry } from '../src/routes.classification.js';
 import { dispatch, classify } from '../src/dispatch.js';
 
 describe('Route Classification Gate (Check A)', () => {
@@ -849,7 +849,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
           },
         },
       };
-      const syntheticTable: RouteClassificationEntry[] = [
+      const syntheticTable: RouteEntry[] = [
         { method: 'GET', path: '/test/synthetic', class: 'global-ro' },
       ];
       const result = checkDocRoutes(doc, {
