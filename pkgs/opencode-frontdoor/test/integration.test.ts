@@ -3190,6 +3190,29 @@ describe("FrontDoor Integration", () => {
         expect(parsed.error).toBe("bad_request");
         expect(parsed.message).toBe("destination.directory does not exist or is not readable");
       });
+
+      // Pins the stat-vs-lstat choice. A worktree reachable through a symlinked
+      // path is legitimate, so the existence check MUST follow symlinks. Without
+      // this test the `stat` -> `lstat` mutation is invisible to the whole suite
+      // (adversarial review, 2026-10-01): every other fixture passes a real
+      // directory, a regular file, a missing path or a NUL byte, none of which
+      // distinguish the two calls. `lstat` would 400 this legitimate request.
+      test("accepts a destination that is a symlink to a directory (stat, not lstat)", async () => {
+        const linkTarget = fs.mkdtempSync(path.join(os.tmpdir(), "frontdoor-move-linktarget-"));
+        const linkPath = path.join(validMoveDir, "symlink-to-dir");
+        fs.symlinkSync(linkTarget, linkPath);
+        try {
+          const res = await makeRequest("POST", "/session/ses_a/move", {
+            "Content-Type": "application/json",
+          }, JSON.stringify({ destination: { directory: linkPath } }));
+          expect(res.status).toBe(204);
+          expect(moveSessionCalls.length).toBe(1);
+          expect(JSON.parse(moveSessionCalls[0].body).destination.directory).toBe(linkPath);
+        } finally {
+          fs.rmSync(linkPath, { force: true });
+          fs.rmSync(linkTarget, { recursive: true, force: true });
+        }
+      });
     });
 
     test("413 on a >16 KiB body", async () => {
