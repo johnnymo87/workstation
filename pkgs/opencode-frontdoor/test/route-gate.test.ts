@@ -11,7 +11,7 @@ import {
   EXPECTED_CONSTRAINT_CENSUS,
 } from '../src/route-gate.js';
 import { ROUTE_DISPOSITIONS, getRouteDisposition, type RouteDisposition } from '../src/routes.dispositions.js';
-import { ROUTE_CLASSIFICATION_TABLE } from '../src/routes.classification.js';
+import { ROUTE_CLASSIFICATION_TABLE, DOOR_ALIASES } from '../src/routes.classification.js';
 import { dispatch, classify } from '../src/dispatch.js';
 
 describe('Route Classification Gate (Check A)', () => {
@@ -662,7 +662,7 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       });
       expect(shrunk.passed).toBe(false);
       expect(shrunk.error).toContain('Constraint census mismatch');
-      expect(shrunk.error).toContain('needs-audit: expected 0, got 26');
+      expect(shrunk.error).toContain('needs-audit: expected 0, got 25');
 
       const grown = checkDocRoutes(doc, {
         expectedConstraintCensus: { ...EXPECTED_CONSTRAINT_CENSUS, 'process-pinned-ram': 99 },
@@ -787,6 +787,54 @@ describe('Route Denial Disposition Gate (Check B)', () => {
       expect(result.passed).toBe(false);
       expect(result.error).toContain('Check D failed');
       expect(result.error).toContain('present in HTML_GUARD_EXEMPT_ROUTES but does not declare application/octet-stream in /doc: [GET /stale/exemption/*]');
+    });
+  });
+
+  describe('Check E — Door Alias Invariants', () => {
+    test('DOOR_ALIASES is non-empty so Check E cannot be vacuous', () => {
+      expect(DOOR_ALIASES.length).toBeGreaterThan(0);
+    });
+
+    test('pinned fixture plus declared alias fails Check E (upstream must not declare alias)', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+      doc.paths['/session/{sessionID}/move'] = {
+        post: { summary: 'Declared move session' },
+      };
+      const result = checkDocRoutes(doc);
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Check E');
+      expect(result.checkEViolations).toBeDefined();
+      expect(result.checkEViolations.some((v: string) => v.includes('/session/{sessionID}/move'))).toBe(true);
+    });
+
+    test('pinned fixture minus forward target fails Check E (forward target must exist in /doc)', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+      delete doc.paths['/experimental/control-plane/move-session'];
+      const result = checkDocRoutes(doc);
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Check E');
+      expect(result.checkEViolations).toBeDefined();
+      expect(result.checkEViolations.some((v: string) => v.includes('/experimental/control-plane/move-session'))).toBe(true);
+    });
+
+    test('registry/table disagreement fails Check E', () => {
+      const docPath = path.join(__dirname, 'fixtures', 'doc.pinned-1.18.18.1.json');
+      const doc = JSON.parse(fs.readFileSync(docPath, 'utf8'));
+      const result = checkDocRoutes(doc, {
+        doorAliases: [
+          ...DOOR_ALIASES,
+          {
+            alias: 'POST /session/{sessionID}/unknown_alias',
+            forwardsTo: 'POST /experimental/control-plane/move-session',
+          },
+        ],
+      });
+      expect(result.passed).toBe(false);
+      expect(result.error).toContain('Check E');
+      expect(result.checkEViolations).toBeDefined();
+      expect(result.checkEViolations.some((v: string) => v.includes('/session/{sessionID}/unknown_alias'))).toBe(true);
     });
   });
 });

@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'vitest';
+import { dispatch } from '../src/dispatch.js';
 import {
   getRouteDisposition,
   ROUTE_DISPOSITIONS,
@@ -141,5 +142,17 @@ describe('credential-writing rows carry a pool-correct remedy', () => {
         );
       }
     }
+  });
+
+  test('POST /experimental/control-plane/move-session is superseded by non-denying route', () => {
+    const d = ROUTE_DISPOSITIONS['POST /experimental/control-plane/move-session'];
+    expect(d).toBeDefined();
+    expect(d.kind).toBe('superseded');
+    expect(d.constraint).toBe('superseded-by-session-route');
+    expect(d.supersededBy).toBe('POST /session/{sessionID}/move');
+    expect(d.tuiSurface).toBe('degrades');
+    const [method, path] = d.supersededBy!.split(/\s+/);
+    const resolved = dispatch(method, path);
+    expect(['route-session', 'create', 'fork', 'move-session', 'forward-anchor', 'forward-pool']).toContain(resolved.action);
   });
 });

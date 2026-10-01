@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import http from "node:http";
 import https from "node:https";
+import path from "node:path";
 import { identify } from "./identity.js";
 import { dispatch } from "./dispatch.js";
 import { getRouteDisposition, OPERATOR_RUNBOOK } from "./routes.dispositions.js";
@@ -551,6 +552,267 @@ async function handleFork(
   return { sid: r.sid, degraded: r.degraded || resolved.degraded };
 }
 
+async function handleMoveSession(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ProxyContext,
+  url: URL,
+): Promise<{ sid: string | null; target: string }> {
+  // 1. extractSessionIdFromPath(url.pathname); !sid || !SID_REGEX.test(sid) -> 400
+  const sid = extractSessionIdFromPath(url.pathname);
+  if (!sid || !SID_REGEX.test(sid)) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "bad_request", message: "Malformed session ID" }));
+    return { sid: null, target: "" };
+  }
+
+  // 2. readIncomingBody(req, 16384) -> on payload_too_large 413, other read error 400.
+  let clientBody: string;
+  try {
+    clientBody = await readIncomingBody(req, 16384);
+  } catch (err: any) {
+    if (err?.message === "payload_too_large") {
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "payload_too_large", message: "Request body exceeds maximum size" }));
+    } else {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "bad_request", message: "Failed to read request body" }));
+    }
+    return { sid, target: "" };
+  }
+
+  // 3. JSON.parse -> 400 on invalid JSON.
+  let parsedBody: any;
+  try {
+    parsedBody = JSON.parse(clientBody);
+  } catch {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "bad_request", message: "Invalid JSON body" }));
+    return { sid, target: "" };
+  }
+
+  // 4. Shape validation only (the door does not interpret the path's meaning):
+  // Note: the door does NOT stat the path or check it is inside a repo. That is
+  // the helper's job; the door's contract is shape + routing only.
+  if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "bad_request", message: "Request body must be an object" }));
+    return { sid, target: "" };
+  }
+
+  if ("moveChanges" in parsedBody) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_request",
+        message:
+          "moveChanges is not supported through the front door: on a live source it runs 'git change discard … untracked: remove' and can destroy uncommitted work",
+      })
+    );
+    return { sid, target: "" };
+  }
+
+  if ("sessionID" in parsedBody) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_request",
+        message:
+          "sessionID must not be specified in request body; the path is the only authority for which session moves",
+      })
+    );
+    return { sid, target: "" };
+  }
+
+  const bodyKeys = Object.keys(parsedBody);
+  const extraBodyKeys = bodyKeys.filter((k) => k !== "destination");
+  if (extraBodyKeys.length > 0 || !bodyKeys.includes("destination")) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_request",
+        message:
+          extraBodyKeys.length > 0
+            ? `Unexpected key in request body: ${extraBodyKeys.join(", ")}`
+            : "Missing destination in request body",
+      })
+    );
+    return { sid, target: "" };
+  }
+
+  const dest = parsedBody.destination;
+  if (!dest || typeof dest !== "object" || Array.isArray(dest)) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "bad_request", message: "destination must be an object" }));
+    return { sid, target: "" };
+  }
+
+  const destKeys = Object.keys(dest);
+  const extraDestKeys = destKeys.filter((k) => k !== "directory");
+  if (extraDestKeys.length > 0 || !destKeys.includes("directory")) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_request",
+        message:
+          extraDestKeys.length > 0
+            ? `Unexpected key in destination: ${extraDestKeys.join(", ")}`
+            : "Missing directory in destination",
+      })
+    );
+    return { sid, target: "" };
+  }
+
+  const dir = dest.directory;
+  if (typeof dir !== "string") {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "bad_request", message: "destination.directory must be a string" }));
+    return { sid, target: "" };
+  }
+
+  if (dir.length === 0) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "bad_request", message: "destination.directory must be non-empty" }));
+    return { sid, target: "" };
+  }
+
+  if (!dir.startsWith("/")) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "bad_request", message: "destination.directory must start with /" }));
+    return { sid, target: "" };
+  }
+
+  if (path.resolve(dir) !== dir) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_request",
+        message:
+          "destination.directory must be an absolute normalized path without '.', '..', '//', or trailing slash",
+      })
+    );
+    return { sid, target: "" };
+  }
+
+  // 5. resolveOwner(sid, ctx.config, ctx.deps) (read-only; it only GETs pigeon /route and may walk parentage).
+  const resolved = await resolveOwner(sid, ctx.config, ctx.deps);
+  // Rationale: an active owner must receive it so the Moved event reaches an
+  // attached TUI's serve; for every other reason (prospective / not-routed / pigeon down)
+  // the anchor is correct, and we deliberately do NOT use resolved.url for prospective,
+  // because that is an HRW guess and routing a mutation there is what 5obe punished.
+  const target = resolved.reason === "active" ? resolved.url : ctx.config.anchorUrl;
+
+  // 6. boundedFetch(`${stripTrailingSlashes(target)}/experimental/control-plane/move-session`, {...})
+  const forwardHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (ctx.config.serveAuthHeader) {
+    forwardHeaders["Authorization"] = ctx.config.serveAuthHeader;
+  }
+  // Do not forward arbitrary client headers (unlike placeAfterCreate): this is a door-owned
+  // request with a door-constructed body, so the client's headers have no standing.
+  const targetBase = stripTrailingSlashes(target);
+  const forwardUrl = `${targetBase}/experimental/control-plane/move-session`;
+  const forwardBody = JSON.stringify({
+    sessionID: sid,
+    destination: { directory: dir },
+  });
+
+  const result = await boundedFetch(forwardUrl, {
+    method: "POST",
+    timeoutMs: ctx.config.mintTimeoutMs,
+    headers: forwardHeaders,
+    body: forwardBody,
+    fetchImpl: ctx.deps?.fetch,
+  });
+
+  // 7. Response mapping (be exhaustive; a test per row):
+  if (!result.ok) {
+    if (result.timedOut) {
+      res.writeHead(504, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "gateway_timeout",
+          message: "Move outcome unknown; re-read the session before any cleanup.",
+        })
+      );
+    } else {
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "bad_gateway", message: "Failed to connect to target serve" }));
+    }
+    return { sid, target };
+  }
+
+  const response = result.response!;
+
+  if (isHtmlResponse(response.headers.get("content-type") ?? undefined)) {
+    ctx.metrics.htmlPoisonBlocked++;
+    console.warn(
+      `[FRONTDOOR WARN] html-poison blocked: POST ${url.pathname} -> ${target} returned ${response.status} text/html (stale-serve SPA fallback); returned 502`
+    );
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_gateway",
+        message:
+          "Upstream returned an HTML page for an API route. The target serve is probably running an older binary that lacks this route; restart the serve pool.",
+      })
+    );
+    discardBody(response);
+    return { sid, target };
+  }
+
+  if (response.status === 204) {
+    res.writeHead(204);
+    res.end();
+    discardBody(response);
+    return { sid, target };
+  }
+
+  if (response.status >= 200 && response.status < 300) {
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_gateway",
+        message: "Unexpected upstream status for move-session",
+      })
+    );
+    discardBody(response);
+    return { sid, target };
+  }
+
+  if (response.status >= 300 && response.status < 400) {
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "bad_gateway",
+        message: "Unexpected redirect from upstream for move-session",
+      })
+    );
+    discardBody(response);
+    return { sid, target };
+  }
+
+  if (response.status >= 400 && response.status < 600) {
+    const upstreamBody = await response.text();
+    const responseHeaders = forwardableResponseHeaders(response.headers);
+    res.writeHead(response.status, responseHeaders);
+    res.end(upstreamBody);
+    return { sid, target };
+  }
+
+  // Any other status: 502
+  res.writeHead(502, { "Content-Type": "application/json" });
+  res.end(
+    JSON.stringify({
+      error: "bad_gateway",
+      message: "Unexpected upstream status for move-session",
+    })
+  );
+  discardBody(response);
+  return { sid, target };
+}
+
 export async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -747,6 +1009,13 @@ export async function handleRequest(
       const r = await handleFork(req, res, ctx, url);
       sid = r.sid;
       degraded = r.degraded;
+      return;
+    }
+
+    if (decision.action === "move-session") {
+      const resVal = await handleMoveSession(req, res, ctx, url);
+      sid = resVal.sid;
+      target = resVal.target;
       return;
     }
 

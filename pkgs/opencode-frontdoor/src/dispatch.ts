@@ -5,6 +5,7 @@ export type RouteAction =
   | 'route-session'
   | 'create'
   | 'fork'
+  | 'move-session'
   | 'pty-501'
   | 'tui-501'
   | 'forward-anchor'
@@ -127,6 +128,9 @@ export function dispatch(method: string, pathname: string): {
       break;
     case 'fork':
       action = 'fork';
+      break;
+    case 'door-alias':
+      action = 'move-session';
       break;
     case 'pty':
       action = 'pty-501';

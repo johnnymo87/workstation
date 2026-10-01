@@ -42,6 +42,9 @@ describe("FrontDoor Integration", () => {
   let serveBHealthStatus = 200;
   let pigeonSessionOwners: Record<string, string | number> = {};
   let anchorParentMap: Record<string, string | null> = {};
+  let testSticky: StickyMap;
+  let moveSessionCalls: Array<{ serve: string; method: string; url: string; headers: http.IncomingHttpHeaders; body: string }> = [];
+  let moveSessionHandler: ((serve: string, req: http.IncomingMessage, body: string, res: http.ServerResponse) => Promise<boolean> | boolean) | null = null;
 
   beforeEach(() => {
     // Restore any spies (e.g. console.warn) that a prior test installed, so a
@@ -51,6 +54,9 @@ describe("FrontDoor Integration", () => {
     serveBHealthStatus = 200;
     pigeonSessionOwners = {};
     anchorParentMap = {};
+    pigeonPlaceCalls = [];
+    moveSessionCalls = [];
+    moveSessionHandler = null;
   });
 
   // Helper to read body from IncomingMessage
@@ -70,6 +76,17 @@ describe("FrontDoor Integration", () => {
     serverA = http.createServer(async (req, res) => {
       if (req.url === "/global/health") {
         res.writeHead(serveAHealthStatus);
+        res.end();
+        return;
+      }
+      if (req.url === "/experimental/control-plane/move-session") {
+        const body = await readBody(req);
+        moveSessionCalls.push({ serve: "serve-a", method: req.method || "POST", url: req.url, headers: req.headers, body });
+        if (moveSessionHandler) {
+          const handled = await moveSessionHandler("serve-a", req, body, res);
+          if (handled) return;
+        }
+        res.writeHead(204);
         res.end();
         return;
       }
@@ -164,6 +181,17 @@ describe("FrontDoor Integration", () => {
         res.end();
         return;
       }
+      if (req.url === "/experimental/control-plane/move-session") {
+        const body = await readBody(req);
+        moveSessionCalls.push({ serve: "serve-b", method: req.method || "POST", url: req.url, headers: req.headers, body });
+        if (moveSessionHandler) {
+          const handled = await moveSessionHandler("serve-b", req, body, res);
+          if (handled) return;
+        }
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       const body = await readBody(req);
       const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
       res.writeHead(status, {
@@ -196,6 +224,17 @@ describe("FrontDoor Integration", () => {
 
     // 3. Fake Anchor Serve
     anchorServer = http.createServer(async (req, res) => {
+      if (req.url === "/experimental/control-plane/move-session") {
+        const body = await readBody(req);
+        moveSessionCalls.push({ serve: "anchor", method: req.method || "POST", url: req.url, headers: req.headers, body });
+        if (moveSessionHandler) {
+          const handled = await moveSessionHandler("anchor", req, body, res);
+          if (handled) return;
+        }
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       if (req.headers["x-test-content-type"] !== undefined) {
         const ct = req.headers["x-test-content-type"] as string;
         const status = req.headers["x-test-status"] ? parseInt(req.headers["x-test-status"] as string, 10) : 200;
@@ -417,8 +456,10 @@ describe("FrontDoor Integration", () => {
     };
 
     testMetrics = createMetrics();
+    testSticky = new StickyMap(testConfig.stickyTtlMs);
     const testDeps = {
       metrics: testMetrics,
+      sticky: testSticky,
       logger: {
         sink: (line: string) => {
           try {
@@ -2936,6 +2977,261 @@ describe("FrontDoor Integration", () => {
       // s2 and s3 must NOT have been called (no retry on timeout!)
       expect(counts[2]).toBe(0);
       expect(counts[3]).toBe(0);
+    });
+  });
+
+  describe("move-session (POST /session/{sessionID}/move)", () => {
+    test("5obe guard, prospective: move on ses_prospective -> forwarded to anchor, not portA; no placement; no sticky", async () => {
+      const now = Date.now();
+      const res = await makeRequest("POST", "/session/ses_prospective/move", {
+        "Content-Type": "application/json",
+      }, JSON.stringify({
+        destination: { directory: "/abs/path/dest" }
+      }));
+      expect(res.status).toBe(204);
+      expect(moveSessionCalls.length).toBe(1);
+      expect(moveSessionCalls[0].serve).toBe("anchor");
+      expect(pigeonPlaceCalls.length).toBe(0);
+      expect(testSticky.has("ses_prospective", now)).toBe(false);
+    });
+
+    test("5obe guard, pre-seeded sticky: goes to resolved target (anchor/owner), not portB, and entry is neither deleted nor refreshed", async () => {
+      const sid = "ses_preseeded";
+      const now = 100000;
+      const initialRenewedAt = 90000;
+      testSticky.record(sid, `http://127.0.0.1:${portB}`, now, initialRenewedAt);
+      const entryBefore = (testSticky as any).entries.get(sid);
+      const expiryBefore = entryBefore.expiry;
+
+      // pigeon returns 404 for ses_preseeded, so resolved target is anchor
+      const res = await makeRequest("POST", `/session/${sid}/move`, {
+        "Content-Type": "application/json",
+      }, JSON.stringify({
+        destination: { directory: "/abs/path/dest" }
+      }));
+      expect(res.status).toBe(204);
+      expect(moveSessionCalls.length).toBe(1);
+      expect(moveSessionCalls[0].serve).toBe("anchor"); // not portB!
+      const entryAfter = (testSticky as any).entries.get(sid);
+      expect(entryAfter).toBeDefined();
+      expect(entryAfter.serve).toBe(`http://127.0.0.1:${portB}`);
+      expect(entryAfter.expiry).toBe(expiryBefore);
+      expect(entryAfter.leaseRenewedAt).toBe(initialRenewedAt);
+    });
+
+    test("active owner: sid pigeon reports active on serve B -> forwarded to serve B", async () => {
+      pigeonSessionOwners["ses_active_b"] = `http://127.0.0.1:${portB}`;
+      const res = await makeRequest("POST", "/session/ses_active_b/move", {
+        "Content-Type": "application/json",
+      }, JSON.stringify({
+        destination: { directory: "/abs/path/dest" }
+      }));
+      expect(res.status).toBe(204);
+      expect(moveSessionCalls.length).toBe(1);
+      expect(moveSessionCalls[0].serve).toBe("serve-b");
+    });
+
+    test("exact upstream wire: path /experimental/control-plane/move-session, exact keys, exact values", async () => {
+      const res = await makeRequest("POST", "/session/ses_a/move", {
+        "Content-Type": "application/json",
+      }, JSON.stringify({
+        destination: { directory: "/abs/path/exact_wire" }
+      }));
+      expect(res.status).toBe(204);
+      expect(moveSessionCalls.length).toBe(1);
+      const call = moveSessionCalls[0];
+      expect(call.url).toBe("/experimental/control-plane/move-session");
+      const parsedBody = JSON.parse(call.body);
+      expect(Object.keys(parsedBody).sort()).toEqual(["destination", "sessionID"]);
+      expect(parsedBody.sessionID).toBe("ses_a");
+      expect(parsedBody.destination).toEqual({ directory: "/abs/path/exact_wire" });
+      expect(call.headers["content-type"]).toBe("application/json");
+    });
+
+    describe("validation 400s (upstream must not be called)", () => {
+      const invalidCases = [
+        {
+          name: "moveChanges present",
+          sid: "ses_a",
+          body: { destination: { directory: "/abs/path" }, moveChanges: true },
+          expectedMessage: "git change discard",
+        },
+        {
+          name: "body sessionID present",
+          sid: "ses_a",
+          body: { destination: { directory: "/abs/path" }, sessionID: "ses_a" },
+          expectedMessage: "the path is the only authority",
+        },
+        {
+          name: "extra top-level key",
+          sid: "ses_a",
+          body: { destination: { directory: "/abs/path" }, extra: "bad" },
+          expectedMessage: "Unexpected key in request body: extra",
+        },
+        {
+          name: "extra destination key",
+          sid: "ses_a",
+          body: { destination: { directory: "/abs/path", extra: "bad" } },
+          expectedMessage: "Unexpected key in destination: extra",
+        },
+        {
+          name: "directory relative",
+          sid: "ses_a",
+          body: { destination: { directory: "relative/path" } },
+          expectedMessage: "must start with /",
+        },
+        {
+          name: "directory with ..",
+          sid: "ses_a",
+          body: { destination: { directory: "/abs/path/../other" } },
+          expectedMessage: "must be an absolute normalized path without",
+        },
+        {
+          name: "directory with trailing slash",
+          sid: "ses_a",
+          body: { destination: { directory: "/abs/path/" } },
+          expectedMessage: "must be an absolute normalized path without",
+        },
+        {
+          name: "directory empty",
+          sid: "ses_a",
+          body: { destination: { directory: "" } },
+          expectedMessage: "must be non-empty",
+        },
+        {
+          name: "directory non-string",
+          sid: "ses_a",
+          body: { destination: { directory: 123 } },
+          expectedMessage: "must be a string",
+        },
+        {
+          name: "destination non-object",
+          sid: "ses_a",
+          body: { destination: "/abs/path" },
+          expectedMessage: "must be an object",
+        },
+      ];
+
+      for (const tc of invalidCases) {
+        test(`rejects ${tc.name}`, async () => {
+          const res = await makeRequest("POST", `/session/${tc.sid}/move`, {
+            "Content-Type": "application/json",
+          }, JSON.stringify(tc.body));
+          expect(res.status).toBe(400);
+          expect(moveSessionCalls.length).toBe(0);
+          const parsed = JSON.parse(res.body);
+          expect(parsed.error).toBe("bad_request");
+          expect(parsed.message).toContain(tc.expectedMessage);
+        });
+      }
+
+      test("rejects invalid JSON", async () => {
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, "{ invalid-json ");
+        expect(res.status).toBe(400);
+        expect(moveSessionCalls.length).toBe(0);
+      });
+
+      test("rejects malformed sid", async () => {
+        const res = await makeRequest("POST", "/session/bad$sid/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        expect(res.status).toBe(400);
+        expect(moveSessionCalls.length).toBe(0);
+      });
+    });
+
+    test("413 on a >16 KiB body", async () => {
+      const largeDir = "/abs/path/" + "x".repeat(17000);
+      const res = await makeRequest("POST", "/session/ses_a/move", {
+        "Content-Type": "application/json",
+      }, JSON.stringify({ destination: { directory: largeDir } }));
+      expect(res.status).toBe(413);
+      expect(moveSessionCalls.length).toBe(0);
+    });
+
+    describe("upstream response mapping", () => {
+      test("204 -> 204 with empty body", async () => {
+        moveSessionHandler = async (_serve, _req, _body, res) => {
+          res.writeHead(204);
+          res.end();
+          return true;
+        };
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        expect(res.status).toBe(204);
+        expect(res.body).toBe("");
+      });
+
+      test("upstream 400 -> 400 with body intact", async () => {
+        moveSessionHandler = async (_serve, _req, _body, res) => {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "directory_does_not_exist" }));
+          return true;
+        };
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        expect(res.status).toBe(400);
+        expect(JSON.parse(res.body)).toEqual({ error: "directory_does_not_exist" });
+      });
+
+      test("upstream 200 -> 502 unexpected status", async () => {
+        moveSessionHandler = async (_serve, _req, _body, res) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+          return true;
+        };
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        expect(res.status).toBe(502);
+        expect(JSON.parse(res.body).error).toBe("bad_gateway");
+        expect(JSON.parse(res.body).message).toContain("Unexpected upstream status");
+      });
+
+      test("upstream 500 -> 500 passed through", async () => {
+        moveSessionHandler = async (_serve, _req, _body, res) => {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "internal_failure" }));
+          return true;
+        };
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        expect(res.status).toBe(500);
+        expect(JSON.parse(res.body)).toEqual({ error: "internal_failure" });
+      });
+
+      test("text/html -> 502 and metrics.htmlPoisonBlocked incremented", async () => {
+        const poisonBefore = testMetrics.htmlPoisonBlocked;
+        moveSessionHandler = async (_serve, _req, _body, res) => {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end("<html><body>Error</body></html>");
+          return true;
+        };
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        expect(res.status).toBe(502);
+        expect(testMetrics.htmlPoisonBlocked).toBe(poisonBefore + 1);
+        expect(JSON.parse(res.body).error).toBe("bad_gateway");
+      });
+
+      test("timeout -> 504 whose message contains outcome unknown", async () => {
+        moveSessionHandler = async () => {
+          await new Promise((r) => setTimeout(r, 1200));
+          return true;
+        };
+        const res = await makeRequest("POST", "/session/ses_a/move", {
+          "Content-Type": "application/json",
+        }, JSON.stringify({ destination: { directory: "/abs/path" } }));
+        expect(res.status).toBe(504);
+        expect(JSON.parse(res.body).error).toBe("gateway_timeout");
+        expect(JSON.parse(res.body).message).toContain("Move outcome unknown; re-read the session before any cleanup.");
+      });
     });
   });
 });

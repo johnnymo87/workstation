@@ -656,4 +656,43 @@ describe('Route Dispatcher', () => {
       expect(flagged).toEqual(EXPECTED_POOL_SAFE_ROUTES);
     });
   });
+
+  describe('door-alias / move-session', () => {
+    test('POST /session/ses_x/move -> door-alias / move-session', () => {
+      expect(classify('POST', '/session/ses_x/move')).toBe('door-alias');
+      expect(dispatch('POST', '/session/ses_x/move')).toEqual({
+        class: 'door-alias',
+        action: 'move-session',
+        recognized: true,
+        allowedMethods: [],
+      });
+    });
+
+    test('GET /session/ses_x/move -> unrecognized / not-found-404 (only POST)', () => {
+      expect(classify('GET', '/session/ses_x/move')).toBe('unrecognized');
+      expect(dispatch('GET', '/session/ses_x/move')).toEqual({
+        class: 'unrecognized',
+        action: 'not-found-404',
+        recognized: false,
+        allowedMethods: [],
+      });
+    });
+
+    test('POST /api/session/ses_x/move -> unrecognized (no mirror, deliberately)', () => {
+      expect(classify('POST', '/api/session/ses_x/move')).toBe('unrecognized');
+      expect(dispatch('POST', '/api/session/ses_x/move')).toEqual({
+        class: 'unrecognized',
+        action: 'not-found-404',
+        recognized: false,
+        allowedMethods: [],
+      });
+    });
+
+    test('POST /session/ses_x/moveover and /session/ses_x/move/extra -> NOT the alias', () => {
+      expect(classify('POST', '/session/ses_x/moveover')).not.toBe('door-alias');
+      expect(classify('POST', '/session/ses_x/move/extra')).not.toBe('door-alias');
+      expect(dispatch('POST', '/session/ses_x/moveover').action).not.toBe('move-session');
+      expect(dispatch('POST', '/session/ses_x/move/extra').action).not.toBe('move-session');
+    });
+  });
 });
