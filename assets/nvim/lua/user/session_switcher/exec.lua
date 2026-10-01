@@ -195,14 +195,22 @@ function M.attach(desc, opts)
   return true
 end
 
---- Refuse navigation to a session whose target directory is missing on disk.
+--- Refuse navigation to a session whose target directory is missing on disk,
+--- and asynchronously query oc-revive for a recovery hint.
 ---
 --- WHY THIS MATTERS:
 --- Attaching to a pruned worktree or deleted directory allows the TUI to render history,
 --- but the session can NEVER complete a turn — user messages hang indefinitely with no error.
 --- Refusing upfront and visibly warning the user prevents the silent turn hang.
 ---
---- @param desc table { directory?: string }
+--- REVIVE HINT (ASYNC & SILENT ON FAILURE):
+--- When desc.sid is valid (^ses_[%w]+$), we spawn `oc-revive plan <sid>` in the background
+--- to check if the session can be revived or if revive is blocked by an existing worktree.
+--- The hint is purely advisory and emitted via vim.schedule; failure to spawn, non-zero exit,
+--- timeout, parse errors, or unhandled reasons are completely silent so the synchronous
+--- refusal remains fast, reliable, and noise-free.
+---
+--- @param desc table { directory?: string, sid?: string }
 --- @return boolean
 function M.refuse_dir_missing(desc)
   local dir = (type(desc) == "table" and desc.directory) and desc.directory or "(unknown)"
@@ -210,6 +218,66 @@ function M.refuse_dir_missing(desc)
     string.format("session directory '%s' no longer exists on disk; session is read-only", dir),
     vim.log.levels.WARN
   )
+
+  local sid = (type(desc) == "table" and type(desc.sid) == "string") and desc.sid or nil
+  if sid and sid:match("^ses_[%w]+$") then
+    local on_exit = function(result)
+      pcall(function()
+        if type(result) ~= "table" or result.code ~= 0 or type(result.stdout) ~= "string" then
+          return
+        end
+        local ok, plan = pcall(vim.json.decode, result.stdout)
+        if not ok or type(plan) ~= "table" or plan.sid ~= sid then
+          return
+        end
+
+        if plan.revivable == true and type(plan.candidates) == "table" and #plan.candidates > 0 then
+          local candidate_lines = {}
+          for _, cand in ipairs(plan.candidates) do
+            if type(cand) == "table"
+              and type(cand.branch) == "string"
+              and type(cand.tip_short) == "string"
+              and type(cand.source) == "string"
+            then
+              local line = string.format("  branch %s @ %s (%s)", cand.branch, cand.tip_short, cand.source)
+              if cand.merged == true then
+                line = line .. " [merged]"
+              end
+              table.insert(candidate_lines, line)
+            end
+          end
+          if #candidate_lines == 0 then
+            return
+          end
+
+          local lines = {
+            string.format("revivable: run `oc-revive %s`", sid),
+          }
+          for _, cline in ipairs(candidate_lines) do
+            table.insert(lines, cline)
+          end
+          if #candidate_lines > 1 then
+            table.insert(lines, "  candidates disagree; oc-revive will ask which to use")
+          end
+
+          local msg = table.concat(lines, "\n")
+          vim.schedule(function()
+            pcall(vim.notify, msg, vim.log.levels.INFO)
+          end)
+        elseif plan.revivable ~= true and type(plan.reason) == "string" and plan.reason:find("blocked_by_worktree:", 1, true) == 1 then
+          local msg = string.format("revive blocked: a revive worktree for this branch already exists; run `oc-revive %s` for details", sid)
+          vim.schedule(function()
+            pcall(vim.notify, msg, vim.log.levels.WARN)
+          end)
+        end
+      end)
+    end
+
+    pcall(function()
+      vim.system({ "oc-revive", "plan", sid }, { text = true, stdin = false, timeout = 5000 }, on_exit)
+    end)
+  end
+
   return true
 end
 
